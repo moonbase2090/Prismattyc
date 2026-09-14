@@ -1,0 +1,30 @@
+# Hive TUI theme — Hive Monochromatic (dark)
+# From the Hive design package color studies (turns 4 & 6).
+# Guest ANSI body hues are shared across variants by design — guest output is
+# never themed; theme-owned slots (yellow=amber, cyan=cool support, white/black,
+# brights) carry the scheme. Amber is spent on attention only.
+id = "hive-monochromatic"
+name = "Hive Monochromatic"
+variant = "dark"
+source = "Hive TUI Variants — design package"
+license = "Unspecified"
+default_fg = "#d3c9ba"
+default_bg = "#171310"
+chrome_fg = "#8a7f6d"
+chrome_bg = "#110e0c"
+pane_border = "#3f301e"
+overlay_bg = "#28231f"
+unseen_badge = "#e0a458"
+mail_letter = "#e0a458"
+active_badge = "#e0a458"
+attention_badge = "#ff6b6b"
+cursor_fg = "#171310"
+cursor_bg = "#e0a458"
+selection_fg = "#efe6d6"
+selection_bg = "#574127"
+ansi = [
+  "#14100e", "#c9705f", "#8fb573", "#e0a458",
+  "#7fafc4", "#b48ead", "#85b1a4", "#d3c9ba",
+  "#574e42", "#d18a79", "#a4c089", "#e5b87e",
+  "#98bbc8", "#c1a1b6", "#9cbdaf", "#efe6d6",
+]

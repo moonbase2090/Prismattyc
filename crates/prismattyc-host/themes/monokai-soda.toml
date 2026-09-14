@@ -1,0 +1,31 @@
+# "Monokai Soda": terminal colors verbatim from the iTerm2-Color-Schemes catalog
+# (mbadolato/iTerm2-Color-Schemes, MIT), as redistributed by Ghostty 1.3.1
+# (/usr/share/ghostty/themes, MIT). The catalog's LICENSE keeps each theme's
+# copyright with its original author; the catalog names no author for this
+# scheme, so the colors are shipped under the catalog's MIT terms as
+# received. The chrome, overlay and badge tokens are Prismattyc-derived.
+id = "monokai-soda"
+name = "Monokai Soda"
+variant = "dark"
+source = "https://github.com/mbadolato/iTerm2-Color-Schemes"
+license = "Terminal colors: iTerm2-Color-Schemes catalog, MIT (per-theme copyright stays with the original author, unnamed in the catalog); chrome tokens: Prismattyc-derived"
+default_fg = "#c4c5b5"
+default_bg = "#1a1a1a"
+chrome_fg = "#c4c5b5"
+chrome_bg = "#151515"
+pane_border = "#625e4c"
+overlay_bg = "#2e2f2d"
+unseen_badge = "#fa8419"
+mail_letter = "#fa8419"
+active_badge = "#98e024"
+attention_badge = "#ff6b6b"
+cursor_fg = "#b7b8a8"
+cursor_bg = "#f6f7ec"
+selection_fg = "#c4c5b5"
+selection_bg = "#343434"
+ansi = [
+  "#1a1a1a", "#f4005f", "#98e024", "#fa8419",
+  "#9d65ff", "#f4005f", "#58d1eb", "#c4c5b5",
+  "#625e4c", "#f4005f", "#98e024", "#e0d561",
+  "#9d65ff", "#f4005f", "#58d1eb", "#f6f6ef",
+]

@@ -1,0 +1,1101 @@
+name: CI
+
+# GitHub-hosted minutes are paused until the billing month resets.
+# Local Actions (act + Docker) is the merge gate. Same file, same jobs.
+# Jobs no-op on github.com (actor is the pusher). Local Actions passes
+# --actor nektos/act. Restore GHA by deleting the per-job `if`.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Split into a few jobs so local-actions can queue/run them independently
+# (and GHA can parallelize when it is turned back on).
+# On the 32 GiB Nexus host, do not fire the full matrix in one shot.
+# Use scripts/la-staged-pr.sh (PT-305).
+env:
+  RUSTUP_TOOLCHAIN: "1.90.0"
+  # Containment for the mutants job, not an OOM fix (PT-261). Measured
+  # --jobs 1 host peak: 4.56 GiB compile, 1.31 GiB link, 0.23 GiB execute.
+  # Default 8g. Do not raise it (PT-286, PT-305). Override via act --env
+  # without editing container.options.
+  MUTANTS_MEMORY: "8g"
+
+jobs:
+  format:
+    name: Format
+    if: ${{ github.actor == 'nektos/act' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then
+            # shellcheck source=/dev/null
+            . "$cargo_env"
+          elif [ -f "$HOME/.cargo/env" ]; then
+            # shellcheck source=/dev/null
+            . "$HOME/.cargo/env"
+          fi
+          rustup toolchain install 1.90.0 --profile minimal --component rustfmt
+          rustup default 1.90.0
+
+      - name: Check formatting
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          cargo fmt --all -- --check
+
+  check:
+    name: Check
+    if: ${{ github.actor == 'nektos/act' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then
+            . "$cargo_env"
+          elif [ -f "$HOME/.cargo/env" ]; then
+            . "$HOME/.cargo/env"
+          fi
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+
+      - name: Check workspace
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          cargo check --workspace --locked
+
+      - name: Check prismattyc-host gpu feature
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          cargo check -p prismattyc-host --features gpu --locked
+
+      - name: Check prismattyc-labs on wasm32
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          rustup target add wasm32-unknown-unknown
+          cargo check -p prismattyc-labs --target wasm32-unknown-unknown --locked
+
+  test:
+    name: Test
+    if: ${{ github.actor == 'nektos/act' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then
+            . "$cargo_env"
+          elif [ -f "$HOME/.cargo/env" ]; then
+            . "$HOME/.cargo/env"
+          fi
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+
+      - name: Install tmux
+        run: |
+          if command -v tmux >/dev/null 2>&1; then
+            tmux -V
+            exit 0
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tmux
+
+      - name: Install real-window test display
+        run: ./scripts/install-render-test-deps.sh
+
+      - name: Test workspace
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          cargo test --workspace --locked
+
+  # Frozen rich harness pin. Not a light-stage / PRD §5.6 / A-6 gate.
+  # Hand / Local Actions: --event pull_request --job phase3-rich
+  # Periodic: .github/workflows/phase3-rich-nightly.yml
+  phase3-rich:
+    name: Phase 3 rich harness
+    if: ${{ github.actor == 'nektos/act' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then
+            . "$cargo_env"
+          elif [ -f "$HOME/.cargo/env" ]; then
+            . "$HOME/.cargo/env"
+          fi
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+
+      - name: Install tmux
+        run: |
+          if command -v tmux >/dev/null 2>&1; then
+            tmux -V
+            exit 0
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tmux
+
+      - name: Run test-phase3-rich.sh
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          ./scripts/test-phase3-rich.sh
+
+      - name: Run test-phase3-transport.sh
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          ./scripts/test-phase3-transport.sh
+
+  lint:
+    name: Lint
+    if: ${{ github.actor == 'nektos/act' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then
+            . "$cargo_env"
+          elif [ -f "$HOME/.cargo/env" ]; then
+            . "$HOME/.cargo/env"
+          fi
+          rustup toolchain install 1.90.0 --profile minimal --component clippy
+          rustup default 1.90.0
+
+      - name: Lint workspace
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  # Windows CI guard (PT-101). Cross-compile + Wine. Not a Windows container.
+  # Portable set (named with -p below): prismattyc-core, prismattyc-protocol,
+  # prismattyc-emulator, prismattyc-render, prismattyc-labs,
+  # prismattyc-rich-client.
+  # Excluded (lift crate-by-crate in PT-180; no stubs here):
+  # - prismattyc-mux: pmux/pmuxd/pmux-attach import Unix sockets and PTY types
+  # - prismattyc-host: attach_log uses UnixStream; main.rs names unix-only mux symbols
+  # - prismattyc: classic expand_empty_paste is a unix-only mux export
+  # - pmux-mcp: Mail* UnixStream
+  windows-check:
+    name: Windows check
+    if: ${{ github.actor == 'nektos/act' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain and MinGW
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then
+            # shellcheck source=/dev/null
+            . "$cargo_env"
+          elif [ -f "$HOME/.cargo/env" ]; then
+            # shellcheck source=/dev/null
+            . "$HOME/.cargo/env"
+          fi
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+          rustup target add x86_64-pc-windows-gnu
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-mingw-w64-x86-64
+          if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+            echo "error: x86_64-w64-mingw32-gcc is missing after install" >&2
+            exit 1
+          fi
+          if ! rustup target list --installed | grep -qx 'x86_64-pc-windows-gnu'; then
+            echo "error: rustup target x86_64-pc-windows-gnu is missing after install" >&2
+            exit 1
+          fi
+
+      - name: Check portable crates for Windows GNU
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+            echo "error: x86_64-w64-mingw32-gcc is missing" >&2
+            exit 1
+          fi
+          export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc
+          cargo check --locked --target x86_64-pc-windows-gnu \
+            -p prismattyc-core \
+            -p prismattyc-protocol \
+            -p prismattyc-emulator \
+            -p prismattyc-render \
+            -p prismattyc-labs \
+            -p prismattyc-rich-client
+
+  windows-test:
+    name: Windows test
+    if: ${{ github.actor == 'nektos/act' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain, MinGW, and Wine
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then
+            # shellcheck source=/dev/null
+            . "$cargo_env"
+          elif [ -f "$HOME/.cargo/env" ]; then
+            # shellcheck source=/dev/null
+            . "$HOME/.cargo/env"
+          fi
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+          rustup target add x86_64-pc-windows-gnu
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-mingw-w64-x86-64 wine64
+          if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+            echo "error: x86_64-w64-mingw32-gcc is missing after install" >&2
+            exit 1
+          fi
+          if ! rustup target list --installed | grep -qx 'x86_64-pc-windows-gnu'; then
+            echo "error: rustup target x86_64-pc-windows-gnu is missing after install" >&2
+            exit 1
+          fi
+          wine_bin=""
+          if command -v wine64 >/dev/null 2>&1; then
+            wine_bin="$(command -v wine64)"
+          elif command -v wine >/dev/null 2>&1; then
+            wine_bin="$(command -v wine)"
+          elif [ -x /usr/lib/wine/wine64 ]; then
+            wine_bin=/usr/lib/wine/wine64
+          fi
+          if [ -z "$wine_bin" ]; then
+            echo "error: wine64 is missing after install" >&2
+            echo "error: also looked for wine and /usr/lib/wine/wine64" >&2
+            exit 1
+          fi
+          echo "using wine runner: ${wine_bin}"
+
+      - name: Build Windows GNU test binaries
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+            echo "error: x86_64-w64-mingw32-gcc is missing" >&2
+            exit 1
+          fi
+          export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc
+          cargo test --locked --no-run --tests --target x86_64-pc-windows-gnu \
+            --message-format=json \
+            -p prismattyc-core \
+            -p prismattyc-protocol \
+            -p prismattyc-emulator \
+            -p prismattyc-render \
+            -p prismattyc-labs \
+            -p prismattyc-rich-client \
+            > "${RUNNER_TEMP:-/tmp}/windows-gnu-test-build.json"
+
+      - name: Run Windows GNU test binaries under Wine
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          wine_bin=""
+          if command -v wine64 >/dev/null 2>&1; then
+            wine_bin="$(command -v wine64)"
+          elif command -v wine >/dev/null 2>&1; then
+            wine_bin="$(command -v wine)"
+          elif [ -x /usr/lib/wine/wine64 ]; then
+            wine_bin=/usr/lib/wine/wine64
+          fi
+          if [ -z "$wine_bin" ]; then
+            echo "error: wine64 is missing" >&2
+            echo "error: also looked for wine and /usr/lib/wine/wine64" >&2
+            exit 1
+          fi
+          export WINE_BIN="$wine_bin"
+          export WINEDEBUG=-all
+          export WINEPREFIX="${RUNNER_TEMP:-/tmp}/pmux-wine"
+          mkdir -p "$WINEPREFIX"
+          python3 - "${RUNNER_TEMP:-/tmp}/windows-gnu-test-build.json" <<'PY'
+          import json, os, subprocess, sys
+
+          json_path = sys.argv[1]
+          exes = []
+          with open(json_path, encoding="utf-8") as handle:
+              for line in handle:
+                  line = line.strip()
+                  if not line:
+                      continue
+                  try:
+                      msg = json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+                  if msg.get("reason") != "compiler-artifact":
+                      continue
+                  if not msg.get("profile", {}).get("test"):
+                      continue
+                  executable = msg.get("executable")
+                  if executable:
+                      exes.append(executable)
+          if not exes:
+              raise SystemExit("no Windows GNU test executables in cargo json")
+          wine_bin = os.environ.get("WINE_BIN")
+          if not wine_bin:
+              raise SystemExit("error: wine64 is missing")
+          for exe in exes:
+              print(f"{wine_bin} {exe}", flush=True)
+              subprocess.run([wine_bin, exe, "--test-threads", "1"], check=True)
+          PY
+
+  spaces-e2e:
+    name: Spaces e2e (PT-219)
+    if: ${{ github.actor == 'nektos/act' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Job container: act attaches the host Docker socket. Fail if the
+    # image is missing; do not skip.
+    env:
+      LA_HEAVY: "1"
+      LA_HEAVY_JOB: spaces-e2e
+    container:
+      image: local-actions-runner:latest
+      options: --privileged --init -v /tmp/prismattyc-la:/tmp/prismattyc-la
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Acquire heavy-job lock (PT-305)
+        run: python3 scripts/la-heavy-serial.py --acquire --wait --job spaces-e2e
+
+      - name: Syntax-check spaces and host UX fixtures
+        run: |
+          bash -n demo/spaces-e2e.sh
+          bash -n demo/host-ux-e2e.sh
+          bash -n demo/docker/run.sh
+          PYTHONPYCACHEPREFIX=build/python-cache python3 -m py_compile demo/host-ux-e2e.py
+          PYTHONPYCACHEPREFIX=build/python-cache python3 -m py_compile demo/restart-spaces-e2e.py
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then
+            . "$cargo_env"
+          elif [ -f "$HOME/.cargo/env" ]; then
+            . "$HOME/.cargo/env"
+          fi
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+
+      - name: Build host and mux bins
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          cargo build --locked -p prismattyc-host -p prismattyc-mux --bins
+
+      - name: Run spaces and host UX e2e in the demo box
+        run: |
+          set -euo pipefail
+          if docker info >/dev/null 2>&1; then
+            dkr() { docker "$@"; }
+          elif sudo -n docker info >/dev/null 2>&1; then
+            dkr() { sudo -n docker "$@"; }
+          else
+            echo "error: docker is not available in this runner" >&2
+            exit 1
+          fi
+          if ! dkr image inspect prismattyc-demo >/dev/null 2>&1; then
+            echo "error: image prismattyc-demo is missing (demo/docker/run.sh build)" >&2
+            exit 1
+          fi
+          # Act copies the workspace; host docker does not see overlay files.
+          # Stage bins and scripts onto a host path, then run run.sh in a
+          # sidecar that bind-mounts that same path (PT-219).
+          host_root="/tmp/prismattyc-spaces-e2e-$$"
+          trap "dkr run --rm -v /tmp:/tmp alpine:latest rm -rf '$host_root'" EXIT
+          dkr run --rm -v "$host_root:$host_root" alpine:latest \
+            mkdir -p "$host_root/bins" "$host_root/demo/docker"
+          tar -C "$PWD/target/debug" -cf - pmux pmuxd pmux-attach prismattyc-host \
+            | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
+              tar -C "$host_root/bins" -xf -
+          tar -C "$PWD/demo" -cf - spaces-e2e.sh host-ux-e2e.sh host-ux-e2e.py space-open-race.py restart-spaces-e2e.py docker/run.sh \
+            | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
+              tar -C "$host_root/demo" -xf -
+          dkr run --rm --privileged \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$host_root:$host_root" \
+            -v "$PWD/build/host-ux-e2e:$host_root/build/host-ux-e2e" \
+            -e PRISMATTYC_BINS="$host_root/bins" \
+            -e WIGGLE="${WIGGLE:-0}" \
+            -w "$host_root" \
+            -u 0 \
+            local-actions-runner:latest \
+            bash -c 'bash demo/docker/run.sh spaces-e2e && bash demo/docker/run.sh host-ux-e2e'
+          # The nested artifact mount writes to the host checkout. It survives
+          # removal of both job containers and the temporary staging path.
+          echo "Host UX artifacts: $PWD/build/host-ux-e2e"
+
+      - name: Release heavy-job lock
+        if: always()
+        run: python3 scripts/la-heavy-serial.py --release --job spaces-e2e
+
+  walkthrough-caption-e2e:
+    name: Walkthrough caption e2e (PT-297)
+    if: ${{ github.actor == 'nektos/act' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Same X11 demo box as spaces-e2e. Fail if the image is missing.
+    env:
+      LA_HEAVY: "1"
+      LA_HEAVY_JOB: walkthrough-caption-e2e
+    container:
+      image: local-actions-runner:latest
+      options: --privileged --init -v /tmp/prismattyc-la:/tmp/prismattyc-la
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Acquire heavy-job lock (PT-305)
+        run: python3 scripts/la-heavy-serial.py --acquire --wait --job walkthrough-caption-e2e
+
+      - name: Syntax-check demo/walkthrough-caption-e2e.sh
+        run: bash -n demo/walkthrough-caption-e2e.sh && bash -n demo/docker/run.sh
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then
+            . "$cargo_env"
+          elif [ -f "$HOME/.cargo/env" ]; then
+            . "$HOME/.cargo/env"
+          fi
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+
+      - name: Build host and mux bins
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          cargo build --locked -p prismattyc-host -p prismattyc-mux --bins
+
+      - name: Run walkthrough caption e2e in the demo box
+        run: |
+          set -euo pipefail
+          if docker info >/dev/null 2>&1; then
+            dkr() { docker "$@"; }
+          elif sudo -n docker info >/dev/null 2>&1; then
+            dkr() { sudo -n docker "$@"; }
+          else
+            echo "error: docker is not available in this runner" >&2
+            exit 1
+          fi
+          if ! dkr image inspect prismattyc-demo >/dev/null 2>&1; then
+            echo "error: image prismattyc-demo is missing (demo/docker/run.sh build)" >&2
+            exit 1
+          fi
+          host_root="/tmp/prismattyc-walkthrough-caption-e2e-$$"
+          trap "dkr run --rm -v /tmp:/tmp alpine:latest rm -rf '$host_root'" EXIT
+          dkr run --rm -v "$host_root:$host_root" alpine:latest \
+            mkdir -p "$host_root/bins" "$host_root/demo/docker"
+          tar -C "$PWD/target/debug" -cf - pmux pmuxd pmux-attach prismattyc-host \
+            | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
+              tar -C "$host_root/bins" -xf -
+          tar -C "$PWD/demo" -cf - walkthrough-caption-e2e.sh docker/run.sh \
+            | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
+              tar -C "$host_root/demo" -xf -
+          dkr run --rm --privileged \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$host_root:$host_root" \
+            -e PRISMATTYC_BINS="$host_root/bins" \
+            -w "$host_root" \
+            -u 0 \
+            local-actions-runner:latest \
+            bash "$host_root/demo/docker/run.sh" walkthrough-caption-e2e
+
+      - name: Release heavy-job lock
+        if: always()
+        run: python3 scripts/la-heavy-serial.py --release --job walkthrough-caption-e2e
+
+  spaces-e2e-wayland:
+    # PT-290: weston headless --socket=pt290-wayland.
+    # Run 1: window_opacity 0.95, native wl_shm. Fail on XWayland or
+    # softbuffer. Run 2: opacity 1.0, blur off; startup line is not
+    # wl_shm; dismiss splash, type, no splash pixels across two
+    # presents (PT-294). Not --privileged (PT-278). See
+    # docs/testing-policy.md.
+    name: Spaces e2e Wayland (PT-290)
+    if: ${{ github.actor == 'nektos/act' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      LA_HEAVY: "1"
+      LA_HEAVY_JOB: spaces-e2e-wayland
+    container:
+      image: local-actions-runner:latest
+      options: --privileged --init -v /tmp/prismattyc-la:/tmp/prismattyc-la
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Acquire heavy-job lock (PT-305)
+        run: python3 scripts/la-heavy-serial.py --acquire --wait --job spaces-e2e-wayland
+
+      - name: Syntax-check demo/spaces-e2e-wayland.sh
+        run: bash -n demo/spaces-e2e-wayland.sh && bash -n demo/docker/run.sh
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then
+            . "$cargo_env"
+          elif [ -f "$HOME/.cargo/env" ]; then
+            . "$HOME/.cargo/env"
+          fi
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+
+      - name: Build host and mux bins
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          cargo build --locked -p prismattyc-host -p prismattyc-mux --bins
+
+      - name: Run Wayland shm e2e in the demo box
+        run: |
+          set -euo pipefail
+          if docker info >/dev/null 2>&1; then
+            dkr() { docker "$@"; }
+          elif sudo -n docker info >/dev/null 2>&1; then
+            dkr() { sudo -n docker "$@"; }
+          else
+            echo "error: docker is not available in this runner" >&2
+            exit 1
+          fi
+          if ! dkr image inspect prismattyc-demo >/dev/null 2>&1; then
+            echo "error: image prismattyc-demo is missing (demo/docker/run.sh build)" >&2
+            exit 1
+          fi
+          host_root="/tmp/prismattyc-spaces-e2e-wayland-$$"
+          trap "dkr run --rm -v /tmp:/tmp alpine:latest rm -rf '$host_root'" EXIT
+          dkr run --rm -v "$host_root:$host_root" alpine:latest \
+            mkdir -p "$host_root/bins" "$host_root/demo/docker"
+          tar -C "$PWD/target/debug" -cf - pmux pmuxd pmux-attach prismattyc-host \
+            | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
+              tar -C "$host_root/bins" -xf -
+          tar -C "$PWD/demo" -cf - spaces-e2e-wayland.sh docker/run.sh docker/sway-headless.conf \
+            | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
+              tar -C "$host_root/demo" -xf -
+          dkr run --rm --privileged \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$host_root:$host_root" \
+            -e PRISMATTYC_BINS="$host_root/bins" \
+            -w "$host_root" \
+            -u 0 \
+            local-actions-runner:latest \
+            bash "$host_root/demo/docker/run.sh" spaces-e2e-wayland
+
+      - name: Release heavy-job lock
+        if: always()
+        run: python3 scripts/la-heavy-serial.py --release --job spaces-e2e-wayland
+
+  render-bench:
+    name: Render bench (PT-246)
+    if: ${{ github.actor == 'nektos/act' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      LA_HEAVY: "1"
+      LA_HEAVY_JOB: render-bench
+    container:
+      image: local-actions-runner:latest
+      options: --privileged --init -v /tmp/prismattyc-la:/tmp/prismattyc-la
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Acquire heavy-job lock (PT-305)
+        run: python3 scripts/la-heavy-serial.py --acquire --wait --job render-bench
+
+      - name: Syntax-check demo/render-bench.sh
+        run: bash -n demo/render-bench.sh && bash -n demo/docker/run.sh
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then
+            . "$cargo_env"
+          elif [ -f "$HOME/.cargo/env" ]; then
+            . "$HOME/.cargo/env"
+          fi
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+
+      - name: Build host and mux bins
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          cargo build --locked -p prismattyc-host -p prismattyc-mux --bins
+
+      - name: Run render bench in the demo box
+        run: |
+          set -euo pipefail
+          if docker info >/dev/null 2>&1; then
+            dkr() { docker "$@"; }
+          elif sudo -n docker info >/dev/null 2>&1; then
+            dkr() { sudo -n docker "$@"; }
+          else
+            echo "error: docker is not available in this runner" >&2
+            exit 1
+          fi
+          if ! dkr image inspect prismattyc-demo >/dev/null 2>&1; then
+            echo "error: image prismattyc-demo is missing (demo/docker/run.sh build)" >&2
+            exit 1
+          fi
+          host_root="/tmp/prismattyc-render-bench-$$"
+          trap "dkr run --rm -v /tmp:/tmp alpine:latest rm -rf '$host_root'" EXIT
+          dkr run --rm -v "$host_root:$host_root" alpine:latest \
+            mkdir -p "$host_root/bins" "$host_root/demo/docker"
+          tar -C "$PWD/target/debug" -cf - pmux pmuxd pmux-attach prismattyc-host \
+            | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
+              tar -C "$host_root/bins" -xf -
+          tar -C "$PWD/demo" -cf - render-bench.sh docker/run.sh \
+            | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
+              tar -C "$host_root/demo" -xf -
+          dkr run --rm --privileged \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$host_root:$host_root" \
+            -e PRISMATTYC_BINS="$host_root/bins" \
+            -w "$host_root" \
+            -u 0 \
+            local-actions-runner:latest \
+            bash "$host_root/demo/docker/run.sh" render-bench
+
+      - name: Release heavy-job lock
+        if: always()
+        run: python3 scripts/la-heavy-serial.py --release --job render-bench
+
+  crap:
+    name: CRAP
+    if: ${{ github.actor == 'nektos/act' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # act mounts the Docker socket for container jobs. The fallback needs
+    # that socket to read the host worktree gitdir in a read-only sidecar.
+    # --init so pid 1 reaps (PT-259).
+    env:
+      LA_HEAVY: "1"
+      LA_HEAVY_JOB: crap
+    container:
+      image: local-actions-runner:latest
+      options: --init -v /tmp/prismattyc-la:/tmp/prismattyc-la
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Acquire heavy-job lock (PT-305)
+        run: python3 scripts/la-heavy-serial.py --acquire --wait --job crap
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then
+            . "$cargo_env"
+          elif [ -f "$HOME/.cargo/env" ]; then
+            . "$HOME/.cargo/env"
+          fi
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+          rustup component add llvm-tools-preview
+
+      - name: Install real-window test display
+        run: ./scripts/install-render-test-deps.sh
+
+      - name: Install cargo-llvm-cov and cargo-crap
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          command -v cargo-llvm-cov >/dev/null 2>&1 \
+            || cargo install cargo-llvm-cov --version 0.9.0
+          command -v cargo-crap >/dev/null 2>&1 \
+            || cargo install cargo-crap --version 0.4.3
+
+      - name: CRAP gate unit tests
+        run: |
+          python3 scripts/crap-gate_test.py
+          python3 scripts/crap-changed-files_test.py
+
+      - name: Coverage LCOV and CRAP report
+        env:
+          PRISMATTYC_TEST_TIME_SCALE: "4"
+        run: |
+          set -euo pipefail
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          mkdir -p build
+          cargo llvm-cov --workspace --locked --lcov --output-path build/crap-lcov.info
+          cargo crap --workspace \
+            --lcov build/crap-lcov.info \
+            --format json \
+            --sort file \
+            --output build/crap-current.json
+
+      - name: Gate against committed baseline
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          bash scripts/crap-changed-files.sh > build/crap-changed.txt
+          python3 scripts/crap-gate.py \
+            --baseline docs/crap-baseline.json \
+            --current build/crap-current.json \
+            --changed-files-from build/crap-changed.txt \
+            --repo "$PWD"
+
+      - name: Export crap-current.json onto the host worktree
+        if: success()
+        run: |
+          set -euo pipefail
+          test -f build/crap-current.json
+          copy_ok=0
+          if docker info >/dev/null 2>&1; then
+            dkr() { docker "$@"; }
+            copy_ok=1
+          elif sudo -n docker info >/dev/null 2>&1; then
+            dkr() { sudo -n docker "$@"; }
+            copy_ok=1
+          fi
+          if [ "$copy_ok" -eq 1 ]; then
+            if dkr run --rm -i -v "$PWD/build:/host-build" alpine:latest \
+              tee /host-build/crap-current.json >/dev/null < build/crap-current.json
+            then
+              echo "host worktree build/crap-current.json updated"
+            else
+              echo "warning: docker copy failed; gate already passed; file remains at $PWD/build/crap-current.json"
+            fi
+          else
+            echo "crap-current.json already at $PWD/build/crap-current.json"
+          fi
+
+      - name: Release heavy-job lock
+        if: always()
+        run: python3 scripts/la-heavy-serial.py --release --job crap
+
+  crap-refresh:
+    name: CRAP refresh
+    if: ${{ github.actor == 'nektos/act' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # Job container so act attaches the host Docker socket and the
+    # written baseline can be copied onto the host worktree.
+    env:
+      LA_HEAVY: "1"
+      LA_HEAVY_JOB: crap-refresh
+    container:
+      image: local-actions-runner:latest
+      options: --privileged --init -v /tmp/prismattyc-la:/tmp/prismattyc-la
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Acquire heavy-job lock (PT-305)
+        run: python3 scripts/la-heavy-serial.py --acquire --wait --job crap-refresh
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then
+            . "$cargo_env"
+          elif [ -f "$HOME/.cargo/env" ]; then
+            . "$HOME/.cargo/env"
+          fi
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+          rustup component add llvm-tools-preview
+
+      - name: Install real-window test display
+        run: ./scripts/install-render-test-deps.sh
+
+      - name: Install cargo-llvm-cov and cargo-crap
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          command -v cargo-llvm-cov >/dev/null 2>&1 \
+            || cargo install cargo-llvm-cov --version 0.9.0
+          command -v cargo-crap >/dev/null 2>&1 \
+            || cargo install cargo-crap --version 0.4.3
+
+      - name: Refresh baseline and copy onto the host worktree
+        run: |
+          set -euo pipefail
+          if env -u GITHUB_ACTOR CRAP_REFRESH_IN_RUNNER= ./scripts/crap-refresh.sh; then
+            echo "error: crap-refresh.sh must refuse outside the runner" >&2
+            exit 1
+          fi
+          CRAP_REFRESH_IN_RUNNER=1 ./scripts/crap-refresh.sh
+          if docker info >/dev/null 2>&1; then
+            dkr() { docker "$@"; }
+          elif sudo -n docker info >/dev/null 2>&1; then
+            dkr() { sudo -n docker "$@"; }
+          else
+            echo "error: docker is required to copy the baseline onto the host worktree" >&2
+            exit 1
+          fi
+          dkr run --rm -i -v "$PWD/docs:/host-docs" alpine:latest \
+            tee /host-docs/crap-baseline.json >/dev/null < docs/crap-baseline.json
+          echo "host worktree docs/crap-baseline.json updated; commit it"
+
+      - name: Release heavy-job lock
+        if: always()
+        run: python3 scripts/la-heavy-serial.py --release --job crap-refresh
+
+  mutants:
+    name: Mutants
+    if: ${{ github.actor == 'nektos/act' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # Job container so act attaches the host Docker socket. The overlay
+    # copy has a worktree .git file whose gitdir lives on the host.
+    # 8g here is the start cap. Act cannot interpolate env into
+    # container.options. The next step applies MUTANTS_MEMORY (PT-261).
+    # --init so pid 1 reaps. Without it, act's pid 1 is
+    # `tail -f /dev/null` and HostConfig.Init is null (PT-259).
+    # Keep 8g so the container dies before the 32 GiB host (PT-305).
+    # Mutants scratch is multi-GiB. Bind host SSD cache into the
+    # container. Do not use container /tmp (tmpfs). act cannot
+    # interpolate env into container.options, so the host path is
+    # fixed: /var/cache/prismattyc/mutants. Create it on disk or
+    # symlink it to ${XDG_CACHE_HOME:-$HOME/.cache}/prismattyc/mutants.
+    env:
+      LA_HEAVY: "1"
+      LA_HEAVY_JOB: mutants
+      MUTANTS_TMPDIR: /cache/prismattyc/mutants
+      TMPDIR: /cache/prismattyc/mutants
+    container:
+      image: local-actions-runner:latest
+      options: --privileged --init -v /tmp/prismattyc-la:/tmp/prismattyc-la -v /var/cache/prismattyc/mutants:/cache/prismattyc/mutants --memory=8g
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Acquire heavy-job lock (PT-305)
+        run: python3 scripts/la-heavy-serial.py --acquire --wait --job mutants
+
+      - name: Check host headroom (PT-305)
+        run: python3 scripts/mutants-gate.py --check-host-headroom
+
+      - name: Check mutants scratch is not tmpfs (PT-305)
+        run: |
+          mkdir -p "${MUTANTS_TMPDIR}"
+          python3 scripts/mutants-gate.py --check-tmpdir
+
+      - name: Apply MUTANTS_MEMORY cap
+        run: |
+          set -euo pipefail
+          mem="${MUTANTS_MEMORY:-8g}"
+          cid="$(hostname)"
+          if docker info >/dev/null 2>&1 && docker inspect "$cid" >/dev/null 2>&1; then
+            docker update --memory="$mem" "$cid"
+          fi
+          python3 scripts/mutants-gate.py \
+            --check-memory-cap \
+            --requested-memory "$mem"
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then
+            . "$cargo_env"
+          elif [ -f "$HOME/.cargo/env" ]; then
+            . "$HOME/.cargo/env"
+          fi
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+
+      - name: Install tmux
+        run: |
+          if command -v tmux >/dev/null 2>&1; then
+            tmux -V
+            exit 0
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tmux
+
+      - name: Install real-window test display
+        run: ./scripts/install-render-test-deps.sh
+
+      - name: Install cargo-mutants
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          command -v cargo-mutants >/dev/null 2>&1 \
+            || cargo install cargo-mutants --locked --version 27.1.0
+
+      - name: Syntax-check mutants scripts
+        run: |
+          bash -n scripts/mutants-pr.sh
+          bash -n scripts/mutants-nightly.sh
+          bash -n scripts/la-staged-pr.sh
+          bash -n scripts/la-reclaim-host.sh
+          bash -n scripts/la-reclaim-zram.sh
+
+      - name: Mutants gate unit tests
+        run: |
+          python3 scripts/mutants-gate_test.py
+          python3 scripts/mutants-route_test.py
+          python3 scripts/la-heavy-serial_test.py
+          python3 scripts/la-staged_test.py
+
+      - name: cargo mutants --in-diff on touched crates
+        env:
+          LA_HEAVY_HELD: "1"
+        run: ./scripts/mutants-pr.sh
+
+      - name: Release heavy-job lock
+        if: always()
+        run: python3 scripts/la-heavy-serial.py --release --job mutants

@@ -1,0 +1,28 @@
+[package]
+name = "prismattyc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+default-run = "prismattyc"
+autobins = false
+
+[[bin]]
+name = "prismattyc"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+crossterm.workspace = true
+portable-pty.workspace = true
+prismattyc-core = { path = "../prismattyc-core" }
+prismattyc-emulator = { path = "../prismattyc-emulator" }
+prismattyc-mux = { path = "../prismattyc-mux" }
+prismattyc-protocol = { path = "../prismattyc-protocol" }
+prismattyc-render = { path = "../prismattyc-render" }
+
+[target.'cfg(unix)'.dependencies]
+# Already pulled by crossterm; direct dep for host terminate-signal restore.
+signal-hook = "0.3"
+# Host-input hangup guard: poll STDIN for POLLHUP when no SIGHUP arrives.
+libc = "0.2"

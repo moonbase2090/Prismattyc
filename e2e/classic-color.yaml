@@ -1,0 +1,20 @@
+# Truecolor / SGR paint through nested prism.
+session:
+  command: prismattyc
+  args:
+    - "/bin/sh"
+    - "-c"
+    - "printf '\\033[38;2;255;0;0mred\\033[0m \\033[32mgreen\\033[0m\\n'; sleep 2"
+  cols: 80
+  rows: 16
+  env:
+    TERM: xterm-256color
+
+steps:
+  - waitForText: {text: "red", timeoutMs: 15000}
+  - expectText: {text: "green"}
+  - screenshot: {name: "01-color"}
+
+artifacts:
+  mode: always
+  dir: e2e/artifacts

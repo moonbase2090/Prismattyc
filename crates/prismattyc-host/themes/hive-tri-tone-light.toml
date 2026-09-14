@@ -1,0 +1,30 @@
+# Hive TUI theme — Hive Tri-Tone Light (light)
+# From the Hive design package color studies (turns 4 & 6).
+# Guest ANSI body hues are shared across variants by design — guest output is
+# never themed; theme-owned slots (yellow=amber, cyan=cool support, white/black,
+# brights) carry the scheme. Amber is spent on attention only.
+id = "hive-tri-tone-light"
+name = "Hive Tri-Tone Light"
+variant = "light"
+source = "Hive TUI Variants — design package"
+license = "Unspecified"
+default_fg = "#433b2d"
+default_bg = "#f4f0e7"
+chrome_fg = "#8d8270"
+chrome_bg = "#ebe7de"
+pane_border = "#d7bf9a"
+overlay_bg = "#e8e3da"
+unseen_badge = "#a8701c"
+mail_letter = "#a8701c"
+active_badge = "#a8701c"
+attention_badge = "#ff6b6b"
+cursor_fg = "#f4f0e7"
+cursor_bg = "#a8701c"
+selection_fg = "#231d13"
+selection_bg = "#dfccae"
+ansi = [
+  "#4c4436", "#a4432f", "#4e7a35", "#a8701c",
+  "#2f6f8c", "#7d5386", "#2f6f8c", "#d9d5cb",
+  "#b5ab94", "#863727", "#40642b", "#8a5c17",
+  "#275b73", "#67446e", "#275b73", "#231d13",
+]

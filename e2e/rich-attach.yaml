@@ -1,0 +1,23 @@
+# Nested-host rich attach through Termwright.
+# Drives capability query + cell-rect attach under --experimental-rich.
+# Not a PRD §5.6 pass. session.command rewritten by the runner.
+session:
+  command: prismattyc
+  args:
+    - "--experimental-rich"
+    - "/bin/sh"
+    - "-c"
+    - "stty raw -echo; printf '\\033_Prismattyc;cap;q;id=1;max=0.1\\033\\\\'; sleep 0.3; printf '\\033_Prismattyc;attach;cell_rect;id=1;row=0;col=0;rows=1;cols=4;text=STAT\\033\\\\'; sleep 2"
+  cols: 80
+  rows: 16
+  env:
+    TERM: xterm-256color
+
+steps:
+  - waitForText: {text: "STAT", timeoutMs: 15000}
+  - expectText: {text: "STAT"}
+  - screenshot: {name: "01-rich-attach"}
+
+artifacts:
+  mode: always
+  dir: e2e/artifacts

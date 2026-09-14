@@ -1,0 +1,28 @@
+# Nested prism interactive shell (spaces + echo).
+# session.command is rewritten by scripts/termwright-e2e.sh
+session:
+  command: prismattyc
+  args: ["/bin/sh"]
+  cols: 80
+  rows: 24
+  env:
+    TERM: xterm-256color
+
+steps:
+  - waitForIdle: {idleMs: 500, timeoutMs: 15000}
+  - screenshot: {name: "01-shell-ready"}
+  - type: {text: "printf 'space %s ok\\n' test"}
+  - press: {key: Enter}
+  - waitForText: {text: "space test ok", timeoutMs: 15000}
+  - expectText: {text: "space test ok"}
+  - screenshot: {name: "02-space-echo"}
+  - type: {text: "printf 'hello %s\\n' operator"}
+  - press: {key: Enter}
+  - waitForText: {text: "hello operator", timeoutMs: 10000}
+  - screenshot: {name: "03-hello"}
+  - type: {text: "exit"}
+  - press: {key: Enter}
+
+artifacts:
+  mode: always
+  dir: e2e/artifacts

@@ -1,0 +1,4 @@
+# Local Actions (act) is the merge gate. Cap job parallelism: five
+# uncapped containers each building the full workspace exhaust host
+# memory (observed: swap-full, flaky Lint/Test failures at 31GB RAM).
+--concurrent-jobs=2

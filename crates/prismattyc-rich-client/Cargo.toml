@@ -1,0 +1,21 @@
+[package]
+name = "prismattyc-rich-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Public 0.1/0.2 rich-session client"
+
+[lib]
+name = "prismattyc_rich_client"
+path = "src/lib.rs"
+
+[dependencies]
+prismattyc-protocol = { path = "../prismattyc-protocol" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[[example]]
+name = "negotiate"
+path = "examples/negotiate.rs"

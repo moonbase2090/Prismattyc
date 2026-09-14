@@ -1,0 +1,26 @@
+# Official terminal palette: folke/tokyonight.nvim (Apache-2.0).
+id = "tokyo-night"
+name = "Tokyo Night"
+variant = "dark"
+source = "https://github.com/folke/tokyonight.nvim/blob/main/extras/alacritty/tokyonight_night.toml"
+license = "Apache-2.0"
+default_fg = "#c0caf5"
+default_bg = "#1a1b26"
+chrome_fg = "#c0caf5"
+chrome_bg = "#15161e"
+pane_border = "#414868"
+overlay_bg = "#24283b"
+unseen_badge = "#e0af68"
+mail_letter = "#e0af68"
+active_badge = "#9ece6a"
+attention_badge = "#ff6b6b"
+cursor_fg = "#1a1b26"
+cursor_bg = "#c0caf5"
+selection_fg = "#c0caf5"
+selection_bg = "#33467c"
+ansi = [
+  "#15161e", "#f7768e", "#9ece6a", "#e0af68",
+  "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6",
+  "#414868", "#ff899d", "#9fe044", "#faba4a",
+  "#8db0ff", "#c7a9ff", "#a4daff", "#c0caf5",
+]

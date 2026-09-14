@@ -1,0 +1,27 @@
+# Official Moon palette: https://github.com/rose-pine/rose-pine-palette (MIT).
+# ANSI assignment and Prismattyc chrome roles are Prismattyc-authored mappings.
+id = "rose-pine-moon"
+name = "Rosé Pine Moon"
+variant = "dark"
+source = "https://github.com/rose-pine/rose-pine-palette/blob/main/palette.json"
+license = "MIT"
+default_fg = "#e0def4"
+default_bg = "#232136"
+chrome_fg = "#e0def4"
+chrome_bg = "#2a273f"
+pane_border = "#6e6a86"
+overlay_bg = "#393552"
+unseen_badge = "#f6c177"
+mail_letter = "#f6c177"
+active_badge = "#9ccfd8"
+attention_badge = "#ff6b6b"
+cursor_fg = "#232136"
+cursor_bg = "#e0def4"
+selection_fg = "#e0def4"
+selection_bg = "#44415a"
+ansi = [
+  "#2a273f", "#eb6f92", "#9ccfd8", "#f6c177",
+  "#3e8fb0", "#c4a7e7", "#ea9a97", "#e0def4",
+  "#6e6a86", "#eb6f92", "#9ccfd8", "#f6c177",
+  "#3e8fb0", "#c4a7e7", "#ea9a97", "#e0def4",
+]

@@ -1,0 +1,27 @@
+# PT-85: PMUX_MAIL must not land in a partial composer line.
+# Not in the default termwright-e2e.sh list: that runner rewrites
+# command to nested prismattyc. Drive this with a real pmuxd +
+# pmux-attach PTY (see crates/prismattyc-mux tests for the
+# deterministic unit/e2e coverage).
+session:
+  command: pmux-attach
+  args: ["--no-attach"]
+  cols: 80
+  rows: 24
+  env:
+    TERM: xterm-256color
+
+steps:
+  - waitForIdle: {idleMs: 500, timeoutMs: 15000}
+  - type: {text: "echo PT85_PARTIAL"}
+  - waitForIdle: {idleMs: 5000, timeoutMs: 8000}
+  - screenshot: {name: "01-partial-line-before-mail"}
+  - expectText: {text: "echo PT85_PARTIAL"}
+  - press: {key: Enter}
+  - waitForText: {text: "PT85_PARTIAL", timeoutMs: 15000}
+  - waitForIdle: {idleMs: 11000, timeoutMs: 15000}
+  - screenshot: {name: "02-after-submit-idle"}
+
+artifacts:
+  mode: always
+  dir: e2e/artifacts

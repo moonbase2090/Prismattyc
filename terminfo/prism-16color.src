@@ -1,0 +1,9 @@
+# Prism child-facing 16-color terminfo.
+#
+# PRISMATTYC_COLOR / PRISMATTYC_COLOR=16 / ansi / 8. No COLORTERM. System fallback is xterm.
+#
+# Compile (from repo root):
+#   tic -x -o terminfo terminfo/prism-16color.src
+#
+prismattyc-16color|Prismattyc terminal with ANSI colors,
+	use=xterm,

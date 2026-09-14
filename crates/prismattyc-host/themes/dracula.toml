@@ -1,0 +1,26 @@
+# Official palette specification: https://draculatheme.com/spec (MIT).
+id = "dracula"
+name = "Dracula"
+variant = "dark"
+source = "https://draculatheme.com/spec"
+license = "MIT"
+default_fg = "#f8f8f2"
+default_bg = "#282a36"
+chrome_fg = "#f8f8f2"
+chrome_bg = "#21222c"
+pane_border = "#6272a4"
+overlay_bg = "#44475a"
+unseen_badge = "#ffb86c"
+mail_letter = "#ffb86c"
+active_badge = "#50fa7b"
+attention_badge = "#ff6b6b"
+cursor_fg = "#282a36"
+cursor_bg = "#f8f8f2"
+selection_fg = "#f8f8f2"
+selection_bg = "#44475a"
+ansi = [
+  "#21222c", "#ff5555", "#50fa7b", "#f1fa8c",
+  "#bd93f9", "#ff79c6", "#8be9fd", "#f8f8f2",
+  "#6272a4", "#ff6e6e", "#69ff94", "#ffffa5",
+  "#d6acff", "#ff92df", "#a4ffff", "#ffffff",
+]

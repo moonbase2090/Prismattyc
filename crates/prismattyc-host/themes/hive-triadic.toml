@@ -1,0 +1,30 @@
+# Hive TUI theme — Hive Triadic (dark)
+# From the Hive design package color studies (turns 4 & 6).
+# Guest ANSI body hues are shared across variants by design — guest output is
+# never themed; theme-owned slots (yellow=amber, cyan=cool support, white/black,
+# brights) carry the scheme. Amber is spent on attention only.
+id = "hive-triadic"
+name = "Hive Triadic"
+variant = "dark"
+source = "Hive TUI Variants — design package"
+license = "Unspecified"
+default_fg = "#d2ccc0"
+default_bg = "#131118"
+chrome_fg = "#827e72"
+chrome_bg = "#0e0c11"
+pane_border = "#3c2e23"
+overlay_bg = "#242227"
+unseen_badge = "#dfa14f"
+mail_letter = "#dfa14f"
+active_badge = "#dfa14f"
+attention_badge = "#ff6b6b"
+cursor_fg = "#131118"
+cursor_bg = "#dfa14f"
+selection_fg = "#ece5d8"
+selection_bg = "#543f2a"
+ansi = [
+  "#100e14", "#c9705f", "#7ba86a", "#dfa14f",
+  "#7fafc4", "#9a7fc0", "#7daca0", "#d2ccc0",
+  "#524f48", "#d18a7a", "#94b582", "#e3b578",
+  "#97bbc8", "#ac95c5", "#95b9ac", "#ece5d8",
+]

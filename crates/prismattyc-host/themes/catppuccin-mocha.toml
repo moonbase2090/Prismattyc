@@ -1,0 +1,27 @@
+# Official palette: https://github.com/catppuccin/palette (MIT).
+# ANSI assignment and Prismattyc chrome roles are Prismattyc-authored mappings.
+id = "catppuccin-mocha"
+name = "Catppuccin Mocha"
+variant = "dark"
+source = "https://github.com/catppuccin/palette/blob/main/palette.json"
+license = "MIT"
+default_fg = "#cdd6f4"
+default_bg = "#1e1e2e"
+chrome_fg = "#cdd6f4"
+chrome_bg = "#181825"
+pane_border = "#585b70"
+overlay_bg = "#313244"
+unseen_badge = "#fab387"
+mail_letter = "#fab387"
+active_badge = "#a6e3a1"
+attention_badge = "#ff6b6b"
+cursor_fg = "#1e1e2e"
+cursor_bg = "#f5e0dc"
+selection_fg = "#cdd6f4"
+selection_bg = "#585b70"
+ansi = [
+  "#11111b", "#f38ba8", "#a6e3a1", "#f9e2af",
+  "#89b4fa", "#cba6f7", "#94e2d5", "#bac2de",
+  "#6c7086", "#eba0ac", "#a6e3a1", "#fab387",
+  "#74c7ec", "#f5c2e7", "#89dceb", "#cdd6f4",
+]

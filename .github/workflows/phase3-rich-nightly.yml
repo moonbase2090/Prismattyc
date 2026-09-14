@@ -1,0 +1,72 @@
+name: Phase 3 rich nightly
+
+# Frozen rich harness pin. Not a PRD §5.6 / A-6 pass and not a light
+# Local Actions gate. Does not score mutants.
+# GitHub-hosted minutes are paused. Local Actions is the runner
+# (if: github.actor == 'nektos/act'). Dispatch:
+#   local-actions run --event workflow_dispatch --job phase3-rich-nightly
+# The same scripts stay runnable from ci.yml:
+#   local-actions run --event pull_request --job phase3-rich
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase3-rich-nightly-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUSTUP_TOOLCHAIN: "1.90.0"
+
+jobs:
+  phase3-rich-nightly:
+    name: Phase 3 rich nightly
+    if: ${{ github.actor == 'nektos/act' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then
+            . "$cargo_env"
+          elif [ -f "$HOME/.cargo/env" ]; then
+            . "$HOME/.cargo/env"
+          fi
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+
+      - name: Install tmux
+        run: |
+          if command -v tmux >/dev/null 2>&1; then
+            tmux -V
+            exit 0
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tmux
+
+      - name: Run test-phase3-rich.sh
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          ./scripts/test-phase3-rich.sh
+
+      - name: Run test-phase3-transport.sh
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          ./scripts/test-phase3-transport.sh

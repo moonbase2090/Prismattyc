@@ -1,0 +1,22 @@
+[package]
+name = "pmux-mcp"
+description = "MCP stdio adapter over the pmux Mail* socket"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+repository = "https://github.com/Moonbase2090/Prismattyc"
+
+
+[dependencies]
+rmcp = { version = "3.1", features = ["server", "macros", "transport-io", "schemars"] }
+schemars = { version = "1", features = ["derive"] }
+serde = { workspace = true }
+serde_json = "1"
+prismattyc-core = { path = "../prismattyc-core" }
+prismattyc-mux = { path = "../prismattyc-mux" }
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "time"] }
+
+[[bin]]
+name = "pmux-mcp"
+path = "src/main.rs"

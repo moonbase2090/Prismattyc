@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Prismattyc
+GenericName=Terminal
+Comment=Classic terminal. Modern surface.
+# Exec/TryExec filled by scripts/install-prismattyc-host-desktop.sh with absolute path
+# (Plasma/KRunner do not search ~/.cargo/bin).
+Exec=@EXEC@
+TryExec=@TRYEXEC@
+Icon=prismattyc
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupNotify=true
+StartupWMClass=prismattyc-host
+Keywords=terminal;shell;console;pty;mux;

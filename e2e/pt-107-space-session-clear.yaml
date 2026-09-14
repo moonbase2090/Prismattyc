@@ -1,0 +1,17 @@
+# PT-107: pmux space --help lists clear next to rm.
+session:
+  command: pmux
+  args: ["space", "--help"]
+  cols: 80
+  rows: 40
+  env:
+    TERM: xterm-256color
+
+steps:
+  - waitForText: {text: "pmux space", timeoutMs: 5000}
+  - expectText: {text: "rm"}
+  - expectText: {text: "clear"}
+
+artifacts:
+  mode: always
+  dir: e2e/artifacts

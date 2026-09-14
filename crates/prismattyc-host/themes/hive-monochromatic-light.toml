@@ -1,0 +1,30 @@
+# Hive TUI theme — Hive Monochromatic Light (light)
+# From the Hive design package color studies (turns 4 & 6).
+# Guest ANSI body hues are shared across variants by design — guest output is
+# never themed; theme-owned slots (yellow=amber, cyan=cool support, white/black,
+# brights) carry the scheme. Amber is spent on attention only.
+id = "hive-monochromatic-light"
+name = "Hive Monochromatic Light"
+variant = "light"
+source = "Hive TUI Variants — design package"
+license = "Unspecified"
+default_fg = "#443c2f"
+default_bg = "#f2ede4"
+chrome_fg = "#8a8071"
+chrome_bg = "#e9e4db"
+pane_border = "#d6be98"
+overlay_bg = "#e6e1d7"
+unseen_badge = "#a8701c"
+mail_letter = "#a8701c"
+active_badge = "#a8701c"
+attention_badge = "#ff6b6b"
+cursor_fg = "#f2ede4"
+cursor_bg = "#a8701c"
+selection_fg = "#241f15"
+selection_bg = "#ddcaac"
+ansi = [
+  "#4d4538", "#a4432f", "#4e7a35", "#a8701c",
+  "#2f6f8c", "#7d5386", "#387272", "#d8d2c9",
+  "#b3a892", "#863727", "#40642b", "#8a5c17",
+  "#275b73", "#67446e", "#2e5d5d", "#241f15",
+]

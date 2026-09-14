@@ -1,0 +1,114 @@
+name: CRAP release
+
+# Run before cutting a release tag. Per-merge version stamps do not run this.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: "1.90.0"
+
+jobs:
+  crap-release:
+    name: CRAP release
+    if: ${{ github.actor == 'nektos/act' && github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      LA_HEAVY: "1"
+      LA_HEAVY_JOB: crap-release
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Acquire heavy-job lock (PT-305)
+        run: python3 scripts/la-heavy-serial.py --acquire --wait --job crap-release
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then
+            . "$cargo_env"
+          elif [ -f "$HOME/.cargo/env" ]; then
+            . "$HOME/.cargo/env"
+          fi
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+          rustup component add llvm-tools-preview
+
+      - name: Install real-window test display
+        run: ./scripts/install-render-test-deps.sh
+
+      - name: Install cargo-llvm-cov and cargo-crap
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          command -v cargo-llvm-cov >/dev/null 2>&1 \
+            || cargo install cargo-llvm-cov --version 0.9.0
+          command -v cargo-crap >/dev/null 2>&1 \
+            || cargo install cargo-crap --version 0.4.3
+
+      - name: CRAP gate unit tests
+        run: python3 scripts/crap-gate_test.py
+
+      - name: Coverage LCOV and CRAP report
+        env:
+          PRISMATTYC_TEST_TIME_SCALE: "4"
+        run: |
+          set -euo pipefail
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          mkdir -p build
+          cargo llvm-cov --workspace --locked --lcov --output-path build/crap-lcov.info
+          cargo crap --workspace \
+            --lcov build/crap-lcov.info \
+            --format json \
+            --sort file \
+            --output build/crap-current.json
+
+      - name: Check the tagged-release reduction target
+        run: |
+          python3 scripts/crap-gate.py --release \
+            --baseline docs/crap-baseline.json \
+            --current build/crap-current.json \
+            --repo "$PWD"
+
+      - name: Export crap-current.json onto the host worktree
+        if: success()
+        run: |
+          set -euo pipefail
+          test -f build/crap-current.json
+          copy_ok=0
+          if docker info >/dev/null 2>&1; then
+            dkr() { docker "$@"; }
+            copy_ok=1
+          elif sudo -n docker info >/dev/null 2>&1; then
+            dkr() { sudo -n docker "$@"; }
+            copy_ok=1
+          fi
+          if [ "$copy_ok" -eq 1 ]; then
+            if dkr run --rm -i -v "$PWD/build:/host-build" alpine:latest \
+              tee /host-build/crap-current.json >/dev/null < build/crap-current.json
+            then
+              echo "host worktree build/crap-current.json updated"
+            else
+              echo "warning: docker copy failed; gate already passed; file remains at $PWD/build/crap-current.json"
+            fi
+          else
+            echo "crap-current.json already at $PWD/build/crap-current.json"
+          fi
+
+      - name: Release heavy-job lock
+        if: always()
+        run: python3 scripts/la-heavy-serial.py --release --job crap-release

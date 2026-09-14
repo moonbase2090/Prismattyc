@@ -1,0 +1,28 @@
+# Stock default palette of an industry-peer terminal emulator (MIT).
+# ANSI 0–15 and window defaults come from that project's published source.
+# Prismattyc chrome tokens are project-authored mappings onto that palette.
+id = "ghost"
+name = "Ghost"
+variant = "dark"
+source = "https://github.com/ghostty-org/ghostty"
+license = "MIT"
+default_fg = "#ffffff"
+default_bg = "#282c34"
+chrome_fg = "#ffffff"
+chrome_bg = "#1d1f21"
+pane_border = "#666666"
+overlay_bg = "#3e4451"
+unseen_badge = "#f0c674"
+mail_letter = "#f0c674"
+active_badge = "#b5bd68"
+attention_badge = "#ff6b6b"
+cursor_fg = "#282c34"
+cursor_bg = "#ffffff"
+selection_fg = "#282c34"
+selection_bg = "#ffffff"
+ansi = [
+  "#1d1f21", "#cc6666", "#b5bd68", "#f0c674",
+  "#81a2be", "#b294bb", "#8abeb7", "#c5c8c6",
+  "#666666", "#d54e53", "#b9ca4a", "#e7c547",
+  "#7aa6da", "#c397d8", "#70c0b1", "#eaeaea",
+]

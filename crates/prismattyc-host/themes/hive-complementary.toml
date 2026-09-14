@@ -1,0 +1,30 @@
+# Hive TUI theme — Hive Complementary (dark)
+# From the Hive design package color studies (turns 4 & 6).
+# Guest ANSI body hues are shared across variants by design — guest output is
+# never themed; theme-owned slots (yellow=amber, cyan=cool support, white/black,
+# brights) carry the scheme. Amber is spent on attention only.
+id = "hive-complementary"
+name = "Hive Complementary"
+variant = "dark"
+source = "Hive TUI Variants — design package"
+license = "Unspecified"
+default_fg = "#ccd5d0"
+default_bg = "#101414"
+chrome_fg = "#7d8b85"
+chrome_bg = "#0c0e0e"
+pane_border = "#3a3122"
+overlay_bg = "#212525"
+unseen_badge = "#e0a458"
+mail_letter = "#e0a458"
+active_badge = "#e0a458"
+attention_badge = "#ff6b6b"
+cursor_fg = "#101414"
+cursor_bg = "#e0a458"
+selection_fg = "#e7eee9"
+selection_bg = "#53422a"
+ansi = [
+  "#0e1111", "#c9705f", "#8fb573", "#e0a458",
+  "#7fafc4", "#b48ead", "#6fb3ae", "#ccd5d0",
+  "#4e5a55", "#d08c7d", "#a2c28d", "#e2ba84",
+  "#96bdcc", "#bfa3ba", "#89c0bb", "#e7eee9",
+]

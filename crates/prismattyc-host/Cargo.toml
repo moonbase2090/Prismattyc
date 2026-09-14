@@ -1,0 +1,86 @@
+[package]
+name = "prismattyc-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Windowed OS host for Prismattyc — own window, not nested in Kitty/Ghostty"
+
+[[bin]]
+name = "prismattyc-host"
+path = "src/main.rs"
+
+[features]
+default = []
+# opt-in wgpu present. Softbuffer stays the default path.
+gpu = ["dep:wgpu", "dep:pollster"]
+
+[dependencies]
+anyhow.workspace = true
+mutants = "0.0.3"
+getrandom = "0.3"
+fontdue = "0.9"
+portable-pty.workspace = true
+prismattyc-core = { path = "../prismattyc-core" }
+prismattyc-emulator = { path = "../prismattyc-emulator" }
+prismattyc-mux = { path = "../prismattyc-mux" }
+prismattyc-protocol = { path = "../prismattyc-protocol" }
+prismattyc-render = { path = "../prismattyc-render" }
+png = "0.17"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+softbuffer = "0.4"
+toml = "0.8"
+toml_edit = "0.22"
+ttf-parser = "0.25"
+rustybuzz = "0.20"
+winit = "0.30"
+accesskit = "0.24"
+accesskit_winit = "0.32"
+wgpu = { version = "26", optional = true }
+pollster = { version = "0.4", optional = true }
+
+[build-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3.6", default-features = false, features = [
+    "image-data",
+    "wayland-data-control",
+] }
+# PT-118: native Wayland alpha present (wl_shm ARGB8888 on the winit
+# surface). Versions must stay in lockstep with winit's Wayland stack so the
+# guest backend wraps the same libwayland connection.
+memmap2 = "0.9"
+rustix = { version = "1.1", features = ["event", "fs"] }
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["staging"] }
+# Ghostty-style codepoint fallback: charset match, no bundled CJK.
+yeslogic-fontconfig-sys = { version = "6", features = ["dlopen"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+arboard = "3.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSApplication",
+    "NSEvent",
+    "NSImage",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSMenu",
+    "NSMenuItem",
+    "NSView",
+    "NSVisualEffectView",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "NSData",
+    "NSObject",
+    "NSString",
+] }
+
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { version = "1.1", features = ["process"] }

@@ -1,0 +1,33 @@
+# Monokai Pro Community Edition (CE), MIT, Copyright © 2025 Monokai.
+# Terminal colors verbatim from github.com/monokai-pro/xfce4-terminal
+# (themes/monokai-pro.theme, maintained by Henriquehnnm); chrome, overlay
+# and border tokens from the `defs` of github.com/monokai-pro/opencode
+# (monokai-pro.json, maintained by Relz): backgroundDimmed1 #221F22,
+# dimmed5 #403E41, dimmed4 #5B595C, dimmed3 #727072. Only the classic
+# filter is published under CE; the other Monokai Pro filters stay with the
+# commercial product.
+id = "monokai-pro"
+name = "Monokai Pro (CE)"
+variant = "dark"
+source = "https://github.com/monokai-pro/opencode"
+license = "MIT (Monokai Pro Community Edition, © 2025 Monokai)"
+default_fg = "#fcfcfa"
+default_bg = "#2d2a2e"
+chrome_fg = "#fcfcfa"
+chrome_bg = "#221f22"
+pane_border = "#5b595c"
+overlay_bg = "#403e41"
+unseen_badge = "#ffd866"
+mail_letter = "#ffd866"
+active_badge = "#a9dc76"
+attention_badge = "#ff6188"
+cursor_fg = "#2d2a2e"
+cursor_bg = "#fcfcfa"
+selection_fg = "#fcfcfa"
+selection_bg = "#5b595c"
+ansi = [
+  "#2d2a2e", "#ff6188", "#a9dc76", "#ffd866",
+  "#fc9867", "#ab9df2", "#78dce8", "#fcfcfa",
+  "#908e8f", "#ff6188", "#a9dc76", "#ffd866",
+  "#fc9867", "#ab9df2", "#78dce8", "#fcfcfa",
+]

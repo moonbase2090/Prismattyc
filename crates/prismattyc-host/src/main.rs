@@ -19,6 +19,8 @@ mod keybind;
 mod keys;
 mod local_views;
 #[cfg(target_os = "macos")]
+mod mac_present;
+#[cfg(target_os = "macos")]
 mod macos_menu;
 #[cfg(target_os = "macos")]
 mod macos_window;
@@ -1383,12 +1385,15 @@ struct RichPointerGesture {
     cancelled: bool,
 }
 
-/// Present path for the CPU `u32` framebuffer. Softbuffer is the default;
+/// Present path for the CPU `u32` framebuffer. macOS uses an alpha-capable
+/// Core Animation layer. Other platforms default to softbuffer;
 /// on native Wayland with transparency configured, our own `wl_shm`
 /// ARGB8888 path (PT-118) takes over because softbuffer presents XRGB
 /// there; wgpu is opt-in (`--features gpu` + `--gpu`) and falls back to
 /// softbuffer on init failure.
 enum PresentBackend {
+    #[cfg(target_os = "macos")]
+    Mac(Box<mac_present::MacPresent>),
     Softbuffer {
         /// Kept alive for `surface` (softbuffer requires context outlive use).
         _context: softbuffer::Context<Arc<Window>>,
@@ -1409,6 +1414,8 @@ enum PresentBackend {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PartialRasterBackend {
+    #[cfg(target_os = "macos")]
+    Mac,
     Softbuffer {
         wayland: bool,
     },
@@ -1420,6 +1427,8 @@ enum PartialRasterBackend {
 
 fn backend_supports_partial_raster(backend: PartialRasterBackend) -> bool {
     match backend {
+        #[cfg(target_os = "macos")]
+        PartialRasterBackend::Mac => false,
         PartialRasterBackend::Softbuffer { wayland } => !wayland,
         #[cfg(target_os = "linux")]
         PartialRasterBackend::WaylandShm => true,
@@ -1667,6 +1676,8 @@ impl PresentBackend {
         // its exact rectangle is part of FrameDamage.
         let partial_allowed = partial_raster_allowed(
             match self {
+                #[cfg(target_os = "macos")]
+                Self::Mac(_) => PartialRasterBackend::Mac,
                 Self::Softbuffer { wayland, .. } => {
                     PartialRasterBackend::Softbuffer { wayland: *wayland }
                 }
@@ -1680,6 +1691,36 @@ impl PresentBackend {
             host.render_timer,
         );
         match self {
+            #[cfg(target_os = "macos")]
+            Self::Mac(mac) => {
+                mac.prepare(width, height)?;
+                let raster_started = Instant::now();
+                // Every frame overwrites the previously premultiplied pixels.
+                rasterize_frame(host, mac.pixels_mut(), width, height, false);
+                if host.render_timer.shows_osd() {
+                    rasterize_render_timer(
+                        mac.pixels_mut(),
+                        width,
+                        height,
+                        &host.font,
+                        &host.theme,
+                        host.render_osd,
+                    );
+                }
+                host.render_frame.timing.raster_us = raster_started.elapsed().as_micros() as u64;
+                premultiply_in_place(mac.pixels_mut());
+                maybe_dump_present(
+                    host.dump_present.as_deref(),
+                    &mut host.dump_present_seq,
+                    mac.pixels_mut(),
+                    width,
+                    height,
+                    host.render_frame.full_repaint_reason,
+                );
+                let present_started = Instant::now();
+                mac.present()?;
+                host.render_frame.timing.present_us = present_started.elapsed().as_micros() as u64;
+            }
             #[cfg(all(test, target_os = "linux"))]
             Self::Probe => unreachable!("probe backend cannot paint"),
             Self::Softbuffer {
@@ -1808,6 +1849,8 @@ impl PresentBackend {
     /// does carry premultiplied alpha. The PT-118 shm path is ARGB8888.
     fn carries_alpha(&self, window: &Window) -> bool {
         match self {
+            #[cfg(target_os = "macos")]
+            Self::Mac(_) => true,
             Self::Softbuffer { .. } => {
                 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
                 let Ok(handle) = window.window_handle() else {
@@ -2357,21 +2400,6 @@ impl App {
                     host.dirty = true;
                 }
             }
-            #[cfg(target_os = "macos")]
-            if !host.alpha_visual
-                && self.file_config.window_opacity() != prior.window_opacity()
-                && !macos_window::set_window_opacity(
-                    &host.window,
-                    self.file_config.window_opacity(),
-                )
-            {
-                eprintln!(
-                    "prismattyc-host: window_opacity changed to {}; restart the host to \
-                     recreate the window with native macOS opacity",
-                    self.file_config.window_opacity()
-                );
-            }
-            #[cfg(not(target_os = "macos"))]
             if !host.alpha_visual && self.file_config.window_opacity() != prior.window_opacity() {
                 eprintln!(
                     "prismattyc-host: window_opacity changed to {}; restart the host to \
@@ -2383,7 +2411,7 @@ impl App {
             #[cfg(target_os = "macos")]
             if self.file_config.window_blur() != prior.window_blur() {
                 let wanted = self.file_config.window_blur();
-                let active = if wanted {
+                let active = if wanted && host.alpha_visual {
                     macos_window::set_window_blur(&host.window, true)
                 } else {
                     let _ = macos_window::set_window_blur(&host.window, false);
@@ -2813,10 +2841,10 @@ impl App {
             use winit::platform::wayland::WindowAttributesExtWayland;
             attrs = attrs.with_name("prismattyc-host", "Prismattyc");
         }
-        // PT-87: an alpha visual has to be requested at creation time. Ask for
-        // one only when the config wants transparency, so the default path and
-        // its visual are unchanged.
-        let want_alpha = wants_alpha_visual(&self.file_config);
+        // Request alpha at creation time. Other platforms keep their opaque
+        // visual unless configured otherwise. macOS always supports alpha so
+        // opacity and blur can be enabled through hot reload.
+        let want_alpha = cfg!(target_os = "macos") || wants_alpha_visual(&self.file_config);
         if want_alpha {
             attrs = attrs.with_transparent(true);
         }
@@ -2839,16 +2867,6 @@ impl App {
             window.set_visible(true);
         }
         window.set_ime_allowed(true);
-        #[cfg(target_os = "macos")]
-        let native_window_opacity = want_alpha
-            && macos_window::set_window_opacity(&window, self.file_config.window_opacity());
-        #[cfg(not(target_os = "macos"))]
-        let native_window_opacity = false;
-        #[cfg(target_os = "macos")]
-        let native_window_blur =
-            self.file_config.window_blur() && macos_window::set_window_blur(&window, true);
-        #[cfg(not(target_os = "macos"))]
-        let native_window_blur = false;
         #[cfg(target_os = "macos")]
         icon::apply_macos_app_icon();
         #[cfg(target_os = "macos")]
@@ -3023,9 +3041,15 @@ impl App {
             self.file_config.window_blur(),
         )?;
         let alpha_visual = want_alpha && present.carries_alpha(&window);
-        if want_alpha && !alpha_visual && !native_window_opacity {
+        if wants_alpha_visual(&self.file_config) && !alpha_visual {
             eprintln!("prismattyc-host: {}", ALPHA_UNSUPPORTED_NOTICE);
         }
+        #[cfg(target_os = "macos")]
+        let native_window_blur = alpha_visual
+            && self.file_config.window_blur()
+            && macos_window::set_window_blur(&window, true);
+        #[cfg(not(target_os = "macos"))]
+        let native_window_blur = false;
         let blur_installed = native_window_blur || present.blur_active();
         let blur_surface = if cfg!(target_os = "macos") {
             BlurSurface::Macos
@@ -3831,8 +3855,14 @@ fn open_present_backend(
             }
         }
     }
-    let _ = want_alpha;
-    let _ = want_blur;
+    let _ = (want_alpha, want_blur);
+    #[cfg(target_os = "macos")]
+    {
+        let mac = mac_present::MacPresent::new(window)?;
+        eprintln!("prismattyc-host: Core Animation present (premultiplied ARGB)");
+        Ok(PresentBackend::Mac(Box::new(mac)))
+    }
+    #[cfg(not(target_os = "macos"))]
     PresentBackend::softbuffer(window, wayland)
 }
 
@@ -3867,7 +3897,7 @@ fn wants_alpha_visual(config: &config::ConfigFile) -> bool {
 /// Printed once at startup when `window_opacity` cannot be honoured.
 #[cfg(target_os = "macos")]
 const ALPHA_UNSUPPORTED_NOTICE: &str =
-    "window_opacity ignored: the macOS NSWindow alphaValue could not be configured.";
+    "window_opacity ignored: this present path cannot carry per-pixel alpha on macOS.";
 #[cfg(not(target_os = "macos"))]
 const ALPHA_UNSUPPORTED_NOTICE: &str = "window_opacity ignored: this present path cannot carry \
      alpha. On Wayland the ARGB8888 shm present failed to initialize; on \

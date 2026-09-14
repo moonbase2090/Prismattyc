@@ -1,0 +1,30 @@
+# Hive TUI theme — Hive Night Hive (dark)
+# From the Hive design package color studies (turns 4 & 6).
+# Guest ANSI body hues are shared across variants by design — guest output is
+# never themed; theme-owned slots (yellow=amber, cyan=cool support, white/black,
+# brights) carry the scheme. Amber is spent on attention only.
+id = "hive-night-hive"
+name = "Hive Night Hive"
+variant = "dark"
+source = "Hive TUI Variants — design package"
+license = "Unspecified"
+default_fg = "#cbc5da"
+default_bg = "#100f1a"
+chrome_fg = "#8b84ad"
+chrome_bg = "#0c0b13"
+pane_border = "#372c28"
+overlay_bg = "#211f2b"
+unseen_badge = "#d3a05e"
+mail_letter = "#d3a05e"
+active_badge = "#d3a05e"
+attention_badge = "#ff6b6b"
+cursor_fg = "#100f1a"
+cursor_bg = "#d3a05e"
+selection_fg = "#e6e0f0"
+selection_bg = "#4e3d30"
+ansi = [
+  "#0e0d16", "#c9705f", "#8fb573", "#d3a05e",
+  "#7fafc4", "#9a90c8", "#85b1a4", "#cbc5da",
+  "#565073", "#cf897f", "#a2be8f", "#d9b38a",
+  "#96bace", "#aba2d1", "#9abbb5", "#e6e0f0",
+]

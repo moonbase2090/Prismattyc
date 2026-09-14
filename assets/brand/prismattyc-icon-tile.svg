@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Full-bleed dark squircle (r=0.24), same mark as prismattyc-icon.svg.
+       Linux/desktop has no extra Dock mask, so do not inset. -->
+  <rect width="512" height="512" rx="122.88" ry="122.88" fill="#121214"/>
+    <rect x="24" y="238" width="464" height="36" fill="#D0D0D0"></rect>
+  <polygon points="80,256 256,116 432,256 256,156" fill="#FF6E63"></polygon>
+  <polygon points="80,256 256,156 432,256 256,196" fill="#FFB454"></polygon>
+  <polygon points="80,256 256,196 432,256 256,236" fill="#FFE066"></polygon>
+  <polygon points="80,256 256,236 432,256 256,276" fill="#7BD88F"></polygon>
+  <polygon points="80,256 256,276 432,256 256,316" fill="#62A8FF"></polygon>
+  <polygon points="80,256 256,316 432,256 256,356" fill="#7B8CFA"></polygon>
+  <polygon points="80,256 256,356 432,256 256,396" fill="#9B8CF5"></polygon>
+</svg>

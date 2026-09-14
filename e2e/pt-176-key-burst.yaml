@@ -1,0 +1,22 @@
+# PT-176: a fast typed command must reach a nested classic shell intact.
+session:
+  command: prismattyc
+  args: ["/bin/sh"]
+  cols: 80
+  rows: 16
+  env:
+    TERM: xterm-256color
+
+steps:
+  - waitForIdle: {idleMs: 500, timeoutMs: 15000}
+  - type: {text: "printf 'PT176-BURST-OK 1234567890 abcdefghijklmnop \\033[31mred\\033[0m\\n'"}
+  - press: {key: Enter}
+  - waitForText: {text: "PT176-BURST-OK 1234567890 abcdefghijklmnop red", timeoutMs: 15000}
+  - expectText: {text: "PT176-BURST-OK 1234567890 abcdefghijklmnop red"}
+  - screenshot: {name: "01-key-burst"}
+  - type: {text: "exit"}
+  - press: {key: Enter}
+
+artifacts:
+  mode: always
+  dir: e2e/artifacts

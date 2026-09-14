@@ -1,0 +1,40 @@
+[package]
+name = "prismattyc-mux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+mutants = "0.0.3"
+getrandom = "0.3"
+png = "0.17"
+portable-pty.workspace = true
+prismattyc-core = { path = "../prismattyc-core" }
+prismattyc-emulator = { path = "../prismattyc-emulator" }
+prismattyc-protocol = { path = "../prismattyc-protocol" }
+prismattyc-render = { path = "../prismattyc-render" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+semver = "1.0"
+sha2 = "0.10"
+toml = "0.8"
+toml_edit = "0.22"
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+rustix = { version = "1.1", features = ["event", "fs", "net", "process", "termios"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3.6", default-features = false, features = [
+    "image-data",
+    "wayland-data-control",
+] }
+
+[target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
+arboard = "3.6"
+
+[dev-dependencies]
+prismattyc-core = { path = "../prismattyc-core" }

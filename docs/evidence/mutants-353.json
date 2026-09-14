@@ -1,0 +1,112 @@
+{
+  "binary": "/home/brandan/Projects/prismattyc-worktrees/astra-spaces-p1-outcomes/target/debug/deps/prismattyc_host-7f72bf627361fa01",
+  "binary_sha256": "5946f3c818a25b5427ffd7d240a74477a98235360e05856dd12f30ca07a0daad",
+  "build_source": "6fa72616e70f4018afb49351e80863a2a6ed93dc",
+  "build_log": "/home/brandan/Projects/prismattyc-worktrees/astra-spaces-p1-outcomes/build/space-outcome-frozen-host-tests.log",
+  "note": "Cached host test executable from the completed #350 build; no compile, Cargo orchestration, or mutant execution included. This is not the #349 mutation runner baseline.",
+  "baselines": [
+    {
+      "selector_args": [
+        "space_open::tests::"
+      ],
+      "tests": [
+        "space_open::tests::failed_child_or_partial_apply_keeps_the_cache_fenced",
+        "space_open::tests::hung_helper_is_reaped_before_queued_retry",
+        "space_open::tests::new_window_finishes_without_requiring_a_shared_cache_write",
+        "space_open::tests::old_unrelated_and_wrong_mode_caches_do_not_complete_an_open",
+        "space_open::tests::queue_waits_for_apply_and_child_exit_in_either_order"
+      ],
+      "test_count": 5,
+      "wall_seconds": 0.023822251008823514,
+      "exit_code": 0
+    },
+    {
+      "selector_args": [
+        "space_open_window_tests::delayed_chip_opens_keep_cache_label_and_focus_in_order",
+        "--exact"
+      ],
+      "tests": [
+        "space_open_window_tests::delayed_chip_opens_keep_cache_label_and_focus_in_order"
+      ],
+      "test_count": 1,
+      "wall_seconds": 10.611868629930541,
+      "exit_code": 0
+    }
+  ],
+  "existing_mutant_evidence": {
+    "source_commit": "270d5548fd38333d1c1e927d5a27b6f9f545e1c7",
+    "local_actions_run": "1789052743-6354652e",
+    "source_fingerprint": "2c57135834be850a2a07a1f6229bc9428f5d63002bb34f7c203a34a601b7058e",
+    "outcome": {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/prismattyc-host/src/main.rs:6563:5: replace open_space_from_host with ()",
+          "package": "prismattyc-host",
+          "file": "crates/prismattyc-host/src/main.rs",
+          "function": {
+            "function_name": "open_space_from_host",
+            "return_type": "",
+            "span": {
+              "start": {
+                "line": 6559,
+                "column": 1
+              },
+              "end": {
+                "line": 6641,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 6563,
+              "column": 5
+            },
+            "end": {
+              "line": 6640,
+              "column": 31
+            }
+          },
+          "replacement": "()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__prismattyc-host__src__main.rs_line_6563_col_5.log",
+      "diff_path": "diff/crates__prismattyc-host__src__main.rs_line_6563_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 3.154948697,
+          "process_status": "Success",
+          "argv": [
+            "/usr/local/rustup/toolchains/1.90.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=prismattyc-host@0.1.297"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 78.839144984,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/usr/local/rustup/toolchains/1.90.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=prismattyc-host@0.1.297",
+            "--locked",
+            "--",
+            "--test-threads=1"
+          ]
+        }
+      ]
+    },
+    "observed_nested_fixture_seconds": 2.52,
+    "observed_enclosing_722_test_seconds": 76.57,
+    "note": "Read from the actual caught-mutant log during the #351 inspection before Nexus cancelled the enclosing wave. This is one observed caught identity, not a completed gate or a new paired experiment."
+  }
+}

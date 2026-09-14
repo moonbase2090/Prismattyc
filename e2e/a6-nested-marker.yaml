@@ -1,0 +1,24 @@
+# Nested-only analog of §5.6.1 step 3 (distinct marker).
+# Does NOT prove windowed mux panes. session.command rewritten by the runner.
+session:
+  command: prismattyc
+  args: ["/bin/sh"]
+  cols: 80
+  rows: 24
+  env:
+    TERM: xterm-256color
+
+steps:
+  - waitForIdle: {idleMs: 500, timeoutMs: 15000}
+  - screenshot: {name: "01-a6-ready"}
+  - type: {text: "echo A6PM43MARKER"}
+  - press: {key: Enter}
+  - waitForText: {text: "A6PM43MARKER", timeoutMs: 15000}
+  - expectText: {text: "A6PM43MARKER"}
+  - screenshot: {name: "02-a6-marker"}
+  - type: {text: "exit"}
+  - press: {key: Enter}
+
+artifacts:
+  mode: always
+  dir: e2e/artifacts

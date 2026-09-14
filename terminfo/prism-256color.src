@@ -1,0 +1,13 @@
+# Prism child-facing terminfo (follow-up).
+#
+# Built from the common xterm-256color feature set so claimed classic paths
+# (alt screen, DECSTBM, 256-color, mouse, keys) stay usable under apps that
+# probe terminfo. Prismattyc forces TERM=prismattyc-256color and points TERMINFO at the
+# bundled database so the entry is found without a system install.
+#
+# Compile (from repo root):
+#   tic -x -o terminfo terminfo/prism-256color.src
+#
+# Truecolor remains via COLORTERM=truecolor (matrix F10), not a custom setaf.
+prismattyc-256color|Prismattyc terminal with 256 colors,
+	use=xterm-256color,

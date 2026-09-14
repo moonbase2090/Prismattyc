@@ -1,0 +1,26 @@
+# Prismattyc adaptation of the classic public Monokai palette (not Monokai Pro).
+id = "monokai"
+name = "Monokai"
+variant = "dark"
+source = "https://monokai.nl/"
+license = "Prismattyc-authored mapping from publicly documented classic colors"
+default_fg = "#f8f8f2"
+default_bg = "#272822"
+chrome_fg = "#f8f8f2"
+chrome_bg = "#1e1f1c"
+pane_border = "#75715e"
+overlay_bg = "#3e3d32"
+unseen_badge = "#e6db74"
+mail_letter = "#e6db74"
+active_badge = "#a6e22e"
+attention_badge = "#ff6b6b"
+cursor_fg = "#272822"
+cursor_bg = "#f8f8f2"
+selection_fg = "#f8f8f2"
+selection_bg = "#49483e"
+ansi = [
+  "#272822", "#f92672", "#a6e22e", "#e6db74",
+  "#66d9ef", "#ae81ff", "#a1efe4", "#f8f8f2",
+  "#75715e", "#f92672", "#a6e22e", "#e6db74",
+  "#66d9ef", "#ae81ff", "#a1efe4", "#ffffff",
+]

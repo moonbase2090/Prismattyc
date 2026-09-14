@@ -1,0 +1,99 @@
+name: Mutants nightly
+
+# Full crate mutation. Archive build/mutants/<crate>. Not the PR 80% gate.
+# GitHub-hosted minutes are paused. Local Actions is the runner
+# (if: github.actor == 'nektos/act'). Dispatch:
+#   local-actions run --event workflow_dispatch --job mutants-nightly
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutants-nightly-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUSTUP_TOOLCHAIN: "1.90.0"
+
+jobs:
+  mutants-nightly:
+    name: Mutants nightly
+    if: ${{ github.actor == 'nektos/act' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      LA_HEAVY: "1"
+      LA_HEAVY_JOB: mutants-nightly
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Acquire heavy-job lock (PT-305)
+        run: python3 scripts/la-heavy-serial.py --acquire --wait --job mutants-nightly
+
+      - name: Check host headroom (PT-305)
+        run: python3 scripts/mutants-gate.py --check-host-headroom
+
+      - name: Check mutants scratch is not tmpfs (PT-305)
+        run: |
+          scratch="${MUTANTS_TMPDIR:-${XDG_CACHE_HOME:-$HOME/.cache}/prismattyc/mutants}"
+          mkdir -p "${scratch}"
+          MUTANTS_TMPDIR="${scratch}" TMPDIR="${scratch}" \
+            python3 scripts/mutants-gate.py --check-tmpdir
+
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then
+            . "$cargo_env"
+          elif [ -f "$HOME/.cargo/env" ]; then
+            . "$HOME/.cargo/env"
+          fi
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+
+      - name: Install tmux
+        run: |
+          if command -v tmux >/dev/null 2>&1; then
+            tmux -V
+            exit 0
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tmux
+
+      - name: Install real-window test display
+        run: ./scripts/install-render-test-deps.sh
+
+      - name: Install cargo-mutants
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          command -v cargo-mutants >/dev/null 2>&1 \
+            || cargo install cargo-mutants --locked --version 27.1.0
+
+      - name: Mutants per crate
+        env:
+          LA_HEAVY_HELD: "1"
+        run: ./scripts/mutants-nightly.sh
+
+      - name: Archive mutants reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-nightly
+          path: build/mutants
+          if-no-files-found: warn
+
+      - name: Release heavy-job lock
+        if: always()
+        run: python3 scripts/la-heavy-serial.py --release --job mutants-nightly

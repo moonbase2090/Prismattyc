@@ -1,0 +1,30 @@
+[workspace]
+members = [
+    "crates/prismattyc",
+    "crates/prismattyc-core",
+    "crates/prismattyc-emulator",
+    "crates/prismattyc-host",
+    "crates/prismattyc-labs",
+    "crates/prismattyc-mux",
+    "crates/prismattyc-protocol",
+    "crates/prismattyc-render",
+    "crates/prismattyc-rich-client",
+    "crates/pmux-mcp",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.90"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1.0"
+crossterm = "0.29"
+libc = "0.2"
+portable-pty = "0.9"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+unicode-width = "0.2"
+vte = "0.15"

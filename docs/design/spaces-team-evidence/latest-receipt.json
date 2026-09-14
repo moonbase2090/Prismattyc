@@ -1,0 +1,37 @@
+{
+  "head": "75037c4dda28347d845881c7858fbde19150f748",
+  "workspace_tests": 2079,
+  "installed_move_checks": 5,
+  "daily_spaces_checks": 11,
+  "termwright_scenarios": 6,
+  "check": "PASS",
+  "clippy": "PASS",
+  "daemon_restarted": false,
+  "compatibility": "Reopen host; detach and reattach existing pre-0.1.315 nested viewers once.",
+  "binaries": {
+    "pmux": {
+      "version": "pmux 0.1.315 (75037c4dda28)",
+      "sha256": "ea983549e92e2105081770d44eaa66a52f0837c550b61a18a7f10cc0c8582fa0"
+    },
+    "pmuxd": {
+      "version": "pmuxd 0.1.315 (75037c4dda28)",
+      "sha256": "8dc70ce5db2aa7c1c08510e8726c0cdc4b53b33d15fdddefda6423a6d274760b"
+    },
+    "pmux-attach": {
+      "version": "pmux-attach 0.1.315 (75037c4dda28)",
+      "sha256": "7171352c56e90cbe374c704b1e2c9db2548674993afc54b3e10e3035cbdfd04e"
+    },
+    "prismattyc-host": {
+      "version": "prismattyc-host 0.1.315 (75037c4dda28)",
+      "sha256": "78c863b08bf60220bf66ce811a5393832097666d3d309aac3f4d04ace2ac4575"
+    },
+    "pmux-mcp": {
+      "version": "pmux-mcp 0.1.315 (75037c4dda28)",
+      "sha256": "60272fb626127857920aecb158910b22fb437b6737736328706b0359ec28085f"
+    },
+    "prismattyc": {
+      "version": "prismattyc 0.1.315 (75037c4dda28)",
+      "sha256": "97465eaad6fe5d0053227d9b7e65fc55f67baae6fe0a3ff7fe3813bdad745816"
+    }
+  }
+}

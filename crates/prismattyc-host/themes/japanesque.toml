@@ -1,0 +1,31 @@
+# "Japanesque": terminal colors verbatim from the iTerm2-Color-Schemes catalog
+# (mbadolato/iTerm2-Color-Schemes, MIT), as redistributed by Ghostty 1.3.1
+# (/usr/share/ghostty/themes, MIT). The catalog's LICENSE keeps each theme's
+# copyright with its original author; the catalog names no author for this
+# scheme, so the colors are shipped under the catalog's MIT terms as
+# received. The chrome, overlay and badge tokens are Prismattyc-derived.
+id = "japanesque"
+name = "Japanesque"
+variant = "dark"
+source = "https://github.com/mbadolato/iTerm2-Color-Schemes"
+license = "Terminal colors: iTerm2-Color-Schemes catalog, MIT (per-theme copyright stays with the original author, unnamed in the catalog); chrome tokens: Prismattyc-derived"
+default_fg = "#f7f6ec"
+default_bg = "#1e1e1e"
+chrome_fg = "#f7f6ec"
+chrome_bg = "#181818"
+pane_border = "#595b59"
+overlay_bg = "#383837"
+unseen_badge = "#e9b32a"
+mail_letter = "#e9b32a"
+active_badge = "#7bb75b"
+attention_badge = "#ff6b6b"
+cursor_fg = "#343935"
+cursor_bg = "#edcf4f"
+selection_fg = "#f7f6ec"
+selection_bg = "#175877"
+ansi = [
+  "#343935", "#cf3f61", "#7bb75b", "#e9b32a",
+  "#4c9ad4", "#a57fc4", "#389aad", "#fafaf6",
+  "#595b59", "#d18fa6", "#767f2c", "#78592f",
+  "#135979", "#604291", "#76bbca", "#b2b5ae",
+]

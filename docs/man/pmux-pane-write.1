@@ -1,0 +1,82 @@
+.TH PMUX-PANE-WRITE 1 "September 2026" "Prismattyc" "User Commands"
+.SH NAME
+pmux-pane-write \- send intentional text to one live pane
+.SH SYNOPSIS
+.B pmux pane-write
+.I PANE
+.RB ( --text " TEXT" " | " --stdin )
+.RB [ --submit " auto|enter|none" ]
+.RB [ --json ]
+.SH DESCRIPTION
+Write literal UTF-8 text to the exact numeric pane ID.
+The operation checks the current child PID and writes only to that pane.
+Sync-input does not copy the text to sibling panes.
+The operation does not acquire, take over, or release a controller lease.
+.PP
+Use this command for direct collaboration in a live agent pane or for an
+explicitly authorized shell command.
+Use
+.B pmux mail send
+for stored messages with claim/commit tracking.
+.SH OPTIONS
+.TP
+.BI --text " TEXT"
+Send literal text. Backslash escapes are not decoded.
+.TP
+.B --stdin
+Read the body from standard input. Choose exactly one of --text or --stdin.
+.TP
+.BI --submit " MODE"
+The default, auto, uses bracketed paste and the detected agent's submit
+sequence. Supported families are Grok, Claude, Kiro, Codex, and Cursor.
+An unknown foreground application is refused.
+Enter mode appends CR. None mode adds no submit key and leaves input dirty.
+.TP
+.B --json
+Print a structured result on standard output.
+.SH LIMITS AND REFUSALS
+Text must contain 1 to 65,504 UTF-8 bytes.
+Tabs and newlines are allowed. Other control characters are rejected.
+Use pmux send for raw control keys.
+.PP
+Another controller, unsubmitted text, input within 750 ms, or at least
+8 KiB of output in three seconds causes a refusal.
+Activity checks do not prove that an application is ready.
+.SH RESULTS
+A queued result means the PTY input queue accepted all bytes.
+It does not mean the recipient accepted, read, or executed the text.
+Byte counts include paste framing and submit bytes.
+.PP
+A partial result means some bytes were queued before a failure.
+The result includes accepted and total byte counts.
+Inspect the pane before continuing. Do not automatically replay a partial
+write or a write whose reply was lost.
+.SH EXIT STATUS
+Zero means all bytes were queued. Nonzero means an error or partial write.
+.SH EXAMPLES
+Send a message to an agent:
+.PP
+.nf
+pmux pane-write 15 --text 'Review the parser change.' --json
+.fi
+.PP
+Run a command in an authorized shell pane and inspect its output:
+.PP
+.nf
+pmux pane-write 15 --text 'seq 1 10000' --submit enter --json
+pmux save-buffer 15 -
+.fi
+.PP
+Read a multiline body from a file:
+.PP
+.nf
+pmux pane-write 15 --stdin --json < request.txt
+.fi
+.SH COMPATIBILITY
+The daemon must support the pane_write operation.
+Older daemons reject it; the CLI does not fall back to raw writes.
+Installing binaries does not replace an already running daemon.
+.SH SEE ALSO
+.BR pmux (1),
+.BR pmuxd (1),
+.BR pmux-mcp (1)

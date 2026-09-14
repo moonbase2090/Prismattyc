@@ -1,0 +1,24 @@
+# Prismattyc-authored baseline palette. Brand focus colors live outside themes.
+id = "prismattyc-default"
+name = "Prismattyc Default"
+variant = "dark"
+source = "https://github.com/brandanmajeske/Prismattyc"
+license = "Project-local palette; no external source"
+default_fg = "#d0d0d0"
+default_bg = "#121214"
+chrome_fg = "#e5e9f0"
+chrome_bg = "#1b1e26"
+pane_border = "#454a57"
+overlay_bg = "#2a364a"
+unseen_badge = "#ffb454"
+mail_letter = "#ffb454"
+active_badge = "#4cd18b"
+attention_badge = "#ff6b6b"
+cursor_fg = "#121214"
+cursor_bg = "#d0d0d0"
+ansi = [
+  "#000000", "#cd0000", "#00cd00", "#cdcd00",
+  "#0000ee", "#cd00cd", "#00cdcd", "#e5e5e5",
+  "#7f7f7f", "#ff0000", "#00ff00", "#ffff00",
+  "#5c5cff", "#ff00ff", "#00ffff", "#ffffff",
+]

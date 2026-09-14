@@ -1,0 +1,185 @@
+schema_version = 1
+# Intro clip for PT-197. Not a catalog step. The voice script reads this.
+intro = "Welcome to the Prismattyc walkthrough."
+
+[[level]]
+id = "window"
+title = "The window"
+
+[[level.step]]
+id = "window.split-right"
+caption = "Split the pane to the right."
+hint = "Use the key shown in the caption."
+command = "split_right"
+audio = "window.split-right"
+expect = { kind = "host_action", action = "split_right", result = "ok" }
+show_me = { kind = "host_action", action = "split_right" }
+
+[[level.step]]
+id = "window.focus-right"
+caption = "Focus the pane on the right."
+hint = "Use the key shown in the caption."
+command = "focus_right"
+audio = "window.focus-right"
+expect = { kind = "host_action", action = "focus_right", result = "ok" }
+show_me = { kind = "host_action", action = "focus_right" }
+
+[[level.step]]
+id = "window.close-pane"
+caption = "Close the focused pane."
+hint = "Use the key shown in the caption."
+command = "close_pane"
+audio = "window.close-pane"
+expect = { kind = "host_action", action = "close_pane", result = "ok" }
+show_me = { kind = "host_action", action = "close_pane" }
+
+[[level]]
+id = "tabs"
+title = "Tabs"
+
+[[level.step]]
+id = "tabs.new"
+caption = "Open a new tab."
+hint = "Use the key shown in the caption."
+command = "new_tab"
+audio = "tabs.new"
+expect = { kind = "host_action", action = "new_tab", result = "ok" }
+show_me = { kind = "host_action", action = "new_tab" }
+
+[[level.step]]
+id = "tabs.rename"
+caption = "Rename the active tab."
+hint = "Use the key shown in the caption."
+command = "rename_tab"
+audio = "tabs.rename"
+expect = { kind = "host_action", action = "rename_tab", result = "ok" }
+show_me = { kind = "host_action", action = "rename_tab" }
+
+[[level.step]]
+id = "tabs.move-pane"
+caption = "Move a pane to the next tab."
+hint = "Use the key shown in the caption."
+command = "move_pane_next_tab"
+audio = "tabs.move-pane"
+expect = { kind = "host_action", action = "move_pane_next_tab", result = "ok" }
+show_me = { kind = "host_action", action = "move_pane_next_tab" }
+
+[[level.step]]
+id = "tabs.drag"
+caption = "Drag the tab one slot to the right."
+hint = "Use the key shown in the caption."
+command = "move_tab_right"
+audio = "tabs.drag"
+expect = { kind = "host_action", action = "move_tab_right", result = "ok" }
+show_me = { kind = "host_action", action = "move_tab_right" }
+
+[[level]]
+id = "seats"
+title = "Seats"
+
+[[level.step]]
+id = "seats.new"
+caption = "Create a new pmux seat."
+hint = "Run pmux new."
+command = "pmux_new"
+audio = "seats.new"
+expect = { kind = "command_event", command = "pmux_new", result = "ok" }
+show_me = { kind = "command_event", command = "pmux_new" }
+
+[[level.step]]
+id = "seats.attach-all"
+caption = "Attach all seats."
+hint = "Run pmux attach --all."
+command = "attach_all"
+audio = "seats.attach-all"
+expect = { kind = "command_event", command = "attach_all", result = "ok" }
+show_me = { kind = "command_event", command = "attach_all" }
+
+[[level.step]]
+id = "seats.mail"
+caption = "Send and commit a letter."
+hint = "Send, claim, then commit."
+command = "mail_commit"
+audio = "seats.mail"
+expect = { kind = "command_event", command = "mail_commit", result = "ok" }
+show_me = { kind = "command_event", command = "mail_commit" }
+
+[[level]]
+id = "spaces"
+title = "Spaces"
+
+[[level.step]]
+id = "spaces.save"
+caption = "Save this space from the rail."
+hint = "Click +, or right-click a chip and choose Save this window here."
+command = "save_space"
+audio = "spaces.save"
+expect = { kind = "space_event", event = "saved" }
+show_me = { kind = "space_event", event = "saved" }
+
+[[level.step]]
+id = "spaces.open"
+caption = "Open the saved space from its chip menu."
+hint = "Click the chip to switch, or choose Open from its menu."
+command = "open_space"
+audio = "spaces.open"
+expect = { kind = "space_event", event = "opened" }
+show_me = { kind = "space_event", event = "opened" }
+
+[[level.step]]
+id = "spaces.reopen"
+caption = "Reopen the ended session."
+hint = "Press Enter on the placeholder."
+audio = "spaces.reopen"
+expect = { kind = "mux_event", event = "SessionCreated", session = "current" }
+
+[[level]]
+id = "power"
+title = "Power"
+
+[[level.step]]
+id = "power.palette"
+caption = "Open the command palette."
+hint = "Use the key shown in the caption."
+command = "command_palette"
+audio = "power.palette"
+expect = { kind = "host_action", action = "command_palette", result = "ok" }
+show_me = { kind = "host_action", action = "command_palette" }
+
+[[level.step]]
+id = "power.preset"
+caption = "Arrange the panes as a grid."
+hint = "Use the key shown in the caption."
+command = "preset_grid"
+audio = "power.preset"
+expect = { kind = "host_action", action = "preset_grid", result = "ok" }
+show_me = { kind = "host_action", action = "preset_grid" }
+
+[[level.step]]
+id = "power.zoom"
+caption = "Zoom the focused pane."
+hint = "Use the key shown in the caption."
+command = "zoom_pane"
+audio = "power.zoom"
+expect = { kind = "host_action", action = "zoom_pane", result = "ok" }
+show_me = { kind = "host_action", action = "zoom_pane" }
+
+[[level.step]]
+id = "power.find"
+caption = "Find text in scrollback."
+hint = "Use the key shown in the caption."
+command = "find"
+audio = "power.find"
+expect = { kind = "host_action", action = "find", result = "ok" }
+show_me = { kind = "host_action", action = "find" }
+
+[[level]]
+id = "boss"
+title = "Boss"
+
+[[level.step]]
+id = "boss.reproduce-space"
+caption = "Reproduce the three-seat picture."
+hint = "Two panes in the first tab, one pane in the second. Three seats."
+audio = "boss.reproduce-space"
+expect = { kind = "space_event", event = "boss_snapshot_match" }

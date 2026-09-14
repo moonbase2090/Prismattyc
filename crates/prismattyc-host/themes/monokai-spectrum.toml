@@ -1,0 +1,29 @@
+# Prismattyc-authored mapping of the publicly documented Filter Spectrum
+# terminal colors (bg #222222, fg #f7f1ff, accents fc618d / 7bd88f /
+# fce566 / fd9353 / 948ae3 / 5ad4e6). Not Monokai Pro (commercial).
+# Classic Monokai remains `monokai`.
+id = "monokai-spectrum"
+name = "Monokai Spectrum"
+variant = "dark"
+source = "https://monokai.pro/history"
+license = "Prismattyc-authored mapping from publicly documented Filter Spectrum terminal colors; not the commercial Monokai Pro product"
+default_fg = "#f7f1ff"
+default_bg = "#222222"
+chrome_fg = "#f7f1ff"
+chrome_bg = "#191919"
+pane_border = "#525053"
+overlay_bg = "#363537"
+unseen_badge = "#fce566"
+mail_letter = "#fce566"
+active_badge = "#7bd88f"
+attention_badge = "#ff6b6b"
+cursor_fg = "#222222"
+cursor_bg = "#bab6c0"
+selection_fg = "#f7f1ff"
+selection_bg = "#525053"
+ansi = [
+  "#222222", "#fc618d", "#7bd88f", "#fce566",
+  "#fd9353", "#948ae3", "#5ad4e6", "#f7f1ff",
+  "#69676c", "#fc618d", "#7bd88f", "#fce566",
+  "#fd9353", "#948ae3", "#5ad4e6", "#f7f1ff",
+]

@@ -1,0 +1,25 @@
+# Key delivery: type, backspace, enter, ctrl-c interrupt path under shell.
+session:
+  command: prismattyc
+  args: ["/bin/sh"]
+  cols: 80
+  rows: 24
+  env:
+    TERM: xterm-256color
+
+steps:
+  - waitForIdle: {idleMs: 500, timeoutMs: 15000}
+  - screenshot: {name: "01-ready"}
+  - type: {text: "echo -n abc"}
+  - press: {key: Backspace}
+  - press: {key: Backspace}
+  - type: {text: "XY"}
+  - press: {key: Enter}
+  - waitForText: {text: "aXY", timeoutMs: 10000}
+  - screenshot: {name: "02-backspace-edit"}
+  - type: {text: "exit"}
+  - press: {key: Enter}
+
+artifacts:
+  mode: always
+  dir: e2e/artifacts

@@ -1,0 +1,87 @@
+{
+  "baseline_head": "37be3ed5299d246ccfd43bab1f1e226526d3af70",
+  "unfixed_compact_cell_head": "c2843bc141eab07675d7a6fd42c5a36d7634682e",
+  "method": "Cut the full heaptrack trace immediately after its first maximal R record. Export live allocation stacks from that complete-record prefix. R values count 4096-byte pages from the I record. These sampled RSS maxima differ slightly from procfs VmHWM.",
+  "variants": {
+    "baseline": {
+      "location": {
+        "trace_ms": 80063,
+        "rss_pages": 84980,
+        "page_bytes": 4096,
+        "cut": "immediately after the first maximal heaptrack R record"
+      },
+      "live_bytes": {
+        "other": 1740735,
+        "font_allocations": 63846772,
+        "attach_reader_and_queue": 329270,
+        "cluster_store": 48,
+        "other_damage": 992,
+        "resize_allocations": 611646,
+        "row_cell_buffers": 145603600,
+        "scroll_event_vector": 75497472
+      },
+      "top_allocator": [
+        {
+          "bytes": 0,
+          "stack": "main;_RNvNtCs75vJTIYSa2J_3std2rt19lang_start_internal;_ZN3std2rt10lang_start28_$u7b$$u7b$closure$u7d$$u7d$17h4dcee8290824504fE.llvm.16123596269675629944;std::sys::backtrace::__rust_begin_short_backtrace::hfab50ed06ad8cf68;prismattyc_host::main::h293c16b911093b8b;winit::platform_impl::linux::x11::EventLoop$LT$T$GT$::run_on_demand::h35ab9c641ba5d54a;core::ops::function::impls::_$LT$impl$u20$core..ops..function..FnMut$LT$A$GT$$u20$for$u20$$RF$mut$u20$F$GT$::call_mut::hd60dc72e8ff22d57;_ZN15prismattyc_host3App4pump17h3d423d8f65e34d7cE.llvm.7668323411846696297;prismattyc_host::mux::MuxRuntime::drain_all::h668de8d9253d2f42;prismattyc_host::mux::PaneRuntime::feed_replica::ha77cecc5e73bcfae;prismattyc_emulator::Emulator::feed::h111abfb8b708a113;prismattyc_emulator::Emulator::advance_parser::he03bba4b30c62901;vte::Parser$LT$_$GT$::ground_dispatch::h4ee0b82a37fbf0ac;prismattyc_core::Screen::line_feed::h3fe1340b862edb25;prismattyc_core::damage::GridDamage::push_scroll::h3667ffe9b529acda;alloc::raw_vec::RawVec$LT$T$C$A$GT$::grow_one::h7b21e245cc830570;_ZN5alloc7raw_vec20RawVecInner$LT$A$GT$11finish_grow17hefc14b02ebb20fc8E.llvm.2367739020565122576;"
+        },
+        {
+          "bytes": 75497472,
+          "stack": "main;_RNvNtCs75vJTIYSa2J_3std2rt19lang_start_internal;_ZN3std2rt10lang_start28_$u7b$$u7b$closure$u7d$$u7d$17h4dcee8290824504fE.llvm.16123596269675629944;std::sys::backtrace::__rust_begin_short_backtrace::hfab50ed06ad8cf68;prismattyc_host::main::h293c16b911093b8b;winit::platform_impl::linux::x11::EventLoop$LT$T$GT$::run_on_demand::h35ab9c641ba5d54a;core::ops::function::impls::_$LT$impl$u20$core..ops..function..FnMut$LT$A$GT$$u20$for$u20$$RF$mut$u20$F$GT$::call_mut::hd60dc72e8ff22d57;_ZN15prismattyc_host3App4pump17h3d423d8f65e34d7cE.llvm.7668323411846696297;prismattyc_host::mux::MuxRuntime::drain_all::h668de8d9253d2f42;prismattyc_host::mux::PaneRuntime::feed_replica::ha77cecc5e73bcfae;prismattyc_emulator::Emulator::feed::h111abfb8b708a113;prismattyc_emulator::Emulator::advance_parser::he03bba4b30c62901;vte::Parser$LT$_$GT$::ground_dispatch::h4ee0b82a37fbf0ac;prismattyc_core::Screen::line_feed::h3fe1340b862edb25;prismattyc_core::damage::GridDamage::push_scroll::h3667ffe9b529acda;alloc::raw_vec::RawVec$LT$T$C$A$GT$::grow_one::h7b21e245cc830570;_ZN5alloc7raw_vec20RawVecInner$LT$A$GT$11finish_grow17hefc14b02ebb20fc8E.llvm.2367739020565122576;"
+        },
+        {
+          "bytes": 0,
+          "stack": "main;_RNvNtCs75vJTIYSa2J_3std2rt19lang_start_internal;_ZN3std2rt10lang_start28_$u7b$$u7b$closure$u7d$$u7d$17h4dcee8290824504fE.llvm.16123596269675629944;std::sys::backtrace::__rust_begin_short_backtrace::hfab50ed06ad8cf68;prismattyc_host::main::h293c16b911093b8b;winit::platform_impl::linux::x11::EventLoop$LT$T$GT$::run_on_demand::h35ab9c641ba5d54a;_ZN15prismattyc_host3App4pump17h3d423d8f65e34d7cE.llvm.7668323411846696297;prismattyc_host::mux::MuxRuntime::drain_all::h668de8d9253d2f42;prismattyc_host::mux::PaneRuntime::feed_replica::ha77cecc5e73bcfae;prismattyc_emulator::Emulator::feed::h111abfb8b708a113;prismattyc_emulator::Emulator::advance_parser::he03bba4b30c62901;vte::Parser$LT$_$GT$::ground_dispatch::h4ee0b82a37fbf0ac;prismattyc_core::Screen::line_feed::h3fe1340b862edb25;prismattyc_core::damage::GridDamage::push_scroll::h3667ffe9b529acda;alloc::raw_vec::RawVec$LT$T$C$A$GT$::grow_one::h7b21e245cc830570;_ZN5alloc7raw_vec20RawVecInner$LT$A$GT$11finish_grow17hefc14b02ebb20fc8E.llvm.2367739020565122576;"
+        },
+        {
+          "bytes": 0,
+          "stack": "main;_RNvNtCs75vJTIYSa2J_3std2rt19lang_start_internal;_ZN3std2rt10lang_start28_$u7b$$u7b$closure$u7d$$u7d$17h4dcee8290824504fE.llvm.16123596269675629944;std::sys::backtrace::__rust_begin_short_backtrace::hfab50ed06ad8cf68;prismattyc_host::main::h293c16b911093b8b;winit::platform_impl::linux::x11::EventLoop$LT$T$GT$::run_on_demand::h35ab9c641ba5d54a;_ZN15prismattyc_host3App4pump17h3d423d8f65e34d7cE.llvm.7668323411846696297;prismattyc_host::mux::MuxRuntime::drain_all::h668de8d9253d2f42;prismattyc_host::mux::PaneRuntime::feed_replica::ha77cecc5e73bcfae;prismattyc_emulator::Emulator::feed::h111abfb8b708a113;prismattyc_emulator::Emulator::advance_parser::he03bba4b30c62901;vte::Parser$LT$_$GT$::ground_dispatch::h4ee0b82a37fbf0ac;prismattyc_core::Screen::line_feed::h3fe1340b862edb25;prismattyc_core::damage::GridDamage::push_scroll::h3667ffe9b529acda;alloc::raw_vec::RawVec$LT$T$C$A$GT$::grow_one::h7b21e245cc830570;_ZN5alloc7raw_vec20RawVecInner$LT$A$GT$11finish_grow17hefc14b02ebb20fc8E.llvm.2367739020565122576;"
+        }
+      ],
+      "profile": "reading file \"/data/baseline-peak.heaptrack.gz\" - please wait, this might take some time...\nDebuggee command was: prismattyc-host --attach-session 2 --attach-session 3 --attach-session 4\nfinished reading file, now analyzing data:\n\ntotal runtime: 80.064000s.\ncalls to allocation functions: 15654200 (195521/s)\ntemporary memory allocations: 14736558 (184059/s)\npeak heap memory consumption: 375.99M\npeak RSS (including heaptrack overhead): 348.08M\ntotal memory leaked: 287.63M\n",
+      "full_trace_sha256": "b222dbe660aa32a59d77a51a94480e704eedd55c271d2ccc270b2c392ea83e0b",
+      "prefix_sha256": "75bbfea1ff660254eb9cf4eafe57e3b5d6204c08245ce296d910b957c1972e29",
+      "stacks_sha256": "cade41e19123cee6abf268109c74faad42924186b0f6da0e6547dfe208414ca4"
+    },
+    "candidate": {
+      "location": {
+        "trace_ms": 64177,
+        "rss_pages": 131021,
+        "page_bytes": 4096,
+        "cut": "immediately after the first maximal heaptrack R record"
+      },
+      "live_bytes": {
+        "other": 1030166,
+        "font_allocations": 63846772,
+        "attach_reader_and_queue": 1191463,
+        "cluster_store": 48,
+        "other_damage": 992,
+        "resize_allocations": 1025310,
+        "row_cell_buffers": 65520000,
+        "scroll_event_vector": 603979776
+      },
+      "top_allocator": [
+        {
+          "bytes": 0,
+          "stack": "main;_RNvNtCs75vJTIYSa2J_3std2rt19lang_start_internal;_ZN3std2rt10lang_start28_$u7b$$u7b$closure$u7d$$u7d$17h35da7eba7573c892E.llvm.16277580022897139169;std::sys::backtrace::__rust_begin_short_backtrace::he37200f8ab9ea8e9;prismattyc_host::main::h2e211d37f6f66362;winit::platform_impl::linux::x11::EventLoop$LT$T$GT$::run_on_demand::h28f0c0bc9ad0c54f;_ZN15prismattyc_host3App4pump17hc34db5648bf523f1E.llvm.12215144417216259615;prismattyc_host::mux::MuxRuntime::drain_all::hb30e100ba959bffe;prismattyc_host::mux::PaneRuntime::feed_replica::h593385677b98adc8;prismattyc_emulator::Emulator::feed::hb6c7e67885708349;prismattyc_emulator::Emulator::advance_parser::hbf9e997048a2d7df;vte::Parser$LT$_$GT$::ground_dispatch::h9e506fd16c985e12;prismattyc_core::Screen::line_feed::hbc8a7f0af8065776;prismattyc_core::damage::GridDamage::push_scroll::hdef54b5392db5788;alloc::raw_vec::RawVec$LT$T$C$A$GT$::grow_one::hd1f03934dddbb4d3;_ZN5alloc7raw_vec20RawVecInner$LT$A$GT$11finish_grow17h0ec6c0c9b867d679E.llvm.4378487685622590409;"
+        },
+        {
+          "bytes": 0,
+          "stack": "main;_RNvNtCs75vJTIYSa2J_3std2rt19lang_start_internal;_ZN3std2rt10lang_start28_$u7b$$u7b$closure$u7d$$u7d$17h35da7eba7573c892E.llvm.16277580022897139169;std::sys::backtrace::__rust_begin_short_backtrace::he37200f8ab9ea8e9;prismattyc_host::main::h2e211d37f6f66362;winit::platform_impl::linux::x11::EventLoop$LT$T$GT$::run_on_demand::h28f0c0bc9ad0c54f;_ZN15prismattyc_host3App4pump17hc34db5648bf523f1E.llvm.12215144417216259615;prismattyc_host::mux::MuxRuntime::drain_all::hb30e100ba959bffe;prismattyc_host::mux::PaneRuntime::feed_replica::h593385677b98adc8;prismattyc_emulator::Emulator::feed::hb6c7e67885708349;prismattyc_emulator::Emulator::advance_parser::hbf9e997048a2d7df;vte::Parser$LT$_$GT$::ground_dispatch::h9e506fd16c985e12;prismattyc_core::Screen::line_feed::hbc8a7f0af8065776;prismattyc_core::damage::GridDamage::push_scroll::hdef54b5392db5788;alloc::raw_vec::RawVec$LT$T$C$A$GT$::grow_one::hd1f03934dddbb4d3;_ZN5alloc7raw_vec20RawVecInner$LT$A$GT$11finish_grow17h0ec6c0c9b867d679E.llvm.4378487685622590409;"
+        },
+        {
+          "bytes": 603979776,
+          "stack": "main;_RNvNtCs75vJTIYSa2J_3std2rt19lang_start_internal;_ZN3std2rt10lang_start28_$u7b$$u7b$closure$u7d$$u7d$17h35da7eba7573c892E.llvm.16277580022897139169;std::sys::backtrace::__rust_begin_short_backtrace::he37200f8ab9ea8e9;prismattyc_host::main::h2e211d37f6f66362;winit::platform_impl::linux::x11::EventLoop$LT$T$GT$::run_on_demand::h28f0c0bc9ad0c54f;core::ops::function::impls::_$LT$impl$u20$core..ops..function..FnMut$LT$A$GT$$u20$for$u20$$RF$mut$u20$F$GT$::call_mut::h3f281bf2768abd5d;_ZN15prismattyc_host3App4pump17hc34db5648bf523f1E.llvm.12215144417216259615;prismattyc_host::mux::MuxRuntime::drain_all::hb30e100ba959bffe;prismattyc_host::mux::PaneRuntime::feed_replica::h593385677b98adc8;prismattyc_emulator::Emulator::feed::hb6c7e67885708349;prismattyc_emulator::Emulator::advance_parser::hbf9e997048a2d7df;vte::Parser$LT$_$GT$::ground_dispatch::h9e506fd16c985e12;prismattyc_core::Screen::line_feed::hbc8a7f0af8065776;prismattyc_core::damage::GridDamage::push_scroll::hdef54b5392db5788;alloc::raw_vec::RawVec$LT$T$C$A$GT$::grow_one::hd1f03934dddbb4d3;_ZN5alloc7raw_vec20RawVecInner$LT$A$GT$11finish_grow17h0ec6c0c9b867d679E.llvm.4378487685622590409;"
+        },
+        {
+          "bytes": 0,
+          "stack": "main;_RNvNtCs75vJTIYSa2J_3std2rt19lang_start_internal;_ZN3std2rt10lang_start28_$u7b$$u7b$closure$u7d$$u7d$17h35da7eba7573c892E.llvm.16277580022897139169;std::sys::backtrace::__rust_begin_short_backtrace::he37200f8ab9ea8e9;prismattyc_host::main::h2e211d37f6f66362;winit::platform_impl::linux::x11::EventLoop$LT$T$GT$::run_on_demand::h28f0c0bc9ad0c54f;core::ops::function::impls::_$LT$impl$u20$core..ops..function..FnMut$LT$A$GT$$u20$for$u20$$RF$mut$u20$F$GT$::call_mut::h3f281bf2768abd5d;_ZN15prismattyc_host3App4pump17hc34db5648bf523f1E.llvm.12215144417216259615;prismattyc_host::mux::MuxRuntime::drain_all::hb30e100ba959bffe;prismattyc_host::mux::PaneRuntime::feed_replica::h593385677b98adc8;prismattyc_emulator::Emulator::feed::hb6c7e67885708349;prismattyc_emulator::Emulator::advance_parser::hbf9e997048a2d7df;vte::Parser$LT$_$GT$::ground_dispatch::h9e506fd16c985e12;prismattyc_core::Screen::line_feed::hbc8a7f0af8065776;prismattyc_core::damage::GridDamage::push_scroll::hdef54b5392db5788;alloc::raw_vec::RawVec$LT$T$C$A$GT$::grow_one::hd1f03934dddbb4d3;_ZN5alloc7raw_vec20RawVecInner$LT$A$GT$11finish_grow17h0ec6c0c9b867d679E.llvm.4378487685622590409;"
+        }
+      ],
+      "profile": "reading file \"/data/candidate-peak.heaptrack.gz\" - please wait, this might take some time...\nDebuggee command was: prismattyc-host --attach-session 2 --attach-session 3 --attach-session 4\nfinished reading file, now analyzing data:\n\ntotal runtime: 64.178000s.\ncalls to allocation functions: 17959355 (279836/s)\ntemporary memory allocations: 17135454 (266998/s)\npeak heap memory consumption: 756.69M\npeak RSS (including heaptrack overhead): 536.66M\ntotal memory leaked: 736.59M\n",
+      "full_trace_sha256": "d3ccb64cb84a199317ff919e41acae62de947a2725ccf2799895bf7da6348e8b",
+      "prefix_sha256": "cdf3af77b99d41250d3dd69a69e9718e58f7c1b9a7ccdd7851d39749a0a85074",
+      "stacks_sha256": "45dde06cb1b684fec2314866691beb674f0829e2f3eedd4a6cec7acb6eb6c27b"
+    }
+  }
+}

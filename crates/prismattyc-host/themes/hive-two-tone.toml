@@ -1,0 +1,30 @@
+# Hive TUI theme — Hive Two-Tone (dark)
+# From the Hive design package color studies (turns 4 & 6).
+# Guest ANSI body hues are shared across variants by design — guest output is
+# never themed; theme-owned slots (yellow=amber, cyan=cool support, white/black,
+# brights) carry the scheme. Amber is spent on attention only.
+id = "hive-two-tone"
+name = "Hive Two-Tone"
+variant = "dark"
+source = "Hive TUI Variants — design package"
+license = "Unspecified"
+default_fg = "#e4d2ab"
+default_bg = "#0e0c09"
+chrome_fg = "#9a8458"
+chrome_bg = "#0a0906"
+pane_border = "#3b2b13"
+overlay_bg = "#211e18"
+unseen_badge = "#f0a63c"
+mail_letter = "#f0a63c"
+active_badge = "#f0a63c"
+attention_badge = "#ff6b6b"
+cursor_fg = "#0e0c09"
+cursor_bg = "#f0a63c"
+selection_fg = "#f7e3b4"
+selection_bg = "#563d19"
+ansi = [
+  "#0c0a08", "#c9705f", "#8fb573", "#f0a63c",
+  "#7fafc4", "#b48ead", "#85b1a4", "#e4d2ab",
+  "#635230", "#d38972", "#a6bf81", "#f2b860",
+  "#99bac0", "#c3a1af", "#9ebca8", "#f7e3b4",
+]

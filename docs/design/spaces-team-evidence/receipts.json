@@ -1,0 +1,230 @@
+{
+  "team": {
+    "status": "PASS",
+    "sha256": {
+      "pmux": "8dcd56f43fa770d67efd9fe22eca4230c0f27df16124557812c14d9701d7810f",
+      "pmuxd": "8664c00b9bf2e66cbc548207704faf7f0e066569c527ac0d919fcd775b57465f",
+      "prismattyc-host": "bf3a8ba52a0d20dd0f6e2f781e38048a88cfbe36b3559599db911edd94f08bcd",
+      "pmux-mcp": "4ff6de77fb675bdd78c288acbf02dc8166dc65d15327c07c1599c21c3cc7c52f"
+    },
+    "checks": [
+      {
+        "name": "independent-create",
+        "status": "PASS"
+      },
+      {
+        "name": "roles-and-context-links",
+        "status": "PASS"
+      },
+      {
+        "name": "attention-dedup-and-separate-mail",
+        "status": "PASS"
+      },
+      {
+        "name": "snooze-keeps-mail",
+        "status": "PASS"
+      },
+      {
+        "name": "stale-attention-refused",
+        "status": "PASS"
+      },
+      {
+        "name": "move-rename-and-resolve-preserve-identity-and-mail",
+        "status": "PASS"
+      },
+      {
+        "name": "space-rename-preserves-roles-and-context-links",
+        "status": "PASS"
+      },
+      {
+        "name": "template-save-and-preview-have-no-launch-side-effects",
+        "status": "PASS"
+      },
+      {
+        "name": "template-conflicts-fail-before-mutation",
+        "status": "PASS"
+      },
+      {
+        "name": "template-explicit-launch-and-idempotent-retry",
+        "status": "PASS"
+      },
+      {
+        "name": "template-shell-only-creation-and-role-copy",
+        "status": "PASS"
+      },
+      {
+        "name": "termwright-space-attach-preserves-team-and-launch-count",
+        "status": "PASS"
+      },
+      {
+        "name": "template-resumes-intent-before-definition-commit",
+        "status": "PASS"
+      },
+      {
+        "name": "interrupted-launch-fails-closed-without-replay",
+        "status": "PASS"
+      },
+      {
+        "name": "template-retry-refuses-changed-live-layout",
+        "status": "PASS"
+      },
+      {
+        "name": "mcp-details-and-template-preview-match-cli",
+        "status": "PASS"
+      },
+      {
+        "name": "native-session-names-in-chip",
+        "status": "PASS"
+      },
+      {
+        "name": "native-keyboard-team-details",
+        "status": "PASS"
+      },
+      {
+        "name": "native-role-link-retry-attention-and-focus",
+        "status": "PASS"
+      },
+      {
+        "name": "mcp-retained-open-result-matches-cli",
+        "status": "PASS"
+      },
+      {
+        "name": "native-template-preview-create-and-retained-result",
+        "status": "PASS"
+      },
+      {
+        "name": "native-cross-space-focus-and-single-session-reopen",
+        "status": "PASS"
+      },
+      {
+        "name": "native-narrow-preview",
+        "status": "PASS"
+      },
+      {
+        "name": "disconnected-attention-retains-labeled-stale-reason",
+        "status": "PASS"
+      },
+      {
+        "name": "offline-template-preview-does-not-start-daemon-or-sessions",
+        "status": "PASS"
+      }
+    ]
+  },
+  "restart": {
+    "status": "PASS",
+    "sha256": {
+      "pmux": "052b6f773a607d73c401b8b9ce7ea973cef1ab5e8663785bf54895c868a660cf",
+      "pmuxd": "0e6f7953338dd2a64286dda051a3825af5b500214e1891dac3f7f74c202f5fce",
+      "prismattyc-host": "9f4d3b4d9e3742ac0ec570923e980117ccf27cce7fb5c6e7b9d94cea0c516ddd"
+    },
+    "checks": [
+      "create_without_daemon",
+      "duplicate_name_retry_and_isolation",
+      "window_restart_preserves_pty_and_input",
+      "daemon_restart_recycled_id_and_single_session_reopen",
+      "create_after_restart",
+      "legacy_numeric_cache_recovery",
+      "restore_without_daemon_then_reopen",
+      "deleted_space_fails_without_blocking_create"
+    ]
+  },
+  "race": {
+    "status": "PASS",
+    "host_binary_sha256": "600ec8783702411f80c6c56497105b6bb370d806cff9f6683ae6dc7cca572415"
+  },
+  "backend": {
+    "status": "PASS",
+    "sha256": {
+      "pmux": "8dcd56f43fa770d67efd9fe22eca4230c0f27df16124557812c14d9701d7810f",
+      "pmuxd": "8664c00b9bf2e66cbc548207704faf7f0e066569c527ac0d919fcd775b57465f",
+      "prismattyc-host": "bf3a8ba52a0d20dd0f6e2f781e38048a88cfbe36b3559599db911edd94f08bcd",
+      "pmux-mcp": "4ff6de77fb675bdd78c288acbf02dc8166dc65d15327c07c1599c21c3cc7c52f"
+    },
+    "checks": [
+      {
+        "name": "independent-create",
+        "status": "PASS"
+      },
+      {
+        "name": "roles-and-context-links",
+        "status": "PASS"
+      },
+      {
+        "name": "attention-dedup-and-separate-mail",
+        "status": "PASS"
+      },
+      {
+        "name": "snooze-keeps-mail",
+        "status": "PASS"
+      },
+      {
+        "name": "stale-attention-refused",
+        "status": "PASS"
+      },
+      {
+        "name": "move-rename-and-resolve-preserve-identity-and-mail",
+        "status": "PASS"
+      },
+      {
+        "name": "space-rename-preserves-roles-and-context-links",
+        "status": "PASS"
+      },
+      {
+        "name": "template-save-and-preview-have-no-launch-side-effects",
+        "status": "PASS"
+      },
+      {
+        "name": "template-conflicts-fail-before-mutation",
+        "status": "PASS"
+      },
+      {
+        "name": "template-explicit-launch-and-idempotent-retry",
+        "status": "PASS"
+      },
+      {
+        "name": "template-shell-only-creation-and-role-copy",
+        "status": "PASS"
+      },
+      {
+        "name": "termwright-space-attach-preserves-team-and-launch-count",
+        "status": "PASS"
+      },
+      {
+        "name": "template-resumes-intent-before-definition-commit",
+        "status": "PASS"
+      },
+      {
+        "name": "interrupted-launch-fails-closed-without-replay",
+        "status": "PASS"
+      },
+      {
+        "name": "template-retry-refuses-changed-live-layout",
+        "status": "PASS"
+      },
+      {
+        "name": "mcp-details-and-template-preview-match-cli",
+        "status": "PASS"
+      },
+      {
+        "name": "disconnected-attention-retains-labeled-stale-reason",
+        "status": "PASS"
+      },
+      {
+        "name": "offline-template-preview-does-not-start-daemon-or-sessions",
+        "status": "PASS"
+      }
+    ]
+  },
+  "workspace": {
+    "passed": 2065,
+    "failed": 0,
+    "log": "build/spaces-acceptance/workspace-complete.log"
+  },
+  "scope": "Linux X11, private sockets and data; no live installation or daemon restart",
+  "captures_sha256": {
+    "narrow-preview.png": "e349b0d3f06e117947c74d07a021c36e9c58e2b2c5ac7ef8e5e77bc7dec6fd6c",
+    "template-preview.png": "e0c217bfb37189753bcb43944378cd07a63410d86ed4af151fa096da11431b25",
+    "attention-details.png": "816f2a4c0e0093999159ad9fe061de54210d124fa91e07c25bbb62a63923b275",
+    "session-names.png": "1c969408891acb611f5fd1f118a4ef7e5fe848f335f4d05c911a7458ba85f17b"
+  }
+}

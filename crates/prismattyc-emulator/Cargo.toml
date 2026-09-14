@@ -1,0 +1,19 @@
+[package]
+name = "prismattyc-emulator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+libc = "0.2"
+portable-pty.workspace = true
+png = "0.17"
+prismattyc-core = { path = "../prismattyc-core" }
+prismattyc-protocol = { path = "../prismattyc-protocol" }
+serde.workspace = true
+vte.workspace = true
+
+[dev-dependencies]
+serde_json = "1.0.151"

@@ -1,0 +1,27 @@
+# PT-99 documentation sketch. Not coverage: needs a pre-existing space
+# `today`, is not in termwright-e2e.sh (that runner rewrites command to
+# nested prismattyc), and `press: {key: "C-\\"}` is unverified against
+# termwright. Real coverage is
+# crates/prismattyc-mux/tests/interactive_attach.rs
+# attach_ctrl_backslash_n_switches_session_chrome.
+session:
+  command: pmux
+  args: ["space", "attach", "today"]
+  cols: 80
+  rows: 24
+  env:
+    TERM: xterm-256color
+
+steps:
+  - waitForText: {text: "space today · session", timeoutMs: 15000}
+  - press: {key: "C-\\"}
+  - type: {text: "n"}
+  - waitForText: {text: "(2/", timeoutMs: 10000}
+  - expectText: {text: "space today · session"}
+  - press: {key: "C-\\"}
+  - type: {text: "d"}
+  - waitForText: {text: "[detached]", timeoutMs: 10000}
+
+artifacts:
+  mode: always
+  dir: e2e/artifacts

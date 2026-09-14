@@ -1,0 +1,30 @@
+# Hive TUI theme — Hive Muted Professional Light (light)
+# From the Hive design package color studies (turns 4 & 6).
+# Guest ANSI body hues are shared across variants by design — guest output is
+# never themed; theme-owned slots (yellow=amber, cyan=cool support, white/black,
+# brights) carry the scheme. Amber is spent on attention only.
+id = "hive-muted-professional-light"
+name = "Hive Muted Professional Light"
+variant = "light"
+source = "Hive TUI Variants — design package"
+license = "Unspecified"
+default_fg = "#3a3f45"
+default_bg = "#eef0f1"
+chrome_fg = "#7d838b"
+chrome_bg = "#e5e7e8"
+pane_border = "#cdbfa7"
+overlay_bg = "#e1e4e5"
+unseen_badge = "#96702f"
+mail_letter = "#96702f"
+active_badge = "#96702f"
+attention_badge = "#ff6b6b"
+cursor_fg = "#eef0f1"
+cursor_bg = "#96702f"
+selection_fg = "#191c20"
+selection_bg = "#d5ccbb"
+ansi = [
+  "#43484e", "#a4432f", "#4e7a35", "#96702f",
+  "#2f6f8c", "#7d5386", "#56718a", "#d3d5d7",
+  "#a9afb6", "#863727", "#40642b", "#7b5c27",
+  "#275b73", "#67446e", "#475d71", "#191c20",
+]

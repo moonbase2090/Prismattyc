@@ -1,0 +1,26 @@
+# PT-130 documentation sketch. Not coverage: the default Termwright
+# runner rewrites `command` to the nested `prismattyc` binary, which has
+# no mux copy mode. Real coverage is
+# crates/prismattyc-mux/src/bin/pmux-attach.rs
+# copy_mode_search_finds_wraps_and_paints_matches and
+# copy_mode_search_esc_closes_prompt_without_leaving_copy_mode.
+session:
+  command: pmux
+  args: ["attach"]
+  cols: 80
+  rows: 24
+  env:
+    TERM: xterm-256color
+
+steps:
+  - waitForText: {text: "READY", timeoutMs: 15000}
+  - press: {key: "C-\\"}
+  - type: {text: "["}
+  - type: {text: "/unique"}
+  - press: {key: "Enter"}
+  - expectText: {text: "copy unique"}
+  - press: {key: "q"}
+
+artifacts:
+  mode: always
+  dir: e2e/artifacts

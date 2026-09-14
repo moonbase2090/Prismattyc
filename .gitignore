@@ -1,0 +1,46 @@
+# Rust
+/target/
+**/*.rs.bk
+# Keep Cargo.lock committed once the workspace exists (binary app).
+# Editors / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+*.code-workspace
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Build artifacts
+/dist/
+/build/
+/mutants.out/
+/build/acceptance/
+/build/acceptance-mutation/
+/target-shared/
+
+# local-actions (act daemon state/logs)
+.local-actions/
+.cache/
+
+# Termwright E2E outputs
+e2e/artifacts/
+termwright-artifacts/
+scripts/__pycache__/
+
+# Local agent / MCP config (machine-specific paths, creds, identities)
+.mcp.json
+.claude/
+.cursor/
+.codex/
+.grok/
+.kiro/
+
+# Python test and packaging caches
+**/__pycache__/

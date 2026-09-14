@@ -1,0 +1,39 @@
+# Prismattyc child-facing truecolor terminfo.
+#
+# Default child TERM is `prismattyc-kitty` so producers that key on TERM
+# containing "kitty" (Claude Code v2.1.238: `TERM.includes("kitty")` before
+# TERM_PROGRAM) emit Kitty graphics APC and CSI-u. `prismattyc-direct` is a
+# name alias.
+#
+# Base caps come from xterm-direct (planner: do not blend a 256-color setaf
+# with colors#0x1000000). Do NOT `use=xterm-kitty`: that entry is 256-color
+# and advertises sequences Prism does not implement (styled underline Su/
+# Smulx/Setulc, strikethrough smxx, Sync, OSC 52 Ms, DECSCUSR Ss/Se).
+# Advertising those is the failure mode.
+#
+# Extra user capabilities are only Kitty-shaped bits Prism actually handles:
+#   fullkbd     — CSI-u keyboard (ADR-0005 / F19)
+#   Tc          — 24-bit color boolean (F10); COLORTERM=truecolor still set
+#   setrgbf/b   — ISO-colon RGB (F10)
+#   BE/BD/PS/PE — bracketed paste DECSET 2004 (F11)
+#   XF, fe/fd   — focus in/out DECSET 1004 (F17)
+#
+# Kitty graphics itself is APC `_G`, not a terminfo cap. The name is the
+# graphics signal; the caps above are the rest of the honest Kitty subset.
+#
+# Compile (from repo root):
+#   tic -x -o terminfo terminfo/prism-direct.src
+#
+prismattyc-kitty|prismattyc-direct|Prismattyc terminal with 24-bit color and Kitty protocol,
+	use=xterm-direct,
+	fullkbd,
+	Tc,
+	XF,
+	BE=\E[?2004h,
+	BD=\E[?2004l,
+	PS=\E[200~,
+	PE=\E[201~,
+	fe=\E[?1004h,
+	fd=\E[?1004l,
+	setrgbf=\E[38:2:%p1%d:%p2%d:%p3%dm,
+	setrgbb=\E[48:2:%p1%d:%p2%d:%p3%dm,

@@ -1,0 +1,29 @@
+# pmuxd user unit. Copy to ~/.config/systemd/user/ and enable.
+#
+# Socket: $XDG_RUNTIME_DIR/prismattyc/pmux.sock
+# Store:  $XDG_DATA_HOME/prismattyc/mail.db (fallback ~/.local/share/…)
+# Binary: ~/.local/bin/pmuxd (cargo install --path crates/prismattyc-mux)
+#
+# The daemon doubles as the agent mailbox (Mail* protocol); no separate
+# switchboardd is needed once this unit runs.
+
+[Unit]
+Description=Prismattyc mux daemon (pmuxd, agent mailbox)
+After=default.target
+StartLimitIntervalSec=30
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/pmuxd
+Restart=on-failure
+RestartSec=2
+UMask=0077
+# systemd --user sets XDG_RUNTIME_DIR=/run/user/%U.
+# Pin data home so linger-at-boot does not depend on a login shell profile.
+Environment=XDG_DATA_HOME=%h/.local/share
+# Socket directory is tmpfs; the store is not. Do not set ProtectHome:
+# mail.db lives under ~/.local/share/prismattyc.
+
+[Install]
+WantedBy=default.target

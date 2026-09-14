@@ -1,0 +1,16 @@
+# Secrets: never commit the real key.
+.eleven.env
+
+# Prebuilt bins copied in for the Docker image. Do not commit.
+docker/bins/
+
+# Generated artifacts.
+narr/
+frames/
+*.mov
+*.mp4
+!demo-reel.mp4
+*.mp3
+*.wav
+*.aiff
+*.log

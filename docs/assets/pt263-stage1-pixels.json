@@ -1,0 +1,12 @@
+{
+  "roi_xyxy": [
+    0,
+    108,
+    300,
+    153
+  ],
+  "different_pixels": 0,
+  "difference_bbox": null,
+  "baseline_head": "9fdd2f3b2c111909c1806794884e880ee95917dd",
+  "candidate_rust_head": "7e3815fda6979fefc8d670c8dcd7e73175cda0ea"
+}

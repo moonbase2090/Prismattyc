@@ -1,0 +1,16 @@
+theme = "prismattyc-default"
+focus_border = "amber"
+focus_border_animation = "light-cycle"
+font_px = 16.0
+panes = 1
+window_padding_px = 5
+pane_gap_px = 5
+pane_padding_px = 5
+space_rail = "bottom"
+session_naming = "auto"
+space_startup = "fresh"
+
+# Screen readers: AccessKit tree for the chrome and the focused pane (ADR-0016).
+[a11y]
+os_tree = true
+announce = true

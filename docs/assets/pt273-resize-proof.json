@@ -1,0 +1,32 @@
+{
+  "implementation_head": "1178b5a19f9577414d1978e0690e577310f04f70",
+  "checks": {
+    "spaces": {
+      "passed": 36,
+      "failed": 0
+    },
+    "termwright": {
+      "passed": 6,
+      "failed": 0
+    }
+  },
+  "geometry": {
+    "600": {
+      "WINDOW": "4194306",
+      "X": "600",
+      "Y": "324",
+      "WIDTH": "600",
+      "HEIGHT": "700",
+      "SCREEN": "0"
+    },
+    "1200": {
+      "WINDOW": "4194306",
+      "X": "600",
+      "Y": "324",
+      "WIDTH": "1200",
+      "HEIGHT": "700",
+      "SCREEN": "0"
+    }
+  },
+  "scope": "Actual host resize and complete Unicode history export. The clipped-wide-glyph snapshot regression is covered by core tests. These screenshots do not show the scrolled-out Unicode rows."
+}

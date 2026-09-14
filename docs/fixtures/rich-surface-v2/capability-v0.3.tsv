@@ -1,0 +1,3 @@
+# name	direction	apc_body
+query_v0_3	app_to_host	Prismattyc;cap;q;id=7;max=0.3
+reply_v0_3	host_to_app	Prismattyc;cap;r;id=7;v=0.3;features=hybrid.attach.cell_rect,hybrid.overlay.viewport,hybrid.reserve.rows,input.rich_focus,input.rich_keyboard.v1,input.rich_pointer.v1,input.rich_scroll.v1,rich.collection.v1,rich.semantic_text.v1,rich.status.v1,rich.tree.v1;limit.body=4096;limit.collection_items=2048;limit.collections=16;limit.dock_rows=24;limit.event_rate=240;limit.nodes=128;limit.patch_ops=128;limit.queue=256;limit.regions=64;limit.retained_text=2097152;limit.surfaces=1;limit.tree_depth=16

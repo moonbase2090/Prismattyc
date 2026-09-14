@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "saved_at_unix": 0,
+  "sessions": [
+    {
+      "name": "left",
+      "windows": [
+        {
+          "title": "left",
+          "cols": 80,
+          "rows": 24,
+          "root": { "kind": "leaf", "cwd": null }
+        }
+      ]
+    },
+    {
+      "name": "right",
+      "windows": [
+        {
+          "title": "right",
+          "cols": 80,
+          "rows": 24,
+          "root": { "kind": "leaf", "cwd": null }
+        }
+      ]
+    },
+    {
+      "name": "solo",
+      "windows": [
+        {
+          "title": "solo",
+          "cols": 80,
+          "rows": 24,
+          "root": { "kind": "leaf", "cwd": null }
+        }
+      ]
+    }
+  ],
+  "tabs": [
+    { "title": "pair", "sessions": ["left", "right"] },
+    { "title": "solo", "sessions": ["solo"] }
+  ]
+}

@@ -12,6 +12,58 @@ pub(super) fn verify(host: &mut HostState) {
     close_context_menu(host);
     verify_menu_and_pointer(host);
     verify_rename_and_rail(host);
+    verify_scrollback_navigation(host);
+    verify_close_target_tab(host);
+}
+
+fn verify_scrollback_navigation(host: &mut HostState) {
+    let _ = host.emulator.feed(b"\x1b[?1049l");
+    for _ in 0..host.emulator.screen().rows() + 12 {
+        let _ = host.emulator.feed(b"history\r\n");
+    }
+    host.view_scroll = 0;
+    host.left_button_down = false;
+    host.keyboard_select_mode = true;
+    pan_view_scroll(host, 5);
+    assert_eq!(host.view_scroll, 5);
+    assert!(!host.keyboard_select_mode);
+    host.scroll_new_output = true;
+    pan_view_scroll(host, -100);
+    assert_eq!(host.view_scroll, 0);
+    assert!(!host.scroll_new_output);
+    pan_view_scroll(host, 100_000);
+    assert_eq!(host.view_scroll, host.emulator.screen().max_view_scroll());
+    let _ = host.emulator.feed(b"\x1b[?1049h");
+    pan_view_scroll(host, 5);
+    assert_eq!(
+        host.view_scroll, 0,
+        "alternate screens have no history view"
+    );
+    let _ = host.emulator.feed(b"\x1b[?1049l");
+}
+
+fn verify_close_target_tab(host: &mut HostState) {
+    let previous = host.mux.window_ids();
+    host.mux
+        .new_tab("/bin/sh", &["-c".into(), "sleep 60".into()])
+        .unwrap();
+    let target = host.mux.selected_tab_index();
+    assert_eq!(host.mux.tab_count(), previous.len() + 1);
+    assert_eq!(
+        close_tab_from_strip(host, usize::MAX),
+        StripClickResult::NotHandled
+    );
+    assert_eq!(host.mux.tab_count(), previous.len() + 1);
+    assert_eq!(
+        close_tab_from_strip(host, target),
+        StripClickResult::Handled
+    );
+    assert_eq!(
+        host.mux.window_ids(),
+        previous,
+        "close only the requested tab"
+    );
+    App::paint(host).unwrap();
 }
 
 fn verify_menu_and_pointer(host: &mut HostState) {

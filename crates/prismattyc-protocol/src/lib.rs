@@ -3171,6 +3171,36 @@ mod tests {
     }
 
     #[test]
+    fn apc_collector_recovers_after_invalid_and_nested_sequences() {
+        // Malformed controls must drain through ST without becoming a command.
+        // A nested introducer starts a fresh command, including after overflow.
+        for bad in [b"a\x00b".as_slice(), b"a\x1bXb", b"a\x1b\x00b"] {
+            let mut collector = ApcCollector::new();
+            assert!(collector.push(b"\x1b_").is_empty());
+            for byte in bad {
+                assert!(collector.push(&[*byte]).is_empty());
+            }
+            assert_eq!(collector.push(b"\x1b\\"), vec![CollectedApc::Discarded]);
+            assert!(!collector.is_active());
+            assert_eq!(
+                collector.push(b"\x1b_ok\x1b\\"),
+                vec![CollectedApc::Body("ok".into())]
+            );
+        }
+        let mut collector = ApcCollector::new();
+        assert!(collector.push(b"\x1b[plain\x1b_").is_empty());
+        assert!(collector
+            .push(&vec![b'x'; MAX_CONTROL_BODY_BYTES + 1])
+            .is_empty());
+        assert!(collector.push(b"\x1b_").is_empty());
+        assert_eq!(
+            collector.push(b"fresh\x1b\x1b\\"),
+            vec![CollectedApc::Body("fresh".into())]
+        );
+        assert!(!collector.is_active());
+    }
+
+    #[test]
     fn v1_query_max_01_is_byte_identical_to_spike() {
         let query = CapabilityQuery {
             request_id: RequestId::new(3).unwrap(),

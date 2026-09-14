@@ -77,6 +77,9 @@ fn missing_child_test_is_rejected() {
 }
 
 pub(super) fn run_in_private_display(test_name: &str) {
+    // Prepare dependencies before the private child's display timeout starts.
+    // A host-only cargo test does not build the mux package's executables.
+    crate::test_support::mux_bin_dir();
     let scratch = Scratch::new();
     let started = Instant::now();
     let time_scale = std::env::var("PRISMATTYC_TEST_TIME_SCALE")

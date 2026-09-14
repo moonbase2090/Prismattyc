@@ -41,7 +41,7 @@ for name in (*BINARIES, 'pmux-pane-write'):
 if 'linux' not in a.target:
     p.error('macOS packaging requires the signed application release process')
 a.out.mkdir(parents=True, exist_ok=False)
-manifest = {'repository': 'Moonbase2090/Prismattyc', 'version': a.version, 'target': a.target, 'assets': []}
+manifest = {'repository': 'moonbase2090/Prismattyc', 'version': a.version, 'target': a.target, 'assets': []}
 for name in BINARIES:
     target = a.out / f'prismattyc-v{a.version}-{a.target}-{name}'
     shutil.copy2(a.bin_dir / name, target)

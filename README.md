@@ -31,6 +31,27 @@ allocates one PTY per pane and brokers input and output between you and
 the child. Agent mail rides the same path: the doorbell writes a token
 into the pane PTY, indistinguishable from keystrokes.
 
+## Install a release
+
+Download the Linux x86_64 archive from [GitHub Releases](https://github.com/moonbase2090/Prismattyc/releases).
+Ubuntu 22.04 or newer is supported. Install `libfontconfig1`, `libxkbcommon0`,
+`libxkbcommon-x11-0`, and `libegl1` with your package manager.
+
+```bash
+tar -xzf prismattyc-x86_64-unknown-linux-gnu.tar.gz
+cd prismattyc-0.2.0
+./install.sh
+~/.local/bin/prismattyc-host
+```
+
+Add `~/.local/bin` to your `PATH` to use `pmux`. The archive includes all six
+binaries, manuals, and checksums. Use `pmux update` for future releases.
+Running sessions remain active until you restart their components.
+
+Signed macOS downloads are pending Apple Developer setup. Apple Silicon
+source builds have passed validation. Linux arm64 and Windows binaries are
+not part of the initial release.
+
 ## Quickstart (`pmux`)
 
 ```bash

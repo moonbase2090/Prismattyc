@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential pkg-config curl ca-certificates git python3 help2man \
     libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-0 libx11-dev \
     libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev libwayland-dev \
-    libegl1-mesa-dev libssl-dev xvfb xdotool fonts-dejavu-core \
+    libegl1-mesa-dev libssl-dev xvfb xdotool ffmpeg fonts-dejavu-core \
     fonts-noto-color-emoji dbus-x11 at-spi2-core python3-pyatspi \
     && rm -rf /var/lib/apt/lists/*
 ENV CARGO_HOME=/opt/cargo RUSTUP_HOME=/opt/rustup

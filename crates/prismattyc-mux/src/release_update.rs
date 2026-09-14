@@ -702,7 +702,16 @@ mod tests {
         let held = lock(&dir).unwrap();
         assert!(lock(&dir).is_err());
         drop(held);
-        assert!(lock(&dir).is_ok());
+        // A parallel spawn can briefly inherit the descriptor between fork and
+        // exec. CLOEXEC closes it before the child program starts.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if lock(&dir).is_ok() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "update lock remained held");
+            std::thread::yield_now();
+        }
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

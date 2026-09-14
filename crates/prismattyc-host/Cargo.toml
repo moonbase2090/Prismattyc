@@ -75,12 +75,28 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSMenuItem",
     "NSView",
     "NSVisualEffectView",
+    "objc2-quartz-core",
 ] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSData",
     "NSObject",
     "NSString",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-core-foundation]
+version = "0.3.2"
+default-features = false
+features = ["std", "CFData", "CFCGTypes"]
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-core-graphics]
+version = "0.3.2"
+default-features = false
+features = ["std", "objc2", "CGColorSpace", "CGDataProvider", "CGImage"]
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-quartz-core]
+version = "0.3.2"
+default-features = false
+features = ["std", "CALayer", "CATransaction", "objc2-core-foundation"]
 
 [target.'cfg(unix)'.dev-dependencies]
 rustix = { version = "1.1", features = ["process"] }

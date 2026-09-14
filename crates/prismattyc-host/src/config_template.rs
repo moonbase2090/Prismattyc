@@ -376,7 +376,7 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey {
         name: "window_opacity",
         group: ConfigGroup::Background,
-        doc: "Desktop show-through; native Wayland and X11/XWayland, or whole-window macOS opacity; lowering below 1.0 needs a restart except on macOS",
+        doc: "Window ground opacity; text and explicit cell backgrounds stay opaque. Hot reload works on macOS; other platforms may need a restart below 1.0",
         range: "0.0-1.0",
         value: ConfigValue::F32(DEFAULT_WINDOW_OPACITY),
     },
@@ -390,7 +390,7 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey {
         name: "window_blur",
         group: ConfigGroup::Background,
-        doc: "Ask the compositor to blur behind the window; no-op where unavailable",
+        doc: "Blur behind translucent window grounds; use window_opacity below 1.0. Hot reload works on macOS; no-op where unavailable",
         range: "true|false",
         value: ConfigValue::Bool(DEFAULT_WINDOW_BLUR),
     },

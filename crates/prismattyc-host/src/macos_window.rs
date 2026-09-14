@@ -16,48 +16,6 @@ thread_local! {
     static BLUR_VIEWS: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
 }
 
-/// Set the native macOS window opacity through `NSWindow.alphaValue`.
-///
-/// The AppKit window is obtained from winit's `NSView` handle. This is a
-/// whole-window opacity, so it also affects text and decorations. The
-/// renderer keeps its normal opaque framebuffer on macOS.
-pub fn set_window_opacity(window: &Window, opacity: f32) -> bool {
-    use objc2::{msg_send, runtime::AnyObject, MainThreadMarker};
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-    if MainThreadMarker::new().is_none() {
-        eprintln!("prismattyc-host: macOS window opacity: not on the main thread");
-        return false;
-    }
-    let Ok(handle) = window.window_handle() else {
-        eprintln!("prismattyc-host: macOS window opacity: no native window handle");
-        return false;
-    };
-    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
-        eprintln!("prismattyc-host: macOS window opacity: unexpected window handle");
-        return false;
-    };
-
-    // winit's AppKit handle is an NSView pointer. AppKit owns the view and its
-    // window, so borrow both objects only for the duration of these messages.
-    let view: &AnyObject = unsafe { &*handle.ns_view.as_ptr().cast() };
-    // SAFETY: `view` is the live NSView supplied by winit, and this call runs
-    // on the AppKit main thread. The returned NSWindow is not retained here.
-    let native_window: *mut AnyObject = unsafe { msg_send![view, window] };
-    if native_window.is_null() {
-        eprintln!("prismattyc-host: macOS window opacity: NSView has no NSWindow");
-        return false;
-    }
-    let native_window: &AnyObject = unsafe { &*native_window };
-    let opacity = opacity.clamp(0.0, 1.0) as f64;
-    // SAFETY: `native_window` is an NSWindow and `setAlphaValue:` takes a
-    // CGFloat. CGFloat is f64 on supported macOS targets.
-    unsafe {
-        let _: () = msg_send![native_window, setAlphaValue: opacity];
-    }
-    true
-}
-
 /// Install or remove the AppKit backdrop used by `window_blur`.
 ///
 /// Returns `true` only when the effect view is installed. AppKit retains the

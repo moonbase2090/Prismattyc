@@ -13580,6 +13580,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod chrome_contract_tests;
+#[cfg(test)]
+mod modifier_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

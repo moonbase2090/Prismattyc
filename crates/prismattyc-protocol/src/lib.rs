@@ -15,6 +15,8 @@ pub use semantics::{
     MAX_DOCUMENT_ID_BYTES, MAX_SEMANTIC_SPANS, MAX_SEMANTIC_TEXT_CHARS,
 };
 
+#[cfg(test)]
+mod collection_codec_tests;
 mod graphics_apc;
 pub use graphics_apc::{
     GraphicsApc, GraphicsApcCollector, GraphicsApcEvent, MAX_GRAPHICS_APC_BYTES,
@@ -2189,7 +2191,10 @@ pub fn encode_collection_snapshot(snapshot: &CollectionSnapshot) -> Result<Vec<u
 
 pub fn encode_collection_patch(patch: &CollectionPatch) -> Result<Vec<u8>, DecodeError> {
     validate_collection_id(&patch.collection_id)?;
-    if patch.surface_generation == 0 || patch.base == 0 || patch.next != patch.base + 1 {
+    if patch.surface_generation == 0
+        || patch.base == 0
+        || Some(patch.next) != patch.base.checked_add(1)
+    {
         return Err(DecodeError::InvalidField("revision"));
     }
     if patch.items.is_empty() || patch.items.len() > DEFAULT_LIMIT_PATCH_OPS as usize {
@@ -2376,7 +2381,10 @@ fn decode_collection<'a>(
                         .ok_or(DecodeError::MissingField("items"))?,
                 )?,
             };
-            if patch.base == 0 || patch.next != patch.base + 1 || patch.items.is_empty() {
+            if patch.base == 0
+                || Some(patch.next) != patch.base.checked_add(1)
+                || patch.items.is_empty()
+            {
                 return Err(DecodeError::InvalidField("revision"));
             }
             if patch.items.len() > DEFAULT_LIMIT_PATCH_OPS as usize {
@@ -2448,7 +2456,7 @@ pub fn apply_collection_patch(
     current: Option<&CollectionSnapshot>,
     patch: CollectionPatch,
 ) -> Result<CollectionSnapshot, CollectionRejectReason> {
-    if patch.next != patch.base + 1 || patch.items.is_empty() {
+    if Some(patch.next) != patch.base.checked_add(1) || patch.items.is_empty() {
         return Err(CollectionRejectReason::Conflict);
     }
     let Some(existing) = current else {

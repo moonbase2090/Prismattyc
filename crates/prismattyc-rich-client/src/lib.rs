@@ -1001,6 +1001,72 @@ mod tests {
     }
 
     #[test]
+    fn collection_responses_require_current_generation_and_collection_grant() {
+        let rich = session_from_message(Some(ControlMessage::CapabilityReply(
+            CapabilityReply::for_surface_query(surface_query()).unwrap(),
+        )));
+        let legacy = session_from_message(Some(ControlMessage::CapabilityReply(
+            CapabilityReply::for_v1_query(v2_query()).unwrap(),
+        )));
+        let classic = Session::Classic {
+            reason: ClassicReason::Unsupported,
+        };
+        for generation in [0, 1, 2] {
+            let responses = [
+                (
+                    ControlMessage::CollectionAck {
+                        surface_generation: generation,
+                        collection_id: "tasks".into(),
+                        rev: 7,
+                    },
+                    Incoming::CollectionAck {
+                        collection_id: "tasks".into(),
+                        rev: 7,
+                    },
+                ),
+                (
+                    ControlMessage::CollectionReject {
+                        surface_generation: generation,
+                        collection_id: "tasks".into(),
+                        reason: CollectionRejectReason::Stale,
+                    },
+                    Incoming::CollectionReject {
+                        collection_id: "tasks".into(),
+                        reason: CollectionRejectReason::Stale,
+                    },
+                ),
+                (
+                    ControlMessage::CollectionResnapshot {
+                        surface_generation: generation,
+                        collection_id: "tasks".into(),
+                    },
+                    Incoming::CollectionResnapshot {
+                        collection_id: "tasks".into(),
+                    },
+                ),
+            ];
+            for (message, expected) in responses {
+                assert_eq!(
+                    validate_event(&rich, message.clone()),
+                    if generation == 1 {
+                        expected
+                    } else {
+                        Incoming::Ignored
+                    }
+                );
+                assert_eq!(validate_event(&legacy, message.clone()), Incoming::Ignored);
+                assert_eq!(validate_event(&classic, message.clone()), Incoming::Ignored);
+                let mut detached = rich.clone();
+                let Session::Rich(grant) = &mut detached else {
+                    unreachable!()
+                };
+                grant.generation = 0;
+                assert_eq!(validate_event(&detached, message), Incoming::Ignored);
+            }
+        }
+    }
+
+    #[test]
     fn surface_grant_builds_monotonic_workspace_snapshots() {
         let reply = CapabilityReply::for_surface_query(surface_query()).unwrap();
         let mut session = session_from_message(Some(ControlMessage::CapabilityReply(reply)));

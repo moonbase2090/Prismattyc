@@ -369,6 +369,39 @@ mod tests {
     }
 
     #[test]
+    fn rename_preserves_pending_delivery_and_flattens_old_addresses() {
+        let mut store = Store::open_in_memory().unwrap();
+        let old = agent("before");
+        let renamed = agent("after");
+        let (held_id, _) = store.send("sender", &old, "held", "first body").unwrap();
+        store.claim(&old).unwrap();
+        let (open_id, _) = store.send("sender", &old, "open", "second body").unwrap();
+        store.rename("before", "after").unwrap();
+        assert_eq!(store.depth(&old).unwrap(), (0, 0));
+        assert_eq!(store.depth(&renamed).unwrap(), (1, 1));
+        assert_eq!(store.resolve("before").unwrap(), "after");
+        let letters = store.claim(&renamed).unwrap();
+        assert_eq!(
+            letters.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(),
+            [held_id.as_str(), open_id.as_str()]
+        );
+        assert_eq!(letters[0].from, "sender");
+        assert_eq!(letters[0].body, "first body");
+        assert_eq!(letters[1].body, "second body");
+        assert!(letters.iter().all(|l| l.to == "after"));
+        store.rename("after", "final").unwrap();
+        assert_eq!(store.resolve("before").unwrap(), "final");
+        assert_eq!(store.resolve("after").unwrap(), "final");
+        // Reusing the original address must remove its old forward, not loop.
+        store.rename("final", "before").unwrap();
+        store.rename("before", "before").unwrap();
+        assert_eq!(store.resolve("before").unwrap(), "before");
+        assert_eq!(store.resolve("after").unwrap(), "before");
+        assert_eq!(store.commit(&old, &[held_id, open_id]).unwrap(), 2);
+        assert_eq!(store.depth(&old).unwrap(), (0, 0));
+    }
+
+    #[test]
     fn claim_holds_then_commit_removes() {
         let mut store = Store::open_in_memory().unwrap();
         let to = agent("operator-a");

@@ -1946,6 +1946,41 @@ mod tests {
     }
 
     #[test]
+    fn styled_snapshot_repaint_preserves_colors_attributes_and_alternate_screen() {
+        let mut source = Emulator::new(40, 3, SCROLLBACK);
+        let _ = source.feed(b"\x1b[?1049h\x1b[1;3;4;7;31;44mA\x1b[0;91;102mB\x1b[0;38;5;123;48;5;45mC\x1b[0;38;2;11;22;33;48;2;44;55;66mD\x1b[0mE\x1b[?25l");
+        let mut styled = styled_from(&source, 40, 3);
+        styled.content.alt_active = true;
+        styled.content.cursor_visible = false;
+        styled.runs = (0..3)
+            .map(|row| {
+                prismattyc_mux::rle_style_runs(
+                    (0..40).map(|col| source.screen().view_cell(0, row, col)),
+                )
+            })
+            .collect();
+        let mut replica = Emulator::new(40, 3, SCROLLBACK);
+        let _ = replica.feed(&snapshot_to_ansi(&styled));
+        assert!(replica.screen().alt_active());
+        for row in 0..3 {
+            for col in 0..40 {
+                let actual = replica.screen().view_cell(0, row, col);
+                let original = source.screen().view_cell(0, row, col);
+                assert_eq!(actual.character, original.character);
+                let mut expected = original.style;
+                // Bright ANSI colors use the equivalent indexed SGR wire form.
+                let canonical = |color| match color {
+                    prismattyc_core::Color::Ansi(n) if n >= 8 => prismattyc_core::Color::Indexed(n),
+                    color => color,
+                };
+                expected.foreground = canonical(expected.foreground);
+                expected.background = canonical(expected.background);
+                assert_eq!(actual.style, expected, "cell {row},{col}");
+            }
+        }
+    }
+
+    #[test]
     fn snapshot_repaint_reproduces_the_visible_grid() {
         let mut source = Emulator::new(20, 3, SCROLLBACK);
         let _ = source.feed(b"\x1b[1;31mred\x1b[0m plain\r\n\x1b[48;5;33msecond\x1b[0m");

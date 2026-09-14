@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-pub const REPOSITORY: &str = "Moonbase2090/Prismattyc";
+pub const REPOSITORY: &str = "moonbase2090/Prismattyc";
 pub const BINARIES: [&str; 6] = [
     "pmux",
     "pmuxd",

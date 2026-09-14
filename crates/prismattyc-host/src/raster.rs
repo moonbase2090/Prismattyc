@@ -7057,6 +7057,33 @@ mod tests {
     use prismattyc_core::Screen;
     use std::sync::Arc;
 
+    #[test]
+    fn region_focus_ring_clips_to_frame_and_preserves_its_interior() {
+        let background = 0xff102030;
+        let mut pixels = vec![background; 12 * 10];
+        rasterize_region_focus_ring(&mut pixels, 12, 1, 1, 2, 2, 1, 1, 2, 3, [255, 0, 0]);
+        for y in 0..10 {
+            for x in 0..12 {
+                let ring = (3..=8).contains(&x)
+                    && (3..=6).contains(&y)
+                    && (x == 3 || x == 8 || y == 3 || y == 6);
+                assert_eq!(
+                    pixels[y * 12 + x],
+                    if ring { 0xffff0000 } else { background }
+                );
+            }
+        }
+        let before = pixels.clone();
+        rasterize_region_focus_ring(&mut pixels, 12, 1, 1, 2, 2, -1, 1, 2, 3, [0, 255, 0]);
+        rasterize_region_focus_ring(&mut pixels, 12, 1, 1, 2, 2, 1, 1, 0, 3, [0, 255, 0]);
+        assert_eq!(pixels, before, "hidden or empty regions do not paint");
+        rasterize_region_focus_ring(&mut pixels, 12, 10, 8, 2, 2, 0, 0, 3, 3, [0, 255, 0]);
+        assert_eq!(pixels[8 * 12 + 10], 0xff00ff00);
+        assert_eq!(pixels[8 * 12 + 11], 0xff00ff00);
+        assert_eq!(pixels[9 * 12 + 10], 0xff00ff00);
+        assert_eq!(pixels[9 * 12 + 11], background);
+    }
+
     fn test_run_cell(style: Style) -> RunCell {
         RunCell {
             style,

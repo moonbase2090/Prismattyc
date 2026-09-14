@@ -268,6 +268,7 @@ fn paint_in_real_window(restore_only: bool) {
             }
             assert!(!guards.iter().any(|value| value == "backend-no-partial"));
             verify_config_reload(&mut self.app, id);
+            chrome_contract_tests::verify(self.app.windows.get_mut(&id).unwrap());
             self.painted = true;
             self.app.windows.clear();
             event_loop.exit();

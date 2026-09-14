@@ -122,6 +122,43 @@ fn map_png_err(err: png::DecodingError) -> DecodeError {
 mod tests {
     use super::*;
 
+    #[test]
+    fn png_channel_normalization_preserves_color_and_alpha_and_rejects_short_pixels() {
+        let cases: &[(png::ColorType, &[u8], &[u8])] = &[
+            (
+                png::ColorType::Rgba,
+                &[10, 20, 30, 40, 50, 60, 70, 80],
+                &[10, 20, 30, 40, 50, 60, 70, 80],
+            ),
+            (
+                png::ColorType::Rgb,
+                &[10, 20, 30, 50, 60, 70],
+                &[10, 20, 30, 255, 50, 60, 70, 255],
+            ),
+            (
+                png::ColorType::Grayscale,
+                &[10, 50],
+                &[10, 10, 10, 255, 50, 50, 50, 255],
+            ),
+            (
+                png::ColorType::GrayscaleAlpha,
+                &[10, 40, 50, 80],
+                &[10, 10, 10, 40, 50, 50, 50, 80],
+            ),
+        ];
+        for &(color, pixels, expected) in cases {
+            assert_eq!(to_rgba8(pixels, color, 2, 1).unwrap(), expected);
+            assert_eq!(
+                to_rgba8(&pixels[..pixels.len() - 1], color, 2, 1),
+                Err(DecodeError::Corrupt)
+            );
+        }
+        assert_eq!(
+            to_rgba8(&[0, 1], png::ColorType::Indexed, 2, 1),
+            Err(DecodeError::Format)
+        );
+    }
+
     // A 1x1 opaque-red PNG, produced once and pasted as bytes so the test has
     // no encoder dependency. (Generate with: `printf` a real PNG, or the png
     // crate in a scratch bin; the reviewer may regenerate.)

@@ -102,6 +102,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn icon_accepts_supported_png_channels_and_rejects_truncation() {
+        for (color, pixels) in [
+            (png::ColorType::Rgba, vec![10, 20, 30, 40]),
+            (png::ColorType::Rgb, vec![10, 20, 30]),
+            (png::ColorType::Grayscale, vec![10]),
+            (png::ColorType::GrayscaleAlpha, vec![10, 40]),
+        ] {
+            let mut bytes = Vec::new();
+            {
+                let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+                encoder.set_color(color);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder
+                    .write_header()
+                    .unwrap()
+                    .write_image_data(&pixels)
+                    .unwrap();
+            }
+            assert!(decode_png_icon(&bytes).is_some(), "{color:?}");
+            assert!(decode_png_icon(&bytes[..bytes.len() / 2]).is_none());
+        }
+        assert!(decode_png_icon(b"not a png").is_none());
+    }
+
+    #[test]
     fn brand_icon_decodes() {
         let icon = load_window_icon().expect("brand PNG should decode");
         // Icon is opaque; successful from_rgba is enough.

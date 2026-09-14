@@ -6462,3 +6462,75 @@ mod tests {
         assert!(text.starts_with("ok!"));
     }
 }
+
+#[cfg(test)]
+mod keyboard_contract_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_navigation_and_function_keys_keep_xterm_wire_sequences() {
+        let navigation = [
+            (KeyCode::Up, "A"),
+            (KeyCode::Down, "B"),
+            (KeyCode::Right, "C"),
+            (KeyCode::Left, "D"),
+            (KeyCode::Home, "H"),
+            (KeyCode::End, "F"),
+        ];
+        for (code, suffix) in navigation {
+            assert_eq!(
+                encode_key_to_pty(KeyEvent::new(code, KeyModifiers::NONE), 0).unwrap(),
+                format!("\x1b[{suffix}").as_bytes()
+            );
+            assert_eq!(
+                encode_key_to_pty(KeyEvent::new(code, KeyModifiers::ALT), 0).unwrap(),
+                format!("\x1b[1;3{suffix}").as_bytes()
+            );
+        }
+        for (code, number) in [
+            (KeyCode::Insert, 2),
+            (KeyCode::Delete, 3),
+            (KeyCode::PageUp, 5),
+            (KeyCode::PageDown, 6),
+        ] {
+            assert_eq!(
+                encode_key_to_pty(KeyEvent::new(code, KeyModifiers::NONE), 0).unwrap(),
+                format!("\x1b[{number}~").as_bytes()
+            );
+            assert_eq!(
+                encode_key_to_pty(KeyEvent::new(code, KeyModifiers::CONTROL), 0).unwrap(),
+                format!("\x1b[{number};5~").as_bytes()
+            );
+        }
+        let plain = [
+            "\x1bOP", "\x1bOQ", "\x1bOR", "\x1bOS", "\x1b[15~", "\x1b[17~", "\x1b[18~", "\x1b[19~",
+            "\x1b[20~", "\x1b[21~", "\x1b[23~", "\x1b[24~",
+        ];
+        let shifted = [
+            "\x1b[1;2P",
+            "\x1b[1;2Q",
+            "\x1b[1;2R",
+            "\x1b[1;2S",
+            "\x1b[15;2~",
+            "\x1b[17;2~",
+            "\x1b[18;2~",
+            "\x1b[19;2~",
+            "\x1b[20;2~",
+            "\x1b[21;2~",
+            "\x1b[23;2~",
+            "\x1b[24;2~",
+        ];
+        for n in 1..=12 {
+            for (modifiers, expected) in [
+                (KeyModifiers::NONE, plain[n - 1]),
+                (KeyModifiers::SHIFT, shifted[n - 1]),
+            ] {
+                assert_eq!(
+                    encode_key_to_pty(KeyEvent::new(KeyCode::F(n as u8), modifiers), 0).unwrap(),
+                    expected.as_bytes()
+                );
+            }
+        }
+        assert!(encode_key_to_pty(KeyEvent::new(KeyCode::Null, KeyModifiers::NONE), 0).is_none());
+    }
+}

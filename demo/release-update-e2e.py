@@ -5,6 +5,11 @@ from pathlib import Path
 import subprocess,tempfile,time
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('--pmux',type=Path,required=True);p.add_argument('--out',type=Path,required=True);a=p.parse_args();binary=a.pmux.resolve();out=a.out.resolve();out.mkdir(parents=True,exist_ok=False)
 records=[]
+installed_label=subprocess.check_output([str(binary),'--version'],text=True).split()
+version=next(word for word in installed_label if len(word.split('.'))==3 and all(part.isdecimal() for part in word.split('.')))
+major,minor,patch=map(int,version.split('.'))
+initial=f'{major}.{minor}.{patch+1}'
+following=f'{major}.{minor}.{patch+2}'
 with tempfile.TemporaryDirectory(prefix='release-update-') as tmp:
     root=Path(tmp);bins=root/'bin';tools=root/'tools';assets=root/'assets'
     for directory in [bins,tools,assets]:directory.mkdir()
@@ -34,7 +39,7 @@ pathlib.Path(args[args.index('--output')+1]).write_bytes((root/'assets'/name).re
         records.append(dict(args=args,exit=result.returncode,stdout=result.stdout,stderr=result.stderr));return result
     def installed(version):
         for name in names:assert subprocess.check_output([str(bins/name),'--version'],text=True).strip()==f'{name} {version}'
-    metadata=release('0.2.0')
+    metadata=release(initial)
     cli('--check','--json')
     child=subprocess.Popen([str(binary),'update','--bin-dir',str(bins)],env=dict(env,INTERRUPT='1'),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
     try:
@@ -43,18 +48,19 @@ pathlib.Path(args[args.index('--output')+1]).write_bytes((root/'assets'/name).re
             assert child.poll() is None and time.monotonic()<deadline;time.sleep(.02)
     finally:
         import signal
-        os.killpg(child.pid,signal.SIGTERM);child.wait(timeout=5)
+        if child.poll() is None:os.killpg(child.pid,signal.SIGTERM)
+        child.wait(timeout=5)
     installed('0.1.319');records.append(dict(check='interrupted-download-preserves-all-old-binaries'))
     # Corrupt one member without changing the trusted fixture digest.
     corrupted=assets/metadata['assets'][2]['name'];original=corrupted.read_bytes();corrupted.write_bytes(original.replace(b'echo',b'exit'))
     cli('--bin-dir',str(bins),success=False);installed('0.1.319');corrupted.write_bytes(original)
-    cli('--bin-dir',str(bins));installed('0.2.0')
+    cli('--bin-dir',str(bins));installed(initial)
     assert not list((root/'data/prismattyc/updates').glob('.stage-*'))
     cli('--rollback');installed('0.1.319')
-    cli('--bin-dir',str(bins));installed('0.2.0')
-    metadata=release('0.2.1');metadata['immutable']=False;(root/'metadata.json').write_text(json.dumps(metadata))
-    cli('--bin-dir',str(bins),success=False);installed('0.2.0')
-    release('0.2.1');cli('--json');installed('0.2.1')
-    cli('--rollback');installed('0.2.0')
+    cli('--bin-dir',str(bins));installed(initial)
+    metadata=release(following);metadata['immutable']=False;(root/'metadata.json').write_text(json.dumps(metadata))
+    cli('--bin-dir',str(bins),success=False);installed(initial)
+    release(following);cli('--json');installed(following)
+    cli('--rollback');installed(initial)
 (out/'result.json').write_text(json.dumps(dict(status='PASS',transport='local curl fixture; no production release published',records=records),indent=2)+'\n')
 print('PASS interruption, digest rejection, install, rollback, retry, immutable channel, next version',flush=True)

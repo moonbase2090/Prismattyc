@@ -603,10 +603,12 @@ mod tests {
         }
     }
     fn temporary() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "pmux-release-{}-{}",
+            "pmux-release-{}-{}-{}",
             std::process::id(),
-            crate::host_render_status::unix_ms()
+            crate::host_render_status::unix_ms(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         fs::create_dir_all(&path).unwrap();
         path
@@ -625,6 +627,12 @@ mod tests {
             release.tag_name = version.into();
             assert!(release_version(&release).is_err());
         }
+    }
+    #[test]
+    fn canonical_github_asset_url_is_accepted() {
+        let mut release = fixture();
+        release.assets[0].browser_download_url = "https://github.com/moonbase2090/Prismattyc/releases/download/v0.2.0/prismattyc-v0.2.0-x86_64-unknown-linux-gnu-pmux".into();
+        assert!(select_asset(&release, "x86_64-unknown-linux-gnu", "pmux").is_ok());
     }
     #[test]
     fn assets_require_exact_repo_platform_digest_and_complete_set() {

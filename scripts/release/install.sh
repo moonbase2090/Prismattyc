@@ -14,33 +14,29 @@ case "$prefix" in /*) ;; *) echo 'The prefix must be an absolute path.' >&2; exi
 cd "$payload"
 sha256sum --check SHA256SUMS
 version="$(cat VERSION)"
-lib="$prefix/lib/prismattyc"
+mkdir -p "$prefix"
+exec 9>"$prefix/.prismattyc-install.lock"
+flock -n 9 || { echo 'Another Prismattyc installation is running.' >&2; exit 1; }
 for name in pmux pmuxd pmux-attach pmux-mcp prismattyc prismattyc-host; do
   ./bin/"$name" --version >/dev/null
   if [[ -e "$prefix/bin/$name" || -L "$prefix/bin/$name" ]]; then
-    [[ -L "$prefix/bin/$name" && "$(readlink "$prefix/bin/$name")" == "$lib/current/$name" ]] || {
+    [[ -f "$prefix/bin/$name" && ! -L "$prefix/bin/$name" ]] &&
+      cmp --silent "bin/$name" "$prefix/bin/$name" || {
       echo "An existing $name is installed in $prefix/bin. Use pmux update for that installation." >&2
       exit 1
     }
   fi
 done
-mkdir -p "$lib" "$prefix/bin"
-stage="$(mktemp -d "$lib/.install.XXXXXX")"
+mkdir -p "$prefix/bin"
+stage="$(mktemp -d "$prefix/bin/.prismattyc-install.XXXXXX")"
 trap 'rm -rf -- "$stage"' EXIT
 install -m 755 bin/* "$stage/"
-dest="$lib/$version"
-if [[ -e "$dest" ]]; then
-  for name in pmux pmuxd pmux-attach pmux-mcp prismattyc prismattyc-host; do
-    cmp --silent "$stage/$name" "$dest/$name" || { echo "Different binaries already exist for $version." >&2; exit 1; }
-  done
-else
-  mv -- "$stage" "$dest"
-  stage="$(mktemp -d "$lib/.install.XXXXXX")"
-fi
-ln -s "$dest" "$stage/current"
-mv -Tf -- "$stage/current" "$lib/current"
+# Hard links publish complete files without replacing a concurrent writer.
+# Real executables in bin also let pmux update find its installation directory.
 for name in pmux pmuxd pmux-attach pmux-mcp prismattyc prismattyc-host; do
-  ln -sfn "$lib/current/$name" "$prefix/bin/$name"
+  if [[ ! -e "$prefix/bin/$name" ]]; then
+    ln "$stage/$name" "$prefix/bin/$name"
+  fi
 done
 mkdir -p "$prefix/share/applications" "$prefix/share/icons/hicolor/scalable/apps" "$prefix/share/man/man1"
 install -m 644 share/prismattyc.svg "$prefix/share/icons/hicolor/scalable/apps/prismattyc.svg"

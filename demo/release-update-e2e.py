@@ -26,7 +26,7 @@ pathlib.Path(args[args.index('--output')+1]).write_bytes((root/'assets'/name).re
         metadata=dict(tag_name='v'+version,draft=False,prerelease=False,immutable=True,assets=[])
         for name in names:
             file=assets/f'prismattyc-v{version}-x86_64-unknown-linux-gnu-{name}';file.write_text(f'#!/bin/sh\necho {name} {version}\n')
-            metadata['assets'].append(dict(name=file.name,size=file.stat().st_size,digest='sha256:'+hashlib.sha256(file.read_bytes()).hexdigest(),browser_download_url='https://github.com/Moonbase2090/Prismattyc/releases/download/v'+version+'/'+file.name))
+            metadata['assets'].append(dict(name=file.name,size=file.stat().st_size,digest='sha256:'+hashlib.sha256(file.read_bytes()).hexdigest(),browser_download_url='https://github.com/moonbase2090/Prismattyc/releases/download/v'+version+'/'+file.name))
         (root/'metadata.json').write_text(json.dumps(metadata));return metadata
     def cli(*args,success=True):
         result=subprocess.run([str(binary),'update',*args],env=env,capture_output=True,text=True,timeout=15)

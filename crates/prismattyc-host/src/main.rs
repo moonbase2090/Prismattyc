@@ -32,6 +32,8 @@ mod regroup;
 mod render_diagnostics;
 mod restart;
 mod terminal_switcher;
+#[cfg(test)]
+mod test_support;
 // cargo-mutants 27.1 does not recognize nested cfg(all(test, ...)).
 // Keep cfg(test) separate so mutation targets exclude the test fixture.
 #[cfg(test)]

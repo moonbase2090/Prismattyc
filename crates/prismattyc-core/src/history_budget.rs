@@ -120,7 +120,9 @@ impl Screen {
         }
     }
 
-    pub(super) fn push_scrollback(&mut self, row: Vec<Cell>, wrapped: bool) {
+    /// Copy the outgoing row before the live grid reuses it. Once history is
+    /// full, reuse the oldest row's allocation instead of allocating per line.
+    pub(super) fn retain_scrolled_row(&mut self, index: usize, wrapped: bool) {
         let limit = row_limit(self.columns, self.max_scrollback, self.max_scrollback_bytes);
         if self.scrollback.len() >= limit && limit < self.max_scrollback {
             self.note_scrollback_budget(self.columns);
@@ -134,11 +136,59 @@ impl Screen {
             .reserve_exact(limit.saturating_sub(self.scrollback.len()));
         self.scrollback_wrapped
             .reserve_exact(limit.saturating_sub(self.scrollback_wrapped.len()));
+        let mut row = if self.scrollback.len() >= limit {
+            self.scrollback_wrapped.pop_front();
+            self.scrollback
+                .pop_front()
+                .expect("full history has an oldest row")
+        } else {
+            Vec::with_capacity(self.columns)
+        };
+        row.clear();
+        row.extend_from_slice(self.active().cells.row(index));
         while self.scrollback.len() >= limit {
             self.pop_scrollback();
         }
         self.scrollback.push_back(row);
         self.scrollback_wrapped.push_back(wrapped);
         self.enforce_scrollback_budget();
+    }
+}
+
+#[cfg(test)]
+mod reuse_tests {
+    use super::*;
+
+    #[test]
+    fn full_history_reuses_evicted_storage_and_keeps_newest_text() {
+        for byte_limited in [false, true] {
+            let mut screen = Screen::new(4, 2, if byte_limited { 100 } else { 2 });
+            if byte_limited {
+                screen.set_scrollback_byte_budget(
+                    2 * (4 * size_of::<Cell>() + size_of::<Vec<Cell>>() + size_of::<bool>()),
+                );
+            }
+            for index in 0..16u8 {
+                screen.put_char(char::from(b'A' + index));
+                let old = (screen.scrollback.len() == 2)
+                    .then(|| screen.scrollback.front().unwrap().as_ptr());
+                screen.line_feed();
+                screen.carriage_return();
+                if let Some(old) = old {
+                    assert_eq!(screen.scrollback.back().unwrap().as_ptr(), old);
+                }
+                if index > 0 {
+                    assert_eq!(
+                        screen.scrollback.back().unwrap()[0].character,
+                        char::from(b'A' + index - 1)
+                    );
+                }
+                assert!(screen.scrollback.len() <= 2);
+                assert!(screen.scrollback_bytes() <= screen.scrollback_byte_budget());
+            }
+            assert_eq!(screen.scrollback.front().unwrap()[0].character, 'N');
+            assert_eq!(screen.scrollback.back().unwrap()[0].character, 'O');
+            assert_eq!(screen.row(0).unwrap()[0].character, 'P');
+        }
     }
 }

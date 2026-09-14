@@ -9,12 +9,14 @@ Protect the default branch, release tags, and publishing credentials.
 2. Run the release gates in [the testing policy](testing-policy.md).
 3. Build all six binaries on each supported target. Use the oldest supported
    Linux runtime to establish the minimum libc requirement.
-4. Package each native build. The packager checks all reported versions.
+4. Generate the manuals with `scripts/install-man.sh`. Set `PRISMATTYC_BINS`
+   to the binary directory and `PMUX_MAN_DIR` to `build/release-man`. Package
+   each native build. The packager checks all reported versions.
 
    ```bash
    python3 scripts/release/package.py --version 0.2.0 \
      --target x86_64-unknown-linux-gnu --bin-dir target/release \
-     --out build/release-linux-x86_64
+     --man-dir build/release-man --out build/release-linux-x86_64
    ```
 
 5. Create a draft release with tag `v0.2.0` in `Moonbase2090/Prismattyc`.

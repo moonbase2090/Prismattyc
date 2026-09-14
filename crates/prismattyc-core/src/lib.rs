@@ -1,5 +1,6 @@
 //! Shared classic-terminal screen model for Prismattyc.
 
+mod cell_grid;
 #[cfg(test)]
 mod cluster_tests;
 mod clusters;
@@ -21,6 +22,7 @@ pub use version::{bin_version, git_hash, git_suffix, package_version, release_la
 
 use std::collections::VecDeque;
 
+use cell_grid::CellGrid;
 use clusters::ClusterStore;
 
 use serde::{Deserialize, Serialize};
@@ -530,7 +532,7 @@ fn history_window_eq(hay: &[char], needle: &[char], case_sensitive: bool) -> boo
 /// One buffer's cells + cursor (primary or alternate).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GridBuffer {
-    cells: Vec<Cell>,
+    cells: CellGrid,
     /// Per row: did this line end because autowrap ran out of columns rather
     /// than because a line feed was written? Copy joins a wrapped row to the
     /// next with no newline. `wrap_pending` below is transient cursor state
@@ -548,7 +550,13 @@ struct GridBuffer {
 
 impl GridBuffer {
     fn eq_with(&self, other: &Self, a: &ClusterStore, b: &ClusterStore) -> bool {
-        cells_equal(&self.cells, &other.cells, a, b)
+        self.cells.len() == other.cells.len()
+            && self.cells.columns() == other.cells.columns()
+            && self
+                .cells
+                .chunks(self.cells.columns())
+                .zip(other.cells.chunks(other.cells.columns()))
+                .all(|(left, right)| cells_equal(left, right, a, b))
             && self.wrapped == other.wrapped
             && self.cursor == other.cursor
             && self.saved_cursor == other.saved_cursor
@@ -560,7 +568,7 @@ impl GridBuffer {
 
     fn new(columns: usize, rows: usize) -> Self {
         Self {
-            cells: vec![Cell::default(); columns * rows],
+            cells: CellGrid::from_flat(vec![Cell::default(); columns * rows], columns),
             wrapped: vec![false; rows],
             cursor: Cursor::default(),
             saved_cursor: SavedCursor::default(),
@@ -1120,7 +1128,6 @@ impl Screen {
         if event.delta == 0 || event.bottom < event.top {
             return;
         }
-        let columns = self.columns;
         let top = event.top.min(self.rows.saturating_sub(1));
         let bottom = event.bottom.min(self.rows.saturating_sub(1));
         if bottom < top {
@@ -1131,19 +1138,13 @@ impl Screen {
         let buf = self.active_mut();
         if event.delta > 0 {
             if n < height {
-                let src_start = (top + n) * columns;
-                let src_end = (bottom + 1) * columns;
-                let dst = top * columns;
-                buf.cells.copy_within(src_start..src_end, dst);
+                buf.cells.scroll_up(top, bottom, n);
                 if bottom < buf.wrapped.len() {
                     buf.wrapped.copy_within(top + n..=bottom, top);
                 }
             }
         } else if n < height {
-            let src_start = top * columns;
-            let src_end = (bottom + 1 - n) * columns;
-            let dst = (top + n) * columns;
-            buf.cells.copy_within(src_start..src_end, dst);
+            buf.cells.scroll_down(top, bottom, n);
             if bottom < buf.wrapped.len() {
                 buf.wrapped.copy_within(top..=bottom - n, top + n);
             }
@@ -1920,7 +1921,8 @@ impl Screen {
     pub fn put_char(&mut self, character: char) {
         // ADR-0004 grapheme slice: non-spacing marks, emoji modifiers, and
         // ZWJ-joined bases attach to the previous cell without advancing.
-        if char_display_width(character) == 0 || is_emoji_modifier(character) {
+        let width = char_display_width(character);
+        if width == 0 || is_emoji_modifier(character) {
             self.attach_cluster_scalar(character);
             return;
         }
@@ -1932,8 +1934,6 @@ impl Screen {
         if is_regional_indicator(character) && self.try_extend_regional_indicator_pair(character) {
             return;
         }
-
-        let width = grapheme_display_width(character, &[]);
 
         if self.autowrap && self.active().wrap_pending {
             self.mark_row_wrapped();
@@ -1973,10 +1973,10 @@ impl Screen {
         let autowrap = self.autowrap;
         let new_cursor = {
             let buf = self.active_mut();
-            let index = row * columns + col;
-            buf.cells[index] = Cell::glyph(character, style).with_hyperlink(hyperlink);
+            let cells = buf.cells.row_mut(row);
+            cells[col] = Cell::glyph(character, style).with_hyperlink(hyperlink);
             if width == 2 && col + 1 < columns {
-                buf.cells[index + 1] = Cell::wide_continuation(style).with_hyperlink(hyperlink);
+                cells[col + 1] = Cell::wide_continuation(style).with_hyperlink(hyperlink);
             }
 
             let next_col = col + width;
@@ -2015,13 +2015,13 @@ impl Screen {
             return None;
         };
         let buf = self.active();
-        let idx = row * columns + target_col;
-        let base_col = if buf.cells[idx].wide_cont && target_col > 0 {
+        let cells = buf.cells.row(row);
+        let base_col = if cells[target_col].wide_cont && target_col > 0 {
             target_col - 1
         } else {
             target_col
         };
-        let base = &buf.cells[row * columns + base_col];
+        let base = &cells[base_col];
         if base.wide_cont {
             return None;
         }
@@ -2032,9 +2032,8 @@ impl Screen {
         let Some(base_col) = self.previous_base_column() else {
             return false;
         };
-        let columns = self.columns;
         let row = self.active().cursor.row;
-        self.active().cells[row * columns + base_col].ends_with_zwj()
+        self.active().cells.row(row)[base_col].ends_with_zwj()
     }
 
     /// Attach a cluster scalar to the most recent base cell (not continuation).
@@ -2151,18 +2150,18 @@ impl Screen {
             return;
         }
         let buf = self.active_mut();
-        let index = row * columns + col;
-        if buf.cells[index].wide_cont {
-            if col > 0 && !buf.cells[index - 1].wide_cont {
-                buf.cells[index - 1] = Cell::default();
+        let cells = buf.cells.row_mut(row);
+        if cells[col].wide_cont {
+            if col > 0 && !cells[col - 1].wide_cont {
+                cells[col - 1] = Cell::default();
             }
-            buf.cells[index] = Cell::default();
+            cells[col] = Cell::default();
             return;
         }
-        if col + 1 < columns && buf.cells[index + 1].wide_cont {
-            buf.cells[index + 1] = Cell::default();
+        if col + 1 < columns && cells[col + 1].wide_cont {
+            cells[col + 1] = Cell::default();
         }
-        buf.cells[index] = Cell::default();
+        cells[col] = Cell::default();
     }
 
     pub fn carriage_return(&mut self) {
@@ -2216,9 +2215,8 @@ impl Screen {
             // At bottom margin: scroll the region only.
             // Fill scrolled-in row with space + current SGR (xterm/VT; matches erase_*).
             let start = top * columns;
-            let end = (bottom + 1) * columns;
             let removed: Vec<Cell> = buf.cells[start..start + columns].to_vec();
-            buf.cells.copy_within(start + columns..end, start);
+            buf.cells.scroll_up(top, bottom, 1);
             let blank_start = bottom * columns;
             let blank = Cell::glyph(' ', buf.style);
             buf.cells[blank_start..blank_start + columns].fill(blank);
@@ -2300,10 +2298,7 @@ impl Screen {
 
             // At top margin: scroll the region down (insert blank at top).
             let start = top * columns;
-            let end = (bottom + 1) * columns;
-            if end > start + columns {
-                buf.cells.copy_within(start..end - columns, start + columns);
-            }
+            buf.cells.scroll_down(top, bottom, 1);
             let style = buf.style;
             let blank = Cell::glyph(' ', style);
             buf.cells[start..start + columns].fill(blank);
@@ -2472,10 +2467,7 @@ impl Screen {
                 let style = buf.style;
                 if n < available {
                     // Shift [row .. bottom-n] down by n → [row+n .. bottom].
-                    let src_start = row * columns;
-                    let src_end = (bottom + 1 - n) * columns;
-                    let dst = (row + n) * columns;
-                    buf.cells.copy_within(src_start..src_end, dst);
+                    buf.cells.scroll_down(row, bottom, n);
                     buf.wrapped.copy_within(row..bottom + 1 - n, row + n);
                 }
                 // Fill the inserted lines (cursor row .. cursor+n-1).
@@ -2530,10 +2522,7 @@ impl Screen {
                 let style = buf.style;
                 if n < available {
                     // Shift [row+n .. bottom] up by n → [row .. bottom-n].
-                    let src_start = (row + n) * columns;
-                    let src_end = (bottom + 1) * columns;
-                    let dst = row * columns;
-                    buf.cells.copy_within(src_start..src_end, dst);
+                    buf.cells.scroll_up(row, bottom, n);
                     buf.wrapped.copy_within(row + n..bottom + 1, row);
                 }
                 // Fill the vacated lines at the bottom of the region.
@@ -2582,10 +2571,7 @@ impl Screen {
             let style = buf.style;
             if n < height {
                 // Shift [top+n .. bottom] up by n → [top .. bottom-n].
-                let src_start = (top + n) * columns;
-                let src_end = (bottom + 1) * columns;
-                let dst = top * columns;
-                buf.cells.copy_within(src_start..src_end, dst);
+                buf.cells.scroll_up(top, bottom, n);
             }
             // Fill vacated lines at the bottom of the region.
             let fill_start = (bottom + 1 - n) * columns;
@@ -2630,10 +2616,7 @@ impl Screen {
             let style = buf.style;
             if n < height {
                 // Shift [top .. bottom-n] down by n → [top+n .. bottom].
-                let src_start = top * columns;
-                let src_end = (bottom + 1 - n) * columns;
-                let dst = (top + n) * columns;
-                buf.cells.copy_within(src_start..src_end, dst);
+                buf.cells.scroll_down(top, bottom, n);
             }
             // Fill vacated lines at the top of the region.
             let fill_start = top * columns;
@@ -3220,18 +3203,18 @@ impl Screen {
     }
 }
 
-fn erase_range(cells: &mut [Cell], start: usize, end: usize, style: Style) {
+fn erase_range(cells: &mut CellGrid, start: usize, end: usize, style: Style) {
     let blank = Cell::glyph(' ', style);
     let end = end.min(cells.len());
     let start = start.min(end);
-    cells[start..end].fill(blank);
+    cells.fill_range(start..end, blank);
 }
 
 /// Expand `[start, end)` on a row so it does not bisect a wide pair (ADR-0004).
 ///
 /// `start`/`end` are column offsets within the row (`end` exclusive).
 fn expand_cell_span_for_wide(
-    cells: &[Cell],
+    cells: &CellGrid,
     row_start: usize,
     columns: usize,
     start: usize,
@@ -3275,7 +3258,7 @@ fn strip_cluster_widening(cell: &mut Cell, clusters: &mut ClusterStore) {
 
 /// Remove orphaned wide halves after insert/delete/erase on a single row.
 fn heal_wide_pairs_in_row(
-    cells: &mut [Cell],
+    cells: &mut CellGrid,
     row_start: usize,
     columns: usize,
     clusters: &mut ClusterStore,
@@ -3777,7 +3760,7 @@ fn import_grid_buffer(
         .map(|row| import_row(row, columns, styles, hyperlink_count, clusters))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(GridBuffer {
-        cells: rows_state.into_iter().flatten().collect(),
+        cells: CellGrid::from_flat(rows_state.into_iter().flatten().collect(), columns),
         wrapped: buffer.rows.iter().map(|row| row.wrapped).collect(),
         cursor,
         saved_cursor: SavedCursor {

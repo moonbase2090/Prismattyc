@@ -59,6 +59,24 @@ fn count_bits(bits: &[u64]) -> usize {
     bits.iter().map(|w| w.count_ones() as usize).sum()
 }
 
+/// Set a half-open range without touching padding bits in the last word.
+fn set_range(bits: &mut [u64], start: usize, end: usize) {
+    if start == end {
+        return;
+    }
+    let first = start / 64;
+    let last = (end - 1) / 64;
+    let head = u64::MAX << (start % 64);
+    let tail = u64::MAX >> (63 - (end - 1) % 64);
+    if first == last {
+        bits[first] |= head & tail;
+    } else {
+        bits[first] |= head;
+        bits[first + 1..last].fill(u64::MAX);
+        bits[last] |= tail;
+    }
+}
+
 impl GridDamage {
     /// Empty damage for a viewport of `rows` by `columns`.
     pub fn empty(rows: usize, columns: usize) -> Self {
@@ -112,18 +130,18 @@ impl GridDamage {
         if row >= self.rows {
             return;
         }
-        for col in 0..self.columns {
-            self.mark_cell(row, col);
-        }
+        self.mark_row(row);
+        let start = row * self.columns;
+        set_range(&mut self.dirty_cells, start, start + self.columns);
     }
 
     pub fn mark_all(&mut self) {
-        for row in 0..self.rows {
-            set_bit(&mut self.dirty_rows, row);
-        }
-        for cell in 0..self.rows.saturating_mul(self.columns) {
-            set_bit(&mut self.dirty_cells, cell);
-        }
+        set_range(&mut self.dirty_rows, 0, self.rows);
+        set_range(
+            &mut self.dirty_cells,
+            0,
+            self.rows.saturating_mul(self.columns),
+        );
     }
 
     /// Record a region scroll. Dirty bits move with the cells so they stay in
@@ -256,6 +274,35 @@ impl GridDamage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn range_marks_preserve_neighbors_and_padding() {
+        for start in 0..=192 {
+            for end in start..=192 {
+                let mut actual = [0x8000_0000_0000_0001; 3];
+                let mut expected = actual;
+                for index in start..end {
+                    set_bit(&mut expected, index);
+                }
+                set_range(&mut actual, start, end);
+                assert_eq!(actual, expected, "{start}..{end}");
+            }
+        }
+        for columns in [1, 63, 64, 65, 80, 129] {
+            let mut damage = GridDamage::empty(3, columns);
+            damage.mark_row_cells(1);
+            assert_eq!(damage.dirty_row_count(), 1);
+            assert_eq!(damage.dirty_cell_count(), columns);
+            for row in 0..3 {
+                for col in 0..columns {
+                    assert_eq!(damage.is_cell_dirty(row, col), row == 1);
+                }
+            }
+            damage.mark_all();
+            assert_eq!(damage.dirty_row_count(), 3);
+            assert_eq!(damage.dirty_cell_count(), columns * 3);
+        }
+    }
 
     #[test]
     fn take_clears_accumulator() {

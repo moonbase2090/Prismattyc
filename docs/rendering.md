@@ -19,6 +19,11 @@ platform and compositor. An opaque window background hides the backdrop.
 See [configuration](config.md),
 [macOS](macos.md#window-transparency-and-blur), and [Hyprland](hyprland.md).
 
+On macOS, the default backend keeps the framebuffer between updates. It
+copies and converts only the damaged 512 by 128 pixel tiles for Core
+Animation. Resize, config changes, and other full repaint requests still
+refresh the whole window. This path works with blur enabled or disabled.
+
 ## Optional GPU presentation
 
 Build the host with the `gpu` feature and pass `--gpu`:

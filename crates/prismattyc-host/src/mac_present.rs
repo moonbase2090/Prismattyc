@@ -1,15 +1,15 @@
 //! Alpha-capable presentation above the AppKit blur backdrop.
 //!
-//! The rasterizer supplies straight ARGB. Each full frame is premultiplied
-//! before Core Graphics copies it into an immutable image. The compositor
-//! can keep that image after the next frame reuses the CPU buffer.
+//! Keep straight ARGB pixels between frames. Only damaged tiles are copied,
+//! premultiplied, and published as immutable Core Graphics images. Core
+//! Animation retains the other tile images without a full-frame conversion.
 
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use objc2::{rc::Retained, MainThreadMarker};
 use objc2_app_kit::NSView;
-use objc2_core_foundation::{CFData, CFRetained, CGPoint};
+use objc2_core_foundation::{CFData, CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGImage, CGImageAlphaInfo,
     CGImageByteOrderInfo,
@@ -18,11 +18,21 @@ use objc2_quartz_core::{kCAGravityTopLeft, CALayer, CATransaction};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
+use crate::frame_damage::{FrameDamage, PixelRect};
+use crate::present_tiles::{copy_tile, damaged_tiles, tiles};
+use crate::raster::premultiply_in_place;
+
 pub struct MacPresent {
     layer: Retained<CALayer>,
     root_layer: Retained<CALayer>,
     color_space: CFRetained<CGColorSpace>,
     pixels: Vec<u32>,
+    tile_rects: Vec<PixelRect>,
+    tile_layers: Vec<Retained<CALayer>>,
+    scratch: Vec<u32>,
+    retained: bool,
+    rebuild_layers: bool,
+    scale: f64,
     width: usize,
     height: usize,
     // Retain the window until the layer and blur view have been removed.
@@ -60,6 +70,12 @@ impl MacPresent {
             root_layer,
             color_space,
             pixels: Vec::new(),
+            tile_rects: Vec::new(),
+            tile_layers: Vec::new(),
+            scratch: Vec::new(),
+            retained: false,
+            rebuild_layers: true,
+            scale: 0.0,
             width: 0,
             height: 0,
             window,
@@ -67,7 +83,8 @@ impl MacPresent {
         })
     }
 
-    pub fn prepare(&mut self, width: u32, height: u32) -> Result<()> {
+    /// Return whether partial raster can reuse the last successful frame.
+    pub fn prepare(&mut self, width: u32, height: u32) -> Result<bool> {
         let width = width as usize;
         let height = height as usize;
         let len = width
@@ -76,27 +93,80 @@ impl MacPresent {
         if len == 0 {
             bail!("Mac framebuffer must be nonempty");
         }
+        let resized = self.width != width || self.height != height;
+        let retained = self.retained && !resized;
+        // An error before presentation must force a full repaint next time.
+        self.retained = false;
+        if resized {
+            self.tile_rects = tiles(width, height);
+            self.rebuild_layers = true;
+        }
         self.pixels.resize(len, 0);
         self.width = width;
         self.height = height;
-        Ok(())
+        Ok(retained)
     }
 
     pub fn pixels_mut(&mut self) -> &mut [u32] {
         &mut self.pixels
     }
 
-    pub fn present(&mut self) -> Result<()> {
-        let image = alpha_image(&self.pixels, self.width, self.height, &self.color_space)?;
+    pub fn present(&mut self, damage: FrameDamage) -> Result<()> {
+        let damage = if self.rebuild_layers {
+            FrameDamage::Full
+        } else {
+            damage
+        };
+        let dirty = damaged_tiles(&self.tile_rects, &damage);
+        // Prepare every replacement before changing the layer tree. Images own
+        // immutable data, so reuse of scratch never races the compositor.
+        let mut images = Vec::with_capacity(dirty.len());
+        for index in dirty {
+            let tile = self.tile_rects[index];
+            copy_tile(&self.pixels, self.width, tile, &mut self.scratch);
+            premultiply_in_place(&mut self.scratch);
+            images.push((
+                index,
+                alpha_image(&self.scratch, tile.width, tile.height, &self.color_space)?,
+            ));
+        }
         CATransaction::begin();
         CATransaction::setDisableActions(true);
-        // Read current point bounds and scale for every frame. This includes
-        // resize and monitor changes without rounding fractional AppKit bounds.
         self.layer.setFrame(self.root_layer.bounds());
-        self.layer.setContentsScale(self.window.scale_factor());
-        // SAFETY: CALayer accepts a CGImage and retains its immutable data.
-        unsafe { self.layer.setContents(Some(image.as_ref())) };
+        let scale = self.window.scale_factor();
+        if self.rebuild_layers {
+            for layer in self.tile_layers.drain(..) {
+                layer.removeFromSuperlayer();
+            }
+            for _ in &self.tile_rects {
+                let layer = CALayer::new();
+                layer.setOpaque(false);
+                layer.setAnchorPoint(CGPoint::new(0.0, 0.0));
+                layer.setGeometryFlipped(true);
+                layer.setContentsGravity(unsafe { kCAGravityTopLeft });
+                self.layer.addSublayer(&layer);
+                self.tile_layers.push(layer);
+            }
+        }
+        // Pixel boundaries divided by the backing scale keep adjacent tiles
+        // aligned on Retina displays, including the short right/bottom tiles.
+        if self.rebuild_layers || self.scale != scale {
+            for (layer, tile) in self.tile_layers.iter().zip(&self.tile_rects) {
+                layer.setFrame(CGRect::new(
+                    CGPoint::new(tile.x as f64 / scale, tile.y as f64 / scale),
+                    CGSize::new(tile.width as f64 / scale, tile.height as f64 / scale),
+                ));
+                layer.setContentsScale(scale);
+            }
+        }
+        for (index, image) in images {
+            // SAFETY: CALayer accepts a CGImage and retains its immutable data.
+            unsafe { self.tile_layers[index].setContents(Some(image.as_ref())) };
+        }
         CATransaction::commit();
+        self.scale = scale;
+        self.rebuild_layers = false;
+        self.retained = true;
         Ok(())
     }
 }

@@ -15,6 +15,8 @@ pub use semantics::{
     MAX_DOCUMENT_ID_BYTES, MAX_SEMANTIC_SPANS, MAX_SEMANTIC_TEXT_CHARS,
 };
 
+#[cfg(test)]
+mod collection_codec_tests;
 mod graphics_apc;
 pub use graphics_apc::{
     GraphicsApc, GraphicsApcCollector, GraphicsApcEvent, MAX_GRAPHICS_APC_BYTES,
@@ -2189,7 +2191,10 @@ pub fn encode_collection_snapshot(snapshot: &CollectionSnapshot) -> Result<Vec<u
 
 pub fn encode_collection_patch(patch: &CollectionPatch) -> Result<Vec<u8>, DecodeError> {
     validate_collection_id(&patch.collection_id)?;
-    if patch.surface_generation == 0 || patch.base == 0 || patch.next != patch.base + 1 {
+    if patch.surface_generation == 0
+        || patch.base == 0
+        || Some(patch.next) != patch.base.checked_add(1)
+    {
         return Err(DecodeError::InvalidField("revision"));
     }
     if patch.items.is_empty() || patch.items.len() > DEFAULT_LIMIT_PATCH_OPS as usize {
@@ -2376,7 +2381,10 @@ fn decode_collection<'a>(
                         .ok_or(DecodeError::MissingField("items"))?,
                 )?,
             };
-            if patch.base == 0 || patch.next != patch.base + 1 || patch.items.is_empty() {
+            if patch.base == 0
+                || Some(patch.next) != patch.base.checked_add(1)
+                || patch.items.is_empty()
+            {
                 return Err(DecodeError::InvalidField("revision"));
             }
             if patch.items.len() > DEFAULT_LIMIT_PATCH_OPS as usize {
@@ -2448,7 +2456,7 @@ pub fn apply_collection_patch(
     current: Option<&CollectionSnapshot>,
     patch: CollectionPatch,
 ) -> Result<CollectionSnapshot, CollectionRejectReason> {
-    if patch.next != patch.base + 1 || patch.items.is_empty() {
+    if Some(patch.next) != patch.base.checked_add(1) || patch.items.is_empty() {
         return Err(CollectionRejectReason::Conflict);
     }
     let Some(existing) = current else {
@@ -3160,6 +3168,36 @@ mod tests {
         let events = collector.push(b"left\x1b_Prismattyc;cap;q;id=1;max=0.1\x1b\\right");
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], CollectedApc::Body(_)));
+    }
+
+    #[test]
+    fn apc_collector_recovers_after_invalid_and_nested_sequences() {
+        // Malformed controls must drain through ST without becoming a command.
+        // A nested introducer starts a fresh command, including after overflow.
+        for bad in [b"a\x00b".as_slice(), b"a\x1bXb", b"a\x1b\x00b"] {
+            let mut collector = ApcCollector::new();
+            assert!(collector.push(b"\x1b_").is_empty());
+            for byte in bad {
+                assert!(collector.push(&[*byte]).is_empty());
+            }
+            assert_eq!(collector.push(b"\x1b\\"), vec![CollectedApc::Discarded]);
+            assert!(!collector.is_active());
+            assert_eq!(
+                collector.push(b"\x1b_ok\x1b\\"),
+                vec![CollectedApc::Body("ok".into())]
+            );
+        }
+        let mut collector = ApcCollector::new();
+        assert!(collector.push(b"\x1b[plain\x1b_").is_empty());
+        assert!(collector
+            .push(&vec![b'x'; MAX_CONTROL_BODY_BYTES + 1])
+            .is_empty());
+        assert!(collector.push(b"\x1b_").is_empty());
+        assert_eq!(
+            collector.push(b"fresh\x1b\x1b\\"),
+            vec![CollectedApc::Body("fresh".into())]
+        );
+        assert!(!collector.is_active());
     }
 
     #[test]

@@ -257,3 +257,34 @@ pub(super) fn versions(paths: &Paths) -> Result<()> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restart_selection_requires_explicit_permission_to_stop_sessions() {
+        let parse_words =
+            |words: &[&str]| parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        for words in [vec![], vec!["--all"], vec!["--json", "--plan"]] {
+            let options = parse_words(&words).unwrap();
+            assert!(options.host && options.daemon && options.mcp);
+            assert!(!options.stop_sessions);
+        }
+        let host = parse_words(&["--host"]).unwrap();
+        assert!(host.host && !host.daemon && !host.mcp);
+        let mcp = parse_words(&["--mcp", "--worker"]).unwrap();
+        assert!(mcp.mcp && mcp.worker && !mcp.host && !mcp.daemon);
+        for daemon in ["--daemon", "--mux"] {
+            let options = parse_words(&[daemon, "--stop-sessions", "--plan"]).unwrap();
+            assert!(options.daemon && options.stop_sessions && options.plan);
+            assert!(!options.host && !options.mcp);
+        }
+        assert!(parse_words(&["--host", "--stop-sessions"]).is_err());
+        assert!(parse_words(&["--mcp", "--stop-sessions"]).is_err());
+        assert!(parse_words(&["--daemno"])
+            .unwrap_err()
+            .to_string()
+            .contains("unknown restart option"));
+    }
+}

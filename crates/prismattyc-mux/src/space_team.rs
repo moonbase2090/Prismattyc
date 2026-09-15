@@ -500,6 +500,81 @@ mod tests {
     use super::*;
 
     #[test]
+    fn team_links_accept_web_and_absolute_paths_but_reject_control_text() {
+        for link in [
+            "https://example.com/review",
+            "http://localhost:8080",
+            "/work/design notes.md",
+        ] {
+            assert!(validate_link(link).is_ok(), "{link}");
+        }
+        for link in [
+            "relative/path",
+            "ftp://example.com",
+            "",
+            "https://example.com/\nnext",
+            "/work/\0bad",
+        ] {
+            assert!(validate_link(link).is_err(), "{link:?}");
+        }
+        assert!(validate_link(&format!("https://example.com/{}", "x".repeat(4096))).is_err());
+    }
+
+    #[test]
+    fn team_text_distinguishes_active_snoozed_and_stale_requests() {
+        let request = |message: &str, snoozed_until_ms| AttentionRequest {
+            pane_id: 1,
+            revision: 1,
+            message: message.into(),
+            source: "agent".into(),
+            raised_at_ms: 1,
+            snoozed_until_ms,
+        };
+        let details = TeamDetails {
+            name: "Review".into(),
+            space_id: None,
+            observed_at_ms: 100,
+            source: "live daemon snapshot".into(),
+            sessions_needing_input: 1,
+            letters: 4,
+            sessions: vec![
+                SessionDetails {
+                    name: "reviewer".into(),
+                    role: Some("review".into()),
+                    session_id: Some(1),
+                    panes: vec![1],
+                    state: "running".into(),
+                    letters: 3,
+                    attention: vec![request("approve patch", 0), request("check later", 200)],
+                },
+                SessionDetails {
+                    name: "builder".into(),
+                    role: None,
+                    session_id: None,
+                    panes: vec![],
+                    state: "stopped".into(),
+                    letters: 1,
+                    attention: vec![request("old question", 0)],
+                },
+            ],
+            links: BTreeMap::from([("design".into(), "https://example.com/design".into())]),
+        };
+        assert_eq!(
+            details.text(),
+            concat!(
+                "Review — 1 sessions need you; 4 letters\n",
+                "live daemon snapshot\n",
+                "reviewer | review | running | 3 letters\n",
+                "  needs input: approve patch (agent)\n",
+                "  snoozed: check later (agent)\n",
+                "builder | no role | stopped | 1 letters\n",
+                "  stale: old question (agent)\n",
+                "design: https://example.com/design"
+            )
+        );
+    }
+
+    #[test]
     fn retained_results_keep_latest_completion_per_view_and_survive_rename() {
         let dir = std::env::temp_dir().join(format!(
             "pmux-result-test-{}",

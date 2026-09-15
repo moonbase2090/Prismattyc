@@ -432,6 +432,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn restored_log_keeps_newest_frames_and_continues_the_saved_sequence() {
+        let frames: Vec<_> = (7..=9)
+            .map(|seq| PaneLogFrame {
+                seq,
+                event: PaneEvent::Output {
+                    bytes: vec![seq as u8; 4],
+                },
+            })
+            .collect();
+        let cap = frames[0].event.byte_len() * 2;
+        let mut log = PaneLog::from_frames(frames.clone(), cap);
+        assert_eq!(log.frames(), frames[1..]);
+        assert_eq!(log.byte_len(), cap);
+        assert_eq!(log.current_seq(), 9);
+        assert_eq!(
+            log.catch_up(6),
+            CatchUp::Gap {
+                oldest: 8,
+                current: 9
+            }
+        );
+        assert_eq!(log.catch_up(8), CatchUp::Events(vec![frames[2].clone()]));
+        assert_eq!(log.append(PaneEvent::Output { bytes: vec![10; 4] }), 10);
+        assert_eq!(log.oldest_seq(), Some(9));
+        let oversized = PaneLog::from_frames(frames.clone(), 1);
+        assert_eq!(oversized.frames(), frames[2..]);
+        assert!(
+            oversized.byte_len() > 1,
+            "retain the newest oversized frame"
+        );
+        let empty = PaneLog::from_frames(vec![], cap);
+        assert_eq!(empty.current_seq(), 0);
+        assert_eq!(empty.next_seq(), 1);
+        assert_eq!(empty.byte_len(), 0);
+    }
+
+    #[test]
     fn frame_policy_table_covers_every_event_variant_and_pane_styled() {
         let cases = [
             (

@@ -1167,3 +1167,32 @@ fn maintenance_result(text: &str) -> String {
     }
     lines.join("\n")
 }
+
+#[cfg(test)]
+mod maintenance_tests {
+    use super::*;
+
+    #[test]
+    fn maintenance_summary_keeps_deferred_restarts_and_version_mismatches_visible() {
+        assert_eq!(
+            maintenance_result("connection refused"),
+            "connection refused"
+        );
+        assert_eq!(
+            maintenance_result(
+                r#"{"components":[{"component":"daemon","response":{"status":"deferred","detail":"live sessions"}},{"component":"host","status":"restarted","detail":"ready"}]}"#
+            ),
+            "daemon: deferred. live sessions\nhost: restarted. ready"
+        );
+        assert_eq!(
+            maintenance_result(
+                r#"{"installed":[{"component":"host","version":"0.2.1"}],"daemon":{"version":"0.2.0"},"running":[{"component":"host","pid":123,"version":"0.2.0"}]}"#
+            ),
+            "Installed host: 0.2.1\nRunning daemon: 0.2.0\nRunning host (PID 123): 0.2.0"
+        );
+        assert_eq!(
+            maintenance_result(r#"{"status":"updated","version":"0.2.1"}"#),
+            "updated: 0.2.1"
+        );
+    }
+}

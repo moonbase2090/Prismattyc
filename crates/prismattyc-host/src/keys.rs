@@ -148,18 +148,28 @@ fn encode_named(named: NamedKey, mod_param: u8, shift: bool, ctrl: bool) -> Opti
         NamedKey::Delete => Some(csi_mod("3", b'~', mod_param)),
         NamedKey::Insert => Some(csi_mod("2", b'~', mod_param)),
 
+        // Editing cluster (when compositors expose them as named).
+        NamedKey::Clear => Some(b"\x1b[3;5~".to_vec()), // uncommon; best-effort
+        NamedKey::Copy | NamedKey::Cut | NamedKey::Paste | NamedKey::Undo | NamedKey::Redo => None,
+
+        _ => encode_function_key(named, mod_param),
+    }
+}
+
+fn encode_function_key(named: NamedKey, mod_param: u8) -> Option<Vec<u8>> {
+    match named {
         NamedKey::F1 => Some(plain_or_mod_f(b"\x1bOP", "1", b'P', mod_param)),
         NamedKey::F2 => Some(plain_or_mod_f(b"\x1bOQ", "1", b'Q', mod_param)),
         NamedKey::F3 => Some(plain_or_mod_f(b"\x1bOR", "1", b'R', mod_param)),
         NamedKey::F4 => Some(plain_or_mod_f(b"\x1bOS", "1", b'S', mod_param)),
         NamedKey::F5 => Some(csi_mod("15", b'~', mod_param)),
-        NamedKey::F6 => Some(csi_mod("16", b'~', mod_param)),
-        NamedKey::F7 => Some(csi_mod("17", b'~', mod_param)),
-        NamedKey::F8 => Some(csi_mod("18", b'~', mod_param)),
-        NamedKey::F9 => Some(csi_mod("19", b'~', mod_param)),
-        NamedKey::F10 => Some(csi_mod("20", b'~', mod_param)),
-        NamedKey::F11 => Some(csi_mod("21", b'~', mod_param)),
-        NamedKey::F12 => Some(csi_mod("22", b'~', mod_param)),
+        NamedKey::F6 => Some(csi_mod("17", b'~', mod_param)),
+        NamedKey::F7 => Some(csi_mod("18", b'~', mod_param)),
+        NamedKey::F8 => Some(csi_mod("19", b'~', mod_param)),
+        NamedKey::F9 => Some(csi_mod("20", b'~', mod_param)),
+        NamedKey::F10 => Some(csi_mod("21", b'~', mod_param)),
+        NamedKey::F11 => Some(csi_mod("23", b'~', mod_param)),
+        NamedKey::F12 => Some(csi_mod("24", b'~', mod_param)),
         // xterm F13–F20 (common enough for some keyboards / bindings).
         NamedKey::F13 => Some(csi_mod("25", b'~', mod_param)),
         NamedKey::F14 => Some(csi_mod("26", b'~', mod_param)),
@@ -169,10 +179,6 @@ fn encode_named(named: NamedKey, mod_param: u8, shift: bool, ctrl: bool) -> Opti
         NamedKey::F18 => Some(csi_mod("32", b'~', mod_param)),
         NamedKey::F19 => Some(csi_mod("33", b'~', mod_param)),
         NamedKey::F20 => Some(csi_mod("34", b'~', mod_param)),
-
-        // Editing cluster (when compositors expose them as named).
-        NamedKey::Clear => Some(b"\x1b[3;5~".to_vec()), // uncommon; best-effort
-        NamedKey::Copy | NamedKey::Cut | NamedKey::Paste | NamedKey::Undo | NamedKey::Redo => None,
 
         _ => None,
     }
@@ -210,109 +216,129 @@ fn encode_keycode(
     ctrl: bool,
     alt: bool,
 ) -> Option<Vec<u8>> {
-    match code {
-        KeyCode::Space => {
-            if ctrl {
-                Some(vec![0x00])
-            } else {
-                Some(vec![b' '])
-            }
-        }
-        KeyCode::Enter => Some(vec![b'\r']),
-        KeyCode::Tab if shift => Some(b"\x1b[Z".to_vec()),
-        KeyCode::Tab => Some(vec![b'\t']),
-        KeyCode::Backspace => Some(vec![0x7f]),
-        KeyCode::Escape => Some(vec![0x1b]),
-        KeyCode::ArrowUp => Some(csi_mod("1", b'A', mod_param)),
-        KeyCode::ArrowDown => Some(csi_mod("1", b'B', mod_param)),
-        KeyCode::ArrowRight => Some(csi_mod("1", b'C', mod_param)),
-        KeyCode::ArrowLeft => Some(csi_mod("1", b'D', mod_param)),
-        KeyCode::Home => Some(csi_mod("1", b'H', mod_param)),
-        KeyCode::End => Some(csi_mod("1", b'F', mod_param)),
-        KeyCode::PageUp => Some(csi_mod("5", b'~', mod_param)),
-        KeyCode::PageDown => Some(csi_mod("6", b'~', mod_param)),
-        KeyCode::Delete => Some(csi_mod("3", b'~', mod_param)),
-        KeyCode::Insert => Some(csi_mod("2", b'~', mod_param)),
-        KeyCode::F1 => Some(plain_or_mod_f(b"\x1bOP", "1", b'P', mod_param)),
-        KeyCode::F2 => Some(plain_or_mod_f(b"\x1bOQ", "1", b'Q', mod_param)),
-        KeyCode::F3 => Some(plain_or_mod_f(b"\x1bOR", "1", b'R', mod_param)),
-        KeyCode::F4 => Some(plain_or_mod_f(b"\x1bOS", "1", b'S', mod_param)),
-        KeyCode::F5 => Some(csi_mod("15", b'~', mod_param)),
-        KeyCode::F6 => Some(csi_mod("16", b'~', mod_param)),
-        KeyCode::F7 => Some(csi_mod("17", b'~', mod_param)),
-        KeyCode::F8 => Some(csi_mod("18", b'~', mod_param)),
-        KeyCode::F9 => Some(csi_mod("19", b'~', mod_param)),
-        KeyCode::F10 => Some(csi_mod("20", b'~', mod_param)),
-        KeyCode::F11 => Some(csi_mod("21", b'~', mod_param)),
-        KeyCode::F12 => Some(csi_mod("22", b'~', mod_param)),
-        // Numpad (physical) — same sequences as main cluster when NumLock on
-        // typically arrives as Character; these cover NumLock-off navigation.
-        KeyCode::NumpadEnter => Some(vec![b'\r']),
-        KeyCode::NumpadAdd => encode_char('+', ctrl, alt),
-        KeyCode::NumpadSubtract => encode_char('-', ctrl, alt),
-        KeyCode::NumpadMultiply => encode_char('*', ctrl, alt),
-        KeyCode::NumpadDivide => encode_char('/', ctrl, alt),
-        KeyCode::NumpadDecimal => encode_char('.', ctrl, alt),
-        KeyCode::Numpad0 => encode_char('0', ctrl, alt),
-        KeyCode::Numpad1 => encode_char('1', ctrl, alt),
-        KeyCode::Numpad2 => encode_char('2', ctrl, alt),
-        KeyCode::Numpad3 => encode_char('3', ctrl, alt),
-        KeyCode::Numpad4 => encode_char('4', ctrl, alt),
-        KeyCode::Numpad5 => encode_char('5', ctrl, alt),
-        KeyCode::Numpad6 => encode_char('6', ctrl, alt),
-        KeyCode::Numpad7 => encode_char('7', ctrl, alt),
-        KeyCode::Numpad8 => encode_char('8', ctrl, alt),
-        KeyCode::Numpad9 => encode_char('9', ctrl, alt),
-        // Digit / letter physical codes when logical is Unidentified.
-        KeyCode::Digit0 => encode_char('0', ctrl, alt),
-        KeyCode::Digit1 => encode_char('1', ctrl, alt),
-        KeyCode::Digit2 => encode_char('2', ctrl, alt),
-        KeyCode::Digit3 => encode_char('3', ctrl, alt),
-        KeyCode::Digit4 => encode_char('4', ctrl, alt),
-        KeyCode::Digit5 => encode_char('5', ctrl, alt),
-        KeyCode::Digit6 => encode_char('6', ctrl, alt),
-        KeyCode::Digit7 => encode_char('7', ctrl, alt),
-        KeyCode::Digit8 => encode_char('8', ctrl, alt),
-        KeyCode::Digit9 => encode_char('9', ctrl, alt),
-        KeyCode::KeyA => encode_char(if shift { 'A' } else { 'a' }, ctrl, alt),
-        KeyCode::KeyB => encode_char(if shift { 'B' } else { 'b' }, ctrl, alt),
-        KeyCode::KeyC => encode_char(if shift { 'C' } else { 'c' }, ctrl, alt),
-        KeyCode::KeyD => encode_char(if shift { 'D' } else { 'd' }, ctrl, alt),
-        KeyCode::KeyE => encode_char(if shift { 'E' } else { 'e' }, ctrl, alt),
-        KeyCode::KeyF => encode_char(if shift { 'F' } else { 'f' }, ctrl, alt),
-        KeyCode::KeyG => encode_char(if shift { 'G' } else { 'g' }, ctrl, alt),
-        KeyCode::KeyH => encode_char(if shift { 'H' } else { 'h' }, ctrl, alt),
-        KeyCode::KeyI => encode_char(if shift { 'I' } else { 'i' }, ctrl, alt),
-        KeyCode::KeyJ => encode_char(if shift { 'J' } else { 'j' }, ctrl, alt),
-        KeyCode::KeyK => encode_char(if shift { 'K' } else { 'k' }, ctrl, alt),
-        KeyCode::KeyL => encode_char(if shift { 'L' } else { 'l' }, ctrl, alt),
-        KeyCode::KeyM => encode_char(if shift { 'M' } else { 'm' }, ctrl, alt),
-        KeyCode::KeyN => encode_char(if shift { 'N' } else { 'n' }, ctrl, alt),
-        KeyCode::KeyO => encode_char(if shift { 'O' } else { 'o' }, ctrl, alt),
-        KeyCode::KeyP => encode_char(if shift { 'P' } else { 'p' }, ctrl, alt),
-        KeyCode::KeyQ => encode_char(if shift { 'Q' } else { 'q' }, ctrl, alt),
-        KeyCode::KeyR => encode_char(if shift { 'R' } else { 'r' }, ctrl, alt),
-        KeyCode::KeyS => encode_char(if shift { 'S' } else { 's' }, ctrl, alt),
-        KeyCode::KeyT => encode_char(if shift { 'T' } else { 't' }, ctrl, alt),
-        KeyCode::KeyU => encode_char(if shift { 'U' } else { 'u' }, ctrl, alt),
-        KeyCode::KeyV => encode_char(if shift { 'V' } else { 'v' }, ctrl, alt),
-        KeyCode::KeyW => encode_char(if shift { 'W' } else { 'w' }, ctrl, alt),
-        KeyCode::KeyX => encode_char(if shift { 'X' } else { 'x' }, ctrl, alt),
-        KeyCode::KeyY => encode_char(if shift { 'Y' } else { 'y' }, ctrl, alt),
-        KeyCode::KeyZ => encode_char(if shift { 'Z' } else { 'z' }, ctrl, alt),
-        KeyCode::Minus => encode_char(if shift { '_' } else { '-' }, ctrl, alt),
-        KeyCode::Equal => encode_char(if shift { '+' } else { '=' }, ctrl, alt),
-        KeyCode::BracketLeft => encode_char(if shift { '{' } else { '[' }, ctrl, alt),
-        KeyCode::BracketRight => encode_char(if shift { '}' } else { ']' }, ctrl, alt),
-        KeyCode::Backslash => encode_char(if shift { '|' } else { '\\' }, ctrl, alt),
-        KeyCode::Semicolon => encode_char(if shift { ':' } else { ';' }, ctrl, alt),
-        KeyCode::Quote => encode_char(if shift { '"' } else { '\'' }, ctrl, alt),
-        KeyCode::Backquote => encode_char(if shift { '~' } else { '`' }, ctrl, alt),
-        KeyCode::Comma => encode_char(if shift { '<' } else { ',' }, ctrl, alt),
-        KeyCode::Period => encode_char(if shift { '>' } else { '.' }, ctrl, alt),
-        KeyCode::Slash => encode_char(if shift { '?' } else { '/' }, ctrl, alt),
-        _ => None,
+    if let Some(named) = physical_named_key(code) {
+        return encode_named(named, mod_param, shift, ctrl);
     }
+    let ch = physical_character(code, shift)?;
+    encode_char(ch, ctrl, alt)
+}
+
+fn physical_named_key(code: KeyCode) -> Option<NamedKey> {
+    Some(match code {
+        KeyCode::Space => NamedKey::Space,
+        KeyCode::Enter | KeyCode::NumpadEnter => NamedKey::Enter,
+        KeyCode::Tab => NamedKey::Tab,
+        KeyCode::Backspace => NamedKey::Backspace,
+        KeyCode::Escape => NamedKey::Escape,
+        KeyCode::ArrowUp => NamedKey::ArrowUp,
+        KeyCode::ArrowDown => NamedKey::ArrowDown,
+        KeyCode::ArrowRight => NamedKey::ArrowRight,
+        KeyCode::ArrowLeft => NamedKey::ArrowLeft,
+        KeyCode::Home => NamedKey::Home,
+        KeyCode::End => NamedKey::End,
+        KeyCode::PageUp => NamedKey::PageUp,
+        KeyCode::PageDown => NamedKey::PageDown,
+        KeyCode::Delete => NamedKey::Delete,
+        KeyCode::Insert => NamedKey::Insert,
+        KeyCode::F1 => NamedKey::F1,
+        KeyCode::F2 => NamedKey::F2,
+        KeyCode::F3 => NamedKey::F3,
+        KeyCode::F4 => NamedKey::F4,
+        KeyCode::F5 => NamedKey::F5,
+        KeyCode::F6 => NamedKey::F6,
+        KeyCode::F7 => NamedKey::F7,
+        KeyCode::F8 => NamedKey::F8,
+        KeyCode::F9 => NamedKey::F9,
+        KeyCode::F10 => NamedKey::F10,
+        KeyCode::F11 => NamedKey::F11,
+        KeyCode::F12 => NamedKey::F12,
+        _ => return None,
+    })
+}
+
+fn physical_character(code: KeyCode, shift: bool) -> Option<char> {
+    if let Some(letter) = physical_letter(code) {
+        return Some(if shift {
+            letter.to_ascii_uppercase()
+        } else {
+            letter
+        });
+    }
+    if let Some(number) = physical_number_or_operator(code) {
+        return Some(number);
+    }
+    let (plain, shifted) = physical_punctuation(code)?;
+    Some(if shift { shifted } else { plain })
+}
+
+fn physical_letter(code: KeyCode) -> Option<char> {
+    Some(match code {
+        KeyCode::KeyA => 'a',
+        KeyCode::KeyB => 'b',
+        KeyCode::KeyC => 'c',
+        KeyCode::KeyD => 'd',
+        KeyCode::KeyE => 'e',
+        KeyCode::KeyF => 'f',
+        KeyCode::KeyG => 'g',
+        KeyCode::KeyH => 'h',
+        KeyCode::KeyI => 'i',
+        KeyCode::KeyJ => 'j',
+        KeyCode::KeyK => 'k',
+        KeyCode::KeyL => 'l',
+        KeyCode::KeyM => 'm',
+        KeyCode::KeyN => 'n',
+        KeyCode::KeyO => 'o',
+        KeyCode::KeyP => 'p',
+        KeyCode::KeyQ => 'q',
+        KeyCode::KeyR => 'r',
+        KeyCode::KeyS => 's',
+        KeyCode::KeyT => 't',
+        KeyCode::KeyU => 'u',
+        KeyCode::KeyV => 'v',
+        KeyCode::KeyW => 'w',
+        KeyCode::KeyX => 'x',
+        KeyCode::KeyY => 'y',
+        KeyCode::KeyZ => 'z',
+        _ => return None,
+    })
+}
+
+fn physical_number_or_operator(code: KeyCode) -> Option<char> {
+    Some(match code {
+        KeyCode::Digit0 | KeyCode::Numpad0 => '0',
+        KeyCode::Digit1 | KeyCode::Numpad1 => '1',
+        KeyCode::Digit2 | KeyCode::Numpad2 => '2',
+        KeyCode::Digit3 | KeyCode::Numpad3 => '3',
+        KeyCode::Digit4 | KeyCode::Numpad4 => '4',
+        KeyCode::Digit5 | KeyCode::Numpad5 => '5',
+        KeyCode::Digit6 | KeyCode::Numpad6 => '6',
+        KeyCode::Digit7 | KeyCode::Numpad7 => '7',
+        KeyCode::Digit8 | KeyCode::Numpad8 => '8',
+        KeyCode::Digit9 | KeyCode::Numpad9 => '9',
+        KeyCode::NumpadAdd => '+',
+        KeyCode::NumpadSubtract => '-',
+        KeyCode::NumpadMultiply => '*',
+        KeyCode::NumpadDivide => '/',
+        KeyCode::NumpadDecimal => '.',
+        _ => return None,
+    })
+}
+
+fn physical_punctuation(code: KeyCode) -> Option<(char, char)> {
+    Some(match code {
+        KeyCode::Minus => ('-', '_'),
+        KeyCode::Equal => ('=', '+'),
+        KeyCode::BracketLeft => ('[', '{'),
+        KeyCode::BracketRight => (']', '}'),
+        KeyCode::Backslash => ('\\', '|'),
+        KeyCode::Semicolon => (';', ':'),
+        KeyCode::Quote => ('\'', '"'),
+        KeyCode::Backquote => ('`', '~'),
+        KeyCode::Comma => (',', '<'),
+        KeyCode::Period => ('.', '>'),
+        KeyCode::Slash => ('/', '?'),
+        _ => return None,
+    })
 }
 
 fn plain_or_mod_f(plain: &[u8], intermediate: &str, final_byte: u8, mod_param: u8) -> Vec<u8> {
@@ -511,13 +537,13 @@ mod tests {
             (NamedKey::F3, b"\x1bOR".to_vec()),
             (NamedKey::F4, b"\x1bOS".to_vec()),
             (NamedKey::F5, b"\x1b[15~".to_vec()),
-            (NamedKey::F6, b"\x1b[16~".to_vec()),
-            (NamedKey::F7, b"\x1b[17~".to_vec()),
-            (NamedKey::F8, b"\x1b[18~".to_vec()),
-            (NamedKey::F9, b"\x1b[19~".to_vec()),
-            (NamedKey::F10, b"\x1b[20~".to_vec()),
-            (NamedKey::F11, b"\x1b[21~".to_vec()),
-            (NamedKey::F12, b"\x1b[22~".to_vec()),
+            (NamedKey::F6, b"\x1b[17~".to_vec()),
+            (NamedKey::F7, b"\x1b[18~".to_vec()),
+            (NamedKey::F8, b"\x1b[19~".to_vec()),
+            (NamedKey::F9, b"\x1b[20~".to_vec()),
+            (NamedKey::F10, b"\x1b[21~".to_vec()),
+            (NamedKey::F11, b"\x1b[23~".to_vec()),
+            (NamedKey::F12, b"\x1b[24~".to_vec()),
             (NamedKey::F13, b"\x1b[25~".to_vec()),
             (NamedKey::F14, b"\x1b[26~".to_vec()),
             (NamedKey::F15, b"\x1b[28~".to_vec()),
@@ -581,13 +607,13 @@ mod tests {
             (KeyCode::F3, b"\x1bOR".to_vec()),
             (KeyCode::F4, b"\x1bOS".to_vec()),
             (KeyCode::F5, b"\x1b[15~".to_vec()),
-            (KeyCode::F6, b"\x1b[16~".to_vec()),
-            (KeyCode::F7, b"\x1b[17~".to_vec()),
-            (KeyCode::F8, b"\x1b[18~".to_vec()),
-            (KeyCode::F9, b"\x1b[19~".to_vec()),
-            (KeyCode::F10, b"\x1b[20~".to_vec()),
-            (KeyCode::F11, b"\x1b[21~".to_vec()),
-            (KeyCode::F12, b"\x1b[22~".to_vec()),
+            (KeyCode::F6, b"\x1b[17~".to_vec()),
+            (KeyCode::F7, b"\x1b[18~".to_vec()),
+            (KeyCode::F8, b"\x1b[19~".to_vec()),
+            (KeyCode::F9, b"\x1b[20~".to_vec()),
+            (KeyCode::F10, b"\x1b[21~".to_vec()),
+            (KeyCode::F11, b"\x1b[23~".to_vec()),
+            (KeyCode::F12, b"\x1b[24~".to_vec()),
             (KeyCode::NumpadEnter, b"\r".to_vec()),
             (KeyCode::NumpadAdd, b"+".to_vec()),
             (KeyCode::NumpadSubtract, b"-".to_vec()),

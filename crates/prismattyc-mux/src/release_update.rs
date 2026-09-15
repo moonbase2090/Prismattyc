@@ -614,6 +614,49 @@ mod tests {
         path
     }
     #[test]
+    fn durable_receipt_selects_installation_without_overwriting_prior_metadata() {
+        let dir = temporary();
+        let current = dir.join("current");
+        fs::create_dir(&current).unwrap();
+        let original = Receipt {
+            repository: REPOSITORY.into(),
+            version: "0.2.0".into(),
+            target: target().unwrap().into(),
+            bin_dir: dir.join("custom-bin"),
+        };
+        let remembered = dir.join("legacy-bin");
+        fs::write(
+            dir.join("installation.json"),
+            serde_json::to_vec(&remembered).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(default_bin_dir(&dir).unwrap(), remembered);
+        write_receipt(&current, &original).unwrap();
+        assert_eq!(default_bin_dir(&dir).unwrap(), original.bin_dir);
+        let saved = receipt(&current).unwrap();
+        assert_eq!(saved.version, "0.2.0");
+        assert_eq!(saved.repository, REPOSITORY);
+        assert_eq!(saved.target, original.target);
+        assert_eq!(
+            fs::metadata(current.join("receipt.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let bytes = fs::read(current.join("receipt.json")).unwrap();
+        assert!(write_receipt(&current, &original).is_err());
+        assert_eq!(fs::read(current.join("receipt.json")).unwrap(), bytes);
+        fs::write(current.join("receipt.json"), b"invalid").unwrap();
+        assert!(
+            default_bin_dir(&dir).is_err(),
+            "a corrupt receipt must not silently select another installation"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn release_channel_rejects_unpublished_mutable_and_old_releases() {
         let mut release = fixture();
         assert_eq!(release_version(&release).unwrap(), Version::new(0, 2, 0));

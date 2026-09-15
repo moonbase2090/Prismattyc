@@ -100,14 +100,17 @@ impl Screen {
         let start = output.rows.len().saturating_sub(rows);
         let absolute_start = start + output.removed;
         let primary = GridBuffer {
-            cells: output
-                .rows
-                .iter()
-                .skip(start)
-                .flat_map(|(row, _)| row.iter().copied())
-                .chain(std::iter::repeat(Cell::default()))
-                .take(columns * rows)
-                .collect(),
+            cells: CellGrid::from_flat(
+                output
+                    .rows
+                    .iter()
+                    .skip(start)
+                    .flat_map(|(row, _)| row.iter().copied())
+                    .chain(std::iter::repeat(Cell::default()))
+                    .take(columns * rows)
+                    .collect(),
+                columns,
+            ),
             wrapped: output
                 .rows
                 .iter()

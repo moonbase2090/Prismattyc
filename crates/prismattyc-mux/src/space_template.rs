@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+#[path = "space_template_tests.rs"]
+mod tests;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TeamTemplate {
     pub version: u32,

@@ -290,10 +290,14 @@ mod tests {
             },
         )
         .expect("send");
+        assert!(format_data(&sent).ends_with(" (depth 1)\n"));
         let ControlResponseData::MailSent { id, depth: 1 } = sent else {
             panic!("expected MailSent: {sent:?}");
         };
         let claimed = exchange(&socket, &recipient, MailOp::Claim).expect("claim");
+        let text = format_data(&claimed);
+        assert!(text.starts_with("status: held  (1 letter(s))\n"));
+        assert!(text.contains("from:     kiro-sb\nsummary:  mcp\n---\nover mail star\n"));
         let ControlResponseData::MailLetters { letters } = claimed else {
             panic!("expected MailLetters: {claimed:?}");
         };
@@ -301,13 +305,38 @@ mod tests {
         assert_eq!(letters[0].id, id);
         assert_eq!(letters[0].from, "kiro-sb");
         assert_eq!(letters[0].body, "over mail star");
+        let released = exchange(
+            &socket,
+            &recipient,
+            MailOp::Release {
+                ids: vec![id.clone()],
+            },
+        )
+        .unwrap();
+        assert_eq!(format_data(&released), "released: 1\n");
+        assert_eq!(
+            format_data(&exchange(&socket, &recipient, MailOp::Inbox).unwrap()),
+            "open: 1 held: 0\n"
+        );
+        exchange(&socket, &recipient, MailOp::Claim).unwrap();
+        let alias = exchange(
+            &socket,
+            &recipient,
+            MailOp::Alias {
+                name: "reviewer".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(format_data(&alias), "aliased: reviewer -> kiro-pm\n");
         let committed =
             exchange(&socket, &recipient, MailOp::Commit { ids: vec![id] }).expect("commit");
+        assert_eq!(format_data(&committed), "committed: 1\n");
         assert!(matches!(
             committed,
             ControlResponseData::MailCommitted { committed: 1 }
         ));
         let inbox = exchange(&socket, &recipient, MailOp::Inbox).expect("inbox");
+        assert_eq!(format_data(&inbox), "open: 0 held: 0\n");
         assert!(matches!(
             inbox,
             ControlResponseData::MailDepth { open: 0, held: 0 }

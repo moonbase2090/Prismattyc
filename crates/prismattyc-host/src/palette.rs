@@ -1451,6 +1451,58 @@ mod tests {
     }
 
     #[test]
+    fn space_picker_navigation_and_cancel_never_delete_or_move_accidentally() {
+        let spaces = sample_spaces();
+        let mut picker = SpacePicker::new(SpacePickerKind::Delete);
+        let press =
+            |picker: &mut SpacePicker, key| picker.key(&Key::Named(key), empty_mods(), &spaces);
+        press(&mut picker, NamedKey::ArrowUp);
+        assert_eq!(picker.selected, 1);
+        press(&mut picker, NamedKey::ArrowDown);
+        assert_eq!(picker.selected, 0);
+        press(&mut picker, NamedKey::Enter);
+        assert_eq!(picker.confirm.as_deref(), Some("alpha"));
+        assert_eq!(
+            press(&mut picker, NamedKey::ArrowDown),
+            SpacePickerVerdict::Consumed
+        );
+        assert_eq!(picker.confirm.as_deref(), Some("alpha"));
+        press(&mut picker, NamedKey::Escape);
+        assert!(picker.confirm.is_none());
+        assert!(picker.status.is_none());
+        let _ = picker.key(&Key::Character("missing\n".into()), empty_mods(), &spaces);
+        assert_eq!(picker.query, "missing");
+        assert_eq!(
+            press(&mut picker, NamedKey::Enter),
+            SpacePickerVerdict::Consumed
+        );
+        assert_eq!(
+            press(&mut picker, NamedKey::ArrowDown),
+            SpacePickerVerdict::Consumed
+        );
+        press(&mut picker, NamedKey::Backspace);
+        assert_eq!(picker.query, "missin");
+        assert_eq!(picker.selected, 0);
+        assert_eq!(
+            picker.key(
+                &Key::Named(NamedKey::Enter),
+                ModifiersState::CONTROL,
+                &spaces
+            ),
+            SpacePickerVerdict::Consumed
+        );
+        assert_eq!(
+            press(&mut picker, NamedKey::Escape),
+            SpacePickerVerdict::Close
+        );
+        let mut mover = SpacePicker::new(SpacePickerKind::MoveSession);
+        assert_eq!(
+            press(&mut mover, NamedKey::Enter),
+            SpacePickerVerdict::Move("alpha".into())
+        );
+    }
+
+    #[test]
     fn space_picker_open_enter_returns_name() {
         let spaces = sample_spaces();
         let mut picker = SpacePicker::new(SpacePickerKind::Open);

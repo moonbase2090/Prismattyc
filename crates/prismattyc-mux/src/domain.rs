@@ -1347,6 +1347,123 @@ mod tests {
     }
 
     #[test]
+    fn domain_errors_identify_the_resource_and_required_recovery() {
+        let pane = PaneId::from_raw(7);
+        let window = WindowId::from_raw(8);
+        let session = SessionId::from_raw(9);
+        let client = ClientId::from_raw(10);
+        for (error, text) in [
+            (DomainError::UnknownSession(session), "unknown session SessionId(9)"),
+            (DomainError::UnknownWindow(window), "unknown window WindowId(8)"),
+            (DomainError::UnknownPane(pane), "unknown pane PaneId(7)"),
+            (DomainError::EmptyName, "name must be non-empty"),
+            (
+                DomainError::InvalidName,
+                "name must be 1..=64 bytes and contain no NUL",
+            ),
+            (
+                DomainError::LastLeafRefused,
+                "refused to destroy last leaf under active policy",
+            ),
+            (DomainError::IdSpaceExhausted, "id space exhausted"),
+            (
+                DomainError::DuplicatePane(pane),
+                "duplicate pane PaneId(7) in layout",
+            ),
+            (
+                DomainError::PaneOwnedElsewhere {
+                    pane,
+                    owner: window,
+                },
+                "pane PaneId(7) already owned by window WindowId(8)",
+            ),
+            (
+                DomainError::LeaseHeld { holder: client },
+                "controller lease held by ClientId(10)",
+            ),
+            (
+                DomainError::NotController {
+                    holder: Some(client),
+                },
+                "not controller (held by ClientId(10))",
+            ),
+            (
+                DomainError::NotController { holder: None },
+                "not controller (lease free)",
+            ),
+            (
+                DomainError::AgentIdInUse {
+                    agent_id: "reviewer".into(),
+                },
+                "agent_id \"reviewer\" already bound to a session",
+            ),
+            (
+                DomainError::SpaceOwnerMismatch {
+                    session,
+                    owner: Some("space-2".into()),
+                },
+                "session SessionId(9) has Space owner Some(\"space-2\"); explicit transfer required",
+            ),
+        ] {
+            assert_eq!(error.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn resize_parent_changes_only_the_nearest_split_and_rejects_invalid_geometry() {
+        let mut domain = Domain::bootstrap("resize").unwrap();
+        let window = domain.sessions().next().unwrap().windows[0];
+        let first = domain.window(window).unwrap().layout.panes()[0];
+        let second = domain
+            .split_pane(window, first, Axis::Horizontal, 0.5, None)
+            .unwrap();
+        let third = domain
+            .split_pane(window, second, Axis::Vertical, 0.5, None)
+            .unwrap();
+        let watermark = domain.id_watermarks();
+        domain
+            .resize_parent_split(window, third, 0.7, Some((80, 24, 2, 1)))
+            .unwrap();
+        let PaneLayout::Split(root) = &domain.window(window).unwrap().layout else {
+            panic!("root split")
+        };
+        assert_eq!(root.ratio, 0.5);
+        let PaneLayout::Split(inner) = root.second.as_ref() else {
+            panic!("nested split")
+        };
+        assert_eq!(inner.ratio, 0.7);
+        assert_eq!(
+            domain.window(window).unwrap().layout.panes(),
+            [first, second, third]
+        );
+        assert_eq!(domain.id_watermarks(), watermark);
+        let saved = domain.window(window).unwrap().layout.clone();
+        for ratio in [0.0, 1.0, f64::NAN] {
+            assert!(domain
+                .resize_parent_split(window, second, ratio, None)
+                .is_err());
+            assert_eq!(domain.window(window).unwrap().layout, saved);
+        }
+        assert!(domain
+            .resize_parent_split(window, second, 0.99, Some((80, 4, 2, 3)))
+            .is_err());
+        assert_eq!(domain.window(window).unwrap().layout, saved);
+        assert!(domain
+            .resize_parent_split(window, PaneId::from_raw(u64::MAX), 0.5, None)
+            .is_err());
+        assert!(domain
+            .resize_parent_split(WindowId::from_raw(u64::MAX), first, 0.5, None)
+            .is_err());
+        domain
+            .resize_parent_split(window, first, 0.4, None)
+            .unwrap();
+        let PaneLayout::Split(root) = &domain.window(window).unwrap().layout else {
+            panic!("root split")
+        };
+        assert_eq!(root.ratio, 0.4);
+    }
+
+    #[test]
     fn split_probe_too_small_atomic() {
         let mut d = Domain::bootstrap("s").unwrap();
         let wid = d.sessions().next().unwrap().windows[0];

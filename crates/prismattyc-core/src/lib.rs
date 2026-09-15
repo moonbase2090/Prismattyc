@@ -2207,26 +2207,28 @@ impl Screen {
             return;
         }
 
-        let (top, bottom, removed, removed_wrapped) = {
+        let top = self.active().scroll_top;
+        if top == 0 && max_scrollback > 0 && (!alt_active || self.retain_alt_history) {
+            let wrapped = self.active().wrapped.first().copied().unwrap_or(false);
+            self.retain_scrolled_row(top, wrapped);
+        }
+        let (top, bottom) = {
             let buf = self.active_mut();
             let bottom = buf.scroll_bottom;
             let top = buf.scroll_top;
 
             // At bottom margin: scroll the region only.
             // Fill scrolled-in row with space + current SGR (xterm/VT; matches erase_*).
-            let start = top * columns;
-            let removed: Vec<Cell> = buf.cells[start..start + columns].to_vec();
             buf.cells.scroll_up(top, bottom, 1);
             let blank_start = bottom * columns;
             let blank = Cell::glyph(' ', buf.style);
             buf.cells[blank_start..blank_start + columns].fill(blank);
             // Flags travel with their rows. The freed bottom row starts clean.
-            let removed_wrapped = buf.wrapped.get(top).copied().unwrap_or(false);
             if bottom < buf.wrapped.len() {
                 buf.wrapped.copy_within(top + 1..=bottom, top);
                 buf.wrapped[bottom] = false;
             }
-            (top, buf.scroll_bottom, removed, removed_wrapped)
+            (top, buf.scroll_bottom)
         };
 
         self.damage.push_scroll(ScrollDamage {
@@ -2237,16 +2239,10 @@ impl Screen {
         self.damage.mark_row_cells(bottom);
         // Any region scroll bumps the content epoch (selection invalidation).
         self.bump_epoch();
-        if top == 0 {
-            if !alt_active {
-                self.scrolled_lines = self.scrolled_lines.saturating_add(1);
-            }
-            // Alt rows feed history only under the opt-in; primary
-            // always does. `scrolled_lines` stays primary-only (cell-rect
-            // translation is suspended on alt).
-            if max_scrollback > 0 && (!alt_active || self.retain_alt_history) {
-                self.push_scrollback(removed, removed_wrapped);
-            }
+        // Absolute primary-row translation stays primary-only, even when
+        // alternate-screen history is retained by explicit preference.
+        if top == 0 && !alt_active {
+            self.scrolled_lines = self.scrolled_lines.saturating_add(1);
         }
         if self.clusters.retire_rows(
             1,

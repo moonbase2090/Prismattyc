@@ -3944,7 +3944,6 @@ mod tests {
     use super::*;
     use std::process::{Child, Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::OnceLock;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -4076,49 +4075,8 @@ mod tests {
         }
     }
 
-    fn mux_bin_dir() -> &'static PathBuf {
-        static BIN_DIR: OnceLock<PathBuf> = OnceLock::new();
-        BIN_DIR.get_or_init(|| {
-            let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-            let target = std::env::var_os("CARGO_TARGET_DIR")
-                .map(PathBuf::from)
-                .map(|path| {
-                    if path.is_absolute() {
-                        path
-                    } else {
-                        workspace.join(path)
-                    }
-                })
-                .unwrap_or_else(|| workspace.join("target"));
-            let bin_dir = target.join("debug");
-            let missing = ["pmuxd", "pmux-attach"]
-                .iter()
-                .map(|name| bin_dir.join(name))
-                .any(|path| !path.exists());
-            if missing {
-                let status = Command::new("cargo")
-                    .args(["build", "-p", "prismattyc-mux", "--bins", "--locked"])
-                    .current_dir(&workspace)
-                    .status()
-                    .expect("build prismattyc-mux test binaries");
-                assert!(
-                    status.success(),
-                    "cargo build -p prismattyc-mux --bins failed"
-                );
-            }
-            for name in ["pmuxd", "pmux-attach"] {
-                assert!(
-                    bin_dir.join(name).exists(),
-                    "missing {} after building prismattyc-mux bins",
-                    bin_dir.join(name).display()
-                );
-            }
-            bin_dir
-        })
-    }
-
     fn mux_binary(name: &str) -> PathBuf {
-        mux_bin_dir().join(name)
+        crate::test_support::mux_bin_dir().join(name)
     }
 
     fn private_mux_server() -> PrivateMuxServer {

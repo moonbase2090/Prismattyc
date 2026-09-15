@@ -4,7 +4,7 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NATIVE="$(cd "$DIR/.." && pwd)"
 REPO="$(cd "$NATIVE/../.." && pwd)"
-IMAGE="${PRISMATTYC_NATIVE_TEST_IMAGE:-prismattyc-native-tests}"
+IMAGE="${PRISMATTYC_NATIVE_TEST_IMAGE:-prismattyc-native-tests:latest}"
 
 build() {
   docker build -t "$IMAGE" "$DIR"

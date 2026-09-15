@@ -351,7 +351,7 @@ run_pt298_four_pane_keystroke() {
     # Leave a real shell waiting for one key in DECSET 1049. The marker
     # printed after read makes that real input observable in the raster.
     xdotool type --clearmodifiers --delay 20 -- \
-      "stty echo; printf '\\033[?1049h\\033[2J\\033[H\\033[?25lPT298-pane-$pane\\n'; read -r -n1; printf '\\r\\nPT298-key\\n'"
+      "stty size > '$PT298_LOG.pane-$pane.size'; stty echo; printf '\\033[?1049h\\033[2J\\033[H\\033[?25lPT298-pane-$pane\\n'; read -r -n1; printf '\\r\\nPT298-key\\n'"
     xdotool key --clearmodifiers Return
     sleep 0.3
   done
@@ -399,33 +399,9 @@ print(f"{match.group(1)} {match.group(2)}" if match else "10 21")
 PY
   )
   local typed_pane_cols="" typed_pane_rows=""
-  read -r typed_pane_cols typed_pane_rows < <(python3 - "$PT298_LOG" "$WIDTH" "$cell_w" <<'PY'
-import re, sys
-
-try:
-    lines = open(sys.argv[1], encoding="utf-8", errors="replace").readlines()
-except FileNotFoundError:
-    lines = []
-full_cells = []
-for line in lines:
-    match = re.search(r"cells_painted=(\d+).*full_repaint_reason=(\S+)", line)
-    if match:
-        cells, reason = int(match.group(1)), match.group(2)
-        if cells > 0 and reason != "-":
-            full_cells.append(cells)
-if not full_cells:
-    raise SystemExit(1)
-total = max(full_cells)
-if total % 4:
-    raise SystemExit(1)
-area = total // 4
-target_cols = max(1, round(int(sys.argv[2]) / (2 * int(sys.argv[3]))))
-divisors = [cols for cols in range(1, area + 1) if area % cols == 0]
-cols = min(divisors, key=lambda candidate: abs(candidate - target_cols))
-print(cols, area // cols)
-raise SystemExit(0)
-PY
-  ) || true
+  # Read the top-left terminal's actual size. Split panes can differ by
+  # one row or column, so aggregate paint counts do not give pane geometry.
+  read -r typed_pane_rows typed_pane_cols < "$PT298_LOG.pane-1.size" || true
   if [[ ! "$typed_pane_cols" =~ ^[0-9]+$ || ! "$typed_pane_rows" =~ ^[0-9]+$ ||
     "$typed_pane_cols" -eq 0 || "$typed_pane_rows" -eq 0 ]]; then
     fail "PT-298 could not derive the live four-pane geometry"
@@ -723,93 +699,43 @@ wait_space_title() {
   fi
 }
 
-rail_names() {
-  python3 - <<'PY' "$SPACES"
-import os, sys
-d = sys.argv[1]
-if not os.path.isdir(d):
-    raise SystemExit(0)
-names = sorted(os.path.splitext(f)[0] for f in os.listdir(d) if f.endswith(".json"))
-print(" ".join(names))
-PY
-}
-
-# cell WxH from the host log (prismattyc-host: font … cell WxH).
-cell_wh() {
-  python3 - <<'PY' "$HOST_LOG"
-import re, sys
-path = sys.argv[1]
-try:
-    text = open(path).read()
-except FileNotFoundError:
-    text = ""
-m = re.search(r"cell (\d+)x(\d+)", text)
-print(f"{m.group(1)} {m.group(2)}" if m else "10 21")
-PY
-}
-
-# Bottom rail: label-sized chips (PT-123), then +. Click the label, not the close cell.
+# Use the host's hit rectangles so clicks follow rail size and position.
 click_rail_index() {
-  local index="$1"
-  local wid geom cell_w cell_h names xy x y
-  local WINDOW X Y WIDTH HEIGHT SCREEN
+  local index="$1" wid status_tmp xy x y
   wid="$(find_host)"
-  [[ -z "$wid" ]] && return 1
-  geom="$(xdotool getwindowgeometry --shell "$wid")"
-  eval "$geom"
-  names="$(rail_names)"
-  read -r cell_w cell_h < <(cell_wh)
-  xy="$(python3 - "$index" "$X" "$Y" "$WIDTH" "$HEIGHT" "$cell_w" "$cell_h" $names <<'PY'
-import sys
-idx = int(sys.argv[1])
-win_x, win_y = int(sys.argv[2]), int(sys.argv[3])
-width, height = int(sys.argv[4]), int(sys.argv[5])
-cell_w, cell_h = int(sys.argv[6]), int(sys.argv[7])
-names = sys.argv[8:]
-pad, gap = 5, 5
-cap, min_cols = 28, 6
-inset = 4
-
-def chip_w(name):
-    return min(max(len(name) + 3, min_cols), cap) * cell_w
-
-n = len(names)
-plus = idx == n
-if idx > n:
-    raise SystemExit(1)
-before = sum(chip_w(name) for name in names[:idx])
-x0 = pad + before + idx * gap
-if plus:
-    w = cell_w + inset * 2
-    x = x0 + w // 2
-else:
-    w = chip_w(names[idx])
-    # Left of center so the close cell on the right is not hit.
-    x = x0 + max(cell_w, w // 3)
-y = height - max(6, cell_h // 2)
-print(win_x + x, win_y + y)
+  [[ -n "$wid" ]] || return 1
+  status_tmp="$(mktemp)"
+  pmux render-status --json >"$status_tmp"
+  xy="$(python3 - "$status_tmp" "$index" <<'PY'
+import json, sys
+window = json.load(open(sys.argv[1]))["windows"][0]
+chips = window["space_chips"]
+chip = (next(chip for chip in chips if chip["name"] is None)
+        if sys.argv[2] == "plus" else chips[int(sys.argv[2])])
+# Stay in the left part of the label, away from its close button.
+print(chip["x"] + max(1, chip["width"] // 3),
+      chip["y"] + max(1, chip["height"] // 2))
 PY
-)"
-  [[ -n "$xy" ]] || return 1
+)" || { rm -f "$status_tmp"; return 1; }
+  rm -f "$status_tmp"
   read -r x y <<<"$xy"
-  log "click rail index=$index at $x $y names=[$names] cell=${cell_w}x${cell_h}"
+  log "click rail index=$index at window-relative $x $y"
   xdotool windowactivate --sync "$wid"
-  xdotool mousemove --sync "$x" "$y"
+  xdotool mousemove --sync --window "$wid" "$x" "$y"
   sleep 0.15
   xdotool click 1
   sleep 0.5
 }
 
 click_rail_plus() {
-  local n
-  n="$(rail_names | wc -w | tr -d ' ')"
-  click_rail_index "$n"
+  click_rail_index plus
 }
 
 cleanup() {
   stop_host
   rm -f "$PARTIAL_CONFIG" "$TUI_SCRIPT" "$PT298_LOG" "$PT298_CONFIG" \
     "$PT298_DUMP" "${PT298_DUMP%.png}.json" "$PT298_BEFORE" "$PT298_AFTER"
+  rm -f "$PT298_LOG".pane-*.size
   rm -f "$SPACES"/alpha.json "$SPACES"/beta.json "$SPACES"/probe.json "$SPACES"/fromplus.json
 }
 trap cleanup EXIT

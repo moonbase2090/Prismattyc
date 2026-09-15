@@ -154,6 +154,8 @@ refresh_bundle_binaries() {
     chmod +x "$tmp"
     mv -f "$tmp" "$dest/Contents/MacOS/$name"
   done
+  mkdir -p "$dest/Contents/Resources"
+  cp "$DEST_APP/Contents/Resources/OMARCHY-LICENSE.txt" "$dest/Contents/Resources/OMARCHY-LICENSE.txt"
   sign_bundle "$dest"
   echo "refreshed binaries -> $dest"
 }
@@ -163,6 +165,7 @@ APP="$WORK/$APP_NAME.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/prismattyc-host"
 cp "$ICNS" "$APP/Contents/Resources/prismattyc.icns"
+cp "$ROOT/crates/prismattyc-host/themes/OMARCHY-LICENSE.txt" "$APP/Contents/Resources/OMARCHY-LICENSE.txt"
 
 # Finder and Dock launches do not provide the shell PATH. Build and bundle
 # the mux front door and its helper binaries from this checkout so host-only

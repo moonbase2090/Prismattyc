@@ -492,7 +492,7 @@ jobs:
             echo "error: docker is not available in this runner" >&2
             exit 1
           fi
-          if ! dkr image inspect prismattyc-native-tests >/dev/null 2>&1; then
+          if ! dkr image inspect prismattyc-native-tests:latest >/dev/null 2>&1; then
             echo "error: image prismattyc-native-tests is missing (tests/native/docker/run.sh build)" >&2
             exit 1
           fi
@@ -586,7 +586,7 @@ jobs:
             echo "error: docker is not available in this runner" >&2
             exit 1
           fi
-          if ! dkr image inspect prismattyc-native-tests >/dev/null 2>&1; then
+          if ! dkr image inspect prismattyc-native-tests:latest >/dev/null 2>&1; then
             echo "error: image prismattyc-native-tests is missing (tests/native/docker/run.sh build)" >&2
             exit 1
           fi
@@ -677,7 +677,7 @@ jobs:
             echo "error: docker is not available in this runner" >&2
             exit 1
           fi
-          if ! dkr image inspect prismattyc-native-tests >/dev/null 2>&1; then
+          if ! dkr image inspect prismattyc-native-tests:latest >/dev/null 2>&1; then
             echo "error: image prismattyc-native-tests is missing (tests/native/docker/run.sh build)" >&2
             exit 1
           fi
@@ -762,7 +762,7 @@ jobs:
             echo "error: docker is not available in this runner" >&2
             exit 1
           fi
-          if ! dkr image inspect prismattyc-native-tests >/dev/null 2>&1; then
+          if ! dkr image inspect prismattyc-native-tests:latest >/dev/null 2>&1; then
             echo "error: image prismattyc-native-tests is missing (tests/native/docker/run.sh build)" >&2
             exit 1
           fi

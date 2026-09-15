@@ -34,6 +34,14 @@ PATH="$PWD/target/debug:$PATH" python3 tests/native/restart-spaces-e2e.py
 python3 tests/native/release-update-e2e.py --pmux target/debug/pmux --out build/update-check
 ```
 
+Check Space rail transparency and opacity hot reload:
+
+```bash
+PRISMATTYC_BINS="$PWD/target/debug" tests/native/docker/run.sh rail-transparency-e2e
+```
+
+This check inspects alpha in the host framebuffer. It does not verify compositor blur.
+
 ## Run macOS tests
 
 Use a Mac with a logged-in desktop session. Build the same workspace revision
@@ -47,11 +55,3 @@ python3 tests/native/macos-restart-e2e.py --bins target/debug --out build/macos-
 Native framebuffer captures and desktop screenshots prove different paths.
 Read each fixture's output to see which path it checked. See [test requirements](../../docs/testing-policy.md)
 for release validation and [accessibility](../../docs/accessibility.md) for AT-SPI checks.
-
-Check Space rail transparency and opacity hot reload:
-
-```bash
-PRISMATTYC_BINS="$PWD/target/debug" tests/native/docker/run.sh rail-transparency-e2e
-```
-
-This check inspects alpha in the host framebuffer. It does not verify compositor blur.

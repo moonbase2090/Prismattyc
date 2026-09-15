@@ -45,6 +45,7 @@ def configure(opacity, blur):
     (out / 'config.toml').write_text(
         f'window_opacity = {opacity}\nchrome_opacity = {opacity}\n'
         f'window_blur = {str(blur).lower()}\nfont_px = 16.0\n'
+        'focus_border_animation = "none"\n'
         '[theme_overrides]\ndefault_bg = "#405060"\ndefault_fg = "#f0d020"\n')
 
 
@@ -74,7 +75,8 @@ def frame():
     if before != after:
         return None
     image = module.PNG(png)
-    counts = Counter(bytes(row[i:i + 3]) for row in image.rows for i in range(0, len(row), image.bpp))
+    assert image.bpp == 4, "Expected straight RGBA capture"
+    counts = Counter(bytes(row[i:i + 4]) for row in image.rows for i in range(0, len(row), image.bpp))
     return png, json.loads(after), counts
 
 
@@ -107,7 +109,7 @@ try:
                                 ('blur-on', 0.5, True), ('opaque-blur', 1.0, True),
                                 ('blur-off', 0.5, False), ('restored', 1.0, False)]:
         configure(opacity, blur)
-        expected = bytes((64, 80, 96) if opacity == 1.0 else (32, 40, 48))
+        expected = bytes((64, 80, 96, 255 if opacity == 1.0 else 128))
 
         def ready():
             value = frame()
@@ -116,7 +118,7 @@ try:
             _, meta, counts = value
             if meta['seq'] <= previous_seq or counts[expected] < 10000:
                 return None
-            if counts[bytes((17, 231, 149))] < 100 or counts[bytes((240, 208, 32))] < 30:
+            if counts[bytes((17, 231, 149, 255))] < 100 or counts[bytes((240, 208, 32, 255))] < 30:
                 return None
             return value
 
@@ -127,9 +129,24 @@ try:
         (out / (name + '.png')).write_bytes(png)
         records.append(dict(phase=name, host_pid=host.pid, seq=previous_seq,
                             ground_pixels=counts[expected],
-                            opaque_background_pixels=counts[bytes((17, 231, 149))],
-                            opaque_text_pixels=counts[bytes((240, 208, 32))]))
+                            opaque_background_pixels=counts[bytes((17, 231, 149, 255))],
+                            opaque_text_pixels=counts[bytes((240, 208, 32, 255))]))
         print('PASS ' + name, flush=True)
+        # Confirm that cursor/row changes can use retained straight pixels at
+        # each opacity. Config reload itself must still repaint the full frame.
+        cli('pane-write', pane, '--text', "printf '.'", '--submit', 'enter', '--json')
+
+        def partial_ready():
+            value = ready()
+            if value and not value[1]['full']:
+                return value
+            return None
+
+        png, partial, _ = wait(partial_ready, name + ' partial repaint')
+        previous_seq = partial['seq']
+        (out / (name + '-partial.png')).write_bytes(png)
+        records[-1]['partial_seq'] = previous_seq
+        print('PASS ' + name + ' partial repaint', flush=True)
     log = (out / 'host.log').read_text()
     assert 'Core Animation present (premultiplied ARGB)' in log, log
     assert 'window_blur ignored' not in log and 'window_opacity ignored' not in log, log

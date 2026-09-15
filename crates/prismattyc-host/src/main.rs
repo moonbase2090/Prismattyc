@@ -28,6 +28,8 @@ mod move_target;
 mod mux;
 mod notify;
 mod palette;
+#[cfg(any(target_os = "macos", test))]
+mod present_tiles;
 mod rail_resize;
 mod raster;
 mod regroup;
@@ -1430,7 +1432,7 @@ enum PartialRasterBackend {
 fn backend_supports_partial_raster(backend: PartialRasterBackend) -> bool {
     match backend {
         #[cfg(target_os = "macos")]
-        PartialRasterBackend::Mac => false,
+        PartialRasterBackend::Mac => true,
         PartialRasterBackend::Softbuffer { wayland } => !wayland,
         #[cfg(target_os = "linux")]
         PartialRasterBackend::WaylandShm => true,
@@ -1698,10 +1700,15 @@ impl PresentBackend {
         match self {
             #[cfg(target_os = "macos")]
             Self::Mac(mac) => {
-                mac.prepare(width, height)?;
+                let retained = mac.prepare(width, height)?;
                 let raster_started = Instant::now();
-                // Every frame overwrites the previously premultiplied pixels.
-                rasterize_frame(host, mac.pixels_mut(), width, height, false);
+                let damage = rasterize_frame(
+                    host,
+                    mac.pixels_mut(),
+                    width,
+                    height,
+                    partial_allowed && retained,
+                );
                 if host.render_timer.shows_osd() {
                     rasterize_render_timer(
                         mac.pixels_mut(),
@@ -1722,8 +1729,7 @@ impl PresentBackend {
                     host.render_frame.full_repaint_reason,
                 );
                 let present_started = Instant::now();
-                premultiply_in_place(mac.pixels_mut());
-                mac.present()?;
+                mac.present(damage)?;
                 host.render_frame.timing.present_us = present_started.elapsed().as_micros() as u64;
             }
             #[cfg(all(test, target_os = "linux"))]
@@ -15251,6 +15257,8 @@ mod tests {
 
     #[test]
     fn partial_raster_policy_tracks_present_backend() {
+        #[cfg(target_os = "macos")]
+        assert!(backend_supports_partial_raster(PartialRasterBackend::Mac));
         assert!(backend_supports_partial_raster(
             PartialRasterBackend::Softbuffer { wayland: false }
         ));

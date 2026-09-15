@@ -1,9 +1,7 @@
 # Route Space mutations to focused tests
 
 The router uses two Space selectors before the ordinary full crate suite.
-These routes require the Space fixtures introduced by PR #349. Merge that
-prerequisite before enabling the routes on main. If a selected group matches
-zero tests, the router fails before it runs a mutant.
+If a selected group matches zero tests, the router fails before it runs a mutant.
 
 | Source | First test selection |
 | --- | --- |
@@ -21,24 +19,6 @@ not remove identities from the discovered universe. Mutations that cannot be
 isolated from an overlapping unlisted function use the full suite. Existing
 source-level exclusions remain separate coverage debt.
 
-## Read the timing evidence
-
-The [retained receipt](evidence/mutants-353.json) records binary identity,
-source commits, selector test names, and one existing caught-mutant result.
-
-| Observation | Source | Duration |
-| --- | --- | ---: |
-| Five state tests, cached test executable | #350 implementation `6fa72616` | 0.024 s wall time |
-| One exact Space window fixture, cached test executable | #350 implementation `6fa72616` | 10.612 s wall time |
-| Failed nested Space fixture for `open_space_from_host` replaced with `()` | #349 `270d5548` | 2.52 s libtest duration |
-| Enclosing 722-test suite for that same mutation | #349 `270d5548` | 76.57 s libtest duration |
-
-The cached selector measurements exclude Cargo, compilation, discovery, and
-mutation setup. The #350 fixture has additional outcome cases and is not the
-#349 baseline. These measurements are not a paired speedup benchmark. Nexus
-must measure selector baselines again in the runner used for mutation gating.
-The cancelled #349 wave is not a passing mutation gate.
-
 ## Verify the route
 
 Run `python3 scripts/mutants-route_test.py`. The small real cargo-mutants
@@ -48,5 +28,4 @@ it does not substitute for the host window fixture. The selector identity
 assertion must fail when a Space route is removed.
 
 Keep cargo-mutants at the pinned version. Keep one mutant worker and one test
-thread. Keep the complete-universe 80% gate and the ordinary full baseline.
-Nexus owns light Local Actions and any targeted host mutation sample.
+thread. Keep the complete-universe caught-rate gate in `scripts/mutants-pr.sh` and the ordinary full baseline.

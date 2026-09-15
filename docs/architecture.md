@@ -1,135 +1,70 @@
-# Architecture (draft sketch)
+# Architecture
 
-High-level components and data flow for Prismattyc. This is a **sketch** to make
-classic fidelity and opt-in richness coexist without fighting. Nothing here is
-frozen until it meets real code.
+Prismattyc separates the running terminal sessions from the windows that
+display them. The background server, `pmuxd`, owns managed sessions and
+their child processes. Desktop windows and terminal attach clients connect
+to that server.
 
-Related: [hybrid-rendering.md](hybrid-rendering.md),
-[capability-protocol.md](capability-protocol.md), charter technical tenets.
-
-## Goals of the architecture
-
-- One native host binary can fully emulate a modern terminal **and** multiplex.
-- Classic cell-grid path stays correct and fast even when rich features exist.
-- Rich features are discoverable, versioned, and off by default for unaware apps.
-- Detach/reattach and multi-pane do not require abandoning the classic model.
-
-## Component map
+## Data flow
 
 ```text
-                        ┌─────────────────────────────┐
-                        │  Input (keyboard / mouse)   │
-                        └──────────────┬──────────────┘
-                                       │
-                                       ▼
-┌──────────────┐   bytes    ┌──────────────────────────┐
-│  Shell / app │◄──────────►│  PTY / process layer      │
-│  (in pane)   │            └──────────────┬───────────┘
-└──────────────┘                           │ host→app / app→host
-                                           ▼
-                                ┌──────────────────────┐
-                                │  Escape / VT parser  │
-                                │  (prismattyc-emulator)    │
-                                └──────────┬───────────┘
-                     classic sequences     │    Prismattyc-specific /
-                     (default path)        │    capability + rich
-                                           ▼
-                    ┌──────────────────────────────────────┐
-                    │           Screen model                 │
-                    │  classic cell grid + scrollback        │
-                    │  + optional rich attachments           │
-                    │           (prismattyc-core)                 │
-                    └──────────────────┬───────────────────┘
-                                       │
-              ┌────────────────────────┼────────────────────────┐
-              ▼                        ▼                        ▼
-     ┌────────────────┐     ┌────────────────────┐    ┌──────────────────┐
-     │  Multiplexer   │     │  Renderer          │    │  Control plane   │
-     │  sessions /    │     │  classic grid path │    │  client↔server   │
-     │  windows /     │     │  + optional rich   │    │  attach/detach   │
-     │  panes         │     │  (prismattyc-render)    │    │  (later)         │
-     │  (prismattyc-mux)   │     └────────────────────┘    └──────────────────┘
-     └────────────────┘
+Shell or program
+       ↕ PTY input and output
+pmuxd: terminal parser, screen state, sessions, and pane layouts
+       ↕ local control socket
+prismattyc-host or pmux-attach
+       ↕ keyboard, mouse, and display
+User
 ```
 
-## Layers (conceptual)
+A managed pane has its own pseudo-terminal (PTY). The child program writes
+terminal escape sequences to the PTY. The emulator parses those bytes and
+updates the screen model. A client displays the resulting state and sends
+input back through the server.
 
-### 1. PTY / process layer
+## Session ownership
 
-- Spawn and supervise one process per pane (or shared process model TBD).
-- Resize, signal, and lifecycle ownership live here (and in mux).
-- Must not assume the child knows about Prismattyc.
+The server owns managed session topology: sessions contain windows, and
+windows contain panes. Moving a managed pane changes its membership without
+restarting its child process.
 
-### 2. Escape sequence parser → screen model
+Detaching a client leaves the server and its sessions running. Stopping the
+server ends those sessions. Saved Space layouts describe how to restore a
+workspace; they are not process snapshots.
 
-- Parse a solid VT/xterm (and common extensions) subset first; expand coverage
-  under tests.
-- **Default interpretation:** mutate the classic cell grid and scrollback only.
-- Sequences that belong to Prismattyc's rich protocol are routed to the protocol
-  module; unknown sequences follow established terminal ignore/pass rules.
+The desktop application also supports local blank terminals. Their restore
+option saves layout and directory information and starts fresh shells.
+See [Sessions and Spaces](spaces.md).
 
-### 3. Multiplexer
+## Screen model
 
-- Sessions, windows, panes, layouts.
-- Focus, zoom, split, and navigation.
-- Detach/reattach: screen state + scrollback + process attachment must survive
-  without corrupting classic behavior.
+`prismattyc-core` stores terminal cells, styles, cursor state, scrollback,
+and changed regions. `prismattyc-emulator` applies terminal input to that
+model. The cell grid maps logical rows to physical storage so scrolling can
+move row indices instead of copying the whole screen.
 
-### 4. Renderer
+Scrollback has row and byte limits. Once history is full, outgoing lines
+can reuse the oldest stored row's allocation. Resizing reflows text while
+preserving the logical row order.
 
-Two paths, one compositor responsibility:
+## Presentation
 
-| Path | Responsibility |
-|------|----------------|
-| Classic | Draw cell grid + cursor + selection chrome with low latency |
-| Rich (opt-in) | Draw retained markup / styling / animation / canvas where attached |
+`prismattyc-host` draws the terminal and its controls into a CPU framebuffer.
+It selects a presentation backend for the platform. The nested
+`prismattyc` executable renders into an existing terminal instead.
 
-See [hybrid-rendering.md](hybrid-rendering.md) for z-order, cursor ownership,
-and input focus rules.
+See [Rendering](rendering.md) for backend and transparency behavior.
 
-### 5. Client ↔ server control protocol (Phase 2B)
+## Control and application protocols
 
-- Same-user 0600 Unix socket for a thin client attached to a long-lived server
-  ([ADR-0011](adr/0011-long-lived-mux-server.md)).
-- Carries input, resize, and pane control — not a substitute for the app's PTY
-  stream.
-- Remote attach is a goal, not an MVP requirement.
+The local control plane uses versioned JSON messages over a same-user Unix
+socket. Clients receive snapshots and events. Controller leases prevent
+multiple clients from writing conflicting input to a pane.
 
-### 6. Capability / feature discovery
+Applications can negotiate optional rich-content capabilities. Programs
+that do not negotiate those capabilities continue to use ordinary terminal
+input and output. The protocol types live in `prismattyc-protocol`; the
+application-side library is `prismattyc-rich-client`.
 
-- Apps **query** what Prismattyc supports before emitting rich content.
-- Unaware apps never see a behavior change beyond a high-quality terminal.
-- See [capability-protocol.md](capability-protocol.md).
-
-## Data ownership (proposed)
-
-| Data | Owner | Notes |
-|------|-------|--------|
-| Byte stream to/from child | PTY layer | Single writer to child stdin |
-| Cell grid + scrollback | Screen model per pane | Classic source of truth for text |
-| Rich scene / attachments | Screen model or sibling store keyed by pane | Must not desync from grid lifecycle |
-| Focus / layout | Mux | Decides which pane gets input |
-| Capability answers | Protocol + host config | Versioned |
-
-## Failure and compatibility posture
-
-- Parser bugs that break classic apps are **P0**.
-- Rich-layer bugs must not freeze or blank the classic grid.
-- If rich content cannot be rendered, fall back to classic (or a safe textual
-  placeholder) rather than failing the whole pane.
-
-## Open questions
-
-1. Single process vs client/server split for MVP (sketch assumes split is later).
-2. Which VT coverage matrix we treat as "MVP solid" (xterm, tmux nesting, …).
-3. Whether scrollback is per-pane only or can be shared/searchable across a session early.
-4. GPU backend timeline vs software-first correctness — **lean recorded in**
-   [decisions-v0.md](decisions-v0.md) **D9** (feature-flagged later; optional
-   capacity). Concrete API and ship phase still open.
-5. How much of Kitty/Sixel/iTerm image protocols we implement vs bridge.
-
-## Next formalization steps
-
-1. Draw this against the real crate boundaries in [workspace.md](workspace.md).
-2. Write sequence diagrams for: resize, alternate screen, detach, rich attach.
-3. Promote answers to open questions into ADRs when decided.
+See the [pmux reference](mux-cli.md), [capability protocol](capability-protocol.md),
+and [rich-client guide](rich-client.md) for those interfaces.

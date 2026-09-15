@@ -9425,7 +9425,7 @@ mod tests {
     }
 
     #[test]
-    fn tutorial_pack_covers_all_eight_lessons() {
+    fn tutorial_pack_covers_product_usage() {
         for heading in [
             "## 1. Quickstart",
             "## 2. Discovery environment",
@@ -9433,8 +9433,7 @@ mod tests {
             "## 4. Mail",
             "## 5. Architecture",
             "## 6. Operations",
-            "## 7. The docs map",
-            "## 8. Docs and memory",
+            "## 7. Documentation",
             "## Prove it",
         ] {
             assert!(PMUX_TUTORIAL.contains(heading), "missing {heading}");

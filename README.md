@@ -1,275 +1,148 @@
-# <img src="assets/brand/png/prismattyc-tile-64.png" alt="" width="48" height="48" align="center"> Prismattyc
+# Prismattyc
 
-**Classic terminal. Modern surface.**
+Prismattyc is a terminal application with built-in session management.
+You can run shells and command-line programs in tabs and split panes,
+organize them into named workspaces called **Spaces**, and reconnect to
+sessions without stopping the programs inside them.
 
-A native emulator and multiplexer that keeps compatibility with the
-existing terminal world and gives applications a markup, styling,
-animation, and canvas layer when they opt in. Agent mail is built into
-the mux. Prismattyc supersedes the Prism name.
+The desktop application is `prismattyc-host`. The `pmux` command manages
+sessions from a terminal. A background process, `pmuxd`, keeps those
+sessions running when you detach.
 
-## Why the name
+## What you can do
 
-- **TTY** = **T**ele**TY**pewriter. The name is a fossil from the
-  1960s-era teleprinters that Unix was first operated from. The hardware
-  is gone; the name stayed as the Unix terminal abstraction: line
-  discipline, echo, and job-control signals.
-- A **PTY** (pseudo-terminal) is the software form: a master/slave pair.
-  The slave side looks like a hardware terminal to the child process.
-  The multiplexer holds the master side.
-- **VT** = **V**ideo **T**erminal, DEC's CRT family (VT100, 1978). Its
-  escape sequences — `ESC [ 2 J` clears the screen, `ESC [ 31 m` makes
-  text red — became the de facto standard that every terminal emulator
-  still speaks.
+- Open terminal tabs and split them into panes.
+- Group sessions into Spaces and save their layouts.
+- Detach from a session and reconnect while `pmuxd` keeps running.
+- Search terminal history, select text, and copy and paste.
+- Change fonts, colors, keyboard shortcuts, and window appearance.
+- Use `pmux` to manage sessions from scripts.
+- Send messages between local agent sessions with `pmux mail`.
 
-The lineage: teleprinter (TTY) → CRT terminal (VT100) → software
-emulation of both. The hardware changed twice; the protocol never did.
+Saved Spaces restore workspace layouts. They do not preserve running
+processes across a computer restart.
 
-Prismattyc owns the terminal model end to end. `prismattyc-emulator` pairs the
-`vte` crate's escape-sequence parser with our own cell grid, scrollback,
-and SGR attribute handling — no `alacritty_terminal`, no curses. `pmux`
-allocates one PTY per pane and brokers input and output between you and
-the child. Agent mail rides the same path: the doorbell writes a token
-into the pane PTY, indistinguishable from keystrokes.
+## Platforms
 
-## Install a release
+| Platform | Availability |
+| --- | --- |
+| Linux x86_64 | Release downloads. Ubuntu 22.04 or newer. Runs on Wayland and X11. |
+| macOS on Apple Silicon | Build from source. Signed downloads are not available yet. |
+| Linux arm64 and Windows | No release binaries or supported installation yet. |
 
-Download the Linux x86_64 archive from [GitHub Releases](https://github.com/moonbase2090/Prismattyc/releases).
-Ubuntu 22.04 or newer is supported. Install `libfontconfig1`, `libxkbcommon0`,
-`libxkbcommon-x11-0`, and `libegl1` with your package manager.
+## Install on Linux
 
-```bash
-tar -xzf prismattyc-x86_64-unknown-linux-gnu.tar.gz
-cd prismattyc-0.2.0
-./install.sh
-~/.local/bin/prismattyc-host
-```
+1. Install the runtime libraries. On Ubuntu:
 
-Add `~/.local/bin` to your `PATH` to use `pmux`. The archive includes all six
-binaries, manuals, and checksums. Use `pmux update` for future releases.
-Running sessions remain active until you restart their components.
+   ```bash
+   sudo apt install libfontconfig1 libxkbcommon0 libxkbcommon-x11-0 libegl1
+   ```
 
-Signed macOS downloads are pending Apple Developer setup. Apple Silicon
-source builds have passed validation. Linux arm64 and Windows binaries are
-not part of the initial release.
+2. Download `prismattyc-x86_64-unknown-linux-gnu.tar.gz` from
+   [GitHub Releases](https://github.com/moonbase2090/Prismattyc/releases).
 
-## Quickstart (`pmux`)
+3. Extract the archive and run its installer:
 
-```bash
-cargo install --path crates/prismattyc-mux --bins --locked
-pmux up                      # start pmuxd ($SHELL -l)
-pmux new work                # named session; binds agent id `work`
-pmux attach work             # TTY attach; detach with C-\ d
-pmux space save              # snapshot sessions to spaces/default.json
-pmux space open              # restore them and open prismattyc-host
-pmux ls
-pmux status
-```
+   ```bash
+   mkdir prismattyc-release
+   tar -xzf prismattyc-x86_64-unknown-linux-gnu.tar.gz --strip-components=1 -C prismattyc-release
+   ./prismattyc-release/install.sh
+   ```
 
-Socket: `$XDG_RUNTIME_DIR/prismattyc/pmux.sock`. Honor `PMUX_SOCKET`.
-Wrapper: `./scripts/prismattyc-mux-daemon.sh start`.
+4. Start the application:
 
-Full command reference: [docs/mux-cli.md](docs/mux-cli.md).
-Install command manuals with `scripts/install-man.sh`; then use `man pmux`
-and `man pmux-pane-write`. See the [pane messaging demo](demo/README.md#watch-intentional-pane-messaging)
-for a recorded command-and-cleanup workflow.
+   ```bash
+   ~/.local/bin/prismattyc-host
+   ```
 
-## Components
+Add `~/.local/bin` to your `PATH` to run `pmux` without its full path.
+The archive includes the application, command-line tools, manuals, and
+checksums.
 
-| Thing | Name |
-|-------|------|
-| Mux CLI | **`pmux`** |
-| Mux server | **`pmuxd`** |
-| Attach helper | **`pmux-attach`** |
-| Nested classic host | **`prismattyc`** |
-| Windowed host | **`prismattyc-host`** |
-| Mail CLI | **`pmux mail`** |
-| MCP adapter | **`pmux-mcp`** |
-| Control socket | `$XDG_RUNTIME_DIR/prismattyc/pmux.sock` |
-| Mail database | `$XDG_DATA_HOME/prismattyc/mail.db` |
+To check for an update, run `pmux update --check`. To install one, run
+`pmux update`. Updating the files does not restart running sessions.
+See [Update and restart](docs/update-and-restart.md).
 
-Cargo crate names match the product (`prismattyc-mux`, `prismattyc-core`, …).
-
-## Docs
-
-| Doc | Description |
-|-----|-------------|
-| [Prismattyc-Charter.md](Prismattyc-Charter.md) | Vision, principles, goals, non-goals |
-| [Prismattyc-Starting-Points.md](Prismattyc-Starting-Points.md) | First development slices |
-| [docs/README.md](docs/README.md) | Documentation index |
-| [docs/roadmap.md](docs/roadmap.md) | Status and ordered work |
-| [docs/architecture.md](docs/architecture.md) | Component map and data flow (draft) |
-| [docs/hybrid-rendering.md](docs/hybrid-rendering.md) | Cell grid + rich layer model (draft) |
-| [docs/capability-protocol.md](docs/capability-protocol.md) | Opt-in feature discovery (draft) |
-| [docs/workspace.md](docs/workspace.md) | Planned Cargo layout |
-| [docs/testing-policy.md](docs/testing-policy.md) | Merge gates: seam rules, box e2e, CRAP, mutation |
-| [docs/agents.md](docs/agents.md) | How to work in this repo (mux identity, mail, tests) |
-| [docs/termwright.md](docs/termwright.md) | E2E TUI testing with Termwright |
-| [e2e/README.md](e2e/README.md) | Termwright scenarios (`./scripts/termwright-e2e.sh`) |
-| [docs/mux-cli.md](docs/mux-cli.md) | `pmux` command reference |
-| [docs/PRD.md](docs/PRD.md) | Product requirements (PRD v0.5) |
-| [crates/prismattyc-labs/README.md](crates/prismattyc-labs/README.md) | Browser labs WASM crate: mailbox teaching mirror + splash (UI lives in the separate `prismattyc-website` repo) |
-| [Spaces agent-team proposal](docs/design/spaces-agent-centric-prd.md) | PRD, current topology, program flows, and phased roadmap (proposal) |
-| [docs/fidelity-matrix-v1.md](docs/fidelity-matrix-v1.md) | Supported classic claim (`prismattyc-classic/0.1.1`; package `0.1.300`) |
-| [docs/spike-baseline-v0.md](docs/spike-baseline-v0.md) | Phase 0A internal baseline |
-| [docs/phase-0b-spike.md](docs/phase-0b-spike.md) | Experimental rich spike (off by default) |
-
-## Windowed host (`prismattyc-host`)
+## Use sessions from the command line
 
 ```bash
-cargo install --path crates/prismattyc-host --locked
-# FreeDesktop icons + .desktop (menu entry):
-./scripts/install-prismattyc-host-desktop.sh
-prismattyc-host
+pmux up                   # Start the session server.
+pmux new work --no-attach  # Create a session named work.
+pmux attach work          # Connect to it in this terminal.
 ```
 
-The windowed host supports opt-in, render-only OpenType ligatures for terminal
-text. Set `font_ligatures = true` in the host config; cell widths, PTY sizes,
-selection, and hit-testing remain unchanged.
-
-The host runs natively on Wayland (KWin and Hyprland, with real window
-transparency via `wl_shm` ARGB8888) and on X11. Hyprland notes and window
-rules: [docs/hyprland.md](docs/hyprland.md).
-
-From a Prismattyc checkout, `prismattyc update` (or `pmux update` if `prismattyc` is not on PATH) pulls `main` and reinstalls host, mux bins, `pmux-mcp`, and `prismattyc`. `--host` or `--mux` installs only that package (`--mux` includes `pmux-mcp`). On macOS that also rebuilds `Prismattyc.app` (`~/Applications` and any other existing copy). Quit the running app and reopen it; `~/.cargo/bin/prismattyc-host` is not what the Dock launches.
-
-Brand mark: [assets/brand/](assets/brand/) · brief [docs/brand/logo-brief.md](docs/brand/logo-brief.md)
-
-## Status
-
-Package **`0.2.5`**. Daily use is `prismattyc-host` against a local `pmuxd`.
-
-**Classic claim:** `prismattyc-classic/0.1.1` (matrix F1–F19). Nested
-`prismattyc` is the claim harness. Tag **`v0.1.0`** is the Phase 1 baseline.
-
-**Shipped with the mux:** detach/reattach (`pmux` / `pmuxd` / `pmux-attach`),
-agent mail (`pmux mail`), session seats (`pmux new NAME` sets `$PMUX_AGENT`),
-and `pmux tutorial` (`pmux tutorial --play` for the shared walkthrough).
-
-**Not in the product claim:** experimental rich (`--experimental-rich`).
-Phase 3 entry is open. Remote attach is a first slice. A-6 operator PASS is
-deferred.
-
-See [docs/fidelity-matrix-v1.md](docs/fidelity-matrix-v1.md),
-[docs/roadmap.md](docs/roadmap.md), and [docs/mux-cli.md](docs/mux-cli.md).
-
-### Host selection cheatsheet (classic)
-
-| Action | Input |
-|--------|--------|
-| Drag select | Left mouse (works in **scrollback view** too). When the app enables mouse (vim/htop), **plain** click goes to the app; **Shift+drag** still host-selects ([ADR-0003](docs/adr/0003-hybrid-mouse.md)) |
-| Word / line | Double / triple click |
-| Mark + grow | **Shift+arrow** (primary); **Ctrl+2** mark; Ctrl+Space when the outer host delivers it and no active IME consumes it (desktop/IME may consume Ctrl+Space or Ctrl+2) |
-| Home / End / page (select mode) | In select mode, or with Shift while selecting |
-| Select all viewport | Ctrl+Shift+A |
-| Copy | Mouse-up after drag; Ctrl+C with multi-cell selection; Ctrl+Shift+C |
-| Clear | Esc (also clears when the child prints) |
-| Find in history | **Windowed host:** Ctrl+Shift+F (also `;` `'` `.`). **Nested under Kitty:** Ctrl+Shift+; (Kitty often steals F and /). `/` while scrolled also opens find. Type query (live first match, case-insensitive); prompt shows **`n/m`**. **Enter** / **F3** next, **Shift+Enter** / **Shift+F3** previous, **Esc** exit |
-| Command palette | **Ctrl+Shift+P** opens the command bar: type to filter, **Ctrl+←/→** cycles the chips (All · Panes · Tabs · Layout · Spaces · View & Edit), RECENT lists the last five actions run, a detail box names the chords and config key. **Up** / **Down** selects. **Enter** runs; `select_tab_1…9` and `layout_2…9` ask for the digit next. **Esc** closes. The palette consumes keys while it is open. |
-| Zoom pane | **Ctrl+Shift+Z** (`zoom_pane`) gives the focused pane the whole tab; press again to restore the split. The split tree does not change; the tab label shows `[Z]`. Splitting, retiling, moving a pane, or focusing a hidden sibling leaves zoom first. |
-| Paste image or file | **Ctrl+Shift+V** pastes ordinary text first. A clipboard image or one image file pastes its path; image data is saved under `$XDG_RUNTIME_DIR/prism-paste` and the last 8 PNG files are kept. |
-
-### Scrollback view
-
-| Action | Input |
-|--------|--------|
-| Pan history | **Mouse wheel** (≈3 rows); **Ctrl+Shift+Up/Down** (1 row); **scrollbar** drag or click-jump |
-| Page history | **Shift+PageUp** / **Shift+PageDown**, or **Shift+wheel** |
-| Jump oldest / live | **Shift+Home** / **Shift+End** |
-| Back to live | Type any key (or Shift+End) |
-| Bare PageUp/Home/End/arrows | Still go to the **child** (less/vim/readline) |
-
-While scrolled (defaults **on**; opt out via env). Nested `prismattyc` and
-`prismattyc-host` both show this chrome:
-
-| Chrome | Default | Disable |
-|--------|---------|---------|
-| Bottom-right inverse chip ` N/M ` | on | `PRISMATTYC_SCROLL_CHIP=0` (also `false` / `off`) |
-| Window / OSC title `… scroll N/M` | on | `PRISMATTYC_SCROLL_TITLE=0` |
-
-Both show `· new` if the live bottom moved while you were scrolled.
-
-## Agent seats
-
-`pmux new NAME` binds `NAME` as the mailbox address for that session.
-Inside a pane, `$PMUX_AGENT` is the seat id. Local editor/MCP dirs
-(`.claude/`, `.cursor/`, `.codex/`, `.grok/`, `.kiro/`, `.mcp.json`) are
-gitignored. Guide: [docs/agents.md](docs/agents.md).
-
-### Child `TERM` identity
-
-Prismattyc forces the child PTY environment (never inherits Kitty/Ghostty/etc.):
-
-| Variable | Value |
-|----------|--------|
-| `TERM` | `prismattyc-kitty` by default (24-bit, alias `prismattyc-direct`); `prismattyc-256color` or `prismattyc-16color` when `PRISMATTYC_COLOR` is `256` or `16`. Last system fallback is `xterm-256color` (never a bare `-direct` name). |
-| `TERMINFO` | Path to bundled [`terminfo/`](terminfo/) database (override with `PRISMATTYC_TERMINFO`) |
-| `TERM_PROGRAM` | `prismattyc` |
-| `COLORTERM` | `truecolor` in 24-bit and 256 modes; unset for 16-color |
-| `PRISMATTYC_COLOR` | Optional: `truecolor` (default), `256`, or `16` (`ansi`/`8` also pin 16) |
-
-Rebuild compiled entries after editing a source:
+To detach, press **Ctrl+\\**, release the keys, then press **d**.
+The session keeps running. Use `pmux attach work` to reconnect.
 
 ```bash
-tic -x -o terminfo terminfo/prism-direct.src
-tic -x -o terminfo terminfo/prism-256color.src
-tic -x -o terminfo terminfo/prism-16color.src
+pmux ls               # List sessions and panes.
+pmux status           # Show the server status.
+pmux space save       # Save the current Space layout.
+pmux space open       # Open the saved Space in a desktop window.
 ```
 
-`tic -x` writes 32-bit extended files (`terminfo/p/`, magic `0x021E`) that
-carry user caps (`fullkbd`, `Tc`, `setrgbf`/`setrgbb`, paste, focus). Spawn
-copies those into the letter subdir of the child's `TERMINFO`. macOS system
-ncurses 6.0.x cannot read that format, so spawn also copies 16-bit fallbacks
-(`terminfo/legacy/p/`, magic `0x011A`) into the hex subdir (`70/`). Homebrew
-ncurses on macOS uses `p/` and sees the extras; `/usr/bin/tmux` uses `70/`
-and still loads. Do not compile the extras with `/usr/bin/tic` — it drops
-them.
+See the [pmux command reference](docs/mux-cli.md) for tabs, panes, Spaces,
+mail, and scripting commands. The installed command manual is also
+available with `man pmux`.
 
-## Build
+## Configure the application
 
-Prismattyc is a Rust 2021 workspace with a minimum supported Rust version (MSRV) of
-**1.90**.
+The desktop application reads `~/.config/prismattyc/config.toml`.
+Set `PRISMATTYC_CONFIG` to use a different file. Most settings apply
+while the application is running.
 
-```sh
-cargo check --workspace --locked
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
-# Nested classic host (claim gate; runs inside Kitty/Ghostty):
-cargo run -p prismattyc -- /bin/sh
-# Windowed host (Phase 1.5 — own OS window, no outer terminal):
-cargo run -p prismattyc-host -- /bin/sh
-# Long-lived local mux server + thin attach client (Phase 2B):
-cargo install --path crates/prismattyc-mux --bins --locked
-./scripts/prismattyc-mux-daemon.sh start          # background daemon (socket under $XDG_RUNTIME_DIR)
-./scripts/prismattyc-mux-daemon.sh status
-./scripts/prismattyc-mux-daemon.sh attach --json --watch
-# or:
-# cargo run -p prismattyc-mux --bin pmuxd -- /bin/sh
-# cargo run -p prismattyc-mux --bin pmux-attach
-# optional experimental rich (Phase 0B; off by default):
-# cargo run -p prismattyc -- --experimental-rich /bin/sh
-# nested-PTY host UX scripts (scroll / find under a real prismattyc binary):
-# cargo test -p prismattyc --test nested_pty_ux --locked
-# display-free Phase 2B server/attach architecture proofs:
-./scripts/test-phase2b-server.sh
-# deterministic detach/reattach process-lifetime proof:
-./scripts/test-phase2b-detach.sh
+```toml
+font_px = 16.0
+font_ligatures = true
 ```
 
-| Binary | Role |
-|--------|------|
-| `prismattyc` | Nested classic host (TTY-backed). **`prismattyc-classic/*` claim harness.** |
-| `prismattyc-host` | Windowed OS host ([ADR-0006](docs/adr/0006-windowed-host.md)). Daily-driver path. |
-| `pmux` | Mux front door (`up` / `attach` / `ls` / `new` / …). |
-| `pmuxd` | Long-lived local PTY/emulator and mux owner ([ADR-0011](docs/adr/0011-long-lived-mux-server.md)). |
-| `pmux-attach` | Thin same-user reference attach client for snapshot/events/leases/content/input. |
+Read the [configuration reference](docs/config.md) for all settings.
+Platform notes cover [Hyprland](docs/hyprland.md) and [macOS](docs/macos.md).
 
-Host UX is covered by unit tests, nested outer-PTY scripts, and human
-dogfood — see [docs/testing-ux.md](docs/testing-ux.md).
+Useful desktop shortcuts:
 
-Workspace crates: `prismattyc`, `prismattyc-host`, `prismattyc-core`, `prismattyc-emulator`,
-`prismattyc-mux`, `prismattyc-render`, and `prismattyc-protocol` — see
-[docs/workspace.md](docs/workspace.md).
+| Action | Shortcut |
+| --- | --- |
+| Open the command palette | Ctrl+Shift+P |
+| Search terminal history | Ctrl+Shift+F |
+| Copy selected text | Ctrl+Shift+C |
+| Paste | Ctrl+Shift+V |
+| Expand the current pane, or restore its size | Ctrl+Shift+Z |
+
+The command palette lists available actions and their shortcuts. You can
+change shortcuts in the configuration file.
+
+## Build from source
+
+You need Rust 1.90 or newer. From the repository root:
+
+```bash
+cargo build --workspace --release --locked
+./target/release/prismattyc-host
+```
+
+The executables are in `target/release/`:
+
+| Executable | Purpose |
+| --- | --- |
+| `prismattyc-host` | Desktop terminal application. |
+| `pmux` | Command-line session management. |
+| `pmuxd` | Background session server. |
+| `pmux-attach` | Connect to a session from an existing terminal. |
+| `pmux-mcp` | Expose session and messaging tools to MCP clients. |
+| `prismattyc` | Run the terminal renderer inside another terminal. |
+
+See the [documentation index](docs/README.md) for configuration,
+troubleshooting, compatibility, and application integration.
+
+## Version
+
+The workspace package version is **`0.2.6`**. A version in source does not
+necessarily have a published download. Use
+[GitHub Releases](https://github.com/moonbase2090/Prismattyc/releases)
+to find published builds.
 
 ## License
 
-TBD.
+The project-wide license is being decided. Bundled third-party components
+retain their own license terms.

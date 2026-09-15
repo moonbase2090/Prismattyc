@@ -1,75 +1,39 @@
-# Workspace and repository layout
+# Workspace layout
 
-Planned layout for the Rust monorepo. **Not yet created** — this is the target
-shape from the starting points and charter technical tenets.
+Prismattyc is a Rust 2021 workspace. The minimum supported Rust version is
+1.90. The root `Cargo.toml` lists the workspace members and shared version.
 
-## Planned crates
+## Crates
 
-| Crate | Role |
-|-------|------|
-| `prism` | Nested classic host binary (TTY-backed; claim harness) |
-| `prismattyc-host` | Windowed OS host binary (Phase 1.5; own window) |
-| `prismattyc-core` | Shared types, screen model, common errors |
-| `prismattyc-emulator` | VT/xterm parsing, PTY spawn and I/O |
-| `prismattyc-mux` | Sessions, windows, panes, layouts, control plane, and the Phase 2B server runtime (`pmux` / `pmuxd` / `pmux-attach`) |
-| `prismattyc-render` | Hybrid cell-grid + optional rich-layer rendering |
-| `prismattyc-protocol` | Capability queries; rich markup / canvas protocol definitions |
-| `prismattyc-labs` | wasm32 browser labs: in-memory mailbox mirror of the pmux mail contract + splash attract. The `/labs` UI lives in the separate `prismattyc-website` repository; this crate only builds the wasm package (`wasm-pack build crates/prismattyc-labs --target web`) |
+| Crate | Purpose |
+| --- | --- |
+| `prismattyc` | Terminal renderer that runs inside another terminal. |
+| `prismattyc-host` | Desktop window, fonts, input, configuration, and presentation. |
+| `prismattyc-core` | Screen cells, text styles, scrollback, reflow, and damage tracking. |
+| `prismattyc-emulator` | Escape-sequence parsing, terminal state updates, and PTY support. |
+| `prismattyc-mux` | Sessions, windows, panes, layouts, messaging, and the `pmux` tools. |
+| `prismattyc-render` | Shared rendering of terminal and rich content. |
+| `prismattyc-protocol` | Application capability and rich-content protocol types. |
+| `prismattyc-rich-client` | Client library for applications that use rich content. |
+| `prismattyc-labs` | WebAssembly components for the separate website's interactive examples. |
+| `pmux-mcp` | MCP access to session and messaging tools. |
 
-Root `Cargo.toml` will be a **workspace** member list only (no logic in the
-root package unless we later want a thin meta crate).
+## Other directories
 
-## Early decisions (open until skeleton lands)
+| Directory | Purpose |
+| --- | --- |
+| `assets/` | Application icons and artwork. |
+| `docs/` | User guides, technical references, and test documentation. |
+| `scripts/` | Build, installation, packaging, and validation tools. |
+| `scripts/release/` | Linux release archive builder and installer. |
+| `demo/` | Native-window tests, performance probes, and demonstration tools. |
+| `e2e/` | Terminal interaction tests and fixtures. |
+| `features/` | Acceptance scenarios. |
+| `terminfo/` | Terminal descriptions bundled with the emulator. |
+| `.github/workflows/` | Continuous integration and release checks. |
 
-| Topic | Lean / default | Status |
-|-------|----------------|--------|
-| Language | Rust (charter) | Decided |
-| Edition | 2021 or 2024 (whatever MSRV supports) | Open |
-| MSRV | Pick a recent stable; document in README | Open |
-| License | TBD (siblings often Apache-2.0 / MIT) | Open |
-| Feature flags | `gpu`, `wayland`, `x11` (names illustrative) | Open |
-| Default backend | Software / host-terminal first; GPU later | Lean |
+Generated builds and test output are not source files. Keep them under
+ignored output directories such as `target/`, `build/`, and `e2e/artifacts/`.
 
-## Repository layout (target)
-
-```text
-Prismattyc/
-  Cargo.toml                 # workspace
-  README.md
-  Prismattyc-Charter.md
-  Prismattyc-Starting-Points.md
-  LICENSE                    # when chosen
-  crates/
-    prism/
-    prismattyc-host/
-    prismattyc-core/
-    prismattyc-emulator/
-    prismattyc-mux/
-    prismattyc-render/
-    prismattyc-protocol/
-    prismattyc-labs/           # wasm32 only; checked with --target wasm32-unknown-unknown
-  docs/                      # this tree
-  .github/workflows/         # check, test, clippy
-```
-
-Local editor and MCP dirs are gitignored (machine paths, not repo identity). See [agents.md](agents.md).
-
-## CI (when code exists)
-
-Minimum gates:
-
-- `cargo check --workspace`
-- `cargo test --workspace`
-- `cargo clippy --workspace -- -D warnings` (or project-agreed lint level)
-
-Classic-path correctness tests should be cheap and default-on; GPU/backend
-tests may be feature-gated.
-
-## Principles that affect layout
-
-- **Classic path stays lean** — keep emulator/parser independent of rich-layer
-  types where possible (`prismattyc-emulator` must not depend on a heavy rich DOM).
-- **Protocol is its own crate** — apps and tests can depend on
-  `prismattyc-protocol` without pulling the full host binary.
-- **Render backends are swappable** — traits or feature-gated modules in
-  `prismattyc-render`, not scattered `cfg` across the tree.
+See [Contributing](../CONTRIBUTING.md) for validation commands and
+[Architecture](architecture.md) for the component relationships.

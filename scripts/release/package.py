@@ -52,6 +52,8 @@ with tempfile.TemporaryDirectory() as tmp:
     root = pathlib.Path(tmp) / f'prismattyc-{a.version}'
     (root / 'bin').mkdir(parents=True)
     (root / 'share/man').mkdir(parents=True)
+    (root / 'share/licenses').mkdir()
+    shutil.copy2(repo / 'crates/prismattyc-host/themes/OMARCHY-LICENSE.txt', root / 'share/licenses/OMARCHY-LICENSE.txt')
     for name in BINARIES:
         shutil.copy2(a.bin_dir / name, root / 'bin' / name)
     for name in (*BINARIES, 'pmux-pane-write'):

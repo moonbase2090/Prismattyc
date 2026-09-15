@@ -1314,7 +1314,7 @@ impl PaneRuntime {
 
     /// Feed replica bytes. Terminal replies (DSR/CPR/DA) are taken so they
     /// cannot accumulate and **dropped**: only the PTY owner answers them
-    /// (`docs/pane-event-log-spike.md` §2).
+    /// (`docs/adr/0011-long-lived-mux-server.md`).
     fn feed_replica(&mut self, bytes: &[u8]) {
         let _ = self.emulator.feed(bytes);
         let _ = self.emulator.take_pending_replies();

@@ -25,7 +25,6 @@ Neutral beam: D0D0D0 · Surface: 121214
 - Below 24px prefer the supplied PNGs (hinted geometry).
 - Mono only where color is unavailable; never recolor individual bands.
 - Wordmark: Space Grotesk 600, letter-spacing -0.01em, set "Prismattyc" in EDEEF2.
-- Tagline (marketing only): "Classic terminal. Modern surface."
 
 ## Host integration
 - **`prismattyc-host`** embeds `png/prismattyc-tile-128.png` as the OS **window

@@ -1,0 +1,50 @@
+# Omarchy Osaka Jade: terminal colors from the pinned upstream palette.
+# Window-control colors are mapped to Prismattyc roles.
+# Upstream MIT notice is retained here and in OMARCHY-LICENSE.txt.
+#
+# Copyright (c) David Heinemeier Hansson
+#
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and associated documentation files (the
+# "Software"), to deal in the Software without restriction, including
+# without limitation the rights to use, copy, modify, merge, publish,
+# distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so, subject to
+# the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+# LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+# WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+id = "omarchy-osaka-jade"
+name = "Omarchy Osaka Jade"
+variant = "dark"
+source = "https://github.com/omacom/omarchy/blob/f2b419d9a9d7e7821de2ddf9c42991e32cf06cdf/themes/osaka-jade/colors.toml"
+license = "MIT; Copyright (c) David Heinemeier Hansson"
+default_fg = "#C1C497"
+default_bg = "#111c18"
+chrome_fg = "#C1C497"
+chrome_bg = "#0c1512"
+pane_border = "#53685B"
+overlay_bg = "#23372B"
+unseen_badge = "#459451"
+mail_letter = "#459451"
+active_badge = "#549e6a"
+attention_badge = "#FF5345"
+cursor_fg = "#111c18"
+cursor_bg = "#F7E8B2"
+selection_fg = "#C1C497"
+selection_bg = "#32473B"
+ansi = [
+  "#111c18", "#FF5345", "#549e6a", "#459451",
+  "#509475", "#D2689C", "#2DD5B7", "#C1C497",
+  "#53685B", "#db9f9c", "#63b07a", "#E5C736",
+  "#ACD4CF", "#75bbb3", "#8CD3CB", "#F7E8B2",
+]

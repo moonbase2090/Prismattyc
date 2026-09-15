@@ -1,13 +1,11 @@
 # Testing policy
 
-Adopted 2026-09-04 after the spaces push (epic PT-212). Six of the seven bugs
-found in review passed the unit suites. They lived at seams: a real child
-process, an idle event loop, a subprocess race, or the real paint path. This
-policy makes those seams part of the merge gate.
+Tests cover process lifetimes, event-loop timing, subprocess races, and
+rendered output as well as individual functions.
 
 ## Gates
 
-Every PR passes these jobs before merge. On the 32 GiB Nexus host, run
+Every PR passes these jobs before merge. On the 32 GiB Linux host, run
 `scripts/la-staged-pr.sh`. Do not fire one-shot
 `local-actions run --event pull_request`. That path leaves act
 containers up and keeps zram full. The staged script runs light jobs,
@@ -124,33 +122,10 @@ Pass `--exact` only for complete test names. Do not use the broad
 
 All other functions use the full suite. Extend the fast list only after
 you validate a focused test for the added function. See the
-[Space mutation route evidence](mutants-space-routes.md) for selector scope
+[Space mutation routes](mutants-space-routes.md) for selector scope
 and measurement limits. A mutation whose span
 overlaps a changed line remains in the score, even when most of its
 function did not change. Record coverage debt without excluding it.
-
-### Spaces P1.1 exclusion exception
-
-PR #349 has an explicit exception to the exclusion rule above. Nexus relayed
-the operator's peel/skip decision in PMUX letter #4280 after cancelling
-mutation run `1789052743-6354652e`. These seven functions retain their runtime
-behavior but are excluded from mutation discovery until their follow-ups land:
-
-| Function | Follow-up |
-| --- | --- |
-| `App::pump` | #355 |
-| `open_space_from_host`, `poll_host_attach_tabs` | #356 |
-| `persist_attach_selection`, `save_space_from_host` | #357 |
-| `App::publish_render_status` | #358 |
-| `Active::drop` | #359 |
-
-The attributes exclude whole functions, including mutations that earlier
-tests caught. Do not report excluded identities as caught or equivalent.
-The before/after inventory is `docs/evidence/spaces-345-exclusions.json`.
-Report the excluded count beside the remaining mutation universe. The 60%
-gate applies to the remaining universe; it does not validate the exclusions.
-Remove each attribute when its follow-up restores meaningful mutation coverage.
-This exception does not authorize exclusions for other functions or PRs.
 
 ### Baseline and result accounting
 
@@ -208,9 +183,7 @@ The job container memory cap is containment (`MUTANTS_MEMORY`, default
 `8g`). Keep this cap so the container dies before the 32 GiB host
 (PT-305). Do not raise it. The mutants job container also passes
 `--init` so pid 1 reaps (PT-259). act's default pid 1 is
-`tail -f /dev/null`, which does not reap. Sample from #306 mutants
-`1788715639-d15f47f3`: HostConfig.Init was null; 76 defunct processes
-(sleep and xkbcomp) had ppid 1. Those zombies are not the 8g RSS. Every
+`tail -f /dev/null`, which does not reap. Every
 Local Actions job that sets `container.options` also passes `--init`.
 That field replaces act's `--container-options`. Without `--init` here,
 the reaper is dropped.
@@ -221,8 +194,7 @@ pressure. Require at least 10 GiB `MemAvailable` and swap use below 50%
 `/proc/meminfo`. When the 8g cgroup hides the host view, it uses a
 pid-host Docker sidecar. Set `MUTANTS_HOST_MEMINFO` to inject a file.
 A failed floor check is infrastructure. It is not a caught-rate failure.
-On Nexus, swap at or near 100% makes this refuse expected until swap
-drains. That is host pressure, not a gate bug.
+The job refuses to start while swap use exceeds the limit.
 
 Put cargo-mutants scratch on disk. On the host, use
 `${XDG_CACHE_HOME:-$HOME/.cache}/prismattyc/mutants`. Do not use `/tmp`.
@@ -240,7 +212,7 @@ interpolate env into `container.options`, so the host path is fixed.
 Create `/var/cache/prismattyc/mutants` on SSD. You may symlink that
 directory to `${XDG_CACHE_HOME:-$HOME/.cache}/prismattyc/mutants`.
 
-## Run Local Actions in stages on Nexus
+## Run Local Actions in stages
 
 Use `scripts/la-staged-pr.sh` on the 32 GiB host. The stages are
 `light`, `mutants`, `crap`, and `e2e`. `phase3-rich` stays in
@@ -257,14 +229,14 @@ drops `prismattyc-la-heavy` when no other heavy job remains, and
 deletes `cargo-mutants-*` under the SSD cache paths. It does not
 clear host `/tmp`.
 
-Zram reclaim needs passwordless root. Nexus prompts for a password
-today, so reclaim cannot run from the agent.
+Zram reclaim needs passwordless access to a root-owned helper. Configure
+that helper before you run automatic reclaim.
 
 1. Copy `scripts/la-reclaim-zram.sh` to
    `/usr/local/sbin/prismattyc-la-reclaim-zram`.
 2. Keep that file root-owned and executable.
-3. Add a sudoers drop-in that allows only that path. Nexus is Arch
-   Linux. Brandan is in group `wheel`, not `sudo`. Use `%wheel`:
+3. Add a sudoers drop-in that allows only that path. This example uses
+   the `wheel` group. Use your local administrator group:
 
 ```
 # /etc/sudoers.d/prismattyc-la-reclaim
@@ -276,24 +248,12 @@ You may use an equivalent polkit rule. Do not grant passwordless sudo
 for arbitrary commands. Test with
 `sudo -n /usr/local/sbin/prismattyc-la-reclaim-zram --dry-run`.
 
-Pass `--allow-missing-zram` only on hosts that have no zram. On Nexus,
-install the rule. The staged script then reclaims swap between stages
-so the next headroom check can pass.
+Pass `--allow-missing-zram` only on hosts that have no zram. The staged
+script reclaims swap between stages before the next headroom check.
 
-A bounded `cargo mutants --jobs 1 -p prismattyc-host --file icon.rs`
-run (5 mutants, full host suite) measured process-tree VmRSS:
-
-- compile: 4.56 GiB
-- rust-lld link: 1.31 GiB
-- test execution (up to 40 processes, rustc absent): 0.23 GiB
-
-Compile is the peak. The ticket's worry that 8g would cause the PT-255
-137s does not hold for `--jobs 1`. Those 137s were unconstrained
-parallel jobs on the 31g host. The cap is not an OOM fix. Host and mux
-together in one `--in-diff` hit 8g (PT-286). The PR gate runs one crate
-at a time and shards the remainder. Do not raise the cap to combine
-crates. A typical Spaces-sized host diff must complete on Nexus without
-a host swap death spiral.
+Run mutation tests one crate at a time and keep one worker. Shard the
+remaining mutation set when necessary. Do not combine crates under a
+single memory cap.
 
 Act cannot interpolate env into `container.options`, so the YAML starts
 at 8g and the job applies `MUTANTS_MEMORY` with `docker update`, then

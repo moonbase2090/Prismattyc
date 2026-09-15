@@ -2,12 +2,12 @@
 
 **Status:** Published supported classic claim — exact-head gated.
 **Release id:** `prismattyc-classic/0.1.1` (classic claim). Workspace package
-version is **`0.2.5`** and can move without widening this claim.
+version is **`0.2.6`** and can move without widening this claim.
 **Prior claim:** `prism-classic/0.1.0` (tag **`v0.1.0`** @ `60d23a3`; issued under the Prism name).
 **Kind:** Supported classic product subset — not universal xterm parity,
 not a modern-terminal marketing claim outside the rows below.
 
-Related: [PRD.md](PRD.md) §2.6 / I-20 / US-1 / US-2, [spike-baseline-v0.md](spike-baseline-v0.md),
+Related:
 [hybrid-rendering.md](hybrid-rendering.md) (selection policy),
 [adr/0001-host-selection-clipboard.md](adr/0001-host-selection-clipboard.md),
 [adr/0003-hybrid-mouse.md](adr/0003-hybrid-mouse.md),
@@ -48,7 +48,7 @@ expected state for that row at a claimed tip.
 
 | | |
 |--|--|
-| **Inputs** | Fixture inventory in [spike-baseline-v0.md](spike-baseline-v0.md) |
+| **Inputs** | Parser, grid, and control-sequence fixtures in `crates/prismattyc-emulator/tests/` |
 | **Expected** | All baseline fixtures green; allowlisted gaps unchanged as non-P0 |
 | **Evidence** | `cargo test --workspace --locked` includes baseline tests |
 
@@ -56,7 +56,7 @@ expected state for that row at a claimed tip.
 
 | | |
 |--|--|
-| **Inputs** | Interactive `prism` session; normal child exit, abnormal PTY EIO, and Unix terminate signals (SIGINT/SIGTERM/SIGHUP) |
+| **Inputs** | Interactive `prismattyc` session; normal child exit, abnormal PTY EIO, and Unix terminate signals (SIGINT/SIGTERM/SIGHUP) |
 | **Expected** | Host raw mode cleared; host leave-alt-screen; mouse capture disabled; focus change disabled; cursor shown; partial `enter` failure best-effort rolls back already-emitted host modes; signal path restores via flag + Drop (idempotent with Drop) |
 | **Evidence** | `TerminalGuard` Drop + `restore_host_terminal_once`; Unix signal flag install; `take_host_terminal_ownership_is_idempotent`; `enter_host_modes_*` injected-writer normal/EIO/fail-once rollback; live `real_binary_printf_transcript_contains_output`, `real_binary_sigterm_exits_under_pty_flood` |
 
@@ -131,9 +131,9 @@ cargo fmt --all -- --check
 cargo check --workspace --locked
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo build --bin prism --locked
+cargo build --bin prismattyc --locked
 cargo doc --workspace --no-deps
-git diff --check 534284b..HEAD   # Phase 1 base (0B PASS tip) .. release tip
+git diff --check origin/main...HEAD
 ```
 
 ### F10 — 256-color + truecolor SGR (0.1.x pack)

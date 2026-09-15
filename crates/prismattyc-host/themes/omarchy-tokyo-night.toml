@@ -1,0 +1,50 @@
+# Omarchy Tokyo Night: terminal colors from the pinned upstream palette.
+# Window-control colors are mapped to Prismattyc roles.
+# Upstream MIT notice is retained here and in OMARCHY-LICENSE.txt.
+#
+# Copyright (c) David Heinemeier Hansson
+#
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and associated documentation files (the
+# "Software"), to deal in the Software without restriction, including
+# without limitation the rights to use, copy, modify, merge, publish,
+# distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so, subject to
+# the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+# LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+# WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+id = "omarchy-tokyo-night"
+name = "Omarchy Tokyo Night"
+variant = "dark"
+source = "https://github.com/omacom/omarchy/blob/f2b419d9a9d7e7821de2ddf9c42991e32cf06cdf/themes/tokyo-night/colors.toml"
+license = "MIT; Copyright (c) David Heinemeier Hansson"
+default_fg = "#a9b1d6"
+default_bg = "#1a1b26"
+chrome_fg = "#a9b1d6"
+chrome_bg = "#13141c"
+pane_border = "#414868"
+overlay_bg = "#24283b"
+unseen_badge = "#e0af68"
+mail_letter = "#e0af68"
+active_badge = "#9ece6a"
+attention_badge = "#f7768e"
+cursor_fg = "#1a1b26"
+cursor_bg = "#c0caf5"
+selection_fg = "#a9b1d6"
+selection_bg = "#292e42"
+ansi = [
+  "#1a1b26", "#f7768e", "#9ece6a", "#e0af68",
+  "#7aa2f7", "#ad8ee6", "#449dab", "#a9b1d6",
+  "#414868", "#ff7a93", "#b9f27c", "#ff9e64",
+  "#7da6ff", "#bb9af7", "#0db9d7", "#c0caf5",
+]

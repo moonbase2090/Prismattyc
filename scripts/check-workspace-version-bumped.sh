@@ -32,7 +32,7 @@ theirs="$(git show "$base:Cargo.toml" | workspace_version)"
 
 if [ "$ours" = "$theirs" ]; then
   echo "workspace.package.version is $ours, same as $base."
-  echo "Bump one patch in Cargo.toml for this PR (docs/agents.md, Package version)."
+  echo "Bump one patch in Cargo.toml for this PR (CONTRIBUTING.md, Version a change)."
   exit 1
 fi
 

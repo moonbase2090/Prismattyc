@@ -32,6 +32,6 @@ to the GPU. Use the default backend when you need window transparency or blur.
 
 ## Native-window tests
 
-The native fixtures under `demo/` exercise desktop rendering. Termwright
+The native fixtures under `tests/native/` exercise desktop rendering. Termwright
 tests the nested terminal executable; it does not drive desktop windows.
 A CPU framebuffer capture does not show the desktop compositor's backdrop.

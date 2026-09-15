@@ -1,4 +1,4 @@
-//! AccessKit chrome tree for `prismattyc-host` (PT-173 / PT-174 / PT-175, ADR-0016).
+//! AccessKit chrome tree for `prismattyc-host` (PT-173 / PT-174 / PT-175, accessibility).
 //!
 //! Tree shape is a pure function of [`ChromeSnapshot`]. Window, mux, and
 //! AccessKit side effects stay in the caller. The focused viewport is one
@@ -18,7 +18,7 @@ pub(crate) const TEXT_RUN_ID: u64 = 7;
 pub(crate) const LIVE_ID: u64 = 8;
 pub(crate) const CAPTION_ID: u64 = 9;
 
-/// Minimum gap between cursor-line announces (ADR-0016 D-A5 coalesce).
+/// Minimum gap between cursor-line announces (accessibility D-A5 coalesce).
 pub(crate) const GRID_ANNOUNCE_GAP_MS: u64 = 400;
 /// Trailing mark so two identical utterances still change the live value.
 const LIVE_REPEAT_MARK: char = '\u{200B}';
@@ -118,7 +118,7 @@ impl OverlayKind {
     }
 }
 
-/// Focused-pane viewport as one document (ADR-0016 D-A4).
+/// Focused-pane viewport as one document (accessibility D-A4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DocumentSnap {
     pub text: String,
@@ -141,7 +141,7 @@ pub(crate) struct ChromeSnapshot {
     pub caption: Option<String>,
 }
 
-/// One live-region utterance (ADR-0016 D-A5).
+/// One live-region utterance (accessibility D-A5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LiveSnap {
     pub text: String,

@@ -1,4 +1,4 @@
-//! Windowed OS host for Prismattyc (Phase 1.5 / ADR-0006).
+//! Windowed OS host for Prismattyc.
 //!
 //! Opens its own window — does **not** nest inside Kitty/Ghostty.
 //! Classic nested host remains `cargo run -p prismattyc`.
@@ -741,18 +741,18 @@ Launch splash:   shown on bare launches; --no-splash, PRISMATTYC_NO_SPLASH=1,
                  file; use the flag or env there.
 Nested classic claim host: cargo run -p prismattyc -- /bin/sh
 
-See docs/adr/0006-windowed-host.md.
+See docs/rendering.md.
 "
     );
     for line in config_template::help_lines() {
         eprintln!("{line}");
     }
-    // Generated from the same table the dispatcher uses (ADR-0015), so the
+    // Generated from the same table the dispatcher uses (keybindings), so the
     // list cannot drift from what the keys do.
     let keymap = keybind::KeyMap::default();
     eprintln!(
         "Key actions ([keys] in config.toml; value = \"chord\" or [\"chord\", ...];\n\
-         chord = mod+...+key with ctrl/shift/alt/super; see docs/adr/0015-user-keybindings.md):"
+         chord = mod+...+key with ctrl/shift/alt/super; see docs/config.md):"
     );
     for action in keybind::Action::all() {
         let chords = keymap.spellings(action).join(", ");
@@ -2179,7 +2179,7 @@ struct App {
     /// Coalesced wake from PTY reader threads and the config watcher.
     wake: mux::Wake,
     wake_pending: Arc<AtomicBool>,
-    /// Effective host key table (`[keys]` over the defaults, ADR-0015).
+    /// Effective host key table (`[keys]` over the defaults, keybindings).
     /// Shared with the dispatcher per event; replaced on hot reload.
     keymap: Arc<keybind::KeyMap>,
     /// Defers operations that need a fresh mutable App borrow until the
@@ -3592,7 +3592,7 @@ fn chrome_snapshot(host: &HostState, live: Option<a11y::LiveSnap>) -> a11y::Chro
     }
 }
 
-/// Focused pane viewport as one document (ADR-0016 D-A4). Scrollback stays
+/// Focused pane viewport as one document (accessibility D-A4). Scrollback stays
 /// out of the live node.
 fn focused_document(host: &HostState) -> a11y::DocumentSnap {
     let pane = host.mux.focused();
@@ -8861,7 +8861,7 @@ fn chord_help_text(mux: &mux::MuxRuntime, keymap: &keybind::KeyMap, show_tabs: b
     out.trim_end().to_string()
 }
 
-/// Fixed find fallbacks (ADR-0015 D-K3): punctuation chords that match the
+/// Fixed find fallbacks (keybindings D-K3): punctuation chords that match the
 /// nested host, because outer terminals often steal Ctrl+Shift+F. The
 /// primary chord is the `find` action in the key table.
 fn is_find_fallback_chord(logical: &Key, modifiers: ModifiersState) -> bool {
@@ -10038,7 +10038,7 @@ fn mux_command_plan(command: &MuxCommand) -> MuxCommandPlan {
 }
 
 /// Mux command for a key-table action; `None` for host-side actions.
-/// Chords themselves live in `keybind` (ADR-0015); this is the only place
+/// Chords themselves live in `keybind` (keybindings); this is the only place
 /// that knows which actions the mux runtime implements.
 fn mux_command_for(action: keybind::Action) -> Option<MuxCommand> {
     use keybind::Action;
@@ -10661,7 +10661,7 @@ fn is_copy_chord(logical: &Key, modifiers: ModifiersState, has_selection: bool) 
     modifiers.shift_key() || has_selection
 }
 
-/// Paste fallbacks that stay fixed (ADR-0015 D-K3): **Shift+Insert**
+/// Paste fallbacks that stay fixed (keybindings D-K3): **Shift+Insert**
 /// (classic X11) and the dedicated Paste key. The primary chord is the
 /// `paste` action in the key table. Plain Ctrl+V is **not** claimed — many
 /// apps (vim, readline) own it.
@@ -10830,7 +10830,7 @@ fn note_copied_announce(host: &mut HostState, text: &str) {
     }
 }
 
-/// Read system clipboard and deliver to the focused child PTY (ADR-0001 paste-in).
+/// Read system clipboard and deliver to the focused child PTY (text selection paste-in).
 ///
 /// Text wins when the clipboard has a non-empty string. Image-only clipboards
 /// become a temp PNG path so agent CLIs can read the file. A single image file
@@ -10943,7 +10943,7 @@ fn show_paste_toast(host: &mut HostState, path: &Path) {
     host.dirty = true;
 }
 
-/// Strip nested bracketed-paste wrappers (ADR-0001 / classic-host parity).
+/// Strip nested bracketed-paste wrappers (text selection / classic-host parity).
 ///
 /// O(n) scan: skip complete START/END matches; pop suffix-synthesized delimiters.
 fn normalize_paste_text(text: &str) -> String {
@@ -11054,7 +11054,7 @@ fn try_send_chunk_until<T: From<Vec<u8>>>(
 
 /// Ctrl/Cmd+left-press on a detected http(s) URL: open and consume the gesture.
 ///
-/// Hit wins: no selection (ADR-0001) and no app-mouse report (ADR-0003).
+/// Hit wins: no selection (text selection) and no app-mouse report (mouse input).
 fn try_open_url_at_cursor(host: &mut HostState) -> bool {
     let open_gesture = hyperlink::is_open_url_click(host.modifiers);
     if !open_gesture {
@@ -11730,7 +11730,7 @@ fn finish_pointer_selection(host: &mut HostState) {
 }
 
 /// `select_all` action: select the visible viewport and auto-copy it
-/// (ADR-0001 D-H3).
+/// (text selection D-H3).
 fn select_all_viewport(host: &mut HostState) {
     if let Some(range) = host.emulator.screen().viewport_range() {
         let screen = host.emulator.screen();
@@ -12011,7 +12011,7 @@ fn handle_selection_key(host: &mut HostState, logical: &Key) -> bool {
         return false;
     }
 
-    // Fixed copy fallback (ADR-0001 D-H4): plain Ctrl+C with a multi-cell
+    // Fixed copy fallback (text selection D-H4): plain Ctrl+C with a multi-cell
     // selection. The Ctrl+Shift+C chord is the `copy` table action and is
     // dispatched before this point, so only the unshifted form is checked.
     if !host.modifiers.shift_key()
@@ -12837,7 +12837,7 @@ impl ApplicationHandler<UserAction> for App {
                 if ime_blocks_host_keyboard(&host.preedit) {
                     return;
                 }
-                // One key-table lookup per event (ADR-0015). Repeats never
+                // One key-table lookup per event (keybindings). Repeats never
                 // fire one-shot actions; history scroll may repeat.
                 let keymap = self.keymap.clone();
                 let action_any = event_action(&keymap, &event, host.modifiers);

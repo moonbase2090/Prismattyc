@@ -618,7 +618,7 @@ pub struct CollectionPatch {
     pub items: Vec<CollectionItem>,
 }
 
-/// One styled text run (ADR-0013). Colors are optional 0–255 palette indexes.
+/// One styled text run (hybrid rendering). Colors are optional 0–255 palette indexes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StyledRun {
     pub text: String,

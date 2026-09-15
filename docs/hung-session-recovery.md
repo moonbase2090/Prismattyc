@@ -132,13 +132,5 @@ Avoid starting an attach inside a mux-owned pane. Use another terminal or
 - Server termination is not detach. There is no cold session resurrection.
 - Mux IDs are server-scoped counters, not UUIDs or durable identities.
 
-## Incident example
-
-The `cursor-la` session froze on 2026-08-16. The operator destroyed only that
-session and created a replacement. `cursor-qa` and the mux server survived.
-
-At the time, Prismattyc had no `doctor` or `kick`. With the current CLI, inspect and
-kick the attach layer before using the destructive session stop.
-
-See [mux-cli.md](mux-cli.md) for command details and
-[ADR-0011](adr/0011-long-lived-mux-server.md) for detach lifetime guarantees.
+See [pmux commands](mux-cli.md) and [session ownership](architecture.md)
+for command details and detach lifetime guarantees.

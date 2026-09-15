@@ -2,23 +2,18 @@
 
 **Status:** Published supported classic claim — exact-head gated.
 **Release id:** `prismattyc-classic/0.1.1` (classic claim). Workspace package
-version is **`0.2.7`** and can move without widening this claim.
-**Prior claim:** `prism-classic/0.1.0` (tag **`v0.1.0`** @ `60d23a3`; issued under the Prism name).
+version is **`0.2.8`** and can move without widening this claim.
 **Kind:** Supported classic product subset — not universal xterm parity,
 not a modern-terminal marketing claim outside the rows below.
 
-Related:
-[hybrid-rendering.md](hybrid-rendering.md) (selection policy),
-[adr/0001-host-selection-clipboard.md](adr/0001-host-selection-clipboard.md),
-[adr/0003-hybrid-mouse.md](adr/0003-hybrid-mouse.md),
-[adr/0004-wide-unicode.md](adr/0004-wide-unicode.md),
-[adr/0005-kitty-keyboard.md](adr/0005-kitty-keyboard.md).
+See [terminal input](input.md) and [hybrid rendering](hybrid-rendering.md)
+for input ownership and composition rules.
 
-## Named reference (I-20)
+## Reference behavior
 
 | Field | Value |
 |-------|--------|
-| Primary reference | **xterm** control sequences, **patch #410** (2026-04-19; ctlseqs online: [invisible-island.net/xterm/ctlseqs](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html)); **VT100** DECSTBM ([vt100.net DECSTBM](https://vt100.net/docs/vt100-ug/chapter3.html#DECSTBM)); Kitty keyboard protocol (clean-room, [ADR-0005](adr/0005-kitty-keyboard.md)) |
+| Primary reference | **xterm** control sequences, **patch #410** (2026-04-19; ctlseqs online: [invisible-island.net/xterm/ctlseqs](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html)); **VT100** DECSTBM ([vt100.net DECSTBM](https://vt100.net/docs/vt100-ug/chapter3.html#DECSTBM)); Kitty keyboard protocol (clean-room, [keyboard encoding](input.md)) |
 | Reference posture | Match **enumerated** row behaviors against those references; not a full binary differential harness vs a distro xterm package |
 | Secondary notes | VTE-derived parse boundaries via the `vte` 0.15 crate; Prismattyc owns grid/PTY semantics |
 | Host OS primary | Linux |
@@ -31,9 +26,9 @@ Related:
 | Interactive shell (`/bin/sh`, bash/zsh as child) | Printable output, line editing via child, clean exit restores host |
 | Simple pagers / `printf` / `ls` style CLI | Grid text, 16-color + 256/truecolor SGR |
 | Full-screen TUIs using **alternate screen + cursor/erase + DECSTBM + DECOM/DECAWM** | Usable when they stay within claimed CSI/private-mode rows |
-| Editors requiring mouse reporting | **Claimed hybrid** — ADR-0003 (1000/1002/1003 + SGR 1006; Shift=host select) |
-| Editors requiring wide graphemes / combining | **Partial** — ADR-0004 width-2 + combining + ZWJ/skin/RI cluster join; not full UAX #29 |
-| Apps using Kitty CSI-u progressive keyboard | **Partial** — ADR-0005 first claim slice |
+| Editors requiring mouse reporting | **Claimed hybrid** — mouse input (1000/1002/1003 + SGR 1006; Shift=host select) |
+| Editors requiring wide graphemes / combining | **Partial** — wide text width-2 + combining + ZWJ/skin/RI cluster join; not full UAX #29 |
+| Apps using Kitty CSI-u progressive keyboard | **Partial** — keyboard encoding first claim slice |
 
 The windowed host may enable OpenType ligatures for terminal-grid rendering.
 This option is host-only and render-only. It does not change cell widths, PTY
@@ -98,8 +93,8 @@ Reference: VT100 DECSTBM ([vt100.net](https://vt100.net/docs/vt100-ug/chapter3.h
 
 | | |
 |--|--|
-| **Inputs** | Host left-button down/drag/up on viewport cells (mouse capture enabled); when app mouse is off, or with **Shift** while tracking is on ([ADR-0003](adr/0003-hybrid-mouse.md)); keyboard selection paths (**F12**); scrolled history view (**F18**) |
-| **Expected** | (1) Selection range uses **absolute history row indices** (viewport or scrollback view); (2) **does not mutate** cells; (3) Esc clears; (4) **invalidate** when `content_epoch` changes **or** child PTY produces output under a finished selection (mid-drag may keep the gesture); (5) **click-only** (no drag) leaves **no** sticky one-cell highlight; (6) new left-down starts a fresh gesture; (7) **double-click** selects word (char-class run); **triple-click** selects row; (8) multi-row **visual** paint trims trailing spaces (`selection_covers_cell` / abs); (9) **Ctrl+Shift+A** selects full viewport ([ADR-0001](adr/0001-host-selection-clipboard.md) D-H2); (10) alt-screen refuses host selection gestures |
+| **Inputs** | Host left-button down/drag/up on viewport cells (mouse capture enabled); when app mouse is off, or with **Shift** while tracking is on ([mouse input](input.md)); keyboard selection paths (**F12**); scrolled history view (**F18**) |
+| **Expected** | (1) Selection range uses **absolute history row indices** (viewport or scrollback view); (2) **does not mutate** cells; (3) Esc clears; (4) **invalidate** when `content_epoch` changes **or** child PTY produces output under a finished selection (mid-drag may keep the gesture); (5) **click-only** (no drag) leaves **no** sticky one-cell highlight; (6) new left-down starts a fresh gesture; (7) **double-click** selects word (char-class run); **triple-click** selects row; (8) multi-row **visual** paint trims trailing spaces (`selection_covers_cell` / abs); (9) **Ctrl+Shift+A** selects full viewport ([text selection](input.md) D-H2); (10) alt-screen refuses host selection gestures |
 | **Evidence** | `selection_does_not_mutate_cells`, `content_epoch_bumps_on_margin_scroll_and_alt_roundtrip`, `selection_cleared_on_margin_scroll`, `selection_cleared_on_same_chunk_alt_roundtrip`, `click_only_selection_has_no_range`, `drag_selection_retains_range_after_finish`, `begin_clears_prior_dragged_selection`, `word_range_expands_alphanumeric_run`, `line_range_spans_full_row`, `multi_click_cycles_one_two_three`, `multi_row_selection_visual_trim_skips_trailing_spaces`, `viewport_range_covers_full_grid`, `select_all_chord_selects_viewport_without_forwarding`, `abs_selection_spans_history_after_edge_autoscroll`; host uses `content_epoch` + clear-on-output |
 
 ### F7 — Plain-text copy (OSC 52)
@@ -157,10 +152,10 @@ git diff --check origin/main...HEAD
 | | |
 |--|--|
 | **Inputs** | Shift+arrow (primary); Ctrl+2 mark; Ctrl+Space when delivered; plain arrows in select mode; Home/End/PgUp/PgDn; copy chords |
-| **Expected** | Host-local selection grows without forwarding motion to child; Esc clears; see [ADR-0001](adr/0001-host-selection-clipboard.md) D-H2/D-H3 |
+| **Expected** | Host-local selection grows without forwarding motion to child; Esc clears; see [text selection](input.md) D-H2/D-H3 |
 | **Evidence** | `shift_arrow_starts_viewport_keyboard_selection`, `handle_host_key_shift_left_does_not_forward_to_child`, `ctrl_space_then_arrow_selects_without_shift`, `extend_selection_home_end_and_page`, `select_all_chord_selects_viewport_without_forwarding` |
 
-### F13 — Hybrid application mouse (ADR-0003)
+### F13 — Hybrid application mouse (mouse input)
 
 | | |
 |--|--|
@@ -168,7 +163,7 @@ git diff --check origin/main...HEAD
 | **Expected** | (1) Modes tracked (highest of 1000/1002/1003); (2) plain mouse → SGR (or X10 if no 1006) on child PTY; (3) **Shift** → host selection/scroll, no report; (4) level filters drag/motion; (5) RIS clears modes; (6) alt + plain forwards when tracking on |
 | **Evidence** | `app_mouse_private_modes_are_tracked`, `ris_clears_mouse_tracking_modes`, `encode_mouse_report_*`, `hybrid_plain_click_forwards_sgr_not_selection`, `hybrid_shift_drag_selects_host_not_app`, `hybrid_alt_plain_click_forwards_sgr`, `hybrid_plain_wheel_forwards_not_scroll_view` |
 
-### F14 — Wide Unicode display width (ADR-0004)
+### F14 — Wide Unicode display width (wide text)
 
 | | |
 |--|--|
@@ -208,12 +203,12 @@ git diff --check origin/main...HEAD
 | **Expected** | (1) Wheel and Shift+Page pan history (bare Page goes to child); (2) paint uses `view_cell` / `render_scrolled`; (3) selection rows are absolute history indices; extract via abs/view APIs; (4) edge autoscroll keeps selection anchor; (5) alt forces live view |
 | **Evidence** | `extract_text_view_reads_scrolled_history`, `shift_pageup_scrolls_view_when_scrollback_exists`, `mouse_wheel_scrolls_view`, `abs_selection_spans_history_after_edge_autoscroll` |
 
-### F19 — Extended keyboard + Kitty CSI-u (ADR-0005)
+### F19 — Extended keyboard + Kitty CSI-u (keyboard encoding)
 
 | | |
 |--|--|
 | **Inputs** | Legacy modified keys; Super; Shift+Tab; Kitty progressive enhancement (`CSI = flags ; mode u`, push/pop/query) |
-| **Expected** | (1) Legacy: Alt+char ESC prefix; modified cursor/Page/Home/End/F-keys as xterm CSI with mod; Super in mod param; Shift+Tab `CSI Z`; Ctrl+letter CSI `27` form when needed; (2) Kitty: set/push/pop/query flags; main and alt independent stacks (cap 16); RIS clears stacks; when flags non-zero encode per ADR-0005 slice (disambiguate, event types, report-all, report-text); (3) host chords (selection/find) still intercept before encode |
+| **Expected** | (1) Legacy: Alt+char ESC prefix; modified cursor/Page/Home/End/F-keys as xterm CSI with mod; Super in mod param; Shift+Tab `CSI Z`; Ctrl+letter CSI `27` form when needed; (2) Kitty: set/push/pop/query flags; main and alt independent stacks (cap 16); RIS clears stacks; when flags non-zero encode per keyboard encoding slice (disambiguate, event types, report-all, report-text); (3) host chords (selection/find) still intercept before encode |
 | **Evidence** | `encode_key_alt_b_is_esc_b`, `encode_key_f1_is_xterm_ss3`, `encode_key_ctrl_left_right_are_modified_csi`, `encode_key_ctrl_up_down_and_alt_arrows`, `encode_key_ctrl_shift_letter_is_csi27`, `encode_key_backtab_is_csi_z`, `encode_key_super_mod_in_arrow`, `encode_key_modified_page_home_and_fkeys`, `kitty_keyboard_push_pop_set_and_query`, `kitty_keyboard_alt_screen_has_independent_stack`, `ris_clears_kitty_keyboard_flags`, `kitty_disambiguate_encodes_esc_and_ctrl_as_csi_u`, `kitty_report_all_encodes_plain_keys_as_csi_u`, `kitty_event_types_encode_repeat_and_release` |
 
 ### H1 — Windowed-host styled underlines (PT-45)
@@ -228,33 +223,15 @@ mux/protocol styled-underline passthrough remain deferred.
 | **Expected** | Render single, double, curly, dotted, and dashed underlines. Clear the underline with `4:0` or `24`. Use the effective foreground when no explicit underline color is set. Use explicit SGR `58` colors for normal text. Preserve Kitty placeholder placement semantics. |
 | **Evidence** | Core style tests, emulator SGR tests, host raster pattern/color tests, `cargo test --workspace --locked`, and live PT-45 dogfood |
 
-## Explicit exclusions (not P0 for 0.1.1)
+## Compatibility limits
 
 - Alternate mouse encodings **1005 / 1015 / 1016** (X10/SGR 1006 only under F13)
 - Full **UAX #29** grapheme segmentation (F14 is East Asian Width + combining + ZWJ/skin/RI slice only)
-- Kitty CSI-u **alternate-key base-layout** depth and **lock modifiers** (Caps/Num) beyond ADR-0005 first slice
+- Kitty CSI-u **alternate-key base-layout** depth and **lock modifiers** (Caps/Num) beyond keyboard encoding first slice
 - Reflow of alternate-screen application grids (intentionally retained as grids)
 - Nested tmux / SSH transport fidelity claims
-- Multiplexer product UX (Phase 2)
 - Production rich/APC product claim (Phase 0B remains experimental)
 - Full xterm private-mode table on DECSTR/RIS (partial: claimed modes only — residual)
-
-## Claim history
-
-| Release id | Package | Tag / tip | What landed |
-|------------|---------|-----------|-------------|
-| `prism-classic/0.1.0` | `0.1.0` | **`v0.1.0`** @ `60d23a3` | F1–F9 first supported classic (issued as Prism) |
-| `prismattyc-classic/0.1.1` | `0.1.1` | tag **`v0.1.1`**; same matrix, claim id renamed from `prism-classic/0.1.1` | F10–F19 dogfood pack + hybrid mouse + wide/ZWJ + DECOM/DECAWM/1004 + abs scrollback select + extended keys / Kitty CSI-u |
-
-## Exit criteria (0.1.1 claim ship)
-
-1. This matrix is published on `main` with no open P0 against required rows.
-2. Every required-row evidence test is green at the release tip.
-3. Live GitHub Actions is green at that tip (or recorded residual with owner ack).
-4. Workspace package version is **`0.1.1`** and matches the release id.
-5. README / `scripts/test-phase1.sh` cite **`prismattyc-classic/0.1.1`**.
-6. Phase 0B remains experimental and outside the product claim.
-7. Rich-surface ticket closed with outcome; dogfood epic closed after children.
 
 ## Non-claims
 

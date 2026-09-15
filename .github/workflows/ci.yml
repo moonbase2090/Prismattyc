@@ -452,11 +452,11 @@ jobs:
 
       - name: Syntax-check spaces and host UX fixtures
         run: |
-          bash -n demo/spaces-e2e.sh
-          bash -n demo/host-ux-e2e.sh
-          bash -n demo/docker/run.sh
-          PYTHONPYCACHEPREFIX=build/python-cache python3 -m py_compile demo/host-ux-e2e.py
-          PYTHONPYCACHEPREFIX=build/python-cache python3 -m py_compile demo/restart-spaces-e2e.py
+          bash -n tests/native/spaces-e2e.sh
+          bash -n tests/native/host-ux-e2e.sh
+          bash -n tests/native/docker/run.sh
+          PYTHONPYCACHEPREFIX=build/python-cache python3 -m py_compile tests/native/host-ux-e2e.py
+          PYTHONPYCACHEPREFIX=build/python-cache python3 -m py_compile tests/native/restart-spaces-e2e.py
 
       - name: Install Rust toolchain
         run: |
@@ -481,7 +481,7 @@ jobs:
           [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
           cargo build --locked -p prismattyc-host -p prismattyc-mux --bins
 
-      - name: Run spaces and host UX e2e in the demo box
+      - name: Run spaces and host UX e2e in the native test container
         run: |
           set -euo pipefail
           if docker info >/dev/null 2>&1; then
@@ -492,8 +492,8 @@ jobs:
             echo "error: docker is not available in this runner" >&2
             exit 1
           fi
-          if ! dkr image inspect prismattyc-demo >/dev/null 2>&1; then
-            echo "error: image prismattyc-demo is missing (demo/docker/run.sh build)" >&2
+          if ! dkr image inspect prismattyc-native-tests >/dev/null 2>&1; then
+            echo "error: image prismattyc-native-tests is missing (tests/native/docker/run.sh build)" >&2
             exit 1
           fi
           # Act copies the workspace; host docker does not see overlay files.
@@ -502,13 +502,13 @@ jobs:
           host_root="/tmp/prismattyc-spaces-e2e-$$"
           trap "dkr run --rm -v /tmp:/tmp alpine:latest rm -rf '$host_root'" EXIT
           dkr run --rm -v "$host_root:$host_root" alpine:latest \
-            mkdir -p "$host_root/bins" "$host_root/demo/docker"
+            mkdir -p "$host_root/bins" "$host_root/tests/native/docker"
           tar -C "$PWD/target/debug" -cf - pmux pmuxd pmux-attach prismattyc-host \
             | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
               tar -C "$host_root/bins" -xf -
-          tar -C "$PWD/demo" -cf - spaces-e2e.sh host-ux-e2e.sh host-ux-e2e.py space-open-race.py restart-spaces-e2e.py docker/run.sh \
+          tar -C "$PWD/tests/native" -cf - spaces-e2e.sh host-ux-e2e.sh host-ux-e2e.py space-open-race.py restart-spaces-e2e.py docker/run.sh \
             | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
-              tar -C "$host_root/demo" -xf -
+              tar -C "$host_root/tests/native" -xf -
           dkr run --rm --privileged \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$host_root:$host_root" \
@@ -518,7 +518,7 @@ jobs:
             -w "$host_root" \
             -u 0 \
             local-actions-runner:latest \
-            bash -c 'bash demo/docker/run.sh spaces-e2e && bash demo/docker/run.sh host-ux-e2e'
+            bash -c 'bash tests/native/docker/run.sh spaces-e2e && bash tests/native/docker/run.sh host-ux-e2e'
           # The nested artifact mount writes to the host checkout. It survives
           # removal of both job containers and the temporary staging path.
           echo "Host UX artifacts: $PWD/build/host-ux-e2e"
@@ -532,7 +532,7 @@ jobs:
     if: ${{ github.actor == 'nektos/act' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Same X11 demo box as spaces-e2e. Fail if the image is missing.
+    # Same X11 native test container as spaces-e2e. Fail if the image is missing.
     env:
       LA_HEAVY: "1"
       LA_HEAVY_JOB: walkthrough-caption-e2e
@@ -549,8 +549,8 @@ jobs:
       - name: Acquire heavy-job lock (PT-305)
         run: python3 scripts/la-heavy-serial.py --acquire --wait --job walkthrough-caption-e2e
 
-      - name: Syntax-check demo/walkthrough-caption-e2e.sh
-        run: bash -n demo/walkthrough-caption-e2e.sh && bash -n demo/docker/run.sh
+      - name: Syntax-check tests/native/walkthrough-caption-e2e.sh
+        run: bash -n tests/native/walkthrough-caption-e2e.sh && bash -n tests/native/docker/run.sh
 
       - name: Install Rust toolchain
         run: |
@@ -575,7 +575,7 @@ jobs:
           [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
           cargo build --locked -p prismattyc-host -p prismattyc-mux --bins
 
-      - name: Run walkthrough caption e2e in the demo box
+      - name: Run walkthrough caption e2e in the native test container
         run: |
           set -euo pipefail
           if docker info >/dev/null 2>&1; then
@@ -586,20 +586,20 @@ jobs:
             echo "error: docker is not available in this runner" >&2
             exit 1
           fi
-          if ! dkr image inspect prismattyc-demo >/dev/null 2>&1; then
-            echo "error: image prismattyc-demo is missing (demo/docker/run.sh build)" >&2
+          if ! dkr image inspect prismattyc-native-tests >/dev/null 2>&1; then
+            echo "error: image prismattyc-native-tests is missing (tests/native/docker/run.sh build)" >&2
             exit 1
           fi
           host_root="/tmp/prismattyc-walkthrough-caption-e2e-$$"
           trap "dkr run --rm -v /tmp:/tmp alpine:latest rm -rf '$host_root'" EXIT
           dkr run --rm -v "$host_root:$host_root" alpine:latest \
-            mkdir -p "$host_root/bins" "$host_root/demo/docker"
+            mkdir -p "$host_root/bins" "$host_root/tests/native/docker"
           tar -C "$PWD/target/debug" -cf - pmux pmuxd pmux-attach prismattyc-host \
             | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
               tar -C "$host_root/bins" -xf -
-          tar -C "$PWD/demo" -cf - walkthrough-caption-e2e.sh docker/run.sh \
+          tar -C "$PWD/tests/native" -cf - walkthrough-caption-e2e.sh docker/run.sh \
             | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
-              tar -C "$host_root/demo" -xf -
+              tar -C "$host_root/tests/native" -xf -
           dkr run --rm --privileged \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$host_root:$host_root" \
@@ -607,7 +607,7 @@ jobs:
             -w "$host_root" \
             -u 0 \
             local-actions-runner:latest \
-            bash "$host_root/demo/docker/run.sh" walkthrough-caption-e2e
+            bash "$host_root/tests/native/docker/run.sh" walkthrough-caption-e2e
 
       - name: Release heavy-job lock
         if: always()
@@ -640,8 +640,8 @@ jobs:
       - name: Acquire heavy-job lock (PT-305)
         run: python3 scripts/la-heavy-serial.py --acquire --wait --job spaces-e2e-wayland
 
-      - name: Syntax-check demo/spaces-e2e-wayland.sh
-        run: bash -n demo/spaces-e2e-wayland.sh && bash -n demo/docker/run.sh
+      - name: Syntax-check tests/native/spaces-e2e-wayland.sh
+        run: bash -n tests/native/spaces-e2e-wayland.sh && bash -n tests/native/docker/run.sh
 
       - name: Install Rust toolchain
         run: |
@@ -666,7 +666,7 @@ jobs:
           [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
           cargo build --locked -p prismattyc-host -p prismattyc-mux --bins
 
-      - name: Run Wayland shm e2e in the demo box
+      - name: Run Wayland shm e2e in the native test container
         run: |
           set -euo pipefail
           if docker info >/dev/null 2>&1; then
@@ -677,20 +677,20 @@ jobs:
             echo "error: docker is not available in this runner" >&2
             exit 1
           fi
-          if ! dkr image inspect prismattyc-demo >/dev/null 2>&1; then
-            echo "error: image prismattyc-demo is missing (demo/docker/run.sh build)" >&2
+          if ! dkr image inspect prismattyc-native-tests >/dev/null 2>&1; then
+            echo "error: image prismattyc-native-tests is missing (tests/native/docker/run.sh build)" >&2
             exit 1
           fi
           host_root="/tmp/prismattyc-spaces-e2e-wayland-$$"
           trap "dkr run --rm -v /tmp:/tmp alpine:latest rm -rf '$host_root'" EXIT
           dkr run --rm -v "$host_root:$host_root" alpine:latest \
-            mkdir -p "$host_root/bins" "$host_root/demo/docker"
+            mkdir -p "$host_root/bins" "$host_root/tests/native/docker"
           tar -C "$PWD/target/debug" -cf - pmux pmuxd pmux-attach prismattyc-host \
             | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
               tar -C "$host_root/bins" -xf -
-          tar -C "$PWD/demo" -cf - spaces-e2e-wayland.sh docker/run.sh docker/sway-headless.conf \
+          tar -C "$PWD/tests/native" -cf - spaces-e2e-wayland.sh docker/run.sh docker/sway-headless.conf \
             | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
-              tar -C "$host_root/demo" -xf -
+              tar -C "$host_root/tests/native" -xf -
           dkr run --rm --privileged \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$host_root:$host_root" \
@@ -698,7 +698,7 @@ jobs:
             -w "$host_root" \
             -u 0 \
             local-actions-runner:latest \
-            bash "$host_root/demo/docker/run.sh" spaces-e2e-wayland
+            bash "$host_root/tests/native/docker/run.sh" spaces-e2e-wayland
 
       - name: Release heavy-job lock
         if: always()
@@ -725,8 +725,8 @@ jobs:
       - name: Acquire heavy-job lock (PT-305)
         run: python3 scripts/la-heavy-serial.py --acquire --wait --job render-bench
 
-      - name: Syntax-check demo/render-bench.sh
-        run: bash -n demo/render-bench.sh && bash -n demo/docker/run.sh
+      - name: Syntax-check tests/native/render-bench.sh
+        run: bash -n tests/native/render-bench.sh && bash -n tests/native/docker/run.sh
 
       - name: Install Rust toolchain
         run: |
@@ -751,7 +751,7 @@ jobs:
           [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
           cargo build --locked -p prismattyc-host -p prismattyc-mux --bins
 
-      - name: Run render bench in the demo box
+      - name: Run render bench in the native test container
         run: |
           set -euo pipefail
           if docker info >/dev/null 2>&1; then
@@ -762,20 +762,20 @@ jobs:
             echo "error: docker is not available in this runner" >&2
             exit 1
           fi
-          if ! dkr image inspect prismattyc-demo >/dev/null 2>&1; then
-            echo "error: image prismattyc-demo is missing (demo/docker/run.sh build)" >&2
+          if ! dkr image inspect prismattyc-native-tests >/dev/null 2>&1; then
+            echo "error: image prismattyc-native-tests is missing (tests/native/docker/run.sh build)" >&2
             exit 1
           fi
           host_root="/tmp/prismattyc-render-bench-$$"
           trap "dkr run --rm -v /tmp:/tmp alpine:latest rm -rf '$host_root'" EXIT
           dkr run --rm -v "$host_root:$host_root" alpine:latest \
-            mkdir -p "$host_root/bins" "$host_root/demo/docker"
+            mkdir -p "$host_root/bins" "$host_root/tests/native/docker"
           tar -C "$PWD/target/debug" -cf - pmux pmuxd pmux-attach prismattyc-host \
             | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
               tar -C "$host_root/bins" -xf -
-          tar -C "$PWD/demo" -cf - render-bench.sh docker/run.sh \
+          tar -C "$PWD/tests/native" -cf - render-bench.sh docker/run.sh \
             | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
-              tar -C "$host_root/demo" -xf -
+              tar -C "$host_root/tests/native" -xf -
           dkr run --rm --privileged \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$host_root:$host_root" \
@@ -783,7 +783,7 @@ jobs:
             -w "$host_root" \
             -u 0 \
             local-actions-runner:latest \
-            bash "$host_root/demo/docker/run.sh" render-bench
+            bash "$host_root/tests/native/docker/run.sh" render-bench
 
       - name: Release heavy-job lock
         if: always()

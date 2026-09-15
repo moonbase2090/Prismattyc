@@ -28,7 +28,7 @@ use clusters::ClusterStore;
 use serde::{Deserialize, Serialize};
 use unicode_width::UnicodeWidthChar;
 
-/// Display columns for a single Unicode scalar (ADR-0004).
+/// Display columns for a single Unicode scalar (wide text).
 ///
 /// Uses Unicode East Asian Width via `unicode-width`. Returns `0` for
 /// non-spacing / combining marks, `1` for narrow, `2` for wide. Values above 2
@@ -72,7 +72,7 @@ pub const ZWJ: char = '\u{200d}';
 /// Fitzpatrick emoji skin-tone modifiers (U+1F3FB..=U+1F3FF).
 ///
 /// `unicode-width` reports these as width 2, but terminals attach them to the
-/// preceding emoji base without advancing (ADR-0004 ZWJ / grapheme slice).
+/// preceding emoji base without advancing (wide text ZWJ / grapheme slice).
 #[inline]
 pub const fn is_emoji_modifier(c: char) -> bool {
     matches!(c, '\u{1f3fb}'..='\u{1f3ff}')
@@ -192,7 +192,7 @@ struct Hyperlink {
 pub struct Cell {
     pub character: char,
     pub style: Style,
-    /// Trailing half of a double-width glyph (ADR-0004). Not painted or extracted.
+    /// Trailing half of a double-width glyph (wide text). Not painted or extracted.
     pub wide_cont: bool,
     hyperlink: Option<HyperlinkId>,
     /// Handle into the owning screen. Zero means no trailing scalars.
@@ -1919,7 +1919,7 @@ impl Screen {
     }
 
     pub fn put_char(&mut self, character: char) {
-        // ADR-0004 grapheme slice: non-spacing marks, emoji modifiers, and
+        // wide text grapheme slice: non-spacing marks, emoji modifiers, and
         // ZWJ-joined bases attach to the previous cell without advancing.
         let width = char_display_width(character);
         if width == 0 || is_emoji_modifier(character) {
@@ -2143,7 +2143,7 @@ impl Screen {
         true
     }
 
-    /// Clear a wide pair if `row`/`col` is a lead or continuation half (ADR-0004).
+    /// Clear a wide pair if `row`/`col` is a lead or continuation half (wide text).
     fn clear_wide_pair_covering(&mut self, row: usize, col: usize) {
         let columns = self.columns;
         if row >= self.rows || col >= columns {
@@ -2643,7 +2643,7 @@ impl Screen {
     /// the right edge are discarded. New cells are spaces with the current SGR.
     /// Cursor position is unchanged. `n` is clamped to the remaining columns.
     ///
-    /// Wide pairs (ADR-0004): starting on a continuation snaps to the lead; after
+    /// Wide pairs (wide text): starting on a continuation snaps to the lead; after
     /// the shift, orphaned wide halves on the row are healed.
     pub fn insert_chars(&mut self, n: usize) {
         if n == 0 {
@@ -2689,7 +2689,7 @@ impl Screen {
     /// is filled with spaces + current SGR. Cursor unchanged. `n` is clamped to the
     /// remaining columns.
     ///
-    /// Wide pairs (ADR-0004): the delete span is expanded to whole lead+cont pairs;
+    /// Wide pairs (wide text): the delete span is expanded to whole lead+cont pairs;
     /// the row is healed after the shift.
     pub fn delete_chars(&mut self, n: usize) {
         if n == 0 {
@@ -2740,7 +2740,7 @@ impl Screen {
     /// Replaces cells with spaces + current SGR. Cursor unchanged. `n` is clamped
     /// to the remaining columns on the row.
     ///
-    /// Wide pairs (ADR-0004): erase expands to whole pairs; row is healed after.
+    /// Wide pairs (wide text): erase expands to whole pairs; row is healed after.
     pub fn erase_chars(&mut self, n: usize) {
         if n == 0 {
             return;
@@ -2994,7 +2994,7 @@ impl Screen {
 
     /// Last column within `start_col..=end_col` whose character is not a space.
     ///
-    /// Used for multi-row selection paint trim (ADR-0001 D-H2 visual polish).
+    /// Used for multi-row selection paint trim (text selection D-H2 visual polish).
     /// Returns `None` when every cell in the span is a space (or the row is missing).
     /// Whether host selection chrome should inverse-paint this cell.
     ///
@@ -3206,7 +3206,7 @@ fn erase_range(cells: &mut CellGrid, start: usize, end: usize, style: Style) {
     cells.fill_range(start..end, blank);
 }
 
-/// Expand `[start, end)` on a row so it does not bisect a wide pair (ADR-0004).
+/// Expand `[start, end)` on a row so it does not bisect a wide pair (wide text).
 ///
 /// `start`/`end` are column offsets within the row (`end` exclusive).
 fn expand_cell_span_for_wide(
@@ -5955,7 +5955,7 @@ mod tests {
         assert_eq!((tr.end_row, tr.end_col), (0, 0));
     }
 
-    /// ADR-0004: fullwidth CJK occupies two cells; cursor advances by 2.
+    /// wide text: fullwidth CJK occupies two cells; cursor advances by 2.
     #[test]
     fn put_char_wide_cjk_uses_two_columns() {
         let mut screen = Screen::new(8, 1, 0);
@@ -6195,7 +6195,7 @@ mod tests {
         }
     }
 
-    /// ADR-0004 follow-up: DCH on the lead of a wide pair removes both cells.
+    /// wide text follow-up: DCH on the lead of a wide pair removes both cells.
     #[test]
     fn delete_chars_removes_whole_wide_pair() {
         let mut screen = Screen::new(8, 1, 0);

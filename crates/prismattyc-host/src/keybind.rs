@@ -1,15 +1,15 @@
-//! User keybindings for host actions (ADR-0015, PT-41).
+//! User keybindings for host actions (keybindings, PT-41).
 //!
 //! One table maps named [`Action`]s to [`Chord`]s. Dispatch, the chord strip,
 //! `--help`, and `docs/config.md` all read this table, so a rebinding shows up
 //! everywhere. `[keys]` in config.toml overrides the defaults per action
 //! (D-K5: an entry replaces every default chord of that action).
 //!
-//! Matching is physical-scancode first (layout-independent, ADR-0010), then
+//! Matching is physical-scancode first (layout-independent, Space controls), then
 //! the logical character. Ctrl/Shift/Alt must match exactly; Super is
 //! required only when the chord names it (some compositors leave Super
 //! sticky). A chord must carry Ctrl, Alt, or Super — plain and Shift-only
-//! keys belong to the PTY (ADR-0001 D-H3).
+//! keys belong to the PTY (text selection D-H3).
 //!
 //! Validation rejects the whole file (D-K4): unknown action, unparsable
 //! chord, missing Ctrl/Alt/Super, two actions on one chord, or a chord equal
@@ -593,7 +593,7 @@ fn unshift(c: char) -> char {
 }
 
 /// Physical scancodes that produce this character on a US layout, plus the
-/// aliases ADR-0010 matching already accepted.
+/// aliases Space controls matching already accepted.
 fn codes_for_char(c: char) -> &'static [KeyCode] {
     match c {
         'a' => &[KeyCode::KeyA],
@@ -977,11 +977,11 @@ impl KeysValue {
 const FIXED: &[(&str, &str)] = &[
     (
         "ctrl+c",
-        "plain Ctrl+C: copy with a selection, else interrupt (ADR-0001 D-H4)",
+        "plain Ctrl+C: copy with a selection, else interrupt (text selection D-H4)",
     ),
-    ("ctrl+2", "keyboard-select mark (ADR-0001 D-H3)"),
-    ("ctrl+space", "keyboard-select mark (ADR-0001 D-H3)"),
-    ("shift+insert", "paste fallback (ADR-0001 D-H3)"),
+    ("ctrl+2", "keyboard-select mark (text selection D-H3)"),
+    ("ctrl+space", "keyboard-select mark (text selection D-H3)"),
+    ("shift+insert", "paste fallback (text selection D-H3)"),
     ("ctrl+shift+/", "find fallback for nested hosts"),
     ("ctrl+shift+;", "find fallback for nested hosts"),
     ("ctrl+shift+'", "find fallback for nested hosts"),
@@ -1013,7 +1013,7 @@ fn fixed_chord(text: &str) -> Chord {
     chord
 }
 
-/// Default chords per action (ADR-0015 D-K1). Reproduces the chords shipped
+/// Default chords per action (keybindings D-K1). Reproduces the chords shipped
 /// before user keybindings, including the macOS layout alternates.
 pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
     match action {

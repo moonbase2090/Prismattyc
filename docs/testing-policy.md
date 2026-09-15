@@ -16,7 +16,7 @@ headroom`. Single-job debug still uses
 `local-actions run --job NAME`.
 
 Heavy jobs must not overlap on the dogfood host (PT-305): `mutants`,
-demo-box jobs (`spaces-e2e`, `spaces-e2e-wayland`,
+native-container jobs (`spaces-e2e`, `spaces-e2e-wayland`,
 `walkthrough-caption-e2e`, `render-bench`), and CRAP lcov (`crap`,
 `crap-refresh`, `crap-release`). `scripts/la-heavy-serial.py` takes one
 exclusive lock for those jobs. Acquire waits and retries when the lock
@@ -43,10 +43,10 @@ Unit tests use a temp lock dir and do not append tokens to
 | Gate | Job | Rule |
 | --- | --- | --- |
 | Unit | `test`, `lint` | crate tests and `clippy -D warnings` |
-| Box e2e | `spaces-e2e` | `demo/spaces-e2e.sh` in the demo box; X11 softbuffer; the box must run, never skip |
-| Box e2e caption | `walkthrough-caption-e2e` | `demo/walkthrough-caption-e2e.sh` in the demo box; X11; double-click `[show me]` advances one step and does not skip; never skip the job |
-| Box e2e Wayland | `spaces-e2e-wayland` | `demo/spaces-e2e-wayland.sh`; weston headless `--socket=pt290-wayland`; native `wl_shm` ARGB8888 |
-| Render bench | `render-bench` | `demo/render-bench.sh` in the demo box; per-frame cells max/mean; archive under `build/render-bench/<version>` |
+| Box e2e | `spaces-e2e` | `tests/native/spaces-e2e.sh` in the native test container; X11 softbuffer; the box must run, never skip |
+| Box e2e caption | `walkthrough-caption-e2e` | `tests/native/walkthrough-caption-e2e.sh` in the native test container; X11; double-click `[show me]` advances one step and does not skip; never skip the job |
+| Box e2e Wayland | `spaces-e2e-wayland` | `tests/native/spaces-e2e-wayland.sh`; weston headless `--socket=pt290-wayland`; native `wl_shm` ARGB8888 |
+| Render bench | `render-bench` | `tests/native/render-bench.sh` in the native test container; per-frame cells max/mean; archive under `build/render-bench/<version>` |
 | CRAP | `crap` | `cargo llvm-cov` + `cargo-crap`; new or newly above-40 functions in PR-touched files block merge; global counts are informational; top 10 per crate |
 | Mutation | `mutants` | one crate at a time, with render routing and remainder shards; caught rate at or above 60% per crate when scored ≥ 5; score only the merged full universe; fewer scored are reported, not gated; runner OOM is infrastructure; refuse to start below host headroom; scratch on disk, never tmpfs `/tmp` |
 
@@ -347,7 +347,7 @@ the reachable floor.
 ## Seam rules
 
 1. **One box step per claimed effect.** A ticket that changes what the
-   user sees or does ships with a step in `demo/spaces-e2e.sh` (or a
+   user sees or does ships with a step in `tests/native/spaces-e2e.sh` (or a
    sibling script). A ticket that claims a behaviour or performance
    change does too. The step is the acceptance criterion. The reviewer
    runs it. A performance ticket is not exempt because it changes no
@@ -366,7 +366,7 @@ the reachable floor.
    real frame onto a gradient backdrop with a translucent config, then
    assert pixels. Painting a helper onto a bare buffer is not a rendering
    test.
-6. **Reviewer box run.** The reviewer builds the PR, runs it in the demo box
+6. **Reviewer box run.** The reviewer builds the PR, runs it in the native test container
    (`docker create --init`, `docker cp` the bins), drives the feature, and
    attaches screenshots to the PR. A PR that changes pixels is not merged
    without them.
@@ -379,23 +379,6 @@ the reachable floor.
    If you cannot name a failing observation, the box run cannot prove
    the claim.
 
-## Worked example: PT-243
-
-Partial raster shipped with a config flag that defaulted to true and
-short-circuited the optimization on every frame. 594 unit tests and
-38 box checks passed. None of them observed a partial frame. The
-feature never ran.
-
-The step that caught it asserts the mechanism: after a small screen
-update, `full_repaint_reason=-` and `cells_painted` is below the full
-grid. That step fails if partial raster stops engaging. The earlier
-checks would still pass.
-
-Most box steps cannot be a single counter. The no-op question is the
-test that still applies. Title counts, cache fields, loaded-fallback
-log lines, and grapheme exports already fail if you revert those
-changes. A counter is one shape of that test, not the only shape.
-
 ## PR template
 
 `.github/pull_request_template.md` asks for: what changed, how it was
@@ -403,15 +386,6 @@ verified (unit, e2e step, box run, screenshots), the no-op test (what
 the step would catch if the change were a no-op), the CRAP delta, the
 mutants score, and which seams the change touches. If the no-op answer
 is nothing, the step is wrong.
-
-## Why
-
-PT-210 (nested attach), PT-171 (idle poll), PT-218 (chip-click race),
-PT-220 (flat overlay), PT-221 (title revert), and the first PT-213 pass all
-passed unit tests. Each was found by driving a real host in the box.
-PT-243 passed 594 unit tests and 38 box checks while partial raster
-never ran. The box run only became evidence when a step asserted the
-mechanism.
 
 ## Run host render tests with a real window
 
@@ -451,7 +425,7 @@ the full host suite.
 
 ## Present backends (PT-290)
 
-The owner runs KDE Wayland (KWin). The demo box has two e2e jobs on one
+The owner runs KDE Wayland (KWin). The native test container has two e2e jobs on one
 image:
 
 | Job | Present path | What it proves | What it does not prove |
@@ -516,10 +490,10 @@ the same function `WindowEvent::KeyboardInput` uses, which calls
 into the real session PTY. X11 `spaces-e2e` still uses xdotool. Do
 not wait on grim or weston-screenshooter. Do not skip.
 
-A stale `prismattyc-demo` image may lack weston, grim, or wtype.
-`demo/docker/run.sh spaces-e2e-wayland` installs those three with
+A stale `prismattyc-native-tests` image may lack weston, grim, or wtype.
+`tests/native/docker/run.sh spaces-e2e-wayland` installs those three with
 pacman when any is missing.
 
-`demo/docker/run.sh spaces-e2e` stays X11.
-`demo/docker/run.sh spaces-e2e-wayland` starts weston
-`--socket=pt290-wayland` in the same `prismattyc-demo` image.
+`tests/native/docker/run.sh spaces-e2e` stays X11.
+`tests/native/docker/run.sh spaces-e2e-wayland` starts weston
+`--socket=pt290-wayland` in the same `prismattyc-native-tests` image.

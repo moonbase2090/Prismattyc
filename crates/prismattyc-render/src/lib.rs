@@ -838,7 +838,7 @@ impl<W: Write> AnsiRenderer<W> {
             }
             for col in 0..screen.columns() {
                 let cell = screen.view_cell(scroll_offset, row_index, col);
-                // ADR-0004: continuation half is not painted; the lead wide glyph
+                // wide text: continuation half is not painted; the lead wide glyph
                 // already advanced the outer host by two columns.
                 if cell.wide_cont {
                     continue;
@@ -920,7 +920,7 @@ impl<W: Write> AnsiRenderer<W> {
             }
             for column in 0..screen.columns() {
                 let cell = screen.view_cell(0, row_index, column);
-                // ADR-0004: skip continuation half (lead wide glyph spans two cols).
+                // wide text: skip continuation half (lead wide glyph spans two cols).
                 if cell.wide_cont && composed_chars.is_none() {
                     continue;
                 }

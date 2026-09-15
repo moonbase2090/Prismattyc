@@ -84,20 +84,3 @@ termwright exec --socket "$SOCK" --method screen --params '{"format":"text"}'
 termwright exec --socket "$SOCK" --method screenshot | jq -r '.result.png_base64' | base64 -d > shot.png
 termwright exec --socket "$SOCK" --method close
 ```
-
-## For agents
-
-1. Build: `cargo build -p prismattyc --locked` (and `prismattyc-host` when touching windowed).
-2. Run: `./scripts/termwright-e2e.sh` — **must pass** before claiming host UX done.
-3. Open latest PNGs under `e2e/artifacts/` and reason about layout, colors, cursor, selection chrome.
-4. Prefer adding a new `e2e/*.yaml` over one-off scripts when a regression class is permanent.
-5. Do **not** claim windowed `prismattyc-host` is Termwright-validated; say “nested Termwright green; windowed unit/dogfood”.
-6. Teach by linking this file + `e2e/README.md` in review handoffs.
-
-## Upstream skill (optional)
-
-Vendor skill lives in the crates.io package:
-
-`~/.cargo/registry/src/*/termwright-0.2.0/skills/termwright-tui-testing/SKILL.md`
-
-Project copy of the agent contract: [e2e/README.md](../e2e/README.md).

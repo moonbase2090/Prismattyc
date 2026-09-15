@@ -564,7 +564,7 @@ pub enum ControlRequest {
     },
     /// Publish sticky mail attention for a pane.
     ///
-    /// Registered client identity (ADR-0009). Not a cell token. Not a lease.
+    /// Registered client identity (controller leases). Not a cell token. Not a lease.
     /// Idempotent on `(pane_id, queue_rev)`. `depth == 0` clears.
     MailAttentionSet {
         version: u16,
@@ -859,7 +859,7 @@ pub enum ControlRequest {
         request_id: u64,
         session_id: u64,
     },
-    /// Terminate the long-lived server (ADR-0008). Not detach.
+    /// Terminate the long-lived server (control protocol). Not detach.
     ShutdownServer {
         version: u16,
         request_id: u64,
@@ -885,7 +885,7 @@ pub enum ControlRequest {
         #[serde(default)]
         rows: Option<u32>,
     },
-    /// Destroy a window. Empty-session policy applies (ADR-0007).
+    /// Destroy a window. Empty-session policy applies (mux architecture).
     DestroyWindow {
         version: u16,
         request_id: u64,
@@ -1475,7 +1475,7 @@ pub enum ControlResponseData {
         window_id: u64,
         pane_id: u64,
     },
-    /// Server accepted termination; written before teardown (ADR-0008).
+    /// Server accepted termination; written before teardown (control protocol).
     ShutdownAccepted,
     /// Window create, destroy ack, or client-local switch result.
     Window {
@@ -6397,7 +6397,7 @@ impl ControlPlane {
     }
 
     /// Keep at most one `OutputActivity` per pane in the ring. Busy PTYs must not
-    /// evict topology events (ADR-0008 sequence is for mutations; activity is
+    /// evict topology events (control protocol sequence is for mutations; activity is
     /// a coalesced rising-edge hint — use `ReadPane` for content).
     fn emit_output_activity(
         &mut self,

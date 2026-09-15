@@ -26,7 +26,7 @@ Prismattyc is a Rust 2021 workspace. The minimum supported Rust version is
 | `docs/` | User guides, technical references, and test documentation. |
 | `scripts/` | Build, installation, packaging, and validation tools. |
 | `scripts/release/` | Linux release archive builder and installer. |
-| `demo/` | Native-window tests, performance probes, and demonstration tools. |
+| `tests/native/` | Automated native-window regression tests. |
 | `e2e/` | Terminal interaction tests and fixtures. |
 | `features/` | Acceptance scenarios. |
 | `terminfo/` | Terminal descriptions bundled with the emulator. |

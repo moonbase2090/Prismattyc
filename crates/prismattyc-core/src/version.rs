@@ -1,8 +1,4 @@
-//! Package version plus the git stamp from [`build.rs`](../build.rs).
-//!
-//! Workspace Cargo.toml was frozen at 0.1.1 with the classic claim, so
-//! `CARGO_PKG_VERSION` alone does not move when `prismattyc update`
-//! installs a new tip. The git hash does.
+//! Package version and the source revision captured at build time.
 
 /// Workspace package version (`CARGO_PKG_VERSION`).
 #[must_use]

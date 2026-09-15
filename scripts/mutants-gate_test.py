@@ -34,7 +34,7 @@ CRATES = [
 
 def mutant(
     summary: str,
-    file: str = "crates/demo/src/lib.rs",
+    file: str = "crates/tests/native/src/lib.rs",
     line: int = 10,
     function: str = "foo",
     replacement: str = "true",

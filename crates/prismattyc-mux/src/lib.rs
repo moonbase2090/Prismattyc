@@ -1,6 +1,6 @@
 //! Session, window, pane, and layout management for Prismattyc (Phase 2 / 2A).
 //!
-//! Architecture: `docs/architecture.md`; mux domain contract: ADR-0007.
+//! Architecture: `docs/architecture.md`; mux domain contract: mux architecture.
 //!
 //! This crate owns mux topology and the optional long-lived server runtime.
 //! Focus and active-tab selection remain **per-client** ([`ClientView`]); the

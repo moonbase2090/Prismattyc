@@ -1,7 +1,7 @@
 //! `pmux` — single front door for the Phase 2B mux (T1).
 //!
 //! Wraps the existing `pmuxd` / `pmux-attach` binaries and the
-//! ADR-0008 control plane behind tmux-shaped verbs:
+//! control protocol control plane behind tmux-shaped verbs:
 //!
 //! ```text
 //! pmux up [PROGRAM ARGS...]     start the server detached

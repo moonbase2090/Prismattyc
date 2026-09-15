@@ -5298,7 +5298,7 @@ pub fn rasterize_pane_chrome_with_theme(
     }
 }
 
-/// Pixel overlay AFTER the guest raster (ADR-0010). Does not steal a cell.
+/// Pixel overlay AFTER the guest raster (Space controls). Does not steal a cell.
 /// Lights for MailAttention `depth > 0`, including the focused pane.
 #[allow(clippy::too_many_arguments)]
 #[cfg(test)]
@@ -8681,7 +8681,7 @@ mod tests {
         let Ok(font) = FontMetrics::load_baked(16.0) else {
             return;
         };
-        let png = include_bytes!("../../../demo/parts/prismattyc-256.png");
+        let png = include_bytes!("../../../assets/brand/png/prismattyc-256.png");
         let b64 = b64_std(png);
         let cols = 24usize;
         let rows = 12usize;

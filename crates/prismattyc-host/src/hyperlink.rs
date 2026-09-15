@@ -51,7 +51,7 @@ pub fn is_open_url_click(modifiers: ModifiersState) -> bool {
     }
 }
 
-/// Hit + open-modifier owns the gesture. Otherwise ADR-0001 / ADR-0003 apply.
+/// Hit + open-modifier owns the gesture. Otherwise text selection / mouse input apply.
 pub fn click_owns_url(open_gesture: bool, hit: bool) -> bool {
     open_gesture && hit
 }
@@ -392,7 +392,7 @@ mod tests {
         );
         assert!(
             !click_owns_url(true, false),
-            "open-gesture miss defers to ADR-0001/0003"
+            "open-gesture miss defers to text selection/0003"
         );
         assert!(
             !click_owns_url(false, hit),

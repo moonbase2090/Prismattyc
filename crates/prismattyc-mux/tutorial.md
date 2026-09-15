@@ -260,8 +260,8 @@ Key invariants:
   stale discovery keys are stripped before the mux stamps its own.
 
 Read next: `docs/architecture.md`,
-`docs/adr/0007-phase2-mux-domain.md`, `docs/adr/0008-control-plane-v0.md`,
-`docs/adr/0011-long-lived-mux-server.md`.
+`docs/architecture.md`, `docs/control-plane.md`,
+`docs/architecture.md`.
 
 ## 6. Operations
 
@@ -288,7 +288,7 @@ Read next: `docs/hung-session-recovery.md` and `docs/update-and-restart.md`.
 - `docs/spaces.md` explains saved layouts and session ownership.
 - `docs/pane-write-protocol.md` explains programmatic input.
 - `docs/architecture.md` describes the server and clients.
-- `docs/adr/README.md` lists protocol and input contracts.
+- `docs/README.md` lists protocol and input contracts.
 
 ## Prove it
 

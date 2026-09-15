@@ -44,3 +44,7 @@ scripts/__pycache__/
 
 # Python test and packaging caches
 **/__pycache__/
+
+# Keep generated recordings out of source.
+*.mp4
+/demo/

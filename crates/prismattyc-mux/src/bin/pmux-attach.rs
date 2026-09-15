@@ -72,7 +72,7 @@ const SPACE_STAMP_INTERVAL: Duration = Duration::from_secs(1);
 /// Socket read/write budget for one attach control request.
 /// Hang-prevention for the TTY poll loop, not an operation SLA.
 /// Measured 2026-09-07 on this box: 200 Snapshot round-trips on a local
-/// pmuxd unix socket (same `Client::request` path `demo/spaces-e2e.sh` uses):
+/// pmuxd unix socket (same `Client::request` path `tests/native/spaces-e2e.sh` uses):
 /// p50 = 0.15 ms, p99 = 0.55 ms. 2 s is >3000× that p99 so a loaded host
 /// still returns before the attach poll (50 ms) looks wedged, without
 /// waiting SubscribePane's 7 s.

@@ -49,7 +49,7 @@ const SUBSCRIBE_READ_TIMEOUT: Duration = Duration::from_millis(SUBSCRIBE_TIMEOUT
 /// Socket read/write budget for one host attach control request.
 /// Hang-prevention, not an operation SLA.
 /// Measured 2026-09-07 on this box: 200 Snapshot round-trips on a local
-/// pmuxd unix socket (same `Client::request` path `demo/spaces-e2e.sh` uses):
+/// pmuxd unix socket (same `Client::request` path `tests/native/spaces-e2e.sh` uses):
 /// p50 = 0.15 ms, p99 = 0.55 ms. 2 s is >3000× that p99 so a loaded host
 /// still returns before the writer tick (100 ms) looks wedged, without
 /// waiting `SUBSCRIBE_READ_TIMEOUT`.

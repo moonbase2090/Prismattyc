@@ -688,7 +688,7 @@ impl Domain {
 
     /// Destroy a window and its panes. Removes from parent session.
     ///
-    /// **Default empty-session policy (ADR-0007):** when the session has no
+    /// **Default empty-session policy (mux architecture):** when the session has no
     /// windows left, the session is destroyed.
     pub fn destroy_window(&mut self, id: WindowId) -> Result<(), DomainError> {
         if !self.windows.contains_key(&id) {

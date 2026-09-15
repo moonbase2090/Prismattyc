@@ -39,7 +39,7 @@ proof. The Linux polish fixture uses a private D-Bus session, accessibility
 bus, registry, and display. It retains the native tree separately from PNGs.
 
 ```bash
-dbus-run-session -- python3 demo/polish-e2e.py --bins target/debug \
+dbus-run-session -- python3 tests/native/polish-e2e.py --bins target/debug \
   --out build/polish/accessibility-check --atspi-only
 ```
 

@@ -218,11 +218,11 @@ pub struct ConfigFile {
     #[serde(default)]
     pub mux: Option<prismattyc_mux::MuxSection>,
     /// `[keys]`: host action name → chord string or array of chord strings
-    /// (ADR-0015). Validated by [`load`]; an entry replaces that action's
+    /// (keybindings). Validated by [`load`]; an entry replaces that action's
     /// default chords. See `crate::keybind`.
     #[serde(default)]
     pub keys: Option<std::collections::BTreeMap<String, crate::keybind::KeysValue>>,
-    /// `[a11y]` (ADR-0016). Defaults on when the table is absent.
+    /// `[a11y]` (accessibility). Defaults on when the table is absent.
     #[serde(default)]
     pub a11y: Option<A11ySection>,
     /// `[theme_overrides]` (PT-207). Recolours keys of the named theme;
@@ -274,7 +274,7 @@ impl ConfigFile {
         self.splash.unwrap_or(true)
     }
 
-    /// ADR-0016: AccessKit registration. Default on.
+    /// accessibility: AccessKit registration. Default on.
     pub fn a11y_os_tree(&self) -> bool {
         self.a11y
             .as_ref()
@@ -282,7 +282,7 @@ impl ConfigFile {
             .unwrap_or(true)
     }
 
-    /// ADR-0016: live-region speech. Default on.
+    /// accessibility: live-region speech. Default on.
     pub fn a11y_announce(&self) -> bool {
         self.a11y
             .as_ref()

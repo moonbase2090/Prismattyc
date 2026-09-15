@@ -600,7 +600,7 @@ file is missing. It does not parse the file before opening the editor, so you
 can repair malformed TOML.
 
 ```toml
-# Host keybindings (ADR-0015). Each entry replaces that action's default
+# Host keybindings (keybindings). Each entry replaces that action's default
 # chords; list aliases explicitly; [] unbinds. Chord = mod+...+key with
 # ctrl, shift, alt, super (cmd/meta/win) and a key: a letter, digit,
 # punctuation (`\` `-` `=` `[` `]` `;` `'` `,` `.` `/` or spelled: backslash,

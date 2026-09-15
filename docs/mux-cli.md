@@ -1,7 +1,7 @@
 # pmux — the mux front door
 
 One binary to remember for the Phase 2B mux. It wraps `pmuxd`,
-`pmux-attach`, and the ADR-0008 control plane behind tmux-shaped verbs.
+`pmux-attach`, and the control protocol control plane behind tmux-shaped verbs.
 
 ## Glossary
 
@@ -1011,7 +1011,7 @@ false`. A non-TTY `new` still creates and prints the attach hint unless
 or NESTED (inside the pane child tree). `kick SESSION` SIGTERMs nested
 attaches if any, otherwise viewers; it never calls DestroySession and
 never signals the pane child. Create/destroy/move/switch window verbs are
-on the control plane (ADR-0008); the umbrella CLI still creates
+on the control plane (control protocol); the umbrella CLI still creates
 sessions via `new` and lists whatever windows the server has.
 `scripts/prismattyc-mux-daemon.sh` is now a thin compat wrapper over this
 binary (`start` → `up`).

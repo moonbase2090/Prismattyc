@@ -1,16 +1,9 @@
-# Hybrid rendering rules — v0 freeze
+# Hybrid rendering rules
 
-**Status:** Phase 0 design freeze. Binding for implementation until a
-superseding ADR or PRD amendment. The Phase 3 wire/paint encoding this
-freeze deferred is now scoped by [ADR-0013](adr/0013-rich-surface-v1.md)
-(entry). Reserved-row workspaces and rich v2 ownership are superseded by
-[ADR-0014](adr/0014-rich-surface-v2-fabric.md); the v0 rules remain binding for
-cell rectangles, viewport overlays, and protocol `0.1`/`0.2`.
-**Kind:** Product composition rules for classic grid + opt-in rich layer.
-**Not:** a rich paint protocol, wire encoder, or GPU backend.
-
-Related: [capability negotiation](capability-protocol.md) and
-[architecture](architecture.md).
+Rich content shares a pane with the terminal grid. These rules describe
+composition, focus, fallback, and resource limits. See the [rich surface
+protocol](rich-surface.md) for reserved rows and [capability discovery](capability-protocol.md)
+for the optional features applications can request.
 
 ## Invariants
 
@@ -28,7 +21,7 @@ Related: [capability negotiation](capability-protocol.md) and
 
 ## Layers and z-order (primary screen)
 
-Bottom → top within a **single pane** (unambiguous freeze):
+Bottom → top within a **single pane** (paint order):
 
 | Z | Layer | Owner | Notes |
 |---|-------|--------|-------|
@@ -63,9 +56,6 @@ behavior, once implemented in the fidelity matrix):
 | Cursor / selection | Same one-caret and grid-native defaults on the alternate grid |
 | Exit alt-screen | **Destroy** all alt-scoped attachments; **resume** preserved primary attachment state (same IDs/geometry policy as before enter); repaint primary |
 
-**v0 implementation note:** Spike Baseline v0 allowlists missing child alt-screen
-modeling. These rules apply when alt-screen lands; they do not expand Phase 0A
-fixtures.
 
 ## Attachment model (frozen first kinds)
 
@@ -75,7 +65,7 @@ fixtures.
 | Viewport overlay | `hybrid.overlay.viewport` | Viewport-local rectangle (cell or pixel later) | Fixed to visible viewport | Claims pointer only if `pointer=claim` |
 
 **Deferred (not frozen):** line-relative sticky anchors, full-pane rich-primary
-takeover, multi-pane shared surfaces. ADR-0014 separately freezes a top
+takeover, multi-pane shared surfaces. The rich surface protocol defines a top
 reserved-row workspace that shrinks the guest grid; it is not either attachment
 kind in this table.
 
@@ -128,7 +118,7 @@ App                         Host
 | Selection vs caret | Selection is z3 (above app content, below caret); does not transfer keyboard focus |
 
 **Phase note:** basic grid selection/copy product acceptance is **Phase 1**
-(PRD US-2). This freeze defines the hybrid policy so Phase 1 and 0B do not invent
+This reference defines the hybrid policy so renderers do not invent
 conflicting rules.
 
 ## Mouse and keyboard focus
@@ -166,7 +156,7 @@ complexity. Classic text remains the durable recovery surface.
 
 ## Damage and performance
 
-| Path | Budget intent (no numeric SLO yet — PRD T-5) |
+| Path | Budget intent (no numeric SLO) |
 |------|-----------------------------------------------|
 | Classic-only pane | No rich allocations; damage = cell dirty rects; idle path is PTY + parse + grid |
 | Classic with empty rich handle | One null check per frame/path that could paint rich |
@@ -206,8 +196,7 @@ host-authoritative after the resize.
 - Screen-reader / accessibility trees for rich content are **not** frozen here.
 - **Required classic guarantee:** the grid's plain-text rows remain a usable
   textual representation of the session for tools that only see cells.
-- Rich-only information without a classic textual fallback violates PRD US-3 /
-  capability fallback rules for any spike that claims a user task.
+- Rich-only information without a classic textual fallback violates the capability fallback rules.
 
 ## Image protocols (Sixel / Kitty graphics)
 

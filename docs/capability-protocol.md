@@ -1,4 +1,4 @@
-# Capability protocol — first cut
+# Capability discovery protocol
 
 How applications discover Prismattyc's opt-in rich features without changing the
 classic terminal path.
@@ -7,7 +7,7 @@ classic terminal path.
 semantic identifiers below are stable enough to implement. Rich rendering
 commands are deliberately out of scope. Protocol `0.3` capability families,
 limits, and compatibility fixtures are frozen separately by
-[ADR-0014](adr/0014-rich-surface-v2-fabric.md); this document remains the
+[rich surfaces](rich-surface.md); this document remains the
 binding envelope and `0.1`/`0.2` compatibility contract.
 
 Related: [architecture.md](architecture.md),
@@ -104,7 +104,7 @@ names, for example `limit.regions=64`. No limit key is frozen in this cut.
 
 ## Implemented protocol 0.3 slice
 
-ADR-0014 freezes the complete 0.3 registry and eventual canonical capability
+rich surfaces freezes the complete 0.3 registry and eventual canonical capability
 fixture. Implementations advertise features incrementally: registry membership
 does not imply a grant. through implement and advertise this
 bounded subset:
@@ -121,7 +121,7 @@ bounded subset:
 | `rich.status.v1` | Static themed badge, determinate/indeterminate meter, and bounded sparkline layer |
 
 The reply also retains `hybrid.attach.cell_rect`,
-`hybrid.overlay.viewport`, and `input.rich_focus`. It advertises the ADR-0014
+`hybrid.overlay.viewport`, and `input.rich_focus`. It advertises the rich surfaces
 numeric bounds so independently granted families cannot silently expand
 resource use. `markup`, `style`, `animation`, and `canvas` remain
 unadvertised.
@@ -189,7 +189,7 @@ Therefore:
 - Fuzz the eventual decoder and test fragmented input across arbitrary byte
   boundaries before enabling replies by default.
 
-## Rust type plan
+## Rust types
 
 `prismattyc-protocol` owns dependency-light semantic types:
 
@@ -203,17 +203,5 @@ The emulator owns streaming escape recognition but hands a bounded APC body to
 `prismattyc-protocol` for decoding. The protocol crate must not depend on the screen,
 renderer, mux, PTY, or a rich document model.
 
-Encoding/decoding and rich command types land only with tests for malformed,
-fragmented, oversized, and unknown-field input. freezes the envelope and
-semantic types; it does not enable rich mode.
-
-## Acceptance evidence
-
-- [x] Query/reply envelope and namespace selected.
-- [x] Version and feature semantics defined.
-- [x] Classic fallback and tmux limitation explicit.
-- [x] Parser bounds and failure behavior specified.
-- [x] Initial dependency-light Rust types implemented in `prismattyc-protocol`.
-- [x] Bounded body encoder/decoder + APC sidecar collector (Phase 0B; adversarial unit tests).
-- [x] Decoder fuzz corpus / adversarial suite (transport-matrix harness is).
-- [x] xterm, tmux, and another emulator compatibility harness (matrix recorded; T2–T7 inconclusive where the environment was not reproduced — **not** a PRD §5.6 pass).
+The decoder tests cover malformed, fragmented, oversized, and unknown-field
+input. Capability discovery does not itself enable rich mode.

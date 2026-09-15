@@ -24,7 +24,7 @@ For terminal input or rendering changes, also run:
 ```
 
 Inspect the generated PNG files under `e2e/artifacts/`. Desktop-window
-changes also need the relevant native fixture under `demo/`; Termwright
+changes also need the relevant native fixture under `tests/native/`; Termwright
 runs the nested terminal, not the desktop application.
 
 See [test requirements](docs/testing-policy.md),

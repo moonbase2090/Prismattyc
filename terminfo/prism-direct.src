@@ -12,7 +12,7 @@
 # Advertising those is the failure mode.
 #
 # Extra user capabilities are only Kitty-shaped bits Prism actually handles:
-#   fullkbd     — CSI-u keyboard (ADR-0005 / F19)
+#   fullkbd     — CSI-u keyboard (keyboard encoding / F19)
 #   Tc          — 24-bit color boolean (F10); COLORTERM=truecolor still set
 #   setrgbf/b   — ISO-colon RGB (F10)
 #   BE/BD/PS/PE — bracketed paste DECSET 2004 (F11)

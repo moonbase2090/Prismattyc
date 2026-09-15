@@ -161,7 +161,7 @@ pub(crate) enum DetachView {
     ExitHost,
 }
 
-/// Compact per-tab strip model for the windowed host (ADR-0012).
+/// Compact per-tab strip model for the windowed host (tab controls).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TabInfo {
     pub title: String,
@@ -1314,7 +1314,7 @@ impl PaneRuntime {
 
     /// Feed replica bytes. Terminal replies (DSR/CPR/DA) are taken so they
     /// cannot accumulate and **dropped**: only the PTY owner answers them
-    /// (`docs/adr/0011-long-lived-mux-server.md`).
+    /// (`docs/architecture.md`).
     fn feed_replica(&mut self, bytes: &[u8]) {
         let _ = self.emulator.feed(bytes);
         let _ = self.emulator.take_pending_replies();
@@ -1583,7 +1583,7 @@ pub(crate) struct MuxRuntime {
     pending_attentions: Vec<(PaneId, String)>,
     /// Log-backed writer-death toasts since the last [`Self::take_pending_toasts`].
     pending_toasts: Vec<(PaneId, String)>,
-    /// Client-local zoom (ADR-0007: a view projection, never a topology
+    /// Client-local zoom (mux architecture: a view projection, never a topology
     /// mutation). While set, the pane takes the whole window of the tab that
     /// owns it and its siblings keep their PTY sizes untouched in the tree.
     zoomed: Option<PaneId>,
@@ -3609,7 +3609,7 @@ impl MuxRuntime {
         self.move_pane_to_window(self.focused_id(), dest)
     }
 
-    /// Move `pane` onto `dest`. Identity is preserved (ADR-0008).
+    /// Move `pane` onto `dest`. Identity is preserved (control protocol).
     pub(crate) fn move_pane_to_window(&mut self, pane: PaneId, dest: WindowId) -> Result<bool> {
         let Some(src) = self
             .domain
@@ -3828,7 +3828,7 @@ fn ranges_overlap(a_start: usize, a_end: usize, b_start: usize, b_end: usize) ->
 
 /// Visible rects for `window`. A `zoomed` pane that lives in `window`
 /// projects as a single leaf over the whole area; the split tree in the
-/// domain is not consulted for its siblings (ADR-0007 zoom-as-view).
+/// domain is not consulted for its siblings (mux architecture zoom-as-view).
 /// Bounding cells of every leaf under `layout`, from the live rects.
 fn subtree_bounds(layout: &PaneLayout, rects: &HashMap<PaneId, CellRect>) -> Option<CellRect> {
     let mut acc: Option<(usize, usize, usize, usize)> = None;

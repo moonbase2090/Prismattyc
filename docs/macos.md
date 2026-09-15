@@ -73,7 +73,7 @@ Run these checks in a logged-in macOS desktop session.
    Use a new output directory for each run.
 
    ```bash
-   python3 demo/macos-alpha-e2e.py --bins target/debug --out build/macos-alpha-check
+   python3 tests/native/macos-alpha-e2e.py --bins target/debug --out build/macos-alpha-check
    ```
 
 The private-session fixture saves CPU framebuffer captures. It checks that
@@ -196,18 +196,14 @@ Entitlements: the hardened runtime does not block `fork`/`exec` or PTY use, so
 Prismattyc needs no special entitlement for child processes. Add entitlements only
 for JIT or unsigned executable memory, which Prismattyc does not use.
 
-CI note: notarization needs the certificate and secrets in the runner. The
-`macos-latest` job stays out of scope (billing + Apple SDK) until distribution
-starts.
+## Validate a source build
 
-## Dogfood
-
-On a Mac with the same Rust MSRV (1.90):
+On a Mac with Rust 1.90 or newer, run:
 
 ```bash
-cargo test --workspace --locked
+cargo test --workspace --locked -- --test-threads=1
 cargo run -p prismattyc-host --locked
 ```
 
-Mux stop/up should refuse to signal a recycled pid using argv (not inode).
-Report gaps in rather than widening the classic claim.
+Use the native checks in [the native test guide](../tests/native/README.md) to verify
+window rendering and restart behavior.

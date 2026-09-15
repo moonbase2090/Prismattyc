@@ -1,6 +1,6 @@
 # Rich surface v2 design fixtures
 
-These fixtures are normative inputs from ADR-0014. freezes decisions; it
+These fixtures are normative inputs from rich surfaces. freezes decisions; it
 does not advertise or implement protocol `0.3`.
 
 - `compat-wire.tsv` locks the exact existing `0.1` and `0.2` query/reply bytes.

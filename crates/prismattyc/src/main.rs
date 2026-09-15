@@ -240,7 +240,7 @@ fn main() -> Result<()> {
                             drain_emulator_replies(&mut emulator, &to_child_tx);
                         }
                         // Drop host selection when the grid under it may have changed
-                        // (ADR-0001: child output invalidates finished ranges).
+                        // (text selection: child output invalidates finished ranges).
                         // Mid-drag (`active` + anchor) is kept so continuous echo
                         // does not thrash highlight every put_char restarts
                         // if a clear still wipes the anchor.
@@ -695,7 +695,7 @@ fn handle_host_key(
 
 /// Host keys: selection shortcuts stay local; other keys forward to the child.
 ///
-/// Policy: `docs/adr/0001-host-selection-clipboard.md` (clean-room; original code).
+/// Policy: `docs/input.md` (clean-room; original code).
 /// Returns whether a repaint is needed.
 #[allow(clippy::too_many_arguments)]
 fn handle_host_key_with_pending(
@@ -776,7 +776,7 @@ fn handle_host_key_with_pending(
     // Host clipboard / selection ownership **before** jump-to-live.
     // While scrolled, clearing view_scroll first used to drop multi-cell history
     // selections and forward Ctrl+C as ETX (dual-sign review FAIL @ 5f5cd42;
-    // README + ADR-0001 D-H3/D-H4). Preserve scroll for extract_text_view.
+    // README + text selection D-H3/D-H4). Preserve scroll for extract_text_view.
     //
     // Copy → OSC 52 to the *host* terminal (Kitty/Ghostty clipboard).
     // - Ctrl+Shift+C: classic terminal copy chord (when the outer host delivers it).
@@ -836,7 +836,7 @@ fn handle_host_key_with_pending(
     }
 
     // Grow selection: Shift+motion always; plain motion while select mode is on.
-    // Motion includes arrows, Home/End, PageUp/PageDown (ADR-0001 D-H2).
+    // Motion includes arrows, Home/End, PageUp/PageDown (text selection D-H2).
     if is_selection_motion(key, *keyboard_select_mode) {
         *keyboard_select_mode = true;
         let result = extend_selection_keyboard(selection, emulator, key.code, view_scroll);
@@ -892,7 +892,7 @@ fn is_scrollback_key(key: KeyEvent) -> bool {
     }
 }
 
-/// ADR-0001 clear-on-output: drop finished ranges / select-mode when the child
+/// text selection clear-on-output: drop finished ranges / select-mode when the child
 /// mutates the grid. Keep an in-progress mouse drag so flood echo does not
 /// thrash highlight every `put_char` (still restarts via if cleared).
 fn should_clear_selection_on_child_output(
@@ -1133,7 +1133,7 @@ fn is_copy_chord(key: KeyEvent, has_selection: bool) -> bool {
     has_selection && !key.modifiers.contains(KeyModifiers::ALT)
 }
 
-/// Whether Ctrl+C should copy rather than interrupt (ADR-0001 D-H4).
+/// Whether Ctrl+C should copy rather than interrupt (text selection D-H4).
 ///
 /// A pure one-cell mark from Ctrl+Space (`dragged` with anchor == free end) is
 /// paintable for inverse chrome but does **not** count as a copyable selection
@@ -1146,7 +1146,7 @@ fn selection_claims_ctrl_c(selection: &Selection) -> bool {
     range.start_row != range.end_row || range.start_col != range.end_col
 }
 
-/// Ctrl+Shift+A — select entire viewport (ADR-0001 D-H2). Not plain Ctrl+A.
+/// Ctrl+Shift+A — select entire viewport (text selection D-H2). Not plain Ctrl+A.
 fn is_select_all_chord(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL)
         && key.modifiers.contains(KeyModifiers::SHIFT)
@@ -1407,7 +1407,7 @@ enum PasteEnqueueResult {
 /// the entire clipboard payload. Key bursts use a separate coalesced message
 /// and budget; their ordering is flushed at every non-key boundary. On
 /// `Partial`/`Dropped`, ring BEL on the outer host so the failure is user-visible
-/// (ADR-0001 paste path). Never blocks forever.
+/// (text selection paste path). Never blocks forever.
 /// `normalize_paste_text` truncates to MAX_PASTE_BYTES before scanning.
 fn handle_paste(
     text: &str,
@@ -1519,7 +1519,7 @@ fn signal_child_enqueue_failure() {
     let _ = out.flush();
 }
 
-/// Multi-click detector for word/line select (ADR-0001 D-H2). Original logic.
+/// Multi-click detector for word/line select (text selection D-H2). Original logic.
 #[derive(Debug, Default)]
 struct MultiClick {
     last_at: Option<std::time::Instant>,
@@ -1555,7 +1555,7 @@ impl MultiClick {
     }
 }
 
-/// Host mouse with hybrid app reporting (ADR-0003).
+/// Host mouse with hybrid app reporting (mouse input).
 ///
 /// - App tracking **off** → host selection / scrollback pan (ADR-0002 path).
 /// - Tracking **on** + **Shift** → host selection (and Shift+wheel page pan).
@@ -1574,13 +1574,13 @@ fn handle_mouse(
     let tracking = emulator.mouse_tracking();
     let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
 
-    // ADR-0003: plain mouse while tracking is on → application report, not host
+    // mouse input: plain mouse while tracking is on → application report, not host
     // selection. Shift keeps the host path (including on alt screen).
     if tracking.is_on() && !shift {
         edge_pan.clear();
         if let Some(report) = encode_mouse_report(mouse, emulator) {
             // Drop host selection chrome so plain app clicks do not leave a
-            // sticky range that would steal Ctrl+C (ADR-0001).
+            // sticky range that would steal Ctrl+C (text selection).
             let had = selection.range().is_some()
                 || selection.active
                 || selection.dragged
@@ -1599,7 +1599,7 @@ fn handle_mouse(
     }
 
     // Host path: tracking off, or Shift override while tracking is on.
-    // Alt screen: refuse host selection unless Shift hybrid override (ADR-0003).
+    // Alt screen: refuse host selection unless Shift hybrid override (mouse input).
     // Wheel does not pan primary history while alt is active.
     if emulator.screen().alt_active() && !shift {
         edge_pan.clear();
@@ -1735,7 +1735,7 @@ fn handle_mouse(
     }
 }
 
-/// Encode a crossterm mouse event as an application mouse report (ADR-0003).
+/// Encode a crossterm mouse event as an application mouse report (mouse input).
 ///
 /// Returns `None` when tracking is off or the event is filtered by tracking level.
 fn encode_mouse_report(mouse: MouseEvent, emulator: &Emulator) -> Option<Vec<u8>> {
@@ -4801,7 +4801,7 @@ mod tests {
         assert!(!selection.dragged || selection.active);
     }
 
-    /// ADR-0003: SGR left-down at (col=2,row=0) → CSI < 0 ; 3 ; 1 M (1-based).
+    /// mouse input: SGR left-down at (col=2,row=0) → CSI < 0 ; 3 ; 1 M (1-based).
     #[test]
     fn encode_mouse_report_sgr_left_down() {
         let mut emulator = Emulator::new(80, 24, 0);
@@ -4875,7 +4875,7 @@ mod tests {
         assert_eq!(bytes, vec![0x1b, b'[', b'M', 32, 33, 33]);
     }
 
-    /// ADR-0003 hybrid: tracking on + plain click → child SGR, no host selection.
+    /// mouse input hybrid: tracking on + plain click → child SGR, no host selection.
     #[test]
     fn hybrid_plain_click_forwards_sgr_not_selection() {
         let mut emulator = Emulator::new(20, 5, 0);
@@ -4905,7 +4905,7 @@ mod tests {
         assert_eq!(&*bytes, b"\x1b[<0;4;2M");
     }
 
-    /// ADR-0003 hybrid: Shift+drag while tracking on → host selection, no report.
+    /// mouse input hybrid: Shift+drag while tracking on → host selection, no report.
     #[test]
     fn hybrid_shift_drag_selects_host_not_app() {
         let mut emulator = Emulator::new(20, 5, 0);
@@ -4960,7 +4960,7 @@ mod tests {
         );
     }
 
-    /// ADR-0003: alt + tracking + plain → SGR to child (vim path).
+    /// mouse input: alt + tracking + plain → SGR to child (vim path).
     #[test]
     fn hybrid_alt_plain_click_forwards_sgr() {
         let mut emulator = Emulator::new(20, 5, 0);
@@ -5051,7 +5051,7 @@ mod tests {
         assert_eq!(selection.cursor.map(|c| c.row), Some(expected));
     }
 
-    /// ADR-0003: tracking on + plain wheel → app report, not host pan.
+    /// mouse input: tracking on + plain wheel → app report, not host pan.
     #[test]
     fn hybrid_plain_wheel_forwards_not_scroll_view() {
         let mut emulator = Emulator::new(8, 3, 100);

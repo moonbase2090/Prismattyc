@@ -71,7 +71,7 @@ pub fn pty_size_with_cell_pixels(cols: usize, rows: usize, cell_w: u32, cell_h: 
 /// Application mouse tracking level (DECSET 1000 / 1002 / 1003).
 ///
 /// Highest enabled level wins: [`Any`](Self::Any) > [`Drag`](Self::Drag) >
-/// [`Click`](Self::Click) > [`Off`](Self::Off). See ADR-0003.
+/// [`Click`](Self::Click) > [`Off`](Self::Off). See mouse input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MouseTracking {
     /// No 1000/1002/1003 enabled — host owns mouse (selection / scroll).
@@ -101,7 +101,7 @@ impl MouseTracking {
     }
 }
 
-/// Stored DECSET mouse flags (ADR-0003). Not a full xterm mode table.
+/// Stored DECSET mouse flags (mouse input). Not a full xterm mode table.
 #[derive(Debug, Clone, Copy, Default)]
 struct MouseModeFlags {
     /// DECSET 1000 click tracking.
@@ -367,7 +367,7 @@ pub struct Emulator {
     cursor_visible: bool,
     /// Child cursor shape (DECSCUSR `CSI Ps SP q`). Default block.
     cursor_shape: CursorShape,
-    /// Application mouse tracking / SGR flags (ADR-0003).
+    /// Application mouse tracking / SGR flags (mouse input).
     mouse: MouseModeFlags,
     /// Focus in/out reporting (DECSET `?1004`). Host sends CSI I / CSI O.
     focus_report: bool,
@@ -589,7 +589,7 @@ impl Emulator {
         self.cursor_shape
     }
 
-    /// Highest enabled application mouse tracking level (ADR-0003).
+    /// Highest enabled application mouse tracking level (mouse input).
     pub const fn mouse_tracking(&self) -> MouseTracking {
         self.mouse.tracking()
     }
@@ -599,7 +599,7 @@ impl Emulator {
         self.mouse.sgr
     }
 
-    /// Prismattyc-private wheel-only reporting (DECSET `?7700` / ADR-0003 addendum).
+    /// Prismattyc-private wheel-only reporting (DECSET `?7700` / mouse input addendum).
     ///
     /// Does not change [`mouse_tracking`] — 1000/1002/1003 still own press/drag.
     pub const fn mouse_wheel_only(&self) -> bool {
@@ -1158,7 +1158,7 @@ impl Perform for ScreenPerformer<'_> {
                 }
                 self.screen.ris_reset();
                 *self.bracketed_paste = false;
-                // ADR-0003: RIS clears application mouse modes.
+                // mouse input: RIS clears application mouse modes.
                 self.mouse.clear();
                 *self.focus_report = false;
                 // DECTCEM defaults to visible after RIS. DECSCUSR → block.
@@ -1277,7 +1277,7 @@ fn apply_private_mode(
             7 => screen.set_autowrap(enable),
             // Focus in/out reporting: host sends CSI I / CSI O when enabled.
             1004 => *focus_report = enable,
-            // Application mouse tracking (ADR-0003 hybrid). Flags are independent;
+            // Application mouse tracking (mouse input hybrid). Flags are independent;
             // host routes via highest enabled level. 1005/1015/1016 encodings are
             // accepted but not implemented — SGR (1006) or legacy X10 is used.
             1000 => mouse.m1000 = enable,
@@ -1477,7 +1477,7 @@ fn apply_sgr(screen: &mut Screen, params: &Params) {
 ///
 /// Why not a narrower well-known name (`vt100`, `ansi`)?
 /// - The published matrix claims **256-color + truecolor SGR (F10)**, **alt
-///   screen (F4)**, **DECSTBM (F5)**, and **hybrid mouse (F13 / ADR-0003)**.
+///   screen (F4)**, **DECSTBM (F5)**, and **hybrid mouse (F13 / mouse input)**.
 ///   Those map to the common `xterm-256color` feature set better than
 ///   `vt100`/`ansi`.
 /// - Bundled `prism-256color` (`use=xterm-256color`) rebrands that baseline
@@ -2388,7 +2388,7 @@ mod tests {
         assert!(!emulator.bracketed_paste());
     }
 
-    /// ADR-0003: DECSET 1000/1002/1003/1006 are stored; highest tracking wins.
+    /// mouse input: DECSET 1000/1002/1003/1006 are stored; highest tracking wins.
     #[test]
     fn app_mouse_private_modes_are_tracked() {
         let mut emulator = Emulator::new(40, 10, 0);
@@ -2574,7 +2574,7 @@ mod tests {
         assert_eq!(emulator.mouse_tracking(), MouseTracking::Click);
         assert!(
             emulator.mouse_sgr(),
-            "DECSTR keeps mouse (ADR-0003 soft path)"
+            "DECSTR keeps mouse (mouse input soft path)"
         );
         assert!(
             emulator.bracketed_paste(),

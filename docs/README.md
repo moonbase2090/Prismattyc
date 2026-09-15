@@ -27,7 +27,9 @@ Start with the [README](../README.md) for installation and basic use.
 | [Transport compatibility](capability-transport-matrix.md) | Protocol versions and transport behavior. |
 | [Rendering](rendering.md) | Presentation backends and transparency. |
 | [Architecture](architecture.md) | Components, process ownership, and data flow. |
-| [Technical references](adr/README.md) | Detailed terminal, input, and protocol contracts. |
+| [Terminal input](input.md) | Selection, mouse input, wide text, and keyboard encoding. |
+| [Control protocol](control-plane.md) | Local mux socket messages and ownership. |
+| [Rich surface protocol](rich-surface.md) | Optional surface geometry, limits, and revisions. |
 
 ## Build and test
 

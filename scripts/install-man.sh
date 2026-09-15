@@ -68,7 +68,7 @@ for name in prismattyc prismattyc-host pmux pmuxd pmux-attach pmux-mcp; do
     extra+=(--include "$REPO_DIR/docs/man/pmux.inc")
   fi
   if ! help2man --no-info --no-discard-stderr --name "Prismattyc $name command interface" \
-    "${extra[@]}" --output "$MAN_TMP/$name.1" "$binary"; then
+    ${extra[@]+"${extra[@]}"} --output "$MAN_TMP/$name.1" "$binary"; then
     echo "install-man: could not render $name; skipping." >&2
     continue
   fi

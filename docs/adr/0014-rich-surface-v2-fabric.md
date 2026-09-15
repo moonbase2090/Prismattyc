@@ -5,7 +5,6 @@
 **Supersedes:** ADR-0013 for protocol `0.3` and later
 **Preserves:** protocol `0.1` and `0.2` byte behavior; classic-grid P0 priority;
 query-before-emit
-**Plan:** [Rich TUI next phase](../rich-tui-next-phase.md)
 **Fixtures:** [`rich-surface-v2`](../fixtures/rich-surface-v2/README.md)
 
 ## Context

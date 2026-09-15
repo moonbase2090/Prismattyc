@@ -57,7 +57,7 @@ pub const PMUX_SOCKET: &str = "PMUX_SOCKET";
 /// instead of a separate registration.
 pub const PMUX_AGENT: &str = "PMUX_AGENT";
 /// VectorVault tutorial pack manifest for this mux. Always stamped so an
-/// agent that joins a session inherits the tutorial (`docs/agents.md`).
+/// agent that joins a session inherits the tutorial (`crates/prismattyc-mux/tutorial.md`).
 pub const PMUX_TUTORIAL_PACK: &str = "PMUX_TUTORIAL_PACK";
 /// Manifest task id the tutorial pack resolves through.
 pub(crate) const TUTORIAL_PACK_MANIFEST: &str = "prismattyc-tutorial-pack";

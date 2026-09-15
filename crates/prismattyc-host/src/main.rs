@@ -2854,7 +2854,7 @@ impl App {
             #[cfg(not(feature = "gpu"))]
             bail!(
                 "prismattyc-host --gpu requires a build with --features gpu \
-                 (softbuffer remains the default present path; see docs/gpu-spike.md)"
+                 (CPU rendering remains the default; see docs/rendering.md)"
             );
         }
         let window = Arc::new(event_loop.create_window(attrs)?);

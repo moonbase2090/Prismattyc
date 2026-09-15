@@ -1,6 +1,6 @@
 //! Session, window, pane, and layout management for Prismattyc (Phase 2 / 2A).
 //!
-//! Product freezes: [PRD §2.8](../../docs/PRD.md), [ADR-0007](../../docs/adr/0007-phase2-mux-domain.md).
+//! Architecture: `docs/architecture.md`; mux domain contract: ADR-0007.
 //!
 //! This crate owns mux topology and the optional long-lived server runtime.
 //! Focus and active-tab selection remain **per-client** ([`ClientView`]); the

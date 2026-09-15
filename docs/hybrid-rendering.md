@@ -9,9 +9,8 @@ cell rectangles, viewport overlays, and protocol `0.1`/`0.2`.
 **Kind:** Product composition rules for classic grid + opt-in rich layer.
 **Not:** a rich paint protocol, wire encoder, or GPU backend.
 
-Related: [PRD.md](PRD.md) I-14…I-17, [decisions-v0.md](decisions-v0.md) D5,
-[capability-protocol.md](capability-protocol.md),
-[spike-baseline-v0.md](spike-baseline-v0.md), [architecture.md](architecture.md).
+Related: [capability negotiation](capability-protocol.md) and
+[architecture](architecture.md).
 
 ## Invariants
 
@@ -234,18 +233,3 @@ From [capability-protocol.md](capability-protocol.md):
 - Forcing existing TUI toolkits to rewrite for classic workloads.
 - Making the classic grid a façade over a browser compositor.
 - Freezing wire paint opcodes (Phase 3 / experimental 0B).
-
-## Acceptance
-
-- [x] Cursor, selection, mouse, and focus rules for classic-only, hybrid passive,
-      rich focus, and alternate-screen posture.
-- [x] Resize sequence for cell-rect attachments.
-- [x] Classic-only / empty-rich performance posture (category-level; no fake SLOs).
-- [x] Capability feature ids cross-linked.
-- [x] Scrollback policy for live rich vs deferred frozen snapshots.
-- [x] Explicit non-goals and failure isolation.
-
-## Supersedes
-
-This freeze **deepens** decisions-v0 D5. Open questions from the prior draft sketch
-are closed as above or explicitly deferred.

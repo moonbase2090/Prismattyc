@@ -100,8 +100,7 @@ snapshot**:
   `through_seq`. The host repaints from the snapshot with cursor addressing
   and tails from `through_seq`.
 - The replica is a read replica. It never forwards `take_pending_replies()`:
-  DSR/CPR/DA answers belong to the PTY owner
-  ([pane-event-log-spike.md](../pane-event-log-spike.md) §2).
+  DSR/CPR/DA answers belong to the PTY owner.
 - The server is still the single writer and the single PTY owner. Nothing
   about pane ownership, leases, or lifetime moves.
 

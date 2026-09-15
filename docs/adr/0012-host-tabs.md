@@ -4,7 +4,7 @@
 per-tab close glyph, middle-click close, child-exit cascade, rail insets,
 title-icon scaling, and session-ended placeholders on attach panes)
 **Date:** 2026-08-13
-**Depends on:** ADR-0007; ADR-0010; [tabs-design.md](../tabs-design.md);
+**Depends on:** ADR-0007; ADR-0010;
 ADR-0008 (`RenameWindow`)
 **Supersedes:** ADR-0010 “Out of scope — Full multi-window/tab creation and
 switching”
@@ -21,8 +21,7 @@ only the OS title and per-pane badges.
 
 ### Window is the tab
 
-No new grouping layer. Frozen in ADR-0007 and the spike conclusion in
-[tabs-design.md](../tabs-design.md).
+A `Window` is a tab, as defined in [ADR-0007](0007-phase2-mux-domain.md).
 
 ### Chrome
 

@@ -19,12 +19,13 @@ use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
 use crate::frame_damage::{FrameDamage, PixelRect};
+use crate::pixel_alpha::premultiply_in_place;
 use crate::present_tiles::{copy_tile, damaged_tiles, tiles};
-use crate::raster::premultiply_in_place;
 
 pub struct MacPresent {
     layer: Retained<CALayer>,
     root_layer: Retained<CALayer>,
+    view: Retained<NSView>,
     color_space: CFRetained<CGColorSpace>,
     pixels: Vec<u32>,
     tile_rects: Vec<PixelRect>,
@@ -50,7 +51,8 @@ impl MacPresent {
             bail!("Mac presenter requires an AppKit view");
         };
         // SAFETY: winit supplies a live NSView, held alive by `window`.
-        let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+        let view = unsafe { Retained::retain(handle.ns_view.cast::<NSView>().as_ptr()) }
+            .context("retain AppKit view")?;
         view.setWantsLayer(true);
         let root_layer = view.layer().context("AppKit view has no backing layer")?;
         let color_space = CGColorSpace::new_device_rgb().context("create RGB color space")?;
@@ -68,6 +70,7 @@ impl MacPresent {
         Ok(Self {
             layer,
             root_layer,
+            view,
             color_space,
             pixels: Vec::new(),
             tile_rects: Vec::new(),
@@ -152,10 +155,19 @@ impl MacPresent {
         // aligned on Retina displays, including the short right/bottom tiles.
         if self.rebuild_layers || self.scale != scale {
             for (layer, tile) in self.tile_layers.iter().zip(&self.tile_rects) {
-                layer.setFrame(CGRect::new(
+                // Framebuffer rows use winit's top-left view coordinates.
+                // AppKit backing layers and this container can have different
+                // Y axes. Convert through both spaces instead of assigning a
+                // view rectangle directly as a sublayer frame.
+                let view_rect = CGRect::new(
                     CGPoint::new(tile.x as f64 / scale, tile.y as f64 / scale),
                     CGSize::new(tile.width as f64 / scale, tile.height as f64 / scale),
-                ));
+                );
+                let root_rect = self.view.convertRectToLayer(view_rect);
+                let frame = self
+                    .layer
+                    .convertRect_fromLayer(root_rect, Some(&self.root_layer));
+                layer.setFrame(frame);
                 layer.setContentsScale(scale);
             }
         }

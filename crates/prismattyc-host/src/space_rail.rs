@@ -61,8 +61,8 @@ pub fn rail_thickness_px(side: RailSide, cell_w: usize, cell_h: usize, chip_cols
     }
 }
 
-/// Inset of chip text from the chip's left edge (matches the tab strip).
-pub const RAIL_LABEL_INSET: usize = 4;
+/// Minimum inset of chip text from the chip's edge, shared with the tab strip.
+pub const RAIL_LABEL_INSET: usize = crate::raster::TAB_LABEL_INSET;
 
 /// Widest chip when `space_rail_chip_cols = 0` (PT-123).
 pub const DEFAULT_CHIP_CAP: usize = 28;
@@ -129,6 +129,8 @@ pub struct RailLayout {
     pub gap: usize,
     /// Leading pad before the first chip.
     pub pad: usize,
+    /// Text inset within each chip. Side rails align with the first tab title.
+    pub label_inset: usize,
 }
 
 impl RailLayout {
@@ -171,6 +173,12 @@ impl RailLayout {
             overflow: false,
             gap: geom.rail_gap,
             pad,
+            label_inset: if geom.rail_side.horizontal() {
+                RAIL_LABEL_INSET
+            } else {
+                effective_tab_end_pad(geom.window_pad, width)
+                    .saturating_add(RAIL_LABEL_INSET.max(geom.inner_pad))
+            },
         };
         let layout = match geom.rail_side {
             RailSide::Off => return None,

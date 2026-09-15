@@ -4851,7 +4851,7 @@ pub fn rasterize_space_rail(
         } else {
             layout.close_left(x0, width)
         };
-        let text_x = x0.saturating_add(crate::space_rail::RAIL_LABEL_INSET);
+        let text_x = x0.saturating_add(layout.label_inset);
         let text_limit = close_left
             .unwrap_or(slot_end)
             .saturating_sub(crate::space_rail::RAIL_LABEL_INSET);

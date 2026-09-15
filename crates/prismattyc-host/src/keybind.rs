@@ -511,9 +511,9 @@ impl Action {
             }
             Action::SelectTab(_) => Some("Enter, then press the tab digit."),
             Action::Layout(_) => Some("Enter, then press the column count. Spawns panes up to N."),
-            Action::AgentMessages
-                | Action::UpdateRestart
-                | Action::PresetSingle
+            Action::AgentMessages => Some("Read agent messages and inspect pending deliveries."),
+            Action::UpdateRestart => Some("Check installed versions, update, or restart components."),
+            Action::PresetSingle
             | Action::PresetSplitH
             | Action::PresetSplitV
             | Action::PresetGrid
@@ -526,7 +526,7 @@ impl Action {
             }
             Action::DeleteSpace => Some("Asks once before the file is removed."),
             Action::MovePaneToSpace => {
-                Some("The focused pane must be mux-backed. Picks a saved space other than the current one.")
+                Some("Move the focused pane to another saved Space. Blank terminals keep their local shell.")
             }
             Action::SpaceRailFocus => {
                 Some("Arrows move, Enter opens, F2 renames, Delete asks, Esc returns to the pane.")
@@ -1846,5 +1846,41 @@ mod tests {
             let err = KeyMap::from_config(Some(&one("copy", reserved))).unwrap_err();
             assert!(err.contains("reserved"), "{reserved}: {err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod detail_contract_tests {
+    use super::*;
+
+    #[test]
+    fn palette_notes_describe_messages_maintenance_and_local_pane_moves() {
+        assert!(Action::AgentMessages.note().unwrap().contains("messages"));
+        assert!(Action::UpdateRestart
+            .note()
+            .unwrap()
+            .contains("restart components"));
+        assert!(Action::MovePaneToSpace
+            .note()
+            .unwrap()
+            .contains("Blank terminals"));
+        for action in Action::all() {
+            if let Some(note) = action.note() {
+                assert!(!note.is_empty());
+                assert!(!note.contains('\n'));
+            }
+        }
+    }
+
+    #[test]
+    fn shifted_punctuation_matches_the_same_physical_shortcut_key() {
+        for (shifted, base) in "~!@#$%^&*()_+{}|:\"<>?"
+            .chars()
+            .zip("`1234567890-=[]\\;',./".chars())
+        {
+            assert_eq!(unshift(shifted), base);
+        }
+        assert_eq!(unshift('A'), 'a');
+        assert_eq!(unshift('é'), 'é');
     }
 }

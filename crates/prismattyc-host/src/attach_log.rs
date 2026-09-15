@@ -535,6 +535,8 @@ pub(crate) enum LogMessage {
     Batch {
         snapshot: Option<Box<PaneStyled>>,
         events: Vec<PaneLogFrame>,
+        /// Output at or before this sequence restores state without alerts.
+        replay_through: u64,
         reservation: HostReservation,
         counters: PolicyCounters,
     },
@@ -820,6 +822,10 @@ fn reader_loop(
         Ok(client) => client,
         Err(error) => return Some(format!("subscribe connect failed: {error}")),
     };
+    let mut replay_through = match pane_replay_boundary(&mut client, pane_id) {
+        Ok(sequence) => sequence,
+        Err(error) => return Some(format!("pane replay boundary failed: {error}")),
+    };
     let mut from_seq = 0u64;
     let mut retries = 0u32;
     'subscribe: loop {
@@ -850,10 +856,17 @@ fn reader_loop(
                 Err(error) => match error_code(&error) {
                     // Ahead of the server: the log was rebuilt. Restart.
                     Some(ControlErrorCode::StaleSequence) => {
+                        let Some(current) = error
+                            .downcast_ref::<ControlError>()
+                            .and_then(|error| error.current_sequence)
+                        else {
+                            return Some("pane reset omitted its current sequence".into());
+                        };
                         if events_tx.send(LogMessage::Reset).is_err() {
                             return None;
                         }
                         from_seq = 0;
+                        replay_through = current;
                         continue 'subscribe;
                     }
                     // The pane is gone. PT-68 placeholder takes over.
@@ -898,6 +911,7 @@ fn reader_loop(
                     .send(LogMessage::Batch {
                         snapshot: gap.then_some(snapshot).flatten().map(Box::new),
                         events,
+                        replay_through,
                         reservation,
                         counters,
                     })
@@ -915,6 +929,30 @@ fn reader_loop(
                 break;
             }
         }
+    }
+}
+
+/// Capture the existing log's end before replay starts. The existing protocol
+/// reports its current sequence when a subscriber asks beyond the log's end.
+/// This avoids changing pmuxd or guessing that the first batch is all history.
+fn pane_replay_boundary(client: &mut Client, pane_id: u64) -> Result<u64> {
+    let client_id = client.client_id;
+    match client.request(|request_id| ControlRequest::SubscribePane {
+        version: PROTOCOL_VERSION,
+        request_id,
+        client_id,
+        pane_id,
+        from_seq: u64::MAX,
+        timeout_ms: 0,
+    }) {
+        Err(error) if error_code(&error) == Some(ControlErrorCode::StaleSequence) => error
+            .downcast_ref::<ControlError>()
+            .and_then(|error| error.current_sequence)
+            .context("pane replay boundary omitted its current sequence"),
+        // A log whose sequence has reached u64::MAX is already at the probe.
+        Ok(ControlResponseData::PaneSubscribe { through_seq, .. }) => Ok(through_seq),
+        Ok(_) => bail!("unexpected pane replay boundary response"),
+        Err(error) => Err(error),
     }
 }
 
@@ -2003,6 +2041,141 @@ mod tests {
                     .map_or(' ', |cell| cell.character)
             })
             .collect()
+    }
+
+    #[test]
+    fn reader_keeps_replay_boundary_across_batches_and_resets() {
+        for (name, boundary, reset) in [
+            ("history", 600, false),
+            ("empty", 0, false),
+            ("reset", 600, true),
+        ] {
+            let socket = test_socket(name);
+            let _guard = UnlinkOnDrop(socket.clone());
+            let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            let server = thread::spawn(move || {
+                let (mut writer, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(writer.try_clone().unwrap());
+                let mut read_request = || {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    serde_json::from_str::<ControlRequest>(&line).unwrap()
+                };
+                let ControlRequest::RegisterClient { request_id, .. } = read_request() else {
+                    panic!("expected registration");
+                };
+                write_ok(
+                    &mut writer,
+                    request_id,
+                    ControlResponseData::ClientRegistered { client_id: 1 },
+                );
+                let ControlRequest::SubscribePane {
+                    request_id,
+                    from_seq,
+                    timeout_ms,
+                    ..
+                } = read_request()
+                else {
+                    panic!("expected boundary probe");
+                };
+                assert_eq!((from_seq, timeout_ms), (u64::MAX, 0));
+                let send_boundary =
+                    |writer: &mut std::os::unix::net::UnixStream, request_id, current| {
+                        let response = ControlResponse {
+                            version: PROTOCOL_VERSION,
+                            request_id,
+                            body: ControlResponseBody::Error {
+                                error: ControlError {
+                                    code: ControlErrorCode::StaleSequence,
+                                    message: "ahead".into(),
+                                    resnapshot_required: true,
+                                    oldest_available_sequence: Some(1),
+                                    current_sequence: Some(current),
+                                    holder: None,
+                                },
+                            },
+                        };
+                        serde_json::to_writer(&mut *writer, &response).unwrap();
+                        writer.write_all(b"\n").unwrap();
+                    };
+                send_boundary(&mut writer, request_id, boundary);
+                let ControlRequest::SubscribePane {
+                    mut request_id,
+                    from_seq,
+                    ..
+                } = read_request()
+                else {
+                    panic!("expected replay");
+                };
+                assert_eq!(from_seq, 0);
+                let effective_boundary = if reset {
+                    send_boundary(&mut writer, request_id, 3);
+                    let ControlRequest::SubscribePane {
+                        request_id: next,
+                        from_seq,
+                        ..
+                    } = read_request()
+                    else {
+                        panic!("expected reset replay");
+                    };
+                    assert_eq!(from_seq, 0);
+                    request_id = next;
+                    3
+                } else {
+                    boundary
+                };
+                for sequence in [1, effective_boundary.max(1), effective_boundary + 1] {
+                    write_ok(
+                        &mut writer,
+                        request_id,
+                        ControlResponseData::PaneSubscribe {
+                            pane_id: 1,
+                            gap: false,
+                            snapshot: None,
+                            events: vec![PaneLogFrame {
+                                seq: sequence,
+                                event: PaneEvent::Output {
+                                    bytes: b"\x07".to_vec(),
+                                },
+                            }],
+                            through_seq: sequence,
+                            done: false,
+                        },
+                    );
+                }
+                // Close the fixture connection after delivering all frames.
+            });
+            let (tx, rx) = mpsc::channel();
+            let result = reader_loop(
+                &socket,
+                1,
+                &tx,
+                None,
+                &AtomicBool::new(false),
+                &HostByteBudget::new(HOST_EVENT_BUDGET_BYTES),
+            );
+            assert!(result.is_some(), "fixture closes its stream");
+            drop(tx);
+            let messages: Vec<_> = rx.into_iter().collect();
+            let effective_boundary = if reset { 3 } else { boundary };
+            assert_eq!(messages.len(), 3 + usize::from(reset));
+            if reset {
+                assert!(matches!(messages[0], LogMessage::Reset));
+            }
+            for message in &messages[usize::from(reset)..] {
+                let LogMessage::Batch {
+                    replay_through,
+                    events,
+                    ..
+                } = message
+                else {
+                    panic!("expected output batch");
+                };
+                assert_eq!(*replay_through, effective_boundary);
+                assert_eq!(events.len(), 1);
+            }
+            server.join().unwrap();
+        }
     }
 
     #[test]

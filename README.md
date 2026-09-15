@@ -137,12 +137,16 @@ troubleshooting, compatibility, and application integration.
 
 ## Version
 
-The workspace package version is **`0.2.6`**. A version in source does not
+The workspace package version is **`0.2.7`**. A version in source does not
 necessarily have a published download. Use
 [GitHub Releases](https://github.com/moonbase2090/Prismattyc/releases)
 to find published builds.
 
 ## License
 
-The project-wide license is being decided. Bundled third-party components
-retain their own license terms.
+Prismattyc is licensed under the [Mozilla Public License 2.0](LICENSE).
+You can use it in commercial products. If you distribute modified MPL-covered
+files, you must make their source available under MPL-2.0.
+
+Third-party components retain their own terms. See [license scope and source
+availability](NOTICE.txt).

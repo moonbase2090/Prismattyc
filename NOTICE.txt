@@ -1,0 +1,32 @@
+Prismattyc
+
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+This notice applies to Prismattyc's original source code, build scripts,
+tests, and documentation in this repository, unless a file or its directory
+specifies different terms. The full license is in LICENSE at the repository
+root and MPL-2.0.txt in binary distribution license directories.
+
+Source code is available without charge at:
+https://github.com/moonbase2090/Prismattyc
+
+For a published binary release, use the matching v<version> release tag.
+The release page includes source archive downloads:
+https://github.com/moonbase2090/Prismattyc/releases
+
+For a build from a checkout, use the revision reported by --version. Local
+changes are not included in that revision. Distributors of modified builds
+must also provide their covered source changes and tell recipients where
+to obtain them.
+
+Third-party material retains its existing licenses and copyright notices.
+This includes dependencies, fonts, and externally sourced themes. Font
+notices are in crates/prismattyc-host/assets/fonts/. Theme terms and source
+links are in crates/prismattyc-host/themes/. The Omarchy notice is in
+OMARCHY-LICENSE.txt in that directory and in binary distributions. Consult
+each dependency's source package for its license and attribution notices.
+
+This license choice does not revoke permissions granted for earlier
+versions under their previous license terms.

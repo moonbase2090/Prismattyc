@@ -4,8 +4,8 @@ description = "MCP stdio adapter over the pmux Mail* socket"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license = "Apache-2.0"
-repository = "https://github.com/Moonbase2090/Prismattyc"
+license.workspace = true
+repository = "https://github.com/moonbase2090/Prismattyc"
 
 
 [dependencies]

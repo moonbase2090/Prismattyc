@@ -1,8 +1,7 @@
 # Publish release artifacts
 
-`Moonbase2090/Prismattyc` starts at 0.2.0 with fresh git history.
-The development repository ancestry is not part of this repository.
-Enable immutable releases before publishing the first release.
+Publish releases in `Moonbase2090/Prismattyc`. Use a new version for each
+release. Enable immutable releases before publication.
 Protect the default branch, release tags, and publishing credentials.
 
 1. Set the workspace version to the release version.
@@ -14,21 +13,27 @@ Protect the default branch, release tags, and publishing credentials.
    each native build. The packager checks all reported versions.
 
    ```bash
-   python3 scripts/release/package.py --version 0.2.0 \
+   python3 scripts/release/package.py --version 0.2.7 \
      --target x86_64-unknown-linux-gnu --bin-dir target/release \
      --man-dir build/release-man --out build/release-linux-x86_64
    ```
 
-5. Create a draft release with tag `v0.2.0` in `Moonbase2090/Prismattyc`.
-6. Upload every target's six executable assets and manifest to the draft.
-7. Publish minimum OS/runtime requirements in the release notes.
-8. Verify the complete asset set, sizes, and GitHub SHA-256 metadata.
+5. Create a draft release with tag `v0.2.7` in `Moonbase2090/Prismattyc`.
+6. Upload every target's six executable assets, manifest, installation archive,
+   and checksums to the draft. Upload `MPL-2.0.txt` and `NOTICE.txt` once.
+7. Publish minimum OS/runtime requirements in the release notes. State that
+   Prismattyc uses MPL-2.0. Link to the license notice and the matching source
+   archive, including for users who download individual executables.
+8. Verify the complete asset set, sizes, and GitHub SHA-256 metadata. Verify
+   that the release tag contains the exact source used to build the binaries.
+   Include all covered changes. Confirm that recipients can download the
+   source and license notices without authentication.
 9. Publish the release. Confirm that GitHub reports it as immutable.
 10. Test `pmux update --check`, install, coordinated restart, and rollback
     against a disposable installation. Keep the receipts with the release.
 
 The updater requires exact names such as
-`prismattyc-v0.2.0-x86_64-unknown-linux-gnu-pmux`.
+`prismattyc-v0.2.7-x86_64-unknown-linux-gnu-pmux`.
 It rejects draft, prerelease, mutable, incomplete, or mismatched releases.
 Stage all assets before publishing: immutable assets cannot be replaced.
 Publish corrections as a new version.

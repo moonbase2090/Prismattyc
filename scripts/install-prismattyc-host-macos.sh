@@ -155,7 +155,9 @@ refresh_bundle_binaries() {
     mv -f "$tmp" "$dest/Contents/MacOS/$name"
   done
   mkdir -p "$dest/Contents/Resources"
-  cp "$DEST_APP/Contents/Resources/OMARCHY-LICENSE.txt" "$dest/Contents/Resources/OMARCHY-LICENSE.txt"
+  for notice in "$DEST_APP/Contents/Resources/"*.txt; do
+    cp "$notice" "$dest/Contents/Resources/"
+  done
   sign_bundle "$dest"
   echo "refreshed binaries -> $dest"
 }
@@ -165,6 +167,9 @@ APP="$WORK/$APP_NAME.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/prismattyc-host"
 cp "$ICNS" "$APP/Contents/Resources/prismattyc.icns"
+cp "$ROOT/LICENSE" "$APP/Contents/Resources/MPL-2.0.txt"
+cp "$ROOT/NOTICE.txt" "$APP/Contents/Resources/NOTICE.txt"
+cp "$ROOT/crates/prismattyc-host/assets/fonts/"*.txt "$APP/Contents/Resources/"
 cp "$ROOT/crates/prismattyc-host/themes/OMARCHY-LICENSE.txt" "$APP/Contents/Resources/OMARCHY-LICENSE.txt"
 
 # Finder and Dock launches do not provide the shell PATH. Build and bundle

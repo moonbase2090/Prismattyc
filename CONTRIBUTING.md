@@ -60,3 +60,10 @@ Use short sentences and plain English. Describe current behavior. Keep
 examples runnable and link to the relevant command or configuration guide.
 User documentation belongs in `docs/`. Keep internal planning, work logs,
 and per-run validation reports out of the product source tree.
+
+## License contributions
+
+Contribute original code and documentation under MPL-2.0. The repository
+[license](LICENSE) and [notice](NOTICE.txt) describe its scope. Add
+`SPDX-License-Identifier: MPL-2.0` in a comment when you create a source
+file. Preserve existing third-party license and copyright notices.

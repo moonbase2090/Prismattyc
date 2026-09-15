@@ -14,10 +14,11 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 rust-version = "1.90"
 publish = false
+license = "MPL-2.0"
 
 [workspace.dependencies]
 anyhow = "1.0"

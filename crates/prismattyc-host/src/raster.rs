@@ -7057,6 +7057,33 @@ mod tests {
     use prismattyc_core::Screen;
     use std::sync::Arc;
 
+    #[test]
+    fn region_focus_ring_clips_to_frame_and_preserves_its_interior() {
+        let background = 0xff102030;
+        let mut pixels = vec![background; 12 * 10];
+        rasterize_region_focus_ring(&mut pixels, 12, 1, 1, 2, 2, 1, 1, 2, 3, [255, 0, 0]);
+        for y in 0..10 {
+            for x in 0..12 {
+                let ring = (3..=8).contains(&x)
+                    && (3..=6).contains(&y)
+                    && (x == 3 || x == 8 || y == 3 || y == 6);
+                assert_eq!(
+                    pixels[y * 12 + x],
+                    if ring { 0xffff0000 } else { background }
+                );
+            }
+        }
+        let before = pixels.clone();
+        rasterize_region_focus_ring(&mut pixels, 12, 1, 1, 2, 2, -1, 1, 2, 3, [0, 255, 0]);
+        rasterize_region_focus_ring(&mut pixels, 12, 1, 1, 2, 2, 1, 1, 0, 3, [0, 255, 0]);
+        assert_eq!(pixels, before, "hidden or empty regions do not paint");
+        rasterize_region_focus_ring(&mut pixels, 12, 10, 8, 2, 2, 0, 0, 3, 3, [0, 255, 0]);
+        assert_eq!(pixels[8 * 12 + 10], 0xff00ff00);
+        assert_eq!(pixels[8 * 12 + 11], 0xff00ff00);
+        assert_eq!(pixels[9 * 12 + 10], 0xff00ff00);
+        assert_eq!(pixels[9 * 12 + 11], background);
+    }
+
     fn test_run_cell(style: Style) -> RunCell {
         RunCell {
             style,
@@ -14703,5 +14730,62 @@ mod overlay_surface_tests {
             );
             assert!(contrast_ratio(fg, bg) >= 4.5, "{} selected", theme.id);
         }
+    }
+}
+
+#[cfg(test)]
+mod pixel_contract_tests {
+    use super::*;
+
+    #[test]
+    fn complementary_quadrants_tile_without_gaps_or_overlap() {
+        // Each Unicode pair covers exactly the whole cell, including odd sizes.
+        for (a, b) in [('▖', '▜'), ('▗', '▛'), ('▘', '▟'), ('▙', '▝'), ('▚', '▞')]
+        {
+            for (width, height) in [(8, 16), (9, 17), (1, 1)] {
+                let first = block_element_coverage(a, width, height).unwrap();
+                let second = block_element_coverage(b, width, height).unwrap();
+                assert_eq!(first.len(), width * height);
+                for (a, b) in first.iter().zip(&second) {
+                    assert_eq!(u16::from(*a) + u16::from(*b), 255);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nearest_fit_preserves_aspect_and_does_not_upscale() {
+        let src: Vec<_> = (0..8u8).flat_map(|v| [v, v + 10, v + 20, 255]).collect();
+        assert_eq!(scale_rgba_nearest(4, 2, &src, 8, 8), (4, 2, src.clone()));
+        let expected = [src[0..4].to_vec(), src[8..12].to_vec()].concat();
+        assert_eq!(scale_rgba_nearest(4, 2, &src, 2, 2), (2, 1, expected));
+        for dims in [(0, 2, 2, 2), (4, 0, 2, 2), (4, 2, 0, 2), (4, 2, 2, 0)] {
+            assert_eq!(
+                scale_rgba_nearest(dims.0, dims.1, &src, dims.2, dims.3),
+                (0, 0, vec![])
+            );
+        }
+    }
+
+    #[test]
+    fn rgba_blit_clips_and_preserves_transparent_destination_pixels() {
+        let mut frame = vec![0xff0000ff; 12];
+        let src = [
+            255, 0, 0, 255, 0, 255, 0, 128, 255, 255, 255, 0, 255, 0, 0, 255,
+        ];
+        blit_rgba(&mut frame, 4, &src, 4, 1, 0, 1, 0, 0, 3, 3);
+        assert_eq!(frame[4], 0xffff0000);
+        assert_eq!(frame[5], 0xff00807e);
+        assert_eq!(frame[6], 0xff0000ff, "transparent source keeps destination");
+        assert_eq!(frame[7], 0xff0000ff, "clip excludes right edge");
+        assert!(frame[..4]
+            .iter()
+            .chain(&frame[8..])
+            .all(|&p| p == 0xff0000ff));
+        let mut edge = vec![0; 4];
+        blit_rgba(&mut edge, 2, &src[..4], 1, 1, -1, -1, -2, -2, 10, 10);
+        blit_rgba(&mut edge, 2, &src[..4], 1, 1, 2, 0, 0, 0, 10, 10);
+        blit_rgba(&mut edge, 2, &src[..4], 1, 1, 0, 2, 0, 0, 10, 10);
+        assert_eq!(edge, [0; 4]);
     }
 }

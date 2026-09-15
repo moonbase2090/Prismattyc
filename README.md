@@ -136,7 +136,7 @@ Brand mark: [assets/brand/](assets/brand/) · brief [docs/brand/logo-brief.md](d
 
 ## Status
 
-Package **`0.2.1`**. Daily use is `prismattyc-host` against a local `pmuxd`.
+Package **`0.2.2`**. Daily use is `prismattyc-host` against a local `pmuxd`.
 
 **Classic claim:** `prismattyc-classic/0.1.1` (matrix F1–F19). Nested
 `prismattyc` is the claim harness. Tag **`v0.1.0`** is the Phase 1 baseline.

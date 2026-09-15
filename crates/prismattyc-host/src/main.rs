@@ -1654,8 +1654,10 @@ fn maybe_e2e_dismiss_splash(host: &mut HostState) {
     host.e2e_second_dump_at = Some(Instant::now() + Duration::from_millis(400));
 }
 
-fn softbuffer_partial_raster_allowed(backend_allowed: bool, age: u8) -> bool {
-    backend_allowed && age == 1
+fn softbuffer_partial_raster_allowed(backend_allowed: bool, age: u8, alpha_visual: bool) -> bool {
+    // Translucent X11 buffers already contain premultiplied pixels. Repaint
+    // them before conversion so retained pixels do not darken each frame.
+    backend_allowed && age == 1 && !alpha_visual
 }
 
 impl PresentBackend {
@@ -1711,7 +1713,6 @@ impl PresentBackend {
                     );
                 }
                 host.render_frame.timing.raster_us = raster_started.elapsed().as_micros() as u64;
-                premultiply_in_place(mac.pixels_mut());
                 maybe_dump_present(
                     host.dump_present.as_deref(),
                     &mut host.dump_present_seq,
@@ -1721,6 +1722,7 @@ impl PresentBackend {
                     host.render_frame.full_repaint_reason,
                 );
                 let present_started = Instant::now();
+                premultiply_in_place(mac.pixels_mut());
                 mac.present()?;
                 host.render_frame.timing.present_us = present_started.elapsed().as_micros() as u64;
             }
@@ -1749,8 +1751,11 @@ impl PresentBackend {
                 // Only age 1 contains the immediately preceding frame. Core
                 // Graphics returns a new zeroed buffer (age 0) every time;
                 // older buffers also need a full repaint without damage history.
-                let partial_allowed =
-                    softbuffer_partial_raster_allowed(partial_allowed, buffer.age());
+                let partial_allowed = softbuffer_partial_raster_allowed(
+                    partial_allowed,
+                    buffer.age(),
+                    host.alpha_visual,
+                );
                 let _damage = rasterize_frame(host, &mut buffer, width, height, partial_allowed);
                 if host.render_timer.shows_osd() {
                     rasterize_render_timer(
@@ -1763,11 +1768,6 @@ impl PresentBackend {
                     );
                 }
                 host.render_frame.timing.raster_us = raster_started.elapsed().as_micros() as u64;
-                // The X11 present path expects premultiplied ARGB. Skip the
-                // pass on an opaque window so the default path pays nothing.
-                if host.alpha_visual {
-                    premultiply_in_place(&mut buffer);
-                }
                 maybe_dump_present(
                     host.dump_present.as_deref(),
                     &mut host.dump_present_seq,
@@ -1777,6 +1777,11 @@ impl PresentBackend {
                     host.render_frame.full_repaint_reason,
                 );
                 let present_started = Instant::now();
+                // The X11 present path expects premultiplied ARGB. Skip the
+                // pass on an opaque window so the default path pays nothing.
+                if host.alpha_visual {
+                    premultiply_in_place(&mut buffer);
+                }
                 buffer
                     .present()
                     .map_err(|e| anyhow::anyhow!("present: {e}"))?;
@@ -13625,11 +13630,14 @@ mod tests {
 
     #[test]
     fn softbuffer_partial_raster_requires_the_previous_frame() {
-        assert!(!softbuffer_partial_raster_allowed(true, 0));
-        assert!(softbuffer_partial_raster_allowed(true, 1));
-        assert!(!softbuffer_partial_raster_allowed(true, 2));
-        assert!(!softbuffer_partial_raster_allowed(true, 255));
-        assert!(!softbuffer_partial_raster_allowed(false, 1));
+        assert!(!softbuffer_partial_raster_allowed(true, 0, false));
+        assert!(softbuffer_partial_raster_allowed(true, 1, false));
+        assert!(!softbuffer_partial_raster_allowed(true, 2, false));
+        assert!(!softbuffer_partial_raster_allowed(true, 255, false));
+        assert!(!softbuffer_partial_raster_allowed(false, 1, false));
+        for age in [0, 1, 2, 255] {
+            assert!(!softbuffer_partial_raster_allowed(true, age, true));
+        }
     }
 
     static DUMP_PRESENT_ENV: Mutex<()> = Mutex::new(());

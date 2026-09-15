@@ -2,7 +2,7 @@
 """Check Space rail alpha and hot reload in an isolated native test container."""
 import importlib.util
 import json
-import os
+import time
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location(
@@ -62,12 +62,17 @@ def main():
                 current = next(c for c in chips if c['name'] == 'PRISMATTYC')
                 x, y, h = current['x'], current['y'], current['height']
                 top, bottom = frame.pixel(x + 1, y + 1), frame.pixel(x + 1, y + h - 4)
-                if expected < 255:
-                    assert top != bottom, 'active Space gradient missing'
+                if expected < 255 and top == bottom:
+                    return None  # The open request can precede its first painted frame.
                 return {'opacity': opacity, 'samples': samples, 'active_top': top,
                         'active_bottom': bottom, 'frame_seq': meta['seq']}
 
             result['cases'].append(ux.wait_for(check, f'rail opacity {opacity}', timeout=15))
+        time.sleep(2)
+        idle = ux.wait_for(check, 'stable idle rail', timeout=15)
+        assert idle['active_top'] == result['cases'][-1]['active_top']
+        assert idle['active_bottom'] == result['cases'][-1]['active_bottom']
+        result['idle'] = idle
         host.display('rail')
         result['status'] = 'PASS'
         print('RAIL_TRANSPARENCY_E2E_COMPLETE: rail, session names, and opacity hot reload PASS')

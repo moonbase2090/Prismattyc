@@ -779,6 +779,8 @@ the file applies changes on the next poll tick:
 - `visual_bell` / `audible_bell` / `bell_toaster` / `bell_toaster_ms` /
   `os_notify_bell` — apply to the next BEL; deleting a key restores its
   default (flash, sound, and toaster on, 10s linger; OS notification off).
+  Reopening a log-backed session restores its output without replaying old
+  bells or agent-attention alerts. New alerts still use these settings.
 - `walkthrough_audio` — apply to the next walkthrough clip. Deleting the
   key restores `true`. Missing clips, `false`, or no player leave captions
   unchanged. `walkthrough_voice` is generation-time only

@@ -21,9 +21,10 @@ def main():
     result = {'status': 'FAIL', 'cases': []}
     host = None
     try:
-        for name in ('astra', 'kiro', 'quota-1', 'quota-2'):
+        ux.wait_for(lambda: 'status: running' in ux.run('pmux', 'status'), 'test daemon')
+        for name in ('astra', 'kiro-rail', 'quota-1', 'quota-2'):
             ux.run('pmux', 'new', name, '--no-attach', '--', 'bash', '--noprofile', '--norc')
-        for name, sessions in [('PRISMATTYC', ['astra']), ('Nexus', ['kiro']),
+        for name, sessions in [('PRISMATTYC', ['astra']), ('Nexus', ['kiro-rail']),
                                ('QUOTA', ['quota-1', 'quota-2'])]:
             ux.run('pmux', 'space', 'save', name, *sessions)
         base = ('theme = "prismattyc-default"\nfont_px = 16.0\n'

@@ -1460,7 +1460,7 @@ fn dump_present_path() -> Option<PathBuf> {
     Some(PathBuf::from(value))
 }
 
-/// Write the CPU framebuffer that is about to present as an 8-bit RGB PNG.
+/// Write the CPU framebuffer that is about to present as an 8-bit RGBA PNG.
 /// Callers keep the side effect out of `rasterize_frame`.
 fn present_png_empty(width: u32, height: u32) -> bool {
     width == 0 || height == 0
@@ -1490,17 +1490,18 @@ fn write_present_png(path: &Path, pixels: &[u32], width: u32, height: u32) -> Re
     {
         let file = std::fs::File::create(&tmp)?;
         let mut encoder = png::Encoder::new(file, width, height);
-        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header()?;
-        let mut rgb = vec![0u8; expected * 3];
+        let mut rgba = vec![0u8; expected * 4];
         for (i, px) in pixels.iter().take(expected).enumerate() {
-            let o = i * 3;
-            rgb[o] = ((*px >> 16) & 0xff) as u8;
-            rgb[o + 1] = ((*px >> 8) & 0xff) as u8;
-            rgb[o + 2] = (*px & 0xff) as u8;
+            let o = i * 4;
+            rgba[o] = ((*px >> 16) & 0xff) as u8;
+            rgba[o + 1] = ((*px >> 8) & 0xff) as u8;
+            rgba[o + 2] = (*px & 0xff) as u8;
+            rgba[o + 3] = (*px >> 24) as u8;
         }
-        writer.write_image_data(&rgb)?;
+        writer.write_image_data(&rgba)?;
     }
     std::fs::rename(&tmp, path)?;
     Ok(())
@@ -15266,7 +15267,7 @@ mod tests {
     }
 
     #[test]
-    fn write_present_png_round_trips_rgb() {
+    fn write_present_png_round_trips_rgba() {
         let dir = std::env::temp_dir().join(format!(
             "pt290-dump-{}-{}",
             std::process::id(),
@@ -15279,12 +15280,12 @@ mod tests {
         let path = dir.join("frame.png");
         // 3x2 so width*height != width/height; decode every pixel.
         let pixels = [
-            0x00ff6e63u32,
-            0x00d0d0d0,
+            0xffff6e63u32,
+            0x75d0d0d0,
             0x0000aa11,
-            0x00112233,
-            0x00abcdef,
-            0x00010203,
+            0x01112233,
+            0x80abcdef,
+            0xfe010203,
         ];
         write_present_png(&path, &pixels, 3, 2).unwrap();
         let file = std::fs::File::open(&path).unwrap();
@@ -15294,12 +15295,12 @@ mod tests {
         let info = reader.next_frame(&mut buf).unwrap();
         assert_eq!(info.width, 3);
         assert_eq!(info.height, 2);
-        assert_eq!(info.color_type, png::ColorType::Rgb);
+        assert_eq!(info.color_type, png::ColorType::Rgba);
         assert_eq!(
-            &buf[..18],
+            &buf[..24],
             &[
-                0xff, 0x6e, 0x63, 0xd0, 0xd0, 0xd0, 0x00, 0xaa, 0x11, 0x11, 0x22, 0x33, 0xab, 0xcd,
-                0xef, 0x01, 0x02, 0x03
+                0xff, 0x6e, 0x63, 0xff, 0xd0, 0xd0, 0xd0, 0x75, 0x00, 0xaa, 0x11, 0x00, 0x11, 0x22,
+                0x33, 0x01, 0xab, 0xcd, 0xef, 0x80, 0x01, 0x02, 0x03, 0xfe
             ]
         );
         let empty_w = write_present_png(&path, &[0], 0, 1)

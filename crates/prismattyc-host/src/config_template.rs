@@ -383,7 +383,7 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey {
         name: "chrome_opacity",
         group: ConfigGroup::Background,
-        doc: "Tab strip and footer bar opacity; defaults to window_opacity",
+        doc: "Tab strip, Space rail, and footer opacity; defaults to window_opacity",
         range: "0.0-1.0",
         value: ConfigValue::F32(DEFAULT_WINDOW_OPACITY),
     },

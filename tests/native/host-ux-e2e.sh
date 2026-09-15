@@ -11,6 +11,10 @@ done
 case "${HOST_UX_CASE:-all}" in
   all) python3 "$(dirname "${BASH_SOURCE[0]}")/host-ux-e2e.py" 2>&1 | tee "$HOST_UX_OUT/runner.log" ;;
   space-open-race) ;;
+  rail-transparency)
+    python3 "$(dirname "${BASH_SOURCE[0]}")/rail-transparency-e2e.py" 2>&1 | tee "$HOST_UX_OUT/runner.log"
+    exit 0
+    ;;
   *) echo "unknown HOST_UX_CASE" >&2; exit 1 ;;
 esac
 

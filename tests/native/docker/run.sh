@@ -35,6 +35,7 @@ host_ux_e2e() {
   done
   docker cp "$NATIVE/host-ux-e2e.sh" "$cid:/home/tester/host-ux-e2e.sh"
   docker cp "$NATIVE/host-ux-e2e.py" "$cid:/home/tester/host-ux-e2e.py"
+  docker cp "$NATIVE/rail-transparency-e2e.py" "$cid:/home/tester/rail-transparency-e2e.py"
   docker cp "$NATIVE/space-open-race.py" "$cid:/home/tester/space-open-race.py"
   docker cp "$NATIVE/restart-spaces-e2e.py" "$cid:/home/tester/restart-spaces-e2e.py"
   docker start "$cid" >/dev/null
@@ -52,6 +53,10 @@ host_ux_e2e() {
   python3 - "$destination" "${HOST_UX_CASE:-all}" <<'PY_CHECK'
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
+if sys.argv[2] == 'rail-transparency':
+    assert json.loads((root / 'result.json').read_text())['status'] == 'PASS'
+    assert 'RAIL_TRANSPARENCY_E2E_COMPLETE:' in (root / 'runner.log').read_text()
+    raise SystemExit(0)
 if sys.argv[2] == 'all':
     assert json.loads((root / 'result.json').read_text())['status'] == 'PASS'
     assert 'HOST_UX_E2E_COMPLETE: caret, light-cycle, and restore PASS' in (root / 'runner.log').read_text()
@@ -245,8 +250,9 @@ case "${1:-}" in
   build) build ;;
   spaces-e2e) spaces_e2e ;;
   host-ux-e2e) host_ux_e2e ;;
+  rail-transparency-e2e) HOST_UX_CASE=rail-transparency host_ux_e2e ;;
   spaces-e2e-wayland) spaces_e2e_wayland ;;
   walkthrough-caption-e2e) walkthrough_caption_e2e ;;
   render-bench) render_bench ;;
-  *) echo "Usage: $0 build|spaces-e2e|host-ux-e2e|spaces-e2e-wayland|walkthrough-caption-e2e|render-bench" >&2; exit 2 ;;
+  *) echo "Usage: $0 build|spaces-e2e|host-ux-e2e|rail-transparency-e2e|spaces-e2e-wayland|walkthrough-caption-e2e|render-bench" >&2; exit 2 ;;
 esac

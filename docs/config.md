@@ -138,7 +138,7 @@ overlay_opacity = 1.0
 pane_opacity_inactive = 1.0
 # Window ground opacity; text and explicit cell backgrounds stay opaque. Hot reload works on macOS; other platforms may need a restart below 1.0. 0.0-1.0.
 window_opacity = 1.0
-# Tab strip and footer bar opacity; defaults to window_opacity. 0.0-1.0.
+# Tab strip, Space rail, and footer opacity; defaults to window_opacity. 0.0-1.0.
 chrome_opacity = 1.0
 # Blur behind translucent window grounds; use window_opacity below 1.0. Hot reload works on macOS; no-op where unavailable. true|false.
 window_blur = false

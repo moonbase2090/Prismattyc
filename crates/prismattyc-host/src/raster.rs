@@ -4651,7 +4651,6 @@ fn rasterize_rail_names(
     width: usize,
     height: usize,
     ink: [u8; 3],
-    background: [u8; 3],
 ) {
     let visible_h = font.cell_h.min(height);
     if width == 0 || visible_h == 0 {
@@ -4659,7 +4658,18 @@ fn rasterize_rail_names(
     }
     let source_w = width;
     let source_h = font.cell_h.max(1);
-    let mut scratch = vec![pack_argb(OPAQUE_ALPHA, background); source_w * source_h];
+    let mut scratch = vec![0; source_w * source_h];
+    // Keep the existing alpha and gradient beneath the glyphs.
+    for row in 0..visible_h {
+        for col in 0..width {
+            if x + col >= stride {
+                break;
+            }
+            if let Some(pixel) = buffer.get((y + row) * stride + x + col) {
+                scratch[row * source_w + col] = *pixel;
+            }
+        }
+    }
     let text = ellipsized(text, source_w / font.cell_w.max(1));
     let mut dx = 0;
     for ch in text.chars() {
@@ -4769,8 +4779,21 @@ pub fn rasterize_space_rail(
                 hover_blend,
             ));
         }
+        let fill_alpha = if editing || view.confirm {
+            OPAQUE_ALPHA
+        } else {
+            bg_alpha
+        };
         if let Some(fill) = fill {
-            fill_rect(buffer, stride_px, x0, y0, width, height, fill);
+            if view.current && !editing && !view.confirm && bg_alpha < OPAQUE_ALPHA {
+                let depth = active_tab_gradient_depth(fill);
+                for row in 0..height {
+                    let shade = active_tab_gradient_rgb(fill, depth, row, height);
+                    fill_rect_argb(buffer, stride_px, x0, y0 + row, width, 1, shade, fill_alpha);
+                }
+            } else {
+                fill_rect_argb(buffer, stride_px, x0, y0, width, height, fill, fill_alpha);
+            }
         }
         if hover == Some(crate::space_rail::RailHit::Chip { index, close: true })
             && !editing
@@ -4780,8 +4803,8 @@ pub fn rasterize_space_rail(
                 let base = fill.unwrap_or(theme.pane_backdrop);
                 let close_fill =
                     crate::theme::hover_rgb(theme.variant, base, theme.chrome_fg, hover_blend);
-                fill_rect(
-                    buffer, stride_px, close_left, y0, cell_w, height, close_fill,
+                fill_rect_argb(
+                    buffer, stride_px, close_left, y0, cell_w, height, close_fill, bg_alpha,
                 );
             }
         }
@@ -4881,7 +4904,6 @@ pub fn rasterize_space_rail(
                 text_limit.saturating_sub(text_x),
                 height.saturating_sub(cell_h + TAB_MARKER_H),
                 ink,
-                fill.unwrap_or(theme.pane_backdrop),
             );
         }
         if let Some(close_left) = close_left {
@@ -14330,18 +14352,8 @@ mod space_rail_raster_tests {
         assert!(native.iter().any(|pixel| *pixel != pack_rgb(background)));
         for height in [font.cell_h, font.cell_h.saturating_sub(TAB_MARKER_H)] {
             let mut actual = vec![sentinel; stride * (font.cell_h + 8)];
-            rasterize_rail_names(
-                &font,
-                text,
-                &mut actual,
-                stride,
-                4,
-                4,
-                width,
-                height,
-                ink,
-                background,
-            );
+            fill_rect(&mut actual, stride, 4, 4, width, height, background);
+            rasterize_rail_names(&font, text, &mut actual, stride, 4, 4, width, height, ink);
             for y in 0..font.cell_h + 8 {
                 for x in 0..stride {
                     let expected = if (4..4 + height).contains(&y) && (4..4 + width).contains(&x) {
@@ -14498,6 +14510,91 @@ mod space_rail_raster_tests {
             ),
             "rail hover composes over the current chip colour"
         );
+    }
+
+    #[test]
+    fn rail_chip_and_name_backgrounds_keep_chrome_alpha() {
+        let font = FontMetrics::load(16.0).expect("rail font");
+        let mut geom = HostGeom::tight(font.cell_w, font.cell_h);
+        geom.rail_side = RailSide::Left;
+        geom.rail_chip_cols = 24;
+        geom.rail_px = rail_thickness_px(RailSide::Left, font.cell_w, font.cell_h, 24);
+        let (width, height) = (48 * font.cell_w, 12 * font.cell_h);
+        let names = vec!["current".to_string(), "other".to_string()];
+        let layout = RailLayout::for_window(geom, width, height, &names)
+            .unwrap()
+            .with_pane_names(true);
+        let theme = default_theme();
+        let mut views = vec![chip("current", true), chip("other", false), plus()];
+        views[0].pane_names = "astra".into();
+        views[1].pane_names = "kiro".into();
+        for alpha in [0, 117, OPAQUE_ALPHA] {
+            for hover in [
+                None,
+                Some(crate::space_rail::RailHit::Chip {
+                    index: 1,
+                    close: false,
+                }),
+                Some(crate::space_rail::RailHit::Chip {
+                    index: 1,
+                    close: true,
+                }),
+            ] {
+                let mut buffer = vec![pack_argb(OPAQUE_ALPHA, theme.default_bg); width * height];
+                rasterize_space_rail(
+                    theme,
+                    &font,
+                    &layout,
+                    &views,
+                    &mut buffer,
+                    width,
+                    [255, 180, 84],
+                    [240, 64, 64],
+                    hover,
+                    crate::config::DEFAULT_HOVER_BLEND,
+                    alpha,
+                );
+                for index in 0..2 {
+                    let (x, y, w, h) = layout.chip_bounds(index, 2).unwrap();
+                    let label_end = if index == 0 {
+                        x + w
+                    } else {
+                        layout.close_left(x, w).unwrap()
+                    };
+                    let name_x = label_end - crate::space_rail::RAIL_LABEL_INSET - 1;
+                    assert_eq!(
+                        alpha_of(buffer[(y + 1) * width + x + 1]),
+                        alpha,
+                        "chip ground: index={index}, hover={hover:?}"
+                    );
+                    assert_eq!(
+                        alpha_of(buffer[(y + font.cell_h) * width + name_x]),
+                        alpha,
+                        "name ground: index={index}, hover={hover:?}"
+                    );
+                    assert!(
+                        buffer[(y + 1) * width..(y + h - TAB_MARKER_H) * width]
+                            .chunks(width)
+                            .any(|row| row[x + 4..label_end - 4]
+                                .iter()
+                                .any(|pixel| alpha_of(*pixel) == OPAQUE_ALPHA)),
+                        "text keeps opaque ink"
+                    );
+                    if index == 0 && alpha < OPAQUE_ALPHA {
+                        assert_ne!(
+                            rgb_at(&buffer, width, x + 1, y + 1),
+                            rgb_at(&buffer, width, x + 1, y + h - TAB_MARKER_H - 1),
+                            "the active chip has a frosted gradient"
+                        );
+                        assert_eq!(
+                            rgb_at(&buffer, width, name_x, y + font.cell_h),
+                            rgb_at(&buffer, width, x + 1, y + font.cell_h),
+                            "names preserve the underlying gradient"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

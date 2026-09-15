@@ -26,9 +26,9 @@ processes across a computer restart.
 
 | Platform | Availability |
 | --- | --- |
-| Linux x86_64 | Release downloads. Ubuntu 22.04 or newer. Runs on Wayland and X11. |
+| Linux x86_64 and ARM64 | Release downloads. Ubuntu 22.04 or newer. Runs on Wayland and X11. |
 | macOS on Apple Silicon | Build from source. Signed downloads are not available yet. |
-| Linux arm64 and Windows | No release binaries or supported installation yet. |
+| Windows | No release binaries or supported installation yet. |
 
 ## Install on Linux
 
@@ -41,7 +41,8 @@ processes across a computer restart.
 2. Download `prismattyc-x86_64-unknown-linux-gnu.tar.gz` from
    [GitHub Releases](https://github.com/moonbase2090/Prismattyc/releases).
 
-3. Extract the archive and run its installer:
+3. Extract the archive and run its installer. This example uses x86_64;
+   use the ARM64 archive name on ARM64:
 
    ```bash
    mkdir prismattyc-release
@@ -137,7 +138,7 @@ troubleshooting, compatibility, and application integration.
 
 ## Version
 
-The workspace package version is **`0.2.11`**. A version in source does not
+The workspace package version is **`0.2.12`**. A version in source does not
 necessarily have a published download. Use
 [GitHub Releases](https://github.com/moonbase2090/Prismattyc/releases)
 to find published builds.

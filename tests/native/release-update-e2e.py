@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Exercise the updater CLI with local curl fixtures and disposable installations."""
-import argparse,hashlib,json,os
+import argparse,hashlib,json,os,platform
 from pathlib import Path
 import subprocess,tempfile,time
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('--pmux',type=Path,required=True);p.add_argument('--out',type=Path,required=True);a=p.parse_args();binary=a.pmux.resolve();out=a.out.resolve();out.mkdir(parents=True,exist_ok=False)
+target = {'x86_64': 'x86_64-unknown-linux-gnu', 'aarch64': 'aarch64-unknown-linux-gnu'}[platform.machine()]
 records=[]
 installed_label=subprocess.check_output([str(binary),'--version'],text=True).split()
 version=next(word for word in installed_label if len(word.split('.'))==3 and all(part.isdecimal() for part in word.split('.')))
@@ -30,7 +31,7 @@ pathlib.Path(args[args.index('--output')+1]).write_bytes((root/'assets'/name).re
     def release(version):
         metadata=dict(tag_name='v'+version,draft=False,prerelease=False,immutable=True,assets=[])
         for name in names:
-            file=assets/f'prismattyc-v{version}-x86_64-unknown-linux-gnu-{name}';file.write_text(f'#!/bin/sh\necho {name} {version}\n')
+            file=assets/f'prismattyc-v{version}-{target}-{name}';file.write_text(f'#!/bin/sh\necho {name} {version}\n')
             metadata['assets'].append(dict(name=file.name,size=file.stat().st_size,digest='sha256:'+hashlib.sha256(file.read_bytes()).hexdigest(),browser_download_url='https://github.com/moonbase2090/Prismattyc/releases/download/v'+version+'/'+file.name))
         (root/'metadata.json').write_text(json.dumps(metadata));return metadata
     def cli(*args,success=True):

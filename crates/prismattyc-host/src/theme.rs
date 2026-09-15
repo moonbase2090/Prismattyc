@@ -100,8 +100,16 @@ const BUILTIN_FILES: &[(&str, &str)] = &[
     ("monokai", include_str!("../themes/monokai.toml")),
     ("monokai-pro", include_str!("../themes/monokai-pro.toml")),
     (
-        "monokai-spectrum",
-        include_str!("../themes/monokai-spectrum.toml"),
+        "omarchy-tokyo-night",
+        include_str!("../themes/omarchy-tokyo-night.toml"),
+    ),
+    (
+        "omarchy-osaka-jade",
+        include_str!("../themes/omarchy-osaka-jade.toml"),
+    ),
+    (
+        "omarchy-matte-black",
+        include_str!("../themes/omarchy-matte-black.toml"),
     ),
     (
         "monokai-dimmed",
@@ -187,7 +195,7 @@ pub fn builtins() -> &'static [Theme] {
     BUILTINS.as_slice()
 }
 
-/// First hyphen-separated token of a theme id (`monokai-spectrum` → `monokai`).
+/// First hyphen-separated token of a theme id (`omarchy-osaka-jade` → `omarchy`).
 pub fn family_key(id: &str) -> &str {
     id.split('-')
         .next()
@@ -217,7 +225,7 @@ pub enum PickerItem {
 }
 
 /// Root picker rows. Ids that share a family key nest under one family when
-/// two or more built-ins share that key (Monokai, later Hive).
+/// two or more built-ins share that key (for example, Omarchy and Hive).
 pub fn picker_root(themes: &[Theme]) -> Vec<PickerItem> {
     let mut counts = HashMap::<&str, usize>::new();
     for theme in themes {
@@ -650,7 +658,7 @@ mod tests {
 
     #[test]
     fn all_embedded_themes_are_valid_and_unique() {
-        assert_eq!(builtins().len(), 27);
+        assert_eq!(builtins().len(), 29);
         for (index, theme) in builtins().iter().enumerate() {
             assert!(theme.ansi.iter().any(|color| color != &theme.ansi[0]));
             assert!(builtins()[..index]
@@ -798,12 +806,16 @@ mod tests {
             .collect();
         assert_eq!(
             families,
-            vec![("monokai", "Monokai", 7), ("hive", "Hive", 13)]
+            vec![
+                ("monokai", "Monokai", 6),
+                ("omarchy", "Omarchy", 3),
+                ("hive", "Hive", 13)
+            ]
         );
         assert_eq!(
             rows.len(),
-            builtins().len() - 6 - 12,
-            "Monokai and Hive collapse to one root row each"
+            builtins().len() - 5 - 2 - 12,
+            "Monokai, Omarchy, and Hive collapse to one root row each"
         );
         let members = match &rows
             .iter()
@@ -814,8 +826,8 @@ mod tests {
         };
         assert_eq!(builtins()[members[0]].id, "monokai");
         assert_eq!(builtins()[members[1]].id, "monokai-pro");
-        assert_eq!(builtins()[members[2]].id, "monokai-spectrum");
-        assert_eq!(builtins()[members[6]].id, "monokai-vivid");
+        assert_eq!(builtins()[members[2]].id, "monokai-dimmed");
+        assert_eq!(builtins()[members[5]].id, "monokai-vivid");
         assert!(rows.iter().any(|row| matches!(
             row,
             PickerItem::Theme { index } if builtins()[*index].id == "japanesque"
@@ -826,7 +838,7 @@ mod tests {
         )));
         assert!(!rows.iter().any(|row| matches!(
             row,
-            PickerItem::Theme { index } if builtins()[*index].id == "monokai-spectrum"
+            PickerItem::Theme { index } if builtins()[*index].id == "omarchy-tokyo-night"
         )));
     }
 
@@ -862,8 +874,8 @@ mod tests {
         assert_eq!(load(Some("DRACULA"), config).unwrap().id, "dracula");
         assert_eq!(load(Some("Tokyo Night"), config).unwrap().id, "tokyo-night");
         assert_eq!(
-            load(Some("Monokai Spectrum"), config).unwrap().id,
-            "monokai-spectrum"
+            load(Some("Omarchy Tokyo Night"), config).unwrap().id,
+            "omarchy-tokyo-night"
         );
         assert_eq!(load(Some("Ghost"), config).unwrap().id, "ghost");
         assert_eq!(

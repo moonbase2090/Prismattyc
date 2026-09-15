@@ -530,7 +530,7 @@ chosen by contrast.
 
 ### Themes
 
-Prismattyc ships 27 built-in themes:
+Prismattyc ships 29 built-in themes:
 
 | Config slug | Display name |
 | --- | --- |
@@ -540,7 +540,9 @@ Prismattyc ships 27 built-in themes:
 | `rose-pine-moon` | Rosé Pine Moon |
 | `monokai` | Monokai (classic) |
 | `monokai-pro` | Monokai Pro (CE) (MIT, Monokai Pro Community Edition) |
-| `monokai-spectrum` | Monokai Spectrum |
+| `omarchy-tokyo-night` | Omarchy Tokyo Night |
+| `omarchy-osaka-jade` | Omarchy Osaka Jade |
+| `omarchy-matte-black` | Omarchy Matte Black |
 | `monokai-dimmed` | Dimmed Monokai (MIT, iTerm2-Color-Schemes) |
 | `monokai-remastered` | Monokai Remastered (MIT, iTerm2-Color-Schemes) |
 | `monokai-soda` | Monokai Soda (MIT, iTerm2-Color-Schemes) |
@@ -561,6 +563,13 @@ Prismattyc ships 27 built-in themes:
 | `hive-monochromatic-light` | Hive Monochromatic Light |
 | `hive-tri-tone-light` | Hive Tri-Tone Light |
 | `hive-muted-professional-light` | Hive Muted Professional Light |
+
+The Omarchy themes use palettes from the official Omarchy repository, with
+window-control colors mapped to Prismattyc. Their [MIT notice](../crates/prismattyc-host/themes/OMARCHY-LICENSE.txt)
+is included with the themes.
+
+Monokai Spectrum has been removed. If your configuration selected it, set
+`theme = "omarchy-tokyo-night"` or choose another theme from the picker.
 
 Slugs and display names are case-insensitive. A bare name first checks a
 `themes/` directory next to `config.toml`, then the embedded themes. This lets

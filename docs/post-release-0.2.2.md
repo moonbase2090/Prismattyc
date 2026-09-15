@@ -37,9 +37,10 @@ The follow-up checks these user and protocol contracts:
 
 ## Validation status
 
-Focused contract tests and strict workspace Clippy pass. Full workspace
-coverage and native-window checks are pending. The release CRAP target stays
-at 123 functions above 40, compared with 168 in the 0.2.1 capture. A new
-complete capture must establish the final count before this follow-up is
-ready to merge. Mutation results must retain the complete changed-code
-universe and use the existing 60% threshold.
+At revision `f6d55c52c4f2`, the complete workspace coverage run passes
+2,146 tests. Strict workspace Clippy and native chrome checks also pass.
+The release CRAP gate passes at 123 functions above 40, compared with 168
+in the 0.2.1 capture. The baseline and thresholds are unchanged.
+
+Complete mutation validation remains outstanding. Its results must retain
+the complete changed-code universe and use the existing 60% threshold.

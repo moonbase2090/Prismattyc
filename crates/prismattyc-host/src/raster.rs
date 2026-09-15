@@ -492,14 +492,21 @@ impl FontMetrics {
         )
     }
 
-    /// First candidate whose ink fits one cell. ASCII x is the floor.
+    /// Prefer a fitting glyph from the primary face before loading fallbacks.
+    /// A chrome button must not expand a whole icon font when primary ink works.
     fn pick_close_glyph(&self) -> char {
         let box_w = i32::try_from(self.cell_w.max(1)).unwrap_or(i32::MAX);
         CLOSE_GLYPH_CANDIDATES
             .into_iter()
             .find(|&ch| {
-                self.close_glyph_ink_right(ch)
+                close_glyph_ink_right(self.fonts.iter(), self.px, ch)
                     .is_some_and(|right| right <= box_w)
+            })
+            .or_else(|| {
+                CLOSE_GLYPH_CANDIDATES.into_iter().find(|&ch| {
+                    self.close_glyph_ink_right(ch)
+                        .is_some_and(|right| right <= box_w)
+                })
             })
             .unwrap_or('x')
     }
@@ -11926,6 +11933,29 @@ mod tests {
         let mut font = FontMetrics::load_baked(16.0).expect("bundled font");
         font.fonts.clear();
         assert_eq!(font.pick_close_glyph(), 'x');
+    }
+
+    #[test]
+    fn close_button_does_not_load_unused_nerd_font() {
+        let font = FontMetrics::load_sources(
+            16.0,
+            vec![
+                baked_source(BAKED_FALLBACK_NAME, BAKED_FALLBACK),
+                baked_source(BAKED_MONO_NAME, BAKED_MONO),
+            ],
+        )
+        .expect("bundled monospace and Nerd Font");
+        assert!(font.primary_covers(font.close_glyph));
+        let GlyphPaint::Coverage(glyph) = font.paint_char(font.close_glyph) else {
+            panic!("close button must have visible ink");
+        };
+        assert!(glyph.bitmap.iter().any(|&alpha| alpha != 0));
+        assert!(glyph.xmin + glyph.width as i32 <= font.cell_w as i32);
+        assert!(font.lazy_fonts[0].font.get().is_none());
+        assert!(font.lazy_fonts[0].bytes.get().is_none());
+        // A terminal that actually prints a Nerd Font icon still gets fallback.
+        assert!(matches!(font.paint_char('\u{f467}'), GlyphPaint::Coverage(_)));
+        assert!(font.lazy_fonts[0].font.get().is_some());
     }
 
     #[test]

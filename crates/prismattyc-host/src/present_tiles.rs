@@ -53,7 +53,7 @@ pub(crate) fn copy_tile(pixels: &[u32], stride: usize, tile: PixelRect, out: &mu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raster::premultiply_in_place;
+    use crate::pixel_alpha::premultiply_in_place;
 
     #[test]
     fn full_frame_tiles_cover_edges_once() {

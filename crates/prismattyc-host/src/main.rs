@@ -28,6 +28,7 @@ mod move_target;
 mod mux;
 mod notify;
 mod palette;
+mod pixel_alpha;
 #[cfg(any(target_os = "macos", test))]
 mod present_tiles;
 mod rail_resize;

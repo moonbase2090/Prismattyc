@@ -63,10 +63,19 @@ Run these checks in a logged-in macOS desktop session.
    cargo build --locked -p prismattyc-host -p prismattyc-mux
    ```
 
-2. Check the native image, window opacity, blur view lifecycle, and resize.
+2. Check tile positions, retained images, window opacity, blur, and resize.
 
    ```bash
    cargo run -p prismattyc-host --example macos_present_probe --locked
+   ```
+
+   The probe maps each tile back into view coordinates. It checks that a
+   partial update replaces only the damaged tile image. To check that the
+   probe detects the old coordinate error, run this negative control. It
+   must fail a tile position assertion.
+
+   ```bash
+   PRISMATTYC_PROBE_OLD_TILE_FRAMES=1 cargo run -p prismattyc-host --example macos_present_probe --locked
    ```
 
 3. Check config hot reload and terminal colors in a private session.
@@ -80,6 +89,9 @@ The private-session fixture saves CPU framebuffer captures. It checks that
 text and explicit backgrounds retain their colors as opacity changes.
 These captures do not show the composited desktop blur. Check the backdrop
 in the native window, or use a desktop capture with Screen Recording access.
+Also check a cold start with a saved Space in a large window. The complete
+"Restore last space?" dialog must appear in order. Check ordinary terminal
+output and resize for displaced bands or clipped rows.
 
 ## Linux-only today
 

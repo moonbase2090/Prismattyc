@@ -7056,22 +7056,7 @@ pub fn opacity_to_alpha(opacity: f32) -> u8 {
     (opacity.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
-/// Premultiply every pixel's RGB by its alpha, in place.
-///
-/// X11 (and Wayland where a backend carries alpha) expects premultiplied
-/// ARGB. Skip the pass entirely when the window is opaque.
-pub fn premultiply_in_place(buffer: &mut [u32]) {
-    for px in buffer.iter_mut() {
-        let alpha = u32::from(alpha_of(*px));
-        if alpha == 255 {
-            continue;
-        }
-        let r = ((*px >> 16) & 0xff) * alpha / 255;
-        let g = ((*px >> 8) & 0xff) * alpha / 255;
-        let b = (*px & 0xff) * alpha / 255;
-        *px = (alpha << 24) | (r << 16) | (g << 8) | b;
-    }
-}
+pub use crate::pixel_alpha::premultiply_in_place;
 
 #[cfg(test)]
 mod tests {

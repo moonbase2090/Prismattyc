@@ -22,7 +22,7 @@ has both. After a terminfo change, restart `prismattyc-host` so children respawn
 - PTY spawn via `portable-pty`
 - Unix-domain control socket + `chmod 0600`
 - rustix termios / poll / signals
-- winit + softbuffer window (Cocoa)
+- winit window with alpha-capable Core Animation presentation (Cocoa)
 - Nested `prismattyc` VT host
 - Mux `stop`/`up` argv match via `procinfo` (`KERN_PROCARGS2` on Darwin). Inode proof stays Linux-only; 0600 socket remains the gate
 - Mux attach scan (`ls`/`doctor`/`kick`) via `procinfo::pids` + `cmdline`
@@ -30,6 +30,56 @@ has both. After a terminfo change, restart `prismattyc-host` so children respawn
 - Host split cwd via `procinfo::cwd_of` (`proc_pidinfo` on Darwin). OSC 7 still preferred
 - Host child-exit wait via `kill(pid, 0)` on non-Linux
 - Host clipboard via default `arboard` (Cocoa pasteboard)
+
+## Window transparency and blur
+
+The default macOS presenter keeps per-pixel alpha. `window_opacity` controls
+the window ground and default cell backgrounds. Text and explicit cell
+backgrounds remain opaque. `chrome_opacity` controls the tab strip and footer.
+It defaults to `window_opacity`.
+
+Set `window_opacity` below `1.0` to see the desktop through the window.
+Set `window_blur = true` to blur that backdrop with AppKit. An opaque ground
+covers the blur. These settings apply through config hot reload, including
+when the window starts fully opaque. They do not use `NSWindow.alphaValue`
+to fade text or window decorations.
+
+```toml
+window_opacity = 0.75
+chrome_opacity = 0.9
+window_blur = true
+```
+
+The optional GPU presenter does not carry per-pixel alpha. Use the default
+presenter for these settings.
+
+### Check transparency changes
+
+Run these checks in a logged-in macOS desktop session.
+
+1. Build the host and mux binaries.
+
+   ```bash
+   cargo build --locked -p prismattyc-host -p prismattyc-mux
+   ```
+
+2. Check the native image, window opacity, blur view lifecycle, and resize.
+
+   ```bash
+   cargo run -p prismattyc-host --example macos_present_probe --locked
+   ```
+
+3. Check config hot reload and terminal colors in a private session.
+   Use a new output directory for each run.
+
+   ```bash
+   python3 demo/macos-alpha-e2e.py --bins target/debug --out build/macos-alpha-check
+   ```
+
+The private-session fixture saves CPU framebuffer captures. It checks that
+text and explicit backgrounds retain their colors as opacity changes.
+These captures do not show the composited desktop blur. Check the backdrop
+in the native window, or use a desktop capture with Screen Recording access.
 
 ## Linux-only today
 

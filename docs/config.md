@@ -136,11 +136,11 @@ pane_opacity_active = 1.0
 overlay_opacity = 1.0
 # Every other pane surface opacity; try 0.6-0.8. 0.0-1.0.
 pane_opacity_inactive = 1.0
-# Desktop show-through; native Wayland and X11/XWayland, or whole-window macOS opacity; lowering below 1.0 needs a restart except on macOS. 0.0-1.0.
+# Window ground opacity; text and explicit cell backgrounds stay opaque. Hot reload works on macOS; other platforms may need a restart below 1.0. 0.0-1.0.
 window_opacity = 1.0
 # Tab strip and footer bar opacity; defaults to window_opacity. 0.0-1.0.
 chrome_opacity = 1.0
-# Ask the compositor to blur behind the window; no-op where unavailable. true|false.
+# Blur behind translucent window grounds; use window_opacity below 1.0. Hot reload works on macOS; no-op where unavailable. true|false.
 window_blur = false
 
 # -- theme overrides --
@@ -479,7 +479,7 @@ size if the look bothers you.
 | Native Wayland (KWin, Hyprland, wlroots) | own `wl_shm` `ARGB8888` present (PT-118) | works | KWin 6.7+: works via `ext-background-effect-v1`. Hyprland: use a `windowrulev2 = blur` instead; see [docs/hyprland.md](hyprland.md) |
 | X11 with a compositor | softbuffer, depth-32 ARGB visual | works | ignored, with a startup notice |
 | XWayland (`unset WAYLAND_DISPLAY`) | softbuffer, depth-32 ARGB visual | works | ignored, with a startup notice |
-| macOS | softbuffer + `NSWindow.alphaValue` + `NSVisualEffectView` | works for whole-window opacity | works through an AppKit backdrop; hot-reloads without recreating the window |
+| macOS | alpha-capable Core Animation present | works for the window ground; text and explicit backgrounds stay opaque | works through an AppKit backdrop; hot-reloads without recreating the window |
 | Windows | softbuffer | untested, treated as unsupported | ignored, with a startup notice |
 | `--gpu` (`--features gpu`) | wgpu | ignored; the composite-alpha mode is not wired yet | ignored, with a startup notice |
 
@@ -491,17 +491,18 @@ depth-32 visuals and a window created with an alpha visual carries
 premultiplied ARGB. When no path can carry alpha the host prints one line at
 startup and treats `window_opacity` as `1.0`; nothing else changes.
 
-On macOS, `window_opacity` uses AppKit's `NSWindow.alphaValue`. This is
-whole-window opacity, so it also affects text and decorations. macOS can
-apply changes while the host runs. When `window_blur` is `true`, the host
-adds an `NSVisualEffectView` behind the winit content view. It uses the
+On macOS, the host uses an alpha-capable Core Animation surface. The
+`window_opacity` value applies to the window ground. Text, the cursor, badges,
+and explicit SGR backgrounds stay opaque. When `window_blur` is `true`, the
+host adds an `NSVisualEffectView` behind the winit content view. It uses the
 `underWindowBackground` material, `behindWindow` blending, and the active
-state. The host adds or removes this view when you change the setting. The
-host keeps the existing `background_image` and `background_blur_px` raster
-paths unchanged.
+state. Set `window_opacity` below `1.0` to make the backdrop visible. The host
+adds or removes the effect view when you change the setting. The host keeps
+the existing `background_image` and `background_blur_px` raster paths
+unchanged.
 
 `chrome_opacity` still needs a present path with per-pixel alpha, such as
-native Wayland or X11 with a depth-32 visual.
+macOS, native Wayland, or X11 with a depth-32 visual.
 
 `window_blur` asks the compositor or AppKit to blur what is behind the
 window. On KWin 6.7+ the host installs an `ext-background-effect-v1` blur for
@@ -513,8 +514,8 @@ The alpha visual is chosen once, when the window is created. On Wayland and
 X11, raising or lowering `window_opacity` while the host runs applies on the
 next frame only if the window already has an alpha visual; going from `1.0`
 to anything lower needs a host restart, and the host says so on the next poll.
-On macOS, `window_opacity` uses `NSWindow.alphaValue` and can change while the
-host runs without recreating the window.
+On macOS, the Core Animation present path already carries alpha. You can
+change `window_opacity` while the host runs without recreating the window.
 
 ### Active tab and current space chip
 

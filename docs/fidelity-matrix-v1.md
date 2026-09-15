@@ -2,7 +2,7 @@
 
 **Status:** Published supported classic claim — exact-head gated.
 **Release id:** `prismattyc-classic/0.1.1` (classic claim). Workspace package
-version is **`0.2.3`** and can move without widening this claim.
+version is **`0.2.4`** and can move without widening this claim.
 **Prior claim:** `prism-classic/0.1.0` (tag **`v0.1.0`** @ `60d23a3`; issued under the Prism name).
 **Kind:** Supported classic product subset — not universal xterm parity,
 not a modern-terminal marketing claim outside the rows below.

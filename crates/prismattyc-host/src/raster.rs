@@ -11981,7 +11981,10 @@ mod tests {
         assert!(font.lazy_fonts[0].font.get().is_none());
         assert!(font.lazy_fonts[0].bytes.get().is_none());
         // A terminal that actually prints a Nerd Font icon still gets fallback.
-        assert!(matches!(font.paint_char('\u{f467}'), GlyphPaint::Coverage(_)));
+        assert!(matches!(
+            font.paint_char('\u{f467}'),
+            GlyphPaint::Coverage(_)
+        ));
         assert!(font.lazy_fonts[0].font.get().is_some());
     }
 

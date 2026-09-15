@@ -47,8 +47,8 @@ and [release integrity verification](https://docs.github.com/en/code-security/ho
 The updater checks GitHub's HTTPS metadata and digests. It does not claim
 independent attestation verification or full TUF protections.
 
-The initial release supports Linux x86_64 on glibc 2.35 or newer
-(Ubuntu 22.04 or newer). Linux arm64 and macOS binary releases are pending.
+Linux x86_64 and ARM64 releases require glibc 2.35 or newer
+(Ubuntu 22.04 or newer). macOS binary releases are pending.
 Do not advertise a target until its release assets and platform checks pass.
 Apple Silicon source builds have been tested. Mac application distribution
 waits for Developer ID signing and notarization.
@@ -66,7 +66,15 @@ waits for Developer ID signing and notarization.
    to the binary directory. Set `PMUX_MAN_DIR` to a staging directory.
 4. Run `scripts/release/package.py` in the build image. Supply `--version`,
    `--target`, `--bin-dir`, `--man-dir`, and a new `--out` directory.
-5. Test the archive installer in a clean container before uploading assets.
+5. Test the archive installer in a clean container for each architecture
+   before uploading assets. Run the ARM64 checks on ARM64 hardware or under
+   emulation. Record which environment you used.
+
+Use target `aarch64-unknown-linux-gnu` when packaging ARM64 binaries. The
+packager rejects executable files for a different architecture. Run it in
+an environment that can execute the binaries, including through emulation.
+Combine both targets in one draft release. Keep one copy of each shared
+license notice. Regenerate `SHA256SUMS` over the combined asset set.
 
 The package contains individual updater assets and a complete installation
 archive. `SHA256SUMS` covers the release assets. The archive contains another

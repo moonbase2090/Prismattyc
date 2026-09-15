@@ -30,16 +30,25 @@ def sha256(path):
 parts = a.version.split('.')
 if len(parts) != 3 or any(not part.isdecimal() for part in parts) or tuple(map(int, parts)) < (0, 2, 0):
     p.error('use a stable version at or after 0.2.0')
+if 'linux' not in a.target:
+    p.error('macOS packaging requires the signed application release process')
+architecture, elf_machine = {
+    'x86_64-unknown-linux-gnu': ('x86_64', 62),
+    'aarch64-unknown-linux-gnu': ('ARM64', 183),
+}[a.target]
 # Validate the entire set before publishing any package output.
 for name in BINARIES:
+    with (a.bin_dir / name).open('rb') as binary:
+        header = binary.read(20)
+    if (header[:6] != b'\x7fELF\x02\x01' or
+            int.from_bytes(header[18:20], 'little') != elf_machine):
+        p.error(f'{name} is not a Linux {architecture} executable')
     result = subprocess.run([str(a.bin_dir / name), '--version'], capture_output=True, timeout=5, check=True)
     if a.version not in result.stdout.decode().split():
         p.error(f'{name} has the wrong version')
 for name in (*BINARIES, 'pmux-pane-write'):
     if not (a.man_dir / f'{name}.1').is_file():
         p.error(f'missing manual: {name}.1')
-if 'linux' not in a.target:
-    p.error('macOS packaging requires the signed application release process')
 a.out.mkdir(parents=True, exist_ok=False)
 shutil.copy2(repo / 'LICENSE', a.out / 'MPL-2.0.txt')
 shutil.copy2(repo / 'NOTICE.txt', a.out / 'NOTICE.txt')
@@ -68,7 +77,7 @@ with tempfile.TemporaryDirectory() as tmp:
     shutil.copy2(repo / 'assets/brand/prismattyc-icon-tile.svg', root / 'share/prismattyc.svg')
     (root / 'VERSION').write_text(a.version + '\n')
     (root / 'INSTALL.txt').write_text(
-        'Prismattyc for Linux x86_64 (Ubuntu 22.04 or newer).\n'
+        f'Prismattyc for Linux {architecture} (Ubuntu 22.04 or newer).\n'
         'Install runtime dependencies with your distribution package manager:\n'
         'Ubuntu: sudo apt install libfontconfig1 libxkbcommon0 libxkbcommon-x11-0 libegl1\n'
         'Run ./install.sh to install into ~/.local, or use --prefix /absolute/path.\n'

@@ -1155,6 +1155,7 @@ impl PaneRuntime {
                 Ok(LogMessage::Batch {
                     snapshot,
                     events,
+                    replay_through,
                     reservation,
                     counters,
                 }) => {
@@ -1177,7 +1178,14 @@ impl PaneRuntime {
                     }
                     let event_count = events.len();
                     for frame in events {
+                        let replay = frame.seq <= replay_through;
                         self.apply_log_event(frame.event);
+                        if replay {
+                            // Restore terminal state, but do not sound old BEL
+                            // or attention signals when a Space is reopened.
+                            let _ = self.emulator.take_pending_bell();
+                            let _ = self.emulator.take_pending_attention();
+                        }
                     }
                     self.policy_superseded_frames = self
                         .policy_superseded_frames
@@ -5381,6 +5389,95 @@ mod tests {
         assert_eq!(rises.len(), 1);
         assert_eq!(rises[0].1, 3);
         assert!(runtime.take_mail_rises(&mut last).is_empty());
+    }
+
+    #[test]
+    fn reopening_log_pane_restores_output_without_replaying_alerts() {
+        let server = private_mux_server();
+        let created = Command::new(mux_binary("pmux"))
+            .arg("--socket")
+            .arg(&server.socket)
+            .args([
+                "new", "--no-attach", "alerts", "--", "/bin/sh", "-c",
+                "printf '\\007\\033]9;old alert\\007OLD_OUTPUT\\n'; while IFS= read -r label; do printf '\\007\\033]9;%s\\007%s\\n' \"$label\" \"$label\"; done",
+            ])
+            .output()
+            .unwrap();
+        assert!(created.status.success(), "{created:?}");
+
+        // Wait for the server to retain the initial output before attaching.
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            let output = Command::new(mux_binary("pmux"))
+                .arg("--socket")
+                .arg(&server.socket)
+                .args(["attach", "alerts", "--json"])
+                .output()
+                .unwrap();
+            if String::from_utf8_lossy(&output.stdout).contains("OLD_OUTPUT") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "initial output missing: {output:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        // Each new replica follows the same attach path used on Space return.
+        // The second attach also restores the previous iteration's live alert.
+        for iteration in 0..2 {
+            let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+            let pane = runtime.focused_id();
+            assert!(runtime
+                .promote_to_log_replica(pane, "alerts", "alerts", &server.socket)
+                .unwrap());
+            let previous = if iteration == 0 {
+                "OLD_OUTPUT"
+            } else {
+                "LIVE_0"
+            };
+            let deadline = Instant::now() + Duration::from_secs(6);
+            loop {
+                runtime.drain_all();
+                assert!(runtime.take_pending_bells().is_empty(), "replayed BEL");
+                assert!(
+                    runtime.take_pending_attentions().is_empty(),
+                    "replayed attention"
+                );
+                let screen = runtime.focused_mut().emulator.screen();
+                let text: String = (0..screen.rows())
+                    .flat_map(|row| screen.row(row).unwrap().iter().map(|cell| cell.character))
+                    .collect();
+                if text.contains(previous) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "replay did not restore {previous}"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+
+            let label = format!("LIVE_{iteration}");
+            runtime
+                .focused_mut()
+                .send_bytes(format!("{label}\n").into_bytes())
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(6);
+            let mut rang = false;
+            let mut attention = false;
+            while !(rang && attention) {
+                runtime.drain_all();
+                rang |= runtime.take_pending_bells().contains(&pane);
+                attention |= runtime
+                    .take_pending_attentions()
+                    .iter()
+                    .any(|(id, message)| *id == pane && message == &label);
+                assert!(Instant::now() < deadline, "new alerts were suppressed");
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
     }
 
     #[test]

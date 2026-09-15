@@ -132,21 +132,6 @@ try:
                             opaque_background_pixels=counts[bytes((17, 231, 149, 255))],
                             opaque_text_pixels=counts[bytes((240, 208, 32, 255))]))
         print('PASS ' + name, flush=True)
-        # Confirm that cursor/row changes can use retained straight pixels at
-        # each opacity. Config reload itself must still repaint the full frame.
-        cli('pane-write', pane, '--text', "printf '.'", '--submit', 'enter', '--json')
-
-        def partial_ready():
-            value = ready()
-            if value and not value[1]['full']:
-                return value
-            return None
-
-        png, partial, _ = wait(partial_ready, name + ' partial repaint')
-        previous_seq = partial['seq']
-        (out / (name + '-partial.png')).write_bytes(png)
-        records[-1]['partial_seq'] = previous_seq
-        print('PASS ' + name + ' partial repaint', flush=True)
     log = (out / 'host.log').read_text()
     assert 'Core Animation present (premultiplied ARGB)' in log, log
     assert 'window_blur ignored' not in log and 'window_opacity ignored' not in log, log

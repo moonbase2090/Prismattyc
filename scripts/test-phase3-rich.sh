@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Deterministic Phase 3 rich harness.
 # Pins named rich tests and re-runs Spike Baseline v0 fixtures with the
-# experimental flag off and on (phase-0b-spike.md:105).
+# experimental flag off and on.
 # Not a PRD §5.6 pass and not the owner's production-rich checkpoint.
 set -euo pipefail
 

@@ -87,7 +87,7 @@ class CratesFromPathsTests(unittest.TestCase):
     def test_skips_tests_and_docs(self) -> None:
         paths = [
             "crates/prismattyc-mux/tests/mail_cli.rs",
-            "docs/agents.md",
+            "docs/README.md",
             "scripts/mutants-gate.py",
             "crates/prismattyc-mux/Cargo.toml",
         ]

@@ -58,9 +58,7 @@ then generates deterministic Termwright YAML and runs the generated files.
 Build files go under `build/acceptance/`.
 
 The adapter sends typed input in chunks of at most 16 characters. It waits for
-150 milliseconds after each chunk. This keeps the acceptance run reliable while
-PT-176 is validated. Once the PT-176 key-burst proof passes, this workaround may
-be relaxed; leave the adapter pacing in place until that 10/10 proof is recorded.
+150 milliseconds after each chunk. This gives the nested terminal time to process each chunk.
 
 ## Run acceptance mutation
 
@@ -92,7 +90,7 @@ script uses `full` so each deliberate run gives a fresh result.
 This is a separate gate from Gherkin acceptance mutation. Keep
 `scripts/acceptance-mutate.sh`. Do not replace it.
 
-On the 32 GiB Nexus host, run `scripts/la-staged-pr.sh` instead of
+On the 32 GiB Linux host, run `scripts/la-staged-pr.sh` instead of
 one-shot `local-actions run --event pull_request`. Mutants is stage 2.
 The script waits for each job to reach a terminal
 `local-actions status` before it reclaims. A queued exit 0 is not a

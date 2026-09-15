@@ -2,9 +2,8 @@
 
 - **Status:** Accepted (2026-09-01; Linux AT-SPI probe retried the same day)
 - **Ticket:** PT-34
-- **Depends on:** ADR-0006, ADR-0010, ADR-0012, [a11y-spike.md](../a11y-spike.md)
-- **Amends:** [decisions-v0.md](../decisions-v0.md) A11y v0 (plain grid text
-  stays the guaranteed textual surface; chrome now also has an OS tree)
+- **Depends on:** ADR-0006, ADR-0010, ADR-0012
+- Plain grid text remains available. Window controls also have an OS accessibility tree.
 
 ## Clean-room process (binding)
 
@@ -38,10 +37,9 @@ any `prismattyc-host` PID. Plasma’s taskbar exposes one childless
 are the same silence. VoiceOver on a raw winit `NSView` has the same
 gap: window title only.
 
-`decisions-v0.md` A11y v0 already requires plain grid text as the
-guaranteed textual surface. Keyboard already reaches chrome
-([host-feedback.md](../host-feedback.md) rule 2). Walkthrough captions
-must stay readable without audio ([walkthrough-spike.md](../walkthrough-spike.md)).
+Plain grid text remains the guaranteed textual surface. You can use the
+keyboard to reach window controls. Walkthrough captions must remain
+readable without audio.
 
 ## Decision
 

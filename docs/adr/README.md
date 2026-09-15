@@ -1,25 +1,14 @@
-# Architecture Decision Records (Prismattyc)
+# Protocol and input contracts
 
-One decision per file. Prefer **append / supersede** over silent rewrites of accepted ADRs.
-
-## Process
-
-For host UX and other “solved in other terminals” areas:
-
-1. Study **behavior and public specs** (not paste foreign source).
-2. Freeze policy in an ADR in **our** words.
-3. Implement **original** Prismattyc code from the ADR.
-4. No vendoring of other terminal emulator trees; no GPL implementation without an
-   explicit product decision.
-
-See ADR-0001 for the worked example.
+These records explain implementation decisions and compatibility rules.
+Where a record is superseded, use its replacement for current behavior.
+User-facing controls are described in the [configuration reference](../config.md).
 
 ## Index
 
 | ADR | Title | Status |
 |-----|--------|--------|
 | [0001](0001-host-selection-clipboard.md) | Host selection, clipboard, and key ownership | Accepted |
-| [0002](0002-host-mouse-policy.md) | Host mouse policy (selection only; no app mouse claim) | Accepted (superseded in part by 0003) |
 | [0003](0003-hybrid-mouse.md) | Hybrid mouse (app report + Shift host select) | Accepted |
 | [0004](0004-wide-unicode.md) | Wide Unicode display width (first slice) | Accepted |
 | [0005](0005-kitty-keyboard.md) | Kitty CSI-u progressive keyboard protocol | Accepted |
@@ -34,4 +23,3 @@ See ADR-0001 for the worked example.
 | [0014](0014-rich-surface-v2-fabric.md) | Rich surface v2 and Runbook boundary | Accepted |
 | [0015](0015-user-keybindings.md) | User keybindings for host actions (`[keys]`) | Accepted |
 | [0016](0016-host-accessibility.md) | Host accessibility (OS tree + announce) | Accepted |
-| [0017](0017-windows-surface.md) | Windows surface (control transport and cfg gates) | Proposed |

@@ -853,7 +853,7 @@ running, the CLI may be looking at `/tmp/prismattyc-<uid>/pmux.sock`.
 `XDG_RUNTIME_DIR=/run/user/$(id -u)`.
 
 Full RCA and later windowed-remote plan:
-[ssh-mux-attach-spike.md](ssh-mux-attach-spike.md).
+[Use sessions over SSH](ssh.md).
 
 ## Instances instead of socket paths
 
@@ -874,7 +874,7 @@ Each mux-owned child is stamped at `execve` with:
 | `PRISMATTYC_PANE_ID` | Decimal pane id. Never reused for the Domain lifetime. |
 | `PMUX_SOCKET` | Absolute path of this server's control socket. |
 | `PMUX_AGENT` | Bound agent id of the pane's session. Absent when the session has no `--agent` binding. |
-| `PMUX_TUTORIAL_PACK` | In-repo tutorial name (`prismattyc-tutorial-pack`). Always stamped. See [agents.md](agents.md). |
+| `PMUX_TUTORIAL_PACK` | In-repo tutorial name (`prismattyc-tutorial-pack`). Always stamped. Run `pmux tutorial` to read it. |
 
 The same tutorial ships in the binary. Run `pmux tutorial`. The embedded
 text is canonical.
@@ -991,7 +991,7 @@ socket. With no cache, each session gets its own tab. The leftover
 On Linux, `attach --all` without `WAYLAND_DISPLAY` or `DISPLAY` does not
 exec `prismattyc-host`. It prints the TTY recipe and the resolved socket, then
 exits. Use `pmux attach SESSION` over SSH. Do not forward Wayland/X11
-to run the Linux host. See [ssh-mux-attach-spike.md](ssh-mux-attach-spike.md).
+to run the Linux host. See [Use sessions over SSH](ssh.md).
 `Ctrl+Shift+X` detaches the current session tab. The last tab exits the
 host. Closing the window also detaches. Server-owned sessions stay. `ls`/`new`/`status`/`stop`/`doctor`/`kick`
 speak the control plane directly (`doctor`/`kick` also scan `/proc` for

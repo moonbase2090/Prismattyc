@@ -63,8 +63,7 @@ session create/switch**, **window (tab) create/destroy/switch/rename**, **pane
 move across windows**, coalesced **output-activity** events,
 **SetPaneStatus**, and **server termination** via `ShutdownServer`.
 
-Window verbs (`Window` is the tab per [ADR-0007](0007-phase2-mux-domain.md)
-and [tabs-design.md](../tabs-design.md)):
+Window verbs (`Window` is the tab per [ADR-0007](0007-phase2-mux-domain.md)):
 
 - `CreateWindow { version, request_id, session_id, title, spawn, cols, rows }`
   allocates one leaf in an existing session and registers `WindowBounds`

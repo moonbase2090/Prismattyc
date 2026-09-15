@@ -1,15 +1,14 @@
 # Prismattyc E2E (Termwright)
 
-Playwright-style terminal E2E for the **nested** `prism` binary.
+Playwright-style terminal E2E for the **nested** `prismattyc` binary.
 
 For the display-free Phase 2A multiplexer acceptance matrix, run
 `./scripts/test-phase2a.sh` and see
-[`docs/phase2a-proof-harness.md`](../docs/phase2a-proof-harness.md). The
+[acceptance tests](../docs/acceptance-pipeline.md). The
 Termwright scenarios remain the nested/shared-VT regression surface.
 
 For the Phase 2B server/attach ownership and lifecycle matrix, run
-`./scripts/test-phase2b-server.sh`. The full operator detach/reattach dogfood
-remains this harness is intentionally display-free.
+`./scripts/test-phase2b-server.sh`. This harness checks server behavior without a display.
 
 `./scripts/test-phase2b-detach.sh` is the process-lifetime E2E. It uses
 the real server and attach binaries, retains JSON/text evidence under
@@ -63,7 +62,7 @@ Generated from templates in this directory; the runner resolves the declared
 ## Artifacts
 
 `e2e/artifacts/<run-id>/` — PNG screenshots + screen text/json per step.  
-**Agents: open the PNGs.** That is the human-operator view.
+Inspect the PNG files to check what the user sees.
 
 ## Windowed host
 

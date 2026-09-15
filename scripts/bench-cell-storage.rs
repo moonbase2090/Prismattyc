@@ -1,5 +1,5 @@
 // Compile against each checkout with rustc --extern prismattyc_core=... .
-// See docs/scrollback-storage-pt263.md for the paired measurement procedure.
+// Compare runs with the same inputs and compiler settings.
 use prismattyc_core::{Cell, GridDamage, Screen, ScrollDamage};
 use std::{hint::black_box, time::Instant};
 fn require_copy<T: Copy>() {}

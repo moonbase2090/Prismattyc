@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-31
 - **Charter:** classic path first; host chrome must not corrupt the child PTY model
-- **Supersedes in part:** [ADR-0002](0002-host-mouse-policy.md) D-M1 host-selection-only claim
+- **Supersedes in part:** the earlier host-selection-only policy D-M1 host-selection-only claim
   (implements **Option B** from D-M5)
 - **Related:** [ADR-0001](0001-host-selection-clipboard.md), fidelity matrix app-mouse row
 - **Does not supersede:** ADR-0001 selection/clipboard ownership; alt-screen copy-chord

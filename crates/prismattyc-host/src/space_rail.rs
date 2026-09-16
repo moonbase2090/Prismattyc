@@ -1204,6 +1204,40 @@ mod tests {
         assert!(SpaceRail::new(None).neighbour(1).is_none());
     }
 
+    #[test]
+    fn keyboard_menu_and_rename_keep_the_selected_space_and_ignore_the_plus_chip() {
+        let mut rail = rail(&["alpha", "beta"], Some("alpha"));
+        rail.focus_rail();
+        rail.key(RailKey::Last);
+        assert_eq!(rail.key(RailKey::Menu), RailVerdict::Menu { index: 1 });
+        rail.key(RailKey::Next);
+        assert_eq!(rail.key(RailKey::Menu), RailVerdict::Consumed);
+        rail.key(RailKey::Delete);
+        assert!(rail.confirm.is_none(), "the plus chip cannot be deleted");
+        rail.key(RailKey::First);
+        assert_eq!(rail.key(RailKey::Enter), RailVerdict::Open("alpha".into()));
+
+        rail.key(RailKey::Last);
+        rail.key(RailKey::Rename);
+        rail.key(RailKey::Edit(EditStroke::DropSelection));
+        rail.key(RailKey::Edit(EditStroke::Backspace));
+        rail.key(RailKey::Edit(EditStroke::Insert('\n')));
+        rail.key(RailKey::Edit(EditStroke::Insert('2')));
+        assert_eq!(
+            rail.key(RailKey::Enter),
+            RailVerdict::Rename {
+                old: "beta".into(),
+                new: "bet2".into()
+            }
+        );
+        assert_eq!(rail.focus, Some(1));
+        rail.key(RailKey::Rename);
+        rail.key(RailKey::Edit(EditStroke::Backspace));
+        assert_eq!(rail.key(RailKey::Enter), RailVerdict::Consumed);
+        assert!(rail.edit.is_none(), "an empty rename cancels the edit");
+        assert_eq!(rail.names, ["alpha", "beta"]);
+    }
+
     fn rail_none() -> SpaceRail {
         rail(&["a", "b", "c"], None)
     }

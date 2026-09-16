@@ -517,6 +517,28 @@ mod tests {
     }
 
     #[test]
+    fn stopped_sessions_restore_as_placeholders_beside_an_empty_saved_tab() {
+        let mut mux = runtime();
+        let mut panes = HashMap::new();
+        let saved = file(&[("stopped", &["s1", "s2"]), ("empty", &[])], 0, Some("s2"));
+        let stopped = HashSet::from(["s1".to_string(), "s2".to_string()]);
+        assert!(apply_with_placeholders(
+            &mut mux,
+            &mut panes,
+            &saved,
+            "/missing-pmux-must-not-be-spawned",
+            &HashMap::new(),
+            &stopped,
+        )
+        .unwrap());
+        assert_eq!(titles(&mux), ["stopped", "empty"]);
+        assert_eq!(sessions_per_tab(&mux, &panes), [vec!["s1", "s2"], vec![]]);
+        assert!(panes.keys().all(|pane| mux.is_placeholder(*pane)));
+        assert_eq!(total_panes(&mux), 3, "the empty tab keeps its local pane");
+        assert_eq!(panes.get(&mux.focused_id()).map(String::as_str), Some("s2"));
+    }
+
+    #[test]
     fn apply_move_cleanup_preserves_an_unrelated_local_tab() {
         let mut mux = runtime();
         let mut panes = HashMap::new();

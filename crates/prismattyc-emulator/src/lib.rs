@@ -3523,6 +3523,17 @@ mod tests {
             "expected XDG path, got {via_xdg:?}"
         );
         assert!(via_xdg.join("p").join("prismattyc-256color").is_file());
+        // An unusable user cache must not prevent a child from finding the
+        // installed or bundled terminal description.
+        let blocked = xdg.join("not-a-directory");
+        std::fs::write(&blocked, b"blocked").unwrap();
+        unsafe {
+            std::env::set_var("PRISMATTYC_TERMINFO", &blocked);
+            std::env::set_var("XDG_DATA_HOME", &blocked);
+        }
+        let fallback = resolve_child_terminfo_dir().expect("unwritable cache must fall back");
+        assert!(super::has_terminfo_entry(&fallback));
+        assert!(!fallback.starts_with(&blocked));
         unsafe {
             match old_override {
                 Some(v) => std::env::set_var("PRISMATTYC_TERMINFO", v),

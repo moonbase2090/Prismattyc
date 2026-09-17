@@ -506,7 +506,7 @@ jobs:
           tar -C "$PWD/target/debug" -cf - pmux pmuxd pmux-attach prismattyc-host \
             | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
               tar -C "$host_root/bins" -xf -
-          tar -C "$PWD/tests/native" -cf - spaces-e2e.sh host-ux-e2e.sh host-ux-e2e.py space-open-race.py restart-spaces-e2e.py docker/run.sh \
+          tar -C "$PWD/tests/native" -cf - spaces-e2e.sh host-ux-e2e.sh host-ux-e2e.py rail-transparency-e2e.py space-open-race.py restart-spaces-e2e.py docker/run.sh \
             | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
               tar -C "$host_root/tests/native" -xf -
           dkr run --rm --privileged \
@@ -688,7 +688,7 @@ jobs:
           tar -C "$PWD/target/debug" -cf - pmux pmuxd pmux-attach prismattyc-host \
             | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
               tar -C "$host_root/bins" -xf -
-          tar -C "$PWD/tests/native" -cf - spaces-e2e-wayland.sh docker/run.sh docker/sway-headless.conf \
+          tar -C "$PWD/tests/native" -cf - spaces-e2e-wayland.sh docker/run.sh \
             | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
               tar -C "$host_root/tests/native" -xf -
           dkr run --rm --privileged \

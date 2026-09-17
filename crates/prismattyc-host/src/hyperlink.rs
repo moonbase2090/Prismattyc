@@ -177,7 +177,7 @@ pub fn is_allowed_http_url(url: &str) -> bool {
     if url.len() > MAX_URL_CHARS || url.is_empty() || url.contains('\0') {
         return false;
     }
-    if url.bytes().any(|b| b < 0x20 || b == 0x7f) {
+    if !url.is_ascii() || url.bytes().any(|b| b < 0x20 || b == 0x7f) {
         return false;
     }
     let rest = if url.len() >= 8 && url[..8].eq_ignore_ascii_case("https://") {
@@ -299,6 +299,14 @@ mod tests {
         let mut emulator = Emulator::new(32, 1, 0);
         let _ =
             emulator.feed(b"\x1b]8;;javascript:alert(1)\x1b\\https://safe.example\x1b]8;;\x1b\\");
+        assert_eq!(url_at(emulator.screen(), 0, 0, 0), None);
+    }
+
+    #[test]
+    fn non_ascii_explicit_target_is_a_miss_without_panicking() {
+        let mut emulator = Emulator::new(32, 1, 0);
+        let _ = emulator
+            .feed("\x1b]8;;日本語のリンク\x1b\\https://safe.example\x1b]8;;\x1b\\".as_bytes());
         assert_eq!(url_at(emulator.screen(), 0, 0, 0), None);
     }
 

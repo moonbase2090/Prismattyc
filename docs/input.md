@@ -15,6 +15,13 @@ Use the [configuration reference](config.md) for shortcuts and overrides.
 Use the [compatibility matrix](fidelity-matrix-v1.md) for supported behaviors
 and their regression tests.
 
+## Open hyperlinks
+
+Move the pointer over an HTTP or HTTPS link to show the hand cursor.
+The host recognizes URLs in terminal text and named OSC 8 hyperlinks.
+Hold Ctrl and click to open a link on Linux. On macOS, hold Command and click.
+Plain clicks keep their normal selection or application behavior.
+
 ## Route mouse input
 
 When application mouse tracking is off, the host handles selection. When

@@ -49,8 +49,16 @@ PY
 launch_host() {
   mkdir -p "$HOME/work" "$(dirname "$PROGRESS")"
   rm -f "$PROGRESS" "$DUMP"
+  local fixture_config="${TMPDIR:-/tmp}/pt295-config.toml"
+  python3 - "$HOME/.config/prismattyc/config.toml" "$fixture_config" <<'PYCONFIG'
+import pathlib, re, sys
+config = pathlib.Path(sys.argv[1]).read_text()
+config = re.sub(r'(?m)^session_naming\s*=.*$', '', config)
+pathlib.Path(sys.argv[2]).write_text('session_naming = "ask"\n' + config)
+PYCONFIG
   ( cd "$HOME/work"
     env -u WAYLAND_DISPLAY COLORTERM=truecolor WINIT_UNIX_BACKEND=x11 DISPLAY="$DISPLAY" \
+      PRISMATTYC_CONFIG="$fixture_config" \
       PRISMATTYC_WALKTHROUGH_DUMP="$DUMP" PRISMATTYC_BELL_TOASTER=0 \
       prismattyc-host >"$HOST_LOG" 2>&1 & echo $! >/tmp/pt295-host.pid )
   local i

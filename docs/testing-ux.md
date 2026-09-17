@@ -63,3 +63,23 @@ cargo test -p prismattyc --test nested_pty_ux --locked
 cargo test -p prismattyc --test live_pty_fast_child --locked
 cargo test --workspace --locked
 ```
+
+## Check the hyperlink pointer
+
+Build the desktop host. Run the native cursor fixture on Linux:
+
+```sh
+cargo build -p prismattyc-host --locked
+python3 tests/native/hyperlink-hover-e2e.py
+```
+
+The fixture starts a private Xvfb display. It requires `xdotool`, `ffmpeg`,
+and `libXfixes`. Set `PRISMATTYC_HOST` to test another host binary.
+Set `HYPERLINK_HOVER_OUT` to choose the artifact directory.
+The default directory is `build/hyperlink-hover`.
+
+The fixture compares the native cursor over named OSC 8 links and detected
+URLs with the hand over a pane chip. It checks plain text, rejected targets,
+and link changes under a stationary pointer. It saves a screenshot and a
+JSON result. This fixture proves the X11 cursor path. It does not prove the
+native Wayland or macOS cursor path.

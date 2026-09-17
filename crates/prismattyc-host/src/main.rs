@@ -993,6 +993,7 @@ struct HostState {
     /// Interactive chrome element under the pointer. Changes, rather than raw
     /// pointer motion, invalidate the frame (PT-96).
     hover_target: Option<HoverTarget>,
+    hyperlink_hover: Option<(HyperlinkHoverKey, bool)>,
     /// Configured immediate hover blend (0.0-0.3).
     hover_blend: f32,
     /// Drag state for the host scrollback scrollbar (PT-40).
@@ -1262,6 +1263,16 @@ enum HoverTarget {
     Strip(mux::StripHit),
     Rail(space_rail::RailHit),
     ScrollbarThumb(PaneId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HyperlinkHoverKey {
+    pane: PaneId,
+    row: usize,
+    col: usize,
+    scroll: usize,
+    epoch: u64,
+    size: (usize, usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3239,6 +3250,7 @@ impl App {
                 tab_rename: None,
                 pointer_px: None,
                 hover_target: None,
+                hyperlink_hover: None,
                 hover_blend: self.file_config.hover_blend(),
                 scrollbar_drag: None,
                 strip_drag: None,
@@ -6039,6 +6051,9 @@ impl App {
         let parse_started = Instant::now();
         let parked_more = local_views::drain(host);
         let (pty_dirty, more) = host.mux.drain_all();
+        if pty_dirty {
+            host.hyperlink_hover = None;
+        }
         let more = more || parked_more;
         host.render_frame.timing.parse_us = parse_started.elapsed().as_micros() as u64;
         let damage_started = Instant::now();
@@ -8088,8 +8103,9 @@ fn apply_palette_pointer(host: &mut HostState) {
     }
 }
 
-fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
-    if host.restore_prompt.is_some()
+fn pointer_hover_blocked(host: &HostState) -> bool {
+    host.restore_prompt.is_some()
+        || host.session_prompt.is_some()
         || host.theme_picker.is_some()
         || host.palette.is_some()
         || host.space_picker.is_some()
@@ -8100,7 +8116,10 @@ fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
             .edit
             .as_ref()
             .is_some_and(|edit| edit.target.is_none())
-    {
+}
+
+fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
+    if pointer_hover_blocked(host) {
         return None;
     }
     let (x, y) = host
@@ -8156,6 +8175,7 @@ fn cursor_for_hover(
     strip_dragging: bool,
     scrollbar_dragging: bool,
     divider_axis: Option<prismattyc_mux::Axis>,
+    hyperlink: bool,
 ) -> CursorIcon {
     if let Some(axis) = divider_axis {
         match axis {
@@ -8164,16 +8184,54 @@ fn cursor_for_hover(
         }
     } else if strip_dragging || scrollbar_dragging {
         CursorIcon::Grab
-    } else if matches!(
-        hover,
-        Some(HoverTarget::Caption(Some(_)))
-            | Some(HoverTarget::Strip(_))
-            | Some(HoverTarget::Rail(_))
-    ) {
+    } else if hyperlink
+        || matches!(
+            hover,
+            Some(HoverTarget::Caption(Some(_)))
+                | Some(HoverTarget::Strip(_))
+                | Some(HoverTarget::Rail(_))
+        )
+    {
         CursorIcon::Pointer
     } else {
         CursorIcon::Default
     }
+}
+
+fn hyperlink_hover_at_pointer(host: &mut HostState) -> bool {
+    if pointer_hover_blocked(host) || host.left_button_down {
+        return false;
+    }
+    let Some((x, y)) = host.pointer_px else {
+        return false;
+    };
+    let Some((pane, row, col)) =
+        cell_at_position(PhysicalPosition::new(x, y), &host.font, &host.mux)
+    else {
+        return false;
+    };
+    let Some(runtime) = host.mux.pane(pane) else {
+        return false;
+    };
+    let screen = runtime.emulator.screen();
+    let scroll = runtime.view_scroll.min(screen.max_view_scroll());
+    let key = HyperlinkHoverKey {
+        pane,
+        row,
+        col,
+        scroll,
+        epoch: screen.content_epoch(),
+        size: (screen.columns(), screen.rows()),
+    };
+    if let Some((previous, hit)) = host.hyperlink_hover {
+        if previous == key {
+            return hit;
+        }
+    }
+    // Reuse click detection, but do not rescan the grid on every pixel of motion.
+    let hit = hyperlink::url_at(screen, scroll, row, col).is_some();
+    host.hyperlink_hover = Some((key, hit));
+    hit
 }
 
 /// Refresh chrome hover after geometry or pointer state changes. Raw motion
@@ -8196,11 +8254,13 @@ fn sync_chrome_hover(host: &mut HostState) -> bool {
     let next = hover_target_at_pointer(host);
     let strip_dragging = host.strip_drag.as_ref().is_some_and(|drag| drag.active);
     let divider_axis = divider_axis_for_cursor(host);
+    let hyperlink = next.is_none() && hyperlink_hover_at_pointer(host);
     let cursor = cursor_for_hover(
         next,
         strip_dragging,
         host.scrollbar_drag.is_some(),
         divider_axis,
+        hyperlink,
     );
     host.window
         .set_cursor(if rail_resize::at_edge(host) || host.rail_resizing {
@@ -12650,6 +12710,8 @@ impl ApplicationHandler<UserAction> for App {
             // produced a redraw still runs the exit cascade.
             self.pump(event_loop);
             if let Some(host) = self.windows.get_mut(&id) {
+                // Output and scrollback can change the link under a stationary pointer.
+                sync_chrome_hover(host);
                 let dirty = host.dirty;
                 if let Err(e) = Self::paint(host) {
                     eprintln!("prismattyc-host: paint error: {e:#}");
@@ -18295,34 +18357,47 @@ session mail (id 15)
             index: 0,
             close: false,
         }));
+        assert_eq!(
+            cursor_for_hover(None, false, false, None, true),
+            CursorIcon::Pointer
+        );
         let rail = Some(HoverTarget::Rail(space_rail::RailHit::Plus));
         let pane = mux::MuxRuntime::spawn("/bin/sh", &[], 2, 2)
             .unwrap()
             .focused_id();
         let scrollbar = Some(HoverTarget::ScrollbarThumb(pane));
         assert_eq!(
-            cursor_for_hover(tab, false, false, None),
+            cursor_for_hover(tab, false, false, None, false),
             CursorIcon::Pointer
         );
         assert_eq!(
-            cursor_for_hover(rail, false, false, None),
+            cursor_for_hover(rail, false, false, None, false),
             CursorIcon::Pointer
         );
         assert_eq!(
-            cursor_for_hover(scrollbar, false, false, None),
+            cursor_for_hover(scrollbar, false, false, None, false),
             CursorIcon::Default
         );
-        assert_eq!(cursor_for_hover(tab, true, false, None), CursorIcon::Grab);
         assert_eq!(
-            cursor_for_hover(scrollbar, false, true, None),
+            cursor_for_hover(tab, true, false, None, true),
             CursorIcon::Grab
         );
         assert_eq!(
-            cursor_for_hover(None, false, false, None),
+            cursor_for_hover(scrollbar, false, true, None, true),
+            CursorIcon::Grab
+        );
+        assert_eq!(
+            cursor_for_hover(None, false, false, None, false),
             CursorIcon::Default
         );
         assert_eq!(
-            cursor_for_hover(tab, false, false, Some(prismattyc_mux::Axis::Horizontal)),
+            cursor_for_hover(
+                tab,
+                false,
+                false,
+                Some(prismattyc_mux::Axis::Horizontal),
+                true
+            ),
             CursorIcon::ColResize,
             "divider resize wins over chrome hover"
         );

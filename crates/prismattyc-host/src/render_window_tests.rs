@@ -69,6 +69,108 @@ fn real_window_paint_reaches_the_backend() {
 }
 
 #[test]
+fn hyperlink_hover_respects_session_modal_and_view_lifetime() {
+    if std::env::var_os(CHILD_ENV).is_none() {
+        run_in_private_display(
+            "render_window_tests::hyperlink_hover_respects_session_modal_and_view_lifetime",
+        );
+        return;
+    }
+    struct HoverProof {
+        app: App,
+        completed: bool,
+    }
+    impl ApplicationHandler<UserAction> for HoverProof {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            let id = self.app.open_window(event_loop, false).unwrap();
+            let host = self.app.windows.get_mut(&id).unwrap();
+            let pane = host.mux.focused_id();
+            let rect = host.mux.rects().next().unwrap().1;
+            let (x, y, _, _) = host.mux.geom().pane_content_px(rect);
+            host.pointer_px = Some((x as f64 + 1.0, y as f64 + 1.0));
+            let (cols, rows) = host.mux.geom().content_cells(rect);
+            host.mux.focused_mut().emulator = Emulator::new(cols, rows, 0);
+            let link = b"https://moonbase2090.com/";
+            let _ = host.mux.focused_mut().emulator.feed(link);
+            assert!(hyperlink_hover_at_pointer(host));
+            let (link_key, _) = host.hyperlink_hover.unwrap();
+
+            session_prompt::retry_space(host, "hover-space".into(), "hover".into(), "".into());
+            assert!(host.session_prompt.is_some());
+            sync_chrome_hover(host);
+            assert!(!hyperlink_hover_at_pointer(host));
+            session_prompt::finish(host, false);
+            assert!(hyperlink_hover_at_pointer(host));
+
+            host.mux
+                .mark_attach_session(pane, "1".into(), "hover".into());
+            assert!(session_prompt::rename(
+                host,
+                pane,
+                keybind::Action::RenamePane
+            ));
+            sync_chrome_hover(host);
+            assert!(!hyperlink_hover_at_pointer(host));
+            session_prompt::finish(host, false);
+            assert!(hyperlink_hover_at_pointer(host));
+
+            host.mux.retain_local_terminal(pane);
+            assert!(!local_views::switch(host, Some("plain".into())).unwrap());
+            assert!(host.hyperlink_hover.is_none());
+            let plain_pane = host.mux.focused_id();
+            host.mux.retain_local_terminal(plain_pane);
+            host.mux.focused_mut().emulator = Emulator::new(cols, rows, 0);
+            let _ = host
+                .mux
+                .focused_mut()
+                .emulator
+                .feed(&vec![b'x'; link.len()]);
+            assert!(!hyperlink_hover_at_pointer(host));
+            assert_eq!(host.hyperlink_hover.unwrap().0, link_key);
+
+            for _ in 0..2 {
+                assert!(local_views::switch(host, None).unwrap());
+                assert!(host.hyperlink_hover.is_none());
+                assert!(hyperlink_hover_at_pointer(host));
+                assert_eq!(host.hyperlink_hover.unwrap().0, link_key);
+                assert!(!local_views::switch(host, None).unwrap());
+                assert_eq!(host.hyperlink_hover, Some((link_key, true)));
+                assert!(local_views::switch(host, Some("plain".into())).unwrap());
+                assert!(host.hyperlink_hover.is_none());
+                assert!(!hyperlink_hover_at_pointer(host));
+                assert_eq!(host.hyperlink_hover.unwrap().0, link_key);
+            }
+            self.completed = true;
+            self.app.windows.clear();
+            event_loop.exit();
+        }
+
+        fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+    }
+    let event_loop = EventLoop::<UserAction>::with_user_event()
+        .with_x11()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
+    let cli = Cli::parse(["--no-splash", "/bin/cat"].into_iter().map(String::from)).unwrap();
+    let config = config::ConfigFile {
+        a11y: Some(config::A11ySection {
+            os_tree: Some(false),
+            announce: Some(false),
+        }),
+        ..Default::default()
+    };
+    let app = App::new(cli, config, None, event_loop.create_proxy()).unwrap();
+    let mut proof = HoverProof {
+        app,
+        completed: false,
+    };
+    event_loop.run_app(&mut proof).unwrap();
+    assert!(proof.completed);
+    std::fs::write(std::env::var_os(RESULT_ENV).unwrap(), b"complete").unwrap();
+}
+
+#[test]
 #[should_panic(expected = "window fixture did not complete")]
 fn missing_child_test_is_rejected() {
     // Rust's test harness returns success when --exact matches no tests.

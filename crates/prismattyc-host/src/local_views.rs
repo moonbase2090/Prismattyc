@@ -53,6 +53,7 @@ pub(super) fn switch(host: &mut HostState, owner: Option<String>) -> Result<bool
         adopted: std::mem::replace(&mut host.adopted, incoming.adopted),
         observed: std::mem::replace(&mut host.observed_space_sessions, incoming.observed),
     };
+    host.hyperlink_hover = None;
     if has_local(&old.mux) {
         host.local_views.parked.insert(old_owner, old);
     }

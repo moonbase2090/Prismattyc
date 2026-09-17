@@ -8105,6 +8105,7 @@ fn apply_palette_pointer(host: &mut HostState) {
 
 fn pointer_hover_blocked(host: &HostState) -> bool {
     host.restore_prompt.is_some()
+        || host.session_prompt.is_some()
         || host.theme_picker.is_some()
         || host.palette.is_some()
         || host.space_picker.is_some()

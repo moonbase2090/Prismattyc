@@ -18,6 +18,37 @@ use support::clear_command_env;
 const FIXTURE: &[u8] = include_bytes!("../../prismattyc-emulator/tests/fixtures/pt72-session.bin");
 
 #[test]
+fn continuous_output_keeps_checkpoints_rate_limited() {
+    let data = DataGuard(data_dir());
+    let socket = socket_path();
+    let _server = start_server(
+        &socket,
+        &data.0,
+        "/bin/sh",
+        &["-c", "while :; do printf .; sleep 0.02; done"],
+    );
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let mut writes = Vec::new();
+    while writes.len() < 3 {
+        if let Ok(modified) = std::fs::metadata(persist_path(&data.0)).and_then(|m| m.modified()) {
+            if writes.last() != Some(&modified) {
+                if let Some(previous) = writes.last() {
+                    // Allow scheduling and filesystem timestamp variation while
+                    // rejecting a checkpoint on every output/maintenance tick.
+                    assert!(
+                        modified.duration_since(*previous).unwrap() >= Duration::from_secs(1),
+                        "continuous output bypassed the two-second checkpoint cadence"
+                    );
+                }
+                writes.push(modified);
+            }
+        }
+        assert!(Instant::now() < deadline, "periodic checkpoints stopped");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn blocked_checkpoint_writer_does_not_block_control_requests() {
     use std::io::Read;

@@ -2986,6 +2986,27 @@ mod tests {
     }
 
     #[test]
+    fn cell_pixel_changes_report_each_dimension_and_normalize_zero() {
+        let mut emulator = Emulator::new(80, 24, 0);
+        for (width, height, changed) in [
+            (10, 23, true),
+            (11, 23, true),
+            (11, 24, true),
+            (11, 24, false),
+            (0, 0, true),
+            (1, 1, false),
+            (0, 1, false),
+        ] {
+            assert_eq!(emulator.set_cell_pixels(width, height), changed);
+            emulator.feed(b"\x1b[16t");
+            assert_eq!(
+                emulator.take_pending_replies(),
+                vec![format!("\x1b[6;{};{}t", height.max(1), width.max(1)).into_bytes()]
+            );
+        }
+    }
+
+    #[test]
     fn csi_xtwinops_matches_ghostty_size_report() {
         // Ghostty size_report.zig: 14 t window pixels (h,w), 16 t cell (h,w), 18 t cells.
         let mut emulator = Emulator::new(80, 24, 0);

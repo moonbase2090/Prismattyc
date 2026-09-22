@@ -21,7 +21,8 @@ use crate::pane_log::{
     PANE_FRAME_OVERHEAD, PTY_OUTPUT_BUDGET_BYTES,
 };
 use crate::pane_log_persist::{
-    replay_event, reset_output_event, restore_emulator, PersistPane, ScreenCodec,
+    replay_event, reset_output_event, restore_emulator, CaptureMarks, PendingPane, PersistPane,
+    ScreenCodec,
 };
 use crate::rich::{self, RichSession};
 
@@ -1158,6 +1159,51 @@ impl LiveRuntime {
                 .wrapping_add(seq);
         }
         mark
+    }
+
+    pub(crate) fn capture_persist(
+        &self,
+        keys: &[(u64, String, usize)],
+        previous: &CaptureMarks,
+    ) -> (Vec<PendingPane>, CaptureMarks) {
+        let mut captured = HashMap::new();
+        let pending = keys
+            .iter()
+            .filter_map(|(id, session, pane_index)| {
+                let pane = self.panes.get(id)?;
+                let signature = (pane.log.current_seq(), session.clone(), *pane_index);
+                let unchanged = previous.get(id) == Some(&signature);
+                captured.insert(*id, signature);
+                if unchanged {
+                    return Some(PendingPane {
+                        id: *id,
+                        record: None,
+                        state: None,
+                    });
+                }
+                let state = pane.emulator.export_state().ok();
+                let snapshot_seq = if state.is_some() {
+                    pane.log.current_seq()
+                } else {
+                    pane.log.oldest_seq().unwrap_or(1).saturating_sub(1)
+                };
+                Some(PendingPane {
+                    id: *id,
+                    state,
+                    record: Some(PersistPane {
+                        session: session.clone(),
+                        pane_index: *pane_index,
+                        snapshot_seq,
+                        snapshot: None,
+                        cols: u16::try_from(pane.cols).unwrap_or(u16::MAX),
+                        rows: u16::try_from(pane.rows).unwrap_or(u16::MAX),
+                        cell_px: (pane.cell_w, pane.cell_h),
+                        tail: pane.log.frames(),
+                    }),
+                })
+            })
+            .collect();
+        (pending, captured)
     }
 
     pub(crate) fn export_persist(

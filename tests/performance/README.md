@@ -1,5 +1,29 @@
 # Compare terminal throughput and memory
 
+## Measure checkpoint stalls
+
+Run `checkpoint-latency.py` with a frozen release `pmuxd` binary:
+
+```bash
+python3 tests/performance/checkpoint-latency.py /path/to/pmuxd --panes 26 --seconds 20
+python3 tests/performance/checkpoint-latency.py /path/to/pmuxd --panes 26 --seconds 20 --persist off
+```
+
+Each pane fills 10,000 history rows and then emits one byte every 50 ms.
+The probe measures control-socket round trips across repeated checkpoints.
+It uses a private daemon and generated text. It does not read existing panes.
+Run baseline and candidate sequentially while compilation is idle.
+Compare the maximum pause and the count above 50 ms as well as percentiles.
+Rare checkpoint stalls can fall outside the 99th percentile.
+This probe measures control latency, not compositor presentation latency.
+
+The Linux `blocked_checkpoint_writer_does_not_block_control_requests` test
+blocks a real checkpoint write with a small FIFO. It checks control replies
+and PTY echo while the write is blocked. Set `PMUX_CHECKPOINT_TEST_BINARY`
+to an older daemon when checking that this regression detects the old bug.
+
+## Measure output throughput
+
 This Linux probe runs two frozen `prismattyc-host` binaries and Foot.
 Each case gets a private home directory, Xvfb display, and Weston compositor.
 It does not connect to your desktop or your `pmuxd`.

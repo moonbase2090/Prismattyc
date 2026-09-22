@@ -1603,10 +1603,7 @@ mod tests {
         let mut replica = replay_log(&pane);
         pane.resize(4, 24, 8, 16).expect("logical resize");
         pane.resize(4, 24, 13, 27).expect("pixel resize");
-        crate::pane_log_persist::replay_event(
-            &mut replica,
-            &pane.log.iter().last().unwrap().event,
-        );
+        crate::pane_log_persist::replay_event(&mut replica, &pane.log.iter().last().unwrap().event);
         assert_eq!(replica.screen().history_line_text(1), "efgh");
         assert_eq!(replica.screen(), pane.emulator.screen());
     }

@@ -451,9 +451,11 @@ impl Emulator {
     }
 
     /// Host FontMetrics → XTWINOPS / Kitty size reports.
-    pub fn set_cell_pixels(&mut self, width: u32, height: u32) {
+    pub fn set_cell_pixels(&mut self, width: u32, height: u32) -> bool {
+        let changed = self.cell_width_px != width.max(1) || self.cell_height_px != height.max(1);
         self.cell_width_px = width.max(1);
         self.cell_height_px = height.max(1);
+        changed
     }
 
     /// Export stable emulator state. Call this only between complete parser

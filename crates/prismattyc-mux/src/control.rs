@@ -2850,14 +2850,16 @@ impl ControlPlane {
     }
 
     /// Enable pane-log persist at `path` and restore if a file is already there.
-    pub fn set_pane_log_path(&mut self, path: PathBuf) {
+    pub fn set_pane_log_path(&mut self, path: PathBuf) -> std::io::Result<()> {
+        let worker = PersistWorker::start()?;
         self.pane_log_worker.take();
         self.pane_log_pending_mark = None;
         self.pane_log_captured.clear();
         self.pane_log_capture = None;
         self.pane_log_path = Some(path);
         self.restore_pane_logs();
-        self.pane_log_worker = PersistWorker::start().ok();
+        self.pane_log_worker = Some(worker);
+        Ok(())
     }
 
     pub(crate) fn flush_pane_logs(&mut self) {

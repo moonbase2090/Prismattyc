@@ -378,10 +378,14 @@ pub(crate) fn replay_event(emulator: &mut Emulator, event: &PaneEvent) {
             reflow,
         } => {
             emulator.set_cell_pixels(cell_px.0.max(1), cell_px.1.max(1));
-            if *reflow {
-                emulator.resize((*cols as usize).max(1), (*rows as usize).max(1));
-            } else {
-                emulator.resize_legacy((*cols as usize).max(1), (*rows as usize).max(1));
+            let cols = usize::from(*cols).max(1);
+            let rows = usize::from(*rows).max(1);
+            if emulator.screen().columns() != cols || emulator.screen().rows() != rows {
+                if *reflow {
+                    emulator.resize(cols, rows);
+                } else {
+                    emulator.resize_legacy(cols, rows);
+                }
             }
         }
         _ => {}
@@ -534,6 +538,61 @@ mod tests {
             },
         );
         assert_eq!(new.screen().history_line_text(1), "efgh");
+    }
+
+    #[test]
+    fn pixel_resize_tail_recovery_preserves_graphics() {
+        let image = b"\x1b_Ga=T,t=d,f=100,i=7;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR42mP4z8AAAAMBAQD3A0FDAAAAAElFTkSuQmCC\x1b\\";
+        for reflow in [false, true] {
+            let mut live = fresh_emulator(80, 24);
+            live.feed(image);
+            let graphics = live.export_state().unwrap().graphics;
+            assert_eq!(graphics.images.len(), 1);
+            live.set_cell_pixels(13, 27);
+            live.feed(b"\x1b[");
+            let snapshot = EmulatorStateCodec.export(&live).unwrap();
+            assert!(snapshot.is_empty());
+            let rec = PersistPane {
+                session: "default".into(),
+                pane_index: 0,
+                snapshot_seq: 0,
+                snapshot: Some(snapshot),
+                cols: 80,
+                rows: 24,
+                cell_px: (13, 27),
+                tail: vec![
+                    PaneLogFrame {
+                        seq: 1,
+                        event: PaneEvent::Output {
+                            bytes: image.to_vec(),
+                        },
+                    },
+                    PaneLogFrame {
+                        seq: 2,
+                        event: PaneEvent::Resize {
+                            cols: 80,
+                            rows: 24,
+                            cell_px: (13, 27),
+                            size_owner: None,
+                            reflow,
+                        },
+                    },
+                    PaneLogFrame {
+                        seq: 3,
+                        event: PaneEvent::Output {
+                            bytes: b"\x1b[".to_vec(),
+                        },
+                    },
+                ],
+            };
+            let mut restored = restore_emulator(&rec, &EmulatorStateCodec).unwrap();
+            restored.feed(b"0m");
+            live.feed(b"0m");
+            let state = restored.export_state().unwrap();
+            assert_eq!(state.graphics, graphics);
+            assert_eq!((state.cell_width_px, state.cell_height_px), (13, 27));
+            assert_eq!(state, live.export_state().unwrap());
+        }
     }
 
     #[test]

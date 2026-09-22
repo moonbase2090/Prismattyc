@@ -199,7 +199,9 @@ fn main() -> Result<()> {
         .with_context(|| format!("open mailbox {}", mail_db.display()))?;
     plane.set_mail_store(store);
     if let Some(path) = prismattyc_mux::resolve_pane_log_path(&cli.socket) {
-        plane.set_pane_log_path(path);
+        plane
+            .set_pane_log_path(path)
+            .context("start pane-log checkpoint worker")?;
     }
     let server = ControlServer::bind(&cli.socket, plane)
         .with_context(|| format!("bind {}", cli.socket.display()))?;

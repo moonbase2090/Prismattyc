@@ -9,7 +9,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use prismattyc_mux::{
-    ControlRequest, ControlResponse, ControlResponseBody, ControlResponseData, PROTOCOL_VERSION,
+    ControlRequest, ControlResponse, ControlResponseBody, ControlResponseData, SpawnSpec,
+    PROTOCOL_VERSION,
 };
 
 mod support;
@@ -81,6 +82,101 @@ fn small_output_appends_checkpoint_and_survives_unclean_restart() {
     assert!(
         restored.contains("RECOVER THIS DELTA"),
         "lost committed delta: {restored}"
+    );
+}
+
+#[test]
+fn identity_change_checkpoint_survives_unclean_restart() {
+    let data = DataGuard(data_dir());
+    let socket = socket_path();
+    let server = start_server(
+        &socket,
+        &data.0,
+        "sh",
+        &["-c", "printf 'IDENTITY BASE\n'; exec cat"],
+    );
+    let mut client = Client::connect(&socket);
+    let pane = first_pane(&mut client);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !read_lines(&mut client, pane)
+        .join("\n")
+        .contains("IDENTITY BASE")
+    {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    let path = persist_path(&data.0);
+    wait_persisted_session(&path, "default");
+
+    let snapshot = match ok_data(client.call(&ControlRequest::Snapshot {
+        version: PROTOCOL_VERSION,
+        request_id: 0,
+    })) {
+        ControlResponseData::Snapshot { snapshot } => snapshot,
+        other => panic!("expected Snapshot: {other:?}"),
+    };
+    let old_session = snapshot.sessions[0].id;
+    ok_data(client.call(&ControlRequest::NameSession {
+        version: PROTOCOL_VERSION,
+        request_id: 0,
+        session_id: old_session,
+        name: "old".into(),
+    }));
+    wait_persisted_session(&path, "old");
+
+    let new_session = match ok_data(client.call(&ControlRequest::CreateSession {
+        version: PROTOCOL_VERSION,
+        request_id: 0,
+        name: "default".into(),
+        spawn: SpawnSpec {
+            program: "/bin/sleep".into(),
+            argv: vec!["999".into()],
+            cwd: Some(PathBuf::from("/tmp")),
+            env: std::collections::BTreeMap::new(),
+        },
+        cols: None,
+        rows: None,
+        agent_id: None,
+        headless: true,
+    })) {
+        ControlResponseData::Session { session_id, .. } => session_id,
+        other => panic!("expected Session: {other:?}"),
+    };
+    ok_data(client.call(&ControlRequest::TransferSpaceSessions {
+        version: PROTOCOL_VERSION,
+        request_id: 0,
+        session_ids: vec![old_session],
+        from: None,
+        to: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+    }));
+    ok_data(client.call(&ControlRequest::TransferSpaceSessions {
+        version: PROTOCOL_VERSION,
+        request_id: 0,
+        session_ids: vec![new_session],
+        from: None,
+        to: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+    }));
+    ok_data(client.call(&ControlRequest::TransferSpacePane {
+        version: PROTOCOL_VERSION,
+        request_id: 0,
+        pane_id: pane,
+        to_session_id: new_session,
+        from_space: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        to_space: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+    }));
+    wait_persisted_session(&path, "default");
+
+    drop(client);
+    drop(server);
+    let socket = socket_path();
+    let _server = start_server(&socket, &data.0, "/bin/sleep", &["999"]);
+    let mut client = Client::connect(&socket);
+    let pane = first_pane(&mut client);
+    let restored = read_lines(&mut client, pane).join("\n");
+    assert!(
+        restored.contains("IDENTITY BASE"),
+        "lost history after identity-only checkpoint: {restored}"
     );
 }
 
@@ -411,6 +507,26 @@ fn wait_content(client: &mut Client, pane_id: u64) -> Vec<String> {
 
 fn persist_path(data: &Path) -> PathBuf {
     data.join("prismattyc").join("pane-log-default.json")
+}
+
+fn wait_persisted_session(path: &Path, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline {
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            if let Some(first) = raw.lines().next() {
+                if serde_json::from_str::<serde_json::Value>(first)
+                    .ok()
+                    .and_then(|file| file["panes"][0]["session"].as_str().map(str::to_owned))
+                    .as_deref()
+                    == Some(expected)
+                {
+                    return;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("persist never reached session {expected:?}");
 }
 
 fn write_mismatch(path: &Path) {

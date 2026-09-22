@@ -1143,24 +1143,22 @@ impl LiveRuntime {
             .map(|pane| pane.log.catch_up(from_seq))
     }
 
-    /// Stable persist fingerprint: pane id and current seq, ordered.
-    pub(crate) fn persist_mark(&self) -> u64 {
-        let mut ids: Vec<u64> = self.panes.keys().copied().collect();
-        ids.sort_unstable();
-        let mut mark = 0u64;
-        for id in ids {
-            let seq = self
-                .panes
-                .get(&id)
+    /// Stable persist fingerprint: current restore keys and pane log sequences.
+    pub(crate) fn persist_mark(&self, keys: &[(u64, String, usize)]) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for (id, session, pane_index) in keys {
+            id.hash(&mut hasher);
+            session.hash(&mut hasher);
+            pane_index.hash(&mut hasher);
+            self.panes
+                .get(id)
                 .map(|pane| pane.log.current_seq())
-                .unwrap_or(0);
-            mark = mark
-                .wrapping_mul(1_000_003)
-                .wrapping_add(id)
-                .wrapping_mul(1_000_003)
-                .wrapping_add(seq);
+                .unwrap_or(0)
+                .hash(&mut hasher);
         }
-        mark
+        hasher.finish()
     }
 
     pub(crate) fn capture_persist(
@@ -1586,7 +1584,7 @@ mod tests {
             pending_size_owner: None,
         };
         let keys = [(1, "session".into(), 0)];
-        let mark = runtime.persist_mark();
+        let mark = runtime.persist_mark(&keys);
         let (_, captured) = runtime.capture_persist(&keys, &HashMap::new());
         let pane = runtime.panes.get_mut(&1).unwrap();
         pane.resize(80, 24, 13, 27).expect("pixel resize");
@@ -1600,19 +1598,19 @@ mod tests {
                 ..
             }
         ));
-        assert_ne!(runtime.persist_mark(), mark);
+        assert_ne!(runtime.persist_mark(&keys), mark);
         let (pending, captured) = runtime.capture_persist(&keys, &captured);
         assert_eq!(pending[0].record.as_ref().unwrap().cell_px, (13, 27));
         let state = pending[0].state.as_ref().unwrap();
         assert_eq!((state.cell_width_px, state.cell_height_px), (13, 27));
-        let mark = runtime.persist_mark();
+        let mark = runtime.persist_mark(&keys);
         runtime
             .panes
             .get_mut(&1)
             .unwrap()
             .resize_guest(80, 24)
             .unwrap();
-        assert_eq!(runtime.persist_mark(), mark);
+        assert_eq!(runtime.persist_mark(&keys), mark);
         let (pending, _) = runtime.capture_persist(&keys, &captured);
         assert!(pending[0].record.is_none());
     }

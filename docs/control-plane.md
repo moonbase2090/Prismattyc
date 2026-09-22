@@ -183,7 +183,14 @@ Each frame is one NDJSON `ControlResponse` with the same `request_id`.
 The last frame has `done: true`. A dedicated subscribe socket is
 rejected: one connection already owns a thread.
 
+Recovery checkpoints do not run in request handlers. Maintenance captures
+at most one changed pane per tick and releases the control lock between
+panes. A background worker encodes and writes the checkpoint. Unchanged
+panes reuse their captured state. Only one checkpoint is in flight, so a
+slow disk cannot build an unbounded queue of snapshots. Failed writes are
+rate-limited and retried. Shutdown waits for the worker before writing the
+final snapshot. The recovery file format stays the same.
+
 The server is local same-user automation. [session ownership](architecture.md)
 extends this exact transport with server-owned PTY/emulator lifetime; it does
 not replace the v0 identity, lease, snapshot, event, or resync contracts.
-

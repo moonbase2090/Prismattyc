@@ -13,6 +13,8 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
 
 use prismattyc_emulator::{Emulator, EmulatorStateV1};
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,100 @@ use crate::pane_log::{PaneEvent, PaneLogFrame};
 pub(crate) const PERSIST_FORMAT: u32 = 1;
 /// How often a dirty log may be written while the daemon runs.
 pub(crate) const PERSIST_CADENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Pane id to log sequence and restore identity at the last capture.
+pub(crate) type CaptureMarks = std::collections::HashMap<u64, (u64, String, usize)>;
+
+/// State captured under the control lock. Encoding and disk I/O belong to the
+/// worker, never to a request handler. Only one checkpoint may be in flight.
+pub(crate) struct PendingPane {
+    pub id: u64,
+    pub record: Option<PersistPane>,
+    pub state: Option<EmulatorStateV1>,
+}
+
+pub(crate) struct PersistWorker {
+    send: mpsc::SyncSender<(PathBuf, Vec<PendingPane>)>,
+    done: mpsc::Receiver<bool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl PersistWorker {
+    pub(crate) fn start() -> io::Result<Self> {
+        let (send, jobs) = mpsc::sync_channel::<(PathBuf, Vec<PendingPane>)>(1);
+        let (complete, done) = mpsc::channel();
+        let thread = thread::Builder::new()
+            .name("pmux-checkpoint".into())
+            .spawn(move || {
+                let mut cached = std::collections::HashMap::new();
+                while let Ok((path, pending)) = jobs.recv() {
+                    let result = (|| -> Result<(), PersistError> {
+                        let ids: Vec<_> = pending.iter().map(|p| p.id).collect();
+                        cached.retain(|id, _| ids.contains(id));
+                        for pane in pending {
+                            if let Some(mut record) = pane.record {
+                                record.snapshot = pane
+                                    .state
+                                    .map(|state| serde_json::to_vec(&state))
+                                    .transpose()?;
+                                cached.insert(pane.id, record);
+                            }
+                        }
+                        #[derive(Serialize)]
+                        struct Document<'a> {
+                            format: u32,
+                            codec: &'a str,
+                            panes: Vec<&'a PersistPane>,
+                        }
+                        let panes = ids
+                            .iter()
+                            .map(|id| {
+                                cached.get(id).ok_or_else(|| {
+                                    PersistError::State("missing checkpoint cache".into())
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        write_document(
+                            &path,
+                            &Document {
+                                format: PERSIST_FORMAT,
+                                codec: ScreenCodec::id(&EmulatorStateCodec),
+                                panes,
+                            },
+                        )
+                    })();
+                    if complete.send(result.is_ok()).is_err() {
+                        break;
+                    }
+                }
+            })?;
+        Ok(Self {
+            send,
+            done,
+            thread: Some(thread),
+        })
+    }
+
+    pub(crate) fn submit(&self, path: PathBuf, panes: Vec<PendingPane>) -> bool {
+        self.send.try_send((path, panes)).is_ok()
+    }
+
+    pub(crate) fn completed(&self) -> Option<bool> {
+        self.done.try_recv().ok()
+    }
+}
+
+impl Drop for PersistWorker {
+    fn drop(&mut self) {
+        // Disconnect before joining. Shutdown waits for the accepted checkpoint.
+        let (closed, _) = mpsc::sync_channel(0);
+        let sender = std::mem::replace(&mut self.send, closed);
+        drop(sender);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 /// Visible line when the persist file is unusable.
 pub(crate) const RESET_LINE: &str = "pane log reset";
 const SCROLLBACK: usize = 10_000;
@@ -248,6 +344,10 @@ pub(crate) fn parse_persist_bytes(bytes: &[u8]) -> Result<PersistFile, RestoreFa
 }
 
 pub(crate) fn write_persist(path: &Path, file: &PersistFile) -> Result<(), PersistError> {
+    write_document(path, file)
+}
+
+fn write_document(path: &Path, file: &impl Serialize) -> Result<(), PersistError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -278,10 +378,14 @@ pub(crate) fn replay_event(emulator: &mut Emulator, event: &PaneEvent) {
             reflow,
         } => {
             emulator.set_cell_pixels(cell_px.0.max(1), cell_px.1.max(1));
-            if *reflow {
-                emulator.resize((*cols as usize).max(1), (*rows as usize).max(1));
-            } else {
-                emulator.resize_legacy((*cols as usize).max(1), (*rows as usize).max(1));
+            let cols = usize::from(*cols).max(1);
+            let rows = usize::from(*rows).max(1);
+            if emulator.screen().columns() != cols || emulator.screen().rows() != rows {
+                if *reflow {
+                    emulator.resize(cols, rows);
+                } else {
+                    emulator.resize_legacy(cols, rows);
+                }
             }
         }
         _ => {}
@@ -332,6 +436,69 @@ mod tests {
     const FIXTURE: &[u8] =
         include_bytes!("../../prismattyc-emulator/tests/fixtures/pt72-session.bin");
 
+    #[test]
+    fn worker_reuses_unchanged_panes_removes_closed_panes_and_drains_on_drop() {
+        let dir = std::env::temp_dir().join(format!("checkpoint-worker-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("log.json");
+        let worker = PersistWorker::start().unwrap();
+        let wait = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                if let Some(ok) = worker.completed() {
+                    assert!(ok);
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline);
+                thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        let original = fixture_pane();
+        assert!(worker.submit(
+            path.clone(),
+            vec![PendingPane {
+                id: 1,
+                record: Some(original.clone()),
+                state: None,
+            }]
+        ));
+        wait();
+        assert_eq!(read_persist(&path).unwrap().panes, vec![original.clone()]);
+        let mut renamed = original.clone();
+        renamed.session = "second".into();
+        assert!(worker.submit(
+            path.clone(),
+            vec![
+                PendingPane {
+                    id: 1,
+                    record: None,
+                    state: None
+                },
+                PendingPane {
+                    id: 2,
+                    record: Some(renamed.clone()),
+                    state: None
+                },
+            ]
+        ));
+        wait();
+        assert_eq!(
+            read_persist(&path).unwrap().panes,
+            vec![original, renamed.clone()]
+        );
+        assert!(worker.submit(
+            path.clone(),
+            vec![PendingPane {
+                id: 2,
+                record: None,
+                state: None
+            }]
+        ));
+        drop(worker);
+        assert_eq!(read_persist(&path).unwrap().panes, vec![renamed]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     fn fixture_pane() -> PersistPane {
         let mut log = PaneLog::new(4 * 1024 * 1024);
         log.append(PaneEvent::Output {
@@ -371,6 +538,61 @@ mod tests {
             },
         );
         assert_eq!(new.screen().history_line_text(1), "efgh");
+    }
+
+    #[test]
+    fn pixel_resize_tail_recovery_preserves_graphics() {
+        let image = b"\x1b_Ga=T,t=d,f=100,i=7;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR42mP4z8AAAAMBAQD3A0FDAAAAAElFTkSuQmCC\x1b\\";
+        for reflow in [false, true] {
+            let mut live = fresh_emulator(80, 24);
+            live.feed(image);
+            let graphics = live.export_state().unwrap().graphics;
+            assert_eq!(graphics.images.len(), 1);
+            live.set_cell_pixels(13, 27);
+            live.feed(b"\x1b[");
+            let snapshot = EmulatorStateCodec.export(&live).unwrap();
+            assert!(snapshot.is_empty());
+            let rec = PersistPane {
+                session: "default".into(),
+                pane_index: 0,
+                snapshot_seq: 0,
+                snapshot: Some(snapshot),
+                cols: 80,
+                rows: 24,
+                cell_px: (13, 27),
+                tail: vec![
+                    PaneLogFrame {
+                        seq: 1,
+                        event: PaneEvent::Output {
+                            bytes: image.to_vec(),
+                        },
+                    },
+                    PaneLogFrame {
+                        seq: 2,
+                        event: PaneEvent::Resize {
+                            cols: 80,
+                            rows: 24,
+                            cell_px: (13, 27),
+                            size_owner: None,
+                            reflow,
+                        },
+                    },
+                    PaneLogFrame {
+                        seq: 3,
+                        event: PaneEvent::Output {
+                            bytes: b"\x1b[".to_vec(),
+                        },
+                    },
+                ],
+            };
+            let mut restored = restore_emulator(&rec, &EmulatorStateCodec).unwrap();
+            restored.feed(b"0m");
+            live.feed(b"0m");
+            let state = restored.export_state().unwrap();
+            assert_eq!(state.graphics, graphics);
+            assert_eq!((state.cell_width_px, state.cell_height_px), (13, 27));
+            assert_eq!(state, live.export_state().unwrap());
+        }
     }
 
     #[test]

@@ -21,7 +21,8 @@ use crate::pane_log::{
     PANE_FRAME_OVERHEAD, PTY_OUTPUT_BUDGET_BYTES,
 };
 use crate::pane_log_persist::{
-    replay_event, reset_output_event, restore_emulator, PersistPane, ScreenCodec,
+    replay_event, reset_output_event, restore_emulator, CaptureMarks, PendingPane, PersistPane,
+    ScreenCodec,
 };
 use crate::rich::{self, RichSession};
 
@@ -360,11 +361,13 @@ impl LivePane {
         let size = pty_size_with_cell_pixels(cols, rows, self.cell_w, self.cell_h);
         let cells_changed = self.emulator.screen().columns() != cols || self.rows != rows;
         self.session.resize(size)?;
-        self.emulator.set_cell_pixels(self.cell_w, self.cell_h);
-        if !cells_changed {
+        let pixels_changed = self.emulator.set_cell_pixels(self.cell_w, self.cell_h);
+        if !cells_changed && !pixels_changed {
             return Ok(());
         }
-        self.emulator.resize(cols, rows);
+        if cells_changed {
+            self.emulator.resize(cols, rows);
+        }
         self.record(PaneEvent::Resize {
             cols: u16::try_from(cols).unwrap_or(u16::MAX),
             rows: u16::try_from(rows).unwrap_or(u16::MAX),
@@ -1160,6 +1163,51 @@ impl LiveRuntime {
         mark
     }
 
+    pub(crate) fn capture_persist(
+        &self,
+        keys: &[(u64, String, usize)],
+        previous: &CaptureMarks,
+    ) -> (Vec<PendingPane>, CaptureMarks) {
+        let mut captured = HashMap::new();
+        let pending = keys
+            .iter()
+            .filter_map(|(id, session, pane_index)| {
+                let pane = self.panes.get(id)?;
+                let signature = (pane.log.current_seq(), session.clone(), *pane_index);
+                let unchanged = previous.get(id) == Some(&signature);
+                captured.insert(*id, signature);
+                if unchanged {
+                    return Some(PendingPane {
+                        id: *id,
+                        record: None,
+                        state: None,
+                    });
+                }
+                let state = pane.emulator.export_state().ok();
+                let snapshot_seq = if state.is_some() {
+                    pane.log.current_seq()
+                } else {
+                    pane.log.oldest_seq().unwrap_or(1).saturating_sub(1)
+                };
+                Some(PendingPane {
+                    id: *id,
+                    state,
+                    record: Some(PersistPane {
+                        session: session.clone(),
+                        pane_index: *pane_index,
+                        snapshot_seq,
+                        snapshot: None,
+                        cols: u16::try_from(pane.cols).unwrap_or(u16::MAX),
+                        rows: u16::try_from(pane.rows).unwrap_or(u16::MAX),
+                        cell_px: (pane.cell_w, pane.cell_h),
+                        tail: pane.log.frames(),
+                    }),
+                })
+            })
+            .collect();
+        (pending, captured)
+    }
+
     pub(crate) fn export_persist(
         &self,
         keys: &[(u64, String, usize)],
@@ -1505,6 +1553,59 @@ mod tests {
         let mut replica = replay_log(&pane);
         assert_eq!(replica.screen(), pane.emulator.screen());
         assert_eq!(replica.take_pending_replies(), Vec::<Vec<u8>>::new());
+    }
+
+    #[test]
+    fn pane_log_pixel_resize_invalidates_checkpoint_cache() {
+        let pane = spawn_test_pane(1, &sleep_spawn(BTreeMap::new()), None);
+        let mut runtime = LiveRuntime {
+            panes: HashMap::from([(1, pane)]),
+            mux_socket: None,
+            watch: PaneLogWatch::new(),
+            pending_size_owner: None,
+        };
+        let keys = [(1, "session".into(), 0)];
+        let mark = runtime.persist_mark();
+        let (_, captured) = runtime.capture_persist(&keys, &HashMap::new());
+        let pane = runtime.panes.get_mut(&1).unwrap();
+        pane.resize(80, 24, 13, 27).expect("pixel resize");
+        assert!(matches!(
+            &pane.log.iter().last().unwrap().event,
+            PaneEvent::Resize {
+                cols: 80,
+                rows: 24,
+                cell_px: (13, 27),
+                reflow: true,
+                ..
+            }
+        ));
+        assert_ne!(runtime.persist_mark(), mark);
+        let (pending, captured) = runtime.capture_persist(&keys, &captured);
+        assert_eq!(pending[0].record.as_ref().unwrap().cell_px, (13, 27));
+        let state = pending[0].state.as_ref().unwrap();
+        assert_eq!((state.cell_width_px, state.cell_height_px), (13, 27));
+        let mark = runtime.persist_mark();
+        runtime
+            .panes
+            .get_mut(&1)
+            .unwrap()
+            .resize_guest(80, 24)
+            .unwrap();
+        assert_eq!(runtime.persist_mark(), mark);
+        let (pending, _) = runtime.capture_persist(&keys, &captured);
+        assert!(pending[0].record.is_none());
+    }
+
+    #[test]
+    fn pane_log_pixel_resize_preserves_superseded_resize_reflow() {
+        let mut pane = spawn_test_pane(1, &sleep_spawn(BTreeMap::new()), None);
+        pane.apply_pty_bytes(b"abcdefgh");
+        let mut replica = replay_log(&pane);
+        pane.resize(4, 24, 8, 16).expect("logical resize");
+        pane.resize(4, 24, 13, 27).expect("pixel resize");
+        crate::pane_log_persist::replay_event(&mut replica, &pane.log.iter().last().unwrap().event);
+        assert_eq!(replica.screen().history_line_text(1), "efgh");
+        assert_eq!(replica.screen(), pane.emulator.screen());
     }
 
     #[test]

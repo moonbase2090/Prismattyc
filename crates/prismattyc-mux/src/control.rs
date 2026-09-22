@@ -25,7 +25,8 @@ use crate::live::{LiveRuntime, LiveWriteError};
 use crate::pane_log::{CatchUp, PaneLogWatch};
 pub use crate::pane_log::{PaneEvent, PaneLogFrame};
 use crate::pane_log_persist::{
-    read_persist, write_persist, EmulatorStateCodec, PersistFile, ScreenCodec, PERSIST_CADENCE,
+    read_persist, write_persist, EmulatorStateCodec, PendingPane, PersistFile, PersistWorker,
+    ScreenCodec, PERSIST_CADENCE,
 };
 use crate::remote_size::{
     disconnect_decision, record_host_chosen, resize_decision, ClientRole, RemoteSizePolicy,
@@ -2222,6 +2223,15 @@ pub struct MutationAck {
     pub sequence: u64,
 }
 
+/// Capture at most one pane per maintenance tick, releasing the control lock
+/// between panes. Checkpoints remain independent per-pane snapshots.
+struct CheckpointCapture {
+    keys: std::collections::VecDeque<(u64, String, usize)>,
+    panes: Vec<PendingPane>,
+    captured: std::collections::HashMap<u64, (u64, String, usize)>,
+    mark: u64,
+}
+
 /// Display-free owner of control-visible mux topology and event history.
 ///
 /// `new_live` additionally binds one server-owned PTY/emulator per pane. The
@@ -2311,6 +2321,10 @@ pub struct ControlPlane {
     pane_log_path: Option<PathBuf>,
     last_pane_log_persist: Option<Instant>,
     pane_log_persist_mark: u64,
+    pane_log_worker: Option<PersistWorker>,
+    pane_log_pending_mark: Option<u64>,
+    pane_log_captured: std::collections::HashMap<u64, (u64, String, usize)>,
+    pane_log_capture: Option<CheckpointCapture>,
 }
 
 impl ControlPlane {
@@ -2417,6 +2431,10 @@ impl ControlPlane {
             pane_log_path: None,
             last_pane_log_persist: None,
             pane_log_persist_mark: 0,
+            pane_log_worker: None,
+            pane_log_pending_mark: None,
+            pane_log_captured: std::collections::HashMap::new(),
+            pane_log_capture: None,
         })
     }
 
@@ -2614,7 +2632,6 @@ impl ControlPlane {
             Some(live) => live.drain(),
             None => return,
         };
-        self.maybe_persist_pane_logs();
         if let Some(sink) = self.supervisor.as_ref() {
             for notice in notices {
                 sink.try_emit(notice);
@@ -2833,12 +2850,23 @@ impl ControlPlane {
     }
 
     /// Enable pane-log persist at `path` and restore if a file is already there.
-    pub fn set_pane_log_path(&mut self, path: PathBuf) {
+    pub fn set_pane_log_path(&mut self, path: PathBuf) -> std::io::Result<()> {
+        let worker = PersistWorker::start()?;
+        self.pane_log_worker.take();
+        self.pane_log_pending_mark = None;
+        self.pane_log_captured.clear();
+        self.pane_log_capture = None;
         self.pane_log_path = Some(path);
         self.restore_pane_logs();
+        self.pane_log_worker = Some(worker);
+        Ok(())
     }
 
     pub(crate) fn flush_pane_logs(&mut self) {
+        // Shutdown must finish the older write before publishing the final state.
+        self.pane_log_worker.take();
+        self.pane_log_pending_mark = None;
+        self.pane_log_capture = None;
         let Some(path) = self.pane_log_path.clone() else {
             return;
         };
@@ -2875,20 +2903,60 @@ impl ControlPlane {
     }
 
     fn maybe_persist_pane_logs(&mut self) {
+        let Some(worker) = self.pane_log_worker.as_ref() else {
+            return;
+        };
+        if let Some(success) = worker.completed() {
+            if let Some(mark) = self.pane_log_pending_mark.take() {
+                if success {
+                    self.pane_log_persist_mark = mark;
+                } else {
+                    self.pane_log_captured.clear();
+                }
+            }
+        }
+        if self.pane_log_pending_mark.is_some() {
+            return;
+        }
         let Some(live) = self.live.as_ref() else {
             return;
         };
-        let mark = live.persist_mark();
-        if mark == self.pane_log_persist_mark {
+        if self.pane_log_capture.is_none() {
+            let mark = live.persist_mark();
+            if mark == self.pane_log_persist_mark
+                || self
+                    .last_pane_log_persist
+                    .is_some_and(|at| at.elapsed() < PERSIST_CADENCE)
+            {
+                return;
+            }
+            self.pane_log_capture = Some(CheckpointCapture {
+                keys: self.persist_keys().into(),
+                panes: Vec::new(),
+                captured: std::collections::HashMap::new(),
+                mark,
+            });
+            self.last_pane_log_persist = Some(Instant::now());
+        }
+        let Some(path) = self.pane_log_path.clone() else {
+            return;
+        };
+        let capture = self.pane_log_capture.as_mut().unwrap();
+        if let Some(key) = capture.keys.pop_front() {
+            let (panes, captured) = live.capture_persist(&[key], &self.pane_log_captured);
+            capture.panes.extend(panes);
+            capture.captured.extend(captured);
+        }
+        if !capture.keys.is_empty() {
             return;
         }
-        if self
-            .last_pane_log_persist
-            .is_some_and(|at| Instant::now().duration_since(at) < PERSIST_CADENCE)
-        {
-            return;
+        let capture = self.pane_log_capture.take().unwrap();
+        // Rate-limit failed writes as well as successful ones. A slow writer
+        // cannot queue unbounded snapshots or hold up incoming keystrokes.
+        if worker.submit(path, capture.panes) {
+            self.pane_log_pending_mark = Some(capture.mark);
+            self.pane_log_captured = capture.captured;
         }
-        self.flush_pane_logs();
     }
 
     fn restore_pane_logs(&mut self) {
@@ -6991,6 +7059,7 @@ impl ControlServer {
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner());
                             guard.drain_live();
+                            guard.maybe_persist_pane_logs();
                             guard.retry_mail_nudges();
                             guard.pane_log_watch()
                         };

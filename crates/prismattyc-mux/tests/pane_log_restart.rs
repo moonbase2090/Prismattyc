@@ -17,6 +17,130 @@ use support::clear_command_env;
 
 const FIXTURE: &[u8] = include_bytes!("../../prismattyc-emulator/tests/fixtures/pt72-session.bin");
 
+#[test]
+fn continuous_output_keeps_checkpoints_rate_limited() {
+    let data = DataGuard(data_dir());
+    let socket = socket_path();
+    let _server = start_server(
+        &socket,
+        &data.0,
+        "/bin/sh",
+        &["-c", "while :; do printf .; sleep 0.02; done"],
+    );
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let mut writes = Vec::new();
+    while writes.len() < 3 {
+        if let Ok(modified) = std::fs::metadata(persist_path(&data.0)).and_then(|m| m.modified()) {
+            if writes.last() != Some(&modified) {
+                if let Some(previous) = writes.last() {
+                    // Allow scheduling and filesystem timestamp variation while
+                    // rejecting a checkpoint on every output/maintenance tick.
+                    assert!(
+                        modified.duration_since(*previous).unwrap() >= Duration::from_secs(1),
+                        "continuous output bypassed the two-second checkpoint cadence"
+                    );
+                }
+                writes.push(modified);
+            }
+        }
+        assert!(Instant::now() < deadline, "periodic checkpoints stopped");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn blocked_checkpoint_writer_does_not_block_control_requests() {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let data = DataGuard(data_dir());
+    let socket = socket_path();
+    let fifo = persist_path(&data.0).with_extension("json.tmp");
+    std::fs::create_dir_all(fifo.parent().unwrap()).unwrap();
+    assert!(Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap()
+        .success());
+    let mut reader = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&fifo)
+        .unwrap();
+    // A blank terminal snapshot must not fit into the pipe. Otherwise the
+    // writer can finish and the test would exercise an ordinary idle daemon.
+    assert_eq!(
+        unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_SETPIPE_SZ, 4096) },
+        4096
+    );
+    let _server = start_server(
+        &socket,
+        &data.0,
+        "sh",
+        &["-c", "printf 'checkpoint ready'; exec cat"],
+    );
+    // The snapshot exceeds the FIFO buffer. Reading one byte proves that the
+    // writer started; leaving the rest unread keeps that write blocked.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut byte = [0];
+        if reader.read(&mut byte).is_ok_and(|n| n == 1) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "checkpoint writer did not reach FIFO"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    serde_json::to_writer(
+        &mut stream,
+        &ControlRequest::Ping {
+            version: PROTOCOL_VERSION,
+            request_id: 1,
+        },
+    )
+    .unwrap();
+    stream.write_all(b"\n").unwrap();
+    let mut line = String::new();
+    BufReader::new(stream)
+        .read_line(&mut line)
+        .expect("checkpoint I/O blocked the control lock");
+    assert!(matches!(
+        serde_json::from_str::<ControlResponse>(&line).unwrap().body,
+        ControlResponseBody::Ok { .. }
+    ));
+    let mut client = Client::connect(&socket);
+    client
+        .stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let pane_id = first_pane(&mut client);
+    ok_data(client.call(&ControlRequest::WritePane {
+        version: PROTOCOL_VERSION,
+        request_id: 0,
+        client_id: client.client_id,
+        pane_id,
+        data: "typing while checkpoint blocked\n".into(),
+    }));
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !read_lines(&mut client, pane_id)
+        .join("\n")
+        .contains("typing while checkpoint blocked")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "PTY echo stalled behind checkpoint"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn socket_path() -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -61,7 +185,10 @@ impl Drop for DataGuard {
 }
 
 fn start_server(socket: &Path, data: &Path, program: &str, argv: &[&str]) -> ServerGuard {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pmuxd"));
+    let mut command = Command::new(
+        std::env::var_os("PMUX_CHECKPOINT_TEST_BINARY")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_pmuxd").into()),
+    );
     clear_command_env(&mut command);
     let guard = ServerGuard {
         child: command

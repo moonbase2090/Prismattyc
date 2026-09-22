@@ -451,9 +451,11 @@ impl Emulator {
     }
 
     /// Host FontMetrics → XTWINOPS / Kitty size reports.
-    pub fn set_cell_pixels(&mut self, width: u32, height: u32) {
+    pub fn set_cell_pixels(&mut self, width: u32, height: u32) -> bool {
+        let changed = self.cell_width_px != width.max(1) || self.cell_height_px != height.max(1);
         self.cell_width_px = width.max(1);
         self.cell_height_px = height.max(1);
+        changed
     }
 
     /// Export stable emulator state. Call this only between complete parser
@@ -2981,6 +2983,27 @@ mod tests {
         let tiny = pty_size_with_cell_pixels(80, 24, 0, 0);
         assert_eq!(tiny.pixel_width, 80);
         assert_eq!(tiny.pixel_height, 24);
+    }
+
+    #[test]
+    fn cell_pixel_changes_report_each_dimension_and_normalize_zero() {
+        let mut emulator = Emulator::new(80, 24, 0);
+        for (width, height, changed) in [
+            (10, 23, true),
+            (11, 23, true),
+            (11, 24, true),
+            (11, 24, false),
+            (0, 0, true),
+            (1, 1, false),
+            (0, 1, false),
+        ] {
+            assert_eq!(emulator.set_cell_pixels(width, height), changed);
+            emulator.feed(b"\x1b[16t");
+            assert_eq!(
+                emulator.take_pending_replies(),
+                vec![format!("\x1b[6;{};{}t", height.max(1), width.max(1)).into_bytes()]
+            );
+        }
     }
 
     #[test]

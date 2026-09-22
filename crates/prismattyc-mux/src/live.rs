@@ -373,7 +373,7 @@ impl LivePane {
             rows: u16::try_from(rows).unwrap_or(u16::MAX),
             cell_px: (self.cell_w, self.cell_h),
             size_owner: self.size_owner,
-            reflow: cells_changed,
+            reflow: true,
         });
         self.cols = cols;
         self.rows = rows;
@@ -1575,7 +1575,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 cell_px: (13, 27),
-                reflow: false,
+                reflow: true,
                 ..
             }
         ));
@@ -1594,6 +1594,21 @@ mod tests {
         assert_eq!(runtime.persist_mark(), mark);
         let (pending, _) = runtime.capture_persist(&keys, &captured);
         assert!(pending[0].record.is_none());
+    }
+
+    #[test]
+    fn pane_log_pixel_resize_preserves_superseded_resize_reflow() {
+        let mut pane = spawn_test_pane(1, &sleep_spawn(BTreeMap::new()), None);
+        pane.apply_pty_bytes(b"abcdefgh");
+        let mut replica = replay_log(&pane);
+        pane.resize(4, 24, 8, 16).expect("logical resize");
+        pane.resize(4, 24, 13, 27).expect("pixel resize");
+        crate::pane_log_persist::replay_event(
+            &mut replica,
+            &pane.log.iter().last().unwrap().event,
+        );
+        assert_eq!(replica.screen().history_line_text(1), "efgh");
+        assert_eq!(replica.screen(), pane.emulator.screen());
     }
 
     #[test]

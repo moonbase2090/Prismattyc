@@ -18,6 +18,73 @@ use support::clear_command_env;
 const FIXTURE: &[u8] = include_bytes!("../../prismattyc-emulator/tests/fixtures/pt72-session.bin");
 
 #[test]
+fn small_output_appends_checkpoint_and_survives_unclean_restart() {
+    let data = DataGuard(data_dir());
+    let socket = socket_path();
+    let server = start_server(
+        &socket,
+        &data.0,
+        "sh",
+        &["-c", "printf 'BASE READY\n'; exec cat"],
+    );
+    let mut client = Client::connect(&socket);
+    let pane = first_pane(&mut client);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !read_lines(&mut client, pane)
+        .join("\n")
+        .contains("BASE READY")
+    {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Let the checkpoint include the initial output before measuring one edit.
+    std::thread::sleep(Duration::from_secs(3));
+    let path = persist_path(&data.0);
+    let before = std::fs::read(&path).unwrap();
+    let before_time = std::fs::metadata(&path).unwrap().modified().unwrap();
+    ok_data(client.call(&ControlRequest::WritePane {
+        version: PROTOCOL_VERSION,
+        request_id: 0,
+        client_id: client.client_id,
+        pane_id: pane,
+        data: "RECOVER THIS DELTA\n".into(),
+    }));
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let changed = std::fs::metadata(&path).unwrap().modified().unwrap() != before_time;
+        if changed {
+            break;
+        }
+        assert!(Instant::now() < deadline, "delta checkpoint never arrived");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let after = std::fs::read(&path).unwrap();
+    assert!(
+        after.starts_with(&before),
+        "ordinary output rewrote the full recovery snapshot"
+    );
+    assert!(
+        after.len() - before.len() < 32 * 1024,
+        "small output rewrote saved history"
+    );
+    drop(client);
+    drop(server); // SIGKILL: no shutdown snapshot can hide a broken journal.
+    let socket = socket_path();
+    let _server = start_server(&socket, &data.0, "/bin/sleep", &["999"]);
+    let mut client = Client::connect(&socket);
+    let pane = first_pane(&mut client);
+    let restored = read_lines(&mut client, pane).join("\n");
+    assert!(
+        restored.contains("BASE READY"),
+        "lost the base snapshot: {restored}"
+    );
+    assert!(
+        restored.contains("RECOVER THIS DELTA"),
+        "lost committed delta: {restored}"
+    );
+}
+
+#[test]
 fn continuous_output_keeps_checkpoints_rate_limited() {
     let data = DataGuard(data_dir());
     let socket = socket_path();

@@ -2906,11 +2906,12 @@ impl ControlPlane {
         let Some(worker) = self.pane_log_worker.as_ref() else {
             return;
         };
-        if let Some(success) = worker.completed() {
+        if let Some((success, compact)) = worker.completed() {
             if let Some(mark) = self.pane_log_pending_mark.take() {
                 if success {
                     self.pane_log_persist_mark = mark;
-                } else {
+                }
+                if !success || compact {
                     self.pane_log_captured.clear();
                 }
             }

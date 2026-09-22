@@ -185,11 +185,26 @@ rejected: one connection already owns a thread.
 
 Recovery checkpoints do not run in request handlers. Maintenance captures
 at most one changed pane per tick and releases the control lock between
-panes. A background worker encodes and writes the checkpoint. Unchanged
-panes reuse their captured state. Only one checkpoint is in flight, so a
+panes. Ordinary output captures only events since the previous checkpoint.
+A background worker appends these events in newline-terminated transactions.
+Unchanged panes do not export or rewrite their screen history. Only one checkpoint is in flight, so a
 slow disk cannot build an unbounded queue of snapshots. Failed writes are
 rate-limited and retried. Shutdown waits for the worker before writing the
-final snapshot. The recovery file format stays the same.
+final snapshot.
+
+Recovery format 2 stores a base snapshot followed by event transactions.
+The checkpoint cadence remains two seconds. A journal that reaches 4 MiB
+requests a fresh base on the next dirty checkpoint. A resize, changed pane
+identity, or gap in the event ring also requires a fresh pane snapshot.
+Each transaction includes the active pane list, so removed panes cannot
+return during recovery. Atomic rename publishes a complete replacement base.
+Recovery ignores an incomplete final transaction after a process crash.
+Complete malformed transactions reject the file. Writes do not call `fsync`;
+the checkpoint cadence is not a power-loss durability guarantee.
+
+The reader accepts format 1 files from earlier releases. Earlier daemons
+cannot read format 2 files. Downgrading loses saved terminal history; it
+does not restore the old PTY processes.
 
 The server is local same-user automation. [session ownership](architecture.md)
 extends this exact transport with server-owned PTY/emulator lifetime; it does

@@ -2224,9 +2224,11 @@ pub struct MutationAck {
 }
 
 /// Capture at most one pane per maintenance tick, releasing the control lock
-/// between panes. Checkpoints remain independent per-pane snapshots.
+/// between panes. Restore keys are revalidated before submission; mutations
+/// after submission are captured on the next normal cadence.
 struct CheckpointCapture {
     keys: std::collections::VecDeque<(u64, String, usize)>,
+    restore_keys: Vec<(u64, String, usize)>,
     panes: Vec<PendingPane>,
     captured: std::collections::HashMap<u64, (u64, String, usize)>,
     mark: u64,
@@ -2880,7 +2882,7 @@ impl ControlPlane {
         );
         if write_persist(&path, &file).is_ok() {
             self.last_pane_log_persist = Some(Instant::now());
-            self.pane_log_persist_mark = live.persist_mark();
+            self.pane_log_persist_mark = live.persist_mark(&keys);
         }
     }
 
@@ -2906,11 +2908,12 @@ impl ControlPlane {
         let Some(worker) = self.pane_log_worker.as_ref() else {
             return;
         };
-        if let Some(success) = worker.completed() {
+        if let Some((success, compact)) = worker.completed() {
             if let Some(mark) = self.pane_log_pending_mark.take() {
                 if success {
                     self.pane_log_persist_mark = mark;
-                } else {
+                }
+                if !success || compact {
                     self.pane_log_captured.clear();
                 }
             }
@@ -2922,7 +2925,8 @@ impl ControlPlane {
             return;
         };
         if self.pane_log_capture.is_none() {
-            let mark = live.persist_mark();
+            let keys = self.persist_keys();
+            let mark = live.persist_mark(&keys);
             if mark == self.pane_log_persist_mark
                 || self
                     .last_pane_log_persist
@@ -2931,7 +2935,8 @@ impl ControlPlane {
                 return;
             }
             self.pane_log_capture = Some(CheckpointCapture {
-                keys: self.persist_keys().into(),
+                keys: keys.clone().into(),
+                restore_keys: keys,
                 panes: Vec::new(),
                 captured: std::collections::HashMap::new(),
                 mark,
@@ -2941,6 +2946,15 @@ impl ControlPlane {
         let Some(path) = self.pane_log_path.clone() else {
             return;
         };
+        let current_keys = self.persist_keys();
+        if self
+            .pane_log_capture
+            .as_ref()
+            .is_some_and(|capture| capture.restore_keys != current_keys)
+        {
+            self.pane_log_capture = None;
+            return;
+        }
         let capture = self.pane_log_capture.as_mut().unwrap();
         if let Some(key) = capture.keys.pop_front() {
             let (panes, captured) = live.capture_persist(&[key], &self.pane_log_captured);
@@ -11788,6 +11802,70 @@ mod tests {
             !split_text.contains(&format!("PANE={pane_id}\n")),
             "split child must not keep the parent pane id: {split_text:?}"
         );
+    }
+
+    #[test]
+    fn stale_checkpoint_capture_is_discarded_before_submission() {
+        let (mut plane, window, pane) = live_fixture("STALE");
+        let client = register_live_client(&mut plane);
+        wait_live_text(&mut plane, client, pane, "STALE");
+        let split = plane.handle(ControlRequest::Split {
+            version: PROTOCOL_VERSION,
+            request_id: 2,
+            window_id: window,
+            target_pane_id: pane,
+            axis: AxisWire::Horizontal,
+            ratio: 0.5,
+            spawn: spawn(),
+            client_id: None,
+        });
+        assert!(
+            matches!(split.body, ControlResponseBody::Ok { .. }),
+            "{split:?}"
+        );
+
+        let path = socket_path().with_extension("json");
+        plane.set_pane_log_path(path.clone()).unwrap();
+        plane.maybe_persist_pane_logs();
+        assert!(plane.pane_log_capture.is_some());
+
+        let session_id = plane.snapshot().unwrap().sessions[0].id;
+        let renamed = plane.handle(ControlRequest::NameSession {
+            version: PROTOCOL_VERSION,
+            request_id: 3,
+            session_id,
+            name: "renamed".into(),
+        });
+        assert!(
+            matches!(renamed.body, ControlResponseBody::Ok { .. }),
+            "{renamed:?}"
+        );
+        plane.maybe_persist_pane_logs();
+        assert!(plane.pane_log_capture.is_none());
+        assert!(!path.exists());
+
+        plane.last_pane_log_persist = Some(Instant::now() - PERSIST_CADENCE);
+        plane.maybe_persist_pane_logs();
+        plane.maybe_persist_pane_logs();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while plane.pane_log_pending_mark.is_some() {
+            plane.maybe_persist_pane_logs();
+            assert!(
+                Instant::now() < deadline,
+                "replacement checkpoint did not complete"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let persisted = read_persist(&path).unwrap();
+        assert!(persisted.panes.iter().all(|pane| pane.session == "renamed"));
+        assert!(persisted.panes.iter().any(|pane| {
+            pane.tail.iter().any(|frame| {
+                matches!(&frame.event, PaneEvent::Output { bytes } if bytes.windows(5).any(|window| window == b"STALE"))
+            })
+        }));
+        drop(plane);
+        let _ = fs::remove_file(path);
     }
 
     #[test]

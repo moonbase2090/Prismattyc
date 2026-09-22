@@ -1143,24 +1143,22 @@ impl LiveRuntime {
             .map(|pane| pane.log.catch_up(from_seq))
     }
 
-    /// Stable persist fingerprint: pane id and current seq, ordered.
-    pub(crate) fn persist_mark(&self) -> u64 {
-        let mut ids: Vec<u64> = self.panes.keys().copied().collect();
-        ids.sort_unstable();
-        let mut mark = 0u64;
-        for id in ids {
-            let seq = self
-                .panes
-                .get(&id)
+    /// Stable persist fingerprint: current restore keys and pane log sequences.
+    pub(crate) fn persist_mark(&self, keys: &[(u64, String, usize)]) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for (id, session, pane_index) in keys {
+            id.hash(&mut hasher);
+            session.hash(&mut hasher);
+            pane_index.hash(&mut hasher);
+            self.panes
+                .get(id)
                 .map(|pane| pane.log.current_seq())
-                .unwrap_or(0);
-            mark = mark
-                .wrapping_mul(1_000_003)
-                .wrapping_add(id)
-                .wrapping_mul(1_000_003)
-                .wrapping_add(seq);
+                .unwrap_or(0)
+                .hash(&mut hasher);
         }
-        mark
+        hasher.finish()
     }
 
     pub(crate) fn capture_persist(
@@ -1178,10 +1176,30 @@ impl LiveRuntime {
                 captured.insert(*id, signature);
                 if unchanged {
                     return Some(PendingPane {
+                        delta: Vec::new(),
                         id: *id,
                         record: None,
                         state: None,
                     });
+                }
+                if let Some((seq, prior_session, prior_index)) = previous.get(id) {
+                    if prior_session == session && prior_index == pane_index {
+                        if let CatchUp::Events(delta) = pane.log.catch_up(*seq) {
+                            // Resize changes the snapshot's dimensions. Capture a new
+                            // base for it; ordinary output needs only the event tail.
+                            if !delta
+                                .iter()
+                                .any(|f| matches!(f.event, PaneEvent::Resize { .. }))
+                            {
+                                return Some(PendingPane {
+                                    id: *id,
+                                    record: None,
+                                    state: None,
+                                    delta,
+                                });
+                            }
+                        }
+                    }
                 }
                 let state = pane.emulator.export_state().ok();
                 let snapshot_seq = if state.is_some() {
@@ -1190,6 +1208,7 @@ impl LiveRuntime {
                     pane.log.oldest_seq().unwrap_or(1).saturating_sub(1)
                 };
                 Some(PendingPane {
+                    delta: Vec::new(),
                     id: *id,
                     state,
                     record: Some(PersistPane {
@@ -1565,7 +1584,7 @@ mod tests {
             pending_size_owner: None,
         };
         let keys = [(1, "session".into(), 0)];
-        let mark = runtime.persist_mark();
+        let mark = runtime.persist_mark(&keys);
         let (_, captured) = runtime.capture_persist(&keys, &HashMap::new());
         let pane = runtime.panes.get_mut(&1).unwrap();
         pane.resize(80, 24, 13, 27).expect("pixel resize");
@@ -1579,21 +1598,59 @@ mod tests {
                 ..
             }
         ));
-        assert_ne!(runtime.persist_mark(), mark);
+        assert_ne!(runtime.persist_mark(&keys), mark);
         let (pending, captured) = runtime.capture_persist(&keys, &captured);
         assert_eq!(pending[0].record.as_ref().unwrap().cell_px, (13, 27));
         let state = pending[0].state.as_ref().unwrap();
         assert_eq!((state.cell_width_px, state.cell_height_px), (13, 27));
-        let mark = runtime.persist_mark();
+        let mark = runtime.persist_mark(&keys);
         runtime
             .panes
             .get_mut(&1)
             .unwrap()
             .resize_guest(80, 24)
             .unwrap();
-        assert_eq!(runtime.persist_mark(), mark);
+        assert_eq!(runtime.persist_mark(&keys), mark);
         let (pending, _) = runtime.capture_persist(&keys, &captured);
         assert!(pending[0].record.is_none());
+    }
+
+    #[test]
+    fn checkpoint_output_uses_deltas_and_log_gap_requires_fresh_snapshot() {
+        let pane = spawn_test_pane(1, &sleep_spawn(BTreeMap::new()), None);
+        let mut runtime = LiveRuntime {
+            panes: HashMap::from([(1, pane)]),
+            mux_socket: None,
+            watch: PaneLogWatch::new(),
+            pending_size_owner: None,
+        };
+        let keys = [(1, "session".into(), 0)];
+        let (initial, captured) = runtime.capture_persist(&keys, &HashMap::new());
+        assert!(initial[0].state.is_some());
+        runtime
+            .panes
+            .get_mut(&1)
+            .unwrap()
+            .apply_pty_bytes(b"new output");
+        let (pending, _) = runtime.capture_persist(&keys, &captured);
+        assert!(pending[0].record.is_none());
+        assert!(pending[0].state.is_none());
+        assert!(pending[0]
+            .delta
+            .iter()
+            .any(|f| matches!(&f.event, PaneEvent::Output { bytes } if bytes == b"new output")));
+        let renamed = [(1, "renamed".into(), 0)];
+        assert!(runtime.capture_persist(&renamed, &captured).0[0]
+            .record
+            .is_some());
+        let pane = runtime.panes.get_mut(&1).unwrap();
+        // Shrink without resetting sequence numbers, then evict unpersisted events.
+        pane.log = PaneLog::from_frames(pane.log.frames(), 16);
+        pane.apply_pty_bytes(&[b'x'; 32]);
+        pane.apply_pty_bytes(&[b'y'; 32]);
+        let (pending, _) = runtime.capture_persist(&keys, &captured);
+        assert!(pending[0].state.is_some());
+        assert!(pending[0].delta.is_empty());
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //! A snapshot that fails import is dropped and the tail is replayed.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -23,7 +23,7 @@ use crate::mailbox::default_mail_db_path;
 use crate::pane_log::{PaneEvent, PaneLogFrame};
 
 /// On-disk format number. A mismatch starts empty with one reset line.
-pub(crate) const PERSIST_FORMAT: u32 = 1;
+pub(crate) const PERSIST_FORMAT: u32 = 2;
 /// How often a dirty log may be written while the daemon runs.
 pub(crate) const PERSIST_CADENCE: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -33,6 +33,7 @@ pub(crate) type CaptureMarks = std::collections::HashMap<u64, (u64, String, usiz
 /// State captured under the control lock. Encoding and disk I/O belong to the
 /// worker, never to a request handler. Only one checkpoint may be in flight.
 pub(crate) struct PendingPane {
+    pub delta: Vec<PaneLogFrame>,
     pub id: u64,
     pub record: Option<PersistPane>,
     pub state: Option<EmulatorStateV1>,
@@ -40,7 +41,7 @@ pub(crate) struct PendingPane {
 
 pub(crate) struct PersistWorker {
     send: mpsc::SyncSender<(PathBuf, Vec<PendingPane>)>,
-    done: mpsc::Receiver<bool>,
+    done: mpsc::Receiver<(bool, bool)>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -51,44 +52,79 @@ impl PersistWorker {
         let thread = thread::Builder::new()
             .name("pmux-checkpoint".into())
             .spawn(move || {
-                let mut cached = std::collections::HashMap::new();
+                let mut cached = std::collections::HashMap::<u64, PersistPane>::new();
+                let mut journal_bytes = 0usize;
                 while let Ok((path, pending)) = jobs.recv() {
                     let result = (|| -> Result<(), PersistError> {
+                        let full = pending.iter().all(|p| p.record.is_some());
                         let ids: Vec<_> = pending.iter().map(|p| p.id).collect();
                         cached.retain(|id, _| ids.contains(id));
+                        let mut updates = Vec::new();
                         for pane in pending {
                             if let Some(mut record) = pane.record {
-                                record.snapshot = pane
-                                    .state
-                                    .map(|state| serde_json::to_vec(&state))
-                                    .transpose()?;
+                                if let Some(state) = pane.state {
+                                    record.snapshot = Some(serde_json::to_vec(&state)?);
+                                }
+                                updates.push(JournalUpdate::Replace {
+                                    pane: record.clone(),
+                                });
                                 cached.insert(pane.id, record);
+                            } else if !pane.delta.is_empty() {
+                                let record = cached.get_mut(&pane.id).ok_or_else(|| {
+                                    PersistError::State("missing checkpoint cache".into())
+                                })?;
+                                updates.push(JournalUpdate::Append {
+                                    session: record.session.clone(),
+                                    pane_index: record.pane_index,
+                                    frames: pane.delta.clone(),
+                                });
+                                record.tail.extend(pane.delta);
                             }
                         }
-                        #[derive(Serialize)]
-                        struct Document<'a> {
-                            format: u32,
-                            codec: &'a str,
-                            panes: Vec<&'a PersistPane>,
-                        }
-                        let panes = ids
-                            .iter()
-                            .map(|id| {
-                                cached.get(id).ok_or_else(|| {
-                                    PersistError::State("missing checkpoint cache".into())
+                        if full {
+                            let panes = ids
+                                .iter()
+                                .map(|id| {
+                                    cached.get(id).cloned().ok_or_else(|| {
+                                        PersistError::State("missing checkpoint cache".into())
+                                    })
                                 })
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        write_document(
-                            &path,
-                            &Document {
-                                format: PERSIST_FORMAT,
-                                codec: ScreenCodec::id(&EmulatorStateCodec),
-                                panes,
-                            },
-                        )
+                                .collect::<Result<Vec<_>, _>>()?;
+                            write_persist(
+                                &path,
+                                &PersistFile::from_panes(panes, EmulatorStateCodec.id()),
+                            )?;
+                            journal_bytes = 0;
+                        } else {
+                            let active = ids
+                                .iter()
+                                .map(|id| {
+                                    cached
+                                        .get(id)
+                                        .map(|p| (p.session.clone(), p.pane_index))
+                                        .ok_or_else(|| {
+                                            PersistError::State("missing checkpoint cache".into())
+                                        })
+                                })
+                                .collect::<Result<Vec<_>, _>>()?;
+                            let transaction = JournalTransaction { active, updates };
+                            let mut bytes = serde_json::to_vec(&transaction)?;
+                            bytes.push(b'\n');
+                            // A partial append is repaired by a fresh atomic snapshot on retry.
+                            fs::OpenOptions::new()
+                                .append(true)
+                                .open(&path)?
+                                .write_all(&bytes)?;
+                            journal_bytes = journal_bytes.saturating_add(bytes.len());
+                        }
+                        Ok(())
                     })();
-                    if complete.send(result.is_ok()).is_err() {
+                    // Request fresh captures after bounded journal growth. An idle daemon
+                    // need not compact until another event makes it dirty.
+                    if complete
+                        .send((result.is_ok(), journal_bytes >= JOURNAL_LIMIT))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -104,7 +140,7 @@ impl PersistWorker {
         self.send.try_send((path, panes)).is_ok()
     }
 
-    pub(crate) fn completed(&self) -> Option<bool> {
+    pub(crate) fn completed(&self) -> Option<(bool, bool)> {
         self.done.try_recv().ok()
     }
 }
@@ -308,6 +344,67 @@ pub(crate) struct PersistPane {
     pub tail: Vec<PaneLogFrame>,
 }
 
+// Bound replay work and in-memory tails independently of session lifetime.
+const JOURNAL_LIMIT: usize = 4 * 1024 * 1024;
+
+#[derive(Serialize, Deserialize)]
+struct JournalTransaction {
+    active: Vec<(String, usize)>,
+    updates: Vec<JournalUpdate>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum JournalUpdate {
+    Replace {
+        pane: PersistPane,
+    },
+    Append {
+        session: String,
+        pane_index: usize,
+        frames: Vec<PaneLogFrame>,
+    },
+}
+
+impl JournalTransaction {
+    fn apply(self, file: &mut PersistFile) -> Result<(), RestoreFail> {
+        for update in self.updates {
+            match update {
+                JournalUpdate::Replace { pane } => {
+                    file.panes.retain(|p| {
+                        (p.session.as_str(), p.pane_index)
+                            != (pane.session.as_str(), pane.pane_index)
+                    });
+                    file.panes.push(pane);
+                }
+                JournalUpdate::Append {
+                    session,
+                    pane_index,
+                    frames,
+                } => {
+                    let pane = file
+                        .panes
+                        .iter_mut()
+                        .find(|p| p.session == session && p.pane_index == pane_index)
+                        .ok_or(RestoreFail::Corrupt)?;
+                    pane.tail.extend(frames);
+                }
+            }
+        }
+        let mut ordered = Vec::with_capacity(self.active.len());
+        for (session, index) in self.active {
+            let position = file
+                .panes
+                .iter()
+                .position(|p| p.session == session && p.pane_index == index)
+                .ok_or(RestoreFail::Corrupt)?;
+            ordered.push(file.panes.remove(position));
+        }
+        file.panes = ordered;
+        Ok(())
+    }
+}
+
 /// Root persist document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PersistFile {
@@ -338,9 +435,36 @@ impl PersistFile {
     }
 }
 
-/// Parse bytes into a persist file. Invalid JSON is corrupt.
+/// Read a legacy snapshot or a snapshot followed by committed event transactions.
 pub(crate) fn parse_persist_bytes(bytes: &[u8]) -> Result<PersistFile, RestoreFail> {
-    serde_json::from_slice(bytes).map_err(|_| RestoreFail::Corrupt)
+    let mut stream = serde_json::Deserializer::from_slice(bytes).into_iter::<PersistFile>();
+    let mut file = stream
+        .next()
+        .ok_or(RestoreFail::Corrupt)?
+        .map_err(|_| RestoreFail::Corrupt)?;
+    let offset = stream.byte_offset();
+    // Version 1 was a single JSON document. Upgrade it in memory only.
+    if file.format == 1 {
+        if !bytes[offset..].iter().all(u8::is_ascii_whitespace) {
+            return Err(RestoreFail::Corrupt);
+        }
+        file.format = PERSIST_FORMAT;
+    } else if file.format == PERSIST_FORMAT {
+        for line in bytes[offset..].split_inclusive(|b| *b == b'\n') {
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            // A killed writer can leave an incomplete final transaction. Never
+            // apply it, even if the prefix happens to be valid JSON.
+            if line.last() != Some(&b'\n') {
+                break;
+            }
+            let transaction: JournalTransaction =
+                serde_json::from_slice(line).map_err(|_| RestoreFail::Corrupt)?;
+            transaction.apply(&mut file)?;
+        }
+    }
+    Ok(file)
 }
 
 pub(crate) fn write_persist(path: &Path, file: &PersistFile) -> Result<(), PersistError> {
@@ -351,7 +475,8 @@ fn write_document(path: &Path, file: &impl Serialize) -> Result<(), PersistError
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let bytes = serde_json::to_vec(file)?;
+    let mut bytes = serde_json::to_vec(file)?;
+    bytes.push(b'\n');
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, bytes)?;
     fs::rename(&tmp, path)?;
@@ -445,7 +570,7 @@ mod tests {
         let wait = || {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
             loop {
-                if let Some(ok) = worker.completed() {
+                if let Some((ok, _)) = worker.completed() {
                     assert!(ok);
                     break;
                 }
@@ -457,6 +582,7 @@ mod tests {
         assert!(worker.submit(
             path.clone(),
             vec![PendingPane {
+                delta: Vec::new(),
                 id: 1,
                 record: Some(original.clone()),
                 state: None,
@@ -470,11 +596,13 @@ mod tests {
             path.clone(),
             vec![
                 PendingPane {
+                    delta: Vec::new(),
                     id: 1,
                     record: None,
                     state: None
                 },
                 PendingPane {
+                    delta: Vec::new(),
                     id: 2,
                     record: Some(renamed.clone()),
                     state: None
@@ -489,6 +617,7 @@ mod tests {
         assert!(worker.submit(
             path.clone(),
             vec![PendingPane {
+                delta: Vec::new(),
                 id: 2,
                 record: None,
                 state: None
@@ -497,6 +626,151 @@ mod tests {
         drop(worker);
         assert_eq!(read_persist(&path).unwrap().panes, vec![renamed]);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn wait_worker(worker: &PersistWorker) -> (bool, bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(result) = worker.completed() {
+                return result;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn incremental_checkpoint_preserves_base_and_restores_after_torn_append() {
+        let dir = std::env::temp_dir().join(format!("checkpoint-delta-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("log.json");
+        let worker = PersistWorker::start().unwrap();
+        let original = fixture_pane();
+        assert!(worker.submit(
+            path.clone(),
+            vec![PendingPane {
+                id: 1,
+                record: Some(original.clone()),
+                state: None,
+                delta: vec![],
+            }]
+        ));
+        assert_eq!(wait_worker(&worker), (true, false));
+        let base = fs::read(&path).unwrap();
+        let frame = PaneLogFrame {
+            seq: original.tail.last().unwrap().seq + 1,
+            event: PaneEvent::Output {
+                bytes: b"\r\nAFTER CHECKPOINT".to_vec(),
+            },
+        };
+        assert!(worker.submit(
+            path.clone(),
+            vec![PendingPane {
+                id: 1,
+                record: None,
+                state: None,
+                delta: vec![frame.clone()],
+            }]
+        ));
+        assert_eq!(wait_worker(&worker), (true, false));
+        let saved = fs::read(&path).unwrap();
+        assert!(
+            saved.starts_with(&base),
+            "steady output must not rewrite the snapshot"
+        );
+        assert!(
+            saved.len() - base.len() < 1024,
+            "one event must not rewrite history"
+        );
+        let mut expected = restore_emulator(&original, &EmulatorStateCodec).unwrap();
+        replay_event(&mut expected, &frame.event);
+        let restored = read_persist(&path).unwrap();
+        assert_eq!(
+            restore_emulator(&restored.panes[0], &EmulatorStateCodec)
+                .unwrap()
+                .export_state()
+                .unwrap(),
+            expected.export_state().unwrap()
+        );
+        // Exercise every possible truncation of the new transaction, including
+        // complete JSON without its commit newline.
+        for end in base.len()..saved.len() {
+            assert_eq!(
+                parse_persist_bytes(&saved[..end]).unwrap().panes,
+                vec![original.clone()]
+            );
+        }
+        assert!(worker.submit(
+            path.clone(),
+            vec![PendingPane {
+                id: 1,
+                record: None,
+                state: None,
+                delta: vec![PaneLogFrame {
+                    seq: frame.seq + 1,
+                    event: PaneEvent::Output {
+                        bytes: vec![b'x'; JOURNAL_LIMIT / 2]
+                    }
+                }],
+            }]
+        ));
+        assert_eq!(
+            wait_worker(&worker),
+            (true, true),
+            "large journals must request compaction"
+        );
+        // A fresh capture atomically replaces all prior journal transactions.
+        assert!(worker.submit(
+            path.clone(),
+            vec![PendingPane {
+                id: 1,
+                record: Some(original.clone()),
+                state: None,
+                delta: vec![],
+            }]
+        ));
+        assert_eq!(wait_worker(&worker), (true, false));
+        assert_eq!(fs::read(&path).unwrap(), base);
+        // Failure must be visible; a retry with fresh captures repairs the file.
+        fs::remove_file(&path).unwrap();
+        assert!(worker.submit(
+            path.clone(),
+            vec![PendingPane {
+                id: 1,
+                record: None,
+                state: None,
+                delta: vec![frame],
+            }]
+        ));
+        assert_eq!(wait_worker(&worker), (false, false));
+        assert!(worker.submit(
+            path.clone(),
+            vec![PendingPane {
+                id: 1,
+                record: Some(original.clone()),
+                state: None,
+                delta: vec![],
+            }]
+        ));
+        assert_eq!(wait_worker(&worker), (true, false));
+        assert_eq!(read_persist(&path).unwrap().panes, vec![original]);
+        drop(worker);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_checkpoint_is_readable_and_complete_corrupt_journal_is_rejected() {
+        let mut file = PersistFile::from_panes(vec![fixture_pane()], EmulatorStateCodec.id());
+        file.format = 1;
+        let bytes = serde_json::to_vec(&file).unwrap();
+        let upgraded = parse_persist_bytes(&bytes).unwrap();
+        upgraded
+            .validate(PERSIST_FORMAT, EmulatorStateCodec.id())
+            .unwrap();
+        assert_eq!(upgraded.panes, file.panes);
+        let mut bytes = serde_json::to_vec(&upgraded).unwrap();
+        bytes.extend_from_slice(b"\n{bad journal}\n");
+        assert_eq!(parse_persist_bytes(&bytes), Err(RestoreFail::Corrupt));
     }
 
     fn fixture_pane() -> PersistPane {

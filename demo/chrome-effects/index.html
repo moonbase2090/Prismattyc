@@ -111,5 +111,6 @@ $('reduced').onchange=()=>{for(const [key,r]of state.effects){if(r.kind==='focus
 function visibility(){if(hidden())cancelTransient();note(hidden()?'Hidden: transient effects cancelled.':'Visible: expired transients are not replayed.');render();arm();}
 $('hidden').onchange=visibility;document.addEventListener('visibilitychange',visibility);
 $('reset').onclick=()=>{state.effects.clear();state.coalesced=0;state.space='Build';state.focus='a';$('hidden').checked=false;note('Reset. No effect deadline is armed.');render();arm();};
+window.addEventListener('blur',()=>{for(const [key,r]of state.effects)if(r.kind==='focus')state.effects.delete(key);render();arm();});
 window.addEventListener('pagehide',()=>clearTimeout(state.timer));render();
 </script></body></html>

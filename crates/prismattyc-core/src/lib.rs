@@ -2029,6 +2029,12 @@ impl Screen {
     }
 
     fn previous_base_ends_with_zwj(&self) -> bool {
+        // Every ZWJ tail has a nonzero handle in this store, including tails
+        // restored from state or copied from another screen. With no tails,
+        // plain output can skip the previous-cell lookup entirely.
+        if self.clusters.len() == 0 {
+            return false;
+        }
         let Some(base_col) = self.previous_base_column() else {
             return false;
         };
@@ -6430,3 +6436,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod plain_output_tests;

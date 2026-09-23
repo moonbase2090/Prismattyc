@@ -19,9 +19,13 @@ use prismattyc_core::{
 pub use prismattyc_core::{GridDamage, ScrollDamage};
 use prismattyc_protocol::{ApcCollector, CollectedApc};
 use serde::{Deserialize, Serialize};
-use vte::{Params, Parser, Perform};
+use stream_parser::StreamParser as Parser;
+use vte::{Params, Perform};
 
 mod graphics;
+mod stream_parser;
+#[cfg(test)]
+mod utf8_chunk_tests;
 pub use graphics::placeholder::{self as kitty_placeholder, PLACEHOLDER as KITTY_PLACEHOLDER};
 pub use graphics::{
     GraphicsStateV1, PlacedImage, StoredImage, VirtualPlacement, VirtualPlacementStateV1,

@@ -866,10 +866,94 @@ fn verify_pane_damage_and_chrome(host: &mut HostState) {
     let first = host.mux.focused_id();
     verify_split_panes(host, first);
     verify_steady_four_pane_partial(host);
+    verify_pane_local_bell(host);
     verify_cursor_only_partial_frames(host);
     verify_same_layout_tab_switch(host);
     verify_idle_pulse_damage(host);
     verify_light_cycle_settles_without_head_trails(host);
+}
+
+fn verify_pane_local_bell(host: &mut HostState) {
+    let saved_enabled = host.pane_visual_bell;
+    let saved_visual = host.visual_bell;
+    let saved_focus = host.window_focused;
+    host.pane_visual_bell = true;
+    host.visual_bell = true;
+    host.window_focused = false;
+    let mut retained = frame(host);
+    let before = retained.clone();
+    let pane = host.mux.focused_id();
+    let view = host.mux.focused().view_identity();
+    let geom = host.mux.geom();
+    let (_, _, rect) = host
+        .mux
+        .panes_and_rects()
+        .find(|(id, _, _)| *id == pane)
+        .unwrap();
+    let (x, y, w, h) = geom.pane_slot_px(rect);
+    let slot = PixelRect::new(x, y, w, h);
+    // Keep the hold stable across the retained/full comparison on slow runners.
+    let now = Instant::now() + Duration::from_secs(60);
+    assert!(host
+        .pane_bells
+        .ring(pane.get(), view, host.mux.space_id.as_deref(), slot, now));
+    let painted = paint_retained(host, &mut retained);
+    assert_eq!(painted.full_repaint_reason, None);
+    assert_eq!(
+        painted.cells_painted, 0,
+        "bell-only start must not rasterize cells"
+    );
+    assert_ne!(retained, before);
+    let width = host.window.inner_size().width as usize;
+    for (index, pixel) in retained.iter().enumerate() {
+        let (px, py) = (index % width, index / width);
+        if px < x || px >= x + w || py < y || py >= y + h {
+            assert_eq!(
+                *pixel, before[index],
+                "bell altered another pane or shared chrome"
+            );
+        }
+    }
+    assert_eq!(retained, full_frame_oracle(host));
+    assert!(!host
+        .pane_bells
+        .ring(pane.get(), view, host.mux.space_id.as_deref(), slot, now));
+    host.mux
+        .focused_mut()
+        .emulator
+        .feed(b"\x1b[999;1Hscroll during bell\r\nnext\r\n");
+    paint_retained(host, &mut retained);
+    assert_eq!(
+        retained,
+        full_frame_oracle(host),
+        "scroll must not copy bell pixels"
+    );
+    assert!(host.pane_bells.cancel());
+    let cleared = paint_retained(host, &mut retained);
+    assert_eq!(cleared.full_repaint_reason, None);
+    assert_eq!(
+        cleared.cells_painted, 0,
+        "bell-only cleanup must not rasterize cells"
+    );
+    assert_eq!(retained, full_frame_oracle(host));
+    assert!(host.pane_bells.is_empty());
+    host.pane_bells
+        .ring(pane.get(), view, host.mux.space_id.as_deref(), slot, now);
+    paint_retained(host, &mut retained);
+    host.window_occluded = true;
+    settle_pane_bells(host, Instant::now());
+    assert_eq!(host.pane_bells.deadline(), None);
+    host.window_occluded = false;
+    paint_retained(host, &mut retained);
+    assert_eq!(
+        retained,
+        full_frame_oracle(host),
+        "occlusion cleanup must survive until paint"
+    );
+    host.pane_visual_bell = saved_enabled;
+    host.visual_bell = saved_visual;
+    host.window_focused = saved_focus;
+    frame(host);
 }
 
 fn verify_single_pane_activity_damage(host: &mut HostState) {

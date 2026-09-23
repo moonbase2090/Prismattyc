@@ -641,6 +641,12 @@ pub(crate) struct PaneRuntime {
 }
 
 impl PaneRuntime {
+    /// Minted for every runtime, including plain terminals. A replacement in
+    /// the same pane slot must not inherit transient chrome from its predecessor.
+    pub(crate) fn view_identity(&self) -> ViewerId {
+        self.rich_viewer_id
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn spawn(
         pane: PaneId,

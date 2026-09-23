@@ -29,6 +29,7 @@ mod move_target;
 mod mux;
 mod notify;
 mod palette;
+mod pane_bell;
 mod pixel_alpha;
 #[cfg(any(target_os = "macos", test))]
 mod present_tiles;
@@ -948,6 +949,8 @@ struct HostState {
     last_cycle_step: u8,
     /// Config `visual_bell` (default true): invert the frame briefly on BEL.
     visual_bell: bool,
+    pane_visual_bell: bool,
+    pane_bells: pane_bell::PaneBells,
     /// Config `audible_bell` (default true): play a short bell cue on BEL.
     audible_bell: bool,
     /// Config `walkthrough_audio` (default true): play bundled walkthrough clips.
@@ -2484,8 +2487,20 @@ impl App {
                 if !visual_bell && host.bell_flash.is_some() {
                     // Turning the flash off mid-lit settles the frame.
                     host.bell_flash = None;
+                    host.pending_full_repaint = Some(FullRepaintReason::Fallback);
                     host.dirty = true;
                 }
+            }
+            let pane_visual_bell = self.file_config.pane_visual_bell.unwrap_or(false);
+            if host.pane_visual_bell != pane_visual_bell {
+                host.pane_visual_bell = pane_visual_bell;
+                if host.bell_flash.take().is_some() {
+                    host.pending_full_repaint = Some(FullRepaintReason::Fallback);
+                }
+                host.dirty = true;
+            }
+            if !host.visual_bell || !host.pane_visual_bell {
+                host.dirty |= host.pane_bells.cancel();
             }
             host.audible_bell = self.file_config.audible_bell();
             host.walkthrough_audio = self.file_config.walkthrough_audio();
@@ -2775,7 +2790,10 @@ impl App {
             // PTY byte or event happens to wake it.
             let flash_end = host
                 .bell_flash
-                .map(|start| start + Duration::from_millis(BELL_FLASH_MS as u64));
+                .map(|start| start + Duration::from_millis(BELL_FLASH_MS as u64))
+                .into_iter()
+                .chain(host.pane_bells.deadline())
+                .min();
             let toast_end = host.bell_toasts.iter().map(|toast| toast.until).min();
             let notice_end = host.title_notice.as_ref().map(|notice| notice.until);
             // The splash attract loop arms its own frame deadline while the
@@ -3231,6 +3249,8 @@ impl App {
                 border_underlay: Default::default(),
                 last_cycle_step: 0,
                 visual_bell: self.file_config.visual_bell(),
+                pane_visual_bell: self.file_config.pane_visual_bell.unwrap_or(false),
+                pane_bells: Default::default(),
                 audible_bell: self.file_config.audible_bell(),
                 walkthrough_audio: self.file_config.walkthrough_audio(),
                 last_walkthrough_sound: None,
@@ -4689,6 +4709,27 @@ fn compose_host_frame_damage(
     (damage, snapshot.paint_rows)
 }
 
+/// Bound pending bell state to the current visible owner and geometry.
+fn settle_pane_bells(host: &mut HostState, now: Instant) {
+    if host.pane_bells.is_empty() {
+        return;
+    }
+    if host.window_occluded || !host.visual_bell || !host.pane_visual_bell {
+        host.dirty |= host.pane_bells.cancel();
+        return;
+    }
+    let mux = &host.mux;
+    let geom = mux.geom();
+    host.dirty |= host.pane_bells.settle(now, mux.space_id.as_deref(), |id| {
+        mux.panes_and_rects().find_map(|(pane, runtime, rect)| {
+            (pane.get() == id).then(|| {
+                let (x, y, w, h) = geom.pane_slot_px(rect);
+                (runtime.view_identity(), PixelRect::new(x, y, w, h))
+            })
+        })
+    });
+}
+
 fn rasterize_frame(
     host: &mut HostState,
     buffer: &mut [u32],
@@ -4704,6 +4745,7 @@ fn rasterize_frame(
     let geom = host.mux.geom();
     let focused = host.mux.focused_id();
     let frame_now = Instant::now();
+    settle_pane_bells(host, frame_now);
     let damage_snapshot = frame_damage_snapshot(host, geom, focused, frame_now);
     let layout_changed = damage_snapshot.layout_changed;
     let chrome_changed = damage_snapshot.chrome_changed;
@@ -4789,6 +4831,8 @@ fn rasterize_frame(
     }
     // A sweep may begin and finish between chrome snapshots. Its retained
     // underlay independently carries cleanup damage until the next paint.
+    host.pane_bells
+        .restore(buffer, width as usize, &mut frame_damage);
     host.border_underlay
         .restore(buffer, width as usize, &mut frame_damage);
     if empty_partial_skips_paint(
@@ -5961,6 +6005,7 @@ fn rasterize_frame(
     if painted_save.is_some() {
         host.palette_layout = painted_save;
     }
+    host.pane_bells.paint(buffer, width as usize);
     // Topmost: the launch splash covers panes, chrome, and other overlays.
     if let Some(splash) = host.splash.as_ref() {
         let animation_ms = splash.frame_clock();
@@ -6102,8 +6147,27 @@ impl App {
         let bells = host.mux.take_pending_bells();
         if !bells.is_empty() {
             if host.visual_bell {
-                host.bell_flash = Some(Instant::now());
-                host.dirty = true;
+                if host.pane_visual_bell {
+                    if !host.window_occluded {
+                        let now = Instant::now();
+                        let geom = host.mux.geom();
+                        for (id, runtime, rect) in host.mux.panes_and_rects() {
+                            if bells.contains(&id) {
+                                let (x, y, w, h) = geom.pane_slot_px(rect);
+                                host.dirty |= host.pane_bells.ring(
+                                    id.get(),
+                                    runtime.view_identity(),
+                                    host.mux.space_id.as_deref(),
+                                    PixelRect::new(x, y, w, h),
+                                    now,
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    host.bell_flash = Some(Instant::now());
+                    host.dirty = true;
+                }
             }
             if host.audible_bell {
                 let now = Instant::now();
@@ -6118,6 +6182,13 @@ impl App {
             if host.bell_toaster {
                 let until = Instant::now() + host.bell_toaster_ms;
                 for pane in &bells {
+                    if host.visual_bell
+                        && host.pane_visual_bell
+                        && !host.window_occluded
+                        && host.mux.panes_and_rects().any(|(id, _, _)| id == *pane)
+                    {
+                        continue;
+                    }
                     match host.bell_toasts.iter_mut().find(|t| t.pane == *pane) {
                         Some(toast) => {
                             toast.label = BELL_TOAST_LABEL.to_string();
@@ -6129,8 +6200,8 @@ impl App {
                             label: BELL_TOAST_LABEL.to_string(),
                         }),
                     }
+                    host.dirty = true;
                 }
-                host.dirty = true;
             }
             if host.os_notify_bell && !host.window_focused {
                 let now = Instant::now();
@@ -6257,6 +6328,7 @@ impl App {
                 host.dirty = true;
             }
         }
+        settle_pane_bells(host, Instant::now());
         // Settle an expired bell flash with one final repaint.
         if host
             .bell_flash
@@ -13634,6 +13706,9 @@ impl ApplicationHandler<UserAction> for App {
             }
             WindowEvent::Occluded(occluded) => {
                 host.window_occluded = occluded;
+                if occluded {
+                    host.dirty |= host.pane_bells.cancel();
+                }
                 // Publish the occlusion state even when the status throttle
                 // would otherwise defer this event.
                 self.last_render_status = None;

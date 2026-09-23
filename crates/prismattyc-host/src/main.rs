@@ -4454,6 +4454,7 @@ fn frame_chrome_snapshot(
     focused: PaneId,
     pulse_step: Option<u8>,
     light_cycle_step: Option<u8>,
+    now: Instant,
 ) -> ChromeSnapshot {
     let mux = &host.mux;
     let mut focused_slot = None;
@@ -4468,13 +4469,15 @@ fn frame_chrome_snapshot(
         }
         let (content_x, content_y, content_w, content_h) = geom.pane_content_px(rect);
         let content = PixelRect::new(content_x, content_y, content_w, content_h);
+        let active =
+            pane.is_active_at(now) && pulse_live(host.window_focused, host.window_occluded);
         push_pane_chrome_boxes(
             slot,
             content,
             multi_pane,
             pane.mail_depth > 0,
             pane.unseen_output,
-            pane.is_active(),
+            active,
             &mut boxes,
         );
         let max_scroll = pane.emulator.screen().max_view_scroll();
@@ -4487,7 +4490,7 @@ fn frame_chrome_snapshot(
         // must not change for ordinary scrollback growth or thumb movement.
         markers.push(pane_marker_word(
             id.get(),
-            pane_chrome_bits(pane.mail_depth > 0, pane.unseen_output, pane.is_active()),
+            pane_chrome_bits(pane.mail_depth > 0, pane.unseen_output, active),
             scrollbar_marker(max_scroll, scroll),
         ));
     }
@@ -4576,6 +4579,7 @@ fn frame_damage_snapshot(
     host: &HostState,
     geom: mux::HostGeom,
     focused: PaneId,
+    now: Instant,
 ) -> FrameDamageSnapshot {
     let layout = layout_snapshot(&host.mux, geom);
     let pulse_step = pulse_step_for_snapshot(
@@ -4585,7 +4589,7 @@ fn frame_damage_snapshot(
     );
     let light_cycle_step =
         light_cycle_step_for_snapshot(host.border_anim.is_some(), host.last_cycle_step);
-    let chrome = frame_chrome_snapshot(host, geom, focused, pulse_step, light_cycle_step);
+    let chrome = frame_chrome_snapshot(host, geom, focused, pulse_step, light_cycle_step, now);
     let layout_changed = layout_transition(host.last_layout_snapshot.as_ref(), &layout);
     let chrome_changed = chrome_geometry_changed(host.last_chrome_snapshot.as_ref(), &chrome);
     let prior_focus = host
@@ -4682,7 +4686,8 @@ fn rasterize_frame(
     let mut reason = current_full_repaint_reason(host, width, height, overflowed);
     let geom = host.mux.geom();
     let focused = host.mux.focused_id();
-    let damage_snapshot = frame_damage_snapshot(host, geom, focused);
+    let frame_now = Instant::now();
+    let damage_snapshot = frame_damage_snapshot(host, geom, focused, frame_now);
     let layout_changed = damage_snapshot.layout_changed;
     let chrome_changed = damage_snapshot.chrome_changed;
     let strip_changed = host
@@ -5507,7 +5512,8 @@ fn rasterize_frame(
                 pane_id == focused,
                 pane.unseen_output,
                 pulse_phase_if(
-                    pane.is_active() && pulse_live(host.window_focused, host.window_occluded),
+                    pane.is_active_at(frame_now)
+                        && pulse_live(host.window_focused, host.window_occluded),
                     host.last_pulse_step,
                 ),
                 cycle_progress.filter(|_| pane_id == focused),

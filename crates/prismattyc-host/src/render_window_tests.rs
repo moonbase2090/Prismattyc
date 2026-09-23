@@ -912,6 +912,42 @@ fn verify_activity_expiration_during_sweep(host: &mut HostState) {
             full_frame_oracle(host),
             "active dot padding={padding}"
         );
+        for focused in [false, true, false] {
+            host.mux.focused_mut().last_output_at = Some(Instant::now());
+            host.window_focused = focused;
+            let changed = paint_retained(host, &mut retained);
+            assert_eq!(changed.full_repaint_reason, None);
+            if !focused {
+                assert!(changed.cells_painted > 0);
+                assert!(changed.cells_painted < render_cells_painted(host));
+            }
+            assert_eq!(
+                retained,
+                full_frame_oracle(host),
+                "window focused={focused} padding={padding}"
+            );
+            let unchanged = paint_retained(host, &mut retained);
+            assert_eq!(unchanged.cells_painted, 0);
+            assert_eq!(retained, full_frame_oracle(host));
+        }
+        host.border_anim = None;
+        let unfocused_cleanup = paint_retained(host, &mut retained);
+        assert_eq!(unfocused_cleanup.cells_painted, 0);
+        assert_eq!(
+            retained,
+            full_frame_oracle(host),
+            "unfocused cleanup padding={padding}"
+        );
+        host.window_focused = true;
+        host.mux.focused_mut().last_output_at = Some(Instant::now());
+        paint_retained(host, &mut retained);
+        assert_eq!(
+            retained,
+            full_frame_oracle(host),
+            "focus regain after cleanup"
+        );
+        host.border_anim = Some(Instant::now() - Duration::from_millis(500_000));
+        paint_retained(host, &mut retained);
         host.mux.focused_mut().last_output_at = Some(Instant::now() - Duration::from_secs(2));
         assert!(!host.mux.focused().is_active());
         let expired = paint_retained(host, &mut retained);

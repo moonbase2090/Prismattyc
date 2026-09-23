@@ -258,6 +258,17 @@ class ShardTests(unittest.TestCase):
 
 
 class SelectionTests(unittest.TestCase):
+    def test_changed_lines_exclude_context_and_deletion_neighbours(self):
+        diff = ("--- a/a.rs\n+++ b/a.rs\n@@ -10,4 +10,3 @@\n"
+                " keep\n-remove\n keep\n-old\n+replacement\n"
+                "--- a/deleted.rs\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-gone\n")
+        selection = route.changed_lines_diff(diff)
+        self.assertEqual(route.affected_lines(selection), {"a.rs": {12}})
+        self.assertEqual(route.changed_lines_diff(selection), selection)
+        self.assertEqual(route.changed_lines_diff(
+            "--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,1 @@\n-gone\n keep\n"
+        ), "")
+
     def test_helpers_route_to_their_own_tests(self):
         for function, selector in (
             ("PresentBackend::paint", "render_window_tests::real_window_paint_reaches_the_backend"),
@@ -510,6 +521,31 @@ class OrchestrationTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("cargo-mutants"), "requires pinned cargo-mutants")
 class RealCargoTests(unittest.TestCase):
+    def test_real_discovery_excludes_unchanged_deletion_neighbours(self):
+        cache = Path.home() / ".cache/prismattyc"
+        cache.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="scope-test-", dir=cache) as directory:
+            repo = Path(directory)
+            (repo / "src").mkdir()
+            (repo / "Cargo.toml").write_text(
+                '[package]\nname = "scope-test"\nversion = "0.0.0"\nedition = "2021"\n'
+            )
+            code = "pub fn before(x: i32) -> i32 { x + 1 }\npub fn changed(x: i32) -> i32 { x * 2 }\npub fn after(x: i32) -> i32 { x - 1 }\n"
+            (repo / "src/lib.rs").write_text(code)
+            diff = ("--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,4 +1,3 @@\n"
+                    " " + code.splitlines()[0] + "\n-deleted\n-old\n+"
+                    + code.splitlines()[1] + "\n " + code.splitlines()[2] + "\n")
+            selection = repo / "selection.diff"
+            selection.write_text(route.changed_lines_diff(diff))
+            result = subprocess.run(
+                ["cargo", "mutants", "--list", "--json", "--in-diff", str(selection)],
+                cwd=repo, capture_output=True, text=True, check=True, timeout=30,
+                env=dict(os.environ, CARGO_NET_OFFLINE="true"),
+            )
+            mutants = json.loads(result.stdout)
+            self.assertTrue(mutants)
+            self.assertEqual({m["function"]["function_name"] for m in mutants}, {"changed"})
+
     def test_real_fast_survivor_is_caught_by_full_fallback(self):
         # This tiny crate exercises actual libtest filtering, cargo-mutants
         # discovery/outcomes and --iterate. It has no registry dependencies.

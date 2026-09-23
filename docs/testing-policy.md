@@ -68,8 +68,13 @@ and retain their status and logs.
 
 ## Route PR mutations
 
-`scripts/mutants-pr.sh` discovers the complete `--in-diff` mutation set
-for each touched crate. `scripts/mutants-route.py` runs these steps:
+`scripts/mutants-pr.sh` supplies the PR diff for each touched crate.
+`scripts/mutants-route.py` first converts added or replacement lines to
+insert-only selection hunks. This excludes unchanged deletion neighbours
+that cargo-mutants would otherwise select. Pure deletions select no surviving
+code. Function-replacement mutations remain eligible when their span contains
+a changed line. The complete selected mutation set is retained.
+`scripts/mutants-route.py` then runs these steps:
 
 1. Select changed lines inside the functions and modules listed below.
 2. List the tests for each selected group. Fail if a selector matches zero

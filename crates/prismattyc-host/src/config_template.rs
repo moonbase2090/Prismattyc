@@ -262,6 +262,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         value: ConfigValue::Bool(true),
     },
     ConfigKey {
+        name: "pane_visual_bell",
+        group: ConfigGroup::BellsAttention,
+        doc: "Use a 120ms pane perimeter instead of the window flash and visible BEL toast; requires visual_bell",
+        range: "true|false",
+        value: ConfigValue::Bool(false),
+    },
+    ConfigKey {
         name: "audible_bell",
         group: ConfigGroup::BellsAttention,
         doc: "Play the bundled Zen bell on BEL",
@@ -917,6 +924,7 @@ mod tests {
         "restore_blank_terminals",
         "space_rail_chip_cols",
         "visual_bell",
+        "pane_visual_bell",
         "audible_bell",
         "bell_toaster",
         "bell_toaster_ms",

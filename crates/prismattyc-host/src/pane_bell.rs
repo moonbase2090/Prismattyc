@@ -244,7 +244,7 @@ mod tests {
             let slot = PixelRect::new(5, 4, w, h);
             let stride = w + 12;
             let original: Vec<u32> = (0..stride * (h + 10))
-                .map(|i| 0x80000000 | (i as u32 * 7919 & 0xffffff))
+                .map(|i| 0x80000000 | ((i as u32 * 7919) & 0xffffff))
                 .collect();
             let mut pixels = original.clone();
             let mut bells = PaneBells::default();

@@ -102,8 +102,7 @@ space_rail_chip_cols = 0
 # -- bells and attention --
 # Flash the window on BEL (~120ms invert). true|false.
 visual_bell = true
-# Opt in to a static pane perimeter instead of the window flash and visible BEL toast.
-# Requires visual_bell; holds 120ms, repeated bells do not extend the hold.
+# Use a 120ms pane perimeter instead of the window flash and visible BEL toast; requires visual_bell. true|false.
 pane_visual_bell = false
 # Play the bundled Zen bell on BEL. true|false.
 audible_bell = true

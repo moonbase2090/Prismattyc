@@ -26,7 +26,6 @@ impl PixelRect {
         }
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn clipped(self, width: usize, height: usize) -> Option<Self> {
         let x = self.x.min(width);
         let y = self.y.min(height);
@@ -105,7 +104,7 @@ pub(crate) struct ChromeSnapshot {
     pub(crate) markers: Vec<(u64, u64)>,
     /// Quantized active-dot pulse step. A changed step repaints the dot boxes.
     pub(crate) pulse_step: Option<u8>,
-    /// Quantized focus-border sweep step. A live step repaints the focus slot.
+    /// Quantized focus-border sweep step. A live step repaints the edge strips.
     pub(crate) light_cycle_step: Option<u8>,
     /// Signature for chrome that the bounded composer does not map to boxes.
     /// A changed signature requires a conservative full repaint.
@@ -205,7 +204,6 @@ fn push_chrome_box_damage(
         prior.boxes != current.boxes
             || prior.markers != current.markers
             || prior.pulse_step != current.pulse_step
-            || prior.light_cycle_step != current.light_cycle_step
     });
     if !changed {
         return false;
@@ -293,10 +291,14 @@ pub(crate) fn compose_frame_damage(
         prior_chrome.and_then(|chrome| chrome.light_cycle_step) != current_chrome.light_cycle_step;
     if current_chrome.light_cycle_step.is_some() || light_cycle_changed {
         if let Some(prior_slot) = prior_chrome.and_then(|chrome| chrome.focused_slot) {
-            damage.push_rect(prior_slot);
+            for strip in border_strips(prior_slot) {
+                damage.push_rect(strip);
+            }
         }
         if let Some(current_slot) = current_chrome.focused_slot {
-            damage.push_rect(current_slot);
+            for strip in border_strips(current_slot) {
+                damage.push_rect(strip);
+            }
         }
     }
 
@@ -305,6 +307,36 @@ pub(crate) fn compose_frame_damage(
         return FrameDamage::Full;
     }
     damage
+}
+
+/// The animated head can extend seven pixels inward from the slot edge.
+/// Keep this bound shared with the painter, including at clipped corners.
+pub(crate) const BORDER_HEAD_SIZE: usize = 7;
+
+/// Disjoint edge strips, including the full footprint of the animated head.
+/// Tiny slots collapse to a full slot without overlap or underflow.
+pub(crate) fn border_strips(slot: PixelRect) -> [PixelRect; 4] {
+    let top = BORDER_HEAD_SIZE.min(slot.height);
+    let bottom = BORDER_HEAD_SIZE.min(slot.height - top);
+    let middle = slot.height - top - bottom;
+    let left = BORDER_HEAD_SIZE.min(slot.width);
+    let right = BORDER_HEAD_SIZE.min(slot.width - left);
+    [
+        PixelRect::new(slot.x, slot.y, slot.width, top),
+        PixelRect::new(
+            slot.x,
+            slot.y.saturating_add(slot.height - bottom),
+            slot.width,
+            bottom,
+        ),
+        PixelRect::new(slot.x, slot.y.saturating_add(top), left, middle),
+        PixelRect::new(
+            slot.x.saturating_add(slot.width - right),
+            slot.y.saturating_add(top),
+            right,
+            middle,
+        ),
+    ]
 }
 
 /// Quantized pulse steps used by chrome snapshots and paint.
@@ -1090,7 +1122,7 @@ mod tests {
     }
 
     #[test]
-    fn live_light_cycle_repaints_focus_slot_each_step_and_settles() {
+    fn live_light_cycle_repaints_edge_strips_each_step_and_settles() {
         let current = layout();
         let prior_chrome = ChromeSnapshot {
             focused_pane: Some(7),
@@ -1113,7 +1145,7 @@ mod tests {
                 &[],
                 false,
             ),
-            FrameDamage::Rects(vec![PixelRect::new(0, 0, 100, 100)])
+            FrameDamage::Rects(border_strips(PixelRect::new(0, 0, 100, 100)).to_vec())
         );
         let settled = ChromeSnapshot {
             light_cycle_step: None,
@@ -1128,7 +1160,7 @@ mod tests {
                 &[],
                 false,
             ),
-            FrameDamage::Rects(vec![PixelRect::new(0, 0, 100, 100)])
+            FrameDamage::Rects(border_strips(PixelRect::new(0, 0, 100, 100)).to_vec())
         );
     }
 
@@ -1244,7 +1276,7 @@ mod tests {
     }
 
     #[test]
-    fn live_light_cycle_same_step_still_repaints_focus_slot() {
+    fn live_light_cycle_same_step_still_repaints_edge_strips() {
         let current = layout();
         let chrome = ChromeSnapshot {
             focused_pane: Some(7),
@@ -1254,7 +1286,7 @@ mod tests {
         };
         assert_eq!(
             compose_frame_damage(Some(&current), &current, Some(&chrome), &chrome, &[], false,),
-            FrameDamage::Rects(vec![PixelRect::new(0, 0, 100, 100)])
+            FrameDamage::Rects(border_strips(PixelRect::new(0, 0, 100, 100)).to_vec())
         );
         let idle = ChromeSnapshot {
             light_cycle_step: None,
@@ -1264,6 +1296,54 @@ mod tests {
             compose_frame_damage(Some(&current), &current, Some(&idle), &idle, &[], false),
             FrameDamage::rects()
         );
+    }
+
+    #[test]
+    fn sweep_does_not_invalidate_unrelated_chrome_boxes() {
+        let layout = layout();
+        let prior = ChromeSnapshot {
+            focused_pane: Some(7),
+            focused_slot: Some(PixelRect::new(0, 0, 100, 100)),
+            boxes: vec![PixelRect::new(110, 10, 9, 9)],
+            light_cycle_step: Some(1),
+            ..Default::default()
+        };
+        let current = ChromeSnapshot {
+            light_cycle_step: Some(2),
+            ..prior.clone()
+        };
+        let damage =
+            compose_frame_damage(Some(&layout), &layout, Some(&prior), &current, &[], false);
+        assert!(!frame_damage_intersects(&damage, prior.boxes[0]));
+        assert!(!frame_damage_intersects(
+            &damage,
+            PixelRect::new(7, 7, 86, 86)
+        ));
+    }
+
+    #[test]
+    fn border_strips_are_disjoint_and_cover_only_edges_including_tiny_slots() {
+        for width in [0, 1, 7, 13, 14, 15, 100] {
+            for height in [0, 1, 7, 13, 14, 15, 100] {
+                let slot = PixelRect::new(5, 8, width, height);
+                let strips = border_strips(slot);
+                for y in 0..height {
+                    for x in 0..width {
+                        let covered = strips
+                            .iter()
+                            .filter(|r| {
+                                x + 5 >= r.x
+                                    && x + 5 < r.x + r.width
+                                    && y + 8 >= r.y
+                                    && y + 8 < r.y + r.height
+                            })
+                            .count();
+                        let edge = x < 7 || y < 7 || width - x <= 7 || height - y <= 7;
+                        assert_eq!(covered, usize::from(edge));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

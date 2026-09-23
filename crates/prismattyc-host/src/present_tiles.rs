@@ -101,6 +101,38 @@ mod tests {
     }
 
     #[test]
+    fn border_sweep_keeps_interior_tiles_retained() {
+        let (width, height) = (5186, 2740);
+        let grid = tiles(width, height);
+        let strips = crate::frame_damage::border_strips(PixelRect::new(0, 0, width, height));
+        let damage = FrameDamage::Rects(strips.to_vec());
+        let dirty = damaged_tiles(&grid, &damage);
+        let copied: usize = dirty.iter().map(|i| grid[*i].width * grid[*i].height).sum();
+        let restored: usize = strips.iter().map(|r| r.width * r.height).sum();
+        assert!(
+            copied * 2 < width * height,
+            "tile granularity must still save copies"
+        );
+        assert!(
+            restored * 100 < width * height,
+            "underlay is bounded by perimeter"
+        );
+        assert!(dirty.iter().all(|i| {
+            let tile = grid[*i];
+            tile.x == 0
+                || tile.y == 0
+                || tile.x + tile.width == width
+                || tile.y + tile.height == height
+        }));
+        eprintln!(
+            "border sweep: surface={}px underlay={restored}px tiles={}/{} copied={copied}px",
+            width * height,
+            dirty.len(),
+            grid.len()
+        );
+    }
+
+    #[test]
     fn partial_publication_matches_full_image_and_keeps_straight_source() {
         let (width, height) = (1025, 257);
         let grid = tiles(width, height);

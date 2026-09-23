@@ -299,7 +299,11 @@ fn window_child_command(scratch: &Scratch, number: u32, test_name: &str) -> Comm
 
 fn private_child_removes_env(name: &str) -> bool {
     name.starts_with("PMUX_")
-        || (name.starts_with("PRISMATTYC_") && name != "PRISMATTYC_TEST_TIME_SCALE")
+        || (name.starts_with("PRISMATTYC_")
+            && !matches!(
+                name,
+                "PRISMATTYC_TEST_TIME_SCALE" | "PRISMATTYC_TEST_BORDER_BENCH"
+            ))
 }
 
 pub(super) fn restore_in_private_window() {
@@ -352,6 +356,12 @@ fn paint_in_real_window(restore_only: bool) {
                 host.render_frame.cells_painted > 0,
                 "the real backend must rasterize the pane, not return a no-op success"
             );
+            if std::env::var_os("PRISMATTYC_TEST_BORDER_BENCH").is_some() {
+                measure_border_frame_cost(host);
+                self.painted = true;
+                event_loop.exit();
+                return;
+            }
             verify_paint_bookkeeping(host);
             verify_repaint_reasons(host);
             verify_pixels_and_overlays(host);
@@ -878,22 +888,56 @@ fn verify_light_cycle_settles_without_head_trails(host: &mut HostState) {
 
 fn verify_light_cycle_frames(host: &mut HostState, expected_full: Option<FullRepaintReason>) {
     host.light_cycle = true;
-    host.light_cycle_ms = 5000;
+    // Slow the clock so retained and full-oracle paints use the same pixel phase.
+    host.light_cycle_ms = 5_000_000;
     host.light_cycle_head = true;
     let mut retained = frame(host);
-    let screen = host.mux.focused_mut().emulator.screen();
     let painted_cells = if expected_full.is_some() {
         render_cells_painted(host)
     } else {
-        screen.columns() as u64 * screen.rows() as u64
+        0
     };
     for step in [2, 6, 10, 14] {
-        host.border_anim = Some(Instant::now() - Duration::from_millis(step * 250));
+        host.border_anim = Some(Instant::now() - Duration::from_millis(step * 250_000));
         host.last_cycle_step = step as u8;
         let painted = paint_retained(host, &mut retained);
         assert_eq!(painted.full_repaint_reason, expected_full);
         assert_eq!(painted.cells_painted, painted_cells);
+        assert_eq!(
+            retained,
+            full_frame_oracle(host),
+            "mid-sweep pixels at step {step}"
+        );
     }
+    // New terminal content under a running head must survive later cleanup.
+    let _ = host
+        .mux
+        .focused_mut()
+        .emulator
+        .feed(b"\x1b[1;1Hchanged edge\x1b[?25l");
+    paint_retained(host, &mut retained);
+    assert_eq!(retained, full_frame_oracle(host), "output during sweep");
+    let _ = host
+        .mux
+        .focused_mut()
+        .emulator
+        .feed(b"\x1b[999;1Hscroll under border\r\n");
+    paint_retained(host, &mut retained);
+    assert_eq!(retained, full_frame_oracle(host), "scroll during sweep");
+    // Switching panes must still restore both pane surfaces and their alphas.
+    let other = host
+        .mux
+        .active_pane_ids()
+        .into_iter()
+        .find(|id| *id != host.mux.focused_id())
+        .unwrap();
+    assert!(host.mux.focus(other));
+    paint_retained(host, &mut retained);
+    assert_eq!(
+        retained,
+        full_frame_oracle(host),
+        "focus change during sweep"
+    );
     host.border_anim = None;
     let settled = paint_retained(host, &mut retained);
     assert_eq!(settled.full_repaint_reason, expected_full);
@@ -1190,6 +1234,7 @@ fn full_frame_oracle(host: &mut HostState) -> Vec<u32> {
     let saved_last_frame_size = host.last_frame_size;
     let saved_background = host.background.take();
     let saved_palette_layout = host.palette_layout.take();
+    let saved_border_underlay = std::mem::take(&mut host.border_underlay);
     rasterize_frame(host, &mut pixels, size.width, size.height, false);
     host.render_frame = saved_frame;
     host.pending_full_repaint = saved_pending;
@@ -1202,6 +1247,7 @@ fn full_frame_oracle(host: &mut HostState) -> Vec<u32> {
     host.last_frame_size = saved_last_frame_size;
     host.background = saved_background;
     host.palette_layout = saved_palette_layout;
+    host.border_underlay = saved_border_underlay;
     pixels
 }
 
@@ -1650,4 +1696,69 @@ pub(super) fn session_naming_in_private_window() {
     event_loop.run_app(&mut proof).unwrap();
     assert!(proof.completed);
     std::fs::write(std::env::var_os(RESULT_ENV).unwrap(), b"complete").unwrap();
+}
+
+/// Opt-in release measurement using this fixture's private display and panes.
+/// Run the real-window test with PRISMATTYC_TEST_BORDER_BENCH=1 and --nocapture.
+/// This measures raster work; it does not measure input-to-display latency.
+fn measure_border_frame_cost(host: &mut HostState) {
+    let first = host.mux.focused_id();
+    verify_split_panes(host, first);
+    host.window_focused = false; // Freeze activity dots; isolate the border.
+    host.last_focused = host.mux.focused_id();
+    host.light_cycle = false; // Start sweeps explicitly, without focus changes.
+    host.light_cycle_ms = 5_000_000;
+    let mut pixels = frame(host);
+    for trial in 0..5 {
+        // Alternate order to reduce cache/order bias between repeats.
+        for case in if trial % 2 == 0 {
+            [0, 1, 2, 3]
+        } else {
+            [3, 2, 1, 0]
+        } {
+            let animated = case & 1 != 0;
+            let output = case & 2 != 0;
+            let mut times = Vec::new();
+            let mut cells = 0;
+            let mut damage_pixels = 0;
+            for iteration in 0..160 {
+                host.border_anim = animated.then(|| {
+                    Instant::now() - Duration::from_millis(((iteration % 16) + 1) * 250_000)
+                });
+                host.last_cycle_step = (iteration % 16) as u8;
+                if output {
+                    let _ = host.mux.focused_mut().emulator.feed(if iteration % 2 == 0 {
+                        b"\x1b[2;1Hworkload A\x1b[?25l"
+                    } else {
+                        b"\x1b[2;1Hworkload B\x1b[?25l"
+                    });
+                }
+                let size = host.window.inner_size();
+                let started = Instant::now();
+                let damage = rasterize_frame(host, &mut pixels, size.width, size.height, true);
+                let elapsed = started.elapsed().as_nanos() as u64;
+                if iteration >= 32 {
+                    times.push(elapsed);
+                    cells += host.render_frame.cells_painted;
+                    damage_pixels += match damage {
+                        FrameDamage::Full => size.width as u64 * size.height as u64,
+                        FrameDamage::Rects(rects) => {
+                            rects.iter().map(|r| r.width as u64 * r.height as u64).sum()
+                        }
+                    };
+                }
+            }
+            times.sort_unstable();
+            eprintln!(
+                "BORDER_BENCH {}",
+                serde_json::json!({
+                    "trial": trial, "animated": animated, "output": output,
+                    "frames": times.len(), "raster_p50_ns": times[times.len()/2],
+                    "raster_p95_ns": times[times.len()*95/100],
+                    "cells_per_frame": cells / times.len() as u64,
+                    "damage_pixels_per_frame": damage_pixels / times.len() as u64,
+                })
+            );
+        }
+    }
 }

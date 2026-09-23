@@ -7,6 +7,7 @@ mod a11y;
 mod attach_adopt;
 mod attach_log;
 mod attach_tabs;
+mod border_underlay;
 mod config;
 mod config_template;
 mod frame_damage;
@@ -940,6 +941,8 @@ struct HostState {
     last_focused: PaneId,
     /// Sweep start time while a light-cycle animation is running.
     border_anim: Option<Instant>,
+    /// Pixels beneath the current animated border; empty outside a sweep.
+    border_underlay: border_underlay::BorderUnderlay,
     /// Last quantized sweep step painted (same repaint-throttle idea as the
     /// pulse dot).
     last_cycle_step: u8,
@@ -3225,6 +3228,7 @@ impl App {
                 light_cycle_head: self.cli.light_cycle_head,
                 last_focused: initial_focus,
                 border_anim: None,
+                border_underlay: Default::default(),
                 last_cycle_step: 0,
                 visual_bell: self.file_config.visual_bell(),
                 audible_bell: self.file_config.audible_bell(),
@@ -4761,6 +4765,10 @@ fn rasterize_frame(
         host.render_frame.full_repaint_reason = reason;
         host.render_frame.cells_painted = render_cells_painted(host);
     }
+    // A sweep may begin and finish between chrome snapshots. Its retained
+    // underlay independently carries cleanup damage until the next paint.
+    host.border_underlay
+        .restore(buffer, width as usize, &mut frame_damage);
     if empty_partial_skips_paint(
         full,
         &frame_damage,
@@ -5481,6 +5489,13 @@ fn rasterize_frame(
             );
         }
         if host.mux.pane_count() > 1 {
+            if pane_id == focused && cycle_progress.is_some_and(|progress| progress < 1.0) {
+                host.border_underlay.capture(
+                    buffer,
+                    width as usize,
+                    PixelRect::new(slot_x, slot_y, slot_width, slot_height),
+                );
+            }
             rasterize_pane_chrome_with_theme(
                 &host.theme,
                 buffer,

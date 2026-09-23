@@ -5480,10 +5480,13 @@ fn trace_border_trail(
     } else {
         (x, y + height.saturating_sub(traced - 2 * width - height))
     };
-    let head_x = head_x.saturating_sub(3).max(x);
-    let head_y = head_y.saturating_sub(3).max(y);
-    let head_w = 7usize.min(x.saturating_add(width).saturating_sub(head_x));
-    let head_h = 7usize.min(y.saturating_add(height).saturating_sub(head_y));
+    let radius = crate::frame_damage::BORDER_HEAD_SIZE / 2;
+    let head_x = head_x.saturating_sub(radius).max(x);
+    let head_y = head_y.saturating_sub(radius).max(y);
+    let head_w =
+        crate::frame_damage::BORDER_HEAD_SIZE.min(x.saturating_add(width).saturating_sub(head_x));
+    let head_h =
+        crate::frame_damage::BORDER_HEAD_SIZE.min(y.saturating_add(height).saturating_sub(head_y));
     fill_rect(buffer, stride_px, head_x, head_y, head_w, head_h, focus_rgb);
     if head_w > 2 && head_h > 2 {
         fill_rect(

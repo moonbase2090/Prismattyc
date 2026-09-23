@@ -862,6 +862,7 @@ fn verify_background(host: &mut HostState) {
 }
 
 fn verify_pane_damage_and_chrome(host: &mut HostState) {
+    verify_single_pane_activity_damage(host);
     let first = host.mux.focused_id();
     verify_split_panes(host, first);
     verify_steady_four_pane_partial(host);
@@ -869,6 +870,58 @@ fn verify_pane_damage_and_chrome(host: &mut HostState) {
     verify_same_layout_tab_switch(host);
     verify_idle_pulse_damage(host);
     verify_light_cycle_settles_without_head_trails(host);
+}
+
+fn verify_single_pane_activity_damage(host: &mut HostState) {
+    assert_eq!(host.mux.pane_count(), 1);
+    let saved_geom = host.mux.geom();
+    let saved_focused = host.window_focused;
+    let saved_strip = host.tab_strip_mode;
+    host.tab_strip_mode = config::TabStripMode::Multi;
+    assert!(!show_tab_strip(host));
+    host.mux
+        .set_geom(mux::HostGeom {
+            inner_pad: 1,
+            pane_gap: 0,
+            scrollbar_gutter_px: 0,
+            ..saved_geom
+        })
+        .unwrap();
+    let pane = host.mux.focused_mut();
+    let (cols, rows) = (
+        pane.emulator.screen().columns(),
+        pane.emulator.screen().rows(),
+    );
+    pane.emulator = Emulator::new(cols, rows, 0);
+    pane.mail_depth = 0;
+    let _ = pane.emulator.feed(b"\x1b[Htop row\x1b[5;1H\x1b[?25l");
+    for focus_loss in [true, false] {
+        host.window_focused = true;
+        host.mux.focused_mut().last_output_at = Some(Instant::now());
+        host.mux.focused_mut().unseen_output = true;
+        let mut retained = frame(host);
+        let _ = host.mux.focused_mut().emulator.feed(b"\x1b[T");
+        let scrolled = paint_retained(host, &mut retained);
+        assert_eq!(scrolled.full_repaint_reason, None);
+        assert!(scrolled.rows_scrolled_as_blit > 0);
+        assert!(scrolled.cells_painted < render_cells_painted(host));
+        assert_eq!(retained, full_frame_oracle(host));
+        if focus_loss {
+            host.window_focused = false;
+        } else {
+            host.mux.focused_mut().last_output_at = Some(Instant::now() - Duration::from_secs(2));
+        }
+        let changed = paint_retained(host, &mut retained);
+        assert_eq!(changed.full_repaint_reason, None);
+        assert_eq!(changed.cells_painted, 0, "focus_loss={focus_loss}");
+        assert_eq!(retained, full_frame_oracle(host));
+    }
+    host.mux.focused_mut().unseen_output = false;
+    host.mux.focused_mut().last_output_at = None;
+    host.mux.set_geom(saved_geom).unwrap();
+    host.tab_strip_mode = saved_strip;
+    host.window_focused = saved_focused;
+    frame(host);
 }
 
 fn verify_light_cycle_settles_without_head_trails(host: &mut HostState) {

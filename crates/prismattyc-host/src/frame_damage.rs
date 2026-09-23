@@ -306,6 +306,21 @@ pub(crate) fn compose_frame_damage(
     if chrome_changed && chrome_boxes_area(prior_chrome, current_chrome) > CHROME_DAMAGE_BUDGET_PX {
         return FrameDamage::Full;
     }
+    if let Some(prior) = prior_chrome.filter(|prior| prior.boxes != current_chrome.boxes) {
+        let removed = FrameDamage::Rects(
+            prior
+                .boxes
+                .iter()
+                .copied()
+                .filter(|rect| !current_chrome.boxes.contains(rect))
+                .collect(),
+        );
+        for pane in &current_layout.panes {
+            if frame_damage_intersects(&removed, pane.slot) {
+                damage.push_rect(pane.slot);
+            }
+        }
+    }
     damage
 }
 
@@ -736,6 +751,64 @@ mod tests {
             assert_eq!(
                 frame_damage_covers(&FrameDamage::Rects(vec![rect]), slot),
                 expected
+            );
+        }
+    }
+
+    #[test]
+    fn expired_activity_dot_repaints_only_its_pane_during_sweep() {
+        for padding in [0, 4, 16] {
+            let slot = PixelRect::new(0, 0, 100, 100);
+            let other = PixelRect::new(100, 0, 100, 100);
+            let layout = LayoutSnapshot {
+                panes: vec![
+                    PaneLayoutSnapshot {
+                        id: 7,
+                        slot,
+                        content: PixelRect::new(
+                            padding,
+                            padding,
+                            100 - 2 * padding,
+                            100 - 2 * padding,
+                        ),
+                    },
+                    PaneLayoutSnapshot {
+                        id: 8,
+                        slot: other,
+                        content: other,
+                    },
+                ],
+            };
+            let active = ChromeSnapshot {
+                focused_pane: Some(7),
+                focused_slot: Some(slot),
+                boxes: vec![active_dot_box(slot)],
+                pulse_step: Some(0),
+                light_cycle_step: Some(2),
+                ..Default::default()
+            };
+            let expired = ChromeSnapshot {
+                boxes: Vec::new(),
+                pulse_step: None,
+                ..active.clone()
+            };
+            let damage =
+                compose_frame_damage(Some(&layout), &layout, Some(&active), &expired, &[], false);
+            assert!(frame_damage_covers(&damage, slot));
+            assert!(!frame_damage_intersects(&damage, other));
+            let settled = ChromeSnapshot {
+                light_cycle_step: None,
+                ..expired.clone()
+            };
+            for (prior, current) in [(&expired, &expired), (&expired, &settled)] {
+                assert_eq!(
+                    compose_frame_damage(Some(&layout), &layout, Some(prior), current, &[], false),
+                    FrameDamage::Rects(border_strips(slot).to_vec()),
+                );
+            }
+            assert_eq!(
+                compose_frame_damage(Some(&layout), &layout, Some(&settled), &settled, &[], false),
+                FrameDamage::rects(),
             );
         }
     }

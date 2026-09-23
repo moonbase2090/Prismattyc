@@ -872,6 +872,7 @@ fn verify_pane_damage_and_chrome(host: &mut HostState) {
 }
 
 fn verify_light_cycle_settles_without_head_trails(host: &mut HostState) {
+    verify_activity_expiration_during_sweep(host);
     verify_light_cycle_frames(host, None);
     host.background_png = Some(RED_PNG.to_vec());
     host.background_opacity = 1.0;
@@ -883,6 +884,62 @@ fn verify_light_cycle_settles_without_head_trails(host: &mut HostState) {
     host.background_png = None;
     host.background = None;
     host.window_alpha = OPAQUE_ALPHA;
+    frame(host);
+}
+
+fn verify_activity_expiration_during_sweep(host: &mut HostState) {
+    let saved_geom = host.mux.geom();
+    let saved_focused = host.window_focused;
+    host.window_focused = true;
+    host.light_cycle = false;
+    host.light_cycle_ms = 5_000_000;
+    for padding in [0, 4, 16] {
+        host.mux
+            .set_geom(mux::HostGeom {
+                inner_pad: padding,
+                ..saved_geom
+            })
+            .unwrap();
+        host.border_anim = None;
+        host.mux.focused_mut().last_output_at = Some(Instant::now());
+        host.last_pulse_step = 0;
+        let mut retained = frame(host);
+        host.border_anim = Some(Instant::now() - Duration::from_millis(500_000));
+        host.last_cycle_step = 2;
+        paint_retained(host, &mut retained);
+        assert_eq!(
+            retained,
+            full_frame_oracle(host),
+            "active dot padding={padding}"
+        );
+        host.mux.focused_mut().last_output_at = Some(Instant::now() - Duration::from_secs(2));
+        assert!(!host.mux.focused().is_active());
+        let expired = paint_retained(host, &mut retained);
+        assert_eq!(expired.full_repaint_reason, None);
+        assert!(expired.cells_painted > 0);
+        assert!(expired.cells_painted < render_cells_painted(host));
+        assert_eq!(
+            retained,
+            full_frame_oracle(host),
+            "expired dot padding={padding}"
+        );
+        let next = paint_retained(host, &mut retained);
+        assert_eq!(next.cells_painted, 0);
+        assert_eq!(retained, full_frame_oracle(host));
+        host.border_anim = None;
+        let cleanup = paint_retained(host, &mut retained);
+        assert_eq!(cleanup.cells_painted, 0);
+        assert_eq!(
+            retained,
+            full_frame_oracle(host),
+            "sweep cleanup padding={padding}"
+        );
+        let idle = paint_retained(host, &mut retained);
+        assert_eq!(idle.cells_painted, 0);
+        assert_eq!(retained, full_frame_oracle(host));
+    }
+    host.mux.set_geom(saved_geom).unwrap();
+    host.window_focused = saved_focused;
     frame(host);
 }
 

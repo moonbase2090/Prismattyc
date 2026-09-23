@@ -1,116 +1,70 @@
 <!doctype html>
 <!-- SPDX-License-Identifier: MPL-2.0 -->
 <html lang="en">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Prismattyc · Chrome behavior preview</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prismattyc · Pane-local bell</title>
 <style>
-:root{color-scheme:dark;--bg:#11151b;--panel:#1a2029;--line:#303b4a;--text:#e7edf5;--muted:#a4b0c0;--accent:#a8b8ff;--bell:#efbe73}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif}main{max-width:1250px;margin:auto;padding:38px 28px}header{display:flex;justify-content:space-between;gap:20px;align-items:start;margin-bottom:28px}h1{font-size:30px;letter-spacing:-.8px;margin:4px 0}h2{font-size:15px;margin:0 0 12px}.eyebrow{color:var(--accent);font-size:12px;letter-spacing:2px;text-transform:uppercase}.muted{color:var(--muted)}p{margin:7px 0 16px}.tag{border:1px solid var(--line);border-radius:30px;padding:6px 12px;color:var(--muted);white-space:nowrap;font-size:12px}.layout{display:grid;grid-template-columns:minmax(0,1fr) 290px;gap:22px}button,select{font:inherit;color:inherit;background:#242d3a;border:1px solid #435066;border-radius:7px;padding:8px 12px;cursor:pointer}button:hover{background:#334055}button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:3px}button[aria-pressed=true]{background:#354263;border-color:var(--accent)}button:disabled{opacity:.45;cursor:default}.choices{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}.window{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#10141a;min-height:425px}.titlebar{padding:12px 16px;display:flex;align-items:center;gap:9px;background:#202731;border-bottom:1px solid var(--line)}.dot{width:8px;height:8px;background:#596678;border-radius:50%}.brand{margin-left:7px;font-size:13px}.spaces{display:flex;gap:7px;padding:12px 14px;border-bottom:1px solid var(--line)}.spaces button{font-size:13px;padding:5px 12px}.panes{padding:12px;display:grid;grid-template-columns:1.15fr 1fr;gap:10px;min-height:326px}.pane{position:relative;border:2px solid #303b4a;border-radius:5px;min-width:0;cursor:pointer;overflow:hidden;background:#111820}.pane[data-focused=true]{border-color:var(--accent)}.pane.focuscue{border-color:#e5eaff}.pane.bellcue{border-color:var(--bell)}.pane[data-inactive=true]{background:#0c1118}.panehead{display:flex;align-items:center;gap:6px;min-height:35px;padding:6px 10px;border-bottom:1px solid #27313f;font-size:12px;color:var(--muted)}.panehead .name{flex:1}.badge{color:#17120a;background:var(--bell);font-size:11px;font-weight:650;padding:1px 7px;border-radius:4px}.badge[hidden]{display:none}.pane pre{padding:14px 12px;margin:0;white-space:pre-wrap;font:13px/1.9 ui-monospace,monospace;color:#d9e2ed}.pane pre .prompt{color:#a7cda9}.pane pre .hint{color:#8c9daf}.statebar{padding:9px 15px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;display:flex;justify-content:space-between;gap:10px}.controls{border:1px solid var(--line);border-radius:12px;padding:18px;background:#181e27}.controls section+section{border-top:1px solid var(--line);margin-top:18px;padding-top:18px}.field{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:12px 0}.field select{padding:4px 8px}.check{display:flex;align-items:center;gap:9px;margin:11px 0}.check input{accent-color:var(--accent)}.actions{display:flex;flex-wrap:wrap;gap:8px}.actions button{font-size:13px}.metrics{display:grid;grid-template-columns:1fr auto;gap:8px;font-size:13px}.metrics span:nth-child(odd){color:var(--muted)}.note{font-size:12px;color:var(--muted);margin-top:15px}.caption{padding:17px 2px;max-width:740px}.caption strong{color:var(--accent)}.hiddenstage .panes{visibility:hidden}.hiddenstage .window{background:#0a0e14}.hiddenlabel{display:none}.hiddenstage .hiddenlabel{display:inline}.log{margin-top:20px;border-top:1px solid var(--line);padding-top:13px;font:12px/1.7 ui-monospace,monospace;color:var(--muted);min-height:65px}a{color:var(--accent)}@media(max-width:850px){.layout{grid-template-columns:1fr}.controls{display:grid;grid-template-columns:1fr 1fr;gap:18px}.controls section+section{border:0;margin:0;padding:0}.controls section:last-child{grid-column:1/-1}}@media(max-width:560px){main{padding:24px 15px}header{display:block}.tag{display:inline-block;margin-top:8px}.panes{grid-template-columns:1fr}.controls{display:block}.controls section+section{border-top:1px solid var(--line);margin-top:18px;padding-top:18px}.pane{min-height:180px}}
+:root { color-scheme:dark; font:16px/1.5 system-ui; background:#11151b; color:#e7edf5 }
+body { max-width:1000px; margin:40px auto; padding:0 24px }
+button,label { margin:6px; padding:8px; } button { cursor:pointer }
+#panes { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin:24px 0 }
+.pane { position:relative; min-height:220px; padding:20px; border:1px solid #394252; background:#181e26 }
+.pane[data-focus="true"] { border-color:#9faeff; background:#1d2430 }
+.pane[data-bell="true"]::after { content:""; position:absolute; inset:0; border:2px solid white; mix-blend-mode:difference; pointer-events:none }
+pre { white-space:pre-wrap } small,p { color:#b0bac8 } #panes[data-hidden="true"] { visibility:hidden }
+@media(max-width:600px) { #panes { grid-template-columns:1fr } }
 </style>
-</head>
-<body><main>
-<header><div><div class="eyebrow">Prismattyc / PT-308</div><h1>A little context. Then quiet.</h1><p class="muted">Explore focus and bell cues without changing your terminal.</p></div><span class="tag">Interactive design proposal</span></header>
-<div class="layout"><div>
-<div class="choices" role="group" aria-label="Design option"><button id="quiet" aria-pressed="true">Quiet signals</button><button id="timed" aria-pressed="false">Timed accents</button></div>
-<div id="stage"><div class="window"><div class="titlebar"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span class="brand">Prismattyc</span></div>
-<div class="spaces" role="group" aria-label="Preview Spaces"><button data-space="Build" aria-pressed="true">Build</button><button data-space="Review" aria-pressed="false">Review</button></div>
-<div class="panes"><div class="pane" id="pane-a" tabindex="0" role="button" aria-label="Focus compiler pane" data-focused="true"><div class="panehead"><span class="name">compiler</span><span class="badge" hidden>bell</span></div><pre><span class="prompt">❯ cargo build</span>
-   Finished release profile
-
-<span class="hint">Ready for the next command.</span></pre></div><div class="pane" id="pane-b" tabindex="0" role="button" aria-label="Focus shell pane" data-focused="false"><div class="panehead"><span class="name">shell</span><span class="badge" hidden>bell</span></div><pre><span class="prompt">❯ git status --short</span>
-
-<span class="hint">Working tree clean.</span></pre></div></div>
-<div class="statebar"><span id="location">Build / compiler</span><span class="hiddenlabel">Window hidden</span><span id="status">Quiet</span></div></div></div>
-<div class="caption"><strong id="design-title">Quiet signals</strong><p id="design-description">The focus border stays sharp. A bell marks only the pane that rang and clears when you interact with it. No decorative timer.</p><p class="note">Click either pane, switch Spaces, or ring a bell. This browser preview illustrates behavior only. Native rendering cost and platform performance are not measured here. Both proposed modes would be opt-in.</p></div>
-<div class="log" id="eventlog" aria-live="polite">Ready. No effect deadline is armed.</div>
+<h1>Pane-local visual bell</h1>
+<p>PT-308: a fixed 120 ms perimeter on the pane that rang. Focus cues remain as they are.</p>
+<label><input id="enabled" type="checkbox" checked>Preview pane visual bell</label>
+<label><input id="hidden" type="checkbox">Window occluded</label>
+<button id="space">Switch Space</button><span id="space-name">Build</span>
+<div id="panes">
+<div class="pane" id="a" tabindex="0" role="button" aria-label="Focus compiler pane" data-focus="true"><strong>compiler</strong><pre>❯ cargo build
+Finished release profile</pre></div>
+<div class="pane" id="b" tabindex="0" role="button" aria-label="Focus shell pane"><strong>shell</strong><pre>❯ git status --short
+Working tree clean.</pre></div>
 </div>
-<aside class="controls" aria-label="Preview controls"><section><h2>Try an event</h2><label class="field">Bell target <select id="target"><option value="b">shell</option><option value="a">compiler</option></select></label><div class="actions"><button id="ring">Ring bell</button><button id="burst">20 bells</button><button id="swap">Switch focus</button><button id="output">Append output</button></div></section>
-<section><h2>Visibility &amp; appearance</h2><label class="check"><input type="checkbox" id="enabled" checked>Preview effects</label><label class="check"><input type="checkbox" id="dim">Dim inactive background</label><label class="check"><input type="checkbox" id="reduced">Reduced motion</label><label class="check"><input type="checkbox" id="hidden">Hide window</label><p class="note">Dimming changes the preview background, never its text. It does not animate.</p></section>
-<section><h2>Preview lifecycle</h2><div class="metrics"><span>Effective mode</span><b id="effective">quiet</b><span>Active effect records</span><b id="active">0</b><span>Scheduled cleanup</span><b id="deadline">none</b><span>Animation frame loops</span><b>0</b><span>Coalesced events</span><b id="coalesced">0</b></div><p class="note">These are this preview’s state counters, not host telemetry.</p><button id="reset">Reset preview</button></section></aside></div>
-</main>
+<button id="ring-a">Ring compiler</button><button id="ring-b">Ring shell</button><button id="burst">20 bells in shell</button>
+<p id="status" aria-live="polite">No active bells; no bell deadline.</p>
+<small>Behavior preview only. The native option defaults to off. This page enables it to demonstrate the interaction; it does not measure native rendering cost, reproduce terminal pixels, or play sound.</small>
 <script>
-'use strict';
-const $=id=>document.getElementById(id);
-const media=window.matchMedia('(prefers-reduced-motion: reduce)');
-$('reduced').checked=media.matches;
-const state={mode:'quiet',space:'Build',focus:'a',effects:new Map(),timer:null,coalesced:0,events:[],output:0};
-const owner=id=>`${state.space}:${id}`;
-const pane=id=>$(`pane-${id}`);
-const label=id=>id==='a'?'compiler':'shell';
-const mode=()=> $('reduced').checked?'quiet':state.mode;
-const hidden=()=>document.hidden||$('hidden').checked;
-function note(text){state.events.unshift(text);state.events=state.events.slice(0,3);$('eventlog').textContent=state.events.join(' · ');}
-function visibleRecord(record){return record.space===state.space&&!hidden();}
-function arm(){
- clearTimeout(state.timer);state.timer=null;
- if(hidden()||!$('enabled').checked)return;
- const due=[...state.effects.values()].filter(r=>visibleRecord(r)&&r.until!==null).map(r=>r.until);
- if(due.length)state.timer=setTimeout(expire,Math.max(0,Math.min(...due)-performance.now()));
+const panes = [...document.querySelectorAll('.pane')];
+const enabled = document.querySelector('#enabled');
+const hidden = document.querySelector('#hidden');
+const holds = new Map();
+let timer, coalesced = 0;
+function render() {
+  clearTimeout(timer);
+  const now = performance.now();
+  for (const [id, until] of holds) if (until <= now) holds.delete(id);
+  for (const pane of panes) pane.dataset.bell = String(holds.has(pane.id));
+  document.querySelector('#panes').dataset.hidden = String(hidden.checked);
+  document.querySelector('#status').textContent = `${holds.size} active bells; ${holds.size ? 'one next cleanup deadline' : 'no bell deadline'}; ${coalesced} coalesced events.`;
+  if (holds.size) timer = setTimeout(render, Math.max(0, Math.min(...holds.values()) - now));
 }
-function expire(){
- const now=performance.now();let removed=0;
- for(const [key,r] of state.effects)if(r.until!==null&&r.until<=now){state.effects.delete(key);removed++;}
- if(removed)note(`Cleaned up ${removed} timed effect${removed===1?'':'s'}.`);
- render();arm();
+function ring(id) {
+  if (!enabled.checked || hidden.checked) return;
+  const now = performance.now();
+  if ((holds.get(id) || 0) > now) { coalesced++; } else { holds.set(id, now + 120); }
+  render();
 }
-function cue(kind,id){
- if(!$('enabled').checked)return;
- if(kind==='focus'&&(mode()==='quiet'||hidden()))return;
- const key=`${owner(id)}:${kind}`,old=state.effects.get(key);
- if(old){state.coalesced++;return;}
- const duration=kind==='bell'?360:120;
- // Hidden bells retain a quiet indication; they never enqueue a pulse replay.
- state.effects.set(key,{space:state.space,pane:id,kind,until:mode()==='timed'&&!hidden()?performance.now()+duration:null});
+for (const pane of panes) {
+  const focus = () => { for (const p of panes) p.dataset.focus = String(p === pane); };
+  pane.addEventListener('click', focus);
+  pane.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); focus(); } });
 }
-function cancelTransient(){for(const [key,r] of state.effects)if(r.until!==null)state.effects.delete(key);clearTimeout(state.timer);state.timer=null;}
-function focus(id){
- if(hidden())return;
- const changed=state.focus!==id;
- state.effects.delete(`${owner(id)}:bell`);
- for(const [key,r]of state.effects)if(r.kind==='focus')state.effects.delete(key);
- state.focus=id;if(changed)cue('focus',id);
- note(`${label(id)} focused; its bell is acknowledged.`);render();arm();
-}
-function ring(count){
- const id=$('target').value;
- for(let i=0;i<count;i++)cue('bell',id);
- note(`${count===1?'Bell':count+' bells'} from ${label(id)}${hidden()?' while hidden; no pulse queued':''}.`);render();arm();
-}
-function render(){
- const isHidden=hidden();$('stage').classList.toggle('hiddenstage',isHidden);
- for(const id of ['a','b']){
-  const p=pane(id);p.dataset.focused=String(state.focus===id);p.dataset.inactive=String($('dim').checked&&state.focus!==id);
-  p.classList.remove('focuscue','bellcue');p.querySelector('.badge').hidden=true;
-  for(const r of state.effects.values())if(r.pane===id&&visibleRecord(r)){
-   if(r.kind==='bell'){p.querySelector('.badge').hidden=false;if(r.until!==null)p.classList.add('bellcue');}
-   else p.classList.add('focuscue');
-  }
- }
- $('quiet').setAttribute('aria-pressed',String(state.mode==='quiet'));$('timed').setAttribute('aria-pressed',String(state.mode==='timed'));
- for(const b of document.querySelectorAll('[data-space]'))b.setAttribute('aria-pressed',String(b.dataset.space===state.space));
- $('location').textContent=`${state.space} / ${label(state.focus)}`;
- const timed=[...state.effects.values()].filter(r=>r.until!==null&&visibleRecord(r)).length;
- $('status').textContent=isHidden?'No decorative work':timed?'Accent held':state.effects.size?'Bell marked':'Quiet';
- $('active').textContent=state.effects.size;$('deadline').textContent=timed?'one deadline':'none';$('coalesced').textContent=state.coalesced;
- $('effective').textContent=$('enabled').checked?mode():'off';
- $('design-title').textContent=state.mode==='quiet'?'Quiet signals':'Timed accents';
- $('design-description').textContent=state.mode==='quiet'?'The focus border stays sharp. A bell marks only the pane that rang and clears when you interact with it. No decorative timer.':'Focus holds a bright edge for 120 ms. A bell marks its pane for 360 ms. One cleanup removes each cue; repeated events do not extend its deadline.';
-}
-for(const id of ['a','b']){pane(id).onclick=()=>focus(id);pane(id).onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();focus(id);}};}
-for(const m of ['quiet','timed'])$(m).onclick=()=>{state.effects.clear();state.mode=m;note(`Preview changed to ${m}.`);render();arm();};
-for(const b of document.querySelectorAll('[data-space]'))b.onclick=()=>{
- if(state.space===b.dataset.space)return;
- state.effects.clear();state.space=b.dataset.space;cue('focus',state.focus);note(`Entered ${state.space}; departing effects cancelled.`);render();arm();
+document.querySelector('#ring-a').onclick = () => ring('a');
+document.querySelector('#ring-b').onclick = () => ring('b');
+document.querySelector('#burst').onclick = () => { for (let i=0; i<20; i++) ring('b'); };
+for (const control of [enabled, hidden]) control.onchange = () => { holds.clear(); render(); };
+document.querySelector('#space').onclick = () => {
+  holds.clear();
+  const name = document.querySelector('#space-name');
+  name.textContent = name.textContent === 'Build' ? 'Review' : 'Build';
+  render();
 };
-$('ring').onclick=()=>ring(1);$('burst').onclick=()=>ring(20);$('swap').onclick=()=>focus(state.focus==='a'?'b':'a');
-$('output').onclick=()=>{if(hidden())return;state.output++;const line=document.createElement('span');line.textContent=`\noutput ${state.output}: ready`;const pre=pane(state.focus).querySelector('pre');if(state.output%5===0)pre.textContent='❯ output preview';pre.append(line);note('Content changed in the focused pane.');};
-$('enabled').onchange=()=>{state.effects.clear();note($('enabled').checked?'Effects enabled for preview.':'Effects cleared; no effect deadline.');render();arm();};
-$('dim').onchange=render;
-$('reduced').onchange=()=>{for(const [key,r]of state.effects){if(r.kind==='focus')state.effects.delete(key);else r.until=null;}note('Motion preference changed; bell indications remain quiet.');render();arm();};
-function visibility(){if(hidden())cancelTransient();note(hidden()?'Hidden: transient effects cancelled.':'Visible: expired transients are not replayed.');render();arm();}
-$('hidden').onchange=visibility;document.addEventListener('visibilitychange',visibility);
-$('reset').onclick=()=>{state.effects.clear();state.coalesced=0;state.space='Build';state.focus='a';$('hidden').checked=false;note('Reset. No effect deadline is armed.');render();arm();};
-window.addEventListener('blur',()=>{for(const [key,r]of state.effects)if(r.kind==='focus')state.effects.delete(key);render();arm();});
-window.addEventListener('pagehide',()=>clearTimeout(state.timer));render();
-</script></body></html>
+render();
+</script>
+</html>

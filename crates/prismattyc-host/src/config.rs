@@ -161,6 +161,9 @@ pub struct ConfigFile {
     pub space_startup: Option<String>,
     /// Flash the window on BEL (invert for ~120ms). Default true.
     pub visual_bell: Option<bool>,
+    /// Use a static pane perimeter instead of the full-window visual flash and
+    /// visible-pane BEL toast. Requires visual_bell; default false.
+    pub pane_visual_bell: Option<bool>,
     /// Play the bundled "Zen" bell sound on BEL. Default true. Linux tries
     /// `paplay`, `pw-play`, `aplay`; macOS uses `afplay`.
     pub audible_bell: Option<bool>,

@@ -69,6 +69,7 @@ pub(super) fn switch(host: &mut HostState, owner: Option<String>) -> Result<bool
     host.last_focused = host.mux.focused_id();
     host.last_mail_depths.clear();
     host.bell_toasts.clear();
+    host.pane_bells.cancel();
     host.last_attention_notify.clear();
     host.pending_attention_announce = None;
     host.pending_mail_announce = None;

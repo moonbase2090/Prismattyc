@@ -102,6 +102,9 @@ space_rail_chip_cols = 0
 # -- bells and attention --
 # Flash the window on BEL (~120ms invert). true|false.
 visual_bell = true
+# Opt in to a static pane perimeter instead of the window flash and visible BEL toast.
+# Requires visual_bell; holds 120ms, repeated bells do not extend the hold.
+pane_visual_bell = false
 # Play the bundled Zen bell on BEL. true|false.
 audible_bell = true
 # Show a toast on the pane that rang BEL. true|false.
@@ -790,6 +793,12 @@ the file applies changes on the next poll tick:
   default (flash, sound, and toaster on, 10s linger; OS notification off).
   Reopening a log-backed session restores its output without replaying old
   bells or agent-attention alerts. New alerts still use these settings.
+- `pane_visual_bell` — hot-reloaded, default `false`. With `visual_bell = true`,
+  replaces the full-window flash and visible-pane BEL toast with a two-pixel
+  inverted perimeter for 120 ms. Repeated bells coalesce without extending the
+  deadline. Occlusion, view replacement and geometry changes cancel the accent.
+  Hidden-pane toast/attention handling, sound and OS notifications are unchanged.
+  Disabling the option clears a live accent; it does not replay it in the old mode.
 - `walkthrough_audio` — apply to the next walkthrough clip. Deleting the
   key restores `true`. Missing clips, `false`, or no player leave captions
   unchanged. `walkthrough_voice` is generation-time only

@@ -68,3 +68,33 @@ fn imported_and_collected_zwj_tail_still_joins() {
     assert_eq!(screen.clusters.len(), 0);
     assert_scalar_matches_general_path(&mut screen, 'a');
 }
+
+#[test]
+fn copied_and_alternate_tails_keep_general_join_semantics() {
+    let mut source = Screen::new(8, 3, 8);
+    for character in "👩\u{200d}".chars() {
+        source.put_char(character);
+    }
+    let mut screen = Screen::new(8, 3, 8);
+    let damage = source.take_damage();
+    screen.apply_damage(&source, &damage);
+    assert!(screen.previous_base_ends_with_zwj());
+    assert_scalar_matches_general_path(&mut screen, '💻');
+    for mode in [
+        AltScreenMode::Mode47,
+        AltScreenMode::Mode1047,
+        AltScreenMode::Mode1049,
+    ] {
+        screen.enter_alt_screen(mode);
+        for character in "ASCII界\u{200d}a".chars() {
+            assert_scalar_matches_general_path(&mut screen, character);
+        }
+        screen.leave_alt_screen(mode);
+        screen.collect_clusters();
+        screen.set_autowrap(false);
+        for character in "overwrite last cell".chars() {
+            assert_scalar_matches_general_path(&mut screen, character);
+        }
+        screen.set_autowrap(true);
+    }
+}

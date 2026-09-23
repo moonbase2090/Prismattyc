@@ -7,6 +7,7 @@ mod a11y;
 mod attach_adopt;
 mod attach_log;
 mod attach_tabs;
+mod border_underlay;
 mod config;
 mod config_template;
 mod frame_damage;
@@ -940,6 +941,8 @@ struct HostState {
     last_focused: PaneId,
     /// Sweep start time while a light-cycle animation is running.
     border_anim: Option<Instant>,
+    /// Pixels beneath the current animated border; empty outside a sweep.
+    border_underlay: border_underlay::BorderUnderlay,
     /// Last quantized sweep step painted (same repaint-throttle idea as the
     /// pulse dot).
     last_cycle_step: u8,
@@ -3225,6 +3228,7 @@ impl App {
                 light_cycle_head: self.cli.light_cycle_head,
                 last_focused: initial_focus,
                 border_anim: None,
+                border_underlay: Default::default(),
                 last_cycle_step: 0,
                 visual_bell: self.file_config.visual_bell(),
                 audible_bell: self.file_config.audible_bell(),
@@ -4165,9 +4169,22 @@ fn apply_framebuffer_scroll_blits(
     frame_height: usize,
     rect: FramebufferScrollRect,
     events: &[ScrollDamage],
+    chrome_boxes: &[PixelRect],
 ) -> Option<u64> {
     let (copies, copied_rows) =
         framebuffer_scroll_plan(rect, stride, frame_height, buffer.len(), events)?;
+    if copies.iter().any(|copy| {
+        chrome_boxes.iter().any(|chrome| {
+            chrome.width > 0
+                && chrome.height > 0
+                && chrome.x < rect.x + rect.width
+                && rect.x < chrome.x.saturating_add(chrome.width)
+                && chrome.y < copy.src_y + copy.scanlines
+                && copy.src_y < chrome.y.saturating_add(chrome.height)
+        })
+    }) {
+        return None;
+    }
     for copy in copies {
         for offset in 0..copy.scanlines {
             let line = match copy.direction {
@@ -4450,6 +4467,7 @@ fn frame_chrome_snapshot(
     focused: PaneId,
     pulse_step: Option<u8>,
     light_cycle_step: Option<u8>,
+    now: Instant,
 ) -> ChromeSnapshot {
     let mux = &host.mux;
     let mut focused_slot = None;
@@ -4464,13 +4482,19 @@ fn frame_chrome_snapshot(
         }
         let (content_x, content_y, content_w, content_h) = geom.pane_content_px(rect);
         let content = PixelRect::new(content_x, content_y, content_w, content_h);
+        let active = multi_pane
+            && width >= 10
+            && height >= 10
+            && pane.is_active_at(now)
+            && pulse_live(host.window_focused, host.window_occluded);
+        let unseen = multi_pane && width >= 24 && height >= 10 && pane.unseen_output;
         push_pane_chrome_boxes(
             slot,
             content,
             multi_pane,
             pane.mail_depth > 0,
-            pane.unseen_output,
-            pane.is_active(),
+            unseen,
+            active,
             &mut boxes,
         );
         let max_scroll = pane.emulator.screen().max_view_scroll();
@@ -4483,7 +4507,7 @@ fn frame_chrome_snapshot(
         // must not change for ordinary scrollback growth or thumb movement.
         markers.push(pane_marker_word(
             id.get(),
-            pane_chrome_bits(pane.mail_depth > 0, pane.unseen_output, pane.is_active()),
+            pane_chrome_bits(pane.mail_depth > 0, unseen, active),
             scrollbar_marker(max_scroll, scroll),
         ));
     }
@@ -4572,6 +4596,7 @@ fn frame_damage_snapshot(
     host: &HostState,
     geom: mux::HostGeom,
     focused: PaneId,
+    now: Instant,
 ) -> FrameDamageSnapshot {
     let layout = layout_snapshot(&host.mux, geom);
     let pulse_step = pulse_step_for_snapshot(
@@ -4581,7 +4606,7 @@ fn frame_damage_snapshot(
     );
     let light_cycle_step =
         light_cycle_step_for_snapshot(host.border_anim.is_some(), host.last_cycle_step);
-    let chrome = frame_chrome_snapshot(host, geom, focused, pulse_step, light_cycle_step);
+    let chrome = frame_chrome_snapshot(host, geom, focused, pulse_step, light_cycle_step, now);
     let layout_changed = layout_transition(host.last_layout_snapshot.as_ref(), &layout);
     let chrome_changed = chrome_geometry_changed(host.last_chrome_snapshot.as_ref(), &chrome);
     let prior_focus = host
@@ -4678,7 +4703,8 @@ fn rasterize_frame(
     let mut reason = current_full_repaint_reason(host, width, height, overflowed);
     let geom = host.mux.geom();
     let focused = host.mux.focused_id();
-    let damage_snapshot = frame_damage_snapshot(host, geom, focused);
+    let frame_now = Instant::now();
+    let damage_snapshot = frame_damage_snapshot(host, geom, focused, frame_now);
     let layout_changed = damage_snapshot.layout_changed;
     let chrome_changed = damage_snapshot.chrome_changed;
     let strip_changed = host
@@ -4761,6 +4787,10 @@ fn rasterize_frame(
         host.render_frame.full_repaint_reason = reason;
         host.render_frame.cells_painted = render_cells_painted(host);
     }
+    // A sweep may begin and finish between chrome snapshots. Its retained
+    // underlay independently carries cleanup damage until the next paint.
+    host.border_underlay
+        .restore(buffer, width as usize, &mut frame_damage);
     if empty_partial_skips_paint(
         full,
         &frame_damage,
@@ -5134,6 +5164,9 @@ fn rasterize_frame(
                         height as usize,
                         rect,
                         damage.scroll_events(),
+                        host.last_chrome_snapshot
+                            .as_ref()
+                            .map_or(&[], |chrome| chrome.boxes.as_slice()),
                     ) {
                         frame_damage.push_rect(PixelRect::new(
                             rect.x,
@@ -5481,6 +5514,13 @@ fn rasterize_frame(
             );
         }
         if host.mux.pane_count() > 1 {
+            if pane_id == focused && cycle_progress.is_some_and(|progress| progress < 1.0) {
+                host.border_underlay.capture(
+                    buffer,
+                    width as usize,
+                    PixelRect::new(slot_x, slot_y, slot_width, slot_height),
+                );
+            }
             rasterize_pane_chrome_with_theme(
                 &host.theme,
                 buffer,
@@ -5492,7 +5532,8 @@ fn rasterize_frame(
                 pane_id == focused,
                 pane.unseen_output,
                 pulse_phase_if(
-                    pane.is_active() && pulse_live(host.window_focused, host.window_occluded),
+                    pane.is_active_at(frame_now)
+                        && pulse_live(host.window_focused, host.window_occluded),
                     host.last_pulse_step,
                 ),
                 cycle_progress.filter(|_| pane_id == focused),
@@ -14860,6 +14901,7 @@ mod tests {
                     bottom: 3,
                     delta: 1,
                 }],
+                &[],
             ),
             Some(3)
         );
@@ -14881,6 +14923,7 @@ mod tests {
                     bottom: 3,
                     delta: -1,
                 }],
+                &[],
             ),
             Some(3)
         );
@@ -14927,7 +14970,7 @@ mod tests {
         ];
         let mut buffer = vec![0, 1, 2, 3, 4];
         assert_eq!(
-            apply_framebuffer_scroll_blits(&mut buffer, 1, 5, rect, &events),
+            apply_framebuffer_scroll_blits(&mut buffer, 1, 5, rect, &events, &[]),
             Some(6)
         );
         assert_eq!(buffer, vec![1, 2, 2, 3, 4]);
@@ -14945,10 +14988,70 @@ mod tests {
                     bottom: 3,
                     delta: 3,
                 }],
+                &[],
             ),
             None
         );
         assert_eq!(rejected, original);
+    }
+
+    #[test]
+    fn framebuffer_scroll_blit_rejects_only_overlapping_chrome_sources() {
+        let rect = FramebufferScrollRect {
+            x: 2,
+            y: 1,
+            width: 3,
+            row_height: 2,
+            rows: 4,
+        };
+        let original: Vec<u32> = (0..70).collect();
+        let events = [ScrollDamage {
+            top: 0,
+            bottom: 3,
+            delta: -1,
+        }];
+        for (chrome, rejected) in [
+            (PixelRect::new(2, 1, 1, 1), true),
+            (PixelRect::new(4, 6, 1, 1), true),
+            (PixelRect::new(5, 1, 1, 1), false),
+            (PixelRect::new(2, 7, 3, 2), false),
+            (PixelRect::new(2, 1, 0, 1), false),
+        ] {
+            let mut pixels = original.clone();
+            let result =
+                apply_framebuffer_scroll_blits(&mut pixels, 7, 10, rect, &events, &[chrome]);
+            assert_eq!(result, if rejected { None } else { Some(3) });
+            if rejected {
+                assert_eq!(pixels, original);
+            } else {
+                assert_eq!(&pixels[23..26], &original[9..12]);
+            }
+        }
+        let mut pixels = original.clone();
+        let events = [
+            ScrollDamage {
+                top: 2,
+                bottom: 3,
+                delta: -1,
+            },
+            ScrollDamage {
+                top: 0,
+                bottom: 3,
+                delta: -1,
+            },
+        ];
+        assert_eq!(
+            apply_framebuffer_scroll_blits(
+                &mut pixels,
+                7,
+                10,
+                rect,
+                &events,
+                &[PixelRect::new(2, 1, 1, 1)]
+            ),
+            None,
+        );
+        assert_eq!(pixels, original);
     }
 
     #[test]

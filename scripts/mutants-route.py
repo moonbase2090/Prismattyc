@@ -125,6 +125,36 @@ def index_mutants(mutants):
     return result
 
 
+def changed_lines_diff(diff):
+    """Select only added/replacement lines, without deletion neighbours.
+
+    cargo-mutants also selects surviving lines beside deletions. Emit insert-only
+    selection hunks so unchanged neighbours never enter the PR universe.
+    """
+    selected = {}
+    path, line = None, None
+    for text in diff.splitlines():
+        if text.startswith("diff --git "):
+            path, line = None, None
+        elif text.startswith("+++ "):
+            path = text[4:].removeprefix("b/")
+            line = None
+        elif match := HUNK.match(text):
+            line = int(match[1])
+        elif path is not None and line is not None:
+            if text.startswith("+"):
+                selected.setdefault(path, []).append((line, text))
+                line += 1
+            elif text.startswith(" "):
+                line += 1
+    chunks = []
+    for path, lines in sorted(selected.items()):
+        chunks.extend([f"diff --git a/{path} b/{path}", f"--- a/{path}", f"+++ b/{path}"])
+        for line, text in lines:
+            chunks.extend([f"@@ -{line - 1},0 +{line},1 @@", text])
+    return "\n".join(chunks) + ("\n" if chunks else "")
+
+
 def affected_lines(diff):
     """Match 27.1.0 in_diff::affected_lines, including deletion neighbours."""
     result = {}
@@ -461,8 +491,12 @@ class Runner:
     def __init__(self, repo, diff, out, crate, oom_events, shard_size=DEFAULT_SHARD_SIZE):
         if shard_size < 1:
             raise ValueError("shard size must be >= 1")
-        self.repo, self.diff, self.out, self.crate = repo, diff, out, crate
-        self.diff_text = diff.read_text()
+        self.repo, self.out, self.crate = repo, out, crate
+        self.input_diff = diff
+        self.input_diff_text = diff.read_text()
+        self.diff = out / "changed-lines.diff"
+        self.diff_text = changed_lines_diff(self.input_diff_text)
+        self.diff.write_text(self.diff_text)
         self.snapshot = fingerprint(repo, self.diff_text)
         self.oom_events = oom_events
         self.shard_size = shard_size
@@ -471,7 +505,9 @@ class Runner:
         spec.loader.exec_module(self.gate)
 
     def unchanged(self):
-        if self.diff.read_text() != self.diff_text or fingerprint(self.repo, self.diff_text) != self.snapshot:
+        if (self.input_diff.read_text() != self.input_diff_text
+                or self.diff.read_text() != self.diff_text
+                or fingerprint(self.repo, self.diff_text) != self.snapshot):
             raise ValueError("source or diff changed during routing; discard this run")
 
     def require_headroom(self, label):
@@ -637,6 +673,10 @@ class Runner:
         status, version, _ = self.command(["cargo", "mutants", "--version"], "version", capture=True)
         if status or version.strip() != f"cargo-mutants {VERSION}":
             raise ValueError(f"routing requires cargo-mutants {VERSION}: {version.strip()}")
+        if not self.diff_text:
+            write_json(self.out / "universe.json", [])
+            print("No mutants to filter; PR has no added/replacement lines", flush=True)
+            return
         universe = self.discover(self.diff, "universe")
         if not universe:
             print("No mutants to filter; verified empty PR universe", flush=True)
@@ -654,7 +694,8 @@ class Runner:
             "universe": len(universe), "fast": len(expected_fast),
             "shard_size": self.shard_size,
             "fast_routes": FAST_ROUTES,
-            "policy": "Every original diff mutant remains scored; no debt exclusions. "
+            "policy": "Only added/replacement lines select mutations; deletion neighbours are excluded. "
+                      "Every selected diff mutant remains scored; no debt exclusions. "
                       "Score only the merged full universe.",
         })
         for index, (selector, selection, expected) in enumerate(selections):

@@ -56,3 +56,39 @@ fn trailing_continuations(bytes: &[u8]) -> u8 {
     }
     0
 }
+
+#[cfg(test)]
+mod utf8_chunk_tests {
+    use super::*;
+
+    struct Sink;
+    impl vte::Perform for Sink {}
+
+    #[test]
+    fn pending_prefix_returns_to_bulk_at_each_scalar_boundary() {
+        for text in ["¢", "߿", "ࠀ", "€", "\u{ffff}", "𐀀", "😀", "\u{10ffff}"] {
+            let bytes = text.as_bytes();
+            for split in 1..bytes.len() {
+                let mut parser = StreamParser::new();
+                parser.advance(&mut Sink, &bytes[..split]);
+                assert_eq!(parser.continuations as usize, bytes.len() - split);
+                parser.advance(&mut Sink, &[]);
+                assert_eq!(parser.continuations as usize, bytes.len() - split);
+                for (index, byte) in bytes[split..].iter().enumerate() {
+                    parser.advance(&mut Sink, std::slice::from_ref(byte));
+                    assert_eq!(
+                        parser.continuations as usize,
+                        bytes.len() - split - index - 1
+                    );
+                }
+                parser.advance(&mut Sink, b"plain ASCII");
+                assert_eq!(parser.continuations, 0);
+            }
+        }
+        let mut parser = StreamParser::new();
+        for byte in 0..=0x7f {
+            parser.advance(&mut Sink, &[byte]);
+            assert_eq!(parser.continuations, 0);
+        }
+    }
+}

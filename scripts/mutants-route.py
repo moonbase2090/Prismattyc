@@ -673,6 +673,10 @@ class Runner:
         status, version, _ = self.command(["cargo", "mutants", "--version"], "version", capture=True)
         if status or version.strip() != f"cargo-mutants {VERSION}":
             raise ValueError(f"routing requires cargo-mutants {VERSION}: {version.strip()}")
+        if not self.diff_text:
+            write_json(self.out / "universe.json", [])
+            print("No mutants to filter; PR has no added/replacement lines", flush=True)
+            return
         universe = self.discover(self.diff, "universe")
         if not universe:
             print("No mutants to filter; verified empty PR universe", flush=True)

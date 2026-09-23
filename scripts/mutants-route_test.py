@@ -414,6 +414,9 @@ class OrchestrationTests(unittest.TestCase):
                 f"--- a/{route.HOST_MAIN}\n+++ b/{route.HOST_MAIN}\n@@ -2,0 +2,6 @@\n"
                 "+render\n+pty\n+scroll\n+one\n+two\n+three\n"
             )
+            if mode == "deletion-only":
+                diff.write_text(f"--- a/{route.HOST_MAIN}\n+++ b/{route.HOST_MAIN}\n"
+                                "@@ -1,2 +1,1 @@\n-deleted\n context\n")
             oom = root / "memory.events"
             oom.write_text("oom_kill 0\n")
             env = dict(
@@ -434,6 +437,13 @@ class OrchestrationTests(unittest.TestCase):
             routing = json.loads((out / "routing.json").read_text()) if (out / "routing.json").exists() else None
             calls = [json.loads(line) for line in case.with_suffix(".calls").read_text().splitlines()]
             return result, data, calls, routing
+
+    def test_deletion_only_does_not_run_mutations_or_tests(self):
+        result, data, calls, routing = self.run_case("deletion-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNone(data)
+        self.assertIsNone(routing)
+        self.assertEqual(calls, [["mutants", "--version"]])
 
     def test_full_baseline_and_later_catch_survive_orchestration(self):
         result, data, calls, _routing = self.run_case()

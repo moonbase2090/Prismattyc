@@ -20,9 +20,6 @@ Setting `visual_bell = false` disables either visual flash mode; the existing to
 setting remains independent in that case. No automatic reduced-motion preference
 integration is added; the accent has no movement and can be disabled explicitly.
 
-The [browser preview](../../demo/chrome-effects/index.html) illustrates the narrowed
-interaction only. It is not a native rendering or performance measurement.
-
 ## Ownership and cleanup
 
 Each live record owns a Space ID, pane ID, runtime identity, geometry and deadline.

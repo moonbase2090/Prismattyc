@@ -4169,9 +4169,22 @@ fn apply_framebuffer_scroll_blits(
     frame_height: usize,
     rect: FramebufferScrollRect,
     events: &[ScrollDamage],
+    chrome_boxes: &[PixelRect],
 ) -> Option<u64> {
     let (copies, copied_rows) =
         framebuffer_scroll_plan(rect, stride, frame_height, buffer.len(), events)?;
+    if copies.iter().any(|copy| {
+        chrome_boxes.iter().any(|chrome| {
+            chrome.width > 0
+                && chrome.height > 0
+                && chrome.x < rect.x + rect.width
+                && rect.x < chrome.x.saturating_add(chrome.width)
+                && chrome.y < copy.src_y + copy.scanlines
+                && copy.src_y < chrome.y.saturating_add(chrome.height)
+        })
+    }) {
+        return None;
+    }
     for copy in copies {
         for offset in 0..copy.scanlines {
             let line = match copy.direction {
@@ -5147,6 +5160,9 @@ fn rasterize_frame(
                         height as usize,
                         rect,
                         damage.scroll_events(),
+                        host.last_chrome_snapshot
+                            .as_ref()
+                            .map_or(&[], |chrome| chrome.boxes.as_slice()),
                     ) {
                         frame_damage.push_rect(PixelRect::new(
                             rect.x,
@@ -14881,6 +14897,7 @@ mod tests {
                     bottom: 3,
                     delta: 1,
                 }],
+                &[],
             ),
             Some(3)
         );
@@ -14902,6 +14919,7 @@ mod tests {
                     bottom: 3,
                     delta: -1,
                 }],
+                &[],
             ),
             Some(3)
         );
@@ -14948,7 +14966,7 @@ mod tests {
         ];
         let mut buffer = vec![0, 1, 2, 3, 4];
         assert_eq!(
-            apply_framebuffer_scroll_blits(&mut buffer, 1, 5, rect, &events),
+            apply_framebuffer_scroll_blits(&mut buffer, 1, 5, rect, &events, &[]),
             Some(6)
         );
         assert_eq!(buffer, vec![1, 2, 2, 3, 4]);
@@ -14966,10 +14984,70 @@ mod tests {
                     bottom: 3,
                     delta: 3,
                 }],
+                &[],
             ),
             None
         );
         assert_eq!(rejected, original);
+    }
+
+    #[test]
+    fn framebuffer_scroll_blit_rejects_only_overlapping_chrome_sources() {
+        let rect = FramebufferScrollRect {
+            x: 2,
+            y: 1,
+            width: 3,
+            row_height: 2,
+            rows: 4,
+        };
+        let original: Vec<u32> = (0..70).collect();
+        let events = [ScrollDamage {
+            top: 0,
+            bottom: 3,
+            delta: -1,
+        }];
+        for (chrome, rejected) in [
+            (PixelRect::new(2, 1, 1, 1), true),
+            (PixelRect::new(4, 6, 1, 1), true),
+            (PixelRect::new(5, 1, 1, 1), false),
+            (PixelRect::new(2, 7, 3, 2), false),
+            (PixelRect::new(2, 1, 0, 1), false),
+        ] {
+            let mut pixels = original.clone();
+            let result =
+                apply_framebuffer_scroll_blits(&mut pixels, 7, 10, rect, &events, &[chrome]);
+            assert_eq!(result, if rejected { None } else { Some(3) });
+            if rejected {
+                assert_eq!(pixels, original);
+            } else {
+                assert_eq!(&pixels[23..26], &original[9..12]);
+            }
+        }
+        let mut pixels = original.clone();
+        let events = [
+            ScrollDamage {
+                top: 2,
+                bottom: 3,
+                delta: -1,
+            },
+            ScrollDamage {
+                top: 0,
+                bottom: 3,
+                delta: -1,
+            },
+        ];
+        assert_eq!(
+            apply_framebuffer_scroll_blits(
+                &mut pixels,
+                7,
+                10,
+                rect,
+                &events,
+                &[PixelRect::new(2, 1, 1, 1)]
+            ),
+            None,
+        );
+        assert_eq!(pixels, original);
     }
 
     #[test]

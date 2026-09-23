@@ -873,6 +873,7 @@ fn verify_pane_damage_and_chrome(host: &mut HostState) {
 
 fn verify_light_cycle_settles_without_head_trails(host: &mut HostState) {
     verify_activity_expiration_during_sweep(host);
+    verify_mail_scroll_during_sweep(host);
     verify_light_cycle_frames(host, None);
     host.background_png = Some(RED_PNG.to_vec());
     host.background_opacity = 1.0;
@@ -884,6 +885,67 @@ fn verify_light_cycle_settles_without_head_trails(host: &mut HostState) {
     host.background_png = None;
     host.background = None;
     host.window_alpha = OPAQUE_ALPHA;
+    frame(host);
+}
+
+fn verify_mail_scroll_during_sweep(host: &mut HostState) {
+    let saved_geom = host.mux.geom();
+    let saved_focused = host.window_focused;
+    let saved_mail = host.mux.focused().mail_depth;
+    host.window_focused = false;
+    host.light_cycle = false;
+    host.light_cycle_ms = 5_000_000;
+    host.mux
+        .set_geom(mux::HostGeom {
+            inner_pad: 0,
+            pane_gap: 0,
+            scrollbar_gutter_px: 0,
+            ..saved_geom
+        })
+        .unwrap();
+    let focused = host.mux.focused_id();
+    let rect = host.mux.rects().find(|(id, _)| *id == focused).unwrap().1;
+    assert_eq!(
+        host.mux.geom().pane_slot_px(rect),
+        host.mux.geom().pane_content_px(rect)
+    );
+    let pane = host.mux.focused_mut();
+    pane.mail_depth = 1;
+    let _ = pane
+        .emulator
+        .feed(b"\x1b[0m\x1b[2J\x1b[Htop row\x1b[5;1H\x1b[?25l");
+    host.border_anim = None;
+    let mut retained = frame(host);
+    host.border_anim = Some(Instant::now() - Duration::from_millis(500_000));
+    host.last_cycle_step = 2;
+    let unchanged = paint_retained(host, &mut retained);
+    assert_eq!(unchanged.cells_painted, 0);
+    assert_eq!(retained, full_frame_oracle(host));
+    let _ = host.mux.focused_mut().emulator.feed(b"\x1b[T");
+    let scrolled = paint_retained(host, &mut retained);
+    assert_eq!(scrolled.full_repaint_reason, None);
+    assert_eq!(scrolled.rows_scrolled_as_blit, 0);
+    assert!(scrolled.cells_painted > 0);
+    assert!(scrolled.cells_painted < render_cells_painted(host));
+    assert_eq!(
+        retained,
+        full_frame_oracle(host),
+        "mail during downward scroll"
+    );
+    let unchanged = paint_retained(host, &mut retained);
+    assert_eq!(unchanged.cells_painted, 0);
+    assert_eq!(retained, full_frame_oracle(host));
+    host.border_anim = None;
+    let cleanup = paint_retained(host, &mut retained);
+    assert_eq!(cleanup.cells_painted, 0);
+    assert_eq!(
+        retained,
+        full_frame_oracle(host),
+        "mail scroll after sweep cleanup"
+    );
+    host.mux.focused_mut().mail_depth = saved_mail;
+    host.mux.set_geom(saved_geom).unwrap();
+    host.window_focused = saved_focused;
     frame(host);
 }
 

@@ -907,7 +907,7 @@ fn verify_pane_local_bell(host: &mut HostState) {
     let width = host.window.inner_size().width as usize;
     for (index, pixel) in retained.iter().enumerate() {
         let (px, py) = (index % width, index / width);
-        if px < x || px >= x + w || py < y || py >= y + h {
+        if !(x..x + w).contains(&px) || !(y..y + h).contains(&py) {
             assert_eq!(
                 *pixel, before[index],
                 "bell altered another pane or shared chrome"

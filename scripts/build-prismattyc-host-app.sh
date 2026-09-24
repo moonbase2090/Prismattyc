@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Assemble a local, unsigned Prismattyc.app bundle for macOS.
 #
-# Signing/notarization are out of scope here (deferred; see docs/macos.md).
 # This produces target/Prismattyc.app so the Dock and menu bar show
 # "Prismattyc" instead of the "prismattyc-host" binary name.
+# It is a local ad-hoc bundle. Release signing and notarization are
+# scripts/release/package-macos.sh (see docs/release-process.md).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -37,4 +38,4 @@ if ! codesign --force --deep --sign - "$APP"; then
 fi
 
 # 5. Report.
-echo "Built $APP (unsigned/ad-hoc). Notarization deferred (docs/macos.md)."
+echo "Built $APP (unsigned/ad-hoc). Release notarization is scripts/release/package-macos.sh."

@@ -104,8 +104,10 @@ output and resize for displaced bands or clipped rows.
 
 ## Out of this first slice
 
-- GitHub Actions `macos-latest` job (billing + Apple SDK)
-- App bundle, notarization, Sparkle
+- GitHub Actions `macos-latest` job (billing + Apple SDK). Release signing
+  runs on a Mac through `scripts/release/package-macos.sh`.
+- Intel and universal binaries. The release zip is Apple silicon only.
+- Sparkle
 - Windows
 - Claiming `prismattyc-classic/*` on Darwin
 
@@ -143,8 +145,10 @@ executables under `~/.cargo/bin` only.
 Quit Prismattyc.app (Cmd+Q) and reopen it from the Dock after an update, or the
 old image stays in memory.
 
-Signing and notarization stay out of the first slice. This section is also
-the reference for when distribution starts.
+Local dogfood builds stay ad-hoc signed. A GitHub release uses
+[`scripts/release/package-macos.sh`](../scripts/release/package-macos.sh),
+documented in [Publish release artifacts](release-process.md). That script
+produces `Prismattyc-vX.Y.Z-macos-arm64.zip` for Apple silicon only.
 
 ### Signing vs. notarization
 
@@ -170,42 +174,63 @@ xattr -dr com.apple.quarantine Prismattyc.app
 
 Right-click > Open also bypasses the first-launch block once.
 
-### Distribution pipeline (when required)
+### Release signing and notarization
+
+The release app is Apple silicon only. There is no universal or Intel
+`lipo` step.
 
 Prerequisites:
 
-1. Apple Developer Program membership ($99/year).
-2. A **Developer ID Application** certificate installed in the login keychain.
-3. An app-specific password or App Store Connect API key for `notarytool`.
+1. Apple Developer Program membership.
+2. A **Developer ID Application** certificate in the login keychain.
+   The packager's default identity is
+   `Developer ID Application: Moonbase 2090 LLC (S24C53PD3Y)`.
+   Override it with `PRISMATTYC_CODESIGN_IDENTITY`.
+3. A `notarytool` keychain profile. The default name is `moonbase-notary`.
+   Override it with `PRISMATTYC_NOTARY_KEYCHAIN_PROFILE`.
+   Store the profile once. `notarytool` prompts for the app-specific
+   password and keeps it in the keychain:
 
-Per-release steps:
+   ```bash
+   xcrun notarytool store-credentials moonbase-notary \
+     --apple-id "$APPLE_ID" \
+     --team-id "$APPLE_TEAM_ID"
+   ```
+
+   Do not put the password or an API key in the repo, the environment, or
+   the `notarytool submit` command.
+
+Package the same version you package for Linux, then upload the zip to the
+draft before that release is published:
 
 ```bash
-# 1. Universal binary
-lipo -create -output prismattyc-host \
-  target/aarch64-apple-darwin/release/prismattyc-host \
-  target/x86_64-apple-darwin/release/prismattyc-host
-
-# 2. Assemble Prismattyc.app (Info.plist, Resources/prismattyc.icns, MacOS/prismattyc-host)
-
-# 3. Sign with hardened runtime + secure timestamp
-codesign --force --deep --options runtime --timestamp \
-  --sign "Developer ID Application: <NAME> (<TEAMID>)" Prismattyc.app
-
-# 4. Notarize (zip first; notarytool wants an archive)
-ditto -c -k --keepParent Prismattyc.app Prismattyc.zip
-xcrun notarytool submit Prismattyc.zip \
-  --apple-id <APPLE_ID> --team-id <TEAMID> --password <APP_PASSWORD> --wait
-
-# 5. Staple the ticket for offline validation
-xcrun stapler staple Prismattyc.app
-
-# 6. Verify Gatekeeper acceptance
-spctl -a -vvv Prismattyc.app
+scripts/release/package-macos.sh --version 0.2.8 \
+  --out build/release-macos-arm64
 ```
 
+The script does the following:
+
+1. Assemble `Prismattyc.app` with `prismattyc-host`, `pmux`, `pmuxd`, and
+   `pmux-attach` under `Contents/MacOS`. It builds those binaries from this
+   checkout unless `--bin-dir` points at an existing arm64 release build.
+2. Require each binary to be arm64 and to report the release version.
+3. Sign each nested Mach-O, then the `.app`, with the hardened runtime and
+   a secure timestamp. It does not use `codesign --deep`.
+4. Zip with `ditto`, remove AppleDouble `._*` and `__MACOSX` members, and
+   check that the extracted app still verifies.
+5. Submit that zip with `xcrun notarytool submit --keychain-profile … --wait`.
+   The first team notarization can take hours. The default wait is 6 hours
+   (`PRISMATTYC_NOTARY_TIMEOUT`).
+6. Staple the ticket onto the app, check it with `stapler validate` and
+   `spctl --assess --type execute`, then zip the stapled app as
+   `Prismattyc-v0.2.8-macos-arm64.zip`.
+
+The shipped zip is the stapled app, not the archive that was submitted.
+`SHA256SUMS` for the draft must include that zip. See
+[Publish release artifacts](release-process.md).
+
 Entitlements: the hardened runtime does not block `fork`/`exec` or PTY use, so
-Prismattyc needs no special entitlement for child processes. Add entitlements only
+the packager does not pass an entitlements file. Add entitlements only
 for JIT or unsigned executable memory, which Prismattyc does not use.
 
 ## Validate a source build

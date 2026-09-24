@@ -10,11 +10,19 @@
 #   scripts/install-prismattyc-host-macos.sh            # icns + Prismattyc.app -> ~/Applications
 #   scripts/install-prismattyc-host-macos.sh --icns-only [OUT.icns]
 #   APP_DEST=/path scripts/install-prismattyc-host-macos.sh   # install app elsewhere
+#   scripts/install-prismattyc-host-macos.sh --release-bundle DIR [--bin-dir DIR]
 #
 # Always writes APP_DEST/Prismattyc.app (default ~/Applications). Also
 # replaces the embedded binary in any other existing Prismattyc.app that we
 # can find (/Applications, $ROOT/target, Spotlight), so a Dock-pinned copy
 # cannot stay stale after `prismattyc update`.
+#
+# --release-bundle writes one unsigned app and does not ad-hoc sign it or
+# refresh other copies. scripts/release/package-macos.sh uses that mode, then
+# Developer ID signs and notarizes. Set PRISMATTYC_BUNDLE_VERSION to the
+# release version so Info.plist matches the binaries. --bin-dir supplies
+# prismattyc-host, pmux, pmuxd, and pmux-attach; otherwise the release bundle
+# is built from this checkout, not from ~/.cargo/bin.
 #
 # The bundle is Prismattyc.app (display name "Prismattyc"); the executable
 # inside is prismattyc-host. Icon art is the Continuous beam mark.
@@ -28,10 +36,56 @@ APP_DEST="${APP_DEST:-$HOME/Applications}"
 SRC="$PNG/prismattyc-tile-1024.png"
 
 ICNS_ONLY=0
-if [[ "${1:-}" == "--icns-only" ]]; then
-  ICNS_ONLY=1
-  shift
-  ICNS="${1:-$ICNS}"
+RELEASE_BUNDLE=0
+BIN_DIR=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --icns-only)
+      ICNS_ONLY=1
+      shift
+      if [[ $# -gt 0 && "$1" != --* ]]; then
+        ICNS="$1"
+        shift
+      fi
+      ;;
+    --release-bundle)
+      RELEASE_BUNDLE=1
+      shift
+      if [[ $# -lt 1 || "$1" == --* ]]; then
+        echo "error: --release-bundle needs a directory" >&2
+        exit 2
+      fi
+      APP_DEST="$1"
+      shift
+      ;;
+    --bin-dir)
+      shift
+      if [[ $# -lt 1 || "$1" == --* ]]; then
+        echo "error: --bin-dir needs a directory" >&2
+        exit 2
+      fi
+      BIN_DIR="$1"
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: scripts/install-prismattyc-host-macos.sh [--icns-only [OUT.icns]]"
+      echo "       scripts/install-prismattyc-host-macos.sh --release-bundle DIR [--bin-dir DIR]"
+      echo "APP_DEST overrides the dogfood install directory (default ~/Applications)."
+      exit 0
+      ;;
+    *)
+      echo "error: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+if [[ "$ICNS_ONLY" -eq 1 && "$RELEASE_BUNDLE" -eq 1 ]]; then
+  echo "error: --icns-only and --release-bundle cannot be combined" >&2
+  exit 2
+fi
+if [[ "$RELEASE_BUNDLE" -eq 0 && -n "$BIN_DIR" ]]; then
+  echo "error: --bin-dir is only valid with --release-bundle" >&2
+  exit 2
 fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/prism-iconset.XXXXXX")"
@@ -101,8 +155,17 @@ if [[ ! -f "$ICNS" ]]; then
 fi
 
 # ---- Binary: cargo-installed copy if present, else a release build ---------
+# A release bundle must come from this checkout or from --bin-dir. A
+# ~/.cargo/bin copy can be a different version than the tag being signed.
 CARGO_BIN="${CARGO_HOME:-$HOME/.cargo}/bin/prismattyc-host"
-if [[ -x "$CARGO_BIN" ]]; then
+if [[ "$RELEASE_BUNDLE" -eq 1 && -n "$BIN_DIR" ]]; then
+  BIN="$BIN_DIR/prismattyc-host"
+  echo "using $BIN"
+elif [[ "$RELEASE_BUNDLE" -eq 1 ]]; then
+  echo "building prismattyc-host (release)..."
+  ( cd "$ROOT" && cargo build --release --locked -p prismattyc-host )
+  BIN="$ROOT/target/release/prismattyc-host"
+elif [[ -x "$CARGO_BIN" ]]; then
   BIN="$CARGO_BIN"
   echo "using $BIN"
 else
@@ -114,12 +177,23 @@ if [[ ! -x "$BIN" ]]; then
   echo "error: host binary not found at $BIN" >&2
   exit 1
 fi
-VERSION="$(cd "$ROOT" && cargo metadata --no-deps --format-version 1 \
-  | /usr/bin/python3 -c 'import sys,json; pkgs=json.load(sys.stdin)["packages"]; print(next(p["version"] for p in pkgs if p["name"]=="prismattyc-host"))' \
-  2>/dev/null || echo "0.0.0")"
+if [[ -n "${PRISMATTYC_BUNDLE_VERSION:-}" ]]; then
+  VERSION="$PRISMATTYC_BUNDLE_VERSION"
+else
+  VERSION="$(cd "$ROOT" && cargo metadata --no-deps --format-version 1 \
+    | /usr/bin/python3 -c 'import sys,json; pkgs=json.load(sys.stdin)["packages"]; print(next(p["version"] for p in pkgs if p["name"]=="prismattyc-host"))' \
+    2>/dev/null || echo "0.0.0")"
+  if [[ "$RELEASE_BUNDLE" -eq 1 && "$VERSION" == "0.0.0" ]]; then
+    echo "error: could not read the workspace version for the release bundle" >&2
+    exit 1
+  fi
+fi
 
 sign_bundle() {
   local dest="$1"
+  if [[ "$RELEASE_BUNDLE" -eq 1 ]]; then
+    return 0
+  fi
   if command -v codesign >/dev/null 2>&1; then
     # Sign nested mux executables too. Finder-launched apps can be denied when
     # a nested helper retains only its linker signature under a newly signed
@@ -163,6 +237,9 @@ refresh_bundle_binaries() {
 }
 
 # ---- Assemble Prismattyc.app into APP_DEST ---------------------------------
+if [[ "$RELEASE_BUNDLE" -eq 1 ]]; then
+  export COPYFILE_DISABLE=1
+fi
 APP="$WORK/$APP_NAME.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/prismattyc-host"
@@ -175,10 +252,16 @@ cp "$ROOT/crates/prismattyc-host/themes/OMARCHY-LICENSE.txt" "$APP/Contents/Reso
 # Finder and Dock launches do not provide the shell PATH. Build and bundle
 # the mux front door and its helper binaries from this checkout so host-only
 # updates cannot package stale executables from Cargo bin or ambient PATH.
-echo "building prismattyc-mux helpers (release)..."
-( cd "$ROOT" && CARGO_TARGET_DIR="$ROOT/target" cargo build --release --locked -p prismattyc-mux --bins )
+if [[ "$RELEASE_BUNDLE" -eq 0 || -z "$BIN_DIR" ]]; then
+  echo "building prismattyc-mux helpers (release)..."
+  ( cd "$ROOT" && CARGO_TARGET_DIR="$ROOT/target" cargo build --release --locked -p prismattyc-mux --bins )
+fi
 for name in pmux pmuxd pmux-attach; do
-  source_bin="$ROOT/target/release/$name"
+  if [[ "$RELEASE_BUNDLE" -eq 1 && -n "$BIN_DIR" ]]; then
+    source_bin="$BIN_DIR/$name"
+  else
+    source_bin="$ROOT/target/release/$name"
+  fi
   [[ -x "$source_bin" ]] || {
     echo "error: mux helper build did not produce $source_bin" >&2
     exit 1
@@ -223,6 +306,10 @@ DEST_APP="$APP_DEST/$APP_NAME.app"
 rm -rf "$DEST_APP"
 cp -R "$APP" "$DEST_APP"
 sign_bundle "$DEST_APP"
+if [[ "$RELEASE_BUNDLE" -eq 1 ]]; then
+  echo "release bundle -> $DEST_APP"
+  exit 0
+fi
 echo "app  -> $DEST_APP"
 
 # Refresh every other copy we can find. Dock often keeps /Applications or

@@ -27,7 +27,7 @@ processes across a computer restart.
 | Platform | Availability |
 | --- | --- |
 | Linux x86_64 and ARM64 | Release downloads. Ubuntu 22.04 or newer. Runs on Wayland and X11. |
-| macOS on Apple Silicon | Build from source. Signed downloads are not available yet. |
+| macOS on Apple Silicon | Notarized `Prismattyc.app` zip when the release includes `Prismattyc-v…-macos-arm64.zip`. Otherwise build from source. No Intel or universal download. |
 | Windows | No release binaries or supported installation yet. |
 
 ## Install on Linux
@@ -63,6 +63,20 @@ checksums.
 To check for an update, run `pmux update --check`. To install one, run
 `pmux update`. Updating the files does not restart running sessions.
 See [Update and restart](docs/update-and-restart.md).
+
+## Install on macOS
+
+When a release includes `Prismattyc-vX.Y.Z-macos-arm64.zip`, that file is
+the Apple silicon app. It is signed and notarized.
+
+1. Download the zip from
+   [GitHub Releases](https://github.com/moonbase2090/Prismattyc/releases).
+2. Open it and move `Prismattyc.app` to the Applications folder.
+3. Open Prismattyc. Gatekeeper uses the stapled notarization ticket.
+
+The zip does not include an Intel build. `pmux update` does not replace
+`Prismattyc.app`. Building from source is described below. Platform behavior
+is in [macOS](docs/macos.md).
 
 ## Use sessions from the command line
 

@@ -38,10 +38,13 @@ Use `--bin-dir /absolute/path` to select the installation when running from
 a build tree. An incomplete existing installation must be repaired first.
 
 Linux release assets use `x86_64-unknown-linux-gnu` or
-`aarch64-unknown-linux-gnu`. macOS command-line installations use the
-corresponding Apple target. Updating these binaries does not replace a
-separately installed macOS application bundle. Distribute a signed and
-notarized bundle through the macOS release process.
+`aarch64-unknown-linux-gnu`. Update downloads those six binaries.
+It does not download or replace `Prismattyc.app`.
+
+The Apple silicon app is a separate release asset,
+`Prismattyc-vX.Y.Z-macos-arm64.zip`. Open that zip and move
+`Prismattyc.app` to the Applications folder. A later `pmux update` does
+not replace that bundle. Intel and universal Mac archives are not published.
 
 To restore the previous complete installation:
 

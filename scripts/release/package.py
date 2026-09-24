@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Package the complete executable set for a GitHub release. No git ancestry."""
+"""Package a GitHub release. Linux targets write updater binaries and an archive.
+
+aarch64-apple-darwin delegates to scripts/release/package-macos.sh, which
+signs and notarizes the Apple silicon app. No git ancestry is required.
+"""
 import argparse
 import hashlib
 import json
@@ -13,12 +17,10 @@ BINARIES = ('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismatty
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--version', required=True)
 p.add_argument('--target', required=True, choices=('x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'x86_64-apple-darwin', 'aarch64-apple-darwin'))
-p.add_argument('--bin-dir', type=pathlib.Path, required=True)
+p.add_argument('--bin-dir', type=pathlib.Path)
 p.add_argument('--out', type=pathlib.Path, required=True)
-p.add_argument('--man-dir', type=pathlib.Path, required=True)
+p.add_argument('--man-dir', type=pathlib.Path)
 a = p.parse_args()
-a.bin_dir = a.bin_dir.resolve()
-a.man_dir = a.man_dir.resolve()
 repo = pathlib.Path(__file__).resolve().parents[2]
 
 def sha256(path):
@@ -30,8 +32,22 @@ def sha256(path):
 parts = a.version.split('.')
 if len(parts) != 3 or any(not part.isdecimal() for part in parts) or tuple(map(int, parts)) < (0, 2, 0):
     p.error('use a stable version at or after 0.2.0')
-if 'linux' not in a.target:
-    p.error('macOS packaging requires the signed application release process')
+if a.target.endswith('apple-darwin'):
+    if a.target != 'aarch64-apple-darwin':
+        p.error(
+            'x86_64-apple-darwin is not packaged. There is no Intel or universal lipo build. '
+            'Ship Apple silicon with scripts/release/package-macos.sh '
+            '(Prismattyc-vVERSION-macos-arm64.zip)'
+        )
+    script = repo / 'scripts/release/package-macos.sh'
+    cmd = ['bash', str(script), '--version', a.version, '--out', str(a.out)]
+    if a.bin_dir is not None:
+        cmd.extend(['--bin-dir', str(a.bin_dir)])
+    raise SystemExit(subprocess.call(cmd))
+if a.bin_dir is None or a.man_dir is None:
+    p.error('Linux packaging requires --bin-dir and --man-dir')
+a.bin_dir = a.bin_dir.resolve()
+a.man_dir = a.man_dir.resolve()
 architecture, elf_machine = {
     'x86_64-unknown-linux-gnu': ('x86_64', 62),
     'aarch64-unknown-linux-gnu': ('ARM64', 183),

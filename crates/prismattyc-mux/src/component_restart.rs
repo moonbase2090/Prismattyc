@@ -18,6 +18,8 @@ pub struct Request {
 pub struct Response {
     pub id: String,
     pub pid: u32,
+    #[cfg(windows)]
+    pub generation: String,
     pub status: String,
     pub detail: String,
     pub version: String,
@@ -135,7 +137,9 @@ pub fn respond(socket: &Path, request: &Request, status: &str, detail: &str) -> 
         &response_path(socket, &request.id),
         &Response {
             id: request.id.clone(),
-            pid: std::process::id(),
+            pid: request.pid,
+            #[cfg(windows)]
+            generation: request.generation.clone(),
             status: status.into(),
             detail: detail.into(),
             version: env!("CARGO_PKG_VERSION").into(),

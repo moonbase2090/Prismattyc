@@ -364,6 +364,18 @@ pub fn installed_binary(binary: &str) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+#[cfg(windows)]
+pub fn replacement_binary(binary: &str) -> Result<PathBuf> {
+    ensure!(BINARIES.contains(&binary), "unknown executable");
+    let root = root()?;
+    if !root.join("windows-current.json").try_exists()? {
+        return std::env::current_exe().context("current executable");
+    }
+    let directory = current_directory(&root)?;
+    windows_update::complete(&directory)?;
+    Ok(directory.join(crate::platform::executable_name(binary)))
+}
+
 fn default_bin_dir(root: &Path) -> Result<PathBuf> {
     #[cfg(windows)]
     if root.join("windows-current.json").exists() {
@@ -913,7 +925,7 @@ mod windows_update {
         }
         Ok(())
     }
-    fn complete(directory: &Path) -> Result<()> {
+    pub(super) fn complete(directory: &Path) -> Result<()> {
         for binary in BINARIES {
             ensure!(
                 directory

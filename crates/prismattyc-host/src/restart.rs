@@ -19,6 +19,25 @@ pub(super) struct Resume {
     pub views: Vec<WindowState>,
 }
 
+#[cfg(windows)]
+pub(super) fn receive() -> Result<Option<Resume>> {
+    use std::io::Read;
+    let Some(raw) = std::env::var_os("PMUX_HOST_RESTART") else {
+        return Ok(None);
+    };
+    std::env::remove_var("PMUX_HOST_RESTART");
+    let resume = serde_json::from_str::<Resume>(&raw.to_string_lossy())?;
+    let mut pid = [0u8; 4];
+    std::io::stdin()
+        .read_exact(&mut pid)
+        .context("read replacement identity")?;
+    anyhow::ensure!(
+        u32::from_le_bytes(pid) == std::process::id(),
+        "restart replacement identity mismatch"
+    );
+    Ok(Some(resume))
+}
+
 pub(super) fn poll(app: &mut App) {
     let now = Instant::now();
     if app
@@ -97,9 +116,12 @@ fn perform(app: &mut App, request: &requests::Request) -> Result<()> {
         request: request.clone(),
         views,
     };
+    #[cfg(unix)]
     let executable = prismattyc_mux::release_update::installed_binary("prismattyc-host")
         .or_else(|| std::env::current_exe().ok())
         .context("host executable")?;
+    #[cfg(windows)]
+    let executable = prismattyc_mux::release_update::replacement_binary("prismattyc-host")?;
     let mut command = std::process::Command::new(executable);
     command
         .args(std::env::args_os().skip(1))
@@ -111,22 +133,41 @@ fn perform(app: &mut App, request: &requests::Request) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        command.spawn().context("start replacement host")?;
+        use std::io::Write;
+        let mut child = command
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .context("start replacement host")?;
+        let mut input = child.stdin.take().context("replacement input pipe")?;
+        if let Err(error) = input.write_all(&child.id().to_le_bytes()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error).context("send replacement identity");
+        }
+        drop(input);
         std::process::exit(0);
     }
 }
 
 pub(super) fn resume(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
-    let Some(raw) = std::env::var_os("PMUX_HOST_RESTART") else {
+    #[cfg(unix)]
+    let resume = {
+        let Some(raw) = std::env::var_os("PMUX_HOST_RESTART") else {
+            return false;
+        };
+        std::env::remove_var("PMUX_HOST_RESTART");
+        let Ok(resume) = serde_json::from_str::<Resume>(&raw.to_string_lossy()) else {
+            return false;
+        };
+        if resume.request.pid != std::process::id() {
+            return false;
+        }
+        resume
+    };
+    #[cfg(windows)]
+    let Some(resume) = app.restart_resume.take() else {
         return false;
     };
-    std::env::remove_var("PMUX_HOST_RESTART");
-    let Ok(resume) = serde_json::from_str::<Resume>(&raw.to_string_lossy()) else {
-        return false;
-    };
-    if resume.request.pid != std::process::id() {
-        return false;
-    }
     let Some(socket) = host_mux_socket() else {
         return false;
     };

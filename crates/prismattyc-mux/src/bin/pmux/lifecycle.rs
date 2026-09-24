@@ -189,7 +189,16 @@ fn restart_cooperative(
             let response = std::fs::read(&path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<components::Response>(&bytes).ok());
-            if let Some(response) = response.filter(|r| r.id == request.id) {
+            if let Some(response) = response.filter(|r| {
+                #[cfg(windows)]
+                {
+                    r.id == request.id && r.pid == request.pid && r.generation == request.generation
+                }
+                #[cfg(unix)]
+                {
+                    r.id == request.id
+                }
+            }) {
                 results.push(json!({"component":component,"response":response}));
                 let _ = std::fs::remove_file(path);
                 false

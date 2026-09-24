@@ -2226,6 +2226,8 @@ struct App {
     render_status_seq: u64,
     last_component_poll: Option<Instant>,
     restart_view: Option<PathBuf>,
+    #[cfg(windows)]
+    restart_resume: Option<restart::Resume>,
 }
 
 impl App {
@@ -2270,6 +2272,8 @@ impl App {
             render_status_seq: 0,
             last_component_poll: None,
             restart_view: None,
+            #[cfg(windows)]
+            restart_resume: None,
         })
     }
 
@@ -13761,6 +13765,13 @@ impl ApplicationHandler<UserAction> for App {
 }
 
 fn main() -> Result<()> {
+    #[cfg(windows)]
+    let restart_resume = restart::receive()?;
+    #[cfg(windows)]
+    if restart_resume.is_none() {
+        prismattyc_mux::release_update::forward_installed("prismattyc-host")?;
+    }
+    #[cfg(unix)]
     prismattyc_mux::release_update::forward_installed("prismattyc-host")?;
     // Parse first so --help / --version / --write-config never create
     // the default config path (PT-84 review).
@@ -13800,6 +13811,10 @@ fn main() -> Result<()> {
     }
 
     let mut app = App::new(cli, file_config, startup_config_error, proxy)?;
+    #[cfg(windows)]
+    {
+        app.restart_resume = restart_resume;
+    }
     event_loop.run_app(&mut app).context("run_app")?;
     if app.exit_code != 0 {
         std::process::exit(app.exit_code);

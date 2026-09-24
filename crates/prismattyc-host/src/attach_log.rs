@@ -212,6 +212,10 @@ pub(crate) fn pty_fallback_requested() -> bool {
 /// write, and `--all` argv stay ordinary PTY panes.
 pub(crate) fn attach_target(program: &str, args: &[String]) -> Option<String> {
     let stem = std::path::Path::new(program).file_name()?.to_str()?;
+    #[cfg(windows)]
+    let name = stem.to_ascii_lowercase();
+    #[cfg(windows)]
+    let stem = name.strip_suffix(".exe").unwrap_or(&name);
     match stem {
         "pmux" => {
             if args.first().map(String::as_str) != Some("attach") {

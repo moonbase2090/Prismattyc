@@ -21,7 +21,6 @@
 
 use std::{
     io::{self, BufRead, BufReader, Write},
-    os::{fd::AsFd, unix::net::UnixStream},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -32,6 +31,11 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
+use prismattyc_mux::local_socket::UnixStream;
+use std::io::{IsTerminal, Read};
+#[cfg(windows)]
+#[path = "pmux-attach/windows_terminal.rs"]
+mod windows_terminal;
 use prismattyc_core::{
     for_each_display_scalar, line_display_width,
     splash::{INK, SPECTRUM},
@@ -47,14 +51,20 @@ use prismattyc_mux::{
     SocketLiveness, SpawnSpec, StyleRun, WorkspaceInverseRun, WorkspaceStyleRun, PROTOCOL_VERSION,
 };
 use prismattyc_protocol::encode_focus_key;
+#[cfg(unix)]
 use rustix::{
     event::{poll, PollFd, PollFlags, Timespec},
     termios::{self, OptionalActions, Termios},
 };
+#[cfg(unix)]
+use std::os::fd::AsFd;
+#[cfg(windows)]
+use windows_terminal::PollFlags;
 
 const DETACH_PREFIX: u8 = 0x1c; // C-\
 /// History lines per mouse-wheel notch.
 const WHEEL_LINES: u32 = 3;
+#[cfg(unix)]
 const POLL_WAIT: Timespec = Timespec {
     tv_sec: 0,
     tv_nsec: 50_000_000,
@@ -519,6 +529,8 @@ fn probe_current_seq(client: &mut Client, client_id: u64, pane_id: u64) -> Resul
 
 struct LogPaintWake {
     ready: UnixStream,
+    #[cfg(windows)]
+    native_wake: windows_terminal::SocketWake,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -527,10 +539,14 @@ impl LogPaintWake {
     fn start(socket: PathBuf, pane_id: u64) -> Result<Self> {
         let (ready, signal) = UnixStream::pair()?;
         ready.set_nonblocking(true)?;
+        #[cfg(windows)]
+        let native_wake = windows_terminal::SocketWake::new(&ready)?;
         let stop = Arc::new(AtomicBool::new(false));
         let stop_t = Arc::clone(&stop);
         let thread = thread::spawn(move || subscribe_paint_loop(socket, pane_id, signal, &stop_t));
         Ok(Self {
+            #[cfg(windows)]
+            native_wake,
             ready,
             stop,
             thread: Some(thread),
@@ -544,13 +560,18 @@ impl LogPaintWake {
         let mut events = false;
         let mut closed = false;
         loop {
-            match rustix::io::read(&self.ready, &mut buf) {
+            match (&self.ready).read(&mut buf) {
                 Ok(0) => {
                     closed = true;
                     break;
                 }
                 Ok(_) => events = true,
-                Err(err) if err == rustix::io::Errno::AGAIN || err == rustix::io::Errno::INTR => {
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) =>
+                {
                     break
                 }
                 Err(_) => {
@@ -1121,7 +1142,7 @@ fn toast_contrast_fg(bg: [u8; 3]) -> [u8; 3] {
 
 fn default_create_spawn() -> SpawnSpec {
     SpawnSpec {
-        program: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
+        program: prismattyc_mux::platform::default_shell(),
         argv: vec!["-l".into()],
         cwd: std::env::current_dir().ok(),
         env: Default::default(),
@@ -1129,11 +1150,11 @@ fn default_create_spawn() -> SpawnSpec {
 }
 
 fn stdin_is_tty() -> bool {
-    termios::isatty(io::stdin())
+    io::stdin().is_terminal()
 }
 
 fn stdout_is_tty() -> bool {
-    termios::isatty(io::stdout())
+    io::stdout().is_terminal()
 }
 
 /// Raw interactive attach needs both a TTY stdin (keys) and a TTY stdout
@@ -1335,10 +1356,20 @@ fn take_utf8_prefix(buf: &mut Vec<u8>) -> Option<String> {
 }
 
 struct RawTerminal {
+    #[cfg(unix)]
     original: Termios,
+    #[cfg(windows)]
+    original: windows_terminal::RawConsole,
 }
 
 impl RawTerminal {
+    #[cfg(windows)]
+    fn enter() -> Result<Self> {
+        Ok(Self {
+            original: windows_terminal::RawConsole::enter()?,
+        })
+    }
+    #[cfg(unix)]
     fn enter() -> Result<Self> {
         let stdin = io::stdin();
         let original = termios::tcgetattr(&stdin).context("tcgetattr")?;
@@ -1349,12 +1380,15 @@ impl RawTerminal {
     }
 
     fn restore(&self) {
+        #[cfg(unix)]
         let _ = termios::tcsetattr(io::stdin(), OptionalActions::Now, &self.original);
         let mut out = io::stdout();
         let _ = out.write_all(
             b"\x1b[?7700l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[?7h\x1b[?1049l",
         );
         let _ = out.flush();
+        #[cfg(windows)]
+        self.original.restore();
     }
 }
 
@@ -1382,6 +1416,7 @@ struct LocalWinsize {
     cell_height_px: u32,
 }
 
+#[cfg(any(unix, test))]
 fn cell_px_from_window(window_px: u16, cells: u32) -> u32 {
     if window_px == 0 || cells == 0 {
         return 0;
@@ -1415,6 +1450,7 @@ impl Drop for InjectedWinsize {
     }
 }
 
+#[cfg(unix)]
 fn local_winsize() -> Option<LocalWinsize> {
     #[cfg(test)]
     if let Some(forced) = INJECTED_WINSIZE.with(|cell| cell.get()) {
@@ -4202,22 +4238,32 @@ fn run_interactive(
     // idle timer so InjectMail is not blocked until the first key.
     let mut last_typed: Option<Instant> = controller.then(Instant::now);
     let mut session_switch = None;
+    #[cfg(unix)]
     let stdin = io::stdin();
 
+    #[cfg(windows)]
+    let native_input = windows_terminal::Input::new()?;
     let mut host_focus = prismattyc_mux::attach_focus::Reporter::new(&opts.socket);
     let end = loop {
         if host_focus.update(pane_id) {
             break AttachEnd::Detached;
         }
-        let mut fds = vec![PollFd::new(&stdin, PollFlags::IN | PollFlags::HUP)];
-        if let Some(wake) = log_wake.as_ref() {
-            fds.push(PollFd::new(&wake.ready, PollFlags::IN | PollFlags::HUP));
-        }
-        let _ = poll(&mut fds, Some(&POLL_WAIT));
-        let ready = fds[0].revents();
-        let wake_revents = fds.get(1).map(|fd| fd.revents());
-        let wake_hup = wake_revents
-            .is_some_and(|rev| rev.intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL));
+        #[cfg(unix)]
+        let (ready, wake_hup) = {
+            let mut fds = vec![PollFd::new(&stdin, PollFlags::IN | PollFlags::HUP)];
+            if let Some(wake) = log_wake.as_ref() {
+                fds.push(PollFd::new(&wake.ready, PollFlags::IN | PollFlags::HUP));
+            }
+            let _ = poll(&mut fds, Some(&POLL_WAIT));
+            let ready = fds[0].revents();
+            let wake_revents = fds.get(1).map(|fd| fd.revents());
+            let wake_hup = wake_revents.is_some_and(|rev| {
+                rev.intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL)
+            });
+            (ready, wake_hup)
+        };
+        #[cfg(windows)]
+        let (ready, wake_hup) = native_input.poll(log_wake.as_ref().map(|w| &w.native_wake))?;
         let (woke, wake_closed) = log_wake
             .as_ref()
             .map(LogPaintWake::drain)
@@ -4236,7 +4282,11 @@ fn run_interactive(
         let mut got_input = false;
         if ready.contains(PollFlags::IN) {
             let mut buf = [0u8; 256];
-            match rustix::io::read(stdin.as_fd(), &mut buf) {
+            #[cfg(unix)]
+            let read = rustix::io::read(stdin.as_fd(), &mut buf).map_err(io::Error::from);
+            #[cfg(windows)]
+            let read = native_input.read(&mut buf);
+            match read {
                 Ok(0) => break AttachEnd::Detached,
                 Ok(n) => {
                     got_input = true;
@@ -4384,7 +4434,11 @@ fn run_interactive(
                         previous = None;
                     }
                 }
-                Err(err) if err == rustix::io::Errno::INTR || err == rustix::io::Errno::AGAIN => {}
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                    ) => {}
                 Err(_) => break AttachEnd::Detached,
             }
         }
@@ -5978,6 +6032,7 @@ fn dump_styled_json(client: &mut Client, client_id: u64, pane_id: u64, watch: bo
 }
 
 fn main() -> Result<()> {
+    prismattyc_mux::release_update::forward_installed("pmux-attach")?;
     let cli = Cli::parse(std::env::args().skip(1))?;
     diagnose_socket(&cli.socket)?;
     let mut client = Client::connect(&cli.socket)?;
@@ -11583,4 +11638,16 @@ mod tests {
         }
         panic!("subscriber on a missing socket must exit so the TTY loop can fall back");
     }
+}
+
+#[cfg(windows)]
+fn local_winsize() -> Option<LocalWinsize> {
+    let (cols, rows) = crossterm::terminal::size().ok()?;
+    let (cols, rows) = normalize_winsize(cols, rows)?;
+    Some(LocalWinsize {
+        cols,
+        rows,
+        cell_width_px: prismattyc_emulator::NOMINAL_CELL_W_PX,
+        cell_height_px: prismattyc_emulator::NOMINAL_CELL_H_PX,
+    })
 }

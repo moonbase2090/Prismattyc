@@ -3,6 +3,8 @@
 //! Opens its own window — does **not** nest inside Kitty/Ghostty.
 //! Classic nested host remains `cargo run -p prismattyc`.
 
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod a11y;
 mod attach_adopt;
 mod attach_log;
@@ -482,10 +484,11 @@ impl Cli {
         // Homebrew / user tools are missing from the shell.
         let (program, child_args) = match program {
             Some(program) => (program, child_args),
-            None => (
-                std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
-                vec!["-l".to_string()],
-            ),
+            None => {
+                let mut command = prismattyc_mux::platform::default_shell_command();
+                let program = command.remove(0);
+                (program, command)
+            }
         };
         Ok(Self {
             program,
@@ -552,7 +555,7 @@ fn find_mux_bin() -> std::path::PathBuf {
     }
     if let Ok(me) = std::env::current_exe() {
         if let Some(dir) = me.parent() {
-            let sibling = dir.join("pmux");
+            let sibling = dir.join(prismattyc_mux::platform::executable_name("pmux"));
             if sibling.is_file() {
                 return sibling;
             }
@@ -13758,6 +13761,7 @@ impl ApplicationHandler<UserAction> for App {
 }
 
 fn main() -> Result<()> {
+    prismattyc_mux::release_update::forward_installed("prismattyc-host")?;
     // Parse first so --help / --version / --write-config never create
     // the default config path (PT-84 review).
     let mut cli = Cli::parse(std::env::args().skip(1))?;
@@ -17056,7 +17060,7 @@ mod tests {
         // and PATH matches Terminal.app (Finder/Dock launch has minimal PATH).
         let cli = Cli::parse(std::iter::empty()).expect("parse");
         assert_eq!(cli.child_args, ["-l"]);
-        let expected = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let expected = prismattyc_mux::platform::default_shell();
         assert_eq!(cli.program, expected);
     }
 

@@ -519,7 +519,7 @@ pub fn clamp_ratio(ratio: f64) -> f64 {
 /// `$XDG_DATA_HOME/prismattyc/layouts`, else `$HOME/.local/share/prismattyc/layouts`.
 #[must_use]
 pub fn layouts_dir() -> PathBuf {
-    layouts_dir_from(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
+    layouts_dir_from(crate::platform::data_home(), crate::platform::home_dir())
 }
 
 fn layouts_dir_from(xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> PathBuf {
@@ -624,7 +624,7 @@ pub fn list_layouts(dir: &Path) -> Result<Vec<LayoutListEntry>> {
 /// `$XDG_DATA_HOME/prismattyc/spaces`, else `$HOME/.local/share/prismattyc/spaces`.
 #[must_use]
 pub fn spaces_dir() -> PathBuf {
-    spaces_dir_from(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
+    spaces_dir_from(crate::platform::data_home(), crate::platform::home_dir())
 }
 
 fn spaces_dir_from(xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> PathBuf {

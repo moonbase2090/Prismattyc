@@ -30,7 +30,7 @@ pub fn save(spaces: &Path, name: &str, template: &TeamTemplate) -> Result<PathBu
         .create(true)
         .truncate(false)
         .open(directory(spaces).join(".lock"))?;
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
+    crate::platform::lock_exclusive(&lock)?;
     if path.exists() {
         bail!("template {name:?} already exists; choose another name");
     }

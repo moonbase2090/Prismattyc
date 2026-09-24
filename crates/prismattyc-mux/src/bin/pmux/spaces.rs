@@ -356,7 +356,7 @@ impl Store {
             .read(true)
             .write(true)
             .open(dir.join(".ownership.lock"))?;
-        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
+        prismattyc_mux::platform::lock_exclusive(&file)?;
         Ok(Self(file))
     }
 
@@ -481,7 +481,7 @@ impl Store {
             prismattyc_mux::space_team::transfer_roles(&spaces_dir(), from, to, &tx.sessions)?;
         }
         std::fs::remove_file(path)?;
-        std::fs::File::open(spaces_dir())?.sync_all()?;
+        prismattyc_mux::platform::sync_directory(&spaces_dir())?;
         Ok(())
     }
 
@@ -587,7 +587,7 @@ impl Store {
             )?;
         }
         std::fs::remove_file(path)?;
-        std::fs::File::open(spaces_dir())?.sync_all()?;
+        prismattyc_mux::platform::sync_directory(&spaces_dir())?;
         Ok(())
     }
 }
@@ -708,7 +708,7 @@ fn discard_unchanged_rejection(client: &mut Client, path: &Path, tx: &Transactio
 
 impl Drop for Store {
     fn drop(&mut self) {
-        let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
+        let _ = prismattyc_mux::platform::unlock(&self.0);
     }
 }
 
@@ -719,9 +719,10 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     file.write_all(bytes)?;
     file.write_all(b"\n")?;
     file.sync_all()?;
-    std::fs::rename(&temporary, path)?;
+    drop(file);
+    prismattyc_mux::platform::replace_file(&temporary, path)?;
     if let Some(parent) = path.parent() {
-        std::fs::File::open(parent)?.sync_all()?;
+        prismattyc_mux::platform::sync_directory(parent)?;
     }
     Ok(())
 }
@@ -959,7 +960,7 @@ fn fresh_record(
     record.agent = Some(name.clone());
     record.windows[0].title = name;
     if let SavedNode::Leaf { cwd, .. } = &mut record.windows[0].root {
-        *cwd = std::env::var_os("HOME")
+        *cwd = prismattyc_mux::platform::home_dir()
             .map(PathBuf::from)
             .filter(|path| path.is_absolute());
     }

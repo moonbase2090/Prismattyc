@@ -1,7 +1,8 @@
 //! Cooperative host restart. Blank/local PTYs require the old process to stay.
 use super::*;
 use prismattyc_mux::component_restart as requests;
-use std::os::unix::process::CommandExt;
+#[cfg(unix)]
+use prismattyc_mux::platform::Exec;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct WindowState {
@@ -103,8 +104,16 @@ fn perform(app: &mut App, request: &requests::Request) -> Result<()> {
     command
         .args(std::env::args_os().skip(1))
         .env("PMUX_HOST_RESTART", serde_json::to_string(&resume)?);
-    let error = command.exec();
-    Err(error).context("start replacement host")
+    #[cfg(unix)]
+    {
+        let error = command.exec();
+        Err(error).context("start replacement host")
+    }
+    #[cfg(windows)]
+    {
+        command.spawn().context("start replacement host")?;
+        std::process::exit(0);
+    }
 }
 
 pub(super) fn resume(app: &mut App, event_loop: &ActiveEventLoop) -> bool {

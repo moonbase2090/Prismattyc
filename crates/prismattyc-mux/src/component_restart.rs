@@ -2,9 +2,9 @@
 //! the coordinator never signals an arbitrary PID or replays guest input.
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,29 +59,26 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>> {
 pub fn coordinator_lock(socket: &Path) -> Result<std::fs::File> {
     let directory = directory(socket);
     fs::create_dir_all(&directory)?;
-    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
-    let file = OpenOptions::new()
+    crate::platform::set_mode(&directory, 0o700)?;
+    let file = crate::platform::private_options()
         .write(true)
         .create(true)
         .truncate(false)
-        .mode(0o600)
         .open(directory.join("restart.lock"))?;
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-        .context("another restart is in progress")?;
+    crate::platform::try_lock_exclusive(&file).context("another restart is in progress")?;
     Ok(file)
 }
 
 fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let parent = path.parent().context("component request parent")?;
     fs::create_dir_all(parent)?;
-    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    crate::platform::set_mode(parent, 0o700)?;
     static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let temp = path.with_extension(format!("{}-{serial}.tmp", generation()));
-    let mut file = OpenOptions::new()
+    let mut file = crate::platform::private_options()
         .write(true)
         .create_new(true)
-        .mode(0o600)
         .open(&temp)?;
     file.write_all(&serde_json::to_vec(value)?)?;
     file.sync_all()?;

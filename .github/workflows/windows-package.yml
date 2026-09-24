@@ -1,0 +1,32 @@
+name: Windows package
+
+# Explicit dispatch only: hosted build minutes remain opt-in.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build native binaries and package
+        shell: pwsh
+        run: ./scripts/release/build-windows.ps1
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: prismattyc-windows-x64-${{ github.sha }}
+          path: build/windows-release/
+          if-no-files-found: error
+          retention-days: 14

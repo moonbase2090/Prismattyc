@@ -94,6 +94,7 @@ static HOST_TERMINAL_OWNED: AtomicBool = AtomicBool::new(false);
 static SIGNAL_REQUESTED_EXIT: AtomicBool = AtomicBool::new(false);
 
 fn main() -> Result<()> {
+    prismattyc_mux::release_update::forward_installed("prismattyc")?;
     let argv: Vec<String> = env::args().collect();
     if argv.get(1).map(String::as_str) == Some("update") {
         return prismattyc_mux::run_update(argv.iter().skip(2));
@@ -2468,8 +2469,7 @@ impl Cli {
         }
 
         let explicit_program = program.is_some();
-        let program =
-            program.unwrap_or_else(|| env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()));
+        let program = program.unwrap_or_else(|| prismattyc_mux::platform::default_shell());
 
         Ok(Self {
             experimental_rich,

@@ -299,6 +299,7 @@ fn rebuild_macos_bundle(_repo: &Path) -> bool {
 /// Cross-platform (macOS + Linux). Best-effort: a failure here — including a
 /// missing help2man — only prints a warning; the cargo binaries are already
 /// installed, and the man page is a convenience, not a requirement.
+#[cfg(unix)]
 fn install_man_pages(repo: &Path) {
     let script = repo.join("scripts/install-man.sh");
     eprintln!("prismattyc update: installing man page");
@@ -375,3 +376,6 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 }
+
+#[cfg(windows)]
+fn install_man_pages(_repo: &Path) {}

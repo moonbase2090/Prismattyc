@@ -177,6 +177,7 @@ pub fn resolve_pane_log_path(socket: &Path) -> Option<PathBuf> {
     )
 }
 
+#[cfg(unix)]
 pub(crate) fn instance_socket_dirs() -> Vec<PathBuf> {
     let uid = rustix::process::geteuid().as_raw();
     let mut dirs = Vec::new();
@@ -1099,4 +1100,9 @@ mod tests {
             other => panic!("{other:?}"),
         }
     }
+}
+
+#[cfg(windows)]
+pub(crate) fn instance_socket_dirs() -> Vec<PathBuf> {
+    crate::platform::user_directory().into_iter().collect()
 }

@@ -19,8 +19,8 @@
 //! child started with `env_clear()` so the connecting peer's `/proc/.../environ` has
 //! no cell token.
 
+use crate::local_socket::UnixStream;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn send_cell_exited_inprocess_writes_lease_and_accepts_eof() {
-        use std::os::unix::net::UnixListener;
+        use crate::local_socket::UnixListener;
         let (dir, sock) = temp_hive_sock();
         let listener = UnixListener::bind(&sock).unwrap();
         let (tx, rx) = mpsc::channel();
@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn send_cell_exited_inprocess_omits_empty_lease_and_surfaces_error() {
-        use std::os::unix::net::UnixListener;
+        use crate::local_socket::UnixListener;
         let (dir, sock) = temp_hive_sock();
         let listener = UnixListener::bind(&sock).unwrap();
         let (tx, rx) = mpsc::channel();

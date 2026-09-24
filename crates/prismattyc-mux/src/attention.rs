@@ -5,8 +5,8 @@
 //! Reverse: when peek is drained, clear `pane.mail` so attach/host drop the
 //! letter. Operator RPC only — does not watch `hive.db`.
 
+use crate::local_socket::UnixStream;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

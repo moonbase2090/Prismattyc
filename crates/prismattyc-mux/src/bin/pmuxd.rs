@@ -96,8 +96,7 @@ impl Cli {
             cols,
             rows,
             experimental_rich,
-            program: program
-                .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())),
+            program: program.unwrap_or_else(|| prismattyc_mux::platform::default_shell()),
             argv,
         })
     }
@@ -141,6 +140,7 @@ MovePane can change session without respawn.
 }
 
 fn main() -> Result<()> {
+    prismattyc_mux::release_update::forward_installed("pmuxd")?;
     // Clean-env one-shot for supervisor.cell_exited (see prismattyc_mux::supervisor).
     let mut argv = std::env::args();
     let _argv0 = argv.next();

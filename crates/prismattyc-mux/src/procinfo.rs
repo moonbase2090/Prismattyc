@@ -88,6 +88,7 @@ pub fn live_foreground_command(root: u32) -> Option<String> {
     foreground_command_impl(root)
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 enum TtyForeground {
     /// Controlling terminal's foreground process group.
     Pgid(u32),
@@ -312,7 +313,10 @@ pub fn cmdline_matches_server(pid: u32, socket: &Path) -> bool {
         return false;
     };
     let name = Path::new(argv0).file_name();
-    if name != Some(OsStr::new("pmuxd")) {
+    if name != Some(OsStr::new("pmuxd"))
+        && !(cfg!(windows)
+            && name.is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("pmuxd.exe")))
+    {
         return false;
     }
     let want = socket.as_os_str().as_encoded_bytes();
@@ -337,7 +341,7 @@ fn pid_alive_impl(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn pid_alive_impl(pid: u32) -> bool {
     let Some(pid) = rustix::process::Pid::from_raw(pid as i32) else {
         return false;
@@ -364,7 +368,7 @@ fn cmdline_impl(pid: u32) -> Option<Vec<Vec<u8>>> {
     macos::procargs(pid)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn cmdline_impl(_pid: u32) -> Option<Vec<Vec<u8>>> {
     None
 }
@@ -394,7 +398,7 @@ fn children_of_impl(pid: u32) -> Vec<u32> {
     macos::list_children(pid)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn children_of_impl(_pid: u32) -> Vec<u32> {
     Vec::new()
 }
@@ -410,7 +414,7 @@ fn cwd_of_impl(pid: u32) -> Option<PathBuf> {
     macos::cwd(pid)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn cwd_of_impl(_pid: u32) -> Option<PathBuf> {
     None
 }
@@ -431,7 +435,7 @@ fn list_pids() -> Vec<u32> {
     macos::list_pids()
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn list_pids() -> Vec<u32> {
     Vec::new()
 }
@@ -785,5 +789,79 @@ mod tests {
             found.is_none(),
             "background sleep must not be the PTY foreground: {found:?}"
         );
+    }
+}
+
+#[cfg(windows)]
+fn pid_alive_impl(pid: u32) -> bool {
+    crate::platform::process_alive(pid)
+}
+
+#[cfg(windows)]
+fn cmdline_impl(pid: u32) -> Option<Vec<Vec<u8>>> {
+    windows::with_process(pid, |p| {
+        let args: Vec<_> = p
+            .cmd()
+            .iter()
+            .map(|s| s.to_string_lossy().as_bytes().to_vec())
+            .collect();
+        (!args.is_empty()).then_some(args)
+    })
+    .flatten()
+}
+#[cfg(windows)]
+fn cwd_of_impl(pid: u32) -> Option<PathBuf> {
+    windows::with_process(pid, |p| p.cwd().map(Path::to_path_buf)).flatten()
+}
+#[cfg(windows)]
+fn children_of_impl(pid: u32) -> Vec<u32> {
+    windows::process_tree()
+        .into_iter()
+        .filter_map(|(child, parent)| (parent == pid).then_some(child))
+        .collect()
+}
+#[cfg(windows)]
+fn list_pids() -> Vec<u32> {
+    windows::process_tree()
+        .into_iter()
+        .map(|(pid, _)| pid)
+        .collect()
+}
+#[cfg(windows)]
+mod windows {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    pub(super) fn with_process<T>(pid: u32, f: impl FnOnce(&sysinfo::Process) -> T) -> Option<T> {
+        let mut system = System::new();
+        let pid = Pid::from_u32(pid);
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing()
+                .with_cmd(UpdateKind::Always)
+                .with_cwd(UpdateKind::Always),
+        );
+        system.process(pid).map(f)
+    }
+    pub(super) fn process_tree() -> Vec<(u32, u32)> {
+        use windows_sys::Win32::{Foundation::*, System::Diagnostics::ToolHelp::*};
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snapshot == INVALID_HANDLE_VALUE {
+                return Vec::new();
+            }
+            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of_val(&entry) as u32;
+            let mut result = Vec::new();
+            if Process32FirstW(snapshot, &mut entry) != 0 {
+                loop {
+                    result.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                    if Process32NextW(snapshot, &mut entry) == 0 {
+                        break;
+                    }
+                }
+            }
+            CloseHandle(snapshot);
+            result
+        }
     }
 }

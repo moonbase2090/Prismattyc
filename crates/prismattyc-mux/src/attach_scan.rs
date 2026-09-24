@@ -30,7 +30,10 @@ pub enum AttachKind {
 pub fn parse_attach_client(args: &[&[u8]], socket: &Path) -> Option<AttachClient> {
     let argv0 = std::str::from_utf8(args.first()?).ok()?;
     let name = Path::new(argv0).file_name();
-    if name != Some(OsStr::new("pmux-attach")) {
+    if name != Some(OsStr::new("pmux-attach"))
+        && !(cfg!(windows)
+            && name.is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("pmux-attach.exe")))
+    {
         return None;
     }
     let want = socket.as_os_str().as_encoded_bytes();

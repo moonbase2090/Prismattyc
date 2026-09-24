@@ -132,7 +132,10 @@ impl PmuxMcp {
     async fn space_command(&self, args: Vec<String>) -> Result<CallToolResult, McpError> {
         let pmux = std::env::current_exe()
             .ok()
-            .and_then(|p| p.parent().map(|p| p.join("pmux")))
+            .and_then(|p| {
+                p.parent()
+                    .map(|p| p.join(prismattyc_mux::platform::executable_name("pmux")))
+            })
             .filter(|p| p.is_file())
             .unwrap_or_else(|| PathBuf::from("pmux"));
         let mut command = tokio::process::Command::new(pmux);
@@ -509,6 +512,10 @@ fn parse_config() -> Result<Config, String> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    if let Err(error) = prismattyc_mux::release_update::forward_installed("pmux-mcp") {
+        eprintln!("pmux-mcp: {error:#}");
+        return ExitCode::FAILURE;
+    }
     let config = match parse_config() {
         Ok(config) => config,
         Err(e) => {

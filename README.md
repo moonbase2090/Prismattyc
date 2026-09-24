@@ -152,7 +152,7 @@ troubleshooting, compatibility, and application integration.
 
 ## Version
 
-The workspace package version is **`0.2.18`**. A version in source does not
+The workspace package version is **`0.2.20`**. A version in source does not
 necessarily have a published download. Use
 [GitHub Releases](https://github.com/moonbase2090/Prismattyc/releases)
 to find published builds.

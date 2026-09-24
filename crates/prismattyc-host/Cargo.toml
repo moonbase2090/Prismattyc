@@ -101,3 +101,6 @@ features = ["std", "CALayer", "CATransaction", "objc2-core-foundation"]
 
 [target.'cfg(unix)'.dev-dependencies]
 rustix = { version = "1.1", features = ["process"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

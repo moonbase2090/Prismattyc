@@ -2418,6 +2418,13 @@ impl App {
                 host.overlay_opacity = overlay_opacity;
                 host.dirty = true;
             }
+            // AppKit can change native transparency without replacing the alpha-
+            // capable tile presenter. Restore its background for opaque configs.
+            #[cfg(target_os = "macos")]
+            if wants_alpha_visual(&self.file_config) != wants_alpha_visual(&prior) {
+                host.window
+                    .set_transparent(wants_alpha_visual(&self.file_config));
+            }
             // The alpha visual is chosen once, at window creation. Reloading a
             // lower window_opacity into an opaque window would paint the
             // premultiplied ground as if over black, so only follow the value
@@ -2889,10 +2896,10 @@ impl App {
             attrs = attrs.with_name("prismattyc-host", "Prismattyc");
         }
         // Request alpha at creation time. Other platforms keep their opaque
-        // visual unless configured otherwise. macOS always supports alpha so
-        // opacity and blur can be enabled through hot reload.
+        // visual unless configured otherwise. macOS presentation remains alpha
+        // capable for hot reload, independently of the native window background.
         let want_alpha = cfg!(target_os = "macos") || wants_alpha_visual(&self.file_config);
-        if want_alpha {
+        if wants_alpha_visual(&self.file_config) {
             attrs = attrs.with_transparent(true);
         }
         if self.cli.gpu {
@@ -2903,6 +2910,8 @@ impl App {
             );
         }
         let window = Arc::new(event_loop.create_window(attrs)?);
+        #[cfg(target_os = "macos")]
+        macos_window::install_titlebar_background(&window);
         let a11y = os_tree.then(|| {
             accesskit_winit::Adapter::with_event_loop_proxy(
                 event_loop,

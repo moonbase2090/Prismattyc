@@ -201,9 +201,16 @@ pub fn commands(node: &SavedNode) -> Vec<Option<String>> {
         SavedNode::Leaf {
             program, command, ..
         } => vec![command.clone().or_else(|| {
-            program
-                .as_ref()
-                .map(|program| format!("exec '{}'", program.replace('\'', "'\\''")))
+            program.as_ref().and_then(|program| {
+                #[cfg(windows)]
+                {
+                    crate::procinfo::replay_command(std::slice::from_ref(program))
+                }
+                #[cfg(not(windows))]
+                {
+                    Some(format!("exec '{}'", program.replace('\'', "'\\''")))
+                }
+            })
         })],
         SavedNode::Split { first, second, .. } => {
             let mut all = commands(first);

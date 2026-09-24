@@ -9,7 +9,9 @@
 //! - Claude: assumed one CR (not probed this session).
 //! - Kiro: assumed one CR (not probed).
 
+#[cfg(not(windows))]
 use std::collections::{HashSet, VecDeque};
+#[cfg(not(windows))]
 use std::path::Path;
 
 use crate::PMUX_MAIL_NOTIFICATION;
@@ -30,6 +32,7 @@ pub const CURSOR_SUBMIT: &[u8] = b"\x1b[13;5u";
 
 /// Classify a `/proc` cmdline (NUL or space separated).
 #[must_use]
+#[cfg(not(windows))]
 pub fn classify_cmdline(cmd: &str) -> Option<InjectAgent> {
     let normalized = cmd.replace('\0', " ");
     let tokens: Vec<&str> = normalized.split_whitespace().collect();
@@ -72,6 +75,87 @@ pub fn classify_cmdline(cmd: &str) -> Option<InjectAgent> {
     None
 }
 
+#[cfg(windows)]
+pub fn classify_cmdline(cmd: &str) -> Option<InjectAgent> {
+    if cmd.contains('\0') {
+        let args = cmd
+            .trim_end_matches('\0')
+            .split('\0')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        return classify_windows_argv(&args);
+    }
+    if cmd.is_empty() {
+        return None;
+    }
+    let wide = cmd.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let mut count = 0;
+    unsafe {
+        let argv = windows_sys::Win32::UI::Shell::CommandLineToArgvW(wide.as_ptr(), &mut count);
+        if argv.is_null() {
+            return None;
+        }
+        let args = std::slice::from_raw_parts(argv, count as usize)
+            .iter()
+            .map(|&arg| {
+                let mut len = 0;
+                while *arg.add(len) != 0 {
+                    len += 1;
+                }
+                String::from_utf16(std::slice::from_raw_parts(arg, len)).ok()
+            })
+            .collect::<Option<Vec<_>>>();
+        windows_sys::Win32::Foundation::LocalFree(argv.cast());
+        classify_windows_argv(&args?)
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn classify_windows_argv(args: &[String]) -> Option<InjectAgent> {
+    let mut name = crate::procinfo::executable_name(args.first()?);
+    if matches!(name.as_str(), "node" | "nodejs" | "bun" | "deno") {
+        let script = args.get(1)?;
+        if script.starts_with('-') {
+            return None;
+        }
+        name = crate::procinfo::executable_name(script);
+        if name == "cli.js"
+            && std::path::Path::new(script)
+                .parent()
+                .is_some_and(|parent| {
+                    crate::procinfo::executable_name(&parent.to_string_lossy()) == "claude-code"
+                        && parent.parent().is_some_and(|scope| {
+                            crate::procinfo::executable_name(&scope.to_string_lossy()) == "@anthropic-ai"
+                        })
+                })
+        {
+            return Some(InjectAgent::Claude);
+        }
+        name = name
+            .strip_suffix(".js")
+            .or_else(|| name.strip_suffix(".cjs"))
+            .or_else(|| name.strip_suffix(".mjs"))?
+            .to_owned();
+    }
+    let name = name
+        .strip_suffix(".cmd")
+        .or_else(|| name.strip_suffix(".bat"))
+        .unwrap_or(&name);
+    if name == "cursor-agent" || name.starts_with("cursor-agent-") {
+        Some(InjectAgent::Cursor)
+    } else if name == "codex" || name.starts_with("codex-") {
+        Some(InjectAgent::Codex)
+    } else if name == "claude" || name.starts_with("claude-") {
+        Some(InjectAgent::Claude)
+    } else if name == "grok" || name.starts_with("grok-") {
+        Some(InjectAgent::Grok)
+    } else if name == "kiro" || name.starts_with("kiro-") {
+        Some(InjectAgent::Kiro)
+    } else {
+        None
+    }
+}
+
 /// Writes to send, in order. Codex needs two writes (text+CR, then CR).
 /// The text is always [`PMUX_MAIL_NOTIFICATION`] — never free text.
 #[must_use]
@@ -92,6 +176,7 @@ pub fn inject_writes(agent: InjectAgent) -> Vec<Vec<u8>> {
     }
 }
 
+#[cfg(not(windows))]
 fn read_cmdline(pid: u32) -> Option<String> {
     let args = crate::procinfo::cmdline(pid)?;
     if args.is_empty() {
@@ -105,12 +190,14 @@ fn read_cmdline(pid: u32) -> Option<String> {
     Some(String::from_utf8_lossy(&raw).into_owned())
 }
 
+#[cfg(not(windows))]
 fn children_of(pid: u32) -> Vec<u32> {
     crate::procinfo::children_of(pid)
 }
 
 /// True if `target` is `root` or a descendant.
 #[must_use]
+#[cfg(not(windows))]
 pub fn pid_in_tree(root: u32, target: u32) -> bool {
     if root == target {
         return true;
@@ -129,8 +216,14 @@ pub fn pid_in_tree(root: u32, target: u32) -> bool {
     false
 }
 
+#[cfg(windows)]
+pub fn pid_in_tree(root: u32, target: u32) -> bool {
+    crate::procinfo::windows_pid_in_tree(root, target)
+}
+
 /// Walk `bound_pid` then the pane root and their descendants.
 #[must_use]
+#[cfg(not(windows))]
 pub fn detect_inject_agent(bound_pid: Option<u32>, root_pid: Option<u32>) -> InjectAgent {
     let mut seen = HashSet::new();
     let mut q = VecDeque::new();
@@ -149,6 +242,14 @@ pub fn detect_inject_agent(bound_pid: Option<u32>, root_pid: Option<u32>) -> Inj
         q.extend(children_of(pid));
     }
     InjectAgent::Unknown
+}
+
+#[cfg(windows)]
+pub fn detect_inject_agent(bound_pid: Option<u32>, root_pid: Option<u32>) -> InjectAgent {
+    root_pid
+        .or(bound_pid)
+        .map(crate::procinfo::foreground_agent)
+        .unwrap_or(InjectAgent::Unknown)
 }
 
 #[cfg(test)]

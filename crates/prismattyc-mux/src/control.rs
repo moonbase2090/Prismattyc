@@ -3741,9 +3741,7 @@ impl ControlPlane {
         let Some(root) = self.live.as_ref().and_then(|live| live.child_pid(pane_raw)) else {
             return crate::InjectAgent::Unknown;
         };
-        crate::procinfo::foreground_command(root)
-            .and_then(|cmd| crate::classify_cmdline(&cmd))
-            .unwrap_or(crate::InjectAgent::Unknown)
+        crate::procinfo::foreground_agent(root)
     }
 
     fn write_inject_chunks(

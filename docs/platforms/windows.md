@@ -44,9 +44,20 @@ anything on a user's machine.
 - Attach input uses one bounded console reader and native wait handles.
   The existing paint subscription wakes the renderer. Platform adaptation adds
   no decorative passes, additional frame timer, or full-grid redraw policy.
-- Process discovery refreshes only the requested process's command and working
-  directory. Windows has no Unix foreground process group; process-tree
-  classification provides the fallback.
+- Windows has no Unix foreground process group. Foreground discovery uses one
+  process-tree snapshot and a batch command refresh, capped at 256 processes in
+  a pane tree. It follows a single shell-child chain to the running command;
+  branching trees, unreadable metadata, and noninteractive shells are unknown,
+  never idle for command replay. Background jobs cannot be distinguished from
+  foreground jobs by this fallback, so a child also blocks replay.
+  Replay into an existing shell also requires that shell to match the default
+  shell used to serialize commands and create restored panes.
+- Space capture quotes commands for the Windows default shell, including paths
+  with spaces and arguments with trailing backslashes. Commands containing
+  control characters, percent signs, exclamation marks, or embedded double
+  quotes are not saved for automatic replay through cmd/PowerShell; they remain
+  busy for replay guards and their agents can still receive mail. Native agent
+  executable names are case-insensitive and accept the `.exe` suffix.
 - Updates stage complete version directories. A write-through replacement of
   one state file selects all six executables. Existing entry-point executables
   forward to that directory; running executable files are never overwritten.

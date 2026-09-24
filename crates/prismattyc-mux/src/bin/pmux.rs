@@ -5993,8 +5993,8 @@ fn pane_has_foreground(snapshot: &Snapshot, pane_id: u64) -> bool {
         .flat_map(|window| window.panes.iter())
         .find(|pane| pane.id == pane_id)
         .and_then(|pane| pane.child_pid)
-        .and_then(procinfo::live_foreground_command)
-        .is_some()
+        .map(procinfo::has_foreground)
+        .unwrap_or(cfg!(windows))
 }
 
 fn write_pane_command(
@@ -6817,7 +6817,11 @@ impl PipeWriter {
                 })
             }
             PipePaneDest::Exec(cmd) => {
-                let mut child = Command::new(prismattyc_mux::platform::default_shell())
+                #[cfg(unix)]
+                let shell = "sh";
+                #[cfg(windows)]
+                let shell = prismattyc_mux::platform::default_shell();
+                let mut child = Command::new(shell)
                     .arg(if cfg!(windows) { "/C" } else { "-c" })
                     .arg(cmd)
                     .stdin(Stdio::piped())

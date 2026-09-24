@@ -849,6 +849,27 @@ fn rollback(root: &Path) -> Result<String> {
     windows_update::rollback(root)
 }
 
+#[cfg(windows)]
+pub(crate) fn is_windows_forwarding_pair(parent: &Path, child: &Path) -> bool {
+    let check = || -> Result<bool> {
+        let root = root()?;
+        let state = windows_update::load(&root)?;
+        let parent = parent.canonicalize()?;
+        let child = child.canonicalize()?;
+        if parent.parent() != Some(state.bin_dir.canonicalize()?.as_path()) {
+            return Ok(false);
+        }
+        let name = parent.file_name().context("forwarder filename")?;
+        for version in std::iter::once(&state.current).chain(state.previous.iter()) {
+            if root.join(version).join(name).canonicalize().ok().as_ref() == Some(&child) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    check().unwrap_or(false)
+}
+
 /// Windows keeps stable launch executables and atomically selects a versioned
 /// directory. No running executable is replaced and no symlink privilege is needed.
 pub fn forward_installed(binary: &str) -> Result<()> {
@@ -868,7 +889,7 @@ mod windows_update {
     #[derive(serde::Serialize, serde::Deserialize)]
     pub(super) struct State {
         pub current: PathBuf,
-        previous: Option<PathBuf>,
+        pub(super) previous: Option<PathBuf>,
         pub(super) bin_dir: PathBuf,
     }
     fn validate_component(path: &Path) -> Result<()> {

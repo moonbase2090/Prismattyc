@@ -104,7 +104,8 @@ pub fn replay_command(args: &[String]) -> Option<String> {
 pub fn has_foreground(root: u32) -> bool {
     #[cfg(windows)]
     {
-        !matches!(windows::foreground(root), windows::Foreground::Idle)
+        let _ = root;
+        true
     }
     #[cfg(not(windows))]
     {
@@ -230,8 +231,19 @@ pub fn in_terminal_foreground(root: u32, pid: u32) -> Option<bool> {
     #[cfg(windows)]
     {
         match windows::foreground(root) {
-            windows::Foreground::Running { pid: active, .. } => (active == pid).then_some(true),
-            windows::Foreground::Idle => Some(false),
+            windows::Foreground::Running {
+                pid: active,
+                forwarders,
+                ..
+            } => {
+                if active == pid {
+                    Some(true)
+                } else if forwarders.contains(&pid) {
+                    Some(false)
+                } else {
+                    None
+                }
+            }
             windows::Foreground::Unknown => None,
         }
     }
@@ -933,8 +945,11 @@ mod windows {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
     pub(super) enum Foreground {
-        Idle,
-        Running { pid: u32, args: Vec<String> },
+        Running {
+            pid: u32,
+            args: Vec<String>,
+            forwarders: Vec<u32>,
+        },
         Unknown,
     }
 
@@ -972,6 +987,7 @@ mod windows {
                 .with_exe(UpdateKind::Always),
         );
         let mut pid = root;
+        let mut forwarders = Vec::new();
         loop {
             let process = system.process(Pid::from_u32(pid))?;
             let mut args: Vec<String> = process
@@ -983,22 +999,27 @@ mod windows {
             let name = executable_name(args.first()?);
             let shell = matches!(name.as_str(), "cmd" | "powershell" | "pwsh")
                 || is_shell_argv(&[name.clone()]);
+            let next = children.get(&pid).map(Vec::as_slice).unwrap_or(&[]);
             if !shell {
-                return Some(Foreground::Running { pid, args });
-            }
-            match children.get(&pid).map(Vec::as_slice).unwrap_or(&[]) {
-                [] => {
-                    let interactive = args.iter().skip(1).all(|arg| {
-                        matches!(
-                            arg.to_ascii_lowercase().as_str(),
-                            "-l" | "-i" | "--login" | "--norc" | "--noprofile"
-                                | "-nologo" | "-noprofile" | "-noexit" | "/d" | "/q"
-                        )
+                if matches!(name.as_str(), "pmux" | "pmux-attach") && !next.is_empty() {
+                    let [child] = next else {
+                        return None;
+                    };
+                    let child_process = system.process(Pid::from_u32(*child))?;
+                    if !forwarding(process, child_process)? {
+                        return None;
+                    }
+                    forwarders.push(pid);
+                } else {
+                    return Some(Foreground::Running {
+                        pid,
+                        args,
+                        forwarders,
                     });
-                    return (interactive
-                        && name == executable_name(&crate::platform::default_shell()))
-                    .then_some(Foreground::Idle);
                 }
+            }
+            match next {
+                [] => return None,
                 [child] => {
                     let child_process = system.process(Pid::from_u32(*child))?;
                     if child_process.parent() != Some(Pid::from_u32(pid))
@@ -1011,6 +1032,37 @@ mod windows {
                 _ => return None,
             }
         }
+    }
+
+    fn forwarding(parent: &sysinfo::Process, child: &sysinfo::Process) -> Option<bool> {
+        let parent_exe = parent.exe()?;
+        let child_exe = child.exe()?;
+        let parent_name = executable_name(parent_exe.to_str()?);
+        let child_name = executable_name(child_exe.to_str()?);
+        if parent_name == child_name && parent.cmd().get(1..) == child.cmd().get(1..) {
+            return Some(crate::release_update::is_windows_forwarding_pair(
+                parent_exe, child_exe,
+            ));
+        }
+        if parent_name != "pmux"
+            || child_name != "pmux-attach"
+            || parent_exe.parent()?.canonicalize().ok()? != child_exe.parent()?.canonicalize().ok()?
+        {
+            return Some(false);
+        }
+        let args: Vec<&[u8]> = child
+            .cmd()
+            .iter()
+            .map(|arg| arg.to_str().map(str::as_bytes))
+            .collect::<Option<_>>()?;
+        let socket = args.windows(2).find(|pair| pair[0] == b"--socket")?[1];
+        Some(
+            crate::attach_scan::parse_attach_client(
+                &args,
+                Path::new(std::str::from_utf8(socket).ok()?),
+            )
+            .is_some(),
+        )
     }
 
     pub(super) fn command(args: &[String]) -> Option<String> {

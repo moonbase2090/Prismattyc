@@ -538,6 +538,36 @@ pub fn validate_layout_name(name: &str) -> Result<()> {
     if name.is_empty() || name.contains('/') || name.contains("..") || name.contains('\0') {
         bail!("layout name must be a non-empty file name without '/' or '..'");
     }
+    #[cfg(windows)]
+    {
+        if name.bytes().any(|byte| {
+            byte < 32
+                || matches!(
+                    byte,
+                    b'\\' | b':' | b'<' | b'>' | b'"' | b'|' | b'?' | b'*' | b'~'
+                )
+        }) || name.ends_with(['.', ' '])
+        {
+            bail!("layout name contains a Windows filename character or alias");
+        }
+        let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
+        let stem = stem.to_ascii_uppercase();
+        let device = matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$"
+        ) || stem
+            .strip_prefix("COM")
+            .or_else(|| stem.strip_prefix("LPT"))
+            .is_some_and(|suffix| {
+                matches!(
+                    suffix,
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            });
+        if device {
+            bail!("layout name is a reserved Windows device name");
+        }
+    }
     Ok(())
 }
 

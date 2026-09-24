@@ -6592,7 +6592,17 @@ fn adopt_nested_attaches(host: &mut HostState, now: Instant) {
                 .and_then(|runtime| runtime.child_pid())
                 .map(|pid| (*pane, pid))
         })
-        .filter(|(_, pid)| !prismattyc_mux::procinfo::children_of(*pid).is_empty())
+        .filter(|(_, pid)| {
+            #[cfg(windows)]
+            {
+                let _ = pid;
+                true
+            }
+            #[cfg(not(windows))]
+            {
+                !prismattyc_mux::procinfo::children_of(*pid).is_empty()
+            }
+        })
         .collect();
     if !candidates.is_empty() {
         if let Some(socket) = host_mux_socket() {

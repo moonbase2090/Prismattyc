@@ -853,19 +853,45 @@ fn rollback(root: &Path) -> Result<String> {
 pub(crate) fn is_windows_forwarding_pair(parent: &Path, child: &Path) -> bool {
     let check = || -> Result<bool> {
         let root = root()?;
-        let state = windows_update::load(&root)?;
         let parent = parent.canonicalize()?;
         let child = child.canonicalize()?;
-        if parent.parent() != Some(state.bin_dir.canonicalize()?.as_path()) {
+        let name = parent.file_name().context("forwarder filename")?;
+        if child.file_name() != Some(name) {
             return Ok(false);
         }
-        let name = parent.file_name().context("forwarder filename")?;
-        for version in std::iter::once(&state.current).chain(state.previous.iter()) {
-            if root.join(version).join(name).canonicalize().ok().as_ref() == Some(&child) {
-                return Ok(true);
+        let directory = child.parent().context("forwarded version directory")?;
+        let root = root.canonicalize()?;
+        if directory.parent() != Some(root.as_path()) {
+            return Ok(false);
+        }
+        let component = directory
+            .file_name()
+            .and_then(|s| s.to_str())
+            .context("version directory name")?;
+        if component == "legacy" {
+            let state = windows_update::load(&root)?;
+            if parent.parent() != Some(state.bin_dir.canonicalize()?.as_path()) {
+                return Ok(false);
+            }
+        } else {
+            let installed = receipt(directory)?;
+            if installed.repository != REPOSITORY
+                || installed.target != target()?
+                || !installed.bin_dir.is_absolute()
+                || parent.parent() != Some(installed.bin_dir.canonicalize()?.as_path())
+            {
+                return Ok(false);
+            }
+            let version = Version::parse(&installed.version)?;
+            let prefix = format!("v{version}-{}-", installed.target);
+            if !component.strip_prefix(prefix.as_str()).is_some_and(|nonce| {
+                !nonce.is_empty() && nonce.bytes().all(|b| b.is_ascii_digit())
+            }) {
+                return Ok(false);
             }
         }
-        Ok(false)
+        windows_update::complete(directory)?;
+        Ok(true)
     };
     check().unwrap_or(false)
 }
@@ -889,7 +915,7 @@ mod windows_update {
     #[derive(serde::Serialize, serde::Deserialize)]
     pub(super) struct State {
         pub current: PathBuf,
-        pub(super) previous: Option<PathBuf>,
+        previous: Option<PathBuf>,
         pub(super) bin_dir: PathBuf,
     }
     fn validate_component(path: &Path) -> Result<()> {

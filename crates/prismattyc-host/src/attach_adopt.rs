@@ -10,10 +10,13 @@
 //! pane log, it promotes the pane to a log replica and kills the nested
 //! attach (PT-306). Otherwise the mark is dropped when the attach exits.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
+#[cfg(not(windows))]
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+#[cfg(not(windows))]
 use prismattyc_mux::procinfo::{children_of, cmdline};
 use prismattyc_mux::{parse_attach_client, AttachClient, PaneId};
 
@@ -67,6 +70,7 @@ pub(crate) fn resolve_target<'a>(
 
 /// `pmux-attach` clients on `socket` under any of `roots`: a walk of each
 /// pane's process subtree, so the cost follows the pane, not the machine.
+#[cfg(not(windows))]
 pub(crate) fn subtree_attach_clients(roots: &[u32], socket: &Path) -> Vec<AttachClient> {
     let mut seen: HashSet<u32> = HashSet::new();
     let mut queue: VecDeque<u32> = roots.iter().copied().collect();
@@ -89,6 +93,25 @@ pub(crate) fn subtree_attach_clients(roots: &[u32], socket: &Path) -> Vec<Attach
         }
     }
     out
+}
+
+#[cfg(windows)]
+pub(crate) fn snapshot_attach_clients(
+    snapshot: &prismattyc_mux::procinfo::WindowsProcessSnapshot,
+    roots: &[u32],
+    socket: &Path,
+) -> Vec<AttachClient> {
+    snapshot
+        .pids()
+        .filter(|pid| !roots.contains(pid))
+        .filter_map(|pid| {
+            let args = snapshot.cmdline(pid)?;
+            let refs: Vec<&[u8]> = args.iter().map(Vec::as_slice).collect();
+            let mut client = parse_attach_client(&refs, socket)?;
+            client.pid = pid;
+            Some(client)
+        })
+        .collect()
 }
 
 /// One adoption: pane, attach pid, session id, session name.
@@ -139,8 +162,21 @@ pub(crate) fn adopt_candidates(
     directory: &[SessionEntry],
 ) -> Vec<Adoption<PaneId>> {
     let roots: Vec<u32> = candidates.iter().map(|(_, pid)| *pid).collect();
-    let clients = subtree_attach_clients(&roots, socket);
-    let assignments = assign(candidates, &clients, directory, prismattyc_mux::pid_in_tree);
+    #[cfg(not(windows))]
+    let assignments = {
+        let clients = subtree_attach_clients(&roots, socket);
+        assign(candidates, &clients, directory, prismattyc_mux::pid_in_tree)
+    };
+    #[cfg(windows)]
+    let assignments = {
+        let Some(snapshot) = prismattyc_mux::procinfo::WindowsProcessSnapshot::capture(&roots) else {
+            return Vec::new();
+        };
+        let clients = snapshot_attach_clients(&snapshot, &roots, socket);
+        assign(candidates, &clients, directory, |root, pid| {
+            snapshot.contains(root, pid) && snapshot.in_terminal_foreground(root, pid) == Some(true)
+        })
+    };
     for (pane, pid, id, name) in &assignments {
         mux.mark_attach_session(*pane, id.clone(), name.clone());
         let promoted = match mux.promote_to_log_replica(*pane, id, name, socket) {

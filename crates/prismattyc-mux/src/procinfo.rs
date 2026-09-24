@@ -230,22 +230,7 @@ fn pgid_of(_pid: u32) -> Option<u32> {
 pub fn in_terminal_foreground(root: u32, pid: u32) -> Option<bool> {
     #[cfg(windows)]
     {
-        match windows::foreground(root) {
-            windows::Foreground::Running {
-                pid: active,
-                forwarders,
-                ..
-            } => {
-                if active == pid {
-                    Some(true)
-                } else if forwarders.contains(&pid) {
-                    Some(false)
-                } else {
-                    None
-                }
-            }
-            windows::Foreground::Unknown => None,
-        }
+        WindowsProcessSnapshot::capture(&[root])?.in_terminal_foreground(root, pid)
     }
     #[cfg(not(windows))]
     match classify_tty(root) {
@@ -939,6 +924,9 @@ pub(crate) fn windows_pid_in_tree(root: u32, target: u32) -> bool {
 }
 
 #[cfg(windows)]
+pub use windows::ProcessSnapshot as WindowsProcessSnapshot;
+
+#[cfg(windows)]
 mod windows {
     use super::*;
     use std::collections::HashMap;
@@ -954,82 +942,178 @@ mod windows {
     }
 
     pub(super) fn foreground(root: u32) -> Foreground {
-        inspect(root).unwrap_or(Foreground::Unknown)
+        ProcessSnapshot::capture(&[root])
+            .and_then(|snapshot| snapshot.inspect(root))
+            .unwrap_or(Foreground::Unknown)
     }
 
-    fn inspect(root: u32) -> Option<Foreground> {
-        let tree = process_tree()?;
-        if !tree.iter().any(|(pid, _)| *pid == root) {
-            return None;
-        }
-        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-        for (pid, parent) in tree {
-            children.entry(parent).or_default().push(pid);
-        }
-        let mut seen = HashSet::new();
-        let mut queue = VecDeque::from([root]);
-        let mut pids = Vec::new();
-        while let Some(pid) = queue.pop_front() {
-            if !seen.insert(pid) || seen.len() > 256 {
+    pub struct ProcessSnapshot {
+        parents: HashMap<u32, u32>,
+        children: HashMap<u32, Vec<u32>>,
+        system: System,
+        pids: Vec<Pid>,
+    }
+
+    impl ProcessSnapshot {
+        pub fn capture(roots: &[u32]) -> Option<Self> {
+            if roots.is_empty() || roots.len() > 256 {
                 return None;
             }
-            pids.push(Pid::from_u32(pid));
-            if let Some(next) = children.get(&pid) {
-                queue.extend(next.iter().copied());
+            let tree = process_tree()?;
+            let parents: HashMap<_, _> = tree.iter().copied().collect();
+            let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+            for (pid, parent) in tree {
+                children.entry(parent).or_default().push(pid);
             }
+            let mut seen = HashSet::new();
+            let mut queue = roots.iter().copied().collect::<VecDeque<_>>();
+            let mut pids = Vec::new();
+            while let Some(pid) = queue.pop_front() {
+                if seen.contains(&pid) {
+                    continue;
+                }
+                if !parents.contains_key(&pid) || seen.len() >= 256 {
+                    return None;
+                }
+                seen.insert(pid);
+                pids.push(Pid::from_u32(pid));
+                if let Some(next) = children.get(&pid) {
+                    queue.extend(next.iter().copied());
+                }
+            }
+            let mut system = System::new();
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&pids),
+                true,
+                ProcessRefreshKind::nothing()
+                    .with_cmd(UpdateKind::Always)
+                    .with_exe(UpdateKind::Always),
+            );
+            if pids.iter().any(|pid| {
+                system.process(*pid).is_none_or(|process| {
+                    process.cmd().is_empty() || process.exe().is_none()
+                })
+            }) {
+                return None;
+            }
+            Some(Self {
+                parents,
+                children,
+                system,
+                pids,
+            })
         }
-        let mut system = System::new();
-        system.refresh_processes_specifics(
-            ProcessesToUpdate::Some(&pids),
-            true,
-            ProcessRefreshKind::nothing()
-                .with_cmd(UpdateKind::Always)
-                .with_exe(UpdateKind::Always),
-        );
-        let mut pid = root;
-        let mut forwarders = Vec::new();
-        loop {
-            let process = system.process(Pid::from_u32(pid))?;
-            let mut args: Vec<String> = process
+
+        pub fn pids(&self) -> impl Iterator<Item = u32> + '_ {
+            self.pids.iter().map(|pid| pid.as_u32())
+        }
+
+        pub fn cmdline(&self, pid: u32) -> Option<Vec<Vec<u8>>> {
+            self.system
+                .process(Pid::from_u32(pid))?
                 .cmd()
                 .iter()
-                .map(|arg| arg.to_str().map(str::to_owned))
-                .collect::<Option<_>>()?;
-            *args.first_mut()? = process.exe()?.to_str()?.to_owned();
-            let name = executable_name(args.first()?);
-            let shell = matches!(name.as_str(), "cmd" | "powershell" | "pwsh")
-                || is_shell_argv(&[name.clone()]);
-            let next = children.get(&pid).map(Vec::as_slice).unwrap_or(&[]);
-            if !shell {
-                if matches!(name.as_str(), "pmux" | "pmux-attach") && !next.is_empty() {
-                    let [child] = next else {
-                        return None;
-                    };
-                    let child_process = system.process(Pid::from_u32(*child))?;
-                    if !forwarding(process, child_process)? {
-                        return None;
-                    }
-                    forwarders.push(pid);
-                } else {
-                    return Some(Foreground::Running {
-                        pid,
-                        args,
-                        forwarders,
-                    });
+                .map(|arg| arg.to_str().map(|s| s.as_bytes().to_vec()))
+                .collect()
+        }
+
+        pub fn contains(&self, root: u32, target: u32) -> bool {
+            let mut pid = target;
+            let mut seen = HashSet::new();
+            while seen.insert(pid) && seen.len() <= 256 {
+                let Some(process) = self.system.process(Pid::from_u32(pid)) else {
+                    return false;
+                };
+                if pid == root {
+                    return true;
                 }
+                let Some(&parent) = self.parents.get(&pid) else {
+                    return false;
+                };
+                let Some(parent_process) = self.system.process(Pid::from_u32(parent)) else {
+                    return false;
+                };
+                if process.parent() != Some(Pid::from_u32(parent))
+                    || process.start_time() < parent_process.start_time()
+                {
+                    return false;
+                }
+                pid = parent;
             }
-            match next {
-                [] => return None,
-                [child] => {
-                    let child_process = system.process(Pid::from_u32(*child))?;
-                    if child_process.parent() != Some(Pid::from_u32(pid))
-                        || child_process.start_time() < process.start_time()
-                    {
-                        return None;
+            false
+        }
+
+        pub fn in_terminal_foreground(&self, root: u32, pid: u32) -> Option<bool> {
+            match self.inspect(root)? {
+                Foreground::Running {
+                    pid: active,
+                    forwarders,
+                    ..
+                } => {
+                    if active == pid {
+                        Some(true)
+                    } else if forwarders.contains(&pid) {
+                        Some(false)
+                    } else {
+                        None
                     }
-                    pid = *child;
                 }
-                _ => return None,
+                Foreground::Unknown => None,
+            }
+        }
+
+        fn inspect(&self, root: u32) -> Option<Foreground> {
+            let system = &self.system;
+            let children = &self.children;
+            let mut pid = root;
+            let mut forwarders = Vec::new();
+            let mut visited = HashSet::new();
+            loop {
+                if !visited.insert(pid) || visited.len() > 256 {
+                    return None;
+                }
+                let process = system.process(Pid::from_u32(pid))?;
+                let mut args: Vec<String> = process
+                    .cmd()
+                    .iter()
+                    .map(|arg| arg.to_str().map(str::to_owned))
+                    .collect::<Option<_>>()?;
+                *args.first_mut()? = process.exe()?.to_str()?.to_owned();
+                let name = executable_name(args.first()?);
+                let shell = matches!(name.as_str(), "cmd" | "powershell" | "pwsh")
+                    || is_shell_argv(&[name.clone()]);
+                let next = children.get(&pid).map(Vec::as_slice).unwrap_or(&[]);
+                if !shell {
+                    if matches!(name.as_str(), "pmux" | "pmux-attach") && !next.is_empty() {
+                        let [child] = next else {
+                            return None;
+                        };
+                        let child_process = system.process(Pid::from_u32(*child))?;
+                        if !forwarding(process, child_process)? {
+                            return None;
+                        }
+                        forwarders.push(pid);
+                    } else {
+                        return Some(Foreground::Running {
+                            pid,
+                            args,
+                            forwarders,
+                        });
+                    }
+                }
+                match next {
+                    [] => return None,
+                    [child] => {
+                        let child_process = system.process(Pid::from_u32(*child))?;
+                        if child_process.parent() != Some(Pid::from_u32(pid))
+                            || child_process.start_time() < process.start_time()
+                        {
+                            return None;
+                        }
+                        pid = *child;
+                    }
+                    _ => return None,
+                }
             }
         }
     }

@@ -1141,9 +1141,11 @@ fn toast_contrast_fg(bg: [u8; 3]) -> [u8; 3] {
 }
 
 fn default_create_spawn() -> SpawnSpec {
+    let mut command = prismattyc_mux::platform::default_shell_command();
+    let program = command.remove(0);
     SpawnSpec {
-        program: prismattyc_mux::platform::default_shell(),
-        argv: vec!["-l".into()],
+        program,
+        argv: command,
         cwd: std::env::current_dir().ok(),
         env: Default::default(),
     }

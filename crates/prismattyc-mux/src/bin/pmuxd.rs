@@ -140,13 +140,13 @@ MovePane can change session without respawn.
 }
 
 fn main() -> Result<()> {
-    prismattyc_mux::release_update::forward_installed("pmuxd")?;
     // Clean-env one-shot for supervisor.cell_exited (see prismattyc_mux::supervisor).
     let mut argv = std::env::args();
     let _argv0 = argv.next();
     if argv.next().as_deref() == Some(prismattyc_mux::supervisor::INTERNAL_SEND_ARG) {
         return prismattyc_mux::supervisor::run_internal_send().map_err(anyhow::Error::msg);
     }
+    prismattyc_mux::release_update::forward_installed("pmuxd")?;
 
     let cli = Cli::parse(std::env::args().skip(1))?;
     if cli.experimental_rich {

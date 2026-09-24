@@ -2,7 +2,7 @@
 use prismattyc_mux::local_socket::UnixStream;
 use std::{
     collections::VecDeque,
-    io::{self, Read},
+    io,
     os::windows::io::AsRawSocket,
     sync::{Arc, Condvar, Mutex},
     thread,
@@ -105,13 +105,44 @@ impl Input {
         thread::Builder::new()
             .name("attach-console-input".into())
             .spawn(move || {
-                let mut stdin = io::stdin().lock();
+                let input = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+                let mut pending = None;
+                let mut closed = false;
                 loop {
-                    let mut bytes = vec![0u8; 256];
-                    let result = stdin.read(&mut bytes).map(|n| {
-                        bytes.truncate(n);
-                        bytes
-                    });
+                    let result = loop {
+                        if closed {
+                            break Ok(Vec::new());
+                        }
+                        let mut wide = [0u16; 81];
+                        let prefix = if let Some(unit) = pending.take() {
+                            wide[0] = unit;
+                            1
+                        } else {
+                            0
+                        };
+                        let mut count = 0;
+                        let success = unsafe {
+                            ReadConsoleW(
+                                input,
+                                wide.as_mut_ptr().add(prefix).cast(),
+                                80,
+                                &mut count,
+                                std::ptr::null(),
+                            )
+                        };
+                        if success == 0 {
+                            break Err(io::Error::last_os_error());
+                        }
+                        closed = count == 0;
+                        let mut len = prefix + count as usize;
+                        if !closed && len > 0 && (0xD800..=0xDBFF).contains(&wide[len - 1]) {
+                            len -= 1;
+                            pending = Some(wide[len]);
+                        }
+                        if len > 0 || closed {
+                            break Ok(String::from_utf16_lossy(&wide[..len]).into_bytes());
+                        }
+                    };
                     let end = result.as_ref().map_or(true, |b| b.is_empty());
                     let mut queue = worker.queue.lock().unwrap_or_else(|e| e.into_inner());
                     while queue.len() >= 32 {

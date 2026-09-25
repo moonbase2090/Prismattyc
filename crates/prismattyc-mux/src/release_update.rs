@@ -625,6 +625,8 @@ pub fn run(args: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     fn fixture() -> Release {
         Release {
             tag_name: "v0.2.0".into(),
@@ -682,6 +684,7 @@ mod tests {
         assert_eq!(saved.version, "0.2.0");
         assert_eq!(saved.repository, REPOSITORY);
         assert_eq!(saved.target, original.target);
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(current.join("receipt.json"))
                 .unwrap()

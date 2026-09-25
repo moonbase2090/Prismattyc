@@ -519,7 +519,7 @@ pub fn clamp_ratio(ratio: f64) -> f64 {
 /// `$XDG_DATA_HOME/prismattyc/layouts`, else `$HOME/.local/share/prismattyc/layouts`.
 #[must_use]
 pub fn layouts_dir() -> PathBuf {
-    layouts_dir_from(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
+    layouts_dir_from(crate::platform::data_home(), crate::platform::home_dir())
 }
 
 fn layouts_dir_from(xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> PathBuf {
@@ -537,6 +537,36 @@ fn layouts_dir_from(xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsSt
 pub fn validate_layout_name(name: &str) -> Result<()> {
     if name.is_empty() || name.contains('/') || name.contains("..") || name.contains('\0') {
         bail!("layout name must be a non-empty file name without '/' or '..'");
+    }
+    #[cfg(windows)]
+    {
+        if name.bytes().any(|byte| {
+            byte < 32
+                || matches!(
+                    byte,
+                    b'\\' | b':' | b'<' | b'>' | b'"' | b'|' | b'?' | b'*' | b'~'
+                )
+        }) || name.ends_with(['.', ' '])
+        {
+            bail!("layout name contains a Windows filename character or alias");
+        }
+        let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
+        let stem = stem.to_ascii_uppercase();
+        let device = matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$"
+        ) || stem
+            .strip_prefix("COM")
+            .or_else(|| stem.strip_prefix("LPT"))
+            .is_some_and(|suffix| {
+                matches!(
+                    suffix,
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            });
+        if device {
+            bail!("layout name is a reserved Windows device name");
+        }
     }
     Ok(())
 }
@@ -624,7 +654,7 @@ pub fn list_layouts(dir: &Path) -> Result<Vec<LayoutListEntry>> {
 /// `$XDG_DATA_HOME/prismattyc/spaces`, else `$HOME/.local/share/prismattyc/spaces`.
 #[must_use]
 pub fn spaces_dir() -> PathBuf {
-    spaces_dir_from(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
+    spaces_dir_from(crate::platform::data_home(), crate::platform::home_dir())
 }
 
 fn spaces_dir_from(xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> PathBuf {

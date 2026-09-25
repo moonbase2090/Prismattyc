@@ -106,10 +106,7 @@ impl MuxRuntime {
         let mut domain = Domain::new();
         let session = domain.create_session("host")?;
         let client = domain.mint_client()?;
-        let shell = std::env::var("SHELL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "/bin/sh".into());
+        let shell = prismattyc_mux::platform::default_shell();
         let mut staged = Vec::new();
         let mut used = std::collections::HashSet::new();
         let mut focused = None;
@@ -158,11 +155,13 @@ impl MuxRuntime {
                                 .as_ref()
                                 .filter(|path| path.is_absolute() && path.is_dir())
                                 .cloned()
-                                .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+                                .or_else(|| {
+                                    prismattyc_mux::platform::home_dir().map(PathBuf::from)
+                                });
                             let mut runtime = PaneRuntime::spawn(
                                 pane,
                                 self.shell,
-                                &["-l".into()],
+                                &prismattyc_mux::platform::default_shell_command()[1..],
                                 self.mux.cols.max(1),
                                 self.mux.rows.max(1),
                                 cwd.as_deref(),

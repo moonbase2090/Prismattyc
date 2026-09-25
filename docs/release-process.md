@@ -80,3 +80,12 @@ The package contains individual updater assets and a complete installation
 archive. `SHA256SUMS` covers the release assets. The archive contains another
 checksum file for its extracted files. The installer verifies these files
 before installing them. It leaves existing unrelated installations in place.
+
+## Build the Windows release
+
+Build and package natively with `scripts/release/build-windows.ps1`.
+See [Native Windows host and PMUX](platforms/windows.md) for prerequisites,
+installation, runtime behavior, and platform evidence requirements.
+The Windows ZIP contains all six `.exe` files. Individual updater assets use
+names such as `prismattyc-v0.2.19-x86_64-pc-windows-msvc-pmux.exe`.
+Include the Windows manifest and checksum file with the release assets.

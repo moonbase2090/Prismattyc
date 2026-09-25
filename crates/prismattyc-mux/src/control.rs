@@ -9,9 +9,10 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::ffi::OsStrExt;
+
+use crate::local_socket::{UnixListener, UnixStream};
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -163,11 +164,9 @@ impl SpawnSpec {
                 "spawn cwd must be absolute",
             ));
         }
-        if self
-            .cwd
-            .as_ref()
-            .is_some_and(|cwd| cwd.to_str().is_none() || cwd.as_os_str().as_bytes().contains(&0))
-        {
+        if self.cwd.as_ref().is_some_and(|cwd| {
+            cwd.to_str().is_none() || cwd.as_os_str().as_encoded_bytes().contains(&0)
+        }) {
             return Err(ControlError::new(
                 ControlErrorCode::InvalidRequest,
                 "spawn cwd must be UTF-8 and contain no NUL",
@@ -200,7 +199,7 @@ impl SpawnSpec {
             .chain(
                 self.cwd
                     .as_ref()
-                    .map(|cwd| cwd.as_os_str().as_bytes().len()),
+                    .map(|cwd| cwd.as_os_str().as_encoded_bytes().len()),
             )
             .fold(self.program.len(), usize::saturating_add);
         if total_bytes > MAX_SPAWN_BYTES {
@@ -3742,9 +3741,7 @@ impl ControlPlane {
         let Some(root) = self.live.as_ref().and_then(|live| live.child_pid(pane_raw)) else {
             return crate::InjectAgent::Unknown;
         };
-        crate::procinfo::foreground_command(root)
-            .and_then(|cmd| crate::classify_cmdline(&cmd))
-            .unwrap_or(crate::InjectAgent::Unknown)
+        crate::procinfo::foreground_agent(root)
     }
 
     fn write_inject_chunks(
@@ -6755,7 +6752,7 @@ pub fn probe_socket_liveness(path: impl AsRef<Path>) -> SocketLiveness {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return SocketLiveness::Missing;
     };
-    if !metadata.file_type().is_socket() || metadata.uid() != rustix::process::geteuid().as_raw() {
+    if !owned_socket(path, &metadata) {
         return SocketLiveness::Foreign;
     }
     match UnixStream::connect(path) {
@@ -6818,6 +6815,7 @@ fn validate_socket_instance(instance: &str) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn xdg_runtime_dir_for_uid(uid: u32) -> Option<PathBuf> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)?;
     if !runtime.is_absolute() {
@@ -6842,6 +6840,7 @@ fn socket_filename(instance: &str) -> String {
 /// Resolve the Prismattyc socket path under `$XDG_RUNTIME_DIR/prismattyc/`,
 /// with a UID-qualified `/tmp/prismattyc-<uid>/` fallback.
 /// `instance` cannot contain path separators.
+#[cfg(unix)]
 pub fn default_socket_path(instance: &str) -> io::Result<PathBuf> {
     validate_socket_instance(instance)?;
     let uid = rustix::process::geteuid().as_raw();
@@ -6963,6 +6962,7 @@ pub fn live_pmux_sockets_in(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Diagnose a live `/run/user/<uid>` mux that this process is not using.
+#[cfg(unix)]
 pub fn diagnose_runtime_dir_miss_from_env(resolved_socket: &Path) -> Option<RuntimeDirMiss> {
     let uid = rustix::process::geteuid().as_raw();
     let user_runtime = systemd_user_runtime_dir(uid);
@@ -7022,9 +7022,13 @@ impl ControlServer {
     pub fn bind(path: impl AsRef<Path>, plane: ControlPlane) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let has_live_runtime = plane.is_live();
+        #[cfg(windows)]
+        crate::platform::require_private_directory(
+            path.parent().unwrap_or_else(|| Path::new(".")),
+        )?;
         prepare_socket_path(&path)?;
         let listener = UnixListener::bind(&path)?;
-        if let Err(error) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
+        if let Err(error) = crate::platform::set_mode(&path, 0o600) {
             let _ = fs::remove_file(&path);
             return Err(error);
         }
@@ -7160,8 +7164,7 @@ fn prepare_socket_path(path: &Path) -> io::Result<()> {
 
 fn remove_owned_socket(path: &Path) {
     if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_socket() && metadata.uid() == rustix::process::geteuid().as_raw()
-        {
+        if owned_socket(path, &metadata) {
             let _ = fs::remove_file(path);
         }
     }
@@ -7340,6 +7343,7 @@ const MAX_PANE_LOG_BATCH: usize = 256;
 /// Serve `SubscribePane` on the client thread. Writes one or more NDJSON
 /// frames for the same request_id, then returns. Idle `timeout_ms` ends
 /// the stream (`done: true`). Zero timeout is catch-up only.
+#[cfg(unix)]
 fn control_peer_closed(stream: &UnixStream) -> bool {
     let mut fds = [rustix::event::PollFd::new(
         stream,
@@ -7744,7 +7748,8 @@ fn verify_same_user(stream: &UnixStream) -> io::Result<()> {
 
 #[cfg(not(target_os = "linux"))]
 fn verify_same_user(_stream: &UnixStream) -> io::Result<()> {
-    // The 0600 socket and private XDG runtime directory remain the portable gate.
+    // Access is gated by the socket and runtime directory permissions.
+    // Windows requires an inheritable user-only parent DACL before binding.
     Ok(())
 }
 
@@ -16054,5 +16059,49 @@ mod tests {
             !plane.write_ledger.contains_key(&pane),
             "a rejected write must not dirty input"
         );
+    }
+}
+
+#[cfg(unix)]
+fn owned_socket(_path: &Path, metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_socket() && metadata.uid() == rustix::process::geteuid().as_raw()
+}
+#[cfg(windows)]
+fn owned_socket(path: &Path, _metadata: &fs::Metadata) -> bool {
+    crate::platform::owned_socket(path)
+}
+#[cfg(windows)]
+pub fn default_socket_path(instance: &str) -> io::Result<PathBuf> {
+    validate_socket_instance(instance)?;
+    Ok(crate::platform::user_directory()?.join(socket_filename(instance)))
+}
+#[cfg(windows)]
+pub fn diagnose_runtime_dir_miss_from_env(_resolved_socket: &Path) -> Option<RuntimeDirMiss> {
+    // This diagnostic is exclusively for systemd user runtime directories.
+    None
+}
+#[cfg(windows)]
+fn control_peer_closed(stream: &UnixStream) -> bool {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::*;
+    unsafe {
+        let mut fd = WSAPOLLFD {
+            fd: stream.as_raw_socket() as usize,
+            events: POLLRDNORM,
+            revents: 0,
+        };
+        let ready = WSAPoll(&mut fd, 1, 0);
+        if ready == SOCKET_ERROR {
+            return true;
+        }
+        if ready == 0 {
+            return false;
+        }
+        if fd.revents & (POLLHUP | POLLERR | POLLNVAL) != 0 {
+            return true;
+        }
+        let mut byte = 0u8;
+        let result = recv(fd.fd, &mut byte, 1, MSG_PEEK);
+        result == 0 || (result == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK)
     }
 }

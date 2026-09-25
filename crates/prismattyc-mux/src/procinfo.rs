@@ -85,9 +85,54 @@ pub fn foreground_command(root: u32) -> Option<String> {
 /// Terminal foreground only. Ignores [`TEST_FOREGROUND_COMMAND_ENV`].
 #[must_use]
 pub fn live_foreground_command(root: u32) -> Option<String> {
+    #[cfg(windows)]
+    {
+        match windows::foreground(root) {
+            windows::Foreground::Running { args, .. } => replay_command(&args),
+            _ => None,
+        }
+    }
+    #[cfg(not(windows))]
     foreground_command_impl(root)
 }
 
+#[cfg(windows)]
+pub fn replay_command(args: &[String]) -> Option<String> {
+    windows::command(args)
+}
+
+pub fn has_foreground(root: u32) -> bool {
+    #[cfg(windows)]
+    {
+        let _ = root;
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        live_foreground_command(root).is_some()
+    }
+}
+
+pub fn foreground_agent(root: u32) -> crate::InjectAgent {
+    #[cfg(windows)]
+    {
+        match windows::foreground(root) {
+            windows::Foreground::Running { args, .. } => {
+                crate::inject_submit::classify_windows_argv(&args)
+                    .unwrap_or(crate::InjectAgent::Unknown)
+            }
+            _ => crate::InjectAgent::Unknown,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        foreground_command(root)
+            .and_then(|cmd| crate::classify_cmdline(&cmd))
+            .unwrap_or(crate::InjectAgent::Unknown)
+    }
+}
+
+#[cfg(not(windows))]
 enum TtyForeground {
     /// Controlling terminal's foreground process group.
     Pgid(u32),
@@ -97,6 +142,7 @@ enum TtyForeground {
     Unknown,
 }
 
+#[cfg(not(windows))]
 fn foreground_command_impl(root: u32) -> Option<String> {
     match classify_tty(root) {
         TtyForeground::Pgid(tpgid) => command_in_foreground_pgid(root, tpgid),
@@ -114,6 +160,7 @@ fn foreground_command_impl(root: u32) -> Option<String> {
     }
 }
 
+#[cfg(not(windows))]
 fn classify_tty(pid: u32) -> TtyForeground {
     classify_tty_impl(pid)
 }
@@ -139,7 +186,7 @@ fn classify_tty_impl(pid: u32) -> TtyForeground {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn classify_tty_impl(_pid: u32) -> TtyForeground {
     TtyForeground::Unknown
 }
@@ -174,19 +221,25 @@ fn pgid_of(pid: u32) -> Option<u32> {
     macos::pgid_and_tpgid(pid).map(|(pgid, _)| pgid)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn pgid_of(_pid: u32) -> Option<u32> {
     None
 }
 
 /// Whether a descendant currently owns the root shell's terminal foreground.
 pub fn in_terminal_foreground(root: u32, pid: u32) -> Option<bool> {
+    #[cfg(windows)]
+    {
+        WindowsProcessSnapshot::capture(&[root])?.in_terminal_foreground(root, pid)
+    }
+    #[cfg(not(windows))]
     match classify_tty(root) {
         TtyForeground::Pgid(group) => pgid_of(pid).map(|pgid| pgid == group),
         TtyForeground::NoTty | TtyForeground::Unknown => None,
     }
 }
 
+#[cfg(not(windows))]
 fn command_in_foreground_pgid(root: u32, tpgid: u32) -> Option<String> {
     let mut members = Vec::new();
     for pid in tree_pids(root) {
@@ -213,6 +266,7 @@ fn command_in_foreground_pgid(root: u32, tpgid: u32) -> Option<String> {
     cmdline_strings(pick).map(|args| shell_join(&args))
 }
 
+#[cfg(not(windows))]
 fn tree_pids(root: u32) -> Vec<u32> {
     let mut seen = HashSet::new();
     let mut queue = VecDeque::from([root]);
@@ -227,6 +281,7 @@ fn tree_pids(root: u32) -> Vec<u32> {
     seen.into_iter().collect()
 }
 
+#[cfg(not(windows))]
 fn cmdline_strings(pid: u32) -> Option<Vec<String>> {
     let args = cmdline(pid)?;
     if args.is_empty() {
@@ -252,6 +307,16 @@ fn is_shell_argv(args: &[String]) -> bool {
         name,
         "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "csh" | "tcsh" | "ash" | "busybox"
     )
+}
+
+#[cfg(windows)]
+pub(crate) fn executable_name(program: &str) -> String {
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    name.strip_suffix(".exe").unwrap_or(&name).to_string()
 }
 
 /// Quote argv so a shell can parse it back.
@@ -280,6 +345,7 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
+#[cfg(not(windows))]
 fn first_non_shell_descendant(root: u32) -> Option<u32> {
     let mut seen = HashSet::new();
     let mut queue = VecDeque::from([root]);
@@ -312,7 +378,10 @@ pub fn cmdline_matches_server(pid: u32, socket: &Path) -> bool {
         return false;
     };
     let name = Path::new(argv0).file_name();
-    if name != Some(OsStr::new("pmuxd")) {
+    if name != Some(OsStr::new("pmuxd"))
+        && !(cfg!(windows)
+            && name.is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("pmuxd.exe")))
+    {
         return false;
     }
     let want = socket.as_os_str().as_encoded_bytes();
@@ -337,7 +406,7 @@ fn pid_alive_impl(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn pid_alive_impl(pid: u32) -> bool {
     let Some(pid) = rustix::process::Pid::from_raw(pid as i32) else {
         return false;
@@ -364,7 +433,7 @@ fn cmdline_impl(pid: u32) -> Option<Vec<Vec<u8>>> {
     macos::procargs(pid)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn cmdline_impl(_pid: u32) -> Option<Vec<Vec<u8>>> {
     None
 }
@@ -394,7 +463,7 @@ fn children_of_impl(pid: u32) -> Vec<u32> {
     macos::list_children(pid)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn children_of_impl(_pid: u32) -> Vec<u32> {
     Vec::new()
 }
@@ -410,7 +479,7 @@ fn cwd_of_impl(pid: u32) -> Option<PathBuf> {
     macos::cwd(pid)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn cwd_of_impl(_pid: u32) -> Option<PathBuf> {
     None
 }
@@ -431,7 +500,7 @@ fn list_pids() -> Vec<u32> {
     macos::list_pids()
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn list_pids() -> Vec<u32> {
     Vec::new()
 }
@@ -689,6 +758,7 @@ mod tests {
         assert_eq!(shell_join(&["echo".into(), "a b".into()]), "echo 'a b'");
     }
 
+    #[cfg(unix)]
     #[test]
     fn foreground_command_sees_shell_child() {
         let mut child = std::process::Command::new("/bin/sh")
@@ -711,6 +781,7 @@ mod tests {
         assert!(cmd.contains("sleep"), "{cmd}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn foreground_command_absent_for_bare_shell() {
         let mut bare = std::process::Command::new("/bin/sh")
@@ -785,5 +856,376 @@ mod tests {
             found.is_none(),
             "background sleep must not be the PTY foreground: {found:?}"
         );
+    }
+}
+
+#[cfg(windows)]
+fn pid_alive_impl(pid: u32) -> bool {
+    crate::platform::process_alive(pid)
+}
+
+#[cfg(windows)]
+fn cmdline_impl(pid: u32) -> Option<Vec<Vec<u8>>> {
+    windows::with_process(pid, |p| {
+        let args: Vec<_> = p
+            .cmd()
+            .iter()
+            .map(|s| s.to_string_lossy().as_bytes().to_vec())
+            .collect();
+        (!args.is_empty()).then_some(args)
+    })
+    .flatten()
+}
+#[cfg(windows)]
+fn cwd_of_impl(pid: u32) -> Option<PathBuf> {
+    windows::with_process(pid, |p| p.cwd().map(Path::to_path_buf)).flatten()
+}
+#[cfg(windows)]
+fn children_of_impl(pid: u32) -> Vec<u32> {
+    windows::process_tree()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(child, parent)| (parent == pid).then_some(child))
+        .collect()
+}
+#[cfg(windows)]
+fn list_pids() -> Vec<u32> {
+    windows::process_tree()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(pid, _)| pid)
+        .collect()
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_pid_in_tree(root: u32, target: u32) -> bool {
+    if root == target {
+        return true;
+    }
+    let Some(tree) = windows::process_tree() else {
+        return false;
+    };
+    let parents: std::collections::HashMap<_, _> = tree.into_iter().collect();
+    if !parents.contains_key(&root) {
+        return false;
+    }
+    let mut pid = target;
+    let mut seen = HashSet::new();
+    while seen.insert(pid) && seen.len() <= 256 {
+        let Some(parent) = parents.get(&pid) else {
+            return false;
+        };
+        if *parent == root {
+            return true;
+        }
+        pid = *parent;
+    }
+    false
+}
+
+#[cfg(windows)]
+pub use windows::ProcessSnapshot as WindowsProcessSnapshot;
+
+#[cfg(windows)]
+mod windows {
+    use super::*;
+    use std::collections::HashMap;
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+    pub(super) enum Foreground {
+        Running {
+            pid: u32,
+            args: Vec<String>,
+            forwarders: Vec<u32>,
+        },
+        Unknown,
+    }
+
+    pub(super) fn foreground(root: u32) -> Foreground {
+        ProcessSnapshot::capture(&[root])
+            .and_then(|snapshot| snapshot.inspect(root))
+            .unwrap_or(Foreground::Unknown)
+    }
+
+    pub struct ProcessSnapshot {
+        parents: HashMap<u32, u32>,
+        children: HashMap<u32, Vec<u32>>,
+        system: System,
+        pids: Vec<Pid>,
+    }
+
+    impl ProcessSnapshot {
+        pub fn capture(roots: &[u32]) -> Option<Self> {
+            if roots.is_empty() || roots.len() > 256 {
+                return None;
+            }
+            let tree = process_tree()?;
+            let parents: HashMap<_, _> = tree.iter().copied().collect();
+            let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+            for (pid, parent) in tree {
+                children.entry(parent).or_default().push(pid);
+            }
+            let mut seen = HashSet::new();
+            let mut queue = roots.iter().copied().collect::<VecDeque<_>>();
+            let mut pids = Vec::new();
+            while let Some(pid) = queue.pop_front() {
+                if seen.contains(&pid) {
+                    continue;
+                }
+                if !parents.contains_key(&pid) || seen.len() >= 256 {
+                    return None;
+                }
+                seen.insert(pid);
+                pids.push(Pid::from_u32(pid));
+                if let Some(next) = children.get(&pid) {
+                    queue.extend(next.iter().copied());
+                }
+            }
+            let mut system = System::new();
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&pids),
+                true,
+                ProcessRefreshKind::nothing()
+                    .with_cmd(UpdateKind::Always)
+                    .with_exe(UpdateKind::Always),
+            );
+            if pids.iter().any(|pid| {
+                system.process(*pid).is_none_or(|process| {
+                    process.cmd().is_empty() || process.exe().is_none()
+                })
+            }) {
+                return None;
+            }
+            Some(Self {
+                parents,
+                children,
+                system,
+                pids,
+            })
+        }
+
+        pub fn pids(&self) -> impl Iterator<Item = u32> + '_ {
+            self.pids.iter().map(|pid| pid.as_u32())
+        }
+
+        pub fn cmdline(&self, pid: u32) -> Option<Vec<Vec<u8>>> {
+            self.system
+                .process(Pid::from_u32(pid))?
+                .cmd()
+                .iter()
+                .map(|arg| arg.to_str().map(|s| s.as_bytes().to_vec()))
+                .collect()
+        }
+
+        pub fn contains(&self, root: u32, target: u32) -> bool {
+            let mut pid = target;
+            let mut seen = HashSet::new();
+            while seen.insert(pid) && seen.len() <= 256 {
+                let Some(process) = self.system.process(Pid::from_u32(pid)) else {
+                    return false;
+                };
+                if pid == root {
+                    return true;
+                }
+                let Some(&parent) = self.parents.get(&pid) else {
+                    return false;
+                };
+                let Some(parent_process) = self.system.process(Pid::from_u32(parent)) else {
+                    return false;
+                };
+                if process.parent() != Some(Pid::from_u32(parent))
+                    || process.start_time() < parent_process.start_time()
+                {
+                    return false;
+                }
+                pid = parent;
+            }
+            false
+        }
+
+        pub fn in_terminal_foreground(&self, root: u32, pid: u32) -> Option<bool> {
+            match self.inspect(root)? {
+                Foreground::Running {
+                    pid: active,
+                    forwarders,
+                    ..
+                } => {
+                    if active == pid {
+                        Some(true)
+                    } else if forwarders.contains(&pid) {
+                        Some(false)
+                    } else {
+                        None
+                    }
+                }
+                Foreground::Unknown => None,
+            }
+        }
+
+        fn inspect(&self, root: u32) -> Option<Foreground> {
+            let system = &self.system;
+            let children = &self.children;
+            let mut pid = root;
+            let mut forwarders = Vec::new();
+            let mut visited = HashSet::new();
+            loop {
+                if !visited.insert(pid) || visited.len() > 256 {
+                    return None;
+                }
+                let process = system.process(Pid::from_u32(pid))?;
+                let mut args: Vec<String> = process
+                    .cmd()
+                    .iter()
+                    .map(|arg| arg.to_str().map(str::to_owned))
+                    .collect::<Option<_>>()?;
+                *args.first_mut()? = process.exe()?.to_str()?.to_owned();
+                let name = executable_name(args.first()?);
+                let shell = matches!(name.as_str(), "cmd" | "powershell" | "pwsh")
+                    || is_shell_argv(&[name.clone()]);
+                let next = children.get(&pid).map(Vec::as_slice).unwrap_or(&[]);
+                if !shell {
+                    if matches!(name.as_str(), "pmux" | "pmux-attach") && !next.is_empty() {
+                        let [child] = next else {
+                            return None;
+                        };
+                        let child_process = system.process(Pid::from_u32(*child))?;
+                        if !forwarding(process, child_process)? {
+                            return None;
+                        }
+                        forwarders.push(pid);
+                    } else {
+                        return Some(Foreground::Running {
+                            pid,
+                            args,
+                            forwarders,
+                        });
+                    }
+                }
+                match next {
+                    [] => return None,
+                    [child] => {
+                        let child_process = system.process(Pid::from_u32(*child))?;
+                        if child_process.parent() != Some(Pid::from_u32(pid))
+                            || child_process.start_time() < process.start_time()
+                        {
+                            return None;
+                        }
+                        pid = *child;
+                    }
+                    _ => return None,
+                }
+            }
+        }
+    }
+
+    fn forwarding(parent: &sysinfo::Process, child: &sysinfo::Process) -> Option<bool> {
+        let parent_exe = parent.exe()?;
+        let child_exe = child.exe()?;
+        let parent_name = executable_name(parent_exe.to_str()?);
+        let child_name = executable_name(child_exe.to_str()?);
+        if parent_name == child_name && parent.cmd().get(1..) == child.cmd().get(1..) {
+            return Some(crate::release_update::is_windows_forwarding_pair(
+                parent_exe, child_exe,
+            ));
+        }
+        if parent_name != "pmux"
+            || child_name != "pmux-attach"
+            || parent_exe.parent()?.canonicalize().ok()? != child_exe.parent()?.canonicalize().ok()?
+        {
+            return Some(false);
+        }
+        let args: Vec<&[u8]> = child
+            .cmd()
+            .iter()
+            .map(|arg| arg.to_str().map(str::as_bytes))
+            .collect::<Option<_>>()?;
+        let socket = args.windows(2).find(|pair| pair[0] == b"--socket")?[1];
+        Some(
+            crate::attach_scan::parse_attach_client(
+                &args,
+                Path::new(std::str::from_utf8(socket).ok()?),
+            )
+            .is_some(),
+        )
+    }
+
+    pub(super) fn command(args: &[String]) -> Option<String> {
+        let program = args.first()?;
+        if program.is_empty() || args.iter().any(|arg| arg.chars().any(char::is_control)) {
+            return None;
+        }
+        let shell = executable_name(&crate::platform::default_shell());
+        if is_shell_argv(&[shell.clone()]) {
+            return Some(shell_join(args));
+        }
+        if args.iter().any(|arg| arg.contains(['%', '!', '"'])) {
+            return None;
+        }
+        let quote = |arg: &str| {
+            let trailing = arg.chars().rev().take_while(|ch| *ch == '\\').count();
+            format!("\"{arg}{}\"", "\\".repeat(trailing))
+        };
+        let tail = args
+            .iter()
+            .skip(1)
+            .map(|arg| quote(arg))
+            .collect::<Vec<_>>()
+            .join(" ");
+        match shell.as_str() {
+            "cmd" => Some(format!("\"{program}\" {tail}")),
+            "powershell" | "pwsh" => {
+                let program = program
+                    .chars()
+                    .flat_map(|ch| {
+                        let quote = matches!(ch, '\'' | '\u{2018}' | '\u{2019}');
+                        std::iter::once(ch).chain(quote.then_some(ch))
+                    })
+                    .collect::<String>();
+                Some(format!("& '{program}' --% {tail}"))
+            }
+            _ => None,
+        }
+    }
+    pub(super) fn with_process<T>(pid: u32, f: impl FnOnce(&sysinfo::Process) -> T) -> Option<T> {
+        let mut system = System::new();
+        let pid = Pid::from_u32(pid);
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing()
+                .with_cmd(UpdateKind::Always)
+                .with_cwd(UpdateKind::Always),
+        );
+        system.process(pid).map(f)
+    }
+    pub(super) fn process_tree() -> Option<Vec<(u32, u32)>> {
+        use windows_sys::Win32::{Foundation::*, System::Diagnostics::ToolHelp::*};
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snapshot == INVALID_HANDLE_VALUE {
+                return None;
+            }
+            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of_val(&entry) as u32;
+            let mut result = Vec::new();
+            if Process32FirstW(snapshot, &mut entry) != 0 {
+                loop {
+                    if result.len() >= 65_536 {
+                        CloseHandle(snapshot);
+                        return None;
+                    }
+                    result.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                    if Process32NextW(snapshot, &mut entry) == 0 {
+                        if GetLastError() != ERROR_NO_MORE_FILES {
+                            CloseHandle(snapshot);
+                            return None;
+                        }
+                        break;
+                    }
+                }
+            }
+            CloseHandle(snapshot);
+            (!result.is_empty()).then_some(result)
+        }
     }
 }

@@ -398,7 +398,7 @@ mod tests {
                 .unwrap_or(0)
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("pmux");
+        let path = dir.join(prismattyc_mux::platform::executable_name("pmux"));
         std::fs::write(&path, "#!/bin/sh\nexec sleep 30\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path.to_string_lossy().into_owned()

@@ -432,7 +432,7 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
     // need not have an installed pmux, so own an exited-session stand-in too.
     let bin_dir = path.parent().unwrap().join("fixture-bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
-    let pmux = bin_dir.join("pmux");
+    let pmux = bin_dir.join(prismattyc_mux::platform::executable_name("pmux"));
     std::fs::write(&pmux, "#!/bin/sh\nexit 1\n").unwrap();
     std::fs::set_permissions(&pmux, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::env::set_var("PMUX", pmux);

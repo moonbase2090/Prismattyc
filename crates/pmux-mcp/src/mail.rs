@@ -4,8 +4,8 @@
 //! one mailbox op, drop. Identity is the process `--as` / env agent;
 //! `MailSend` has no `from` field.
 
+use prismattyc_mux::local_socket::UnixStream;
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
 use prismattyc_mux::mailbox::AgentId;

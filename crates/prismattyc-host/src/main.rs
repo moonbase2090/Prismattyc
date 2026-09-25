@@ -3,6 +3,8 @@
 //! Opens its own window — does **not** nest inside Kitty/Ghostty.
 //! Classic nested host remains `cargo run -p prismattyc`.
 
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod a11y;
 mod attach_adopt;
 mod attach_log;
@@ -482,10 +484,11 @@ impl Cli {
         // Homebrew / user tools are missing from the shell.
         let (program, child_args) = match program {
             Some(program) => (program, child_args),
-            None => (
-                std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
-                vec!["-l".to_string()],
-            ),
+            None => {
+                let mut command = prismattyc_mux::platform::default_shell_command();
+                let program = command.remove(0);
+                (program, command)
+            }
         };
         Ok(Self {
             program,
@@ -552,7 +555,7 @@ fn find_mux_bin() -> std::path::PathBuf {
     }
     if let Ok(me) = std::env::current_exe() {
         if let Some(dir) = me.parent() {
-            let sibling = dir.join("pmux");
+            let sibling = dir.join(prismattyc_mux::platform::executable_name("pmux"));
             if sibling.is_file() {
                 return sibling;
             }
@@ -2223,6 +2226,8 @@ struct App {
     render_status_seq: u64,
     last_component_poll: Option<Instant>,
     restart_view: Option<PathBuf>,
+    #[cfg(windows)]
+    restart_resume: Option<restart::Resume>,
 }
 
 impl App {
@@ -2267,6 +2272,8 @@ impl App {
             render_status_seq: 0,
             last_component_poll: None,
             restart_view: None,
+            #[cfg(windows)]
+            restart_resume: None,
         })
     }
 
@@ -6594,7 +6601,17 @@ fn adopt_nested_attaches(host: &mut HostState, now: Instant) {
                 .and_then(|runtime| runtime.child_pid())
                 .map(|pid| (*pane, pid))
         })
-        .filter(|(_, pid)| !prismattyc_mux::procinfo::children_of(*pid).is_empty())
+        .filter(|(_, pid)| {
+            #[cfg(windows)]
+            {
+                let _ = pid;
+                true
+            }
+            #[cfg(not(windows))]
+            {
+                !prismattyc_mux::procinfo::children_of(*pid).is_empty()
+            }
+        })
         .collect();
     if !candidates.is_empty() {
         if let Some(socket) = host_mux_socket() {
@@ -13767,6 +13784,14 @@ impl ApplicationHandler<UserAction> for App {
 }
 
 fn main() -> Result<()> {
+    #[cfg(windows)]
+    let restart_resume = restart::receive()?;
+    #[cfg(windows)]
+    if restart_resume.is_none() {
+        prismattyc_mux::release_update::forward_installed("prismattyc-host")?;
+    }
+    #[cfg(unix)]
+    prismattyc_mux::release_update::forward_installed("prismattyc-host")?;
     // Parse first so --help / --version / --write-config never create
     // the default config path (PT-84 review).
     let mut cli = Cli::parse(std::env::args().skip(1))?;
@@ -13805,6 +13830,10 @@ fn main() -> Result<()> {
     }
 
     let mut app = App::new(cli, file_config, startup_config_error, proxy)?;
+    #[cfg(windows)]
+    {
+        app.restart_resume = restart_resume;
+    }
     event_loop.run_app(&mut app).context("run_app")?;
     if app.exit_code != 0 {
         std::process::exit(app.exit_code);
@@ -17065,7 +17094,7 @@ mod tests {
         // and PATH matches Terminal.app (Finder/Dock launch has minimal PATH).
         let cli = Cli::parse(std::iter::empty()).expect("parse");
         assert_eq!(cli.child_args, ["-l"]);
-        let expected = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let expected = prismattyc_mux::platform::default_shell();
         assert_eq!(cli.program, expected);
     }
 

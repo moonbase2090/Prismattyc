@@ -212,6 +212,10 @@ pub(crate) fn pty_fallback_requested() -> bool {
 /// write, and `--all` argv stay ordinary PTY panes.
 pub(crate) fn attach_target(program: &str, args: &[String]) -> Option<String> {
     let stem = std::path::Path::new(program).file_name()?.to_str()?;
+    #[cfg(windows)]
+    let name = stem.to_ascii_lowercase();
+    #[cfg(windows)]
+    let stem = name.strip_suffix(".exe").unwrap_or(&name);
     match stem {
         "pmux" => {
             if args.first().map(String::as_str) != Some("attach") {
@@ -350,15 +354,15 @@ fn live_snapshot_at(socket: &Path) -> Option<Snapshot> {
 /// `client_id` claimed by another connection), so a log-backed pane holds
 /// two.
 struct Client {
-    reader: BufReader<std::os::unix::net::UnixStream>,
-    writer: std::os::unix::net::UnixStream,
+    reader: BufReader<prismattyc_mux::local_socket::UnixStream>,
+    writer: prismattyc_mux::local_socket::UnixStream,
     next_request_id: u64,
     client_id: u64,
 }
 
 impl Client {
     fn connect(path: &Path, read_timeout: Duration) -> Result<Self> {
-        let stream = std::os::unix::net::UnixStream::connect(path)
+        let stream = prismattyc_mux::local_socket::UnixStream::connect(path)
             .with_context(|| format!("connect {}", path.display()))?;
         stream.set_read_timeout(Some(read_timeout))?;
         stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
@@ -2052,7 +2056,7 @@ mod tests {
         ] {
             let socket = test_socket(name);
             let _guard = UnlinkOnDrop(socket.clone());
-            let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            let listener = prismattyc_mux::local_socket::UnixListener::bind(&socket).unwrap();
             let server = thread::spawn(move || {
                 let (mut writer, _) = listener.accept().unwrap();
                 let mut reader = BufReader::new(writer.try_clone().unwrap());
@@ -2080,7 +2084,7 @@ mod tests {
                 };
                 assert_eq!((from_seq, timeout_ms), (u64::MAX, 0));
                 let send_boundary =
-                    |writer: &mut std::os::unix::net::UnixStream, request_id, current| {
+                    |writer: &mut prismattyc_mux::local_socket::UnixStream, request_id, current| {
                         let response = ControlResponse {
                             version: PROTOCOL_VERSION,
                             request_id,
@@ -2182,7 +2186,7 @@ mod tests {
     fn dropped_log_pane_stops_reader() {
         let socket = test_socket("reader-stop");
         let _guard = UnlinkOnDrop(socket.clone());
-        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let listener = prismattyc_mux::local_socket::UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || serve_subscribe_done(listener));
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
@@ -2216,7 +2220,7 @@ mod tests {
     fn writer_error_still_releases_lease() {
         let socket = test_socket("writer-lease");
         let _guard = UnlinkOnDrop(socket.clone());
-        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let listener = prismattyc_mux::local_socket::UnixListener::bind(&socket).unwrap();
         let (released_tx, released_rx) = mpsc::channel();
         let server = thread::spawn(move || serve_write_then_fail(listener, released_tx));
         let (to_tx, to_rx) = mpsc::sync_channel(4);
@@ -2382,7 +2386,7 @@ mod tests {
         REQUEST_ERRS.lock().unwrap().clear();
         let socket = test_socket("writer-resize-err");
         let _guard = UnlinkOnDrop(socket.clone());
-        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let listener = prismattyc_mux::local_socket::UnixListener::bind(&socket).unwrap();
         let (seen_tx, seen_rx) = mpsc::channel();
         let server = thread::spawn(move || serve_resize_ok_then_err(listener, seen_tx));
         let first = pending(80, 24);
@@ -2453,7 +2457,7 @@ mod tests {
     fn writer_survives_repeated_input_dirty() {
         let socket = test_socket("writer-dirty");
         let _guard = UnlinkOnDrop(socket.clone());
-        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let listener = prismattyc_mux::local_socket::UnixListener::bind(&socket).unwrap();
         let (writes_tx, writes_rx) = mpsc::channel();
         let server = thread::spawn(move || serve_repeated_input_dirty(listener, writes_tx));
         let (to_tx, to_rx) = mpsc::sync_channel(4);
@@ -2504,7 +2508,7 @@ mod tests {
     }
 
     fn write_frame(
-        writer: &mut std::os::unix::net::UnixStream,
+        writer: &mut prismattyc_mux::local_socket::UnixStream,
         request_id: u64,
         body: ControlResponseBody,
     ) {
@@ -2519,7 +2523,7 @@ mod tests {
     }
 
     fn write_ok(
-        writer: &mut std::os::unix::net::UnixStream,
+        writer: &mut prismattyc_mux::local_socket::UnixStream,
         request_id: u64,
         response: ControlResponseData,
     ) {
@@ -2528,7 +2532,7 @@ mod tests {
 
     #[test]
     fn request_drains_two_stale_ids_and_the_next_request_succeeds() {
-        let (stream, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (stream, mut peer) = prismattyc_mux::local_socket::UnixStream::pair().unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
@@ -2558,7 +2562,7 @@ mod tests {
         assert_eq!(second, registered);
     }
 
-    fn serve_subscribe_done(listener: std::os::unix::net::UnixListener) {
+    fn serve_subscribe_done(listener: prismattyc_mux::local_socket::UnixListener) {
         let Ok((stream, _)) = listener.accept() else {
             return;
         };
@@ -2604,7 +2608,7 @@ mod tests {
     }
 
     fn serve_write_then_fail(
-        listener: std::os::unix::net::UnixListener,
+        listener: prismattyc_mux::local_socket::UnixListener,
         released: mpsc::Sender<()>,
     ) {
         let Ok((stream, _)) = listener.accept() else {
@@ -2682,7 +2686,7 @@ mod tests {
     }
 
     fn serve_resize_ok_then_err(
-        listener: std::os::unix::net::UnixListener,
+        listener: prismattyc_mux::local_socket::UnixListener,
         seen: mpsc::Sender<(u32, u32)>,
     ) {
         let Ok((stream, _)) = listener.accept() else {
@@ -2740,7 +2744,7 @@ mod tests {
     }
 
     fn serve_repeated_input_dirty(
-        listener: std::os::unix::net::UnixListener,
+        listener: prismattyc_mux::local_socket::UnixListener,
         writes: mpsc::Sender<()>,
     ) {
         let Ok((stream, _)) = listener.accept() else {

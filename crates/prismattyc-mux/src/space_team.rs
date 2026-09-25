@@ -1,9 +1,9 @@
 //! Shared Space details for the desktop, CLI, and MCP.
 
+use crate::local_socket::UnixStream;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -58,7 +58,7 @@ pub fn edit_metadata(
         .read(true)
         .write(true)
         .open(parent.join(".lock"))?;
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
+    crate::platform::lock_exclusive(&lock)?;
     let mut value = metadata(dir, space)?;
     edit(&mut value)?;
     write_json(&path, &value)
@@ -76,8 +76,8 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
         file.write_all(&serde_json::to_vec_pretty(value)?)?;
         file.write_all(b"\n")?;
         file.sync_all()?;
-        fs::rename(&tmp, path)?;
-        fs::File::open(parent)?.sync_all()?;
+        crate::platform::replace_file(&tmp, path)?;
+        crate::platform::sync_directory(parent)?;
         Ok(())
     })();
     if outcome.is_err() {
@@ -99,7 +99,7 @@ pub fn transfer_roles(dir: &Path, from: &str, to: &str, names: &[String]) -> Res
         .truncate(false)
         .write(true)
         .open(parent.join(".lock"))?;
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
+    crate::platform::lock_exclusive(&lock)?;
     let read = |path: &Path| -> Result<TeamMetadata> {
         match fs::read(path) {
             Ok(raw) => Ok(serde_json::from_slice(&raw)?),
@@ -432,7 +432,7 @@ pub fn record_result(
         .truncate(false)
         .write(true)
         .open(parent.join(".lock"))?;
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
+    crate::platform::lock_exclusive(&lock)?;
     let path = parent.join(format!("{:016x}.json", key.finish()));
     if let Ok(raw) = fs::read(&path) {
         let old: serde_json::Value = serde_json::from_slice(&raw)?;

@@ -71,8 +71,7 @@ fn exclusive_pid_lock(path: &Path) -> std::io::Result<fs::File> {
         .write(true)
         .truncate(false)
         .open(PathBuf::from(lock_path))?;
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)
-        .map_err(|err| std::io::Error::from_raw_os_error(err.raw_os_error()))?;
+    crate::platform::lock_exclusive(&lock)?;
     Ok(lock)
 }
 

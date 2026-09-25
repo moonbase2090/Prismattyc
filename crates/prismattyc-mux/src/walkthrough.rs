@@ -14,11 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(unix)]
 use crate::layout_file::{stub_space_session, SavedSpace, SavedSpaceTab, SAVED_SPACE_VERSION};
 
 const BUNDLED_LEVELS: &str = include_str!("../walkthrough/levels.toml");
-#[cfg(unix)]
 const BUNDLED_BOSS: &str = include_str!("../walkthrough/boss.json");
 const SPACE_EVENTS: &[&str] = &["saved", "opened", "boss_snapshot_match"];
 /// Catalog `schema_version` this crate loads.
@@ -247,7 +245,7 @@ pub struct Progress {
 /// `$HOME/.local/share/prismattyc/walkthrough.json`.
 #[must_use]
 pub fn progress_path() -> PathBuf {
-    progress_path_from(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
+    progress_path_from(crate::platform::data_home(), crate::platform::home_dir())
 }
 
 #[must_use]
@@ -631,19 +629,16 @@ pub fn scripted_fact(expect: &Expect) -> Detected {
 
 /// Boss snapshot comparison (PT-198). Session count, tab count, and
 /// panes-per-tab multiset. Names, cwd, agents, and pids are ignored.
-#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BossVerdict {
     Match,
     Mismatch(String),
 }
 
-#[cfg(unix)]
 pub fn bundled_boss() -> Result<SavedSpace, serde_json::Error> {
     serde_json::from_str(BUNDLED_BOSS)
 }
 
-#[cfg(unix)]
 fn panes_per_tab(space: &SavedSpace) -> Vec<usize> {
     if space.tabs.is_empty() {
         vec![1; space.sessions.len()]
@@ -652,7 +647,6 @@ fn panes_per_tab(space: &SavedSpace) -> Vec<usize> {
     }
 }
 
-#[cfg(unix)]
 #[must_use]
 pub fn space_from_pane_counts(session_count: usize, panes_per_tab: &[usize]) -> SavedSpace {
     let mut sessions = Vec::new();
@@ -690,7 +684,6 @@ pub fn space_from_pane_counts(session_count: usize, panes_per_tab: &[usize]) -> 
 /// Restrict a live space to the host arrangement. When `tabs` is present,
 /// keep only sessions named in those tabs. When it is missing, drop the
 /// leftover `default` session.
-#[cfg(unix)]
 #[must_use]
 pub fn scoped_boss_space(mut live: SavedSpace, tabs: Option<&[SavedSpaceTab]>) -> SavedSpace {
     match tabs {
@@ -721,7 +714,6 @@ pub fn scoped_boss_space(mut live: SavedSpace, tabs: Option<&[SavedSpaceTab]>) -
     }
 }
 
-#[cfg(unix)]
 #[must_use]
 pub fn boss_matches(target: &SavedSpace, live: &SavedSpace) -> BossVerdict {
     let want_seats = target.sessions.len();
@@ -1166,7 +1158,6 @@ expect = { kind = "space_event", event = "teleport" }
         assert!(Cursor::resume(catalog, None, Some("missing")).is_none());
     }
 
-    #[cfg(unix)]
     #[test]
     fn boss_fixture_matches_three_seat_shape() {
         let target = bundled_boss().expect("boss.json");
@@ -1177,7 +1168,6 @@ expect = { kind = "space_event", event = "teleport" }
         assert_eq!(boss_matches(&target, &live), BossVerdict::Match);
     }
 
-    #[cfg(unix)]
     #[test]
     fn boss_two_seats_and_wrong_split_mismatch() {
         let target = bundled_boss().expect("boss.json");
@@ -1193,7 +1183,6 @@ expect = { kind = "space_event", event = "teleport" }
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn scoped_boss_space_keeps_attach_tab_sessions() {
         let live = space_from_pane_counts(5, &[1, 1, 1, 1, 1]);

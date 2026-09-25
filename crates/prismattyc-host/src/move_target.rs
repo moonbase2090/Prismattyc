@@ -52,8 +52,18 @@ fn descend(
             seen.insert(root) && seen.len() <= 16,
             "nested terminal cycle"
         );
+        #[cfg(windows)]
+        let processes = prismattyc_mux::procinfo::WindowsProcessSnapshot::capture(&[root])
+            .context("cannot inspect the nested terminal process tree")?;
+        #[cfg(windows)]
+        let mut clients = attach_adopt::snapshot_attach_clients(&processes, &[root], socket);
+        #[cfg(not(windows))]
         let mut clients = attach_adopt::subtree_attach_clients(&[root], socket);
-        if let Some(args) = prismattyc_mux::procinfo::cmdline(root) {
+        #[cfg(windows)]
+        let root_args = processes.cmdline(root);
+        #[cfg(not(windows))]
+        let root_args = prismattyc_mux::procinfo::cmdline(root);
+        if let Some(args) = root_args {
             let refs: Vec<&[u8]> = args.iter().map(Vec::as_slice).collect();
             if let Some(mut client) = prismattyc_mux::parse_attach_client(&refs, socket) {
                 client.pid = root;
@@ -62,7 +72,11 @@ fn descend(
         }
         let mut foreground = Vec::new();
         for client in clients {
-            match prismattyc_mux::procinfo::in_terminal_foreground(root, client.pid) {
+            #[cfg(windows)]
+            let is_foreground = processes.in_terminal_foreground(root, client.pid);
+            #[cfg(not(windows))]
+            let is_foreground = prismattyc_mux::procinfo::in_terminal_foreground(root, client.pid);
+            match is_foreground {
                 Some(true) => foreground.push(client),
                 Some(false) => {}
                 None => anyhow::bail!("cannot identify the foreground nested terminal"),

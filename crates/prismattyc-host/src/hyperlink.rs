@@ -4,7 +4,9 @@
 //! remain non-clickable and never fall through to displayed-text detection.
 
 use std::io::Write;
+#[cfg(not(windows))]
 use std::process::{Command, Stdio};
+#[cfg(not(windows))]
 use std::thread;
 
 use prismattyc_core::{Screen, MAX_HYPERLINK_URI_BYTES};
@@ -191,6 +193,7 @@ pub fn is_allowed_http_url(url: &str) -> bool {
 }
 
 /// Program + single URL argument. Never `sh -c`.
+#[cfg(not(windows))]
 pub fn open_argv(url: &str) -> Option<(&'static str, String)> {
     if !is_allowed_http_url(url) {
         return None;
@@ -198,6 +201,7 @@ pub fn open_argv(url: &str) -> Option<(&'static str, String)> {
     Some((open_program(), url.to_string()))
 }
 
+#[cfg(not(windows))]
 pub fn open_program() -> &'static str {
     if cfg!(target_os = "macos") {
         "open"
@@ -207,6 +211,7 @@ pub fn open_program() -> &'static str {
 }
 
 /// Spawn the platform opener detached. Failures are silent to the caller (`false`).
+#[cfg(not(windows))]
 pub fn spawn_open(url: &str) -> bool {
     let Some((program, arg)) = open_argv(url) else {
         return false;
@@ -225,6 +230,37 @@ pub fn spawn_open(url: &str) -> bool {
             true
         }
         Err(_) => false,
+    }
+}
+
+#[cfg(windows)]
+pub fn spawn_open(url: &str) -> bool {
+    use windows_sys::Win32::{
+        System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE},
+        UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+    };
+    if !is_allowed_http_url(url) {
+        return false;
+    }
+    let url: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        if CoInitializeEx(
+            std::ptr::null(),
+            (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+        ) < 0
+        {
+            return false;
+        }
+        let result = ShellExecuteW(
+            std::ptr::null_mut(),
+            windows_sys::w!("open"),
+            url.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        );
+        CoUninitialize();
+        result as isize > 32
     }
 }
 
@@ -359,9 +395,12 @@ mod tests {
         assert!(!is_allowed_http_url("javascript:alert(1)"));
         assert!(!is_allowed_http_url("file:///etc/passwd"));
         assert!(!is_allowed_http_url("data:text/html,hi"));
-        assert!(open_argv("javascript:alert(1)").is_none());
-        assert!(open_argv("file:///tmp").is_none());
-        assert!(open_argv("data:text/html,hi").is_none());
+        #[cfg(not(windows))]
+        {
+            assert!(open_argv("javascript:alert(1)").is_none());
+            assert!(open_argv("file:///tmp").is_none());
+            assert!(open_argv("data:text/html,hi").is_none());
+        }
 
         let mut screen = Screen::new(40, 1, 0);
         fill(&mut screen, "javascript:alert(1) file://x data:y");
@@ -377,12 +416,15 @@ mod tests {
         assert!(!is_allowed_http_url("https://"));
         assert!(!is_allowed_http_url("http://"));
         assert!(!is_allowed_http_url("ftp://example.com"));
-        let (program, arg) =
-            open_argv("https://example.com/some/app/installations/new").expect("allowlisted");
-        assert_eq!(program, open_program());
-        assert!(!program.contains(' '));
-        assert_ne!(program, "sh");
-        assert_eq!(arg, "https://example.com/some/app/installations/new");
+        #[cfg(not(windows))]
+        {
+            let (program, arg) =
+                open_argv("https://example.com/some/app/installations/new").expect("allowlisted");
+            assert_eq!(program, open_program());
+            assert!(!program.contains(' '));
+            assert_ne!(program, "sh");
+            assert_eq!(arg, "https://example.com/some/app/installations/new");
+        }
     }
 
     #[test]

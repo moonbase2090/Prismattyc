@@ -100,7 +100,6 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
     if opts.daemon && opts.stop_sessions && !opts.worker {
         // The caller may itself live in a session being stopped. Detach the
         // entire coordinator before asking the old daemon to shut down.
-        use std::os::unix::process::CommandExt;
         let executable = prismattyc_mux::release_update::installed_binary("pmux")
             .unwrap_or(std::env::current_exe()?);
         let log = paths.logfile.with_extension("restart.log");
@@ -115,14 +114,7 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
             .stdin(Stdio::null())
             .stdout(output.try_clone()?)
             .stderr(output);
-        unsafe {
-            child.pre_exec(|| {
-                if libc::setsid() < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
+        prismattyc_mux::platform::detach_command(&mut child);
         let process = child.spawn()?;
         println!(
             "{}",
@@ -197,7 +189,16 @@ fn restart_cooperative(
             let response = std::fs::read(&path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<components::Response>(&bytes).ok());
-            if let Some(response) = response.filter(|r| r.id == request.id) {
+            if let Some(response) = response.filter(|r| {
+                #[cfg(windows)]
+                {
+                    r.id == request.id && r.pid == request.pid && r.generation == request.generation
+                }
+                #[cfg(unix)]
+                {
+                    r.id == request.id
+                }
+            }) {
                 results.push(json!({"component":component,"response":response}));
                 let _ = std::fs::remove_file(path);
                 false

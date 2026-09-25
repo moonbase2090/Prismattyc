@@ -30,7 +30,7 @@ pub fn save(spaces: &Path, name: &str, template: &TeamTemplate) -> Result<PathBu
         .create(true)
         .truncate(false)
         .open(directory(spaces).join(".lock"))?;
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)?;
+    crate::platform::lock_exclusive(&lock)?;
     if path.exists() {
         bail!("template {name:?} already exists; choose another name");
     }
@@ -201,9 +201,16 @@ pub fn commands(node: &SavedNode) -> Vec<Option<String>> {
         SavedNode::Leaf {
             program, command, ..
         } => vec![command.clone().or_else(|| {
-            program
-                .as_ref()
-                .map(|program| format!("exec '{}'", program.replace('\'', "'\\''")))
+            program.as_ref().and_then(|program| {
+                #[cfg(windows)]
+                {
+                    crate::procinfo::replay_command(std::slice::from_ref(program))
+                }
+                #[cfg(not(windows))]
+                {
+                    Some(format!("exec '{}'", program.replace('\'', "'\\''")))
+                }
+            })
         })],
         SavedNode::Split { first, second, .. } => {
             let mut all = commands(first);

@@ -96,8 +96,7 @@ impl Cli {
             cols,
             rows,
             experimental_rich,
-            program: program
-                .unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())),
+            program: program.unwrap_or_else(|| prismattyc_mux::platform::default_shell()),
             argv,
         })
     }
@@ -147,6 +146,7 @@ fn main() -> Result<()> {
     if argv.next().as_deref() == Some(prismattyc_mux::supervisor::INTERNAL_SEND_ARG) {
         return prismattyc_mux::supervisor::run_internal_send().map_err(anyhow::Error::msg);
     }
+    prismattyc_mux::release_update::forward_installed("pmuxd")?;
 
     let cli = Cli::parse(std::env::args().skip(1))?;
     if cli.experimental_rich {

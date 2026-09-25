@@ -59,10 +59,10 @@ pub fn prism_config_path() -> PathBuf {
     if let Some(explicit) = std::env::var_os("PRISMATTYC_CONFIG") {
         return PathBuf::from(explicit);
     }
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+    let base = crate::platform::config_home()
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".config")));
+        .or_else(|| crate::platform::home_dir().map(|home| Path::new(&home).join(".config")));
     base.map_or_else(
         || PathBuf::from("prismattyc-config.toml"),
         |base| base.join("prismattyc").join("config.toml"),

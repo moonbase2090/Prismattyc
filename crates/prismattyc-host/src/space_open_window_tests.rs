@@ -1,8 +1,8 @@
 //! Real daemon, two host windows, exclusive ownership, and rendered evidence.
 
 use super::*;
+use prismattyc_mux::local_socket::UnixStream;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use winit::platform::x11::EventLoopBuilderExtX11;
 

@@ -52,13 +52,13 @@
 //! Live sockets are never replaced or unlinked here — bind-side stale handling
 //! stays in the server.
 
+use prismattyc_mux::local_socket::UnixStream;
 #[cfg(any(test, target_os = "linux"))]
 use std::ffi::OsStr;
 use std::{
     collections::BTreeSet,
     fs::OpenOptions,
     io::{self, BufRead, BufReader, Read, Write},
-    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     time::{Duration, Instant, SystemTime},
@@ -423,6 +423,7 @@ fn parse_argv(args: impl IntoIterator<Item = String>) -> Result<Cli> {
 }
 
 fn main() -> Result<()> {
+    prismattyc_mux::release_update::forward_installed("pmux")?;
     // Execute stays in `main` rather than a new `run`. Extracting `run`
     // scores C=75 as a new function and PT-277 blocks it; leaving the
     // same code here is allowed because `main` is already above 30
@@ -891,10 +892,7 @@ fn program_from(mut rest: Vec<String>) -> Vec<String> {
         rest.remove(0);
     }
     if rest.is_empty() {
-        vec![
-            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
-            "-l".into(),
-        ]
+        prismattyc_mux::platform::default_shell_command()
     } else {
         rest
     }
@@ -912,7 +910,7 @@ fn find_bin(keys: &[&str], names: &[&str]) -> PathBuf {
     if let Ok(me) = std::env::current_exe() {
         if let Some(dir) = me.parent() {
             for name in names {
-                let sibling = dir.join(name);
+                let sibling = dir.join(prismattyc_mux::platform::executable_name(name));
                 if sibling.is_file() {
                     return sibling;
                 }
@@ -961,13 +959,7 @@ fn cmd_up(paths: &Paths, program: Vec<String>) -> Result<()> {
         .stderr(Stdio::from(log));
     // Detach into its own session so closing this terminal never HUPs the
     // server.
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        command.pre_exec(|| {
-            let _ = rustix::process::setsid();
-            Ok(())
-        });
-    }
+    prismattyc_mux::platform::detach_command(&mut command);
     let mut child = command
         .spawn()
         .with_context(|| format!("spawn {}", server.display()))?;
@@ -1142,7 +1134,7 @@ fn cmd_attach_all(paths: &Paths) -> Result<()> {
         sessions.len(),
         session_list(&sessions)
     );
-    use std::os::unix::process::CommandExt;
+    use prismattyc_mux::platform::Exec;
     Err(command.exec()).with_context(|| format!("exec {}", host.display()))
 }
 
@@ -1340,7 +1332,7 @@ fn cmd_attach(paths: &Paths, rest: Vec<String>) -> Result<()> {
     if parsed.fit {
         command.arg("--fit");
     }
-    use std::os::unix::process::CommandExt;
+    use prismattyc_mux::platform::Exec;
     Err(command.exec()).with_context(|| format!("exec {}", attach.display()))
 }
 
@@ -1519,6 +1511,7 @@ fn play_key_from_byte(byte: u8) -> PlayKey {
 
 /// Clear ICANON and ECHO (and ICRNL so Enter is `\r`). Keep OPOST and ISIG
 /// so `println!` still emits `\r\n` and Ctrl-C raises SIGINT.
+#[cfg(unix)]
 fn play_cbreak_modes(
     local: rustix::termios::LocalModes,
     input: rustix::termios::InputModes,
@@ -1934,10 +1927,12 @@ fn apply_play_route(
     }
 }
 
+#[cfg(unix)]
 struct PlayRawStdin {
     original: rustix::termios::Termios,
 }
 
+#[cfg(unix)]
 impl PlayRawStdin {
     fn enter() -> Result<Self> {
         use rustix::termios::{self, OptionalActions};
@@ -1952,6 +1947,7 @@ impl PlayRawStdin {
     }
 }
 
+#[cfg(unix)]
 impl Drop for PlayRawStdin {
     fn drop(&mut self) {
         use rustix::termios::{self, OptionalActions};
@@ -1959,6 +1955,7 @@ impl Drop for PlayRawStdin {
     }
 }
 
+#[cfg(unix)]
 fn read_play_key(timeout: Duration) -> Result<Option<PlayKey>> {
     use rustix::event::{poll, PollFd, PollFlags, Timespec};
     let stdin = io::stdin();
@@ -2240,7 +2237,7 @@ fn exec_attach_session(paths: &Paths, session: &str, space: Option<&str>) -> Res
         command.arg("--space").arg(space);
         command.env("PMUX_SPACE", space);
     }
-    use std::os::unix::process::CommandExt;
+    use prismattyc_mux::platform::Exec;
     Err(command.exec()).with_context(|| format!("exec {}", attach.display()))
 }
 
@@ -2589,7 +2586,7 @@ const JOIN_PANE_USAGE: &str = "usage: pmux join-pane PANE --to TAB [-h|-v]";
 
 fn dummy_window_spawn() -> SpawnSpec {
     SpawnSpec {
-        program: "/bin/sh".into(),
+        program: prismattyc_mux::platform::default_shell(),
         argv: vec![],
         cwd: None,
         env: Default::default(),
@@ -3520,7 +3517,7 @@ fn cmd_kick(paths: &Paths, key: &str) -> Result<()> {
         if !still {
             continue;
         }
-        signal(attach.pid, rustix::process::Signal::TERM)?;
+        signal(attach.pid, prismattyc_mux::platform::Signal::TERM)?;
         kicked.push(attach.pid);
     }
     if kicked.is_empty() {
@@ -3785,7 +3782,7 @@ fn cmd_detach_other(paths: &Paths, key: Option<&str>) -> Result<()> {
             DetachFate::Keep => kept.push(row.pid),
             DetachFate::Skip => {}
             DetachFate::Signal => {
-                signal(row.pid, rustix::process::Signal::TERM)?;
+                signal(row.pid, prismattyc_mux::platform::Signal::TERM)?;
                 signalled.push(row.pid);
             }
         }
@@ -5531,19 +5528,7 @@ fn open_applied_space(paths: &Paths, space: Option<&str>) -> Result<()> {
             log.try_clone().context("clone host log handle")?,
         ))
         .stderr(Stdio::from(log));
-    {
-        use std::os::unix::process::CommandExt;
-        // SAFETY: `setsid` is async-signal-safe and touches no Rust state
-        // between fork and exec.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
+    prismattyc_mux::platform::detach_command(&mut command);
     let child = command
         .spawn()
         .with_context(|| format!("spawn {}", host.display()))?;
@@ -6008,8 +5993,8 @@ fn pane_has_foreground(snapshot: &Snapshot, pane_id: u64) -> bool {
         .flat_map(|window| window.panes.iter())
         .find(|pane| pane.id == pane_id)
         .and_then(|pane| pane.child_pid)
-        .and_then(procinfo::live_foreground_command)
-        .is_some()
+        .map(procinfo::has_foreground)
+        .unwrap_or(cfg!(windows))
 }
 
 fn write_pane_command(
@@ -6832,8 +6817,12 @@ impl PipeWriter {
                 })
             }
             PipePaneDest::Exec(cmd) => {
-                let mut child = Command::new("sh")
-                    .arg("-c")
+                #[cfg(unix)]
+                let shell = "sh";
+                #[cfg(windows)]
+                let shell = prismattyc_mux::platform::default_shell();
+                let mut child = Command::new(shell)
+                    .arg(if cfg!(windows) { "/C" } else { "-c" })
                     .arg(cmd)
                     .stdin(Stdio::piped())
                     .spawn()
@@ -7286,7 +7275,7 @@ fn cmd_stop(paths: &Paths, session: Option<String>) -> Result<()> {
     }
     let pid =
         pid.context("server is running but its pid could not be determined; stop it manually")?;
-    signal(pid, rustix::process::Signal::TERM)?;
+    signal(pid, prismattyc_mux::platform::Signal::TERM)?;
     let deadline = Instant::now() + STOP_GRACE;
     while Instant::now() < deadline && !server_gone(pid, &paths.socket) {
         std::thread::sleep(Duration::from_millis(50));
@@ -7294,7 +7283,7 @@ fn cmd_stop(paths: &Paths, session: Option<String>) -> Result<()> {
     // Re-verify before escalating: if the pid was recycled inside the grace
     // window, the cmdline no longer matches and KILL must not be sent.
     if pid_alive(pid) && cmdline_matches(pid, &paths.socket) {
-        signal(pid, rustix::process::Signal::KILL)?;
+        signal(pid, prismattyc_mux::platform::Signal::KILL)?;
         let deadline = Instant::now() + STOP_GRACE;
         while Instant::now() < deadline && !server_gone(pid, &paths.socket) {
             std::thread::sleep(Duration::from_millis(50));
@@ -7314,7 +7303,8 @@ fn server_gone(pid: u32, socket: &Path) -> bool {
     !pid_alive(pid) || !cmdline_matches(pid, socket)
 }
 
-fn signal(pid: u32, signal: rustix::process::Signal) -> Result<()> {
+#[cfg(unix)]
+fn signal(pid: u32, signal: prismattyc_mux::platform::Signal) -> Result<()> {
     let pid = rustix::process::Pid::from_raw(pid as i32).context("invalid pid")?;
     rustix::process::kill_process(pid, signal).with_context(|| format!("signal {pid:?}"))?;
     Ok(())
@@ -7381,15 +7371,7 @@ impl Client {
             UnixStream::connect(path).with_context(|| format!("connect {}", path.display()))?;
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
         stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-        use std::os::unix::fs::MetadataExt;
-        let metadata = std::fs::metadata(path)?;
-        let socket_identity = format!(
-            "{}:{}:{}:{}",
-            metadata.dev(),
-            metadata.ino(),
-            metadata.ctime(),
-            metadata.ctime_nsec()
-        );
+        let socket_identity = prismattyc_mux::platform::socket_identity(path)?;
         Ok(Self {
             socket_identity,
             reader: BufReader::new(stream.try_clone()?),
@@ -8189,7 +8171,7 @@ mod tests {
             snapshot: Snapshot,
             child_pid: std::sync::Arc<std::sync::Mutex<Option<u32>>>,
         ) -> Self {
-            use std::os::unix::net::UnixListener;
+            use prismattyc_mux::local_socket::UnixListener;
             use std::sync::atomic::{AtomicBool, Ordering};
             let dir = std::env::temp_dir().join(format!(
                 "pt231-ctl-{}-{}",
@@ -8327,7 +8309,7 @@ mod tests {
     }
 
     fn spawn_fake_attach(dir: &Path, sock: &Path) -> ReapChild {
-        use std::os::unix::process::CommandExt;
+        use prismattyc_mux::platform::Exec;
         let ready = dir.join("attach-ready");
         // A native test process retains argv0 on macOS. Python framework
         // launchers replace it during startup, making the scan race exec.
@@ -10213,4 +10195,45 @@ mod tests {
         let request = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(request["type"], "snapshot");
     }
+}
+
+#[cfg(windows)]
+struct PlayRawStdin;
+#[cfg(windows)]
+impl PlayRawStdin {
+    fn enter() -> Result<Self> {
+        crossterm::terminal::enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+#[cfg(windows)]
+impl Drop for PlayRawStdin {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+#[cfg(windows)]
+fn read_play_key(timeout: Duration) -> Result<Option<PlayKey>> {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    if !event::poll(timeout)? {
+        return Ok(None);
+    }
+    Ok(match event::read()? {
+        Event::Key(k) if k.kind == KeyEventKind::Release => None,
+        Event::Key(k)
+            if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            Some(play_key_from_byte(3))
+        }
+        Event::Key(k) => Some(match k.code {
+            KeyCode::Enter => PlayKey::Enter,
+            KeyCode::Char(c) if c.is_ascii() => play_key_from_byte(c as u8),
+            _ => PlayKey::Other,
+        }),
+        _ => None,
+    })
+}
+#[cfg(windows)]
+fn signal(pid: u32, _signal: prismattyc_mux::platform::Signal) -> Result<()> {
+    prismattyc_mux::platform::terminate_process(pid).context("terminate process")
 }

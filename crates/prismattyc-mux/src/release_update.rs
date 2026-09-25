@@ -4,10 +4,13 @@ use anyhow::{bail, ensure, Context, Result};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::os::unix::fs::{symlink, OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -80,12 +83,22 @@ pub fn target() -> Result<&'static str> {
         ("linux", "aarch64") => Ok("aarch64-unknown-linux-gnu"),
         ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
         ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
+        ("windows", "x86_64") => Ok(if cfg!(target_env = "msvc") {
+            "x86_64-pc-windows-msvc"
+        } else {
+            "x86_64-pc-windows-gnu"
+        }),
         _ => bail!("no release target for this platform"),
     }
 }
 
 pub fn asset_name(tag: &str, target: &str, binary: &str) -> String {
-    format!("prismattyc-{tag}-{target}-{binary}")
+    let suffix = if target.contains("windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    format!("prismattyc-{tag}-{target}-{binary}{suffix}")
 }
 
 fn release_version(release: &Release) -> Result<Version> {
@@ -227,13 +240,18 @@ fn verify(path: &Path, asset: &Asset) -> Result<()> {
 
 /// Bound both runtime and output, including descendants that inherit stdout.
 pub fn version_label(executable: &Path) -> Result<String> {
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    #[cfg(unix)]
+    command.process_group(0);
+    command
         .arg("--version")
-        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    let mut child = command.spawn()?;
+    #[cfg(windows)]
+    let (mut child, probe_job) = crate::platform::spawn_probe(&mut command)?;
     let mut stdout = child.stdout.take().context("version stdout")?;
     let (tx, rx) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
@@ -269,19 +287,22 @@ pub fn version_label(executable: &Path) -> Result<String> {
         }
     })();
     // This process group belongs only to this probe, never a user's terminal.
+    #[cfg(unix)]
     unsafe {
         libc::kill(-(child.id() as i32), libc::SIGKILL);
     }
+    #[cfg(windows)]
+    drop(probe_job);
     let _ = child.wait();
     let _ = reader.join();
     result
 }
 
 fn root() -> Result<PathBuf> {
-    let data = std::env::var_os("XDG_DATA_HOME")
+    let data = crate::platform::data_home()
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share")
+            PathBuf::from(crate::platform::home_dir().unwrap_or_default()).join(".local/share")
         });
     ensure!(data.is_absolute(), "update data directory must be absolute");
     Ok(data.join("prismattyc/updates"))
@@ -289,18 +310,19 @@ fn root() -> Result<PathBuf> {
 
 fn lock(root: &Path) -> Result<File> {
     fs::create_dir_all(root)?;
-    let file = OpenOptions::new()
+    #[cfg(windows)]
+    crate::platform::secure_directory(root)?;
+    let file = crate::platform::private_options()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .mode(0o600)
         .open(root.join("update.lock"))?;
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-        .context("another update or rollback is running")?;
+    crate::platform::try_lock_exclusive(&file).context("another update or rollback is running")?;
     Ok(file)
 }
 
+#[cfg(unix)]
 fn atomic_link(target: &Path, link: &Path) -> Result<()> {
     let temporary = link.with_extension(format!("{}.tmp", std::process::id()));
     // Our lock owns these names. Remove an interrupted attempt before retrying.
@@ -319,13 +341,13 @@ fn receipt(directory: &Path) -> Result<Receipt> {
 }
 
 fn write_receipt(directory: &Path, receipt: &Receipt) -> Result<()> {
-    let mut file = OpenOptions::new()
+    let mut file = crate::platform::private_options()
         .write(true)
         .create_new(true)
-        .mode(0o600)
         .open(directory.join("receipt.json"))?;
     file.write_all(&serde_json::to_vec_pretty(receipt)?)?;
     file.sync_all()?;
+    #[cfg(unix)]
     File::open(directory)?.sync_all()?;
     Ok(())
 }
@@ -336,13 +358,33 @@ pub fn installed_binary(binary: &str) -> Option<PathBuf> {
         return None;
     }
     let root = root().ok()?;
-    let path = root.join("current").join(binary);
+    let path = current_directory(&root)
+        .ok()?
+        .join(crate::platform::executable_name(binary));
     path.is_file().then_some(path)
 }
 
+#[cfg(windows)]
+pub fn replacement_binary(binary: &str) -> Result<PathBuf> {
+    ensure!(BINARIES.contains(&binary), "unknown executable");
+    let root = root()?;
+    if !root.join("windows-current.json").try_exists()? {
+        return std::env::current_exe().context("current executable");
+    }
+    let directory = current_directory(&root)?;
+    windows_update::complete(&directory)?;
+    Ok(directory.join(crate::platform::executable_name(binary)))
+}
+
 fn default_bin_dir(root: &Path) -> Result<PathBuf> {
-    if root.join("current/receipt.json").exists() {
-        return Ok(receipt(&root.join("current"))?.bin_dir);
+    #[cfg(windows)]
+    if root.join("windows-current.json").exists() {
+        return Ok(windows_update::load(root)?.bin_dir);
+    }
+    if let Ok(directory) = current_directory(root) {
+        if directory.join("receipt.json").exists() {
+            return Ok(receipt(&directory)?.bin_dir);
+        }
     }
     if root.join("installation.json").exists() {
         return Ok(serde_json::from_slice(&fs::read(
@@ -361,6 +403,7 @@ fn default_bin_dir(root: &Path) -> Result<PathBuf> {
 /// Convert a legacy install to indirection while keeping all old binaries available.
 /// Every launcher initially resolves to the old version; one current-link rename
 /// then activates all six new binaries. Interrupted migrations can be resumed.
+#[cfg(unix)]
 fn prepare_launchers(root: &Path, bin_dir: &Path) -> Result<()> {
     ensure!(bin_dir.is_absolute(), "--bin-dir must be absolute");
     fs::create_dir_all(bin_dir)?;
@@ -382,11 +425,10 @@ fn prepare_launchers(root: &Path, bin_dir: &Path) -> Result<()> {
             );
         }
         let temporary = root.join("installation.tmp");
-        let mut file = OpenOptions::new()
+        let mut file = crate::platform::private_options()
             .write(true)
             .create(true)
             .truncate(true)
-            .mode(0o600)
             .open(&temporary)?;
         file.write_all(&serde_json::to_vec(bin_dir)?)?;
         file.sync_all()?;
@@ -426,6 +468,7 @@ fn prepare_launchers(root: &Path, bin_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn activate(root: &Path, version_dir: &Path, bin_dir: &Path) -> Result<()> {
     prepare_launchers(root, bin_dir)?;
     let old = fs::read_link(root.join("current"))?;
@@ -433,6 +476,7 @@ fn activate(root: &Path, version_dir: &Path, bin_dir: &Path) -> Result<()> {
     atomic_link(version_dir, &root.join("current"))
 }
 
+#[cfg(unix)]
 fn rollback(root: &Path) -> Result<String> {
     let old =
         fs::read_link(root.join("previous")).context("no previous installation to restore")?;
@@ -475,7 +519,8 @@ pub fn run(args: &[String]) -> Result<()> {
         .iter()
         .map(|b| select_asset(&release, target, b))
         .collect::<Result<_>>()?;
-    let installed = receipt(&root.join("current"))
+    let installed = current_directory(&root)
+        .and_then(|p| receipt(&p))
         .ok()
         .map(|r| r.version)
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
@@ -525,7 +570,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let result = (|| -> Result<()> {
         for (binary, asset) in BINARIES.iter().zip(assets) {
             eprintln!("Downloading {binary} {version}");
-            let path = staging.join(binary);
+            let path = staging.join(crate::platform::executable_name(binary));
             let status = curl()
                 .arg("--max-filesize")
                 .arg(MAX_ASSET.to_string())
@@ -538,12 +583,12 @@ pub fn run(args: &[String]) -> Result<()> {
                 "download failed for {binary}; installed version unchanged"
             );
             verify(&path, asset)?;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
-            File::open(&path)?.sync_all()?;
+            crate::platform::set_mode(&path, 0o755)?;
+            crate::platform::sync_file(&path)?;
         }
         // The complete set is trusted before any downloaded program executes.
         for binary in BINARIES {
-            let text = version_label(&staging.join(binary))?;
+            let text = version_label(&staging.join(crate::platform::executable_name(binary)))?;
             ensure!(
                 text.split_whitespace().any(|w| w == version.to_string()),
                 "{binary} did not report release version {version}"
@@ -580,6 +625,8 @@ pub fn run(args: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     fn fixture() -> Release {
         Release {
             tag_name: "v0.2.0".into(),
@@ -637,6 +684,7 @@ mod tests {
         assert_eq!(saved.version, "0.2.0");
         assert_eq!(saved.repository, REPOSITORY);
         assert_eq!(saved.target, original.target);
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(current.join("receipt.json"))
                 .unwrap()
@@ -775,7 +823,7 @@ mod tests {
         let dir = temporary();
         let script = dir.join("probe");
         fs::write(&script, b"#!/bin/sh\necho pmux 0.2.0\n").unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::platform::set_mode(&script, 0o755).unwrap();
         assert_eq!(version_label(&script).unwrap(), "pmux 0.2.0");
         fs::write(
             &script,
@@ -784,5 +832,224 @@ mod tests {
         .unwrap();
         assert!(version_label(&script).is_err());
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(unix)]
+fn current_directory(root: &Path) -> Result<PathBuf> {
+    Ok(root.join("current"))
+}
+#[cfg(windows)]
+fn current_directory(root: &Path) -> Result<PathBuf> {
+    Ok(root.join(windows_update::load(root)?.current))
+}
+#[cfg(windows)]
+fn activate(root: &Path, version_dir: &Path, bin_dir: &Path) -> Result<()> {
+    windows_update::activate(root, version_dir, bin_dir)
+}
+#[cfg(windows)]
+fn rollback(root: &Path) -> Result<String> {
+    windows_update::rollback(root)
+}
+
+#[cfg(windows)]
+pub(crate) fn is_windows_forwarding_pair(parent: &Path, child: &Path) -> bool {
+    let check = || -> Result<bool> {
+        let root = root()?;
+        let parent = parent.canonicalize()?;
+        let child = child.canonicalize()?;
+        let name = parent.file_name().context("forwarder filename")?;
+        if child.file_name() != Some(name) {
+            return Ok(false);
+        }
+        let directory = child.parent().context("forwarded version directory")?;
+        let root = root.canonicalize()?;
+        if directory.parent() != Some(root.as_path()) {
+            return Ok(false);
+        }
+        let component = directory
+            .file_name()
+            .and_then(|s| s.to_str())
+            .context("version directory name")?;
+        if component == "legacy" {
+            let state = windows_update::load(&root)?;
+            if parent.parent() != Some(state.bin_dir.canonicalize()?.as_path()) {
+                return Ok(false);
+            }
+        } else {
+            let installed = receipt(directory)?;
+            if installed.repository != REPOSITORY
+                || installed.target != target()?
+                || !installed.bin_dir.is_absolute()
+                || parent.parent() != Some(installed.bin_dir.canonicalize()?.as_path())
+            {
+                return Ok(false);
+            }
+            let version = Version::parse(&installed.version)?;
+            let prefix = format!("v{version}-{}-", installed.target);
+            if !component.strip_prefix(prefix.as_str()).is_some_and(|nonce| {
+                !nonce.is_empty() && nonce.bytes().all(|b| b.is_ascii_digit())
+            }) {
+                return Ok(false);
+            }
+        }
+        windows_update::complete(directory)?;
+        Ok(true)
+    };
+    check().unwrap_or(false)
+}
+
+/// Windows keeps stable launch executables and atomically selects a versioned
+/// directory. No running executable is replaced and no symlink privilege is needed.
+pub fn forward_installed(binary: &str) -> Result<()> {
+    #[cfg(windows)]
+    {
+        windows_update::forward(binary)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = binary;
+        Ok(())
+    }
+}
+#[cfg(windows)]
+mod windows_update {
+    use super::*;
+    #[derive(serde::Serialize, serde::Deserialize)]
+    pub(super) struct State {
+        pub current: PathBuf,
+        previous: Option<PathBuf>,
+        pub(super) bin_dir: PathBuf,
+    }
+    fn validate_component(path: &Path) -> Result<()> {
+        ensure!(
+            matches!(
+                (path.components().next(), path.components().count()),
+                (Some(std::path::Component::Normal(_)), 1)
+            ),
+            "invalid update directory"
+        );
+        Ok(())
+    }
+    pub(super) fn load(root: &Path) -> Result<State> {
+        let state: State = serde_json::from_slice(&fs::read(root.join("windows-current.json"))?)?;
+        validate_component(&state.current)?;
+        if let Some(previous) = state.previous.as_ref() {
+            validate_component(previous)?;
+        }
+        ensure!(
+            state.bin_dir.is_absolute(),
+            "invalid installation directory"
+        );
+        Ok(state)
+    }
+    fn save(root: &Path, state: &State) -> Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::*;
+        let temp = root.join("windows-current.tmp");
+        let mut file = crate::platform::private_options()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&temp)?;
+        file.write_all(&serde_json::to_vec(state)?)?;
+        file.sync_all()?;
+        drop(file);
+        let wide = |p: &Path| {
+            p.as_os_str()
+                .encode_wide()
+                .chain(Some(0))
+                .collect::<Vec<_>>()
+        };
+        let destination = root.join("windows-current.json");
+        unsafe {
+            ensure!(
+                MoveFileExW(
+                    wide(&temp).as_ptr(),
+                    wide(&destination).as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+                ) != 0,
+                "activate Windows update: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        Ok(())
+    }
+    pub(super) fn complete(directory: &Path) -> Result<()> {
+        for binary in BINARIES {
+            ensure!(
+                directory
+                    .join(crate::platform::executable_name(binary))
+                    .is_file(),
+                "incomplete version directory"
+            );
+        }
+        Ok(())
+    }
+    pub(super) fn activate(root: &Path, version_dir: &Path, bin_dir: &Path) -> Result<()> {
+        validate_component(version_dir)?;
+        complete(&root.join(version_dir))?;
+        ensure!(
+            bin_dir.is_absolute(),
+            "installation directory must be absolute"
+        );
+        let bin_dir = bin_dir.canonicalize()?;
+        let mut state = if root.join("windows-current.json").exists() {
+            let state = load(root)?;
+            ensure!(
+                state.bin_dir == bin_dir,
+                "update store belongs to another installation"
+            );
+            state
+        } else {
+            complete(&bin_dir)?;
+            let legacy = root.join("legacy");
+            fs::create_dir_all(&legacy)?;
+            for binary in BINARIES {
+                let name = crate::platform::executable_name(binary);
+                fs::copy(bin_dir.join(&name), legacy.join(&name))?;
+                crate::platform::sync_file(&legacy.join(name))?;
+            }
+            State {
+                current: PathBuf::from("legacy"),
+                previous: None,
+                bin_dir,
+            }
+        };
+        state.previous = Some(state.current);
+        state.current = version_dir.into();
+        save(root, &state)
+    }
+    pub(super) fn rollback(root: &Path) -> Result<String> {
+        let mut state = load(root)?;
+        let old = state
+            .previous
+            .take()
+            .context("no previous Windows installation")?;
+        complete(&root.join(&old))?;
+        state.previous = Some(state.current);
+        state.current = old;
+        save(root, &state)?;
+        Ok(state.current.to_string_lossy().into_owned())
+    }
+    pub(super) fn forward(binary: &str) -> Result<()> {
+        ensure!(BINARIES.contains(&binary), "unknown executable");
+        let root = root()?;
+        if !root.join("windows-current.json").exists() {
+            return Ok(());
+        }
+        let state = load(&root)?;
+        let executable = std::env::current_exe()?.canonicalize()?;
+        if executable.parent() != Some(state.bin_dir.as_path()) {
+            return Ok(());
+        }
+        let target = root
+            .join(state.current)
+            .join(crate::platform::executable_name(binary));
+        complete(target.parent().context("version directory")?)?;
+        let status = Command::new(target)
+            .args(std::env::args_os().skip(1))
+            .status()?;
+        std::process::exit(status.code().unwrap_or(1));
     }
 }

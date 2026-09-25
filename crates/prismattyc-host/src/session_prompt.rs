@@ -271,11 +271,9 @@ fn apply_blank(host: &mut HostState, target: &Target) -> Result<()> {
         Target::Layout { .. } => Some(prismattyc_mux::Axis::Horizontal),
         _ => bail!("blank terminals are available for new panes and tabs"),
     };
-    let shell = std::env::var("SHELL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/bin/sh".into());
-    let args = vec!["-l".into()];
+    let command = prismattyc_mux::platform::default_shell_command();
+    let shell = command[0].clone();
+    let args = command[1..].to_vec();
     let pane = if let Some(axis) = axis {
         host.mux.split_focused(&shell, &args, axis, 0.5)?
     } else {

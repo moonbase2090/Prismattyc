@@ -78,11 +78,11 @@ fn parse_letter_id(id: &str) -> Option<i64> {
 /// `$HOME/.local/share/prismattyc/mail.db`.
 #[must_use]
 pub fn default_mail_db_path() -> std::path::PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME")
+    let base = crate::platform::data_home()
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME").map(|home| std::path::Path::new(&home).join(".local/share"))
+            crate::platform::home_dir().map(|home| std::path::Path::new(&home).join(".local/share"))
         });
     base.map_or_else(
         || std::path::PathBuf::from("prismattyc-mail.db"),
@@ -558,7 +558,7 @@ mod tests {
 
     #[test]
     fn default_mail_db_path_uses_xdg_data_home() {
-        let prior = std::env::var_os("XDG_DATA_HOME");
+        let prior = crate::platform::data_home();
         std::env::set_var("XDG_DATA_HOME", "/tmp/pmux-xdg-data");
         let path = default_mail_db_path();
         match prior {

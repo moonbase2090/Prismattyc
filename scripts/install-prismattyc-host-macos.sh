@@ -158,6 +158,8 @@ refresh_bundle_binaries() {
   for notice in "$DEST_APP/Contents/Resources/"*.txt; do
     cp "$notice" "$dest/Contents/Resources/"
   done
+  python3 "$ROOT/scripts/package-terminfo.py" --out "$dest/Contents/Resources/terminfo"
+  cp "$ROOT/scripts/install-prismattyc-terminfo.sh" "$dest/Contents/MacOS/install-prismattyc-terminfo.sh"
   sign_bundle "$dest"
   echo "refreshed binaries -> $dest"
 }
@@ -167,6 +169,8 @@ APP="$WORK/$APP_NAME.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/prismattyc-host"
 cp "$ICNS" "$APP/Contents/Resources/prismattyc.icns"
+python3 "$ROOT/scripts/package-terminfo.py" --out "$APP/Contents/Resources/terminfo"
+cp "$ROOT/scripts/install-prismattyc-terminfo.sh" "$APP/Contents/MacOS/install-prismattyc-terminfo.sh"
 cp "$ROOT/LICENSE" "$APP/Contents/Resources/MPL-2.0.txt"
 cp "$ROOT/NOTICE.txt" "$APP/Contents/Resources/NOTICE.txt"
 cp "$ROOT/crates/prismattyc-host/assets/fonts/"*.txt "$APP/Contents/Resources/"

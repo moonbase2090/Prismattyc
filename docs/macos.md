@@ -6,16 +6,33 @@ a product-support claim and not a §5.6 gate.
 
 ## Child terminfo
 
-Spawn materializes two compiled layouts under `TERMINFO`:
+The app bundles its terminal database in `Contents/Resources/terminfo` before
+signing. New child shells receive `TERMINFO` pointing at that database and
+`TERMINFO_DIRS` with the database prepended, retaining inherited search paths
+and the ncurses default search marker. No `~/.terminfo` installation is needed.
+Standalone executables materialize the same entries under
+`${XDG_DATA_HOME:-$HOME/.local/share}/prismattyc/terminfo`.
+`PRISMATTYC_TERMINFO` remains an explicit override.
 
-| Layout | Format | Who reads it |
-|--------|--------|----------------|
-| `p/prismattyc-kitty` (aliases `prismattyc-direct`, `prism-kitty`, `prism-direct`) | 32-bit extended (`0x021E`) with `fullkbd`, `Tc`, `setrgbf`/`setrgbb`, paste, focus | Homebrew ncurses, Linux |
-| `70/prismattyc-kitty` | 16-bit legacy (`0x011A`), no user caps | Apple `/usr/lib` ncurses 6.0.x (`tmux`, `vim`) |
+| Layout | Format | Reader |
+|--------|--------|--------|
+| `p/` | Full entries, including extended capabilities | Linux and Homebrew ncurses |
+| `70/` | 16-bit entries, below 4,096 bytes | macOS system ncurses |
 
-Do not point `PRISMATTYC_TERMINFO` at the repo `terminfo/` tree on macOS system
-curses: that tree has `p/` only. The XDG materialized dir (`~/.local/share/prism/terminfo`)
-has both. After a terminfo change, restart `prismattyc-host` so children respawn.
+The portable source caps `colors` and `pairs` at 32,767 and omits extended
+capabilities; truecolor entries retain standard RGB `setaf`/`setab` sequences.
+The database includes the three `prismattyc-*` color profiles and their legacy
+aliases. Regenerate portable source and compiled entries with
+`python3 scripts/generate-portable-terminfo.py` after changing the full database;
+review the capability diff before packaging.
+
+On a fresh Mac with no user terminfo, open a new shell in the installed app and
+run `/usr/bin/infocmp "$TERM"`, `/usr/bin/tput colors`, and `/usr/bin/tput clear`.
+Repeat with Homebrew ncurses if installed. This native check is required in
+addition to the Linux container regression; newer Linux ncurses cannot prove
+Apple's older reader compatibility. Installation must bundle resources before
+code signing and notarization. Do not modify a signed app after installation.
+For remote sessions, see [SSH terminal setup](ssh.md#terminal-database-on-the-remote).
 
 ## What already works (unix, not Linux-specific)
 

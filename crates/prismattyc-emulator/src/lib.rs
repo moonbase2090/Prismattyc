@@ -1645,11 +1645,12 @@ const CHILD_ENV_COLOR_STRIP: &[&str] = &[
 ///
 /// Search order:
 /// 1. `PRISMATTYC_TERMINFO` (explicit override)
-/// 2. Per-user stable install (`$XDG_DATA_HOME/prismattyc/terminfo`, else
+/// 2. App-bundle `Contents/Resources/terminfo` when complete.
+/// 3. Per-user stable install (`$XDG_DATA_HOME/prismattyc/terminfo`, else
 ///    `~/.local/share/prismattyc/terminfo`), materialized from bytes baked into
 ///    this crate when missing or content-stale
-/// 3. Next to the running binary (`terminfo/`, `../terminfo`, `../share/terminfo`)
-/// 4. `cfg(debug_assertions)` only: workspace `terminfo/` via `CARGO_MANIFEST_DIR`
+/// 4. Next to the running binary (`terminfo/`, `../terminfo`, `../share/terminfo`)
+/// 5. `cfg(debug_assertions)` only: workspace `terminfo/` via `CARGO_MANIFEST_DIR`
 ///
 /// Release binaries never return a compile-time build directory.
 pub fn resolve_child_terminfo_dir() -> Option<std::path::PathBuf> {
@@ -1661,6 +1662,13 @@ pub fn resolve_child_terminfo_dir() -> Option<std::path::PathBuf> {
             if has_terminfo_entry(&p) {
                 return p.canonicalize().ok().or(Some(p));
             }
+        }
+    }
+
+    // A signed app carries a read-only database, so fresh installs need no cache write.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = app_terminfo_dir(&exe) {
+            return Some(dir);
         }
     }
 
@@ -1694,8 +1702,21 @@ pub fn resolve_child_terminfo_dir() -> Option<std::path::PathBuf> {
     None
 }
 
-// Compiled terminfo magics (little-endian). User capabilities (fullkbd, Tc,
-// setrgbf/setrgbb, paste, focus) exist only in the 32-bit extended format.
+fn app_terminfo_dir(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dir = exe.parent()?.join("../Resources/terminfo");
+    // A partial database must not mask the complete embedded fallback.
+    BAKED_EXTENDED
+        .iter()
+        .all(|(name, _)| {
+            dir.join("p").join(name).is_file()
+                && dir.join(terminfo_hex_subdir(name)).join(name).is_file()
+        })
+        .then(|| dir.canonicalize().ok())
+        .flatten()
+}
+
+// Compiled terminfo magics (little-endian). Our full database includes
+// extended capabilities; the portable database omits them for older readers.
 const TERMINFO_MAGIC_EXTENDED: [u8; 2] = [0x1e, 0x02]; // 0x021E
 const TERMINFO_MAGIC_LEGACY: [u8; 2] = [0x1a, 0x01]; // 0x011A
 
@@ -1726,18 +1747,33 @@ const BUNDLED_PRISMATTYC_16COLOR: &[u8] = include_bytes!(concat!(
     "/../../terminfo/p/prismattyc-16color"
 ));
 
+const BUNDLED_PRISMATTYC_16COLOR_LEGACY: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../terminfo/legacy/p/prismattyc-16color"
+));
+
 const BAKED_EXTENDED: &[(&str, &[u8])] = &[
     ("prismattyc-kitty", BUNDLED_PRISMATTYC_KITTY_EXTENDED),
     ("prismattyc-direct", BUNDLED_PRISMATTYC_KITTY_EXTENDED),
+    ("prism-kitty", BUNDLED_PRISMATTYC_KITTY_EXTENDED),
+    ("prism-direct", BUNDLED_PRISMATTYC_KITTY_EXTENDED),
     ("prismattyc-256color", BUNDLED_PRISMATTYC_256_EXTENDED),
+    ("prism-256color", BUNDLED_PRISMATTYC_256_EXTENDED),
+    ("prism", BUNDLED_PRISMATTYC_256_EXTENDED),
     ("prismattyc-16color", BUNDLED_PRISMATTYC_16COLOR),
+    ("prism-16color", BUNDLED_PRISMATTYC_16COLOR),
 ];
 
 const BAKED_LEGACY: &[(&str, &[u8])] = &[
     ("prismattyc-kitty", BUNDLED_PRISMATTYC_KITTY_LEGACY),
     ("prismattyc-direct", BUNDLED_PRISMATTYC_KITTY_LEGACY),
+    ("prism-kitty", BUNDLED_PRISMATTYC_KITTY_LEGACY),
+    ("prism-direct", BUNDLED_PRISMATTYC_KITTY_LEGACY),
     ("prismattyc-256color", BUNDLED_PRISMATTYC_256_LEGACY),
-    ("prismattyc-16color", BUNDLED_PRISMATTYC_16COLOR),
+    ("prism-256color", BUNDLED_PRISMATTYC_256_LEGACY),
+    ("prism", BUNDLED_PRISMATTYC_256_LEGACY),
+    ("prismattyc-16color", BUNDLED_PRISMATTYC_16COLOR_LEGACY),
+    ("prism-16color", BUNDLED_PRISMATTYC_16COLOR_LEGACY),
 ];
 
 /// The two-char lowercase hex subdirectory ncurses uses for a terminfo name,
@@ -1784,7 +1820,7 @@ pub fn materialize_bundled_terminfo(root: &std::path::Path) -> std::io::Result<s
     fs::create_dir_all(&dir_p)?;
     for (name, bytes) in BAKED_EXTENDED {
         debug_assert!(
-            *name == "prismattyc-16color"
+            matches!(*name, "prismattyc-16color" | "prism-16color")
                 || (bytes.len() >= 2 && bytes[..2] == TERMINFO_MAGIC_EXTENDED),
             "extended terminfo {name} must be magic 0x021E"
         );
@@ -1861,6 +1897,18 @@ pub fn apply_child_term_env(command: &mut CommandBuilder) {
     let identity = child_term_identity();
     command.env("TERM", identity.term);
     if let Some(dir) = identity.terminfo {
+        // Preserve caller search directories and ncurses' default-directory marker.
+        let inherited = command
+            .get_env("TERMINFO_DIRS")
+            .map(std::ffi::OsStr::to_os_string);
+        let mut dirs = vec![dir.clone()];
+        if let Some(value) = inherited {
+            dirs.extend(std::env::split_paths(&value));
+        }
+        dirs.push(std::path::PathBuf::new());
+        if let Ok(value) = std::env::join_paths(dirs) {
+            command.env("TERMINFO_DIRS", value);
+        }
         command.env("TERMINFO", dir);
     } else {
         command.env_remove("TERMINFO");
@@ -3297,6 +3345,7 @@ mod tests {
         command.env("TERM_PROGRAM", "ghostty");
         command.env("COLORTERM", "noforce");
         command.env("KITTY_WINDOW_ID", "42");
+        command.env("TERMINFO_DIRS", "/extra/terminfo");
         command.env("VTE_VERSION", "7600");
         command.env("TERM_PROGRAM_VERSION", "1.2.3");
 
@@ -3309,6 +3358,13 @@ mod tests {
                 command.get_env("TERMINFO").is_some(),
                 "bundled terminfo must set TERMINFO for prismattyc-kitty"
             );
+        }
+        if let Some(dir) = command.get_env("TERMINFO") {
+            let dirs: Vec<_> =
+                std::env::split_paths(command.get_env("TERMINFO_DIRS").unwrap()).collect();
+            assert_eq!(dirs[0], std::path::PathBuf::from(dir));
+            assert!(dirs.contains(&std::path::PathBuf::from("/extra/terminfo")));
+            assert_eq!(dirs.last(), Some(&std::path::PathBuf::new()));
         }
         assert_eq!(
             command.get_env("TERM_PROGRAM"),
@@ -3457,6 +3513,23 @@ mod tests {
                 None => std::env::remove_var("PRISMATTYC_COLOR"),
             }
         }
+    }
+
+    #[test]
+    fn app_database_requires_complete_entries_and_resolves_without_user_cache() {
+        let root = std::env::temp_dir().join(format!("prism-app-terminfo-{}", std::process::id()));
+        let exe = root.join("Prismattyc.app/Contents/MacOS/prismattyc-host");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        let resources = root.join("Prismattyc.app/Contents/Resources/terminfo");
+        assert_eq!(super::app_terminfo_dir(&exe), None);
+        materialize_bundled_terminfo(&resources).unwrap();
+        assert_eq!(
+            super::app_terminfo_dir(&exe),
+            Some(resources.canonicalize().unwrap())
+        );
+        std::fs::remove_file(resources.join("70/prismattyc-256color")).unwrap();
+        assert_eq!(super::app_terminfo_dir(&exe), None);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

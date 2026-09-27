@@ -10,6 +10,7 @@ mod frame_damage;
 mod mac_present;
 #[cfg(target_os = "macos")]
 #[path = "../src/macos_window.rs"]
+#[allow(dead_code)]
 mod macos_window;
 #[cfg(target_os = "macos")]
 #[path = "../src/pixel_alpha.rs"]

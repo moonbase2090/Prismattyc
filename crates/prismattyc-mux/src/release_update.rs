@@ -622,219 +622,6 @@ pub fn run(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
-    fn fixture() -> Release {
-        Release {
-            tag_name: "v0.2.0".into(),
-            draft: false,
-            prerelease: false,
-            immutable: true,
-            assets: BINARIES
-                .iter()
-                .map(|b| {
-                    let name = asset_name("v0.2.0", "x86_64-unknown-linux-gnu", b);
-                    Asset {
-                        browser_download_url: format!(
-                            "https://github.com/{REPOSITORY}/releases/download/v0.2.0/{name}"
-                        ),
-                        name,
-                        size: 3,
-                        digest: Some(format!("sha256:{:x}", Sha256::digest(b"old"))),
-                    }
-                })
-                .collect(),
-        }
-    }
-    fn temporary() -> PathBuf {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "pmux-release-{}-{}-{}",
-            std::process::id(),
-            crate::host_render_status::unix_ms(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&path).unwrap();
-        path
-    }
-    #[test]
-    fn durable_receipt_selects_installation_without_overwriting_prior_metadata() {
-        let dir = temporary();
-        let current = dir.join("current");
-        fs::create_dir(&current).unwrap();
-        let original = Receipt {
-            repository: REPOSITORY.into(),
-            version: "0.2.0".into(),
-            target: target().unwrap().into(),
-            bin_dir: dir.join("custom-bin"),
-        };
-        let remembered = dir.join("legacy-bin");
-        fs::write(
-            dir.join("installation.json"),
-            serde_json::to_vec(&remembered).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(default_bin_dir(&dir).unwrap(), remembered);
-        write_receipt(&current, &original).unwrap();
-        assert_eq!(default_bin_dir(&dir).unwrap(), original.bin_dir);
-        let saved = receipt(&current).unwrap();
-        assert_eq!(saved.version, "0.2.0");
-        assert_eq!(saved.repository, REPOSITORY);
-        assert_eq!(saved.target, original.target);
-        #[cfg(unix)]
-        assert_eq!(
-            fs::metadata(current.join("receipt.json"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
-        let bytes = fs::read(current.join("receipt.json")).unwrap();
-        assert!(write_receipt(&current, &original).is_err());
-        assert_eq!(fs::read(current.join("receipt.json")).unwrap(), bytes);
-        fs::write(current.join("receipt.json"), b"invalid").unwrap();
-        assert!(
-            default_bin_dir(&dir).is_err(),
-            "a corrupt receipt must not silently select another installation"
-        );
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn release_channel_rejects_unpublished_mutable_and_old_releases() {
-        let mut release = fixture();
-        assert_eq!(release_version(&release).unwrap(), Version::new(0, 2, 0));
-        release.immutable = false;
-        assert!(release_version(&release).is_err());
-        release.immutable = true;
-        release.draft = true;
-        assert!(release_version(&release).is_err());
-        release.draft = false;
-        for version in ["v0.1.999", "v0.2.0-beta.1", "v0.2.0+untrusted", "../../bad"] {
-            release.tag_name = version.into();
-            assert!(release_version(&release).is_err());
-        }
-    }
-    #[test]
-    fn canonical_github_asset_url_is_accepted() {
-        let mut release = fixture();
-        release.assets[0].browser_download_url = "https://github.com/moonbase2090/Prismattyc/releases/download/v0.2.0/prismattyc-v0.2.0-x86_64-unknown-linux-gnu-pmux".into();
-        assert!(select_asset(&release, "x86_64-unknown-linux-gnu", "pmux").is_ok());
-    }
-    #[test]
-    fn assets_require_exact_repo_platform_digest_and_complete_set() {
-        let mut release = fixture();
-        let target = "x86_64-unknown-linux-gnu";
-        for binary in BINARIES {
-            assert!(select_asset(&release, target, binary).is_ok());
-        }
-        assert!(select_asset(&release, "aarch64-apple-darwin", "pmux").is_err());
-        release.assets[0].browser_download_url = release.assets[0]
-            .browser_download_url
-            .replace(REPOSITORY, "other/repo");
-        assert!(select_asset(&release, target, "pmux").is_err());
-        release = fixture();
-        release.assets[0].digest = None;
-        assert!(select_asset(&release, target, "pmux").is_err());
-        release = fixture();
-        release.assets[0].size = MAX_ASSET + 1;
-        assert!(select_asset(&release, target, "pmux").is_err());
-        release = fixture();
-        release.assets.remove(0);
-        assert!(select_asset(&release, target, "pmux").is_err());
-    }
-    #[test]
-    fn digest_rejects_same_size_corruption() {
-        let dir = temporary();
-        let path = dir.join("binary");
-        let release = fixture();
-        fs::write(&path, b"old").unwrap();
-        verify(&path, &release.assets[0]).unwrap();
-        fs::write(&path, b"bad").unwrap();
-        assert!(verify(&path, &release.assets[0]).is_err());
-        fs::remove_dir_all(dir).unwrap();
-    }
-    #[test]
-    fn activation_switches_complete_set_and_rollback_restores_original() {
-        let dir = temporary();
-        let root = dir.join("updates");
-        let bins = dir.join("bin");
-        fs::create_dir_all(root.join("v0.2.0-test")).unwrap();
-        fs::create_dir(&bins).unwrap();
-        for binary in BINARIES {
-            fs::write(bins.join(binary), b"old").unwrap();
-            fs::write(root.join("v0.2.0-test").join(binary), b"new").unwrap();
-        }
-        prepare_launchers(&root, &bins).unwrap();
-        for binary in BINARIES {
-            assert_eq!(fs::read(bins.join(binary)).unwrap(), b"old");
-        }
-        // Repeat preparation after a simulated interruption; no old file is lost.
-        prepare_launchers(&root, &bins).unwrap();
-        activate(&root, Path::new("v0.2.0-test"), &bins).unwrap();
-        for binary in BINARIES {
-            assert_eq!(fs::read(bins.join(binary)).unwrap(), b"new");
-        }
-        rollback(&root).unwrap();
-        for binary in BINARIES {
-            assert_eq!(fs::read(bins.join(binary)).unwrap(), b"old");
-        }
-        rollback(&root).unwrap();
-        assert_eq!(fs::read(bins.join("pmux")).unwrap(), b"new");
-        fs::remove_dir_all(dir).unwrap();
-    }
-    #[test]
-    fn update_lock_refuses_overlap() {
-        let dir = temporary();
-        let held = lock(&dir).unwrap();
-        assert!(lock(&dir).is_err());
-        drop(held);
-        // A parallel spawn can briefly inherit the descriptor between fork and
-        // exec. CLOEXEC closes it before the child program starts.
-        let deadline = Instant::now() + Duration::from_secs(1);
-        loop {
-            if lock(&dir).is_ok() {
-                break;
-            }
-            assert!(Instant::now() < deadline, "update lock remained held");
-            std::thread::yield_now();
-        }
-        fs::remove_dir_all(dir).unwrap();
-    }
-    #[test]
-    fn incomplete_legacy_install_does_not_replace_any_launcher() {
-        let dir = temporary();
-        let root = dir.join("updates");
-        let bins = dir.join("bin");
-        fs::create_dir_all(&root).unwrap();
-        fs::create_dir(&bins).unwrap();
-        fs::write(bins.join("pmux"), b"old").unwrap();
-        assert!(prepare_launchers(&root, &bins).is_err());
-        assert!(!root.join("current").exists());
-        assert_eq!(fs::read(bins.join("pmux")).unwrap(), b"old");
-        fs::remove_dir_all(dir).unwrap();
-    }
-    #[test]
-    fn version_probe_bounds_output_and_reaps_descendants() {
-        let dir = temporary();
-        let script = dir.join("probe");
-        fs::write(&script, b"#!/bin/sh\necho pmux 0.2.0\n").unwrap();
-        crate::platform::set_mode(&script, 0o755).unwrap();
-        assert_eq!(version_label(&script).unwrap(), "pmux 0.2.0");
-        fs::write(
-            &script,
-            b"#!/bin/sh\nwhile :; do echo too-much-output; done\n",
-        )
-        .unwrap();
-        assert!(version_label(&script).is_err());
-        fs::remove_dir_all(dir).unwrap();
-    }
-}
-
 #[cfg(unix)]
 fn current_directory(root: &Path) -> Result<PathBuf> {
     Ok(root.join("current"))
@@ -1052,5 +839,218 @@ mod windows_update {
             .args(std::env::args_os().skip(1))
             .status()?;
         std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    fn fixture() -> Release {
+        Release {
+            tag_name: "v0.2.0".into(),
+            draft: false,
+            prerelease: false,
+            immutable: true,
+            assets: BINARIES
+                .iter()
+                .map(|b| {
+                    let name = asset_name("v0.2.0", "x86_64-unknown-linux-gnu", b);
+                    Asset {
+                        browser_download_url: format!(
+                            "https://github.com/{REPOSITORY}/releases/download/v0.2.0/{name}"
+                        ),
+                        name,
+                        size: 3,
+                        digest: Some(format!("sha256:{:x}", Sha256::digest(b"old"))),
+                    }
+                })
+                .collect(),
+        }
+    }
+    fn temporary() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "pmux-release-{}-{}-{}",
+            std::process::id(),
+            crate::host_render_status::unix_ms(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+    #[test]
+    fn durable_receipt_selects_installation_without_overwriting_prior_metadata() {
+        let dir = temporary();
+        let current = dir.join("current");
+        fs::create_dir(&current).unwrap();
+        let original = Receipt {
+            repository: REPOSITORY.into(),
+            version: "0.2.0".into(),
+            target: target().unwrap().into(),
+            bin_dir: dir.join("custom-bin"),
+        };
+        let remembered = dir.join("legacy-bin");
+        fs::write(
+            dir.join("installation.json"),
+            serde_json::to_vec(&remembered).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(default_bin_dir(&dir).unwrap(), remembered);
+        write_receipt(&current, &original).unwrap();
+        assert_eq!(default_bin_dir(&dir).unwrap(), original.bin_dir);
+        let saved = receipt(&current).unwrap();
+        assert_eq!(saved.version, "0.2.0");
+        assert_eq!(saved.repository, REPOSITORY);
+        assert_eq!(saved.target, original.target);
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(current.join("receipt.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let bytes = fs::read(current.join("receipt.json")).unwrap();
+        assert!(write_receipt(&current, &original).is_err());
+        assert_eq!(fs::read(current.join("receipt.json")).unwrap(), bytes);
+        fs::write(current.join("receipt.json"), b"invalid").unwrap();
+        assert!(
+            default_bin_dir(&dir).is_err(),
+            "a corrupt receipt must not silently select another installation"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn release_channel_rejects_unpublished_mutable_and_old_releases() {
+        let mut release = fixture();
+        assert_eq!(release_version(&release).unwrap(), Version::new(0, 2, 0));
+        release.immutable = false;
+        assert!(release_version(&release).is_err());
+        release.immutable = true;
+        release.draft = true;
+        assert!(release_version(&release).is_err());
+        release.draft = false;
+        for version in ["v0.1.999", "v0.2.0-beta.1", "v0.2.0+untrusted", "../../bad"] {
+            release.tag_name = version.into();
+            assert!(release_version(&release).is_err());
+        }
+    }
+    #[test]
+    fn canonical_github_asset_url_is_accepted() {
+        let mut release = fixture();
+        release.assets[0].browser_download_url = "https://github.com/moonbase2090/Prismattyc/releases/download/v0.2.0/prismattyc-v0.2.0-x86_64-unknown-linux-gnu-pmux".into();
+        assert!(select_asset(&release, "x86_64-unknown-linux-gnu", "pmux").is_ok());
+    }
+    #[test]
+    fn assets_require_exact_repo_platform_digest_and_complete_set() {
+        let mut release = fixture();
+        let target = "x86_64-unknown-linux-gnu";
+        for binary in BINARIES {
+            assert!(select_asset(&release, target, binary).is_ok());
+        }
+        assert!(select_asset(&release, "aarch64-apple-darwin", "pmux").is_err());
+        release.assets[0].browser_download_url = release.assets[0]
+            .browser_download_url
+            .replace(REPOSITORY, "other/repo");
+        assert!(select_asset(&release, target, "pmux").is_err());
+        release = fixture();
+        release.assets[0].digest = None;
+        assert!(select_asset(&release, target, "pmux").is_err());
+        release = fixture();
+        release.assets[0].size = MAX_ASSET + 1;
+        assert!(select_asset(&release, target, "pmux").is_err());
+        release = fixture();
+        release.assets.remove(0);
+        assert!(select_asset(&release, target, "pmux").is_err());
+    }
+    #[test]
+    fn digest_rejects_same_size_corruption() {
+        let dir = temporary();
+        let path = dir.join("binary");
+        let release = fixture();
+        fs::write(&path, b"old").unwrap();
+        verify(&path, &release.assets[0]).unwrap();
+        fs::write(&path, b"bad").unwrap();
+        assert!(verify(&path, &release.assets[0]).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn activation_switches_complete_set_and_rollback_restores_original() {
+        let dir = temporary();
+        let root = dir.join("updates");
+        let bins = dir.join("bin");
+        fs::create_dir_all(root.join("v0.2.0-test")).unwrap();
+        fs::create_dir(&bins).unwrap();
+        for binary in BINARIES {
+            fs::write(bins.join(binary), b"old").unwrap();
+            fs::write(root.join("v0.2.0-test").join(binary), b"new").unwrap();
+        }
+        prepare_launchers(&root, &bins).unwrap();
+        for binary in BINARIES {
+            assert_eq!(fs::read(bins.join(binary)).unwrap(), b"old");
+        }
+        // Repeat preparation after a simulated interruption; no old file is lost.
+        prepare_launchers(&root, &bins).unwrap();
+        activate(&root, Path::new("v0.2.0-test"), &bins).unwrap();
+        for binary in BINARIES {
+            assert_eq!(fs::read(bins.join(binary)).unwrap(), b"new");
+        }
+        rollback(&root).unwrap();
+        for binary in BINARIES {
+            assert_eq!(fs::read(bins.join(binary)).unwrap(), b"old");
+        }
+        rollback(&root).unwrap();
+        assert_eq!(fs::read(bins.join("pmux")).unwrap(), b"new");
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn update_lock_refuses_overlap() {
+        let dir = temporary();
+        let held = lock(&dir).unwrap();
+        assert!(lock(&dir).is_err());
+        drop(held);
+        // A parallel spawn can briefly inherit the descriptor between fork and
+        // exec. CLOEXEC closes it before the child program starts.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if lock(&dir).is_ok() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "update lock remained held");
+            std::thread::yield_now();
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn incomplete_legacy_install_does_not_replace_any_launcher() {
+        let dir = temporary();
+        let root = dir.join("updates");
+        let bins = dir.join("bin");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir(&bins).unwrap();
+        fs::write(bins.join("pmux"), b"old").unwrap();
+        assert!(prepare_launchers(&root, &bins).is_err());
+        assert!(!root.join("current").exists());
+        assert_eq!(fs::read(bins.join("pmux")).unwrap(), b"old");
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn version_probe_bounds_output_and_reaps_descendants() {
+        let dir = temporary();
+        let script = dir.join("probe");
+        fs::write(&script, b"#!/bin/sh\necho pmux 0.2.0\n").unwrap();
+        crate::platform::set_mode(&script, 0o755).unwrap();
+        assert_eq!(version_label(&script).unwrap(), "pmux 0.2.0");
+        fs::write(
+            &script,
+            b"#!/bin/sh\nwhile :; do echo too-much-output; done\n",
+        )
+        .unwrap();
+        assert!(version_label(&script).is_err());
+        fs::remove_dir_all(dir).unwrap();
     }
 }

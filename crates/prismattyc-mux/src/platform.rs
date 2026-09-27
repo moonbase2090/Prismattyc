@@ -433,7 +433,7 @@ pub fn socket_identity(path: &Path) -> io::Result<String> {
 }
 
 pub fn home_dir() -> Option<std::ffi::OsString> {
-    std::env::var_os("HOME").or_else(|| {
+    std::env::var_os("HOME").or({
         #[cfg(windows)]
         {
             std::env::var_os("USERPROFILE")
@@ -447,7 +447,7 @@ pub fn home_dir() -> Option<std::ffi::OsString> {
 pub fn config_home() -> Option<std::ffi::OsString> {
     std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
-        .or_else(|| {
+        .or({
             #[cfg(windows)]
             {
                 std::env::var_os("APPDATA")
@@ -461,7 +461,7 @@ pub fn config_home() -> Option<std::ffi::OsString> {
 pub fn data_home() -> Option<std::ffi::OsString> {
     std::env::var_os("XDG_DATA_HOME")
         .filter(|v| !v.is_empty())
-        .or_else(|| {
+        .or({
             #[cfg(windows)]
             {
                 std::env::var_os("LOCALAPPDATA")

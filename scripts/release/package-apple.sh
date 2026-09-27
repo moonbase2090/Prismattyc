@@ -18,7 +18,7 @@ if [[ "$(uname -s)" != Darwin ]]; then
   exit 1
 fi
 
-for tool in codesign ditto file hdiutil lipo openssl python3 security shasum spctl xcrun; do
+for tool in codesign dmgbuild ditto file hdiutil lipo openssl python3 security shasum spctl xcrun; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "required tool not found: $tool" >&2
     exit 1
@@ -85,7 +85,7 @@ if not reports_release_version(output, version):
 PY
   lipo -create "$arm64" "$x86_64" -output "$MACOS/$name"
   chmod 755 "$MACOS/$name"
-  lipo -verify_arch arm64 x86_64 "$MACOS/$name"
+  lipo "$MACOS/$name" -verify_arch x86_64 arm64
 done
 
 cp "$ROOT/crates/prismattyc-host/macos/Info.plist" "$APP/Contents/Info.plist"
@@ -226,7 +226,8 @@ submit_notarization "$SUBMIT_ZIP"
 xcrun stapler staple "$APP"
 spctl -a -vvv -t exec "$APP"
 xcrun stapler validate "$APP"
-hdiutil create -volname Prismattyc -srcfolder "$APP" -ov -format UDZO "$DMG"
+dmgbuild -s "$ROOT/scripts/release/dmgbuild_settings.py" \
+  -D "app=$APP" -D "root=$ROOT" Prismattyc "$DMG"
 codesign --force --timestamp --sign "$IDENTITY" --keychain "$KEYCHAIN" "$DMG"
 submit_notarization "$DMG"
 xcrun stapler staple "$DMG"

@@ -36,7 +36,7 @@ jobs:
       - name: Install Rust coverage tools
         run: |
           set -eu
-          rustup toolchain install 1.90.0 --profile minimal --component llvm-tools
+          rustup toolchain install 1.90.0 --profile minimal --component llvm-tools --component clippy
           rustup default 1.90.0
           cargo install cargo-llvm-cov --version 0.9.1 --locked
           cargo llvm-cov --version

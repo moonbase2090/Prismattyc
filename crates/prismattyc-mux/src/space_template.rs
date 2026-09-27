@@ -209,9 +209,9 @@ pub fn commands(node: &SavedNode) -> Vec<Option<String>> {
             }
             #[cfg(not(windows))]
             {
-                program.as_ref().map(|program| {
-                    format!("exec '{}'", program.replace('\'', "'\\''"))
-                })
+                program
+                    .as_ref()
+                    .map(|program| format!("exec '{}'", program.replace('\'', "'\\''")))
             }
         })],
         SavedNode::Split { first, second, .. } => {

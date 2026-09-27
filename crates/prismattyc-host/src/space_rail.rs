@@ -104,8 +104,62 @@ pub enum RailHit {
     Plus,
     /// Open the searchable list of all Spaces.
     Overflow,
+    /// A configured SSH destination chip (`[[remote]]`, issue #24).
+    Destination(usize),
     /// Inside the rail, on no chip.
     Empty,
+}
+
+/// Pixels between the local chips' `+` and the first destination chip. The
+/// separator line is painted in its middle.
+pub const DESTINATION_SEPARATOR_PX: usize = 2 * RAIL_LABEL_INSET + 1;
+
+/// Connection state a destination chip shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationStatus {
+    Disconnected,
+    Loading,
+    Ready,
+    Failed,
+}
+
+impl DestinationStatus {
+    /// Leading glyph cell of the chip.
+    pub fn glyph(self) -> char {
+        match self {
+            Self::Disconnected => '○',
+            Self::Loading => '…',
+            Self::Ready => '●',
+            Self::Failed => '!',
+        }
+    }
+
+    /// Spoken state for the accessibility tree.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Disconnected => "not connected",
+            Self::Loading => "connecting",
+            Self::Ready => "connected",
+            Self::Failed => "connection failed",
+        }
+    }
+}
+
+/// What one destination chip paints as. Built from the remote catalog state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RailDestinationView {
+    /// Label and, when connected, the running Space count (`devbox 3`).
+    pub label: String,
+    pub status: DestinationStatus,
+    /// Its Space list is open.
+    pub open: bool,
+}
+
+impl RailDestinationView {
+    /// Chip width in cells: the status glyph and a space before the label.
+    pub fn cells(&self, cap: usize) -> usize {
+        chip_cells_for(name_cells(&self.label).saturating_add(1), cap)
+    }
 }
 
 /// Pixel box of the rail and the chip grid inside it. Chips are sized to
@@ -124,6 +178,9 @@ pub struct RailLayout {
     pub chip_cols: usize,
     /// Per-chip widths in pixels, in rail order (without the `+`).
     pub chip_px: Vec<usize>,
+    /// Destination chip widths in pixels. They follow the `+` (issue #24);
+    /// empty when no `[[remote]]` is configured, which leaves the rail as is.
+    pub dest_px: Vec<usize>,
     pub overflow: bool,
     /// Gap between chips (the configured `pane_gap_px`).
     pub gap: usize,
@@ -170,6 +227,7 @@ impl RailLayout {
             cell_h,
             chip_cols: cap,
             chip_px: chip_px.clone(),
+            dest_px: Vec::new(),
             overflow: false,
             gap: geom.rail_gap,
             pad,
@@ -305,6 +363,58 @@ impl RailLayout {
         }
     }
 
+    /// Pixel box of destination chip `index`, or `None` when it would not
+    /// fit. Destinations follow the `+` after [`DESTINATION_SEPARATOR_PX`];
+    /// with overflow they sit just before the `+`, anchored to the end.
+    pub fn dest_bounds(&self, index: usize, n: usize) -> Option<(usize, usize, usize, usize)> {
+        let count = self.dest_px.len();
+        if index >= count {
+            return None;
+        }
+        let (plus_x, plus_y, plus_w, plus_h) = self.chip_bounds(n, n)?;
+        let sep = DESTINATION_SEPARATOR_PX;
+        if self.side.horizontal() {
+            let w = self.dest_px[index];
+            let x = if self.overflow {
+                let tail: usize = self.dest_px[index..].iter().sum();
+                plus_x.checked_sub(sep + tail + (count - 1 - index) * self.gap)?
+            } else {
+                let before: usize = self.dest_px[..index].iter().sum();
+                plus_x + plus_w + sep + before + index * self.gap
+            };
+            let left = self.x + self.pad;
+            let right = (self.x + self.w).saturating_sub(self.pad);
+            (x >= left && x + w <= right).then_some((x, self.y, w, self.h))
+        } else {
+            let step = self.cell_h + self.gap;
+            let y = if self.overflow {
+                plus_y.checked_sub(sep + (count - index) * step - self.gap)?
+            } else {
+                plus_y + plus_h + sep + index * step
+            };
+            (y >= self.y && y + self.cell_h <= self.y + self.h).then_some((
+                self.x,
+                y,
+                self.w,
+                self.cell_h,
+            ))
+        }
+    }
+
+    /// Room the destination group needs past the `+`, along the rail.
+    fn dest_extent(&self) -> usize {
+        if self.dest_px.is_empty() {
+            return 0;
+        }
+        let count = self.dest_px.len();
+        let along = if self.side.horizontal() {
+            self.dest_px.iter().sum::<usize>()
+        } else {
+            count * self.cell_h
+        };
+        DESTINATION_SEPARATOR_PX + along + (count - 1) * self.gap
+    }
+
     /// Left edge of the close cell inside a chip, if the chip can hold it.
     pub fn close_left(&self, x0: usize, width: usize) -> Option<usize> {
         tab_close_left(x0, width, self.cell_w)
@@ -332,6 +442,14 @@ impl RailLayout {
                 }
                 let close = self.close_left(x0, w).is_some_and(|left| px >= left);
                 return Some(RailHit::Chip { index, close });
+            }
+        }
+        for index in 0..self.dest_px.len() {
+            let Some((x0, y0, w, h)) = self.dest_bounds(index, n) else {
+                continue;
+            };
+            if px >= x0 && px < x0.saturating_add(w) && py >= y0 && py < y0.saturating_add(h) {
+                return Some(RailHit::Destination(index));
             }
         }
         Some(RailHit::Empty)
@@ -400,6 +518,8 @@ pub struct SpaceRail {
     pub names: Vec<String>,
     pub live_pane_names: std::collections::HashMap<String, Vec<String>>,
     pub attention_counts: std::collections::HashMap<String, usize>,
+    /// Configured SSH destinations, after the `+` (issue #24).
+    pub destinations: Vec<RailDestinationView>,
     /// Space this host last opened (or was launched with).
     pub current: Option<String>,
     /// Keyboard focus, `0..=names.len()` (`len` is the `+` chip).
@@ -426,6 +546,7 @@ impl SpaceRail {
             names: Vec::new(),
             live_pane_names: Default::default(),
             attention_counts: Default::default(),
+            destinations: Vec::new(),
             current: current.filter(|name| !name.is_empty()),
             focus: None,
             edit: None,
@@ -464,17 +585,30 @@ impl SpaceRail {
                 }
             }
         }
+        let cap = layout.chip_cols;
+        let cell_w = layout.cell_w;
+        layout.dest_px = self
+            .destinations
+            .iter()
+            .map(|dest| dest.cells(cap) * cell_w)
+            .collect();
         let n = self.names.len();
-        if layout.chip_bounds(n, n).is_none() {
+        let dest_overflow = self
+            .destinations
+            .len()
+            .checked_sub(1)
+            .is_some_and(|last| layout.dest_bounds(last, n).is_none());
+        if layout.chip_bounds(n, n).is_none() || dest_overflow {
             layout.overflow = true;
+            let trailing = layout.dest_extent();
             let available = if layout.side.horizontal() {
-                layout
-                    .w
-                    .saturating_sub(2 * layout.pad + 2 * layout.plus_w() + 2 * layout.gap)
+                layout.w.saturating_sub(
+                    2 * layout.pad + 2 * layout.plus_w() + 2 * layout.gap + trailing,
+                )
             } else {
                 layout
                     .h
-                    .saturating_sub(layout.pad + 2 * layout.cell_h + 2 * layout.gap)
+                    .saturating_sub(layout.pad + 2 * layout.cell_h + 2 * layout.gap + trailing)
             };
             let start = self
                 .focus
@@ -1009,6 +1143,152 @@ mod tests {
         geom.rail_chip_cols = 10;
         geom.rail_px = rail_thickness_px(side, 8, 16, 10);
         geom
+    }
+
+    fn dest(label: &str, status: DestinationStatus) -> RailDestinationView {
+        RailDestinationView {
+            label: label.into(),
+            status,
+            open: false,
+        }
+    }
+
+    fn rail_with(names_list: &[&str], dests: Vec<RailDestinationView>) -> SpaceRail {
+        let mut rail = SpaceRail::new(None);
+        rail.names = names(names_list);
+        rail.destinations = dests;
+        rail
+    }
+
+    fn overlaps(a: (usize, usize, usize, usize), b: (usize, usize, usize, usize)) -> bool {
+        a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
+    }
+
+    #[test]
+    fn no_destinations_leave_the_rail_layout_unchanged() {
+        for side in [RailSide::Bottom, RailSide::Left] {
+            let list = names(&["alpha", "beta"]);
+            let plain = RailLayout::for_window(geom(side), 400, 300, &list).unwrap();
+            let rail = rail_with(&["alpha", "beta"], Vec::new());
+            let layout = rail.layout(geom(side), 400, 300, false).unwrap();
+            assert_eq!(layout, plain, "{side:?}");
+            assert!(layout.dest_bounds(0, 2).is_none());
+        }
+    }
+
+    #[test]
+    fn bottom_destinations_follow_the_plus_after_a_separator() {
+        let rail = rail_with(
+            &["alpha", "beta"],
+            vec![
+                dest("devbox 3", DestinationStatus::Ready),
+                dest("lab", DestinationStatus::Disconnected),
+            ],
+        );
+        let layout = rail
+            .layout(geom(RailSide::Bottom), 400, 300, false)
+            .unwrap();
+        assert!(!layout.overflow);
+        // devbox 3: 8 + 1 cells + 3 → 10 (cap); lab: 3 + 1 + 3 → 7.
+        assert_eq!(layout.dest_px, vec![80, 56]);
+        let plus = layout.chip_bounds(2, 2).unwrap();
+        let first = layout.dest_bounds(0, 2).unwrap();
+        let second = layout.dest_bounds(1, 2).unwrap();
+        assert_eq!(first.0, plus.0 + plus.2 + DESTINATION_SEPARATOR_PX);
+        assert_eq!(second.0, first.0 + first.2 + layout.gap);
+        assert_eq!(
+            layout.hit(first.0 + 1, first.1 + 1, 2),
+            Some(RailHit::Destination(0))
+        );
+        assert_eq!(
+            layout.hit(second.0 + second.2 - 1, second.1, 2),
+            Some(RailHit::Destination(1))
+        );
+        assert_eq!(
+            layout.hit(plus.0 + plus.2 + 1, plus.1, 2),
+            Some(RailHit::Empty),
+            "the separator is not a target"
+        );
+    }
+
+    #[test]
+    fn destinations_force_overflow_and_keep_clear_of_local_chips() {
+        let many = ["alpha", "beta", "gamma", "delta", "epsilon"];
+        let dests = vec![
+            dest("devbox 3", DestinationStatus::Ready),
+            dest("lab", DestinationStatus::Failed),
+        ];
+        let without = rail_with(&many, Vec::new())
+            .layout(geom(RailSide::Bottom), 400, 300, false)
+            .unwrap();
+        assert!(!without.overflow, "local chips alone fit");
+        let rail = rail_with(&many, dests);
+        let layout = rail
+            .layout(geom(RailSide::Bottom), 400, 300, false)
+            .unwrap();
+        assert!(layout.overflow, "destinations push the rail into overflow");
+        let n = many.len();
+        let plus = layout.chip_bounds(n, n).unwrap();
+        let more = layout.chip_bounds(n + 1, n).unwrap();
+        let first = layout.dest_bounds(0, n).unwrap();
+        let second = layout.dest_bounds(1, n).unwrap();
+        assert_eq!(second.0 + second.2 + DESTINATION_SEPARATOR_PX, plus.0);
+        assert_eq!(first.0 + first.2 + layout.gap, second.0);
+        for index in 0..n {
+            if let Some(chip) = layout.chip_bounds(index, n) {
+                for other in [first, second, plus, more] {
+                    assert!(!overlaps(chip, other), "chip {index} overlaps {other:?}");
+                }
+            }
+        }
+        assert_eq!(
+            layout.hit(first.0 + 1, first.1 + 1, n),
+            Some(RailHit::Destination(0))
+        );
+    }
+
+    #[test]
+    fn side_destinations_stack_below_the_plus_or_above_it_on_overflow() {
+        let rail = rail_with(&["alpha"], vec![dest("devbox", DestinationStatus::Loading)]);
+        let layout = rail.layout(geom(RailSide::Left), 400, 300, false).unwrap();
+        let plus = layout.chip_bounds(1, 1).unwrap();
+        let first = layout.dest_bounds(0, 1).unwrap();
+        assert_eq!(first.0, layout.x);
+        assert_eq!(first.2, layout.w, "side chips fill the column");
+        assert_eq!(first.1, plus.1 + plus.3 + DESTINATION_SEPARATOR_PX);
+
+        let crowded: Vec<&str> = vec!["s"; 30];
+        let rail = rail_with(
+            &crowded,
+            vec![
+                dest("devbox", DestinationStatus::Ready),
+                dest("lab", DestinationStatus::Ready),
+            ],
+        );
+        let layout = rail.layout(geom(RailSide::Left), 400, 300, false).unwrap();
+        assert!(layout.overflow);
+        let n = crowded.len();
+        let plus = layout.chip_bounds(n, n).unwrap();
+        let second = layout.dest_bounds(1, n).unwrap();
+        let first = layout.dest_bounds(0, n).unwrap();
+        assert_eq!(second.1 + second.3 + DESTINATION_SEPARATOR_PX, plus.1);
+        assert_eq!(first.1 + first.3 + layout.gap, second.1);
+        for index in 0..n {
+            if let Some(chip) = layout.chip_bounds(index, n) {
+                assert!(!overlaps(chip, first) && !overlaps(chip, second));
+            }
+        }
+    }
+
+    #[test]
+    fn destination_chip_width_counts_the_status_glyph() {
+        assert_eq!(dest("lab", DestinationStatus::Ready).cells(28), 7);
+        assert_eq!(
+            dest("a-very-long-destination-label", DestinationStatus::Ready).cells(10),
+            10
+        );
+        assert_eq!(DestinationStatus::Failed.glyph(), '!');
+        assert_eq!(DestinationStatus::Loading.describe(), "connecting");
     }
 
     #[test]

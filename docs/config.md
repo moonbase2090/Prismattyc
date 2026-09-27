@@ -739,8 +739,12 @@ and shows why.
 
 ### Remote Spaces over SSH
 
-`[[remote]]` entries name SSH destinations whose running Spaces the host
-will list (issue #24; the rail integration is in progress). Each entry has
+`[[remote]]` entries add one chip per SSH destination to the Space rail,
+after the `+` (issue #24). Select a chip to connect and list the running
+Spaces on that machine; select it again to refresh. Its glyph shows the
+state: `○` not connected, `…` connecting, `●` connected, `!` failed (the
+list shows the full error and a Retry row). Attaching a remote Space from
+the list is not available yet. Each entry has
 a unique `id` (`a-z`, `0-9`, inner `-`), an `ssh` Host alias from your SSH
 config, and an optional `label`. User, port, keys and proxies belong in
 `~/.ssh/config`; the alias may not start with `-` or contain spaces, `@`,

@@ -26,11 +26,14 @@ pub(crate) const TAB_BASE: u64 = 100;
 pub(crate) const PANE_BASE: u64 = 200;
 pub(crate) const OVERLAY_ROW_BASE: u64 = 400;
 pub(crate) const RAIL_CHIP_BASE: u64 = 700;
+/// SSH destination chips in the rail (issue #24).
+pub(crate) const RAIL_DEST_BASE: u64 = 800;
 
 const MAX_TABS: u64 = 64;
 const MAX_PANES: u64 = 64;
 const MAX_OVERLAY_ROWS: u64 = 64;
 const MAX_RAIL_CHIPS: u64 = 64;
+const MAX_RAIL_DESTS: u64 = 32;
 
 /// One tab chip and the panes it owns.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +139,8 @@ pub(crate) struct ChromeSnapshot {
     pub scroll: Option<String>,
     pub rail: Vec<String>,
     pub rail_current: Option<usize>,
+    /// Destination chips as spoken labels (`devbox, remote, connected`).
+    pub remote: Vec<String>,
     pub document: Option<DocumentSnap>,
     pub live: Option<LiveSnap>,
     pub caption: Option<String>,
@@ -364,6 +369,7 @@ pub(crate) enum ChromeAction {
     SelectTab(usize),
     OverlayActivate(usize),
     OpenSpace(usize),
+    OpenRemote(usize),
 }
 
 /// Join badge words for a tab description.
@@ -432,10 +438,11 @@ pub(crate) fn build_chrome_tree(snap: &ChromeSnapshot) -> (u64, Vec<TreeNode>) {
         ));
     }
 
-    if !snap.rail.is_empty() {
+    if !snap.rail.is_empty() || !snap.remote.is_empty() {
         window_children.push(RAIL_ID);
         let chips: Vec<u64> = (0..snap.rail.len())
             .map(|i| RAIL_CHIP_BASE + i as u64)
+            .chain((0..snap.remote.len()).map(|i| RAIL_DEST_BASE + i as u64))
             .collect();
         nodes.push(chrome_node(
             RAIL_ID,
@@ -450,6 +457,15 @@ pub(crate) fn build_chrome_tree(snap: &ChromeSnapshot) -> (u64, Vec<TreeNode>) {
                 "Button",
                 name.clone(),
                 snap.rail_current == Some(i),
+                Vec::new(),
+            ));
+        }
+        for (i, label) in snap.remote.iter().enumerate() {
+            nodes.push(chrome_node(
+                RAIL_DEST_BASE + i as u64,
+                "Button",
+                label.clone(),
+                false,
                 Vec::new(),
             ));
         }
@@ -589,6 +605,12 @@ pub(crate) fn action_for(id: u64, snap: &ChromeSnapshot) -> Option<ChromeAction>
             return Some(ChromeAction::OpenSpace(index));
         }
     }
+    if (RAIL_DEST_BASE..RAIL_DEST_BASE + MAX_RAIL_DESTS).contains(&id) {
+        let index = (id - RAIL_DEST_BASE) as usize;
+        if index < snap.remote.len() {
+            return Some(ChromeAction::OpenRemote(index));
+        }
+    }
     None
 }
 
@@ -701,6 +723,7 @@ mod tests {
             scroll: None,
             rail: Vec::new(),
             rail_current: None,
+            remote: Vec::new(),
             document: None,
             live: None,
             caption: None,
@@ -756,6 +779,7 @@ mod tests {
             scroll: None,
             rail: Vec::new(),
             rail_current: None,
+            remote: Vec::new(),
             document: None,
             live: None,
             caption: None,
@@ -782,6 +806,7 @@ mod tests {
             scroll: None,
             rail: Vec::new(),
             rail_current: None,
+            remote: Vec::new(),
             document: None,
             live: None,
             caption: None,
@@ -829,6 +854,7 @@ mod tests {
             scroll: Some("4/20".into()),
             rail: vec!["work".into()],
             rail_current: Some(0),
+            remote: Vec::new(),
             document: None,
             live: None,
             caption: None,
@@ -854,6 +880,45 @@ mod tests {
     }
 
     #[test]
+    fn remote_destinations_are_rail_buttons_that_open_their_list() {
+        let snap = ChromeSnapshot {
+            window_title: "Prismattyc".into(),
+            tabs: vec![tab("main", true, "", vec![])],
+            overlay: OverlayKind::None,
+            scroll: None,
+            rail: vec!["work".into()],
+            rail_current: Some(0),
+            remote: vec!["devbox 2, remote, connected".into()],
+            document: None,
+            live: None,
+            caption: None,
+        };
+        let (_, nodes) = build_chrome_tree(&snap);
+        let rail = nodes.iter().find(|node| node.id == RAIL_ID).unwrap();
+        assert_eq!(rail.children, vec![RAIL_CHIP_BASE, RAIL_DEST_BASE]);
+        let dest = nodes.iter().find(|node| node.id == RAIL_DEST_BASE).unwrap();
+        assert_eq!(dest.role, "Button");
+        assert_eq!(dest.name, "devbox 2, remote, connected");
+        assert_eq!(
+            action_for(RAIL_DEST_BASE, &snap),
+            Some(ChromeAction::OpenRemote(0))
+        );
+        assert_eq!(action_for(RAIL_DEST_BASE + 1, &snap), None);
+        assert_eq!(
+            action_for(RAIL_CHIP_BASE, &snap),
+            Some(ChromeAction::OpenSpace(0))
+        );
+
+        let remote_only = ChromeSnapshot {
+            rail: Vec::new(),
+            rail_current: None,
+            ..snap
+        };
+        let (_, nodes) = build_chrome_tree(&remote_only);
+        assert!(nodes.iter().any(|node| node.id == RAIL_ID));
+    }
+
+    #[test]
     fn tab_description_joins_badges() {
         assert_eq!(tab_description(0, false, false), "");
         assert_eq!(tab_description(2, true, true), "2 mail, unseen, attention");
@@ -868,6 +933,7 @@ mod tests {
             scroll: None,
             rail: Vec::new(),
             rail_current: None,
+            remote: Vec::new(),
             document: None,
             live: None,
             caption: None,
@@ -885,6 +951,7 @@ mod tests {
             scroll: None,
             rail: Vec::new(),
             rail_current: None,
+            remote: Vec::new(),
             document: None,
             live: None,
             caption: None,
@@ -912,6 +979,7 @@ mod tests {
             scroll: None,
             rail: Vec::new(),
             rail_current: None,
+            remote: Vec::new(),
             document: None,
             live: None,
             caption: None,
@@ -985,6 +1053,7 @@ mod tests {
             scroll: None,
             rail: Vec::new(),
             rail_current: None,
+            remote: Vec::new(),
             document: Some(viewport_document(&["$ ls".into()], Some((0, 4)), None)),
             live: None,
             caption: None,
@@ -1014,6 +1083,7 @@ mod tests {
             scroll: None,
             rail: Vec::new(),
             rail_current: None,
+            remote: Vec::new(),
             document: Some(viewport_document(&["x".into()], Some((0, 0)), None)),
             live: None,
             caption: None,
@@ -1122,6 +1192,7 @@ mod tests {
             scroll: None,
             rail: Vec::new(),
             rail_current: None,
+            remote: Vec::new(),
             document: None,
             live: Some(LiveSnap {
                 text: "grok-pc: 1 mail".into(),
@@ -1162,6 +1233,7 @@ mod tests {
             scroll: None,
             rail: Vec::new(),
             rail_current: None,
+            remote: Vec::new(),
             document: None,
             live: None,
             caption: None,
@@ -1183,6 +1255,7 @@ mod tests {
             scroll: None,
             rail: Vec::new(),
             rail_current: None,
+            remote: Vec::new(),
             document: None,
             live: None,
             caption: Some("Split the pane to the right. Ctrl+Shift+\\".into()),

@@ -103,12 +103,22 @@ Do not generalize the local daemon protocol merely to implement the catalog. Add
 - [x] Establish catalog schema, typed identities and explicit destination configuration (`prismattyc_mux::remote_catalog`; the host reads `[[remote]]` in the SSH worker step).
 - [x] Implement a read-only remote catalog endpoint using a live daemon snapshot (`pmux space catalog`).
 - [x] Implement bounded SSH catalog requests with cancellation and error results (`prismattyc-host` `remote_catalog`; key or agent authentication only, `BatchMode=yes`).
-- [ ] Present remote destinations and Spaces in the rail with explicit connection states.
+- [x] Present remote destinations and Spaces in the rail with explicit connection states (option B below; selecting a Space reports that attach is not available until the next item).
 - [ ] Implement one-step PTY attach with session selection and lifecycle cleanup.
 - [ ] Exercise isolated SSH catalog, attach, resize, disconnect, reconnect and stale-selection cases.
 - [ ] Run native Mac acceptance for discovery and one-step attachment.
 
 Before rail implementation, compare runnable UI sketches for destination grouping and connection states using the current Space rail geometry. Keep the resulting UI decision with this PR.
+
+### Rail decision (2026-09-27)
+
+Three runnable sketches were compared on the current rail geometry: A, inline groups (a destination chip followed by its Spaces in the rail row); B, one chip per destination that opens a searchable list; C, a leading switcher that shows one machine's Spaces at a time. The owner chose **B**.
+
+- The local rail is unchanged. Destination chips follow the `+` after a separator; with no `[[remote]]` configured, layout, hit testing and painting are identical to before. When the row overflows, destinations sit just before the `+` and the local chips give way first.
+- Each chip shows a status glyph and the label: `○` not connected, `…` connecting, `●` connected (with the running Space count, `devbox 3`), `!` failed (label in the attention colour).
+- Selecting a chip connects, retries, or refreshes it and opens the Space list. The list header names the machine and its state or full error text. Rows are the running Spaces (session count and active session), then Spaces that cannot be attached with the reason. A failure shows one Retry row.
+- Catalog state is app-wide, so every window shows the same connection state and one request runs per destination. Which list is open belongs to each window.
+- Remote chips have no close or rename, and the list never offers local rename or delete. The accessibility tree exposes each destination as a rail button named with its state.
 
 ## Acceptance evidence
 

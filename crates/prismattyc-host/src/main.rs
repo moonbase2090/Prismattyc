@@ -38,6 +38,7 @@ mod present_tiles;
 mod rail_resize;
 mod raster;
 mod regroup;
+mod remote_catalog;
 mod render_diagnostics;
 mod restart;
 mod terminal_switcher;

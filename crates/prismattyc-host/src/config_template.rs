@@ -510,8 +510,21 @@ pub fn render_template() -> String {
     emit_keys_table(&mut out);
     out.push('\n');
     out.push_str(&render_a11y_section());
+    out.push('\n');
+    out.push_str(REMOTE_SECTION);
     out
 }
+
+/// Commented `[[remote]]` example. No destination is configured by default.
+const REMOTE_SECTION: &str = "# -- remote spaces --
+# SSH destinations whose running Spaces the host can list (issue #24).
+# `ssh` names a Host alias from your SSH config. Authentication uses keys
+# or ssh-agent only; unknown host keys are never accepted automatically.
+# [[remote]]
+# id = \"devbox\"        # a-z, 0-9 and '-'; unique
+# ssh = \"devbox\"       # SSH config Host alias
+# label = \"Dev box\"    # optional display name
+";
 
 fn render_a11y_section() -> String {
     let mut out = String::from("# -- accessibility --\n");
@@ -872,6 +885,11 @@ pub fn help_lines() -> Vec<String> {
             key.name, key.doc, key.range
         ));
     }
+    lines.push("    [[remote]]".to_string());
+    lines.push(
+        "    remote.id / ssh / label       SSH destination for remote Spaces (id, Host alias, name)"
+            .to_string(),
+    );
     lines.push("    [a11y]".to_string());
     lines.push(
         "    a11y.os_tree                 Expose host chrome through AccessKit (VoiceOver / Orca) (true|false)"
@@ -949,6 +967,7 @@ mod tests {
         "keys",
         "a11y",
         "theme_overrides",
+        "remote",
     ];
 
     #[test]
@@ -959,7 +978,10 @@ mod tests {
                 || template.contains(&format!("# {field} ="))
                 || template.contains(&format!("[{field}]"));
             assert!(present, "template missing {field}");
-            if !matches!(*field, "mux" | "keys" | "a11y" | "theme_overrides") {
+            if !matches!(
+                *field,
+                "mux" | "keys" | "a11y" | "theme_overrides" | "remote"
+            ) {
                 assert!(
                     CONFIG_KEYS.iter().any(|key| key.name == *field),
                     "CONFIG_KEYS missing {field}"

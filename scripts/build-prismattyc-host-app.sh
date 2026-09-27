@@ -30,7 +30,7 @@ cp "$ROOT/crates/prismattyc-host/macos/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/target/release/prismattyc-host" "$APP/Contents/MacOS/prismattyc-host"
 cp "$ICNS" "$APP/Contents/Resources/prismattyc.icns"
 python3 "$ROOT/scripts/package-terminfo.py" --out "$APP/Contents/Resources/terminfo"
-cp "$ROOT/scripts/install-prismattyc-terminfo.sh" "$APP/Contents/MacOS/install-prismattyc-terminfo.sh"
+cp "$ROOT/scripts/install-prismattyc-terminfo.sh" "$APP/Contents/Resources/install-prismattyc-terminfo.sh"
 
 # 4. Ad-hoc sign for local Gatekeeper. Tolerated on failure (e.g. no
 # codesign identity available); this is a local unsigned bundle either way.

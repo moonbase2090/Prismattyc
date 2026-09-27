@@ -87,7 +87,7 @@ cp "$ROOT/LICENSE" "$RESOURCES/MPL-2.0.txt"
 cp "$ROOT/NOTICE.txt" "$RESOURCES/NOTICE.txt"
 cp "$ROOT/crates/prismattyc-host/themes/OMARCHY-LICENSE.txt" "$RESOURCES/OMARCHY-LICENSE.txt"
 cp "$ROOT/crates/prismattyc-host/assets/fonts/"*.txt "$RESOURCES/"
-cp "$ROOT/scripts/install-prismattyc-terminfo.sh" "$MACOS/"
+cp "$ROOT/scripts/install-prismattyc-terminfo.sh" "$RESOURCES/"
 python3 "$ROOT/scripts/package-terminfo.py" --out "$RESOURCES/terminfo"
 
 for name in prismattyc-host pmux pmuxd pmux-attach; do

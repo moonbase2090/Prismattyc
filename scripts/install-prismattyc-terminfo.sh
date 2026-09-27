@@ -3,7 +3,7 @@
 set -eu
 base=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 source_file=
-for candidate in "$base/../Resources/terminfo/portable.src" "$base/../share/terminfo/portable.src" "$base/../terminfo/portable.src"; do
+for candidate in "$base/terminfo/portable.src" "$base/../Resources/terminfo/portable.src" "$base/../share/terminfo/portable.src" "$base/../terminfo/portable.src"; do
     if [ -f "$candidate" ]; then source_file=$candidate; break; fi
 done
 if [ -z "$source_file" ]; then

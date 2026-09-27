@@ -34,8 +34,12 @@ Explicitly install the portable entries once for your remote user (requires
 ```bash
 # From a source checkout:
 ./scripts/install-prismattyc-terminfo.sh --ssh user@host
-# From the macOS app, adjust the installation location if necessary:
-/Applications/Prismattyc.app/Contents/MacOS/install-prismattyc-terminfo.sh --ssh user@host
+# From the macOS app (the second path supports older installed bundles):
+helper=/Applications/Prismattyc.app/Contents/Resources/install-prismattyc-terminfo.sh
+if [ ! -x "$helper" ]; then
+    helper=/Applications/Prismattyc.app/Contents/MacOS/install-prismattyc-terminfo.sh
+fi
+"$helper" --ssh user@host
 ssh user@host
 ```
 

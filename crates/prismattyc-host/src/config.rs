@@ -232,6 +232,10 @@ pub struct ConfigFile {
     /// applied by [`load`] so hot reload and the picker both keep them.
     #[serde(default)]
     pub theme_overrides: Option<crate::theme::ThemeOverrides>,
+    /// `[[remote]]` SSH destinations for remote Spaces (issue #24).
+    /// Validated by [`load`]; see [`ConfigFile::remote_destinations`].
+    #[serde(default)]
+    pub remote: Option<Vec<prismattyc_mux::remote_catalog::RemoteDestinationEntry>>,
 }
 
 /// Host accessibility switches (PT-173 / PT-175).
@@ -245,6 +249,13 @@ pub struct A11ySection {
 impl ConfigFile {
     /// The effective key table. Falls back to the defaults if the table
     /// somehow fails validation (it cannot after [`load`], but never panic).
+    /// Validated `[[remote]]` destinations. Empty when none are configured.
+    pub fn remote_destinations(
+        &self,
+    ) -> Result<Vec<prismattyc_mux::remote_catalog::SshDestination>> {
+        prismattyc_mux::remote_catalog::parse_destinations(self.remote.as_deref().unwrap_or(&[]))
+    }
+
     pub fn loaded_keymap(&self) -> crate::keybind::KeyMap {
         crate::keybind::KeyMap::from_config(self.keys.as_ref())
             .unwrap_or_else(|_| crate::keybind::KeyMap::default())
@@ -538,6 +549,7 @@ fn parse(raw: &str, path: &Path) -> Result<ConfigFile> {
             "focus_border {spec:?} is not a spectrum name or 0-6 index"
         );
     }
+    config.remote_destinations()?;
     let mut theme = crate::theme::load(config.theme.as_deref(), path)?;
     if let Some(overrides) = &config.theme_overrides {
         crate::theme::apply_overrides(&mut theme, overrides)?;
@@ -782,6 +794,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn remote_destinations_load_and_invalid_entries_are_rejected() {
+        let dir = temp_dir("remote");
+        let path = dir.join("config.toml");
+        assert!(ConfigFile::default()
+            .remote_destinations()
+            .unwrap()
+            .is_empty());
+
+        std::fs::write(
+            &path,
+            "[[remote]]\nid = \"devbox\"\nssh = \"devbox.lan\"\nlabel = \"Dev box\"\n\n[[remote]]\nid = \"lab\"\nssh = \"lab\"\n",
+        )
+        .unwrap();
+        let destinations = load(&path).unwrap().remote_destinations().unwrap();
+        assert_eq!(destinations.len(), 2);
+        assert_eq!(destinations[0].ssh_alias.as_str(), "devbox.lan");
+        assert_eq!(destinations[0].label, "Dev box");
+        assert_eq!(destinations[1].label, "lab");
+
+        for bad in [
+            "[[remote]]\nid = \"x\"\nssh = \"-oProxyCommand=sh\"\n",
+            "[[remote]]\nid = \"Bad Id\"\nssh = \"x\"\n",
+            "[[remote]]\nid = \"x\"\nssh = \"a\"\n[[remote]]\nid = \"x\"\nssh = \"b\"\n",
+            "[[remote]]\nid = \"x\"\nssh = \"a\"\nport = 22\n",
+        ] {
+            std::fs::write(&path, bad).unwrap();
+            assert!(load(&path).is_err(), "{bad:?} must be rejected");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -377,6 +377,15 @@ rich_focus = "ctrl+shift+g"
 os_tree = true
 # Speak mail, attention, pane-title notices, and cursor-line changes (PT-175). true|false.
 announce = true
+
+# -- remote spaces --
+# SSH destinations whose running Spaces the host can list (issue #24).
+# `ssh` names a Host alias from your SSH config. Authentication uses keys
+# or ssh-agent only; unknown host keys are never accepted automatically.
+# [[remote]]
+# id = "devbox"        # a-z, 0-9 and '-'; unique
+# ssh = "devbox"       # SSH config Host alias
+# label = "Dev box"    # optional display name
 ```
 
 All spacing values accept `0` through `128` physical pixels.
@@ -727,6 +736,25 @@ an empty view.
 The current space cannot be deleted from the rail; open another space first.
 A name that already exists, or one with `/` or `..`, keeps the dialog open
 and shows why.
+
+### Remote Spaces over SSH
+
+`[[remote]]` entries name SSH destinations whose running Spaces the host
+will list (issue #24; the rail integration is in progress). Each entry has
+a unique `id` (`a-z`, `0-9`, inner `-`), an `ssh` Host alias from your SSH
+config, and an optional `label`. User, port, keys and proxies belong in
+`~/.ssh/config`; the alias may not start with `-` or contain spaces, `@`,
+`:` or shell characters.
+
+A catalog request runs `ssh -T -o BatchMode=yes -o ConnectTimeout=10 --
+ALIAS pmux space catalog` only on an explicit connect or refresh, never
+in the background. `BatchMode` means authentication uses keys or
+ssh-agent only: a password or passphrase prompt, or an unknown or changed
+host key, becomes a visible error instead of a hidden prompt. Verify a new
+host once with `ssh ALIAS` in a terminal. Requests stop after 20 seconds
+or 1 MiB of output. `pmux` must be on the remote non-interactive `PATH`,
+and the remote `pmuxd` must already be running; the host never installs
+software or starts a daemon remotely.
 
 ## Hot reload
 

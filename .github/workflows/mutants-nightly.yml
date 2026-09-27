@@ -1,8 +1,7 @@
 name: Mutants nightly
 
 # Full crate mutation. Archive build/mutants/<crate>. Not the PR 80% gate.
-# GitHub-hosted minutes are paused. Local Actions is the runner
-# (if: github.actor == 'nektos/act'). Dispatch:
+# Runs on GitHub-hosted runners. Local Actions dispatch:
 #   local-actions run --event workflow_dispatch --job mutants-nightly
 on:
   schedule:
@@ -22,7 +21,6 @@ env:
 jobs:
   mutants-nightly:
     name: Mutants nightly
-    if: ${{ github.actor == 'nektos/act' }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:

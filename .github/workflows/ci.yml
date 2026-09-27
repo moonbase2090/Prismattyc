@@ -1,9 +1,8 @@
 name: CI
 
-# GitHub-hosted minutes are paused until the billing month resets.
-# Local Actions (act + Docker) is the merge gate. Same file, same jobs.
-# Jobs no-op on github.com (actor is the pusher). Local Actions passes
-# --actor nektos/act. Restore GHA by deleting the per-job `if`.
+# Standard jobs run on GitHub-hosted runners (free for public repos).
+# Jobs that need the local-actions-runner image still run only under
+# Local Actions (act + Docker), which passes --actor nektos/act.
 on:
   push:
   pull_request:
@@ -31,7 +30,6 @@ env:
 jobs:
   format:
     name: Format
-    if: ${{ github.actor == 'nektos/act' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -65,7 +63,6 @@ jobs:
 
   check:
     name: Check
-    if: ${{ github.actor == 'nektos/act' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -112,7 +109,6 @@ jobs:
 
   test:
     name: Test
-    if: ${{ github.actor == 'nektos/act' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -159,7 +155,6 @@ jobs:
   # Periodic: .github/workflows/phase3-rich-nightly.yml
   phase3-rich:
     name: Phase 3 rich harness
-    if: ${{ github.actor == 'nektos/act' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -207,7 +202,6 @@ jobs:
 
   lint:
     name: Lint
-    if: ${{ github.actor == 'nektos/act' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -248,7 +242,6 @@ jobs:
   # - pmux-mcp: Mail* UnixStream
   windows-check:
     name: Windows check
-    if: ${{ github.actor == 'nektos/act' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -304,7 +297,6 @@ jobs:
 
   windows-test:
     name: Windows test
-    if: ${{ github.actor == 'nektos/act' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

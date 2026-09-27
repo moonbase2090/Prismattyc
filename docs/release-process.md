@@ -35,13 +35,13 @@ push a tag.
 gh workflow run release.yml \
   --repo moonbase2090/Prismattyc \
   --ref main \
-  -f tag=v0.2.19 \
+  -f tag=v0.2.20 \
   -f dry_run=true
 gh run list --repo moonbase2090/Prismattyc --workflow release.yml --limit 5
 gh run watch RUN_ID --repo moonbase2090/Prismattyc --exit-status
 ```
 
-Replace `v0.2.19` with the release tag to validate. Copy the run ID from
+Replace `v0.2.20` with the release tag to validate. Copy the run ID from
 `gh run list` into `gh run watch`.
 
 ## Configure Apple credentials

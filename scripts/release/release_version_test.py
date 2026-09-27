@@ -6,17 +6,17 @@ from release_version import parse_release_version, reports_release_version
 
 class ReleaseVersionTests(unittest.TestCase):
     def test_stable_version(self):
-        self.assertEqual(parse_release_version("0.2.19"), ("0.2.19", "0.2.19"))
+        self.assertEqual(parse_release_version("0.2.20"), ("0.2.20", "0.2.20"))
 
     def test_tag_prefix_is_optional(self):
-        self.assertEqual(parse_release_version("v0.2.19"), ("0.2.19", "0.2.19"))
+        self.assertEqual(parse_release_version("v0.2.20"), ("0.2.20", "0.2.20"))
 
     def test_prerelease_accepts_full_or_base_binary_version(self):
-        self.assertTrue(reports_release_version("prismattyc 0.2.19-rc.2", "0.2.19-rc.2"))
-        self.assertTrue(reports_release_version("prismattyc 0.2.19", "0.2.19-rc.2"))
+        self.assertTrue(reports_release_version("prismattyc 0.2.20-rc.2", "0.2.20-rc.2"))
+        self.assertTrue(reports_release_version("prismattyc 0.2.20", "0.2.20-rc.2"))
 
     def test_unrelated_version_is_rejected(self):
-        self.assertFalse(reports_release_version("prismattyc 0.2.18", "0.2.19-rc.2"))
+        self.assertFalse(reports_release_version("prismattyc 0.2.19", "0.2.20-rc.2"))
 
     def test_malformed_versions_are_rejected(self):
         for version in (

@@ -236,7 +236,9 @@ pub fn spawn_open(url: &str) -> bool {
 #[cfg(windows)]
 pub fn spawn_open(url: &str) -> bool {
     use windows_sys::Win32::{
-        System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE},
+        System::Com::{
+            CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+        },
         UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
     };
     if !is_allowed_http_url(url) {

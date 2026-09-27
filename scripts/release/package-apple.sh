@@ -18,7 +18,7 @@ if [[ "$(uname -s)" != Darwin ]]; then
   exit 1
 fi
 
-for tool in codesign dmgbuild ditto file hdiutil lipo openssl python3 security shasum spctl xcrun; do
+for tool in codesign curl dmgbuild ditto file hdiutil lipo openssl python3 security shasum spctl xcrun; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "required tool not found: $tool" >&2
     exit 1
@@ -40,9 +40,22 @@ PY
 
 WORK="$(mktemp -d /tmp/prismattyc-release.XXXXXX)"
 KEYCHAIN="$WORK/release.keychain-db"
+ORIGINAL_KEYCHAINS=()
+KEYCHAIN_SEARCH_LIST_UPDATED=0
 cleanup() {
   status=$?
   trap - EXIT
+  if [[ "$KEYCHAIN_SEARCH_LIST_UPDATED" == 1 ]]; then
+    if ((${#ORIGINAL_KEYCHAINS[@]})); then
+      if ! security list-keychains -d user -s "${ORIGINAL_KEYCHAINS[@]}"; then
+        echo 'failed to restore the original user keychain search list' >&2
+        status=1
+      fi
+    elif ! security list-keychains -d user -s; then
+      echo 'failed to restore the empty user keychain search list' >&2
+      status=1
+    fi
+  fi
   security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true
   if ! rm -rf "$WORK"; then
     status=1
@@ -51,6 +64,18 @@ cleanup() {
 }
 trap cleanup EXIT
 KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+KEYCHAIN_SEARCH_LIST="$WORK/keychain-search-list.nul"
+security list-keychains -d user | python3 -c '
+import os
+import shlex
+import sys
+
+for keychain in shlex.split(sys.stdin.read()):
+    sys.stdout.buffer.write(os.fsencode(keychain) + b"\0")
+' > "$KEYCHAIN_SEARCH_LIST"
+while IFS= read -r -d '' keychain; do
+  ORIGINAL_KEYCHAINS+=("$keychain")
+done < "$KEYCHAIN_SEARCH_LIST"
 
 mkdir -p "$DIST"
 APP="$WORK/Prismattyc.app"
@@ -125,6 +150,27 @@ security set-keychain-settings -lut 21600 "$KEYCHAIN"
 security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 security import "$CERTIFICATE" -f pkcs12 -k "$KEYCHAIN" \
   -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+# codesign also needs the imported identity to be reachable through this list.
+KEYCHAIN_SEARCH_LIST_UPDATED=1
+if ((${#ORIGINAL_KEYCHAINS[@]})); then
+  security list-keychains -d user -s "$KEYCHAIN" "${ORIGINAL_KEYCHAINS[@]}"
+else
+  security list-keychains -d user -s "$KEYCHAIN"
+fi
+
+DEVELOPER_ID_G2_SHA256=f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a
+if ! security find-certificate -a -Z "$KEYCHAIN" \
+  | grep -Fi "$DEVELOPER_ID_G2_SHA256" >/dev/null; then
+  # The p12 may omit its issuer; fetch only Apple's pinned Developer ID G2 cert.
+  DEVELOPER_ID_G2_CERTIFICATE="$WORK/DeveloperIDG2CA.cer"
+  curl --fail --silent --show-error --location \
+    --output "$DEVELOPER_ID_G2_CERTIFICATE" \
+    https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+  printf '%s  %s\n' "$DEVELOPER_ID_G2_SHA256" "$DEVELOPER_ID_G2_CERTIFICATE" \
+    | shasum -a 256 -c -
+  security import "$DEVELOPER_ID_G2_CERTIFICATE" -t cert -k "$KEYCHAIN"
+fi
+
 security set-key-partition-list -S apple-tool:,apple:,codesign: \
   -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
 IDENTITY_LINES="$(security find-identity -v -p codesigning "$KEYCHAIN" \

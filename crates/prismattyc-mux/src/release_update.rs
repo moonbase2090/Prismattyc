@@ -887,9 +887,10 @@ pub(crate) fn is_windows_forwarding_pair(parent: &Path, child: &Path) -> bool {
             }
             let version = Version::parse(&installed.version)?;
             let prefix = format!("v{version}-{}-", installed.target);
-            if !component.strip_prefix(prefix.as_str()).is_some_and(|nonce| {
-                !nonce.is_empty() && nonce.bytes().all(|b| b.is_ascii_digit())
-            }) {
+            if !component
+                .strip_prefix(prefix.as_str())
+                .is_some_and(|nonce| !nonce.is_empty() && nonce.bytes().all(|b| b.is_ascii_digit()))
+            {
                 return Ok(false);
             }
         }

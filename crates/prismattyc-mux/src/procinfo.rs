@@ -990,9 +990,9 @@ mod windows {
                     .with_exe(UpdateKind::Always),
             );
             if pids.iter().any(|pid| {
-                system.process(*pid).is_none_or(|process| {
-                    process.cmd().is_empty() || process.exe().is_none()
-                })
+                system
+                    .process(*pid)
+                    .is_none_or(|process| process.cmd().is_empty() || process.exe().is_none())
             }) {
                 return None;
             }
@@ -1130,7 +1130,8 @@ mod windows {
         }
         if parent_name != "pmux"
             || child_name != "pmux-attach"
-            || parent_exe.parent()?.canonicalize().ok()? != child_exe.parent()?.canonicalize().ok()?
+            || parent_exe.parent()?.canonicalize().ok()?
+                != child_exe.parent()?.canonicalize().ok()?
         {
             return Some(false);
         }

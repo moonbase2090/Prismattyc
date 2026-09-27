@@ -28,7 +28,7 @@ fn decode_png_icon(png_bytes: &[u8]) -> Option<Icon> {
         png::ColorType::Rgb => {
             let rgb = &buf[..info.buffer_size()];
             let mut out = Vec::with_capacity((rgb.len() / 3) * 4);
-            for chunk in rgb.chunks_exact(3) {
+            for chunk in rgb.as_chunks::<3>().0 {
                 out.extend_from_slice(chunk);
                 out.push(255);
             }
@@ -37,7 +37,7 @@ fn decode_png_icon(png_bytes: &[u8]) -> Option<Icon> {
         png::ColorType::GrayscaleAlpha => {
             let ga = &buf[..info.buffer_size()];
             let mut out = Vec::with_capacity((ga.len() / 2) * 4);
-            for chunk in ga.chunks_exact(2) {
+            for chunk in ga.as_chunks::<2>().0 {
                 let g = chunk[0];
                 out.extend_from_slice(&[g, g, g, chunk[1]]);
             }

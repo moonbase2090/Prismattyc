@@ -10,6 +10,7 @@ import struct
 import subprocess
 import tempfile
 import zipfile
+from release_version import parse_release_version, reports_release_version
 
 BINARIES = ('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host')
 
@@ -37,8 +38,10 @@ def main():
     parser.add_argument('--bin-dir', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
-    if len(args.version.split('.')) != 3 or any(not p.isdecimal() for p in args.version.split('.')):
-        parser.error('version must be three decimal components')
+    try:
+        args.version, _base_version = parse_release_version(args.version)
+    except ValueError as error:
+        parser.error(str(error))
     if sys.platform != "win32":
         parser.error("package on native Windows so every executable version is checked")
     repo = Path(__file__).resolve().parents[2]
@@ -47,7 +50,7 @@ def main():
         path = bins / f'{name}.exe'
         validate_pe(path)
         result = subprocess.run([str(path), '--version'], capture_output=True, text=True, timeout=10, check=True)
-        if args.version not in result.stdout.split():
+        if not reports_release_version(result.stdout, args.version):
             parser.error(f'{name}: unexpected version output {result.stdout!r}')
     args.out.mkdir(parents=True, exist_ok=False)
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()

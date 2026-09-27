@@ -2,7 +2,8 @@
 param(
     [ValidateSet('x86_64-pc-windows-msvc', 'x86_64-pc-windows-gnu')]
     [string]$Target = 'x86_64-pc-windows-msvc',
-    [string]$Output = 'build/windows-release'
+    [string]$Output = 'build/windows-release',
+    [string]$Version = ''
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
@@ -22,8 +23,10 @@ try {
     $binDir = Join-Path $targetRoot "$Target/release"
     $metadata = cargo +1.90.0 metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed.' }
-    $version = ($metadata.packages | Where-Object { $_.name -eq 'prismattyc-host' }).version
-    python scripts/release/package-windows.py --version $version --target $Target --bin-dir $binDir --out $Output
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        $Version = ($metadata.packages | Where-Object { $_.name -eq 'prismattyc-host' }).version
+    }
+    python scripts/release/package-windows.py --version $Version --target $Target --bin-dir $binDir --out $Output
     if ($LASTEXITCODE -ne 0) { throw 'Windows packaging failed.' }
     Write-Host "Windows package: $((Resolve-Path $Output).Path)"
 } finally {

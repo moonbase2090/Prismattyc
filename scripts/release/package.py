@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+from release_version import parse_release_version, reports_release_version
 
 BINARIES = ('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host')
 p = argparse.ArgumentParser(description=__doc__)
@@ -27,9 +28,12 @@ def sha256(path):
         for chunk in iter(lambda: stream.read(1024 * 1024), b''):
             digest.update(chunk)
     return digest.hexdigest()
-parts = a.version.split('.')
-if len(parts) != 3 or any(not part.isdecimal() for part in parts) or tuple(map(int, parts)) < (0, 2, 0):
-    p.error('use a stable version at or after 0.2.0')
+try:
+    a.version, base_version = parse_release_version(a.version)
+except ValueError as error:
+    p.error(str(error))
+if tuple(map(int, base_version.split('.'))) < (0, 2, 0):
+    p.error('use a version at or after 0.2.0')
 if 'linux' not in a.target:
     p.error('macOS packaging requires the signed application release process')
 architecture, elf_machine = {
@@ -44,8 +48,8 @@ for name in BINARIES:
             int.from_bytes(header[18:20], 'little') != elf_machine):
         p.error(f'{name} is not a Linux {architecture} executable')
     result = subprocess.run([str(a.bin_dir / name), '--version'], capture_output=True, timeout=5, check=True)
-    if a.version not in result.stdout.decode().split():
-        p.error(f'{name} has the wrong version')
+    if not reports_release_version(result.stdout.decode(), a.version):
+        p.error(f'{name} does not report release version {a.version} or its base version')
 for name in (*BINARIES, 'pmux-pane-write'):
     if not (a.man_dir / f'{name}.1').is_file():
         p.error(f'missing manual: {name}.1')

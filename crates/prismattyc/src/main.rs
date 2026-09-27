@@ -2469,7 +2469,7 @@ impl Cli {
         }
 
         let explicit_program = program.is_some();
-        let program = program.unwrap_or_else(|| prismattyc_mux::platform::default_shell());
+        let program = program.unwrap_or_else(prismattyc_mux::platform::default_shell);
 
         Ok(Self {
             experimental_rich,

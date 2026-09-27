@@ -7897,6 +7897,50 @@ fn write_all_timeout_aware(
     Ok(())
 }
 
+#[cfg(unix)]
+fn owned_socket(_path: &Path, metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_socket() && metadata.uid() == rustix::process::geteuid().as_raw()
+}
+#[cfg(windows)]
+fn owned_socket(path: &Path, _metadata: &fs::Metadata) -> bool {
+    crate::platform::owned_socket(path)
+}
+#[cfg(windows)]
+pub fn default_socket_path(instance: &str) -> io::Result<PathBuf> {
+    validate_socket_instance(instance)?;
+    Ok(crate::platform::user_directory()?.join(socket_filename(instance)))
+}
+#[cfg(windows)]
+pub fn diagnose_runtime_dir_miss_from_env(_resolved_socket: &Path) -> Option<RuntimeDirMiss> {
+    // This diagnostic is exclusively for systemd user runtime directories.
+    None
+}
+#[cfg(windows)]
+fn control_peer_closed(stream: &UnixStream) -> bool {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::*;
+    unsafe {
+        let mut fd = WSAPOLLFD {
+            fd: stream.as_raw_socket() as usize,
+            events: POLLRDNORM,
+            revents: 0,
+        };
+        let ready = WSAPoll(&mut fd, 1, 0);
+        if ready == SOCKET_ERROR {
+            return true;
+        }
+        if ready == 0 {
+            return false;
+        }
+        if fd.revents & (POLLHUP | POLLERR | POLLNVAL) != 0 {
+            return true;
+        }
+        let mut byte = 0u8;
+        let result = recv(fd.fd, &mut byte, 1, MSG_PEEK);
+        result == 0 || (result == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -16059,49 +16103,5 @@ mod tests {
             !plane.write_ledger.contains_key(&pane),
             "a rejected write must not dirty input"
         );
-    }
-}
-
-#[cfg(unix)]
-fn owned_socket(_path: &Path, metadata: &fs::Metadata) -> bool {
-    metadata.file_type().is_socket() && metadata.uid() == rustix::process::geteuid().as_raw()
-}
-#[cfg(windows)]
-fn owned_socket(path: &Path, _metadata: &fs::Metadata) -> bool {
-    crate::platform::owned_socket(path)
-}
-#[cfg(windows)]
-pub fn default_socket_path(instance: &str) -> io::Result<PathBuf> {
-    validate_socket_instance(instance)?;
-    Ok(crate::platform::user_directory()?.join(socket_filename(instance)))
-}
-#[cfg(windows)]
-pub fn diagnose_runtime_dir_miss_from_env(_resolved_socket: &Path) -> Option<RuntimeDirMiss> {
-    // This diagnostic is exclusively for systemd user runtime directories.
-    None
-}
-#[cfg(windows)]
-fn control_peer_closed(stream: &UnixStream) -> bool {
-    use std::os::windows::io::AsRawSocket;
-    use windows_sys::Win32::Networking::WinSock::*;
-    unsafe {
-        let mut fd = WSAPOLLFD {
-            fd: stream.as_raw_socket() as usize,
-            events: POLLRDNORM,
-            revents: 0,
-        };
-        let ready = WSAPoll(&mut fd, 1, 0);
-        if ready == SOCKET_ERROR {
-            return true;
-        }
-        if ready == 0 {
-            return false;
-        }
-        if fd.revents & (POLLHUP | POLLERR | POLLNVAL) != 0 {
-            return true;
-        }
-        let mut byte = 0u8;
-        let result = recv(fd.fd, &mut byte, 1, MSG_PEEK);
-        result == 0 || (result == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK)
     }
 }

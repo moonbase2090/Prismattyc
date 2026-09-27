@@ -24,6 +24,7 @@ pmux attach work         # attach to a named session
 pmux attach work --json # force the JSON ReadPane dump
 pmux attach --read-only  # view only; never take the input lease
 pmux attach --all        # open prismattyc-host; sessions as panes in tabs
+pmux attach --session-id 3 --space-id SPACE  # only if SPACE still owns session 3; never starts a server (remote attach)
 pmux ls                  # sessions → windows (tabs) → panes (liveness, pids, leases)
 pmux whoami              # this pane: session name, opaque id, pane, agent
 pmux attention work "needs input" # send OSC 9 to the session pane

@@ -217,3 +217,66 @@ fn catalog_reports_a_stopped_daemon_as_an_error() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn space_id_attach_requires_ownership_and_never_starts_a_daemon() {
+    let mut f = Fixture::new();
+    f.ok(&["space", "create", "work", "--no-attach"]);
+    f.ok(&["space", "create", "other", "--no-attach"]);
+    let catalog = f.catalog();
+    let space = |name: &str| {
+        catalog
+            .spaces
+            .iter()
+            .find(|space| space.name == name)
+            .unwrap()
+    };
+    let work = space("work").clone();
+    let other = space("other").clone();
+    let session = work.active_session.0.to_string();
+    fn attach(f: &Fixture, session: &str, space_id: &str) -> Output {
+        f.command(env!("CARGO_BIN_EXE_pmux"))
+            .env("PMUX_ATTACH", env!("CARGO_BIN_EXE_pmux-attach"))
+            .args([
+                "attach",
+                "--session-id",
+                session,
+                "--space-id",
+                space_id,
+                "--json",
+            ])
+            .output()
+            .unwrap()
+    }
+
+    let owned = attach(&f, &session, work.id.as_str());
+    assert!(
+        owned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&owned.stderr)
+    );
+    assert!(!owned.stdout.is_empty(), "the owned session attaches");
+
+    let moved = attach(&f, &session, other.id.as_str());
+    assert!(!moved.status.success());
+    assert!(
+        String::from_utf8_lossy(&moved.stderr).contains("no longer in that Space"),
+        "{}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+
+    let gone = attach(&f, "999999", work.id.as_str());
+    assert!(!gone.status.success());
+    assert!(String::from_utf8_lossy(&gone.stderr).contains("no longer running"));
+
+    f.stop_daemon();
+    let _ = std::fs::remove_file(&f.socket);
+    let down = attach(&f, &session, work.id.as_str());
+    assert!(!down.status.success());
+    assert!(String::from_utf8_lossy(&down.stderr).contains("not running"));
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        !f.socket.exists(),
+        "a remote attach must never start a daemon"
+    );
+}

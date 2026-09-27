@@ -103,8 +103,8 @@ Do not generalize the local daemon protocol merely to implement the catalog. Add
 - [x] Establish catalog schema, typed identities and explicit destination configuration (`prismattyc_mux::remote_catalog`; the host reads `[[remote]]` in the SSH worker step).
 - [x] Implement a read-only remote catalog endpoint using a live daemon snapshot (`pmux space catalog`).
 - [x] Implement bounded SSH catalog requests with cancellation and error results (`prismattyc-host` `remote_catalog`; key or agent authentication only, `BatchMode=yes`).
-- [x] Present remote destinations and Spaces in the rail with explicit connection states (option B below; selecting a Space reports that attach is not available until the next item).
-- [ ] Implement one-step PTY attach with session selection and lifecycle cleanup.
+- [x] Present remote destinations and Spaces in the rail with explicit connection states (option B below).
+- [x] Implement one-step PTY attach with session selection and lifecycle cleanup (`pmux attach --session-id ID --space-id SPACE` over `ssh -t` in a new tab; the existing `pmux space attach` re-applies the saved layout and may replay commands, so it is not used).
 - [ ] Exercise isolated SSH catalog, attach, resize, disconnect, reconnect and stale-selection cases.
 - [ ] Run native Mac acceptance for discovery and one-step attachment.
 

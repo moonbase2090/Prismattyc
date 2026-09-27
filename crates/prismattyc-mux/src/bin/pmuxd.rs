@@ -96,7 +96,7 @@ impl Cli {
             cols,
             rows,
             experimental_rich,
-            program: program.unwrap_or_else(|| prismattyc_mux::platform::default_shell()),
+            program: program.unwrap_or_else(prismattyc_mux::platform::default_shell),
             argv,
         })
     }

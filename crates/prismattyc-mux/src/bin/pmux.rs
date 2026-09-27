@@ -1298,17 +1298,18 @@ fn require_space_session(paths: &Paths, session_id: &str, space_id: &str) -> Res
         .parse()
         .context("--session-id requires an opaque numeric session ID")?;
     let mut client = Client::connect(&paths.socket)?;
-    let snapshot = take_snapshot(&mut client)?;
+    space_owns_session(&take_snapshot(&mut client)?, id, space_id)
+}
+
+/// Snapshot check behind [`require_space_session`].
+fn space_owns_session(snapshot: &Snapshot, id: u64, space_id: &str) -> Result<()> {
     let session = snapshot
         .sessions
         .iter()
         .find(|session| session.id == id)
         .with_context(|| format!("session {id} is no longer running; refresh the Space list"))?;
-    if !session
-        .space_id
-        .as_deref()
-        .is_some_and(|owner| owner.eq_ignore_ascii_case(space_id))
-    {
+    let owner = session.space_id.as_deref().unwrap_or_default();
+    if !owner.eq_ignore_ascii_case(space_id) {
         bail!("session {id} is no longer in that Space; refresh the Space list");
     }
     Ok(())
@@ -8751,6 +8752,43 @@ mod tests {
                 dump,
                 "{args:?}"
             );
+        }
+    }
+
+    #[test]
+    fn space_owns_session_refuses_moved_unowned_and_missing_sessions() {
+        const WORK: &str = "0123456789abcdef0123456789abcdef";
+        const OTHER: &str = "fedcba9876543210fedcba9876543210";
+        let session = |id: u64, owner: Option<&str>| SessionSnapshot {
+            id,
+            name: format!("s{id}"),
+            agent_id: None,
+            space_id: owner.map(str::to_string),
+            windows: Vec::new(),
+        };
+        let snapshot = Snapshot {
+            sequence: 1,
+            sessions: vec![
+                session(1, Some(WORK)),
+                session(2, Some(OTHER)),
+                session(3, None),
+            ],
+        };
+        assert!(space_owns_session(&snapshot, 1, WORK).is_ok());
+        assert!(
+            space_owns_session(&snapshot, 1, &WORK.to_ascii_uppercase()).is_ok(),
+            "ids compare without case"
+        );
+        for (id, needle) in [
+            (2, "no longer in that Space"),
+            (3, "no longer in that Space"),
+            (9, "no longer running"),
+        ] {
+            let error = space_owns_session(&snapshot, id, WORK)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(needle), "{id}: {error}");
+            assert!(error.contains("refresh the Space list"), "{error}");
         }
     }
 

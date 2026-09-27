@@ -33,6 +33,13 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Install real-window test display
         run: ./scripts/install-render-test-deps.sh
+      - name: Install Rust coverage tools
+        run: |
+          set -eu
+          rustup toolchain install 1.90.0 --profile minimal --component llvm-tools
+          rustup default 1.90.0
+          cargo install cargo-llvm-cov --version 0.9.1 --locked
+          cargo llvm-cov --version
       - name: Analyze
         run: sc analyze . --format all --out scorecard.html --fail-on "" --budget-seconds 900
       - name: Upload report

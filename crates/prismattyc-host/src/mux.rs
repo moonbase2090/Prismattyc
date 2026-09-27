@@ -855,6 +855,7 @@ impl PaneRuntime {
         } else {
             Emulator::new(cols, rows, MAX_SCROLLBACK)
         };
+        emulator.set_retain_alt_history(true);
         emulator.set_cell_pixels(cell_w as u32, cell_h as u32);
         let last_content_epoch = emulator.screen().content_epoch();
         let mut viewer_bytes = [0u8; 16];
@@ -1096,13 +1097,9 @@ impl PaneRuntime {
                             let _ = self.to_child_tx.try_send(ChildWrite::bytes(reply));
                         }
                     }
-                    if self.emulator.screen().alt_active() {
-                        self.view_scroll = 0;
-                    } else {
-                        self.view_scroll = self
-                            .view_scroll
-                            .min(self.emulator.screen().max_view_scroll());
-                    }
+                    self.view_scroll = self
+                        .view_scroll
+                        .min(self.emulator.screen().max_view_scroll());
                     let epoch = self.emulator.screen().content_epoch();
                     let epoch_changed = epoch != self.last_content_epoch;
                     self.last_content_epoch = epoch;
@@ -1211,6 +1208,7 @@ impl PaneRuntime {
                     } else {
                         Emulator::new(self.cols, self.rows, MAX_SCROLLBACK)
                     };
+                    emulator.set_retain_alt_history(true);
                     emulator.set_cell_pixels(self.cell_w as u32, self.cell_h as u32);
                     self.emulator = emulator;
                     self.selection.clear();
@@ -1232,13 +1230,9 @@ impl PaneRuntime {
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
             }
-            if self.emulator.screen().alt_active() {
-                self.view_scroll = 0;
-            } else {
-                self.view_scroll = self
-                    .view_scroll
-                    .min(self.emulator.screen().max_view_scroll());
-            }
+            self.view_scroll = self
+                .view_scroll
+                .min(self.emulator.screen().max_view_scroll());
             let epoch = self.emulator.screen().content_epoch();
             let epoch_changed = epoch != self.last_content_epoch;
             self.last_content_epoch = epoch;
@@ -2618,6 +2612,10 @@ impl MuxRuntime {
 
     pub(crate) fn pane(&self, id: PaneId) -> Option<&PaneRuntime> {
         self.panes.get(&id)
+    }
+
+    pub(crate) fn pane_mut(&mut self, id: PaneId) -> Option<&mut PaneRuntime> {
+        self.panes.get_mut(&id)
     }
 
     pub(crate) fn panes_and_rects(&self) -> impl Iterator<Item = (PaneId, &PaneRuntime, CellRect)> {

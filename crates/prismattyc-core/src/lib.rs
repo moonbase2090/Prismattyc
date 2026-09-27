@@ -1264,17 +1264,20 @@ impl Screen {
                 .copied()
                 .unwrap_or(false);
         }
-        self.primary
-            .wrapped
-            .get(abs_row - sb)
-            .copied()
-            .unwrap_or(false)
+        let buffer = if self.alt_active && self.retain_alt_history {
+            self.active()
+        } else {
+            &self.primary
+        };
+        buffer.wrapped.get(abs_row - sb).copied().unwrap_or(false)
     }
 
-    /// How far the host may scroll up from the live bottom (primary scrollback
-    /// only). Alternate screen has no history view — returns 0.
+    /// How far the host may scroll up from the live bottom.
+    ///
+    /// Alternate-screen history is exposed only when retention was explicitly
+    /// enabled; classic terminal behavior remains a live-only view.
     pub fn max_view_scroll(&self) -> usize {
-        if self.alt_active {
+        if self.alt_active && !self.retain_alt_history {
             0
         } else {
             self.scrollback.len()
@@ -1323,10 +1326,12 @@ impl Screen {
 
     /// Absolute history row for a viewport cell under `scroll_offset` (ADR abs select).
     ///
-    /// Combined history (oldest → newest): `scrollback || primary`. Live view
-    /// (`scroll_offset == 0`) maps viewport row `r` to `scrollback.len() + r`.
+    /// Combined history (oldest → newest): `scrollback || active grid` while
+    /// alternate history is retained, otherwise `scrollback || primary`.
+    /// Live view (`scroll_offset == 0`) maps viewport row `r` to
+    /// `scrollback.len() + r` when history is available.
     pub fn abs_row_at_view(&self, scroll_offset: usize, view_row: usize) -> usize {
-        if self.alt_active {
+        if self.alt_active && !self.retain_alt_history {
             return view_row.min(self.rows.saturating_sub(1));
         }
         let sb = self.scrollback.len();
@@ -1337,8 +1342,9 @@ impl Screen {
 
     /// Cell at viewport `(row, col)` when scrolled up `scroll_offset` rows from
     /// the live bottom. Offset 0 is the live active grid. Offsets > 0 walk
-    /// primary scrollback then the primary buffer (never alt). Out-of-range
-    /// coordinates yield a blank default cell.
+    /// primary scrollback then the primary buffer. When alternate history is
+    /// retained, offsets walk its scrollback and the active alternate grid.
+    /// Out-of-range coordinates yield a blank default cell.
     ///
     /// Combined history (oldest → newest): `scrollback[0..N) || primary[0..rows)`.
     /// Live view shows the last `rows` lines; offset `k` shows the window that
@@ -1347,7 +1353,7 @@ impl Screen {
         if row >= self.rows || col >= self.columns {
             return self.cell_view(&BLANK_CELL);
         }
-        if scroll_offset == 0 || self.alt_active {
+        if scroll_offset == 0 || (self.alt_active && !self.retain_alt_history) {
             return self
                 .row(row)
                 .and_then(|line| line.get(col))
@@ -1367,8 +1373,12 @@ impl Screen {
                 .unwrap_or_else(|| self.cell_view(&BLANK_CELL))
         } else {
             let vrow = abs - sb;
-            self.primary_row(vrow)
-                .and_then(|line| line.get(col))
+            let line = if self.alt_active {
+                self.row(vrow)
+            } else {
+                self.primary_row(vrow)
+            };
+            line.and_then(|line| line.get(col))
                 .map(|cell| self.cell_view(cell))
                 .unwrap_or_else(|| self.cell_view(&BLANK_CELL))
         }
@@ -1379,9 +1389,9 @@ impl Screen {
         self.primary.cells.get(start..start + self.columns)
     }
 
-    /// Total lines in primary history + live grid (oldest → newest). Alt: live only.
+    /// Total lines in history + live grid (oldest → newest).
     pub fn history_line_count(&self) -> usize {
-        if self.alt_active {
+        if self.alt_active && !self.retain_alt_history {
             self.rows
         } else {
             self.scrollback.len().saturating_add(self.rows)
@@ -1406,7 +1416,7 @@ impl Screen {
     }
 
     fn history_cell(&self, abs_row: usize, col: usize) -> CellView<'_> {
-        if self.alt_active {
+        if self.alt_active && !self.retain_alt_history {
             return self
                 .row(abs_row)
                 .and_then(|line| line.get(col))
@@ -1422,8 +1432,12 @@ impl Screen {
                 .unwrap_or_else(|| self.cell_view(&BLANK_CELL))
         } else {
             let vrow = abs_row - sb;
-            self.primary_row(vrow)
-                .and_then(|line| line.get(col))
+            let line = if self.alt_active {
+                self.row(vrow)
+            } else {
+                self.primary_row(vrow)
+            };
+            line.and_then(|line| line.get(col))
                 .map(|cell| self.cell_view(cell))
                 .unwrap_or_else(|| self.cell_view(&BLANK_CELL))
         }
@@ -1431,7 +1445,7 @@ impl Screen {
 
     /// `view_scroll` so `abs_row` is visible (prefer ~1/3 from top).
     pub fn view_scroll_for_history_row(&self, abs_row: usize) -> usize {
-        if self.alt_active || self.rows == 0 {
+        if (self.alt_active && !self.retain_alt_history) || self.rows == 0 {
             return 0;
         }
         let sb = self.scrollback.len();
@@ -1442,7 +1456,7 @@ impl Screen {
 
     /// Viewport row for `abs_row` given a `view_scroll` (clamped).
     pub fn viewport_row_for_history(&self, abs_row: usize, view_scroll: usize) -> Option<usize> {
-        if self.alt_active {
+        if self.alt_active && !self.retain_alt_history {
             return (abs_row < self.rows).then_some(abs_row);
         }
         let sb = self.scrollback.len();
@@ -4031,7 +4045,7 @@ mod tests {
     }
 
     #[test]
-    fn alt_history_is_opt_in_and_classic_view_stays_zero() {
+    fn alt_history_is_opt_in_and_viewable_when_enabled() {
         // Default off: alt scroll evicts rows to nowhere (real-terminal).
         let mut screen = Screen::new(3, 2, 10);
         screen.enter_alt_screen(AltScreenMode::Mode1049);
@@ -4042,7 +4056,7 @@ mod tests {
         assert_eq!(screen.scrollback().len(), 0);
         assert_eq!(screen.max_view_scroll(), 0);
 
-        // Opt-in: evicted alt rows feed history; classic view still refuses.
+        // Opt-in: evicted alt rows feed history and become host-scrollable.
         let mut screen = Screen::new(3, 2, 10);
         screen.set_retain_alt_history(true);
         screen.enter_alt_screen(AltScreenMode::Mode1049);
@@ -4051,17 +4065,27 @@ mod tests {
         }
         assert!(screen.alt_active());
         assert!(screen.history_len() >= 1, "alt eviction reaches history");
-        assert_eq!(
-            screen.max_view_scroll(),
-            0,
-            "classic host view must still refuse alt history"
-        );
-        // The first evicted alt row is readable through the view.
+        assert_eq!(screen.max_view_scroll(), screen.history_len());
         let depth = screen.history_len();
         let first: String = (0..3)
             .map(|col| screen.history_view_cell(depth, 0, col).character)
             .collect();
         assert_eq!(first, "abc");
+        let view: String = (0..3)
+            .map(|col| screen.view_cell(depth, 0, col).character)
+            .collect();
+        assert_eq!(view, "abc");
+        assert_eq!(screen.abs_row_at_view(depth, 0), 0);
+        assert_eq!(screen.history_line_count(), depth + screen.rows());
+        assert_eq!(
+            screen.extract_text_abs(CellRange {
+                start_row: 0,
+                start_col: 0,
+                end_row: 2,
+                end_col: 2,
+            }),
+            "abcdefghi"
+        );
         // scrolled_lines is primary-only: no cell-rect translation from alt.
         assert_eq!(screen.scrolled_lines(), 0);
     }

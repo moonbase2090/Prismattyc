@@ -11323,37 +11323,40 @@ fn begin_pointer_selection(host: &mut HostState, pane: PaneId, row: usize, col: 
 }
 
 fn pan_view_scroll(host: &mut HostState, delta_rows: isize) {
-    if host.emulator.screen().alt_active() {
-        host.view_scroll = 0;
+    pan_pane_view_scroll(host, host.mux.focused_id(), delta_rows);
+}
+
+fn pan_pane_view_scroll(host: &mut HostState, pane_id: PaneId, delta_rows: isize) {
+    let left_button_down = host.left_button_down;
+    let focused_pane = host.mux.focused_id();
+    let Some(pane) = host.mux.pane_mut(pane_id) else {
         return;
-    }
-    let max = host.emulator.screen().max_view_scroll();
-    let before = host.view_scroll;
+    };
+    let max = pane.emulator.screen().max_view_scroll();
+    let before = pane.view_scroll;
     if delta_rows > 0 {
-        host.view_scroll = (host.view_scroll + delta_rows as usize).min(max);
+        pane.view_scroll = (pane.view_scroll + delta_rows as usize).min(max);
     } else {
-        host.view_scroll = host.view_scroll.saturating_sub((-delta_rows) as usize);
+        pane.view_scroll = pane.view_scroll.saturating_sub((-delta_rows) as usize);
     }
-    if host.view_scroll != before {
+    if pane.view_scroll != before {
         // Pan clears finished selection chrome (nested parity); mid-drag keeps anchor.
-        if !host.left_button_down {
-            host.selection.clear();
-            host.keyboard_select_mode = false;
+        if !left_button_down {
+            pane.selection.clear();
+            pane.keyboard_select_mode = false;
         }
-        if host.view_scroll == 0 {
-            host.scroll_new_output = false;
+        if pane.view_scroll == 0 {
+            pane.scroll_new_output = false;
         }
-        host.window
-            .set_title(&window_title(&host.mux, show_tab_strip(host)));
         host.dirty = true;
+        if pane_id == focused_pane {
+            host.window
+                .set_title(&window_title(&host.mux, show_tab_strip(host)));
+        }
     }
 }
 
 fn set_view_scroll(host: &mut HostState, scroll: usize) {
-    if host.emulator.screen().alt_active() {
-        host.view_scroll = 0;
-        return;
-    }
     let max = host.emulator.screen().max_view_scroll();
     let next = scroll.min(max);
     if host.view_scroll == next {
@@ -12614,6 +12617,10 @@ struct WheelInput {
     host_lines: isize,
 }
 
+fn wheel_target_pane(focused_pane: PaneId, cursor_pane: Option<PaneId>) -> PaneId {
+    cursor_pane.unwrap_or(focused_pane)
+}
+
 fn wheel_input(delta: &MouseScrollDelta, cell_h: usize) -> WheelInput {
     match delta {
         MouseScrollDelta::LineDelta(_, y) => WheelInput {
@@ -12662,7 +12669,7 @@ struct WheelContext {
     rich_focus_active: bool,
     rich_hit_focused: bool,
     app_wheel: bool,
-    app_cursor_focused: bool,
+    app_cursor_over_pane: bool,
     alt_active: bool,
     page_rows: usize,
 }
@@ -12686,7 +12693,7 @@ fn wheel_decision(input: WheelInput, context: WheelContext) -> WheelDecision {
         };
     }
     if !context.shift && context.app_wheel {
-        if !context.app_cursor_focused {
+        if !context.app_cursor_over_pane {
             return WheelDecision::Consume;
         }
         return match input.direction {
@@ -12695,7 +12702,7 @@ fn wheel_decision(input: WheelInput, context: WheelContext) -> WheelDecision {
             ScrollDirection::None => WheelDecision::Consume,
         };
     }
-    if context.alt_active {
+    if context.alt_active && !context.shift {
         return WheelDecision::Consume;
     }
     let page = context.page_rows.saturating_sub(1).max(1) as isize;
@@ -12712,6 +12719,22 @@ fn wheel_decision(input: WheelInput, context: WheelContext) -> WheelDecision {
         WheelDecision::Consume
     } else {
         WheelDecision::Host { rows }
+    }
+}
+
+fn pane_wheel_context(
+    pane: &mux::PaneRuntime,
+    shift: bool,
+    app_cursor_over_pane: bool,
+) -> WheelContext {
+    WheelContext {
+        shift,
+        rich_focus_active: false,
+        rich_hit_focused: false,
+        app_wheel: pane.emulator.reports_app_wheel(),
+        app_cursor_over_pane,
+        alt_active: pane.emulator.screen().alt_active(),
+        page_rows: pane.rows,
     }
 }
 
@@ -13369,6 +13392,51 @@ impl ApplicationHandler<UserAction> for App {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let shift = host.modifiers.shift_key();
+                let focused_pane = host.mux.focused_id();
+                let pane_id = wheel_target_pane(
+                    focused_pane,
+                    host.cursor_cell.map(|(pane_id, _, _)| pane_id),
+                );
+                if pane_id != focused_pane {
+                    if let Some(pane) = host.mux.pane(pane_id) {
+                        let decision = wheel_decision(
+                            wheel_input(&delta, host.font.cell_h),
+                            pane_wheel_context(pane, shift, true),
+                        );
+                        match decision {
+                            WheelDecision::App { button } => {
+                                if let Some((_, row, col)) = host
+                                    .cursor_cell
+                                    .filter(|(hovered, _, _)| *hovered == pane_id)
+                                {
+                                    let report = host.mux.pane(pane_id).and_then(|pane| {
+                                        encode_app_mouse_report(
+                                            &pane.emulator,
+                                            col,
+                                            row,
+                                            button,
+                                            false,
+                                            false,
+                                            host.modifiers.alt_key(),
+                                            host.modifiers.control_key(),
+                                        )
+                                    });
+                                    if let Some(report) = report {
+                                        if let Some(pane) = host.mux.pane(pane_id) {
+                                            let _ = pane.try_send_bytes(report);
+                                        }
+                                    }
+                                }
+                            }
+                            WheelDecision::Host { rows } => {
+                                pan_pane_view_scroll(host, pane_id, rows);
+                            }
+                            WheelDecision::Rich { .. } | WheelDecision::Consume => {}
+                        }
+                    }
+                    host.window.request_redraw();
+                    return;
+                }
                 let rich_hit = if !shift && host.mux.rich_focus_active() {
                     host.pointer_px
                         .and_then(|(x, y)| {
@@ -13382,7 +13450,7 @@ impl ApplicationHandler<UserAction> for App {
                 } else {
                     None
                 };
-                let app_cursor_focused = host
+                let app_cursor_over_pane = host
                     .cursor_cell
                     .is_some_and(|(pane, _, _)| pane == host.mux.focused_id());
                 let decision = wheel_decision(
@@ -13392,7 +13460,7 @@ impl ApplicationHandler<UserAction> for App {
                         rich_focus_active: host.mux.rich_focus_active(),
                         rich_hit_focused: rich_hit.is_some(),
                         app_wheel: host.emulator.reports_app_wheel(),
-                        app_cursor_focused,
+                        app_cursor_over_pane,
                         alt_active: host.emulator.screen().alt_active(),
                         page_rows: host.rows,
                     },
@@ -16005,6 +16073,41 @@ mod tests {
     }
 
     #[test]
+    fn wheel_target_uses_pointer_pane_without_changing_focus() {
+        let mut mux = mux::MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let focused = mux.focused_id();
+        let hovered = mux
+            .split_focused("/bin/sh", &[], prismattyc_mux::Axis::Horizontal, 0.5)
+            .unwrap();
+        assert_ne!(focused, hovered);
+        assert!(mux.focus(focused));
+
+        assert_eq!(wheel_target_pane(focused, Some(hovered)), hovered);
+        assert_eq!(mux.focused_id(), focused);
+        assert_eq!(wheel_target_pane(focused, None), focused);
+
+        let focused_pane = mux.pane_mut(focused).unwrap();
+        focused_pane
+            .emulator
+            .feed(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h");
+        assert!(focused_pane.emulator.screen().alt_active());
+        assert!(focused_pane.emulator.reports_app_wheel());
+
+        let hovered_pane = mux.pane_mut(hovered).unwrap();
+        assert!(!hovered_pane.emulator.screen().alt_active());
+        assert!(!hovered_pane.emulator.reports_app_wheel());
+        let input = WheelInput {
+            direction: ScrollDirection::Up,
+            host_lines: 3,
+        };
+        assert_eq!(
+            wheel_decision(input, pane_wheel_context(hovered_pane, false, true)),
+            WheelDecision::Host { rows: 3 }
+        );
+        assert_eq!(mux.focused_id(), focused);
+    }
+
+    #[test]
     fn wheel_decision_routes_modes_table() {
         let cases = [
             (
@@ -16093,6 +16196,20 @@ mod tests {
             ),
             (
                 WheelInput {
+                    direction: ScrollDirection::Up,
+                    host_lines: 3,
+                },
+                true,
+                false,
+                false,
+                true,
+                true,
+                true,
+                24,
+                WheelDecision::Host { rows: 23 },
+            ),
+            (
+                WheelInput {
                     direction: ScrollDirection::Down,
                     host_lines: -3,
                 },
@@ -16126,7 +16243,7 @@ mod tests {
             rich_focus_active,
             rich_hit_focused,
             app_wheel,
-            app_cursor_focused,
+            app_cursor_over_pane,
             alt_active,
             page_rows,
             expected,
@@ -16140,13 +16257,13 @@ mod tests {
                         rich_focus_active,
                         rich_hit_focused,
                         app_wheel,
-                        app_cursor_focused,
+                        app_cursor_over_pane,
                         alt_active,
                         page_rows,
                     },
                 ),
                 expected,
-                "{input:?} shift={shift} rich={rich_focus_active}/{rich_hit_focused} app={app_wheel}/{app_cursor_focused} alt={alt_active}"
+                "{input:?} shift={shift} rich={rich_focus_active}/{rich_hit_focused} app={app_wheel}/{app_cursor_over_pane} alt={alt_active}"
             );
         }
     }

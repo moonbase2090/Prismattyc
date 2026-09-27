@@ -120,14 +120,13 @@ pub(crate) fn classify_windows_argv(args: &[String]) -> Option<InjectAgent> {
         }
         name = crate::procinfo::executable_name(script);
         if name == "cli.js"
-            && std::path::Path::new(script)
-                .parent()
-                .is_some_and(|parent| {
-                    crate::procinfo::executable_name(&parent.to_string_lossy()) == "claude-code"
-                        && parent.parent().is_some_and(|scope| {
-                            crate::procinfo::executable_name(&scope.to_string_lossy()) == "@anthropic-ai"
-                        })
-                })
+            && std::path::Path::new(script).parent().is_some_and(|parent| {
+                crate::procinfo::executable_name(&parent.to_string_lossy()) == "claude-code"
+                    && parent.parent().is_some_and(|scope| {
+                        crate::procinfo::executable_name(&scope.to_string_lossy())
+                            == "@anthropic-ai"
+                    })
+            })
         {
             return Some(InjectAgent::Claude);
         }

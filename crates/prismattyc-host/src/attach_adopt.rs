@@ -169,7 +169,8 @@ pub(crate) fn adopt_candidates(
     };
     #[cfg(windows)]
     let assignments = {
-        let Some(snapshot) = prismattyc_mux::procinfo::WindowsProcessSnapshot::capture(&roots) else {
+        let Some(snapshot) = prismattyc_mux::procinfo::WindowsProcessSnapshot::capture(&roots)
+        else {
             return Vec::new();
         };
         let clients = snapshot_attach_clients(&snapshot, &roots, socket);

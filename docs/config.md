@@ -743,8 +743,8 @@ and shows why.
 after the `+` (issue #24). Select a chip to connect and list the running
 Spaces on that machine; select it again to refresh. Its glyph shows the
 state: `○` not connected, `…` connecting, `●` connected, `!` failed (the
-list shows the full error and a Retry row). Attaching a remote Space from
-the list is not available yet. Each entry has
+list shows the full error and a Retry row). Choosing a running Space opens
+a new tab attached to that Space's active session. Each entry has
 a unique `id` (`a-z`, `0-9`, inner `-`), an `ssh` Host alias from your SSH
 config, and an optional `label`. User, port, keys and proxies belong in
 `~/.ssh/config`; the alias may not start with `-` or contain spaces, `@`,
@@ -759,6 +759,15 @@ host once with `ssh ALIAS` in a terminal. Requests stop after 20 seconds
 or 1 MiB of output. `pmux` must be on the remote non-interactive `PATH`,
 and the remote `pmuxd` must already be running; the host never installs
 software or starts a daemon remotely.
+
+The attach tab runs `ssh -t -o BatchMode=yes -o ConnectTimeout=10 -- ALIAS
+pmux attach --session-id ID --space-id SPACE`. Only the session and Space
+ids from the catalog reach the remote command. The remote refuses with
+"refresh the Space list" when that Space no longer owns the session (for
+example after the remote daemon restarted), and it never starts a daemon.
+Resizing the tab resizes the remote session through SSH. Closing the tab
+ends the local `ssh` only; the remote session keeps running. The remote
+needs a terminfo entry for the tab's `TERM`.
 
 ## Hot reload
 

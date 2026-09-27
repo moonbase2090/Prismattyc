@@ -17,7 +17,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use prismattyc_mux::remote_catalog::{
-    parse_catalog, Catalog, DestinationId, SshDestination, MAX_CATALOG_BYTES,
+    parse_catalog, Catalog, DestinationId, RemoteSessionId, RemoteSpaceId, SshDestination,
+    MAX_CATALOG_BYTES,
 };
 
 /// Fixed remote argv. Request data never becomes remote shell text.
@@ -49,6 +50,34 @@ pub fn ssh_command(destination: &SshDestination) -> Command {
         .arg(destination.ssh_alias.as_str())
         .args(REMOTE_COMMAND);
     command
+}
+
+/// Program and argv for a one-step remote attach in a PTY tab:
+/// `ssh -t -o BatchMode=yes -o ConnectTimeout=10 -- ALIAS pmux attach
+/// --session-id N --space-id HEX`. Only typed ids reach the remote command;
+/// the remote refuses a session its Space no longer owns and never starts
+/// a daemon.
+pub fn attach_command(
+    destination: &SshDestination,
+    session: RemoteSessionId,
+    space: &RemoteSpaceId,
+) -> (String, Vec<String>) {
+    let args = vec![
+        "-t".into(),
+        "-o".into(),
+        "BatchMode=yes".into(),
+        "-o".into(),
+        format!("ConnectTimeout={CONNECT_TIMEOUT_SECS}"),
+        "--".into(),
+        destination.ssh_alias.as_str().into(),
+        "pmux".into(),
+        "attach".into(),
+        "--session-id".into(),
+        session.0.to_string(),
+        "--space-id".into(),
+        space.as_str().into(),
+    ];
+    ("ssh".into(), args)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -568,6 +597,32 @@ mod tests {
                 "pmux",
                 "space",
                 "catalog"
+            ]
+        );
+    }
+
+    #[test]
+    fn attach_command_passes_only_typed_ids_after_double_dash() {
+        let space =
+            RemoteSpaceId::try_from("0123456789abcdef0123456789abcdef".to_string()).unwrap();
+        let (program, args) = attach_command(&destination("devbox"), RemoteSessionId(42), &space);
+        assert_eq!(program, "ssh");
+        assert_eq!(
+            args,
+            [
+                "-t",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "--",
+                "devbox",
+                "pmux",
+                "attach",
+                "--session-id",
+                "42",
+                "--space-id",
+                "0123456789abcdef0123456789abcdef"
             ]
         );
     }

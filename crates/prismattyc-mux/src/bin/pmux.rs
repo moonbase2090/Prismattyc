@@ -122,6 +122,9 @@ session
                                   auto-starts a missing or stale server.
                                   --read-only never takes the input lease.
                                   --fit resizes the pane to this terminal.
+    attach --session-id ID --space-id SPACE
+                                  attach only if the Space still owns the
+                                  session; never starts a server (remote).
     ls                            list sessions, windows, and panes
     whoami [--json]               this pane: session name, id, pane, agent
     session name NAME [--session KEY]
@@ -1226,6 +1229,9 @@ struct AttachArgs {
     pane: Option<String>,
     session: Option<String>,
     session_id: Option<String>,
+    /// Remote attach (issue #24): the session must still be owned by this
+    /// Space. Never auto-starts the daemon or routes to a host.
+    space_id: Option<String>,
     read_only: bool,
     fit: bool,
 }
@@ -1254,6 +1260,13 @@ fn parse_attach_args(rest: Vec<String>) -> Result<AttachArgs> {
                         .context("--session-id requires an opaque numeric session ID")?,
                 );
             }
+            "--space-id" => {
+                let id = rest
+                    .next()
+                    .filter(|id| prismattyc_mux::valid_space_id(id))
+                    .context("--space-id requires a 32-hex Space ID")?;
+                parsed.space_id = Some(id);
+            }
             session if !session.starts_with('-') && parsed.session.is_none() => {
                 parsed.session = Some(session.to_string());
             }
@@ -1266,7 +1279,39 @@ fn parse_attach_args(rest: Vec<String>) -> Result<AttachArgs> {
     if parsed.read_only && parsed.write.is_some() {
         bail!("--read-only cannot be combined with --write");
     }
+    if parsed.space_id.is_some()
+        && (parsed.session_id.is_none()
+            || parsed.session.is_some()
+            || parsed.all
+            || parsed.pane.is_some()
+            || parsed.write.is_some())
+    {
+        bail!("--space-id requires --session-id and no session name, --all, --pane or --write");
+    }
     Ok(parsed)
+}
+
+/// Refuse unless live session `session_id` is owned by `space_id`. A stale
+/// selection never falls back to another session.
+fn require_space_session(paths: &Paths, session_id: &str, space_id: &str) -> Result<()> {
+    let id: u64 = session_id
+        .parse()
+        .context("--session-id requires an opaque numeric session ID")?;
+    let mut client = Client::connect(&paths.socket)?;
+    let snapshot = take_snapshot(&mut client)?;
+    let session = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == id)
+        .with_context(|| format!("session {id} is no longer running; refresh the Space list"))?;
+    if !session
+        .space_id
+        .as_deref()
+        .is_some_and(|owner| owner.eq_ignore_ascii_case(space_id))
+    {
+        bail!("session {id} is no longer in that Space; refresh the Space list");
+    }
+    Ok(())
 }
 
 fn cmd_attach(paths: &Paths, rest: Vec<String>) -> Result<()> {
@@ -1289,17 +1334,27 @@ fn cmd_attach(paths: &Paths, rest: Vec<String>) -> Result<()> {
         return cmd_attach_all(paths);
     }
 
-    ensure_live_server(paths)?;
+    if let Some(space_id) = parsed.space_id.as_deref() {
+        // Remote attach: never start a daemon, never hand the seat to a host.
+        require_live_socket(paths)?;
+        let session_id = parsed.session_id.as_deref().expect("validated by parse");
+        require_space_session(paths, session_id, space_id)?;
+    } else {
+        ensure_live_server(paths)?;
+    }
 
-    if should_try_host_route_attach(
-        attach_is_dump_or_write(&parsed),
-        stdin_is_tty(),
-        stdout_is_tty(),
-    ) && try_host_route_seat(
-        paths,
-        parsed.session.as_deref(),
-        parsed.session_id.as_deref(),
-    )? {
+    if parsed.space_id.is_none()
+        && should_try_host_route_attach(
+            attach_is_dump_or_write(&parsed),
+            stdin_is_tty(),
+            stdout_is_tty(),
+        )
+        && try_host_route_seat(
+            paths,
+            parsed.session.as_deref(),
+            parsed.session_id.as_deref(),
+        )?
+    {
         return Ok(());
     }
 
@@ -8711,6 +8766,44 @@ mod tests {
         assert!(styled.styled_json);
         assert!(!styled.json);
         assert!(parse_attach_args(vec!["--json".into(), "--styled-json".into()]).is_err());
+        let owned = parse_attach_args(
+            [
+                "--session-id",
+                "7",
+                "--space-id",
+                "0123456789abcdef0123456789abcdef",
+            ]
+            .map(String::from)
+            .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(
+            owned.space_id.as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+        for bad in [
+            &["--space-id", "0123456789abcdef0123456789abcdef"][..],
+            &["--session-id", "7", "--space-id", "work"],
+            &["--session-id", "7", "--space-id"],
+            &[
+                "work",
+                "--session-id",
+                "7",
+                "--space-id",
+                "0123456789abcdef0123456789abcdef",
+            ],
+            &[
+                "--session-id",
+                "7",
+                "--pane",
+                "1",
+                "--space-id",
+                "0123456789abcdef0123456789abcdef",
+            ],
+        ] {
+            let args = bad.iter().map(|arg| arg.to_string()).collect();
+            assert!(parse_attach_args(args).is_err(), "{bad:?}");
+        }
         let ro = parse_attach_args(vec!["--read-only".into()]).unwrap();
         assert!(ro.read_only);
         let fit = parse_attach_args(vec!["--fit".into()]).unwrap();

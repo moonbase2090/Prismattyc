@@ -7145,6 +7145,30 @@ fn open_remote_list(host: &mut HostState, index: usize) {
     sync_chrome_hover(host);
 }
 
+/// One-step remote attach (issue #24): a new tab whose PTY runs `ssh -t`
+/// into `pmux attach --session-id … --space-id …`. SSH carries resize;
+/// closing the tab ends only the local `ssh`, never the remote session.
+fn open_remote_attach(
+    host: &mut HostState,
+    key: &prismattyc_mux::remote_catalog::RemoteSpaceKey,
+    session: prismattyc_mux::remote_catalog::RemoteSessionId,
+    name: &str,
+) {
+    let Some(destination) = host.remote.borrow().destination(&key.destination).cloned() else {
+        rail_toast(host, " That destination is no longer configured ");
+        return;
+    };
+    let (program, args) = remote_catalog::attach_command(&destination, session, &key.space);
+    match host.mux.new_tab(&program, &args) {
+        Ok(_) => {
+            let title = format!("{} › {name}", destination.label);
+            let _ = host.mux.rename_window(host.mux.active_window(), &title);
+            host.dirty = true;
+        }
+        Err(error) => rail_toast(host, &format!(" Remote attach failed: {error:#} ")),
+    }
+}
+
 /// Enter on a remote list row. Retry and unavailable rows keep the list.
 fn choose_remote_row(host: &mut HostState, name: &str) -> bool {
     let Some(id) = host.remote_open.clone() else {
@@ -7162,14 +7186,8 @@ fn choose_remote_row(host: &mut HostState, name: &str) -> bool {
             rail_toast(host, &format!(" {name}: {detail} "));
             false
         }
-        Some((remote_rail::RemoteRowKind::Space { session_name, .. }, _)) => {
-            // One-step attach is the next slice of issue #24.
-            rail_toast(
-                host,
-                &format!(
-                    " {id} › {name}: remote attach is not available yet (session {session_name}) "
-                ),
-            );
+        Some((remote_rail::RemoteRowKind::Space { key, session, .. }, _)) => {
+            open_remote_attach(host, &key, session, name);
             true
         }
         None => false,

@@ -53,6 +53,7 @@
 //! stays in the server.
 
 use prismattyc_mux::local_socket::UnixStream;
+use prismattyc_mux::remote_catalog;
 #[cfg(any(test, target_os = "linux"))]
 use std::ffi::OsStr;
 use std::{
@@ -4538,6 +4539,7 @@ Each session belongs to only one Space. Other Spaces keep running.
   template create TEMPLATE NEW_SPACE [--launch] [--no-attach]
     Create independent shells. Only --launch executes previewed recipes.
   ls                        List saved Spaces.
+  catalog                   Print running Spaces as versioned JSON (read-only).
   rm [NAME...] [--all]       Delete definitions; keep sessions alive.
   clear [--keep NAME]        Delete all except kept names; keep sessions alive.
 Version-1 migration rejects ambiguous ownership. Originals: legacy-backups/.
@@ -4570,6 +4572,7 @@ enum SpaceVerb {
     Add(Vec<String>),
     Remove(Vec<String>),
     Ls,
+    Catalog,
     Help,
 }
 
@@ -4592,6 +4595,7 @@ fn parse_space_verb(rest: Vec<String>) -> Result<SpaceVerb, SpaceUsage> {
         Some("add") => Ok(SpaceVerb::Add(rest.into_iter().skip(1).collect())),
         Some("remove") => Ok(SpaceVerb::Remove(rest.into_iter().skip(1).collect())),
         Some("ls") if rest.len() == 1 => Ok(SpaceVerb::Ls),
+        Some("catalog") if rest.len() == 1 => Ok(SpaceVerb::Catalog),
         _ => Err(SpaceUsage),
     }
 }
@@ -4615,6 +4619,7 @@ fn cmd_space(paths: &Paths, rest: Vec<String>) -> Result<()> {
         }
         SpaceVerb::Attach(args) => cmd_space_attach(paths, args),
         SpaceVerb::Ls => cmd_space_ls(),
+        SpaceVerb::Catalog => cmd_space_catalog(paths),
         SpaceVerb::Rm(args) => space_commands::delete_spaces(paths, args, false),
         SpaceVerb::Clear(args) => space_commands::delete_spaces(paths, args, true),
         SpaceVerb::Add(args) => space_commands::add(paths, args),
@@ -4735,6 +4740,25 @@ fn cmd_space_ls() -> Result<()> {
     for entry in list_spaces(&spaces_dir())? {
         println!("{}", format_space_list_row(&entry, false));
     }
+    Ok(())
+}
+
+/// Remote discovery (issue #24): saved Spaces joined with one live snapshot.
+/// Never starts sessions or replays saved commands.
+fn cmd_space_catalog(paths: &Paths) -> Result<()> {
+    require_live_socket(paths)?;
+    let mut client = Client::connect(&paths.socket)?;
+    let snapshot = take_snapshot(&mut client)?;
+    let dir = spaces_dir();
+    let saved = list_spaces(&dir)?
+        .into_iter()
+        .map(|entry| {
+            let space = load_space(&dir, &entry.name);
+            (entry.name, space)
+        })
+        .collect();
+    let catalog = remote_catalog::build_catalog(saved, &snapshot);
+    println!("{}", remote_catalog::encode_catalog(&catalog)?);
     Ok(())
 }
 
@@ -9016,6 +9040,11 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(parse_space_verb(args(&["ls"])).unwrap(), SpaceVerb::Ls);
+        assert_eq!(
+            parse_space_verb(args(&["catalog"])).unwrap(),
+            SpaceVerb::Catalog
+        );
+        assert!(parse_space_verb(args(&["catalog", "--json"])).is_err());
         assert_eq!(
             parse_space_verb(args(&["--help"])).unwrap(),
             SpaceVerb::Help

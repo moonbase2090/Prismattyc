@@ -55,6 +55,7 @@ pmux space save [NAME] [SESSION...]  # save owned sessions (live cwd + agent)
 pmux space open [NAME] [--add] [--replace] [--no-attach] [--new-window] [--no-run] [--tty]  # restore; switch is default
 pmux space attach [NAME] [--session S]  # attach a space session in this TTY
 pmux space ls            # list saved spaces
+pmux space catalog       # running spaces as versioned JSON (read-only)
 pmux space rm [NAME...] [--all]  # delete space files (`delete` is an alias)
 pmux space add NAME [--session S] [--tab TITLE]  # fresh or unassigned session
 pmux space move NAME --session S              # transfer session ownership
@@ -403,6 +404,25 @@ pmux space clear           # delete every space file
 pmux space clear --keep NAME
                            # delete every space file except NAME (repeatable)
 ```
+
+`pmux space catalog` prints one JSON line for remote Space discovery over
+SSH (issue #24). It is read-only: it loads saved Space files and one daemon
+snapshot, and never creates sessions or replays saved commands. A Space is
+listed under `spaces` only when the daemon reports live sessions owned by
+its stable id. Every other saved Space is listed under `unavailable` with a
+`reason`: `missing_identity` (legacy file; `pmux space open` assigns an id),
+`duplicate_identity`, `no_live_sessions`, `unreadable`, or `out_of_limits`.
+
+```json
+{"version":1,"producer":"0.2.19",
+ "spaces":[{"id":"<32 hex>","name":"work",
+            "sessions":[{"id":3,"name":"work-1"}],"active_session":3}],
+ "unavailable":[{"name":"old","reason":"missing_identity"}]}
+```
+
+Readers reject other versions, unknown fields, control characters in names,
+and responses over 1 MiB. Names are display data; attach by id. The command
+exits non-zero with nothing on stdout when the daemon is not running.
 
 On a cold host launch, the registered host asks **Restore last space?**
 if its saved attach-tabs cache contains sessions. Choose **Restore** to

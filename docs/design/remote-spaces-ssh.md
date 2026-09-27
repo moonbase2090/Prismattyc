@@ -100,8 +100,8 @@ Do not generalize the local daemon protocol merely to implement the catalog. Add
 
 ## Implementation sequence
 
-- [ ] Establish catalog schema, typed identities and explicit destination configuration.
-- [ ] Implement a read-only remote catalog endpoint using a live daemon snapshot.
+- [x] Establish catalog schema, typed identities and explicit destination configuration (`prismattyc_mux::remote_catalog`; the host reads `[[remote]]` in the SSH worker step).
+- [x] Implement a read-only remote catalog endpoint using a live daemon snapshot (`pmux space catalog`).
 - [ ] Implement bounded SSH catalog requests with cancellation and error results.
 - [ ] Present remote destinations and Spaces in the rail with explicit connection states.
 - [ ] Implement one-step PTY attach with session selection and lifecycle cleanup.

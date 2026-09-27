@@ -28,6 +28,7 @@ mod pane_log;
 mod pane_log_persist;
 pub mod procinfo;
 pub mod release_update;
+pub mod remote_catalog;
 mod remote_size;
 mod rich;
 pub mod session_name;

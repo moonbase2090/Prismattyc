@@ -20,7 +20,8 @@ class TerminfoTests(unittest.TestCase):
     def test_packaged_database_and_fresh_home_install(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
-            database = root / 'Prismattyc.app/Contents/Resources/terminfo'
+            resources = root / 'Prismattyc.app/Contents/Resources'
+            database = resources / 'terminfo'
             run('python3', str(ROOT / 'scripts/package-terminfo.py'), '--out', str(database))
             home = root / 'home'
             home.mkdir()
@@ -33,8 +34,7 @@ class TerminfoTests(unittest.TestCase):
                 data = (database / '70' / name).read_bytes()
                 self.assertEqual(data[:2], b'\x1a\x01')
                 self.assertLessEqual(len(data), 4096)
-            helper = root / 'Prismattyc.app/Contents/MacOS/install-prismattyc-terminfo.sh'
-            helper.parent.mkdir()
+            helper = resources / 'install-prismattyc-terminfo.sh'
             shutil.copyfile(ROOT / 'scripts/install-prismattyc-terminfo.sh', helper)
             # Force the packaged helper/source through the real compiler and HOME lookup.
             env.pop('TERMINFO')
@@ -45,6 +45,12 @@ class TerminfoTests(unittest.TestCase):
                 self.assertGreater(int(run('tput', '-T', name, 'colors', env=env).stdout), 0)
             # Repeated installation is safe.
             run('sh', str(helper), env=env)
+            # Older app bundles placed the helper in MacOS while keeping the
+            # terminfo database in Resources. Preserve that installed layout.
+            legacy_helper = root / 'Prismattyc.app/Contents/MacOS/install-prismattyc-terminfo.sh'
+            legacy_helper.parent.mkdir()
+            shutil.copyfile(ROOT / 'scripts/install-prismattyc-terminfo.sh', legacy_helper)
+            run('sh', str(legacy_helper), env=env)
 
     @unittest.skipUnless(os.environ.get('PRISMATTYC_TERMINFO_SSH_TEST') == '1', 'isolated SSH box required')
     def test_real_ssh_install(self):

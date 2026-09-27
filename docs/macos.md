@@ -158,7 +158,8 @@ A local ad-hoc `Prismattyc.app` is the macOS dogfood host. `prismattyc update --
 runs [`scripts/install-prismattyc-host-macos.sh`](../scripts/install-prismattyc-host-macos.sh),
 which writes `~/Applications/Prismattyc.app`. The bundle contains
 `prismattyc-host`, `pmux`, `pmuxd`, and `pmux-attach` under `Contents/MacOS`,
-so Finder and Dock launches do not depend on the shell `PATH`. The installer
+so Finder and Dock launches do not depend on the shell `PATH`. The terminal
+installer and its database live under `Contents/Resources`. The installer
 builds the mux helpers from the same checkout as the app release. It refreshes
 all four executables in other existing copies (`/Applications`,
 `target/Prismattyc.app`, Spotlight). `cargo install` updates the separate

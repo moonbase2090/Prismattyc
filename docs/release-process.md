@@ -1,91 +1,93 @@
 # Publish release artifacts
 
-Publish releases in `Moonbase2090/Prismattyc`. Use a new version for each
-release. Enable immutable releases before publication.
-Protect the default branch, release tags, and publishing credentials.
+The `Release` workflow builds the supported release assets when a `v*` tag is
+pushed. It builds Linux x86_64 and ARM64 packages, a native Windows x64 package,
+and a signed universal macOS app distributed as a DMG and a zip.
 
-1. Set the workspace version to the release version.
-2. Run the release gates in [the testing policy](testing-policy.md).
-3. Build all six binaries on each supported target. Use the oldest supported
-   Linux runtime to establish the minimum libc requirement.
-4. Generate the manuals with `scripts/install-man.sh`. Set `PRISMATTYC_BINS`
-   to the binary directory and `PMUX_MAN_DIR` to `build/release-man`. Package
-   each native build. The packager checks all reported versions.
+## Prepare a release
 
-   ```bash
-   python3 scripts/release/package.py --version 0.2.8 \
-     --target x86_64-unknown-linux-gnu --bin-dir target/release \
-     --man-dir build/release-man --out build/release-linux-x86_64
-   ```
+1. Set the workspace package version in `Cargo.toml`. The tag version must
+   match the binaries. For a prerelease tag such as `v0.2.20-rc.1`, binaries
+   may report the base version `0.2.20`.
+2. Merge the release source into `main` and complete the release gates in
+   [the testing policy](testing-policy.md).
+3. Confirm that the repository has the Apple secrets listed below.
+4. Push a tag such as `v0.2.20` to start the release workflow.
+5. Wait for every build job. The publish job creates the release only after
+   every platform package succeeds and the Apple job reports `signed=true`.
 
-5. Create a draft release with tag `v0.2.8` in `Moonbase2090/Prismattyc`.
-6. Upload every target's six executable assets, manifest, installation archive,
-   and checksums to the draft. Upload `MPL-2.0.txt` and `NOTICE.txt` once.
-7. Publish minimum OS/runtime requirements in the release notes. State that
-   Prismattyc uses MPL-2.0. Link to the license notice and the matching source
-   archive, including for users who download individual executables.
-8. Verify the complete asset set, sizes, and GitHub SHA-256 metadata. Verify
-   that the release tag contains the exact source used to build the binaries.
-   Include all covered changes. Confirm that recipients can download the
-   source and license notices without authentication.
-9. Publish the release. Confirm that GitHub reports it as immutable.
-10. Test `pmux update --check`, install, coordinated restart, and rollback
-    against a disposable installation. Keep the receipts with the release.
+The publish job downloads each platform's assets, writes a combined
+`SHA256SUMS`, and creates the GitHub release. A tag containing a hyphen creates
+a prerelease. The release includes the Linux per-binary updater assets,
+manifests, installation archives, the Windows package and manifest, and both
+macOS files. The Windows package includes the shared license notices.
+Platform checksum files remain alongside the combined checksum. GitHub also
+provides source archives for the tag.
 
-The updater requires exact names such as
-`prismattyc-v0.2.8-x86_64-unknown-linux-gnu-pmux`.
-It rejects draft, prerelease, mutable, incomplete, or mismatched releases.
-Stage all assets before publishing: immutable assets cannot be replaced.
-Publish corrections as a new version.
+## Run a signed dry run
 
-For macOS, sign executable artifacts and publish a signed, notarized
-application bundle. The command-line updater manages its binary prefix;
-it does not replace an independent application bundle.
+Set `dry_run` to `true` to build, sign, and notarize all platform assets without
+publishing a release. Dispatch the workflow from `main` and choose a tag whose
+base version matches the checked-out binaries. A dry run does not create or
+push a tag.
 
-GitHub documents [immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)
-and [release integrity verification](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/verify-release-integrity).
-The updater checks GitHub's HTTPS metadata and digests. It does not claim
-independent attestation verification or full TUF protections.
+```bash
+gh workflow run release.yml \
+  --repo moonbase2090/Prismattyc \
+  --ref main \
+  -f tag=v0.2.19 \
+  -f dry_run=true
+gh run list --repo moonbase2090/Prismattyc --workflow release.yml --limit 5
+gh run watch RUN_ID --repo moonbase2090/Prismattyc --exit-status
+```
+
+Replace `v0.2.19` with the release tag to validate. Copy the run ID from
+`gh run list` into `gh run watch`.
+
+## Configure Apple credentials
+
+The Apple job requires five repository secrets:
+
+| Secret | Value |
+| --- | --- |
+| `APPLE_CERTIFICATE_P12` | Base64-encoded Developer ID Application `.p12` |
+| `APPLE_CERTIFICATE_PASSWORD` | Password for the `.p12` |
+| `APPLE_NOTARY_ISSUER` | App Store Connect issuer ID |
+| `APPLE_NOTARY_KEY_ID` | App Store Connect API key ID |
+| `APPLE_NOTARY_KEY` | App Store Connect `.p8` PEM or base64-encoded PEM |
+
+The workflow imports the certificate into a temporary keychain under a
+`mktemp` directory and removes it when the job exits. It signs the helper
+binaries and app with the hardened runtime and
+`scripts/release/prismattyc.entitlements`. Prismattyc currently needs no
+special hardened runtime entitlements. The workflow submits the app archive
+and DMG to Apple's notary service, then staples and validates the app and DMG.
+
+## Build platform packages
+
+The Linux jobs use Ubuntu 22.04 and build all six binaries on native x86_64 or
+ARM64 runners. They generate manual pages with `scripts/install-man.sh` and
+package the result with `scripts/release/package.py`.
+
+The Windows job runs `scripts/release/build-windows.ps1` on Windows Server 2022.
+It builds and checks all six Windows executables before creating the release
+zip, manifest, and `SHA256SUMS-windows`.
+
+The Apple job runs on `macos-14`. It builds arm64 and x86_64 binaries, checks
+the x86_64 binaries' reported versions, combines both architectures, and
+packages `Prismattyc.app`. It signs nested code before the app and does not use
+recursive signing. The release contains the notarized
+`Prismattyc-vVERSION-macos-universal.dmg` and
+`Prismattyc-vVERSION-macos-universal.zip`.
 
 Linux x86_64 and ARM64 releases require glibc 2.35 or newer
-(Ubuntu 22.04 or newer). macOS binary releases are pending.
-Do not advertise a target until its release assets and platform checks pass.
-Apple Silicon source builds have been tested. Mac application distribution
-waits for Developer ID signing and notarization.
+(Ubuntu 22.04 or newer). The Windows package supports Windows 10 version 1809
+or newer, or Windows 11. The macOS app supports macOS 11 or newer.
 
-## Build the Linux release
+The command-line updater manages its binary prefix. It does not install or
+replace the macOS application bundle.
 
-1. Build the Ubuntu 22.04 image:
-
-   ```bash
-   docker build -t prismattyc-release:ubuntu22 -f scripts/release/Dockerfile.linux .
-   ```
-
-2. Build all six binaries with the pinned Rust 1.90.0 toolchain in that image.
-3. Generate the manuals with `scripts/install-man.sh`. Set `PRISMATTYC_BINS`
-   to the binary directory. Set `PMUX_MAN_DIR` to a staging directory.
-4. Run `scripts/release/package.py` in the build image. Supply `--version`,
-   `--target`, `--bin-dir`, `--man-dir`, and a new `--out` directory.
-5. Test the archive installer in a clean container for each architecture
-   before uploading assets. Run the ARM64 checks on ARM64 hardware or under
-   emulation. Record which environment you used.
-
-Use target `aarch64-unknown-linux-gnu` when packaging ARM64 binaries. The
-packager rejects executable files for a different architecture. Run it in
-an environment that can execute the binaries, including through emulation.
-Combine both targets in one draft release. Keep one copy of each shared
-license notice. Regenerate `SHA256SUMS` over the combined asset set.
-
-The package contains individual updater assets and a complete installation
-archive. `SHA256SUMS` covers the release assets. The archive contains another
-checksum file for its extracted files. The installer verifies these files
-before installing them. It leaves existing unrelated installations in place.
-
-## Build the Windows release
-
-Build and package natively with `scripts/release/build-windows.ps1`.
-See [Native Windows host and PMUX](platforms/windows.md) for prerequisites,
-installation, runtime behavior, and platform evidence requirements.
-The Windows ZIP contains all six `.exe` files. Individual updater assets use
-names such as `prismattyc-v0.2.19-x86_64-pc-windows-msvc-pmux.exe`.
-Include the Windows manifest and checksum file with the release assets.
+After publication, check the complete asset list and the combined checksums.
+On a disposable Linux installation, run `pmux update --check`, install the
+release, test a coordinated restart, and verify rollback. On macOS, open the
+zip, validate `Prismattyc.app` with Gatekeeper, and launch it.

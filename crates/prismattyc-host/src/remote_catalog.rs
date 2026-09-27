@@ -6,8 +6,6 @@
 //! [`CatalogFetcher::poll`], and a response whose generation is no longer
 //! current is dropped. Authentication is key or agent only: `BatchMode=yes`
 //! turns every prompt into a visible [`FetchError`].
-// The Space rail consumes this in the next slice.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::HashMap;
 use std::fmt;

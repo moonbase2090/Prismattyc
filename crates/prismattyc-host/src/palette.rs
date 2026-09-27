@@ -585,6 +585,8 @@ pub enum SpacePickerKind {
     Delete,
     MovePane,
     MoveSession,
+    /// Running Spaces on an SSH destination (issue #24).
+    Remote,
 }
 
 /// One saved space shown in the picker.
@@ -773,7 +775,9 @@ impl SpacePicker {
                         return SpacePickerVerdict::Consumed;
                     };
                     match self.kind {
-                        SpacePickerKind::Open => SpacePickerVerdict::Open(row.name.clone()),
+                        SpacePickerKind::Open | SpacePickerKind::Remote => {
+                            SpacePickerVerdict::Open(row.name.clone())
+                        }
                         SpacePickerKind::MovePane | SpacePickerKind::MoveSession => {
                             SpacePickerVerdict::Move(row.name.clone())
                         }
@@ -1509,6 +1513,20 @@ mod tests {
         assert_eq!(
             picker.key(&Key::Named(NamedKey::Enter), empty_mods(), &spaces),
             SpacePickerVerdict::Open("alpha".into())
+        );
+    }
+
+    #[test]
+    fn remote_space_picker_enter_returns_the_row_name() {
+        let spaces = sample_spaces();
+        let mut picker = SpacePicker::new(SpacePickerKind::Remote);
+        assert_eq!(
+            picker.key(&Key::Named(NamedKey::Enter), empty_mods(), &spaces),
+            SpacePickerVerdict::Open("alpha".into())
+        );
+        assert_eq!(
+            picker.key(&Key::Named(NamedKey::Escape), empty_mods(), &spaces),
+            SpacePickerVerdict::Close
         );
     }
 

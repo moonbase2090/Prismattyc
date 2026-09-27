@@ -147,6 +147,22 @@ fn open_mode(host: &mut HostState, messages: bool) {
     host.window.request_redraw();
 }
 pub(super) fn rows(host: &HostState, kind: SpacePickerKind) -> Vec<SpacePickerRow> {
+    if kind == SpacePickerKind::Remote {
+        let Some(id) = host.remote_open.as_ref() else {
+            return Vec::new();
+        };
+        return host
+            .remote
+            .borrow()
+            .rows(id)
+            .into_iter()
+            .map(|row| SpacePickerRow {
+                name: row.name,
+                sessions: 0,
+                saved_at_unix: 0,
+            })
+            .collect();
+    }
     match &host.terminal_targets {
         Some(entries) => entries
             .iter()

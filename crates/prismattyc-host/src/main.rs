@@ -39,6 +39,7 @@ mod rail_resize;
 mod raster;
 mod regroup;
 mod remote_catalog;
+mod remote_rail;
 mod render_diagnostics;
 mod restart;
 mod terminal_switcher;
@@ -70,10 +71,12 @@ mod walkthrough_audio;
 #[cfg(target_os = "linux")]
 mod wayland_shm;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU32;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -889,6 +892,10 @@ struct HostState {
     context_menu_target: Option<ContextMenuTarget>,
     /// Saved-spaces rail (PT-91): chip list, current space, keyboard mode.
     space_rail: space_rail::SpaceRail,
+    /// `[[remote]]` catalog state, shared by every window (issue #24).
+    remote: Rc<RefCell<remote_rail::RemoteRail>>,
+    /// Destination whose Space list this window shows.
+    remote_open: Option<prismattyc_mux::remote_catalog::DestinationId>,
     /// Host-rendered text from the active input method. It is never sent to the PTY.
     preedit: Preedit,
     /// Incremental find over the focused pane's history (PT-37).
@@ -2212,6 +2219,8 @@ struct App {
     _config_watcher: Option<config::ConfigWatch>,
     /// Coalesced wake from PTY reader threads and the config watcher.
     wake: mux::Wake,
+    /// `[[remote]]` destinations and their catalogs (issue #24).
+    remote: Rc<RefCell<remote_rail::RemoteRail>>,
     wake_pending: Arc<AtomicBool>,
     /// Effective host key table (`[keys]` over the defaults, keybindings).
     /// Shared with the dispatcher per event; replaced on hot reload.
@@ -2255,6 +2264,11 @@ impl App {
             }
         };
         let keymap = Arc::new(file_config.loaded_keymap());
+        // `config::load` already rejected invalid entries.
+        let remote = Rc::new(RefCell::new(remote_rail::RemoteRail::new(
+            file_config.remote_destinations().unwrap_or_default(),
+            wake.clone(),
+        )));
         Ok(Self {
             cli,
             windows: std::collections::HashMap::new(),
@@ -2264,6 +2278,7 @@ impl App {
             startup_config_error,
             _config_watcher: watcher,
             wake,
+            remote,
             wake_pending,
             keymap,
             event_proxy,
@@ -2318,6 +2333,16 @@ impl App {
             return;
         }
         let prior = std::mem::replace(&mut self.file_config, newest);
+        if self.file_config.remote != prior.remote
+            && self
+                .remote
+                .borrow_mut()
+                .set_destinations(self.file_config.remote_destinations().unwrap_or_default())
+        {
+            for host in self.windows.values_mut() {
+                sync_remote_rail(host, true);
+            }
+        }
         // A valid config reload can change host-drawn pixels without terminal
         // damage (theme, background removal, opacity, chrome, or geometry).
         // Consume one conservative full frame before row-filtered raster can
@@ -2760,10 +2785,12 @@ impl App {
         let mut next_deadline: Option<Instant> = None;
         self.retry_register_host_pid();
         let rail_now = Instant::now();
+        let remote_changed = self.remote.borrow_mut().poll();
         for (id, host) in self.windows.iter_mut() {
             if host.space_rail.poll(&spaces_dir(), rail_now) {
                 rail_changed(host);
             }
+            sync_remote_rail(host, remote_changed);
             adopt_nested_attaches(host, rail_now);
             if !host.space_opens.blocks_persist()
                 && host.space_rail.current_index().is_none()
@@ -3069,6 +3096,7 @@ impl App {
         let mut space_rail =
             space_rail::SpaceRail::new(if first_window { live_env_space() } else { None });
         space_rail.refresh(&spaces_dir());
+        space_rail.destinations = self.remote.borrow().views(None);
         let geom = host_geom(
             &font,
             initial_multi_pane,
@@ -3238,6 +3266,8 @@ impl App {
                 team_attention_feed: Default::default(),
                 context_menu_target: None,
                 space_rail,
+                remote: self.remote.clone(),
+                remote_open: None,
                 preedit: Preedit::default(),
                 find: FindMode::default(),
                 splash,
@@ -3481,6 +3511,11 @@ impl App {
                             }
                             None
                         }
+                        Some(a11y::ChromeAction::OpenRemote(index)) => {
+                            open_remote_list(host, index);
+                            host.window.request_redraw();
+                            None
+                        }
                         None => None,
                     }
                 };
@@ -3646,6 +3681,15 @@ fn chrome_snapshot(host: &HostState, live: Option<a11y::LiveSnap>) -> a11y::Chro
         scroll,
         rail,
         rail_current: host.space_rail.current_index(),
+        remote: if host.mux.geom().rail_side == space_rail::RailSide::Off {
+            Vec::new()
+        } else {
+            host.space_rail
+                .destinations
+                .iter()
+                .map(|dest| format!("{}, remote, {}", dest.label, dest.status.describe()))
+                .collect()
+        },
         document: Some(focused_document(host)),
         live,
         caption: walkthrough_caption_view(host).map(|view| {
@@ -3795,7 +3839,9 @@ fn chrome_overlay(host: &HostState) -> a11y::OverlayKind {
     if let Some(picker) = host.space_picker.as_ref() {
         let rows = terminal_switcher::rows(host, picker.kind);
         return a11y::OverlayKind::Choices {
-            title: if host.terminal_messages && host.terminal_targets.is_some() {
+            title: if picker.kind == SpacePickerKind::Remote {
+                "Remote Spaces"
+            } else if host.terminal_messages && host.terminal_targets.is_some() {
                 "Agent messages: queue receipts do not confirm execution"
             } else if host.terminal_targets.is_some() {
                 "Find terminal"
@@ -4964,6 +5010,10 @@ fn rasterize_frame(
             height as usize,
             host.spacing.space_rail_pane_names,
         ) {
+            let rail_hover = match host.hover_target {
+                Some(HoverTarget::Rail(hit)) => Some(hit),
+                _ => None,
+            };
             rasterize_space_rail(
                 &host.theme,
                 &host.font,
@@ -4973,10 +5023,20 @@ fn rasterize_frame(
                 width as usize,
                 focus_border_rgb(host.focus_border),
                 focus_border_rgb(0),
-                match host.hover_target {
-                    Some(HoverTarget::Rail(hit)) => Some(hit),
-                    _ => None,
-                },
+                rail_hover,
+                host.hover_blend,
+                host.chrome_alpha,
+            );
+            raster::rasterize_rail_destinations(
+                &host.theme,
+                &host.font,
+                &layout,
+                host.space_rail.names.len(),
+                &host.space_rail.destinations,
+                buffer,
+                width as usize,
+                focus_border_rgb(host.focus_border),
+                rail_hover,
                 host.hover_blend,
                 host.chrome_alpha,
             );
@@ -5817,7 +5877,13 @@ fn rasterize_frame(
                 } else {
                     "sessions"
                 };
-                let describe = if let Some(entries) = &host.terminal_targets {
+                let describe = if picker.kind == SpacePickerKind::Remote {
+                    host.remote_open
+                        .as_ref()
+                        .and_then(|id| host.remote.borrow().row(id, &space.name))
+                        .map(|row| row.detail)
+                        .unwrap_or_default()
+                } else if let Some(entries) = &host.terminal_targets {
                     entries
                         .iter()
                         .find(|entry| entry.label == space.name)
@@ -5856,6 +5922,10 @@ fn rasterize_frame(
             SpacePickerKind::MoveSession => {
                 ("MOVE SESSION TO SPACE", "Enter move · Esc close · ↑↓ move")
             }
+            SpacePickerKind::Remote => (
+                "REMOTE SPACES",
+                "Enter select · Esc close · ↑↓ move · click the chip again to refresh",
+            ),
         };
         let move_label = host
             .move_target
@@ -5863,9 +5933,13 @@ fn rasterize_frame(
             .and_then(|target| target.remote.as_ref())
             .map(|target| format!("{} · pane {}", target.name, target.pane))
             .unwrap_or_default();
+        let subtitle = match (picker.kind, host.remote_open.as_ref()) {
+            (SpacePickerKind::Remote, Some(id)) => host.remote.borrow().status_line(id),
+            _ => move_label,
+        };
         let sections = [PaletteSection {
             header,
-            subtitle: &move_label,
+            subtitle: &subtitle,
             rows: &rows,
         }];
         let detail = host
@@ -7023,6 +7097,83 @@ fn rail_changed(host: &mut HostState) {
     // chips are re-laid at paint time, so the refit is a no-op there.
     App::refit_geom(host, host.window.inner_size(), Some("spaces changed"));
     sync_chrome_hover(host);
+}
+
+/// Copy destination chips from the shared remote state. `changed` means a
+/// catalog request settled, so an open remote list repaints too.
+fn sync_remote_rail(host: &mut HostState, changed: bool) {
+    let remote_list = host
+        .space_picker
+        .as_ref()
+        .is_some_and(|picker| picker.kind == SpacePickerKind::Remote);
+    if !remote_list {
+        host.remote_open = None;
+    }
+    let views = {
+        let remote = host.remote.borrow();
+        if host
+            .remote_open
+            .as_ref()
+            .is_some_and(|id| remote.destination(id).is_none())
+        {
+            host.remote_open = None;
+        }
+        remote.views(host.remote_open.as_ref())
+    };
+    if host.space_rail.destinations != views {
+        host.space_rail.destinations = views;
+        rail_changed(host);
+    } else if changed && remote_list {
+        host.dirty = true;
+    }
+}
+
+/// Select destination chip `index`: connect, retry, or refresh it and show
+/// its Space list.
+fn open_remote_list(host: &mut HostState, index: usize) {
+    let Some(id) = host.remote.borrow_mut().activate(index) else {
+        return;
+    };
+    host.space_rail.leave();
+    host.remote_open = Some(id);
+    host.space_picker = Some(SpacePicker::new(SpacePickerKind::Remote));
+    host.palette_layout = None;
+    host.tab_rename = None;
+    host.window.set_title("Prismattyc — remote spaces");
+    sync_remote_rail(host, true);
+    host.dirty = true;
+    sync_chrome_hover(host);
+}
+
+/// Enter on a remote list row. Retry and unavailable rows keep the list.
+fn choose_remote_row(host: &mut HostState, name: &str) -> bool {
+    let Some(id) = host.remote_open.clone() else {
+        return false;
+    };
+    let row = host.remote.borrow().row(&id, name);
+    match row.map(|row| (row.kind, row.detail)) {
+        Some((remote_rail::RemoteRowKind::Retry, _)) => {
+            host.remote.borrow_mut().retry(&id);
+            sync_remote_rail(host, true);
+            host.dirty = true;
+            false
+        }
+        Some((remote_rail::RemoteRowKind::Unavailable, detail)) => {
+            rail_toast(host, &format!(" {name}: {detail} "));
+            false
+        }
+        Some((remote_rail::RemoteRowKind::Space { session_name, .. }, _)) => {
+            // One-step attach is the next slice of issue #24.
+            rail_toast(
+                host,
+                &format!(
+                    " {id} › {name}: remote attach is not available yet (session {session_name}) "
+                ),
+            );
+            true
+        }
+        None => false,
+    }
 }
 
 /// Re-read the spaces directory and reflow if the chip width follows it.
@@ -8302,6 +8453,9 @@ fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
             Some(space_rail::RailHit::Overflow) => {
                 return Some(HoverTarget::Rail(space_rail::RailHit::Overflow))
             }
+            Some(space_rail::RailHit::Destination(index)) => {
+                return Some(HoverTarget::Rail(space_rail::RailHit::Destination(index)))
+            }
             Some(space_rail::RailHit::Empty) | None => {}
         }
     }
@@ -8485,9 +8639,11 @@ fn handle_rail_click(host: &mut HostState, button: MouseButton) -> bool {
             host.palette_layout = None;
             host.dirty = true;
         }
-        (MouseButton::Right, RailHit::Empty | RailHit::Plus | RailHit::Overflow) => {
-            space_panel::settings(host)
-        }
+        (MouseButton::Left, RailHit::Destination(index)) => open_remote_list(host, index),
+        (
+            MouseButton::Right,
+            RailHit::Empty | RailHit::Plus | RailHit::Overflow | RailHit::Destination(_),
+        ) => space_panel::settings(host),
         (MouseButton::Left, RailHit::Plus) => {
             if was_edit.as_ref().is_some_and(|edit| edit.target.is_none()) {
                 return true;
@@ -9420,11 +9576,20 @@ fn apply_space_picker_verdict(
             host.move_target = None;
             host.terminal_targets = None;
             host.space_picker = None;
+            host.remote_open = None;
+            sync_remote_rail(host, false);
             host.palette_layout = None;
             host.window
                 .set_title(&window_title(&host.mux, show_tab_strip(host)));
             host.dirty = true;
             sync_chrome_hover(host);
+            true
+        }
+        SpacePickerVerdict::Open(name) if kind == SpacePickerKind::Remote => {
+            if choose_remote_row(host, &name) {
+                return apply_space_picker_verdict(host, kind, SpacePickerVerdict::Close);
+            }
+            host.dirty = true;
             true
         }
         SpacePickerVerdict::Open(name) => {

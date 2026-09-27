@@ -4936,6 +4936,128 @@ pub fn rasterize_space_rail(
     }
 }
 
+/// Destination chips after the rail's `+` (issue #24): a separator line,
+/// then one chip per `[[remote]]` destination with a status glyph and its
+/// label. The chip whose Space list is open sits on the current-chip lift.
+#[allow(clippy::too_many_arguments)]
+pub fn rasterize_rail_destinations(
+    theme: &Theme,
+    font: &FontMetrics,
+    layout: &crate::space_rail::RailLayout,
+    local_count: usize,
+    views: &[crate::space_rail::RailDestinationView],
+    buffer: &mut [u32],
+    stride_px: usize,
+    focus_rgb: [u8; 3],
+    hover: Option<crate::space_rail::RailHit>,
+    hover_blend: f32,
+    bg_alpha: u8,
+) {
+    use crate::space_rail::{
+        DestinationStatus, RailHit, DESTINATION_SEPARATOR_PX, RAIL_LABEL_INSET,
+    };
+    if views.is_empty() || stride_px == 0 {
+        return;
+    }
+    let cell_w = font.cell_w.max(1);
+    if let Some((x0, y0, _, height)) = layout.dest_bounds(0, local_count) {
+        let inset = height / 4;
+        if layout.side.horizontal() {
+            let x = x0.saturating_sub(DESTINATION_SEPARATOR_PX / 2 + 1);
+            let h = height.saturating_sub(2 * inset);
+            fill_rect(buffer, stride_px, x, y0 + inset, 1, h, theme.pane_border);
+        } else {
+            let y = y0.saturating_sub(DESTINATION_SEPARATOR_PX / 2 + 1);
+            let w = layout.w.saturating_sub(2 * RAIL_LABEL_INSET);
+            fill_rect(
+                buffer,
+                stride_px,
+                x0 + RAIL_LABEL_INSET,
+                y,
+                w,
+                1,
+                theme.pane_border,
+            );
+        }
+    }
+    for (index, view) in views.iter().enumerate() {
+        let Some((x0, y0, width, height)) = layout.dest_bounds(index, local_count) else {
+            continue;
+        };
+        let slot_end = x0.saturating_add(width);
+        let mut fill = view.open.then(|| active_chip_bg(theme, focus_rgb));
+        if hover == Some(RailHit::Destination(index)) {
+            let base = fill.unwrap_or(theme.pane_backdrop);
+            fill = Some(crate::theme::hover_rgb(
+                theme.variant,
+                base,
+                theme.chrome_fg,
+                hover_blend,
+            ));
+        }
+        if let Some(fill) = fill {
+            fill_rect_argb(buffer, stride_px, x0, y0, width, height, fill, bg_alpha);
+        }
+        if view.open {
+            let marker_h = TAB_MARKER_H.min(height);
+            fill_rect(
+                buffer,
+                stride_px,
+                x0,
+                y0.saturating_add(height).saturating_sub(marker_h),
+                width,
+                marker_h,
+                tab_marker_rgb_with_theme(theme, focus_rgb),
+            );
+        }
+        let ink = match fill {
+            Some(fill) => contrast_ink(fill),
+            None => theme.chrome_fg,
+        };
+        let glyph_ink = match view.status {
+            DestinationStatus::Disconnected => ink,
+            DestinationStatus::Loading => theme.unseen_badge,
+            DestinationStatus::Ready => theme.active_badge,
+            DestinationStatus::Failed => theme.attention_badge,
+        };
+        let label_ink = if view.status == DestinationStatus::Failed {
+            theme.attention_badge
+        } else {
+            ink
+        };
+        let text_x = x0.saturating_add(layout.label_inset);
+        let text_limit = slot_end.saturating_sub(RAIL_LABEL_INSET);
+        if text_x.saturating_add(cell_w) > text_limit {
+            continue;
+        }
+        blit_glyph_in(
+            buffer,
+            stride_px,
+            font,
+            view.status.glyph(),
+            text_x,
+            y0,
+            glyph_ink,
+            x0,
+            slot_end,
+            false,
+        );
+        let label_x = text_x.saturating_add(2 * cell_w);
+        let max_cells = text_limit.saturating_sub(label_x) / cell_w;
+        let mut x = label_x;
+        for ch in ellipsized(&view.label, max_cells).chars() {
+            let advance = cell_w.saturating_mul(prismattyc_core::char_display_width(ch).max(1));
+            if x.saturating_add(advance) > text_limit {
+                break;
+            }
+            blit_glyph_in(
+                buffer, stride_px, font, ch, x, y0, label_ink, x0, slot_end, false,
+            );
+            x = x.saturating_add(advance);
+        }
+    }
+}
+
 /// The active tab's bottom border: a white line at half alpha over the
 /// chip colour beneath it (owner order, PT-143). The rail's current chip
 /// keeps the focus-colour marker.
@@ -14381,6 +14503,118 @@ mod space_rail_raster_tests {
 
     fn rgb_at(buffer: &[u32], stride: usize, x: usize, y: usize) -> [u8; 3] {
         unpack_rgb(buffer[y * stride + x])
+    }
+
+    #[test]
+    fn rail_paints_destination_chips_after_a_separator() {
+        use crate::space_rail::{DestinationStatus, RailDestinationView, RailHit, SpaceRail};
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let mut geom = HostGeom::tight(font.cell_w, font.cell_h);
+        geom.window_pad = 4;
+        geom.rail_gap = 3;
+        geom.rail_side = RailSide::Bottom;
+        geom.rail_chip_cols = 12;
+        geom.rail_px = rail_thickness_px(RailSide::Bottom, font.cell_w, font.cell_h, 12);
+        let (width, height) = (80 * font.cell_w, 10 * font.cell_h);
+        let mut rail = SpaceRail::new(None);
+        rail.names = vec!["local".into()];
+        rail.destinations = vec![
+            RailDestinationView {
+                label: "devbox 2".into(),
+                status: DestinationStatus::Ready,
+                open: true,
+            },
+            RailDestinationView {
+                label: "lab".into(),
+                status: DestinationStatus::Failed,
+                open: false,
+            },
+        ];
+        let layout = rail.layout(geom, width, height, false).unwrap();
+        let theme = default_theme();
+        let focus = [0xff, 0x80, 0x10];
+        let mut buffer = vec![pack_argb(OPAQUE_ALPHA, theme.default_bg); width * height];
+        rasterize_space_rail(
+            theme,
+            &font,
+            &layout,
+            &rail.views(),
+            &mut buffer,
+            width,
+            focus,
+            [0xf0, 0x40, 0x40],
+            None,
+            crate::config::DEFAULT_HOVER_BLEND,
+            OPAQUE_ALPHA,
+        );
+        rasterize_rail_destinations(
+            theme,
+            &font,
+            &layout,
+            1,
+            &rail.destinations,
+            &mut buffer,
+            width,
+            focus,
+            Some(RailHit::Destination(1)),
+            crate::config::DEFAULT_HOVER_BLEND,
+            OPAQUE_ALPHA,
+        );
+        let (x0, y0, w0, h0) = layout.dest_bounds(0, 1).unwrap();
+        let (x1, y1, w1, h1) = layout.dest_bounds(1, 1).unwrap();
+        // The separator sits in the gap before the first destination.
+        let sep_x = x0 - crate::space_rail::DESTINATION_SEPARATOR_PX / 2 - 1;
+        assert_eq!(
+            rgb_at(&buffer, width, sep_x, y0 + h0 / 2),
+            theme.pane_border
+        );
+        // The open destination carries the current-chip lift and marker.
+        assert_eq!(
+            rgb_at(&buffer, width, x0 + w0 - 2, y0 + 2),
+            active_chip_bg(theme, focus)
+        );
+        assert_eq!(
+            rgb_at(&buffer, width, x0 + w0 / 2, y0 + h0 - 1),
+            blend_rgb(focus, theme.chrome_bg, TAB_MARKER_OPACITY)
+        );
+        // Glyph edges are anti-aliased over the chip fill; the stem is close.
+        let near = |a: [u8; 3], b: [u8; 3]| a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= 48);
+        let has = |x_lo: usize, x_hi: usize, y_lo: usize, y_hi: usize, rgb: [u8; 3]| {
+            (y_lo..y_hi).any(|y| (x_lo..x_hi).any(|x| near(rgb_at(&buffer, width, x, y), rgb)))
+        };
+        let glyph_x = x0 + layout.label_inset;
+        // Ready glyph in the connected colour; failed glyph and label in the
+        // attention colour; the hovered chip is filled.
+        assert!(has(
+            glyph_x,
+            glyph_x + font.cell_w,
+            y0,
+            y0 + h0,
+            theme.active_badge
+        ));
+        let glyph_x1 = x1 + layout.label_inset;
+        assert!(has(
+            glyph_x1,
+            glyph_x1 + font.cell_w,
+            y1,
+            y1 + h1,
+            theme.attention_badge
+        ));
+        assert!(has(
+            glyph_x1 + 2 * font.cell_w,
+            x1 + w1,
+            y1,
+            y1 + h1,
+            theme.attention_badge
+        ));
+        assert_ne!(
+            rgb_at(&buffer, width, x1 + w1 - 2, y1 + 1),
+            theme.pane_backdrop
+        );
+        // Nothing is painted past the last destination.
+        assert!(!has(x1 + w1 + 1, width, y1, y1 + h1, theme.attention_badge));
     }
 
     #[test]

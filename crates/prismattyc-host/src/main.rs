@@ -11533,6 +11533,38 @@ fn pan_view_scroll(host: &mut HostState, delta_rows: isize) {
     }
 }
 
+/// Advance one pane's saved scroll offset toward `delta_rows`, clamped to
+/// `max`. Returns whether the offset moved. Pure (takes `max` instead of the
+/// emulator) so the pane wheel-routing path is unit-testable without a window.
+fn step_pane_view_scroll(
+    view_scroll: &mut usize,
+    max: usize,
+    delta_rows: isize,
+    selection: &mut Selection,
+    keyboard_select_mode: &mut bool,
+    scroll_new_output: &mut bool,
+    left_button_down: bool,
+) -> bool {
+    let before = *view_scroll;
+    if delta_rows > 0 {
+        *view_scroll = (*view_scroll + delta_rows as usize).min(max);
+    } else {
+        *view_scroll = view_scroll.saturating_sub((-delta_rows) as usize);
+    }
+    if *view_scroll == before {
+        return false;
+    }
+    // Pan clears finished selection chrome (nested parity); mid-drag keeps anchor.
+    if !left_button_down {
+        selection.clear();
+        *keyboard_select_mode = false;
+    }
+    if *view_scroll == 0 {
+        *scroll_new_output = false;
+    }
+    true
+}
+
 fn pan_pane_view_scroll(host: &mut HostState, pane_id: PaneId, delta_rows: isize) {
     let left_button_down = host.left_button_down;
     let focused_pane = host.mux.focused_id();
@@ -11540,21 +11572,16 @@ fn pan_pane_view_scroll(host: &mut HostState, pane_id: PaneId, delta_rows: isize
         return;
     };
     let max = pane.emulator.screen().max_view_scroll();
-    let before = pane.view_scroll;
-    if delta_rows > 0 {
-        pane.view_scroll = (pane.view_scroll + delta_rows as usize).min(max);
-    } else {
-        pane.view_scroll = pane.view_scroll.saturating_sub((-delta_rows) as usize);
-    }
-    if pane.view_scroll != before {
-        // Pan clears finished selection chrome (nested parity); mid-drag keeps anchor.
-        if !left_button_down {
-            pane.selection.clear();
-            pane.keyboard_select_mode = false;
-        }
-        if pane.view_scroll == 0 {
-            pane.scroll_new_output = false;
-        }
+    let changed = step_pane_view_scroll(
+        &mut pane.view_scroll,
+        max,
+        delta_rows,
+        &mut pane.selection,
+        &mut pane.keyboard_select_mode,
+        &mut pane.scroll_new_output,
+        left_button_down,
+    );
+    if changed {
         host.dirty = true;
         if pane_id == focused_pane {
             host.window
@@ -19049,5 +19076,90 @@ session mail (id 15)
         assert!(overlay_requires_full_repaint(false, true));
         assert!(overlay_requires_full_repaint(true, true));
         assert!(overlay_requires_full_repaint(true, false));
+    }
+
+    fn scroll_step_state(
+        view: usize,
+        scrolled_new: bool,
+        selecting: bool,
+    ) -> (usize, Selection, bool, bool) {
+        let mut selection = Selection::default();
+        if selecting {
+            selection.begin(4, 2);
+        }
+        (view, selection, false, scrolled_new)
+    }
+
+    #[test]
+    fn pane_scroll_step_down_clamps_to_max_and_clears_selection() {
+        let (mut view, mut selection, mut keyboard_select, mut scroll_new) =
+            scroll_step_state(0, false, true);
+        let changed = step_pane_view_scroll(
+            &mut view,
+            10,
+            100,
+            &mut selection,
+            &mut keyboard_select,
+            &mut scroll_new,
+            false,
+        );
+        assert!(changed);
+        assert_eq!(view, 10);
+        assert!(selection.anchor.is_none());
+    }
+
+    #[test]
+    fn pane_scroll_step_up_saturates_and_resets_new_output() {
+        let (mut view, mut selection, mut keyboard_select, mut scroll_new) =
+            scroll_step_state(3, true, false);
+        let changed = step_pane_view_scroll(
+            &mut view,
+            10,
+            -5,
+            &mut selection,
+            &mut keyboard_select,
+            &mut scroll_new,
+            false,
+        );
+        assert!(changed);
+        assert_eq!(view, 0);
+        assert!(!scroll_new);
+    }
+
+    #[test]
+    fn pane_scroll_step_no_movement_reports_unchanged() {
+        let (mut view, mut selection, mut keyboard_select, mut scroll_new) =
+            scroll_step_state(4, true, true);
+        let changed = step_pane_view_scroll(
+            &mut view,
+            10,
+            0,
+            &mut selection,
+            &mut keyboard_select,
+            &mut scroll_new,
+            false,
+        );
+        assert!(!changed);
+        assert_eq!(view, 4);
+        assert!(selection.anchor.is_some());
+        assert!(scroll_new);
+    }
+
+    #[test]
+    fn pane_scroll_step_mid_drag_keeps_selection_anchor() {
+        let (mut view, mut selection, mut keyboard_select, mut scroll_new) =
+            scroll_step_state(6, false, true);
+        let changed = step_pane_view_scroll(
+            &mut view,
+            10,
+            -2,
+            &mut selection,
+            &mut keyboard_select,
+            &mut scroll_new,
+            true,
+        );
+        assert!(changed);
+        assert_eq!(view, 4);
+        assert!(selection.anchor.is_some());
     }
 }

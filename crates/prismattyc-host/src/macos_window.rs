@@ -189,43 +189,61 @@ objc2::define_class!(
 /// config hot reload. No terminal damage, presentation work, or animation
 /// timer is introduced.
 pub fn sync_titlebar_background(window: &Window, needs_fill: bool) {
-    use objc2::{msg_send, MainThreadMarker, MainThreadOnly};
-    use objc2_app_kit::{NSBox, NSBoxType, NSColor, NSTitlePosition, NSWindowButton};
+    let Some((mtm, content, native)) = titlebar_native_parts(window) else {
+        return;
+    };
+    native.setTitlebarAppearsTransparent(false);
+    let key = content as *const NSView as usize;
+    let already = TITLEBAR_FILLS.with(|views| views.borrow().contains_key(&key));
+    match titlebar_fill_action(needs_fill, already) {
+        TitlebarFillAction::Keep => {}
+        TitlebarFillAction::Remove => remove_titlebar_fill(key),
+        TitlebarFillAction::Install => install_titlebar_fill(mtm, content, &native, key),
+    }
+}
+
+fn titlebar_native_parts(
+    window: &Window,
+) -> Option<(
+    objc2::MainThreadMarker,
+    &NSView,
+    objc2::rc::Retained<objc2_app_kit::NSWindow>,
+)> {
+    use objc2::MainThreadMarker;
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-    let Ok(handle) = window.window_handle() else {
-        return;
-    };
+    let mtm = MainThreadMarker::new()?;
+    let handle = window.window_handle().ok()?;
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
-        return;
+        return None;
     };
     // SAFETY: winit supplies a live NSView, accessed on the main thread while
     // the Window owner remains alive.
     let content: &NSView = unsafe { &*handle.ns_view.as_ptr().cast() };
-    let Some(native) = content.window() else {
+    let native = content.window()?;
+    Some((mtm, content, native))
+}
+
+fn remove_titlebar_fill(key: usize) {
+    use objc2_app_kit::NSBox;
+
+    let Some(fill) = TITLEBAR_FILLS.with(|views| views.borrow_mut().remove(&key)) else {
         return;
     };
-    native.setTitlebarAppearsTransparent(false);
+    // SAFETY: address came from a retained TitlebarBackground inserted by this
+    // module and remains live until removal.
+    let fill: &NSBox = unsafe { &*(fill as *const NSBox) };
+    fill.removeFromSuperview();
+}
 
-    let key = content as *const NSView as usize;
-    let already = TITLEBAR_FILLS.with(|views| views.borrow().contains_key(&key));
-    match titlebar_fill_action(needs_fill, already) {
-        TitlebarFillAction::Keep => return,
-        TitlebarFillAction::Remove => {
-            let fill = TITLEBAR_FILLS.with(|views| views.borrow_mut().remove(&key));
-            if let Some(fill) = fill {
-                // SAFETY: address came from a retained TitlebarBackground inserted
-                // by this module and remains live until removal.
-                let fill: &NSBox = unsafe { &*(fill as *const NSBox) };
-                fill.removeFromSuperview();
-            }
-            return;
-        }
-        TitlebarFillAction::Install => {}
-    }
+fn install_titlebar_fill(
+    mtm: objc2::MainThreadMarker,
+    content: &NSView,
+    native: &objc2_app_kit::NSWindow,
+    key: usize,
+) {
+    use objc2::{msg_send, MainThreadOnly};
+    use objc2_app_kit::{NSBoxType, NSColor, NSTitlePosition, NSWindowButton};
 
     let Some(button) = native.standardWindowButton(NSWindowButton::CloseButton) else {
         return; // Borderless windows have no native title bar to fill.

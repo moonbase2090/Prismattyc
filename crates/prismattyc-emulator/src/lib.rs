@@ -4037,12 +4037,7 @@ mod tests {
 
     fn history_row_text(emulator: &Emulator, depth: usize) -> String {
         (0..8)
-            .map(|col| {
-                emulator
-                    .screen()
-                    .history_view_cell(depth, 0, col)
-                    .character
-            })
+            .map(|col| emulator.screen().history_view_cell(depth, 0, col).character)
             .collect()
     }
 
@@ -4060,4 +4055,3 @@ mod tests {
         }
     }
 }
-

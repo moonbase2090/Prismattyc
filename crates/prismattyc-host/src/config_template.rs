@@ -248,6 +248,11 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         range: "true | false", value: ConfigValue::Bool(false),
     },
     ConfigKey {
+        name: "alt_screen_scrollback", group: ConfigGroup::Layout,
+        doc: "Keep full-screen TUI scrollback reachable in host scroll and selection",
+        range: "true | false", value: ConfigValue::Bool(false),
+    },
+    ConfigKey {
         name: "space_rail_chip_cols",
         group: ConfigGroup::Layout,
         doc: "Widest space chip in cells (chips fit their labels); 0 = 28",
@@ -940,6 +945,7 @@ mod tests {
         "space_startup",
         "space_rail_width_cols",
         "restore_blank_terminals",
+        "alt_screen_scrollback",
         "space_rail_chip_cols",
         "visual_bell",
         "pane_visual_bell",

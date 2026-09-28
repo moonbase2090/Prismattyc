@@ -1058,7 +1058,7 @@ pub(crate) fn decode_png_rgba(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
         png::ColorType::Rgb => {
             let rgb = &buf[..info.buffer_size()];
             let mut out = Vec::with_capacity(w * h * 4);
-            for px in rgb.chunks_exact(3) {
+            for px in rgb.as_chunks::<3>().0 {
                 out.extend_from_slice(&[px[0], px[1], px[2], 255]);
             }
             out
@@ -1236,7 +1236,7 @@ pub(crate) fn build_background_layer(
     drop(rgba);
     box_blur_rgba(&mut scaled, w, h, blur);
     let mut out = Vec::with_capacity(w * h);
-    for px in scaled.chunks_exact(4) {
+    for px in scaled.as_chunks::<4>().0 {
         out.push(background_tint([px[0], px[1], px[2]], theme_bg, opacity));
     }
     if out.len() != w * h {

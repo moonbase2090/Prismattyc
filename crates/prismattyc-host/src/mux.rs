@@ -593,6 +593,8 @@ pub(crate) struct PaneRuntime {
     pub(crate) rich: RichSession,
     rich_viewer_id: ViewerId,
     experimental_rich: bool,
+    /// Opt-in alternate-screen scrollback retention (B1 gate, default off).
+    pub(crate) alt_screen_scrollback: bool,
     pub(crate) cols: usize,
     /// Full pane content height before a rich workspace reservation.
     pub(crate) outer_rows: usize,
@@ -656,6 +658,7 @@ impl PaneRuntime {
         rows: usize,
         cwd: Option<&Path>,
         experimental_rich: bool,
+        alt_screen_scrollback: bool,
         wake: Option<Wake>,
         cell_w: usize,
         cell_h: usize,
@@ -673,6 +676,7 @@ impl PaneRuntime {
                 cols,
                 rows,
                 experimental_rich,
+                alt_screen_scrollback,
                 cell_w,
                 cell_h,
             )?;
@@ -692,6 +696,7 @@ impl PaneRuntime {
                 cols,
                 rows,
                 experimental_rich,
+                alt_screen_scrollback,
                 wake.clone(),
                 cell_w,
                 cell_h,
@@ -788,6 +793,7 @@ impl PaneRuntime {
             cols,
             rows,
             experimental_rich,
+            alt_screen_scrollback,
             cell_w,
             cell_h,
         )
@@ -802,6 +808,7 @@ impl PaneRuntime {
         cols: usize,
         rows: usize,
         experimental_rich: bool,
+        alt_screen_scrollback: bool,
         wake: Option<Wake>,
         cell_w: usize,
         cell_h: usize,
@@ -824,6 +831,7 @@ impl PaneRuntime {
             cols,
             rows,
             experimental_rich,
+            alt_screen_scrollback,
             cell_w,
             cell_h,
         )?;
@@ -847,6 +855,7 @@ impl PaneRuntime {
         cols: usize,
         rows: usize,
         experimental_rich: bool,
+        alt_screen_scrollback: bool,
         cell_w: usize,
         cell_h: usize,
     ) -> Result<Self> {
@@ -855,6 +864,7 @@ impl PaneRuntime {
         } else {
             Emulator::new(cols, rows, MAX_SCROLLBACK)
         };
+        emulator.set_retain_alt_history(alt_screen_scrollback);
         emulator.set_cell_pixels(cell_w as u32, cell_h as u32);
         let last_content_epoch = emulator.screen().content_epoch();
         let mut viewer_bytes = [0u8; 16];
@@ -884,6 +894,7 @@ impl PaneRuntime {
             rich: RichSession::default(),
             rich_viewer_id: ViewerId::from_bytes(viewer_bytes),
             experimental_rich,
+            alt_screen_scrollback,
             cols,
             outer_rows: rows,
             rows,
@@ -1096,13 +1107,9 @@ impl PaneRuntime {
                             let _ = self.to_child_tx.try_send(ChildWrite::bytes(reply));
                         }
                     }
-                    if self.emulator.screen().alt_active() {
-                        self.view_scroll = 0;
-                    } else {
-                        self.view_scroll = self
-                            .view_scroll
-                            .min(self.emulator.screen().max_view_scroll());
-                    }
+                    self.view_scroll = self
+                        .view_scroll
+                        .min(self.emulator.screen().max_view_scroll());
                     let epoch = self.emulator.screen().content_epoch();
                     let epoch_changed = epoch != self.last_content_epoch;
                     self.last_content_epoch = epoch;
@@ -1211,6 +1218,7 @@ impl PaneRuntime {
                     } else {
                         Emulator::new(self.cols, self.rows, MAX_SCROLLBACK)
                     };
+                    emulator.set_retain_alt_history(self.alt_screen_scrollback);
                     emulator.set_cell_pixels(self.cell_w as u32, self.cell_h as u32);
                     self.emulator = emulator;
                     self.selection.clear();
@@ -1232,13 +1240,9 @@ impl PaneRuntime {
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
             }
-            if self.emulator.screen().alt_active() {
-                self.view_scroll = 0;
-            } else {
-                self.view_scroll = self
-                    .view_scroll
-                    .min(self.emulator.screen().max_view_scroll());
-            }
+            self.view_scroll = self
+                .view_scroll
+                .min(self.emulator.screen().max_view_scroll());
             let epoch = self.emulator.screen().content_epoch();
             let epoch_changed = epoch != self.last_content_epoch;
             self.last_content_epoch = epoch;
@@ -1582,6 +1586,7 @@ pub(crate) struct MuxRuntime {
     rows: usize,
     geom: HostGeom,
     experimental_rich: bool,
+    alt_screen_scrollback: bool,
     wake: Option<Wake>,
     /// Panes that rang BEL since the last [`Self::take_pending_bells`].
     pending_bells: Vec<PaneId>,
@@ -1610,6 +1615,7 @@ impl MuxRuntime {
             rows,
             HostGeom::tight(1, 1),
             false,
+            false,
             None,
         )
     }
@@ -1629,6 +1635,7 @@ impl MuxRuntime {
             rows,
             HostGeom::tight(1, 1),
             false,
+            false,
             Some(wake),
         )
     }
@@ -1647,10 +1654,12 @@ impl MuxRuntime {
             rows,
             HostGeom::tight(1, 1),
             true,
+            false,
             None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn_with_geom(
         program: &str,
         child_args: &[String],
@@ -1658,6 +1667,7 @@ impl MuxRuntime {
         rows: usize,
         geom: HostGeom,
         experimental_rich: bool,
+        alt_screen_scrollback: bool,
         wake: Option<Wake>,
     ) -> Result<Self> {
         let mut domain = Domain::bootstrap("default")?;
@@ -1686,6 +1696,7 @@ impl MuxRuntime {
             pty_rows,
             None,
             experimental_rich,
+            alt_screen_scrollback,
             wake.clone(),
             geom.cell_w,
             geom.cell_h,
@@ -1704,6 +1715,7 @@ impl MuxRuntime {
             rows,
             geom,
             experimental_rich,
+            alt_screen_scrollback,
             wake,
             pending_bells: Vec::new(),
             pending_attentions: Vec::new(),
@@ -1722,6 +1734,7 @@ impl MuxRuntime {
             self.rows,
             self.geom,
             self.experimental_rich,
+            self.alt_screen_scrollback,
             self.wake.clone(),
         )
     }
@@ -2074,6 +2087,7 @@ impl MuxRuntime {
             pty_rows,
             inherit_cwd.as_deref(),
             self.experimental_rich,
+            self.alt_screen_scrollback,
             self.wake.clone(),
             self.geom.cell_w,
             self.geom.cell_h,
@@ -2620,6 +2634,10 @@ impl MuxRuntime {
         self.panes.get(&id)
     }
 
+    pub(crate) fn pane_mut(&mut self, id: PaneId) -> Option<&mut PaneRuntime> {
+        self.panes.get_mut(&id)
+    }
+
     pub(crate) fn panes_and_rects(&self) -> impl Iterator<Item = (PaneId, &PaneRuntime, CellRect)> {
         self.rects
             .iter()
@@ -2967,6 +2985,7 @@ impl MuxRuntime {
             old.cols,
             old.outer_rows,
             old.experimental_rich,
+            old.alt_screen_scrollback,
             old.cell_w,
             old.cell_h,
         )?;
@@ -3025,6 +3044,7 @@ impl MuxRuntime {
         let cell_w = runtime.cell_w;
         let cell_h = runtime.cell_h;
         let experimental_rich = runtime.experimental_rich;
+        let alt_screen_scrollback = runtime.alt_screen_scrollback;
         let resolved = connection.session_key().to_string();
         let mut replacement = PaneRuntime::spawn_log_backed(
             pane,
@@ -3032,6 +3052,7 @@ impl MuxRuntime {
             cols,
             rows,
             experimental_rich,
+            alt_screen_scrollback,
             self.wake.clone(),
             cell_w,
             cell_h,
@@ -3126,6 +3147,7 @@ impl MuxRuntime {
         let cell_w = runtime.cell_w;
         let cell_h = runtime.cell_h;
         let experimental_rich = runtime.experimental_rich;
+        let alt_screen_scrollback = runtime.alt_screen_scrollback;
         let attach_session = runtime.attach_session.clone();
         let attach_name = runtime.attach_name.clone();
         let cwd = runtime.cwd_for_split();
@@ -3137,6 +3159,7 @@ impl MuxRuntime {
             rows,
             cwd.as_deref(),
             experimental_rich,
+            alt_screen_scrollback,
             self.wake.clone(),
             cell_w,
             cell_h,
@@ -3196,6 +3219,7 @@ impl MuxRuntime {
             pty_rows,
             None,
             self.experimental_rich,
+            self.alt_screen_scrollback,
             self.wake.clone(),
             self.geom.cell_w,
             self.geom.cell_h,
@@ -3977,6 +4001,40 @@ mod tests {
         let runtime = MuxRuntime::spawn("/bin/sh", &[], 8, 4).expect("test mux runtime");
         let pane = runtime.focused_id();
         assert!(!runtime.is_log_backed(pane));
+    }
+
+    fn feed_alt_lines(emulator: &mut Emulator, count: usize) {
+        let _ = emulator.feed(b"\x1b[?1049h\x1b[H");
+        for i in 1..=count {
+            let _ = emulator.feed(format!("line-{i:03}\r\n").as_bytes());
+        }
+    }
+
+    #[test]
+    fn alt_retention_is_off_by_default_and_opt_in_at_spawn() {
+        // B1: the host must be able to turn retention off. Default spawns
+        // keep the classic live-only alt view; the flag opts in.
+        for retain in [false, true] {
+            let mut runtime = MuxRuntime::spawn_with_geom(
+                "/bin/sh",
+                &[],
+                80,
+                24,
+                HostGeom::tight(1, 1),
+                false,
+                retain,
+                None,
+            )
+            .expect("test mux runtime");
+            let pane = runtime.focused_id();
+            let pane_runtime = runtime.panes.get_mut(&pane).expect("focused pane");
+            feed_alt_lines(&mut pane_runtime.emulator, 30);
+            let depth = pane_runtime.emulator.screen().max_view_scroll();
+            assert_eq!(depth == 0, !retain, "retain={retain} depth={depth}");
+            if retain {
+                assert!(depth > 0, "opt-in must retain alt scrollback");
+            }
+        }
     }
 
     #[test]

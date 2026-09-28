@@ -151,6 +151,10 @@ pub struct ConfigFile {
     pub space_rail_width_cols: Option<usize>,
     /// Recreate blank terminal layouts and working directories on restore.
     pub restore_blank_terminals: Option<bool>,
+    /// Keep alternate-screen (full-screen TUI) scrollback reachable in host
+    /// scroll and selection. Default false: classic live-only alt view.
+    /// `--alt-screen-scrollback` and `PRISMATTYC_ALT_SCREEN_SCROLLBACK` win.
+    pub alt_screen_scrollback: Option<bool>,
     /// Show live pane names below each Space name. Default true.
     pub space_rail_pane_names: Option<bool>,
     /// Save changed Space layouts after a short idle period. Default false.
@@ -286,6 +290,11 @@ impl ConfigFile {
     /// Show the launch splash on a bare first window. Default true.
     pub fn splash(&self) -> bool {
         self.splash.unwrap_or(true)
+    }
+
+    /// Alternate-screen scrollback retention. Default false.
+    pub fn alt_screen_scrollback(&self) -> bool {
+        self.alt_screen_scrollback.unwrap_or(false)
     }
 
     /// accessibility: AccessKit registration. Default on.
@@ -915,6 +924,12 @@ mod tests {
         std::fs::write(&path, "render_timer_log_every_frame = true\n").unwrap();
         assert!(load(&path).unwrap().render_timer_log_every_frame());
         assert!(!ConfigFile::default().render_timer_log_every_frame());
+        // B1: alt-screen scrollback retention is off by default, opt-in by key.
+        assert_eq!(ConfigFile::default().alt_screen_scrollback, None);
+        assert!(!ConfigFile::default().alt_screen_scrollback());
+        std::fs::write(&path, "alt_screen_scrollback = true\n").unwrap();
+        assert_eq!(load(&path).unwrap().alt_screen_scrollback, Some(true));
+        assert!(load(&path).unwrap().alt_screen_scrollback());
         for value in ["log", "both", "off"] {
             std::fs::write(&path, format!("render_timer = \"{value}\"\n")).unwrap();
             assert_eq!(load(&path).unwrap().render_timer().logs(), value != "off");

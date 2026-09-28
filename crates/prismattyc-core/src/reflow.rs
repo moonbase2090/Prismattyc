@@ -17,7 +17,18 @@ impl Screen {
     }
 
     pub(super) fn reflow_primary(&mut self, columns: usize, rows: usize) {
-        let history_len = self.scrollback.len();
+        // While the alternate screen is active, scrollback holds pre-alt
+        // shell history (prefix) plus retained alt rows (suffix). Reflow
+        // the prefix with the hidden primary grid and leave the suffix
+        // untouched: reflowing everything clipped retained rows against
+        // the stale primary cursor (B2), while skipping everything left
+        // shell history unreflowed (R1).
+        let suffix = if self.alt_active {
+            self.alt_history_rows.min(self.scrollback.len())
+        } else {
+            0
+        };
+        let history_len = self.scrollback.len() - suffix;
         let cursor = self.primary.cursor;
         let saved = self.primary.saved_cursor;
         let last_used = self
@@ -29,8 +40,8 @@ impl Screen {
         let last_used = last_used.max(cursor.row).max(saved.cursor.row);
         let mut input: Vec<_> = self
             .scrollback
-            .drain(..)
-            .zip(self.scrollback_wrapped.drain(..))
+            .drain(..history_len)
+            .zip(self.scrollback_wrapped.drain(..history_len))
             .collect();
         input.extend(
             self.primary
@@ -143,14 +154,18 @@ impl Screen {
             scroll_bottom: rows - 1,
         };
         self.primary = primary;
-        self.scrollback = output
-            .rows
-            .drain(..start)
-            .map(|(row, wrap)| {
-                self.scrollback_wrapped.push_back(wrap);
-                row
-            })
-            .collect();
+        // Repacked pre-alt history goes back in front of the untouched alt
+        // suffix (which the post-reflow width pass still adjusts).
+        let mut rows_out = VecDeque::new();
+        let mut wraps_out = VecDeque::new();
+        for (row, wrap) in output.rows.drain(..start) {
+            rows_out.push_back(row);
+            wraps_out.push_back(wrap);
+        }
+        rows_out.extend(self.scrollback.drain(..));
+        wraps_out.extend(self.scrollback_wrapped.drain(..));
+        self.scrollback = rows_out;
+        self.scrollback_wrapped = wraps_out;
     }
 }
 
@@ -326,6 +341,34 @@ mod tests {
         assert_eq!(s.history_line_text(s.scrollback.len()), "1234");
         s.leave_alt_screen(AltScreenMode::Mode1049);
         assert_eq!(logical(&s), "abcdefghijk");
+    }
+    #[test]
+    fn alt_resize_still_reflows_pre_alt_shell_history() {
+        // R1: with retention off, scrollback holds only shell history while
+        // alt is active. Resizing must reflow it with the hidden primary,
+        // not leave it at the old width.
+        let mut s = Screen::new(40, 10, 10_000);
+        for i in 0..20 {
+            write(&mut s, &format!("shell-{i:02}-"));
+            write(&mut s, &"x".repeat(50));
+            write(&mut s, "\n");
+        }
+        let before = s.scrollback.len();
+        assert!(before > 11, "20 wrapped lines must overflow 10 rows");
+        s.enter_alt_screen(AltScreenMode::Mode1049);
+        s.resize_reflow(80, 10);
+        s.leave_alt_screen(AltScreenMode::Mode1049);
+        let text = logical(&s);
+        for i in 0..20 {
+            let marker = format!("shell-{i:02}-");
+            assert_eq!(text.matches(&marker).count(), 1, "{marker} intact");
+            let line = text.lines().find(|l| l.starts_with(&marker)).unwrap();
+            assert_eq!(line.len(), 59, "{marker} rejoined to one 80-col row");
+        }
+        assert!(
+            s.scrollback.len() < before,
+            "reflow must rejoin wrapped shell history"
+        );
     }
     #[test]
     fn reflow_keeps_history_within_its_byte_and_row_limits() {

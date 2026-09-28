@@ -11,6 +11,7 @@ Start with the [README](../README.md) for installation and basic use.
 | [pmux commands](mux-cli.md) | Session management, scripting, and messaging. |
 | [Update and restart](update-and-restart.md) | Install updates, restart components, and roll back. |
 | [Troubleshooting](hung-session-recovery.md) | Diagnose an unresponsive pane or session. |
+| [Scrollback and selection](scrollback-triage.md) | Diagnose panes that stop scrolling or selecting text. |
 | [Accessibility](accessibility.md) | Keyboard controls and screen-reader support. |
 | [macOS](macos.md) | Source builds, application bundles, and platform behavior. |
 | [Hyprland](hyprland.md) | Wayland settings and window rules. |

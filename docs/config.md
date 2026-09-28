@@ -96,6 +96,8 @@ space_startup = "ask"
 space_rail_width_cols = 18
 # Recreate blank terminal tabs, split layouts, and directories with fresh shells. true | false.
 restore_blank_terminals = false
+# Keep full-screen TUI scrollback reachable in host scroll and selection. true | false.
+alt_screen_scrollback = false
 # Widest space chip in cells (chips fit their labels); 0 = 28. 0 or 6-40.
 space_rail_chip_cols = 0
 
@@ -928,6 +930,19 @@ its tabs, split layout, and focus.
 To move a blank terminal, right-click its pane and select **Move pane to space**.
 Select the destination Space. The terminal leaves the current view and
 appears in the destination. Its process, directory, and scrollback stay intact.
+
+### Alternate-screen scrollback
+
+Full-screen TUIs keep the classic live-only view by default. Set
+`alt_screen_scrollback = true` (or `--alt-screen-scrollback`, or
+`PRISMATTYC_ALT_SCREEN_SCROLLBACK=1`) to keep rows the TUI scrolls off the
+top of its screen reachable in host scroll, scrollbar, and selection. The
+wheel targets the pane under the pointer without moving focus. Exiting the
+TUI leaves its retained rows in the shell's scrollback. The three sources
+OR together: there is no flag to force the setting off when the config file
+enables it, and toggling it hot-reloads only for panes opened afterwards —
+already-open panes keep the value from spawn. See
+`docs/scrollback-triage.md`.
 
 ### Restore blank terminals after restart
 

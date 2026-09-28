@@ -524,3 +524,57 @@ fn stale_ids_after_a_remote_daemon_restart_are_refused() {
         "{text}"
     );
 }
+
+/// The `pmux ls` pane line for `pane`, e.g. `pane 2 — 80x24 … viewers 123`.
+fn ls_pane_line(f: &Fixture, pane: u64) -> String {
+    let prefix = format!("pane {pane} ");
+    f.ok(&["ls"])
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with(&prefix))
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[test]
+fn tty_attach_over_ssh_shows_and_reports_the_selected_session() {
+    let Some(target) = target() else { return };
+    let f = Fixture::new(target);
+    f.ok(&["space", "create", "work", "--no-attach"]);
+    let work = f.catalog().spaces[0].clone();
+    let id = work.active_session.0;
+    let snapshot = f.snapshot();
+    let first = snapshot.sessions[0].id;
+    assert_ne!(first, id, "the selected session must not be the first one");
+    let pane_of = |session: u64| {
+        let session = snapshot.sessions.iter().find(|s| s.id == session).unwrap();
+        session.windows[0].panes[0].id.to_string()
+    };
+    let (first_pane, work_pane) = (pane_of(first), pane_of(id));
+
+    let (pair, mut child, transcript) = spawn_tty_attach(&f, &id.to_string(), work.id.as_str());
+    wait_for("attach output", || transcript.lock().unwrap().len() > 64);
+    f.ok(&[
+        "attach",
+        "--pane",
+        &first_pane,
+        "--write",
+        "FIRST_PANE_MARK",
+    ]);
+    f.ok(&["attach", "--pane", &work_pane, "--write", "WORK_PANE_MARK"]);
+    wait_for("the selected pane to be drawn", || {
+        String::from_utf8_lossy(&transcript.lock().unwrap()).contains("WORK_PANE_MARK")
+    });
+    let shown = String::from_utf8_lossy(&transcript.lock().unwrap()).into_owned();
+    assert!(!shown.contains("FIRST_PANE_MARK"), "drew the first session");
+
+    // `pmux ls` attributes the viewer to the selected session, not the first.
+    let work_line = ls_pane_line(&f, work_pane.parse().unwrap());
+    let first_line = ls_pane_line(&f, first_pane.parse().unwrap());
+    assert!(work_line.contains("viewers"), "{work_line}");
+    assert!(!first_line.contains("viewers"), "{first_line}");
+
+    child.kill().unwrap();
+    let _ = child.wait();
+    drop(pair);
+}

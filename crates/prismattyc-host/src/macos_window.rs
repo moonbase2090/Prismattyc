@@ -14,6 +14,44 @@ thread_local! {
     /// AppKit retains subviews after insertion. Keep only their addresses so
     /// hot reload can find and remove the view without touching winit's view.
     static BLUR_VIEWS: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
+    /// Same pattern for the optional opaque title-bar fill used when the
+    /// window content is translucent or blurred (see #22 / #23).
+    static TITLEBAR_FILLS: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
+}
+
+/// Drop any AppKit chrome this module attached for `window`.
+///
+/// Call when the winit window is closing. Map keys are content-view addresses;
+/// leaving them after the view is destroyed can skip a later fill install
+/// (address reuse) or remove a stale pointer on opaque reload (use-after-free).
+pub fn forget_window(window: &Window) {
+    let Some(key) = content_view_key(window) else {
+        return;
+    };
+    forget_blur_key(key);
+    remove_titlebar_fill(key);
+}
+
+fn content_view_key(window: &Window) -> Option<usize> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let handle = window.window_handle().ok()?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return None;
+    };
+    // SAFETY: winit supplies a live NSView while the Window owner remains alive.
+    let content: &NSView = unsafe { &*handle.ns_view.as_ptr().cast() };
+    Some(content as *const NSView as usize)
+}
+
+fn forget_blur_key(key: usize) {
+    let Some(effect) = BLUR_VIEWS.with(|views| views.borrow_mut().remove(&key)) else {
+        return;
+    };
+    // SAFETY: address came from a retained NSVisualEffectView inserted by this
+    // module and remains live until removal.
+    let effect: &NSVisualEffectView = unsafe { &*(effect as *const NSVisualEffectView) };
+    effect.removeFromSuperview();
 }
 
 /// Install or remove the AppKit backdrop used by `window_blur`.
@@ -52,13 +90,7 @@ pub fn set_window_blur(window: &Window, enabled: bool) -> bool {
 
     let key = view as *const NSView as usize;
     if !enabled {
-        let effect = BLUR_VIEWS.with(|views| views.borrow_mut().remove(&key));
-        if let Some(effect) = effect {
-            // SAFETY: the address came from the retained NSVisualEffectView
-            // inserted by this module and remains live until removal.
-            let effect: &NSVisualEffectView = unsafe { &*(effect as *const NSVisualEffectView) };
-            effect.removeFromSuperview();
-        }
+        forget_blur_key(key);
         return false;
     }
 
@@ -98,6 +130,61 @@ pub fn set_window_blur(window: &Window, enabled: bool) -> bool {
     true
 }
 
+/// Whether the title bar needs an opaque fill behind the traffic lights.
+///
+/// Default opaque windows rely on AppKit's system chrome (including glass on
+/// recent macOS). When `window_opacity < 1` or `window_blur` is on, content
+/// can show through the title bar unless an opaque fill is present (#22/#23).
+pub fn titlebar_needs_fill(window_opacity: f32, window_blur: bool) -> bool {
+    window_blur || window_opacity < 1.0
+}
+
+/// What `sync_titlebar_background` should do for the current fill state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TitlebarFillAction {
+    /// Drop any installed fill (opaque window).
+    Remove,
+    /// Fill already present; leave it alone.
+    Keep,
+    /// Walk the title-bar ancestry and install a fill.
+    Install,
+}
+
+fn titlebar_fill_action(needs_fill: bool, already_installed: bool) -> TitlebarFillAction {
+    match (needs_fill, already_installed) {
+        (false, _) => TitlebarFillAction::Remove,
+        (true, true) => TitlebarFillAction::Keep,
+        (true, false) => TitlebarFillAction::Install,
+    }
+}
+
+/// A full-width, non-empty ancestor is a title-bar container candidate.
+fn is_titlebar_fill_container(view_width: f64, view_height: f64, content_width: f64) -> bool {
+    view_width >= content_width && view_height > 0.0
+}
+
+/// Pick the first title-bar ancestor that can hold the opaque fill.
+///
+/// `candidates` is ordered from the close-button superview upward. Each entry
+/// is `(width, height, content_is_descendant)`. Walking stops without a match
+/// once a view that contains the terminal content is reached.
+fn select_titlebar_fill_container(
+    content_width: f64,
+    candidates: &[(f64, f64, bool)],
+) -> Option<usize> {
+    for (index, &(width, height, hits_content)) in candidates.iter().enumerate() {
+        if hits_content {
+            return None;
+        }
+        if is_titlebar_fill_container(width, height, content_width) {
+            return Some(index);
+        }
+    }
+    None
+}
+
+const TITLEBAR_WALK_MAX: usize = 16;
+
 // An AppKit-owned background behind the native title and traffic lights. Using
 // NSBox lets AppKit resolve the semantic fill color when appearance changes.
 // Hit testing passes through, preserving native dragging and window controls.
@@ -117,68 +204,195 @@ objc2::define_class!(
     }
 );
 
-/// Keep native chrome readable independently of content opacity and blur.
-/// Called once per window; AppKit owns, resizes, and redraws the backdrop.
-/// No terminal damage, presentation work, or animation timer is introduced.
-pub fn install_titlebar_background(window: &Window) {
-    use objc2::{msg_send, MainThreadMarker, MainThreadOnly};
-    use objc2_app_kit::{NSBoxType, NSColor, NSTitlePosition, NSWindowButton};
+/// Sync the native title bar with the current opacity / blur config.
+///
+/// Always asks AppKit for a non-transparent system title bar so current SDKs
+/// can draw glass chrome in the default opaque case. Installs the opaque
+/// `windowBackgroundColor` fill only when [`titlebar_needs_fill`] is true,
+/// and removes it again when the window returns to opaque. Safe to call on
+/// config hot reload. No terminal damage, presentation work, or animation
+/// timer is introduced.
+pub fn sync_titlebar_background(window: &Window, needs_fill: bool) {
+    let Some((mtm, content, native)) = titlebar_native_parts(window) else {
+        return;
+    };
+    native.setTitlebarAppearsTransparent(false);
+    let key = content as *const NSView as usize;
+    let already = TITLEBAR_FILLS.with(|views| views.borrow().contains_key(&key));
+    match titlebar_fill_action(needs_fill, already) {
+        TitlebarFillAction::Keep => {}
+        TitlebarFillAction::Remove => remove_titlebar_fill(key),
+        TitlebarFillAction::Install => install_titlebar_fill(mtm, content, &native, key),
+    }
+}
+
+fn titlebar_native_parts(
+    window: &Window,
+) -> Option<(
+    objc2::MainThreadMarker,
+    &NSView,
+    objc2::rc::Retained<objc2_app_kit::NSWindow>,
+)> {
+    use objc2::MainThreadMarker;
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-    let Ok(handle) = window.window_handle() else {
-        return;
-    };
+    let mtm = MainThreadMarker::new()?;
+    let handle = window.window_handle().ok()?;
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
-        return;
+        return None;
     };
     // SAFETY: winit supplies a live NSView, accessed on the main thread while
     // the Window owner remains alive.
     let content: &NSView = unsafe { &*handle.ns_view.as_ptr().cast() };
-    let Some(native) = content.window() else {
+    let native = content.window()?;
+    Some((mtm, content, native))
+}
+
+fn remove_titlebar_fill(key: usize) {
+    use objc2_app_kit::NSBox;
+
+    let Some(fill) = TITLEBAR_FILLS.with(|views| views.borrow_mut().remove(&key)) else {
         return;
     };
-    native.setTitlebarAppearsTransparent(false);
+    // SAFETY: address came from a retained TitlebarBackground inserted by this
+    // module and remains live until removal.
+    let fill: &NSBox = unsafe { &*(fill as *const NSBox) };
+    fill.removeFromSuperview();
+}
+
+fn install_titlebar_fill(
+    mtm: objc2::MainThreadMarker,
+    content: &NSView,
+    native: &objc2_app_kit::NSWindow,
+    key: usize,
+) {
+    use objc2::{msg_send, MainThreadOnly};
+    use objc2_app_kit::{NSBoxType, NSColor, NSTitlePosition, NSWindowButton};
+
     let Some(button) = native.standardWindowButton(NSWindowButton::CloseButton) else {
         return; // Borderless windows have no native title bar to fill.
     };
-    // Walk public NSView relationships, without relying on private AppKit class
-    // names. Stop before a container holding terminal content, and choose a
-    // full-width title-bar ancestor rather than a traffic-light-only cluster.
+    // Collect public NSView ancestry (no private AppKit class names), then let
+    // the pure selector pick the full-width title-bar container.
+    let content_width = content.bounds().size.width;
+    let mut ancestors: Vec<objc2::rc::Retained<NSView>> = Vec::new();
+    let mut dims: Vec<(f64, f64, bool)> = Vec::new();
     let mut parent = unsafe { button.superview() };
-    for _ in 0..16 {
+    while ancestors.len() < TITLEBAR_WALK_MAX {
         let Some(view) = parent else { break };
-        if content.isDescendantOf(&view) {
-            break;
-        }
-        let bounds = view.bounds();
-        if bounds.size.width >= content.bounds().size.width && bounds.size.height > 0.0 {
-            // SAFETY: NSBox's designated initializer accepts an NSRect and
-            // returns the initialized subclass; AppKit retains it on insertion.
-            let background: objc2::rc::Retained<TitlebarBackground> = unsafe {
-                msg_send![super(TitlebarBackground::alloc(mtm).set_ivars(())), initWithFrame: bounds]
-            };
-            background.setBoxType(NSBoxType::Custom);
-            background.setTitlePosition(NSTitlePosition::NoTitle);
-            background.setBorderWidth(0.0);
-            background.setCornerRadius(0.0);
-            background.setTransparent(false);
-            background.setFillColor(&NSColor::windowBackgroundColor());
-            background.setAutoresizingMask(
-                NSAutoresizingMaskOptions::ViewWidthSizable
-                    | NSAutoresizingMaskOptions::ViewHeightSizable,
-            );
-            // SAFETY: documented NSView ordering API; -1 is NSWindowBelow.
-            unsafe {
-                let _: () = msg_send![&*view, addSubview: &*background,
-                    positioned: -1isize, relativeTo: std::ptr::null::<NSView>()];
-            }
-            return;
-        }
+        dims.push((
+            view.bounds().size.width,
+            view.bounds().size.height,
+            content.isDescendantOf(&view),
+        ));
         // SAFETY: traversal remains on the main thread with each view retained.
         parent = unsafe { view.superview() };
+        ancestors.push(view);
     }
-    eprintln!("prismattyc-host: could not locate native title-bar background container");
+    let Some(index) = select_titlebar_fill_container(content_width, &dims) else {
+        eprintln!("prismattyc-host: could not locate native title-bar background container");
+        return;
+    };
+    let view = &ancestors[index];
+    let bounds = view.bounds();
+    // SAFETY: NSBox's designated initializer accepts an NSRect and
+    // returns the initialized subclass; AppKit retains it on insertion.
+    let background: objc2::rc::Retained<TitlebarBackground> = unsafe {
+        msg_send![super(TitlebarBackground::alloc(mtm).set_ivars(())), initWithFrame: bounds]
+    };
+    background.setBoxType(NSBoxType::Custom);
+    background.setTitlePosition(NSTitlePosition::NoTitle);
+    background.setBorderWidth(0.0);
+    background.setCornerRadius(0.0);
+    background.setTransparent(false);
+    background.setFillColor(&NSColor::windowBackgroundColor());
+    background.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
+    // SAFETY: documented NSView ordering API; -1 is NSWindowBelow.
+    unsafe {
+        let _: () = msg_send![view, addSubview: &*background,
+            positioned: -1isize, relativeTo: std::ptr::null::<NSView>()];
+    }
+    TITLEBAR_FILLS.with(|views| {
+        views
+            .borrow_mut()
+            .insert(key, (&*background) as *const TitlebarBackground as usize);
+    });
+}
+
+/// Initial title-bar setup for a new window. See [`sync_titlebar_background`].
+pub fn install_titlebar_background(window: &Window, needs_fill: bool) {
+    sync_titlebar_background(window, needs_fill);
+}
+
+#[cfg(test)]
+mod titlebar_fill_tests {
+    use super::{
+        is_titlebar_fill_container, select_titlebar_fill_container, titlebar_fill_action,
+        titlebar_needs_fill, TitlebarFillAction,
+    };
+
+    #[test]
+    fn opaque_default_skips_fill() {
+        assert!(!titlebar_needs_fill(1.0, false));
+    }
+
+    #[test]
+    fn translucent_or_blur_needs_fill() {
+        assert!(titlebar_needs_fill(0.8, false));
+        assert!(titlebar_needs_fill(1.0, true));
+        assert!(titlebar_needs_fill(0.5, true));
+    }
+
+    #[test]
+    fn fill_action_covers_all_states() {
+        assert_eq!(
+            titlebar_fill_action(false, false),
+            TitlebarFillAction::Remove
+        );
+        assert_eq!(
+            titlebar_fill_action(false, true),
+            TitlebarFillAction::Remove
+        );
+        assert_eq!(titlebar_fill_action(true, true), TitlebarFillAction::Keep);
+        assert_eq!(
+            titlebar_fill_action(true, false),
+            TitlebarFillAction::Install
+        );
+    }
+
+    #[test]
+    fn fill_container_requires_full_width_and_height() {
+        assert!(is_titlebar_fill_container(800.0, 28.0, 800.0));
+        assert!(is_titlebar_fill_container(900.0, 28.0, 800.0));
+        assert!(!is_titlebar_fill_container(100.0, 28.0, 800.0));
+        assert!(!is_titlebar_fill_container(800.0, 0.0, 800.0));
+        assert!(!is_titlebar_fill_container(800.0, -1.0, 800.0));
+    }
+
+    #[test]
+    fn select_container_picks_first_full_width() {
+        let candidates = [
+            (100.0, 28.0, false),
+            (800.0, 28.0, false),
+            (800.0, 600.0, true),
+        ];
+        assert_eq!(select_titlebar_fill_container(800.0, &candidates), Some(1));
+    }
+
+    #[test]
+    fn select_container_stops_at_content() {
+        let candidates = [
+            (100.0, 28.0, false),
+            (800.0, 600.0, true),
+            (800.0, 28.0, false),
+        ];
+        assert_eq!(select_titlebar_fill_container(800.0, &candidates), None);
+    }
+
+    #[test]
+    fn select_container_empty_is_none() {
+        assert_eq!(select_titlebar_fill_container(800.0, &[]), None);
+    }
 }

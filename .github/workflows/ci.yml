@@ -61,6 +61,19 @@ jobs:
           [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
           cargo fmt --all -- --check
 
+  # Exercises the same SDK gate the Apple release job uses. Full release
+  # workflow_dispatch needs publish secrets and is not available to the app token.
+  apple-sdk:
+    name: Apple SDK (macos-26)
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Confirm Apple SDK
+        run: scripts/release/confirm-apple-sdk.sh
+
   check:
     name: Check
     runs-on: ubuntu-latest

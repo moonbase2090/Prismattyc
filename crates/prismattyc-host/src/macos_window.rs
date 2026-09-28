@@ -98,36 +98,18 @@ pub fn set_window_blur(window: &Window, enabled: bool) -> bool {
     true
 }
 
-// An AppKit-owned background behind the native title and traffic lights. Using
-// NSBox lets AppKit resolve the semantic fill color when appearance changes.
-// Hit testing passes through, preserving native dragging and window controls.
-objc2::define_class!(
-    // SAFETY: NSBox has no additional subclassing requirements. This class has
-    // no ivars or Drop implementation and all access is on AppKit's main thread.
-    #[unsafe(super = objc2_app_kit::NSBox)]
-    #[thread_kind = objc2::MainThreadOnly]
-    #[name = "PrismattycTitlebarBackground"]
-    struct TitlebarBackground;
-
-    impl TitlebarBackground {
-        #[unsafe(method(hitTest:))]
-        fn hit_test(&self, _point: objc2_foundation::NSPoint) -> *mut NSView {
-            std::ptr::null_mut()
-        }
-    }
-);
-
-/// Keep native chrome readable independently of content opacity and blur.
-/// Called once per window; AppKit owns, resizes, and redraws the backdrop.
+/// Ask AppKit for the system title bar (and its traffic lights).
+///
+/// Called once per window. Leaves the title bar opaque from the content's
+/// point of view (`titlebarAppearsTransparent(false)`) so AppKit draws the
+/// current system chrome — including the glass material on recent macOS —
+/// behind the title and window controls. An earlier opaque
+/// `windowBackgroundColor` fill painted over that material and made the
+/// controls look smaller and flat; that overlay is intentionally gone.
 /// No terminal damage, presentation work, or animation timer is introduced.
 pub fn install_titlebar_background(window: &Window) {
-    use objc2::{msg_send, MainThreadMarker, MainThreadOnly};
-    use objc2_app_kit::{NSBoxType, NSColor, NSTitlePosition, NSWindowButton};
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
     let Ok(handle) = window.window_handle() else {
         return;
     };
@@ -141,44 +123,4 @@ pub fn install_titlebar_background(window: &Window) {
         return;
     };
     native.setTitlebarAppearsTransparent(false);
-    let Some(button) = native.standardWindowButton(NSWindowButton::CloseButton) else {
-        return; // Borderless windows have no native title bar to fill.
-    };
-    // Walk public NSView relationships, without relying on private AppKit class
-    // names. Stop before a container holding terminal content, and choose a
-    // full-width title-bar ancestor rather than a traffic-light-only cluster.
-    let mut parent = unsafe { button.superview() };
-    for _ in 0..16 {
-        let Some(view) = parent else { break };
-        if content.isDescendantOf(&view) {
-            break;
-        }
-        let bounds = view.bounds();
-        if bounds.size.width >= content.bounds().size.width && bounds.size.height > 0.0 {
-            // SAFETY: NSBox's designated initializer accepts an NSRect and
-            // returns the initialized subclass; AppKit retains it on insertion.
-            let background: objc2::rc::Retained<TitlebarBackground> = unsafe {
-                msg_send![super(TitlebarBackground::alloc(mtm).set_ivars(())), initWithFrame: bounds]
-            };
-            background.setBoxType(NSBoxType::Custom);
-            background.setTitlePosition(NSTitlePosition::NoTitle);
-            background.setBorderWidth(0.0);
-            background.setCornerRadius(0.0);
-            background.setTransparent(false);
-            background.setFillColor(&NSColor::windowBackgroundColor());
-            background.setAutoresizingMask(
-                NSAutoresizingMaskOptions::ViewWidthSizable
-                    | NSAutoresizingMaskOptions::ViewHeightSizable,
-            );
-            // SAFETY: documented NSView ordering API; -1 is NSWindowBelow.
-            unsafe {
-                let _: () = msg_send![&*view, addSubview: &*background,
-                    positioned: -1isize, relativeTo: std::ptr::null::<NSView>()];
-            }
-            return;
-        }
-        // SAFETY: traversal remains on the main thread with each view retained.
-        parent = unsafe { view.superview() };
-    }
-    eprintln!("prismattyc-host: could not locate native title-bar background container");
 }

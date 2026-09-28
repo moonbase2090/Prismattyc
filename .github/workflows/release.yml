@@ -69,11 +69,26 @@ jobs:
   apple:
     name: Apple universal app
     needs: validate
-    runs-on: macos-14
+    runs-on: xcode-27
     timeout-minutes: 120
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Confirm Apple SDK
+        run: |
+          set -euo pipefail
+          echo "Xcode: $(xcodebuild -version | tr '\n' ' ')"
+          echo "SDK: $(xcrun --sdk macosx --show-sdk-version) at $(xcrun --sdk macosx --show-sdk-path)"
+          # The glass window chrome AppKit ships on current macOS only appears
+          # when the binary is linked against a current SDK. Fail early if this
+          # runner is still on an old one.
+          sdk="$(xcrun --sdk macosx --show-sdk-version)"
+          major="${sdk%%.*}"
+          if [ "$major" -lt 26 ]; then
+            echo "::error::expected macOS SDK 26+, got $sdk"
+            exit 1
+          fi
 
       - name: Install Rust toolchain and Apple targets
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable action, Rust 1.90.0
@@ -90,9 +105,15 @@ jobs:
         run: python3 -m pip install --disable-pip-version-check 'dmgbuild==1.6.7'
 
       - name: Build both Apple architectures
+        env:
+          # Keep the product runnable on macOS 11+ even when linking a current SDK.
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
         run: |
           cargo build --release --locked --workspace --bins --target aarch64-apple-darwin
           cargo build --release --locked --workspace --bins --target x86_64-apple-darwin
+          # Record the SDK the arm64 host was linked against for the logs.
+          otool -l target/aarch64-apple-darwin/release/prismattyc-host |
+            awk '/LC_BUILD_VERSION/{p=1} p&&/sdk/{print; exit}'
 
       - name: Sign, notarize, staple, and package
         env:

@@ -55,11 +55,12 @@ the window ground and default cell backgrounds. Text and explicit cell
 backgrounds remain opaque. `chrome_opacity` controls the tab strip and footer.
 It defaults to `window_opacity`.
 
-The native title bar keeps a system-colored background behind its title and
-traffic lights, including when terminal content is translucent or blurred.
-These opacity settings apply to the content and host chrome; they do not make
-the native title bar transparent. Switching between opaque and translucent
-settings by hot reload preserves the tile presenter.
+The native title bar uses AppKit's system chrome behind its title and traffic
+lights, including when terminal content is translucent or blurred. On recent
+macOS that chrome is the system glass material; older macOS keeps a solid
+system title bar. These opacity settings apply to the content and host chrome;
+they do not make the native title bar transparent. Switching between opaque
+and translucent settings by hot reload preserves the tile presenter.
 
 Set `window_opacity` below `1.0` to see the desktop through the window.
 Set `window_blur = true` to blur that backdrop with AppKit. An opaque ground

@@ -73,11 +73,13 @@ The Windows job runs `scripts/release/build-windows.ps1` on Windows Server 2022.
 It builds and checks all six Windows executables before creating the release
 zip, manifest, and `SHA256SUMS-windows`.
 
-The Apple job runs on `macos-14`. It builds arm64 and x86_64 binaries, checks
-the x86_64 binaries' reported versions, combines both architectures, and
-packages `Prismattyc.app`. It signs nested code before the app and does not use
-recursive signing. The release contains the notarized
-`Prismattyc-vVERSION-macos-universal.dmg` and
+The Apple job runs on `xcode-27` (GitHub's Xcode 27 image; arm64 only, with
+x86_64 produced by cross-compile). It builds arm64 and x86_64 binaries against
+a current macOS SDK so AppKit can draw current window chrome, keeps
+`MACOSX_DEPLOYMENT_TARGET=11.0`, checks the x86_64 binaries' reported versions,
+combines both architectures, and packages `Prismattyc.app`. It signs nested
+code before the app and does not use recursive signing. The release contains
+the notarized `Prismattyc-vVERSION-macos-universal.dmg` and
 `Prismattyc-vVERSION-macos-universal.zip`.
 
 Linux x86_64 and ARM64 releases require glibc 2.35 or newer

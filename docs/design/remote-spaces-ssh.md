@@ -105,7 +105,7 @@ Do not generalize the local daemon protocol merely to implement the catalog. Add
 - [x] Implement bounded SSH catalog requests with cancellation and error results (`prismattyc-host` `remote_catalog`; key or agent authentication only, `BatchMode=yes`).
 - [x] Present remote destinations and Spaces in the rail with explicit connection states (option B below).
 - [x] Implement one-step PTY attach with session selection and lifecycle cleanup (`pmux attach --session-id ID --space-id SPACE` over `ssh -t` in a new tab; the existing `pmux space attach` re-applies the saved layout and may replay commands, so it is not used).
-- [ ] Exercise isolated SSH catalog, attach, resize, disconnect, reconnect and stale-selection cases.
+- [x] Exercise isolated SSH catalog, attach, resize, disconnect, reconnect and stale-selection cases (`scripts/remote-ssh-tests.sh`).
 - [ ] Run native Mac acceptance for discovery and one-step attachment.
 
 Before rail implementation, compare runnable UI sketches for destination grouping and connection states using the current Space rail geometry. Keep the resulting UI decision with this PR.
@@ -121,6 +121,10 @@ Three runnable sketches were compared on the current rail geometry: A, inline gr
 - Remote chips have no close or rename, and the list never offers local rename or delete. The accessibility tree exposes each destination as a rail button named with its state.
 
 ## Acceptance evidence
+
+Real-SSH tests: `scripts/remote-ssh-tests.sh` runs `crates/prismattyc-mux/tests/remote_ssh.rs` and the host `real_ssh` fetcher test against `PRISMATTYC_SSH_TEST_TARGET` using `PRISMATTYC_SSH_TEST_KEY` and `PRISMATTYC_SSH_TEST_KNOWN_HOSTS`. The key and its authorization are managed outside the repository. Remote commands run the freshly built binaries under an isolated `PMUX_SOCKET`, so a loopback target never reaches the live daemon. Without those variables the tests skip.
+
+Native run: `scripts/remote-spaces-acceptance.sh up` starts an isolated daemon with sample Spaces, an isolated host config with one `[[remote]]` destination, and an `ssh` wrapper for it, then prints a launch command for the host. `down` removes it.
 
 Use isolated daemons and test-only SSH accounts for automated reproduction. Do not alter the live development Space or restart its daemon. A native Mac run must prove that the remote catalog appears and a single selection displays the active remote session. Record the other sessions' navigation behavior, resize, detach and reconnect.
 

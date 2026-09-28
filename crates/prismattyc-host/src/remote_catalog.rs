@@ -847,3 +847,203 @@ mod tests {
         );
     }
 }
+
+/// The production fetcher over real SSH (issue #24). Skipped unless
+/// `PRISMATTYC_SSH_TEST_TARGET`, `_KEY`, `_KNOWN_HOSTS` and `_BIN` (the
+/// directory with the built pmux and pmuxd) are set; see
+/// `scripts/remote-ssh-tests.sh`. Remote commands run under `env` with an
+/// isolated socket, so no live daemon is reached.
+#[cfg(all(test, unix))]
+mod real_ssh_tests {
+    use super::*;
+    use prismattyc_mux::remote_catalog::SshAlias;
+    use std::path::{Path, PathBuf};
+    use std::str::FromStr;
+
+    struct Env {
+        target: String,
+        key: PathBuf,
+        known_hosts: PathBuf,
+        bin: PathBuf,
+    }
+
+    fn env() -> Option<Env> {
+        let var = |name| std::env::var_os(name).filter(|v| !v.is_empty());
+        Some(Env {
+            target: var("PRISMATTYC_SSH_TEST_TARGET")?
+                .to_string_lossy()
+                .into_owned(),
+            key: var("PRISMATTYC_SSH_TEST_KEY")?.into(),
+            known_hosts: var("PRISMATTYC_SSH_TEST_KNOWN_HOSTS")?.into(),
+            bin: var("PRISMATTYC_SSH_TEST_BIN")?.into(),
+        })
+    }
+
+    /// `ssh_command`'s exact options, plus identity/known_hosts options
+    /// before `--`, and the remote `pmux` wrapped in `env` for isolation.
+    fn launcher(env: &Env, key: PathBuf, known_hosts: PathBuf, socket: PathBuf) -> Launcher {
+        let pmux = env.bin.join("pmux");
+        let target = env.target.clone();
+        Arc::new(move |dest: &SshDestination| {
+            let production = ssh_command(dest);
+            let args: Vec<String> = production
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let split = args.iter().position(|arg| arg == "--").unwrap();
+            let mut command = Command::new("/usr/bin/ssh");
+            command.args(&args[..split]);
+            command.args([
+                "-i".to_string(),
+                key.display().to_string(),
+                "-o".into(),
+                "IdentitiesOnly=yes".into(),
+                "-o".into(),
+                "IdentityAgent=none".into(),
+                "-o".into(),
+                format!("UserKnownHostsFile={}", known_hosts.display()),
+                "-o".into(),
+                "GlobalKnownHostsFile=/dev/null".into(),
+                "-o".into(),
+                "StrictHostKeyChecking=yes".into(),
+                "--".into(),
+                target.clone(),
+                "env".into(),
+                format!("PMUX_SOCKET={}", socket.display()),
+                format!("XDG_DATA_HOME={}", socket.parent().unwrap().display()),
+                pmux.display().to_string(),
+            ]);
+            // Production remote argv after the alias: `pmux space catalog`.
+            command.args(&args[split + 3..]);
+            command
+        })
+    }
+
+    fn settle(fetcher: &mut CatalogFetcher, id: &DestinationId) -> CatalogState {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            fetcher.poll();
+            let state = fetcher.state(id).clone();
+            if !matches!(state, CatalogState::Loading { .. }) {
+                return state;
+            }
+            assert!(Instant::now() < deadline, "request never settled");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn fetch(env: &Env, key: &Path, known_hosts: &Path, socket: &Path) -> CatalogState {
+        let dest = SshDestination {
+            id: DestinationId::from_str("loopback").unwrap(),
+            label: "loopback".into(),
+            ssh_alias: SshAlias::from_str("loopback").unwrap(),
+        };
+        let mut fetcher = CatalogFetcher::with_launcher(
+            launcher(env, key.into(), known_hosts.into(), socket.into()),
+            Arc::new(|| {}),
+            Duration::from_secs(30),
+        );
+        fetcher.connect(&dest);
+        settle(&mut fetcher, &dest.id)
+    }
+
+    fn keygen(path: &Path) {
+        let status = Command::new("/usr/bin/ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn production_fetcher_over_real_ssh() {
+        let Some(env) = env() else {
+            eprintln!("skipped: PRISMATTYC_SSH_TEST_TARGET/_KEY/_KNOWN_HOSTS/_BIN not set");
+            return;
+        };
+        let dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("prism-host-ssh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("mux.sock");
+        let local = |binary: &str| {
+            let mut command = Command::new(env.bin.join(binary));
+            command
+                .env("PMUX_SOCKET", &socket)
+                .env("XDG_DATA_HOME", &dir)
+                .env_remove("PRISMATTYC_PANE_ID")
+                .env_remove("PMUX_PANE_LOG")
+                .stdin(Stdio::null());
+            command
+        };
+
+        // No daemon: the remote CLI reports it and the host maps it.
+        assert!(matches!(
+            fetch(&env, &env.key, &env.known_hosts, &socket),
+            CatalogState::Failed {
+                error: FetchError::DaemonNotRunning,
+                ..
+            }
+        ));
+
+        let mut daemon = local("pmuxd")
+            .arg("--socket")
+            .arg(&socket)
+            .args(["--", "/bin/sh", "-c", "exec sleep 999"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+            assert!(Instant::now() < deadline, "daemon did not start");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let created = local("pmux")
+            .args(["space", "create", "work", "--no-attach"])
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+
+        let ready = fetch(&env, &env.key, &env.known_hosts, &socket);
+        let CatalogState::Ready { catalog, .. } = &ready else {
+            panic!("expected ready: {ready:?}")
+        };
+        assert_eq!(catalog.spaces[0].name, "work");
+
+        let stranger = dir.join("stranger");
+        keygen(&stranger);
+        assert!(matches!(
+            fetch(&env, &stranger, &env.known_hosts, &socket),
+            CatalogState::Failed {
+                error: FetchError::AuthenticationRequired,
+                ..
+            }
+        ));
+
+        let fake = dir.join("fake_host");
+        keygen(&fake);
+        let fake_pub = std::fs::read_to_string(fake.with_extension("pub")).unwrap();
+        let fields: Vec<&str> = fake_pub.split_whitespace().take(2).collect();
+        let host = env.target.rsplit('@').next().unwrap();
+        let wrong = dir.join("wrong_known_hosts");
+        std::fs::write(&wrong, format!("{host} {} {}\n", fields[0], fields[1])).unwrap();
+        assert!(matches!(
+            fetch(&env, &env.key, &wrong, &socket),
+            CatalogState::Failed {
+                error: FetchError::HostKeyUnverified,
+                ..
+            }
+        ));
+
+        daemon.kill().expect("kill test daemon");
+        daemon.wait().expect("reap test daemon");
+        std::fs::remove_dir_all(&dir).expect("remove test dir");
+    }
+}

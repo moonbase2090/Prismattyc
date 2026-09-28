@@ -69,7 +69,7 @@ jobs:
   apple:
     name: Apple universal app
     needs: validate
-    runs-on: xcode-27
+    runs-on: macos-26
     timeout-minutes: 120
     steps:
       - name: Check out source
@@ -80,9 +80,9 @@ jobs:
           set -euo pipefail
           echo "Xcode: $(xcodebuild -version | tr '\n' ' ')"
           echo "SDK: $(xcrun --sdk macosx --show-sdk-version) at $(xcrun --sdk macosx --show-sdk-path)"
-          # The glass window chrome AppKit ships on current macOS only appears
+          # Current window chrome (including glass on recent macOS) only appears
           # when the binary is linked against a current SDK. Fail early if this
-          # runner is still on an old one.
+          # runner is still on an old one. macos-26 ships Xcode 26 / SDK 26+.
           sdk="$(xcrun --sdk macosx --show-sdk-version)"
           major="${sdk%%.*}"
           if [ "$major" -lt 26 ]; then

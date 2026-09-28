@@ -56,11 +56,12 @@ backgrounds remain opaque. `chrome_opacity` controls the tab strip and footer.
 It defaults to `window_opacity`.
 
 The native title bar uses AppKit's system chrome behind its title and traffic
-lights, including when terminal content is translucent or blurred. On recent
-macOS that chrome is the system glass material; older macOS keeps a solid
-system title bar. These opacity settings apply to the content and host chrome;
-they do not make the native title bar transparent. Switching between opaque
-and translucent settings by hot reload preserves the tile presenter.
+lights. On recent macOS that chrome is the system glass material when the window
+is opaque. When `window_opacity` is below `1.0` or `window_blur` is enabled, an
+opaque system-colored fill is kept behind the title bar so the desktop does not
+show through (#22 / #23). These opacity settings apply to the content and host
+chrome; they do not make the native title bar transparent. Switching between
+opaque and translucent settings by hot reload preserves the tile presenter.
 
 Set `window_opacity` below `1.0` to see the desktop through the window.
 Set `window_blur = true` to blur that backdrop with AppKit. An opaque ground

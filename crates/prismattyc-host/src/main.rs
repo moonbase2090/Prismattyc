@@ -2510,6 +2510,21 @@ impl App {
                     eprintln!("prismattyc-host: {}", BLUR_UNSUPPORTED_NOTICE);
                 }
             }
+            // Opaque default windows keep AppKit's system title-bar chrome
+            // (glass on current SDKs). Translucent / blurred content needs the
+            // opaque fill from #23 so the desktop does not show through.
+            #[cfg(target_os = "macos")]
+            if self.file_config.window_blur() != prior.window_blur()
+                || self.file_config.window_opacity() != prior.window_opacity()
+            {
+                macos_window::sync_titlebar_background(
+                    &host.window,
+                    macos_window::titlebar_needs_fill(
+                        self.file_config.window_opacity(),
+                        self.file_config.window_blur(),
+                    ),
+                );
+            }
 
             if self.file_config.splash_animation != prior.splash_animation {
                 if let Some(splash) = host.splash.as_mut() {
@@ -2959,7 +2974,13 @@ impl App {
         }
         let window = Arc::new(event_loop.create_window(attrs)?);
         #[cfg(target_os = "macos")]
-        macos_window::install_titlebar_background(&window);
+        macos_window::install_titlebar_background(
+            &window,
+            macos_window::titlebar_needs_fill(
+                self.file_config.window_opacity(),
+                self.file_config.window_blur(),
+            ),
+        );
         let a11y = os_tree.then(|| {
             accesskit_winit::Adapter::with_event_loop_proxy(
                 event_loop,

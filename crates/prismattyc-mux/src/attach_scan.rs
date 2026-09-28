@@ -15,6 +15,8 @@ use crate::pid_in_tree;
 pub struct AttachClient {
     pub pid: u32,
     pub session: Option<String>,
+    /// `--session-id`: the opaque numeric id remote attach uses.
+    pub session_id: Option<u64>,
     pub pane: Option<u64>,
 }
 
@@ -39,6 +41,7 @@ pub fn parse_attach_client(args: &[&[u8]], socket: &Path) -> Option<AttachClient
     let want = socket.as_os_str().as_encoded_bytes();
     let mut seen_socket = false;
     let mut session = None;
+    let mut session_id = None;
     let mut pane = None;
     let mut i = 1;
     while i < args.len() {
@@ -56,6 +59,11 @@ pub fn parse_attach_client(args: &[&[u8]], socket: &Path) -> Option<AttachClient
                 session = Some(value.to_string());
                 i += 2;
             }
+            b"--session-id" => {
+                let value = std::str::from_utf8(args.get(i + 1)?).ok()?;
+                session_id = Some(value.parse().ok()?);
+                i += 2;
+            }
             b"--pane" => {
                 let value = std::str::from_utf8(args.get(i + 1)?).ok()?;
                 pane = Some(value.parse().ok()?);
@@ -67,6 +75,7 @@ pub fn parse_attach_client(args: &[&[u8]], socket: &Path) -> Option<AttachClient
     seen_socket.then_some(AttachClient {
         pid: 0,
         session,
+        session_id,
         pane,
     })
 }
@@ -91,8 +100,9 @@ pub fn scan_attach_clients(socket: &Path) -> Vec<AttachClient> {
 
 /// Whether this attach should be attributed to `session`.
 ///
-/// `--pane` wins (must be one of `pane_ids`). `--session` matches name or id.
-/// No selector means attach's default: first pane of the first snapshot session.
+/// `--pane` wins (must be one of `pane_ids`). `--session-id` matches the id
+/// only. `--session` matches name or id. No selector means attach's default:
+/// first pane of the first snapshot session.
 pub fn attach_targets_session(
     client: &AttachClient,
     session_name: &str,
@@ -102,6 +112,9 @@ pub fn attach_targets_session(
 ) -> bool {
     if let Some(pane) = client.pane {
         return pane_ids.contains(&pane);
+    }
+    if let Some(id) = client.session_id {
+        return id == session_id;
     }
     if let Some(key) = client.session.as_deref() {
         return key == session_name || key == session_id.to_string();
@@ -184,6 +197,20 @@ mod tests {
                 "pmux-attach",
                 "--socket",
                 "/tmp/pmux.sock",
+                "--session-id",
+                "2",
+            ]),
+            sock,
+        )
+        .unwrap();
+        assert_eq!(client.session_id, Some(2));
+        assert_eq!(client.session, None);
+
+        let client = parse_attach_client(
+            &args(&[
+                "pmux-attach",
+                "--socket",
+                "/tmp/pmux.sock",
                 "--session",
                 "work",
             ]),
@@ -207,21 +234,31 @@ mod tests {
         let by_name = AttachClient {
             pid: 1,
             session: Some("work".into()),
+            session_id: None,
             pane: None,
         };
         let by_id = AttachClient {
             pid: 2,
             session: Some("5".into()),
+            session_id: None,
             pane: None,
         };
         let by_pane = AttachClient {
             pid: 3,
             session: None,
+            session_id: None,
             pane: Some(9),
         };
         let implicit = AttachClient {
             pid: 4,
             session: None,
+            session_id: None,
+            pane: None,
+        };
+        let by_session_id = AttachClient {
+            pid: 5,
+            session: None,
+            session_id: Some(5),
             pane: None,
         };
         assert!(attach_targets_session(&by_name, "work", 5, &[9], false));
@@ -230,6 +267,22 @@ mod tests {
         assert!(!attach_targets_session(&by_pane, "work", 5, &[1], false));
         assert!(attach_targets_session(&implicit, "default", 1, &[1], true));
         assert!(!attach_targets_session(&implicit, "work", 5, &[9], false));
+        // Remote attach passes only --session-id; never the first session.
+        assert!(attach_targets_session(
+            &by_session_id,
+            "work-1",
+            5,
+            &[9],
+            false
+        ));
+        assert!(!attach_targets_session(
+            &by_session_id,
+            "default",
+            1,
+            &[1],
+            true
+        ));
+        assert!(!attach_targets_session(&by_session_id, "5", 7, &[9], false));
     }
 
     #[test]

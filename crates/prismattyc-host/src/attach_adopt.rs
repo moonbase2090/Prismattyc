@@ -49,8 +49,9 @@ impl Adopted {
     }
 }
 
-/// The session a `pmux-attach` argv targets: `--pane` wins, then `--session`
-/// by name or id, else attach's default (the first session).
+/// The session a `pmux-attach` argv targets: `--pane` wins, then
+/// `--session-id` by id, then `--session` by name or id, else attach's
+/// default (the first session).
 pub(crate) fn resolve_target<'a>(
     client: &AttachClient,
     directory: &'a [SessionEntry],
@@ -59,6 +60,9 @@ pub(crate) fn resolve_target<'a>(
         return directory
             .iter()
             .find(|session| session.pane_ids.contains(&pane));
+    }
+    if let Some(id) = client.session_id {
+        return directory.iter().find(|session| session.id == id);
     }
     if let Some(key) = client.session.as_deref() {
         return directory
@@ -226,6 +230,7 @@ mod tests {
         AttachClient {
             pid,
             session: session.map(str::to_string),
+            session_id: None,
             pane,
         }
     }
@@ -286,6 +291,20 @@ mod tests {
         assert_eq!(got[0].3, "kiro");
         assert_eq!(got[1].3, "grok");
         assert_eq!(got[2].3, "claude", "no selector is attach's default");
+    }
+
+    #[test]
+    fn session_id_flag_resolves_by_id_not_to_the_default() {
+        let by_id = AttachClient {
+            session_id: Some(6),
+            ..client(336, None, None)
+        };
+        assert_eq!(resolve_target(&by_id, &directory()).unwrap().name, "kiro");
+        let stale = AttachClient {
+            session_id: Some(99),
+            ..client(337, None, None)
+        };
+        assert!(resolve_target(&stale, &directory()).is_none());
     }
 
     #[test]

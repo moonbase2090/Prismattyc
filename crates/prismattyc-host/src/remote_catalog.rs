@@ -1042,8 +1042,8 @@ mod real_ssh_tests {
             }
         ));
 
-        let _ = daemon.kill();
-        let _ = daemon.wait();
-        let _ = std::fs::remove_dir_all(&dir);
+        daemon.kill().expect("kill test daemon");
+        daemon.wait().expect("reap test daemon");
+        std::fs::remove_dir_all(&dir).expect("remove test dir");
     }
 }

@@ -33,8 +33,18 @@ up() {
   local dir
   dir="$(mktemp -d "${TMPDIR:-/tmp}/prismattyc-accept.XXXXXX")"
   dir="$(cd "$dir" && pwd -P)"
+  # If any step below fails, stop the half-started daemon and remove the
+  # directory so a failed `up` never leaks either.
+  cleanup_on_fail() {
+    if [ -f "$dir/remote/pmuxd.pid" ]; then
+      kill "$(cat "$dir/remote/pmuxd.pid")" 2>/dev/null || true
+    fi
+    rm -rf "$dir"
+  }
+  trap cleanup_on_fail ERR
+  fail() { cleanup_on_fail; die "$*"; }
   case "$dir$BIN$PRISMATTYC_SSH_TEST_KEY$PRISMATTYC_SSH_TEST_KNOWN_HOSTS" in
-    *[[:space:]\"\'\\]*) die "paths must not contain spaces, quotes or backslashes" ;;
+    *[[:space:]\"\'\\]*) fail "paths must not contain spaces, quotes or backslashes" ;;
   esac
   mkdir -p "$dir/remote" "$dir/local" "$dir/bin"
   local rsock="$dir/remote/pmux.sock"
@@ -44,7 +54,7 @@ up() {
     >"$dir/remote/pmuxd.log" 2>&1 &
   echo $! >"$dir/remote/pmuxd.pid"
   for _ in $(seq 1 100); do [ -S "$rsock" ] && break; sleep 0.05; done
-  [ -S "$rsock" ] || die "isolated pmuxd did not start"
+  [ -S "$rsock" ] || fail "isolated pmuxd did not start"
   remote_pmux() {
     PMUX_SOCKET="$rsock" XDG_DATA_HOME="$dir/remote" XDG_CONFIG_HOME="$dir/remote/config" \
       XDG_STATE_HOME="$dir/remote/state" "$BIN/pmux" "$@"
@@ -55,6 +65,10 @@ up() {
 
   # Test wrapper: alias "loopback" -> the test target with the test key;
   # the remote pmux runs against the isolated daemon.
+  # Note on the joining below: "$before"/"$after" are glued with spaces and
+  # re-split by the shell on receipt. That is safe here because up() rejects
+  # spaces, quotes and backslashes in every interpolated path, and the ssh
+  # target plus pmux arguments are single tokens.
   cat >"$dir/bin/ssh" <<EOF
 #!/bin/sh
 set -eu
@@ -94,6 +108,7 @@ exec env PATH="$dir/bin:\$PATH" PRISMATTYC_CONFIG="$dir/config.toml" \\
   XDG_STATE_HOME="$dir/local/state" "$BIN/prismattyc-host" --no-splash
 EOF
   chmod 755 "$dir/launch.sh"
+  trap - ERR
   echo "PRISMATTYC_ACCEPT_DIR=$dir"
   echo "launch: $dir/launch.sh"
 }
@@ -101,9 +116,14 @@ EOF
 down() {
   local dir="${PRISMATTYC_ACCEPT_DIR:-}"
   [ -n "$dir" ] && [ -d "$dir" ] || die "set PRISMATTYC_ACCEPT_DIR"
-  if [ -f "$dir/remote/pmuxd.pid" ]; then
-    kill "$(cat "$dir/remote/pmuxd.pid")" 2>/dev/null || true
-  fi
+  # Guard the rm -rf below: only remove directories this script created,
+  # recognizable by the mktemp basename and the daemon pid file.
+  case "$(basename "$dir")" in
+    prismattyc-accept.*) ;;
+    *) die "refusing to remove $dir: not an acceptance directory" ;;
+  esac
+  [ -f "$dir/remote/pmuxd.pid" ] || die "refusing to remove $dir: no remote/pmuxd.pid"
+  kill "$(cat "$dir/remote/pmuxd.pid")" 2>/dev/null || true
   rm -rf "$dir"
   echo "removed $dir"
 }

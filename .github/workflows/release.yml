@@ -76,19 +76,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Confirm Apple SDK
-        run: |
-          set -euo pipefail
-          echo "Xcode: $(xcodebuild -version | tr '\n' ' ')"
-          echo "SDK: $(xcrun --sdk macosx --show-sdk-version) at $(xcrun --sdk macosx --show-sdk-path)"
-          # Current window chrome (including glass on recent macOS) only appears
-          # when the binary is linked against a current SDK. Fail early if this
-          # runner is still on an old one. macos-26 ships Xcode 26 / SDK 26+.
-          sdk="$(xcrun --sdk macosx --show-sdk-version)"
-          major="${sdk%%.*}"
-          if [ "$major" -lt 26 ]; then
-            echo "::error::expected macOS SDK 26+, got $sdk"
-            exit 1
-          fi
+        run: scripts/release/confirm-apple-sdk.sh
 
       - name: Install Rust toolchain and Apple targets
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable action, Rust 1.90.0

@@ -11507,7 +11507,30 @@ fn begin_pointer_selection(host: &mut HostState, pane: PaneId, row: usize, col: 
 }
 
 fn pan_view_scroll(host: &mut HostState, delta_rows: isize) {
-    pan_pane_view_scroll(host, host.mux.focused_id(), delta_rows);
+    if host.emulator.screen().alt_active() {
+        host.view_scroll = 0;
+        return;
+    }
+    let max = host.emulator.screen().max_view_scroll();
+    let before = host.view_scroll;
+    if delta_rows > 0 {
+        host.view_scroll = (host.view_scroll + delta_rows as usize).min(max);
+    } else {
+        host.view_scroll = host.view_scroll.saturating_sub((-delta_rows) as usize);
+    }
+    if host.view_scroll != before {
+        // Pan clears finished selection chrome (nested parity); mid-drag keeps anchor.
+        if !host.left_button_down {
+            host.selection.clear();
+            host.keyboard_select_mode = false;
+        }
+        if host.view_scroll == 0 {
+            host.scroll_new_output = false;
+        }
+        host.window
+            .set_title(&window_title(&host.mux, show_tab_strip(host)));
+        host.dirty = true;
+    }
 }
 
 fn pan_pane_view_scroll(host: &mut HostState, pane_id: PaneId, delta_rows: isize) {

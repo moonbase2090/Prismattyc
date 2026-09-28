@@ -7,12 +7,12 @@ and a signed universal macOS app distributed as a DMG and a zip.
 ## Prepare a release
 
 1. Set the workspace package version in `Cargo.toml`. The tag version must
-   match the binaries. For a prerelease tag such as `v0.2.20-rc.1`, binaries
-   may report the base version `0.2.20`.
+   match the binaries. For a prerelease tag such as `v0.2.21-rc.1`, binaries
+   may report the base version `0.2.21`.
 2. Merge the release source into `main` and complete the release gates in
    [the testing policy](testing-policy.md).
 3. Confirm that the repository has the Apple secrets listed below.
-4. Push a tag such as `v0.2.20` to start the release workflow.
+4. Push a tag such as `v0.2.21` to start the release workflow.
 5. Wait for every build job. The publish job creates the release only after
    every platform package succeeds and the Apple job reports `signed=true`.
 
@@ -35,13 +35,13 @@ push a tag.
 gh workflow run release.yml \
   --repo moonbase2090/Prismattyc \
   --ref main \
-  -f tag=v0.2.20 \
+  -f tag=v0.2.21 \
   -f dry_run=true
 gh run list --repo moonbase2090/Prismattyc --workflow release.yml --limit 5
 gh run watch RUN_ID --repo moonbase2090/Prismattyc --exit-status
 ```
 
-Replace `v0.2.20` with the release tag to validate. Copy the run ID from
+Replace `v0.2.21` with the release tag to validate. Copy the run ID from
 `gh run list` into `gh run watch`.
 
 ## Configure Apple credentials

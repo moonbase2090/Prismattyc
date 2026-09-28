@@ -13159,6 +13159,8 @@ impl ApplicationHandler<UserAction> for App {
         if let WindowEvent::CloseRequested = event {
             if let Some(host) = self.windows.get_mut(&id) {
                 local_views::persist_and_restore(host, true);
+                #[cfg(target_os = "macos")]
+                macos_window::forget_window(&host.window);
             }
             self.windows.remove(&id);
             if self.windows.is_empty() {

@@ -19,6 +19,41 @@ thread_local! {
     static TITLEBAR_FILLS: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
 }
 
+/// Drop any AppKit chrome this module attached for `window`.
+///
+/// Call when the winit window is closing. Map keys are content-view addresses;
+/// leaving them after the view is destroyed can skip a later fill install
+/// (address reuse) or remove a stale pointer on opaque reload (use-after-free).
+pub fn forget_window(window: &Window) {
+    let Some(key) = content_view_key(window) else {
+        return;
+    };
+    forget_blur_key(key);
+    remove_titlebar_fill(key);
+}
+
+fn content_view_key(window: &Window) -> Option<usize> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let handle = window.window_handle().ok()?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return None;
+    };
+    // SAFETY: winit supplies a live NSView while the Window owner remains alive.
+    let content: &NSView = unsafe { &*handle.ns_view.as_ptr().cast() };
+    Some(content as *const NSView as usize)
+}
+
+fn forget_blur_key(key: usize) {
+    let Some(effect) = BLUR_VIEWS.with(|views| views.borrow_mut().remove(&key)) else {
+        return;
+    };
+    // SAFETY: address came from a retained NSVisualEffectView inserted by this
+    // module and remains live until removal.
+    let effect: &NSVisualEffectView = unsafe { &*(effect as *const NSVisualEffectView) };
+    effect.removeFromSuperview();
+}
+
 /// Install or remove the AppKit backdrop used by `window_blur`.
 ///
 /// Returns `true` only when the effect view is installed. AppKit retains the
@@ -55,13 +90,7 @@ pub fn set_window_blur(window: &Window, enabled: bool) -> bool {
 
     let key = view as *const NSView as usize;
     if !enabled {
-        let effect = BLUR_VIEWS.with(|views| views.borrow_mut().remove(&key));
-        if let Some(effect) = effect {
-            // SAFETY: the address came from the retained NSVisualEffectView
-            // inserted by this module and remains live until removal.
-            let effect: &NSVisualEffectView = unsafe { &*(effect as *const NSVisualEffectView) };
-            effect.removeFromSuperview();
-        }
+        forget_blur_key(key);
         return false;
     }
 
@@ -129,11 +158,6 @@ fn titlebar_fill_action(needs_fill: bool, already_installed: bool) -> TitlebarFi
     }
 }
 
-/// Stop walking once the candidate contains the terminal content view.
-fn titlebar_walk_hits_content(content_is_descendant: bool) -> bool {
-    content_is_descendant
-}
-
 /// A full-width, non-empty ancestor is a title-bar container candidate.
 fn is_titlebar_fill_container(view_width: f64, view_height: f64, content_width: f64) -> bool {
     view_width >= content_width && view_height > 0.0
@@ -149,7 +173,7 @@ fn select_titlebar_fill_container(
     candidates: &[(f64, f64, bool)],
 ) -> Option<usize> {
     for (index, &(width, height, hits_content)) in candidates.iter().enumerate() {
-        if titlebar_walk_hits_content(hits_content) {
+        if hits_content {
             return None;
         }
         if is_titlebar_fill_container(width, height, content_width) {
@@ -306,7 +330,7 @@ pub fn install_titlebar_background(window: &Window, needs_fill: bool) {
 mod titlebar_fill_tests {
     use super::{
         is_titlebar_fill_container, select_titlebar_fill_container, titlebar_fill_action,
-        titlebar_needs_fill, titlebar_walk_hits_content, TitlebarFillAction,
+        titlebar_needs_fill, TitlebarFillAction,
     };
 
     #[test]
@@ -336,12 +360,6 @@ mod titlebar_fill_tests {
             titlebar_fill_action(true, false),
             TitlebarFillAction::Install
         );
-    }
-
-    #[test]
-    fn walk_stops_on_content_descendant() {
-        assert!(titlebar_walk_hits_content(true));
-        assert!(!titlebar_walk_hits_content(false));
     }
 
     #[test]

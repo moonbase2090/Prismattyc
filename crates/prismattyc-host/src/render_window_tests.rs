@@ -397,7 +397,14 @@ fn paint_in_real_window(restore_only: bool) {
         .with_any_thread(true)
         .build()
         .unwrap();
-    let cli = Cli::parse(["--no-splash", "/bin/cat"].into_iter().map(String::from)).unwrap();
+    // Opt into alt-screen scrollback: paint_in_real_window runs the chrome
+    // contract, including alt-history scroll and selection.
+    let cli = Cli::parse(
+        ["--no-splash", "--alt-screen-scrollback", "/bin/cat"]
+            .into_iter()
+            .map(String::from),
+    )
+    .unwrap();
     let config = config::ConfigFile {
         a11y: Some(config::A11ySection {
             os_tree: Some(false),

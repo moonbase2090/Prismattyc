@@ -17,7 +17,17 @@ impl Screen {
     }
 
     pub(super) fn reflow_primary(&mut self, columns: usize, rows: usize) {
-        let history_len = self.scrollback.len();
+        // While the alternate screen is active, scrollback holds retained
+        // alt rows, not primary history. Reflow the hidden primary grid
+        // alone (so a later alt exit restores rejoined lines) and leave
+        // scrollback untouched: draining it here would clip retained rows
+        // against the stale primary cursor.
+        let include_history = !self.alt_active;
+        let history_len = if include_history {
+            self.scrollback.len()
+        } else {
+            0
+        };
         let cursor = self.primary.cursor;
         let saved = self.primary.saved_cursor;
         let last_used = self
@@ -27,11 +37,14 @@ impl Screen {
             .rposition(|row| row.iter().any(|c| *c != Cell::default()))
             .unwrap_or(0);
         let last_used = last_used.max(cursor.row).max(saved.cursor.row);
-        let mut input: Vec<_> = self
-            .scrollback
-            .drain(..)
-            .zip(self.scrollback_wrapped.drain(..))
-            .collect();
+        let mut input: Vec<_> = if include_history {
+            self.scrollback
+                .drain(..)
+                .zip(self.scrollback_wrapped.drain(..))
+                .collect()
+        } else {
+            Vec::new()
+        };
         input.extend(
             self.primary
                 .cells
@@ -143,14 +156,16 @@ impl Screen {
             scroll_bottom: rows - 1,
         };
         self.primary = primary;
-        self.scrollback = output
-            .rows
-            .drain(..start)
-            .map(|(row, wrap)| {
-                self.scrollback_wrapped.push_back(wrap);
-                row
-            })
-            .collect();
+        if include_history {
+            self.scrollback = output
+                .rows
+                .drain(..start)
+                .map(|(row, wrap)| {
+                    self.scrollback_wrapped.push_back(wrap);
+                    row
+                })
+                .collect();
+        }
     }
 }
 

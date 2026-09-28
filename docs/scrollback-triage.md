@@ -26,16 +26,28 @@ The host previously exposed primary-screen history only:
   native host did not enable or use that history.
 
 The old policy made scrolling and copying appear broken without an explanation.
-A report that Grok scroll works in `/minimal` but not `/fullscreen` is
+A report that scroll works in `/minimal` but not `/fullscreen` is
 consistent with the fullscreen UI using the alternate screen; this remains an
 inference until the pane mode is captured during reproduction.
 
-## Host scrollback fix
+## Host scrollback fix (opt-in)
 
-The host now opts into the core's bounded alternate-screen row history. Its
-viewport, scrollbar, and selection/copy paths use that history while retained
-rows exist. Shift+wheel is host-owned; an unmodified wheel over a mouse-aware
-TUI still goes to the child. Shift-drag selection continues to auto-copy.
+The host can opt into the core's bounded alternate-screen row history behind
+`alt_screen_scrollback` (config `alt_screen_scrollback = true`,
+`--alt-screen-scrollback`, or `PRISMATTYC_ALT_SCREEN_SCROLLBACK=1`; default
+off). When enabled, its viewport, scrollbar, and selection/copy paths use that
+history while retained rows exist. When off, the alternate screen keeps the
+classic live-only view. Shift+wheel is host-owned; an unmodified wheel over a
+mouse-aware TUI still goes to the child. Shift-drag selection continues to
+auto-copy.
+
+The wheel targets the pane under the pointer (scroll or app mouse report)
+without moving focus; a wheel over the focused pane behaves as before.
+
+Exiting a full-screen TUI leaves its retained rows (including blank rows the
+app pushed on entry) in the shell's scrollback. That matches terminals that
+keep alt content, but it changes what the shell history looks like, so it is
+covered by the same opt-in setting.
 
 This preserves rows the TUI actually scrolls off the top of its screen. It
 cannot recover text that the TUI erases or overwrites during a full-screen

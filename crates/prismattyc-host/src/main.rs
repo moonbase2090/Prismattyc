@@ -343,6 +343,10 @@ struct Cli {
     light_cycle_head: bool,
     /// Opt-in rich attachments (APC collect + z1 cell-rect paint).
     experimental_rich: bool,
+    /// Opt-in alternate-screen scrollback retention (`--alt-screen-scrollback`
+    /// or `PRISMATTYC_ALT_SCREEN_SCROLLBACK=1`; config
+    /// `alt_screen_scrollback = true`; default off).
+    alt_screen_scrollback: bool,
     /// Opt-in GPU present. Softbuffer stays the default.
     gpu: bool,
     /// Mux sessions to attach (`prismattyc-mux attach --all`).
@@ -377,6 +381,7 @@ impl Cli {
         let mut focus_border = env_focus_border.unwrap_or(DEFAULT_FOCUS_BORDER_INDEX);
         let mut focus_border_pinned = env_focus_border.is_some();
         let mut experimental_rich = env_flag_enabled("PRISMATTYC_EXPERIMENTAL_RICH");
+        let mut alt_screen_scrollback = env_flag_enabled("PRISMATTYC_ALT_SCREEN_SCROLLBACK");
         let mut gpu = env_flag_enabled("PRISMATTYC_GPU");
         let mut no_splash = false;
         let mut explicit_program = false;
@@ -419,6 +424,10 @@ impl Cli {
             }
             if a == "--experimental-rich" && program.is_none() {
                 experimental_rich = true;
+                continue;
+            }
+            if a == "--alt-screen-scrollback" && program.is_none() {
+                alt_screen_scrollback = true;
                 continue;
             }
             if a == "--gpu" && program.is_none() {
@@ -505,6 +514,7 @@ impl Cli {
             light_cycle_ms: DEFAULT_LIGHT_CYCLE_MS,
             light_cycle_head: true,
             experimental_rich,
+            alt_screen_scrollback,
             gpu,
             attach_sessions,
             no_splash,
@@ -705,7 +715,7 @@ fn print_help() {
 prismattyc-host — windowed Prismattyc host
 
 USAGE:
-    prismattyc-host [-V|--version] [--panes N] [--focus-border NAME] [--experimental-rich] [--gpu] [PROGRAM [ARGS...]]
+    prismattyc-host [-V|--version] [--panes N] [--focus-border NAME] [--experimental-rich] [--alt-screen-scrollback] [--gpu] [PROGRAM [ARGS...]]
     prismattyc-host --attach-session ID [--attach-title NAME] ...
     prismattyc-host --write-config [PATH] [--merge]
     prismattyc-host -- /bin/bash -l
@@ -746,6 +756,9 @@ Config file:     ~/.config/prismattyc/config.toml (or $PRISMATTYC_CONFIG), hot-r
                  CLI flags and PRISMATTYC_* env vars always win over the file.
 Config keys:
 Rich attach:     --experimental-rich or PRISMATTYC_EXPERIMENTAL_RICH=1
+Alt scrollback:  --alt-screen-scrollback or PRISMATTYC_ALT_SCREEN_SCROLLBACK=1
+                 (or config alt_screen_scrollback = true). Default off:
+                 full-screen TUIs keep the classic live-only view.
 GPU present:     --gpu or PRISMATTYC_GPU=1 (needs --features gpu; else errors)
 Launch splash:   shown on bare launches; --no-splash, PRISMATTYC_NO_SPLASH=1,
                  or config splash = false opts out. An explicit PROGRAM or
@@ -3161,6 +3174,7 @@ impl App {
             rows,
             geom,
             self.cli.experimental_rich,
+            self.cli.alt_screen_scrollback || self.file_config.alt_screen_scrollback(),
             Some(self.wake.clone()),
         )
         .with_context(|| format!("spawn {boot_program:?}"))?;

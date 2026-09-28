@@ -4021,4 +4021,43 @@ mod tests {
         let _ = emulator.feed(b"\x1b[2J");
         assert!(emulator.images().is_empty());
     }
+
+    fn feed_retained_alt_history() -> Emulator {
+        let mut emulator = Emulator::new(80, 24, 10_000);
+        emulator.set_retain_alt_history(true);
+        let mut bytes = b"\x1b[?1049h\x1b[H".to_vec();
+        for i in 1..=100 {
+            bytes.extend_from_slice(format!("line-{i:03}\r\n").as_bytes());
+        }
+        let _ = emulator.feed(&bytes);
+        assert!(emulator.screen().alt_active());
+        assert_eq!(emulator.screen().history_len(), 77);
+        emulator
+    }
+
+    fn history_row_text(emulator: &Emulator, depth: usize) -> String {
+        (0..8)
+            .map(|col| {
+                emulator
+                    .screen()
+                    .history_view_cell(depth, 0, col)
+                    .character
+            })
+            .collect()
+    }
+
+    #[test]
+    fn alt_resize_keeps_retained_history() {
+        // B2: reflowing against the stale primary cursor used to drain and
+        // clip retained alt rows. Every geometry must keep all 77 rows.
+        for (cols, rows) in [(100, 30), (100, 24), (60, 20)] {
+            let mut emulator = feed_retained_alt_history();
+            emulator.resize(cols, rows);
+            assert_eq!(emulator.screen().history_len(), 77, "{cols}x{rows}");
+            assert_eq!(emulator.screen().max_view_scroll(), 77, "{cols}x{rows}");
+            assert_eq!(history_row_text(&emulator, 0), "line-078", "{cols}x{rows}");
+            assert_eq!(history_row_text(&emulator, 76), "line-002", "{cols}x{rows}");
+        }
+    }
 }
+

@@ -629,6 +629,12 @@ pub struct Screen {
     /// (alt never enters history). The mux server enables it so attach
     /// clients can page through TUI output via `history_view_cell`.
     retain_alt_history: bool,
+    /// Rows at the back of `scrollback` retained from the active alternate
+    /// screen since alt entry. Lets reflow split shell history (prefix, still
+    /// reflowed with the hidden primary) from alt rows (suffix, untouched).
+    /// Reset on alt entry and alt exit; front eviction only drops prefix
+    /// rows first, so no adjustment is needed there.
+    alt_history_rows: usize,
     /// Count of full-viewport clears (ED mode 2/3). Used by callers (e.g. the
     /// emulator's Kitty-graphics store) to invalidate stale rasters without
     /// over-invalidating on every write, unlike `content_epoch`.
@@ -668,6 +674,7 @@ impl PartialEq for Screen {
             && self.origin_mode == other.origin_mode
             && self.autowrap == other.autowrap
             && self.retain_alt_history == other.retain_alt_history
+            && self.alt_history_rows == other.alt_history_rows
             && self.full_clears == other.full_clears
             && self.active_hyperlink == other.active_hyperlink
             && self.hyperlinks == other.hyperlinks
@@ -698,6 +705,8 @@ pub struct ScreenStateV1 {
     pub origin_mode: bool,
     pub autowrap: bool,
     pub retain_alt_history: bool,
+    #[serde(default)]
+    pub alt_history_rows: u64,
     pub full_clears: u64,
     pub active_hyperlink: Option<u32>,
     pub hyperlinks: Vec<HyperlinkStateV1>,
@@ -818,6 +827,7 @@ impl Screen {
             origin_mode: false,
             autowrap: true,
             retain_alt_history: false,
+            alt_history_rows: 0,
             full_clears: 0,
             active_hyperlink: None,
             hyperlinks: Vec::new(),
@@ -854,6 +864,7 @@ impl Screen {
             origin_mode: self.origin_mode,
             autowrap: self.autowrap,
             retain_alt_history: self.retain_alt_history,
+            alt_history_rows: self.alt_history_rows as u64,
             full_clears: self.full_clears,
             active_hyperlink: self.active_hyperlink.map(|id| id.0),
             hyperlinks: self
@@ -948,6 +959,7 @@ impl Screen {
             origin_mode: state.origin_mode,
             autowrap: state.autowrap,
             retain_alt_history: state.retain_alt_history,
+            alt_history_rows: state.alt_history_rows as usize,
             full_clears: state.full_clears,
             active_hyperlink: state.active_hyperlink.map(HyperlinkId),
             hyperlinks,
@@ -1842,6 +1854,7 @@ impl Screen {
             }
         }
         self.alt_active = true;
+        self.alt_history_rows = 0;
         self.damage.mark_all();
         self.bump_epoch();
     }
@@ -1859,6 +1872,7 @@ impl Screen {
         // Capture active (alt) pen before switching buffers (reverse path).
         let alt_pen = self.active().style;
         self.alt_active = false;
+        self.alt_history_rows = 0;
         if matches!(mode, AltScreenMode::Mode1049) {
             // Active is primary again: same restore as ESC 8 / DECRC (saved pen).
             self.restore_cursor();

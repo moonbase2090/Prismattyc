@@ -42,7 +42,10 @@ mouse-aware TUI still goes to the child. Shift-drag selection continues to
 auto-copy.
 
 The wheel targets the pane under the pointer (scroll or app mouse report)
-without moving focus; a wheel over the focused pane behaves as before.
+without moving focus; a wheel over the focused pane behaves as before. This
+routing is always on and independent of the setting below: with retention
+off, panes simply have no host history to scroll, so an unmodified wheel
+over a mouse-aware TUI still goes to the child either way.
 
 Exiting a full-screen TUI leaves its retained rows (including blank rows the
 app pushed on entry) in the shell's scrollback. That matches terminals that

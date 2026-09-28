@@ -151,6 +151,11 @@ impl Screen {
         }
         self.scrollback.push_back(row);
         self.scrollback_wrapped.push_back(wrapped);
+        if self.alt_active {
+            // Retained alt rows form the scrollback suffix; reflow splits on
+            // this count so pre-alt shell history still reflows (R1).
+            self.alt_history_rows = self.alt_history_rows.saturating_add(1);
+        }
         self.enforce_scrollback_budget();
     }
 }

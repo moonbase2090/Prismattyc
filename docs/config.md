@@ -938,7 +938,10 @@ Full-screen TUIs keep the classic live-only view by default. Set
 `PRISMATTYC_ALT_SCREEN_SCROLLBACK=1`) to keep rows the TUI scrolls off the
 top of its screen reachable in host scroll, scrollbar, and selection. The
 wheel targets the pane under the pointer without moving focus. Exiting the
-TUI leaves its retained rows in the shell's scrollback. See
+TUI leaves its retained rows in the shell's scrollback. The three sources
+OR together: there is no flag to force the setting off when the config file
+enables it, and toggling it hot-reloads only for panes opened afterwards —
+already-open panes keep the value from spawn. See
 `docs/scrollback-triage.md`.
 
 ### Restore blank terminals after restart

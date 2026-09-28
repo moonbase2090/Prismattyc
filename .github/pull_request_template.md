@@ -1,12 +1,16 @@
+Classification: leaf / trunk (see REVIEW_POLICY.md; when unsure, trunk)
+
 ## Changes
 
 Describe the problem and the resulting behavior.
 
-## Validation
+## Proof
 
-List the checks run and their results. Include the tested revision.
-For visual changes, include screenshots or native-window evidence.
-State any skipped checks or known limitations.
+Paste real evidence, such as test output, a CI run link, a screenshot or
+recording for UI changes (native-window evidence for visual changes), or a
+before/after for behavior changes. "Tested locally" without output is not
+proof. Include the tested revision and state any skipped checks or known
+limitations.
 
 ## Compatibility
 

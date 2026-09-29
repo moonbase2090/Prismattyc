@@ -183,6 +183,23 @@ reinstall a specific version, download its DMG from the
 and replace `/Applications/Prismattyc.app`. Quit and reopen the app. Mux
 sessions keep running.
 
+On first launch and after an app update, Prismattyc links the bundled
+`Contents/MacOS/pmux` into `/usr/local/bin` when it can add the link there.
+Otherwise it tries `~/.local/bin`. Prismattyc does not edit shell profiles. If
+another `pmux` earlier on `PATH` shadows the app link, the host prints the
+path and recovery steps. For an older Cargo install, run
+`cargo uninstall pmux`, then open a new terminal.
+`pmux uninstall` removes only the link that Prismattyc created; it leaves
+manual links and separate Cargo installs in place.
+
+To create the link yourself, use the app path and bin directory that apply to
+your install. This example uses `/Applications` and `~/.local/bin`:
+
+```bash
+mkdir -p ~/.local/bin
+ln -s /Applications/Prismattyc.app/Contents/MacOS/pmux ~/.local/bin/pmux
+```
+
 Signing and notarization stay out of the first slice. This section is also
 the reference for when distribution starts.
 

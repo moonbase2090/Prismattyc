@@ -22,7 +22,7 @@
 //! absolute path in the inventory comes from an injected [`Dirs`] field, so
 //! tests build `Dirs` from a tempdir root and can never target a real machine
 //! path such as `/Applications`. Host-global paths (`/Applications`,
-//! `/tmp/prismattyc-<uid>`) are included only when the user directories are
+//! `/usr/local/bin`, `/tmp/prismattyc-<uid>`) are included only when the user directories are
 //! NOT redirected (see [`EnvSnapshot::is_redirected`]): an invocation with a
 //! sandboxed HOME/XDG can never target the real system app or the shared
 //! `/tmp` runtime dir, and `stop_daemons` scans only the resolved runtime
@@ -142,6 +142,9 @@ pub struct Dirs {
     /// System-wide macOS Applications dir (`/Applications` in production).
     /// Injectable so tests never target the real one.
     pub system_app_dir: Option<PathBuf>,
+    /// System-wide PATH directory used for the app's `pmux` link. It is
+    /// omitted when HOME or XDG paths are redirected.
+    pub system_bin_dir: Option<PathBuf>,
     pub os: Os,
 }
 
@@ -150,7 +153,8 @@ impl Dirs {
     /// installer and self-updater. Delegates to the pure [`Dirs::resolve`] so
     /// the redirection logic can be tested without mutating process env.
     ///
-    /// Host-global paths (`/Applications`, `/tmp/prismattyc-<uid>`) are the
+    /// Host-global paths (`/Applications`, `/usr/local/bin`,
+    /// `/tmp/prismattyc-<uid>`) are the
     /// only real machine paths introduced here, and only when the user
     /// directories are NOT redirected — see [`EnvSnapshot::is_redirected`].
     #[must_use]
@@ -161,7 +165,7 @@ impl Dirs {
     /// Pure resolver: build [`Dirs`] from an explicit environment snapshot.
     /// When the user directories are redirected (a sandboxed / non-default
     /// HOME or XDG), host-global paths are omitted so an invocation with fake
-    /// user directories can never target the real system app or the shared
+    /// user directories can never target the system app, PATH link, or shared
     /// `/tmp` runtime dir.
     #[must_use]
     pub fn resolve(env: &EnvSnapshot) -> Self {
@@ -231,6 +235,11 @@ impl Dirs {
         } else {
             None
         };
+        let system_bin_dir = if env.os == Os::Macos && !redirected {
+            Some(PathBuf::from("/usr/local/bin"))
+        } else {
+            None
+        };
 
         Self {
             home,
@@ -240,6 +249,7 @@ impl Dirs {
             windows_run,
             bin_dirs,
             system_app_dir,
+            system_bin_dir,
             os: env.os,
         }
     }
@@ -302,15 +312,15 @@ impl EnvSnapshot {
     /// True when the user directories are redirected away from their defaults,
     /// e.g. a sandbox that sets `HOME`, `XDG_DATA_HOME`, `XDG_RUNTIME_DIR`, or
     /// `CARGO_HOME` under a temp dir. In that case host-global paths
-    /// (`/Applications`, `/tmp/prismattyc-<uid>`) are omitted: the caller has
+    /// (`/Applications`, `/usr/local/bin`, `/tmp/prismattyc-<uid>`) are omitted: the caller has
     /// signalled it is not operating on the real user account.
     ///
     /// Fails safe: host-global paths are emitted **only** when we can
     /// positively confirm this is the real account — `HOME` is set and equals
     /// the OS's real home for this uid. If the real home cannot be resolved
     /// (`getpwuid` returned nothing) or `HOME` is unset, we treat the run as
-    /// redirected so a destructive uninstall never targets `/Applications`
-    /// or the shared `/tmp/prismattyc-<uid>` on an unverified environment.
+    /// redirected so a destructive uninstall never targets `/Applications`,
+    /// `/usr/local/bin`, or the shared `/tmp/prismattyc-<uid>` on an unverified environment.
     #[must_use]
     pub fn is_redirected(&self) -> bool {
         // Any explicit XDG override or CARGO_HOME is a redirection signal.
@@ -382,6 +392,12 @@ pub fn inventory(dirs: &Dirs) -> Vec<Item> {
     // --- Binaries: PATH launchers / symlinks in the managed bin dirs. ---
     for dir in &dirs.bin_dirs {
         for bin in BINARIES {
+            // On macOS, `pmux` may be an app-managed symlink or an independent
+            // Cargo install. Only the symlink with its ownership record is
+            // removed; never delete an arbitrary `pmux` at this path.
+            if os == Os::Macos && bin == "pmux" {
+                continue;
+            }
             let name = crate::platform::executable_name(bin);
             push(
                 dir.join(&name),
@@ -654,7 +670,7 @@ fn run_with_shutdown(
     live_probe: &dyn Fn(&Path) -> Option<PathBuf>,
     shutdown: &dyn Fn(&Dirs),
 ) -> Result<()> {
-    let mut plan = inventory(dirs);
+    let mut plan = removal_plan(dirs);
     if opts.keep_data {
         plan.retain(|item| !item.category.is_data());
     }
@@ -727,7 +743,7 @@ fn run_with_shutdown(
                 continue;
             }
         }
-        match remove_path(&item.path) {
+        match remove_item(item) {
             Outcome::Removed => removed += 1,
             Outcome::Absent => {}
             Outcome::Failed { why, fix } => {
@@ -892,16 +908,82 @@ where
 /// A convenience for tests and callers: the set of paths the plan would touch.
 #[must_use]
 pub fn planned_paths(dirs: &Dirs, keep_data: bool) -> Vec<PathBuf> {
-    inventory(dirs)
+    removal_plan(dirs)
         .into_iter()
         .filter(|item| !(keep_data && item.category.is_data()))
         .map(|item| item.path)
         .collect()
 }
 
-/// Build a fully sandboxed [`Dirs`] rooted at `root` (a tempdir). Every field
-/// — including the "system" Applications dir — is derived from `root`, so an
-/// inventory built from it can never name a real machine path. Tests use this
+/// Include only PATH links with a matching Prismattyc ownership record. The
+/// ordinary inventory stays pure; this filesystem check is kept at the
+/// uninstall boundary and uses only paths derived from `Dirs`.
+fn removal_plan(dirs: &Dirs) -> Vec<Item> {
+    let mut items = inventory(dirs);
+    if dirs.os == Os::Macos {
+        #[cfg(any(target_os = "macos", all(test, unix)))]
+        {
+            let mut candidates = Vec::new();
+            if let Some(home) = &dirs.home {
+                candidates.push(home.join(".local/bin"));
+            }
+            if let Some(system_bin) = &dirs.system_bin_dir {
+                candidates.push(system_bin.clone());
+            }
+            candidates.sort();
+            candidates.dedup();
+            for directory in candidates {
+                let link = directory.join("pmux");
+                if crate::path_shim::is_managed_link_or_absent(&link) {
+                    items.push(Item {
+                        path: link,
+                        category: Category::Binaries,
+                        what: "app-managed pmux PATH link".to_string(),
+                    });
+                }
+            }
+        }
+    }
+    items.sort_by(|left, right| {
+        left.category
+            .cmp(&right.category)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    items
+}
+
+fn remove_item(item: &Item) -> Outcome {
+    if item.what == "app-managed pmux PATH link" {
+        #[cfg(any(target_os = "macos", all(test, unix)))]
+        {
+            return match crate::path_shim::remove_owned_link(&item.path) {
+                Ok(crate::path_shim::RemoveOutcome::Removed) => Outcome::Removed,
+                Ok(crate::path_shim::RemoveOutcome::Absent) => Outcome::Absent,
+                Ok(crate::path_shim::RemoveOutcome::Preserved) => Outcome::Failed {
+                    why: "the pmux path changed after the plan was printed; it was left untouched"
+                        .to_string(),
+                    fix: format!("inspect {} and rerun uninstall", item.path.display()),
+                },
+                Err(error) => Outcome::Failed {
+                    why: error.to_string(),
+                    fix: format!(
+                        "inspect {} and remove the managed link manually",
+                        item.path.display()
+                    ),
+                },
+            };
+        }
+        #[cfg(not(any(target_os = "macos", all(test, unix))))]
+        {
+            return Outcome::Absent;
+        }
+    }
+    remove_path(&item.path)
+}
+
+/// Build a fully sandboxed [`Dirs`] rooted at `root` (a tempdir). Every field,
+/// including the system Applications and bin dirs, comes from `root`, so a
+/// plan built from it can never name a real machine path. Tests use this
 /// exclusively; production uses [`Dirs::from_env`].
 #[must_use]
 pub fn dirs_for_test(root: impl AsRef<Path>, os: Os) -> Dirs {
@@ -915,6 +997,7 @@ pub fn dirs_for_test(root: impl AsRef<Path>, os: Os) -> Dirs {
         bin_dirs: vec![root.join("home/.local/bin"), root.join("home/.cargo/bin")],
         // Sandboxed stand-in for /Applications — inside the tempdir root.
         system_app_dir: Some(root.join("Applications")),
+        system_bin_dir: Some(root.join("usr-local-bin")),
         os,
     }
 }
@@ -1012,6 +1095,46 @@ mod tests {
         assert!(!mac
             .iter()
             .any(|i| i.path.ends_with("prismattyc-host.desktop")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn macos_plan_includes_only_the_owned_pmux_path_link() {
+        let tmp = Scratch::new("pmux-shim-plan");
+        let dirs = fake_dirs(tmp.path(), Os::Macos);
+        let target = tmp
+            .path()
+            .join("Applications/Prismattyc.app/Contents/MacOS/pmux");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"bundled pmux").unwrap();
+
+        let link = tmp.path().join("home/.local/bin/pmux");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let marker = link.parent().unwrap().join(".pmux-prismattyc-shim.json");
+        std::fs::write(
+            &marker,
+            serde_json::to_vec(&serde_json::json!({"version": 1, "target": target})).unwrap(),
+        )
+        .unwrap();
+
+        let cargo_pmux = tmp.path().join("home/.cargo/bin/pmux");
+        std::fs::create_dir_all(cargo_pmux.parent().unwrap()).unwrap();
+        std::fs::write(&cargo_pmux, b"separate Cargo install").unwrap();
+
+        let items = removal_plan(&dirs);
+        let shim = items
+            .iter()
+            .find(|item| item.what == "app-managed pmux PATH link")
+            .expect("owned app link belongs in the plan");
+        assert_eq!(shim.path, link);
+        assert!(!items.iter().any(|item| item.path == cargo_pmux));
+
+        assert!(matches!(remove_item(shim), Outcome::Removed));
+        assert!(!link.exists());
+        assert!(!marker.exists());
+        assert!(target.exists());
+        assert!(cargo_pmux.exists());
     }
 
     #[test]
@@ -1229,8 +1352,8 @@ mod tests {
 
     #[test]
     fn overridden_home_never_targets_real_applications() {
-        // Regression guard: no inventory path may reference the real
-        // /Applications or /tmp/prismattyc-<uid>. Every path must live under
+        // Regression guard: no plan path may reference real host-global dirs.
+        // Every path must live under
         // the injected tempdir root.
         let tmp = Scratch::new("noreal");
         let root = tmp.path();
@@ -1250,6 +1373,18 @@ mod tests {
                 assert!(
                     !item.path.starts_with("/tmp/prismattyc-"),
                     "inventory must never target a real /tmp runtime dir: {}",
+                    item.path.display()
+                );
+            }
+            for item in removal_plan(&dirs) {
+                assert!(
+                    item.path.starts_with(root),
+                    "removal plan escapes the sandbox root: {} (os {os:?})",
+                    item.path.display()
+                );
+                assert!(
+                    !item.path.starts_with("/usr/local/bin"),
+                    "redirected removal plan must not reach the real PATH dir: {}",
                     item.path.display()
                 );
             }
@@ -1293,8 +1428,8 @@ mod tests {
 
     #[test]
     fn production_resolver_redirected_env_omits_host_global_paths() {
-        // The Codex CHANGES fix: through the PRODUCTION resolver, a redirected
-        // env must never yield /Applications or /tmp/prismattyc-<uid>. This is
+        // Through the production resolver, redirected env must never yield
+        // /Applications, /usr/local/bin, or /tmp/prismattyc-<uid>. This is
         // the assertion that runs before any mutating operation.
         let tmp = Scratch::new("prodredir");
         for os in [Os::Macos, Os::Linux] {
@@ -1302,10 +1437,14 @@ mod tests {
             assert!(env.is_redirected(), "sandbox env must read as redirected");
             let dirs = Dirs::resolve(&env);
 
-            // No host-global system app dir on a redirected invocation.
+            // No host-global system app or bin dir on a redirected invocation.
             assert!(
                 dirs.system_app_dir.is_none(),
                 "redirected env must not set system_app_dir (os {os:?})"
+            );
+            assert!(
+                dirs.system_bin_dir.is_none(),
+                "redirected env must not set system_bin_dir (os {os:?})"
             );
 
             for item in inventory(&dirs) {
@@ -1323,6 +1462,13 @@ mod tests {
                 assert!(
                     item.path.starts_with(tmp.path()),
                     "redirected resolver path escaped the sandbox: {} (os {os:?})",
+                    item.path.display()
+                );
+            }
+            for item in removal_plan(&dirs) {
+                assert!(
+                    item.path.starts_with(tmp.path()),
+                    "redirected removal plan escaped the sandbox: {} (os {os:?})",
                     item.path.display()
                 );
             }
@@ -1344,6 +1490,11 @@ mod tests {
             dirs.system_app_dir.as_deref(),
             Some(Path::new("/Applications")),
             "default macOS invocation includes /Applications"
+        );
+        assert_eq!(
+            dirs.system_bin_dir.as_deref(),
+            Some(Path::new("/usr/local/bin")),
+            "default macOS invocation includes the system bin dir"
         );
         let paths: Vec<PathBuf> = inventory(&dirs).into_iter().map(|i| i.path).collect();
         assert!(
@@ -1412,7 +1563,7 @@ mod tests {
         // resolve the real home (real_home = None) and no XDG/CARGO override
         // is set. Previously is_redirected() fell through to false and
         // host-global paths leaked. It must now read as redirected and the
-        // inventory must not contain /Applications or /tmp/prismattyc-<uid>.
+        // inventory must not contain /Applications, /usr/local/bin, or /tmp/prismattyc-<uid>.
         let env = EnvSnapshot {
             home: Some(PathBuf::from("/tmp/sandbox/home")),
             xdg_config_home: None,
@@ -1433,6 +1584,10 @@ mod tests {
         assert!(
             dirs.system_app_dir.is_none(),
             "no system app dir when the real home is unverified"
+        );
+        assert!(
+            dirs.system_bin_dir.is_none(),
+            "no system bin dir when the real home is unverified"
         );
         for item in inventory(&dirs) {
             assert!(
@@ -1468,7 +1623,9 @@ mod tests {
             env.is_redirected(),
             "unset HOME must be treated as redirected"
         );
-        assert!(Dirs::resolve(&env).system_app_dir.is_none());
+        let dirs = Dirs::resolve(&env);
+        assert!(dirs.system_app_dir.is_none());
+        assert!(dirs.system_bin_dir.is_none());
     }
 
     #[test]
@@ -1492,6 +1649,10 @@ mod tests {
         assert_eq!(
             Dirs::resolve(&env).system_app_dir.as_deref(),
             Some(Path::new("/Applications"))
+        );
+        assert_eq!(
+            Dirs::resolve(&env).system_bin_dir.as_deref(),
+            Some(Path::new("/usr/local/bin"))
         );
     }
 

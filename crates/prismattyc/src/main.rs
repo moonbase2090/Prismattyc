@@ -99,6 +99,9 @@ fn main() -> Result<()> {
     if argv.get(1).map(String::as_str) == Some("update") {
         return prismattyc_mux::run_update(argv.iter().skip(2));
     }
+    if argv.get(1).map(String::as_str) == Some("uninstall") {
+        return prismattyc_mux::run_uninstall(argv.iter().skip(2));
+    }
     let cli = Cli::parse(env::args_os().skip(1))?;
     if splash::should_show(cli.explicit_program, cli.no_splash)
         && splash::run(prismattyc_core::package_version())? == splash::Outcome::Quit

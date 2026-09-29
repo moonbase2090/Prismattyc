@@ -130,9 +130,9 @@ fn platform_label(target: &str) -> &'static str {
     }
 }
 
-/// Where to install when `pmux` or `prismattyc` is not already inside an app.
+/// Where an existing app lives, or `/Applications/Prismattyc.app` for a first install.
 /// An executable inside `Prismattyc.app` wins, then an existing system app,
-/// then an existing user app, then `/Applications/Prismattyc.app`.
+/// then an existing user app. Writability is decided by `plan_macos_install`.
 #[cfg(any(test, target_os = "macos"))]
 fn preferred_macos_app(
     current_exe: Option<&Path>,
@@ -159,6 +159,64 @@ fn preferred_macos_app(
         }
     }
     PathBuf::from("/Applications/Prismattyc.app")
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn installed_app_exists(
+    current_exe: Option<&Path>,
+    home: Option<&Path>,
+    system_exists: bool,
+    user_exists: bool,
+    selected: &Path,
+) -> bool {
+    if current_exe
+        .and_then(app_bundle_from_executable)
+        .is_some_and(|bundle| bundle == selected)
+    {
+        return true;
+    }
+    if selected == Path::new("/Applications/Prismattyc.app") {
+        return system_exists;
+    }
+    home.is_some_and(|dir| selected == dir.join("Applications/Prismattyc.app")) && user_exists
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn unwritable_installed_app(app: &Path, parent: &Path) -> String {
+    format!(
+        "could not update {} because {} is not writable. Staging the replacement needs a sibling in that folder, and this account cannot create one. The installed app was not changed. No second copy was installed. Run the update with admin rights, or move Prismattyc.app to ~/Applications and run pmux update again.",
+        app.display(),
+        parent.display()
+    )
+}
+
+/// Choose the app to replace. An existing app whose folder is not writable is an
+/// error. A first install may use `~/Applications` when `/Applications` is not writable.
+#[cfg(any(test, target_os = "macos"))]
+fn plan_macos_install(
+    current_exe: Option<&Path>,
+    home: Option<&Path>,
+    system_exists: bool,
+    user_exists: bool,
+    writable: impl Fn(&Path) -> bool,
+) -> Result<PathBuf> {
+    let selected = preferred_macos_app(current_exe, home, system_exists, user_exists);
+    let parent = selected.parent().context("Prismattyc.app parent")?;
+    if installed_app_exists(current_exe, home, system_exists, user_exists, &selected) {
+        ensure!(
+            writable(parent),
+            "{}",
+            unwritable_installed_app(&selected, parent)
+        );
+        return Ok(selected);
+    }
+    if writable(parent) {
+        return Ok(selected);
+    }
+    if let Some(home) = home {
+        return Ok(home.join("Applications/Prismattyc.app"));
+    }
+    bail!("could not find a writable location for Prismattyc.app")
 }
 
 #[cfg(any(test, target_os = "macos"))]
@@ -1035,11 +1093,40 @@ fn sync_parent(parent: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Move `incoming` onto `destination` on the same volume. When an app was
-/// already installed, it is left at the returned path until the caller deletes
-/// it. A failed swap puts that app back at `destination`.
 #[cfg(any(test, target_os = "macos"))]
-fn replace_app_bundle(destination: &Path, incoming: &Path) -> Result<Option<PathBuf>> {
+struct ReplacedApp {
+    displaced: Option<PathBuf>,
+    directory_sync_warning: Option<String>,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn parent_sync_warning(parent: &Path, error: &dyn std::fmt::Display, had_previous: bool) -> String {
+    let next = if had_previous {
+        "The update will continue, check the new app, and then remove the old one."
+    } else {
+        "The update will continue and check the new app."
+    };
+    format!(
+        "Saving the folder {} failed after Prismattyc.app was replaced: {error}. The new app is already in that folder. {next}",
+        parent.display()
+    )
+}
+
+/// Move `incoming` onto `destination` on the same volume. When an app was
+/// already installed, it is left at `displaced` until the caller deletes it.
+/// A failed swap puts that app back at `destination`. A failed parent-directory
+/// sync after a successful swap is reported and does not drop `displaced`.
+#[cfg(any(test, target_os = "macos"))]
+fn replace_app_bundle(destination: &Path, incoming: &Path) -> Result<ReplacedApp> {
+    replace_app_bundle_syncing(destination, incoming, sync_parent)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn replace_app_bundle_syncing(
+    destination: &Path,
+    incoming: &Path,
+    sync_dir: impl Fn(&Path) -> Result<()>,
+) -> Result<ReplacedApp> {
     require_app_destination(destination)?;
     ensure!(
         incoming.is_dir(),
@@ -1057,8 +1144,14 @@ fn replace_app_bundle(destination: &Path, incoming: &Path) -> Result<Option<Path
     if !destination.exists() {
         fs::rename(incoming, destination)
             .with_context(|| format!("could not install {}", destination.display()))?;
-        sync_parent(&parent)?;
-        return Ok(None);
+        let directory_sync_warning = match sync_dir(&parent) {
+            Ok(()) => None,
+            Err(error) => Some(parent_sync_warning(&parent, &error, false)),
+        };
+        return Ok(ReplacedApp {
+            displaced: None,
+            directory_sync_warning,
+        });
     }
     let meta = fs::symlink_metadata(destination)?;
     ensure!(
@@ -1095,8 +1188,14 @@ fn replace_app_bundle(destination: &Path, incoming: &Path) -> Result<Option<Path
             destination.display()
         ));
     }
-    sync_parent(&parent)?;
-    Ok(Some(displaced))
+    let directory_sync_warning = match sync_dir(&parent) {
+        Ok(()) => None,
+        Err(error) => Some(parent_sync_warning(&parent, &error, true)),
+    };
+    Ok(ReplacedApp {
+        displaced: Some(displaced),
+        directory_sync_warning,
+    })
 }
 
 /// Put the displaced app back at `destination` after a failed install.
@@ -1150,7 +1249,13 @@ fn restore_displaced_app(destination: &Path, displaced: &Path) -> Result<()> {
             )
         })?;
     }
-    sync_parent(&parent)?;
+    if let Err(error) = sync_parent(&parent) {
+        bail!(
+            "the previous app is restored at {}, but saving {} failed: {error}",
+            destination.display(),
+            parent.display()
+        );
+    }
     Ok(())
 }
 
@@ -1215,6 +1320,9 @@ fn directory_writable(dir: &Path) -> bool {
     unsafe { libc::access(bytes.as_ptr().cast(), libc::W_OK) == 0 }
 }
 
+/// Locate the installed app for a version check.
+/// Install selection goes through `plan_macos_install`, which refuses an
+/// unwritable folder instead of choosing a different copy.
 #[cfg(target_os = "macos")]
 fn discover_macos_app() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok();
@@ -1238,31 +1346,28 @@ fn discover_macos_app() -> Option<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn choose_macos_app(tag: &str, target: &str) -> Result<PathBuf> {
-    if let Some(app) = discover_macos_app() {
-        require_app_destination(&app)?;
-        return Ok(app);
-    }
+    let exe = std::env::current_exe().ok();
     let home = crate::platform::home_dir().map(PathBuf::from);
+    let system = PathBuf::from("/Applications/Prismattyc.app");
     let user = home
         .as_ref()
         .map(|dir| dir.join("Applications/Prismattyc.app"));
-    let chosen = preferred_macos_app(None, home.as_deref(), false, false);
-    if chosen
-        .parent()
-        .is_some_and(|parent| directory_writable(parent))
-    {
-        return Ok(chosen);
-    }
-    if let Some(user) = user {
-        if let Some(parent) = user.parent() {
+    let destination = plan_macos_install(
+        exe.as_deref(),
+        home.as_deref(),
+        system.join("Contents/MacOS/pmux").is_file(),
+        user.as_ref()
+            .is_some_and(|path| path.join("Contents/MacOS/pmux").is_file()),
+        directory_writable,
+    )
+    .map_err(|error| anyhow::anyhow!("{error} {}", manual_update_instructions(tag, target)))?;
+    require_app_destination(&destination)?;
+    if !destination.exists() {
+        if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
-        return Ok(user);
     }
-    bail!(
-        "could not find a writable location for Prismattyc.app. {}",
-        manual_update_instructions(tag, target)
-    )
+    Ok(destination)
 }
 
 #[cfg(target_os = "macos")]
@@ -1424,8 +1529,10 @@ fn install_macos_bundle_here(root: &Path, download: MacosDownload<'_>) -> Result
         incoming = Some(staged.clone());
         clear_quarantine(&staged);
         verify_macos_trust(&staged, tag, target)?;
-        let displaced = replace_app_bundle(&destination, &staged)?;
+        let swap = replace_app_bundle(&destination, &staged)?;
         incoming = None;
+        let displaced = swap.displaced;
+        let sync_warning = swap.directory_sync_warning;
         if let Err(error) = verify_macos_trust(&destination, tag, target).and_then(|()| {
             reported_release_version(&destination.join("Contents/MacOS/pmux"), version)
         }) {
@@ -1433,6 +1540,9 @@ fn install_macos_bundle_here(root: &Path, download: MacosDownload<'_>) -> Result
                 restore_displaced_app(&destination, path).with_context(|| error.to_string())?;
             } else {
                 let _ = fs::remove_dir_all(&destination);
+            }
+            if let Some(warning) = &sync_warning {
+                return Err(error.context(warning.clone()));
             }
             return Err(error);
         }
@@ -1449,6 +1559,9 @@ fn install_macos_bundle_here(root: &Path, download: MacosDownload<'_>) -> Result
                 restore_displaced_app(&destination, path).with_context(|| error.to_string())?;
             } else {
                 let _ = fs::remove_dir_all(&destination);
+            }
+            if let Some(warning) = &sync_warning {
+                return Err(error.context(warning.clone()));
             }
             return Err(error);
         }
@@ -1477,8 +1590,12 @@ fn install_macos_bundle_here(root: &Path, download: MacosDownload<'_>) -> Result
             .as_ref()
             .map(|text| format!(" {text}"))
             .unwrap_or_default();
+        let sync_text = sync_warning
+            .as_ref()
+            .map(|text| format!(" {text}"))
+            .unwrap_or_default();
         let message = format!(
-            "Installed {version} from {REPOSITORY} at {}. {restart}{outside}{leftover_text}",
+            "Installed {version} from {REPOSITORY} at {}. {restart}{outside}{leftover_text}{sync_text}",
             destination.display()
         );
         if json {
@@ -1491,6 +1608,7 @@ fn install_macos_bundle_here(root: &Path, download: MacosDownload<'_>) -> Result
                     "restart_required": true,
                     "app": destination,
                     "leftover_app": leftover,
+                    "directory_sync_warning": sync_warning,
                     "message": message,
                 })
             );
@@ -2271,7 +2389,9 @@ mod tests {
         write_fake_app(&app, "old");
         let incoming = dir.join(".Prismattyc.app.incoming");
         write_fake_app(&incoming, "new");
-        let displaced = replace_app_bundle(&app, &incoming).unwrap().unwrap();
+        let replaced = replace_app_bundle(&app, &incoming).unwrap();
+        assert!(replaced.directory_sync_warning.is_none());
+        let displaced = replaced.displaced.unwrap();
         assert_eq!(fs::read(app.join("Contents/MacOS/pmux")).unwrap(), b"new");
         assert_eq!(
             fs::read(displaced.join("Contents/MacOS/pmux")).unwrap(),
@@ -2283,7 +2403,7 @@ mod tests {
         assert!(!displaced.exists());
         let again = dir.join(".Prismattyc.app.incoming-again");
         write_fake_app(&again, "final");
-        let displaced = replace_app_bundle(&app, &again).unwrap().unwrap();
+        let displaced = replace_app_bundle(&app, &again).unwrap().displaced.unwrap();
         assert_eq!(fs::read(app.join("Contents/MacOS/pmux")).unwrap(), b"final");
         discard_replaced_app(&displaced).unwrap();
         assert!(!displaced.exists());
@@ -2294,12 +2414,109 @@ mod tests {
         let created = fresh.join("Prismattyc.app");
         let staged = fresh.join(".incoming");
         write_fake_app(&staged, "first");
-        assert!(replace_app_bundle(&created, &staged).unwrap().is_none());
+        let created_swap = replace_app_bundle(&created, &staged).unwrap();
+        assert!(created_swap.displaced.is_none());
+        assert!(created_swap.directory_sync_warning.is_none());
         assert_eq!(
             fs::read(created.join("Contents/MacOS/pmux")).unwrap(),
             b"first"
         );
         assert!(replace_app_bundle(&dir.join("not-the-app"), &created).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unwritable_existing_app_is_not_replaced_with_a_home_copy() {
+        let home = Path::new("/Users/example");
+        let user_app = home.join("Applications/Prismattyc.app");
+        let system = Path::new("/Applications/Prismattyc.app");
+        let outside = Path::new("/usr/local/bin/pmux");
+        let error = plan_macos_install(Some(outside), Some(home), true, true, |_| false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(system.to_str().unwrap()), "{error}");
+        assert!(error.contains("/Applications is not writable"), "{error}");
+        assert!(error.contains("admin rights"), "{error}");
+        assert!(error.contains("~/Applications"), "{error}");
+        assert!(error.contains("No second copy was installed"), "{error}");
+        assert!(!error.contains(user_app.to_str().unwrap()), "{error}");
+        let inside = Path::new("/Applications/Prismattyc.app/Contents/MacOS/pmux");
+        let error = plan_macos_install(Some(inside), Some(home), true, true, |_| false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("/Applications is not writable"), "{error}");
+        assert!(
+            error.contains("could not update /Applications/Prismattyc.app"),
+            "{error}"
+        );
+        let fresh = plan_macos_install(None, Some(home), false, false, |_| false).unwrap();
+        assert_eq!(fresh, user_app);
+        let kept = plan_macos_install(Some(outside), Some(home), true, true, |_| true).unwrap();
+        assert_eq!(kept, system);
+    }
+
+    #[test]
+    fn app_swap_parent_sync_failure_does_not_strand_the_old_app() {
+        let dir = temporary();
+        let app = dir.join("Prismattyc.app");
+        write_fake_app(&app, "old");
+        let incoming = dir.join(".Prismattyc.app.incoming");
+        write_fake_app(&incoming, "new");
+        let replaced =
+            replace_app_bundle_syncing(&app, &incoming, |_| bail!("disk sync failed")).unwrap();
+        let warning = replaced
+            .directory_sync_warning
+            .expect("sync failure is reported");
+        assert!(warning.contains(&dir.display().to_string()), "{warning}");
+        assert!(warning.contains("disk sync failed"), "{warning}");
+        assert!(
+            warning.contains("The new app is already in that folder"),
+            "{warning}"
+        );
+        assert!(warning.contains("remove the old one"), "{warning}");
+        let displaced = replaced.displaced.expect("displaced app stays reachable");
+        assert_eq!(fs::read(app.join("Contents/MacOS/pmux")).unwrap(), b"new");
+        assert_eq!(
+            fs::read(displaced.join("Contents/MacOS/pmux")).unwrap(),
+            b"old"
+        );
+        assert!(!dir.join("Prismattyc.app.previous").exists());
+        discard_replaced_app(&displaced).unwrap();
+        assert!(!displaced.exists());
+        assert_eq!(fs::read(app.join("Contents/MacOS/pmux")).unwrap(), b"new");
+
+        write_fake_app(&app, "old");
+        let incoming = dir.join(".Prismattyc.app.incoming-again");
+        write_fake_app(&incoming, "newer");
+        let replaced =
+            replace_app_bundle_syncing(&app, &incoming, |_| bail!("disk sync failed")).unwrap();
+        let displaced = replaced.displaced.unwrap();
+        restore_displaced_app(&app, &displaced).unwrap();
+        assert_eq!(fs::read(app.join("Contents/MacOS/pmux")).unwrap(), b"old");
+        assert!(!displaced.exists());
+        assert!(
+            !dir.read_dir().unwrap().any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".Prismattyc.app.displaced-")),
+            "old app must not remain at a displaced path"
+        );
+
+        let fresh_dir = dir.join("fresh");
+        fs::create_dir_all(&fresh_dir).unwrap();
+        let created = fresh_dir.join("Prismattyc.app");
+        let staged = fresh_dir.join(".incoming");
+        write_fake_app(&staged, "first");
+        let created_swap =
+            replace_app_bundle_syncing(&created, &staged, |_| bail!("disk sync failed")).unwrap();
+        assert!(created_swap.displaced.is_none());
+        let warning = created_swap.directory_sync_warning.unwrap();
+        assert!(warning.contains("disk sync failed"), "{warning}");
+        assert_eq!(
+            fs::read(created.join("Contents/MacOS/pmux")).unwrap(),
+            b"first"
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 

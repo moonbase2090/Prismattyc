@@ -53,7 +53,9 @@ It checks that zip against the GitHub asset digest and against
 unpacks the zip in a temporary directory, checks the code signature with
 `codesign --verify --strict`, and checks Gatekeeper with `spctl`. It then
 replaces `Prismattyc.app`. If that swap fails, the old app is put back.
-After the new app is in place and checked again, the old app is deleted.
+If saving the folder after a successful swap fails, the update says so
+and still checks the new app before deleting the old one. After the new
+app is in place and checked again, the old app is deleted.
 Nothing named `Prismattyc.app.previous` is kept. Quit Prismattyc and
 reopen it from the Dock. A restart is required. Mux sessions keep running
 until you restart them. The v0.2.21 release already publishes the
@@ -62,8 +64,13 @@ release without a new macOS asset.
 
 The bundle that gets replaced is the `Prismattyc.app` that contains the
 running command. Otherwise the updater uses `/Applications/Prismattyc.app`
-when that app exists, or `~/Applications/Prismattyc.app` when
-`/Applications` is not writable.
+when that app exists, then `~/Applications/Prismattyc.app` when that app
+exists. A first install uses `/Applications/Prismattyc.app` when that
+folder is writable, and `~/Applications/Prismattyc.app` when it is not.
+When the chosen app's folder is not writable, the update stops. The
+installed app stays where it is. The error names the app and the folder,
+and tells you to run the update with admin rights or to move
+`Prismattyc.app` to `~/Applications` and update again.
 
 If no asset matches, or more than one asset matches, the error names the
 platform and target, lists the release asset names, and prints the DMG

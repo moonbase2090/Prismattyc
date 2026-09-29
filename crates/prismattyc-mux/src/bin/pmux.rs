@@ -7707,8 +7707,8 @@ mod tests {
     fn mail_commit_release_reject_unknown_flags() {
         // A stray flag must never be swallowed as a letter id (issue #30).
         for verb in ["commit", "release"] {
-            let err = parse_mail_verb(verb, args(&["--nope"]))
-                .expect_err("unknown flag must error");
+            let err =
+                parse_mail_verb(verb, args(&["--nope"])).expect_err("unknown flag must error");
             let msg = format!("{err}");
             assert!(
                 msg.contains(&format!("{verb}: unknown flag --nope")),

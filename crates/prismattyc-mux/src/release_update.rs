@@ -212,6 +212,13 @@ fn installed_app_exists(
     home.is_some_and(|dir| selected == dir.join("Applications/Prismattyc.app")) && user_exists
 }
 
+/// Detect the app bundle path separately from checking for its executable.
+/// An incomplete existing bundle must not be treated as a first install.
+#[cfg(any(test, target_os = "macos"))]
+fn app_bundle_path_exists(path: &Path) -> bool {
+    path.exists()
+}
+
 #[cfg(any(test, target_os = "macos"))]
 fn unwritable_installed_app(app: &Path, parent: &Path) -> String {
     format!(
@@ -1520,7 +1527,7 @@ fn discard_replaced_app(path: &Path) -> Result<()> {
 #[cfg(any(test, target_os = "macos"))]
 fn leftover_app_notice(path: &Path, error: &dyn std::fmt::Display) -> String {
     format!(
-        "The new Prismattyc.app is installed, but the old app is still at {}. It was left there because deleting it failed: {error}. Remove that directory yourself with `rm -rf '{}'.",
+        "The new Prismattyc.app is installed, but the old app is still at {}. It was left there because deleting it failed: {error}. Remove that directory yourself with `rm -rf '{}'`.",
         path.display(),
         path.display()
     )
@@ -1602,10 +1609,10 @@ fn choose_macos_app(tag: &str, target: &str) -> Result<PathBuf> {
     let user = home
         .as_ref()
         .map(|dir| dir.join("Applications/Prismattyc.app"));
-    let system_installed = system.join("Contents/MacOS/pmux").is_file();
+    let system_installed = app_bundle_path_exists(&system);
     let user_installed = user
         .as_ref()
-        .is_some_and(|path| path.join("Contents/MacOS/pmux").is_file());
+        .is_some_and(|path| app_bundle_path_exists(path));
     let destination = plan_macos_install(
         exe.as_deref(),
         home.as_deref(),
@@ -2925,6 +2932,36 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_existing_bundle_is_not_treated_as_a_first_install() {
+        let dir = temporary();
+        let incomplete_system_app = dir.join("Applications/Prismattyc.app");
+        fs::create_dir_all(&incomplete_system_app).unwrap();
+        assert!(app_bundle_path_exists(&incomplete_system_app));
+        assert!(!incomplete_system_app.join("Contents/MacOS/pmux").is_file());
+
+        let home = dir.join("home");
+        let user_app = home.join("Applications/Prismattyc.app");
+        let outside = dir.join("bin/pmux");
+        let error = plan_macos_install(
+            Some(&outside),
+            Some(&home),
+            app_bundle_path_exists(&incomplete_system_app),
+            app_bundle_path_exists(&user_app),
+            |_| false,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            error.contains("could not update /Applications/Prismattyc.app"),
+            "{error}"
+        );
+        assert!(error.contains("No second copy was installed"), "{error}");
+        assert!(!error.contains(user_app.to_str().unwrap()), "{error}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn app_swap_parent_sync_failure_does_not_strand_the_old_app() {
         let dir = temporary();
         let app = dir.join("Prismattyc.app");
@@ -3012,6 +3049,10 @@ mod tests {
         assert!(notice.contains(path.to_str().unwrap()), "{notice}");
         assert!(notice.contains("permission denied"), "{notice}");
         assert!(notice.contains("rm -rf"), "{notice}");
+        assert!(
+            notice.contains("`rm -rf '/Applications/.Prismattyc.app.displaced-9'`."),
+            "{notice}"
+        );
         assert!(
             notice.contains("The new Prismattyc.app is installed"),
             "{notice}"

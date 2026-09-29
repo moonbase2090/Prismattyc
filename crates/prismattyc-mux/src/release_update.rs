@@ -61,20 +61,51 @@ fn options(args: &[String]) -> Result<Options> {
     let mut options = Options::default();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--check" => options.check = true,
-            "--json" => options.json = true,
-            "--rollback" => options.rollback = true,
-            "--bin-dir" => options.bin_dir = Some(PathBuf::from(args.next().context("--bin-dir needs a directory")?)),
-            "--all" => {},
-            other => bail!("unknown release update option {other:?}; use --help (development builds: --source)"),
-        }
+        apply_update_option(&mut options, arg, &mut args)?;
     }
     ensure!(
         !(options.check && options.rollback),
         "--check and --rollback cannot be combined"
     );
     Ok(options)
+}
+
+/// Apply one CLI flag to `options`, consuming a value from `args` when the
+/// flag needs one. Split out of [`options`] so each function stays within the
+/// CRAP complexity budget.
+fn apply_update_option<'a>(
+    options: &mut Options,
+    arg: &str,
+    args: &mut impl Iterator<Item = &'a String>,
+) -> Result<()> {
+    if set_update_flag(options, arg) {
+        return Ok(());
+    }
+    if arg == "--bin-dir" {
+        options.bin_dir = Some(next_bin_dir(args)?);
+        return Ok(());
+    }
+    bail!("unknown release update option {arg:?}; use --help (development builds: --source)")
+}
+
+/// The directory argument to `--bin-dir`.
+fn next_bin_dir<'a>(args: &mut impl Iterator<Item = &'a String>) -> Result<PathBuf> {
+    Ok(PathBuf::from(
+        args.next().context("--bin-dir needs a directory")?,
+    ))
+}
+
+/// Set a boolean flag; returns `true` when `arg` was a recognized boolean.
+/// `--all` is accepted and ignored (the release path always installs all).
+fn set_update_flag(options: &mut Options, arg: &str) -> bool {
+    match arg {
+        "--check" => options.check = true,
+        "--json" => options.json = true,
+        "--rollback" => options.rollback = true,
+        "--all" => {}
+        _ => return false,
+    }
+    true
 }
 
 pub fn target() -> Result<&'static str> {
@@ -540,23 +571,32 @@ fn latest_release() -> Result<Release> {
         .stdout(Stdio::piped())
         .spawn()
         .context("start HTTPS download (curl is required)")?;
+    let bytes = read_capped_child_stdout(&mut child, 4_194_304)?;
+    serde_json::from_slice(&bytes).context("parse release metadata")
+}
+
+/// Read up to `cap` bytes from a spawned child's stdout, killing it on
+/// overflow or error, and fail unless it exited cleanly within the cap.
+/// Split out of [`latest_release`] to keep each function's CRAP low.
+fn read_capped_child_stdout(child: &mut std::process::Child, cap: usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     let result = child
         .stdout
         .take()
         .context("download stdout")?
-        .take(4_194_305)
+        .take(cap as u64 + 1)
         .read_to_end(&mut bytes);
-    if result.is_err() || bytes.len() > 4_194_304 {
+    let overflowed = result.is_err() || bytes.len() > cap;
+    if overflowed {
         let _ = child.kill();
     }
     let status = child.wait()?;
     result?;
     ensure!(
-        status.success() && bytes.len() <= 4_194_304,
+        status.success() && bytes.len() <= cap,
         "no usable release from {REPOSITORY}; releases start at 0.2.0. Nothing was installed"
     );
-    serde_json::from_slice(&bytes).context("parse release metadata")
+    Ok(bytes)
 }
 
 fn verify(path: &Path, asset: &Asset) -> Result<()> {
@@ -846,73 +886,162 @@ fn rollback(root: &Path) -> Result<String> {
 }
 
 pub fn run(args: &[String]) -> Result<()> {
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("pmux update [--check] [--json] [--bin-dir PATH]\nprismattyc update [--check] [--json] [--bin-dir PATH]\npmux update --rollback\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together. --rollback restores that previous installation.\nOn macOS, download the universal app zip, verify SHA256SUMS-macos and the code signature, and replace Prismattyc.app. The old app is deleted after the new one is in place. --rollback is not supported; reinstall a version from its DMG on https://github.com/{REPOSITORY}/releases.\nprismattyc update is the same command as pmux update.\nUpdating never stops sessions. Quit Prismattyc and reopen it after a macOS update. Use pmux restart for Linux and Windows components.\n--source is an explicit development-only source build.");
+    if args.iter().any(is_help_flag) {
+        print_update_help();
         return Ok(());
     }
     let options = options(args)?;
     let root = root()?;
-    let _lock = lock(&root)?;
+    run_locked(&root, &options)
+}
+
+/// Take the update lock, then roll back or run the update flow. Split out of
+/// [`run`] so each function stays within the CRAP budget.
+fn run_locked(root: &Path, options: &Options) -> Result<()> {
+    let _lock = lock(root)?;
     if options.rollback {
-        if std::env::consts::OS == "macos" {
-            bail!("{}", macos_rollback_error());
-        }
-        let restored = rollback(&root)?;
-        println!(
-            "{}",
-            serde_json::json!({"status":"rolled_back","version":restored,"restart_required":true})
+        return run_rollback(root);
+    }
+    run_update_flow(root, options)
+}
+
+/// True for `--help` / `-h`.
+fn is_help_flag(arg: &String) -> bool {
+    arg == "--help" || arg == "-h"
+}
+
+fn print_update_help() {
+    println!("pmux update [--check] [--json] [--bin-dir PATH]\nprismattyc update [--check] [--json] [--bin-dir PATH]\npmux update --rollback\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together. --rollback restores that previous installation.\nOn macOS, download the universal app zip, verify SHA256SUMS-macos and the code signature, and replace Prismattyc.app. The old app is deleted after the new one is in place. --rollback is not supported; reinstall a version from its DMG on https://github.com/{REPOSITORY}/releases.\nprismattyc update is the same command as pmux update.\nUpdating never stops sessions. Quit Prismattyc and reopen it after a macOS update. Use pmux restart for Linux and Windows components.\n--source is an explicit development-only source build.");
+}
+
+/// Fetch the latest release, compare versions, and either report or install.
+/// Split out of [`run`] so each function stays within the CRAP budget.
+fn run_update_flow(root: &Path, options: &Options) -> Result<()> {
+    let release = latest_release()?;
+    let target = target()?;
+    let plan = select_plan(&release, target)?;
+    finish_update_flow(root, options, &release, target, plan)
+}
+
+/// Resolve versions and either report or install. Split out of
+/// [`run_update_flow`] so each function stays within the CRAP budget.
+fn finish_update_flow(
+    root: &Path,
+    options: &Options,
+    release: &Release,
+    target: &'static str,
+    plan: UpdatePlan,
+) -> Result<()> {
+    let resolved = resolve_versions(root, release, &plan)?;
+    if should_only_report(options, &resolved.available, &resolved.current) {
+        report_check(
+            &resolved.installed,
+            &resolved.available,
+            &resolved.current,
+            options.json,
         );
         return Ok(());
     }
-    let release = latest_release()?;
-    let version = release_version(&release)?;
-    let target = target()?;
-    let plan = select_plan(&release, target)?;
-    let installed = installed_label(&root, matches!(plan, UpdatePlan::MacosBundle { .. }))?;
+    run_install(
+        root,
+        release,
+        &resolved.available,
+        target,
+        plan,
+        options.json,
+        options.bin_dir.as_deref(),
+    )
+}
+
+/// The installed label and the available/current versions for a plan.
+struct ResolvedVersions {
+    installed: String,
+    available: Version,
+    current: Version,
+}
+
+/// Resolve the available release version and the installed version. Split out
+/// of [`run_update_flow`] to keep each function within the CRAP budget.
+fn resolve_versions(root: &Path, release: &Release, plan: &UpdatePlan) -> Result<ResolvedVersions> {
+    let available = release_version(release)?;
+    let installed = installed_label(root, matches!(plan, UpdatePlan::MacosBundle { .. }))?;
     let current = Version::parse(&installed)?;
-    if options.check || version <= current {
-        if options.json {
-            println!(
-                "{}",
-                serde_json::json!({"repository":REPOSITORY,"installed":installed,"available":version.to_string(),"update_available":version>current,"status":"checked"})
-            );
-        } else {
-            println!(
-                "Installed: {installed}\nAvailable: {version}\nSource: {REPOSITORY}\n{}",
-                if version > current {
-                    "Run pmux update or prismattyc update to install."
-                } else {
-                    "You are up to date."
-                }
-            );
-        }
-        return Ok(());
+    Ok(ResolvedVersions {
+        installed,
+        available,
+        current,
+    })
+}
+
+/// Whether the run should stop at a report: `--check`, or already current.
+fn should_only_report(options: &Options, available: &Version, current: &Version) -> bool {
+    options.check || available <= current
+}
+
+/// Roll back the previous installation (Linux/Windows) or explain that macOS
+/// has no rollback. Split out of [`run`] to keep its complexity low.
+fn run_rollback(root: &Path) -> Result<()> {
+    if std::env::consts::OS == "macos" {
+        bail!("{}", macos_rollback_error());
     }
+    let restored = rollback(root)?;
+    println!(
+        "{}",
+        serde_json::json!({"status":"rolled_back","version":restored,"restart_required":true})
+    );
+    Ok(())
+}
+
+/// Print the check / up-to-date report in JSON or human form.
+fn report_check(installed: &str, version: &Version, current: &Version, json: bool) {
+    let update_available = version > current;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"repository":REPOSITORY,"installed":installed,"available":version.to_string(),"update_available":update_available,"status":"checked"})
+        );
+        return;
+    }
+    let hint = if update_available {
+        "Run pmux update or prismattyc update to install."
+    } else {
+        "You are up to date."
+    };
+    println!("Installed: {installed}\nAvailable: {version}\nSource: {REPOSITORY}\n{hint}");
+}
+
+/// Dispatch the selected install plan. Split out of [`run`] so both stay
+/// within the CRAP budget.
+#[allow(clippy::too_many_arguments)]
+fn run_install(
+    root: &Path,
+    release: &Release,
+    version: &Version,
+    target: &'static str,
+    plan: UpdatePlan,
+    json: bool,
+    bin_dir: Option<&Path>,
+) -> Result<()> {
     match plan {
         UpdatePlan::MacosBundle {
             zip,
             checksums,
             manifest,
         } => install_macos_bundle(
-            &root,
+            root,
             MacosDownload {
                 tag: &release.tag_name,
-                version: &version,
+                version,
                 target,
                 zip,
                 checksums,
                 manifest,
-                json: options.json,
+                json,
             },
         ),
-        UpdatePlan::Binaries(assets) => install_binaries(
-            &root,
-            options.bin_dir.as_deref(),
-            &version,
-            target,
-            &assets,
-            options.json,
-        ),
+        UpdatePlan::Binaries(assets) => {
+            install_binaries(root, bin_dir, version, target, &assets, json)
+        }
     }
 }
 
@@ -947,17 +1076,27 @@ fn current_macos_app_version() -> Option<String> {
 fn clear_abandoned_stages(root: &Path) -> Result<()> {
     for entry in fs::read_dir(root)? {
         let entry = entry?;
-        let name = entry.file_name();
-        if name
-            .to_str()
-            .and_then(|entry_name| entry_name.strip_prefix(".stage-"))
-            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()))
-            && entry.file_type()?.is_dir()
-        {
+        if is_abandoned_stage(&entry)? {
             fs::remove_dir_all(entry.path())?;
         }
     }
     Ok(())
+}
+
+/// True when `entry` is a leftover `.stage-<pid>` directory. Split out of
+/// [`clear_abandoned_stages`] to keep each function's CRAP low.
+fn is_abandoned_stage(entry: &fs::DirEntry) -> Result<bool> {
+    let name = entry.file_name();
+    let looks_like_stage = name
+        .to_str()
+        .and_then(|entry_name| entry_name.strip_prefix(".stage-"))
+        .is_some_and(is_pid_suffix);
+    Ok(looks_like_stage && entry.file_type()?.is_dir())
+}
+
+/// A non-empty, all-ASCII-digit process-id suffix.
+fn is_pid_suffix(pid: &str) -> bool {
+    !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn install_binaries(
@@ -968,64 +1107,140 @@ fn install_binaries(
     assets: &[&Asset],
     json: bool,
 ) -> Result<()> {
-    let bin_dir = match bin_dir_override {
-        Some(path) => path.to_path_buf(),
-        None => default_bin_dir(root)?,
-    };
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_nanos();
-    let directory_name = format!("v{version}-{target}-{nonce}");
+    let bin_dir = resolve_bin_dir(root, bin_dir_override)?;
+    let directory_name = versioned_dir_name(version, target)?;
     let directory = root.join(&directory_name);
     // The update lock proves no other updater owns these abandoned downloads.
     clear_abandoned_stages(root)?;
     let staging = root.join(format!(".stage-{}", std::process::id()));
     fs::create_dir(&staging)?;
-    let result = (|| -> Result<()> {
-        for (binary, asset) in BINARIES.iter().zip(assets) {
-            eprintln!("Downloading {binary} {version}");
-            let path = staging.join(crate::platform::executable_name(binary));
-            let status = curl()
-                .arg("--max-filesize")
-                .arg(MAX_ASSET.to_string())
-                .arg("--output")
-                .arg(&path)
-                .arg(&asset.browser_download_url)
-                .status()?;
-            ensure!(
-                status.success(),
-                "download failed for {binary}; installed version unchanged"
-            );
-            verify(&path, asset)?;
-            crate::platform::set_mode(&path, 0o755)?;
-            crate::platform::sync_file(&path)?;
-        }
-        // The complete set is trusted before any downloaded program executes.
-        for binary in BINARIES {
-            let text = version_label(&staging.join(crate::platform::executable_name(binary)))?;
-            ensure!(
-                text.split_whitespace()
-                    .any(|word| word == version.to_string()),
-                "{binary} did not report release version {version}"
-            );
-        }
-        write_receipt(
-            &staging,
-            &Receipt {
-                repository: REPOSITORY.into(),
-                version: version.to_string(),
-                target: target.into(),
-                bin_dir: bin_dir.clone(),
-            },
-        )?;
-        fs::rename(&staging, &directory)?;
-        activate(root, Path::new(&directory_name), &bin_dir)?;
-        Ok(())
-    })();
+    let result = stage_and_activate(
+        root,
+        &staging,
+        &directory,
+        &directory_name,
+        &bin_dir,
+        version,
+        target,
+        assets,
+    );
+    finish_install(&staging, result, version, json)
+}
+
+/// The managed bin dir: an explicit override, else the platform default.
+fn resolve_bin_dir(root: &Path, bin_dir_override: Option<&Path>) -> Result<PathBuf> {
+    match bin_dir_override {
+        Some(path) => Ok(path.to_path_buf()),
+        None => default_bin_dir(root),
+    }
+}
+
+/// The `v<version>-<target>-<nonce>` install directory name.
+fn versioned_dir_name(version: &Version, target: &str) -> Result<String> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    Ok(format!("v{version}-{target}-{nonce}"))
+}
+
+/// Remove the staging dir, propagate the staged result, then report success.
+/// Split out of [`install_binaries`] to keep each function's CRAP low.
+fn finish_install(staging: &Path, result: Result<()>, version: &Version, json: bool) -> Result<()> {
     if staging.exists() {
-        let _ = fs::remove_dir_all(&staging);
+        let _ = fs::remove_dir_all(staging);
     }
     result?;
+    report_install(version, json);
+    Ok(())
+}
+
+/// Download, verify, receipt, and activate the staged binary set. Split out of
+/// [`install_binaries`] so each function stays within the CRAP budget.
+#[allow(clippy::too_many_arguments)]
+fn stage_and_activate(
+    root: &Path,
+    staging: &Path,
+    directory: &Path,
+    directory_name: &str,
+    bin_dir: &Path,
+    version: &Version,
+    target: &str,
+    assets: &[&Asset],
+) -> Result<()> {
+    download_binary_set(staging, version, assets)?;
+    verify_staged_versions(staging, version)?;
+    write_receipt(
+        staging,
+        &Receipt {
+            repository: REPOSITORY.into(),
+            version: version.to_string(),
+            target: target.into(),
+            bin_dir: bin_dir.to_path_buf(),
+        },
+    )?;
+    fs::rename(staging, directory)?;
+    activate(root, Path::new(directory_name), bin_dir)
+}
+
+/// Download each binary into `staging`, verifying size, digest, and mode.
+fn download_binary_set(staging: &Path, version: &Version, assets: &[&Asset]) -> Result<()> {
+    for (binary, asset) in BINARIES.iter().zip(assets) {
+        eprintln!("Downloading {binary} {version}");
+        download_one_binary(
+            &staging.join(crate::platform::executable_name(binary)),
+            binary,
+            asset,
+        )?;
+    }
+    Ok(())
+}
+
+/// Download, verify, and mark one binary executable. Split out of
+/// [`download_binary_set`] to keep each function's CRAP low.
+fn download_one_binary(path: &Path, binary: &str, asset: &Asset) -> Result<()> {
+    fetch_binary(path, binary, asset)?;
+    finalize_binary(path, asset)
+}
+
+/// Curl one asset to `path`, failing if the download did not succeed.
+fn fetch_binary(path: &Path, binary: &str, asset: &Asset) -> Result<()> {
+    let status = curl()
+        .arg("--max-filesize")
+        .arg(MAX_ASSET.to_string())
+        .arg("--output")
+        .arg(path)
+        .arg(&asset.browser_download_url)
+        .status()?;
+    ensure!(
+        status.success(),
+        "download failed for {binary}; installed version unchanged"
+    );
+    Ok(())
+}
+
+/// Verify the digest, then set mode and fsync a downloaded binary.
+fn finalize_binary(path: &Path, asset: &Asset) -> Result<()> {
+    verify(path, asset)?;
+    crate::platform::set_mode(path, 0o755)?;
+    crate::platform::sync_file(path)?;
+    Ok(())
+}
+
+/// The complete set is trusted before any downloaded program executes.
+fn verify_staged_versions(staging: &Path, version: &Version) -> Result<()> {
+    for binary in BINARIES {
+        let text = version_label(&staging.join(crate::platform::executable_name(binary)))?;
+        ensure!(
+            text.split_whitespace()
+                .any(|word| word == version.to_string()),
+            "{binary} did not report release version {version}"
+        );
+    }
+    Ok(())
+}
+
+/// Print the post-install report in JSON or human form.
+fn report_install(version: &Version, json: bool) {
     if json {
         println!(
             "{}",
@@ -1034,7 +1249,6 @@ fn install_binaries(
     } else {
         println!("Installed {version} from {REPOSITORY}. Running components keep their current version.\nUse pmux restart to review and apply component restarts. Use pmux update --rollback or prismattyc update --rollback to restore the previous installation.");
     }
-    Ok(())
 }
 
 fn macos_rollback_error() -> String {
@@ -1063,15 +1277,23 @@ fn macos_state_path(root: &Path) -> PathBuf {
 fn write_macos_state(root: &Path, state: &MacosAppState) -> Result<()> {
     let path = macos_state_path(root);
     let temporary = root.join(format!("macos-app.json.{}.tmp", std::process::id()));
+    write_json_atomic(&temporary, &path, &serde_json::to_vec_pretty(state)?)?;
+    let _ = File::open(root).and_then(|dir| dir.sync_all());
+    Ok(())
+}
+
+/// Write `bytes` to `temporary`, fsync, then rename onto `path`. Split out of
+/// [`write_macos_state`] to keep each function within the CRAP budget.
+#[cfg(any(test, target_os = "macos"))]
+fn write_json_atomic(temporary: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = crate::platform::private_options()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(&temporary)?;
-    file.write_all(&serde_json::to_vec_pretty(state)?)?;
+        .open(temporary)?;
+    file.write_all(bytes)?;
     file.sync_all()?;
-    fs::rename(&temporary, &path)?;
-    let _ = File::open(root).and_then(|dir| dir.sync_all());
+    fs::rename(temporary, path)?;
     Ok(())
 }
 
@@ -1352,22 +1574,34 @@ fn choose_macos_app(tag: &str, target: &str) -> Result<PathBuf> {
     let user = home
         .as_ref()
         .map(|dir| dir.join("Applications/Prismattyc.app"));
+    let system_installed = system.join("Contents/MacOS/pmux").is_file();
+    let user_installed = user
+        .as_ref()
+        .is_some_and(|path| path.join("Contents/MacOS/pmux").is_file());
     let destination = plan_macos_install(
         exe.as_deref(),
         home.as_deref(),
-        system.join("Contents/MacOS/pmux").is_file(),
-        user.as_ref()
-            .is_some_and(|path| path.join("Contents/MacOS/pmux").is_file()),
+        system_installed,
+        user_installed,
         directory_writable,
     )
     .map_err(|error| anyhow::anyhow!("{error} {}", manual_update_instructions(tag, target)))?;
     require_app_destination(&destination)?;
-    if !destination.exists() {
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
-        }
-    }
+    ensure_parent_dir(&destination)?;
     Ok(destination)
+}
+
+/// Create the parent directory of `destination` when the app does not yet
+/// exist. Split out of [`choose_macos_app`] to keep its CRAP low.
+#[cfg(any(test, target_os = "macos"))]
+fn ensure_parent_dir(destination: &Path) -> Result<()> {
+    if destination.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1486,146 +1720,353 @@ fn install_macos_bundle_here(root: &Path, download: MacosDownload<'_>) -> Result
     let staging = root.join(format!(".stage-{}", std::process::id()));
     fs::create_dir(&staging)?;
     let mut incoming = None;
-    let result = (|| -> Result<()> {
-        eprintln!("Downloading {MACOS_CHECKSUMS_NAME} {version}");
-        let sums_path = staging.join(MACOS_CHECKSUMS_NAME);
-        download_asset(checksums, &sums_path)?;
-        eprintln!("Downloading {} {version}", zip.name);
-        let zip_path = staging.join(&zip.name);
-        download_asset(zip, &zip_path)?;
-        let manifest_bytes = if let Some(manifest) = manifest {
-            eprintln!("Downloading {MACOS_MANIFEST_NAME} {version}");
-            let manifest_path = staging.join(MACOS_MANIFEST_NAME);
-            download_asset(manifest, &manifest_path)?;
-            Some(fs::read(manifest_path)?)
-        } else {
-            None
-        };
-        let sums_text = fs::read_to_string(&sums_path)
-            .with_context(|| format!("{} is not text", checksums.name))?;
-        confirm_macos_zip(zip, &sums_text, manifest_bytes.as_deref(), version, target)?;
-        let extracted = extract_macos_zip(&zip_path, &staging.join("unpacked"), tag, target)?;
-        clear_quarantine(&extracted);
-        verify_macos_trust(&extracted, tag, target)?;
-        reported_release_version(&extracted.join("Contents/MacOS/pmux"), version)?;
-        let parent = destination
-            .parent()
-            .context("Prismattyc.app parent")?
-            .to_path_buf();
-        fs::create_dir_all(&parent)?;
-        let staged = parent.join(format!(".Prismattyc.app.incoming-{}", std::process::id()));
-        if staged.exists() {
-            fs::remove_dir_all(&staged)?;
-        }
-        let copied = Command::new("ditto")
-            .arg(&extracted)
-            .arg(&staged)
-            .status()
-            .context("ditto is required to stage Prismattyc.app")?;
-        ensure!(
-            copied.success(),
-            "staging Prismattyc.app failed ({copied}). The installed app was not changed."
-        );
-        incoming = Some(staged.clone());
-        clear_quarantine(&staged);
-        verify_macos_trust(&staged, tag, target)?;
-        let swap = replace_app_bundle(&destination, &staged)?;
-        incoming = None;
-        let displaced = swap.displaced;
-        let sync_warning = swap.directory_sync_warning;
-        if let Err(error) = verify_macos_trust(&destination, tag, target).and_then(|()| {
-            reported_release_version(&destination.join("Contents/MacOS/pmux"), version)
-        }) {
-            if let Some(path) = &displaced {
-                restore_displaced_app(&destination, path).with_context(|| error.to_string())?;
-            } else {
-                let _ = fs::remove_dir_all(&destination);
-            }
-            if let Some(warning) = &sync_warning {
-                return Err(error.context(warning.clone()));
-            }
-            return Err(error);
-        }
-        if let Err(error) = write_macos_state(
-            root,
-            &MacosAppState {
-                repository: REPOSITORY.into(),
-                version: version.to_string(),
-                target: MACOS_BUNDLE_TARGET.into(),
-                app: destination.clone(),
-            },
-        ) {
-            if let Some(path) = &displaced {
-                restore_displaced_app(&destination, path).with_context(|| error.to_string())?;
-            } else {
-                let _ = fs::remove_dir_all(&destination);
-            }
-            if let Some(warning) = &sync_warning {
-                return Err(error.context(warning.clone()));
-            }
-            return Err(error);
-        }
-        let mut leftover = None;
-        if let Some(path) = displaced {
-            if let Err(error) = discard_replaced_app(&path) {
-                leftover = Some(leftover_app_notice(&path, &error));
-            }
-        }
-        let running = app_process_running(&destination);
-        let restart = if running {
-            "A restart is required. Prismattyc is still running. Quit it (Cmd+Q) and reopen it from the Dock. Mux sessions keep running; reopen the app to use this version in windows."
-        } else {
-            "A restart is required to use this version. Open Prismattyc from the Dock. If it is already running, quit it (Cmd+Q) and reopen it. Mux sessions keep running until you restart them."
-        };
-        let inside = std::env::current_exe()
-            .ok()
-            .and_then(|exe| app_bundle_from_executable(&exe))
-            .is_some_and(|bundle| bundle == destination);
-        let outside = if inside {
-            String::new()
-        } else {
-            " This updated Prismattyc.app. A pmux or prismattyc binary outside that app stays on its current build; open the app to run the new one.".to_string()
-        };
-        let leftover_text = leftover
-            .as_ref()
-            .map(|text| format!(" {text}"))
-            .unwrap_or_default();
-        let sync_text = sync_warning
-            .as_ref()
-            .map(|text| format!(" {text}"))
-            .unwrap_or_default();
-        let message = format!(
-            "Installed {version} from {REPOSITORY} at {}. {restart}{outside}{leftover_text}{sync_text}",
-            destination.display()
-        );
-        if json {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "status": "installed",
-                    "version": version.to_string(),
-                    "repository": REPOSITORY,
-                    "restart_required": true,
-                    "app": destination,
-                    "leftover_app": leftover,
-                    "directory_sync_warning": sync_warning,
-                    "message": message,
-                })
-            );
-        } else {
-            println!("{message}");
-        }
-        Ok(())
-    })();
+    let result = install_macos_bundle_steps(
+        root,
+        &staging,
+        &destination,
+        &mut incoming,
+        MacosDownload {
+            tag,
+            version,
+            target,
+            zip,
+            checksums,
+            manifest,
+            json,
+        },
+    );
+    cleanup_macos_staging(&staging, incoming.as_deref());
+    result
+}
+
+/// Remove the staging dir and any leftover incoming bundle after an install
+/// attempt. Split out of [`install_macos_bundle_here`] to keep its CRAP low.
+#[cfg(any(test, target_os = "macos"))]
+fn cleanup_macos_staging(staging: &Path, incoming: Option<&Path>) {
     if staging.exists() {
-        let _ = fs::remove_dir_all(&staging);
+        let _ = fs::remove_dir_all(staging);
     }
     if let Some(path) = incoming {
         if path.exists() {
             let _ = fs::remove_dir_all(path);
         }
     }
-    result
+}
+
+/// Download, verify, stage, swap, and report a macOS bundle install. On
+/// success `incoming` is cleared; on an early failure it names the staged
+/// bundle so the caller can clean it up. Split out of
+/// [`install_macos_bundle_here`] so each function stays within the CRAP budget.
+#[cfg(any(test, target_os = "macos"))]
+fn install_macos_bundle_steps(
+    root: &Path,
+    staging: &Path,
+    destination: &Path,
+    incoming: &mut Option<PathBuf>,
+    download: MacosDownload<'_>,
+) -> Result<()> {
+    let MacosDownload {
+        tag,
+        version,
+        target,
+        zip,
+        checksums,
+        manifest,
+        json,
+    } = download;
+    let extracted =
+        download_and_extract_macos_zip(staging, zip, checksums, manifest, version, tag, target)?;
+    let staged = stage_macos_bundle(destination, &extracted, tag, target)?;
+    *incoming = Some(staged.clone());
+    let swap = replace_app_bundle(destination, &staged)?;
+    *incoming = None;
+    let leftover = verify_and_record_swap(root, destination, version, tag, target, &swap)?;
+    print_macos_install_report(
+        destination,
+        version,
+        json,
+        leftover.as_deref(),
+        swap.directory_sync_warning.as_deref(),
+    );
+    Ok(())
+}
+
+/// Download the checksums, zip, and optional manifest into `staging`, confirm
+/// the zip digest, extract it, clear quarantine, and verify trust + version.
+/// Returns the extracted bundle path.
+#[cfg(any(test, target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
+fn download_and_extract_macos_zip(
+    staging: &Path,
+    zip: &Asset,
+    checksums: &Asset,
+    manifest: Option<&Asset>,
+    version: &Version,
+    tag: &str,
+    target: &str,
+) -> Result<PathBuf> {
+    let zip_path = download_macos_inputs(staging, zip, checksums, manifest, version)?;
+    confirm_and_extract_macos_zip(
+        staging, &zip_path, zip, checksums, manifest, version, tag, target,
+    )
+}
+
+/// Download the checksums, zip, and optional manifest into `staging`.
+/// Returns the downloaded zip path.
+#[cfg(any(test, target_os = "macos"))]
+fn download_macos_inputs(
+    staging: &Path,
+    zip: &Asset,
+    checksums: &Asset,
+    manifest: Option<&Asset>,
+    version: &Version,
+) -> Result<PathBuf> {
+    eprintln!("Downloading {MACOS_CHECKSUMS_NAME} {version}");
+    download_asset(checksums, &staging.join(MACOS_CHECKSUMS_NAME))?;
+    eprintln!("Downloading {} {version}", zip.name);
+    let zip_path = staging.join(&zip.name);
+    download_asset(zip, &zip_path)?;
+    download_macos_manifest(staging, manifest, version)?;
+    Ok(zip_path)
+}
+
+/// Confirm the zip digest against the checksums and manifest, extract it,
+/// clear quarantine, and verify trust + version. Returns the extracted bundle.
+#[cfg(any(test, target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
+fn confirm_and_extract_macos_zip(
+    staging: &Path,
+    zip_path: &Path,
+    zip: &Asset,
+    checksums: &Asset,
+    manifest: Option<&Asset>,
+    version: &Version,
+    tag: &str,
+    target: &str,
+) -> Result<PathBuf> {
+    confirm_downloaded_macos_zip(staging, zip, checksums, manifest, version, target)?;
+    let extracted = extract_macos_zip(zip_path, &staging.join("unpacked"), tag, target)?;
+    clear_quarantine(&extracted);
+    verify_extracted_bundle(&extracted, version, tag, target)?;
+    Ok(extracted)
+}
+
+/// Confirm the downloaded zip's digest against the checksums file and, when
+/// present, the manifest. Split out to keep each function's CRAP low.
+#[cfg(any(test, target_os = "macos"))]
+fn confirm_downloaded_macos_zip(
+    staging: &Path,
+    zip: &Asset,
+    checksums: &Asset,
+    manifest: Option<&Asset>,
+    version: &Version,
+    target: &str,
+) -> Result<()> {
+    let manifest_bytes = read_macos_manifest_bytes(staging, manifest)?;
+    let sums_text = fs::read_to_string(staging.join(MACOS_CHECKSUMS_NAME))
+        .with_context(|| format!("{} is not text", checksums.name))?;
+    confirm_macos_zip(zip, &sums_text, manifest_bytes.as_deref(), version, target)
+}
+
+/// Verify code signature and reported version of an extracted bundle.
+#[cfg(any(test, target_os = "macos"))]
+fn verify_extracted_bundle(
+    extracted: &Path,
+    version: &Version,
+    tag: &str,
+    target: &str,
+) -> Result<()> {
+    verify_macos_trust(extracted, tag, target)?;
+    reported_release_version(&extracted.join("Contents/MacOS/pmux"), version)
+}
+
+/// Read the manifest bytes previously downloaded into `staging`, if any.
+#[cfg(any(test, target_os = "macos"))]
+fn read_macos_manifest_bytes(staging: &Path, manifest: Option<&Asset>) -> Result<Option<Vec<u8>>> {
+    match manifest {
+        Some(_) => Ok(Some(fs::read(staging.join(MACOS_MANIFEST_NAME))?)),
+        None => Ok(None),
+    }
+}
+
+/// Download the optional manifest asset into `staging` when present.
+#[cfg(any(test, target_os = "macos"))]
+fn download_macos_manifest(
+    staging: &Path,
+    manifest: Option<&Asset>,
+    version: &Version,
+) -> Result<()> {
+    let Some(manifest) = manifest else {
+        return Ok(());
+    };
+    eprintln!("Downloading {MACOS_MANIFEST_NAME} {version}");
+    download_asset(manifest, &staging.join(MACOS_MANIFEST_NAME))
+}
+
+/// Copy the extracted bundle into a sibling `.Prismattyc.app.incoming-<pid>`
+/// of `destination`, then clear quarantine and verify trust. Returns the
+/// staged path ready for the atomic swap.
+#[cfg(any(test, target_os = "macos"))]
+fn stage_macos_bundle(
+    destination: &Path,
+    extracted: &Path,
+    tag: &str,
+    target: &str,
+) -> Result<PathBuf> {
+    let parent = destination
+        .parent()
+        .context("Prismattyc.app parent")?
+        .to_path_buf();
+    fs::create_dir_all(&parent)?;
+    let staged = parent.join(format!(".Prismattyc.app.incoming-{}", std::process::id()));
+    ditto_copy(extracted, &staged)?;
+    clear_quarantine(&staged);
+    verify_macos_trust(&staged, tag, target)?;
+    Ok(staged)
+}
+
+/// Copy `extracted` to `staged` with `ditto`, replacing any prior staged copy.
+#[cfg(any(test, target_os = "macos"))]
+fn ditto_copy(extracted: &Path, staged: &Path) -> Result<()> {
+    if staged.exists() {
+        fs::remove_dir_all(staged)?;
+    }
+    let copied = Command::new("ditto")
+        .arg(extracted)
+        .arg(staged)
+        .status()
+        .context("ditto is required to stage Prismattyc.app")?;
+    ensure!(
+        copied.success(),
+        "staging Prismattyc.app failed ({copied}). The installed app was not changed."
+    );
+    Ok(())
+}
+
+/// After the swap, verify the destination and record macOS state. On failure,
+/// restore the displaced app (or remove the destination) and return the error,
+/// attaching any directory-sync warning. On success, discard the displaced app
+/// and return an optional "leftover" notice when discarding failed.
+#[cfg(any(test, target_os = "macos"))]
+fn verify_and_record_swap(
+    root: &Path,
+    destination: &Path,
+    version: &Version,
+    tag: &str,
+    target: &str,
+    swap: &ReplacedApp,
+) -> Result<Option<String>> {
+    let verify = verify_macos_trust(destination, tag, target)
+        .and_then(|()| reported_release_version(&destination.join("Contents/MacOS/pmux"), version));
+    recover_or_fail(destination, swap, verify)?;
+
+    let state = write_macos_state(
+        root,
+        &MacosAppState {
+            repository: REPOSITORY.into(),
+            version: version.to_string(),
+            target: MACOS_BUNDLE_TARGET.into(),
+            app: destination.to_path_buf(),
+        },
+    );
+    recover_or_fail(destination, swap, state)?;
+
+    Ok(discard_displaced(swap.displaced.as_deref()))
+}
+
+/// If `outcome` failed, restore the displaced app (or remove the destination)
+/// and propagate the error with any sync warning attached.
+#[cfg(any(test, target_os = "macos"))]
+fn recover_or_fail(destination: &Path, swap: &ReplacedApp, outcome: Result<()>) -> Result<()> {
+    let Err(error) = outcome else {
+        return Ok(());
+    };
+    if let Some(path) = &swap.displaced {
+        restore_displaced_app(destination, path).with_context(|| error.to_string())?;
+    } else {
+        let _ = fs::remove_dir_all(destination);
+    }
+    match &swap.directory_sync_warning {
+        Some(warning) => Err(error.context(warning.clone())),
+        None => Err(error),
+    }
+}
+
+/// Discard the displaced old app; returns a leftover notice if that failed.
+#[cfg(any(test, target_os = "macos"))]
+fn discard_displaced(displaced: Option<&Path>) -> Option<String> {
+    let path = displaced?;
+    match discard_replaced_app(path) {
+        Ok(()) => None,
+        Err(error) => Some(leftover_app_notice(path, &error)),
+    }
+}
+
+/// Print the macOS install report in JSON or human form.
+#[cfg(any(test, target_os = "macos"))]
+fn print_macos_install_report(
+    destination: &Path,
+    version: &Version,
+    json: bool,
+    leftover: Option<&str>,
+    sync_warning: Option<&str>,
+) {
+    let message = macos_install_message(destination, version, leftover, sync_warning);
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": "installed",
+                "version": version.to_string(),
+                "repository": REPOSITORY,
+                "restart_required": true,
+                "app": destination,
+                "leftover_app": leftover,
+                "directory_sync_warning": sync_warning,
+                "message": message,
+            })
+        );
+    } else {
+        println!("{message}");
+    }
+}
+
+/// Build the human-readable install message, including restart guidance and
+/// any outside-binary, leftover, and sync notes.
+#[cfg(any(test, target_os = "macos"))]
+fn macos_install_message(
+    destination: &Path,
+    version: &Version,
+    leftover: Option<&str>,
+    sync_warning: Option<&str>,
+) -> String {
+    let restart = if app_process_running(destination) {
+        "A restart is required. Prismattyc is still running. Quit it (Cmd+Q) and reopen it from the Dock. Mux sessions keep running; reopen the app to use this version in windows."
+    } else {
+        "A restart is required to use this version. Open Prismattyc from the Dock. If it is already running, quit it (Cmd+Q) and reopen it. Mux sessions keep running until you restart them."
+    };
+    let outside = if running_inside_bundle(destination) {
+        String::new()
+    } else {
+        " This updated Prismattyc.app. A pmux or prismattyc binary outside that app stays on its current build; open the app to run the new one.".to_string()
+    };
+    let leftover_text = leftover.map(|text| format!(" {text}")).unwrap_or_default();
+    let sync_text = sync_warning
+        .map(|text| format!(" {text}"))
+        .unwrap_or_default();
+    format!(
+        "Installed {version} from {REPOSITORY} at {}. {restart}{outside}{leftover_text}{sync_text}",
+        destination.display()
+    )
+}
+
+/// True when the current executable lives inside `destination`.
+#[cfg(any(test, target_os = "macos"))]
+fn running_inside_bundle(destination: &Path) -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| app_bundle_from_executable(&exe))
+        .is_some_and(|bundle| bundle == destination)
 }
 
 #[cfg(unix)]
@@ -2547,5 +2988,82 @@ mod tests {
             notice.contains("The new Prismattyc.app is installed"),
             "{notice}"
         );
+    }
+
+    #[test]
+    fn options_parse_flags_and_reject_unknown() {
+        let o = options(&["--check".into(), "--json".into()]).unwrap();
+        assert!(o.check && o.json && !o.rollback);
+        let o = options(&["--all".into()]).unwrap();
+        assert!(!o.check && !o.json && !o.rollback, "--all is a no-op");
+        let o = options(&["--bin-dir".into(), "/tmp/x".into()]).unwrap();
+        assert_eq!(o.bin_dir.as_deref(), Some(Path::new("/tmp/x")));
+        assert!(options(&["--rollback".into(), "--check".into()]).is_err());
+        assert!(options(&["--bin-dir".into()]).is_err());
+        assert!(options(&["--nope".into()]).is_err());
+    }
+
+    #[test]
+    fn set_update_flag_recognizes_booleans() {
+        let mut o = Options::default();
+        assert!(set_update_flag(&mut o, "--check"));
+        assert!(set_update_flag(&mut o, "--json"));
+        assert!(set_update_flag(&mut o, "--rollback"));
+        assert!(set_update_flag(&mut o, "--all"));
+        assert!(!set_update_flag(&mut o, "--bin-dir"));
+        assert!(o.check && o.json && o.rollback);
+    }
+
+    #[test]
+    fn is_help_flag_matches_help_and_h() {
+        assert!(is_help_flag(&"--help".to_string()));
+        assert!(is_help_flag(&"-h".to_string()));
+        assert!(!is_help_flag(&"--check".to_string()));
+    }
+
+    #[test]
+    fn is_pid_suffix_accepts_only_nonempty_digits() {
+        assert!(is_pid_suffix("123"));
+        assert!(!is_pid_suffix(""));
+        assert!(!is_pid_suffix("12a"));
+        assert!(!is_pid_suffix("abc"));
+    }
+
+    #[test]
+    fn clear_abandoned_stages_removes_only_stage_pid_dirs() {
+        let dir = temporary();
+        fs::create_dir(dir.join(".stage-123")).unwrap();
+        fs::create_dir(dir.join(".stage-9")).unwrap();
+        fs::create_dir(dir.join(".stage-notpid")).unwrap();
+        fs::create_dir(dir.join("keepme")).unwrap();
+        fs::write(dir.join(".stage-file"), b"x").unwrap();
+        clear_abandoned_stages(&dir).unwrap();
+        assert!(!dir.join(".stage-123").exists());
+        assert!(!dir.join(".stage-9").exists());
+        assert!(dir.join(".stage-notpid").exists(), "non-pid suffix kept");
+        assert!(dir.join("keepme").exists(), "unrelated dir kept");
+        assert!(dir.join(".stage-file").exists(), "non-dir kept");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_capped_child_stdout_reads_and_caps() {
+        // Within cap: returns the bytes.
+        let mut child = Command::new("printf")
+            .arg("hello")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let bytes = read_capped_child_stdout(&mut child, 64).unwrap();
+        assert_eq!(bytes, b"hello");
+
+        // Over cap: errors and does not return oversized data.
+        let mut big = Command::new("sh")
+            .args(["-c", "printf 'aaaaaaaaaa'"]) // 10 bytes
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        assert!(read_capped_child_stdout(&mut big, 3).is_err());
     }
 }

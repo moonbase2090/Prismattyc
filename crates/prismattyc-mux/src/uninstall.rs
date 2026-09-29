@@ -304,6 +304,13 @@ impl EnvSnapshot {
     /// `CARGO_HOME` under a temp dir. In that case host-global paths
     /// (`/Applications`, `/tmp/prismattyc-<uid>`) are omitted: the caller has
     /// signalled it is not operating on the real user account.
+    ///
+    /// Fails safe: host-global paths are emitted **only** when we can
+    /// positively confirm this is the real account — `HOME` is set and equals
+    /// the OS's real home for this uid. If the real home cannot be resolved
+    /// (`getpwuid` returned nothing) or `HOME` is unset, we treat the run as
+    /// redirected so a destructive uninstall never targets `/Applications`
+    /// or the shared `/tmp/prismattyc-<uid>` on an unverified environment.
     #[must_use]
     pub fn is_redirected(&self) -> bool {
         // Any explicit XDG override or CARGO_HOME is a redirection signal.
@@ -314,13 +321,12 @@ impl EnvSnapshot {
         {
             return true;
         }
-        // A HOME that differs from the OS's real home for this uid is a
-        // redirection too (the reviewer's repro set HOME under /tmp).
+        // Not redirected only when HOME is confirmed to be the real home.
+        // Any other case — HOME differs, HOME unset, or the real home could
+        // not be resolved — is treated as redirected (fail safe).
         match (&self.home, &self.real_home) {
             (Some(home), Some(real)) => home != real,
-            // Unknown real home: be conservative and treat a set HOME as safe
-            // only when we could not determine the real one is different.
-            _ => false,
+            _ => true,
         }
     }
 }
@@ -1371,6 +1377,95 @@ mod tests {
         assert!(
             with_cargo.is_redirected(),
             "CARGO_HOME override is redirected"
+        );
+    }
+
+    #[test]
+    fn redirected_home_with_unresolved_real_home_is_redirected() {
+        // Reviewer's CHANGES case: HOME is redirected but getpwuid could not
+        // resolve the real home (real_home = None) and no XDG/CARGO override
+        // is set. Previously is_redirected() fell through to false and
+        // host-global paths leaked. It must now read as redirected and the
+        // inventory must not contain /Applications or /tmp/prismattyc-<uid>.
+        let env = EnvSnapshot {
+            home: Some(PathBuf::from("/tmp/sandbox/home")),
+            xdg_config_home: None,
+            xdg_data_home: None,
+            xdg_runtime_dir: None,
+            cargo_home: None,
+            appdata: None,
+            localappdata: None,
+            real_home: None, // getpwuid failed
+            uid: Some(501),
+            os: Os::Macos,
+        };
+        assert!(
+            env.is_redirected(),
+            "a redirected HOME with an unresolved real_home must be redirected"
+        );
+        let dirs = Dirs::resolve(&env);
+        assert!(
+            dirs.system_app_dir.is_none(),
+            "no system app dir when the real home is unverified"
+        );
+        for item in inventory(&dirs) {
+            assert!(
+                !item.path.starts_with("/Applications"),
+                "must not target real /Applications: {}",
+                item.path.display()
+            );
+            assert!(
+                !item.path.starts_with("/tmp/prismattyc-"),
+                "must not target the shared /tmp runtime dir: {}",
+                item.path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn unset_home_is_redirected() {
+        // HOME unset and real home unknown: cannot confirm the real account,
+        // so treat as redirected (fail safe).
+        let env = EnvSnapshot {
+            home: None,
+            xdg_config_home: None,
+            xdg_data_home: None,
+            xdg_runtime_dir: None,
+            cargo_home: None,
+            appdata: None,
+            localappdata: None,
+            real_home: None,
+            uid: Some(501),
+            os: Os::Macos,
+        };
+        assert!(
+            env.is_redirected(),
+            "unset HOME must be treated as redirected"
+        );
+        assert!(Dirs::resolve(&env).system_app_dir.is_none());
+    }
+
+    #[test]
+    fn confirmed_real_home_still_includes_host_global_paths() {
+        // The one path that emits host-global paths must still work: HOME set
+        // and equal to the resolved real home, no overrides.
+        let real = PathBuf::from("/Users/real-user");
+        let env = EnvSnapshot {
+            home: Some(real.clone()),
+            xdg_config_home: None,
+            xdg_data_home: None,
+            xdg_runtime_dir: None,
+            cargo_home: None,
+            appdata: None,
+            localappdata: None,
+            real_home: Some(real),
+            uid: Some(501),
+            os: Os::Macos,
+        };
+        assert!(!env.is_redirected());
+        assert_eq!(
+            Dirs::resolve(&env).system_app_dir.as_deref(),
+            Some(Path::new("/Applications"))
         );
     }
 

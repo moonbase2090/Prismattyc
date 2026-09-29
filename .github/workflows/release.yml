@@ -125,6 +125,7 @@ jobs:
             dist/*.dmg
             dist/*.zip
             dist/SHA256SUMS-macos
+            dist/manifest-macos-universal.json
           if-no-files-found: error
           retention-days: 7
 

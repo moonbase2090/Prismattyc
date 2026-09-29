@@ -22,7 +22,9 @@ for another new output directory. The default target is `x86_64-pc-windows-msvc`
 The GNU target additionally requires a native MinGW toolchain on PATH.
 
 Extract the ZIP into a directory you own. Launch `bin\prismattyc-host.exe`, or
-add its `bin` directory to your user PATH. The default shell is `%COMSPEC%`,
+add its `bin` directory to your user PATH. After that, `pmux update` or
+`prismattyc update` installs a newer published release and leaves running
+programs on the old version until they restart. The default shell is `%COMSPEC%`,
 normally `cmd.exe`. Select PowerShell with `-- powershell.exe` or `-- pwsh.exe`.
 Windows code signing is a separate release step; Apple signing does not apply.
 

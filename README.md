@@ -61,7 +61,17 @@ The archive includes the application, command-line tools, manuals, and
 checksums.
 
 To check for an update, run `pmux update --check`. To install one, run
-`pmux update`. Updating the files does not restart running sessions.
+`pmux update`. `prismattyc update` does the same thing. On Linux and
+Windows this replaces the installed binaries. On macOS it downloads the
+universal app zip, checks `SHA256SUMS-macos`, and replaces
+`Prismattyc.app`. When that app's folder is not writable, the update
+stops and explains how to run it with admin rights or move the app to
+`~/Applications`. The old app is deleted after the new one is in place,
+and `pmux update --rollback` is not supported there. Reinstall a specific
+macOS version from its DMG on the
+[releases page](https://github.com/moonbase2090/Prismattyc/releases).
+Quit the app and reopen it from the Dock. Updating does not stop mux
+sessions.
 See [Update and restart](docs/update-and-restart.md).
 
 ## Use sessions from the command line
@@ -138,7 +148,7 @@ troubleshooting, compatibility, and application integration.
 
 ## Version
 
-The workspace package version is **`0.2.18`**. A version in source does not
+The workspace package version is **`0.2.22`**. A version in source does not
 necessarily have a published download. Use
 [GitHub Releases](https://github.com/moonbase2090/Prismattyc/releases)
 to find published builds.

@@ -292,6 +292,41 @@ done
 ditto "$APP" "$DIST/Prismattyc.app"
 cp "$DMG" "$DIST/"
 cp "$ZIP" "$DIST/"
-(cd "$DIST" && shasum -a 256 "$(basename "$DMG")" "$(basename "$ZIP")" \
+python3 - "$DIST" "$VERSION" "$TAG" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+dist = pathlib.Path(sys.argv[1])
+version, tag = sys.argv[2], sys.argv[3]
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+names = [
+    f"Prismattyc-{tag}-macos-universal.dmg",
+    f"Prismattyc-{tag}-macos-universal.zip",
+]
+assets = []
+for name in names:
+    path = dist / name
+    assets.append({"name": name, "size": path.stat().st_size, "sha256": sha256(path)})
+manifest = {
+    "repository": "moonbase2090/Prismattyc",
+    "version": version,
+    "target": "universal-apple-darwin",
+    "assets": assets,
+}
+(dist / "manifest-macos-universal.json").write_text(json.dumps(manifest, indent=2) + "\n")
+PY
+(cd "$DIST" && shasum -a 256 \
+  "$(basename "$DMG")" "$(basename "$ZIP")" manifest-macos-universal.json \
   > SHA256SUMS-macos)
 echo "Created signed and notarized assets in $DIST"

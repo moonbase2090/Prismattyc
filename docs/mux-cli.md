@@ -46,7 +46,7 @@ pmux session clear [--all] [--keep NAME]
 pmux restart             # restart safe components; defer active PTY owners
 pmux restart --plan      # inspect restart impact
 pmux versions            # installed and running component versions
-pmux update              # verified GitHub release artifacts, starting at 0.2.0
+pmux update              # verified GitHub release; macOS replaces Prismattyc.app and does not keep a rollback copy
 pmux update --source --host       # host only (macOS: also rebuild Prismattyc.app)
 pmux update --source --mux        # mux / attach / server / pmux-mcp
 pmux completions bash    # emit a completion script (also zsh, fish)
@@ -1244,7 +1244,8 @@ pmux space undo /absolute/path/move.json
 ## Update and restart
 
 See [Update and restart Prismattyc](update-and-restart.md) for release checks,
-rollback, coordinated restart, and individual component controls.
+Linux and Windows rollback, coordinated restart, and individual component
+controls. macOS updates replace `Prismattyc.app` and do not keep a rollback copy.
 
 ## Inspect agent messages
 

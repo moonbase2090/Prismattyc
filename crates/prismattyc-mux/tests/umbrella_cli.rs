@@ -867,6 +867,10 @@ fn update_help_and_unknown_flag() {
     assert!(text.contains("moonbase2090/Prismattyc"), "{text}");
     assert!(text.contains("--source"), "{text}");
     assert!(text.contains("--rollback"), "{text}");
+    assert!(
+        text.contains("prismattyc update"),
+        "pmux update and prismattyc update share the release updater: {text}"
+    );
     let bad = umbrella(&socket_path(), &["update", "--tty"]);
     assert!(!bad.status.success());
     assert!(stderr(&bad).contains("unknown release update option"));

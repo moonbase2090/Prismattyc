@@ -169,6 +169,20 @@ executables under `~/.cargo/bin` only.
 Quit Prismattyc.app (Cmd+Q) and reopen it from the Dock after an update, or the
 old image stays in memory.
 
+A published build updates with `pmux update` or `prismattyc update`. The
+command downloads the universal zip, checks it against `SHA256SUMS-macos`,
+verifies the code signature, and replaces `Prismattyc.app`. After the new
+app is in place, the old app is deleted. The update replaces the app that
+is already installed. When that app's folder is not writable, the command
+stops and explains how to run it with admin rights or move the app to
+`~/Applications`. The installed app stays where it is. A first install
+uses `/Applications` when that folder is writable, and `~/Applications`
+otherwise. Rollback is not supported. To
+reinstall a specific version, download its DMG from the
+[releases page](https://github.com/moonbase2090/Prismattyc/releases)
+and replace `/Applications/Prismattyc.app`. Quit and reopen the app. Mux
+sessions keep running.
+
 Signing and notarization stay out of the first slice. This section is also
 the reference for when distribution starts.
 

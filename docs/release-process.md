@@ -19,8 +19,9 @@ and a signed universal macOS app distributed as a DMG and a zip.
 The publish job downloads each platform's assets, writes a combined
 `SHA256SUMS`, and creates the GitHub release. A tag containing a hyphen creates
 a prerelease. The release includes the Linux per-binary updater assets,
-manifests, installation archives, the Windows package and manifest, and both
-macOS files. The Windows package includes the shared license notices.
+manifests, installation archives, the Windows package and manifest, both
+macOS files, `SHA256SUMS-macos`, and `manifest-macos-universal.json`.
+The Windows package includes the shared license notices.
 Platform checksum files remain alongside the combined checksum. GitHub also
 provides source archives for the tag.
 
@@ -87,10 +88,15 @@ Linux x86_64 and ARM64 releases require glibc 2.35 or newer
 (Ubuntu 22.04 or newer). The Windows package supports Windows 10 version 1809
 or newer, or Windows 11. The macOS app supports macOS 11 or newer.
 
-The command-line updater manages its binary prefix. It does not install or
-replace the macOS application bundle.
+On Linux and Windows, `pmux update` replaces the six installed binaries.
+On macOS it downloads the universal zip, verifies `SHA256SUMS-macos` and the
+code signature, and replaces `Prismattyc.app`. Releases from v0.2.21 onward
+can be installed this way. The macOS manifest is an extra check when a
+release publishes it. `prismattyc update` runs the same installer.
 
 After publication, check the complete asset list and the combined checksums.
 On a disposable Linux installation, run `pmux update --check`, install the
-release, test a coordinated restart, and verify rollback. On macOS, open the
-zip, validate `Prismattyc.app` with Gatekeeper, and launch it.
+release, test a coordinated restart, and verify rollback. On macOS, run
+`pmux update --check`, install the release, quit Prismattyc, and reopen it
+from the Dock. Confirm the old app was removed and
+`pmux update --rollback` reports that rollback is not supported.

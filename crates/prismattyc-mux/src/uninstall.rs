@@ -8,8 +8,8 @@
 //!
 //! # Behaviour
 //!
-//! - Stop the daemon and sessions cleanly, warning first.
 //! - Print exactly what will be removed, then confirm (unless `--yes`).
+//! - After confirmation, stop the daemon and sessions cleanly, warning first.
 //! - Default removes everything, including Spaces and config data.
 //! - `--keep-data` keeps Spaces and config.
 //! - `--dry-run` lists the inventory and removes nothing.
@@ -643,6 +643,17 @@ pub fn run_with(
     interactive: bool,
     live_probe: &dyn Fn(&Path) -> Option<PathBuf>,
 ) -> Result<()> {
+    run_with_shutdown(opts, dirs, input, interactive, live_probe, &stop_daemons)
+}
+
+fn run_with_shutdown(
+    opts: &Options,
+    dirs: &Dirs,
+    input: &mut impl std::io::BufRead,
+    interactive: bool,
+    live_probe: &dyn Fn(&Path) -> Option<PathBuf>,
+    shutdown: &dyn Fn(&Dirs),
+) -> Result<()> {
     let mut plan = inventory(dirs);
     if opts.keep_data {
         plan.retain(|item| !item.category.is_data());
@@ -671,12 +682,6 @@ pub fn run_with(
         return Ok(());
     }
 
-    // Stop the daemon and sessions cleanly, warning first.
-    if interactive {
-        eprintln!("Warning: this stops the Prismattyc daemon and all sessions.");
-        stop_daemons(dirs);
-    }
-
     // Confirm unless --yes.
     if !opts.yes {
         if !interactive {
@@ -691,6 +696,13 @@ pub fn run_with(
             println!("Aborted. Nothing was removed.");
             return Ok(());
         }
+    }
+
+    // Stop only after the user confirms. An abandoned prompt must not interrupt
+    // live sessions or report that nothing changed after stopping the daemon.
+    if interactive {
+        eprintln!("Warning: this stops the Prismattyc daemon and all sessions.");
+        shutdown(dirs);
     }
 
     // Remove, collecting per-item outcomes.
@@ -785,50 +797,40 @@ fn remove_path(path: &Path) -> Outcome {
 
 /// If `dir` (or its `prismattyc` subdir) currently hosts a live pmux control
 /// socket, return that socket path. Used to refuse deleting a running
-/// daemon's runtime dir. Returns `None` on non-unix and when nothing live is
-/// found — including for a tempdir in tests, which never holds a live socket.
+/// daemon's runtime dir on Unix and Windows. Returns `None` when nothing live
+/// is found — including for a tempdir in tests, which never holds a live socket.
 fn live_socket_under(dir: &Path) -> Option<PathBuf> {
-    #[cfg(unix)]
-    {
-        // live_pmux_sockets_in already scans `dir` and `dir/prismattyc`.
-        crate::live_pmux_sockets_in(dir).into_iter().next()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
-        None
-    }
+    // live_pmux_sockets_in already scans `dir` and `dir/prismattyc`; its
+    // socket transport and ownership check are implemented for Windows too.
+    crate::live_pmux_sockets_in(dir).into_iter().next()
 }
 
 /// Best-effort clean shutdown of any live daemon whose socket lives in a
 /// resolved runtime dir. Never fails the uninstall: a daemon that will not
 /// stop shows up later as a leftover socket file. Only the resolved
 /// `dirs.runtime_dirs` are scanned, so a redirected (sandboxed) invocation
-/// cannot reach the real daemon.
+/// cannot reach the real daemon. The shared local-socket transport works on
+/// Unix and Windows.
 fn stop_daemons(dirs: &Dirs) {
-    #[cfg(unix)]
-    {
-        let mut dirs_to_scan: BTreeSet<PathBuf> = BTreeSet::new();
-        for rt in &dirs.runtime_dirs {
-            dirs_to_scan.insert(rt.clone());
-            // live_pmux_sockets_in scans `dir` and `dir/prismattyc`; adding the
-            // parent recovers the `$XDG_RUNTIME_DIR` level for a `…/prismattyc`
-            // runtime dir, without reading outside the resolved set.
-            if let Some(parent) = rt.parent() {
-                dirs_to_scan.insert(parent.to_path_buf());
-            }
-        }
-        for dir in dirs_to_scan {
-            for socket in crate::live_pmux_sockets_in(&dir) {
-                eprintln!("  stopping daemon at {}", socket.display());
-                let _ = shutdown_socket(&socket);
-            }
+    let mut dirs_to_scan: BTreeSet<PathBuf> = BTreeSet::new();
+    for rt in &dirs.runtime_dirs {
+        dirs_to_scan.insert(rt.clone());
+        // live_pmux_sockets_in scans `dir` and `dir/prismattyc`; adding the
+        // parent recovers the `$XDG_RUNTIME_DIR` level for a `…/prismattyc`
+        // runtime dir, without reading outside the resolved set.
+        if let Some(parent) = rt.parent() {
+            dirs_to_scan.insert(parent.to_path_buf());
         }
     }
-    let _ = dirs;
+    for dir in dirs_to_scan {
+        for socket in crate::live_pmux_sockets_in(&dir) {
+            eprintln!("  stopping daemon at {}", socket.display());
+            let _ = shutdown_socket(&socket);
+        }
+    }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn shutdown_socket(socket: &Path) -> Result<()> {
     use std::io::BufReader;
     use std::time::Duration;
@@ -1060,6 +1062,30 @@ mod tests {
         };
         run_with(&opts, &dirs, &mut Cursor::new(b""), false, &|_| None).unwrap();
         assert!(updates.exists(), "dry-run must not remove anything");
+    }
+
+    #[test]
+    fn declining_confirmation_does_not_stop_sessions_or_remove_files() {
+        let tmp = Scratch::new("cancel");
+        let dirs = fake_dirs(tmp.path(), Os::Linux);
+        let updates = tmp.path().join("data/prismattyc/updates");
+        std::fs::create_dir_all(&updates).unwrap();
+        let marker = updates.join("marker");
+        std::fs::write(&marker, b"keep until confirmed").unwrap();
+
+        let shutdown_called = std::cell::Cell::new(false);
+        let result = run_with_shutdown(
+            &Options::default(),
+            &dirs,
+            &mut Cursor::new(b"n\n"),
+            true,
+            &|_| None,
+            &|_| shutdown_called.set(true),
+        );
+
+        result.unwrap();
+        assert!(!shutdown_called.get(), "declining must not stop the daemon");
+        assert!(marker.exists(), "declining must leave the plan untouched");
     }
 
     #[test]
@@ -1556,5 +1582,39 @@ mod tests {
         assert!(result.is_err(), "a live daemon must make the run error");
         let msg = format!("{}", result.unwrap_err());
         assert!(msg.contains("remain"), "error names leftovers: {msg}");
+    }
+
+    #[test]
+    fn live_windows_runtime_dir_is_refused_not_deleted() {
+        let tmp = Scratch::new("live-windows");
+        let dirs = fake_dirs(tmp.path(), Os::Windows);
+        let runtime = tmp.path().join("win-run");
+        std::fs::create_dir_all(&runtime).unwrap();
+        let socket = runtime.join("pmux.sock");
+        std::fs::write(&socket, b"socket marker").unwrap();
+
+        let runtime_for_probe = runtime.clone();
+        let socket_for_probe = socket.clone();
+        let probe = move |dir: &Path| -> Option<PathBuf> {
+            (dir == runtime_for_probe).then(|| socket_for_probe.clone())
+        };
+        let opts = Options {
+            yes: true,
+            dry_run: false,
+            keep_data: false,
+        };
+
+        let result = run_with(&opts, &dirs, &mut Cursor::new(b""), false, &probe);
+
+        assert!(runtime.exists(), "live Windows runtime dir must be kept");
+        assert!(socket.exists(), "live Windows socket must be kept");
+        assert!(
+            result.is_err(),
+            "a live Windows daemon must make the run error"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("remain"),
+            "error should name the leftover runtime dir"
+        );
     }
 }

@@ -49,6 +49,8 @@ pmux versions            # installed and running component versions
 pmux update              # verified GitHub release; macOS replaces Prismattyc.app and does not keep a rollback copy
 pmux update --source --host       # host only (macOS: also rebuild Prismattyc.app)
 pmux update --source --mux        # mux / attach / server / pmux-mcp
+pmux uninstall --dry-run # list everything Prismattyc installed; remove nothing
+pmux uninstall           # remove everything (prompts; --yes to skip, --keep-data to keep Spaces/config)
 pmux completions bash    # emit a completion script (also zsh, fish)
 pmux config init [--merge]  # write [mux] keys into config.toml
 pmux space create NAME             # one fresh shell pane in a new space

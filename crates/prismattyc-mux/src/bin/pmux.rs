@@ -269,6 +269,7 @@ enum Verb {
     Tutorial,
     Completions,
     Update,
+    Uninstall,
     Config,
     Up,
     Attach,
@@ -322,6 +323,7 @@ const VERBS: &[(&str, Verb)] = &[
     ("tutorial", Verb::Tutorial),
     ("completions", Verb::Completions),
     ("update", Verb::Update),
+    ("uninstall", Verb::Uninstall),
     ("config", Verb::Config),
     ("up", Verb::Up),
     ("start", Verb::Up),
@@ -478,6 +480,10 @@ fn main() -> Result<()> {
             reject_session_flag(cli_session.as_deref(), "update")?;
             return prismattyc_mux::run_update(rest);
         }
+        Verb::Uninstall => {
+            reject_session_flag(cli_session.as_deref(), "uninstall")?;
+            return prismattyc_mux::run_uninstall(rest);
+        }
         Verb::Config => {
             reject_session_flag(cli_session.as_deref(), "config")?;
             return cmd_config(rest);
@@ -607,7 +613,12 @@ fn main() -> Result<()> {
             lifecycle::restart(&paths, rest)
         }
         Verb::Versions => lifecycle::versions(&paths),
-        Verb::Tutorial | Verb::Completions | Verb::Update | Verb::Config | Verb::Mail => {
+        Verb::Tutorial
+        | Verb::Completions
+        | Verb::Update
+        | Verb::Uninstall
+        | Verb::Config
+        | Verb::Mail => {
             unreachable!("early verbs return before Paths::resolve")
         }
     }

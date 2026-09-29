@@ -36,6 +36,7 @@ pub mod space_team;
 pub mod space_template;
 pub mod supervisor;
 pub mod team_attention;
+pub mod uninstall;
 pub mod update;
 pub mod walkthrough;
 
@@ -104,6 +105,7 @@ pub use remote_size::{
     disconnect_decision, record_host_chosen, remember_host_size, remote_size_chip, resize_decision,
     ClientRole, RemoteSizePolicy, SizeOwner, SizeOwnerKind, Viewport,
 };
+pub use uninstall::run_uninstall;
 pub use update::run_update;
 
 pub mod local_socket;

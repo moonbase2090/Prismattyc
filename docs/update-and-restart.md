@@ -198,7 +198,8 @@ follows your environment overrides.
 
 | Category | Paths |
 | --- | --- |
-| Binaries / launchers | `pmux`, `pmuxd`, `pmux-attach`, `pmux-mcp`, `prismattyc`, `prismattyc-host` in `~/.local/bin` and `$CARGO_HOME/bin` (`~/.cargo/bin`) |
+| Binaries / launchers | `pmuxd`, `pmux-attach`, `pmux-mcp`, `prismattyc`, and `prismattyc-host` in `~/.local/bin` and `$CARGO_HOME/bin` (default `~/.cargo/bin`). Linux and Windows also remove `pmux` from those directories. |
+| App-managed `pmux` link (macOS) | `~/.local/bin/pmux` and `/usr/local/bin/pmux` only when each is a symlink to the app's bundled executable with a matching `.pmux-prismattyc-shim.json` record. Other `pmux` files and links, including `~/.cargo/bin/pmux`, are left alone. |
 | App bundle (macOS) | `~/Applications/Prismattyc.app`, `/Applications/Prismattyc.app` |
 | Install tree (Windows) | `%LOCALAPPDATA%\Programs\Prismattyc`, `%LOCALAPPDATA%\Prismattyc\run` |
 | Self-update store | `$XDG_DATA_HOME/prismattyc/updates` (versions, `current`/`previous`/`legacy` links, `installation.json`, `update.lock`) |
@@ -209,9 +210,12 @@ follows your environment overrides.
 
 ### Manual uninstall
 
-If the command is unavailable (for example the binaries are already gone), the
-same inventory can be removed by hand. Adjust the base directories for your
-environment overrides.
+If the command is unavailable (for example, the binaries are already gone),
+remove the same inventory by hand. Adjust the base directories for your
+environment overrides. On macOS, uninstall removes `pmux` only when its link
+and `.pmux-prismattyc-shim.json` record identify the app-managed link. It
+leaves `~/.cargo/bin/pmux` and other unowned `pmux` files alone. When you clean
+up by hand, check the link and record before removing either `pmux` link.
 
 macOS / Linux:
 
@@ -219,9 +223,17 @@ macOS / Linux:
 # Stop the daemon first.
 pmux stop 2>/dev/null || true
 
-# Binaries and launchers.
-rm -f ~/.local/bin/{pmux,pmuxd,pmux-attach,pmux-mcp,prismattyc,prismattyc-host}
-rm -f ~/.cargo/bin/{pmux,pmuxd,pmux-attach,pmux-mcp,prismattyc,prismattyc-host}
+# Linux binaries and launchers.
+if [ "$(uname -s)" = Linux ]; then
+  rm -f ~/.local/bin/{pmux,pmuxd,pmux-attach,pmux-mcp,prismattyc,prismattyc-host}
+  rm -f ~/.cargo/bin/{pmux,pmuxd,pmux-attach,pmux-mcp,prismattyc,prismattyc-host}
+fi
+
+# macOS launchers other than pmux.
+if [ "$(uname -s)" = Darwin ]; then
+  rm -f ~/.local/bin/{pmuxd,pmux-attach,pmux-mcp,prismattyc,prismattyc-host}
+  rm -f ~/.cargo/bin/{pmuxd,pmux-attach,pmux-mcp,prismattyc,prismattyc-host}
+fi
 
 # macOS app bundle.
 rm -rf ~/Applications/Prismattyc.app /Applications/Prismattyc.app

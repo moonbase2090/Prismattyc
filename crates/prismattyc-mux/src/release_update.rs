@@ -760,6 +760,13 @@ pub fn installed_binary(binary: &str) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// On macOS, create the app-bundled `pmux` PATH link when the current process
+/// belongs to `Prismattyc.app`. Other launches do not create a link.
+#[cfg(target_os = "macos")]
+pub fn ensure_pmux_path_shim_for_current_app() -> Result<()> {
+    crate::path_shim::ensure_current_app()
+}
+
 #[cfg(windows)]
 pub fn replacement_binary(binary: &str) -> Result<PathBuf> {
     ensure!(BINARIES.contains(&binary), "unknown executable");
@@ -1816,6 +1823,9 @@ fn install_macos_bundle_steps(
     let swap = replace_app_bundle(destination, &staged)?;
     *incoming = None;
     let leftover = verify_and_record_swap(root, destination, version, tag, target, &swap)?;
+    if let Err(error) = crate::path_shim::ensure_app_bundle(destination) {
+        eprintln!("pmux update: warning: could not put the app-bundled pmux on PATH: {error:#}");
+    }
     print_macos_install_report(
         destination,
         version,

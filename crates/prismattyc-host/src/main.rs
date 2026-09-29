@@ -14134,6 +14134,12 @@ fn main() -> Result<()> {
     // Parse first so --help / --version / --write-config never create
     // the default config path (PT-84 review).
     let mut cli = Cli::parse(std::env::args().skip(1))?;
+    #[cfg(target_os = "macos")]
+    if let Err(error) = prismattyc_mux::release_update::ensure_pmux_path_shim_for_current_app() {
+        eprintln!(
+            "prismattyc-host: warning: could not put the app-bundled pmux on PATH: {error:#}"
+        );
+    }
     let config_path = config::config_path();
     match config_template::ensure_template(&config_path) {
         Ok(true) => eprintln!("prismattyc-host: wrote config {}", config_path.display()),

@@ -4160,7 +4160,45 @@ enum MailVerb {
         body: Option<String>,
     },
     Status,
+    /// A verb-level `--help` / `-h`: print [`MAIL_USAGE`] and exit 0.
+    Help,
 }
+
+/// Parses the letter ids for `commit` / `release`.
+///
+/// A flag never becomes a letter id. `--help` / `-h` yields
+/// [`MailVerb::Help`] so the caller prints usage and exits 0. Any other
+/// `-`-prefixed argument is a hard error that names the bad flag and points
+/// at the fix, matching `claim` and `watch`. Bare ids collect as before.
+fn parse_mail_ids(verb: &str, args: impl Iterator<Item = String>) -> Result<Vec<String>> {
+    let mut ids = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => return Err(MailHelp.into()),
+            other if other.starts_with('-') => bail!(
+                "{verb}: unknown flag {other}\n\
+                 {verb} takes only letter ids (e.g. `pmux mail {verb} msg:1 msg:2`).\n\
+                 Run `pmux mail {verb} --help` for usage, or `pmux mail claim --ids` \
+                 to list the ids you hold."
+            ),
+            _ => ids.push(arg),
+        }
+    }
+    Ok(ids)
+}
+
+/// Sentinel that unwinds a verb-level `--help` / `-h` out of a parser that
+/// otherwise returns letter ids, so the caller renders [`MailVerb::Help`].
+#[derive(Debug)]
+struct MailHelp;
+
+impl std::fmt::Display for MailHelp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("help requested")
+    }
+}
+
+impl std::error::Error for MailHelp {}
 
 fn parse_mail_verb(name: &str, mut args: impl Iterator<Item = String>) -> Result<MailVerb> {
     match name {
@@ -4185,12 +4223,16 @@ fn parse_mail_verb(name: &str, mut args: impl Iterator<Item = String>) -> Result
                 format: format.unwrap_or(MailClaimFormat::Human),
             })
         }
-        "commit" => Ok(MailVerb::Commit {
-            ids: args.collect(),
-        }),
-        "release" => Ok(MailVerb::Release {
-            ids: args.collect(),
-        }),
+        "commit" => match parse_mail_ids("commit", args) {
+            Ok(ids) => Ok(MailVerb::Commit { ids }),
+            Err(e) if e.is::<MailHelp>() => Ok(MailVerb::Help),
+            Err(e) => Err(e),
+        },
+        "release" => match parse_mail_ids("release", args) {
+            Ok(ids) => Ok(MailVerb::Release { ids }),
+            Err(e) if e.is::<MailHelp>() => Ok(MailVerb::Help),
+            Err(e) => Err(e),
+        },
         "inbox" => Ok(MailVerb::Inbox),
         "watch" => {
             let mut timeout_secs = None;
@@ -4305,6 +4347,13 @@ fn cmd_mailbox(paths: &Paths, rest: Vec<String>) -> Result<()> {
     }
     let verb = parse_mail_verb(&verb_name, iter).with_context(|| MAIL_USAGE)?;
 
+    // A verb-level `--help` / `-h` (e.g. `pmux mail commit --help`) prints
+    // usage and exits 0 without contacting the daemon or committing anything.
+    if let MailVerb::Help = verb {
+        println!("{MAIL_USAGE}");
+        return Ok(());
+    }
+
     let mut client = Client::connect(&paths.socket)?;
     let registered = client.request(|request_id| ControlRequest::RegisterClient {
         version: PROTOCOL_VERSION,
@@ -4418,7 +4467,7 @@ fn cmd_mailbox(paths: &Paths, rest: Vec<String>) -> Result<()> {
                 summary: summary.clone(),
                 body: body.clone().unwrap_or_default(),
             },
-            MailVerb::Status => unreachable!("handled above"),
+            MailVerb::Status | MailVerb::Help => unreachable!("handled above"),
         }
     };
 
@@ -7652,6 +7701,45 @@ mod tests {
         assert_eq!(ids, ["msg:1", "msg:2"]);
         let verb = parse_mail_verb("release", args(&["msg:3"])).unwrap();
         assert!(matches!(verb, MailVerb::Release { .. }));
+    }
+
+    #[test]
+    fn mail_commit_release_reject_unknown_flags() {
+        // A stray flag must never be swallowed as a letter id (issue #30).
+        for verb in ["commit", "release"] {
+            let err =
+                parse_mail_verb(verb, args(&["--nope"])).expect_err("unknown flag must error");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains(&format!("{verb}: unknown flag --nope")),
+                "error names the bad flag: {msg}"
+            );
+            assert!(
+                msg.contains("letter ids"),
+                "error explains what the verb takes: {msg}"
+            );
+
+            // A bare `-` prefix on a token that is not `--help`/`-h` errors too.
+            assert!(parse_mail_verb(verb, args(&["-x"])).is_err());
+
+            // A flag mixed in with real ids still errors rather than committing.
+            assert!(parse_mail_verb(verb, args(&["msg:1", "--as", "pm"])).is_err());
+        }
+    }
+
+    #[test]
+    fn mail_commit_release_help_prints_usage() {
+        // `pmux mail commit --help` must yield Help (usage + exit 0), not a
+        // letter id sent to the daemon (issue #30).
+        for verb in ["commit", "release"] {
+            for flag in ["--help", "-h"] {
+                let parsed = parse_mail_verb(verb, args(&[flag])).unwrap();
+                assert!(
+                    matches!(parsed, MailVerb::Help),
+                    "{verb} {flag} must request usage, got {parsed:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -311,6 +311,12 @@ pmux mail broadcast --summary "..." # every bound agent except you
 pmux mail status                    # socket, reachability, bound agents (no identity)
 ```
 
+`commit` and `release` take only letter ids. A flag is never treated as an
+id: `pmux mail commit --help` (or `-h`) prints this usage and exits 0 without
+touching the mailbox, and any other `-`-prefixed argument (e.g. a typo like
+`--comit`) is rejected with a non-zero exit that names the flag and points at
+the fix, the same way `claim` and `watch` handle unknown flags.
+
 Identity resolves in order: `--as <agent>`, the agent bound to this live
 pane, then `$PMUX_AGENT` outside a known pane. There is no other
 default — a CLI that guesses who you are sends mail as the wrong agent.

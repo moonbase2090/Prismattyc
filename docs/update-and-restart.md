@@ -1,7 +1,9 @@
 # Update and restart Prismattyc
 
 Open the command palette. Select **update_restart**. You can check for an
-update, install a release, roll back, inspect versions, or restart components.
+update, install a release, inspect versions, or restart components. On Linux
+and Windows you can also roll back the previous installation. On macOS the
+old app is deleted after the new one is in place, so rollback is not offered.
 The same controls are available through `pmux` and `prismattyc`.
 `pmux update` and `prismattyc update` install the same release.
 
@@ -50,12 +52,13 @@ It checks that zip against the GitHub asset digest and against
 `manifest-macos-universal.json`, that hash must match too. The updater
 unpacks the zip in a temporary directory, checks the code signature with
 `codesign --verify --strict`, and checks Gatekeeper with `spctl`. It then
-replaces `Prismattyc.app` and keeps the previous app as
-`Prismattyc.app.previous` beside it. Quit Prismattyc and reopen it from
-the Dock. A restart is required. Mux sessions keep running until you
-restart them. The v0.2.21 release already publishes the universal zip and
-`SHA256SUMS-macos`, so this command can install that release without a
-new macOS asset.
+replaces `Prismattyc.app`. If that swap fails, the old app is put back.
+After the new app is in place and checked again, the old app is deleted.
+Nothing named `Prismattyc.app.previous` is kept. Quit Prismattyc and
+reopen it from the Dock. A restart is required. Mux sessions keep running
+until you restart them. The v0.2.21 release already publishes the
+universal zip and `SHA256SUMS-macos`, so this command can install that
+release without a new macOS asset.
 
 The bundle that gets replaced is the `Prismattyc.app` that contains the
 running command. Otherwise the updater uses `/Applications/Prismattyc.app`
@@ -66,18 +69,23 @@ If no asset matches, or more than one asset matches, the error names the
 platform and target, lists the release asset names, and prints the DMG
 and zip links so you can replace the app by hand.
 
-To restore the previous complete installation:
+On Linux and Windows, restore the previous complete installation:
 
 ```bash
 pmux update --rollback
 ```
 
-On macOS this swaps `Prismattyc.app` with `Prismattyc.app.previous`.
-Quit the app and reopen it after a rollback.
+On macOS, `pmux update --rollback` and `prismattyc update --rollback` are
+not supported. The updater does not keep the old app. To reinstall a
+specific version, download its DMG from the
+[releases page](https://github.com/moonbase2090/Prismattyc/releases),
+open it, and replace `/Applications/Prismattyc.app`. Quit Prismattyc and
+reopen it from the Dock.
 
-Update and rollback change installed binaries, or the macOS app bundle.
-Running processes retain
-their current version until they restart. `pmux versions` reports both.
+On Linux and Windows, update and rollback change installed binaries.
+On macOS, update replaces the app bundle and then deletes the old one.
+Running processes retain their current version until they restart.
+`pmux versions` reports both.
 MCP reports the adapter version separately from its long-lived supervisor.
 Restart updated hosts before upgrading a daemon from a pre-reflow version.
 New hosts replay resize events from older daemons with their original grid

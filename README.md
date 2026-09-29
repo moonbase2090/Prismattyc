@@ -64,8 +64,12 @@ To check for an update, run `pmux update --check`. To install one, run
 `pmux update`. `prismattyc update` does the same thing. On Linux and
 Windows this replaces the installed binaries. On macOS it downloads the
 universal app zip, checks `SHA256SUMS-macos`, and replaces
-`Prismattyc.app`. Quit the app and reopen it from the Dock. Updating
-does not stop mux sessions.
+`Prismattyc.app`. The old app is deleted after the new one is in place,
+and `pmux update --rollback` is not supported there. Reinstall a specific
+macOS version from its DMG on the
+[releases page](https://github.com/moonbase2090/Prismattyc/releases).
+Quit the app and reopen it from the Dock. Updating does not stop mux
+sessions.
 See [Update and restart](docs/update-and-restart.md).
 
 ## Use sessions from the command line

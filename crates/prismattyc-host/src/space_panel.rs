@@ -131,7 +131,8 @@ impl Panel {
                     "Moonbase2090/Prismattyc releases, starting at 0.2.0",
                     Choice::None,
                 );
-                for (label, detail, args) in [
+                #[cfg_attr(target_os = "macos", allow(unused_mut))]
+                let mut actions = vec![
                     (
                         "Check for updates",
                         "Compare installed and available release versions",
@@ -142,11 +143,16 @@ impl Panel {
                         "Verify and install all components; running sessions continue",
                         vec!["update"],
                     ),
-                    (
-                        "Roll back update",
-                        "Restore the previous installed version",
-                        vec!["update", "--rollback"],
-                    ),
+                ];
+                // macOS replaces Prismattyc.app and deletes the old copy, so there
+                // is no previous installation to restore from this menu.
+                #[cfg(not(target_os = "macos"))]
+                actions.push((
+                    "Roll back update",
+                    "Restore the previous installed version",
+                    vec!["update", "--rollback"],
+                ));
+                actions.extend([
                     (
                         "Installed and running versions",
                         "See which components need a restart",
@@ -172,7 +178,8 @@ impl Panel {
                         "Restart only if no sessions exist",
                         vec!["restart", "--daemon"],
                     ),
-                ] {
+                ]);
+                for (label, detail, args) in actions {
                     self.row(
                         label,
                         detail,

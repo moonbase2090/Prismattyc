@@ -789,25 +789,15 @@ fn rollback(root: &Path) -> Result<String> {
 
 pub fn run(args: &[String]) -> Result<()> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("pmux update [--check] [--json] [--bin-dir PATH]\nprismattyc update [--check] [--json] [--bin-dir PATH]\npmux update --rollback\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together.\nOn macOS, download the universal app zip, verify SHA256SUMS-macos and the code signature, and replace Prismattyc.app. The previous app is kept beside it.\nprismattyc update is the same command as pmux update.\nUpdating never stops sessions. Quit Prismattyc and reopen it after a macOS update. Use pmux restart for Linux and Windows components.\n--source is an explicit development-only source build.");
+        println!("pmux update [--check] [--json] [--bin-dir PATH]\nprismattyc update [--check] [--json] [--bin-dir PATH]\npmux update --rollback\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together. --rollback restores that previous installation.\nOn macOS, download the universal app zip, verify SHA256SUMS-macos and the code signature, and replace Prismattyc.app. The old app is deleted after the new one is in place. --rollback is not supported; reinstall a version from its DMG on https://github.com/{REPOSITORY}/releases.\nprismattyc update is the same command as pmux update.\nUpdating never stops sessions. Quit Prismattyc and reopen it after a macOS update. Use pmux restart for Linux and Windows components.\n--source is an explicit development-only source build.");
         return Ok(());
     }
     let options = options(args)?;
     let root = root()?;
     let _lock = lock(&root)?;
     if options.rollback {
-        if macos_state_path(&root).is_file() {
-            let restored = rollback_macos_app(&root)?;
-            println!(
-                "{}",
-                serde_json::json!({
-                    "status": "rolled_back",
-                    "version": restored,
-                    "restart_required": true,
-                    "message": "Quit Prismattyc and reopen it from the Dock. Running sessions keep the previous version until you do."
-                })
-            );
-            return Ok(());
+        if std::env::consts::OS == "macos" {
+            bail!("{}", macos_rollback_error());
         }
         let restored = rollback(&root)?;
         println!(
@@ -989,25 +979,29 @@ fn install_binaries(
     Ok(())
 }
 
+fn macos_rollback_error() -> String {
+    format!(
+        "rollback is not supported on macOS. Prismattyc.app updates replace the installed app and do not keep a previous copy. \
+         Reinstall a specific version by downloading its DMG from https://github.com/{REPOSITORY}/releases, \
+         opening it, and replacing /Applications/Prismattyc.app. Quit Prismattyc and reopen it from the Dock."
+    )
+}
+
+#[cfg(target_os = "macos")]
 #[derive(Debug, Serialize, Deserialize)]
 struct MacosAppState {
     repository: String,
     version: String,
-    previous_version: Option<String>,
     target: String,
     app: PathBuf,
-    backup: Option<PathBuf>,
 }
 
+#[cfg(target_os = "macos")]
 fn macos_state_path(root: &Path) -> PathBuf {
     root.join("macos-app.json")
 }
 
-fn read_macos_state(root: &Path) -> Result<MacosAppState> {
-    serde_json::from_slice(&fs::read(macos_state_path(root))?)
-        .context("read macOS app update receipt")
-}
-
+#[cfg(target_os = "macos")]
 fn write_macos_state(root: &Path, state: &MacosAppState) -> Result<()> {
     let path = macos_state_path(root);
     let temporary = root.join(format!("macos-app.json.{}.tmp", std::process::id()));
@@ -1023,6 +1017,7 @@ fn write_macos_state(root: &Path, state: &MacosAppState) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn require_app_destination(path: &Path) -> Result<()> {
     ensure!(path.is_absolute(), "Prismattyc.app path must be absolute");
     ensure!(
@@ -1035,21 +1030,14 @@ fn require_app_destination(path: &Path) -> Result<()> {
 }
 
 #[cfg(any(test, target_os = "macos"))]
-fn app_backup_path(app: &Path) -> Result<PathBuf> {
-    let parent = app
-        .parent()
-        .context("Prismattyc.app has no parent directory")?;
-    Ok(parent.join("Prismattyc.app.previous"))
-}
-
 fn sync_parent(parent: &Path) -> Result<()> {
     File::open(parent)?.sync_all()?;
     Ok(())
 }
 
-/// Move `incoming` onto `destination` on the same volume. The previous app,
-/// when there was one, is left at `Prismattyc.app.previous` or at the displaced
-/// path when that name cannot be replaced.
+/// Move `incoming` onto `destination` on the same volume. When an app was
+/// already installed, it is left at the returned path until the caller deletes
+/// it. A failed swap puts that app back at `destination`.
 #[cfg(any(test, target_os = "macos"))]
 fn replace_app_bundle(destination: &Path, incoming: &Path) -> Result<Option<PathBuf>> {
     require_app_destination(destination)?;
@@ -1107,86 +1095,80 @@ fn replace_app_bundle(destination: &Path, incoming: &Path) -> Result<Option<Path
             destination.display()
         ));
     }
-    let backup = app_backup_path(destination)?;
-    let kept = match place_backup(&displaced, &backup) {
-        Ok(path) => path,
-        Err(_) => displaced,
-    };
     sync_parent(&parent)?;
-    Ok(Some(kept))
+    Ok(Some(displaced))
 }
 
+/// Put the displaced app back at `destination` after a failed install.
+/// The copy that was briefly installed is removed.
 #[cfg(any(test, target_os = "macos"))]
-fn place_backup(displaced: &Path, backup: &Path) -> Result<PathBuf> {
-    if backup.exists() {
-        fs::remove_dir_all(backup)?;
-    }
-    fs::rename(displaced, backup)?;
-    Ok(backup.to_path_buf())
-}
-
-fn exchange_app_bundle(app: &Path, backup: &Path) -> Result<()> {
-    require_app_destination(app)?;
-    ensure!(backup.is_absolute(), "backup path must be absolute");
+fn restore_displaced_app(destination: &Path, displaced: &Path) -> Result<()> {
+    require_app_destination(destination)?;
     ensure!(
-        backup.is_dir(),
-        "no previous Prismattyc.app to restore at {}",
-        backup.display()
+        displaced.is_dir(),
+        "displaced app is missing at {}",
+        displaced.display()
     );
-    ensure!(
-        app.is_dir(),
-        "installed Prismattyc.app is missing at {}",
-        app.display()
-    );
-    let parent = app.parent().context("app parent")?.to_path_buf();
-    let holding = parent.join(format!(".Prismattyc.app.holding-{}", std::process::id()));
+    let parent = destination
+        .parent()
+        .context("Prismattyc.app parent")?
+        .to_path_buf();
+    let holding = parent.join(format!(".Prismattyc.app.failed-{}", std::process::id()));
     if holding.exists() {
         fs::remove_dir_all(&holding)?;
     }
-    fs::rename(app, &holding).with_context(|| format!("could not move {}", app.display()))?;
-    if let Err(error) = fs::rename(backup, app) {
-        let restored = fs::rename(&holding, app);
-        if let Err(restore) = restored {
-            bail!(
-                "rollback failed ({error}) and restoring {} also failed ({restore}). The previous app is still at {}.",
-                app.display(),
-                holding.display()
-            );
+    if destination.exists() {
+        fs::rename(destination, &holding).with_context(|| {
+            format!(
+                "could not move the failed install aside at {}",
+                destination.display()
+            )
+        })?;
+    }
+    if let Err(error) = fs::rename(displaced, destination) {
+        if holding.exists() {
+            let restored = fs::rename(&holding, destination);
+            if let Err(restore) = restored {
+                bail!(
+                    "could not restore the previous app ({error}) and putting the new app back also failed ({restore}). The previous app is at {}.",
+                    displaced.display()
+                );
+            }
         }
         return Err(error).context(format!(
-            "rollback failed and the installed app was restored at {}",
-            app.display()
+            "could not move the previous app back to {}. It is still at {}",
+            destination.display(),
+            displaced.display()
         ));
     }
-    fs::rename(&holding, backup).with_context(|| {
-        format!(
-            "rolled back {} but could not keep the other copy. It is at {}.",
-            app.display(),
-            holding.display()
-        )
-    })?;
+    if holding.exists() {
+        fs::remove_dir_all(&holding).with_context(|| {
+            format!(
+                "the previous app is restored at {}, but the failed copy remains at {}",
+                destination.display(),
+                holding.display()
+            )
+        })?;
+    }
     sync_parent(&parent)?;
     Ok(())
 }
 
-fn rollback_macos_app(root: &Path) -> Result<String> {
-    let mut state = read_macos_state(root)?;
-    ensure!(
-        state.repository == REPOSITORY,
-        "refusing to roll back an app from {}",
-        state.repository
-    );
-    let previous = state.previous_version.clone().context(
-        "no previous Prismattyc.app to restore. This installation did not replace an existing app.",
-    )?;
-    let backup = state
-        .backup
-        .clone()
-        .context("no previous Prismattyc.app backup path is recorded")?;
-    exchange_app_bundle(&state.app, &backup)?;
-    state.previous_version = Some(std::mem::replace(&mut state.version, previous.clone()));
-    write_macos_state(root, &state)?;
-    Ok(previous)
+#[cfg(any(test, target_os = "macos"))]
+fn discard_replaced_app(path: &Path) -> Result<()> {
+    if path.exists() {
+        fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn leftover_app_notice(path: &Path, error: &dyn std::fmt::Display) -> String {
+    format!(
+        "The new Prismattyc.app is installed, but the old app is still at {}. It was left there because deleting it failed: {error}. Remove that directory yourself with `rm -rf '{}'.",
+        path.display(),
+        path.display()
+    )
 }
 
 struct MacosDownload<'a> {
@@ -1442,37 +1424,39 @@ fn install_macos_bundle_here(root: &Path, download: MacosDownload<'_>) -> Result
         incoming = Some(staged.clone());
         clear_quarantine(&staged);
         verify_macos_trust(&staged, tag, target)?;
-        let previous_version = if destination.join("Contents/MacOS/pmux").is_file() {
-            Some(
-                version_label(&destination.join("Contents/MacOS/pmux"))
-                    .ok()
-                    .and_then(|text| {
-                        text.split_whitespace()
-                            .find(|word| Version::parse(word).is_ok())
-                            .map(str::to_string)
-                    })
-                    .unwrap_or_else(|| "unknown".to_string()),
-            )
-        } else {
-            None
-        };
-        let backup = replace_app_bundle(&destination, &staged)?;
+        let displaced = replace_app_bundle(&destination, &staged)?;
         incoming = None;
+        if let Err(error) = verify_macos_trust(&destination, tag, target).and_then(|()| {
+            reported_release_version(&destination.join("Contents/MacOS/pmux"), version)
+        }) {
+            if let Some(path) = &displaced {
+                restore_displaced_app(&destination, path).with_context(|| error.to_string())?;
+            } else {
+                let _ = fs::remove_dir_all(&destination);
+            }
+            return Err(error);
+        }
         if let Err(error) = write_macos_state(
             root,
             &MacosAppState {
                 repository: REPOSITORY.into(),
                 version: version.to_string(),
-                previous_version,
                 target: MACOS_BUNDLE_TARGET.into(),
                 app: destination.clone(),
-                backup: backup.clone(),
             },
         ) {
-            if let Some(path) = &backup {
-                let _ = exchange_app_bundle(&destination, path);
+            if let Some(path) = &displaced {
+                restore_displaced_app(&destination, path).with_context(|| error.to_string())?;
+            } else {
+                let _ = fs::remove_dir_all(&destination);
             }
             return Err(error);
+        }
+        let mut leftover = None;
+        if let Some(path) = displaced {
+            if let Err(error) = discard_replaced_app(&path) {
+                leftover = Some(leftover_app_notice(&path, &error));
+            }
         }
         let running = app_process_running(&destination);
         let restart = if running {
@@ -1489,12 +1473,12 @@ fn install_macos_bundle_here(root: &Path, download: MacosDownload<'_>) -> Result
         } else {
             " This updated Prismattyc.app. A pmux or prismattyc binary outside that app stays on its current build; open the app to run the new one.".to_string()
         };
-        let backup_text = backup
+        let leftover_text = leftover
             .as_ref()
-            .map(|path| format!(" Previous app: {}.", path.display()))
-            .unwrap_or_else(|| " No previous app was replaced.".to_string());
+            .map(|text| format!(" {text}"))
+            .unwrap_or_default();
         let message = format!(
-            "Installed {version} from {REPOSITORY} at {}.{backup_text} {restart}{outside} Use pmux update --rollback or prismattyc update --rollback to restore the previous app.",
+            "Installed {version} from {REPOSITORY} at {}. {restart}{outside}{leftover_text}",
             destination.display()
         );
         if json {
@@ -1506,7 +1490,7 @@ fn install_macos_bundle_here(root: &Path, download: MacosDownload<'_>) -> Result
                     "repository": REPOSITORY,
                     "restart_required": true,
                     "app": destination,
-                    "backup": backup,
+                    "leftover_app": leftover,
                     "message": message,
                 })
             );
@@ -2281,39 +2265,30 @@ mod tests {
     }
 
     #[test]
-    fn app_swap_keeps_a_backup_and_rollback_restores_it() {
+    fn app_swap_restores_until_commit_then_discards_the_old_app() {
         let dir = temporary();
         let app = dir.join("Prismattyc.app");
         write_fake_app(&app, "old");
         let incoming = dir.join(".Prismattyc.app.incoming");
         write_fake_app(&incoming, "new");
-        let backup = replace_app_bundle(&app, &incoming).unwrap().unwrap();
+        let displaced = replace_app_bundle(&app, &incoming).unwrap().unwrap();
         assert_eq!(fs::read(app.join("Contents/MacOS/pmux")).unwrap(), b"new");
         assert_eq!(
-            fs::read(backup.join("Contents/MacOS/pmux")).unwrap(),
+            fs::read(displaced.join("Contents/MacOS/pmux")).unwrap(),
             b"old"
         );
-        assert_eq!(backup, dir.join("Prismattyc.app.previous"));
-        let root = dir.join("updates");
-        fs::create_dir_all(&root).unwrap();
-        write_macos_state(
-            &root,
-            &MacosAppState {
-                repository: REPOSITORY.into(),
-                version: "0.2.21".into(),
-                previous_version: Some("0.2.20".into()),
-                target: "universal-apple-darwin".into(),
-                app: app.clone(),
-                backup: Some(backup.clone()),
-            },
-        )
-        .unwrap();
-        assert_eq!(rollback_macos_app(&root).unwrap(), "0.2.20");
+        assert!(!dir.join("Prismattyc.app.previous").exists());
+        restore_displaced_app(&app, &displaced).unwrap();
         assert_eq!(fs::read(app.join("Contents/MacOS/pmux")).unwrap(), b"old");
-        assert_eq!(
-            fs::read(backup.join("Contents/MacOS/pmux")).unwrap(),
-            b"new"
-        );
+        assert!(!displaced.exists());
+        let again = dir.join(".Prismattyc.app.incoming-again");
+        write_fake_app(&again, "final");
+        let displaced = replace_app_bundle(&app, &again).unwrap().unwrap();
+        assert_eq!(fs::read(app.join("Contents/MacOS/pmux")).unwrap(), b"final");
+        discard_replaced_app(&displaced).unwrap();
+        assert!(!displaced.exists());
+        assert!(!dir.join("Prismattyc.app.previous").exists());
+        assert_eq!(fs::read(app.join("Contents/MacOS/pmux")).unwrap(), b"final");
         let fresh = dir.join("missing");
         fs::create_dir_all(&fresh).unwrap();
         let created = fresh.join("Prismattyc.app");
@@ -2326,5 +2301,34 @@ mod tests {
         );
         assert!(replace_app_bundle(&dir.join("not-the-app"), &created).is_err());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn macos_rollback_explains_reinstall_from_the_dmg() {
+        let error = macos_rollback_error();
+        assert!(
+            error.contains("rollback is not supported on macOS"),
+            "{error}"
+        );
+        assert!(
+            error.contains("https://github.com/moonbase2090/Prismattyc/releases"),
+            "{error}"
+        );
+        assert!(error.contains("DMG"), "{error}");
+        assert!(error.contains("/Applications/Prismattyc.app"), "{error}");
+    }
+
+    #[test]
+    fn leftover_old_app_notice_names_the_path_and_how_to_remove_it() {
+        let path = Path::new("/Applications/.Prismattyc.app.displaced-9");
+        let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied");
+        let notice = leftover_app_notice(path, &error);
+        assert!(notice.contains(path.to_str().unwrap()), "{notice}");
+        assert!(notice.contains("permission denied"), "{notice}");
+        assert!(notice.contains("rm -rf"), "{notice}");
+        assert!(
+            notice.contains("The new Prismattyc.app is installed"),
+            "{notice}"
+        );
     }
 }

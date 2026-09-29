@@ -171,9 +171,12 @@ old image stays in memory.
 
 A published build updates with `pmux update` or `prismattyc update`. The
 command downloads the universal zip, checks it against `SHA256SUMS-macos`,
-verifies the code signature, and replaces `Prismattyc.app`. The previous
-app stays at `Prismattyc.app.previous`. Quit and reopen the app. Mux
-sessions keep running. `pmux update --rollback` restores the previous app.
+verifies the code signature, and replaces `Prismattyc.app`. After the new
+app is in place, the old app is deleted. Rollback is not supported. To
+reinstall a specific version, download its DMG from the
+[releases page](https://github.com/moonbase2090/Prismattyc/releases)
+and replace `/Applications/Prismattyc.app`. Quit and reopen the app. Mux
+sessions keep running.
 
 Signing and notarization stay out of the first slice. This section is also
 the reference for when distribution starts.

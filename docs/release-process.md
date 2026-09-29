@@ -98,5 +98,5 @@ After publication, check the complete asset list and the combined checksums.
 On a disposable Linux installation, run `pmux update --check`, install the
 release, test a coordinated restart, and verify rollback. On macOS, run
 `pmux update --check`, install the release, quit Prismattyc, and reopen it
-from the Dock. Confirm the previous bundle is still at
-`Prismattyc.app.previous`.
+from the Dock. Confirm the old app was removed and
+`pmux update --rollback` reports that rollback is not supported.

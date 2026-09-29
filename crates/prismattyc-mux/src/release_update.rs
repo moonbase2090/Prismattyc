@@ -1284,7 +1284,7 @@ fn write_macos_state(root: &Path, state: &MacosAppState) -> Result<()> {
 
 /// Write `bytes` to `temporary`, fsync, then rename onto `path`. Split out of
 /// [`write_macos_state`] to keep each function within the CRAP budget.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn write_json_atomic(temporary: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = crate::platform::private_options()
         .write(true)
@@ -1435,35 +1435,57 @@ fn restore_displaced_app(destination: &Path, displaced: &Path) -> Result<()> {
         .context("Prismattyc.app parent")?
         .to_path_buf();
     let holding = parent.join(format!(".Prismattyc.app.failed-{}", std::process::id()));
+    move_failed_install_aside(destination, &holding)?;
+    swap_previous_app_back(displaced, destination, &holding)?;
+    remove_failed_copy(destination, &holding)?;
+    sync_restored_parent(destination, &parent)
+}
+
+/// Move a failed install at `destination` into `holding`, clearing any prior
+/// holding dir first. Split out of [`restore_displaced_app`] for CRAP budget.
+#[cfg(any(test, target_os = "macos"))]
+fn move_failed_install_aside(destination: &Path, holding: &Path) -> Result<()> {
     if holding.exists() {
-        fs::remove_dir_all(&holding)?;
+        fs::remove_dir_all(holding)?;
     }
     if destination.exists() {
-        fs::rename(destination, &holding).with_context(|| {
+        fs::rename(destination, holding).with_context(|| {
             format!(
                 "could not move the failed install aside at {}",
                 destination.display()
             )
         })?;
     }
-    if let Err(error) = fs::rename(displaced, destination) {
-        if holding.exists() {
-            let restored = fs::rename(&holding, destination);
-            if let Err(restore) = restored {
-                bail!(
-                    "could not restore the previous app ({error}) and putting the new app back also failed ({restore}). The previous app is at {}.",
-                    displaced.display()
-                );
-            }
-        }
-        return Err(error).context(format!(
-            "could not move the previous app back to {}. It is still at {}",
-            destination.display(),
-            displaced.display()
-        ));
-    }
+    Ok(())
+}
+
+/// Move the displaced previous app back to `destination`; on failure, put the
+/// failed install back from `holding` and report both errors.
+#[cfg(any(test, target_os = "macos"))]
+fn swap_previous_app_back(displaced: &Path, destination: &Path, holding: &Path) -> Result<()> {
+    let Err(error) = fs::rename(displaced, destination) else {
+        return Ok(());
+    };
     if holding.exists() {
-        fs::remove_dir_all(&holding).with_context(|| {
+        if let Err(restore) = fs::rename(holding, destination) {
+            bail!(
+                "could not restore the previous app ({error}) and putting the new app back also failed ({restore}). The previous app is at {}.",
+                displaced.display()
+            );
+        }
+    }
+    Err(error).context(format!(
+        "could not move the previous app back to {}. It is still at {}",
+        destination.display(),
+        displaced.display()
+    ))
+}
+
+/// Remove the held failed copy once the previous app is restored.
+#[cfg(any(test, target_os = "macos"))]
+fn remove_failed_copy(destination: &Path, holding: &Path) -> Result<()> {
+    if holding.exists() {
+        fs::remove_dir_all(holding).with_context(|| {
             format!(
                 "the previous app is restored at {}, but the failed copy remains at {}",
                 destination.display(),
@@ -1471,7 +1493,13 @@ fn restore_displaced_app(destination: &Path, displaced: &Path) -> Result<()> {
             )
         })?;
     }
-    if let Err(error) = sync_parent(&parent) {
+    Ok(())
+}
+
+/// fsync the parent after a restore, reporting a clear message on failure.
+#[cfg(any(test, target_os = "macos"))]
+fn sync_restored_parent(destination: &Path, parent: &Path) -> Result<()> {
+    if let Err(error) = sync_parent(parent) {
         bail!(
             "the previous app is restored at {}, but saving {} failed: {error}",
             destination.display(),
@@ -1593,7 +1621,7 @@ fn choose_macos_app(tag: &str, target: &str) -> Result<PathBuf> {
 
 /// Create the parent directory of `destination` when the app does not yet
 /// exist. Split out of [`choose_macos_app`] to keep its CRAP low.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn ensure_parent_dir(destination: &Path) -> Result<()> {
     if destination.exists() {
         return Ok(());
@@ -1741,7 +1769,7 @@ fn install_macos_bundle_here(root: &Path, download: MacosDownload<'_>) -> Result
 
 /// Remove the staging dir and any leftover incoming bundle after an install
 /// attempt. Split out of [`install_macos_bundle_here`] to keep its CRAP low.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn cleanup_macos_staging(staging: &Path, incoming: Option<&Path>) {
     if staging.exists() {
         let _ = fs::remove_dir_all(staging);
@@ -1757,7 +1785,7 @@ fn cleanup_macos_staging(staging: &Path, incoming: Option<&Path>) {
 /// success `incoming` is cleared; on an early failure it names the staged
 /// bundle so the caller can clean it up. Split out of
 /// [`install_macos_bundle_here`] so each function stays within the CRAP budget.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn install_macos_bundle_steps(
     root: &Path,
     staging: &Path,
@@ -1794,7 +1822,7 @@ fn install_macos_bundle_steps(
 /// Download the checksums, zip, and optional manifest into `staging`, confirm
 /// the zip digest, extract it, clear quarantine, and verify trust + version.
 /// Returns the extracted bundle path.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 fn download_and_extract_macos_zip(
     staging: &Path,
@@ -1813,7 +1841,7 @@ fn download_and_extract_macos_zip(
 
 /// Download the checksums, zip, and optional manifest into `staging`.
 /// Returns the downloaded zip path.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn download_macos_inputs(
     staging: &Path,
     zip: &Asset,
@@ -1832,7 +1860,7 @@ fn download_macos_inputs(
 
 /// Confirm the zip digest against the checksums and manifest, extract it,
 /// clear quarantine, and verify trust + version. Returns the extracted bundle.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 fn confirm_and_extract_macos_zip(
     staging: &Path,
@@ -1853,7 +1881,7 @@ fn confirm_and_extract_macos_zip(
 
 /// Confirm the downloaded zip's digest against the checksums file and, when
 /// present, the manifest. Split out to keep each function's CRAP low.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn confirm_downloaded_macos_zip(
     staging: &Path,
     zip: &Asset,
@@ -1869,7 +1897,7 @@ fn confirm_downloaded_macos_zip(
 }
 
 /// Verify code signature and reported version of an extracted bundle.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn verify_extracted_bundle(
     extracted: &Path,
     version: &Version,
@@ -1881,7 +1909,7 @@ fn verify_extracted_bundle(
 }
 
 /// Read the manifest bytes previously downloaded into `staging`, if any.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn read_macos_manifest_bytes(staging: &Path, manifest: Option<&Asset>) -> Result<Option<Vec<u8>>> {
     match manifest {
         Some(_) => Ok(Some(fs::read(staging.join(MACOS_MANIFEST_NAME))?)),
@@ -1890,7 +1918,7 @@ fn read_macos_manifest_bytes(staging: &Path, manifest: Option<&Asset>) -> Result
 }
 
 /// Download the optional manifest asset into `staging` when present.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn download_macos_manifest(
     staging: &Path,
     manifest: Option<&Asset>,
@@ -1906,7 +1934,7 @@ fn download_macos_manifest(
 /// Copy the extracted bundle into a sibling `.Prismattyc.app.incoming-<pid>`
 /// of `destination`, then clear quarantine and verify trust. Returns the
 /// staged path ready for the atomic swap.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn stage_macos_bundle(
     destination: &Path,
     extracted: &Path,
@@ -1926,7 +1954,7 @@ fn stage_macos_bundle(
 }
 
 /// Copy `extracted` to `staged` with `ditto`, replacing any prior staged copy.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn ditto_copy(extracted: &Path, staged: &Path) -> Result<()> {
     if staged.exists() {
         fs::remove_dir_all(staged)?;
@@ -1947,7 +1975,7 @@ fn ditto_copy(extracted: &Path, staged: &Path) -> Result<()> {
 /// restore the displaced app (or remove the destination) and return the error,
 /// attaching any directory-sync warning. On success, discard the displaced app
 /// and return an optional "leftover" notice when discarding failed.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn verify_and_record_swap(
     root: &Path,
     destination: &Path,
@@ -1976,7 +2004,7 @@ fn verify_and_record_swap(
 
 /// If `outcome` failed, restore the displaced app (or remove the destination)
 /// and propagate the error with any sync warning attached.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn recover_or_fail(destination: &Path, swap: &ReplacedApp, outcome: Result<()>) -> Result<()> {
     let Err(error) = outcome else {
         return Ok(());
@@ -1993,7 +2021,7 @@ fn recover_or_fail(destination: &Path, swap: &ReplacedApp, outcome: Result<()>) 
 }
 
 /// Discard the displaced old app; returns a leftover notice if that failed.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn discard_displaced(displaced: Option<&Path>) -> Option<String> {
     let path = displaced?;
     match discard_replaced_app(path) {
@@ -2003,7 +2031,7 @@ fn discard_displaced(displaced: Option<&Path>) -> Option<String> {
 }
 
 /// Print the macOS install report in JSON or human form.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn print_macos_install_report(
     destination: &Path,
     version: &Version,
@@ -2033,7 +2061,7 @@ fn print_macos_install_report(
 
 /// Build the human-readable install message, including restart guidance and
 /// any outside-binary, leftover, and sync notes.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn macos_install_message(
     destination: &Path,
     version: &Version,
@@ -2061,7 +2089,7 @@ fn macos_install_message(
 }
 
 /// True when the current executable lives inside `destination`.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn running_inside_bundle(destination: &Path) -> bool {
     std::env::current_exe()
         .ok()

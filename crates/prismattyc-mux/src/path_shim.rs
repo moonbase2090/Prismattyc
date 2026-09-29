@@ -444,6 +444,7 @@ fn is_app_pmux(path: &Path) -> bool {
             .is_some_and(|name| name == "Prismattyc.app")
 }
 
+#[cfg(target_os = "macos")]
 fn dir_is_writable(path: &Path) -> bool {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;

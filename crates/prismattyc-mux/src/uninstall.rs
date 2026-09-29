@@ -21,11 +21,16 @@
 //! Path safety: only paths in the computed inventory are ever removed. Every
 //! absolute path in the inventory comes from an injected [`Dirs`] field, so
 //! tests build `Dirs` from a tempdir root and can never target a real machine
-//! path such as `/Applications`. There is no globbing outside the product's
-//! own directories, and symlinks are removed as links — the target is never
-//! followed or deleted. A runtime directory that still hosts a live pmux
-//! daemon is refused (never deleted), so uninstall can never yank a live
-//! socket out from under a running daemon.
+//! path such as `/Applications`. Host-global paths (`/Applications`,
+//! `/tmp/prismattyc-<uid>`) are included only when the user directories are
+//! NOT redirected (see [`EnvSnapshot::is_redirected`]): an invocation with a
+//! sandboxed HOME/XDG can never target the real system app or the shared
+//! `/tmp` runtime dir, and `stop_daemons` scans only the resolved runtime
+//! dirs. There is no globbing outside the product's own directories, and
+//! symlinks are removed as links — the target is never followed or deleted. A
+//! runtime directory that still hosts a live pmux daemon is refused (never
+//! deleted), so uninstall can never yank a live socket out from under a
+//! running daemon.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -142,33 +147,70 @@ pub struct Dirs {
 
 impl Dirs {
     /// Resolve from the real environment, using the same helpers as the
-    /// installer and self-updater. This is the ONLY place real machine paths
-    /// (`/Applications`, `/tmp/prismattyc-<uid>`) are introduced; they are
-    /// stored as fields so [`inventory`] stays a pure function of `Dirs`.
+    /// installer and self-updater. Delegates to the pure [`Dirs::resolve`] so
+    /// the redirection logic can be tested without mutating process env.
+    ///
+    /// Host-global paths (`/Applications`, `/tmp/prismattyc-<uid>`) are the
+    /// only real machine paths introduced here, and only when the user
+    /// directories are NOT redirected — see [`EnvSnapshot::is_redirected`].
     #[must_use]
     pub fn from_env() -> Self {
-        let home = crate::platform::home_dir().map(PathBuf::from);
-        let config_home = crate::platform::config_home()
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
+        Self::resolve(&EnvSnapshot::from_env())
+    }
+
+    /// Pure resolver: build [`Dirs`] from an explicit environment snapshot.
+    /// When the user directories are redirected (a sandboxed / non-default
+    /// HOME or XDG), host-global paths are omitted so an invocation with fake
+    /// user directories can never target the real system app or the shared
+    /// `/tmp` runtime dir.
+    #[must_use]
+    pub fn resolve(env: &EnvSnapshot) -> Self {
+        let home = env.home.clone();
+        let config_home = env
+            .xdg_config_home
+            .clone()
+            .filter(|v| !v.as_os_str().is_empty())
+            .or_else(|| {
+                if cfg!(windows) {
+                    env.appdata.clone()
+                } else {
+                    None
+                }
+            })
             .or_else(|| home.as_ref().map(|h| h.join(".config")));
-        let data_home = crate::platform::data_home()
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
+        let data_home = env
+            .xdg_data_home
+            .clone()
+            .filter(|v| !v.as_os_str().is_empty())
+            .or_else(|| {
+                if cfg!(windows) {
+                    env.localappdata.clone()
+                } else {
+                    None
+                }
+            })
             .or_else(|| home.as_ref().map(|h| h.join(".local/share")));
 
+        let redirected = env.is_redirected();
+
         let mut runtime_dirs = Vec::new();
-        if let Some(rt) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
-            runtime_dirs.push(PathBuf::from(rt).join("prismattyc"));
-        }
-        #[cfg(unix)]
+        if let Some(rt) = env
+            .xdg_runtime_dir
+            .clone()
+            .filter(|v| !v.as_os_str().is_empty())
         {
-            let uid = rustix::process::geteuid().as_raw();
-            runtime_dirs.push(PathBuf::from(format!("/tmp/prismattyc-{uid}")));
+            runtime_dirs.push(rt.join("prismattyc"));
+        }
+        // The shared /tmp/prismattyc-<uid> dir is host-global: include it only
+        // when the user directories are at their real defaults.
+        if env.os == Os::Linux || env.os == Os::Macos {
+            if let (false, Some(uid)) = (redirected, env.uid) {
+                runtime_dirs.push(PathBuf::from(format!("/tmp/prismattyc-{uid}")));
+            }
         }
 
-        let windows_run = if cfg!(windows) {
-            crate::platform::data_home().map(|d| PathBuf::from(d).join("Prismattyc").join("run"))
+        let windows_run = if env.os == Os::Windows {
+            data_home.as_ref().map(|d| d.join("Prismattyc").join("run"))
         } else {
             None
         };
@@ -178,11 +220,13 @@ impl Dirs {
             bin_dirs.push(h.join(".local/bin"));
             bin_dirs.push(h.join(".cargo/bin"));
         }
-        if let Some(cargo_home) = std::env::var_os("CARGO_HOME").filter(|v| !v.is_empty()) {
-            bin_dirs.push(PathBuf::from(cargo_home).join("bin"));
+        if let Some(cargo_home) = env.cargo_home.clone().filter(|v| !v.as_os_str().is_empty()) {
+            bin_dirs.push(cargo_home.join("bin"));
         }
 
-        let system_app_dir = if cfg!(target_os = "macos") {
+        // /Applications is host-global: include it only on a non-redirected
+        // macOS invocation.
+        let system_app_dir = if env.os == Os::Macos && !redirected {
             Some(PathBuf::from("/Applications"))
         } else {
             None
@@ -196,8 +240,113 @@ impl Dirs {
             windows_run,
             bin_dirs,
             system_app_dir,
+            os: env.os,
+        }
+    }
+}
+
+/// An explicit snapshot of the environment inputs the resolver reads. Captured
+/// once from the process (see [`EnvSnapshot::from_env`]) so [`Dirs::resolve`]
+/// stays a pure function that tests can drive with redirected values without
+/// mutating global process state.
+#[derive(Debug, Clone)]
+pub struct EnvSnapshot {
+    pub home: Option<PathBuf>,
+    pub xdg_config_home: Option<PathBuf>,
+    pub xdg_data_home: Option<PathBuf>,
+    pub xdg_runtime_dir: Option<PathBuf>,
+    pub cargo_home: Option<PathBuf>,
+    /// Windows base dirs (unused on unix; mirrors `platform::config/data_home`).
+    pub appdata: Option<PathBuf>,
+    pub localappdata: Option<PathBuf>,
+    /// The OS's notion of the real user home, used to detect a redirected
+    /// `HOME`. `None` when it cannot be determined.
+    pub real_home: Option<PathBuf>,
+    pub uid: Option<u32>,
+    pub os: Os,
+}
+
+impl EnvSnapshot {
+    /// Capture from the real process environment.
+    #[must_use]
+    pub fn from_env() -> Self {
+        fn nonempty(key: &str) -> Option<PathBuf> {
+            std::env::var_os(key)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        }
+        let home = crate::platform::home_dir().map(PathBuf::from);
+
+        #[cfg(unix)]
+        let (real_home, uid) = {
+            let uid = rustix::process::geteuid().as_raw();
+            (real_home_for_uid(uid), Some(uid))
+        };
+        #[cfg(not(unix))]
+        let (real_home, uid) = (home.clone(), None);
+
+        Self {
+            home,
+            xdg_config_home: nonempty("XDG_CONFIG_HOME"),
+            xdg_data_home: nonempty("XDG_DATA_HOME"),
+            xdg_runtime_dir: nonempty("XDG_RUNTIME_DIR"),
+            cargo_home: nonempty("CARGO_HOME"),
+            appdata: nonempty("APPDATA"),
+            localappdata: nonempty("LOCALAPPDATA"),
+            real_home,
+            uid,
             os: Os::current(),
         }
+    }
+
+    /// True when the user directories are redirected away from their defaults,
+    /// e.g. a sandbox that sets `HOME`, `XDG_DATA_HOME`, `XDG_RUNTIME_DIR`, or
+    /// `CARGO_HOME` under a temp dir. In that case host-global paths
+    /// (`/Applications`, `/tmp/prismattyc-<uid>`) are omitted: the caller has
+    /// signalled it is not operating on the real user account.
+    #[must_use]
+    pub fn is_redirected(&self) -> bool {
+        // Any explicit XDG override or CARGO_HOME is a redirection signal.
+        if self.xdg_config_home.is_some()
+            || self.xdg_data_home.is_some()
+            || self.xdg_runtime_dir.is_some()
+            || self.cargo_home.is_some()
+        {
+            return true;
+        }
+        // A HOME that differs from the OS's real home for this uid is a
+        // redirection too (the reviewer's repro set HOME under /tmp).
+        match (&self.home, &self.real_home) {
+            (Some(home), Some(real)) => home != real,
+            // Unknown real home: be conservative and treat a set HOME as safe
+            // only when we could not determine the real one is different.
+            _ => false,
+        }
+    }
+}
+
+/// The OS's real home directory for `uid`, independent of `$HOME`, so a
+/// redirected `HOME` can be detected. Uses the passwd database on unix.
+#[cfg(unix)]
+fn real_home_for_uid(uid: u32) -> Option<PathBuf> {
+    // Safety: getpwuid returns a pointer into a static buffer; we copy the
+    // dir string immediately and never retain the pointer.
+    unsafe {
+        let pw = libc::getpwuid(uid as libc::uid_t);
+        if pw.is_null() {
+            return None;
+        }
+        let dir = (*pw).pw_dir;
+        if dir.is_null() {
+            return None;
+        }
+        let cstr = std::ffi::CStr::from_ptr(dir);
+        let bytes = cstr.to_bytes();
+        if bytes.is_empty() {
+            return None;
+        }
+        use std::os::unix::ffi::OsStrExt;
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
     }
 }
 
@@ -646,16 +795,22 @@ fn live_socket_under(dir: &Path) -> Option<PathBuf> {
 }
 
 /// Best-effort clean shutdown of any live daemon whose socket lives in a
-/// known runtime dir. Never fails the uninstall: a daemon that will not stop
-/// shows up later as a leftover socket file.
+/// resolved runtime dir. Never fails the uninstall: a daemon that will not
+/// stop shows up later as a leftover socket file. Only the resolved
+/// `dirs.runtime_dirs` are scanned, so a redirected (sandboxed) invocation
+/// cannot reach the real daemon.
 fn stop_daemons(dirs: &Dirs) {
     #[cfg(unix)]
     {
-        let mut dirs_to_scan: Vec<PathBuf> = dirs.runtime_dirs.clone();
-        // Also scan the parent of the XDG runtime dir, matching
-        // live_pmux_sockets_in's `dir` + `dir/prismattyc` behaviour.
-        if let Some(rt) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
-            dirs_to_scan.push(PathBuf::from(rt));
+        let mut dirs_to_scan: BTreeSet<PathBuf> = BTreeSet::new();
+        for rt in &dirs.runtime_dirs {
+            dirs_to_scan.insert(rt.clone());
+            // live_pmux_sockets_in scans `dir` and `dir/prismattyc`; adding the
+            // parent recovers the `$XDG_RUNTIME_DIR` level for a `…/prismattyc`
+            // runtime dir, without reading outside the resolved set.
+            if let Some(parent) = rt.parent() {
+                dirs_to_scan.insert(parent.to_path_buf());
+            }
         }
         for dir in dirs_to_scan {
             for socket in crate::live_pmux_sockets_in(&dir) {
@@ -669,9 +824,7 @@ fn stop_daemons(dirs: &Dirs) {
 
 #[cfg(unix)]
 fn shutdown_socket(socket: &Path) -> Result<()> {
-    use crate::PROTOCOL_VERSION;
-    use crate::{ControlRequest, ControlResponse, ControlResponseBody, ControlResponseData};
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::BufReader;
     use std::time::Duration;
 
     let stream = crate::local_socket::UnixStream::connect(socket)?;
@@ -679,13 +832,29 @@ fn shutdown_socket(socket: &Path) -> Result<()> {
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
+    shutdown_exchange(&mut reader, &mut writer)
+}
 
-    // JSON-line framing, matching the pmux control client.
+/// The pmux shutdown protocol exchange over any reader/writer pair, factored
+/// out so it can be tested with in-memory buffers (no real socket).
+///
+/// Writes `RegisterClient`, reads the `ClientRegistered` reply, then writes
+/// `ShutdownServer`. JSON-line framing, matching the pmux control client. Best
+/// effort: a closed connection or a non-registration reply is not an error,
+/// since a daemon that is already stopping may drop the connection.
+fn shutdown_exchange<R, W>(reader: &mut R, writer: &mut W) -> Result<()>
+where
+    R: std::io::BufRead,
+    W: std::io::Write,
+{
+    use crate::PROTOCOL_VERSION;
+    use crate::{ControlRequest, ControlResponse, ControlResponseBody, ControlResponseData};
+
     let register = ControlRequest::RegisterClient {
         version: PROTOCOL_VERSION,
         request_id: 1,
     };
-    serde_json::to_writer(&mut writer, &register)?;
+    serde_json::to_writer(&mut *writer, &register)?;
     writer.write_all(b"\n")?;
     writer.flush()?;
 
@@ -706,11 +875,9 @@ fn shutdown_socket(socket: &Path) -> Result<()> {
         request_id: 2,
         client_id,
     };
-    serde_json::to_writer(&mut writer, &shutdown)?;
+    serde_json::to_writer(&mut *writer, &shutdown)?;
     writer.write_all(b"\n")?;
     writer.flush()?;
-    // Best effort: we don't wait on the reply — a stopped daemon may close
-    // the connection before answering.
     Ok(())
 }
 
@@ -1057,31 +1224,202 @@ mod tests {
         }
     }
 
+    /// A redirected (sandboxed) env snapshot: HOME under a tempdir, distinct
+    /// from `real_home`, with explicit XDG + CARGO_HOME overrides.
+    fn redirected_snapshot(root: &Path, os: Os) -> EnvSnapshot {
+        EnvSnapshot {
+            home: Some(root.join("home")),
+            xdg_config_home: Some(root.join("config")),
+            xdg_data_home: Some(root.join("data")),
+            xdg_runtime_dir: Some(root.join("run")),
+            cargo_home: Some(root.join("cargo")),
+            appdata: Some(root.join("appdata")),
+            localappdata: Some(root.join("localappdata")),
+            real_home: Some(PathBuf::from("/Users/real-user")),
+            uid: Some(501),
+            os,
+        }
+    }
+
+    /// A non-redirected env snapshot: HOME equals `real_home`, no XDG or
+    /// CARGO_HOME overrides — a real user account.
+    fn default_snapshot(os: Os) -> EnvSnapshot {
+        let real = PathBuf::from("/Users/real-user");
+        EnvSnapshot {
+            home: Some(real.clone()),
+            xdg_config_home: None,
+            xdg_data_home: None,
+            xdg_runtime_dir: None,
+            cargo_home: None,
+            appdata: None,
+            localappdata: None,
+            real_home: Some(real),
+            uid: Some(501),
+            os,
+        }
+    }
+
     #[test]
-    fn from_env_respects_overridden_home_for_bundle() {
-        // Prove the production resolver keys the user app bundle off $HOME.
-        let tmp = Scratch::new("fromenv");
-        let fake_home = tmp.path().join("home");
-        std::fs::create_dir_all(&fake_home).unwrap();
+    fn production_resolver_redirected_env_omits_host_global_paths() {
+        // The Codex CHANGES fix: through the PRODUCTION resolver, a redirected
+        // env must never yield /Applications or /tmp/prismattyc-<uid>. This is
+        // the assertion that runs before any mutating operation.
+        let tmp = Scratch::new("prodredir");
+        for os in [Os::Macos, Os::Linux] {
+            let env = redirected_snapshot(tmp.path(), os);
+            assert!(env.is_redirected(), "sandbox env must read as redirected");
+            let dirs = Dirs::resolve(&env);
 
-        let prior = std::env::var_os("HOME");
-        std::env::set_var("HOME", &fake_home);
-        let dirs = Dirs::from_env();
-        match prior {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-
-        let user_bundle = inventory(&dirs)
-            .into_iter()
-            .find(|i| i.what.contains("user Applications"));
-        if let Some(item) = user_bundle {
+            // No host-global system app dir on a redirected invocation.
             assert!(
-                item.path.starts_with(&fake_home),
-                "user bundle must follow overridden HOME: {}",
-                item.path.display()
+                dirs.system_app_dir.is_none(),
+                "redirected env must not set system_app_dir (os {os:?})"
             );
+
+            for item in inventory(&dirs) {
+                assert!(
+                    !item.path.starts_with("/Applications"),
+                    "redirected resolver leaked /Applications: {} (os {os:?})",
+                    item.path.display()
+                );
+                assert!(
+                    !item.path.starts_with("/tmp/prismattyc-"),
+                    "redirected resolver leaked /tmp runtime dir: {} (os {os:?})",
+                    item.path.display()
+                );
+                // Every remaining path stays under the sandbox root.
+                assert!(
+                    item.path.starts_with(tmp.path()),
+                    "redirected resolver path escaped the sandbox: {} (os {os:?})",
+                    item.path.display()
+                );
+            }
         }
+    }
+
+    #[test]
+    fn production_resolver_default_env_includes_host_global_paths() {
+        // The complement: on a real (non-redirected) account, host-global
+        // paths ARE part of the plan, so a normal uninstall still cleans them.
+        let env = default_snapshot(Os::Macos);
+        assert!(
+            !env.is_redirected(),
+            "default env must not read as redirected"
+        );
+        let dirs = Dirs::resolve(&env);
+
+        assert_eq!(
+            dirs.system_app_dir.as_deref(),
+            Some(Path::new("/Applications")),
+            "default macOS invocation includes /Applications"
+        );
+        let paths: Vec<PathBuf> = inventory(&dirs).into_iter().map(|i| i.path).collect();
+        assert!(
+            paths
+                .iter()
+                .any(|p| p == Path::new("/Applications/Prismattyc.app")),
+            "default invocation lists the system app bundle"
+        );
+        assert!(
+            paths.iter().any(|p| p == Path::new("/tmp/prismattyc-501")),
+            "default invocation lists the shared /tmp runtime dir"
+        );
+    }
+
+    #[test]
+    fn redirection_signals() {
+        // A bare set HOME equal to real_home with no XDG overrides is NOT
+        // redirected; any explicit override flips it.
+        let real = PathBuf::from("/Users/real-user");
+        let base = EnvSnapshot {
+            home: Some(real.clone()),
+            xdg_config_home: None,
+            xdg_data_home: None,
+            xdg_runtime_dir: None,
+            cargo_home: None,
+            appdata: None,
+            localappdata: None,
+            real_home: Some(real.clone()),
+            uid: Some(501),
+            os: Os::Macos,
+        };
+        assert!(!base.is_redirected());
+
+        let mut with_home = base.clone();
+        with_home.home = Some(PathBuf::from("/tmp/sandbox/home"));
+        assert!(
+            with_home.is_redirected(),
+            "a HOME != real_home is redirected"
+        );
+
+        let mut with_data = base.clone();
+        with_data.xdg_data_home = Some(PathBuf::from("/tmp/sandbox/data"));
+        assert!(
+            with_data.is_redirected(),
+            "XDG_DATA_HOME override is redirected"
+        );
+
+        let mut with_rt = base.clone();
+        with_rt.xdg_runtime_dir = Some(PathBuf::from("/tmp/sandbox/run"));
+        assert!(
+            with_rt.is_redirected(),
+            "XDG_RUNTIME_DIR override is redirected"
+        );
+
+        let mut with_cargo = base;
+        with_cargo.cargo_home = Some(PathBuf::from("/tmp/sandbox/cargo"));
+        assert!(
+            with_cargo.is_redirected(),
+            "CARGO_HOME override is redirected"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_exchange_registers_then_requests_shutdown() {
+        use crate::{ControlResponse, ControlResponseBody, ControlResponseData, PROTOCOL_VERSION};
+
+        // The daemon's reply: a ClientRegistered with a known client_id.
+        let reply = ControlResponse {
+            version: PROTOCOL_VERSION,
+            request_id: 1,
+            body: ControlResponseBody::Ok {
+                response: ControlResponseData::ClientRegistered { client_id: 42 },
+            },
+        };
+        let mut reply_line = serde_json::to_string(&reply).unwrap();
+        reply_line.push('\n');
+
+        let mut reader = std::io::Cursor::new(reply_line.into_bytes());
+        let mut writer: Vec<u8> = Vec::new();
+        shutdown_exchange(&mut reader, &mut writer).unwrap();
+
+        // Two JSON lines were written: RegisterClient, then ShutdownServer
+        // carrying the client_id from the reply.
+        let written = String::from_utf8(writer).unwrap();
+        let lines: Vec<&str> = written.lines().collect();
+        assert_eq!(lines.len(), 2, "wrote register + shutdown: {written}");
+        assert!(lines[0].contains("register_client"), "first: {}", lines[0]);
+        assert!(lines[1].contains("shutdown_server"), "second: {}", lines[1]);
+        assert!(
+            lines[1].contains("\"client_id\":42"),
+            "shutdown uses the registered client_id: {}",
+            lines[1]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_exchange_tolerates_closed_connection() {
+        // A daemon already stopping may close before replying: not an error,
+        // and no shutdown request is sent without a client_id.
+        let mut reader = std::io::Cursor::new(Vec::new()); // EOF immediately
+        let mut writer: Vec<u8> = Vec::new();
+        shutdown_exchange(&mut reader, &mut writer).unwrap();
+        let written = String::from_utf8(writer).unwrap();
+        // Only the register line was written.
+        assert_eq!(written.lines().count(), 1, "only register: {written}");
+        assert!(written.contains("register_client"));
     }
 
     #[test]

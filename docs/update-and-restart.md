@@ -139,9 +139,13 @@ Behavior:
 
 Path safety: only paths in the computed inventory are removed. There is no
 globbing outside Prismattyc's own directories, and symlinks are removed as
-links — the target a symlink points at is never followed or deleted. Empty
-`prismattyc/` parent directories inside a shared config or data home may
-remain; they hold nothing and are safe to leave or remove by hand.
+links — the target a symlink points at is never followed or deleted. Host-global
+paths (`/Applications`, the shared `/tmp/prismattyc-<uid>` runtime dir) are
+included only when your user directories are at their real defaults; an
+invocation with a redirected (sandboxed) `HOME`/XDG never targets the real
+system app or the shared runtime dir. Empty `prismattyc/` parent directories
+inside a shared config or data home may remain; they hold nothing and are safe
+to leave or remove by hand.
 
 ### What is removed (inventory)
 

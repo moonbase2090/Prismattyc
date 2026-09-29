@@ -65,6 +65,8 @@ USAGE:
     available (macOS + Linux); a missing help2man is skipped with a hint.
 
     If `prismattyc` is not on PATH, run `pmux update` instead.
+    Without --source, pmux update and prismattyc update install the published
+    release. On macOS that replaces Prismattyc.app.
 
 Finds the checkout by walking from cwd (or $PRISMATTYC_REPO). Refuses a dirty
 tree. Checks out main and fast-forwards. Does not restart a running mux.
@@ -159,14 +161,7 @@ pub fn run_update(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<()>
         args.remove(index);
         return run_source_update(args);
     }
-    #[cfg(unix)]
-    {
-        crate::release_update::run(&args)
-    }
-    #[cfg(not(unix))]
-    {
-        bail!("Release installation is not supported on this platform")
-    }
+    crate::release_update::run(&args)
 }
 
 /// Pull `main` and install the selected packages. Does not restart mux.

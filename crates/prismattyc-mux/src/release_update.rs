@@ -101,6 +101,126 @@ pub fn asset_name(tag: &str, target: &str, binary: &str) -> String {
     format!("prismattyc-{tag}-{target}-{binary}{suffix}")
 }
 
+const MACOS_CHECKSUMS_NAME: &str = "SHA256SUMS-macos";
+const MACOS_MANIFEST_NAME: &str = "manifest-macos-universal.json";
+#[cfg(any(test, target_os = "macos"))]
+const MACOS_BUNDLE_TARGET: &str = "universal-apple-darwin";
+
+fn macos_zip_name(tag: &str) -> String {
+    format!("Prismattyc-{tag}-macos-universal.zip")
+}
+
+fn macos_dmg_name(tag: &str) -> String {
+    format!("Prismattyc-{tag}-macos-universal.dmg")
+}
+
+fn macos_target(target: &str) -> bool {
+    target.ends_with("-apple-darwin")
+}
+
+fn platform_label(target: &str) -> &'static str {
+    if macos_target(target) {
+        "macos"
+    } else if target.contains("windows") {
+        "windows"
+    } else if target.contains("linux") {
+        "linux"
+    } else {
+        "this platform"
+    }
+}
+
+/// Where to install when `pmux` or `prismattyc` is not already inside an app.
+/// An executable inside `Prismattyc.app` wins, then an existing system app,
+/// then an existing user app, then `/Applications/Prismattyc.app`.
+#[cfg(any(test, target_os = "macos"))]
+fn preferred_macos_app(
+    current_exe: Option<&Path>,
+    home: Option<&Path>,
+    system_exists: bool,
+    user_exists: bool,
+) -> PathBuf {
+    if let Some(exe) = current_exe {
+        if let Some(bundle) = app_bundle_from_executable(exe) {
+            if bundle
+                .file_name()
+                .is_some_and(|name| name == "Prismattyc.app")
+            {
+                return bundle;
+            }
+        }
+    }
+    if system_exists {
+        return PathBuf::from("/Applications/Prismattyc.app");
+    }
+    if user_exists {
+        if let Some(home) = home {
+            return home.join("Applications/Prismattyc.app");
+        }
+    }
+    PathBuf::from("/Applications/Prismattyc.app")
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn app_bundle_from_executable(exe: &Path) -> Option<PathBuf> {
+    let macos = exe.parent()?;
+    if macos.file_name()? != "MacOS" {
+        return None;
+    }
+    let contents = macos.parent()?;
+    if contents.file_name()? != "Contents" {
+        return None;
+    }
+    let app = contents.parent()?;
+    if app.extension()? != "app" {
+        return None;
+    }
+    Some(app.to_path_buf())
+}
+
+fn manual_update_instructions(tag: &str, target: &str) -> String {
+    if macos_target(target) {
+        let dmg = macos_dmg_name(tag);
+        let zip = macos_zip_name(tag);
+        format!(
+            "Update manually: download https://github.com/{REPOSITORY}/releases/download/{tag}/{dmg} \
+             (or the zip https://github.com/{REPOSITORY}/releases/download/{tag}/{zip}), \
+             open it, and replace /Applications/Prismattyc.app. Quit Prismattyc and reopen it from the Dock."
+        )
+    } else {
+        format!(
+            "Update manually: download the {target} assets from \
+             https://github.com/{REPOSITORY}/releases/tag/{tag} \
+             and replace the installed binaries. See docs/update-and-restart.md."
+        )
+    }
+}
+
+fn asset_match_error(release: &Release, target: &str, expected: &str, found: usize) -> String {
+    let names = release
+        .assets
+        .iter()
+        .map(|asset| asset.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let names = if names.is_empty() {
+        "(none)".to_string()
+    } else {
+        names
+    };
+    let why = if found == 0 {
+        format!("Nothing in this release is named {expected}.")
+    } else {
+        format!("{found} assets are named {expected}.")
+    };
+    format!(
+        "release {} on {} target {target} needs exactly one {expected} asset, found {found}. {why} Candidate assets: {names}. {}",
+        release.tag_name,
+        platform_label(target),
+        manual_update_instructions(&release.tag_name, target)
+    )
+}
+
 fn release_version(release: &Release) -> Result<Version> {
     let raw = release
         .tag_name
@@ -122,13 +242,36 @@ fn release_version(release: &Release) -> Result<Version> {
     Ok(version)
 }
 
+#[derive(Debug)]
+enum UpdatePlan<'a> {
+    Binaries(Vec<&'a Asset>),
+    MacosBundle {
+        zip: &'a Asset,
+        checksums: &'a Asset,
+        manifest: Option<&'a Asset>,
+    },
+}
+
 fn select_asset<'a>(release: &'a Release, target: &str, binary: &str) -> Result<&'a Asset> {
-    let name = asset_name(&release.tag_name, target, binary);
-    let matching: Vec<_> = release.assets.iter().filter(|a| a.name == name).collect();
-    ensure!(
-        matching.len() == 1,
-        "release needs exactly one {name} asset"
-    );
+    select_named(
+        release,
+        target,
+        &asset_name(&release.tag_name, target, binary),
+    )
+}
+
+fn select_named<'a>(release: &'a Release, target: &str, name: &str) -> Result<&'a Asset> {
+    let matching: Vec<_> = release
+        .assets
+        .iter()
+        .filter(|asset| asset.name == name)
+        .collect();
+    if matching.len() != 1 {
+        bail!(
+            "{}",
+            asset_match_error(release, target, name, matching.len())
+        );
+    }
     let asset = matching[0];
     ensure!(
         asset.size > 0 && asset.size <= MAX_ASSET,
@@ -137,10 +280,10 @@ fn select_asset<'a>(release: &'a Release, target: &str, binary: &str) -> Result<
     let digest = asset
         .digest
         .as_deref()
-        .and_then(|d| d.strip_prefix("sha256:"))
-        .context("release asset has no SHA-256 digest")?;
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .with_context(|| format!("release asset {name} has no SHA-256 digest"))?;
     ensure!(
-        digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
         "invalid SHA-256 digest"
     );
     let expected = format!(
@@ -152,6 +295,154 @@ fn select_asset<'a>(release: &'a Release, target: &str, binary: &str) -> Result<
         "unexpected release asset origin"
     );
     Ok(asset)
+}
+
+/// Linux and Windows keep per-binary assets. macOS arm64 and x86_64 both use
+/// the universal app zip already published for v0.2.21, plus SHA256SUMS-macos.
+/// A manifest is optional so older releases stay installable.
+fn select_plan<'a>(release: &'a Release, target: &str) -> Result<UpdatePlan<'a>> {
+    if macos_target(target) {
+        let zip = select_named(release, target, &macos_zip_name(&release.tag_name))?;
+        let checksums = select_named(release, target, MACOS_CHECKSUMS_NAME)?;
+        let manifest = match release
+            .assets
+            .iter()
+            .filter(|asset| asset.name == MACOS_MANIFEST_NAME)
+            .count()
+        {
+            0 => None,
+            1 => Some(select_named(release, target, MACOS_MANIFEST_NAME)?),
+            found => bail!(
+                "{}",
+                asset_match_error(release, target, MACOS_MANIFEST_NAME, found)
+            ),
+        };
+        return Ok(UpdatePlan::MacosBundle {
+            zip,
+            checksums,
+            manifest,
+        });
+    }
+    let mut assets = Vec::with_capacity(BINARIES.len());
+    for binary in BINARIES {
+        assets.push(select_asset(release, target, binary)?);
+    }
+    Ok(UpdatePlan::Binaries(assets))
+}
+
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Deserialize)]
+struct MacosManifest {
+    repository: String,
+    version: String,
+    target: String,
+    assets: Vec<MacosManifestAsset>,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Deserialize)]
+struct MacosManifestAsset {
+    name: String,
+    sha256: String,
+}
+
+/// Parse a `shasum -a 256` or `sha256sum` line list and return the hex digest.
+#[cfg(any(test, target_os = "macos"))]
+fn sha256_entry(sums: &str, name: &str) -> Result<String> {
+    let mut found = None;
+    for raw in sums.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let hash = parts.next().context("checksum line has no hash")?;
+        let mut file = parts
+            .next()
+            .with_context(|| format!("checksum line has no filename: {line}"))?;
+        ensure!(
+            parts.next().is_none(),
+            "checksum line has extra fields: {line}"
+        );
+        if let Some(stripped) = file.strip_prefix('*') {
+            file = stripped;
+        }
+        ensure!(
+            hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "invalid checksum hash for {file}"
+        );
+        if file == name {
+            ensure!(found.is_none(), "checksum file lists {name} more than once");
+            found = Some(hash.to_ascii_lowercase());
+        }
+    }
+    found.with_context(|| format!("checksum file has no entry for {name}"))
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn manifest_zip_digest(bytes: &[u8], version: &Version, zip_name: &str) -> Result<String> {
+    let manifest: MacosManifest =
+        serde_json::from_slice(bytes).context("parse macOS release manifest")?;
+    ensure!(
+        manifest.repository == REPOSITORY,
+        "macOS manifest repository mismatch"
+    );
+    ensure!(
+        manifest.version == version.to_string(),
+        "macOS manifest version mismatch"
+    );
+    ensure!(
+        manifest.target == MACOS_BUNDLE_TARGET,
+        "macOS manifest target mismatch"
+    );
+    let matches: Vec<_> = manifest
+        .assets
+        .iter()
+        .filter(|asset| asset.name == zip_name)
+        .collect();
+    ensure!(
+        matches.len() == 1,
+        "macOS manifest needs exactly one {zip_name}"
+    );
+    let hash = &matches[0].sha256;
+    ensure!(
+        hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "invalid manifest sha256"
+    );
+    Ok(hash.to_ascii_lowercase())
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn confirm_macos_zip(
+    zip: &Asset,
+    sums_text: &str,
+    manifest_bytes: Option<&[u8]>,
+    version: &Version,
+    target: &str,
+) -> Result<()> {
+    let github = zip
+        .digest
+        .as_deref()
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .context("macOS zip has no SHA-256 digest")?;
+    let listed = sha256_entry(sums_text, &zip.name)?;
+    let tag = format!("v{version}");
+    ensure!(
+        listed.eq_ignore_ascii_case(github),
+        "SHA256SUMS-macos hash for {} is {listed}, but the release digest is {github}. The files disagree, so nothing was installed. {}",
+        zip.name,
+        manual_update_instructions(&tag, target)
+    );
+    if let Some(bytes) = manifest_bytes {
+        let from_manifest = manifest_zip_digest(bytes, version, &zip.name)?;
+        ensure!(
+            from_manifest.eq_ignore_ascii_case(github),
+            "manifest-macos-universal.json hash for {} does not match the release digest. Nothing was installed. {}",
+            zip.name,
+            manual_update_instructions(&tag, target)
+        );
+    }
+    Ok(())
 }
 
 fn curl() -> Command {
@@ -498,13 +789,26 @@ fn rollback(root: &Path) -> Result<String> {
 
 pub fn run(args: &[String]) -> Result<()> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("pmux update [--check] [--json] [--bin-dir PATH]\npmux update --rollback\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nStage all six binaries, then activate them together. Retain the previous version.\nUpdating never stops sessions. Use pmux restart separately.\n--source is an explicit development-only source build.");
+        println!("pmux update [--check] [--json] [--bin-dir PATH]\nprismattyc update [--check] [--json] [--bin-dir PATH]\npmux update --rollback\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together.\nOn macOS, download the universal app zip, verify SHA256SUMS-macos and the code signature, and replace Prismattyc.app. The previous app is kept beside it.\nprismattyc update is the same command as pmux update.\nUpdating never stops sessions. Quit Prismattyc and reopen it after a macOS update. Use pmux restart for Linux and Windows components.\n--source is an explicit development-only source build.");
         return Ok(());
     }
     let options = options(args)?;
     let root = root()?;
     let _lock = lock(&root)?;
     if options.rollback {
+        if macos_state_path(&root).is_file() {
+            let restored = rollback_macos_app(&root)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "rolled_back",
+                    "version": restored,
+                    "restart_required": true,
+                    "message": "Quit Prismattyc and reopen it from the Dock. Running sessions keep the previous version until you do."
+                })
+            );
+            return Ok(());
+        }
         let restored = rollback(&root)?;
         println!(
             "{}",
@@ -515,15 +819,8 @@ pub fn run(args: &[String]) -> Result<()> {
     let release = latest_release()?;
     let version = release_version(&release)?;
     let target = target()?;
-    let assets: Vec<_> = BINARIES
-        .iter()
-        .map(|b| select_asset(&release, target, b))
-        .collect::<Result<_>>()?;
-    let installed = current_directory(&root)
-        .and_then(|p| receipt(&p))
-        .ok()
-        .map(|r| r.version)
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let plan = select_plan(&release, target)?;
+    let installed = installed_label(&root, matches!(plan, UpdatePlan::MacosBundle { .. }))?;
     let current = Version::parse(&installed)?;
     if options.check || version <= current {
         if options.json {
@@ -535,7 +832,7 @@ pub fn run(args: &[String]) -> Result<()> {
             println!(
                 "Installed: {installed}\nAvailable: {version}\nSource: {REPOSITORY}\n{}",
                 if version > current {
-                    "Run pmux update to install."
+                    "Run pmux update or prismattyc update to install."
                 } else {
                     "You are up to date."
                 }
@@ -543,9 +840,89 @@ pub fn run(args: &[String]) -> Result<()> {
         }
         return Ok(());
     }
-    let bin_dir = match options.bin_dir {
-        Some(ref p) => p.clone(),
-        None => default_bin_dir(&root)?,
+    match plan {
+        UpdatePlan::MacosBundle {
+            zip,
+            checksums,
+            manifest,
+        } => install_macos_bundle(
+            &root,
+            MacosDownload {
+                tag: &release.tag_name,
+                version: &version,
+                target,
+                zip,
+                checksums,
+                manifest,
+                json: options.json,
+            },
+        ),
+        UpdatePlan::Binaries(assets) => install_binaries(
+            &root,
+            options.bin_dir.as_deref(),
+            &version,
+            target,
+            &assets,
+            options.json,
+        ),
+    }
+}
+
+fn installed_label(root: &Path, macos_bundle: bool) -> Result<String> {
+    if macos_bundle {
+        if let Some(version) = current_macos_app_version() {
+            return Ok(version);
+        }
+    }
+    Ok(current_directory(root)
+        .and_then(|path| receipt(&path))
+        .ok()
+        .map(|saved| saved.version)
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()))
+}
+
+fn current_macos_app_version() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let app = discover_macos_app()?;
+        let text = version_label(&app.join("Contents/MacOS/pmux")).ok()?;
+        text.split_whitespace()
+            .find(|word| Version::parse(word).is_ok())
+            .map(ToString::to_string)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+fn clear_abandoned_stages(root: &Path) -> Result<()> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .and_then(|entry_name| entry_name.strip_prefix(".stage-"))
+            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()))
+            && entry.file_type()?.is_dir()
+        {
+            fs::remove_dir_all(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn install_binaries(
+    root: &Path,
+    bin_dir_override: Option<&Path>,
+    version: &Version,
+    target: &str,
+    assets: &[&Asset],
+    json: bool,
+) -> Result<()> {
+    let bin_dir = match bin_dir_override {
+        Some(path) => path.to_path_buf(),
+        None => default_bin_dir(root)?,
     };
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -553,18 +930,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let directory_name = format!("v{version}-{target}-{nonce}");
     let directory = root.join(&directory_name);
     // The update lock proves no other updater owns these abandoned downloads.
-    for entry in fs::read_dir(&root)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if name
-            .to_str()
-            .and_then(|n| n.strip_prefix(".stage-"))
-            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
-            && entry.file_type()?.is_dir()
-        {
-            fs::remove_dir_all(entry.path())?;
-        }
-    }
+    clear_abandoned_stages(root)?;
     let staging = root.join(format!(".stage-{}", std::process::id()));
     fs::create_dir(&staging)?;
     let result = (|| -> Result<()> {
@@ -590,7 +956,8 @@ pub fn run(args: &[String]) -> Result<()> {
         for binary in BINARIES {
             let text = version_label(&staging.join(crate::platform::executable_name(binary)))?;
             ensure!(
-                text.split_whitespace().any(|w| w == version.to_string()),
+                text.split_whitespace()
+                    .any(|word| word == version.to_string()),
                 "{binary} did not report release version {version}"
             );
         }
@@ -604,22 +971,559 @@ pub fn run(args: &[String]) -> Result<()> {
             },
         )?;
         fs::rename(&staging, &directory)?;
-        activate(&root, Path::new(&directory_name), &bin_dir)?;
+        activate(root, Path::new(&directory_name), &bin_dir)?;
         Ok(())
     })();
     if staging.exists() {
         let _ = fs::remove_dir_all(&staging);
     }
     result?;
-    if options.json {
+    if json {
         println!(
             "{}",
             serde_json::json!({"status":"installed","version":version.to_string(),"repository":REPOSITORY,"restart_required":true})
         );
     } else {
-        println!("Installed {version} from {REPOSITORY}. Running components keep their current version.\nUse pmux restart to review and apply component restarts. Use pmux update --rollback to restore the previous installation.");
+        println!("Installed {version} from {REPOSITORY}. Running components keep their current version.\nUse pmux restart to review and apply component restarts. Use pmux update --rollback or prismattyc update --rollback to restore the previous installation.");
     }
     Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MacosAppState {
+    repository: String,
+    version: String,
+    previous_version: Option<String>,
+    target: String,
+    app: PathBuf,
+    backup: Option<PathBuf>,
+}
+
+fn macos_state_path(root: &Path) -> PathBuf {
+    root.join("macos-app.json")
+}
+
+fn read_macos_state(root: &Path) -> Result<MacosAppState> {
+    serde_json::from_slice(&fs::read(macos_state_path(root))?)
+        .context("read macOS app update receipt")
+}
+
+fn write_macos_state(root: &Path, state: &MacosAppState) -> Result<()> {
+    let path = macos_state_path(root);
+    let temporary = root.join(format!("macos-app.json.{}.tmp", std::process::id()));
+    let mut file = crate::platform::private_options()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&temporary)?;
+    file.write_all(&serde_json::to_vec_pretty(state)?)?;
+    file.sync_all()?;
+    fs::rename(&temporary, &path)?;
+    let _ = File::open(root).and_then(|dir| dir.sync_all());
+    Ok(())
+}
+
+fn require_app_destination(path: &Path) -> Result<()> {
+    ensure!(path.is_absolute(), "Prismattyc.app path must be absolute");
+    ensure!(
+        path.file_name()
+            .is_some_and(|name| name == "Prismattyc.app"),
+        "refusing to replace {} because it is not Prismattyc.app",
+        path.display()
+    );
+    Ok(())
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn app_backup_path(app: &Path) -> Result<PathBuf> {
+    let parent = app
+        .parent()
+        .context("Prismattyc.app has no parent directory")?;
+    Ok(parent.join("Prismattyc.app.previous"))
+}
+
+fn sync_parent(parent: &Path) -> Result<()> {
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+/// Move `incoming` onto `destination` on the same volume. The previous app,
+/// when there was one, is left at `Prismattyc.app.previous` or at the displaced
+/// path when that name cannot be replaced.
+#[cfg(any(test, target_os = "macos"))]
+fn replace_app_bundle(destination: &Path, incoming: &Path) -> Result<Option<PathBuf>> {
+    require_app_destination(destination)?;
+    ensure!(
+        incoming.is_dir(),
+        "staged app is missing at {}",
+        incoming.display()
+    );
+    ensure!(
+        incoming.join("Contents/MacOS/pmux").is_file(),
+        "staged app has no Contents/MacOS/pmux"
+    );
+    let parent = destination
+        .parent()
+        .context("Prismattyc.app parent")?
+        .to_path_buf();
+    if !destination.exists() {
+        fs::rename(incoming, destination)
+            .with_context(|| format!("could not install {}", destination.display()))?;
+        sync_parent(&parent)?;
+        return Ok(None);
+    }
+    let meta = fs::symlink_metadata(destination)?;
+    ensure!(
+        !meta.file_type().is_symlink(),
+        "refusing to replace a symlink at {}",
+        destination.display()
+    );
+    ensure!(
+        meta.is_dir(),
+        "refusing to replace {} because it is not an app bundle",
+        destination.display()
+    );
+    let displaced = parent.join(format!(".Prismattyc.app.displaced-{}", std::process::id()));
+    if displaced.exists() {
+        fs::remove_dir_all(&displaced)?;
+    }
+    fs::rename(destination, &displaced).with_context(|| {
+        format!(
+            "could not move the installed app aside at {}",
+            destination.display()
+        )
+    })?;
+    if let Err(error) = fs::rename(incoming, destination) {
+        let restored = fs::rename(&displaced, destination);
+        if let Err(restore) = restored {
+            bail!(
+                "install failed ({error}) and restoring {} also failed ({restore}). The previous app is at {}.",
+                destination.display(),
+                displaced.display()
+            );
+        }
+        return Err(error).context(format!(
+            "install failed and the previous app was restored at {}",
+            destination.display()
+        ));
+    }
+    let backup = app_backup_path(destination)?;
+    let kept = match place_backup(&displaced, &backup) {
+        Ok(path) => path,
+        Err(_) => displaced,
+    };
+    sync_parent(&parent)?;
+    Ok(Some(kept))
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn place_backup(displaced: &Path, backup: &Path) -> Result<PathBuf> {
+    if backup.exists() {
+        fs::remove_dir_all(backup)?;
+    }
+    fs::rename(displaced, backup)?;
+    Ok(backup.to_path_buf())
+}
+
+fn exchange_app_bundle(app: &Path, backup: &Path) -> Result<()> {
+    require_app_destination(app)?;
+    ensure!(backup.is_absolute(), "backup path must be absolute");
+    ensure!(
+        backup.is_dir(),
+        "no previous Prismattyc.app to restore at {}",
+        backup.display()
+    );
+    ensure!(
+        app.is_dir(),
+        "installed Prismattyc.app is missing at {}",
+        app.display()
+    );
+    let parent = app.parent().context("app parent")?.to_path_buf();
+    let holding = parent.join(format!(".Prismattyc.app.holding-{}", std::process::id()));
+    if holding.exists() {
+        fs::remove_dir_all(&holding)?;
+    }
+    fs::rename(app, &holding).with_context(|| format!("could not move {}", app.display()))?;
+    if let Err(error) = fs::rename(backup, app) {
+        let restored = fs::rename(&holding, app);
+        if let Err(restore) = restored {
+            bail!(
+                "rollback failed ({error}) and restoring {} also failed ({restore}). The previous app is still at {}.",
+                app.display(),
+                holding.display()
+            );
+        }
+        return Err(error).context(format!(
+            "rollback failed and the installed app was restored at {}",
+            app.display()
+        ));
+    }
+    fs::rename(&holding, backup).with_context(|| {
+        format!(
+            "rolled back {} but could not keep the other copy. It is at {}.",
+            app.display(),
+            holding.display()
+        )
+    })?;
+    sync_parent(&parent)?;
+    Ok(())
+}
+
+fn rollback_macos_app(root: &Path) -> Result<String> {
+    let mut state = read_macos_state(root)?;
+    ensure!(
+        state.repository == REPOSITORY,
+        "refusing to roll back an app from {}",
+        state.repository
+    );
+    let previous = state.previous_version.clone().context(
+        "no previous Prismattyc.app to restore. This installation did not replace an existing app.",
+    )?;
+    let backup = state
+        .backup
+        .clone()
+        .context("no previous Prismattyc.app backup path is recorded")?;
+    exchange_app_bundle(&state.app, &backup)?;
+    state.previous_version = Some(std::mem::replace(&mut state.version, previous.clone()));
+    write_macos_state(root, &state)?;
+    Ok(previous)
+}
+
+struct MacosDownload<'a> {
+    tag: &'a str,
+    version: &'a Version,
+    target: &'a str,
+    zip: &'a Asset,
+    checksums: &'a Asset,
+    manifest: Option<&'a Asset>,
+    json: bool,
+}
+
+fn install_macos_bundle(root: &Path, download: MacosDownload<'_>) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        install_macos_bundle_here(root, download)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (
+            root,
+            download.version,
+            download.zip,
+            download.checksums,
+            download.manifest,
+            download.json,
+        );
+        bail!(
+            "macOS app installation must run on macOS. {}",
+            manual_update_instructions(download.tag, download.target)
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn directory_writable(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let mut bytes = dir.as_os_str().as_bytes().to_vec();
+    if bytes.contains(&0) {
+        return false;
+    }
+    bytes.push(0);
+    // SAFETY: `bytes` is a NUL-terminated path and contains no interior NUL.
+    unsafe { libc::access(bytes.as_ptr().cast(), libc::W_OK) == 0 }
+}
+
+#[cfg(target_os = "macos")]
+fn discover_macos_app() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok();
+    let home = crate::platform::home_dir().map(PathBuf::from);
+    let system = PathBuf::from("/Applications/Prismattyc.app");
+    let user = home
+        .as_ref()
+        .map(|dir| dir.join("Applications/Prismattyc.app"));
+    let chosen = preferred_macos_app(
+        exe.as_deref(),
+        home.as_deref(),
+        system.join("Contents/MacOS/pmux").is_file(),
+        user.as_ref()
+            .is_some_and(|path| path.join("Contents/MacOS/pmux").is_file()),
+    );
+    chosen
+        .join("Contents/MacOS/pmux")
+        .is_file()
+        .then_some(chosen)
+}
+
+#[cfg(target_os = "macos")]
+fn choose_macos_app(tag: &str, target: &str) -> Result<PathBuf> {
+    if let Some(app) = discover_macos_app() {
+        require_app_destination(&app)?;
+        return Ok(app);
+    }
+    let home = crate::platform::home_dir().map(PathBuf::from);
+    let user = home
+        .as_ref()
+        .map(|dir| dir.join("Applications/Prismattyc.app"));
+    let chosen = preferred_macos_app(None, home.as_deref(), false, false);
+    if chosen
+        .parent()
+        .is_some_and(|parent| directory_writable(parent))
+    {
+        return Ok(chosen);
+    }
+    if let Some(user) = user {
+        if let Some(parent) = user.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        return Ok(user);
+    }
+    bail!(
+        "could not find a writable location for Prismattyc.app. {}",
+        manual_update_instructions(tag, target)
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn download_asset(asset: &Asset, path: &Path) -> Result<()> {
+    let status = curl()
+        .arg("--max-filesize")
+        .arg(asset.size.to_string())
+        .arg("--output")
+        .arg(path)
+        .arg(&asset.browser_download_url)
+        .status()
+        .with_context(|| format!("download {}", asset.name))?;
+    ensure!(
+        status.success(),
+        "download failed for {}; installed version unchanged",
+        asset.name
+    );
+    verify(path, asset)?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn verify_macos_trust(app: &Path, tag: &str, target: &str) -> Result<()> {
+    let codesign = Command::new("codesign")
+        .args(["--verify", "--strict", "--verbose=2"])
+        .arg(app)
+        .status()
+        .context("codesign is required to verify Prismattyc.app")?;
+    ensure!(
+        codesign.success(),
+        "codesign rejected {} ({codesign}). The installed app was not changed because the downloaded bundle failed code signature verification. {}",
+        app.display(),
+        manual_update_instructions(tag, target)
+    );
+    let gatekeeper = Command::new("spctl")
+        .args(["--assess", "--verbose", "--type", "exec"])
+        .arg(app)
+        .status()
+        .context("spctl is required to assess Prismattyc.app")?;
+    ensure!(
+        gatekeeper.success(),
+        "spctl rejected {} ({gatekeeper}). The installed app was not changed because Gatekeeper did not accept the downloaded bundle. {}",
+        app.display(),
+        manual_update_instructions(tag, target)
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn extract_macos_zip(zip: &Path, dest: &Path, tag: &str, target: &str) -> Result<PathBuf> {
+    let status = Command::new("ditto")
+        .args(["-x", "-k"])
+        .arg(zip)
+        .arg(dest)
+        .status()
+        .context("ditto is required to unpack the macOS update")?;
+    ensure!(
+        status.success(),
+        "unpacking {} failed ({status}). The installed app was not changed. {}",
+        zip.display(),
+        manual_update_instructions(tag, target)
+    );
+    let app = dest.join("Prismattyc.app");
+    ensure!(
+        app.join("Contents/MacOS/pmux").is_file()
+            && app.join("Contents/MacOS/prismattyc-host").is_file(),
+        "the zip does not contain Prismattyc.app with pmux and prismattyc-host. The installed app was not changed. {}",
+        manual_update_instructions(tag, target)
+    );
+    Ok(app)
+}
+
+#[cfg(target_os = "macos")]
+fn clear_quarantine(app: &Path) {
+    let _ = Command::new("xattr")
+        .args(["-dr", "com.apple.quarantine"])
+        .arg(app)
+        .status();
+}
+
+#[cfg(target_os = "macos")]
+fn app_process_running(app: &Path) -> bool {
+    let Ok(output) = Command::new("/bin/ps").args(["-axo", "command="]).output() else {
+        return true;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let marker = app.to_string_lossy().into_owned();
+    text.lines().any(|line| line.contains(&marker))
+}
+
+#[cfg(target_os = "macos")]
+fn reported_release_version(executable: &Path, version: &Version) -> Result<()> {
+    let text = version_label(executable)?;
+    ensure!(
+        text.split_whitespace()
+            .any(|word| word == version.to_string()),
+        "{} did not report release version {version}",
+        executable.display()
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos_bundle_here(root: &Path, download: MacosDownload<'_>) -> Result<()> {
+    let MacosDownload {
+        tag,
+        version,
+        target,
+        zip,
+        checksums,
+        manifest,
+        json,
+    } = download;
+    let destination = choose_macos_app(tag, target)?;
+    clear_abandoned_stages(root)?;
+    let staging = root.join(format!(".stage-{}", std::process::id()));
+    fs::create_dir(&staging)?;
+    let mut incoming = None;
+    let result = (|| -> Result<()> {
+        eprintln!("Downloading {MACOS_CHECKSUMS_NAME} {version}");
+        let sums_path = staging.join(MACOS_CHECKSUMS_NAME);
+        download_asset(checksums, &sums_path)?;
+        eprintln!("Downloading {} {version}", zip.name);
+        let zip_path = staging.join(&zip.name);
+        download_asset(zip, &zip_path)?;
+        let manifest_bytes = if let Some(manifest) = manifest {
+            eprintln!("Downloading {MACOS_MANIFEST_NAME} {version}");
+            let manifest_path = staging.join(MACOS_MANIFEST_NAME);
+            download_asset(manifest, &manifest_path)?;
+            Some(fs::read(manifest_path)?)
+        } else {
+            None
+        };
+        let sums_text = fs::read_to_string(&sums_path)
+            .with_context(|| format!("{} is not text", checksums.name))?;
+        confirm_macos_zip(zip, &sums_text, manifest_bytes.as_deref(), version, target)?;
+        let extracted = extract_macos_zip(&zip_path, &staging.join("unpacked"), tag, target)?;
+        clear_quarantine(&extracted);
+        verify_macos_trust(&extracted, tag, target)?;
+        reported_release_version(&extracted.join("Contents/MacOS/pmux"), version)?;
+        let parent = destination
+            .parent()
+            .context("Prismattyc.app parent")?
+            .to_path_buf();
+        fs::create_dir_all(&parent)?;
+        let staged = parent.join(format!(".Prismattyc.app.incoming-{}", std::process::id()));
+        if staged.exists() {
+            fs::remove_dir_all(&staged)?;
+        }
+        let copied = Command::new("ditto")
+            .arg(&extracted)
+            .arg(&staged)
+            .status()
+            .context("ditto is required to stage Prismattyc.app")?;
+        ensure!(
+            copied.success(),
+            "staging Prismattyc.app failed ({copied}). The installed app was not changed."
+        );
+        incoming = Some(staged.clone());
+        clear_quarantine(&staged);
+        verify_macos_trust(&staged, tag, target)?;
+        let previous_version = if destination.join("Contents/MacOS/pmux").is_file() {
+            Some(
+                version_label(&destination.join("Contents/MacOS/pmux"))
+                    .ok()
+                    .and_then(|text| {
+                        text.split_whitespace()
+                            .find(|word| Version::parse(word).is_ok())
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_else(|| "unknown".to_string()),
+            )
+        } else {
+            None
+        };
+        let backup = replace_app_bundle(&destination, &staged)?;
+        incoming = None;
+        if let Err(error) = write_macos_state(
+            root,
+            &MacosAppState {
+                repository: REPOSITORY.into(),
+                version: version.to_string(),
+                previous_version,
+                target: MACOS_BUNDLE_TARGET.into(),
+                app: destination.clone(),
+                backup: backup.clone(),
+            },
+        ) {
+            if let Some(path) = &backup {
+                let _ = exchange_app_bundle(&destination, path);
+            }
+            return Err(error);
+        }
+        let running = app_process_running(&destination);
+        let restart = if running {
+            "A restart is required. Prismattyc is still running. Quit it (Cmd+Q) and reopen it from the Dock. Mux sessions keep running; reopen the app to use this version in windows."
+        } else {
+            "A restart is required to use this version. Open Prismattyc from the Dock. If it is already running, quit it (Cmd+Q) and reopen it. Mux sessions keep running until you restart them."
+        };
+        let inside = std::env::current_exe()
+            .ok()
+            .and_then(|exe| app_bundle_from_executable(&exe))
+            .is_some_and(|bundle| bundle == destination);
+        let outside = if inside {
+            String::new()
+        } else {
+            " This updated Prismattyc.app. A pmux or prismattyc binary outside that app stays on its current build; open the app to run the new one.".to_string()
+        };
+        let backup_text = backup
+            .as_ref()
+            .map(|path| format!(" Previous app: {}.", path.display()))
+            .unwrap_or_else(|| " No previous app was replaced.".to_string());
+        let message = format!(
+            "Installed {version} from {REPOSITORY} at {}.{backup_text} {restart}{outside} Use pmux update --rollback or prismattyc update --rollback to restore the previous app.",
+            destination.display()
+        );
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "installed",
+                    "version": version.to_string(),
+                    "repository": REPOSITORY,
+                    "restart_required": true,
+                    "app": destination,
+                    "backup": backup,
+                    "message": message,
+                })
+            );
+        } else {
+            println!("{message}");
+        }
+        Ok(())
+    })();
+    if staging.exists() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    if let Some(path) = incoming {
+        if path.exists() {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+    result
 }
 
 #[cfg(unix)]
@@ -1051,6 +1955,376 @@ mod tests {
         )
         .unwrap();
         assert!(version_label(&script).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn named_asset(tag: &str, name: &str) -> Asset {
+        Asset {
+            browser_download_url: format!(
+                "https://github.com/{REPOSITORY}/releases/download/{tag}/{name}"
+            ),
+            name: name.to_string(),
+            size: 3,
+            digest: Some(format!("sha256:{:x}", Sha256::digest(b"old"))),
+        }
+    }
+
+    fn release_with(tag: &str, names: &[&str]) -> Release {
+        Release {
+            tag_name: tag.into(),
+            draft: false,
+            prerelease: false,
+            immutable: true,
+            assets: names.iter().map(|name| named_asset(tag, name)).collect(),
+        }
+    }
+
+    fn binaries_release(tag: &str, target: &str) -> Release {
+        let names: Vec<String> = BINARIES
+            .iter()
+            .map(|binary| asset_name(tag, target, binary))
+            .collect();
+        let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+        release_with(tag, &borrowed)
+    }
+
+    /// Asset names published on the immutable v0.2.21 release.
+    fn published_v021_names() -> Vec<&'static str> {
+        vec![
+            "manifest-aarch64-unknown-linux-gnu.json",
+            "manifest-x86_64-pc-windows-msvc.json",
+            "manifest-x86_64-unknown-linux-gnu.json",
+            "MPL-2.0.txt",
+            "NOTICE.txt",
+            "prismattyc-aarch64-unknown-linux-gnu.tar.gz",
+            "prismattyc-v0.2.21-aarch64-unknown-linux-gnu-pmux",
+            "prismattyc-v0.2.21-aarch64-unknown-linux-gnu-pmux-attach",
+            "prismattyc-v0.2.21-aarch64-unknown-linux-gnu-pmux-mcp",
+            "prismattyc-v0.2.21-aarch64-unknown-linux-gnu-pmuxd",
+            "prismattyc-v0.2.21-aarch64-unknown-linux-gnu-prismattyc",
+            "prismattyc-v0.2.21-aarch64-unknown-linux-gnu-prismattyc-host",
+            "Prismattyc-v0.2.21-macos-universal.dmg",
+            "Prismattyc-v0.2.21-macos-universal.zip",
+            "prismattyc-v0.2.21-x86_64-pc-windows-msvc-pmux-attach.exe",
+            "prismattyc-v0.2.21-x86_64-pc-windows-msvc-pmux-mcp.exe",
+            "prismattyc-v0.2.21-x86_64-pc-windows-msvc-pmux.exe",
+            "prismattyc-v0.2.21-x86_64-pc-windows-msvc-pmuxd.exe",
+            "prismattyc-v0.2.21-x86_64-pc-windows-msvc-prismattyc-host.exe",
+            "prismattyc-v0.2.21-x86_64-pc-windows-msvc-prismattyc.exe",
+            "prismattyc-v0.2.21-x86_64-pc-windows-msvc.zip",
+            "prismattyc-v0.2.21-x86_64-unknown-linux-gnu-pmux",
+            "prismattyc-v0.2.21-x86_64-unknown-linux-gnu-pmux-attach",
+            "prismattyc-v0.2.21-x86_64-unknown-linux-gnu-pmux-mcp",
+            "prismattyc-v0.2.21-x86_64-unknown-linux-gnu-pmuxd",
+            "prismattyc-v0.2.21-x86_64-unknown-linux-gnu-prismattyc",
+            "prismattyc-v0.2.21-x86_64-unknown-linux-gnu-prismattyc-host",
+            "prismattyc-x86_64-unknown-linux-gnu.tar.gz",
+            "SHA256SUMS",
+            "SHA256SUMS-macos",
+            "SHA256SUMS-windows",
+        ]
+    }
+
+    fn assert_bundle<'a>(plan: UpdatePlan<'a>, zip_name: &str) {
+        match plan {
+            UpdatePlan::MacosBundle {
+                zip,
+                checksums,
+                manifest,
+            } => {
+                assert_eq!(zip.name, zip_name);
+                assert_eq!(checksums.name, MACOS_CHECKSUMS_NAME);
+                assert!(manifest.is_none());
+            }
+            UpdatePlan::Binaries(_) => panic!("macOS must select the universal app zip"),
+        }
+    }
+
+    #[test]
+    fn macos_arm64_and_x86_64_select_published_universal_zip() {
+        let release = release_with("v0.2.21", &published_v021_names());
+        let zip = macos_zip_name("v0.2.21");
+        assert_bundle(select_plan(&release, "aarch64-apple-darwin").unwrap(), &zip);
+        assert_bundle(select_plan(&release, "x86_64-apple-darwin").unwrap(), &zip);
+    }
+
+    #[test]
+    fn linux_targets_select_per_binary_assets() {
+        for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] {
+            let release = binaries_release("v0.2.21", target);
+            match select_plan(&release, target).unwrap() {
+                UpdatePlan::Binaries(assets) => {
+                    assert_eq!(assets.len(), BINARIES.len());
+                    for (binary, asset) in BINARIES.iter().zip(assets) {
+                        assert_eq!(asset.name, asset_name("v0.2.21", target, binary));
+                        assert!(!asset.name.ends_with(".exe"));
+                    }
+                }
+                UpdatePlan::MacosBundle { .. } => panic!("{target} is not a macOS bundle"),
+            }
+        }
+    }
+
+    #[test]
+    fn windows_target_selects_exe_assets() {
+        let target = "x86_64-pc-windows-msvc";
+        let release = binaries_release("v0.2.21", target);
+        match select_plan(&release, target).unwrap() {
+            UpdatePlan::Binaries(assets) => {
+                assert_eq!(assets.len(), BINARIES.len());
+                for (binary, asset) in BINARIES.iter().zip(assets) {
+                    assert_eq!(asset.name, asset_name("v0.2.21", target, binary));
+                    assert!(asset.name.ends_with(".exe"), "{}", asset.name);
+                }
+            }
+            UpdatePlan::MacosBundle { .. } => panic!("windows is not a macOS bundle"),
+        }
+    }
+
+    #[test]
+    fn zero_match_names_platform_candidates_and_manual_download() {
+        let mut names = published_v021_names();
+        names.retain(|name| *name != "Prismattyc-v0.2.21-macos-universal.zip");
+        let release = release_with("v0.2.21", &names);
+        let error = select_plan(&release, "aarch64-apple-darwin")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("on macos target aarch64-apple-darwin"),
+            "{error}"
+        );
+        assert!(
+            error.contains(
+                "needs exactly one Prismattyc-v0.2.21-macos-universal.zip asset, found 0"
+            ),
+            "{error}"
+        );
+        assert!(
+            error.contains(
+                "Nothing in this release is named Prismattyc-v0.2.21-macos-universal.zip"
+            ),
+            "{error}"
+        );
+        assert!(
+            error.contains("prismattyc-v0.2.21-x86_64-unknown-linux-gnu-pmux"),
+            "{error}"
+        );
+        assert!(error.contains("SHA256SUMS-macos"), "{error}");
+        assert!(
+            error.contains("https://github.com/moonbase2090/Prismattyc/releases/download/v0.2.21/Prismattyc-v0.2.21-macos-universal.dmg"),
+            "{error}"
+        );
+        assert!(
+            error.contains("https://github.com/moonbase2090/Prismattyc/releases/download/v0.2.21/Prismattyc-v0.2.21-macos-universal.zip"),
+            "{error}"
+        );
+        let _ = release.tag_name;
+    }
+
+    #[test]
+    fn multi_match_names_platform_candidates_and_manual_download() {
+        let mut names = published_v021_names();
+        names.push("Prismattyc-v0.2.21-macos-universal.zip");
+        let release = release_with("v0.2.21", &names);
+        let error = select_plan(&release, "x86_64-apple-darwin")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("on macos target x86_64-apple-darwin"),
+            "{error}"
+        );
+        assert!(
+            error.contains(
+                "needs exactly one Prismattyc-v0.2.21-macos-universal.zip asset, found 2"
+            ),
+            "{error}"
+        );
+        assert!(
+            error.contains("2 assets are named Prismattyc-v0.2.21-macos-universal.zip"),
+            "{error}"
+        );
+        assert!(
+            error.contains("prismattyc-v0.2.21-aarch64-unknown-linux-gnu-pmux"),
+            "{error}"
+        );
+        assert!(
+            error.contains("https://github.com/moonbase2090/Prismattyc/releases/download/v0.2.21/Prismattyc-v0.2.21-macos-universal.dmg"),
+            "{error}"
+        );
+        let mut doubled = binaries_release("v0.2.0", "x86_64-unknown-linux-gnu");
+        let duplicate = doubled.assets[0].name.clone();
+        doubled.assets.push(named_asset("v0.2.0", &duplicate));
+        let error = select_plan(&doubled, "x86_64-unknown-linux-gnu")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("on linux target x86_64-unknown-linux-gnu"),
+            "{error}"
+        );
+        assert!(error.contains("found 2"), "{error}");
+        assert!(
+            error.contains("prismattyc-v0.2.0-x86_64-unknown-linux-gnu-pmux"),
+            "{error}"
+        );
+        assert!(
+            error.contains("https://github.com/moonbase2090/Prismattyc/releases/tag/v0.2.0"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn sha256sums_macos_accepts_published_v021_bytes() {
+        let sums = "\
+4ca5ef039c61b3113346e740923cae901f6a880d8ca2bad50d71c0915abdfd0c  Prismattyc-v0.2.21-macos-universal.dmg
+993b13dddccad4f3c494b60e39fd58b35de4d9b654f6b64ac1c73d361be9a454  Prismattyc-v0.2.21-macos-universal.zip
+";
+        assert_eq!(
+            sha256_entry(sums, "Prismattyc-v0.2.21-macos-universal.zip").unwrap(),
+            "993b13dddccad4f3c494b60e39fd58b35de4d9b654f6b64ac1c73d361be9a454"
+        );
+        let mut zip = named_asset("v0.2.21", "Prismattyc-v0.2.21-macos-universal.zip");
+        zip.digest =
+            Some("sha256:993b13dddccad4f3c494b60e39fd58b35de4d9b654f6b64ac1c73d361be9a454".into());
+        let version = Version::new(0, 2, 21);
+        confirm_macos_zip(&zip, sums, None, &version, "aarch64-apple-darwin").unwrap();
+        let manifest = r#"{
+            "repository": "moonbase2090/Prismattyc",
+            "version": "0.2.21",
+            "target": "universal-apple-darwin",
+            "assets": [{
+                "name": "Prismattyc-v0.2.21-macos-universal.zip",
+                "size": 26836143,
+                "sha256": "993b13dddccad4f3c494b60e39fd58b35de4d9b654f6b64ac1c73d361be9a454"
+            }]
+        }"#;
+        confirm_macos_zip(
+            &zip,
+            sums,
+            Some(manifest.as_bytes()),
+            &version,
+            "aarch64-apple-darwin",
+        )
+        .unwrap();
+        let bad_sums = sums.replace(
+            "993b13dddccad4f3c494b60e39fd58b35de4d9b654f6b64ac1c73d361be9a454",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        let error = confirm_macos_zip(&zip, &bad_sums, None, &version, "aarch64-apple-darwin")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("SHA256SUMS-macos"), "{error}");
+        assert!(
+            error.contains("nothing was installed") || error.contains("Nothing was installed"),
+            "{error}"
+        );
+        assert!(
+            error.contains("Prismattyc-v0.2.21-macos-universal.dmg"),
+            "{error}"
+        );
+        let bad_manifest = manifest.replace(
+            "993b13dddccad4f3c494b60e39fd58b35de4d9b654f6b64ac1c73d361be9a454",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        );
+        let error = confirm_macos_zip(
+            &zip,
+            sums,
+            Some(bad_manifest.as_bytes()),
+            &version,
+            "x86_64-apple-darwin",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("manifest-macos-universal.json"), "{error}");
+        assert!(
+            error.contains("https://github.com/moonbase2090/Prismattyc/releases/download/v0.2.21/Prismattyc-v0.2.21-macos-universal.zip"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn app_bundle_path_prefers_the_running_prismattyc_app() {
+        let inside = Path::new("/Applications/Prismattyc.app/Contents/MacOS/pmux");
+        assert_eq!(
+            app_bundle_from_executable(inside).unwrap(),
+            Path::new("/Applications/Prismattyc.app")
+        );
+        assert!(app_bundle_from_executable(Path::new("/usr/local/bin/pmux")).is_none());
+        let home = Path::new("/Users/example");
+        let user_exe = Path::new("/Users/example/Applications/Prismattyc.app/Contents/MacOS/pmux");
+        assert_eq!(
+            preferred_macos_app(Some(user_exe), Some(home), true, true),
+            Path::new("/Users/example/Applications/Prismattyc.app")
+        );
+        assert_eq!(
+            preferred_macos_app(
+                Some(Path::new("/usr/local/bin/pmux")),
+                Some(home),
+                true,
+                true
+            ),
+            Path::new("/Applications/Prismattyc.app")
+        );
+        assert_eq!(
+            preferred_macos_app(None, Some(home), false, true),
+            home.join("Applications/Prismattyc.app")
+        );
+        assert_eq!(
+            preferred_macos_app(None, Some(home), false, false),
+            Path::new("/Applications/Prismattyc.app")
+        );
+    }
+
+    fn write_fake_app(path: &Path, marker: &str) {
+        let macos = path.join("Contents/MacOS");
+        fs::create_dir_all(&macos).unwrap();
+        fs::write(macos.join("pmux"), marker).unwrap();
+    }
+
+    #[test]
+    fn app_swap_keeps_a_backup_and_rollback_restores_it() {
+        let dir = temporary();
+        let app = dir.join("Prismattyc.app");
+        write_fake_app(&app, "old");
+        let incoming = dir.join(".Prismattyc.app.incoming");
+        write_fake_app(&incoming, "new");
+        let backup = replace_app_bundle(&app, &incoming).unwrap().unwrap();
+        assert_eq!(fs::read(app.join("Contents/MacOS/pmux")).unwrap(), b"new");
+        assert_eq!(
+            fs::read(backup.join("Contents/MacOS/pmux")).unwrap(),
+            b"old"
+        );
+        assert_eq!(backup, dir.join("Prismattyc.app.previous"));
+        let root = dir.join("updates");
+        fs::create_dir_all(&root).unwrap();
+        write_macos_state(
+            &root,
+            &MacosAppState {
+                repository: REPOSITORY.into(),
+                version: "0.2.21".into(),
+                previous_version: Some("0.2.20".into()),
+                target: "universal-apple-darwin".into(),
+                app: app.clone(),
+                backup: Some(backup.clone()),
+            },
+        )
+        .unwrap();
+        assert_eq!(rollback_macos_app(&root).unwrap(), "0.2.20");
+        assert_eq!(fs::read(app.join("Contents/MacOS/pmux")).unwrap(), b"old");
+        assert_eq!(
+            fs::read(backup.join("Contents/MacOS/pmux")).unwrap(),
+            b"new"
+        );
+        let fresh = dir.join("missing");
+        fs::create_dir_all(&fresh).unwrap();
+        let created = fresh.join("Prismattyc.app");
+        let staged = fresh.join(".incoming");
+        write_fake_app(&staged, "first");
+        assert!(replace_app_bundle(&created, &staged).unwrap().is_none());
+        assert_eq!(
+            fs::read(created.join("Contents/MacOS/pmux")).unwrap(),
+            b"first"
+        );
+        assert!(replace_app_bundle(&dir.join("not-the-app"), &created).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
 }

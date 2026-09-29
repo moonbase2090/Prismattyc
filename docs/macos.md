@@ -169,6 +169,12 @@ executables under `~/.cargo/bin` only.
 Quit Prismattyc.app (Cmd+Q) and reopen it from the Dock after an update, or the
 old image stays in memory.
 
+A published build updates with `pmux update` or `prismattyc update`. The
+command downloads the universal zip, checks it against `SHA256SUMS-macos`,
+verifies the code signature, and replaces `Prismattyc.app`. The previous
+app stays at `Prismattyc.app.previous`. Quit and reopen the app. Mux
+sessions keep running. `pmux update --rollback` restores the previous app.
+
 Signing and notarization stay out of the first slice. This section is also
 the reference for when distribution starts.
 

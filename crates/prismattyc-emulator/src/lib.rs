@@ -1005,7 +1005,7 @@ impl Perform for ScreenPerformer<'_> {
         if intermediates == b">" && action == 'm' {
             let values = params_vec(params);
             if values.first() == Some(&4) {
-                if let Some(mode) = values.get(1).copied().unwrap_or(0).try_into().ok() {
+                if let Ok(mode) = values.get(1).copied().unwrap_or(0).try_into() {
                     if mode <= 3 {
                         *self.modify_other_keys = mode;
                     }

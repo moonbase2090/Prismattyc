@@ -1032,9 +1032,7 @@ fn reader_loop(
                 ) {
                     Ok(start) => start,
                     Err(_) if stop.load(Ordering::Relaxed) => return None,
-                    Err(error) => {
-                        return Some(format!("subscribe reconnect failed: {error:#}"))
-                    }
+                    Err(error) => return Some(format!("subscribe reconnect failed: {error:#}")),
                 };
                 client = start.client;
                 from_seq = start.from_seq;
@@ -1071,8 +1069,7 @@ fn reader_loop(
                             Ok(start) => start,
                             Err(_) if stop.load(Ordering::Relaxed) => return None,
                             Err(error)
-                                if transient_read_error(&error)
-                                    && retries < SUBSCRIBE_RETRIES =>
+                                if transient_read_error(&error) && retries < SUBSCRIBE_RETRIES =>
                             {
                                 retries += 1;
                                 let start = match start_pane_reader_with_retries(

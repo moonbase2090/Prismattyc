@@ -4,19 +4,37 @@
 //! `text` / physical [`KeyCode`]. Terminal hosts must handle **all three** —
 //! Space was dropped because it arrives as `NamedKey::Space`, not `" "`.
 //!
-//! Nested `prism` still owns the full Kitty CSI-u path; this module matches
-//! legacy encodings for interactive shell use.
+//! This module encodes host key events using the active Kitty or xterm
+//! keyboard mode reported by the focused child.
 
+use prismattyc_emulator::{KITTY_DISAMBIGUATE, KITTY_REPORT_ALL};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
 /// Encode a winit key event for the child PTY.
 ///
 /// `None` = ignore (pure modifiers, media keys, unknown).
+#[cfg(test)]
 pub fn encode_key_event(
     logical: &Key,
     physical: PhysicalKey,
     text: Option<&str>,
     modifiers: ModifiersState,
+) -> Option<Vec<u8>> {
+    encode_key_event_with_modes(logical, physical, text, modifiers, 0, 0)
+}
+
+/// Encode a host key event with the focused child's terminal keyboard modes.
+///
+/// Kitty `REPORT_ALL` takes precedence over xterm modifyOtherKeys. Kitty's
+/// disambiguate-only mode retains legacy Enter bytes so a shell can recover
+/// after a child exits without resetting terminal modes.
+pub fn encode_key_event_with_modes(
+    logical: &Key,
+    physical: PhysicalKey,
+    text: Option<&str>,
+    modifiers: ModifiersState,
+    kitty_flags: u16,
+    modify_other_keys: u8,
 ) -> Option<Vec<u8>> {
     let shift = modifiers.shift_key();
     let alt = modifiers.alt_key();
@@ -29,6 +47,9 @@ pub fn encode_key_event(
     if let Key::Named(named) = logical {
         if is_modifier_only(*named) {
             return None;
+        }
+        if *named == NamedKey::Enter {
+            return Some(encode_enter(mod_param, alt, kitty_flags, modify_other_keys));
         }
         if let Some(bytes) = encode_named(*named, mod_param, shift, ctrl) {
             return Some(bytes);
@@ -54,10 +75,55 @@ pub fn encode_key_event(
 
     // 4) Physical key code when logical is Unidentified (rare, but real).
     if let PhysicalKey::Code(code) = physical {
-        return encode_keycode(code, mod_param, shift, ctrl, alt);
+        return encode_keycode_with_modes(
+            code,
+            mod_param,
+            shift,
+            ctrl,
+            alt,
+            kitty_flags,
+            modify_other_keys,
+        );
     }
 
     None
+}
+
+fn encode_enter(mod_param: u8, alt: bool, kitty_flags: u16, modify_other_keys: u8) -> Vec<u8> {
+    if kitty_flags & KITTY_REPORT_ALL != 0 {
+        return if mod_param == 1 {
+            b"\x1b[13u".to_vec()
+        } else {
+            format!("\x1b[13;{mod_param}u").into_bytes()
+        };
+    }
+
+    // Kitty deliberately keeps Enter legacy in disambiguate-only mode. Alt
+    // retains its legacy ESC prefix; Ctrl/Shift remain CR for shell recovery.
+    if kitty_flags & KITTY_DISAMBIGUATE != 0 {
+        return if alt { b"\x1b\r".to_vec() } else { vec![b'\r'] };
+    }
+
+    let has_non_legacy_modifier = mod_param != 1;
+    let encode_modified = match modify_other_keys {
+        // Prismattyc's legacy host encoding already distinguishes modified
+        // Enter using xterm's CSI 27 form, matching its nested terminal.
+        0 => has_non_legacy_modifier,
+        // xterm level 1 encodes Alt/Meta combinations; Ctrl and Shift keep
+        // their traditional behavior.
+        1 => alt || (mod_param & 8 != 0),
+        // Level 2 encodes modified keys, and level 3 also encodes plain keys.
+        2 => has_non_legacy_modifier,
+        3 => true,
+        _ => false,
+    };
+    if encode_modified {
+        format!("\x1b[27;{mod_param};13~").into_bytes()
+    } else if alt {
+        b"\x1b\r".to_vec()
+    } else {
+        vec![b'\r']
+    }
 }
 
 /// Back-compat helper used by unit tests.
@@ -209,6 +275,26 @@ fn is_modifier_only(named: NamedKey) -> bool {
     )
 }
 
+fn encode_keycode_with_modes(
+    code: KeyCode,
+    mod_param: u8,
+    shift: bool,
+    ctrl: bool,
+    alt: bool,
+    kitty_flags: u16,
+    modify_other_keys: u8,
+) -> Option<Vec<u8>> {
+    if let Some(named) = physical_named_key(code) {
+        if named == NamedKey::Enter {
+            return Some(encode_enter(mod_param, alt, kitty_flags, modify_other_keys));
+        }
+        return encode_named(named, mod_param, shift, ctrl);
+    }
+    let ch = physical_character(code, shift)?;
+    encode_char(ch, ctrl, alt)
+}
+
+#[cfg(test)]
 fn encode_keycode(
     code: KeyCode,
     mod_param: u8,
@@ -216,11 +302,7 @@ fn encode_keycode(
     ctrl: bool,
     alt: bool,
 ) -> Option<Vec<u8>> {
-    if let Some(named) = physical_named_key(code) {
-        return encode_named(named, mod_param, shift, ctrl);
-    }
-    let ch = physical_character(code, shift)?;
-    encode_char(ch, ctrl, alt)
+    encode_keycode_with_modes(code, mod_param, shift, ctrl, alt, 0, 0)
 }
 
 fn physical_named_key(code: KeyCode) -> Option<NamedKey> {
@@ -413,6 +495,24 @@ mod tests {
         m
     }
 
+    fn mods_ctrl_alt() -> ModifiersState {
+        let mut m = mods_ctrl();
+        m.set(ModifiersState::ALT, true);
+        m
+    }
+
+    fn encode_enter_with_modes(modifiers: ModifiersState, kitty_flags: u16, modify: u8) -> Vec<u8> {
+        encode_key_event_with_modes(
+            &named(NamedKey::Enter),
+            PhysicalKey::Unidentified(winit::keyboard::NativeKeyCode::Unidentified),
+            None,
+            modifiers,
+            kitty_flags,
+            modify,
+        )
+        .expect("Enter is encoded")
+    }
+
     #[test]
     fn ctrl_c_is_etx() {
         let key = Key::Character("c".into());
@@ -433,6 +533,86 @@ mod tests {
             encode_key(&named(NamedKey::Enter), ModifiersState::empty()),
             Some(vec![b'\r'])
         );
+    }
+
+    #[test]
+    fn modified_enter_uses_xterm_modify_other_keys_levels() {
+        assert_eq!(encode_enter_with_modes(mods_ctrl(), 0, 0), b"\x1b[27;5;13~");
+        assert_eq!(
+            encode_enter_with_modes(mods_shift(), 0, 0),
+            b"\x1b[27;2;13~"
+        );
+        assert_eq!(encode_enter_with_modes(mods_alt(), 0, 0), b"\x1b[27;3;13~");
+
+        // Level 1 distinguishes Alt/Meta; Ctrl and Shift preserve their
+        // traditional Enter behavior.
+        assert_eq!(encode_enter_with_modes(mods_ctrl(), 0, 1), b"\r");
+        assert_eq!(encode_enter_with_modes(mods_shift(), 0, 1), b"\r");
+        assert_eq!(encode_enter_with_modes(mods_alt(), 0, 1), b"\x1b[27;3;13~");
+
+        // Level 2 reports every modified Enter, including Ctrl and Shift.
+        assert_eq!(encode_enter_with_modes(mods_ctrl(), 0, 2), b"\x1b[27;5;13~");
+        assert_eq!(
+            encode_enter_with_modes(mods_shift(), 0, 2),
+            b"\x1b[27;2;13~"
+        );
+        assert_eq!(
+            encode_enter_with_modes(mods_ctrl_alt(), 0, 2),
+            b"\x1b[27;7;13~"
+        );
+
+        // Level 3 also reports the unmodified key.
+        assert_eq!(
+            encode_enter_with_modes(ModifiersState::empty(), 0, 3),
+            b"\x1b[27;1;13~"
+        );
+    }
+
+    #[test]
+    fn kitty_enter_modes_follow_protocol_exceptions_and_report_all() {
+        use prismattyc_emulator::{KITTY_DISAMBIGUATE, KITTY_REPORT_ALL};
+
+        // Disambiguate-only keeps Enter recoverable in a shell; Alt retains
+        // the legacy ESC prefix. It takes precedence over xterm level 3.
+        assert_eq!(
+            encode_enter_with_modes(mods_ctrl(), KITTY_DISAMBIGUATE, 3),
+            b"\r"
+        );
+        assert_eq!(
+            encode_enter_with_modes(mods_shift(), KITTY_DISAMBIGUATE, 3),
+            b"\r"
+        );
+        assert_eq!(
+            encode_enter_with_modes(mods_alt(), KITTY_DISAMBIGUATE, 3),
+            b"\x1b\r"
+        );
+
+        // Report-all represents Enter as CSI-u, including its modifiers.
+        assert_eq!(
+            encode_enter_with_modes(mods_ctrl(), KITTY_REPORT_ALL, 0),
+            b"\x1b[13;5u"
+        );
+        assert_eq!(
+            encode_enter_with_modes(mods_shift(), KITTY_REPORT_ALL, 0),
+            b"\x1b[13;2u"
+        );
+        assert_eq!(
+            encode_enter_with_modes(mods_alt(), KITTY_REPORT_ALL, 0),
+            b"\x1b[13;3u"
+        );
+    }
+
+    #[test]
+    fn physical_numpad_enter_uses_the_same_mode_encoding() {
+        let bytes = encode_key_event_with_modes(
+            &Key::Unidentified(winit::keyboard::NativeKey::Unidentified),
+            PhysicalKey::Code(KeyCode::NumpadEnter),
+            None,
+            mods_ctrl(),
+            0,
+            2,
+        );
+        assert_eq!(bytes, Some(b"\x1b[27;5;13~".to_vec()));
     }
 
     #[test]

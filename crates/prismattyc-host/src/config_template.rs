@@ -182,6 +182,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         value: ConfigValue::StringArray(&["calt", "liga"]),
     },
     ConfigKey {
+        name: "macos_shortcuts",
+        group: ConfigGroup::Keys,
+        doc: "Enable additional standard macOS Command-key shortcuts; Cmd+Q and Cmd+N are already available",
+        range: "true|false",
+        value: ConfigValue::Bool(false),
+    },
+    ConfigKey {
         name: "panes",
         group: ConfigGroup::Layout,
         doc: "Initial pane count; startup only",
@@ -466,6 +473,7 @@ fn emit_keys_table(out: &mut String) {
     out.push_str("[keys]\n");
     out.push_str("# Host actions. An entry replaces that action's default chords.\n");
     out.push_str("# Value is a chord string or an array of chord strings.\n");
+    out.push_str("# Set macos_shortcuts = true above to add more standard Command-key actions.\n");
     let keymap = keybind::KeyMap::default();
     for action in Action::all() {
         let name = action.name();
@@ -935,6 +943,7 @@ mod tests {
         "font_px",
         "font_ligatures",
         "font_features",
+        "macos_shortcuts",
         "panes",
         "window_padding_px",
         "pane_gap_px",
@@ -1030,6 +1039,7 @@ mod tests {
         assert_eq!(parsed.splash, Some(true));
         assert_eq!(parsed.focus_border.as_deref(), Some(DEFAULT_FOCUS_BORDER));
         assert_eq!(parsed.font_px, Some(DEFAULT_FONT_PX));
+        assert_eq!(parsed.macos_shortcuts, Some(false));
         assert_eq!(parsed.panes, Some(DEFAULT_PANES));
         assert_eq!(parsed.window_padding_px(), DEFAULT_WINDOW_PADDING_PX);
         assert!(parsed.visual_bell());

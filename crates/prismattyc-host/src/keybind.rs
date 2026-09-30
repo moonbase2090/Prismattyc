@@ -92,6 +92,7 @@ pub enum Action {
     /// (client-local view, PT-57).
     ZoomPane,
     NewWindow,
+    Quit,
     /// Open the host config in the user's editor. Unbound by default (PT-179).
     OpenConfig,
     CommandPalette,
@@ -121,6 +122,10 @@ pub enum Action {
     /// editor (PT-91). Unbound by default.
     SaveSpace,
     Find,
+    ClearScrollback,
+    IncreaseFontSize,
+    DecreaseFontSize,
+    ResetFontSize,
     /// Open or re-show the walkthrough caption (PT-193). Unbound by default.
     Walkthrough,
     /// Delete walkthrough.json and restart at level 0 (PT-195). Unbound.
@@ -188,6 +193,7 @@ impl Action {
             Action::PresetMainHorizontal,
             Action::ZoomPane,
             Action::NewWindow,
+            Action::Quit,
             Action::OpenConfig,
             Action::CommandPalette,
             Action::PaletteFilterNext,
@@ -203,6 +209,10 @@ impl Action {
             Action::SpaceRailPrev,
             Action::SaveSpace,
             Action::Find,
+            Action::ClearScrollback,
+            Action::IncreaseFontSize,
+            Action::DecreaseFontSize,
+            Action::ResetFontSize,
             Action::Walkthrough,
             Action::WalkthroughReset,
             Action::Copy,
@@ -266,6 +276,7 @@ impl Action {
             Action::PresetMainHorizontal => "preset_main_horizontal".into(),
             Action::ZoomPane => "zoom_pane".into(),
             Action::NewWindow => "new_window".into(),
+            Action::Quit => "quit".into(),
             Action::OpenConfig => "open_config".into(),
             Action::CommandPalette => "command_palette".into(),
             Action::PaletteFilterNext => "palette_filter_next".into(),
@@ -281,6 +292,10 @@ impl Action {
             Action::SpaceRailPrev => "space_rail_prev".into(),
             Action::SaveSpace => "save_space".into(),
             Action::Find => "find".into(),
+            Action::ClearScrollback => "clear_scrollback".into(),
+            Action::IncreaseFontSize => "increase_font_size".into(),
+            Action::DecreaseFontSize => "decrease_font_size".into(),
+            Action::ResetFontSize => "reset_font_size".into(),
             Action::Walkthrough => "walkthrough".into(),
             Action::WalkthroughReset => "walkthrough_reset".into(),
             Action::Copy => "copy".into(),
@@ -359,6 +374,7 @@ impl Action {
                 "zoom the focused pane to the whole tab; again restores the split".into()
             }
             Action::NewWindow => "open a new OS window".into(),
+            Action::Quit => "quit Prismattyc".into(),
             Action::OpenConfig => "edit the config file".into(),
             Action::CommandPalette => "open the command palette".into(),
             Action::PaletteFilterNext => "next command-palette filter chip".into(),
@@ -374,6 +390,10 @@ impl Action {
             Action::SpaceRailPrev => "open the previous saved space".into(),
             Action::SaveSpace => "save the current space arrangement".into(),
             Action::Find => "find in scrollback".into(),
+            Action::ClearScrollback => "clear the screen and scrollback".into(),
+            Action::IncreaseFontSize => "increase the font size".into(),
+            Action::DecreaseFontSize => "decrease the font size".into(),
+            Action::ResetFontSize => "reset the font size".into(),
             Action::Walkthrough => "open the walkthrough caption".into(),
             Action::WalkthroughReset => "delete walkthrough progress and restart at level 0".into(),
             Action::Copy => "copy the selection".into(),
@@ -479,12 +499,17 @@ impl Action {
             | Action::SaveSpace => ActionGroup::Spaces,
             Action::UpdateRestart
             | Action::NewWindow
+            | Action::Quit
             | Action::OpenConfig
             | Action::CommandPalette
             | Action::PaletteFilterNext
             | Action::PaletteFilterPrev
             | Action::ThemePicker
             | Action::Find
+            | Action::ClearScrollback
+            | Action::IncreaseFontSize
+            | Action::DecreaseFontSize
+            | Action::ResetFontSize
             | Action::Walkthrough
             | Action::WalkthroughReset
             | Action::Copy
@@ -1013,6 +1038,25 @@ fn fixed_chord(text: &str) -> Chord {
     chord
 }
 
+/// Additional standard macOS Command shortcuts, opt-in through
+/// `macos_shortcuts = true`. Cmd+Q and Cmd+N are existing defaults.
+/// Entries in `[keys]` replace these along with each action's other defaults.
+fn macos_chord(action: Action) -> Option<&'static str> {
+    Some(match action {
+        Action::NewTab => "super+t",
+        Action::CloseTab => "super+w",
+        Action::Find => "super+f",
+        Action::Copy => "super+c",
+        Action::Paste => "super+v",
+        Action::SelectAll => "super+a",
+        Action::ClearScrollback => "super+k",
+        Action::IncreaseFontSize => "super+shift+=",
+        Action::DecreaseFontSize => "super+-",
+        Action::ResetFontSize => "super+0",
+        _ => return None,
+    })
+}
+
 /// Default chords per action (keybindings D-K1). Reproduces the chords shipped
 /// before user keybindings, including the macOS layout alternates.
 pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
@@ -1118,6 +1162,11 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
             ],
         },
         Action::NewWindow => vec!["super+n"],
+        Action::ClearScrollback
+        | Action::IncreaseFontSize
+        | Action::DecreaseFontSize
+        | Action::ResetFontSize => vec![],
+        Action::Quit => vec!["super+q"],
         Action::OpenConfig => vec![],
         Action::CommandPalette => vec!["ctrl+shift+p"],
         Action::PaletteFilterNext | Action::PaletteFilterPrev => vec![],
@@ -1165,6 +1214,15 @@ impl KeyMap {
     /// Build from the `[keys]` table. `None` or an empty table is the
     /// default map. Errors name the offending entry.
     pub fn from_config(keys: Option<&BTreeMap<String, KeysValue>>) -> Result<KeyMap, String> {
+        Self::from_config_with_macos(keys, false)
+    }
+
+    /// Build defaults with optional macOS Command shortcuts, then apply
+    /// per-action config overrides. Config entries replace all defaults.
+    pub fn from_config_with_macos(
+        keys: Option<&BTreeMap<String, KeysValue>>,
+        macos_shortcuts: bool,
+    ) -> Result<KeyMap, String> {
         let mut bindings: Vec<(Action, Chord)> = Vec::new();
         let mut user_chords: Vec<(Action, Chord)> = Vec::new();
         for action in Action::all() {
@@ -1184,6 +1242,14 @@ impl KeyMap {
                     for text in default_chords(action) {
                         let chord = Chord::parse(text).expect("default chord parses");
                         bindings.push((action, chord));
+                    }
+                    if macos_shortcuts {
+                        if let Some(text) = macos_chord(action) {
+                            let chord = Chord::parse(text).expect("macOS chord parses");
+                            if !bindings.contains(&(action, chord)) {
+                                bindings.push((action, chord));
+                            }
+                        }
                     }
                 }
             }
@@ -1217,6 +1283,23 @@ impl KeyMap {
             }
         }
         Ok(KeyMap { bindings })
+    }
+
+    /// One row per host action, including actions without an active chord.
+    pub fn listing(&self) -> String {
+        Action::all()
+            .into_iter()
+            .map(|action| {
+                let chords = self.spellings(action);
+                let chords = if chords.is_empty() {
+                    "(unbound)".to_string()
+                } else {
+                    chords.join(", ")
+                };
+                format!("{:<22} {chords}", action.name())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// The action for a key event, if any chord matches.
@@ -1356,6 +1439,10 @@ mod tests {
                 | Action::PaletteFilterPrev
                 | Action::Walkthrough
                 | Action::WalkthroughReset
+                | Action::ClearScrollback
+                | Action::IncreaseFontSize
+                | Action::DecreaseFontSize
+                | Action::ResetFontSize
         )
     }
 
@@ -1787,6 +1874,41 @@ mod tests {
             2,
             "duplicate alias collapses"
         );
+    }
+
+    #[test]
+    fn macos_shortcuts_are_opt_in_and_user_entries_replace_them() {
+        let defaults = KeyMap::default();
+        assert_eq!(defaults.spellings(Action::Copy), vec!["ctrl+shift+c"]);
+        assert_eq!(defaults.spellings(Action::Quit), vec!["super+q"]);
+
+        let mac = KeyMap::from_config_with_macos(None, true).unwrap();
+        assert_eq!(mac.spellings(Action::Copy), vec!["ctrl+shift+c", "super+c"]);
+        assert_eq!(
+            mac.spellings(Action::NewTab),
+            vec!["ctrl+shift+t", "super+t"]
+        );
+        assert_eq!(mac.spellings(Action::Quit), vec!["super+q"]);
+        assert_eq!(
+            mac.spellings(Action::IncreaseFontSize),
+            vec!["shift+super+="]
+        );
+        let listing = mac.listing();
+        assert!(listing.contains("clear_scrollback"));
+        assert!(listing.contains("super+k"));
+
+        let overrides = BTreeMap::from([
+            ("copy".to_string(), KeysValue::Many(vec![])),
+            ("quit".to_string(), KeysValue::Many(vec![])),
+            (
+                "new_window".to_string(),
+                KeysValue::One("ctrl+alt+n".into()),
+            ),
+        ]);
+        let custom = KeyMap::from_config_with_macos(Some(&overrides), true).unwrap();
+        assert!(custom.chords(Action::Copy).is_empty());
+        assert!(custom.chords(Action::Quit).is_empty());
+        assert_eq!(custom.spellings(Action::NewWindow), vec!["ctrl+alt+n"]);
     }
 
     #[test]

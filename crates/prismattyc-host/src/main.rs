@@ -363,6 +363,8 @@ struct Cli {
     splash_animation: bool,
     /// True when the user named a PROGRAM (or used `--`): not a bare launch.
     explicit_program: bool,
+    /// Print the effective bindings from config and exit.
+    list_bindings: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -384,6 +386,7 @@ impl Cli {
         let mut alt_screen_scrollback = env_flag_enabled("PRISMATTYC_ALT_SCREEN_SCROLLBACK");
         let mut gpu = env_flag_enabled("PRISMATTYC_GPU");
         let mut no_splash = false;
+        let mut list_bindings = false;
         let mut explicit_program = false;
         let mut attach_sessions = Vec::new();
         while let Some(a) = args.next() {
@@ -405,6 +408,10 @@ impl Cli {
             if a == "-V" || a == "--version" {
                 println!("{}", prismattyc_core::bin_version("prismattyc-host"));
                 std::process::exit(0);
+            }
+            if a == "--list-bindings" && program.is_none() {
+                list_bindings = true;
+                continue;
             }
             if a == "--write-config" && program.is_none() {
                 let mut merge = false;
@@ -520,6 +527,7 @@ impl Cli {
             no_splash,
             splash_animation: true,
             explicit_program,
+            list_bindings,
         })
     }
 
@@ -715,7 +723,7 @@ fn print_help() {
 prismattyc-host — windowed Prismattyc host
 
 USAGE:
-    prismattyc-host [-V|--version] [--panes N] [--focus-border NAME] [--experimental-rich] [--alt-screen-scrollback] [--gpu] [PROGRAM [ARGS...]]
+    prismattyc-host [-V|--version] [--list-bindings] [--panes N] [--focus-border NAME] [--experimental-rich] [--alt-screen-scrollback] [--gpu] [PROGRAM [ARGS...]]
     prismattyc-host --attach-session ID [--attach-title NAME] ...
     prismattyc-host --write-config [PATH] [--merge]
     prismattyc-host -- /bin/bash -l
@@ -751,6 +759,10 @@ Focus border:    coral amber yellow green blue violet ink
                  (also PRISMATTYC_FOCUS_BORDER=name|index)
 Config file:     ~/.config/prismattyc/config.toml (or $PRISMATTYC_CONFIG), hot-reloaded.
                  First run writes the full template when the file is missing.
+Bindings:        --list-bindings prints the effective actions and chords.
+                 Cmd+Q and Cmd+N are available by default; macos_shortcuts = true
+                 adds Cmd+T/W/C/V/A/F/K and Cmd+Plus/Minus/0 actions.
+                 [keys] rebinds or disables any action.
                  --write-config [PATH] prints (PATH omitted or -) or writes it;
                  --write-config --merge appends missing keys to an existing file.
                  CLI flags and PRISMATTYC_* env vars always win over the file.
@@ -835,6 +847,10 @@ struct HostState {
     window: Arc<Window>,
     present: Option<PresentBackend>,
     font: FontMetrics,
+    font_base_px: f32,
+    font_zoom_steps: i8,
+    font_path: Option<PathBuf>,
+    font_fallback: Vec<PathBuf>,
     /// Host-only terminal-grid OpenType shaping settings.
     font_ligatures: bool,
     font_features: Vec<String>,
@@ -2363,7 +2379,9 @@ impl App {
         for host in self.windows.values_mut() {
             host.pending_full_repaint = Some(FullRepaintReason::Fallback);
         }
-        if self.file_config.keys != prior.keys {
+        if self.file_config.keys != prior.keys
+            || self.file_config.macos_shortcuts() != prior.macos_shortcuts()
+        {
             // Rebuild the key table; the chord strip labels repaint with it.
             self.keymap = Arc::new(self.file_config.loaded_keymap());
             for host in self.windows.values_mut() {
@@ -2637,6 +2655,10 @@ impl App {
                         );
                         } else {
                             host.font = font;
+                            host.font_base_px = self.file_config.font_px.unwrap_or(FONT_PX);
+                            host.font_zoom_steps = 0;
+                            host.font_path = self.file_config.font.clone();
+                            host.font_fallback = fallbacks;
                             host.spacing = requested_spacing;
                             host.left_button_down = false;
                             host.cursor_cell = None;
@@ -3252,6 +3274,10 @@ impl App {
                 window,
                 present: Some(present),
                 font,
+                font_base_px: base_px,
+                font_zoom_steps: 0,
+                font_path: self.file_config.font.clone(),
+                font_fallback: fallbacks,
                 font_ligatures: self.file_config.font_ligatures(),
                 font_features: self.file_config.font_features(),
                 render_timer: self.file_config.render_timer(),
@@ -6181,17 +6207,15 @@ impl App {
     /// the effective pixel size is unchanged, so the startup
     /// `ScaleFactorChanged` some compositors send costs nothing. Grid refit
     /// is left to the `Resized` event winit sends right after.
-    fn refit_font_for_scale(
-        file_config: &config::ConfigFile,
-        host: &mut HostState,
-        scale_factor: f64,
-    ) {
-        let px = scaled_font_px(file_config.font_px.unwrap_or(FONT_PX), scale_factor);
+    fn refit_font_for_scale(host: &mut HostState, scale_factor: f64) {
+        let px = scaled_font_px(
+            (host.font_base_px + f32::from(host.font_zoom_steps)).clamp(6.0, 72.0),
+            scale_factor,
+        );
         if (px - host.font.px).abs() < 0.01 {
             return;
         }
-        let fallbacks = file_config.font_fallback.clone().unwrap_or_default();
-        match FontMetrics::load_with(px, file_config.font.as_deref(), &fallbacks) {
+        match FontMetrics::load_with(px, host.font_path.as_deref(), &host.font_fallback) {
             Ok(font) => {
                 eprintln!(
                     "prismattyc-host: scale factor {scale_factor}: font {:.1}px -> {px:.1}px",
@@ -10513,12 +10537,17 @@ fn mux_command_for(action: keybind::Action) -> Option<MuxCommand> {
         Action::PresetMainHorizontal => MuxCommand::Preset(mux::LayoutPreset::MainHorizontal),
         Action::ZoomPane => MuxCommand::ZoomPane,
         Action::NewWindow
+        | Action::Quit
         | Action::OpenConfig
         | Action::CommandPalette
         | Action::PaletteFilterNext
         | Action::PaletteFilterPrev
         | Action::ThemePicker
         | Action::Find
+        | Action::ClearScrollback
+        | Action::IncreaseFontSize
+        | Action::DecreaseFontSize
+        | Action::ResetFontSize
         | Action::Walkthrough
         | Action::WalkthroughReset
         | Action::Copy
@@ -12694,6 +12723,7 @@ fn record_recent(host: &mut HostState, action: keybind::Action) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActionRoute {
     OpenWindow,
+    Quit,
     OpenConfig,
     Scroll(isize),
     Paste,
@@ -12704,6 +12734,10 @@ enum ActionRoute {
     WalkthroughReset,
     Palette,
     Find,
+    ClearScrollback,
+    IncreaseFontSize,
+    DecreaseFontSize,
+    ResetFontSize,
     Noop,
     SpaceRailFocus,
     SpaceSettings,
@@ -12717,6 +12751,7 @@ fn action_route(action: keybind::Action) -> ActionRoute {
     use keybind::Action;
     match action {
         Action::NewWindow => ActionRoute::OpenWindow,
+        Action::Quit => ActionRoute::Quit,
         Action::OpenConfig => ActionRoute::OpenConfig,
         Action::ScrollLineUp => ActionRoute::Scroll(1),
         Action::ScrollLineDown => ActionRoute::Scroll(-1),
@@ -12730,6 +12765,10 @@ fn action_route(action: keybind::Action) -> ActionRoute {
             ActionRoute::Palette
         }
         Action::Find => ActionRoute::Find,
+        Action::ClearScrollback => ActionRoute::ClearScrollback,
+        Action::IncreaseFontSize => ActionRoute::IncreaseFontSize,
+        Action::DecreaseFontSize => ActionRoute::DecreaseFontSize,
+        Action::ResetFontSize => ActionRoute::ResetFontSize,
         Action::ThemePicker | Action::OpenSpace | Action::DeleteSpace | Action::MovePaneToSpace => {
             ActionRoute::Noop
         }
@@ -12769,6 +12808,51 @@ fn apply_save_space_action(host: &mut HostState) {
     }
 }
 
+/// Change the per-window font size by one configured-font pixel per step.
+/// A zero delta restores the configured size. The mux grid is resized before
+/// committing the new metrics so drawing and child dimensions stay in sync.
+fn change_font_size(host: &mut HostState, delta: i8) {
+    let steps = if delta == 0 {
+        0
+    } else {
+        host.font_zoom_steps.saturating_add(delta)
+    };
+    let target_base = (host.font_base_px + f32::from(steps)).clamp(6.0, 72.0);
+    let target_steps = (target_base - host.font_base_px).round() as i8;
+    let px = scaled_font_px(target_base, host.window.scale_factor());
+    if (px - host.font.px).abs() < 0.01 {
+        host.font_zoom_steps = target_steps;
+        return;
+    }
+    let font = match FontMetrics::load_with(px, host.font_path.as_deref(), &host.font_fallback) {
+        Ok(font) => font,
+        Err(error) => {
+            eprintln!("prismattyc-host: font size change failed: {error:#}");
+            return;
+        }
+    };
+    let geom = host_geom(
+        &font,
+        host.mux.active_pane_count() > 1,
+        show_tab_strip(host),
+        strip_handle_row(host),
+        host.spacing,
+        host.space_rail.longest_name_cells(),
+    );
+    let (cols, rows) = size_to_cells(host.window.inner_size(), &font, geom);
+    if let Err(error) = host.mux.resize_with_geom(cols, rows, geom) {
+        eprintln!("prismattyc-host: grid resize for font size failed: {error:#}");
+        return;
+    }
+    host.font = font;
+    host.font_zoom_steps = target_steps;
+    host.left_button_down = false;
+    host.cursor_cell = None;
+    host.pending_full_repaint = Some(FullRepaintReason::Resize);
+    host.dirty = true;
+    App::refit_geom(host, host.window.inner_size(), Some("font size"));
+}
+
 fn dispatch_action(
     host: &mut HostState,
     action: keybind::Action,
@@ -12804,6 +12888,7 @@ fn dispatch_action(
     }
     match action_route(action) {
         ActionRoute::OpenWindow => Dispatch::OpenWindow,
+        ActionRoute::Quit => Dispatch::Exit,
         ActionRoute::OpenConfig => Dispatch::OpenConfig,
         ActionRoute::Scroll(lines) => {
             pan_view_scroll(host, lines);
@@ -12840,6 +12925,25 @@ fn dispatch_action(
         }
         ActionRoute::Find => {
             open_find_prompt(host);
+            Dispatch::Handled
+        }
+        ActionRoute::ClearScrollback => {
+            host.emulator.clear_terminal();
+            host.selection.clear();
+            host.view_scroll = 0;
+            host.dirty = true;
+            Dispatch::Handled
+        }
+        ActionRoute::IncreaseFontSize => {
+            change_font_size(host, 1);
+            Dispatch::Handled
+        }
+        ActionRoute::DecreaseFontSize => {
+            change_font_size(host, -1);
+            Dispatch::Handled
+        }
+        ActionRoute::ResetFontSize => {
+            change_font_size(host, 0);
             Dispatch::Handled
         }
         ActionRoute::Noop => Dispatch::Handled,
@@ -13268,7 +13372,7 @@ impl ApplicationHandler<UserAction> for App {
             // rasterized at the new scale; the `Resized` arm refits the grid
             // with the new cell metrics.
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                Self::refit_font_for_scale(&self.file_config, host, scale_factor);
+                Self::refit_font_for_scale(host, scale_factor);
                 host.window.request_redraw();
             }
             WindowEvent::RedrawRequested => unreachable!("handled above"),
@@ -13494,13 +13598,15 @@ impl ApplicationHandler<UserAction> for App {
                     _ => {}
                 }
                 if let Some(action) = action {
+                    let command_shortcut = host.modifiers.super_key();
                     let blocked_by_guest_alt = matches!(
                         action,
                         keybind::Action::Copy
                             | keybind::Action::SelectAll
                             | keybind::Action::ScrollLineUp
                             | keybind::Action::ScrollLineDown
-                    ) && !host_select;
+                    ) && !host_select
+                        && !command_shortcut;
                     if !blocked_by_guest_alt {
                         if action == keybind::Action::RichFocus
                             && handle_rich_focus_input(host, &event, Some(action))
@@ -13550,11 +13656,13 @@ impl ApplicationHandler<UserAction> for App {
                 // Named + Character + text + physical fallbacks (see keys.rs).
                 // Space is NamedKey::Space; do not rely on Character(" ") alone.
                 let text = event.text.as_ref().map(|s| s.as_str());
-                if let Some(bytes) = keys::encode_key_event(
+                if let Some(bytes) = keys::encode_key_event_with_modes(
                     &event.logical_key,
                     event.physical_key,
                     text,
                     host.modifiers,
+                    host.emulator.keyboard_flags(),
+                    host.emulator.modify_other_keys(),
                 ) {
                     let _ = host.try_send_bytes(bytes);
                 }
@@ -14134,6 +14242,11 @@ fn main() -> Result<()> {
     // Parse first so --help / --version / --write-config never create
     // the default config path (PT-84 review).
     let mut cli = Cli::parse(std::env::args().skip(1))?;
+    if cli.list_bindings {
+        let file_config = config::load(&config::config_path())?;
+        println!("{}", file_config.loaded_keymap().listing());
+        return Ok(());
+    }
     #[cfg(target_os = "macos")]
     if let Err(error) = prismattyc_mux::release_update::ensure_pmux_path_shim_for_current_app() {
         eprintln!(
@@ -14315,6 +14428,7 @@ mod tests {
         use keybind::Action;
         let cases = [
             (Action::NewWindow, ActionRoute::OpenWindow),
+            (Action::Quit, ActionRoute::Quit),
             (Action::OpenConfig, ActionRoute::OpenConfig),
             (Action::ScrollLineUp, ActionRoute::Scroll(1)),
             (Action::ScrollLineDown, ActionRoute::Scroll(-1)),
@@ -14328,6 +14442,10 @@ mod tests {
             (Action::PaletteFilterNext, ActionRoute::Palette),
             (Action::PaletteFilterPrev, ActionRoute::Palette),
             (Action::Find, ActionRoute::Find),
+            (Action::ClearScrollback, ActionRoute::ClearScrollback),
+            (Action::IncreaseFontSize, ActionRoute::IncreaseFontSize),
+            (Action::DecreaseFontSize, ActionRoute::DecreaseFontSize),
+            (Action::ResetFontSize, ActionRoute::ResetFontSize),
             (Action::ThemePicker, ActionRoute::Noop),
             (Action::OpenSpace, ActionRoute::Noop),
             (Action::DeleteSpace, ActionRoute::Noop),
@@ -17490,6 +17608,13 @@ mod tests {
         assert_eq!(cli.child_args, ["-l"]);
         let expected = prismattyc_mux::platform::default_shell();
         assert_eq!(cli.program, expected);
+    }
+
+    #[test]
+    fn cli_lists_active_bindings_without_starting_a_program() {
+        let cli = Cli::parse(["--list-bindings"].into_iter().map(str::to_owned)).expect("parse");
+        assert!(cli.list_bindings);
+        assert!(!cli.explicit_program);
     }
 
     #[test]

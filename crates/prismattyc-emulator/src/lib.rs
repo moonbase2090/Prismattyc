@@ -217,6 +217,9 @@ pub struct EmulatorStateV1 {
     pub focus_report: bool,
     pub keyboard_main: KeyboardModeStateV1,
     pub keyboard_alt: KeyboardModeStateV1,
+    /// xterm modifyOtherKeys mode (0 through 3). Older snapshots omit it.
+    #[serde(default)]
+    pub modify_other_keys: u8,
     pub cwd: Option<PathBuf>,
     pub cell_width_px: u32,
     pub cell_height_px: u32,
@@ -379,6 +382,8 @@ pub struct Emulator {
     keyboard_main: KeyboardModeStack,
     /// Kitty keyboard progressive enhancement — alternate screen stack.
     keyboard_alt: KeyboardModeStack,
+    /// xterm modifyOtherKeys mode, shared by both screens.
+    modify_other_keys: u8,
     /// Bytes the host must write to the child PTY (DSR/CPR, DA1, …).
     /// Drained via [`Self::take_pending_replies`] after each [`Self::feed`].
     pending_replies: Vec<Vec<u8>>,
@@ -416,6 +421,7 @@ impl Emulator {
             focus_report: false,
             keyboard_main: KeyboardModeStack::default(),
             keyboard_alt: KeyboardModeStack::default(),
+            modify_other_keys: 0,
             pending_replies: Vec::new(),
             cwd: None,
             pending_bell: false,
@@ -442,6 +448,7 @@ impl Emulator {
             focus_report: false,
             keyboard_main: KeyboardModeStack::default(),
             keyboard_alt: KeyboardModeStack::default(),
+            modify_other_keys: 0,
             pending_replies: Vec::new(),
             cwd: None,
             pending_bell: false,
@@ -495,6 +502,7 @@ impl Emulator {
                 flags: self.keyboard_alt.flags,
                 stack: self.keyboard_alt.stack.clone(),
             },
+            modify_other_keys: self.modify_other_keys,
             cwd: self.cwd.clone(),
             cell_width_px: self.cell_width_px,
             cell_height_px: self.cell_height_px,
@@ -512,6 +520,12 @@ impl Emulator {
         }
         validate_keyboard_state(&state.keyboard_main)?;
         validate_keyboard_state(&state.keyboard_alt)?;
+        if state.modify_other_keys > 3 {
+            return Err(StateError::Invalid(format!(
+                "modifyOtherKeys mode {} is outside 0..=3",
+                state.modify_other_keys
+            )));
+        }
         let screen = Screen::import_state(state.screen)?;
         let graphics =
             graphics::GraphicsState::import_state(state.graphics).map_err(StateError::Invalid)?;
@@ -539,6 +553,7 @@ impl Emulator {
                 flags: state.keyboard_alt.flags,
                 stack: state.keyboard_alt.stack,
             },
+            modify_other_keys: state.modify_other_keys,
             pending_replies: Vec::new(),
             cwd: state.cwd,
             pending_bell: false,
@@ -629,6 +644,16 @@ impl Emulator {
         } else {
             self.keyboard_main.flags
         }
+    }
+
+    /// Active xterm modifyOtherKeys mode (`CSI > 4 ; Ps m`).
+    pub const fn modify_other_keys(&self) -> u8 {
+        self.modify_other_keys
+    }
+
+    /// Clear the active screen and primary scrollback (xterm ED 3 behavior).
+    pub fn clear_terminal(&mut self) {
+        self.screen.erase_display(3);
     }
 
     /// True when the child wants press/repeat/release event-type reporting.
@@ -734,6 +759,7 @@ impl Emulator {
             focus_report,
             keyboard_main,
             keyboard_alt,
+            modify_other_keys,
             pending_replies,
             cwd,
             pending_bell,
@@ -753,6 +779,7 @@ impl Emulator {
                 focus_report,
                 keyboard_main,
                 keyboard_alt,
+                modify_other_keys,
                 pending_replies,
                 cwd,
                 pending_bell,
@@ -796,6 +823,7 @@ struct ScreenPerformer<'a> {
     focus_report: &'a mut bool,
     keyboard_main: &'a mut KeyboardModeStack,
     keyboard_alt: &'a mut KeyboardModeStack,
+    modify_other_keys: &'a mut u8,
     pending_replies: &'a mut Vec<Vec<u8>>,
     cwd: &'a mut Option<PathBuf>,
     pending_bell: &'a mut bool,
@@ -967,6 +995,21 @@ impl Perform for ScreenPerformer<'_> {
                         .push(format!("\x1b[?{flags}u").into_bytes());
                 }
                 _ => {}
+            }
+            return;
+        }
+
+        // xterm modifyOtherKeys: CSI > 4 ; Ps m. Unlike Kitty keyboard
+        // enhancement, this mode is shared by the primary and alternate
+        // screens. Levels 0..=3 are defined by xterm; ignore other modes.
+        if intermediates == b">" && action == 'm' {
+            let values = params_vec(params);
+            if values.first() == Some(&4) {
+                if let Ok(mode) = values.get(1).copied().unwrap_or(0).try_into() {
+                    if mode <= 3 {
+                        *self.modify_other_keys = mode;
+                    }
+                }
             }
             return;
         }
@@ -1173,6 +1216,7 @@ impl Perform for ScreenPerformer<'_> {
                 // Kitty keyboard protocol: clear both screen stacks.
                 self.keyboard_main.clear();
                 self.keyboard_alt.clear();
+                *self.modify_other_keys = 0;
             }
             b'D' => self.screen.line_feed(), // IND — Index
             b'E' => {
@@ -2574,6 +2618,38 @@ mod tests {
         let mut emulator = Emulator::new(4, 2, 0);
         let _ = emulator.feed(b"\x1b[>1u\x1bc");
         assert_eq!(emulator.keyboard_flags(), 0);
+    }
+
+    #[test]
+    fn modify_other_keys_tracks_xterm_mode_and_resets_on_ris() {
+        let mut emulator = Emulator::new(4, 2, 0);
+        assert_eq!(emulator.modify_other_keys(), 0);
+
+        let _ = emulator.feed(b"\x1b[>4;1m");
+        assert_eq!(emulator.modify_other_keys(), 1);
+        let _ = emulator.feed(b"\x1b[>4;2m");
+        assert_eq!(emulator.modify_other_keys(), 2);
+        let _ = emulator.feed(b"\x1b[>4;3m");
+        assert_eq!(emulator.modify_other_keys(), 3);
+
+        // Unsupported levels do not silently clamp into a supported mode.
+        let _ = emulator.feed(b"\x1b[>4;9m");
+        assert_eq!(emulator.modify_other_keys(), 3);
+        let _ = emulator.feed(b"\x1b[>4;0m");
+        assert_eq!(emulator.modify_other_keys(), 0);
+        let _ = emulator.feed(b"\x1b[>4;2m\x1bc");
+        assert_eq!(emulator.modify_other_keys(), 0, "RIS resets xterm modes");
+    }
+
+    #[test]
+    fn modify_other_keys_is_preserved_in_emulator_state() {
+        let mut emulator = Emulator::new(4, 2, 0);
+        let _ = emulator.feed(b"\x1b[>4;2m");
+        let snapshot = emulator.export_state().expect("parser boundary");
+        assert_eq!(snapshot.modify_other_keys, 2);
+
+        let restored = Emulator::import_state(snapshot).expect("valid state");
+        assert_eq!(restored.modify_other_keys(), 2);
     }
 
     #[test]

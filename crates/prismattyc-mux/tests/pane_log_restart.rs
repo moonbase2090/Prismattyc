@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use prismattyc_emulator::EmulatorStateV1;
 use prismattyc_mux::{
     ControlRequest, ControlResponse, ControlResponseBody, ControlResponseData, SpawnSpec,
     PROTOCOL_VERSION,
@@ -452,6 +453,65 @@ impl Client {
         reader.read_line(&mut line).unwrap();
         serde_json::from_str(&line).unwrap()
     }
+
+    fn read_pane_state(&mut self, pane_id: u64) -> EmulatorStateV1 {
+        self.next_id += 1;
+        let request_id = self.next_id;
+        let request = ControlRequest::ReadPaneState {
+            version: PROTOCOL_VERSION,
+            request_id,
+            client_id: self.client_id,
+            pane_id,
+        };
+        serde_json::to_writer(&mut self.stream, &request).unwrap();
+        self.stream.write_all(b"\n").unwrap();
+        self.stream.flush().unwrap();
+
+        let mut reader = BufReader::new(self.stream.try_clone().unwrap());
+        let mut bytes = Vec::new();
+        let mut next_offset = 0u64;
+        let mut total_bytes = None;
+        let mut through_seq = None;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let response: ControlResponse = serde_json::from_str(&line).unwrap();
+            assert_eq!(response.request_id, request_id);
+            let ControlResponseBody::Ok {
+                response:
+                    ControlResponseData::PaneStateChunk {
+                        pane_id: actual_pane,
+                        through_seq: actual_seq,
+                        offset,
+                        total_bytes: actual_total,
+                        data,
+                        done,
+                    },
+            } = response.body
+            else {
+                panic!("expected pane state chunk: {response:?}");
+            };
+            assert_eq!(actual_pane, pane_id);
+            assert_eq!(offset, next_offset);
+            if let Some(expected) = through_seq {
+                assert_eq!(actual_seq, expected);
+            } else {
+                through_seq = Some(actual_seq);
+            }
+            if let Some(expected) = total_bytes {
+                assert_eq!(actual_total, expected);
+            } else {
+                total_bytes = Some(actual_total);
+            }
+            next_offset += data.len() as u64;
+            bytes.extend_from_slice(&data);
+            assert_eq!(done, next_offset == actual_total);
+            if done {
+                break;
+            }
+        }
+        serde_json::from_slice(&bytes).expect("valid emulator state")
+    }
 }
 
 fn ok_data(response: ControlResponse) -> ControlResponseData {
@@ -710,6 +770,39 @@ fn snapshot_without_tail_survives_pmuxd_restart() {
         "snapshot must restore the pre-restart screen after the tail is dropped"
     );
     let _ = server;
+}
+
+#[test]
+fn scrollback_snapshot_survives_pmuxd_restart() {
+    let data = DataGuard(data_dir());
+    let socket = socket_path();
+    let script = "printf 'SCROLLBACK_RESTART_MARKER\\r\\n'; i=1; while [ \"$i\" -le 100 ]; do printf 'line %03d\\r\\n' \"$i\"; i=$((i + 1)); done; exec cat";
+    let server = start_server(&socket, &data.0, "/bin/sh", &["-c", script]);
+    let mut client = Client::connect(&socket);
+    let pane = first_pane(&mut client);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let lines = read_lines(&mut client, pane);
+        if lines.iter().any(|line| line.contains("line 100")) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "fixture output did not finish");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    drop(client);
+    drop(server);
+
+    let socket = socket_path();
+    let _server = start_server(&socket, &data.0, "/bin/sleep", &["999"]);
+    let mut client = Client::connect(&socket);
+    let pane = first_pane(&mut client);
+    let state = client.read_pane_state(pane);
+    assert!(state
+        .screen
+        .scrollback
+        .iter()
+        .any(|row| row.text.contains("SCROLLBACK_RESTART_MARKER")));
 }
 
 #[test]

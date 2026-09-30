@@ -395,7 +395,11 @@ impl Client {
         loop {
             let mut line = String::new();
             if self.reader.read_line(&mut line)? == 0 {
-                bail!("server closed the pane connection");
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "server closed the pane connection",
+                )
+                .into());
             }
             let response: ControlResponse = serde_json::from_str(&line)?;
             if response.request_id == 0 {
@@ -443,7 +447,11 @@ impl Client {
                 let (take, complete) = {
                     let buffer = self.reader.fill_buf()?;
                     if buffer.is_empty() {
-                        bail!("server closed the pane connection");
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "server closed the pane connection",
+                        )
+                        .into());
                     }
                     let newline = buffer.iter().position(|byte| *byte == b'\n');
                     (
@@ -567,6 +575,31 @@ impl Client {
         }
     }
 
+    fn read_pane_state_at_boundary(
+        &mut self,
+        pane_id: u64,
+        events_tx: &mpsc::Sender<LogMessage>,
+        wake: Option<&crate::mux::Wake>,
+        stop: &AtomicBool,
+        budget: &HostByteBudget,
+    ) -> Result<u64> {
+        for attempt in 0..=PANE_STATE_BOUNDARY_RETRIES {
+            if stop.load(Ordering::Relaxed) {
+                bail!("pane state transfer stopped");
+            }
+            match self.read_pane_state_stream(pane_id, events_tx, wake, stop, budget) {
+                Err(error) if pane_state_boundary_unavailable(&error) => {
+                    if attempt == PANE_STATE_BOUNDARY_RETRIES {
+                        return Err(error);
+                    }
+                    std::thread::sleep(PANE_STATE_BOUNDARY_STEP);
+                }
+                result => return result,
+            }
+        }
+        unreachable!("the final state-boundary attempt returns or errors")
+    }
+
     fn next_id(&mut self) -> Result<u64> {
         let request_id = self.next_request_id;
         self.next_request_id = self
@@ -588,16 +621,46 @@ fn error_code(error: &anyhow::Error) -> Option<ControlErrorCode> {
     error.downcast_ref::<ControlError>().map(|err| err.code)
 }
 
-/// A socket read that timed out or was interrupted, not a server verdict
-/// or a closed connection. The server and the pane are usually fine: the
-/// host or pmuxd was starved (swap, a VM starting) for longer than
-/// [`SUBSCRIBE_READ_TIMEOUT`]. Re-subscribe instead of ending the pane
-/// (PT-135).
+fn pane_state_boundary_unavailable(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<ControlError>().is_some_and(|control| {
+        control.code == ControlErrorCode::InputRouteUnavailable
+            && control.message.contains("safe boundary")
+    })
+}
+
+/// A recoverable transport failure on a pane stream. A restarted daemon
+/// closes the old socket, then may refuse connections until its socket is
+/// ready again. Re-snapshot after reconnect so a log gap cannot drop history.
 fn transient_read_error(error: &anyhow::Error) -> bool {
+    let kind = error
+        .downcast_ref::<std::io::Error>()
+        .map(std::io::Error::kind)
+        .or_else(|| {
+            error
+                .downcast_ref::<serde_json::Error>()
+                .and_then(serde_json::Error::io_error_kind)
+        });
+    matches!(
+        kind,
+        Some(
+            std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::NotConnected
+        )
+    )
+}
+
+fn transient_connect_error(error: &anyhow::Error) -> bool {
     error.downcast_ref::<std::io::Error>().is_some_and(|io| {
         matches!(
             io.kind(),
-            std::io::ErrorKind::WouldBlock
+            std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::NotFound
                 | std::io::ErrorKind::TimedOut
                 | std::io::ErrorKind::Interrupted
         )
@@ -608,6 +671,11 @@ fn transient_read_error(error: &anyhow::Error) -> bool {
 /// declared ended; each retry reconnects and waits `n × 250 ms` first.
 const SUBSCRIBE_RETRIES: u32 = 5;
 const SUBSCRIBE_RETRY_STEP: Duration = Duration::from_millis(250);
+/// Keep trying a closed or not-yet-published socket during a daemon restart.
+const RECONNECT_ATTEMPTS: u32 = 20;
+const RECONNECT_STEP: Duration = Duration::from_millis(250);
+const PANE_STATE_BOUNDARY_RETRIES: u32 = 20;
+const PANE_STATE_BOUNDARY_STEP: Duration = Duration::from_millis(25);
 
 /// Policy counters for frames superseded before host delivery.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -917,34 +985,16 @@ fn reader_loop(
     stop: &AtomicBool,
     budget: &HostByteBudget,
 ) -> Option<String> {
-    let mut client = match Client::connect(socket, SUBSCRIBE_READ_TIMEOUT) {
-        Ok(client) => client,
-        Err(error) => return Some(format!("subscribe connect failed: {error}")),
+    let start = match start_pane_reader_with_retries(
+        socket, pane_id, events_tx, wake, stop, budget, None,
+    ) {
+        Ok(start) => start,
+        Err(_) if stop.load(Ordering::Relaxed) => return None,
+        Err(error) => return Some(format!("subscribe connect failed: {error:#}")),
     };
-    let (mut replay_through, mut from_seq) =
-        match client.read_pane_state_stream(pane_id, events_tx, wake, stop, budget) {
-            Ok(sequence) => (sequence, sequence),
-            Err(error) => {
-                let _ = events_tx.send(LogMessage::RestoreReset);
-                if let Some(wake) = wake {
-                    wake();
-                }
-                eprintln!(
-                    "prismattyc-host: pane state recovery unavailable for pane {pane_id}: {error:#}"
-                );
-                client = match Client::connect(socket, SUBSCRIBE_READ_TIMEOUT) {
-                    Ok(client) => client,
-                    Err(error) => return Some(format!("subscribe reconnect failed: {error}")),
-                };
-                let replay_through = match pane_replay_boundary(&mut client, pane_id) {
-                    Ok(sequence) => sequence,
-                    Err(error) => {
-                        return Some(format!("pane replay boundary failed: {error:#}"));
-                    }
-                };
-                (replay_through, 0)
-            }
-        };
+    let mut client = start.client;
+    let mut from_seq = start.from_seq;
+    let mut replay_through = start.replay_through;
     let mut retries = 0u32;
     'subscribe: loop {
         if stop.load(Ordering::Relaxed) {
@@ -963,6 +1013,34 @@ fn reader_loop(
             timeout_ms: SUBSCRIBE_TIMEOUT_MS,
         };
         if let Err(error) = client.send(&request) {
+            if transient_read_error(&error) && retries < SUBSCRIBE_RETRIES {
+                retries += 1;
+                std::thread::sleep(SUBSCRIBE_RETRY_STEP * retries);
+                if stop.load(Ordering::Relaxed) {
+                    return None;
+                }
+                let fallback = (from_seq, replay_through);
+                drop(client);
+                let start = match start_pane_reader_with_retries(
+                    socket,
+                    pane_id,
+                    events_tx,
+                    wake,
+                    stop,
+                    budget,
+                    Some(fallback),
+                ) {
+                    Ok(start) => start,
+                    Err(_) if stop.load(Ordering::Relaxed) => return None,
+                    Err(error) => {
+                        return Some(format!("subscribe reconnect failed: {error:#}"))
+                    }
+                };
+                client = start.client;
+                from_seq = start.from_seq;
+                replay_through = start.replay_through;
+                continue 'subscribe;
+            }
             return Some(format!("subscribe send failed: {error}"));
         }
         loop {
@@ -980,11 +1058,60 @@ fn reader_loop(
                         else {
                             return Some("pane reset omitted its current sequence".into());
                         };
-                        if events_tx.send(LogMessage::Reset).is_err() {
+                        let start = match start_pane_reader_on_client(
+                            client,
+                            socket,
+                            pane_id,
+                            events_tx,
+                            wake,
+                            stop,
+                            budget,
+                            Some((0, current)),
+                        ) {
+                            Ok(start) => start,
+                            Err(_) if stop.load(Ordering::Relaxed) => return None,
+                            Err(error)
+                                if transient_read_error(&error)
+                                    && retries < SUBSCRIBE_RETRIES =>
+                            {
+                                retries += 1;
+                                let start = match start_pane_reader_with_retries(
+                                    socket,
+                                    pane_id,
+                                    events_tx,
+                                    wake,
+                                    stop,
+                                    budget,
+                                    Some((0, current)),
+                                ) {
+                                    Ok(start) => start,
+                                    Err(_) if stop.load(Ordering::Relaxed) => return None,
+                                    Err(error) => {
+                                        return Some(format!(
+                                            "pane state reconnect failed: {error:#}"
+                                        ));
+                                    }
+                                };
+                                if !start.restored_state
+                                    && events_tx.send(LogMessage::Reset).is_err()
+                                {
+                                    return None;
+                                }
+                                client = start.client;
+                                from_seq = start.from_seq;
+                                replay_through = start.replay_through;
+                                continue 'subscribe;
+                            }
+                            Err(error) => {
+                                return Some(format!("pane state reconnect failed: {error:#}"));
+                            }
+                        };
+                        if !start.restored_state && events_tx.send(LogMessage::Reset).is_err() {
                             return None;
                         }
-                        from_seq = 0;
-                        replay_through = current;
+                        client = start.client;
+                        from_seq = start.from_seq;
+                        replay_through = start.replay_through;
                         continue 'subscribe;
                     }
                     // The pane is gone. PT-68 placeholder takes over.
@@ -998,12 +1125,26 @@ fn reader_loop(
                         if stop.load(Ordering::Relaxed) {
                             return None;
                         }
-                        match Client::connect(socket, SUBSCRIBE_READ_TIMEOUT) {
-                            Ok(fresh) => client = fresh,
+                        let fallback = (from_seq, replay_through);
+                        drop(client);
+                        let start = match start_pane_reader_with_retries(
+                            socket,
+                            pane_id,
+                            events_tx,
+                            wake,
+                            stop,
+                            budget,
+                            Some(fallback),
+                        ) {
+                            Ok(start) => start,
+                            Err(_) if stop.load(Ordering::Relaxed) => return None,
                             Err(error) => {
-                                return Some(format!("subscribe reconnect failed: {error}"))
+                                return Some(format!("subscribe reconnect failed: {error:#}"))
                             }
-                        }
+                        };
+                        client = start.client;
+                        from_seq = start.from_seq;
+                        replay_through = start.replay_through;
                         continue 'subscribe;
                     }
                     _ => return Some(format!("subscribe stream ended: {error}")),
@@ -1043,6 +1184,30 @@ fn reader_loop(
             if let Some(wake) = wake {
                 wake();
             }
+            if gap {
+                drop(client);
+                let start = match start_pane_reader_with_retries(
+                    socket,
+                    pane_id,
+                    events_tx,
+                    wake,
+                    stop,
+                    budget,
+                    Some((through_seq, through_seq)),
+                ) {
+                    Ok(start) => start,
+                    Err(_) if stop.load(Ordering::Relaxed) => return None,
+                    Err(error) => {
+                        return Some(format!(
+                            "pane state refresh after log gap failed: {error:#}"
+                        ));
+                    }
+                };
+                client = start.client;
+                from_seq = start.from_seq;
+                replay_through = start.replay_through;
+                continue 'subscribe;
+            }
             if done {
                 break;
             }
@@ -1072,6 +1237,121 @@ fn pane_replay_boundary(client: &mut Client, pane_id: u64) -> Result<u64> {
         Ok(_) => bail!("unexpected pane replay boundary response"),
         Err(error) => Err(error),
     }
+}
+
+struct PaneReadStart {
+    client: Client,
+    from_seq: u64,
+    replay_through: u64,
+    restored_state: bool,
+}
+
+/// Start a pane stream from a full server snapshot when the daemon supports
+/// it. `fallback` keeps older daemons on their existing bounded-log path.
+fn start_pane_reader(
+    socket: &Path,
+    pane_id: u64,
+    events_tx: &mpsc::Sender<LogMessage>,
+    wake: Option<&crate::mux::Wake>,
+    stop: &AtomicBool,
+    budget: &HostByteBudget,
+    fallback: Option<(u64, u64)>,
+) -> Result<PaneReadStart> {
+    let client = Client::connect(socket, SUBSCRIBE_READ_TIMEOUT)?;
+    start_pane_reader_on_client(
+        client, socket, pane_id, events_tx, wake, stop, budget, fallback,
+    )
+}
+
+fn start_pane_reader_on_client(
+    mut client: Client,
+    socket: &Path,
+    pane_id: u64,
+    events_tx: &mpsc::Sender<LogMessage>,
+    wake: Option<&crate::mux::Wake>,
+    stop: &AtomicBool,
+    budget: &HostByteBudget,
+    fallback: Option<(u64, u64)>,
+) -> Result<PaneReadStart> {
+    let _ = events_tx.send(LogMessage::RestoreReset);
+    if let Some(wake) = wake {
+        wake();
+    }
+    match client.read_pane_state_at_boundary(pane_id, events_tx, wake, stop, budget) {
+        Ok(sequence) => Ok(PaneReadStart {
+            client,
+            from_seq: sequence,
+            replay_through: sequence,
+            restored_state: true,
+        }),
+        Err(error) => {
+            let _ = events_tx.send(LogMessage::RestoreReset);
+            if let Some(wake) = wake {
+                wake();
+            }
+            if stop.load(Ordering::Relaxed) {
+                return Err(error);
+            }
+            if transient_read_error(&error) {
+                return Err(error);
+            }
+            eprintln!(
+                "prismattyc-host: pane state recovery unavailable for pane {pane_id}: {error:#}"
+            );
+            let (client, from_seq, replay_through) = match fallback {
+                Some((from_seq, replay_through)) => {
+                    // A valid unsupported response leaves framing aligned, but
+                    // a partially consumed response may not. Probe before
+                    // reusing this socket; failures enter the reconnect loop.
+                    pane_replay_boundary(&mut client, pane_id)
+                        .context("pane snapshot fallback connection is unusable")?;
+                    (client, from_seq, replay_through)
+                }
+                None => match pane_replay_boundary(&mut client, pane_id) {
+                    Ok(replay_through) => (client, 0, replay_through),
+                    Err(_) => {
+                        drop(client);
+                        let mut client = Client::connect(socket, SUBSCRIBE_READ_TIMEOUT)?;
+                        let replay_through = pane_replay_boundary(&mut client, pane_id)?;
+                        (client, 0, replay_through)
+                    }
+                },
+            };
+            Ok(PaneReadStart {
+                client,
+                from_seq,
+                replay_through,
+                restored_state: false,
+            })
+        }
+    }
+}
+
+fn start_pane_reader_with_retries(
+    socket: &Path,
+    pane_id: u64,
+    events_tx: &mpsc::Sender<LogMessage>,
+    wake: Option<&crate::mux::Wake>,
+    stop: &AtomicBool,
+    budget: &HostByteBudget,
+    fallback: Option<(u64, u64)>,
+) -> Result<PaneReadStart> {
+    for attempt in 0..=RECONNECT_ATTEMPTS {
+        if stop.load(Ordering::Relaxed) {
+            bail!("pane reader stopped during reconnect");
+        }
+        match start_pane_reader(socket, pane_id, events_tx, wake, stop, budget, fallback) {
+            Ok(start) => return Ok(start),
+            Err(error)
+                if attempt < RECONNECT_ATTEMPTS
+                    && (transient_read_error(&error) || transient_connect_error(&error)) =>
+            {
+                std::thread::sleep(RECONNECT_STEP);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the final reconnect attempt returns or errors")
 }
 
 fn coalesce_events(events: Vec<PaneLogFrame>) -> (Vec<PaneLogFrame>, PolicyCounters) {
@@ -2161,6 +2441,458 @@ mod tests {
             .collect()
     }
 
+    fn state_with_scrollback(marker: &str) -> prismattyc_emulator::EmulatorStateV1 {
+        let mut emulator = Emulator::new(80, 24, SCROLLBACK);
+        for line in 0..80 {
+            let text = if line == 0 {
+                marker.to_string()
+            } else {
+                format!("line {line}")
+            };
+            emulator.feed(format!("{text}\r\n").as_bytes());
+        }
+        emulator.export_state().expect("ground-state snapshot")
+    }
+
+    fn write_pane_state(
+        writer: &mut prismattyc_mux::local_socket::UnixStream,
+        request_id: u64,
+        pane_id: u64,
+        through_seq: u64,
+        state: &prismattyc_emulator::EmulatorStateV1,
+    ) {
+        let encoded = serde_json::to_vec(state).unwrap();
+        for (index, data) in encoded.chunks(64 * 1024).enumerate() {
+            let offset = index * 64 * 1024;
+            write_ok(
+                writer,
+                request_id,
+                ControlResponseData::PaneStateChunk {
+                    pane_id,
+                    through_seq,
+                    offset: offset as u64,
+                    total_bytes: encoded.len() as u64,
+                    data: data.to_vec(),
+                    done: offset + data.len() == encoded.len(),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn event_log_rollover_reloads_full_scrollback_before_resuming() {
+        let socket = test_socket("log-rollover-state");
+        let _guard = UnlinkOnDrop(socket.clone());
+        let listener = prismattyc_mux::local_socket::UnixListener::bind(&socket).unwrap();
+        let initial = state_with_scrollback("ROLLBACK_HISTORY_START");
+        let refreshed = state_with_scrollback("ROLLBACK_HISTORY_RESTORED");
+        let server = thread::spawn(move || {
+            for (connection, state, state_seq, subscribe_seq, gap) in
+                [(0, initial, 5, 10, true), (1, refreshed, 10, 10, false)]
+            {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut writer = stream;
+                let mut read_request = || {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    serde_json::from_str::<ControlRequest>(&line).unwrap()
+                };
+                let ControlRequest::RegisterClient { request_id, .. } = read_request() else {
+                    panic!("expected client registration");
+                };
+                write_ok(
+                    &mut writer,
+                    request_id,
+                    ControlResponseData::ClientRegistered {
+                        client_id: u64::try_from(connection + 1).unwrap(),
+                    },
+                );
+                let ControlRequest::ReadPaneState {
+                    request_id,
+                    pane_id,
+                    ..
+                } = read_request()
+                else {
+                    panic!("expected full pane state request");
+                };
+                write_pane_state(&mut writer, request_id, pane_id, state_seq, &state);
+                let ControlRequest::SubscribePane {
+                    request_id,
+                    pane_id,
+                    from_seq,
+                    ..
+                } = read_request()
+                else {
+                    panic!("expected pane log subscription");
+                };
+                assert_eq!(from_seq, state_seq);
+                write_ok(
+                    &mut writer,
+                    request_id,
+                    ControlResponseData::PaneSubscribe {
+                        pane_id,
+                        gap,
+                        snapshot: None,
+                        events: Vec::new(),
+                        through_seq: subscribe_seq,
+                        done: !gap,
+                    },
+                );
+                if connection == 1 {
+                    let ControlRequest::SubscribePane {
+                        request_id,
+                        from_seq,
+                        ..
+                    } = read_request()
+                    else {
+                        panic!("expected subscription after refreshed state");
+                    };
+                    assert_eq!(from_seq, subscribe_seq);
+                    write_frame(
+                        &mut writer,
+                        request_id,
+                        ControlResponseBody::Error {
+                            error: ControlError {
+                                code: ControlErrorCode::StaleId,
+                                message: "fixture complete".into(),
+                                resnapshot_required: false,
+                                oldest_available_sequence: None,
+                                current_sequence: None,
+                                holder: None,
+                            },
+                        },
+                    );
+                    return;
+                }
+            }
+        });
+
+        let (events_tx, events_rx) = mpsc::channel();
+        let reason = reader_loop(
+            &socket,
+            42,
+            &events_tx,
+            None,
+            &AtomicBool::new(false),
+            &HostByteBudget::new(HOST_EVENT_BUDGET_BYTES),
+        );
+        assert_eq!(reason, None);
+        server.join().unwrap();
+        drop(events_tx);
+
+        let mut refreshed_bytes = Vec::new();
+        let mut refreshed_offset = 0u64;
+        for event in events_rx {
+            if let LogMessage::RestoreChunk {
+                through_seq,
+                offset,
+                data,
+                ..
+            } = event
+            {
+                if through_seq == 10 {
+                    assert_eq!(offset, refreshed_offset);
+                    refreshed_offset += data.len() as u64;
+                    refreshed_bytes.extend_from_slice(&data);
+                }
+            }
+        }
+        let restored: prismattyc_emulator::EmulatorStateV1 =
+            serde_json::from_slice(&refreshed_bytes).expect("refreshed pane state");
+        assert!(restored
+            .screen
+            .scrollback
+            .iter()
+            .any(|row| row.text.contains("ROLLBACK_HISTORY_RESTORED")));
+    }
+
+    #[test]
+    fn pane_reconnect_reloads_full_scrollback() {
+        let socket = test_socket("daemon-restart-state");
+        let _guard = UnlinkOnDrop(socket.clone());
+        let listener = prismattyc_mux::local_socket::UnixListener::bind(&socket).unwrap();
+        let before_restart = state_with_scrollback("DAEMON_RESTART_OLD_HISTORY");
+        let after_restart = state_with_scrollback("DAEMON_RESTART_SAVED_HISTORY");
+        let server = thread::spawn(move || {
+            for (connection, state, state_seq) in [(0, before_restart, 5), (1, after_restart, 10)] {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut writer = stream;
+                let mut read_request = || {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    serde_json::from_str::<ControlRequest>(&line).unwrap()
+                };
+                let ControlRequest::RegisterClient { request_id, .. } = read_request() else {
+                    panic!("expected client registration");
+                };
+                write_ok(
+                    &mut writer,
+                    request_id,
+                    ControlResponseData::ClientRegistered {
+                        client_id: u64::try_from(connection + 1).unwrap(),
+                    },
+                );
+                let ControlRequest::ReadPaneState {
+                    request_id,
+                    pane_id,
+                    ..
+                } = read_request()
+                else {
+                    panic!("expected full pane state request");
+                };
+                write_pane_state(&mut writer, request_id, pane_id, state_seq, &state);
+                let ControlRequest::SubscribePane {
+                    request_id,
+                    pane_id,
+                    from_seq,
+                    ..
+                } = read_request()
+                else {
+                    panic!("expected pane log subscription");
+                };
+                assert_eq!(from_seq, state_seq);
+                if connection == 0 {
+                    drop(writer);
+                    continue;
+                }
+                write_ok(
+                    &mut writer,
+                    request_id,
+                    ControlResponseData::PaneSubscribe {
+                        pane_id,
+                        gap: false,
+                        snapshot: None,
+                        events: Vec::new(),
+                        through_seq: state_seq,
+                        done: true,
+                    },
+                );
+                let ControlRequest::SubscribePane { request_id, .. } = read_request() else {
+                    panic!("expected next pane log subscription");
+                };
+                write_frame(
+                    &mut writer,
+                    request_id,
+                    ControlResponseBody::Error {
+                        error: ControlError {
+                            code: ControlErrorCode::StaleId,
+                            message: "fixture complete".into(),
+                            resnapshot_required: false,
+                            oldest_available_sequence: None,
+                            current_sequence: None,
+                            holder: None,
+                        },
+                    },
+                );
+                return;
+            }
+        });
+
+        let (events_tx, events_rx) = mpsc::channel();
+        let reason = reader_loop(
+            &socket,
+            42,
+            &events_tx,
+            None,
+            &AtomicBool::new(false),
+            &HostByteBudget::new(HOST_EVENT_BUDGET_BYTES),
+        );
+        assert_eq!(reason, None);
+        server.join().unwrap();
+        drop(events_tx);
+
+        let mut refreshed_bytes = Vec::new();
+        for event in events_rx {
+            if let LogMessage::RestoreChunk {
+                through_seq: 10,
+                data,
+                ..
+            } = event
+            {
+                refreshed_bytes.extend_from_slice(&data);
+            }
+        }
+        let restored: prismattyc_emulator::EmulatorStateV1 =
+            serde_json::from_slice(&refreshed_bytes).expect("post-restart pane state");
+        assert!(restored
+            .screen
+            .scrollback
+            .iter()
+            .any(|row| row.text.contains("DAEMON_RESTART_SAVED_HISTORY")));
+    }
+
+    #[test]
+    fn interrupted_snapshot_refresh_reconnects_and_restores_scrollback() {
+        let socket = test_socket("interrupted-state-transfer");
+        let _guard = UnlinkOnDrop(socket.clone());
+        let listener = prismattyc_mux::local_socket::UnixListener::bind(&socket).unwrap();
+        let initial_state = state_with_scrollback("BEFORE_INTERRUPTED_REFRESH");
+        let restored_state = state_with_scrollback("MID_SNAPSHOT_RECONNECTED_HISTORY");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            let mut read_request = || {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                serde_json::from_str::<ControlRequest>(&line).unwrap()
+            };
+            let ControlRequest::RegisterClient { request_id, .. } = read_request() else {
+                panic!("expected initial client registration");
+            };
+            write_ok(
+                &mut writer,
+                request_id,
+                ControlResponseData::ClientRegistered { client_id: 1 },
+            );
+            let ControlRequest::ReadPaneState {
+                request_id,
+                pane_id,
+                ..
+            } = read_request()
+            else {
+                panic!("expected initial pane state request");
+            };
+            write_pane_state(&mut writer, request_id, pane_id, 5, &initial_state);
+            let ControlRequest::SubscribePane {
+                request_id,
+                from_seq,
+                ..
+            } = read_request()
+            else {
+                panic!("expected initial pane log subscription");
+            };
+            assert_eq!(from_seq, 5);
+            write_frame(
+                &mut writer,
+                request_id,
+                ControlResponseBody::Error {
+                    error: ControlError {
+                        code: ControlErrorCode::StaleSequence,
+                        message: "fixture sequence reset".into(),
+                        resnapshot_required: true,
+                        oldest_available_sequence: Some(1),
+                        current_sequence: Some(6),
+                        holder: None,
+                    },
+                },
+            );
+            let ControlRequest::ReadPaneState {
+                request_id,
+                pane_id,
+                ..
+            } = read_request()
+            else {
+                panic!("expected state refresh after sequence reset");
+            };
+            write_ok(
+                &mut writer,
+                request_id,
+                ControlResponseData::PaneStateChunk {
+                    pane_id,
+                    through_seq: 6,
+                    offset: 0,
+                    total_bytes: 128,
+                    data: b"{\"partial\":".to_vec(),
+                    done: false,
+                },
+            );
+            drop(read_request);
+            drop(reader);
+            drop(writer);
+
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            let mut read_request = || {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                serde_json::from_str::<ControlRequest>(&line).unwrap()
+            };
+            let ControlRequest::RegisterClient { request_id, .. } = read_request() else {
+                panic!("expected reconnect client registration");
+            };
+            write_ok(
+                &mut writer,
+                request_id,
+                ControlResponseData::ClientRegistered { client_id: 2 },
+            );
+            let ControlRequest::ReadPaneState {
+                request_id,
+                pane_id,
+                ..
+            } = read_request()
+            else {
+                panic!("expected pane state request after reconnect");
+            };
+            write_pane_state(&mut writer, request_id, pane_id, 10, &restored_state);
+            let ControlRequest::SubscribePane {
+                request_id,
+                pane_id: _,
+                from_seq,
+                ..
+            } = read_request()
+            else {
+                panic!("expected pane log subscription after state recovery");
+            };
+            assert_eq!(from_seq, 10);
+            write_frame(
+                &mut writer,
+                request_id,
+                ControlResponseBody::Error {
+                    error: ControlError {
+                        code: ControlErrorCode::StaleId,
+                        message: "fixture complete".into(),
+                        resnapshot_required: false,
+                        oldest_available_sequence: None,
+                        current_sequence: None,
+                        holder: None,
+                    },
+                },
+            );
+        });
+
+        let (events_tx, events_rx) = mpsc::channel();
+        let reason = reader_loop(
+            &socket,
+            42,
+            &events_tx,
+            None,
+            &AtomicBool::new(false),
+            &HostByteBudget::new(HOST_EVENT_BUDGET_BYTES),
+        );
+        assert_eq!(reason, None);
+        server.join().unwrap();
+        drop(events_tx);
+
+        let mut restored_bytes = Vec::new();
+        let mut restored_offset = 0u64;
+        for event in events_rx {
+            if let LogMessage::RestoreChunk {
+                through_seq,
+                offset,
+                data,
+                ..
+            } = event
+            {
+                if through_seq == 10 {
+                    assert_eq!(offset, restored_offset);
+                    restored_offset += data.len() as u64;
+                    restored_bytes.extend_from_slice(&data);
+                }
+            }
+        }
+        let restored: prismattyc_emulator::EmulatorStateV1 =
+            serde_json::from_slice(&restored_bytes).expect("reconnected pane state");
+        assert!(restored
+            .screen
+            .scrollback
+            .iter()
+            .any(|row| row.text.contains("MID_SNAPSHOT_RECONNECTED_HISTORY")));
+    }
+
     #[test]
     fn reader_keeps_replay_boundary_across_batches_and_resets() {
         for (name, boundary, reset) in [
@@ -2186,6 +2918,23 @@ mod tests {
                     &mut writer,
                     request_id,
                     ControlResponseData::ClientRegistered { client_id: 1 },
+                );
+                let ControlRequest::ReadPaneState { request_id, .. } = read_request() else {
+                    panic!("expected full pane state request");
+                };
+                write_frame(
+                    &mut writer,
+                    request_id,
+                    ControlResponseBody::Error {
+                        error: ControlError {
+                            code: ControlErrorCode::InputRouteUnavailable,
+                            message: "pane state unavailable in replay fixture".into(),
+                            resnapshot_required: false,
+                            oldest_available_sequence: None,
+                            current_sequence: None,
+                            holder: None,
+                        },
+                    },
                 );
                 let ControlRequest::SubscribePane {
                     request_id,
@@ -2228,6 +2977,38 @@ mod tests {
                 assert_eq!(from_seq, 0);
                 let effective_boundary = if reset {
                     send_boundary(&mut writer, request_id, 3);
+                    let ControlRequest::ReadPaneState {
+                        request_id: state_request,
+                        ..
+                    } = read_request()
+                    else {
+                        panic!("expected state retry after log reset");
+                    };
+                    write_frame(
+                        &mut writer,
+                        state_request,
+                        ControlResponseBody::Error {
+                            error: ControlError {
+                                code: ControlErrorCode::InputRouteUnavailable,
+                                message: "pane state unavailable in replay fixture".into(),
+                                resnapshot_required: false,
+                                oldest_available_sequence: None,
+                                current_sequence: None,
+                                holder: None,
+                            },
+                        },
+                    );
+                    let ControlRequest::SubscribePane {
+                        request_id: boundary_request,
+                        from_seq,
+                        timeout_ms,
+                        ..
+                    } = read_request()
+                    else {
+                        panic!("expected reset replay boundary probe");
+                    };
+                    assert_eq!((from_seq, timeout_ms), (u64::MAX, 0));
+                    send_boundary(&mut writer, boundary_request, 3);
                     let ControlRequest::SubscribePane {
                         request_id: next,
                         from_seq,
@@ -2261,7 +3042,20 @@ mod tests {
                         },
                     );
                 }
-                // Close the fixture connection after delivering all frames.
+                write_frame(
+                    &mut writer,
+                    request_id,
+                    ControlResponseBody::Error {
+                        error: ControlError {
+                            code: ControlErrorCode::StaleId,
+                            message: "fixture complete".into(),
+                            resnapshot_required: false,
+                            oldest_available_sequence: None,
+                            current_sequence: None,
+                            holder: None,
+                        },
+                    },
+                );
             });
             let (tx, rx) = mpsc::channel();
             let result = reader_loop(
@@ -2272,23 +3066,30 @@ mod tests {
                 &AtomicBool::new(false),
                 &HostByteBudget::new(HOST_EVENT_BUDGET_BYTES),
             );
-            assert!(result.is_some(), "fixture closes its stream");
+            assert_eq!(result, None, "fixture ends with a stale pane id");
             drop(tx);
             let messages: Vec<_> = rx.into_iter().collect();
             let effective_boundary = if reset { 3 } else { boundary };
-            assert_eq!(messages.len(), 3 + usize::from(reset));
-            if reset {
-                assert!(matches!(messages[0], LogMessage::Reset));
-            }
-            for message in &messages[usize::from(reset)..] {
-                let LogMessage::Batch {
-                    replay_through,
-                    events,
-                    ..
-                } = message
-                else {
-                    panic!("expected output batch");
-                };
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| matches!(message, LogMessage::Reset))
+                    .count(),
+                usize::from(reset)
+            );
+            let batches: Vec<_> = messages
+                .iter()
+                .filter_map(|message| match message {
+                    LogMessage::Batch {
+                        replay_through,
+                        events,
+                        ..
+                    } => Some((replay_through, events)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(batches.len(), 3);
+            for (replay_through, events) in batches {
                 assert_eq!(*replay_through, effective_boundary);
                 assert_eq!(events.len(), 1);
             }
@@ -2301,7 +3102,8 @@ mod tests {
         let socket = test_socket("reader-stop");
         let _guard = UnlinkOnDrop(socket.clone());
         let listener = prismattyc_mux::local_socket::UnixListener::bind(&socket).unwrap();
-        let server = thread::spawn(move || serve_subscribe_done(listener));
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let server = thread::spawn(move || serve_subscribe_done(listener, accepted_tx));
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
         let reader_budget = HostByteBudget::new(HOST_EVENT_BUDGET_BYTES);
@@ -2321,6 +3123,9 @@ mod tests {
             stop,
             session_key: "t".into(),
         };
+        accepted_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("reader must connect before the pane closes");
         drop(pane);
         let reason = done_rx
             .recv_timeout(Duration::from_secs(3))
@@ -2676,10 +3481,14 @@ mod tests {
         assert_eq!(second, registered);
     }
 
-    fn serve_subscribe_done(listener: prismattyc_mux::local_socket::UnixListener) {
+    fn serve_subscribe_done(
+        listener: prismattyc_mux::local_socket::UnixListener,
+        accepted: mpsc::Sender<()>,
+    ) {
         let Ok((stream, _)) = listener.accept() else {
             return;
         };
+        let _ = accepted.send(());
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut writer = stream;
         loop {
@@ -2696,6 +3505,22 @@ mod tests {
                         &mut writer,
                         request_id,
                         ControlResponseData::ClientRegistered { client_id: 1 },
+                    );
+                }
+                ControlRequest::ReadPaneState { request_id, .. } => {
+                    write_frame(
+                        &mut writer,
+                        request_id,
+                        ControlResponseBody::Error {
+                            error: ControlError {
+                                code: ControlErrorCode::InputRouteUnavailable,
+                                message: "pane state unavailable in fixture".into(),
+                                resnapshot_required: false,
+                                oldest_available_sequence: None,
+                                current_sequence: None,
+                                holder: None,
+                            },
+                        },
                     );
                 }
                 ControlRequest::SubscribePane {
@@ -2973,18 +3798,44 @@ mod tests {
     }
 
     #[test]
-    fn transient_read_errors_are_timeouts_and_interrupts_only() {
+    fn daemon_restart_transport_errors_are_retryable() {
         let io = |kind| anyhow::Error::new(std::io::Error::from(kind));
         assert!(transient_read_error(&io(std::io::ErrorKind::WouldBlock)));
         assert!(transient_read_error(&io(std::io::ErrorKind::TimedOut)));
         assert!(transient_read_error(&io(std::io::ErrorKind::Interrupted)));
-        assert!(!transient_read_error(&io(
-            std::io::ErrorKind::UnexpectedEof
+        assert!(transient_read_error(&io(std::io::ErrorKind::UnexpectedEof)));
+        assert!(transient_read_error(&io(std::io::ErrorKind::BrokenPipe)));
+        assert!(transient_read_error(&io(
+            std::io::ErrorKind::ConnectionReset
         )));
-        assert!(!transient_read_error(&io(std::io::ErrorKind::BrokenPipe)));
+        assert!(transient_connect_error(&io(
+            std::io::ErrorKind::ConnectionRefused
+        )));
+        assert!(transient_connect_error(&io(std::io::ErrorKind::NotFound)));
+        assert!(!transient_read_error(&io(
+            std::io::ErrorKind::PermissionDenied
+        )));
         assert!(!transient_read_error(&anyhow::anyhow!(
             "server closed the pane connection"
         )));
+        struct BrokenPipeWriter;
+        impl Write for BrokenPipeWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut writer = BrokenPipeWriter;
+        let wrapped = serde_json::to_writer(&mut writer, &"subscription")
+            .expect_err("fixture writer must fail");
+        assert_eq!(
+            wrapped.io_error_kind(),
+            Some(std::io::ErrorKind::BrokenPipe)
+        );
+        assert!(transient_read_error(&anyhow::Error::new(wrapped)));
         // Wrapped with context, the io kind is still visible.
         let wrapped = io(std::io::ErrorKind::WouldBlock).context("read frame");
         assert!(

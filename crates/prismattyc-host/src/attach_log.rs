@@ -31,7 +31,7 @@ use prismattyc_mux::{
     classify_control_request_id, default_socket_path, next_stale_skip, ControlError,
     ControlErrorCode, ControlIdMatch, ControlRequest, ControlResponse, ControlResponseBody,
     ControlResponseData, PaneEvent, PaneFramePolicy, PaneLogFrame, PaneStyled, Snapshot,
-    PROTOCOL_VERSION,
+    MAX_PANE_STATE_BYTES, PROTOCOL_VERSION,
 };
 
 use crate::rich::ChildWrite;
@@ -398,6 +398,12 @@ impl Client {
                 bail!("server closed the pane connection");
             }
             let response: ControlResponse = serde_json::from_str(&line)?;
+            if response.request_id == 0 {
+                return match response.body {
+                    ControlResponseBody::Error { error } => Err(anyhow::Error::new(error)),
+                    _ => bail!("server returned request ID zero"),
+                };
+            }
             match classify_control_request_id(response.request_id, request_id) {
                 ControlIdMatch::Awaited => {
                     return match response.body {
@@ -457,6 +463,12 @@ impl Client {
                 }
             }
             let response: ControlResponse = serde_json::from_slice(&line)?;
+            if response.request_id == 0 {
+                return match response.body {
+                    ControlResponseBody::Error { error } => Err(anyhow::Error::new(error)),
+                    _ => bail!("server returned request ID zero"),
+                };
+            }
             match classify_control_request_id(response.request_id, request_id) {
                 ControlIdMatch::Awaited => {
                     return match response.body {
@@ -479,6 +491,78 @@ impl Client {
                     "response request ID {} is ahead of awaited {request_id}",
                     response.request_id
                 ),
+            }
+        }
+    }
+
+    fn read_pane_state_stream(
+        &mut self,
+        pane_id: u64,
+        events_tx: &mpsc::Sender<LogMessage>,
+        wake: Option<&crate::mux::Wake>,
+        stop: &AtomicBool,
+        budget: &HostByteBudget,
+    ) -> Result<u64> {
+        let request_id = self.next_id()?;
+        self.send(&ControlRequest::ReadPaneState {
+            version: PROTOCOL_VERSION,
+            request_id,
+            client_id: self.client_id,
+            pane_id,
+        })?;
+        let mut expected_offset = 0u64;
+        let mut expected_total = None;
+        let mut expected_sequence = None;
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                bail!("pane state transfer stopped");
+            }
+            let (response, reservation) = self.read_frame_budgeted(request_id, budget)?;
+            let ControlResponseData::PaneStateChunk {
+                pane_id: response_pane,
+                through_seq,
+                offset,
+                total_bytes,
+                data,
+                done,
+            } = response
+            else {
+                bail!("server returned an unexpected pane state response");
+            };
+            let total = usize::try_from(total_bytes).context("pane state size overflow")?;
+            let next_offset = expected_offset
+                .checked_add(u64::try_from(data.len()).context("pane state chunk overflow")?)
+                .context("pane state offset overflow")?;
+            if response_pane != pane_id
+                || offset != expected_offset
+                || total == 0
+                || total > MAX_PANE_STATE_BYTES
+                || expected_total.is_some_and(|expected| expected != total_bytes)
+                || expected_sequence.is_some_and(|expected| expected != through_seq)
+                || data.is_empty()
+                || next_offset > total_bytes
+                || done != (next_offset == total_bytes)
+            {
+                bail!("server returned an invalid pane state chunk");
+            }
+            expected_total = Some(total_bytes);
+            expected_sequence = Some(through_seq);
+            expected_offset = next_offset;
+            events_tx
+                .send(LogMessage::RestoreChunk {
+                    through_seq,
+                    offset,
+                    total_bytes: total,
+                    data,
+                    done,
+                    reservation,
+                })
+                .map_err(|_| anyhow::anyhow!("pane state receiver closed"))?;
+            if let Some(wake) = wake {
+                wake();
+            }
+            if done {
+                return Ok(through_seq);
             }
         }
     }
@@ -535,6 +619,17 @@ pub(crate) struct PolicyCounters {
 /// What the reader thread hands the host thread, in log order.
 #[derive(Debug)]
 pub(crate) enum LogMessage {
+    /// Bounded piece of the saved emulator state used to seed a fresh replica.
+    RestoreChunk {
+        through_seq: u64,
+        offset: u64,
+        total_bytes: usize,
+        data: Vec<u8>,
+        done: bool,
+        reservation: HostReservation,
+    },
+    /// Discard an incomplete state transfer before falling back to log replay.
+    RestoreReset,
     /// One subscribe response, with its byte reservation held until consumed.
     Batch {
         snapshot: Option<Box<PaneStyled>>,
@@ -826,11 +921,30 @@ fn reader_loop(
         Ok(client) => client,
         Err(error) => return Some(format!("subscribe connect failed: {error}")),
     };
-    let mut replay_through = match pane_replay_boundary(&mut client, pane_id) {
-        Ok(sequence) => sequence,
-        Err(error) => return Some(format!("pane replay boundary failed: {error}")),
-    };
-    let mut from_seq = 0u64;
+    let (mut replay_through, mut from_seq) =
+        match client.read_pane_state_stream(pane_id, events_tx, wake, stop, budget) {
+            Ok(sequence) => (sequence, sequence),
+            Err(error) => {
+                let _ = events_tx.send(LogMessage::RestoreReset);
+                if let Some(wake) = wake {
+                    wake();
+                }
+                eprintln!(
+                    "prismattyc-host: pane state recovery unavailable for pane {pane_id}: {error:#}"
+                );
+                client = match Client::connect(socket, SUBSCRIBE_READ_TIMEOUT) {
+                    Ok(client) => client,
+                    Err(error) => return Some(format!("subscribe reconnect failed: {error}")),
+                };
+                let replay_through = match pane_replay_boundary(&mut client, pane_id) {
+                    Ok(sequence) => sequence,
+                    Err(error) => {
+                        return Some(format!("pane replay boundary failed: {error:#}"));
+                    }
+                };
+                (replay_through, 0)
+            }
+        };
     let mut retries = 0u32;
     'subscribe: loop {
         if stop.load(Ordering::Relaxed) {

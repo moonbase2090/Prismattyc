@@ -19,6 +19,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use prismattyc_emulator::EmulatorStateV1;
 use prismattyc_protocol::{InputModifiers, PointerPhase, ViewerId};
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +47,9 @@ const MAX_EVENT_CAPACITY: usize = 4096;
 const MAX_EVENT_BATCH: usize = 256;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+/// Pane-state recovery is streamed in bounded response frames.
+const PANE_STATE_CHUNK_BYTES: usize = 128 * 1024;
+pub const MAX_PANE_STATE_BYTES: usize = 256 * 1024 * 1024;
 mod pane_write;
 pub use pane_write::PaneWriteSubmit;
 
@@ -473,6 +477,13 @@ pub enum ControlRequest {
         /// Idle wait after catch-up. Zero returns catch-up and ends.
         #[serde(default)]
         timeout_ms: u32,
+    },
+    /// Stream a pane's complete emulator snapshot for a fresh host replica.
+    ReadPaneState {
+        version: u16,
+        request_id: u64,
+        client_id: u64,
+        pane_id: u64,
     },
     Split {
         version: u16,
@@ -981,6 +992,11 @@ impl ControlRequest {
                 request_id,
                 ..
             }
+            | Self::ReadPaneState {
+                version,
+                request_id,
+                ..
+            }
             | Self::RegisterClient {
                 version,
                 request_id,
@@ -1254,6 +1270,7 @@ impl ControlRequest {
             | Self::ReadPane { client_id, .. }
             | Self::ReadPaneStyled { client_id, .. }
             | Self::SubscribePane { client_id, .. }
+            | Self::ReadPaneState { client_id, .. }
             | Self::SwitchSession { client_id, .. }
             | Self::ShutdownIdle { client_id, .. }
             | Self::ShutdownServer { client_id, .. }
@@ -1425,6 +1442,15 @@ pub enum ControlResponseData {
         events: Vec<PaneLogFrame>,
         through_seq: u64,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        done: bool,
+    },
+    /// One bounded chunk of a stable emulator snapshot.
+    PaneStateChunk {
+        pane_id: u64,
+        through_seq: u64,
+        offset: u64,
+        total_bytes: u64,
+        data: Vec<u8>,
         done: bool,
     },
     Mutation {
@@ -4045,6 +4071,10 @@ impl ControlPlane {
                 ControlErrorCode::Internal,
                 "SubscribePane is served on the client thread, never under the plane lock",
             )),
+            ControlRequest::ReadPaneState { .. } => Err(ControlError::new(
+                ControlErrorCode::Internal,
+                "ReadPaneState is served on the client thread, never under the plane lock",
+            )),
             ControlRequest::RegisterClient { .. } => {
                 let mut viewer_bytes = [0u8; 16];
                 getrandom::fill(&mut viewer_bytes).map_err(|error| {
@@ -6406,6 +6436,35 @@ impl ControlPlane {
         ))
     }
 
+    fn pane_state_snapshot(
+        &self,
+        client_raw: u64,
+        pane_raw: u64,
+    ) -> Result<(u64, EmulatorStateV1), ControlError> {
+        let _ = self.require_active_client(client_raw)?;
+        let pane = pane_id(pane_raw)?;
+        if self.domain.pane(pane).is_none() {
+            return Err(stale_id("pane", pane_raw));
+        }
+        let (through_seq, state) = self
+            .live
+            .as_ref()
+            .and_then(|live| live.pane_state_snapshot(pane_raw))
+            .ok_or_else(|| {
+                ControlError::new(
+                    ControlErrorCode::InputRouteUnavailable,
+                    "server-owned pane content is unavailable",
+                )
+            })?;
+        let state = state.map_err(|error| {
+            ControlError::new(
+                ControlErrorCode::InputRouteUnavailable,
+                format!("pane state is not available at a safe boundary: {error}"),
+            )
+        })?;
+        Ok((through_seq, state))
+    }
+
     fn ensure_sequence_capacity(&self) -> Result<(), ControlError> {
         if self.sequence == u64::MAX {
             Err(ControlError::new(
@@ -7509,6 +7568,86 @@ fn handle_subscribe_pane(
     }
 }
 
+fn handle_read_pane_state(
+    plane: &Arc<Mutex<ControlPlane>>,
+    request: &ControlRequest,
+    request_id: u64,
+    stop: &Arc<AtomicBool>,
+    writer: &mut UnixStream,
+) -> io::Result<()> {
+    let ControlRequest::ReadPaneState {
+        client_id, pane_id, ..
+    } = request
+    else {
+        return write_response(
+            writer,
+            &ControlResponse::error(
+                request_id,
+                ControlError::new(
+                    ControlErrorCode::Internal,
+                    "handle_read_pane_state: wrong variant",
+                ),
+            ),
+            stop,
+        );
+    };
+    if stop.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let snapshot = {
+        let guard = plane
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.pane_state_snapshot(*client_id, *pane_id)
+    };
+    let (through_seq, state) = match snapshot {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return write_response(writer, &ControlResponse::error(request_id, error), stop);
+        }
+    };
+    let state = serde_json::to_vec(&state)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if state.len() > MAX_PANE_STATE_BYTES {
+        return write_response(
+            writer,
+            &ControlResponse::error(
+                request_id,
+                ControlError::new(
+                    ControlErrorCode::FrameTooLarge,
+                    format!("pane state exceeds {MAX_PANE_STATE_BYTES} bytes"),
+                ),
+            ),
+            stop,
+        );
+    }
+    let total_bytes = u64::try_from(state.len()).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("pane state size: {error}"),
+        )
+    })?;
+    for (index, data) in state.chunks(PANE_STATE_CHUNK_BYTES).enumerate() {
+        if stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let offset = index.saturating_mul(PANE_STATE_CHUNK_BYTES);
+        let response = ControlResponse::ok(
+            request_id,
+            ControlResponseData::PaneStateChunk {
+                pane_id: *pane_id,
+                through_seq,
+                offset: u64::try_from(offset).unwrap_or(u64::MAX),
+                total_bytes,
+                data: data.to_vec(),
+                done: offset.saturating_add(data.len()) == state.len(),
+            },
+        );
+        write_response(writer, &response, stop)?;
+    }
+    Ok(())
+}
+
 fn handle_client_loop(
     reader: &mut BufReader<UnixStream>,
     writer: &mut UnixStream,
@@ -7566,6 +7705,7 @@ fn handle_client_loop(
         let is_register = matches!(request, ControlRequest::RegisterClient { .. });
         let is_mail_wait = matches!(request, ControlRequest::MailWait { .. });
         let is_subscribe = matches!(request, ControlRequest::SubscribePane { .. });
+        let is_pane_state = matches!(request, ControlRequest::ReadPaneState { .. });
         let claimed_client = request.claimed_client_id();
         let response = if request_id != 0 && request_id <= state.last_request_id {
             ControlResponse::error(
@@ -7650,6 +7790,29 @@ fn handle_client_loop(
                     return Ok(());
                 }
                 handle_subscribe_pane(plane, &request, request_id, stop, writer)?;
+                continue;
+            }
+        } else if is_pane_state {
+            if request_id == 0 {
+                ControlResponse::error(
+                    request_id,
+                    ControlError::new(
+                        ControlErrorCode::InvalidRequest,
+                        "request_id must be non-zero",
+                    ),
+                )
+            } else if version != PROTOCOL_VERSION {
+                state.last_request_id = request_id;
+                ControlResponse::error(
+                    request_id,
+                    ControlError::new(
+                        ControlErrorCode::IncompatibleVersion,
+                        format!("protocol {version} is incompatible with {PROTOCOL_VERSION}"),
+                    ),
+                )
+            } else {
+                state.last_request_id = request_id;
+                handle_read_pane_state(plane, &request, request_id, stop, writer)?;
                 continue;
             }
         } else {

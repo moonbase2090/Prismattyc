@@ -14,11 +14,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use portable_pty::PtySize;
 use prismattyc_core::Selection;
-use prismattyc_emulator::{Emulator, PtySession};
+use prismattyc_emulator::{Emulator, EmulatorStateV1, PtySession};
 use prismattyc_mux::{
     apply_arrangement, even_horizontal_row, even_two_row_grid, even_vertical_column,
     layout_to_rects, Arrangement, Axis, CellRect, ClientView, Domain, PaneId, PaneLayout,
-    SessionId, SizeOwner, WindowId, DEFAULT_MIN_COLS, DEFAULT_MIN_ROWS,
+    SessionId, SizeOwner, WindowId, DEFAULT_MIN_COLS, DEFAULT_MIN_ROWS, MAX_PANE_STATE_BYTES,
 };
 use prismattyc_protocol::{InputModifiers, PointerPhase, ViewerId};
 
@@ -579,6 +579,10 @@ pub(crate) struct PaneRuntime {
     from_pty_rx: Option<mpsc::Receiver<std::io::Result<Vec<u8>>>>,
     /// Set on a log-backed attach pane. Mutually exclusive with `session`.
     log: Option<attach_log::LogPane>,
+    /// Serialized state being applied from the log-backed attach handshake.
+    restore_state_bytes: Vec<u8>,
+    restore_state_total: Option<usize>,
+    restore_state_seq: Option<u64>,
     /// Exit text from a log `Exited` event, for the PT-68 placeholder.
     log_exit_reason: Option<String>,
     /// Toast after a log-backed writer dies. Pane stays read-only.
@@ -883,6 +887,9 @@ impl PaneRuntime {
             session,
             from_pty_rx,
             log,
+            restore_state_bytes: Vec::new(),
+            restore_state_total: None,
+            restore_state_seq: None,
             log_exit_reason: None,
             log_write_notice: None,
             policy_superseded_frames: 0,
@@ -1165,6 +1172,68 @@ impl PaneRuntime {
                 break;
             };
             match log.try_recv() {
+                Ok(LogMessage::RestoreChunk {
+                    through_seq,
+                    offset,
+                    total_bytes,
+                    data,
+                    done,
+                    reservation,
+                }) => {
+                    if total_bytes > MAX_PANE_STATE_BYTES {
+                        eprintln!("prismattyc-host: pane state exceeded its transfer limit");
+                        self.reset_restore_state();
+                    } else {
+                        if offset == 0 {
+                            self.restore_state_bytes = Vec::new();
+                            self.restore_state_total = Some(total_bytes);
+                            self.restore_state_seq = Some(through_seq);
+                        }
+                        let expected_offset =
+                            u64::try_from(self.restore_state_bytes.len()).unwrap_or(u64::MAX);
+                        let next_len = self.restore_state_bytes.len().saturating_add(data.len());
+                        let valid = self.restore_state_total == Some(total_bytes)
+                            && self.restore_state_seq == Some(through_seq)
+                            && offset == expected_offset
+                            && next_len <= total_bytes
+                            && done == (next_len == total_bytes);
+                        if !valid {
+                            eprintln!("prismattyc-host: invalid pane state transfer sequence");
+                            self.reset_restore_state();
+                        } else if self.restore_state_bytes.try_reserve(data.len()).is_err() {
+                            eprintln!("prismattyc-host: pane state could not fit in memory");
+                            self.reset_restore_state();
+                        } else {
+                            self.restore_state_bytes.extend_from_slice(&data);
+                            if done {
+                                let state_bytes = std::mem::take(&mut self.restore_state_bytes);
+                                self.restore_state_total = None;
+                                self.restore_state_seq = None;
+                                let restored =
+                                    match serde_json::from_slice::<EmulatorStateV1>(&state_bytes) {
+                                        Ok(state) => Emulator::import_state(state)
+                                            .map_err(|error| error.to_string()),
+                                        Err(error) => Err(error.to_string()),
+                                    };
+                                match restored {
+                                    Ok(mut emulator) => {
+                                        emulator.set_retain_alt_history(self.alt_screen_scrollback);
+                                        self.emulator = emulator;
+                                        self.selection.clear();
+                                        self.keyboard_select_mode = false;
+                                        self.view_scroll = 0;
+                                        self.scroll_new_output = false;
+                                    }
+                                    Err(error) => eprintln!(
+                                        "prismattyc-host: pane state could not be restored: {error}"
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                    drop(reservation);
+                }
+                Ok(LogMessage::RestoreReset) => self.reset_restore_state(),
                 Ok(LogMessage::Batch {
                     snapshot,
                     events,
@@ -1266,6 +1335,12 @@ impl PaneRuntime {
             }
         }
         (dirty, content_changed, more)
+    }
+
+    fn reset_restore_state(&mut self) {
+        self.restore_state_bytes = Vec::new();
+        self.restore_state_total = None;
+        self.restore_state_seq = None;
     }
 
     fn apply_log_event(&mut self, event: prismattyc_mux::PaneEvent) {

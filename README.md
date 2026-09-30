@@ -27,8 +27,8 @@ processes across a computer restart.
 | Platform | Availability |
 | --- | --- |
 | Linux x86_64 and ARM64 | Release downloads. Ubuntu 22.04 or newer. Runs on Wayland and X11. |
-| macOS on Apple Silicon | Build from source. Signed downloads are not available yet. |
-| Windows | No release binaries or supported installation yet. |
+| macOS, Apple Silicon and Intel | Universal signed and notarized release downloads. |
+| Windows x86_64 | Release binaries are available, but Windows is not a supported platform yet. |
 
 ## Install on Linux
 
@@ -60,6 +60,19 @@ Add `~/.local/bin` to your `PATH` to run `pmux` without its full path.
 The archive includes the application, command-line tools, manuals, and
 checksums.
 
+## Install on macOS
+
+1. Download the universal macOS disk image from
+   [GitHub Releases](https://github.com/moonbase2090/Prismattyc/releases).
+2. Open the disk image and move `Prismattyc.app` to `/Applications` or
+   `~/Applications`.
+3. Open Prismattyc from the Dock.
+
+When the app can create a link in `/usr/local/bin`, it links its bundled
+`pmux` there. Otherwise, it uses `~/.local/bin`. Prismattyc does not edit
+shell profiles. If `~/.local/bin` is not on your `PATH`, or another `pmux`
+comes first, the app prints the path and recovery steps.
+
 To check for an update, run `pmux update --check`. To install one, run
 `pmux update`. `prismattyc update` does the same thing. On Linux and
 Windows this replaces the installed binaries. On macOS it downloads the
@@ -73,6 +86,11 @@ macOS version from its DMG on the
 Quit the app and reopen it from the Dock. Updating does not stop mux
 sessions.
 See [Update and restart](docs/update-and-restart.md).
+
+To preview removal, run `pmux uninstall --dry-run`. Run `pmux uninstall` to
+remove Prismattyc. Add `--keep-data` to keep Spaces and configuration. On
+macOS, uninstall removes `pmux` only when its link matches the one created by
+Prismattyc. See [uninstall details](docs/update-and-restart.md#uninstall).
 
 ## Use sessions from the command line
 

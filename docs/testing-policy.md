@@ -50,7 +50,10 @@ Unit tests use a temp lock dir and do not append tokens to
 | CRAP | `crap` | `cargo llvm-cov` + `cargo-crap`; new or newly above-40 functions in PR-touched files block merge; global counts are informational; top 10 per crate |
 | Mutation | `mutants` | one crate at a time, with render routing and remainder shards; caught rate at or above 60% per crate when scored ≥ 5; score only the merged full universe; fewer scored are reported, not gated; runner OOM is infrastructure; refuse to start below host headroom; scratch on disk, never tmpfs `/tmp` |
 
-A nightly job runs `cargo-mutants` on every crate and archives the report.
+A nightly GitHub Actions workflow runs `cargo-mutants` across eight parallel
+shards and uploads one artifact listing the missed mutants. See
+[Mutation testing](mutation-testing.md) to download the report or run a
+focused local pass.
 
 ## Validate new work incrementally
 
@@ -180,9 +183,8 @@ Exit policy:
 
 - PR (`scripts/mutants-pr.sh`): OOM fails the job with exit 137. Do not
   keep scoring missed mutants.
-- Nightly (`scripts/mutants-nightly.sh`): OOM records a failure for that
-  crate and continues so later crates still archive. The job exits
-  non-zero.
+- Nightly (`scripts/mutants-nightly.sh`): OOM fails that shard. The other
+  matrix shards keep running and the summary job reports incomplete results.
 
 The job container memory cap is containment (`MUTANTS_MEMORY`, default
 `8g`). Keep this cap so the container dies before the 32 GiB host

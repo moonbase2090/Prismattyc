@@ -125,15 +125,11 @@ Actions the overlay copy has a worktree `.git` file whose gitdir is on
 the host; `mutants-pr.sh` computes the diff in a docker sidecar that
 bind-mounts that gitdir.
 
-A nightly job runs `scripts/mutants-nightly.sh` on every crate and
-archives `build/mutants/<crate>`. Dispatch:
-
-```bash
-local-actions run --event workflow_dispatch --job mutants-nightly
-```
-
-The nightly job is not the PR 80% gate. A failed unmutated baseline
-still fails that crate.
+A nightly GitHub Actions workflow runs the full workspace across eight
+parallel shards. It merges their outcomes and uploads one
+`mutants-nightly-missed` artifact. See [Mutation testing](mutation-testing.md)
+to download the report or run a focused local pass. The nightly job is not the
+PR 80% gate. A failed unmutated baseline still fails its shard.
 
 ```bash
 python3 scripts/mutants-gate_test.py

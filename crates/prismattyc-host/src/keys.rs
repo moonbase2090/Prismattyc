@@ -255,7 +255,7 @@ fn is_terminal_fallback_named(_named: NamedKey) -> bool {
     false
 }
 
-fn is_modifier_only(named: NamedKey) -> bool {
+pub(crate) fn is_modifier_only(named: NamedKey) -> bool {
     matches!(
         named,
         NamedKey::Shift

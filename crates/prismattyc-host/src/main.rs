@@ -10586,15 +10586,58 @@ fn event_action(
     modifiers: ModifiersState,
 ) -> Option<keybind::Action> {
     let shortcut = event.key_without_modifiers();
-    keymap
-        .action(&shortcut, event.physical_key, modifiers)
-        .or_else(|| {
-            if shortcut != event.logical_key {
-                keymap.action(&event.logical_key, event.physical_key, modifiers)
-            } else {
-                None
-            }
-        })
+    event_action_from_keys(
+        keymap,
+        &shortcut,
+        &event.logical_key,
+        event.physical_key,
+        modifiers,
+    )
+}
+
+/// The key-table part of `WindowEvent::KeyboardInput`, split out so tests can
+/// exercise the same lookup with the modifierless key winit supplies on macOS.
+fn event_action_from_keys(
+    keymap: &keybind::KeyMap,
+    shortcut: &Key,
+    logical: &Key,
+    physical: PhysicalKey,
+    modifiers: ModifiersState,
+) -> Option<keybind::Action> {
+    keymap.action(shortcut, physical, modifiers).or_else(|| {
+        if shortcut != logical {
+            keymap.action(logical, physical, modifiers)
+        } else {
+            None
+        }
+    })
+}
+
+fn action_blocked_by_guest_alt(
+    action: keybind::Action,
+    guest_alt: bool,
+    modifiers: ModifiersState,
+) -> bool {
+    guest_alt
+        && matches!(
+            action,
+            keybind::Action::Copy
+                | keybind::Action::SelectAll
+                | keybind::Action::ScrollLineUp
+                | keybind::Action::ScrollLineDown
+        )
+        && !modifiers.super_key()
+}
+
+fn repeated_copy_action_is_consumed(
+    action: Option<keybind::Action>,
+    repeat: bool,
+    guest_alt: bool,
+    modifiers: ModifiersState,
+) -> bool {
+    repeat
+        && action == Some(keybind::Action::Copy)
+        && !action_blocked_by_guest_alt(keybind::Action::Copy, guest_alt, modifiers)
 }
 
 enum MuxApplyResult {
@@ -11227,6 +11270,19 @@ fn selected_clipboard_text(selection: &Selection, screen: &Screen) -> Option<Str
     // bytes are intentionally discarded because this host writes natively.
     encode_osc52_clipboard(&text)?;
     Some(text)
+}
+
+fn dispatch_copy_action(
+    guest_alt: bool,
+    modifiers: ModifiersState,
+    copy: impl FnOnce() -> bool,
+) -> Dispatch {
+    // Copy is handled even when no selection is available; it must not fall
+    // through to terminal input (where it could become Ctrl+C / ETX).
+    if !action_blocked_by_guest_alt(keybind::Action::Copy, guest_alt, modifiers) {
+        let _ = copy();
+    }
+    Dispatch::Handled
 }
 
 fn write_clipboard_text(host: &mut HostState, text: String) -> bool {
@@ -12514,10 +12570,15 @@ fn handle_selection_key(host: &mut HostState, logical: &Key) -> bool {
     // Guest alt (vim/less): refuse host selection so Ctrl+C interrupts the child.
     // Attach 1049+7700 is chrome, not a guest TUI.
     if guest_alt_blocks_host_select(&host.emulator) {
-        let had = host.selection.range().is_some() || host.keyboard_select_mode;
-        host.selection.clear();
-        host.keyboard_select_mode = false;
-        host.view_scroll = 0;
+        let had = {
+            let pane = host.mux.focused_mut();
+            clear_guest_alt_selection_for_key(
+                &mut pane.selection,
+                &mut pane.keyboard_select_mode,
+                &mut pane.view_scroll,
+                logical,
+            )
+        };
         if had {
             host.dirty = true;
         }
@@ -12590,6 +12651,26 @@ fn handle_selection_key(host: &mut HostState, logical: &Key) -> bool {
         host.dirty = true;
     }
     false
+}
+
+/// Guest-alt input normally returns control to the child and clears host
+/// selection. Modifier-only events (notably macOS Command-down before Cmd+C)
+/// do not represent child input and must leave a mouse selection intact.
+fn clear_guest_alt_selection_for_key(
+    selection: &mut Selection,
+    keyboard_select_mode: &mut bool,
+    view_scroll: &mut usize,
+    logical: &Key,
+) -> bool {
+    if matches!(logical, Key::Named(named) if keys::is_modifier_only(*named)) {
+        return false;
+    }
+
+    let had = selection.range().is_some() || *keyboard_select_mode;
+    selection.clear();
+    *keyboard_select_mode = false;
+    *view_scroll = 0;
+    had
 }
 
 /// PT-124: effective font pixel size at a compositor scale factor, clamped
@@ -12898,12 +12979,11 @@ fn dispatch_action(
             let _ = paste_clipboard_native(host);
             Dispatch::Handled
         }
-        ActionRoute::Copy => {
-            if !guest_alt_blocks_host_select(&host.emulator) {
-                let _ = copy_selection_native(host);
-            }
-            Dispatch::Handled
-        }
+        ActionRoute::Copy => dispatch_copy_action(
+            guest_alt_blocks_host_select(&host.emulator),
+            host.modifiers,
+            || copy_selection_native(host),
+        ),
         ActionRoute::SelectAll => {
             if !guest_alt_blocks_host_select(&host.emulator) {
                 select_all_viewport(host);
@@ -13597,16 +13677,18 @@ impl ApplicationHandler<UserAction> for App {
                     }
                     _ => {}
                 }
+                if repeated_copy_action_is_consumed(
+                    action_any,
+                    event.repeat,
+                    !host_select,
+                    host.modifiers,
+                ) {
+                    host.window.request_redraw();
+                    return;
+                }
                 if let Some(action) = action {
-                    let command_shortcut = host.modifiers.super_key();
-                    let blocked_by_guest_alt = matches!(
-                        action,
-                        keybind::Action::Copy
-                            | keybind::Action::SelectAll
-                            | keybind::Action::ScrollLineUp
-                            | keybind::Action::ScrollLineDown
-                    ) && !host_select
-                        && !command_shortcut;
+                    let blocked_by_guest_alt =
+                        action_blocked_by_guest_alt(action, !host_select, host.modifiers);
                     if !blocked_by_guest_alt {
                         if action == keybind::Action::RichFocus
                             && handle_rich_focus_input(host, &event, Some(action))
@@ -17528,6 +17610,77 @@ mod tests {
         assert!(!is_copy_chord(&c, mods(true, false), false));
         assert!(is_copy_chord(&c, mods(true, false), true));
         assert!(is_copy_chord(&c, mods(true, true), false));
+    }
+
+    #[test]
+    fn macos_cmd_copy_keeps_mouse_selection_and_dispatches_from_guest_alt() {
+        let keys = std::collections::BTreeMap::from([(
+            "copy".to_string(),
+            keybind::KeysValue::Many(vec!["ctrl+shift+c".into(), "super+c".into()]),
+        )]);
+        let keymap = keybind::KeyMap::from_config_with_macos(Some(&keys), true).unwrap();
+
+        let mut screen = Screen::new(8, 1, 0);
+        for ch in "copy me".chars() {
+            screen.put_char(ch);
+        }
+        let mut selection = Selection::default();
+        selection.set_range(0, 0, 0, 6);
+
+        // winit emits Command-down as a modifier-only pressed event before C.
+        // Guest-alt selection handling must not clear the mouse selection.
+        let mut keyboard_select_mode = false;
+        let mut view_scroll = 0;
+        let super_key = Key::Named(NamedKey::Super);
+        assert!(!clear_guest_alt_selection_for_key(
+            &mut selection,
+            &mut keyboard_select_mode,
+            &mut view_scroll,
+            &super_key,
+        ));
+        assert_eq!(
+            selected_clipboard_text(&selection, &screen).as_deref(),
+            Some("copy me")
+        );
+
+        let mut cmd = ModifiersState::empty();
+        apply_modifier_key_event(&mut cmd, &super_key, ElementState::Pressed);
+        assert!(cmd.super_key());
+        let c = Key::Character("c".into());
+        let copy = event_action_from_keys(&keymap, &c, &c, PhysicalKey::Code(KeyCode::KeyC), cmd)
+            .expect("Cmd+C resolves through the active keymap");
+
+        // winit reports the macOS Command modifier as SUPER. The input path
+        // permits that explicit command chord even when a guest TUI owns the
+        // alternate screen.
+        assert_eq!(copy, keybind::Action::Copy);
+        assert!(!action_blocked_by_guest_alt(copy, true, cmd));
+        assert_eq!(action_route(copy), ActionRoute::Copy);
+
+        let selected_text = selected_clipboard_text(&selection, &screen);
+        let mut copied = None;
+        let result = dispatch_copy_action(true, cmd, || {
+            let Some(text) = selected_text else {
+                return false;
+            };
+            copied = Some(text);
+            true
+        });
+
+        assert_eq!(result, Dispatch::Handled);
+        assert_eq!(copied.as_deref(), Some("copy me"));
+        assert!(repeated_copy_action_is_consumed(
+            Some(copy),
+            true,
+            true,
+            cmd,
+        ));
+        assert!(!repeated_copy_action_is_consumed(
+            Some(copy),
+            true,
+            true,
+            mods(true, true),
+        ));
     }
 
     #[test]

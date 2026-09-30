@@ -1,8 +1,6 @@
 name: Mutants nightly
 
-# Full crate mutation. Archive build/mutants/<crate>. Not the PR 80% gate.
-# Runs on GitHub-hosted runners. Local Actions dispatch:
-#   local-actions run --event workflow_dispatch --job mutants-nightly
+# Full workspace mutation, split across GitHub-hosted runners.
 on:
   schedule:
     - cron: "0 4 * * *"
@@ -20,15 +18,21 @@ env:
 
 jobs:
   mutants-nightly:
-    name: Mutants nightly
+    name: Mutants shard ${{ matrix.shard }}/${{ strategy.job-total }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     env:
       LA_HEAVY: "1"
       LA_HEAVY_JOB: mutants-nightly
+      MUTANTS_SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0, Node 24
 
       - name: Acquire heavy-job lock (PT-305)
         run: python3 scripts/la-heavy-serial.py --acquire --wait --job mutants-nightly
@@ -79,19 +83,51 @@ jobs:
           command -v cargo-mutants >/dev/null 2>&1 \
             || cargo install cargo-mutants --locked --version 27.1.0
 
-      - name: Mutants per crate
-        env:
-          LA_HEAVY_HELD: "1"
+      - name: Run cargo-mutants shard
         run: ./scripts/mutants-nightly.sh
 
-      - name: Archive mutants reports
+      - name: Archive shard outcomes
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0, Node 24
         with:
-          name: mutants-nightly
-          path: build/mutants
+          name: mutants-nightly-shard-${{ matrix.shard }}
+          path: build/mutants/shard-${{ matrix.shard }}/mutants.out/outcomes.json
           if-no-files-found: warn
 
       - name: Release heavy-job lock
         if: always()
         run: python3 scripts/la-heavy-serial.py --release --job mutants-nightly
+
+  missed-mutants:
+    name: Merge missed mutants
+    if: ${{ always() }}
+    needs: [mutants-nightly]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0, Node 24
+
+      - name: Download shard outcomes
+        if: always()
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0, Node 24
+        with:
+          pattern: mutants-nightly-shard-*
+          path: build/mutant-shards
+          merge-multiple: false
+
+      - name: Merge shard outcomes
+        if: always()
+        run: >-
+          python3 scripts/mutants-nightly-merge.py
+          --input build/mutant-shards
+          --output build/missed-mutants.txt
+          --shards 8
+
+      - name: Upload missed-mutant report
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0, Node 24
+        with:
+          name: mutants-nightly-missed
+          path: build/missed-mutants.txt
+          if-no-files-found: error

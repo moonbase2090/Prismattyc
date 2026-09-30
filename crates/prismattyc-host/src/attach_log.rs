@@ -1260,6 +1260,7 @@ fn start_pane_reader(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_pane_reader_on_client(
     mut client: Client,
     socket: &Path,
@@ -2729,76 +2730,75 @@ mod tests {
         let restored_state = state_with_scrollback("MID_SNAPSHOT_RECONNECTED_HISTORY");
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut writer = stream;
-            let mut read_request = || {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                serde_json::from_str::<ControlRequest>(&line).unwrap()
-            };
-            let ControlRequest::RegisterClient { request_id, .. } = read_request() else {
-                panic!("expected initial client registration");
-            };
-            write_ok(
-                &mut writer,
-                request_id,
-                ControlResponseData::ClientRegistered { client_id: 1 },
-            );
-            let ControlRequest::ReadPaneState {
-                request_id,
-                pane_id,
-                ..
-            } = read_request()
-            else {
-                panic!("expected initial pane state request");
-            };
-            write_pane_state(&mut writer, request_id, pane_id, 5, &initial_state);
-            let ControlRequest::SubscribePane {
-                request_id,
-                from_seq,
-                ..
-            } = read_request()
-            else {
-                panic!("expected initial pane log subscription");
-            };
-            assert_eq!(from_seq, 5);
-            write_frame(
-                &mut writer,
-                request_id,
-                ControlResponseBody::Error {
-                    error: ControlError {
-                        code: ControlErrorCode::StaleSequence,
-                        message: "fixture sequence reset".into(),
-                        resnapshot_required: true,
-                        oldest_available_sequence: Some(1),
-                        current_sequence: Some(6),
-                        holder: None,
-                    },
-                },
-            );
-            let ControlRequest::ReadPaneState {
-                request_id,
-                pane_id,
-                ..
-            } = read_request()
-            else {
-                panic!("expected state refresh after sequence reset");
-            };
-            write_ok(
-                &mut writer,
-                request_id,
-                ControlResponseData::PaneStateChunk {
+            {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut writer = stream;
+                let mut read_request = || {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    serde_json::from_str::<ControlRequest>(&line).unwrap()
+                };
+                let ControlRequest::RegisterClient { request_id, .. } = read_request() else {
+                    panic!("expected initial client registration");
+                };
+                write_ok(
+                    &mut writer,
+                    request_id,
+                    ControlResponseData::ClientRegistered { client_id: 1 },
+                );
+                let ControlRequest::ReadPaneState {
+                    request_id,
                     pane_id,
-                    through_seq: 6,
-                    offset: 0,
-                    total_bytes: 128,
-                    data: b"{\"partial\":".to_vec(),
-                    done: false,
-                },
-            );
-            drop(read_request);
-            drop(reader);
-            drop(writer);
+                    ..
+                } = read_request()
+                else {
+                    panic!("expected initial pane state request");
+                };
+                write_pane_state(&mut writer, request_id, pane_id, 5, &initial_state);
+                let ControlRequest::SubscribePane {
+                    request_id,
+                    from_seq,
+                    ..
+                } = read_request()
+                else {
+                    panic!("expected initial pane log subscription");
+                };
+                assert_eq!(from_seq, 5);
+                write_frame(
+                    &mut writer,
+                    request_id,
+                    ControlResponseBody::Error {
+                        error: ControlError {
+                            code: ControlErrorCode::StaleSequence,
+                            message: "fixture sequence reset".into(),
+                            resnapshot_required: true,
+                            oldest_available_sequence: Some(1),
+                            current_sequence: Some(6),
+                            holder: None,
+                        },
+                    },
+                );
+                let ControlRequest::ReadPaneState {
+                    request_id,
+                    pane_id,
+                    ..
+                } = read_request()
+                else {
+                    panic!("expected state refresh after sequence reset");
+                };
+                write_ok(
+                    &mut writer,
+                    request_id,
+                    ControlResponseData::PaneStateChunk {
+                        pane_id,
+                        through_seq: 6,
+                        offset: 0,
+                        total_bytes: 128,
+                        data: b"{\"partial\":".to_vec(),
+                        done: false,
+                    },
+                );
+            }
 
             let (stream, _) = listener.accept().unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());

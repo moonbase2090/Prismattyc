@@ -14,11 +14,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use portable_pty::PtySize;
 use prismattyc_core::Selection;
-use prismattyc_emulator::{Emulator, PtySession};
+use prismattyc_emulator::{Emulator, EmulatorStateV1, PtySession};
 use prismattyc_mux::{
     apply_arrangement, even_horizontal_row, even_two_row_grid, even_vertical_column,
     layout_to_rects, Arrangement, Axis, CellRect, ClientView, Domain, PaneId, PaneLayout,
-    SessionId, SizeOwner, WindowId, DEFAULT_MIN_COLS, DEFAULT_MIN_ROWS,
+    SessionId, SizeOwner, WindowId, DEFAULT_MIN_COLS, DEFAULT_MIN_ROWS, MAX_PANE_STATE_BYTES,
 };
 use prismattyc_protocol::{InputModifiers, PointerPhase, ViewerId};
 
@@ -579,6 +579,10 @@ pub(crate) struct PaneRuntime {
     from_pty_rx: Option<mpsc::Receiver<std::io::Result<Vec<u8>>>>,
     /// Set on a log-backed attach pane. Mutually exclusive with `session`.
     log: Option<attach_log::LogPane>,
+    /// Serialized state being applied from the log-backed attach handshake.
+    restore_state_bytes: Vec<u8>,
+    restore_state_total: Option<usize>,
+    restore_state_seq: Option<u64>,
     /// Exit text from a log `Exited` event, for the PT-68 placeholder.
     log_exit_reason: Option<String>,
     /// Toast after a log-backed writer dies. Pane stays read-only.
@@ -883,6 +887,9 @@ impl PaneRuntime {
             session,
             from_pty_rx,
             log,
+            restore_state_bytes: Vec::new(),
+            restore_state_total: None,
+            restore_state_seq: None,
             log_exit_reason: None,
             log_write_notice: None,
             policy_superseded_frames: 0,
@@ -1165,6 +1172,70 @@ impl PaneRuntime {
                 break;
             };
             match log.try_recv() {
+                Ok(LogMessage::RestoreChunk {
+                    through_seq,
+                    offset,
+                    total_bytes,
+                    data,
+                    done,
+                    reservation,
+                }) => {
+                    if total_bytes > MAX_PANE_STATE_BYTES {
+                        eprintln!("prismattyc-host: pane state exceeded its transfer limit");
+                        self.reset_restore_state();
+                    } else {
+                        if offset == 0 {
+                            self.restore_state_bytes = Vec::new();
+                            self.restore_state_total = Some(total_bytes);
+                            self.restore_state_seq = Some(through_seq);
+                        }
+                        let expected_offset =
+                            u64::try_from(self.restore_state_bytes.len()).unwrap_or(u64::MAX);
+                        let next_len = self.restore_state_bytes.len().saturating_add(data.len());
+                        let valid = self.restore_state_total == Some(total_bytes)
+                            && self.restore_state_seq == Some(through_seq)
+                            && offset == expected_offset
+                            && next_len <= total_bytes
+                            && done == (next_len == total_bytes);
+                        if !valid {
+                            eprintln!("prismattyc-host: invalid pane state transfer sequence");
+                            self.reset_restore_state();
+                        } else if self.restore_state_bytes.try_reserve(data.len()).is_err() {
+                            eprintln!("prismattyc-host: pane state could not fit in memory");
+                            self.reset_restore_state();
+                        } else {
+                            self.restore_state_bytes.extend_from_slice(&data);
+                            if done {
+                                let state_bytes = std::mem::take(&mut self.restore_state_bytes);
+                                self.restore_state_total = None;
+                                self.restore_state_seq = None;
+                                let restored =
+                                    match serde_json::from_slice::<EmulatorStateV1>(&state_bytes) {
+                                        Ok(state) => Emulator::import_state(state)
+                                            .map_err(|error| error.to_string()),
+                                        Err(error) => Err(error.to_string()),
+                                    };
+                                match restored {
+                                    Ok(mut emulator) => {
+                                        emulator.set_retain_alt_history(self.alt_screen_scrollback);
+                                        self.emulator = emulator;
+                                        self.view_scroll = self
+                                            .view_scroll
+                                            .min(self.emulator.screen().max_view_scroll());
+                                        self.selection.clear();
+                                        self.keyboard_select_mode = false;
+                                        self.scroll_new_output = false;
+                                    }
+                                    Err(error) => eprintln!(
+                                        "prismattyc-host: pane state could not be restored: {error}"
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                    drop(reservation);
+                }
+                Ok(LogMessage::RestoreReset) => self.reset_restore_state(),
                 Ok(LogMessage::Batch {
                     snapshot,
                     events,
@@ -1266,6 +1337,12 @@ impl PaneRuntime {
             }
         }
         (dirty, content_changed, more)
+    }
+
+    fn reset_restore_state(&mut self) {
+        self.restore_state_bytes = Vec::new();
+        self.restore_state_total = None;
+        self.restore_state_seq = None;
     }
 
     fn apply_log_event(&mut self, event: prismattyc_mux::PaneEvent) {
@@ -4192,6 +4269,107 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         panic!("private pmuxd did not publish {}", socket.display());
+    }
+
+    fn create_scrollback_session(server: &PrivateMuxServer, name: &str) {
+        let script = "printf 'PERSISTED_SCROLLBACK_MARKER\\n'; for i in $(seq 1 100); do printf 'scroll line %03d\\n' \"$i\"; done; exec cat";
+        let output = Command::new(mux_binary("pmux"))
+            .arg("--socket")
+            .arg(&server.socket)
+            .args(["new", "--no-attach", name, "--", "/bin/sh", "-c", script])
+            .output()
+            .expect("start scrollback fixture session");
+        assert!(output.status.success(), "start session: {output:?}");
+    }
+
+    fn log_runtime(server: &PrivateMuxServer, name: &str) -> MuxRuntime {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let pane = runtime.focused_id();
+        assert!(runtime
+            .promote_to_log_replica(pane, name, name, &server.socket)
+            .unwrap());
+        runtime
+    }
+
+    fn has_scrollback(runtime: &mut MuxRuntime, marker: &str) -> bool {
+        runtime.drain_all();
+        runtime
+            .focused_mut()
+            .emulator
+            .export_state()
+            .is_ok_and(|state| {
+                state
+                    .screen
+                    .scrollback
+                    .iter()
+                    .any(|row| row.text.contains(marker))
+            })
+    }
+
+    fn wait_for_scrollback(runtime: &mut MuxRuntime, marker: &str) {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline {
+            if has_scrollback(runtime, marker) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("pane scrollback did not contain {marker:?}");
+    }
+
+    #[test]
+    fn app_restart_reopens_full_pane_scrollback() {
+        let server = private_mux_server();
+        create_scrollback_session(&server, "app-restart-history");
+
+        let mut before_restart = log_runtime(&server, "app-restart-history");
+        wait_for_scrollback(&mut before_restart, "PERSISTED_SCROLLBACK_MARKER");
+        drop(before_restart);
+
+        let mut after_restart = log_runtime(&server, "app-restart-history");
+        wait_for_scrollback(&mut after_restart, "PERSISTED_SCROLLBACK_MARKER");
+    }
+
+    #[test]
+    fn reopening_window_restores_full_pane_scrollback() {
+        let server = private_mux_server();
+        create_scrollback_session(&server, "window-reopen-history");
+
+        let mut existing_window = log_runtime(&server, "window-reopen-history");
+        wait_for_scrollback(&mut existing_window, "PERSISTED_SCROLLBACK_MARKER");
+
+        let mut reopened_window = log_runtime(&server, "window-reopen-history");
+        wait_for_scrollback(&mut reopened_window, "PERSISTED_SCROLLBACK_MARKER");
+    }
+
+    #[test]
+    fn pane_resize_keeps_full_scrollback() {
+        let server = private_mux_server();
+        create_scrollback_session(&server, "resize-history");
+
+        let mut runtime = log_runtime(&server, "resize-history");
+        wait_for_scrollback(&mut runtime, "PERSISTED_SCROLLBACK_MARKER");
+        runtime.focused_mut().resize_guest(48, 16).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            runtime.drain_all();
+            let state = runtime
+                .focused_mut()
+                .emulator
+                .export_state()
+                .expect("resized pane state");
+            let has_marker = state
+                .screen
+                .scrollback
+                .iter()
+                .any(|row| row.text.contains("PERSISTED_SCROLLBACK_MARKER"));
+            if state.screen.columns == 48 && state.screen.rows == 16 && has_marker {
+                break;
+            }
+            assert!(Instant::now() < deadline, "resize lost pane history");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn shell_quote(value: &Path) -> String {

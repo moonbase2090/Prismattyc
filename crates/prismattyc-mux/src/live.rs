@@ -8,7 +8,8 @@ use std::thread;
 
 use anyhow::{Context, Result};
 use prismattyc_emulator::{
-    pty_size_with_cell_pixels, Emulator, PtySession, NOMINAL_CELL_H_PX, NOMINAL_CELL_W_PX,
+    pty_size_with_cell_pixels, Emulator, EmulatorStateV1, PtySession, StateError,
+    NOMINAL_CELL_H_PX, NOMINAL_CELL_W_PX,
 };
 use prismattyc_protocol::{InputModifiers, PointerPhase, ViewerId};
 
@@ -1059,6 +1060,15 @@ impl LiveRuntime {
         self.panes
             .get(&pane_id)
             .map(|runtime| runtime.content(pane_id))
+    }
+
+    pub(crate) fn pane_state_snapshot(
+        &self,
+        pane_id: u64,
+    ) -> Option<(u64, Result<EmulatorStateV1, StateError>)> {
+        self.panes
+            .get(&pane_id)
+            .map(|runtime| (runtime.log.current_seq(), runtime.emulator.export_state()))
     }
 
     pub(crate) fn styled(

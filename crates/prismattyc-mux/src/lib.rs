@@ -57,7 +57,8 @@ pub use control::{
     RuntimeDirMiss, SessionSnapshot, Snapshot, SocketLiveness, SpawnSpec, StyleRun, WindowBounds,
     WindowSnapshot, WorkspaceInverseRun, WorkspaceStyleRun, CONTROL_STALE_SKIP_MAX,
     MAIL_ATTENTION_CELL, MAIL_INJECT_DIRTY_IDLE_MS, MAIL_INJECT_INPUT_IDLE_MS,
-    MAIL_INJECT_NUDGE_DELAY_MS, MAIL_INJECT_PAYLOAD, PMUX_MAIL_NOTIFICATION, PROTOCOL_VERSION,
+    MAIL_INJECT_NUDGE_DELAY_MS, MAIL_INJECT_PAYLOAD, MAX_PANE_STATE_BYTES, PMUX_MAIL_NOTIFICATION,
+    PROTOCOL_VERSION,
 };
 pub use image_paste::{
     clipboard_image_file_with, clipboard_image_to_png, clipboard_image_to_png_with,

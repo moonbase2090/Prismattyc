@@ -75,6 +75,10 @@ font_ligatures = false
 # OpenType feature tags; prefix with '-' to disable. four ASCII alphanumeric characters or spaces.
 font_features = ["calt", "liga"]
 
+# -- keys --
+# Enable additional standard macOS Command-key shortcuts; Cmd+Q and Cmd+N are already available. true|false.
+macos_shortcuts = false
+
 # -- layout --
 # Initial pane count; startup only. 1-8.
 panes = 1
@@ -202,6 +206,7 @@ remote_size = "latest"
 [keys]
 # Host actions. An entry replaces that action's default chords.
 # Value is a chord string or an array of chord strings.
+# Set macos_shortcuts = true above to add more standard Command-key actions.
 # split the focused pane to the right.
 split_right = ['ctrl+shift+\', "ctrl+shift+e"]
 # split the focused pane downward.
@@ -326,6 +331,8 @@ layout_9 = ["ctrl+shift+f9", "ctrl+shift+alt+f9", "super+shift+f9", "ctrl+alt+9"
 zoom_pane = "ctrl+shift+z"
 # open a new OS window.
 new_window = "super+n"
+# quit Prismattyc.
+quit = "super+q"
 # edit the config file.
 # open_config = []
 # open the command palette.
@@ -356,6 +363,14 @@ theme_picker = "ctrl+shift+,"
 # save_space = []
 # find in scrollback.
 find = "ctrl+shift+f"
+# clear the screen and scrollback.
+# clear_scrollback = []
+# increase the font size.
+# increase_font_size = []
+# decrease the font size.
+# decrease_font_size = []
+# reset the font size.
+# reset_font_size = []
 # open the walkthrough caption.
 # walkthrough = []
 # delete walkthrough progress and restart at level 0.
@@ -613,8 +628,12 @@ file is missing. It does not parse the file before opening the editor, so you
 can repair malformed TOML.
 
 ```toml
-# Host keybindings (keybindings). Each entry replaces that action's default
-# chords; list aliases explicitly; [] unbinds. Chord = mod+...+key with
+# Optional standard macOS Command shortcuts. Off by default.
+macos_shortcuts = true
+
+# Host keybindings (keybindings). Each entry replaces every default chord for
+# that action, including its macOS shortcut; list aliases explicitly; [] unbinds.
+# Chord = mod+...+key with
 # ctrl, shift, alt, super (cmd/meta/win) and a key: a letter, digit,
 # punctuation (`\` `-` `=` `[` `]` `;` `'` `,` `.` `/` or spelled: backslash,
 # minus, comma, ...), or enter, tab, backspace, delete, escape, space,
@@ -628,6 +647,9 @@ can repair malformed TOML.
 [keys]
 split_right = "ctrl+alt+enter"
 find = ["ctrl+shift+f", "ctrl+alt+f"]
+copy = "super+c"       # replaces Ctrl+Shift+C
+paste = "super+v"      # replaces Ctrl+Shift+V
+# close_tab = []        # disable this action, including Cmd+W
 command_palette = "ctrl+shift+p"
 theme_picker = []
 open_config = []
@@ -650,6 +672,17 @@ instance = "default"                 # $XDG_RUNTIME_DIR/prismattyc/pmux.sock
 # space_open_runs_commands = "agents"  # agents|all|none; `pmux space open --no-run` skips
 # remote_size = "latest"               # latest|host; TTY attach fits, detach restores host
 ```
+
+Cmd+Q (quit) and Cmd+N (new window) are available by default.
+`macos_shortcuts = true` adds Cmd+T (new tab), Cmd+W (close tab), Cmd+C/V/A
+(copy, paste, select all), Cmd+F (find), Cmd+K (clear screen and scrollback),
+Cmd+Shift+= (larger font), Cmd+- (smaller font), and Cmd+0 (reset font size). Use
+`prismattyc-host --list-bindings` to print the active chords after config
+overrides.
+
+Any action can be rebound by its name in `[keys]`; a string binds one chord,
+an array binds aliases, and `[]` disables it. The list command shows actions
+with no active chord as `(unbound)`.
 
 Layout presets (`preset_single`, `preset_split_h`, `preset_split_v`,
 `preset_grid`, `preset_main_vertical`, `preset_main_horizontal`) retile

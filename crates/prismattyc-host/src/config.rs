@@ -229,6 +229,9 @@ pub struct ConfigFile {
     /// default chords. See `crate::keybind`.
     #[serde(default)]
     pub keys: Option<std::collections::BTreeMap<String, crate::keybind::KeysValue>>,
+    /// Add standard macOS Command-key bindings before applying `[keys]`.
+    /// Defaults off so these new shortcuts can be enabled explicitly.
+    pub macos_shortcuts: Option<bool>,
     /// `[a11y]` (accessibility). Defaults on when the table is absent.
     #[serde(default)]
     pub a11y: Option<A11ySection>,
@@ -261,8 +264,15 @@ impl ConfigFile {
     }
 
     pub fn loaded_keymap(&self) -> crate::keybind::KeyMap {
-        crate::keybind::KeyMap::from_config(self.keys.as_ref())
-            .unwrap_or_else(|_| crate::keybind::KeyMap::default())
+        crate::keybind::KeyMap::from_config_with_macos(
+            self.keys.as_ref(),
+            self.macos_shortcuts.unwrap_or(false),
+        )
+        .unwrap_or_else(|_| crate::keybind::KeyMap::default())
+    }
+
+    pub fn macos_shortcuts(&self) -> bool {
+        self.macos_shortcuts.unwrap_or(false)
     }
 
     pub fn loaded_theme(&self) -> crate::theme::Theme {
@@ -605,7 +615,11 @@ fn parse(raw: &str, path: &Path) -> Result<ConfigFile> {
         );
     }
     if let Some(keys) = config.keys.as_ref() {
-        crate::keybind::KeyMap::from_config(Some(keys)).map_err(|e| anyhow::anyhow!(e))?;
+        crate::keybind::KeyMap::from_config_with_macos(Some(keys), config.macos_shortcuts())
+            .map_err(|e| anyhow::anyhow!(e))?;
+    } else if config.macos_shortcuts() {
+        crate::keybind::KeyMap::from_config_with_macos(None, true)
+            .map_err(|e| anyhow::anyhow!(e))?;
     }
     for (name, value) in [
         ("window_padding_px", config.window_padding_px),
@@ -879,6 +893,23 @@ mod tests {
             vec!["ctrl+alt+enter".to_string()]
         );
         assert_eq!(map.chords(crate::keybind::Action::Find).len(), 2);
+        std::fs::write(
+            &path,
+            "macos_shortcuts = true\n[keys]\ncopy = []\nnew_tab = \"ctrl+alt+t\"\n",
+        )
+        .unwrap();
+        let mac_keys = load(&path).unwrap();
+        let mac_map = mac_keys.loaded_keymap();
+        assert!(mac_keys.macos_shortcuts());
+        assert!(mac_map.chords(crate::keybind::Action::Copy).is_empty());
+        assert_eq!(
+            mac_map.spellings(crate::keybind::Action::NewTab),
+            vec!["ctrl+alt+t".to_string()]
+        );
+        assert_eq!(
+            mac_map.spellings(crate::keybind::Action::Paste),
+            vec!["ctrl+shift+v".to_string(), "super+v".to_string()]
+        );
         assert_eq!(
             ConfigFile::default().loaded_keymap(),
             crate::keybind::KeyMap::default()

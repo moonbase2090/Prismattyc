@@ -1,4 +1,4 @@
-//! macOS menu integration (menu bar, ⌘N item, Dock menu).
+//! macOS menu integration (menu bar and Dock menu).
 //!
 //! winit 0.30 owns the `NSApplicationDelegate`. To surface a Dock right-click
 //! "New Window", we add `applicationDockMenu:` to winit's delegate class at
@@ -18,10 +18,10 @@ use winit::event_loop::EventLoopProxy;
 
 use crate::UserAction;
 
-/// The File-menu items this app installs: (title, key equivalent). Pure and
-/// AppKit-free so it is unit-testable without a display (Task 5).
+/// The File-menu items this app installs: (title, key equivalent). Keyboard
+/// equivalents stay empty so the configurable host keymap owns shortcuts.
 pub fn menu_item_table() -> &'static [(&'static str, &'static str)] {
-    &[("New Window", "n")]
+    &[("New Window", "")]
 }
 
 /// The Dock right-click menu items this app installs. Pure and AppKit-free
@@ -48,8 +48,8 @@ define_class!(
     unsafe impl NSObjectProtocol for NewWindowTarget {}
 
     impl NewWindowTarget {
-        /// Action target for the File > New Window menu item (and its ⌘N key
-        /// equivalent). Forwards to the winit event loop so window creation
+        /// Action target for the File > New Window menu item. Forwards to the
+        /// winit event loop so window creation
         /// happens on `ApplicationHandler::user_event`, same path as the
         /// (later) Dock menu (Task 7).
         #[unsafe(method(newWindow:))]
@@ -84,8 +84,9 @@ unsafe impl Sync for MainThreadOnlyBox {}
 static NEW_WINDOW_TARGET: OnceLock<MainThreadOnlyBox> = OnceLock::new();
 
 /// Installs the real macOS menu bar: an application submenu (required by
-/// AppKit for `NSApp.mainMenu` to behave) plus a File menu with "New Window"
-/// (⌘N). Must run on the main thread, before or shortly after launch so the
+/// AppKit for `NSApp.mainMenu` to behave) plus a File menu with "New Window".
+/// Keyboard shortcuts are handled by the configurable host keymap. Must run
+/// on the main thread, before or shortly after launch so the
 /// menu and key equivalent are live from the first window (Task 5).
 pub fn install_main_menu(proxy: EventLoopProxy<UserAction>) {
     let Some(mtm) = MainThreadMarker::new() else {
@@ -104,7 +105,7 @@ pub fn install_main_menu(proxy: EventLoopProxy<UserAction>) {
     let app_menu = NSMenu::new(mtm);
     let quit_item = NSMenuItem::new(mtm);
     quit_item.setTitle(&NSString::from_str("Quit Prismattyc"));
-    quit_item.setKeyEquivalent(&NSString::from_str("q"));
+    quit_item.setKeyEquivalent(&NSString::from_str(""));
     // SAFETY: `terminate:` is a valid selector on the responder chain
     // (`NSApplication`); leaving target unset routes it there.
     unsafe {
@@ -114,7 +115,8 @@ pub fn install_main_menu(proxy: EventLoopProxy<UserAction>) {
     app_menu_item.setSubmenu(Some(&app_menu));
     main_menu.addItem(&app_menu_item);
 
-    // File menu: "New Window" (⌘N) via the action-target object above.
+    // File menu: "New Window" via the action-target object above. Its key
+    // equivalent is empty; the host keymap handles the configurable chord.
     let file_menu_item = NSMenuItem::new(mtm);
     file_menu_item.setTitle(&NSString::from_str("File"));
     let file_menu = NSMenu::new(mtm);
@@ -137,7 +139,7 @@ pub fn install_main_menu(proxy: EventLoopProxy<UserAction>) {
     main_menu.addItem(&file_menu_item);
 
     NSApplication::sharedApplication(mtm).setMainMenu(Some(&main_menu));
-    eprintln!("prismattyc-host: menu bar installed (File > New Window, Cmd-N)");
+    eprintln!("prismattyc-host: menu bar installed (File > New Window)");
 }
 
 /// The `applicationDockMenu:` implementation added to winit's delegate
@@ -241,7 +243,7 @@ mod tests {
         let table = crate::macos_menu::menu_item_table();
         assert!(table
             .iter()
-            .any(|(title, key)| *title == "New Window" && *key == "n"));
+            .any(|(title, key)| *title == "New Window" && key.is_empty()));
     }
 
     #[test]

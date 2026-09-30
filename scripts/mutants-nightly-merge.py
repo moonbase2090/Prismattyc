@@ -74,7 +74,7 @@ def merge(input_dir: Path, shard_count: int, output: Path) -> int:
     totals: Counter[str] = Counter()
     missed: list[tuple[str, str]] = []
     identities: set[str] = set()
-    loaded = 0
+    completed = 0
 
     for shard, report in sorted(by_shard.items()):
         if shard not in expected_shards:
@@ -94,7 +94,10 @@ def merge(input_dir: Path, shard_count: int, output: Path) -> int:
             )
             continue
 
-        loaded += 1
+        shard_errors_before = len(errors)
+        end_time = data.get("end_time")
+        if not isinstance(end_time, str) or not end_time.strip():
+            errors.append(f"shard {shard} has no end_time; its run may be incomplete")
         baselines = [entry for entry in data["outcomes"] if entry.get("scenario") == "Baseline"]
         if len(baselines) != 1 or baselines[0].get("summary") != "Success":
             errors.extend(helpers.baseline_failures(data["outcomes"]))
@@ -139,11 +142,13 @@ def merge(input_dir: Path, shard_count: int, output: Path) -> int:
         if data.get("total_mutants") != sum(shard_counts.values()):
             errors.append(f"shard {shard} total_mutants does not match its outcomes")
         totals.update(shard_counts)
+        if len(errors) == shard_errors_before:
+            completed += 1
 
     total = sum(totals.values())
     lines = [
         "Prismattyc nightly mutation results",
-        f"Shards: {loaded}/{shard_count}",
+        f"Shards: {completed}/{shard_count}",
         (
             f"Mutants: {total} total, {totals['caught']} caught, "
             f"{totals['missed']} missed, {totals['timeout']} timed out, "

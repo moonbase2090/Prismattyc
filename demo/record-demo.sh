@@ -63,10 +63,10 @@ LINES=(
 "A one-pane write sends a prompt to an agent and returns a receipt. Enter is sent separately, and the submitted prompt gets a reply in that pane."
 "That's Prismattyc. One place for your terminals, your spaces, and the agents working alongside you. Thanks for taking a look."
 )
-# Trailing pause after each clip. Long pauses cover long on-screen actions.
-PAUSE=(1.6 1.5 1.6 1.3 1.8 1.8 2.3 2.8 2.8 3.3 3.5 3.0 4.5 2.5 4.3 3.0 3.3 3.3 4.0 6.0 3.0 3.0 3.0 3.0 4.3)
+# Short pauses keep handoffs moving after each narration clip.
+PAUSE=(0.8 0.8 0.8 0.7 0.8 0.8 0.9 0.9 0.9 1.0 1.0 0.9 1.3 0.9 1.3 1.0 1.2 1.2 1.2 1.5 1.0 1.0 1.1 1.5 1.2)
 # Dry-run stand-in for each clip's spoken length (seconds).
-DRYDUR=(12 15 12 8 7 10 11 8 13 9 8 9 8 10 11 9 7 11 11 11 8 10 12 15 10)
+DRYDUR=(7 8 7 5 5 6 6 5 7 7 6 6 6 7 8 7 6 7 8 8 6 6 7 9 6)
 
 have() { command -v "$1" >/dev/null 2>&1; }
 log() { printf '[%6.1f] %s\n' "$(elapsed)" "$*"; }
@@ -85,7 +85,7 @@ find_host_window() {
 }
 
 check_setup() {
-  local missing=0 version
+  local missing=0 version expected_version actual_version
   echo "Prismattyc demo recorder check"
   echo "  display: Xvfb ${DISPLAY} at 1920x1080"
   for cmd in ffmpeg ffprobe fc-match xdotool xdpyinfo python3 curl file timeout prismattyc-host prismattyc pmux pmuxd pmux-attach pmux-mcp codex muse; do
@@ -101,8 +101,22 @@ check_setup() {
   fi
   if [[ -x "$(command -v prismattyc-host 2>/dev/null || true)" ]]; then
     version="$(prismattyc-host --version 2>/dev/null | head -1)"
-    echo "  OK   $version"
-    [[ -n "$version" ]] || { echo "  MISS Prismattyc version output"; missing=1; }
+    expected_version="$(python3 - "$DIR/../Cargo.toml" <<'PY'
+import pathlib
+import sys
+import tomllib
+
+manifest = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())
+print(manifest["workspace"]["package"]["version"])
+PY
+)"
+    actual_version="${version##* }"
+    if [[ "$actual_version" == "$expected_version" ]]; then
+      echo "  OK   $version matches workspace $expected_version"
+    else
+      echo "  MISS host version ${version:-unavailable}; expected $expected_version"
+      missing=1
+    fi
   fi
   for cmd in codex muse; do
     "$cmd" --version >/dev/null 2>&1 && printf '  OK   %s CLI\n' "$cmd" || { printf '  MISS %s CLI check\n' "$cmd"; missing=1; }
@@ -112,7 +126,7 @@ check_setup() {
   done
   [[ -f "$PARTS/prismattyc-256.png" ]] && echo "  OK   terminal image" || { echo "  MISS terminal image"; missing=1; }
   [[ -f "$CREDS_DIR/codex/auth.json" ]] && echo "  OK   staged Codex credential copy" || { echo "  MISS staged Codex credential copy"; missing=1; }
-  [[ -f "$CREDS_DIR/muse/auth.json" ]] && echo "  OK   staged Muse credential copy" || { echo "  MISS staged Muse credential copy"; missing=1; }
+  [[ -s "$CREDS_DIR/muse/api-key" ]] && echo "  OK   staged Muse API key copy" || { echo "  MISS staged Muse API key copy"; missing=1; }
   if [[ -f "$ENV_FILE" ]] && grep -q '^export ELEVENLABS_API_KEY=.\+' "$ENV_FILE"; then
     echo "  OK   ElevenLabs narration credentials are staged"
   else
@@ -148,8 +162,19 @@ setup_private_sessions() {
   export PRISMATTYC_DEMO_PMUX="$PMUX_REAL"
 
   cp "$CREDS_DIR/codex/auth.json" "$CODEX_HOME/auth.json"
-  cp "$CREDS_DIR/muse/auth.json" "$XDG_CONFIG_HOME/muse/auth.json"
-  chmod 600 "$CODEX_HOME/auth.json" "$XDG_CONFIG_HOME/muse/auth.json"
+  chmod 600 "$CODEX_HOME/auth.json"
+  MUSE_LAUNCHER="$STATE_DIR/muse-with-api-key"
+  cat > "$MUSE_LAUNCHER" <<'MUSE'
+#!/usr/bin/env bash
+set -euo pipefail
+key_file="${PRISMATTYC_DEMO_CREDS:-$HOME/creds}/muse/api-key"
+[[ -s "$key_file" ]] || { echo "ERROR: staged Muse API key is missing" >&2; exit 1; }
+META_API_KEY="$(<"$key_file")"
+[[ -n "$META_API_KEY" ]] || { echo "ERROR: staged Muse API key is empty" >&2; exit 1; }
+export META_API_KEY
+exec muse "$@"
+MUSE
+  chmod 700 "$MUSE_LAUNCHER"
   cp "$DIR/config.toml" "$PRISMATTYC_CONFIG"
   cat > "$CODEX_HOME/config.toml" <<TOML
 [mcp_servers.pmux]
@@ -189,7 +214,7 @@ AGENTS
   pmux new --no-attach --no-agent work -- bash -l
   pmux new --no-attach --agent codex codex -- codex --no-daemon --no-alt-screen \
     --ask-for-approval never --sandbox read-only --disable shell_tool --disable unified_exec -C "$HOME/work"
-  pmux new --no-attach --agent muse muse -- muse --no-session-log \
+  pmux new --no-attach --agent muse muse -- "$MUSE_LAUNCHER" --no-session-log \
     --approval-mode never --trust-workspace
 }
 
@@ -661,7 +686,7 @@ if ! wait_flag "$RANG_FLAG" "$MAIL_TIMEOUT"; then
   pmux save-buffer codex - > "$HOME/Desktop/demo-mail-codex-pane.txt" 2>&1 || true
   [[ -f "$CODEX_HOME/log/codex-tui.log" ]] && cp "$CODEX_HOME/log/codex-tui.log" "$HOME/Desktop/demo-codex-tui.log" || true
   kill "$WATCH_PID" 2>/dev/null || true; wait "$WATCH_PID" 2>/dev/null || true; WATCH_PID=""
-  [[ "$DRY" -eq 1 ]] || exit 1
+  exit 1
 fi
 if [[ "$MAIL_DEMO" -eq 1 ]]; then
   wait "$WATCH_PID" 2>/dev/null || true; WATCH_PID=""
@@ -677,12 +702,12 @@ if [[ "$MAIL_DEMO" -eq 1 ]]; then
   if ! wait_mail_drained muse "$MAIL_TIMEOUT"; then
     MAIL_DEMO=0
     log "Muse did not claim its letter within ${MAIL_TIMEOUT} s"
-    [[ "$DRY" -eq 1 ]] || exit 1
+    exit 1
   fi
   if [[ "$MAIL_DEMO" -eq 1 ]] && ! wait_mail_committed muse "$MAIL_TIMEOUT"; then
     MAIL_DEMO=0
     log "Muse did not commit its letter within ${MAIL_TIMEOUT} s"
-    [[ "$DRY" -eq 1 ]] || exit 1
+    exit 1
   fi
   if [[ "$MAIL_DEMO" -eq 1 ]] && ! wait_flag "$CODEX_RANG_FLAG" "$MAIL_TIMEOUT"; then
     MAIL_DEMO=0
@@ -690,7 +715,7 @@ if [[ "$MAIL_DEMO" -eq 1 ]]; then
     pmux mail --as muse inbox > "$HOME/Desktop/demo-mail-muse-inbox.txt" 2>&1 || true
     pmux save-buffer muse - > "$HOME/Desktop/demo-mail-muse-pane.txt" 2>&1 || true
     [[ -f "$XDG_CONFIG_HOME/muse/log/muse.log" ]] && cp "$XDG_CONFIG_HOME/muse/log/muse.log" "$HOME/Desktop/demo-muse.log" || true
-    [[ "$DRY" -eq 1 ]] || exit 1
+    exit 1
   fi
   if [[ -n "$WATCH_PID" ]]; then
     if [[ -f "$CODEX_RANG_FLAG" ]]; then wait "$WATCH_PID" 2>/dev/null || true
@@ -734,8 +759,7 @@ until wait_mail_drained codex 10; do
     log "Codex did not claim its reply after $max_rings rings"
     mail_diag "not claimed"
     MAIL_DEMO=0
-    [[ "$DRY" -eq 1 ]] || exit 1
-    break
+    exit 1
   }
   out="$(pmux mail codex 2>&1 || true)"; log "ring $ring: $out"
   echo "== ring $ring $(elapsed): $out" >> "$HOME/Desktop/demo-mail-diag.log"
@@ -744,16 +768,16 @@ if [[ "$MAIL_DEMO" -eq 1 ]]; then
   if ! wait_mail_committed codex "$MAIL_TIMEOUT"; then
     MAIL_DEMO=0
     log "Codex did not commit its reply within ${MAIL_TIMEOUT} s"
-    [[ "$DRY" -eq 1 ]] || exit 1
+    exit 1
   fi
 fi
 if [[ "$MAIL_DEMO" -eq 1 ]]; then
   mail_diag after
   # Codex commits before it finishes writing its summary. Wait for the pane
   # to go quiet so the reply text is on screen, then hold on it.
-  if ! wait_pane_quiet codex 30; then
-    log "Codex pane remained busy after 30 s"
-    [[ "$DRY" -eq 1 ]] || exit 1
+  if ! wait_pane_quiet codex "$MAIL_TIMEOUT"; then
+    log "Codex pane remained busy after ${MAIL_TIMEOUT} s"
+    exit 1
   fi
   sleep 4
 fi
@@ -789,8 +813,8 @@ grep -qx PASS "$HOME/Desktop/pane-write-result.txt" || { echo "ERROR: pane-write
 beat 23
 focus_work_pane
 rm -f "$HOME/Desktop/pane-write-agent-result.txt"
-type_cmd "cd \"$HOME/work/demo-parts\" && PRISMATTYC_DEMO_AGENT=$PANE_WRITE_AGENT PRISMATTYC_DEMO_RESULT=\"$HOME/Desktop/pane-write-agent-result.txt\" python3 ./pane-write-agent.py"
-for _ in $(seq 1 240); do
+type_cmd "cd \"$HOME/work/demo-parts\" && PRISMATTYC_DEMO_AGENT=$PANE_WRITE_AGENT PRISMATTYC_DEMO_TIMEOUT=$MAIL_TIMEOUT PRISMATTYC_DEMO_RESULT=\"$HOME/Desktop/pane-write-agent-result.txt\" python3 ./pane-write-agent.py"
+for _ in $(seq 1 "$(((MAIL_TIMEOUT + 5) * 2))"); do
   [[ -f "$HOME/Desktop/pane-write-agent-result.txt" ]] && break
   sleep 0.5
 done

@@ -62,7 +62,52 @@ stage_credentials() {
   mkdir -p "$CRED_ROOT"
   chmod 700 "$CACHE_ROOT" "$CRED_ROOT"
   copy_credential codex "${PRISMATTYC_CODEX_AUTH_FILE:-$HOME/.codex/auth.json}"
-  copy_credential muse "${PRISMATTYC_MUSE_AUTH_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/muse/auth.json}"
+  python3 - "$CRED_ROOT/muse/api-key" "${PRISMATTYC_MUSE_API_KEY_FILE:-}" <<'PY'
+import os
+import pathlib
+import sys
+import tempfile
+
+destination = pathlib.Path(sys.argv[1])
+source = pathlib.Path(sys.argv[2]).expanduser() if sys.argv[2] else None
+if source is not None:
+    if not source.is_file():
+        print("ERROR: Muse API key file is missing", file=sys.stderr)
+        raise SystemExit(1)
+    value = source.read_bytes().strip()
+else:
+    value = os.environ.get("META_API_KEY", "").encode()
+if (
+    not value
+    or value.startswith((b"{", b"["))
+    or any(byte in value for byte in (b"\0", b"\n", b"\r"))
+):
+    print(
+        "ERROR: set PRISMATTYC_MUSE_API_KEY_FILE to a private file containing one Muse API key, "
+        "or set META_API_KEY in the runner environment",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+os.chmod(destination.parent, 0o700)
+fd, temporary = tempfile.mkstemp(prefix=".muse-key-", dir=destination.parent)
+try:
+    with os.fdopen(fd, "wb") as target:
+        target.write(value)
+        target.write(b"\n")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, destination)
+except BaseException:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+# A host auth.json may point to a macOS Keychain item. The Linux CLI must not
+# see that stale, host-only file alongside the explicitly staged API key.
+(destination.parent / "auth.json").unlink(missing_ok=True)
+PY
 
   local eleven_source="${PRISMATTYC_DEMO_ELEVEN_ENV:-$DEMO_DIR/.eleven.env}"
   if [[ -f "$eleven_source" ]]; then

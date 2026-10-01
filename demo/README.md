@@ -50,18 +50,18 @@ check fails, it keeps the raw file in the run directory.
 
 ## Isolate the agents
 
-The runner copies Codex and Muse authentication files into a private local
+The runner copies the Codex auth file and Muse API key into a private local
 cache, then mounts those copies into the disposable container. It never mounts
-the host credential directories. The recorder copies them again into a
-per-take `CODEX_HOME` and XDG config directory.
+the host credential directories. Muse reads the key from `META_API_KEY`; the
+recorder passes that variable only to the Muse process.
 
-`--check` confirms that the credential copies exist; it does not sign in to
-either service. Muse's Linux process needs an auth file the installed CLI can
-read without the host's OS credential store. If the default Muse file refers
-to a host-only credential store, set `PRISMATTYC_MUSE_AUTH_FILE` to a private,
-Linux-compatible auth file. A silent take can continue when a mailbox scene
-cannot complete. Narrated mode stops with an error if an agent does not claim
-and commit its message or finish its visible reply.
+Set `PRISMATTYC_MUSE_API_KEY_FILE` to a private file with one API key, or set
+`META_API_KEY` in the runner environment. The runner copies the key with mode
+`0600`. Do not point it at the host Muse `auth.json`, which may refer to the
+macOS Keychain and cannot authenticate the Linux CLI. `--check` confirms that
+the copies exist; it does not authenticate either service. A silent take stops
+if an agent cannot complete a mailbox scene. Narrated mode also stops if an
+agent does not claim and commit its message or finish its visible reply.
 
 Each take creates its own pmux socket under a private runtime directory. The
 work, Codex, and Muse sessions use that socket. The app and both agents inherit

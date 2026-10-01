@@ -435,7 +435,7 @@ case "$PANE_WRITE_AGENT" in
   *) echo "ERROR: PRISMATTYC_DEMO_PANE_AGENT must be codex or muse" >&2; exit 2 ;;
 esac
 MAIL_TIMEOUT=120
-[[ "$DRY" -eq 0 ]] || MAIL_TIMEOUT=20
+[[ "$DRY" -eq 0 ]] || MAIL_TIMEOUT=60
 
 [[ "${CLIPS_ONLY:-0}" -eq 1 ]] || check_setup
 trap cleanup EXIT
@@ -698,10 +698,22 @@ wait_clip 17
 # ---- 18 Muse receives the letter and replies -------------------------------
 beat 18
 if [[ "$MAIL_DEMO" -eq 1 ]]; then
-  activate; key ctrl+shift+3; sleep 0.5; enter; sleep 0.6
+  focus_work_pane
+  rm -f "$HOME/Desktop/muse-mail-claim-result.txt"
+  type_cmd "cd \"$HOME/work/demo-parts\" && PRISMATTYC_DEMO_TASK=claim PRISMATTYC_DEMO_AGENT=muse PRISMATTYC_DEMO_TIMEOUT=$MAIL_TIMEOUT PRISMATTYC_DEMO_RESULT=\"$HOME/Desktop/muse-mail-claim-result.txt\" python3 ./pane-write-agent.py"
+  activate; key ctrl+shift+3; sleep 0.5
   if ! wait_mail_drained muse "$MAIL_TIMEOUT"; then
     MAIL_DEMO=0
     log "Muse did not claim its letter within ${MAIL_TIMEOUT} s"
+    exit 1
+  fi
+  for _ in $(seq 1 40); do
+    [[ "$(cat "$HOME/Desktop/muse-mail-claim-result.txt" 2>/dev/null || true)" == "PASS" ]] && break
+    sleep 0.1
+  done
+  if [[ "$(cat "$HOME/Desktop/muse-mail-claim-result.txt" 2>/dev/null || true)" != "PASS" ]]; then
+    MAIL_DEMO=0
+    log "Muse mailbox drained without a completed pane-write receipt"
     exit 1
   fi
   if [[ "$MAIL_DEMO" -eq 1 ]] && ! wait_mail_committed muse "$MAIL_TIMEOUT"; then

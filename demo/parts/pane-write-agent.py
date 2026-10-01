@@ -15,13 +15,19 @@ TASK = os.environ.get("PRISMATTYC_DEMO_TASK", "reply")
 AGENT = "codex" if TASK == "mail" else os.environ.get("PRISMATTYC_DEMO_AGENT", "codex")
 if AGENT not in {"codex", "muse"}:
     raise ValueError("PRISMATTYC_DEMO_AGENT must be codex or muse")
-PROMPT = (
-    'Use pmux_send once: to "muse", summary "hello from Codex", body '
-    '"Muse, in one sentence, what can you see from your session? Reply with '
-    'pmux_send to agent id codex." Then say sent and stop.'
-    if TASK == "mail"
-    else "Reply with exactly PANE_WRITE_OK and nothing else."
-)
+PROMPTS = {
+    "mail": (
+        'Use pmux_send once: to "muse", summary "hello from Codex", body '
+        '"Muse, in one sentence, what can you see from your session? Reply with '
+        'pmux_send to agent id codex." Then say sent and stop.'
+    ),
+    "claim": "PMUX_MAIL",
+    "reply": "Reply with exactly PANE_WRITE_OK and nothing else.",
+}
+try:
+    PROMPT = PROMPTS[TASK]
+except KeyError as error:
+    raise ValueError("PRISMATTYC_DEMO_TASK must be mail, claim, or reply") from error
 REPLY = "PANE_WRITE_OK"
 TIMEOUT = int(os.environ.get("PRISMATTYC_DEMO_TIMEOUT", "120"))
 
@@ -64,8 +70,18 @@ def mail_depth(agent):
     return sum(counts[:2]) if counts else 0
 
 
+def mail_open(agent):
+    text = run("mail", "--as", agent, "inbox")
+    match = re.search(r"open:\s*(\d+)", text)
+    return int(match.group(1)) if match else 0
+
+
 def result_visible(pane):
-    return (mail_depth("muse") > 0 or mail_depth("codex") > 0) if TASK == "mail" else visible_reply(pane)
+    if TASK == "mail":
+        return mail_depth("muse") > 0 or mail_depth("codex") > 0
+    if TASK == "claim":
+        return mail_open("muse") == 0
+    return visible_reply(pane)
 
 
 def send_literal_enter(pane):
@@ -81,6 +97,8 @@ def send_literal_enter(pane):
 
 
 def demonstrate():
+    if TASK == "claim" and mail_open("muse") == 0:
+        raise RuntimeError("Muse has no open mail to claim")
     pane = agent_pane()
     print(f"Target: isolated {AGENT.title()} pane {pane}.", flush=True)
     print(
@@ -112,6 +130,9 @@ def demonstrate():
             if TASK == "mail":
                 print("Mail activity is visible in the private inboxes.", flush=True)
                 return
+            if TASK == "claim":
+                print("Muse claimed its open letter.", flush=True)
+                return
             lines = run("save-buffer", str(pane), "-").splitlines()
             print(f"\n{AGENT.title()} pane reply:", flush=True)
             print("\n".join(line.rstrip() for line in lines[-10:]), flush=True)
@@ -119,6 +140,8 @@ def demonstrate():
         time.sleep(0.5)
     if TASK == "mail":
         raise RuntimeError("submitted prompt did not produce visible mailbox activity")
+    if TASK == "claim":
+        raise RuntimeError("Muse did not claim its open letter after PMUX_MAIL was submitted")
     raise RuntimeError("submitted prompt did not produce a visible PANE_WRITE_OK reply")
 
 

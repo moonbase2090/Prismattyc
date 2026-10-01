@@ -38,8 +38,10 @@ Narrated mode writes to `build/demo-reel/<run-id>/demo-reel.mp4`.
 
 For narration, copy `demo/.eleven.env.example` to `demo/.eleven.env` and set
 `ELEVENLABS_API_KEY`. The recorder uses the Daniel voice by default. Set
-`ELEVEN_VOICE_ID` to pin another voice or `ELEVEN_SPEED` to change the pace.
-Use `demo/docker/run.sh --clips` to make or reuse narration clips without
+`ELEVEN_VOICE_ID` in that file or in the runner's environment to pin another
+voice. Set `ELEVEN_SPEED` there or in the runner's environment to change the
+pace. Runner environment values take precedence over the file. Use
+`demo/docker/run.sh --clips` to make or reuse narration clips without
 capturing the display.
 
 The recorder keeps the previous output until `ffprobe` confirms that the
@@ -58,8 +60,8 @@ either service. Muse's Linux process needs an auth file the installed CLI can
 read without the host's OS credential store. If the default Muse file refers
 to a host-only credential store, set `PRISMATTYC_MUSE_AUTH_FILE` to a private,
 Linux-compatible auth file. A silent take can continue when a mailbox scene
-cannot complete; narrated mode fails instead of presenting an incomplete
-exchange as finished.
+cannot complete. Narrated mode stops with an error if an agent does not claim
+and commit its message or finish its visible reply.
 
 Each take creates its own pmux socket under a private runtime directory. The
 work, Codex, and Muse sessions use that socket. The app and both agents inherit
@@ -83,8 +85,8 @@ The prompt text and literal carriage return are sent separately. Four seconds
 after the first carriage return, the recorder sends one more only if the
 prompt remains in the Codex or Muse composer. A delayed agent reply does not
 trigger a second Enter; the take waits until the reply is visible. Codex is the
-default target for the reply beat; set `PRISMATTYC_DEMO_PANE_AGENT=muse` to
-target Muse instead.
+default target for the reply beat. Set `PRISMATTYC_DEMO_PANE_AGENT=muse` in the
+runner's environment to target Muse instead.
 
 `.eleven.env` is ignored by Git. Credential copies and generated recordings
 stay outside the source tree.

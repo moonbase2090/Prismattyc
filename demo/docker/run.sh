@@ -107,6 +107,12 @@ run_demo() {
     -e CARGO_HOME=/home/demo/.cache/cargo-home
     -e CARGO_TARGET_DIR=/home/demo/.cache/cargo-target
   )
+  if [[ -n "${ELEVEN_VOICE_ID:-}" ]]; then envs+=(-e "ELEVEN_VOICE_ID=$ELEVEN_VOICE_ID"); fi
+  if [[ -n "${ELEVEN_SPEED:-}" ]]; then envs+=(-e "ELEVEN_SPEED=$ELEVEN_SPEED"); fi
+  if [[ -n "${VOICE_NAME:-}" ]]; then envs+=(-e "VOICE_NAME=$VOICE_NAME"); fi
+  if [[ -n "${PRISMATTYC_DEMO_PANE_AGENT:-}" ]]; then
+    envs+=(-e "PRISMATTYC_DEMO_PANE_AGENT=$PRISMATTYC_DEMO_PANE_AGENT")
+  fi
   case "$argument" in
     --check)
       output_dir=""

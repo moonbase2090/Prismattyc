@@ -22,10 +22,10 @@ NARRDIR="${NARRDIR:-$HOME/.cache/prismattyc-demo/narr}"
 FULL="$HOME/Desktop/demo-reel_full.mp4"
 OUT="$HOME/Desktop/demo-reel.mp4"
 CREDS_DIR="${PRISMATTYC_DEMO_CREDS:-$HOME/creds}"
-VOICE_NAME="${VOICE_NAME:-Daniel}"
-ELEVEN_VOICE_ID="${ELEVEN_VOICE_ID:-pH8TIDBxKcsLhKFzhwgP}"
+VOICE_NAME_OVERRIDE="${VOICE_NAME:-}"
+ELEVEN_VOICE_ID_OVERRIDE="${ELEVEN_VOICE_ID:-}"
+ELEVEN_SPEED_OVERRIDE="${ELEVEN_SPEED:-}"
 ELEVEN_MODEL="eleven_multilingual_v2"
-ELEVEN_SPEED="${ELEVEN_SPEED:-1.03}"
 ENV_FILE="${PRISMATTYC_DEMO_ENV_FILE:-$DIR/.eleven.env}"
 HOST_LOG="$HOME/Desktop/demo-host.log"
 LAUNCHED_PID=""
@@ -43,7 +43,8 @@ LINES=(
 "Open the command palette and type what you're looking for. Let's find the theme picker."
 "As you move through the themes, the window updates right away. Pick one you like, press Enter, and carry on."
 "Color and text are where a terminal earns its keep. Here's true color, followed by wide characters, emoji, and combining marks."
-"Box drawing, blocks, braille, and powerline symbols line up with the cell grid. Prismattyc also draws images sent with the Kitty graphics protocol."
+"Box drawing, blocks, braille, and powerline symbols line up with the cell grid."
+"Prismattyc also draws images sent with the Kitty graphics protocol."
 "When output scrolls past, move back through the history and search for a match."
 "Split the window, move between panes with Alt and the arrows, or switch to a grid. Zoom a pane for a closer look, then bring the others back."
 "Tabs help separate the work. I'll name these build and logs. The pane handles make it easy to see which terminal is which."
@@ -54,8 +55,7 @@ LINES=(
 "Save an arrangement as a space, and it gets a place on the rail. Keep separate layouts for different jobs, move the rail, or change how new terminals open."
 "Now let's bring in two coding agents, Codex and Muse. Each has its own isolated session and mailbox. Both use pmux tools through MCP."
 "I'll ask Codex to send Muse a short question. Codex calls the mail tool, and pmux delivers the letter."
-"Over in Muse's pane, the mail indicator appears and the doorbell brings the message to its attention. Muse can read it without me copying anything across."
-"Muse reads the question and sends a reply. It then marks the original letter as handled, so it won't be picked up again."
+"Muse's mail indicator rings when Codex sends a note. Muse reads it, replies, and marks the letter handled."
 "And here's the answer back in Codex's pane. That's the round trip: send, read, reply, and finish. Each agent stays in its own session."
 "Prismattyc exposes tabs, pane names, and controls to supported screen readers."
 "Announcements report incoming mail and requests for your attention. You can turn them off and leave the accessibility tree available."
@@ -66,7 +66,7 @@ LINES=(
 # Trailing pause after each clip. Long pauses cover long on-screen actions.
 PAUSE=(1.6 1.5 1.6 1.3 1.8 1.8 2.3 2.8 2.8 3.3 3.5 3.0 4.5 2.5 4.3 3.0 3.3 3.3 4.0 6.0 3.0 3.0 3.0 3.0 4.3)
 # Dry-run stand-in for each clip's spoken length (seconds).
-DRYDUR=(12 15 12 8 7 10 11 8 13 9 8 9 8 10 11 9 7 11 6 11 8 10 12 15 10)
+DRYDUR=(12 15 12 8 7 10 11 8 13 9 8 9 8 10 11 9 7 11 11 11 8 10 12 15 10)
 
 have() { command -v "$1" >/dev/null 2>&1; }
 log() { printf '[%6.1f] %s\n' "$(elapsed)" "$*"; }
@@ -421,10 +421,11 @@ N=${#LINES[@]}
 DUR=()
 if [[ "$DRY" -eq 0 ]]; then
   [[ -f "$ENV_FILE" ]] || { echo "ERROR: $ENV_FILE not found (use --dry for a silent take)" >&2; exit 1; }
-  PRESET_VOICE_ID="${ELEVEN_VOICE_ID:-}"
   # shellcheck disable=SC1090
   source "$ENV_FILE"
-  [[ -n "$PRESET_VOICE_ID" ]] && ELEVEN_VOICE_ID="$PRESET_VOICE_ID"
+  VOICE_NAME="${VOICE_NAME_OVERRIDE:-${VOICE_NAME:-Daniel}}"
+  ELEVEN_VOICE_ID="${ELEVEN_VOICE_ID_OVERRIDE:-${ELEVEN_VOICE_ID:-pH8TIDBxKcsLhKFzhwgP}}"
+  ELEVEN_SPEED="${ELEVEN_SPEED_OVERRIDE:-${ELEVEN_SPEED:-1.03}}"
   : "${ELEVENLABS_API_KEY:?ELEVENLABS_API_KEY not set in $ENV_FILE}"
   VOICE_ID="${ELEVEN_VOICE_ID:-}"
   if [[ -z "$VOICE_ID" ]]; then
@@ -629,7 +630,7 @@ wait_clip 14
 
 # ---- 15 spaces: save the arrangement; the rail chip appears ---------------
 beat 15
-activate; key ctrl+shift+3; sleep 0.5
+activate; key ctrl+shift+1; sleep 0.5
 activate; type_cmd "clear && pmux space save demo"; sleep 2.5
 activate; type_cmd "pmux space ls"; sleep 1.5
 activate; key ctrl+shift+p; sleep 0.6
@@ -673,9 +674,17 @@ wait_clip 17
 beat 18
 if [[ "$MAIL_DEMO" -eq 1 ]]; then
   activate; key ctrl+shift+3; sleep 0.5; enter; sleep 0.6
-  wait_mail_drained muse 8 || log "warn: Muse has not claimed its letter yet"
-  wait_mail_committed muse "$MAIL_TIMEOUT" || log "warn: Muse did not commit within ${MAIL_TIMEOUT} s"
-  if ! wait_flag "$CODEX_RANG_FLAG" "$MAIL_TIMEOUT"; then
+  if ! wait_mail_drained muse "$MAIL_TIMEOUT"; then
+    MAIL_DEMO=0
+    log "Muse did not claim its letter within ${MAIL_TIMEOUT} s"
+    [[ "$DRY" -eq 1 ]] || exit 1
+  fi
+  if [[ "$MAIL_DEMO" -eq 1 ]] && ! wait_mail_committed muse "$MAIL_TIMEOUT"; then
+    MAIL_DEMO=0
+    log "Muse did not commit its letter within ${MAIL_TIMEOUT} s"
+    [[ "$DRY" -eq 1 ]] || exit 1
+  fi
+  if [[ "$MAIL_DEMO" -eq 1 ]] && ! wait_flag "$CODEX_RANG_FLAG" "$MAIL_TIMEOUT"; then
     MAIL_DEMO=0
     log "no reply reached Codex within ${MAIL_TIMEOUT} s"
     pmux mail --as muse inbox > "$HOME/Desktop/demo-mail-muse-inbox.txt" 2>&1 || true
@@ -694,8 +703,9 @@ wait_clip 18
 
 # ---- 19 Codex receives the reply -------------------------------------------
 beat 19
-activate; key ctrl+shift+2; sleep 2.0; enter; sleep 0.6
+activate; key ctrl+shift+2; sleep 2.0
 if [[ "$MAIL_DEMO" -eq 1 ]]; then
+enter; sleep 0.6
 mail_diag() {
   local tag="$1" mux_log
   mux_log="$(pmux status 2>/dev/null | awk '/^log:/{print $2}')"
@@ -716,18 +726,36 @@ mail_diag() {
 # with the product's own verb (`pmux mail SESSION`), which also reports the
 # inject outcome, and keep the outcome in the diag log.
 ring=0
+max_rings=6
+[[ "$DRY" -eq 0 ]] || max_rings=1
 until wait_mail_drained codex 10; do
   ring=$((ring + 1))
-  [[ "$ring" -gt 6 ]] && { log "warn: Codex did not claim after 6 rings"; mail_diag "not claimed"; break; }
+  [[ "$ring" -gt "$max_rings" ]] && {
+    log "Codex did not claim its reply after $max_rings rings"
+    mail_diag "not claimed"
+    MAIL_DEMO=0
+    [[ "$DRY" -eq 1 ]] || exit 1
+    break
+  }
   out="$(pmux mail codex 2>&1 || true)"; log "ring $ring: $out"
   echo "== ring $ring $(elapsed): $out" >> "$HOME/Desktop/demo-mail-diag.log"
 done
-wait_mail_committed codex 60 || log "warn: Codex did not commit within 60 s"
-mail_diag after
-# Codex commits before it finishes writing its summary; wait for the pane
-# to go quiet so the reply text is on screen, then hold on it.
-wait_pane_quiet codex 30 || log "warn: Codex pane still busy after 30 s"
-sleep 4
+if [[ "$MAIL_DEMO" -eq 1 ]]; then
+  if ! wait_mail_committed codex "$MAIL_TIMEOUT"; then
+    MAIL_DEMO=0
+    log "Codex did not commit its reply within ${MAIL_TIMEOUT} s"
+    [[ "$DRY" -eq 1 ]] || exit 1
+  fi
+fi
+if [[ "$MAIL_DEMO" -eq 1 ]]; then
+  mail_diag after
+  # Codex commits before it finishes writing its summary. Wait for the pane
+  # to go quiet so the reply text is on screen, then hold on it.
+  if ! wait_pane_quiet codex 30; then
+    log "Codex pane remained busy after 30 s"
+    [[ "$DRY" -eq 1 ]] || exit 1
+  fi
+  sleep 4
 fi
 wait_clip 19
 

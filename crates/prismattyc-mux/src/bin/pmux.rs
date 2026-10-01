@@ -98,6 +98,8 @@ const UP_WAIT: Duration = Duration::from_secs(3);
 mod lifecycle;
 #[path = "pmux/pane_write.rs"]
 mod pane_write;
+#[path = "pmux/skills.rs"]
+mod skills;
 #[path = "pmux/spaces.rs"]
 mod space_commands;
 
@@ -174,6 +176,10 @@ session
     versions                      show installed and running component versions
     tutorial [--play]             print the mux onboarding pack;
                                   --play runs the shared walkthrough as text
+    skills install [--agent codex|claude|cursor|muse|kiro|all]
+        [--check] [--force]         experimental; set
+                                    PRISMATTYC_EXPERIMENTAL_PMUX_SKILLS=1
+                                    to install the pmux agent skill
     config init [--merge]         write [mux] keys into config.toml
     update [--check|--rollback]  install verified GitHub release artifacts
     completions <bash|zsh|fish>   print shell completion script
@@ -267,6 +273,7 @@ struct Globals {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verb {
     Tutorial,
+    Skills,
     Completions,
     Update,
     Uninstall,
@@ -321,6 +328,7 @@ enum Cli {
 
 const VERBS: &[(&str, Verb)] = &[
     ("tutorial", Verb::Tutorial),
+    ("skills", Verb::Skills),
     ("completions", Verb::Completions),
     ("update", Verb::Update),
     ("uninstall", Verb::Uninstall),
@@ -359,6 +367,8 @@ const VERBS: &[(&str, Verb)] = &[
 ];
 
 const MAILBOX_LEADERS: &[&str] = &[
+    "--help",
+    "-h",
     "send",
     "claim",
     "commit",
@@ -471,6 +481,10 @@ fn main() -> Result<()> {
         Verb::Tutorial => {
             reject_session_flag(cli_session.as_deref(), "tutorial")?;
             return cmd_tutorial(cli_instance, cli_socket, rest);
+        }
+        Verb::Skills => {
+            reject_session_flag(cli_session.as_deref(), "skills")?;
+            return skills::run(rest);
         }
         Verb::Completions => {
             reject_session_flag(cli_session.as_deref(), "completions")?;
@@ -614,6 +628,7 @@ fn main() -> Result<()> {
         }
         Verb::Versions => lifecycle::versions(&paths),
         Verb::Tutorial
+        | Verb::Skills
         | Verb::Completions
         | Verb::Update
         | Verb::Uninstall
@@ -697,7 +712,7 @@ _prismattyc_mux() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
   cmd="${COMP_WORDS[1]}"
-  local cmds="up start attach ls list whoami status-set send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session layout sync status stop restart versions update completions config"
+  local cmds="up start attach ls list whoami status-set send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session layout sync status stop restart versions update completions config skills"
   case "$prev" in
     --instance) return ;;
     --session) return ;;
@@ -705,6 +720,13 @@ _prismattyc_mux() {
   esac
   case "$cmd" in
     completions) COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") ); return ;;
+    skills)
+      case "$prev" in
+        skills) COMPREPLY=( $(compgen -W "install" -- "$cur") ); return ;;
+        install) COMPREPLY=( $(compgen -W "--agent --check --force" -- "$cur") ); return ;;
+        --agent) COMPREPLY=( $(compgen -W "codex claude cursor muse kiro all" -- "$cur") ); return ;;
+      esac
+      ;;
     attach) COMPREPLY=( $(compgen -W "--all --session-id --watch --write --pane --json --styled-json --read-only --fit" -- "$cur") ); return ;;
     new) COMPREPLY=( $(compgen -W "--attach --no-attach" -- "$cur") ); return ;;
     attention) COMPREPLY=()
@@ -763,12 +785,17 @@ _arguments -C \
   '--session[Session name or id for stop]:name:' \
   '--socket[Absolute socket path]:path:_files' \
   '(-h --help)'{-h,--help}'[Help]' \
-  '1:command:(up start attach ls list whoami status-set send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session layout sync status stop restart versions update completions config)' \
+  '1:command:(up start attach ls list whoami status-set send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session layout sync status stop restart versions update completions config skills)' \
   '*::arg:->args'
 case $state in
   args)
     case $words[1] in
       completions) _values 'shell' bash zsh fish ;;
+      skills) _values 'verb' install
+        case $words[2] in
+          install) _arguments '--agent[Target agent]:agent:(codex claude cursor muse kiro all)' '--check' '--force' ;;
+        esac
+        ;;
       attach) _arguments '--all' '--session-id[Opaque session id]:id:' '--watch' '--json' '--styled-json' '--read-only' '--fit' '--write[Text]:text:' '--pane[Pane id]:id:' ;;
       new) _arguments '--attach[Attach after create]' '--no-attach[Do not attach]' '1:name:' ;;
       stop) _arguments '--session[Session name or id]:name:' '1:session:' ;;
@@ -849,6 +876,11 @@ complete -c pmux -n '__fish_use_subcommand' -a 'versions' -d 'Show installed and
 complete -c pmux -n '__fish_use_subcommand' -a 'update' -d 'Pull main and reinstall binaries'
 complete -c pmux -n '__fish_use_subcommand' -a 'completions' -d 'Print completions'
 complete -c pmux -n '__fish_use_subcommand' -a 'config' -d 'Write [mux] keys into config.toml'
+complete -c pmux -n '__fish_use_subcommand' -a 'skills' -d 'Install the pmux agent skill'
+complete -c pmux -n '__fish_seen_subcommand_from skills' -a 'install'
+complete -c pmux -n '__fish_seen_subcommand_from install' -l agent -xa 'codex claude cursor muse kiro all'
+complete -c pmux -n '__fish_seen_subcommand_from install' -l check
+complete -c pmux -n '__fish_seen_subcommand_from install' -l force
 complete -c pmux -n '__fish_seen_subcommand_from config' -a 'init'
 complete -c pmux -n '__fish_seen_subcommand_from config' -l merge
 complete -c pmux -n '__fish_seen_subcommand_from completions' -a 'bash zsh fish'
@@ -8173,9 +8205,27 @@ mod tests {
             verb_cli(Verb::Mailbox, &["--as", "alice"])
         );
         assert_eq!(
+            parse_argv(argv(&["mail", "--help"])).unwrap(),
+            verb_cli(Verb::Mailbox, &["--help"])
+        );
+        assert_eq!(
+            parse_argv(argv(&["skills", "install", "--agent", "codex"])).unwrap(),
+            verb_cli(Verb::Skills, &["install", "--agent", "codex"])
+        );
+        assert_eq!(
             parse_argv(argv(&["mail", "work"])).unwrap(),
             verb_cli(Verb::MailDoorbell, &["work"])
         );
+    }
+
+    #[test]
+    fn skills_installer_is_available_in_shell_completions() {
+        assert!(COMPLETIONS_BASH.contains("skills"));
+        assert!(COMPLETIONS_BASH.contains("--agent --check --force"));
+        assert!(COMPLETIONS_ZSH.contains("skills"));
+        assert!(COMPLETIONS_ZSH.contains("--agent[Target agent]"));
+        assert!(COMPLETIONS_FISH.contains("-a 'skills'"));
+        assert!(COMPLETIONS_FISH.contains("-l agent"));
     }
 
     struct TempEnvDir {

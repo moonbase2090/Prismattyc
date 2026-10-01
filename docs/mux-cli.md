@@ -14,6 +14,34 @@ One binary to remember for the Phase 2B mux. It wraps `pmuxd`,
 | spaces rail | The strip of space chips, at the bottom by default. Use `+` to create a fresh space. Live session names appear below the Space name. |
 | attach-tabs | The host cache `{stem}.attach-tabs.json` next to the mux socket. Never hand-edit it. |
 
+## Agent skill
+
+Install the pmux Agent Skill in user-level agent directories with:
+
+```bash
+pmux skills install [--agent codex|claude|cursor|muse|kiro|all] [--check] [--force]
+```
+
+The default agent selection is `all`. Codex installs to `~/.codex/skills` and
+`~/.agents/skills`; Claude uses `~/.claude/skills`, Cursor uses
+`~/.cursor/skills`, and Kiro uses `~/.kiro/skills`. Muse installation goes
+through `muse skills install --scope user`, which selects Muse's own user
+skills directory. The `all` selection installs the Codex shared directory and
+Muse's directory separately. `--check` reports destinations without changing
+them. Existing copies are left in place unless `--force` is supplied; force
+replaces only `SKILL.md` in file-managed directories and lets Muse replace its
+copy through the Muse CLI. The installer is experimental and off by default;
+enable it for a command by setting
+`PRISMATTYC_EXPERIMENTAL_PMUX_SKILLS=1`, for example:
+
+```bash
+PRISMATTYC_EXPERIMENTAL_PMUX_SKILLS=1 pmux skills install --check
+```
+
+The skill lives in [`skills/pmux/SKILL.md`](../skills/pmux/SKILL.md) and is
+also included in the embedded tutorial. Its description lets compatible agents
+load it automatically for matching pane, mail, and coordination tasks.
+
 Commands:
 
 ```bash
@@ -27,6 +55,8 @@ pmux attach --all        # open prismattyc-host; sessions as panes in tabs
 pmux attach --session-id 3 --space-id SPACE  # only if SPACE still owns session 3; never starts a server (remote attach)
 pmux ls                  # sessions → windows (tabs) → panes (liveness, pids, leases)
 pmux whoami              # this pane: session name, opaque id, pane, agent
+PRISMATTYC_EXPERIMENTAL_PMUX_SKILLS=1 pmux skills install
+PRISMATTYC_EXPERIMENTAL_PMUX_SKILLS=1 pmux skills install --check
 pmux attention work "needs input" # send OSC 9 to the session pane
 pmux attention work                  # default message: needs your attention
 pmux new work            # create a named session (TTY: attach)

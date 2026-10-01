@@ -47,4 +47,3 @@ scripts/__pycache__/
 
 # Keep generated recordings out of source.
 *.mp4
-/demo/

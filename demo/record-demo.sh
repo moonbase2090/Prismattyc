@@ -757,6 +757,7 @@ if [[ "$MAIL_DEMO" -eq 1 ]]; then
   fi
   sleep 4
 fi
+fi
 wait_clip 19
 
 # ---- 20 accessibility: the tree (config lines + palette on screen) ----------

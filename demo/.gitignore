@@ -1,0 +1,11 @@
+# ElevenLabs credentials.
+.eleven.env
+
+# Narration clips and generated takes.
+narr/
+*.mp4
+*.mp3
+*.wav
+*.aiff
+*.log
+*.tsv

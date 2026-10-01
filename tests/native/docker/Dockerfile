@@ -1,7 +1,9 @@
 # Native-window test dependencies. The runner copies the binaries under test.
 FROM archlinux:base
 
-RUN pacman -Syu --noconfirm \
+# The Docker VM's seccomp profile blocks pacman's download sandbox syscalls.
+# The image build remains inside Docker's build sandbox.
+RUN pacman --disable-sandbox -Syu --noconfirm \
         curl \
         ffmpeg \
         file \

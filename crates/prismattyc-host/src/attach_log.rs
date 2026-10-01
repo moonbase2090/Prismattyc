@@ -444,27 +444,18 @@ impl Client {
                 .context("host response overhead exceeds byte budget")?];
             let mut line = Vec::new();
             loop {
-                let (take, complete) = {
-                    let buffer = self.reader.fill_buf()?;
-                    if buffer.is_empty() {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "server closed the pane connection",
-                        )
-                        .into());
-                    }
-                    let newline = buffer.iter().position(|byte| *byte == b'\n');
-                    (
-                        newline.map_or(buffer.len(), |index| index + 1),
-                        newline.is_some(),
+                let (take, complete) = next_buffer_chunk_retry_interrupted(&mut self.reader)?;
+                if take == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "server closed the pane connection",
                     )
-                };
+                    .into());
+                }
                 let reservation = budget
                     .reserve(take)
                     .context("encoded response exceeds host byte budget")?;
-                let buffer = self.reader.fill_buf()?;
-                line.extend_from_slice(&buffer[..take]);
-                self.reader.consume(take);
+                extend_buffer_prefix_retry_interrupted(&mut self.reader, take, &mut line)?;
                 reservations.push(reservation);
                 if complete {
                     break;
@@ -653,6 +644,52 @@ fn transient_read_error(error: &anyhow::Error) -> bool {
                 | std::io::ErrorKind::NotConnected
         )
     )
+}
+
+/// Inspect the next buffered response chunk, retrying EINTR in place. An
+/// interrupted read is not a lost pane stream.
+fn next_buffer_chunk_retry_interrupted<R: BufRead + ?Sized>(
+    reader: &mut R,
+) -> std::io::Result<(usize, bool)> {
+    loop {
+        match reader.fill_buf() {
+            Ok(buffer) => {
+                let newline = buffer.iter().position(|byte| *byte == b'\n');
+                return Ok((
+                    newline.map_or(buffer.len(), |index| index + 1),
+                    newline.is_some(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Copy and consume an admitted response chunk, retrying EINTR without
+/// reconnecting the pane stream.
+fn extend_buffer_prefix_retry_interrupted<R: BufRead + ?Sized>(
+    reader: &mut R,
+    amount: usize,
+    line: &mut Vec<u8>,
+) -> std::io::Result<()> {
+    loop {
+        match reader.fill_buf() {
+            Ok(buffer) if amount <= buffer.len() => {
+                line.extend_from_slice(&buffer[..amount]);
+                reader.consume(amount);
+                return Ok(());
+            }
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "buffered response chunk changed before it was consumed",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn transient_connect_error(error: &anyhow::Error) -> bool {
@@ -1866,6 +1903,47 @@ mod tests {
     use prismattyc_emulator::Emulator;
     use prismattyc_mux::PaneEvent;
     use std::sync::atomic::AtomicU64;
+
+    #[test]
+    fn budgeted_response_read_retries_interrupted_reads() {
+        struct InterruptOnce {
+            inner: std::io::Cursor<&'static [u8]>,
+            interruptions_remaining: usize,
+        }
+
+        impl std::io::Read for InterruptOnce {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                std::io::Read::read(&mut self.inner, buffer)
+            }
+        }
+
+        impl BufRead for InterruptOnce {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                if self.interruptions_remaining > 0 {
+                    self.interruptions_remaining -= 1;
+                    return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+                }
+                self.inner.fill_buf()
+            }
+
+            fn consume(&mut self, amount: usize) {
+                self.inner.consume(amount);
+            }
+        }
+
+        let mut reader = InterruptOnce {
+            inner: std::io::Cursor::new(b"pane response\n"),
+            interruptions_remaining: 1,
+        };
+        let (amount, complete) = next_buffer_chunk_retry_interrupted(&mut reader).unwrap();
+        assert_eq!(amount, b"pane response\n".len());
+        assert!(complete);
+        let mut line = Vec::new();
+        reader.interruptions_remaining = 1;
+        extend_buffer_prefix_retry_interrupted(&mut reader, amount, &mut line).unwrap();
+        assert_eq!(line, b"pane response\n");
+        assert_eq!(reader.interruptions_remaining, 0);
+    }
 
     #[test]
     #[cfg(target_os = "linux")]

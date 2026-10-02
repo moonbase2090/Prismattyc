@@ -19,24 +19,32 @@ One binary to remember for the Phase 2B mux. It wraps `pmuxd`,
 Install the pmux Agent Skill in user-level agent directories with:
 
 ```bash
-pmux skills install [--agent codex|claude|cursor|muse|kiro|all] [--check] [--force]
+pmux skills install [--agent codex|claude|cursor|muse|kiro|detected|all] [--check] [--force]
 ```
 
 The default agent selection is `all`. Codex installs to `~/.codex/skills` and
 `~/.agents/skills`; Claude uses `~/.claude/skills`, Cursor uses
 `~/.cursor/skills`, and Kiro uses `~/.kiro/skills`. Muse installation goes
 through `muse skills install --scope user`, which selects Muse's own user
-skills directory. The `all` selection installs the Codex shared directory and
-Muse's directory separately. `--check` reports destinations without changing
-them. Existing copies are left in place unless `--force` is supplied; force
-replaces only `SKILL.md` in file-managed directories and lets Muse replace its
-copy through the Muse CLI. The installer is experimental and off by default;
-enable it for a command by setting
-`PRISMATTYC_EXPERIMENTAL_PMUX_SKILLS=1`, for example:
+skills directory. The `all` selection installs every supported location.
+`--agent detected` installs only for agents whose config directory already
+exists or whose CLI is on `PATH`. It avoids creating config directories for
+agents that are not installed. `--check` reports destinations without
+changing them. Existing copies are left in place unless `--force` is supplied;
+force replaces only `SKILL.md` in file-managed directories and lets Muse
+replace its copy through the Muse CLI. The command is available without a
+feature flag:
 
 ```bash
-PRISMATTYC_EXPERIMENTAL_PMUX_SKILLS=1 pmux skills install --check
+pmux skills install --agent detected --check
 ```
+
+The macOS app installs this skill once per app version for detected agents.
+Set `install_agent_skills = false` in the host config or
+`PRISMATTYC_NO_AGENT_SKILLS=1` to opt out. The Linux archive installer also
+installs it after the binaries. To skip it, pass `--no-agent-skills`, set
+`PRISMATTYC_NO_AGENT_SKILLS=1`, or set the top-level
+`install_agent_skills = false` in the host config.
 
 The skill lives in [`skills/pmux/SKILL.md`](../skills/pmux/SKILL.md) and is
 also included in the embedded tutorial. Its description lets compatible agents
@@ -55,8 +63,8 @@ pmux attach --all        # open prismattyc-host; sessions as panes in tabs
 pmux attach --session-id 3 --space-id SPACE  # only if SPACE still owns session 3; never starts a server (remote attach)
 pmux ls                  # sessions → windows (tabs) → panes (liveness, pids, leases)
 pmux whoami              # this pane: session name, opaque id, pane, agent
-PRISMATTYC_EXPERIMENTAL_PMUX_SKILLS=1 pmux skills install
-PRISMATTYC_EXPERIMENTAL_PMUX_SKILLS=1 pmux skills install --check
+pmux skills install
+pmux skills install --agent detected --check
 pmux attention work "needs input" # send OSC 9 to the session pane
 pmux attention work                  # default message: needs your attention
 pmux new work            # create a named session (TTY: attach)

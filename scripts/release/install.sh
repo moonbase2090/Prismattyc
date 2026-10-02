@@ -3,14 +3,37 @@
 set -euo pipefail
 payload="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 prefix="${HOME}/.local"
-if [[ "${1:-}" == --prefix && $# == 2 ]]; then
-  prefix="$2"
-elif [[ $# != 0 ]]; then
-  echo "Usage: ./install.sh [--prefix /absolute/path]" >&2
-  exit 2
-fi
+no_agent_skills=0
+while (($#)); do
+  case "$1" in
+    --prefix)
+      [[ $# -ge 2 ]] || { echo 'Usage: ./install.sh [--prefix /absolute/path] [--no-agent-skills]' >&2; exit 2; }
+      prefix="$2"
+      shift 2
+      ;;
+    --no-agent-skills)
+      no_agent_skills=1
+      shift
+      ;;
+    *)
+      echo 'Usage: ./install.sh [--prefix /absolute/path] [--no-agent-skills]' >&2
+      exit 2
+      ;;
+  esac
+done
 case "$prefix" in /*) ;; *) echo 'The prefix must be an absolute path.' >&2; exit 2;; esac
 [[ "$(uname -s)" == Linux ]] || { echo 'This archive is for Linux.' >&2; exit 1; }
+
+agent_skills_disabled_by_config() {
+  local config_file="${PRISMATTYC_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/prismattyc/config.toml}"
+  [[ -r "$config_file" ]] || return 1
+  awk '
+    /^[[:space:]]*\[/ { in_table = 1; next }
+    !in_table && /^[[:space:]]*install_agent_skills[[:space:]]*=[[:space:]]*false([[:space:]]*(#.*)?[[:space:]]*)$/ { found = 1 }
+    END { exit !found }
+  ' "$config_file"
+}
+
 cd "$payload"
 sha256sum --check SHA256SUMS
 version="$(cat VERSION)"
@@ -62,6 +85,15 @@ StartupWMClass=prismattyc-host
 EOF
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "$prefix/share/applications" >/dev/null 2>&1 || true
+fi
+if [[ "$no_agent_skills" == 1 ]]; then
+  printf 'Skipped automatic pmux Agent Skill installation because --no-agent-skills was passed. Run %s/bin/pmux skills install --agent detected to install it later.\n' "$prefix"
+elif [[ "${PRISMATTYC_NO_AGENT_SKILLS:-}" == 1 ]]; then
+  printf 'Skipped automatic pmux Agent Skill installation because PRISMATTYC_NO_AGENT_SKILLS=1. Run %s/bin/pmux skills install --agent detected to install it later.\n' "$prefix"
+elif agent_skills_disabled_by_config; then
+  printf 'Skipped automatic pmux Agent Skill installation because install_agent_skills = false in %s. Set it to true or run %s/bin/pmux skills install --agent detected.\n' "${PRISMATTYC_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/prismattyc/config.toml}" "$prefix"
+elif ! "$prefix/bin/pmux" skills install --agent detected; then
+  printf 'Warning: Prismattyc installed, but automatic pmux Agent Skill installation failed. Retry with %s/bin/pmux skills install --agent detected; set PRISMATTYC_NO_AGENT_SKILLS=1 or pass --no-agent-skills to skip it.\n' "$prefix" >&2
 fi
 printf 'Installed Prismattyc %s. Launch %s/bin/prismattyc-host or use your application menu.\n' "$version" "$prefix"
 case ":$PATH:" in *":$prefix/bin:"*) ;; *) printf 'Add %s/bin to your PATH to use pmux in new shells.\n' "$prefix";; esac

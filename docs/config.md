@@ -27,7 +27,10 @@ across hot reloads. A value pinned on the command line (`--focus-border`,
 `PRISMATTYC_HOST_FONT`, `PRISMATTYC_HOST_FONT_FALLBACK`, `PRISMATTYC_NO_SPLASH`)
 never gets overwritten by a config edit. `splash = false` is the durable
 host opt-out; the flag and env still hide the splash when `splash = true`.
-The classic `prismattyc` binary does not read this file.
+The top-level `install_agent_skills = false` opts out of the macOS app's once-per-version
+pmux Agent Skill install and the Linux archive installer's automatic skill
+install; `PRISMATTYC_NO_AGENT_SKILLS=1` also opts out and wins over the config
+value. The classic `prismattyc` binary does not read this file.
 
 ## Keys
 
@@ -52,6 +55,10 @@ tab_strip = "auto"
 pane_titles = "focused"
 # Immediate hover blend for interactive strip, rail, and scrollbar chrome. 0.0-0.3.
 hover_blend = 0.1
+
+# -- agent integration --
+# Install the pmux Agent Skill for detected agents once per app version. true|false.
+install_agent_skills = true
 
 # -- focus border --
 # Focus border color. coral amber yellow green blue violet ink, or 0-6.

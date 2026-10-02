@@ -176,10 +176,8 @@ session
     versions                      show installed and running component versions
     tutorial [--play]             print the mux onboarding pack;
                                   --play runs the shared walkthrough as text
-    skills install [--agent codex|claude|cursor|muse|kiro|all]
-        [--check] [--force]         experimental; set
-                                    PRISMATTYC_EXPERIMENTAL_PMUX_SKILLS=1
-                                    to install the pmux agent skill
+    skills install [--agent codex|claude|cursor|muse|kiro|detected|all]
+        [--check] [--force]         install the pmux agent skill
     config init [--merge]         write [mux] keys into config.toml
     update [--check|--rollback]  install verified GitHub release artifacts
     completions <bash|zsh|fish>   print shell completion script
@@ -724,7 +722,7 @@ _prismattyc_mux() {
       case "$prev" in
         skills) COMPREPLY=( $(compgen -W "install" -- "$cur") ); return ;;
         install) COMPREPLY=( $(compgen -W "--agent --check --force" -- "$cur") ); return ;;
-        --agent) COMPREPLY=( $(compgen -W "codex claude cursor muse kiro all" -- "$cur") ); return ;;
+        --agent) COMPREPLY=( $(compgen -W "codex claude cursor muse kiro detected all" -- "$cur") ); return ;;
       esac
       ;;
     attach) COMPREPLY=( $(compgen -W "--all --session-id --watch --write --pane --json --styled-json --read-only --fit" -- "$cur") ); return ;;
@@ -793,7 +791,7 @@ case $state in
       completions) _values 'shell' bash zsh fish ;;
       skills) _values 'verb' install
         case $words[2] in
-          install) _arguments '--agent[Target agent]:agent:(codex claude cursor muse kiro all)' '--check' '--force' ;;
+          install) _arguments '--agent[Target agent]:agent:(codex claude cursor muse kiro detected all)' '--check' '--force' ;;
         esac
         ;;
       attach) _arguments '--all' '--session-id[Opaque session id]:id:' '--watch' '--json' '--styled-json' '--read-only' '--fit' '--write[Text]:text:' '--pane[Pane id]:id:' ;;
@@ -878,7 +876,7 @@ complete -c pmux -n '__fish_use_subcommand' -a 'completions' -d 'Print completio
 complete -c pmux -n '__fish_use_subcommand' -a 'config' -d 'Write [mux] keys into config.toml'
 complete -c pmux -n '__fish_use_subcommand' -a 'skills' -d 'Install the pmux agent skill'
 complete -c pmux -n '__fish_seen_subcommand_from skills' -a 'install'
-complete -c pmux -n '__fish_seen_subcommand_from install' -l agent -xa 'codex claude cursor muse kiro all'
+complete -c pmux -n '__fish_seen_subcommand_from install' -l agent -xa 'codex claude cursor muse kiro detected all'
 complete -c pmux -n '__fish_seen_subcommand_from install' -l check
 complete -c pmux -n '__fish_seen_subcommand_from install' -l force
 complete -c pmux -n '__fish_seen_subcommand_from config' -a 'init'
@@ -8222,10 +8220,13 @@ mod tests {
     fn skills_installer_is_available_in_shell_completions() {
         assert!(COMPLETIONS_BASH.contains("skills"));
         assert!(COMPLETIONS_BASH.contains("--agent --check --force"));
+        assert!(COMPLETIONS_BASH.contains("kiro detected all"));
         assert!(COMPLETIONS_ZSH.contains("skills"));
         assert!(COMPLETIONS_ZSH.contains("--agent[Target agent]"));
+        assert!(COMPLETIONS_ZSH.contains("kiro detected all"));
         assert!(COMPLETIONS_FISH.contains("-a 'skills'"));
         assert!(COMPLETIONS_FISH.contains("-l agent"));
+        assert!(COMPLETIONS_FISH.contains("kiro detected all"));
     }
 
     struct TempEnvDir {

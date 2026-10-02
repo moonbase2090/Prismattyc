@@ -58,7 +58,9 @@ processes across a computer restart.
 
 Add `~/.local/bin` to your `PATH` to run `pmux` without its full path.
 The archive includes the application, command-line tools, manuals, and
-checksums.
+checksums. The installer adds the pmux Agent Skill for detected agents. Pass
+`--no-agent-skills`, set `PRISMATTYC_NO_AGENT_SKILLS=1`, or set
+`install_agent_skills = false` in the host config to skip that step.
 
 ## Install on macOS
 
@@ -67,6 +69,14 @@ checksums.
 2. Open the disk image and move `Prismattyc.app` to `/Applications` or
    `~/Applications`.
 3. Open Prismattyc from the Dock.
+
+On the first launch after installation or an app version change, Prismattyc
+installs the pmux Agent Skill in the background for detected agents. Set
+`install_agent_skills = false` in the host config or
+`PRISMATTYC_NO_AGENT_SKILLS=1` to opt out. Installation errors are written to
+`$XDG_DATA_HOME/prismattyc/agent-skills-install.log` (or
+`~/.local/share/prismattyc/agent-skills-install.log` when `XDG_DATA_HOME` is
+unset); retry with `pmux skills install --agent detected`.
 
 When the app can create a link in `/usr/local/bin`, it links its bundled
 `pmux` there. Otherwise, it uses `~/.local/bin`. Prismattyc does not edit
@@ -108,6 +118,7 @@ pmux ls               # List sessions and panes.
 pmux status           # Show the server status.
 pmux space save       # Save the current Space layout.
 pmux space open       # Open the saved Space in a desktop window.
+pmux skills install --agent detected  # Install the pmux Agent Skill for detected agents.
 ```
 
 See the [pmux command reference](docs/mux-cli.md) for tabs, panes, Spaces,

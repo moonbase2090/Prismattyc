@@ -15,14 +15,13 @@ const SKILL: &str = include_str!(concat!(
 ));
 
 const HELP: &str =
-    "pmux skills install [--agent codex|claude|cursor|muse|kiro|all] [--check] [--force]
+    "pmux skills install [--agent codex|claude|cursor|muse|kiro|detected|all] [--check] [--force]
 
 Install the pmux Agent Skill in user-level skill directories.
 --agent defaults to all. Existing files are left alone unless --force is used.
+--agent detected installs only for agents with a config directory or CLI on PATH.
 --check reports what would happen without changing files.
-Enable this experimental command with PRISMATTYC_EXPERIMENTAL_PMUX_SKILLS=1.
 ";
-const FEATURE_FLAG: &str = "PRISMATTYC_EXPERIMENTAL_PMUX_SKILLS";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Agent {
@@ -31,6 +30,7 @@ enum Agent {
     Cursor,
     Muse,
     Kiro,
+    Detected,
     All,
 }
 
@@ -42,8 +42,9 @@ impl Agent {
             "cursor" => Ok(Self::Cursor),
             "muse" => Ok(Self::Muse),
             "kiro" => Ok(Self::Kiro),
+            "detected" => Ok(Self::Detected),
             "all" => Ok(Self::All),
-            _ => bail!("--agent must be codex, claude, cursor, muse, kiro, or all"),
+            _ => bail!("--agent must be codex, claude, cursor, muse, kiro, detected, or all"),
         }
     }
 
@@ -66,8 +67,9 @@ enum Existing {
     Different,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct FileTarget {
+    agent: Agent,
     label: &'static str,
     skill_dir: PathBuf,
 }
@@ -91,22 +93,10 @@ pub(super) fn run(rest: Vec<String>) -> Result<()> {
         return Ok(());
     }
     let args = parse_install_args(rest)?;
-    if !feature_flag_enabled(std::env::var(FEATURE_FLAG).ok().as_deref()) {
-        bail!("pmux skills install is off by default; set {FEATURE_FLAG}=1 to enable it");
-    }
     let home = PathBuf::from(
         prismattyc_mux::platform::home_dir().context("cannot determine the user home directory")?,
     );
     install(&home, args)
-}
-
-fn feature_flag_enabled(value: Option<&str>) -> bool {
-    value.is_some_and(|raw| {
-        matches!(
-            raw.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "on" | "yes"
-        )
-    })
 }
 
 fn parse_install_args(args: impl IntoIterator<Item = String>) -> Result<InstallArgs> {
@@ -133,30 +123,126 @@ fn parse_install_args(args: impl IntoIterator<Item = String>) -> Result<InstallA
 
 fn file_targets(home: &Path, agent: Agent) -> Vec<FileTarget> {
     let mut targets = Vec::new();
-    let mut push = |label, base: &str| {
+    let mut push = |agent, label, base: &str| {
         targets.push(FileTarget {
+            agent,
             label,
             skill_dir: home.join(base).join("skills").join("pmux"),
         });
     };
     match agent {
         Agent::Codex => {
-            push("codex", ".codex");
-            push("codex shared", ".agents");
+            push(Agent::Codex, "codex", ".codex");
+            push(Agent::Codex, "codex shared", ".agents");
         }
-        Agent::Claude => push("claude", ".claude"),
-        Agent::Cursor => push("cursor", ".cursor"),
-        Agent::Kiro => push("kiro", ".kiro"),
+        Agent::Claude => push(Agent::Claude, "claude", ".claude"),
+        Agent::Cursor => push(Agent::Cursor, "cursor", ".cursor"),
+        Agent::Kiro => push(Agent::Kiro, "kiro", ".kiro"),
         Agent::Muse => {}
+        Agent::Detected => {}
         Agent::All => {
-            push("codex", ".codex");
-            push("codex shared", ".agents");
-            push("claude", ".claude");
-            push("cursor", ".cursor");
-            push("kiro", ".kiro");
+            push(Agent::Codex, "codex", ".codex");
+            push(Agent::Codex, "codex shared", ".agents");
+            push(Agent::Claude, "claude", ".claude");
+            push(Agent::Cursor, "cursor", ".cursor");
+            push(Agent::Kiro, "kiro", ".kiro");
         }
     }
     targets
+}
+
+#[derive(Debug, Default)]
+struct DetectedTargets {
+    files: Vec<FileTarget>,
+    muse: bool,
+}
+
+fn detected_targets(
+    home: &Path,
+    config_home: &Path,
+    path: Option<&std::ffi::OsStr>,
+) -> DetectedTargets {
+    let mut detected = DetectedTargets::default();
+    let codex_dir = home.join(".codex");
+    let shared_dir = home.join(".agents");
+    let codex_detected =
+        codex_dir.is_dir() || shared_dir.is_dir() || command_on_path(path, &["codex"]);
+    if codex_detected {
+        if codex_dir.is_dir() {
+            detected.files.push(FileTarget {
+                agent: Agent::Codex,
+                label: "codex",
+                skill_dir: codex_dir.join("skills/pmux"),
+            });
+        }
+        if shared_dir.is_dir() {
+            detected.files.push(FileTarget {
+                agent: Agent::Codex,
+                label: "codex shared",
+                skill_dir: shared_dir.join("skills/pmux"),
+            });
+        }
+        if !codex_dir.is_dir() && !shared_dir.is_dir() {
+            detected.files.push(FileTarget {
+                agent: Agent::Codex,
+                label: "codex",
+                skill_dir: codex_dir.join("skills/pmux"),
+            });
+        }
+    }
+
+    for (agent, label, config_dir, commands) in [
+        (Agent::Claude, "claude", ".claude", &["claude"][..]),
+        (
+            Agent::Cursor,
+            "cursor",
+            ".cursor",
+            &["cursor-agent", "cursor"][..],
+        ),
+        (Agent::Kiro, "kiro", ".kiro", &["kiro-cli", "kiro"][..]),
+    ] {
+        let config_dir = home.join(config_dir);
+        if config_dir.is_dir() || command_on_path(path, commands) {
+            detected.files.push(FileTarget {
+                agent,
+                label,
+                skill_dir: config_dir.join("skills/pmux"),
+            });
+        }
+    }
+
+    detected.muse = config_home.join("muse").is_dir()
+        || home.join(".muse").is_dir()
+        || command_on_path(path, &["muse"]);
+    detected
+}
+
+fn command_on_path(path: Option<&std::ffi::OsStr>, names: &[&str]) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    std::env::split_paths(path).any(|directory| {
+        names
+            .iter()
+            .any(|name| is_executable(&directory.join(name)))
+    })
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(windows)]
+fn is_executable(path: &Path) -> bool {
+    path.is_file() || path.with_extension("exe").is_file()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
 }
 
 fn inspect_file(skill_dir: &Path) -> Result<Existing> {
@@ -245,10 +331,138 @@ fn state_name(existing: Existing, force: bool) -> &'static str {
 }
 
 fn install(home: &Path, args: InstallArgs) -> Result<()> {
+    let path = std::env::var_os("PATH");
+    let config_home = prismattyc_mux::platform::config_home()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    install_with_paths(home, args, path.as_deref(), &config_home)
+}
+
+#[cfg(test)]
+fn install_with_path(home: &Path, args: InstallArgs, path: Option<&std::ffi::OsStr>) -> Result<()> {
+    let config_home = home.join(".config");
+    install_with_paths(home, args, path, &config_home)
+}
+
+fn install_with_paths(
+    home: &Path,
+    args: InstallArgs,
+    path: Option<&std::ffi::OsStr>,
+    config_home: &Path,
+) -> Result<()> {
     let agent = args.agent.unwrap_or(Agent::All);
+    if agent == Agent::Detected {
+        let detected = detected_targets(home, config_home, path);
+        return install_detected(home, args, detected, || muse_skill_path(home));
+    }
     let targets = file_targets(home, agent);
+    let includes_muse = agent.includes_muse();
+    if targets.is_empty() && !includes_muse {
+        println!(
+            "no supported agents detected; install an agent or create its config directory, \
+             then run `pmux skills install --agent detected` (for example, `pmux skills install --agent codex`)"
+        );
+        return Ok(());
+    }
+    install_targets(home, args, &targets, includes_muse)
+}
+
+fn install_detected(
+    home: &Path,
+    args: InstallArgs,
+    detected: DetectedTargets,
+    muse_path: impl FnOnce() -> Result<Option<String>>,
+) -> Result<()> {
+    if detected.files.is_empty() && !detected.muse {
+        println!(
+            "no supported agents detected; install an agent or create its config directory, \
+             then run `pmux skills install --agent detected` (for example, `pmux skills install --agent codex`)"
+        );
+        return Ok(());
+    }
+
+    let mut errors = Vec::new();
+    for (agent, label) in [
+        (Agent::Codex, "codex"),
+        (Agent::Claude, "claude"),
+        (Agent::Cursor, "cursor"),
+        (Agent::Kiro, "kiro"),
+    ] {
+        let targets: Vec<_> = detected
+            .files
+            .iter()
+            .filter(|target| target.agent == agent)
+            .cloned()
+            .collect();
+        if !targets.is_empty() {
+            if let Err(error) = install_targets(home, args, &targets, false) {
+                println!("{label}: failed ({error:#})");
+                errors.push(format!("{label}: {error:#}"));
+            }
+        }
+    }
+
+    if detected.muse {
+        match muse_path() {
+            Err(error) => {
+                println!("muse: failed ({error:#})");
+                errors.push(format!("muse: {error:#}"));
+            }
+            Ok(path) => {
+                if args.check {
+                    println!(
+                        "muse: {} ({})",
+                        match (path.is_some(), args.force) {
+                            (true, true) => "would replace",
+                            (true, false) => "present; left in place",
+                            (false, _) => "missing",
+                        },
+                        path.as_deref().unwrap_or("user skills directory")
+                    );
+                } else {
+                    let result = if path.is_none() || args.force {
+                        install_muse(home, args.force)
+                    } else {
+                        Ok(())
+                    };
+                    match result {
+                        Ok(()) => println!(
+                            "muse: {} ({})",
+                            if path.is_some() && !args.force {
+                                "already present; left in place"
+                            } else {
+                                "installed"
+                            },
+                            path.as_deref().unwrap_or("user skills directory")
+                        ),
+                        Err(error) => {
+                            println!("muse: failed ({error:#})");
+                            errors.push(format!("muse: {error:#}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "detected agent skill installation had failures: {}",
+            errors.join("; ")
+        )
+    }
+}
+
+fn install_targets(
+    home: &Path,
+    args: InstallArgs,
+    targets: &[FileTarget],
+    includes_muse: bool,
+) -> Result<()> {
     let mut file_states = Vec::with_capacity(targets.len());
-    for target in &targets {
+    for target in targets {
         let state = inspect_file(&target.skill_dir)?;
         if state == Existing::Different && !args.force {
             bail!(
@@ -260,7 +474,7 @@ fn install(home: &Path, args: InstallArgs) -> Result<()> {
         file_states.push(state);
     }
 
-    let muse_path = if agent.includes_muse() {
+    let muse_path = if includes_muse {
         muse_skill_path(home)?
     } else {
         None
@@ -275,7 +489,7 @@ fn install(home: &Path, args: InstallArgs) -> Result<()> {
                 target.skill_dir.display()
             );
         }
-        if agent.includes_muse() {
+        if includes_muse {
             println!(
                 "muse: {} ({})",
                 match (muse_path.is_some(), args.force) {
@@ -289,7 +503,7 @@ fn install(home: &Path, args: InstallArgs) -> Result<()> {
         return Ok(());
     }
 
-    if agent.includes_muse() && (muse_path.is_none() || args.force) {
+    if includes_muse && (muse_path.is_none() || args.force) {
         install_muse(home, args.force)?;
     }
     for (target, state) in targets.iter().zip(file_states) {
@@ -307,7 +521,7 @@ fn install(home: &Path, args: InstallArgs) -> Result<()> {
             target.skill_dir.display()
         );
     }
-    if agent.includes_muse() {
+    if includes_muse {
         println!(
             "muse: {} ({})",
             if muse_path.is_some() && !args.force {
@@ -426,13 +640,13 @@ mod tests {
         assert_eq!(
             parse_install_args([
                 "--agent".into(),
-                "kiro".into(),
+                "detected".into(),
                 "--check".into(),
                 "--force".into()
             ])
             .unwrap(),
             InstallArgs {
-                agent: Some(Agent::Kiro),
+                agent: Some(Agent::Detected),
                 check: true,
                 force: true,
             }
@@ -443,16 +657,6 @@ mod tests {
         );
         assert!(parse_install_args(["--agent".into(), "unknown".into()]).is_err());
         assert!(parse_install_args(["--force".into(), "--force".into()]).is_err());
-    }
-
-    #[test]
-    fn installer_feature_flag_is_off_by_default_and_accepts_standard_true_values() {
-        assert!(!feature_flag_enabled(None));
-        assert!(!feature_flag_enabled(Some("0")));
-        assert!(feature_flag_enabled(Some("1")));
-        assert!(feature_flag_enabled(Some(" true ")));
-        assert!(feature_flag_enabled(Some("ON")));
-        assert!(feature_flag_enabled(Some("yes")));
     }
 
     #[test]
@@ -472,6 +676,196 @@ mod tests {
             .iter()
             .any(|target| target.skill_dir == home.join(".kiro/skills/pmux")));
         assert!(Agent::All.includes_muse());
+    }
+
+    #[test]
+    fn detected_agents_use_existing_config_dirs_or_executable_path_entries() {
+        let home = temp_home("detection");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let codex = bin.join("codex");
+        fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let detected = detected_targets(&home, &home.join(".config"), Some(bin.as_os_str()));
+        let paths: Vec<_> = detected
+            .files
+            .iter()
+            .map(|target| target.skill_dir.clone())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                home.join(".codex/skills/pmux"),
+                home.join(".claude/skills/pmux")
+            ]
+        );
+        assert!(!detected.muse);
+        assert!(!home.join(".agents").exists());
+        assert!(!home.join(".cursor").exists());
+        assert!(!home.join(".kiro").exists());
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn detected_cli_on_path_gets_skill_without_other_agent_directories() {
+        let home = temp_home("detected-cli");
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let cursor = bin.join("cursor-agent");
+        fs::write(&cursor, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&cursor, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        install_with_path(
+            &home,
+            InstallArgs {
+                agent: Some(Agent::Detected),
+                check: false,
+                force: false,
+            },
+            Some(bin.as_os_str()),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(home.join(".cursor/skills/pmux/SKILL.md")).unwrap(),
+            SKILL.as_bytes()
+        );
+        assert!(!home.join(".codex").exists());
+        assert!(!home.join(".agents").exists());
+        assert!(!home.join(".claude").exists());
+        assert!(!home.join(".kiro").exists());
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn detected_mode_recognizes_every_supported_cli_on_path() {
+        let home = temp_home("detected-all-clis");
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        for name in ["codex", "claude", "cursor-agent", "kiro-cli", "muse"] {
+            let executable = bin.join(name);
+            fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+
+        let detected = detected_targets(&home, &home.join(".config"), Some(bin.as_os_str()));
+        let labels: Vec<_> = detected.files.iter().map(|target| target.label).collect();
+        assert_eq!(labels, vec!["codex", "claude", "cursor", "kiro"]);
+        assert!(detected.muse);
+        assert!(!home.join(".codex").exists());
+        assert!(!home.join(".claude").exists());
+        assert!(!home.join(".cursor").exists());
+        assert!(!home.join(".kiro").exists());
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn detected_mode_uses_the_config_home_for_muse_detection() {
+        let home = temp_home("detected-muse-xdg");
+        let config_home = home.join("custom-config");
+        fs::create_dir_all(config_home.join("muse")).unwrap();
+
+        let detected = detected_targets(&home, &config_home, None);
+        assert!(detected.files.is_empty());
+        assert!(detected.muse);
+        assert!(!home.join(".config").exists());
+        assert!(!home.join(".muse").exists());
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn detected_install_writes_only_for_detected_agents_and_is_idempotent() {
+        let home = temp_home("detected-install");
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        let no_path = None;
+        let args = InstallArgs {
+            agent: Some(Agent::Detected),
+            check: false,
+            force: false,
+        };
+
+        install_with_path(&home, args, no_path).unwrap();
+        let codex_file = home.join(".codex/skills/pmux/SKILL.md");
+        let claude_file = home.join(".claude/skills/pmux/SKILL.md");
+        assert_eq!(fs::read(&codex_file).unwrap(), SKILL.as_bytes());
+        assert_eq!(fs::read(&claude_file).unwrap(), SKILL.as_bytes());
+        assert!(!home.join(".agents").exists());
+        assert!(!home.join(".cursor").exists());
+        assert!(!home.join(".kiro").exists());
+
+        let before = fs::metadata(&codex_file).unwrap().modified().unwrap();
+        install_with_path(&home, args, no_path).unwrap();
+        let after = fs::metadata(&codex_file).unwrap().modified().unwrap();
+        assert_eq!(
+            before, after,
+            "a second install must leave current files alone"
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn detected_install_preserves_edited_agent_and_installs_other_agents() {
+        let home = temp_home("detected-preserve");
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::create_dir_all(home.join(".claude/skills/pmux")).unwrap();
+        let edited = home.join(".claude/skills/pmux/SKILL.md");
+        fs::write(&edited, "user-edited skill\n").unwrap();
+
+        let result = install_with_path(
+            &home,
+            InstallArgs {
+                agent: Some(Agent::Detected),
+                check: false,
+                force: false,
+            },
+            None,
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read(home.join(".codex/skills/pmux/SKILL.md")).unwrap(),
+            SKILL.as_bytes()
+        );
+        assert_eq!(fs::read_to_string(edited).unwrap(), "user-edited skill\n");
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn detected_muse_failure_does_not_prevent_other_agent_installs() {
+        let home = temp_home("detected-muse-failure");
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::create_dir_all(home.join(".config/muse")).unwrap();
+        let detected = detected_targets(&home, &home.join(".config"), None);
+        let result = install_detected(
+            &home,
+            InstallArgs {
+                agent: Some(Agent::Detected),
+                check: false,
+                force: false,
+            },
+            detected,
+            || anyhow::bail!("Muse CLI is unavailable"),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read(home.join(".codex/skills/pmux/SKILL.md")).unwrap(),
+            SKILL.as_bytes()
+        );
+        let _ = fs::remove_dir_all(home);
     }
 
     #[test]

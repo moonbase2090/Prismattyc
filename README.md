@@ -26,7 +26,7 @@ processes across a computer restart.
 
 | Platform | Availability |
 | --- | --- |
-| Linux x86_64 and ARM64 | Release downloads. Ubuntu 22.04 or newer. Runs on Wayland and X11. |
+| Linux x86_64 and ARM64 | Release downloads for systems with glibc 2.28 or newer. Runs on Wayland and X11. |
 | macOS, Apple Silicon and Intel | Universal signed and notarized release downloads. |
 | Windows x86_64 | Release binaries are available, but Windows is not a supported platform yet. |
 

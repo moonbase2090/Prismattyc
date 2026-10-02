@@ -53,6 +53,11 @@ Core commands:
   `pmux layout save space` / `apply space` remain aliases.
 - `pmux whoami` — this pane's session name, opaque session id, pane, and
   agent. Run it from inside the pane.
+- `PRISMATTYC_EXPERIMENTAL_PMUX_SKILLS=1 pmux skills install` — install the
+  pmux agent skill for supported agents. This command is off by default.
+  Add `--check` to preview destinations; `--force` replaces an existing skill
+  file. The skill explains pane, mail, and coordination rules. See
+  `skills/pmux/SKILL.md`.
 - `pmux status-set TEXT` — set this pane's attach status line. `--clear`
   removes it. Requires `$PRISMATTYC_PANE_ID`.
 - `pmux rename-pane PANE|SESSION [TITLE...]` — set a pane title (shown by

@@ -1043,7 +1043,7 @@ mod tests {
         assert_eq!(parsed.theme.as_deref(), Some(DEFAULT_THEME));
         assert_eq!(parsed.render_timer(), crate::config::RenderTimer::Off);
         assert!(!parsed.render_timer_log_every_frame());
-        assert!(parsed.install_agent_skills());
+        assert_eq!(parsed.install_agent_skills, Some(true));
         assert_eq!(parsed.tab_strip(), crate::config::TabStripMode::Auto);
         assert_eq!(parsed.pane_titles(), crate::config::PaneTitlesMode::Focused);
         assert!(parsed.splash());

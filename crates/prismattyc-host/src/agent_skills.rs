@@ -2,7 +2,9 @@
 
 use std::{fs, io::Write, path::Path, time::SystemTime};
 
+#[cfg(target_os = "macos")]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+#[cfg(target_os = "macos")]
 const OPT_OUT_ENV: &str = "PRISMATTYC_NO_AGENT_SKILLS";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -306,6 +306,7 @@ impl ConfigFile {
     }
 
     /// Automatically install the pmux Agent Skill. Default true.
+    #[cfg(target_os = "macos")]
     pub fn install_agent_skills(&self) -> bool {
         self.install_agent_skills.unwrap_or(true)
     }
@@ -864,10 +865,10 @@ mod tests {
         let dir = temp_dir("parse");
         let path = dir.join("config.toml");
         assert_eq!(load(&path).unwrap(), ConfigFile::default());
-        assert!(ConfigFile::default().install_agent_skills());
+        assert!(ConfigFile::default().install_agent_skills.unwrap_or(true));
 
         std::fs::write(&path, "install_agent_skills = false\n").unwrap();
-        assert!(!load(&path).unwrap().install_agent_skills());
+        assert!(!load(&path).unwrap().install_agent_skills.unwrap_or(true));
 
         std::fs::write(
             &path,

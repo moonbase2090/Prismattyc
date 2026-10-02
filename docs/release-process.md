@@ -67,8 +67,14 @@ and DMG to Apple's notary service, then staples and validates the app and DMG.
 ## Build platform packages
 
 The Linux jobs use Ubuntu 22.04 and build all six binaries on native x86_64 or
-ARM64 runners. They generate manual pages with `scripts/install-man.sh` and
-package the result with `scripts/release/package.py`.
+ARM64 runners. `scripts/release/build-linux.sh` uses `cargo-zigbuild` with a
+`.2.28` target suffix, while keeping the existing target triples and asset
+names. The jobs run `scripts/release/smoke-linux-al2023.sh` before packaging.
+That check reports the maximum GLIBC symbol version from `objdump -T` for each
+binary, then runs `prismattyc --version`, `pmux --version`, and
+`pmuxd --version` in `amazonlinux:2023`. CI runs the same check for both
+architectures. The jobs generate manual pages with `scripts/install-man.sh`
+and package the result with `scripts/release/package.py`.
 
 The Windows job runs `scripts/release/build-windows.ps1` on Windows Server 2022.
 It builds and checks all six Windows executables before creating the release
@@ -84,9 +90,9 @@ recursive signing. The release contains the notarized
 `Prismattyc-vVERSION-macos-universal.dmg` and
 `Prismattyc-vVERSION-macos-universal.zip`.
 
-Linux x86_64 and ARM64 releases require glibc 2.35 or newer
-(Ubuntu 22.04 or newer). The Windows package supports Windows 10 version 1809
-or newer, or Windows 11. The macOS app supports macOS 11 or newer.
+Linux x86_64 and ARM64 release binaries require glibc 2.28 or newer, including
+Amazon Linux 2023. The Windows package supports Windows 10 version 1809 or
+newer, or Windows 11. The macOS app supports macOS 11 or newer.
 
 On Linux and Windows, `pmux update` replaces the six installed binaries.
 On macOS it downloads the universal zip, verifies `SHA256SUMS-macos` and the

@@ -81,7 +81,7 @@ with tempfile.TemporaryDirectory() as tmp:
     shutil.copy2(repo / 'assets/brand/prismattyc-icon-tile.svg', root / 'share/prismattyc.svg')
     (root / 'VERSION').write_text(a.version + '\n')
     (root / 'INSTALL.txt').write_text(
-        f'Prismattyc for Linux {architecture} (Ubuntu 22.04 or newer).\n'
+        f'Prismattyc for Linux {architecture} (glibc 2.28 or newer).\n'
         'Install runtime dependencies with your distribution package manager:\n'
         'Ubuntu: sudo apt install libfontconfig1 libxkbcommon0 libxkbcommon-x11-0 libegl1\n'
         'Run ./install.sh to install into ~/.local, or use --prefix /absolute/path.\n'

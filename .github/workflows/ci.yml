@@ -74,6 +74,43 @@ jobs:
       - name: Confirm Apple SDK
         run: scripts/release/confirm-apple-sdk.sh
 
+  linux-al2023:
+    name: Linux AL2023 (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable action, Rust 1.90.0
+        with:
+          toolchain: 1.90.0
+          targets: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild and Zig
+        run: scripts/release/setup-zigbuild.sh
+
+      - name: Build Linux release binaries with glibc 2.28 floor
+        env:
+          TARGET: ${{ matrix.target }}
+        run: scripts/release/build-linux.sh "$TARGET"
+
+      - name: Run GLIBC check and AL2023 smoke commands
+        env:
+          TARGET: ${{ matrix.target }}
+        run: scripts/release/smoke-linux-al2023.sh "target/$TARGET/release"
+
   check:
     name: Check
     runs-on: ubuntu-latest

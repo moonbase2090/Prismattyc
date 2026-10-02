@@ -152,6 +152,9 @@ jobs:
           toolchain: 1.90.0
           targets: x86_64-unknown-linux-gnu
 
+      - name: Install cargo-zigbuild and Zig
+        run: scripts/release/setup-zigbuild.sh
+
       - name: Install manual generator
         run: |
           sudo apt-get update
@@ -162,7 +165,8 @@ jobs:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           TARGET: x86_64-unknown-linux-gnu
         run: |
-          cargo build --release --locked --workspace --bins --target "$TARGET"
+          scripts/release/build-linux.sh "$TARGET"
+          scripts/release/smoke-linux-al2023.sh "target/$TARGET/release"
           PRISMATTYC_BINS="target/$TARGET/release" \
             PMUX_MAN_DIR=build/release-man scripts/install-man.sh
           python3 scripts/release/package.py \
@@ -199,6 +203,9 @@ jobs:
           toolchain: 1.90.0
           targets: aarch64-unknown-linux-gnu
 
+      - name: Install cargo-zigbuild and Zig
+        run: scripts/release/setup-zigbuild.sh
+
       - name: Install manual generator
         run: |
           sudo apt-get update
@@ -209,7 +216,8 @@ jobs:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           TARGET: aarch64-unknown-linux-gnu
         run: |
-          cargo build --release --locked --workspace --bins --target "$TARGET"
+          scripts/release/build-linux.sh "$TARGET"
+          scripts/release/smoke-linux-al2023.sh "target/$TARGET/release"
           PRISMATTYC_BINS="target/$TARGET/release" \
             PMUX_MAN_DIR=build/release-man scripts/install-man.sh
           python3 scripts/release/package.py \

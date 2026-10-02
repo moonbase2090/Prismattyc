@@ -122,6 +122,9 @@ pub struct ConfigFile {
     /// Animate the launch splash's word art (beam sweep, reflection passes,
     /// lens flares). Default true; `false` shows the art static.
     pub splash_animation: Option<bool>,
+    /// Install the pmux Agent Skill for detected agents on the first launch
+    /// of each app version. Default true; `PRISMATTYC_NO_AGENT_SKILLS=1` wins.
+    pub install_agent_skills: Option<bool>,
     /// Primary font path. `PRISMATTYC_HOST_FONT` still wins when set.
     pub font: Option<PathBuf>,
     /// Extra fallback faces, tried after the built-in chain.
@@ -300,6 +303,12 @@ impl ConfigFile {
     /// Show the launch splash on a bare first window. Default true.
     pub fn splash(&self) -> bool {
         self.splash.unwrap_or(true)
+    }
+
+    /// Automatically install the pmux Agent Skill. Default true.
+    #[cfg(target_os = "macos")]
+    pub fn install_agent_skills(&self) -> bool {
+        self.install_agent_skills.unwrap_or(true)
     }
 
     /// Alternate-screen scrollback retention. Default false.
@@ -856,6 +865,10 @@ mod tests {
         let dir = temp_dir("parse");
         let path = dir.join("config.toml");
         assert_eq!(load(&path).unwrap(), ConfigFile::default());
+        assert!(ConfigFile::default().install_agent_skills.unwrap_or(true));
+
+        std::fs::write(&path, "install_agent_skills = false\n").unwrap();
+        assert!(!load(&path).unwrap().install_agent_skills.unwrap_or(true));
 
         std::fs::write(
             &path,

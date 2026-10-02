@@ -28,6 +28,7 @@ const DEFAULT_PANES: usize = 1;
 #[allow(dead_code)]
 pub enum ConfigGroup {
     Appearance,
+    AgentSkills,
     FocusBorder,
     Font,
     Layout,
@@ -117,6 +118,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         doc: "Immediate hover blend for interactive strip, rail, and scrollbar chrome",
         range: "0.0-0.3",
         value: ConfigValue::F32(crate::config::DEFAULT_HOVER_BLEND),
+    },
+    ConfigKey {
+        name: "install_agent_skills",
+        group: ConfigGroup::AgentSkills,
+        doc: "Install the pmux Agent Skill for detected agents once per app version",
+        range: "true|false",
+        value: ConfigValue::Bool(true),
     },
     ConfigKey {
         name: "focus_border",
@@ -418,6 +426,7 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
 fn group_header(group: ConfigGroup) -> &'static str {
     match group {
         ConfigGroup::Appearance => "appearance / theme",
+        ConfigGroup::AgentSkills => "agent integration",
         ConfigGroup::FocusBorder => "focus border",
         ConfigGroup::Font => "font",
         ConfigGroup::Layout => "layout",
@@ -938,6 +947,7 @@ mod tests {
         "focus_border_animation_head",
         "splash",
         "splash_animation",
+        "install_agent_skills",
         "font",
         "font_fallback",
         "font_px",
@@ -1033,6 +1043,7 @@ mod tests {
         assert_eq!(parsed.theme.as_deref(), Some(DEFAULT_THEME));
         assert_eq!(parsed.render_timer(), crate::config::RenderTimer::Off);
         assert!(!parsed.render_timer_log_every_frame());
+        assert_eq!(parsed.install_agent_skills, Some(true));
         assert_eq!(parsed.tab_strip(), crate::config::TabStripMode::Auto);
         assert_eq!(parsed.pane_titles(), crate::config::PaneTitlesMode::Focused);
         assert!(parsed.splash());

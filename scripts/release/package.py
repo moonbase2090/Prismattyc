@@ -85,6 +85,7 @@ with tempfile.TemporaryDirectory() as tmp:
         'Install runtime dependencies with your distribution package manager:\n'
         'Ubuntu: sudo apt install libfontconfig1 libxkbcommon0 libxkbcommon-x11-0 libegl1\n'
         'Run ./install.sh to install into ~/.local, or use --prefix /absolute/path.\n'
+        'The installer adds the pmux Agent Skill for detected agents; pass --no-agent-skills to skip.\n'
         'Add ~/.local/bin to PATH. Launch prismattyc-host from the application menu.\n'
         'The installer does not stop running sessions. Reopen windows to use this version.\n'
         'Run pmux update for future releases. Read pmux update --help for rollback.\n')

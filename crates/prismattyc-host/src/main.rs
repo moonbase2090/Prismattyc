@@ -6,6 +6,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod a11y;
+#[cfg(any(target_os = "macos", test))]
+mod agent_skills;
 mod attach_adopt;
 mod attach_log;
 mod attach_tabs;
@@ -14348,6 +14350,8 @@ fn main() -> Result<()> {
         config::ConfigFile::default()
     });
     cli.apply_config(&file_config);
+    #[cfg(target_os = "macos")]
+    agent_skills::start(file_config.install_agent_skills(), pmux_bin());
     // Windowed host requires a display; fail clearly in pure SSH/CI. macOS and
     // Windows have no WAYLAND_DISPLAY/DISPLAY; winit reports its own error there.
     #[cfg(all(unix, not(target_os = "macos")))]

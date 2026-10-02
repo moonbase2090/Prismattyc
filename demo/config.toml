@@ -9,6 +9,7 @@ pane_padding_px = 5
 space_rail = "bottom"
 session_naming = "auto"
 space_startup = "fresh"
+install_agent_skills = true
 
 [a11y]
 os_tree = true

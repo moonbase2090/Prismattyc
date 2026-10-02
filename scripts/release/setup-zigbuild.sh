@@ -20,4 +20,4 @@ fi
 export PATH="$environment/bin:$PATH"
 export CARGO_ZIGBUILD_ZIG_PATH=zig
 zig version
-cargo zigbuild --version
+cargo-zigbuild --version

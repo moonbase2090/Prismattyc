@@ -89,3 +89,48 @@ It compares 24-row and 80-row viewports with history disabled and enabled.
 Build both revisions with the same toolchain and profile. Copy the example
 into an older checkout if it predates this probe. This microbenchmark does not
 replace the native comparison or correctness tests.
+
+## Profile emulator grid and history
+
+Run the fixed-input profile from a clean, frozen checkout:
+
+```bash
+python3 tests/performance/profile-grid-history.py \
+  --output build/performance/grid-history-baseline
+```
+
+The output directory must not exist. The runner builds the locked release
+probe, records its SHA-256, source revision, machine, OS, and Rust toolchain,
+then runs five independent timing processes per case. The default feed cases
+each replay 32 MiB in 8 KiB chunks; reflow performs 64 resize operations. Raw
+measurements are written to `timings.jsonl`. The starting case rotates each
+round to limit timing drift from a fixed case order.
+
+Cases are `ascii` (plain lines), `scroll` (one-character lines with history
+disabled), `history` (steady eviction with a warmed 10,000-row scrollback),
+`unicode` (wide characters, combining marks, and joined emoji), `sgr` (styled
+text), and `reflow` (alternating 80x24 and 96x30 with warmed 10,000-row
+history). The reflow input uses 34-column hard-broken ASCII lines, so it does
+not measure soft-wrap-heavy reflow. Setup and warm history are outside the
+timed interval. Feed timing covers `Emulator::feed`; reflow timing covers
+`Emulator::resize`. The result
+JSON records input size, duration, throughput where applicable, final cursor,
+retained history, and allocated history bytes.
+
+Collect separate CPU samples with the same binary and inputs:
+
+```bash
+python3 tests/performance/profile-grid-history.py \
+  --output build/performance/grid-history-profile \
+  --profile --profile-units 512 --sample-seconds 3
+```
+
+On macOS, the runner attaches `/usr/bin/sample`; on Linux it uses `perf
+record` and saves a text report from `perf report`. Linux may require the host's
+normal perf permissions. Profile repetitions are separate from timing runs and
+default to 512 MiB per feed case and 1,024 resizes. Keep other CPU-heavy work
+idle. The runner fails if a workload exits too soon to cover the requested
+sample duration; increase `--profile-units` for slower hosts or longer samples.
+Keep the manifest, raw timing rows, and sample reports together when
+comparing revisions. Sample percentages are profiler samples, not instrumented
+wall time, and inclusive parent percentages must not be added to child rows.

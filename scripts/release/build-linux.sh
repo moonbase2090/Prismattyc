@@ -10,6 +10,6 @@ case "$target" in
     ;;
 esac
 
-CARGO_ZIGBUILD_ZIG_PATH=python-zig cargo zigbuild \
+CARGO_ZIGBUILD_ZIG_PATH=zig cargo zigbuild \
   --release --locked --workspace --bins \
   --target "$target.2.28"

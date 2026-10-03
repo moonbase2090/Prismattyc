@@ -30,6 +30,65 @@ at once. GitHub documents a 6-hour job limit, a 256-job
 matrix limit, and 20 concurrent standard jobs on the Free plan in its
 [Actions limits](https://docs.github.com/en/actions/reference/limits).
 
+## Jev shadow pilot
+
+The optional Jev job runs beside the nightly mutation workflow after its selected
+shard jobs finish. It reads the pinned cycle's mutant list and only evaluates
+mutants with outcomes in that run. Jev predictions do not select tests, skip
+mutants, or change mutation execution.
+
+The job sends Jev requests only when the repository variable
+**JEV_SHADOW_ENABLED** is **true** and both required secrets are available:
+
+| Secret | Required | Purpose |
+| --- | --- | --- |
+| **CLOUDFLARE_ACCOUNT_ID** | Yes | Cloudflare account for the Jev request |
+| **CLOUDFLARE_API_TOKEN** | Yes | Bearer token for Cloudflare's account API |
+| **CLOUDFLARE_AI_GATEWAY_ID** | No | Adds the cf-aig-gateway-id header to select a specific gateway |
+
+Use a token with **Workers AI Read**. Cloudflare's [run endpoint
+reference](https://developers.cloudflare.com/api/resources/ai/methods/run/)
+also accepts Workers AI Write. The job calls Cloudflare's
+`POST /accounts/{account_id}/ai/run` endpoint with model
+`typesafe/jev` and the structured input shown in the [Cloudflare Jev
+model catalog](https://developers.cloudflare.com/ai/models/typesafe/jev/).
+The workflow uses Cloudflare account authentication and has no TypeSafe key,
+Custom Provider, or BYOK secret. Configure the selected AI Gateway for Unified
+Billing and load prepaid credits as described in [Cloudflare's Unified Billing
+docs](https://developers.cloudflare.com/ai-gateway/features/unified-billing/).
+
+Each prediction request sends one mutant diff and its enclosing function
+context. Every `MissedMutant` gets a second request with the observed
+miss outcome. Jev classifies it as likely equivalent or a real test gap.
+Requests run at one per second. Jev's [model
+documentation](https://docs.typesafe.ai/models) currently lists 80 requests
+per second and 100,000 tokens per second, and says those limits can change.
+The client honors `Retry-After` and retries HTTP 429 and 529 with exponential
+backoff. The job records usage and estimates input-token cost at the price in
+the Cloudflare catalog.
+
+Without the opt-in variable or either required secret, the job makes no network
+request and uploads a dry-run report with the matched mutant count and planned
+request counts. The script defaults to dry-run mode:
+
+~~~bash
+python3 scripts/jev-shadow.py \
+  --plan build/mutants/plan.json \
+  --mutants build/mutants/mutants-list.json \
+  --outcomes build/mutant-shards \
+  --repo cycle-source \
+  --output build/jev-shadow/predictions.json \
+  --summary build/jev-shadow/summary.md
+~~~
+
+The live report measures package-pick recall on caught mutants and missed-score
+calibration against shard outcomes. It classifies every missed mutant.
+Triage precision uses the first 25 missed mutants as a review sample. It stays
+unavailable until maintainers label sampled stable IDs in
+`scripts/jev-shadow-labels.json` as likely-equivalent or real-test-gap.
+Human labels determine triage precision. A test survivor alone cannot show
+whether a mutation is equivalent or exposes a test gap.
+
 Rotation state is saved only after every selected shard completes. If a runner
 stops early or an outcome file is missing, the report marks the batch partial
 and the next schedule retries the same shard IDs. The report includes the

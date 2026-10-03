@@ -456,3 +456,98 @@ jobs:
           name: mutants-nightly-missed
           path: build/missed-mutants.txt
           if-no-files-found: warn
+
+  jev-shadow:
+    name: Jev shadow evaluation
+    if: ${{ always() && needs.plan.result == 'success' && github.ref == 'refs/heads/main' && needs.plan.outputs.nextest_profile == 'mutants' }}
+    needs: [plan, mutants-nightly]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out workflow revision
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0, Node 24
+
+      - name: Check out pinned cycle source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0, Node 24
+        with:
+          ref: ${{ needs.plan.outputs.cycle_sha }}
+          path: cycle-source
+
+      - name: Download mutant plan and list
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0, Node 24
+        with:
+          name: mutants-nightly-plan
+          path: build/mutants
+
+      - name: Download completed shard outcomes
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0, Node 24
+        with:
+          pattern: mutants-nightly-shard-*
+          path: build/mutant-shards
+          merge-multiple: false
+
+      - name: Check opt-in and credential presence
+        id: gate
+        env:
+          JEV_SHADOW_ENABLED: ${{ vars.JEV_SHADOW_ENABLED }}
+          CLOUDFLARE_CREDS_PRESENT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' && secrets.CLOUDFLARE_API_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          if [[ "$JEV_SHADOW_ENABLED" == "true" && "$CLOUDFLARE_CREDS_PRESENT" == "true" ]]; then
+            echo "live=true" >> "$GITHUB_OUTPUT"
+            echo "Jev shadow mode is enabled and required credentials are present."
+          else
+            echo "live=false" >> "$GITHUB_OUTPUT"
+            if [[ "$JEV_SHADOW_ENABLED" != "true" ]]; then
+              echo "Jev shadow mode is disabled; preparing a no-network dry-run report."
+            else
+              echo "Cloudflare account/token secrets are absent; preparing a no-network dry-run report."
+            fi
+          fi
+
+      - name: Prepare no-network dry-run report
+        if: ${{ steps.gate.outputs.live != 'true' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/jev-shadow.py \
+            --plan build/mutants/plan.json \
+            --mutants build/mutants/mutants-list.json \
+            --outcomes build/mutant-shards \
+            --repo cycle-source \
+            --output build/jev-shadow/predictions.json \
+            --summary build/jev-shadow/summary.md
+          cat build/jev-shadow/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run Jev shadow requests
+        if: ${{ steps.gate.outputs.live == 'true' }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_AI_GATEWAY_ID: ${{ secrets.CLOUDFLARE_AI_GATEWAY_ID }}
+        run: |
+          set -euo pipefail
+          python3 scripts/jev-shadow.py \
+            --live \
+            --plan build/mutants/plan.json \
+            --mutants build/mutants/mutants-list.json \
+            --outcomes build/mutant-shards \
+            --repo cycle-source \
+            --labels scripts/jev-shadow-labels.json \
+            --output build/jev-shadow/predictions.json \
+            --summary build/jev-shadow/summary.md
+          cat build/jev-shadow/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Archive Jev shadow report
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0, Node 24
+        with:
+          name: jev-shadow-${{ github.run_id }}
+          path: |
+            build/jev-shadow/predictions.json
+            build/jev-shadow/summary.md
+          if-no-files-found: warn

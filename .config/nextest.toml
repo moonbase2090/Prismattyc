@@ -1,0 +1,23 @@
+[profile.mutants-full]
+inherits = "default"
+fail-fast = { max-fail = 1, terminate = "immediate" }
+slow-timeout = { period = "90s", terminate-after = 3, grace-period = "10s" }
+leak-timeout = { period = "1s", result = "fail" }
+
+[profile.mutants]
+inherits = "mutants-full"
+# Keep private-display, detached-tmux, and walkthrough integration suites out
+# of the high-volume rotation. They remain available through mutants-slow.
+default-filter = "not (binary_id(/walkthrough_e2e/) | test(/render_window_tests|space_open_window_tests|real_window|private_window|isolated_space_windows|exact_pane_checks_session_pane_and_child_identity|t[23]_tmux/))"
+
+[profile.mutants-slow]
+inherits = "mutants-full"
+default-filter = "all()"
+slow-timeout = { period = "5m", terminate-after = 2, grace-period = "20s" }
+
+[test-groups]
+serialized-mux-tmux = { max-threads = 1 }
+
+[[profile.mutants-full.overrides]]
+filter = 'package(prismattyc-mux) | test(/t[23]_tmux/)'
+test-group = "serialized-mux-tmux"

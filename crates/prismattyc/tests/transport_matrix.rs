@@ -42,6 +42,23 @@ fn tmux_version_is_3_4(ver: &str) -> bool {
         .is_some_and(|v| v.starts_with("3.4"))
 }
 
+/// Kill the test's private detached tmux server on success, panic, or timeout.
+struct TmuxServerGuard(String);
+
+impl TmuxServerGuard {
+    fn new(socket: String) -> Self {
+        Self(socket)
+    }
+}
+
+impl Drop for TmuxServerGuard {
+    fn drop(&mut self) {
+        let _ = Command::new("tmux")
+            .args(["-L", &self.0, "kill-server"])
+            .output();
+    }
+}
+
 /// Bring a dedicated tmux server up and wait until it answers.
 fn tmux_passthrough_on(label: &str) -> bool {
     let _ = Command::new("tmux")
@@ -205,6 +222,7 @@ fn t2_tmux_passthrough_off_is_classic_only_no_leak() {
             .unwrap()
             .as_nanos()
     );
+    let _server = TmuxServerGuard::new(sock.clone());
     assert!(
         wait_tmux_ready(&sock, &cfg, Duration::from_secs(5)),
         "T2: tmux server did not become ready"
@@ -231,9 +249,6 @@ fn t2_tmux_passthrough_off_is_classic_only_no_leak() {
         Duration::from_secs(25),
         |text| text.contains("T2START") || text.contains("T2DONE"),
     );
-    let _ = Command::new("tmux")
-        .args(["-L", &sock, "kill-server"])
-        .output();
     assert!(
         out.contains("T2START") || out.contains("T2DONE"),
         "T2 marker missing (tmux/prism failed): {out:?}"
@@ -283,6 +298,7 @@ fn t3_tmux_passthrough_on_negotiates() {
             .unwrap()
             .as_nanos()
     );
+    let _server = TmuxServerGuard::new(sock.clone());
     assert!(
         wait_tmux_ready(&sock, &cfg, Duration::from_secs(5)),
         "T3: tmux server did not become ready"
@@ -319,9 +335,6 @@ fn t3_tmux_passthrough_on_negotiates() {
         Duration::from_secs(40),
         |text| (text.contains("T3START") || text.contains("T3DONE")) && text.contains("STAT"),
     );
-    let _ = Command::new("tmux")
-        .args(["-L", &sock, "kill-server"])
-        .output();
     assert!(
         out.contains("T3START") || out.contains("T3DONE"),
         "T3 marker missing: {out:?}"

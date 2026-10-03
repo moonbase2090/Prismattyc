@@ -1,51 +1,91 @@
 name: Mutants nightly
 
-# Full workspace mutation, split across GitHub-hosted runners.
+# The full workspace is pinned for one rotation. A separate in-diff pass checks
+# changes since that pin on current main each night.
 on:
   schedule:
     - cron: "0 4 * * *"
   workflow_dispatch:
+    inputs:
+      nextest_profile:
+        description: Test profile for the selected mutation batch
+        type: choice
+        options: [mutants, mutants-slow]
+        default: mutants
+      start_shard:
+        description: First shard index for this manual batch
+        type: number
+        default: 0
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: mutants-nightly-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   RUSTUP_TOOLCHAIN: "1.90.0"
+  MUTANTS_TIMEOUT_SECONDS: "300"
+  LA_HEAVY: "1"
+  LA_HEAVY_JOB: mutants-nightly
 
 jobs:
-  mutants-nightly:
-    name: Mutants shard ${{ matrix.shard }}/${{ strategy.job-total }}
+  plan:
+    name: Plan pinned rotation
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-    strategy:
-      fail-fast: false
-      max-parallel: 8
-      matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
-    env:
-      LA_HEAVY: "1"
-      LA_HEAVY_JOB: mutants-nightly
-      MUTANTS_SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
+    timeout-minutes: 45
+    outputs:
+      cycle_sha: ${{ steps.plan.outputs.cycle_sha }}
+      head_sha: ${{ steps.plan.outputs.head_sha }}
+      diff_base: ${{ steps.plan.outputs.diff_base }}
+      shard_count: ${{ steps.plan.outputs.shard_count }}
+      shards: ${{ steps.plan.outputs.shards }}
+      persist_state: ${{ steps.plan.outputs.persist_state }}
+      nextest_profile: ${{ steps.plan.outputs.nextest_profile }}
+      mutant_timeout_seconds: ${{ steps.plan.outputs.mutant_timeout_seconds }}
     steps:
-      - name: Check out repository
+      - name: Check out workflow revision
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0, Node 24
+        with:
+          fetch-depth: 0
 
-      - name: Acquire heavy-job lock (PT-305)
-        run: python3 scripts/la-heavy-serial.py --acquire --wait --job mutants-nightly
+      - name: Restore rotation state
+        if: ${{ github.event_name == 'schedule' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/restore@0c907a75c2c80ebcb7f088228285e798b750cf8f # v4.2.1
+        with:
+          path: mutants-nightly-state
+          key: mutants-nightly-state-${{ github.run_id }}
+          restore-keys: mutants-nightly-state-
 
-      - name: Check host headroom (PT-305)
-        run: python3 scripts/mutants-gate.py --check-host-headroom
+      - name: Select pinned cycle commit
+        id: select
+        run: >-
+          python3 scripts/mutants-nightly.py select-cycle
+          --state mutants-nightly-state/state.json
+          --current-sha "$GITHUB_SHA"
+          --event "$GITHUB_EVENT_NAME"
+          --ref "$GITHUB_REF"
+          --github-output "$GITHUB_OUTPUT"
 
-      - name: Check mutants scratch is not tmpfs (PT-305)
+      - name: Select merge base for a slow-profile branch run
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.nextest_profile == 'mutants-slow' && github.ref != 'refs/heads/main' }}
         run: |
-          scratch="${MUTANTS_TMPDIR:-${XDG_CACHE_HOME:-$HOME/.cache}/prismattyc/mutants}"
-          mkdir -p "${scratch}"
-          MUTANTS_TMPDIR="${scratch}" TMPDIR="${scratch}" \
-            python3 scripts/mutants-gate.py --check-tmpdir
+          set -euo pipefail
+          git fetch --no-tags origin main
+          diff_base="$(git merge-base origin/main HEAD)"
+          echo "MUTANTS_DIFF_BASE=$diff_base" >> "$GITHUB_ENV"
+
+      - name: Check out pinned cycle source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0, Node 24
+        with:
+          ref: ${{ steps.select.outputs.cycle_sha }}
+          path: cycle-source
+          fetch-depth: 0
+
+      - name: Verify rotation planner and partial-result handling
+        run: python3 scripts/mutants-nightly_test.py
 
       - name: Install Rust toolchain
         run: |
@@ -55,79 +95,364 @@ jobs:
               | sh -s -- -y --default-toolchain none --profile minimal
           fi
           cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
-          if [ -f "$cargo_env" ]; then
-            . "$cargo_env"
-          elif [ -f "$HOME/.cargo/env" ]; then
-            . "$HOME/.cargo/env"
-          fi
+          if [ -f "$cargo_env" ]; then . "$cargo_env"; fi
           rustup toolchain install 1.90.0 --profile minimal
           rustup default 1.90.0
 
-      - name: Install tmux
+      - name: Install pinned mutation tools once
         run: |
-          if command -v tmux >/dev/null 2>&1; then
-            tmux -V
-            exit 0
+          set -euo pipefail
+          cargo install cargo-mutants --locked --version 27.1.0 \
+            --root build/mutants/tools
+          cargo install cargo-nextest --locked --version 0.9.111 \
+            --root build/mutants/tools
+          echo "$GITHUB_WORKSPACE/build/mutants/tools/bin" >> "$GITHUB_PATH"
+
+      - name: Count mutants and plan a batch
+        id: plan
+        env:
+          CURRENT_SHA: ${{ github.sha }}
+          NEXTTEST_PROFILE: ${{ github.event.inputs.nextest_profile || 'mutants' }}
+          START_SHARD: ${{ github.event.inputs.start_shard || '0' }}
+          MUTANT_TIMEOUT_SECONDS: ${{ github.event.inputs.nextest_profile == 'mutants-slow' && '1200' || '300' }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/mutants
+          cd cycle-source
+          cargo mutants --list --json --workspace \
+            > ../build/mutants/mutants-list.json
+          cd ..
+          python3 scripts/mutants-nightly.py plan \
+            --state mutants-nightly-state/state.json \
+            --mutants-json build/mutants/mutants-list.json \
+            --current-sha "$CURRENT_SHA" \
+            --event "$GITHUB_EVENT_NAME" \
+            --ref "$GITHUB_REF" \
+            --diff-base "${MUTANTS_DIFF_BASE:-}" \
+            --mutant-timeout "$MUTANT_TIMEOUT_SECONDS" \
+            --nextest-profile "$NEXTTEST_PROFILE" \
+            --start-shard "$START_SHARD" \
+            --output build/mutants/plan.json \
+            --summary build/mutants/summary.md \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Upload plan and tool binaries
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0, Node 24
+        with:
+          name: mutants-nightly-plan
+          path: |
+            build/mutants/plan.json
+            build/mutants/summary.md
+            build/mutants/mutants-list.json
+            build/mutants/tools/bin/cargo-mutants
+            build/mutants/tools/bin/cargo-nextest
+          if-no-files-found: error
+
+  baseline:
+    name: Baseline complete test suite
+    needs: [plan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Check out workflow revision
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0, Node 24
+
+      - name: Check out pinned cycle source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0, Node 24
+        with:
+          ref: ${{ needs.plan.outputs.cycle_sha }}
+          path: cycle-source
+
+      - name: Download pinned mutation tools
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0, Node 24
+        with:
+          name: mutants-nightly-plan
+          path: build/mutants
+
+      - name: Add mutation tools to PATH
+        run: |
+          chmod +x build/mutants/tools/bin/cargo-mutants build/mutants/tools/bin/cargo-nextest
+          echo "$GITHUB_WORKSPACE/build/mutants/tools/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust toolchain and test services
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
           fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then . "$cargo_env"; fi
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
           sudo apt-get update -qq
           sudo apt-get install -y -qq tmux
+          ./scripts/install-render-test-deps.sh
+          echo "TMUX_TMPDIR=$RUNNER_TEMP/mutants-tmux" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/mutants-tmux"
 
-      - name: Install real-window test display
-        run: ./scripts/install-render-test-deps.sh
-
-      - name: Install cargo-mutants
+      - name: Run full workspace baseline
+        timeout-minutes: 180
         run: |
+          set -euo pipefail
+          source "${CARGO_HOME:-$HOME/.cargo}/env"
+          start="$(date +%s)"
+          cargo nextest run --manifest-path cycle-source/Cargo.toml \
+            --config-file cycle-source/.config/nextest.toml \
+            --workspace --cargo-profile mutants --profile mutants-slow \
+            --max-fail=1:immediate
+          echo "Full baseline seconds: $(( $(date +%s) - start ))" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up orphaned test services
+        if: always()
+        run: python3 scripts/mutants-nightly-process-cleanup.py --phase after
+
+  mutants-nightly:
+    name: Mutants shard ${{ matrix.shard }}/${{ needs.plan.outputs.shard_count }}
+    if: ${{ needs.plan.outputs.nextest_profile == 'mutants' }}
+    needs: [plan, baseline]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      # GitHub Free permits 20 concurrent standard jobs; 16 leaves four slots.
+      # https://docs.github.com/en/actions/reference/limits
+      max-parallel: 16
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - name: Check out workflow revision
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0, Node 24
+
+      - name: Check out pinned cycle source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0, Node 24
+        with:
+          ref: ${{ needs.plan.outputs.cycle_sha }}
+          path: cycle-source
+
+      - name: Download pinned mutation tools
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0, Node 24
+        with:
+          name: mutants-nightly-plan
+          path: build/mutants
+
+      - name: Add mutation tools to PATH
+        run: |
+          chmod +x build/mutants/tools/bin/cargo-mutants build/mutants/tools/bin/cargo-nextest
+          echo "$GITHUB_WORKSPACE/build/mutants/tools/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust toolchain and tmux
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
           cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
-          [ -f "$cargo_env" ] && . "$cargo_env"
-          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-          command -v cargo-mutants >/dev/null 2>&1 \
-            || cargo install cargo-mutants --locked --version 27.1.0
+          if [ -f "$cargo_env" ]; then . "$cargo_env"; fi
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tmux
+          echo "TMUX_TMPDIR=$RUNNER_TEMP/mutants-tmux" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/mutants-tmux"
+
+      - name: Acquire heavy-job lock (PT-305)
+        run: python3 scripts/la-heavy-serial.py --acquire --wait --job mutants-nightly
 
       - name: Run cargo-mutants shard
+        timeout-minutes: 300
+        env:
+          LA_HEAVY_HELD: "1"
+          MUTANTS_WORKSPACE: cycle-source
+          MUTANTS_SHARD: ${{ matrix.shard }}/${{ needs.plan.outputs.shard_count }}
+          MUTANTS_NEXTTEST_PROFILE: ${{ needs.plan.outputs.nextest_profile }}
+          MUTANTS_TIMEOUT_SECONDS: ${{ needs.plan.outputs.mutant_timeout_seconds }}
         run: ./scripts/mutants-nightly.sh
+
+      - name: Clean up orphaned test services
+        if: always()
+        run: python3 scripts/mutants-nightly-process-cleanup.py --phase after
 
       - name: Archive shard outcomes
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0, Node 24
         with:
           name: mutants-nightly-shard-${{ matrix.shard }}
-          path: build/mutants/shard-${{ matrix.shard }}/mutants.out/outcomes.json
+          path: |
+            cycle-source/build/mutants/shard-${{ matrix.shard }}/mutants.out/outcomes.json
+            cycle-source/build/mutants/shard-${{ matrix.shard }}/mutants.out/*.txt
           if-no-files-found: warn
 
       - name: Release heavy-job lock
         if: always()
         run: python3 scripts/la-heavy-serial.py --release --job mutants-nightly
 
-  missed-mutants:
-    name: Merge missed mutants
-    if: ${{ always() }}
-    needs: [mutants-nightly]
+  mutants-in-diff:
+    name: Mutants changed since selected base
+    needs: [plan]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 360
     steps:
-      - name: Check out repository
+      - name: Check out current head with history
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0, Node 24
+        with:
+          ref: ${{ needs.plan.outputs.head_sha }}
+          fetch-depth: 0
+
+      - name: Download pinned mutation tools
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0, Node 24
+        with:
+          name: mutants-nightly-plan
+          path: build/mutants
+
+      - name: Add mutation tools to PATH
+        run: |
+          chmod +x build/mutants/tools/bin/cargo-mutants build/mutants/tools/bin/cargo-nextest
+          echo "$GITHUB_WORKSPACE/build/mutants/tools/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust toolchain and tmux
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then . "$cargo_env"; fi
+          rustup toolchain install 1.90.0 --profile minimal
+          rustup default 1.90.0
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tmux
+          echo "TMUX_TMPDIR=$RUNNER_TEMP/mutants-tmux" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/mutants-tmux"
+
+      - name: Generate changes since the selected base
+        id: diff
+        env:
+          DIFF_BASE: ${{ needs.plan.outputs.diff_base }}
+          HEAD_SHA: ${{ needs.plan.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/mutants
+          git diff --binary "${DIFF_BASE}...${HEAD_SHA}" -- '*.rs' \
+            > build/mutants/nightly-in-diff.patch
+          if [ ! -s build/mutants/nightly-in-diff.patch ]; then
+            echo "has_mutants=false" >> "$GITHUB_OUTPUT"
+            echo "No source diff since ${DIFF_BASE}." | tee build/mutants/in-diff-status.txt
+            exit 0
+          fi
+          crate_list="$(python3 scripts/mutants-gate.py --list-crates \
+            --repo "$GITHUB_WORKSPACE" --diff build/mutants/nightly-in-diff.patch)"
+          if [ -z "$crate_list" ]; then
+            echo "has_mutants=false" >> "$GITHUB_OUTPUT"
+            echo "No mutatable Rust changes since ${DIFF_BASE}." \
+              | tee build/mutants/in-diff-status.txt
+            exit 0
+          fi
+          echo "has_mutants=true" >> "$GITHUB_OUTPUT"
+          printf 'Mutatable packages since %s:\n%s\n' "$DIFF_BASE" "$crate_list" \
+            | tee build/mutants/in-diff-status.txt
+
+      - name: Run current-head mutation baseline
+        if: ${{ steps.diff.outputs.has_mutants == 'true' && needs.plan.outputs.head_sha != needs.plan.outputs.cycle_sha }}
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          source "${CARGO_HOME:-$HOME/.cargo}/env"
+          cargo nextest run --workspace --cargo-profile mutants \
+            --profile "${{ needs.plan.outputs.nextest_profile }}" \
+            --max-fail=1:immediate
+
+      - name: Run cargo-mutants --in-diff
+        if: ${{ steps.diff.outputs.has_mutants == 'true' }}
+        timeout-minutes: 240
+        env:
+          MUTANTS_IN_DIFF_FILE: build/mutants/nightly-in-diff.patch
+          MUTANTS_NEXTTEST_PROFILE: ${{ needs.plan.outputs.nextest_profile }}
+          MUTANTS_TIMEOUT_SECONDS: ${{ needs.plan.outputs.mutant_timeout_seconds }}
+        run: ./scripts/mutants-nightly.sh
+
+      - name: Clean up orphaned test services
+        if: always()
+        run: python3 scripts/mutants-nightly-process-cleanup.py --phase after
+
+      - name: Add in-diff outcomes to the job summary
+        if: ${{ steps.diff.outputs.has_mutants == 'true' }}
+        run: >-
+          python3 scripts/mutants-gate.py
+          --outcomes build/mutants/in-diff/mutants.out/outcomes.json
+          --min-caught 0 >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Archive in-diff outcomes
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0, Node 24
+        with:
+          name: mutants-nightly-in-diff
+          path: |
+            build/mutants/in-diff-status.txt
+            build/mutants/in-diff/mutants.out/outcomes.json
+            build/mutants/in-diff/mutants.out/*.txt
+          if-no-files-found: warn
+
+  missed-mutants:
+    name: Merge mutation results
+    if: ${{ always() && needs.plan.outputs.nextest_profile == 'mutants' }}
+    needs: [plan, mutants-nightly, mutants-in-diff]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out workflow revision
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0, Node 24
 
-      - name: Download shard outcomes
+      - name: Download plan
+        if: ${{ always() && needs.plan.result == 'success' }}
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0, Node 24
+        with:
+          name: mutants-nightly-plan
+          path: build/mutants
+
+      - name: Download shard results
         if: always()
+        continue-on-error: true
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0, Node 24
         with:
           pattern: mutants-nightly-shard-*
           path: build/mutant-shards
           merge-multiple: false
 
-      - name: Merge shard outcomes
-        if: always()
-        run: >-
-          python3 scripts/mutants-nightly-merge.py
-          --input build/mutant-shards
-          --output build/missed-mutants.txt
-          --shards 8
+      - name: Merge complete and partial results
+        id: merge
+        if: ${{ always() && needs.plan.result == 'success' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/mutants-nightly.py merge \
+            --plan build/mutants/plan.json \
+            --input build/mutant-shards \
+            --output build/missed-mutants.txt \
+            --state-output mutants-nightly-state/state.json \
+            --github-output "$GITHUB_OUTPUT"
 
-      - name: Upload missed-mutant report
+      - name: Publish nightly mutation summary
+        if: always()
+        run: |
+          if [ -f build/mutants/summary.md ]; then cat build/mutants/summary.md >> "$GITHUB_STEP_SUMMARY"; fi
+          if [ -f build/missed-mutants.txt ]; then cat build/missed-mutants.txt >> "$GITHUB_STEP_SUMMARY"; fi
+          printf '\nIn-diff job result: %s\n' '${{ needs.mutants-in-diff.result }}' \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save completed rotation state
+        if: ${{ always() && steps.merge.outputs.complete == 'true' && needs.mutants-in-diff.result == 'success' && github.event_name == 'schedule' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@0c907a75c2c80ebcb7f088228285e798b750cf8f # v4.2.1
+        with:
+          path: mutants-nightly-state
+          key: mutants-nightly-state-${{ github.run_id }}
+
+      - name: Upload partial or complete missed-mutant report
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0, Node 24
         with:
           name: mutants-nightly-missed
           path: build/missed-mutants.txt
-          if-no-files-found: error
+          if-no-files-found: warn

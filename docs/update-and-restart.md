@@ -2,7 +2,9 @@
 
 On macOS, choose **Check for Updates…** from the Prismattyc app menu. The
 check runs on launch and daily when **Automatically Check for Updates** is
-enabled. That setting is off by default. Manual checks are always available.
+enabled, which is the default. Turn it off in the app menu or set
+`automatic_update_checks = false` in `config.toml`. Manual checks remain
+available either way.
 When a release is available, Prismattyc shows its version and release notes.
 Choosing **Install and Relaunch** verifies and installs it, restarts the host,
 and reconnects saved pmux views. **Roll Back Last Update…** restores the

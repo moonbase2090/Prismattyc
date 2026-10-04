@@ -90,7 +90,8 @@ It verifies the published checksum, Developer ID team, and Gatekeeper
 notarization before replacing the app. The previous verified app is kept for
 `pmux update --rollback`. The app restarts its host and reconnects saved pmux
 views. A daemon with active sessions stays running until a safe restart is
-possible. Automatic checks are opt-in in the app menu or `config.toml`.
+possible. Automatic checks are enabled by default. Turn them off in the app menu
+or set `automatic_update_checks = false` in `config.toml`.
 See [Update and restart](docs/update-and-restart.md).
 
 To preview removal, run `pmux uninstall --dry-run`. Run `pmux uninstall` to

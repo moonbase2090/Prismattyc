@@ -2967,6 +2967,7 @@ mod tests {
                     tok: &tok,
                     accent,
                     hover: None,
+                    drop_target: None,
                     bar_alpha: 0xff,
                     editing: None,
                 },

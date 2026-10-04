@@ -1001,7 +1001,7 @@ fn should_only_report(options: &Options, available: &Version, current: &Version)
 fn run_rollback(root: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        return run_macos_rollback(root);
+        run_macos_rollback(root)
     }
     #[cfg(not(target_os = "macos"))]
     {

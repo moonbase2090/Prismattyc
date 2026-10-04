@@ -4,10 +4,6 @@
 //! collapse toggles follow in later PRs; the default `bars` layout never
 //! builds this. Only reads pane-handle fields (#109 owns handle behavior).
 
-// #113 stacks with the render (PR2) and interaction (PR3) PRs, which call
-// this model; allow the unused-code lint until those land.
-#![allow(dead_code)]
-
 use crate::mux::TabInfo;
 use prismattyc_mux::SavedSpaceTab;
 
@@ -17,6 +13,8 @@ pub struct PaneNode {
     pub title: String,
     pub focused: bool,
     pub active: bool,
+    /// Waiting mail count (the mail badge).
+    pub mail: u32,
 }
 
 /// One tab row with its panes.
@@ -41,10 +39,17 @@ pub struct SpaceNode {
     pub tabs: Vec<TabNode>,
 }
 
+/// Live tab for the attached space: info plus per-pane mail depths aligned
+/// with the layout panes (empty means none waiting).
+pub struct LiveTab<'a> {
+    pub info: &'a TabInfo,
+    pub mail: &'a [u32],
+}
+
 /// Tabs for one space: live info for the attached space, saved file content
 /// for the rest.
 pub enum TabsSource<'a> {
-    Live(&'a [TabInfo]),
+    Live(&'a [LiveTab<'a>]),
     Saved {
         tabs: &'a [SavedSpaceTab],
         /// Sessions outside every saved tab; each becomes its own tab.
@@ -68,8 +73,9 @@ pub struct SidebarTree {
 }
 
 impl TabNode {
-    /// Live tab from the attached space.
-    pub fn live(info: &TabInfo) -> Self {
+    /// Live tab from the attached space; `mail` holds per-pane waiting
+    /// counts aligned with the layout panes (empty means none).
+    pub fn live(info: &TabInfo, mail: &[u32]) -> Self {
         let panes = if info.handles == 0 {
             vec![PaneNode {
                 title: info
@@ -78,6 +84,7 @@ impl TabNode {
                     .unwrap_or_else(|| info.title.clone()),
                 focused: info.selected,
                 active: info.active,
+                mail: mail.first().copied().unwrap_or(0),
             }]
         } else {
             info.handle_titles
@@ -87,6 +94,7 @@ impl TabNode {
                     title: title.clone(),
                     focused: info.focused_handle == Some(index),
                     active: info.handle_active.get(index).copied().unwrap_or(false),
+                    mail: mail.get(index).copied().unwrap_or(0),
                 })
                 .collect()
         };
@@ -114,6 +122,7 @@ impl TabNode {
                     title: session.clone(),
                     focused: false,
                     active: false,
+                    mail: 0,
                 })
                 .collect(),
         }
@@ -131,6 +140,57 @@ impl SpaceNode {
     }
 }
 
+/// One flattened tree row for layout and hit-testing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowKind {
+    Space,
+    Tab,
+    Pane,
+}
+
+/// One flattened row: indices into the tree plus depth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeRow {
+    pub depth: usize,
+    pub kind: RowKind,
+    pub space: usize,
+    pub tab: Option<usize>,
+    pub pane: Option<usize>,
+}
+
+/// Rows in paint order: every space, then tabs and panes of expanded ones.
+pub fn visible_rows(tree: &SidebarTree) -> Vec<TreeRow> {
+    let mut rows = Vec::new();
+    for (space_index, space) in tree.spaces.iter().enumerate() {
+        rows.push(TreeRow {
+            depth: 0,
+            kind: RowKind::Space,
+            space: space_index,
+            tab: None,
+            pane: None,
+        });
+        for (tab_index, tab) in space.visible_tabs().iter().enumerate() {
+            rows.push(TreeRow {
+                depth: 1,
+                kind: RowKind::Tab,
+                space: space_index,
+                tab: Some(tab_index),
+                pane: None,
+            });
+            for (pane_index, _) in tab.panes.iter().enumerate() {
+                rows.push(TreeRow {
+                    depth: 2,
+                    kind: RowKind::Pane,
+                    space: space_index,
+                    tab: Some(tab_index),
+                    pane: Some(pane_index),
+                });
+            }
+        }
+    }
+    rows
+}
+
 impl SidebarTree {
     /// Build the tree in rail order. Saved spaces with no recorded tabs
     /// show one tab per session.
@@ -138,7 +198,10 @@ impl SidebarTree {
         let mut tree = SidebarTree::default();
         for space in spaces {
             let tabs = match &space.tabs {
-                TabsSource::Live(infos) => infos.iter().map(TabNode::live).collect(),
+                TabsSource::Live(tabs) => tabs
+                    .iter()
+                    .map(|tab| TabNode::live(tab.info, tab.mail))
+                    .collect(),
                 TabsSource::Saved {
                     tabs,
                     extra_sessions,
@@ -199,7 +262,7 @@ mod tests {
 
     #[test]
     fn live_tabs_expand_handles_with_focus_and_activity() {
-        let tabs = vec![
+        let infos = vec![
             live_tab(
                 "grid",
                 true,
@@ -208,6 +271,12 @@ mod tests {
             ),
             live_tab("notes", false, vec![], None),
         ];
+        let mails: Vec<Vec<u32>> = vec![vec![0, 3], vec![]];
+        let tabs: Vec<LiveTab<'_>> = infos
+            .iter()
+            .zip(mails.iter())
+            .map(|(info, mail)| LiveTab { info, mail })
+            .collect();
         let tree = SidebarTree::build(&[SpaceInput {
             name: "lab",
             current: true,
@@ -224,11 +293,55 @@ mod tests {
         assert_eq!(grid.panes.len(), 2);
         assert!(!grid.panes[0].focused && grid.panes[0].active);
         assert!(grid.panes[1].focused && !grid.panes[1].active);
+        assert_eq!(grid.panes[0].mail, 0);
+        assert_eq!(grid.panes[1].mail, 3, "waiting mail rides the pane");
         // A single-pane tab shows its own title as the one pane.
         let notes = &space.tabs[1];
         assert_eq!(notes.panes.len(), 1);
         assert_eq!(notes.panes[0].title, "notes");
         assert!(!notes.panes[0].focused, "focus sits in the other tab");
+    }
+
+    #[test]
+    fn visible_rows_flatten_in_paint_order() {
+        let tabs = vec![SavedSpaceTab {
+            title: "main".to_string(),
+            sessions: vec!["shell".to_string()],
+        }];
+        let tree = SidebarTree::build(&[
+            SpaceInput {
+                name: "lab",
+                current: true,
+                collapsed: false,
+                attention: 0,
+                tabs: TabsSource::Saved {
+                    tabs: &tabs,
+                    extra_sessions: &[],
+                },
+            },
+            SpaceInput {
+                name: "mail",
+                current: false,
+                collapsed: true,
+                attention: 0,
+                tabs: TabsSource::Saved {
+                    tabs: &tabs,
+                    extra_sessions: &[],
+                },
+            },
+        ]);
+        let rows = visible_rows(&tree);
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.depth, row.kind, row.space))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, RowKind::Space, 0),
+                (1, RowKind::Tab, 0),
+                (2, RowKind::Pane, 0),
+                (0, RowKind::Space, 1),
+            ]
+        );
     }
 
     #[test]

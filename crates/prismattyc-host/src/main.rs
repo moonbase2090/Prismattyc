@@ -174,6 +174,9 @@ struct PaneSpacing {
     space_rail_pane_names: bool,
     /// `chrome_style` (#104). Classic keeps every pre-Graphite size.
     chrome_style: config::ChromeStyle,
+    /// `layout` (issue #113): `sidebar` swaps both bars for the tree.
+    /// Part of the geometry so a config change reflows through this path.
+    layout: config::LayoutMode,
     /// Window scale factor × 1000; only Graphite design sizes read it.
     ui_scale_milli: u32,
     /// `window_padding_px`, `pane_gap_px`, `pane_padding_px` were set in the
@@ -200,6 +203,7 @@ impl From<&config::ConfigFile> for PaneSpacing {
             space_rail_width_cols: config.space_rail_width_cols.unwrap_or(18),
             space_rail_pane_names: config.space_rail_pane_names.unwrap_or(true),
             chrome_style: config.chrome_style(),
+            layout: config.layout(),
             ui_scale_milli: 1000,
             explicit_spacing: [
                 config.window_padding_px.is_some(),
@@ -5370,12 +5374,29 @@ fn rasterize_frame(
             );
         }
     }
-    if should_paint_tab_strip(
-        show_tab_strip(host),
-        geom.top_chrome_px,
-        full,
-        strip_changed,
-    ) {
+    // The sidebar replaces both bars (issue #113): same damage condition
+    // the tabs bar used, so partial repaints behave the way the strip did.
+    // The spaces rail needs no gate: its layout is `None` while `rail_px`
+    // is zero, which the sidebar geometry guarantees.
+    let sidebar_mode = geom.chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar;
+    if sidebar_mode
+        && should_paint_tab_strip(
+            show_tab_strip(host),
+            geom.top_chrome_px,
+            full,
+            strip_changed,
+        )
+    {
+        paint_graphite_sidebar(host, buffer, width as usize, geom, height as usize);
+    }
+    if !sidebar_mode
+        && should_paint_tab_strip(
+            show_tab_strip(host),
+            geom.top_chrome_px,
+            full,
+            strip_changed,
+        )
+    {
         let editing = host
             .tab_rename
             .as_ref()
@@ -10000,6 +10021,248 @@ fn graphite_tab_text(
     }
 }
 
+/// Sidebar tree for `layout = "sidebar"` (#113): live tabs for the current
+/// space, saved files for the rest, collapse state from the rail. Attention
+/// follows the same badge switch as the tabs bar.
+fn graphite_sidebar_tree(
+    host: &HostState,
+    tabs: &[mux::TabInfo],
+    mail: &[Vec<u32>],
+) -> sidebar::SidebarTree {
+    let current = host
+        .space_rail
+        .current
+        .clone()
+        .or_else(|| host.mux.space_id.clone());
+    let live: Vec<sidebar::LiveTab> = tabs
+        .iter()
+        .enumerate()
+        .map(|(index, info)| sidebar::LiveTab {
+            info,
+            mail: mail.get(index).map(Vec::as_slice).unwrap_or(&[]),
+        })
+        .collect();
+    // Saved spaces stay alive for the build below; the tree copies titles.
+    let mut saved: Vec<(String, prismattyc_mux::SavedSpace, Vec<String>)> = Vec::new();
+    for name in &host.space_rail.names {
+        if Some(name) == current.as_ref() {
+            continue;
+        }
+        if let Ok(space) = load_space(&spaces_dir(), name) {
+            let order = prismattyc_mux::space_sessions_in_tab_order(&space);
+            saved.push((name.clone(), space, order));
+        }
+    }
+    let mut inputs: Vec<sidebar::SpaceInput> = Vec::new();
+    for name in &host.space_rail.names {
+        let attention = if host.attention_badge {
+            host.space_rail
+                .attention_counts
+                .get(name)
+                .copied()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let collapsed = host.space_rail.is_collapsed(name);
+        if Some(name) == current.as_ref() {
+            inputs.push(sidebar::SpaceInput {
+                name: name.as_str(),
+                current: true,
+                collapsed,
+                attention,
+                tabs: sidebar::TabsSource::Live(&live),
+            });
+        } else if let Some((_, space, order)) = saved.iter().find(|(saved, _, _)| saved == name) {
+            inputs.push(sidebar::SpaceInput {
+                name: name.as_str(),
+                current: false,
+                collapsed,
+                attention,
+                tabs: sidebar::TabsSource::Saved {
+                    tabs: &space.tabs,
+                    extra_sessions: order,
+                },
+            });
+        } else {
+            inputs.push(sidebar::SpaceInput {
+                name: name.as_str(),
+                current: false,
+                collapsed,
+                attention,
+                tabs: sidebar::TabsSource::Saved {
+                    tabs: &[],
+                    extra_sessions: &[],
+                },
+            });
+        }
+    }
+    sidebar::SidebarTree::build(&inputs)
+}
+
+/// Graphite sidebar (#113): paint the 256 px tree column and the 44 px
+/// header over the panes instead of the tabs bar and the spaces bar.
+fn paint_graphite_sidebar(
+    host: &mut HostState,
+    buffer: &mut [u32],
+    stride: usize,
+    geom: mux::HostGeom,
+    height: usize,
+) {
+    let mut tabs = host.mux.tab_infos();
+    if !host.attention_badge {
+        for tab in &mut tabs {
+            tab.attention = false;
+        }
+    }
+    let mail = host.mux.tab_pane_mail();
+    let tree = graphite_sidebar_tree(host, &tabs, &mail);
+    let visible = sidebar::visible_rows(&tree);
+    let column = graphite::Rect::new(0, 0, geom.sidebar_px, height);
+    // Fixed panel, internal scroll: PR3 owns the offset; PR2 paints the top.
+    let layout = graphite::sidebar_layout(geom.chrome, column, visible.len(), 0);
+    // Owned labels outlive the rows that borrow them.
+    let mut labels: Vec<String> = Vec::new();
+    let mut dots: Vec<Option<graphite::Dot>> = Vec::new();
+    let mut mails: Vec<u32> = Vec::new();
+    let mut selected_tabs: Vec<bool> = Vec::new();
+    for row in &visible {
+        let space = &tree.spaces[row.space];
+        match row.kind {
+            sidebar::RowKind::Space => {
+                labels.push(space.name.clone());
+                dots.push(None);
+                mails.push(0);
+                selected_tabs.push(false);
+            }
+            sidebar::RowKind::Tab => {
+                let tab = row.tab.and_then(|tab| space.tabs.get(tab));
+                // Same label and dot the tabs bar decides, so the tree and
+                // the bar never disagree; saved spaces have no live state.
+                let decided = match (space.current, row.tab) {
+                    (true, Some(index)) => tabs
+                        .get(index)
+                        .map(|info| graphite_tab_text(host, index, info, None)),
+                    _ => None,
+                };
+                match decided {
+                    Some(text) => {
+                        labels.push(text.label);
+                        dots.push(Some(text.dot));
+                        selected_tabs.push(text.selected);
+                    }
+                    None => {
+                        labels.push(tab.map(|tab| tab.title.clone()).unwrap_or_default());
+                        dots.push(Some(graphite::Dot::Idle));
+                        selected_tabs.push(false);
+                    }
+                }
+                mails.push(
+                    tab.map(|tab| tab.panes.iter().map(|pane| pane.mail).sum())
+                        .unwrap_or(0),
+                );
+            }
+            sidebar::RowKind::Pane => {
+                let pane = row
+                    .tab
+                    .and_then(|tab| space.tabs.get(tab))
+                    .and_then(|tab| row.pane.and_then(|pane| tab.panes.get(pane)));
+                labels.push(pane.map(|pane| pane.title.clone()).unwrap_or_default());
+                dots.push(None);
+                mails.push(pane.map(|pane| pane.mail).unwrap_or(0));
+                selected_tabs.push(false);
+            }
+        }
+    }
+    let rows: Vec<graphite::SidebarRow> = visible
+        .iter()
+        .zip(layout.rows.iter())
+        .enumerate()
+        .map(|(index, (row, slot))| {
+            let space = &tree.spaces[row.space];
+            graphite::SidebarRow {
+                slot: *slot,
+                depth: match row.kind {
+                    sidebar::RowKind::Space => 0,
+                    sidebar::RowKind::Tab => 1,
+                    sidebar::RowKind::Pane => 2,
+                },
+                chevron: match row.kind {
+                    sidebar::RowKind::Space => Some(space.collapsed),
+                    _ => None,
+                },
+                dot: dots[index],
+                label: labels[index].as_str(),
+                mail: mails[index],
+                needs_you: match row.kind {
+                    sidebar::RowKind::Space => space.attention,
+                    _ => 0,
+                },
+                selected: selected_tabs[index],
+                hovered: false,
+            }
+        })
+        .collect();
+    let tok = graphite::bar_tokens(host.theme.variant, host.bar_color);
+    graphite::paint_sidebar(
+        buffer,
+        stride,
+        &graphite::SidebarPaint {
+            chrome: geom.chrome,
+            tok: &tok,
+            accent: graphite::accent(&tok, focus_border_rgb(host.focus_border)),
+            layout: &layout,
+            title: "Spaces",
+            rows: &rows,
+            actions: [
+                graphite::SIDEBAR_ACTIONS[0],
+                graphite::SIDEBAR_ACTIONS[1],
+                graphite::SIDEBAR_ACTIONS[2],
+            ],
+            commands_hint: &graphite_chord_label(&host.keymap, keybind::Action::CommandPalette),
+            action_hovered: None,
+            alpha: host.chrome_alpha,
+        },
+    );
+    let span = graphite::Rect::new(
+        geom.sidebar_px,
+        0,
+        stride.saturating_sub(geom.sidebar_px),
+        geom.top_chrome_px,
+    );
+    let header = graphite::sidebar_header_layout(geom.chrome, span);
+    let crumb = host
+        .space_rail
+        .current
+        .clone()
+        .or_else(|| host.mux.space_id.clone())
+        .map(|space| {
+            let tab = tabs
+                .iter()
+                .find(|tab| tab.selected)
+                .map(|tab| tab.title.clone())
+                .unwrap_or_default();
+            if tab.is_empty() {
+                space
+            } else {
+                format!("{space} / {tab}")
+            }
+        })
+        .unwrap_or_else(|| "Prismattyc".to_string());
+    graphite::paint_sidebar_header(
+        buffer,
+        stride,
+        &graphite::SidebarHeaderPaint {
+            chrome: geom.chrome,
+            tok: &tok,
+            layout: &header,
+            crumb: &crumb,
+            arrange_hovered: None,
+            alpha: host.chrome_alpha,
+        },
+    );
+}
+
 /// `Ctrl Shift P` for the first chord bound to `action`; empty when unbound.
 fn graphite_chord_label(keymap: &keybind::KeyMap, action: keybind::Action) -> String {
     let Some(chord) = keymap.chords(action).into_iter().next() else {
@@ -11776,7 +12039,15 @@ fn host_geom(
     let window_pad = graphite_default(window_set, spacing.window_padding_px, graphite::WINDOW_PAD);
     let gap = graphite_default(gap_set, spacing.pane_gap_px, graphite::PANE_GAP);
     let inner_pad = graphite_default(pad_set, spacing.pane_padding_px, graphite::PANE_PAD);
-    let rail_px = if spacing.space_rail == space_rail::RailSide::Off {
+    // The sidebar replaces both bars (issue #113): graphite only, and the
+    // default bars path below is byte-for-byte what it was.
+    let sidebar = chrome.graphite && spacing.layout == config::LayoutMode::Sidebar;
+    let sidebar_px = if sidebar {
+        graphite::SIDEBAR_W.px(chrome)
+    } else {
+        0
+    };
+    let rail_px = if sidebar || spacing.space_rail == space_rail::RailSide::Off {
         0
     } else if chrome.graphite && spacing.space_rail.horizontal() {
         graphite::RAIL_H.px(chrome)
@@ -11800,7 +12071,7 @@ fn host_geom(
         pane_gap: if multi_pane { gap } else { 0 },
         rail_gap: gap,
         inner_pad,
-        top_chrome_px: if show_tabs && chrome.graphite {
+        top_chrome_px: if (show_tabs || sidebar) && chrome.graphite {
             graphite::TABS_BAR_H.px(chrome)
         } else if show_tabs {
             font.cell_h.saturating_mul(if handle_row { 2 } else { 1 })
@@ -11811,6 +12082,7 @@ fn host_geom(
         rail_side: spacing.space_rail,
         rail_px,
         rail_chip_cols: rail_chip_cap,
+        sidebar_px,
         chrome,
     }
 }
@@ -20973,6 +21245,7 @@ session mail (id 15)
             space_rail_width_cols: 18,
             space_rail_pane_names: true,
             chrome_style: config::ChromeStyle::Classic,
+            layout: config::LayoutMode::Bars,
             ui_scale_milli: 1000,
             explicit_spacing: [false; 3],
         };
@@ -20993,6 +21266,7 @@ session mail (id 15)
 
         let graphite = PaneSpacing {
             chrome_style: config::ChromeStyle::Graphite,
+            layout: config::LayoutMode::Bars,
             ..classic
         }
         .at_scale(2.0);
@@ -21019,6 +21293,51 @@ session mail (id 15)
         assert_eq!((geom.window_pad, geom.pane_gap, geom.inner_pad), (3, 16, 5));
     }
 
+    /// Issue #113: the sidebar reserves its 256 px tree, drops the spaces
+    /// rail, and keeps the 44 px top chrome for the header; bars and
+    /// classic geometry are untouched.
+    #[test]
+    fn sidebar_geometry_replaces_both_bars() {
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let bars = PaneSpacing {
+            window_padding_px: 3,
+            pane_gap_px: 3,
+            pane_padding_px: 5,
+            space_rail: space_rail::RailSide::Bottom,
+            space_rail_chip_cols: 0,
+            space_rail_width_cols: 18,
+            space_rail_pane_names: true,
+            chrome_style: config::ChromeStyle::Graphite,
+            layout: config::LayoutMode::Bars,
+            ui_scale_milli: 1000,
+            explicit_spacing: [false; 3],
+        };
+        let geom = host_geom(&font, true, true, true, bars, 10);
+        assert_eq!(geom.sidebar_px, 0);
+        assert!(geom.rail_px > 0);
+        let sidebar = PaneSpacing {
+            layout: config::LayoutMode::Sidebar,
+            ..bars
+        };
+        let geom = host_geom(&font, true, true, true, sidebar, 10);
+        assert_eq!(geom.sidebar_px, 256, "256 px tree at 1x");
+        assert_eq!(geom.rail_px, 0, "spaces bar replaced");
+        assert_eq!(geom.top_chrome_px, 44, "header keeps the bar height");
+        assert_eq!(geom.chrome_left(), 256);
+        let single = host_geom(&font, false, false, false, sidebar, 0);
+        assert_eq!(single.top_chrome_px, 44, "header shows for one tab");
+        assert_eq!(single.sidebar_px, 256);
+        let classic = PaneSpacing {
+            chrome_style: config::ChromeStyle::Classic,
+            ..sidebar
+        };
+        let geom = host_geom(&font, true, true, true, classic, 10);
+        assert_eq!(geom.sidebar_px, 0, "classic ignores the sidebar");
+        assert!(geom.rail_px > 0);
+    }
+
     /// Leftover pixels the cell grid cannot fill are split between both
     /// edges, so the frame is even left/right and top/bottom rather than
     /// piling every spare pixel on the right and bottom.
@@ -21036,6 +21355,7 @@ session mail (id 15)
             space_rail_width_cols: 18,
             space_rail_pane_names: false,
             chrome_style: config::ChromeStyle::Classic,
+            layout: config::LayoutMode::Bars,
             ui_scale_milli: 1000,
             explicit_spacing: [false; 3],
         };
@@ -21098,6 +21418,7 @@ session mail (id 15)
             space_rail_width_cols: 18,
             space_rail_pane_names: false,
             chrome_style: config::ChromeStyle::Classic,
+            layout: config::LayoutMode::Bars,
             ui_scale_milli: 1000,
             explicit_spacing: [false; 3],
         };
@@ -21135,6 +21456,7 @@ session mail (id 15)
             space_rail_width_cols: 18,
             space_rail_pane_names: false,
             chrome_style: config::ChromeStyle::Classic,
+            layout: config::LayoutMode::Bars,
             ui_scale_milli: 1000,
             explicit_spacing: [false; 3],
         };
@@ -21223,6 +21545,7 @@ session mail (id 15)
             space_rail_width_cols: 18,
             space_rail_pane_names: true,
             chrome_style: config::ChromeStyle::Classic,
+            layout: config::LayoutMode::Bars,
             ui_scale_milli: 1000,
             explicit_spacing: [false; 3],
         };
@@ -21232,6 +21555,7 @@ session mail (id 15)
 
         let graphite = PaneSpacing {
             chrome_style: config::ChromeStyle::Graphite,
+            layout: config::LayoutMode::Bars,
             ..classic
         };
         let left = host_geom(&font, false, true, false, graphite, 0);
@@ -21311,6 +21635,7 @@ session mail (id 15)
             space_rail_width_cols: 18,
             space_rail_pane_names: false,
             chrome_style: config::ChromeStyle::Classic,
+            layout: config::LayoutMode::Bars,
             ui_scale_milli: 1000,
             explicit_spacing: [false; 3],
         };

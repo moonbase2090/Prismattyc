@@ -895,14 +895,12 @@ impl SpaceRail {
     }
 
     /// Sidebar collapse state for one space (issue #113).
-    // #113 stacks with the render (PR2) and interaction (PR3) PRs, which
-    // call these; allow the unused-code lint until those land.
-    #[allow(dead_code)]
     pub fn is_collapsed(&self, name: &str) -> bool {
         self.collapsed_spaces.contains(name)
     }
 
     /// Collapse (`true`) or expand (`false`) one space in the sidebar tree.
+    // PR3 wires the toggles; allow the unused-code lint until then.
     #[allow(dead_code)]
     pub fn set_collapsed(&mut self, name: &str, collapsed: bool) {
         if collapsed {

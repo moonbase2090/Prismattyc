@@ -135,6 +135,9 @@ pub struct ConfigFile {
     /// Animate the launch splash's word art (beam sweep, reflection passes,
     /// lens flares). Default true; `false` shows the art static.
     pub splash_animation: Option<bool>,
+    /// Reduced motion (issue #111): the focus ring appears instantly on
+    /// focus change instead of sweeping. Default false.
+    pub reduced_motion: Option<bool>,
     /// Install the pmux Agent Skill for detected agents on the first launch
     /// of each app version. Default true; `PRISMATTYC_NO_AGENT_SKILLS=1` wins.
     pub install_agent_skills: Option<bool>,
@@ -1075,6 +1078,10 @@ mod tests {
         assert_eq!(load(&path).unwrap().pane_titles(), PaneTitlesMode::Hover);
         std::fs::write(&path, "chrome_style = \"graphite\"\n").unwrap();
         assert_eq!(load(&path).unwrap().chrome_style(), ChromeStyle::Graphite);
+        assert_eq!(ConfigFile::default().reduced_motion, None);
+        assert!(!load(&path).unwrap().reduced_motion.unwrap_or(false));
+        std::fs::write(&path, "reduced_motion = true\n").unwrap();
+        assert!(load(&path).unwrap().reduced_motion.unwrap_or(false));
         // chrome_opacity follows window_opacity unless set explicitly.
         let follows = ConfigFile {
             window_opacity: Some(0.8),

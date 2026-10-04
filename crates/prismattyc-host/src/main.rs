@@ -370,6 +370,9 @@ struct Cli {
     /// Draw the bright vehicle box at the sweep head (config
     /// `focus_border_animation_head`).
     light_cycle_head: bool,
+    /// Reduced motion (config-only `reduced_motion`; default off): the
+    /// focus ring appears instantly instead of sweeping.
+    reduced_motion: bool,
     /// Opt-in rich attachments (APC collect + z1 cell-rect paint).
     experimental_rich: bool,
     /// Opt-in alternate-screen scrollback retention (`--alt-screen-scrollback`
@@ -549,6 +552,7 @@ impl Cli {
             light_cycle: false,
             light_cycle_ms: DEFAULT_LIGHT_CYCLE_MS,
             light_cycle_head: true,
+            reduced_motion: false,
             experimental_rich,
             alt_screen_scrollback,
             gpu,
@@ -582,6 +586,7 @@ impl Cli {
             .focus_border_animation_ms
             .map_or(DEFAULT_LIGHT_CYCLE_MS, u128::from);
         self.light_cycle_head = file.focus_border_animation_head.unwrap_or(true);
+        self.reduced_motion = file.reduced_motion.unwrap_or(false);
         self.splash_animation = file.splash_animation.unwrap_or(true);
     }
 }
@@ -1007,6 +1012,8 @@ struct HostState {
     light_cycle_ms: u128,
     /// Whether the bright vehicle box rides the sweep's leading edge.
     light_cycle_head: bool,
+    /// Reduced motion: the focus ring appears instantly, never sweeping.
+    reduced_motion: bool,
     /// Focused pane at the last paint; a difference starts the sweep.
     last_focused: PaneId,
     /// Sweep start time while a light-cycle animation is running.
@@ -2654,6 +2661,14 @@ impl App {
                     host.dirty = true;
                 }
             }
+            if self.file_config.reduced_motion != prior.reduced_motion {
+                host.reduced_motion = self.file_config.reduced_motion.unwrap_or(false);
+                if host.reduced_motion {
+                    // Reduced motion settles a running sweep into the ring.
+                    host.border_anim = None;
+                    host.dirty = true;
+                }
+            }
             host.light_cycle_ms = self
                 .file_config
                 .focus_border_animation_ms
@@ -3463,6 +3478,7 @@ impl App {
                 light_cycle: self.cli.light_cycle,
                 light_cycle_ms: self.cli.light_cycle_ms,
                 light_cycle_head: self.cli.light_cycle_head,
+                reduced_motion: self.cli.reduced_motion,
                 last_focused: initial_focus,
                 border_anim: None,
                 border_underlay: Default::default(),
@@ -5011,6 +5027,13 @@ fn settle_pane_bells(host: &mut HostState, now: Instant) {
     });
 }
 
+/// A focus change starts the light-cycle sweep only when the animation is
+/// opted in, motion is allowed, and more than one pane needs the ring.
+/// Reduced motion (and a single pane) shows the ring instantly.
+fn sweep_armed(light_cycle: bool, reduced_motion: bool, panes: usize) -> bool {
+    light_cycle && !reduced_motion && panes > 1
+}
+
 fn rasterize_frame(
     host: &mut HostState,
     buffer: &mut [u32],
@@ -5218,7 +5241,7 @@ fn rasterize_frame(
     // every focus path (Alt+arrow, click, split, pane close) is covered.
     if focused != host.last_focused {
         host.last_focused = focused;
-        if host.light_cycle && host.mux.pane_count() > 1 {
+        if sweep_armed(host.light_cycle, host.reduced_motion, host.mux.pane_count()) {
             host.border_anim = Some(Instant::now());
             host.last_cycle_step = 0;
         }
@@ -5892,6 +5915,17 @@ fn rasterize_frame(
             let running = pane.is_active_at(frame_now);
             let multi = host.mux.pane_count() > 1;
             let tok = graphite::tokens(host.theme.variant);
+            // Graphite light-cycle (issue #111): the same focus-change
+            // sweep progress the classic border uses, traced round the
+            // 8 px ring. The underlay budget covers the 3 px head.
+            let sweep = cycle_progress.filter(|_| pane_id == focused);
+            if sweep.is_some_and(|progress| progress < 1.0) {
+                host.border_underlay.capture(
+                    buffer,
+                    width as usize,
+                    PixelRect::new(slot_x, slot_y, slot_width, slot_height),
+                );
+            }
             graphite::paint_pane_chrome(
                 buffer,
                 width as usize,
@@ -5918,6 +5952,8 @@ fn rasterize_frame(
                     focused: pane_id == focused,
                 },
                 multi,
+                sweep,
+                host.light_cycle_head,
             );
         } else if host.mux.pane_count() > 1 {
             if pane_id == focused && cycle_progress.is_some_and(|progress| progress < 1.0) {
@@ -19906,6 +19942,30 @@ session mail (id 15)
         // Removed keys restore the speed/head defaults too.
         assert_eq!(cli.light_cycle_ms, DEFAULT_LIGHT_CYCLE_MS);
         assert!(cli.light_cycle_head);
+    }
+
+    #[test]
+    fn sweep_arms_only_with_opt_in_motion_and_panes() {
+        assert!(sweep_armed(true, false, 2));
+        assert!(!sweep_armed(false, false, 2), "opt-in stays off");
+        assert!(
+            !sweep_armed(true, true, 2),
+            "reduced motion shows the ring instantly"
+        );
+        assert!(!sweep_armed(true, false, 1), "one pane needs no sweep");
+    }
+
+    #[test]
+    fn reduced_motion_is_config_opt_in_and_reversible() {
+        let mut cli = Cli::parse(["--", "/bin/sh"].into_iter().map(str::to_owned)).expect("parse");
+        assert!(!cli.reduced_motion, "motion defaults to full");
+        cli.apply_config(&config::ConfigFile {
+            reduced_motion: Some(true),
+            ..Default::default()
+        });
+        assert!(cli.reduced_motion);
+        cli.apply_config(&config::ConfigFile::default());
+        assert!(!cli.reduced_motion, "a removed key restores motion");
     }
 
     /// CI may export PRISMATTYC_FOCUS_BORDER; force the unpinned baseline the test needs.

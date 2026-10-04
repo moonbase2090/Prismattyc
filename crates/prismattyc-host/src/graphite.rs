@@ -123,6 +123,8 @@ pub(crate) struct Tokens {
     pub muted_focus: Rgb,
     /// Unseen/mail status as text (the dot colour fails AA on light).
     pub unseen_text: Rgb,
+    /// Light-cycle vehicle head at the sweep's leading edge.
+    pub cycle_head: Rgb,
 }
 
 pub(crate) const DARK: Tokens = Tokens {
@@ -157,6 +159,7 @@ pub(crate) const DARK: Tokens = Tokens {
     title_focus_line: rgb(0x2a3140),
     muted_focus: rgb(0xb4bcc9),
     unseen_text: rgb(0xf2b84b),
+    cycle_head: rgb(0xd6e8ff),
 };
 
 pub(crate) const LIGHT: Tokens = Tokens {
@@ -191,6 +194,7 @@ pub(crate) const LIGHT: Tokens = Tokens {
     title_focus_line: rgb(0xcddcf3),
     muted_focus: rgb(0x4a525e),
     unseen_text: rgb(0x9a6200),
+    cycle_head: rgb(0x163f80),
 };
 
 pub(crate) fn tokens(variant: ThemeVariant) -> &'static Tokens {
@@ -1479,6 +1483,106 @@ pub(crate) struct PaneHeader<'a> {
     pub focused: bool,
 }
 
+// ---------------------------------------------------------------------------
+// Light-cycle sweep (issue #111)
+
+/// Centerline of the 2 px focus ring around `slot`, sampled clockwise from
+/// the top-left corner at ~1 px arc steps — including across the corner
+/// arcs (arc-length stepping) — so quantized progress advances evenly and
+/// the head rounds the 8 px corners instead of cutting them.
+pub(crate) struct RingSweep {
+    samples: Vec<(f32, f32)>,
+}
+
+impl RingSweep {
+    /// Samples for the ring `paint_pane_chrome` draws: 1 px on the slot
+    /// edge, 1 px outside, corners on `radius`.
+    pub(crate) fn for_slot(slot: Rect, radius: f32) -> Self {
+        let (x0, y0) = (slot.x as f32, slot.y as f32);
+        let (x1, y1) = (slot.right() as f32, (slot.y + slot.h) as f32);
+        let r = radius.min((x1 - x0) / 2.0).min((y1 - y0) / 2.0).max(0.0);
+        let mut samples = Vec::new();
+        use std::f32::consts::{FRAC_PI_2, PI};
+        push_straight(&mut samples, x0 + r, y0, x1 - r, y0);
+        push_arc(&mut samples, x1 - r, y0 + r, r, -FRAC_PI_2, 0.0);
+        push_straight(&mut samples, x1, y0 + r, x1, y1 - r);
+        push_arc(&mut samples, x1 - r, y1 - r, r, 0.0, FRAC_PI_2);
+        push_straight(&mut samples, x1 - r, y1, x0 + r, y1);
+        push_arc(&mut samples, x0 + r, y1 - r, r, FRAC_PI_2, PI);
+        push_straight(&mut samples, x0, y1 - r, x0, y0 + r);
+        push_arc(&mut samples, x0 + r, y0 + r, r, PI, 3.0 * FRAC_PI_2);
+        Self { samples }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// Paint the first `traced` samples as a 2 px accent trail with the 3 px
+    /// head box at the leading edge (`head = false` leaves the trail only).
+    /// Trail and head hug the ring band, inside the 7 px `BorderUnderlay`
+    /// strips the classic sweep budgets.
+    pub(crate) fn paint(
+        &self,
+        buffer: &mut [u32],
+        stride: usize,
+        traced: usize,
+        ink: Rgb,
+        head_ink: Rgb,
+        head: bool,
+    ) {
+        let n = traced.min(self.samples.len());
+        for &(sx, sy) in &self.samples[..n] {
+            stamp_disc(buffer, stride, sx, sy, ink);
+        }
+        if head {
+            if let Some(&(hx, hy)) = self.samples[..n].last() {
+                let (cx, cy) = (hx.round() as i32, hy.round() as i32);
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        blend(buffer, stride, cx + dx, cy + dy, head_ink, 1.0);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One straight centerline run; the endpoint belongs to the next segment.
+fn push_straight(samples: &mut Vec<(f32, f32)>, ax: f32, ay: f32, bx: f32, by: f32) {
+    let len = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
+    if len < 0.5 {
+        return;
+    }
+    let steps = len.round() as usize;
+    for i in 0..steps {
+        let t = i as f32 / steps as f32;
+        samples.push((ax + (bx - ax) * t, ay + (by - ay) * t));
+    }
+}
+
+/// One corner arc with arc-length-spaced samples (~1 px apart).
+fn push_arc(samples: &mut Vec<(f32, f32)>, cx: f32, cy: f32, r: f32, a0: f32, a1: f32) {
+    let steps = ((a1 - a0).abs() * r).round().max(1.0) as usize;
+    for i in 0..steps {
+        let a = a0 + (a1 - a0) * i as f32 / steps as f32;
+        samples.push((cx + r * a.cos(), cy + r * a.sin()));
+    }
+}
+
+/// 2 px trail stamp: full cover within half a pixel, gone by 1.5 px.
+fn stamp_disc(buffer: &mut [u32], stride: usize, cx: f32, cy: f32, ink: Rgb) {
+    for py in (cy as i32 - 2)..=(cy as i32 + 2) {
+        for px in (cx as i32 - 2)..=(cx as i32 + 2) {
+            let d = ((px as f32 + 0.5 - cx).powi(2) + (py as f32 + 0.5 - cy).powi(2)).sqrt();
+            let cover = (1.5 - d).clamp(0.0, 1.0);
+            if cover > 0.0 {
+                blend(buffer, stride, px, py, ink, cover);
+            }
+        }
+    }
+}
+
 /// The pane slot as a rounded card: `ground` fills the corners, `surface`
 /// the inside. Run before the terminal rows are painted.
 #[allow(clippy::too_many_arguments)]
@@ -1527,6 +1631,12 @@ pub(crate) fn paint_pane_chrome(
     surface: Rgb,
     header: &PaneHeader<'_>,
     ring: bool,
+    // Light-cycle sweep (issue #111): Some(0..1 progress) traces the ring
+    // clockwise from the top-left instead of painting it at once; None (or
+    // >= 1.0) is the settled 2 px ring. `cycle_head` draws the 3 px vehicle
+    // box at the leading edge, trail-only when false.
+    cycle: Option<f32>,
+    cycle_head: bool,
 ) {
     let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
     let p = |d: f32| chrome.px(d);
@@ -1700,17 +1810,26 @@ pub(crate) fn paint_pane_chrome(
     let (x0, y0) = (slot.x as f32, slot.y as f32);
     let (x1, y1) = (slot.right() as f32, (slot.y + slot.h) as f32);
     if ring && header.focused {
-        stroke_round_rect(
-            buffer,
-            stride,
-            x0 - 1.0,
-            y0 - 1.0,
-            x1 + 1.0,
-            y1 + 1.0,
-            r + 1.0,
-            2.0,
-            accent,
-        );
+        if let Some(progress) = cycle.filter(|p| *p < 1.0) {
+            // Mid-sweep the untraced remainder stays a neutral hairline;
+            // the accent trail settles into the 2 px ring at completion.
+            stroke_round_rect(buffer, stride, x0, y0, x1, y1, r, 1.0, tok.hairline);
+            let sweep = RingSweep::for_slot(slot, r);
+            let traced = (progress.clamp(0.0, 1.0) * sweep.len() as f32).round() as usize;
+            sweep.paint(buffer, stride, traced, accent, tok.cycle_head, cycle_head);
+        } else {
+            stroke_round_rect(
+                buffer,
+                stride,
+                x0 - 1.0,
+                y0 - 1.0,
+                x1 + 1.0,
+                y1 + 1.0,
+                r + 1.0,
+                2.0,
+                accent,
+            );
+        }
     } else {
         stroke_round_rect(buffer, stride, x0, y0, x1, y1, r, 1.0, tok.hairline);
     }
@@ -2147,6 +2266,204 @@ mod tests {
     }
 
     #[test]
+    fn ring_sweep_starts_top_left_runs_clockwise_with_even_arc_steps() {
+        let sweep = RingSweep::for_slot(Rect::new(0, 0, 100, 60), 8.0);
+        // 2*(100-16) + 2*(60-16) + 2*pi*8 ≈ 306 centerline pixels.
+        assert!(
+            (300..=312).contains(&sweep.len()),
+            "arc-length total {}",
+            sweep.len()
+        );
+        let samples = &sweep.samples;
+        // Starts at the top-left corner's straight, heading clockwise (+x).
+        assert!((samples[0].0 - 8.0).abs() < 0.6 && samples[0].1.abs() < 0.6);
+        assert!(samples[10].0 > samples[0].0 && samples[10].1.abs() < 0.6);
+        // Even ~1 px steps everywhere, including across the corner arcs.
+        let mut worst = 0.0f32;
+        for pair in samples.windows(2) {
+            let gap = ((pair[1].0 - pair[0].0).powi(2) + (pair[1].1 - pair[0].1).powi(2)).sqrt();
+            worst = worst.max(gap);
+        }
+        assert!(worst <= 1.5, "uneven arc step {worst}");
+        // Clockwise order: right edge, then bottom, then left.
+        let right = samples
+            .iter()
+            .position(|&(x, _)| x > 99.0)
+            .expect("reaches the right edge");
+        let bottom = samples
+            .iter()
+            .position(|&(_, y)| y > 59.0)
+            .expect("reaches the bottom edge");
+        let left = samples
+            .iter()
+            .rposition(|&(x, _)| x < 1.0)
+            .expect("returns up the left edge");
+        assert!(right < bottom && bottom < left);
+        // The loop closes back near the start.
+        let last = samples.last().unwrap();
+        let home = ((last.0 - 8.0).powi(2) + last.1.powi(2)).sqrt();
+        assert!(home < 2.0, "loop closes {last:?}");
+    }
+
+    #[test]
+    fn sweep_paints_trail_head_and_neutral_remainder() {
+        let (w, h) = (140usize, 100usize);
+        let slot = Rect::new(10, 10, 100, 60);
+        let ground = pack_argb(0xff, DARK.ground);
+        let accent = rgb(0x5aa2ff);
+        let sweep = RingSweep::for_slot(slot, 8.0);
+        let at = |buffer: &[u32], x: usize, y: usize| unpack_rgb(buffer[y * w + x]);
+
+        // Progress zero paints nothing.
+        let mut buffer = vec![ground; w * h];
+        sweep.paint(&mut buffer, w, 0, accent, DARK.cycle_head, true);
+        assert!(buffer.iter().all(|&px| px == ground));
+
+        // Quarter sweep: top edge traced, bottom still ground. (Trail
+        // stamps blend, so only the solid head hits an exact color.)
+        let traced = sweep.len() / 4;
+        let mut buffer = vec![ground; w * h];
+        sweep.paint(&mut buffer, w, traced, accent, DARK.cycle_head, true);
+        assert_ne!(at(&buffer, 20, 10), DARK.ground, "trail behind the head");
+        assert_eq!(at(&buffer, 50, 69), DARK.ground, "remainder stays neutral");
+        // The 3 px head box rides the leading edge in the token color.
+        let (hx, hy) = sweep.samples[traced - 1];
+        let (hx, hy) = (hx.round() as usize, hy.round() as usize);
+        assert_eq!(at(&buffer, hx, hy), DARK.cycle_head);
+        assert_eq!(at(&buffer, hx.saturating_sub(1), hy), DARK.cycle_head);
+        assert_eq!(at(&buffer, hx, hy + 1), DARK.cycle_head);
+
+        // Head off leaves the trail only.
+        let mut headless = vec![ground; w * h];
+        sweep.paint(&mut headless, w, traced, accent, DARK.cycle_head, false);
+        assert_ne!(at(&headless, hx, hy), DARK.cycle_head);
+        assert_ne!(
+            at(&headless, 20, 10),
+            DARK.ground,
+            "trail paints without the head"
+        );
+    }
+
+    #[test]
+    fn pane_chrome_sweep_settles_into_the_static_ring() {
+        let (w, h) = (300usize, 200usize);
+        let slot = Rect::new(20, 20, 260, 160);
+        let accent = rgb(0x5aa2ff);
+        let paint = |cycle: Option<f32>| {
+            let mut buffer = vec![pack_argb(0xff, DARK.ground); w * h];
+            paint_pane_chrome(
+                &mut buffer,
+                w,
+                scale(1000),
+                &DARK,
+                accent,
+                slot,
+                rgb(0x121214),
+                &PaneHeader {
+                    name: "notes",
+                    meta: None,
+                    dot: Dot::Idle,
+                    status: PaneStatus::Focused,
+                    focused: true,
+                },
+                true,
+                cycle,
+                true,
+            );
+            buffer
+        };
+        let settled = paint(None);
+        let mid = paint(Some(0.25));
+        assert_ne!(mid, settled, "mid-sweep differs from the settled ring");
+        assert_eq!(
+            paint(Some(1.0)),
+            settled,
+            "a completed sweep is the static ring"
+        );
+    }
+
+    /// Job-only stills for design review (issue #111): set
+    /// `PRISMATTYC_DUMP_SWEEP` to a directory to paint the sweep at fixed
+    /// progress values plus the settled ring, dark and light. A plain
+    /// `cargo test` run never writes.
+    #[test]
+    fn dump_sweep_stills_for_review() {
+        let Some(dir) = std::env::var_os("PRISMATTYC_DUMP_SWEEP") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).expect("stills dir");
+        let accent = rgb(0x5aa2ff);
+        for (name, tok, surface) in [
+            ("dark", &DARK, rgb(0x1b1f26)),
+            ("light", &LIGHT, rgb(0xffffff)),
+        ] {
+            for (still, progress) in [
+                ("p000", Some(0.0)),
+                ("p025", Some(0.25)),
+                ("p050", Some(0.5)),
+                ("p075", Some(0.75)),
+                ("settled", None),
+            ] {
+                let (w, h) = (360usize, 240usize);
+                let slot = Rect::new(30, 20, 300, 200);
+                let mut buffer = vec![pack_argb(0xff, tok.ground); w * h];
+                paint_pane_surface(
+                    &mut buffer,
+                    w,
+                    scale(1000),
+                    slot,
+                    tok.ground,
+                    0xff,
+                    surface,
+                    0xff,
+                );
+                paint_pane_chrome(
+                    &mut buffer,
+                    w,
+                    scale(1000),
+                    tok,
+                    accent,
+                    slot,
+                    surface,
+                    &PaneHeader {
+                        name: "notes",
+                        meta: Some("review"),
+                        dot: Dot::Working,
+                        status: PaneStatus::Focused,
+                        focused: true,
+                    },
+                    true,
+                    progress,
+                    true,
+                );
+                write_still_png(
+                    &dir.join(format!("sweep-{name}-{still}.png")),
+                    &buffer,
+                    w,
+                    h,
+                );
+            }
+        }
+    }
+
+    fn write_still_png(path: &std::path::Path, pixels: &[u32], width: usize, height: usize) {
+        let file = std::fs::File::create(path).expect("still file");
+        let mut encoder = png::Encoder::new(file, width as u32, height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        let mut rgba = vec![0u8; width * height * 4];
+        for (i, px) in pixels.iter().enumerate() {
+            rgba[i * 4] = ((px >> 16) & 0xff) as u8;
+            rgba[i * 4 + 1] = ((px >> 8) & 0xff) as u8;
+            rgba[i * 4 + 2] = (px & 0xff) as u8;
+            rgba[i * 4 + 3] = ((px >> 24) & 0xff) as u8;
+        }
+        writer.write_image_data(&rgba).expect("png data");
+    }
+
+    #[test]
     fn pane_chrome_rings_the_focused_pane_and_outlines_the_rest() {
         let (w, h) = (300usize, 200usize);
         let slot = Rect::new(20, 20, 260, 160);
@@ -2178,6 +2495,8 @@ mod tests {
                     status: PaneStatus::decide(false, 0, false, false, focused),
                     focused,
                 },
+                true,
+                None,
                 true,
             );
             buffer

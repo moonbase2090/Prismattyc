@@ -100,6 +100,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         value: ConfigValue::Bool(true),
     },
     ConfigKey {
+        name: "reduced_motion",
+        group: ConfigGroup::Appearance,
+        doc: "Skip focus-change animation; the focus ring appears instantly",
+        range: "true|false",
+        value: ConfigValue::Bool(false),
+    },
+    ConfigKey {
         name: "tab_strip",
         group: ConfigGroup::Appearance,
         doc: "Tab strip visibility: auto and always show one tab; multi needs two tabs",

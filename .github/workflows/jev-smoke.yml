@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: MPL-2.0
 name: Jev smoke
 
-# Manual smoke test: one trivial Jev request through Cloudflare AI Gateway with the
-# same secrets as the nightly jev-shadow job. Costs well under one cent per run.
+# Manual smoke test: one Jev request through Cloudflare AI Gateway with the same
+# secrets and client code as the nightly jev-shadow job. Costs well under one cent
+# per run (about 300 input tokens for the default question at USD 0.042 per 1M).
+#   gh workflow run jev-smoke.yml -R moonbase2090/Prismattyc
 
 on:
   workflow_dispatch:
@@ -15,8 +17,6 @@ on:
         description: Also run read-only token/gateway checks and header variants on 403
         type: boolean
         default: false
-  push:
-    branches: [fix/jev-gateway-smoke]
 
 permissions:
   contents: read

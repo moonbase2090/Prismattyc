@@ -1,0 +1,188 @@
+name: Jev PR triage
+# SPDX-License-Identifier: MPL-2.0
+# Advisory only. This workflow does not fail the check, block a merge,
+# approve a pull request, or request changes. It stays off until the
+# repository variable JEV_PR_TRIAGE_ENABLED is true.
+# Pull request title, body, and diff are untrusted. They are fetched into
+# files and passed to the script as paths. They are not interpolated into a shell command.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jev-pr-triage-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  triage:
+    name: Advisory triage
+    if: ${{ github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0, Node 24
+
+      - name: Decide whether to run
+        id: gate
+        env:
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+          ENABLED: ${{ vars.JEV_PR_TRIAGE_ENABLED }}
+          CREDS: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' && secrets.CLOUDFLARE_API_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          mode=dry-run
+          reason=""
+          if [[ "$HEAD_REPO" != "$BASE_REPO" || "$ACTOR" == "dependabot[bot]" || "$ACTOR" == "dependabot" ]]; then
+            echo "skipped: no credentials"
+            mode=skip
+            reason="no credentials"
+          elif [[ "$ENABLED" != "true" ]]; then
+            echo "Jev PR triage is disabled; building a no-network dry-run."
+            mode=dry-run
+          elif [[ "$CREDS" != "true" ]]; then
+            echo "skipped: no credentials"
+            mode=skip
+            reason="no credentials"
+          else
+            echo "Jev PR triage is enabled."
+            mode=live
+          fi
+          {
+            echo "mode=$mode"
+            echo "reason=$reason"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Fetch pull request inputs
+        id: fetch
+        if: ${{ steps.gate.outputs.mode != 'skip' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/jev-pr-triage
+          ok=true
+          if ! gh api "repos/${REPO}/pulls/${PR_NUMBER}" > build/jev-pr-triage/pr.json; then
+            ok=false
+          fi
+          if [[ "$ok" == "true" ]] && ! gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" > build/jev-pr-triage/files.json; then
+            ok=false
+          fi
+          if [[ "$ok" == "true" ]] && ! gh api -H "Accept: application/vnd.github.diff" "repos/${REPO}/pulls/${PR_NUMBER}" > build/jev-pr-triage/diff.txt; then
+            ok=false
+          fi
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+
+      - name: Record a GitHub API skip
+        if: ${{ steps.gate.outputs.mode != 'skip' && steps.fetch.outputs.ok != 'true' }}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/jev-pr-triage
+          python3 scripts/jev-pr-triage.py \
+            --skip "github api error" \
+            --repository "$REPO" \
+            --pr-number "$PR_NUMBER" \
+            --run-id "$GITHUB_RUN_ID" \
+            --output build/jev-pr-triage/artifact.json
+          echo "skipped: github api error" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Dry-run triage
+        if: ${{ steps.gate.outputs.mode == 'dry-run' && steps.fetch.outputs.ok == 'true' }}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 scripts/jev-pr-triage.py \
+            --dry-run \
+            --repository "$REPO" \
+            --pr-json build/jev-pr-triage/pr.json \
+            --files-json build/jev-pr-triage/files.json \
+            --diff build/jev-pr-triage/diff.txt \
+            --workspace . \
+            --pr-number "$PR_NUMBER" \
+            --run-id "$GITHUB_RUN_ID" \
+            --output build/jev-pr-triage/artifact.json
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          data = json.load(open("build/jev-pr-triage/artifact.json", encoding="utf-8"))
+          planned = ", ".join(data.get("labels_planned") or []) or "no labels"
+          print(f"Jev PR triage dry-run for #{data.get('pr_number')}: planned {planned}.")
+          print("Advisory only; not a review. Labels may be wrong.")
+          PY
+
+      - name: Live triage
+        if: ${{ steps.gate.outputs.mode == 'live' && steps.fetch.outputs.ok == 'true' }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_AI_GATEWAY_TOKEN: ${{ secrets.CLOUDFLARE_AI_GATEWAY_TOKEN }}
+          CLOUDFLARE_AI_GATEWAY_ID: ${{ secrets.CLOUDFLARE_AI_GATEWAY_ID }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 scripts/jev-pr-triage.py \
+            --live \
+            --repository "$REPO" \
+            --pr-json build/jev-pr-triage/pr.json \
+            --files-json build/jev-pr-triage/files.json \
+            --diff build/jev-pr-triage/diff.txt \
+            --workspace . \
+            --pr-number "$PR_NUMBER" \
+            --run-id "$GITHUB_RUN_ID" \
+            --output build/jev-pr-triage/artifact.json
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          data = json.load(open("build/jev-pr-triage/artifact.json", encoding="utf-8"))
+          err = data.get("error")
+          if err:
+              print(f"triage unavailable: {err}")
+          else:
+              applied = ", ".join(data.get("labels_applied") or []) or "no new labels"
+              print(f"Jev PR triage applied {applied}.")
+          print("Advisory only; not a review. Labels may be wrong.")
+          PY
+
+      - name: Skip without credentials
+        if: ${{ steps.gate.outputs.mode == 'skip' }}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/jev-pr-triage
+          python3 scripts/jev-pr-triage.py \
+            --skip "no credentials" \
+            --repository "$REPO" \
+            --pr-number "$PR_NUMBER" \
+            --run-id "$GITHUB_RUN_ID" \
+            --output build/jev-pr-triage/artifact.json
+          echo "skipped: no credentials" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload triage artifact
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0, Node 24
+        with:
+          name: jev-pr-triage-${{ github.event.pull_request.number }}-${{ github.run_id }}
+          path: build/jev-pr-triage/artifact.json
+          retention-days: 30
+          if-no-files-found: warn

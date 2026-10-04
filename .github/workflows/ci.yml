@@ -1129,6 +1129,7 @@ jobs:
       - name: Mutants gate unit tests
         run: |
           python3 scripts/jev-shadow_test.py
+          python3 scripts/jev-pr-triage_test.py
           python3 scripts/mutants-gate_test.py
           python3 scripts/mutants-route_test.py
           python3 scripts/la-heavy-serial_test.py

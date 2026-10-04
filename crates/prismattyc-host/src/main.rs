@@ -124,10 +124,11 @@ use raster::{
     rasterize_screen_at_with_theme_options_filtered, rasterize_scroll_chip, rasterize_scrollbar,
     rasterize_space_rail, rasterize_splash, rasterize_tab_strip_with_theme, rasterize_theme_picker,
     rasterize_walkthrough_caption, scrollbar_layout, scrollbar_scroll_from_thumb_y,
-    scrollbar_thumb_y_for_pointer, set_rect_alpha, theme_picker_visible_rows, FontMetrics,
-    OverlaySurface, PaletteFrame, PaletteLayout, PaletteLayoutMode, PalettePointerTarget,
-    PaletteSection, ScreenPaint, ScrollbarLayout, ThemePickerRow, TitleRowStyle,
-    DEFAULT_FOCUS_BORDER_INDEX, OPAQUE_ALPHA, THEME_PICKER_HINT_FAMILY, THEME_PICKER_HINT_ROOT,
+    scrollbar_thumb_y_for_pointer, set_rect_alpha, theme_picker_hit, theme_picker_visible_rows,
+    FontMetrics, OverlaySurface, PaletteFrame, PaletteLayout, PaletteLayoutMode,
+    PalettePointerTarget, PaletteSection, ScreenPaint, ScrollbarLayout, ThemePickerRow,
+    TitleRowStyle, DEFAULT_FOCUS_BORDER_INDEX, OPAQUE_ALPHA, THEME_PICKER_HINT_FAMILY,
+    THEME_PICKER_HINT_ROOT,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -1316,6 +1317,10 @@ enum HoverTarget {
     Strip(mux::StripHit),
     Rail(space_rail::RailHit),
     ScrollbarThumb(PaneId),
+    ThemePickerRow(usize),
+    ContextMenuRow(usize),
+    DialogButton(usize),
+    ToastDismiss(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8690,6 +8695,39 @@ fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
             PalettePointerTarget::Filter(index) => Some(HoverTarget::PaletteFilter(index)),
         };
     }
+    if host.context_menu.is_some() {
+        let (x, y) = host
+            .pointer_px
+            .filter(|(x, y)| x.is_finite() && y.is_finite() && *x >= 0.0 && *y >= 0.0)?;
+        let layout = host.palette_layout.as_ref()?;
+        if let Some(row) = palette_hit(layout, x as usize, y as usize) {
+            return Some(HoverTarget::ContextMenuRow(row));
+        }
+    }
+    if let Some(button) = session_prompt::hover_button(host) {
+        return Some(HoverTarget::DialogButton(button));
+    }
+    if let Some(button) = restore_prompt::hover_button(host) {
+        return Some(HoverTarget::DialogButton(button));
+    }
+    if let Some(picker) = host.theme_picker.as_ref() {
+        let (x, y) = host
+            .pointer_px
+            .filter(|(x, y)| x.is_finite() && y.is_finite() && *x >= 0.0 && *y >= 0.0)?;
+        let size = host.window.inner_size();
+        let count = picker_items(picker.family.as_deref()).len();
+        if let Some(row) = theme_picker_hit(
+            &host.font,
+            count,
+            picker.scroll,
+            size.width as usize,
+            size.height as usize,
+            x as usize,
+            y as usize,
+        ) {
+            return Some(HoverTarget::ThemePickerRow(row));
+        }
+    }
     if pointer_hover_blocked(host) {
         return None;
     }
@@ -8739,6 +8777,9 @@ fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
             Some(space_rail::RailHit::Empty) | None => {}
         }
     }
+    if let Some(index) = bell_toast_at_pointer(host, px, py) {
+        return Some(HoverTarget::ToastDismiss(index));
+    }
     pane_scrollbar_at(host, px, py)
         .filter(|(_, bar, _)| bar.thumb_contains(py))
         .map(|(pane, _, _)| HoverTarget::ScrollbarThumb(pane))
@@ -8766,6 +8807,11 @@ fn cursor_for_hover(
                 | Some(HoverTarget::Caption(Some(_)))
                 | Some(HoverTarget::Strip(_))
                 | Some(HoverTarget::Rail(_))
+                | Some(HoverTarget::ScrollbarThumb(_))
+                | Some(HoverTarget::ThemePickerRow(_))
+                | Some(HoverTarget::ContextMenuRow(_))
+                | Some(HoverTarget::DialogButton(_))
+                | Some(HoverTarget::ToastDismiss(_))
         )
     {
         CursorIcon::Pointer
@@ -12277,20 +12323,11 @@ fn handle_caption_escape(host: &mut HostState) -> bool {
     }
 }
 
-/// Left-click on a bell toast chip dismisses it and swallows the click.
-fn handle_bell_toast_click(host: &mut HostState, button: MouseButton) -> bool {
-    if button != MouseButton::Left || host.bell_toasts.is_empty() {
-        return false;
-    }
-    let Some((px, py)) = host
-        .pointer_px
-        .filter(|(x, y)| x.is_finite() && y.is_finite() && *x >= 0.0 && *y >= 0.0)
-    else {
-        return false;
-    };
-    let (px, py) = (px as usize, py as usize);
+/// Index of the bell toast chip under the pointer, if any. Clicks and hover
+/// share this so the dismiss cursor matches the dismiss target.
+fn bell_toast_at_pointer(host: &HostState, px: usize, py: usize) -> Option<usize> {
     let geom = host.mux.geom();
-    let hit = host.bell_toasts.iter().position(|toast| {
+    host.bell_toasts.iter().position(|toast| {
         let Some((_, rect)) = host.mux.rects().find(|(id, _)| *id == toast.pane) else {
             return false;
         };
@@ -12311,8 +12348,21 @@ fn handle_bell_toast_click(host: &mut HostState, button: MouseButton) -> bool {
             guest_h,
         )
         .is_some_and(|(x0, y0, w, h)| px >= x0 && px < x0 + w && py >= y0 && py < y0 + h)
-    });
-    let Some(idx) = hit else {
+    })
+}
+
+/// Left-click on a bell toast chip dismisses it and swallows the click.
+fn handle_bell_toast_click(host: &mut HostState, button: MouseButton) -> bool {
+    if button != MouseButton::Left || host.bell_toasts.is_empty() {
+        return false;
+    }
+    let Some((px, py)) = host
+        .pointer_px
+        .filter(|(x, y)| x.is_finite() && y.is_finite() && *x >= 0.0 && *y >= 0.0)
+    else {
+        return false;
+    };
+    let Some(idx) = bell_toast_at_pointer(host, px as usize, py as usize) else {
         return false;
     };
     host.bell_toasts.remove(idx);
@@ -13674,6 +13724,9 @@ impl ApplicationHandler<UserAction> for App {
                     host.pointer_px = Some((position.x, position.y));
                     host.cursor_cell = None;
                     apply_palette_pointer(host);
+                    if sync_chrome_hover(host) {
+                        host.window.request_redraw();
+                    }
                 }
                 WindowEvent::CursorLeft { .. } => {
                     host.pointer_px = None;
@@ -19728,8 +19781,20 @@ session mail (id 15)
         );
         assert_eq!(
             cursor_for_hover(scrollbar, false, false, None, false),
-            CursorIcon::Default
+            CursorIcon::Pointer,
+            "scrollbar thumb hovers with the pointing hand"
         );
+        for hover in [
+            Some(HoverTarget::ThemePickerRow(0)),
+            Some(HoverTarget::ContextMenuRow(1)),
+            Some(HoverTarget::DialogButton(0)),
+            Some(HoverTarget::ToastDismiss(0)),
+        ] {
+            assert_eq!(
+                cursor_for_hover(hover, false, false, None, false),
+                CursorIcon::Pointer
+            );
+        }
         assert_eq!(
             cursor_for_hover(tab, true, false, None, true),
             CursorIcon::Grab

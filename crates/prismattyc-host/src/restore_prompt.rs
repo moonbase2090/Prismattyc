@@ -72,6 +72,7 @@ pub(super) fn handle_pointer(host: &mut HostState, event: &WindowEvent) -> bool 
                 host.restore_prompt.as_mut().unwrap().selected = row;
                 host.dirty = true;
             }
+            sync_chrome_hover(host);
         }
         WindowEvent::CursorLeft { .. } => host.pointer_px = None,
         WindowEvent::MouseInput {
@@ -97,6 +98,13 @@ fn hit(host: &HostState) -> Option<usize> {
         return None;
     }
     palette_hit(host.palette_layout.as_ref()?, x as usize, y as usize).filter(|row| *row < 2)
+}
+
+/// Button row under the pointer for hover cursors. Read-only: selection
+/// follows the pointer in [`handle_pointer`]; this only reports the row.
+pub(super) fn hover_button(host: &HostState) -> Option<usize> {
+    host.restore_prompt.as_ref()?;
+    hit(host)
 }
 
 pub(super) fn finish(host: &mut HostState, accept: bool) {

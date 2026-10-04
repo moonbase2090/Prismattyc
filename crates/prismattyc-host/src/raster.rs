@@ -3012,6 +3012,16 @@ pub struct PaletteLaidRow {
     pub y: usize,
 }
 
+/// Bounds of one painted command-palette filter chip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaletteLaidChip {
+    pub index: usize,
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
 /// Panel rectangle and list-row positions. Paint and hit-test share this.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaletteLayout {
@@ -3024,6 +3034,13 @@ pub struct PaletteLayout {
     pub shown: usize,
     pub more_line: bool,
     pub rows: Vec<PaletteLaidRow>,
+    pub filter_chips: Vec<PaletteLaidChip>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PalettePointerTarget {
+    Row(usize),
+    Filter(usize),
 }
 
 /// Keep `scroll` unless `selected_line` left the visible window.
@@ -3057,6 +3074,25 @@ pub fn palette_hit(layout: &PaletteLayout, pointer_x: usize, pointer_y: usize) -
         (pointer_y >= row.y && pointer_y < row.y.saturating_add(layout.geom.row_pitch_px))
             .then_some(row.global)
     })
+}
+
+/// Map a pointer to a clickable palette row or filter chip.
+pub fn palette_pointer_hit(
+    layout: &PaletteLayout,
+    pointer_x: usize,
+    pointer_y: usize,
+) -> Option<PalettePointerTarget> {
+    layout
+        .filter_chips
+        .iter()
+        .find(|chip| {
+            pointer_x >= chip.x
+                && pointer_x < chip.x.saturating_add(chip.width)
+                && pointer_y >= chip.y
+                && pointer_y < chip.y.saturating_add(chip.height)
+        })
+        .map(|chip| PalettePointerTarget::Filter(chip.index))
+        .or_else(|| palette_hit(layout, pointer_x, pointer_y).map(PalettePointerTarget::Row))
 }
 
 fn palette_chrome_px(
@@ -3258,7 +3294,37 @@ pub fn palette_layout(
         row_y = row_y.saturating_add(geom.query_h_px);
         row_y = row_y.saturating_add(blank);
     }
-    if has_chips {
+    let mut filter_chips = Vec::new();
+    if let Some((labels, _)) = frame.chips {
+        let text_x = x.saturating_add(font.cell_w.saturating_mul(geom.inset_cells));
+        let text_right = x
+            .saturating_add(width)
+            .saturating_sub(font.cell_w.saturating_mul(geom.inset_cells));
+        let hint_cells = text_cells("C-←/→ filter");
+        let hint_x = text_right.saturating_sub(hint_cells.saturating_mul(font.cell_w));
+        let mut chip_x = text_x.saturating_add(font.cell_w);
+        for (index, label) in labels.iter().enumerate() {
+            let chip_width = text_cells(label)
+                .saturating_add(2)
+                .saturating_mul(font.cell_w);
+            if chip_x
+                .saturating_add(chip_width)
+                .saturating_add(font.cell_w)
+                > hint_x
+            {
+                break;
+            }
+            filter_chips.push(PaletteLaidChip {
+                index,
+                x: chip_x,
+                y: row_y,
+                width: chip_width,
+                height: font.cell_h,
+            });
+            chip_x = chip_x
+                .saturating_add(chip_width)
+                .saturating_add(font.cell_w);
+        }
         row_y = row_y.saturating_add(font.cell_h).saturating_add(blank);
     }
     let mut rows = Vec::new();
@@ -3288,6 +3354,7 @@ pub fn palette_layout(
         shown,
         more_line,
         rows,
+        filter_chips,
     })
 }
 
@@ -3308,6 +3375,32 @@ pub fn rasterize_palette(
     stride_px: usize,
     buffer_height_px: usize,
     focus_rgb: [u8; 3],
+) -> Option<PaletteLayout> {
+    rasterize_palette_with_hover(
+        font,
+        frame,
+        theme,
+        surface,
+        buffer,
+        stride_px,
+        buffer_height_px,
+        focus_rgb,
+        None,
+    )
+}
+
+/// Themed palette painter with an optional hovered filter chip.
+#[allow(clippy::too_many_arguments)]
+pub fn rasterize_palette_with_hover(
+    font: &FontMetrics,
+    frame: &PaletteFrame<'_>,
+    theme: &Theme,
+    surface: OverlaySurface,
+    buffer: &mut [u32],
+    stride_px: usize,
+    buffer_height_px: usize,
+    focus_rgb: [u8; 3],
+    hovered_filter: Option<usize>,
 ) -> Option<PaletteLayout> {
     let layout = palette_layout(font, frame, stride_px, buffer_height_px)?;
     let geom = layout.geom;
@@ -3371,24 +3464,34 @@ pub fn rasterize_palette(
         let hint = "C-←/→ filter";
         let hint_cells = text_cells(hint);
         let hint_x = text_right.saturating_sub(hint_cells.saturating_mul(font.cell_w));
-        let mut chip_x = text_x.saturating_add(font.cell_w);
-        for (index, label) in labels.iter().enumerate() {
-            let label_cells = text_cells(label);
-            let chip_w = label_cells.saturating_add(2).saturating_mul(font.cell_w);
-            if chip_x.saturating_add(chip_w).saturating_add(font.cell_w) > hint_x {
-                break;
-            }
-            let ink = if index == selected_chip {
+        for chip in &layout.filter_chips {
+            let Some(label) = labels.get(chip.index) else {
+                continue;
+            };
+            let selected = chip.index == selected_chip;
+            let hovered = hovered_filter == Some(chip.index);
+            let ink = if selected {
                 fill_rect(
                     buffer,
                     stride_px,
-                    chip_x,
-                    row_y,
-                    chip_w,
-                    font.cell_h,
+                    chip.x,
+                    chip.y,
+                    chip.width,
+                    chip.height,
                     theme.chrome_fg,
                 );
                 theme.chrome_bg
+            } else if hovered {
+                fill_rect(
+                    buffer,
+                    stride_px,
+                    chip.x,
+                    chip.y,
+                    chip.width,
+                    chip.height,
+                    selected_bg,
+                );
+                selected_fg
             } else {
                 muted
             };
@@ -3397,12 +3500,11 @@ pub fn rasterize_palette(
                 stride_px,
                 font,
                 label,
-                chip_x.saturating_add(font.cell_w),
-                row_y,
+                chip.x.saturating_add(font.cell_w),
+                chip.y,
                 ink,
                 hint_x,
             );
-            chip_x = chip_x.saturating_add(chip_w).saturating_add(font.cell_w);
         }
         draw_theme_text(
             buffer, stride_px, font, hint, hint_x, row_y, muted, text_right,

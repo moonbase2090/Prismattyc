@@ -114,16 +114,17 @@ use raster::{
     blit_direct_kitty_images, blit_kitty_placeholders, build_background_layer, contrast_ink,
     cycle_focus_border, cycle_focus_border_back, fill_rect_argb, focus_border_name,
     focus_border_rgb, mix_rgb, opacity_to_alpha, opacity_to_weight, pack_argb, palette_hit,
-    parse_focus_border, premultiply_in_place, rasterize_bell_toast, rasterize_find_prompt,
-    rasterize_footer, rasterize_mail_letter_with_theme, rasterize_overlays_at_with_theme,
-    rasterize_palette, rasterize_pane_chrome_with_theme, rasterize_preedit_at,
-    rasterize_region_focus_ring, rasterize_render_timer, rasterize_screen_at_with_theme,
+    palette_pointer_hit, parse_focus_border, premultiply_in_place, rasterize_bell_toast,
+    rasterize_find_prompt, rasterize_footer, rasterize_mail_letter_with_theme,
+    rasterize_overlays_at_with_theme, rasterize_palette, rasterize_palette_with_hover,
+    rasterize_pane_chrome_with_theme, rasterize_preedit_at, rasterize_region_focus_ring,
+    rasterize_render_timer, rasterize_screen_at_with_theme,
     rasterize_screen_at_with_theme_options_filtered, rasterize_scroll_chip, rasterize_scrollbar,
     rasterize_space_rail, rasterize_splash, rasterize_tab_strip_with_theme, rasterize_theme_picker,
     rasterize_walkthrough_caption, scrollbar_layout, scrollbar_scroll_from_thumb_y,
     scrollbar_thumb_y_for_pointer, set_rect_alpha, theme_picker_visible_rows, FontMetrics,
-    OverlaySurface, PaletteFrame, PaletteLayout, PaletteSection, ScreenPaint, ScrollbarLayout,
-    ThemePickerRow, TitleRowStyle, DEFAULT_FOCUS_BORDER_INDEX, OPAQUE_ALPHA,
+    OverlaySurface, PaletteFrame, PaletteLayout, PalettePointerTarget, PaletteSection, ScreenPaint,
+    ScrollbarLayout, ThemePickerRow, TitleRowStyle, DEFAULT_FOCUS_BORDER_INDEX, OPAQUE_ALPHA,
     THEME_PICKER_HINT_FAMILY, THEME_PICKER_HINT_ROOT,
 };
 use winit::application::ApplicationHandler;
@@ -1308,6 +1309,8 @@ struct StripDrag {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HoverTarget {
     Caption(Option<walkthrough::CaptionHit>),
+    PaletteRow(usize),
+    PaletteFilter(usize),
     Strip(mux::StripHit),
     Rail(space_rail::RailHit),
     ScrollbarThumb(PaneId),
@@ -5909,7 +5912,11 @@ fn rasterize_frame(
             detail: detail.as_ref(),
             footer,
         };
-        paint_palette_overlay(
+        let hovered_filter = match host.hover_target {
+            Some(HoverTarget::PaletteFilter(index)) => Some(index),
+            _ => None,
+        };
+        paint_palette_overlay_with_hover(
             &host.font,
             &host.theme,
             focus,
@@ -5918,6 +5925,7 @@ fn rasterize_frame(
             buffer,
             width as usize,
             height as usize,
+            hovered_filter,
         )
     } else {
         None
@@ -8437,6 +8445,31 @@ fn paint_palette_overlay(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn paint_palette_overlay_with_hover(
+    font: &FontMetrics,
+    theme: &theme::Theme,
+    focus_rgb: [u8; 3],
+    frame: &PaletteFrame<'_>,
+    surface: OverlaySurface,
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    hovered_filter: Option<usize>,
+) -> Option<PaletteLayout> {
+    rasterize_palette_with_hover(
+        font,
+        frame,
+        theme,
+        surface,
+        buffer,
+        width,
+        height,
+        focus_rgb,
+        hovered_filter,
+    )
+}
+
 fn apply_palette_pointer(host: &mut HostState) {
     if host.palette.is_none() && host.space_picker.is_none() && host.context_menu.is_none() {
         return;
@@ -8450,7 +8483,15 @@ fn apply_palette_pointer(host: &mut HostState) {
     if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
         return;
     }
-    let Some(row) = palette_hit(layout, x as usize, y as usize) else {
+    let row = if host.palette.is_some() {
+        match palette_pointer_hit(layout, x as usize, y as usize) {
+            Some(PalettePointerTarget::Row(row)) => Some(row),
+            Some(PalettePointerTarget::Filter(_)) | None => None,
+        }
+    } else {
+        palette_hit(layout, x as usize, y as usize)
+    };
+    let Some(row) = row else {
         return;
     };
     if let Some(palette) = host.palette.as_mut() {
@@ -8473,6 +8514,41 @@ fn apply_palette_pointer(host: &mut HostState) {
     }
 }
 
+fn activate_palette_at_pointer(
+    host: &mut HostState,
+    pointer_x: usize,
+    pointer_y: usize,
+) -> Option<keybind::Action> {
+    let target = palette_pointer_hit(host.palette_layout.as_ref()?, pointer_x, pointer_y)?;
+    match target {
+        PalettePointerTarget::Filter(index) => {
+            if host
+                .palette
+                .as_mut()
+                .is_some_and(|palette| palette.select_filter(index))
+            {
+                host.dirty = true;
+            }
+            None
+        }
+        PalettePointerTarget::Row(row) => {
+            let keymap = host.keymap.clone();
+            let rich = host.experimental_rich;
+            let palette = host.palette.as_mut()?;
+            palette.selected = row;
+            let verdict = palette.activate_selected(&keymap, rich);
+            host.dirty = true;
+            match finish_palette_result(host, verdict) {
+                PaletteVerdict::Run(action) => Some(action),
+                PaletteVerdict::Consumed | PaletteVerdict::Close => None,
+                PaletteVerdict::NotHandled => {
+                    unreachable!("palette activation never returns NotHandled")
+                }
+            }
+        }
+    }
+}
+
 fn pointer_hover_blocked(host: &HostState) -> bool {
     host.restore_prompt.is_some()
         || host.session_prompt.is_some()
@@ -8489,6 +8565,15 @@ fn pointer_hover_blocked(host: &HostState) -> bool {
 }
 
 fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
+    if host.palette.is_some() {
+        let (x, y) = host
+            .pointer_px
+            .filter(|(x, y)| x.is_finite() && y.is_finite() && *x >= 0.0 && *y >= 0.0)?;
+        return match palette_pointer_hit(host.palette_layout.as_ref()?, x as usize, y as usize)? {
+            PalettePointerTarget::Row(row) => Some(HoverTarget::PaletteRow(row)),
+            PalettePointerTarget::Filter(index) => Some(HoverTarget::PaletteFilter(index)),
+        };
+    }
     if pointer_hover_blocked(host) {
         return None;
     }
@@ -8560,7 +8645,9 @@ fn cursor_for_hover(
     } else if hyperlink
         || matches!(
             hover,
-            Some(HoverTarget::Caption(Some(_)))
+            Some(HoverTarget::PaletteRow(_))
+                | Some(HoverTarget::PaletteFilter(_))
+                | Some(HoverTarget::Caption(Some(_)))
                 | Some(HoverTarget::Strip(_))
                 | Some(HoverTarget::Rail(_))
         )
@@ -9608,24 +9695,7 @@ fn handle_space_picker_key(
     action: Option<keybind::Action>,
 ) -> bool {
     if host.space_picker.is_none() {
-        let kind = match action {
-            Some(keybind::Action::OpenSpace) => SpacePickerKind::Open,
-            Some(keybind::Action::DeleteSpace) => SpacePickerKind::Delete,
-            Some(keybind::Action::MovePaneToSpace) => {
-                if !move_target::begin(host) {
-                    return true;
-                }
-                SpacePickerKind::MovePane
-            }
-            _ => return false,
-        };
-        host.space_picker = Some(SpacePicker::new(kind));
-        host.palette_layout = None;
-        host.tab_rename = None;
-        host.window.set_title("Prismattyc — spaces");
-        host.dirty = true;
-        sync_chrome_hover(host);
-        return true;
+        return open_space_picker(host, action);
     }
     let logical = event.key_without_modifiers();
     let kind = host
@@ -9640,6 +9710,27 @@ fn handle_space_picker_key(
         .expect("space picker is open")
         .key(&logical, host.modifiers, &spaces);
     apply_space_picker_verdict(host, kind, verdict)
+}
+
+fn open_space_picker(host: &mut HostState, action: Option<keybind::Action>) -> bool {
+    let kind = match action {
+        Some(keybind::Action::OpenSpace) => SpacePickerKind::Open,
+        Some(keybind::Action::DeleteSpace) => SpacePickerKind::Delete,
+        Some(keybind::Action::MovePaneToSpace) => {
+            if !move_target::begin(host) {
+                return true;
+            }
+            SpacePickerKind::MovePane
+        }
+        _ => return false,
+    };
+    host.space_picker = Some(SpacePicker::new(kind));
+    host.palette_layout = None;
+    host.tab_rename = None;
+    host.window.set_title("Prismattyc — spaces");
+    host.dirty = true;
+    sync_chrome_hover(host);
+    true
 }
 fn apply_space_picker_verdict(
     host: &mut HostState,
@@ -9782,6 +9873,10 @@ fn handle_palette_key(
         &keymap,
         host.experimental_rich,
     );
+    finish_palette_result(host, result)
+}
+
+fn finish_palette_result(host: &mut HostState, result: PaletteVerdict) -> PaletteVerdict {
     match result {
         PaletteVerdict::Consumed => PaletteVerdict::Consumed,
         PaletteVerdict::Close => {
@@ -9990,21 +10085,7 @@ fn handle_theme_picker_key(
         if action != Some(keybind::Action::ThemePicker) {
             return false;
         }
-        let selected = picker_root_row_for_theme(&host.theme.id);
-        let count = picker_items(None).len();
-        let size = host.window.inner_size();
-        let visible_rows =
-            theme_picker_visible_rows(&host.font, count, size.width as usize, size.height as usize);
-        host.theme_picker = Some(ThemePicker {
-            original: host.theme.clone(),
-            selected,
-            family: None,
-            scroll: theme_picker_scroll_for_selection(0, selected, visible_rows, count),
-        });
-        host.tab_rename = None;
-        host.window.set_title("Prismattyc — theme settings");
-        host.dirty = true;
-        sync_chrome_hover(host);
+        open_theme_picker(host);
         return true;
     }
 
@@ -10126,6 +10207,24 @@ fn handle_theme_picker_key(
         host.dirty = true;
     }
     true
+}
+
+fn open_theme_picker(host: &mut HostState) {
+    let selected = picker_root_row_for_theme(&host.theme.id);
+    let count = picker_items(None).len();
+    let size = host.window.inner_size();
+    let visible_rows =
+        theme_picker_visible_rows(&host.font, count, size.width as usize, size.height as usize);
+    host.theme_picker = Some(ThemePicker {
+        original: host.theme.clone(),
+        selected,
+        family: None,
+        scroll: theme_picker_scroll_for_selection(0, selected, visible_rows, count),
+    });
+    host.tab_rename = None;
+    host.window.set_title("Prismattyc — theme settings");
+    host.dirty = true;
+    sync_chrome_hover(host);
 }
 
 fn window_title(mux: &mux::MuxRuntime, show_tabs: bool) -> String {
@@ -10991,14 +11090,11 @@ fn handle_rich_focus_input(
     event: &winit::event::KeyEvent,
     action: Option<keybind::Action>,
 ) -> bool {
+    if action == Some(keybind::Action::RichFocus) {
+        return toggle_rich_focus(host);
+    }
     if !host.mux.focused().experimental_rich() {
         return false;
-    }
-    if action == Some(keybind::Action::RichFocus) {
-        if host.mux.toggle_rich_focus() {
-            host.dirty = true;
-        }
-        return true;
     }
     if !host.mux.rich_focus_active() {
         return false;
@@ -11019,6 +11115,16 @@ fn handle_rich_focus_input(
         let _ = host
             .mux
             .send_rich_focus_key(&token, structured_modifiers(host.modifiers));
+    }
+    true
+}
+
+fn toggle_rich_focus(host: &mut HostState) -> bool {
+    if !host.mux.focused().experimental_rich() {
+        return false;
+    }
+    if host.mux.toggle_rich_focus() {
+        host.dirty = true;
     }
     true
 }
@@ -13059,6 +13165,29 @@ fn dispatch_action(
     }
 }
 
+fn dispatch_palette_mouse_action(
+    host: &mut HostState,
+    action: keybind::Action,
+    program: &str,
+    child_args: &[String],
+) -> Dispatch {
+    if action == keybind::Action::ThemePicker {
+        open_theme_picker(host);
+        return Dispatch::Handled;
+    }
+    if open_space_picker(host, Some(action)) {
+        return Dispatch::Handled;
+    }
+    if action == keybind::Action::Find {
+        open_find_prompt(host);
+        return Dispatch::Handled;
+    }
+    if action == keybind::Action::RichFocus && toggle_rich_focus(host) {
+        return Dispatch::Handled;
+    }
+    dispatch_action(host, action, program, child_args)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScrollDirection {
     Up,
@@ -13398,6 +13527,38 @@ impl ApplicationHandler<UserAction> for App {
                         return;
                     }
                     apply_palette_pointer(host);
+                    if host.palette.is_some()
+                        && *state == ElementState::Pressed
+                        && *button == MouseButton::Left
+                    {
+                        let action = host.pointer_px.and_then(|(x, y)| {
+                            (x.is_finite() && y.is_finite() && x >= 0.0 && y >= 0.0)
+                                .then(|| activate_palette_at_pointer(host, x as usize, y as usize))
+                                .flatten()
+                        });
+                        if let Some(action) = action {
+                            match dispatch_palette_mouse_action(
+                                host,
+                                action,
+                                &self.cli.program,
+                                &self.cli.child_args,
+                            ) {
+                                Dispatch::Exit => {
+                                    event_loop.exit();
+                                    return;
+                                }
+                                Dispatch::OpenWindow => {
+                                    let _ = self.event_proxy.send_event(UserAction::NewWindow);
+                                    return;
+                                }
+                                Dispatch::OpenConfig => {
+                                    let _ = self.event_proxy.send_event(UserAction::OpenConfig);
+                                    return;
+                                }
+                                Dispatch::Handled => {}
+                            }
+                        }
+                    }
                     if host.context_menu.is_some()
                         && *state == ElementState::Pressed
                         && *button == MouseButton::Left

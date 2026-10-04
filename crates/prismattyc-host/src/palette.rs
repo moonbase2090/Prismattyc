@@ -278,6 +278,25 @@ impl Palette {
         }
     }
 
+    /// Select a filter by its painted chip index (0 = All).
+    pub fn select_filter(&mut self, index: usize) -> bool {
+        let filter = match index {
+            0 => None,
+            n => match ActionGroup::ALL.get(n - 1) {
+                Some(group) => Some(*group),
+                None => return false,
+            },
+        };
+        if self.filter == filter {
+            return false;
+        }
+        self.filter = filter;
+        self.selected = 0;
+        self.scroll = 0;
+        self.awaiting_digit = None;
+        true
+    }
+
     /// Cycle the chip: All → Panes → … → View & Edit → All.
     pub fn cycle_filter(&mut self, direction: isize) {
         let count = ActionGroup::ALL.len() + 1;
@@ -287,14 +306,8 @@ impl Palette {
         } else {
             (index + 1) % count
         };
-        self.filter = if next == 0 {
-            None
-        } else {
-            Some(ActionGroup::ALL[next - 1])
-        };
-        self.selected = 0;
-        self.scroll = 0;
-        self.awaiting_digit = None;
+        let changed = self.select_filter(next);
+        debug_assert!(changed);
     }
 
     /// Every selectable entry in documentation order, families collapsed.
@@ -434,17 +447,7 @@ impl Palette {
                     PaletteVerdict::Consumed
                 }
                 NamedKey::Escape => PaletteVerdict::Close,
-                NamedKey::Enter => {
-                    let view = self.view(keymap, rich);
-                    match view.row(self.selected).map(|row| row.entry) {
-                        Some(PaletteEntry::Action(action)) => PaletteVerdict::Run(action),
-                        Some(family) => {
-                            self.awaiting_digit = Some(family);
-                            PaletteVerdict::Consumed
-                        }
-                        None => PaletteVerdict::Consumed,
-                    }
-                }
+                NamedKey::Enter => self.activate_selected(keymap, rich),
                 NamedKey::ArrowUp => self.move_selection(-1, keymap, rich),
                 NamedKey::ArrowDown => self.move_selection(1, keymap, rich),
                 NamedKey::PageUp => self.page_selection(-1, keymap, rich),
@@ -461,6 +464,23 @@ impl Palette {
                 _ => PaletteVerdict::Consumed,
             },
             _ => PaletteVerdict::Consumed,
+        }
+    }
+
+    /// Handle the selected row as Enter does, including collapsed action families.
+    #[must_use]
+    pub fn activate_selected(&mut self, keymap: &KeyMap, rich: bool) -> PaletteVerdict {
+        if self.awaiting_digit.is_some() {
+            return PaletteVerdict::Consumed;
+        }
+        let view = self.view(keymap, rich);
+        match view.row(self.selected).map(|row| row.entry) {
+            Some(PaletteEntry::Action(action)) => PaletteVerdict::Run(action),
+            Some(family) => {
+                self.awaiting_digit = Some(family);
+                PaletteVerdict::Consumed
+            }
+            None => PaletteVerdict::Consumed,
         }
     }
 

@@ -12,7 +12,7 @@
 //! See `scripts/remote-ssh-tests.sh`.
 #![cfg(unix)]
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -577,4 +577,108 @@ fn tty_attach_over_ssh_shows_and_reports_the_selected_session() {
     child.kill().unwrap();
     let _ = child.wait();
     drop(pair);
+}
+
+/// Issue #24 historical workflow: `ssh -t` followed by plain
+/// `pmux space attach NAME` on the remote must attach the Space's active
+/// session in one step, carry input, follow resizes, and leave the
+/// session running after disconnect. Unlike `attach --session-id`, this
+/// path re-applies the saved layout first.
+#[test]
+fn space_attach_over_ssh_follows_resizes_and_detaches() {
+    let Some(target) = target() else { return };
+    let f = Fixture::new(target);
+    f.ok(&["space", "create", "work", "--no-attach"]);
+    f.ok(&["space", "add", "work"]);
+    let work = f
+        .catalog()
+        .spaces
+        .iter()
+        .find(|space| space.name == "work")
+        .unwrap()
+        .clone();
+    let id = work.active_session.0;
+    let pane = f
+        .snapshot()
+        .sessions
+        .iter()
+        .find(|session| session.id == id)
+        .unwrap()
+        .windows[0]
+        .panes[0]
+        .id;
+
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut command = CommandBuilder::new("/usr/bin/ssh");
+    support::clear_pty_env(&mut command);
+    command.env("TERM", "xterm-256color");
+    command.args(f.ssh_args(&f.target.key, &f.target.known_hosts));
+    command.args(["-tt", "--", &f.target.host]);
+    command.args(f.remote_words(&["space", "attach", "work"]));
+    let mut child = pair.slave.spawn_command(command).unwrap();
+    let transcript = Arc::new(Mutex::new(Vec::new()));
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let buf = Arc::clone(&transcript);
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        while let Ok(n) = reader.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            buf.lock().unwrap().extend_from_slice(&chunk[..n]);
+        }
+    });
+    let mut writer = pair.master.take_writer().unwrap();
+
+    // One step: the active session attaches with no second command.
+    wait_for("space attach", || {
+        String::from_utf8_lossy(&transcript.lock().unwrap()).contains("is attached; pane")
+    });
+    // The viewer lands on the active session's pane, not another session.
+    wait_for("viewer on the active pane", || {
+        ls_pane_line(&f, pane).contains("viewers")
+    });
+
+    // Input reaches the remote shell: the marker file appears on disk.
+    let marker = f.dir.join("space-attach-probe.out");
+    writer
+        .write_all(format!("echo P24_SPACE_ATTACH_PROBE > {}\r", marker.display()).as_bytes())
+        .unwrap();
+    writer.flush().unwrap();
+    wait_for("remote input", || {
+        std::fs::read_to_string(&marker)
+            .unwrap_or_default()
+            .contains("P24_SPACE_ATTACH_PROBE")
+    });
+
+    // Resize reaches the remote pane through the SSH hop.
+    pair.master
+        .resize(PtySize {
+            rows: 30,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    wait_for("remote pane to follow the resize", || {
+        pane_size(&f, id).is_some_and(|(cols, _)| cols == 100)
+    });
+
+    // Disconnect leaves the session running with the same active session.
+    child.kill().unwrap();
+    let _ = child.wait();
+    drop(pair);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        f.snapshot().sessions.iter().any(|s| s.id == id),
+        "the session outlives the SSH connection"
+    );
+    assert_eq!(f.catalog().spaces[0].active_session.0, id);
 }

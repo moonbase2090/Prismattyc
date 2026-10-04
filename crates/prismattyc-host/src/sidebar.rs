@@ -4,6 +4,10 @@
 //! collapse toggles follow in later PRs; the default `bars` layout never
 //! builds this. Only reads pane-handle fields (#109 owns handle behavior).
 
+// #113 stacks with the render (PR2) and interaction (PR3) PRs, which call
+// this model; allow the unused-code lint until those land.
+#![allow(dead_code)]
+
 use crate::mux::TabInfo;
 use prismattyc_mux::SavedSpaceTab;
 

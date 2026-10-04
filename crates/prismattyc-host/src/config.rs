@@ -373,6 +373,9 @@ impl ConfigFile {
         self.chrome_style.unwrap_or_default()
     }
 
+    // #113 stacks with the render (PR2) PR, which reads this; allow the
+    // unused-code lint until then.
+    #[allow(dead_code)]
     pub fn layout(&self) -> LayoutMode {
         self.layout.unwrap_or_default()
     }

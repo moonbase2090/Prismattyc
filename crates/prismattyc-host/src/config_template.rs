@@ -29,6 +29,7 @@ const DEFAULT_PANES: usize = 1;
 pub enum ConfigGroup {
     Appearance,
     AgentSkills,
+    Updates,
     FocusBorder,
     Font,
     Layout,
@@ -125,6 +126,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         doc: "Install the pmux Agent Skill for detected agents once per app version",
         range: "true|false",
         value: ConfigValue::Bool(true),
+    },
+    ConfigKey {
+        name: "automatic_update_checks",
+        group: ConfigGroup::Updates,
+        doc: "Check for signed app releases on launch and daily; the menu item always works",
+        range: "true|false",
+        value: ConfigValue::Bool(false),
     },
     ConfigKey {
         name: "focus_border",
@@ -427,6 +435,7 @@ fn group_header(group: ConfigGroup) -> &'static str {
     match group {
         ConfigGroup::Appearance => "appearance / theme",
         ConfigGroup::AgentSkills => "agent integration",
+        ConfigGroup::Updates => "updates",
         ConfigGroup::FocusBorder => "focus border",
         ConfigGroup::Font => "font",
         ConfigGroup::Layout => "layout",
@@ -948,6 +957,7 @@ mod tests {
         "splash",
         "splash_animation",
         "install_agent_skills",
+        "automatic_update_checks",
         "font",
         "font_fallback",
         "font_px",

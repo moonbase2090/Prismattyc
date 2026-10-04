@@ -17,6 +17,8 @@ pub(super) struct WindowState {
 pub(super) struct Resume {
     pub request: requests::Request,
     pub views: Vec<WindowState>,
+    #[serde(default)]
+    pub notice: Option<String>,
 }
 
 #[cfg(windows)]
@@ -55,12 +57,29 @@ pub(super) fn poll(app: &mut App) {
         return;
     };
     if let Err(error) = perform(app, &request) {
-        let message = format!("Restart deferred: {error:#}");
+        #[cfg(target_os = "macos")]
+        let update = app
+            .update_restart_notice
+            .take()
+            .map(|notice| format!("{notice} Restart deferred."))
+            .unwrap_or_default();
+        #[cfg(not(target_os = "macos"))]
+        let update = String::new();
+        let message = format!("{update} Restart deferred: {error:#}");
         let _ = requests::respond(&socket, &request, "deferred", &message);
         for host in app.windows.values_mut() {
             rail_toast(host, &message);
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn schedule_after_update(app: &mut App, notice: String) -> Result<()> {
+    app.update_restart_notice = Some(notice);
+    let socket = host_mux_socket().context("mux socket path")?;
+    requests::register(&socket, "host")?;
+    requests::request(&socket, "host", std::process::id())?;
+    Ok(())
 }
 
 fn perform(app: &mut App, request: &requests::Request) -> Result<()> {
@@ -112,9 +131,14 @@ fn perform(app: &mut App, request: &requests::Request) -> Result<()> {
             focused: host.window_focused,
         });
     }
+    #[cfg(target_os = "macos")]
+    let notice = app.update_restart_notice.take();
+    #[cfg(not(target_os = "macos"))]
+    let notice = None;
     let resume = Resume {
         request: request.clone(),
         views,
+        notice,
     };
     #[cfg(unix)]
     let executable = prismattyc_mux::release_update::installed_binary("prismattyc-host")
@@ -172,6 +196,7 @@ pub(super) fn resume(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
         return false;
     };
     let mut focused = None;
+    let notice = resume.notice.clone();
     for view in resume.views {
         let path = view.path;
         let Some(layout) = attach_tabs::load(&path) else {
@@ -221,6 +246,11 @@ pub(super) fn resume(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
         }
     }
     app.restart_view = None;
+    if let Some(notice) = notice {
+        for host in app.windows.values_mut() {
+            rail_toast(host, &notice);
+        }
+    }
     if let Some(id) = focused {
         app.windows[&id].window.focus_window();
     }

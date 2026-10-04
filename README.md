@@ -84,17 +84,13 @@ shell profiles. If `~/.local/bin` is not on your `PATH`, or another `pmux`
 comes first, the app prints the path and recovery steps.
 
 To check for an update, run `pmux update --check`. To install one, run
-`pmux update`. `prismattyc update` does the same thing. On Linux and
-Windows this replaces the installed binaries. On macOS it downloads the
-universal app zip, checks `SHA256SUMS-macos`, and replaces
-`Prismattyc.app`. When that app's folder is not writable, the update
-stops and explains how to run it with admin rights or move the app to
-`~/Applications`. The old app is deleted after the new one is in place,
-and `pmux update --rollback` is not supported there. Reinstall a specific
-macOS version from its DMG on the
-[releases page](https://github.com/moonbase2090/Prismattyc/releases).
-Quit the app and reopen it from the Dock. Updating does not stop mux
-sessions.
+`pmux update`. `prismattyc update` does the same thing. The macOS app also
+has **Check for Updates…** and **Roll Back Last Update…** in its app menu.
+It verifies the published checksum, Developer ID team, and Gatekeeper
+notarization before replacing the app. The previous verified app is kept for
+`pmux update --rollback`. The app restarts its host and reconnects saved pmux
+views. A daemon with active sessions stays running until a safe restart is
+possible. Automatic checks are opt-in in the app menu or `config.toml`.
 See [Update and restart](docs/update-and-restart.md).
 
 To preview removal, run `pmux uninstall --dry-run`. Run `pmux uninstall` to

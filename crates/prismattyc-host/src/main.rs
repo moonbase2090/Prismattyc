@@ -28,6 +28,8 @@ mod mac_present;
 #[cfg(target_os = "macos")]
 mod macos_menu;
 #[cfg(target_os = "macos")]
+mod macos_update;
+#[cfg(target_os = "macos")]
 mod macos_window;
 mod move_target;
 mod mux;
@@ -2212,6 +2214,22 @@ enum UserAction {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     NewWindow,
     OpenConfig,
+    #[cfg(target_os = "macos")]
+    CheckForUpdates,
+    #[cfg(target_os = "macos")]
+    ToggleAutomaticUpdateChecks,
+    #[cfg(target_os = "macos")]
+    RollbackUpdate,
+    #[cfg(target_os = "macos")]
+    UpdateCheckFinished {
+        automatic: bool,
+        result: Result<macos_update::ReleaseCheck, String>,
+    },
+    #[cfg(target_os = "macos")]
+    UpdateInstallFinished {
+        rollback: bool,
+        result: Result<macos_update::InstallResult, String>,
+    },
     AccessKit(accesskit_winit::Event),
 }
 
@@ -2227,6 +2245,12 @@ impl PartialEq for UserAction {
             (Self::Wake, Self::Wake)
             | (Self::NewWindow, Self::NewWindow)
             | (Self::OpenConfig, Self::OpenConfig) => true,
+            #[cfg(target_os = "macos")]
+            (Self::CheckForUpdates, Self::CheckForUpdates)
+            | (Self::ToggleAutomaticUpdateChecks, Self::ToggleAutomaticUpdateChecks)
+            | (Self::RollbackUpdate, Self::RollbackUpdate)
+            | (Self::UpdateCheckFinished { .. }, Self::UpdateCheckFinished { .. })
+            | (Self::UpdateInstallFinished { .. }, Self::UpdateInstallFinished { .. }) => true,
             (Self::AccessKit(left), Self::AccessKit(right)) => left.window_id == right.window_id,
             _ => false,
         }
@@ -2267,6 +2291,14 @@ struct App {
     render_status_seq: u64,
     last_component_poll: Option<Instant>,
     restart_view: Option<PathBuf>,
+    #[cfg(target_os = "macos")]
+    automatic_update_checks: bool,
+    #[cfg(target_os = "macos")]
+    next_automatic_update_check: Option<Instant>,
+    #[cfg(target_os = "macos")]
+    update_check_inflight: bool,
+    #[cfg(target_os = "macos")]
+    update_restart_notice: Option<String>,
     #[cfg(windows)]
     restart_resume: Option<restart::Resume>,
 }
@@ -2300,6 +2332,8 @@ impl App {
             file_config.remote_destinations().unwrap_or_default(),
             wake.clone(),
         )));
+        #[cfg(target_os = "macos")]
+        let automatic_update_checks = file_config.automatic_update_checks.unwrap_or(false);
         Ok(Self {
             cli,
             windows: std::collections::HashMap::new(),
@@ -2319,6 +2353,14 @@ impl App {
             render_status_seq: 0,
             last_component_poll: None,
             restart_view: None,
+            #[cfg(target_os = "macos")]
+            automatic_update_checks,
+            #[cfg(target_os = "macos")]
+            next_automatic_update_check: automatic_update_checks.then(Instant::now),
+            #[cfg(target_os = "macos")]
+            update_check_inflight: false,
+            #[cfg(target_os = "macos")]
+            update_restart_notice: None,
             #[cfg(windows)]
             restart_resume: None,
         })
@@ -2372,6 +2414,15 @@ impl App {
         {
             for host in self.windows.values_mut() {
                 sync_remote_rail(host, true);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let automatic_checks = self.file_config.automatic_update_checks.unwrap_or(false);
+            if automatic_checks != self.automatic_update_checks {
+                self.automatic_update_checks = automatic_checks;
+                self.next_automatic_update_check = automatic_checks.then(Instant::now);
+                macos_menu::set_automatic_checks_enabled(automatic_checks);
             }
         }
         // A valid config reload can change host-drawn pixels without terminal
@@ -2835,6 +2886,23 @@ impl App {
         let mut more = false;
         let mut closed: Vec<WindowId> = Vec::new();
         let mut next_deadline: Option<Instant> = None;
+        #[cfg(target_os = "macos")]
+        if self.automatic_update_checks {
+            let now = Instant::now();
+            if self
+                .next_automatic_update_check
+                .is_some_and(|deadline| deadline <= now)
+            {
+                self.next_automatic_update_check = Some(now + Duration::from_secs(24 * 60 * 60));
+                if !self.update_check_inflight {
+                    self.update_check_inflight = true;
+                    macos_update::start_check(self.event_proxy.clone(), true);
+                }
+            }
+            if let Some(deadline) = self.next_automatic_update_check {
+                next_deadline = Some(deadline);
+            }
+        }
         self.retry_register_host_pid();
         let rail_now = Instant::now();
         let remote_changed = self.remote.borrow_mut().poll();
@@ -14291,6 +14359,89 @@ impl ApplicationHandler<UserAction> for App {
                     eprintln!("prismattyc-host: config window failed: {e:#}");
                 }
             }
+            #[cfg(target_os = "macos")]
+            UserAction::CheckForUpdates => {
+                if !self.update_check_inflight {
+                    self.update_check_inflight = true;
+                    macos_update::start_check(self.event_proxy.clone(), false);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            UserAction::ToggleAutomaticUpdateChecks => {
+                let enabled = !self.automatic_update_checks;
+                match config::save_preference(
+                    &config::config_path(),
+                    "automatic_update_checks",
+                    toml_edit::value(enabled),
+                ) {
+                    Ok(()) => {
+                        self.file_config.automatic_update_checks = Some(enabled);
+                        self.automatic_update_checks = enabled;
+                        self.next_automatic_update_check = enabled.then(Instant::now);
+                        macos_menu::set_automatic_checks_enabled(enabled);
+                    }
+                    Err(error) => macos_menu::show_update_message(
+                        "Could Not Save Update Preference",
+                        &format!("{error:#}"),
+                    ),
+                }
+            }
+            #[cfg(target_os = "macos")]
+            UserAction::RollbackUpdate => {
+                if macos_menu::confirm_rollback() {
+                    macos_update::start_install(self.event_proxy.clone(), true);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            UserAction::UpdateCheckFinished { automatic, result } => {
+                self.update_check_inflight = false;
+                match result {
+                    Ok(check) if check.update_available => {
+                        if !automatic || self.automatic_update_checks {
+                            if macos_menu::prompt_update(&check.available, &check.release_notes) {
+                                macos_update::start_install(self.event_proxy.clone(), false);
+                            }
+                        }
+                    }
+                    Ok(check) if !automatic => macos_menu::show_update_message(
+                        "Prismattyc Is Up to Date",
+                        &format!("Version {} is the latest release.", check.available),
+                    ),
+                    Ok(_) => {}
+                    Err(error) if !automatic => {
+                        macos_menu::show_update_message("Update Check Failed", &error)
+                    }
+                    Err(error) => {
+                        eprintln!("prismattyc-host: automatic update check failed: {error}")
+                    }
+                }
+            }
+            #[cfg(target_os = "macos")]
+            UserAction::UpdateInstallFinished { rollback, result } => match result {
+                Ok(result) => {
+                    if let Err(error) = restart::schedule_after_update(self, result.notice) {
+                        let title = if rollback {
+                            "Rollback Finished"
+                        } else {
+                            "Update Installed"
+                        };
+                        macos_menu::show_update_message(
+                            title,
+                            &format!(
+                                "The app files changed, but this window could not restart automatically: {error:#}. Quit and reopen Prismattyc to use the installed version."
+                            ),
+                        );
+                    }
+                }
+                Err(error) => macos_menu::show_update_message(
+                    if rollback {
+                        "Rollback Failed"
+                    } else {
+                        "Update Failed"
+                    },
+                    &error,
+                ),
+            },
             UserAction::AccessKit(event) => self.handle_accesskit(event_loop, event),
         }
     }
@@ -14370,7 +14521,10 @@ fn main() -> Result<()> {
     {
         // Menu bar must exist before the app finishes launching so ⌘N and
         // the File menu are live from the first window.
-        macos_menu::install_main_menu(proxy.clone());
+        macos_menu::install_main_menu(
+            proxy.clone(),
+            file_config.automatic_update_checks.unwrap_or(false),
+        );
     }
 
     let mut app = App::new(cli, file_config, startup_config_error, proxy)?;

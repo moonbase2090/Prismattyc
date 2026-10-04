@@ -32,6 +32,8 @@ pub struct Release {
     pub draft: bool,
     pub prerelease: bool,
     #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
     pub immutable: bool,
     pub assets: Vec<Asset>,
 }
@@ -880,6 +882,7 @@ fn activate(root: &Path, version_dir: &Path, bin_dir: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn rollback(root: &Path) -> Result<String> {
     let old =
         fs::read_link(root.join("previous")).context("no previous installation to restore")?;
@@ -925,7 +928,7 @@ fn is_help_flag(arg: &String) -> bool {
 }
 
 fn print_update_help() {
-    println!("pmux update [--check] [--json] [--bin-dir PATH]\nprismattyc update [--check] [--json] [--bin-dir PATH]\npmux update --rollback\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together. --rollback restores that previous installation.\nOn macOS, download the universal app zip, verify SHA256SUMS-macos and the code signature, and replace Prismattyc.app. The old app is deleted after the new one is in place. --rollback is not supported; reinstall a version from its DMG on https://github.com/{REPOSITORY}/releases.\nprismattyc update is the same command as pmux update.\nUpdating never stops sessions. Quit Prismattyc and reopen it after a macOS update. Use pmux restart for Linux and Windows components.\n--source is an explicit development-only source build.");
+    println!("pmux update [--check] [--json] [--bin-dir PATH]\nprismattyc update [--check] [--json] [--bin-dir PATH]\npmux update --rollback\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together. --rollback restores that previous installation.\nOn macOS, verify SHA256SUMS-macos, Developer ID Team ID S24C53PD3Y, and Gatekeeper notarization. Keep the previous verified app for --rollback.\nprismattyc update is the same command as pmux update.\nUpdating does not stop sessions. The app menu restarts the host and safely restarts the daemon when it has no active sessions.\n--source is an explicit development-only source build.");
 }
 
 /// Fetch the latest release, compare versions, and either report or install.
@@ -953,6 +956,7 @@ fn finish_update_flow(
             &resolved.available,
             &resolved.current,
             options.json,
+            release.body.as_deref(),
         );
         return Ok(());
     }
@@ -992,27 +996,37 @@ fn should_only_report(options: &Options, available: &Version, current: &Version)
     options.check || available <= current
 }
 
-/// Roll back the previous installation (Linux/Windows) or explain that macOS
-/// has no rollback. Split out of [`run`] to keep its complexity low.
+/// Roll back the previous installation. Split out of [`run`] to keep its
+/// complexity low.
 fn run_rollback(root: &Path) -> Result<()> {
-    if std::env::consts::OS == "macos" {
-        bail!("{}", macos_rollback_error());
+    #[cfg(target_os = "macos")]
+    {
+        return run_macos_rollback(root);
     }
-    let restored = rollback(root)?;
-    println!(
-        "{}",
-        serde_json::json!({"status":"rolled_back","version":restored,"restart_required":true})
-    );
-    Ok(())
+    #[cfg(not(target_os = "macos"))]
+    {
+        let restored = rollback(root)?;
+        println!(
+            "{}",
+            serde_json::json!({"status":"rolled_back","version":restored,"restart_required":true})
+        );
+        Ok(())
+    }
 }
 
 /// Print the check / up-to-date report in JSON or human form.
-fn report_check(installed: &str, version: &Version, current: &Version, json: bool) {
+fn report_check(
+    installed: &str,
+    version: &Version,
+    current: &Version,
+    json: bool,
+    release_notes: Option<&str>,
+) {
     let update_available = version > current;
     if json {
         println!(
             "{}",
-            serde_json::json!({"repository":REPOSITORY,"installed":installed,"available":version.to_string(),"update_available":update_available,"status":"checked"})
+            serde_json::json!({"repository":REPOSITORY,"installed":installed,"available":version.to_string(),"update_available":update_available,"release_notes":release_notes.unwrap_or_default(),"status":"checked"})
         );
         return;
     }
@@ -1265,11 +1279,10 @@ fn report_install(version: &Version, json: bool) {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn macos_rollback_error() -> String {
     format!(
-        "rollback is not supported on macOS. Prismattyc.app updates replace the installed app and do not keep a previous copy. \
-         Reinstall a specific version by downloading its DMG from https://github.com/{REPOSITORY}/releases, \
-         opening it, and replacing /Applications/Prismattyc.app. Quit Prismattyc and reopen it from the Dock."
+        "no previous verified Prismattyc.app is available to roll back. Download a release DMG from https://github.com/{REPOSITORY}/releases to install a specific version."
     )
 }
 
@@ -1280,6 +1293,10 @@ struct MacosAppState {
     version: String,
     target: String,
     app: PathBuf,
+    #[serde(default)]
+    previous_app: Option<PathBuf>,
+    #[serde(default)]
+    previous_version: Option<String>,
 }
 
 #[cfg(target_os = "macos")]
@@ -1293,6 +1310,55 @@ fn write_macos_state(root: &Path, state: &MacosAppState) -> Result<()> {
     let temporary = root.join(format!("macos-app.json.{}.tmp", std::process::id()));
     write_json_atomic(&temporary, &path, &serde_json::to_vec_pretty(state)?)?;
     let _ = File::open(root).and_then(|dir| dir.sync_all());
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_state(root: &Path) -> Result<MacosAppState> {
+    let path = macos_state_path(root);
+    serde_json::from_slice(&fs::read(&path)?)
+        .with_context(|| format!("parse macOS app state at {}", path.display()))
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_rollback(root: &Path) -> Result<()> {
+    let state = read_macos_state(root).context("no macOS update state is available")?;
+    let previous = state
+        .previous_app
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!(macos_rollback_error()))?;
+    let previous_version = Version::parse(
+        state
+            .previous_version
+            .as_deref()
+            .context("the previous app version was not recorded")?,
+    )?;
+    let tag = format!("v{previous_version}");
+    verify_macos_trust(previous, &tag, MACOS_BUNDLE_TARGET)?;
+    reported_release_version(&previous.join("Contents/MacOS/pmux"), &previous_version)?;
+
+    let swap = replace_app_bundle(&state.app, previous)?;
+    let verify = verify_macos_trust(&state.app, &tag, MACOS_BUNDLE_TARGET).and_then(|()| {
+        reported_release_version(&state.app.join("Contents/MacOS/pmux"), &previous_version)
+    });
+    recover_or_fail(&state.app, &swap, verify)?;
+    let rolled_back = write_macos_state(
+        root,
+        &MacosAppState {
+            repository: REPOSITORY.into(),
+            version: previous_version.to_string(),
+            target: MACOS_BUNDLE_TARGET.into(),
+            app: state.app.clone(),
+            previous_app: None,
+            previous_version: None,
+        },
+    );
+    recover_or_fail(&state.app, &swap, rolled_back)?;
+    let leftover = discard_displaced(swap.displaced.as_deref());
+    println!(
+        "{}",
+        serde_json::json!({"status":"rolled_back","version":previous_version.to_string(),"restart_required":true,"app":state.app,"leftover_app":leftover})
+    );
     Ok(())
 }
 
@@ -1678,15 +1744,40 @@ fn verify_macos_trust(app: &Path, tag: &str, target: &str) -> Result<()> {
         app.display(),
         manual_update_instructions(tag, target)
     );
-    let gatekeeper = Command::new("spctl")
-        .args(["--assess", "--verbose", "--type", "exec"])
+    let identity = Command::new("codesign")
+        .args(["--display", "--verbose=4"])
         .arg(app)
-        .status()
-        .context("spctl is required to assess Prismattyc.app")?;
+        .output()
+        .context("codesign is required to inspect Prismattyc.app identity")?;
+    let identity_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&identity.stdout),
+        String::from_utf8_lossy(&identity.stderr)
+    );
     ensure!(
-        gatekeeper.success(),
-        "spctl rejected {} ({gatekeeper}). The installed app was not changed because Gatekeeper did not accept the downloaded bundle. {}",
+        identity.status.success()
+            && identity_text.lines().any(|line| {
+                line.trim() == "TeamIdentifier=S24C53PD3Y"
+            }),
+        "{} is not signed by Prismattyc Developer ID Team S24C53PD3Y. The installed app was not changed. {}",
         app.display(),
+        manual_update_instructions(tag, target)
+    );
+    let gatekeeper = Command::new("spctl")
+        .args(["--assess", "--verbose=4", "--type", "exec"])
+        .arg(app)
+        .output()
+        .context("spctl is required to assess Prismattyc.app")?;
+    let assessment = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&gatekeeper.stdout),
+        String::from_utf8_lossy(&gatekeeper.stderr)
+    );
+    ensure!(
+        gatekeeper.status.success() && assessment.contains("source=Notarized Developer ID"),
+        "spctl rejected {} ({}). Gatekeeper must report a notarized Developer ID app. {}",
+        app.display(),
+        assessment.trim(),
         manual_update_instructions(tag, target)
     );
     Ok(())
@@ -1989,9 +2080,8 @@ fn ditto_copy(extracted: &Path, staged: &Path) -> Result<()> {
 }
 
 /// After the swap, verify the destination and record macOS state. On failure,
-/// restore the displaced app (or remove the destination) and return the error,
-/// attaching any directory-sync warning. On success, discard the displaced app
-/// and return an optional "leftover" notice when discarding failed.
+/// restore the displaced app (or remove the destination). Keep the displaced
+/// app as the one-step rollback copy.
 #[cfg(target_os = "macos")]
 fn verify_and_record_swap(
     root: &Path,
@@ -2005,6 +2095,12 @@ fn verify_and_record_swap(
         .and_then(|()| reported_release_version(&destination.join("Contents/MacOS/pmux"), version));
     recover_or_fail(destination, swap, verify)?;
 
+    let old_state = read_macos_state(root).ok();
+    let previous_app = swap.displaced.clone();
+    let previous_version = previous_app
+        .as_deref()
+        .and_then(macos_app_version)
+        .map(|version| version.to_string());
     let state = write_macos_state(
         root,
         &MacosAppState {
@@ -2012,11 +2108,29 @@ fn verify_and_record_swap(
             version: version.to_string(),
             target: MACOS_BUNDLE_TARGET.into(),
             app: destination.to_path_buf(),
+            previous_app: previous_app.clone(),
+            previous_version,
         },
     );
     recover_or_fail(destination, swap, state)?;
 
-    Ok(discard_displaced(swap.displaced.as_deref()))
+    if let Some(old_previous) = old_state
+        .and_then(|state| state.previous_app)
+        .filter(|path| Some(path) != previous_app.as_ref())
+    {
+        if let Err(error) = discard_replaced_app(&old_previous) {
+            return Ok(Some(leftover_app_notice(&old_previous, &error)));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_app_version(app: &Path) -> Option<Version> {
+    version_label(&app.join("Contents/MacOS/pmux"))
+        .ok()?
+        .split_whitespace()
+        .find_map(|word| Version::parse(word).ok())
 }
 
 /// If `outcome` failed, restore the displaced app (or remove the destination)
@@ -2086,9 +2200,9 @@ fn macos_install_message(
     sync_warning: Option<&str>,
 ) -> String {
     let restart = if app_process_running(destination) {
-        "A restart is required. Prismattyc is still running. Quit it (Cmd+Q) and reopen it from the Dock. Mux sessions keep running; reopen the app to use this version in windows."
+        "A restart is required. The app menu requests a safe host restart after installation. Existing pmux sessions keep running."
     } else {
-        "A restart is required to use this version. Open Prismattyc from the Dock. If it is already running, quit it (Cmd+Q) and reopen it. Mux sessions keep running until you restart them."
+        "A restart is required to use this version. Open Prismattyc from the Dock. Existing pmux sessions keep running."
     };
     let outside = if running_inside_bundle(destination) {
         String::new()
@@ -2344,6 +2458,7 @@ mod tests {
             tag_name: "v0.2.0".into(),
             draft: false,
             prerelease: false,
+            body: None,
             immutable: true,
             assets: BINARIES
                 .iter()
@@ -2562,6 +2677,7 @@ mod tests {
             tag_name: tag.into(),
             draft: false,
             prerelease: false,
+            body: None,
             immutable: true,
             assets: names.iter().map(|name| named_asset(tag, name)).collect(),
         }
@@ -3037,10 +3153,10 @@ mod tests {
     }
 
     #[test]
-    fn macos_rollback_explains_reinstall_from_the_dmg() {
+    fn macos_rollback_explains_when_no_previous_bundle_is_available() {
         let error = macos_rollback_error();
         assert!(
-            error.contains("rollback is not supported on macOS"),
+            error.contains("no previous verified Prismattyc.app"),
             "{error}"
         );
         assert!(
@@ -3048,7 +3164,6 @@ mod tests {
             "{error}"
         );
         assert!(error.contains("DMG"), "{error}");
-        assert!(error.contains("/Applications/Prismattyc.app"), "{error}");
     }
 
     #[test]

@@ -183,6 +183,37 @@ class JevShadowTests(unittest.TestCase):
         self.assertIn("input", body)
         self.assertEqual(result["usage"]["input_tokens"], 100)
 
+    def test_live_request_unwraps_gateway_task_envelope(self) -> None:
+        # Shape returned by api.cloudflare.com /ai/run with cf-aig-gateway-id (Oct 2026).
+        response = {
+            "errors": [],
+            "messages": [],
+            "result": {
+                "result": {
+                    "answers": {"build_ok": {"noul": 0.98, "type": "noul"}},
+                    "model": "jev-1.13.0",
+                    "usage": {"input_tokens": 307, "output_tokens": 21},
+                },
+                "state": "Completed",
+            },
+            "success": True,
+        }
+        client = jev.JevClient("account-1", "api-token", "gateway-1")
+        with patch.object(jev.urllib.request, "urlopen", return_value=FakeResponse(response)):
+            result = client.call({"mutant": {"diff": "x"}}, {"build_ok": {"type": "noul"}})
+        self.assertEqual(result["model"], "jev-1.13.0")
+        self.assertEqual(result["answers"]["build_ok"]["noul"], 0.98)
+        self.assertEqual(jev.response_usage(result), (307, 21))
+
+    def test_jev_result_accepts_single_envelope_and_rejects_unfinished_task(self) -> None:
+        payload = {"answers": {"q": {"noul": 0.1}}, "usage": {"input_tokens": 5}}
+        self.assertIs(jev.jev_result({"result": payload, "success": True}), payload)
+        self.assertIs(jev.jev_result(payload), payload)
+        with self.assertRaisesRegex(RuntimeError, "state: Running"):
+            jev.jev_result({"result": {"state": "Running"}, "success": True})
+        with self.assertRaisesRegex(RuntimeError, "did not contain Jev answers"):
+            jev.jev_result({"result": {"result": {"model": "jev"}, "state": "Completed"}})
+
     def test_live_request_falls_back_to_api_token_for_gateway_auth(self) -> None:
         response = {"answers": {"test_package": {"choice": "prismattyc-core"}}}
         client = jev.JevClient("account-1", "api-token", "gateway-1")

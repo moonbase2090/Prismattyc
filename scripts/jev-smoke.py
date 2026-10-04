@@ -78,21 +78,23 @@ def show(label: str, status: int, headers: dict[str, str], raw: bytes, secrets: 
     print(redact(text, secrets)[:4000])
 
 
-def summarize_success(raw: bytes) -> bool:
+def summarize_success(raw: bytes, shadow: Any) -> bool:
     try:
-        parsed = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
+        result = shadow.jev_result(json.loads(raw.decode("utf-8")))
+    except (RuntimeError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        print(f"unusable response: {exc}")
         return False
-    result = parsed.get("result", parsed) if isinstance(parsed, dict) else None
-    if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
-        return False
-    print(f"result.model: {result.get('model')}")
-    print(f"result.usage: {json.dumps(result.get('usage'), sort_keys=True)}")
-    print(f"result.answers: {json.dumps(result.get('answers'), sort_keys=True)}")
+    report(result)
     return True
 
 
-def probe(account_id: str, api_token: str, gateway_id: str, gateway_token: str) -> int:
+def report(result: dict[str, Any]) -> None:
+    print(f"result.model: {result.get('model')}")
+    print(f"result.usage: {json.dumps(result.get('usage'), sort_keys=True)}")
+    print(f"result.answers: {json.dumps(result.get('answers'), sort_keys=True)}")
+
+
+def probe(account_id: str, api_token: str, gateway_id: str, gateway_token: str, shadow: Any) -> int:
     secrets = (api_token, gateway_token, account_id, gateway_id)
     account = quote(account_id, safe="")
     auth = {"Authorization": f"Bearer {api_token}"}
@@ -125,16 +127,22 @@ def probe(account_id: str, api_token: str, gateway_id: str, gateway_token: str) 
         variants.append(("Authorization + cf-aig-gateway-id", {**base, "cf-aig-gateway-id": gateway_id}))
     variants.append(("Authorization only (no gateway)", base))
 
+    # The first two header sets are the nightly's current and pre-gateway-auth shapes; the
+    # bare request only runs when both are refused. At most three Jev calls per probe.
     url = f"{API_ROOT}/accounts/{account}/ai/run"
-    for label, headers in variants:
+    passed = []
+    for index, (label, headers) in enumerate(variants):
+        if index == len(variants) - 1 and passed and len(variants) > 1:
+            break
         status, response_headers, raw = http("POST", url, headers, body)
         show(f"jev: {label}", status, response_headers, raw, secrets)
-        if 200 <= status < 300 and summarize_success(raw):
-            print(f"PASS with header set: {label}")
-            return 0
-        if status != 403:
-            break
-    print("FAIL: no header set returned a Jev answer")
+        if 200 <= status < 300 and summarize_success(raw, shadow):
+            passed.append(label)
+    for label in passed:
+        print(f"PASS with header set: {label}")
+    if passed and passed[0] == variants[0][0]:
+        return 0
+    print("FAIL: the nightly's header set did not return a Jev answer")
     return 1
 
 
@@ -152,19 +160,17 @@ def main() -> int:
         return 2
     print(f"gateway id present: {bool(gateway_id)}; separate gateway token: {gateway_token != api_token}")
 
-    if args.probe:
-        return probe(account_id, api_token, gateway_id, gateway_token)
-
     shadow = load_shadow()
+    if args.probe:
+        return probe(account_id, api_token, gateway_id, gateway_token, shadow)
+
     client = shadow.JevClient(account_id, api_token, gateway_id or None, gateway_token)
     try:
         result = client.call(STATE, QUESTIONS)
     except RuntimeError as exc:
         print(f"FAIL: {exc}")
         return 1
-    print(f"result.model: {result.get('model')}")
-    print(f"result.usage: {json.dumps(result.get('usage'), sort_keys=True)}")
-    print(f"result.answers: {json.dumps(result.get('answers'), sort_keys=True)}")
+    report(result)
     print("PASS")
     return 0
 

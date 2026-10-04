@@ -320,6 +320,26 @@ def cloudflare_error_detail(body: bytes, secrets: tuple[str, ...]) -> str | None
     return " ".join(detail.split())[:500] or None
 
 
+def jev_result(parsed: Any) -> dict[str, Any]:
+    """Return the Jev answer object from a Cloudflare /ai/run response.
+
+    Through AI Gateway the REST API wraps the model output twice:
+    {"result": {"result": {"model", "answers", "usage"}, "state": "Completed"}, "success": true}.
+    A bare model payload or a single "result" envelope is accepted as well.
+    """
+    current = parsed
+    for _ in range(3):
+        if not isinstance(current, dict) or isinstance(current.get("answers"), dict):
+            break
+        state = current.get("state")
+        if isinstance(state, str) and state != "Completed":
+            raise RuntimeError(f"Cloudflare Jev task did not complete (state: {state[:40]})")
+        current = current.get("result")
+    if not isinstance(current, dict) or not isinstance(current.get("answers"), dict):
+        raise RuntimeError("Cloudflare response did not contain Jev answers")
+    return current
+
+
 class JevClient:
     def __init__(
         self,
@@ -358,11 +378,7 @@ class JevClient:
             try:
                 with urllib.request.urlopen(request, timeout=90) as response:
                     raw = response.read()
-                parsed = json.loads(raw.decode("utf-8"))
-                result = parsed.get("result", parsed) if isinstance(parsed, dict) else None
-                if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
-                    raise RuntimeError("Cloudflare response did not contain Jev answers")
-                return result
+                return jev_result(json.loads(raw.decode("utf-8")))
             except urllib.error.HTTPError as exc:
                 if exc.code not in RETRYABLE or attempt == 5:
                     if exc.code == 403:

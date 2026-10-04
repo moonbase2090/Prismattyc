@@ -42,8 +42,7 @@ jobs:
           PROBE: ${{ github.event_name == 'push' || inputs.probe }}
         run: |
           set -euo pipefail
+          python3 scripts/jev-smoke.py
           if [[ "$PROBE" == "true" ]]; then
             python3 scripts/jev-smoke.py --probe
-          else
-            python3 scripts/jev-smoke.py
           fi

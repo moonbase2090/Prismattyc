@@ -3370,6 +3370,8 @@ mod tests {
                     focused,
                 },
                 true,
+                None,
+                true,
             );
         }
     }

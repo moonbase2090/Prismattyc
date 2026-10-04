@@ -37,6 +37,7 @@ pub(super) enum Guard {
     HoverTarget,
     RestorePrompt,
     SaveSpace,
+    Transparency,
 }
 
 const GUARDS: &[(Guard, &str)] = &[
@@ -73,6 +74,7 @@ const GUARDS: &[(Guard, &str)] = &[
     (Guard::HoverTarget, "hover-target"),
     (Guard::RestorePrompt, "restore-prompt"),
     (Guard::SaveSpace, "save-space"),
+    (Guard::Transparency, "transparency"),
 ];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -141,6 +143,7 @@ pub(super) fn record_overlay_guards(mask: &mut GuardMask, state: TransientOverla
     mask.set(Guard::TitleNotice, state.title_notice);
     mask.set(Guard::HoverTarget, state.hover_target);
     mask.set(Guard::SaveSpace, state.save_space);
+    mask.set(Guard::Transparency, state.transparency);
 }
 
 /// Published `bell-toasts` follows the live chip list, not only the last raster.
@@ -408,6 +411,7 @@ mod tests {
             Guard::HoverTarget,
             Guard::RestorePrompt,
             Guard::SaveSpace,
+            Guard::Transparency,
         ];
         assert_eq!(GUARDS.len(), ALL.len());
         for guard in ALL {
@@ -551,6 +555,13 @@ mod tests {
                     ..TransientOverlayState::default()
                 },
                 "save-space",
+            ),
+            (
+                TransientOverlayState {
+                    transparency: true,
+                    ..TransientOverlayState::default()
+                },
+                "transparency",
             ),
         ];
         for (state, name) in cases {

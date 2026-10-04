@@ -148,6 +148,9 @@ pub enum Action {
     SelectAll,
     ScrollLineUp,
     ScrollLineDown,
+    /// Open the transparency dialog. Unbound. The palette lists it only when
+    /// `chrome_style` is graphite (#112).
+    Transparency,
     RichFocus,
 }
 
@@ -238,6 +241,7 @@ impl Action {
             Action::SelectAll,
             Action::ScrollLineUp,
             Action::ScrollLineDown,
+            Action::Transparency,
             Action::RichFocus,
         ]);
         all
@@ -326,6 +330,7 @@ impl Action {
             Action::SelectAll => "select_all".into(),
             Action::ScrollLineUp => "scroll_line_up".into(),
             Action::ScrollLineDown => "scroll_line_down".into(),
+            Action::Transparency => "transparency".into(),
             Action::RichFocus => "rich_focus".into(),
         }
     }
@@ -436,6 +441,7 @@ impl Action {
             Action::SelectAll => "select the visible viewport".into(),
             Action::ScrollLineUp => "scroll history up one line".into(),
             Action::ScrollLineDown => "scroll history down one line".into(),
+            Action::Transparency => "open transparency settings (graphite chrome only)".into(),
             Action::RichFocus => "toggle rich focus (--experimental-rich)".into(),
         }
     }
@@ -557,6 +563,7 @@ impl Action {
             | Action::SelectAll
             | Action::ScrollLineUp
             | Action::ScrollLineDown
+            | Action::Transparency
             | Action::RichFocus => ActionGroup::ViewEdit,
         }
     }
@@ -609,6 +616,9 @@ impl Action {
                 Some("Deletes walkthrough.json. The caption restarts at the first step.")
             }
             Action::RichFocus => Some("Needs --experimental-rich."),
+            Action::Transparency => Some(
+                "Writes the existing opacity keys. Listed in the palette only when chrome_style is graphite.",
+            ),
             _ => None,
         }
     }
@@ -1240,6 +1250,7 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         Action::SelectAll => vec!["ctrl+shift+a"],
         Action::ScrollLineUp => vec!["ctrl+shift+up"],
         Action::ScrollLineDown => vec!["ctrl+shift+down"],
+        Action::Transparency => vec![],
         Action::RichFocus => vec!["ctrl+shift+g"],
     }
 }
@@ -1538,6 +1549,7 @@ mod tests {
                 | Action::DecreaseFontSize
                 | Action::ResetFontSize
                 | Action::BarColorPrev
+                | Action::Transparency
         )
     }
 

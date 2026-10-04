@@ -582,6 +582,19 @@ pub fn save_theme(path: &Path, theme_id: &str) -> Result<()> {
 
 /// Save one preference atomically and preserve unrelated settings and comments.
 pub fn save_preference(path: &Path, key: &str, value: toml_edit::Item) -> Result<()> {
+    mutate_preference(path, |document| {
+        document[key] = value;
+    })
+}
+
+/// Remove one top-level key and preserve the rest of the file.
+pub fn clear_preference(path: &Path, key: &str) -> Result<()> {
+    mutate_preference(path, |document| {
+        document.remove(key);
+    })
+}
+
+fn mutate_preference(path: &Path, mutate: impl FnOnce(&mut toml_edit::DocumentMut)) -> Result<()> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -589,8 +602,8 @@ pub fn save_preference(path: &Path, key: &str, value: toml_edit::Item) -> Result
     };
     let mut document = raw
         .parse::<toml_edit::DocumentMut>()
-        .with_context(|| format!("parse {} before saving theme", path.display()))?;
-    document[key] = value;
+        .with_context(|| format!("parse {} before saving a preference", path.display()))?;
+    mutate(&mut document);
     parse(&document.to_string(), path)?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)
@@ -1379,6 +1392,26 @@ mod tests {
         assert!(raw.contains("focus_border = \"violet\""), "{raw}");
         assert!(raw.contains("theme = \"rose-pine-moon\""), "{raw}");
         assert_eq!(load(&path).unwrap().loaded_theme().id, "rose-pine-moon");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_preference_removes_one_key_and_keeps_the_rest() {
+        let dir = temp_dir("clear-preference");
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "# keep\nwindow_opacity = 0.82\nchrome_opacity = 0.5\n",
+        )
+        .unwrap();
+        clear_preference(&path, "chrome_opacity").unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# keep"), "{raw}");
+        assert!(raw.contains("window_opacity = 0.82"), "{raw}");
+        assert!(!raw.contains("chrome_opacity"), "{raw}");
+        let loaded = load(&path).unwrap();
+        assert!(loaded.chrome_opacity.is_none());
+        assert!((loaded.chrome_opacity() - 0.82).abs() < 0.001);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -416,6 +416,8 @@ select_all = "ctrl+shift+a"
 scroll_line_up = "ctrl+shift+up"
 # scroll history down one line.
 scroll_line_down = "ctrl+shift+down"
+# open transparency settings (graphite chrome only).
+# transparency = []
 # toggle rich focus (--experimental-rich).
 rich_focus = "ctrl+shift+g"
 
@@ -522,7 +524,15 @@ focused one: its surface is painted at
 
 `chrome_opacity` sets the tab strip and the footer rail; it defaults to
 `window_opacity`. The bars themselves become translucent; their text and
-badges do not.
+badges do not. Omit the key and the bars follow `window_opacity`.
+
+When `chrome_style = "graphite"`, the command palette action `transparency`
+opens a fixed 760×460 dialog that writes these keys. The list scrolls inside
+the dialog. The right side is a live preview of the ground, the bars, and the
+panes. Classic chrome does not list or open that dialog. Text, the cursor,
+status dots, badges, the active tab chip, the command field, and the focus
+ring stay opaque. X11 without a compositor and `--gpu` stay opaque. Lowering
+`window_opacity` from `1.0` on X11 or Wayland needs a restart.
 
 When several windows attach to the same session, a pane is sized to the
 smallest attached window. A larger window shows that pane at the top left

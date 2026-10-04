@@ -128,6 +128,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         value: ConfigValue::String("graphite"),
     },
     ConfigKey {
+        name: "layout",
+        group: ConfigGroup::Appearance,
+        doc: "Graphite chrome arrangement: bars, or the opt-in sidebar tree",
+        range: "bars|sidebar",
+        value: ConfigValue::String("bars"),
+    },
+    ConfigKey {
         name: "pane_titles",
         group: ConfigGroup::Appearance,
         doc: "Multi-pane title row: focused pane OSC title, or handle hover only",
@@ -972,6 +979,7 @@ mod tests {
         "tab_strip",
         "chrome_style",
         "bar_color",
+        "layout",
         "pane_titles",
         "focus_border",
         "focus_border_animation",

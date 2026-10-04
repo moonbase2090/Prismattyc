@@ -673,6 +673,9 @@ pub struct SpaceRail {
     pub keyboard: bool,
     /// First visible row of a Graphite side list. Classic rails ignore it.
     side_scroll: usize,
+    /// Sidebar-collapsed spaces, by name (issue #113). Per window, session
+    /// memory only; the default bars layout ignores it.
+    collapsed_spaces: std::collections::HashSet<String>,
     last_poll: Option<Instant>,
     dir_stamp: Option<SystemTime>,
     /// Inputs of the last [`Self::infer_current`] scan: directory stamp and
@@ -696,6 +699,7 @@ impl SpaceRail {
             notice: None,
             keyboard: false,
             side_scroll: 0,
+            collapsed_spaces: std::collections::HashSet::new(),
             last_poll: None,
             dir_stamp: None,
             infer_tried: None,
@@ -888,6 +892,20 @@ impl SpaceRail {
 
     pub fn set_side_scroll(&mut self, scroll: usize, max_scroll: usize) {
         self.side_scroll = scroll.min(max_scroll);
+    }
+
+    /// Sidebar collapse state for one space (issue #113).
+    pub fn is_collapsed(&self, name: &str) -> bool {
+        self.collapsed_spaces.contains(name)
+    }
+
+    /// Collapse (`true`) or expand (`false`) one space in the sidebar tree.
+    pub fn set_collapsed(&mut self, name: &str, collapsed: bool) {
+        if collapsed {
+            self.collapsed_spaces.insert(name.to_string());
+        } else {
+            self.collapsed_spaces.remove(name);
+        }
     }
 
     /// Reload the chip list from `dir`. Returns whether anything changed.
@@ -2141,6 +2159,18 @@ mod tests {
         assert!(layout.visible_rows.is_none());
         assert_eq!(layout.h, 30);
         assert!(layout.chip_px.contains(&0));
+    }
+
+    #[test]
+    fn collapsed_spaces_remember_per_window_session_state() {
+        let mut rail = SpaceRail::new(None);
+        assert!(!rail.is_collapsed("lab"));
+        rail.set_collapsed("lab", true);
+        assert!(rail.is_collapsed("lab"));
+        rail.set_collapsed("lab", false);
+        assert!(!rail.is_collapsed("lab"));
+        // Unknown names are simply not collapsed.
+        assert!(!rail.is_collapsed("mail"));
     }
 
     #[test]

@@ -238,6 +238,8 @@ pub struct Palette {
     /// First visible list line. Independent of `selected` so hover does not
     /// jump a scrolled window.
     pub scroll: usize,
+    /// Sub-row wheel distance, in thousandths of a physical pixel.
+    wheel_remainder_milli_px: i64,
     /// `None` is the All chip.
     pub filter: Option<ActionGroup>,
     /// Enter was pressed on a family row; the next digit picks the member.
@@ -278,6 +280,26 @@ impl Palette {
         }
     }
 
+    /// Select a filter by its painted chip index (0 = All).
+    pub fn select_filter(&mut self, index: usize) -> bool {
+        let filter = match index {
+            0 => None,
+            n => match ActionGroup::ALL.get(n - 1) {
+                Some(group) => Some(*group),
+                None => return false,
+            },
+        };
+        if self.filter == filter {
+            return false;
+        }
+        self.filter = filter;
+        self.selected = 0;
+        self.scroll = 0;
+        self.wheel_remainder_milli_px = 0;
+        self.awaiting_digit = None;
+        true
+    }
+
     /// Cycle the chip: All → Panes → … → View & Edit → All.
     pub fn cycle_filter(&mut self, direction: isize) {
         let count = ActionGroup::ALL.len() + 1;
@@ -287,14 +309,8 @@ impl Palette {
         } else {
             (index + 1) % count
         };
-        self.filter = if next == 0 {
-            None
-        } else {
-            Some(ActionGroup::ALL[next - 1])
-        };
-        self.selected = 0;
-        self.scroll = 0;
-        self.awaiting_digit = None;
+        let changed = self.select_filter(next);
+        debug_assert!(changed);
     }
 
     /// Every selectable entry in documentation order, families collapsed.
@@ -418,6 +434,7 @@ impl Palette {
                 if appended {
                     self.selected = 0;
                     self.scroll = 0;
+                    self.wheel_remainder_milli_px = 0;
                 }
                 PaletteVerdict::Consumed
             }
@@ -431,20 +448,11 @@ impl Palette {
                     self.query.push(' ');
                     self.selected = 0;
                     self.scroll = 0;
+                    self.wheel_remainder_milli_px = 0;
                     PaletteVerdict::Consumed
                 }
                 NamedKey::Escape => PaletteVerdict::Close,
-                NamedKey::Enter => {
-                    let view = self.view(keymap, rich);
-                    match view.row(self.selected).map(|row| row.entry) {
-                        Some(PaletteEntry::Action(action)) => PaletteVerdict::Run(action),
-                        Some(family) => {
-                            self.awaiting_digit = Some(family);
-                            PaletteVerdict::Consumed
-                        }
-                        None => PaletteVerdict::Consumed,
-                    }
-                }
+                NamedKey::Enter => self.activate_selected(keymap, rich),
                 NamedKey::ArrowUp => self.move_selection(-1, keymap, rich),
                 NamedKey::ArrowDown => self.move_selection(1, keymap, rich),
                 NamedKey::PageUp => self.page_selection(-1, keymap, rich),
@@ -462,6 +470,58 @@ impl Palette {
             },
             _ => PaletteVerdict::Consumed,
         }
+    }
+
+    /// Handle the selected row as Enter does, including collapsed action families.
+    #[must_use]
+    pub fn activate_selected(&mut self, keymap: &KeyMap, rich: bool) -> PaletteVerdict {
+        if self.awaiting_digit.is_some() {
+            return PaletteVerdict::Consumed;
+        }
+        let view = self.view(keymap, rich);
+        match view.row(self.selected).map(|row| row.entry) {
+            Some(PaletteEntry::Action(action)) => PaletteVerdict::Run(action),
+            Some(family) => {
+                self.awaiting_digit = Some(family);
+                PaletteVerdict::Consumed
+            }
+            None => PaletteVerdict::Consumed,
+        }
+    }
+
+    /// Move the selected row by accumulated wheel distance without wrapping.
+    /// Positive deltas are upward, matching winit's wheel direction.
+    pub fn scroll_by_wheel(
+        &mut self,
+        delta_milli_px: i64,
+        row_pitch_px: usize,
+        keymap: &KeyMap,
+        rich: bool,
+    ) -> bool {
+        if row_pitch_px == 0 || delta_milli_px == 0 {
+            return false;
+        }
+        let row_distance = (row_pitch_px as i64).saturating_mul(1_000).max(1);
+        self.wheel_remainder_milli_px =
+            self.wheel_remainder_milli_px.saturating_add(delta_milli_px);
+        let rows = self.wheel_remainder_milli_px / row_distance;
+        if rows == 0 {
+            return false;
+        }
+        self.wheel_remainder_milli_px %= row_distance;
+
+        let count = self.view(keymap, rich).len();
+        if count == 0 {
+            return false;
+        }
+        let last = count.saturating_sub(1) as i128;
+        let next = (self.selected.min(count - 1) as i128 - rows as i128).clamp(0, last) as usize;
+        self.awaiting_digit = None;
+        if next == self.selected {
+            return false;
+        }
+        self.selected = next;
+        true
     }
 
     fn clamp(&mut self, keymap: &KeyMap, rich: bool) {

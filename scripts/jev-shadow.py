@@ -13,7 +13,7 @@ import time
 import tomllib
 import urllib.error
 import urllib.request
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -290,20 +290,62 @@ def retry_after_seconds(value: str | None) -> float | None:
             return None
 
 
+def cloudflare_error_detail(body: bytes, secrets: tuple[str, ...]) -> str | None:
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    messages = []
+    errors = payload.get("errors")
+    if isinstance(errors, list):
+        messages.extend(
+            item["message"]
+            for item in errors
+            if isinstance(item, dict) and isinstance(item.get("message"), str)
+        )
+    if isinstance(payload.get("message"), str):
+        messages.append(payload["message"])
+    if not messages:
+        return None
+
+    detail = "; ".join(dict.fromkeys(messages))
+    for secret in secrets:
+        if secret:
+            detail = detail.replace(secret, "[redacted]")
+            detail = detail.replace(quote(secret, safe=""), "[redacted]")
+    detail = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [redacted]", detail)
+    return " ".join(detail.split())[:500] or None
+
+
 class JevClient:
-    def __init__(self, account_id: str, token: str, gateway_id: str | None):
-        if not account_id.strip() or not token.strip():
+    def __init__(
+        self,
+        account_id: str,
+        api_token: str,
+        gateway_id: str | None,
+        gateway_token: str | None = None,
+    ):
+        if not account_id.strip() or not api_token.strip():
             raise ValueError("live mode requires CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN")
-        if any(char in account_id + token + (gateway_id or "") for char in "\r\n"):
+        credentials = (account_id, api_token, gateway_id or "", gateway_token or "")
+        if any(char in value for value in credentials for char in "\r\n"):
             raise ValueError("Cloudflare credentials or gateway ID contain a line break")
         self.url = API_URL.format(account_id=quote(account_id.strip(), safe=""))
-        self.token = token.strip()
+        self.api_token = api_token.strip()
+        self.gateway_token = (gateway_token or "").strip() or self.api_token
         self.gateway_id = gateway_id.strip() if gateway_id and gateway_id.strip() else None
         self.last_request: float | None = None
 
     def call(self, state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps({"model": MODEL, "input": {"state": state, "questions": questions}}).encode()
-        headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {self.api_token}",
+            "cf-aig-authorization": f"Bearer {self.gateway_token}",
+            "Content-Type": "application/json",
+        }
         if self.gateway_id:
             headers["cf-aig-gateway-id"] = self.gateway_id
         for attempt in range(6):
@@ -323,6 +365,24 @@ class JevClient:
                 return result
             except urllib.error.HTTPError as exc:
                 if exc.code not in RETRYABLE or attempt == 5:
+                    if exc.code == 403:
+                        try:
+                            raw_error = exc.read(16_384)
+                        except OSError:
+                            raw_error = b""
+                        finally:
+                            exc.close()
+                        detail = cloudflare_error_detail(
+                            raw_error, (self.api_token, self.gateway_token)
+                        )
+                        if detail is None:
+                            detail = (
+                                "Verify AI Gateway authentication and the token's Run permission "
+                                "(cf-aig-authorization)."
+                            )
+                        raise RuntimeError(
+                            f"Cloudflare Jev request failed with HTTP 403: {detail}"
+                        ) from None
                     raise RuntimeError(f"Cloudflare Jev request failed with HTTP {exc.code}") from None
                 wait = retry_after_seconds(exc.headers.get("Retry-After"))
                 if wait is None:
@@ -466,8 +526,10 @@ def make_summary(result: dict[str, Any]) -> str:
             f"({triage['labeled']}/{triage['sampled']} labels present)."
         )
     if result["errors"]:
-        lines.extend(["", "Request errors:"])
-        lines.extend(f"- {item['mutant_id']}: {item['error']}" for item in result["errors"])
+        lines.extend(["", "Request errors by reason:"])
+        for error, count in sorted(Counter(item["error"] for item in result["errors"]).items()):
+            noun = "request" if count == 1 else "requests"
+            lines.append(f"- {count} {noun}: {error}")
     lines.extend([
         "",
         f"Pricing: [Cloudflare Jev catalog]({CATALOG_URL}).",
@@ -488,6 +550,7 @@ def run_live(
         os.environ.get("CLOUDFLARE_ACCOUNT_ID", ""),
         os.environ.get("CLOUDFLARE_API_TOKEN", ""),
         os.environ.get("CLOUDFLARE_AI_GATEWAY_ID"),
+        os.environ.get("CLOUDFLARE_AI_GATEWAY_TOKEN"),
     )
     questions = prediction_questions(workspace_packages(args.repo, [row["mutant"] for row in inputs]))
     errors, input_tokens, output_tokens = [], 0, 0

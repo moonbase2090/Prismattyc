@@ -107,6 +107,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         value: ConfigValue::String("auto"),
     },
     ConfigKey {
+        name: "chrome_style",
+        group: ConfigGroup::Appearance,
+        doc: "Host chrome look: classic, or the opt-in Graphite redesign",
+        range: "classic|graphite",
+        value: ConfigValue::String("classic"),
+    },
+    ConfigKey {
         name: "pane_titles",
         group: ConfigGroup::Appearance,
         doc: "Multi-pane title row: focused pane OSC title, or handle hover only",
@@ -949,6 +956,7 @@ mod tests {
         "render_timer",
         "render_timer_log_every_frame",
         "tab_strip",
+        "chrome_style",
         "pane_titles",
         "focus_border",
         "focus_border_animation",
@@ -1055,6 +1063,7 @@ mod tests {
         assert!(!parsed.render_timer_log_every_frame());
         assert_eq!(parsed.install_agent_skills, Some(true));
         assert_eq!(parsed.tab_strip(), crate::config::TabStripMode::Auto);
+        assert_eq!(parsed.chrome_style(), crate::config::ChromeStyle::Classic);
         assert_eq!(parsed.pane_titles(), crate::config::PaneTitlesMode::Focused);
         assert!(parsed.splash());
         assert_eq!(parsed.splash, Some(true));

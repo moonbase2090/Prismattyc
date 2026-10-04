@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 
 ROOT = Path(__file__).resolve().parents[2]
-WORKLOADS = ("ascii", "scroll", "history", "unicode", "sgr", "reflow")
+WORKLOADS = ("ascii", "scroll", "history", "unicode", "sgr", "reflow", "reflow_long")
 
 
 def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -92,7 +92,7 @@ def main() -> int:
     with (output / "timings.jsonl").open("w") as timings:
         for trial_index, order in enumerate(timing_case_order):
             for workload in order:
-                units = args.units * 2 if workload == "reflow" else args.units
+                units = args.units * 2 if workload in ("reflow", "reflow_long") else args.units
                 result = run([str(binary), workload, str(units)], cwd=ROOT,
                              capture_output=True)
                 record = json.loads(result.stdout)
@@ -111,7 +111,7 @@ def main() -> int:
 
     if args.profile:
         for workload in WORKLOADS:
-            units = args.profile_units * 2 if workload == "reflow" else args.profile_units
+            units = args.profile_units * 2 if workload in ("reflow", "reflow_long") else args.profile_units
             profile_path = output / "samples" / (
                 f"{workload}.sample.txt" if sys.platform == "darwin"
                 else f"{workload}.perf.data"

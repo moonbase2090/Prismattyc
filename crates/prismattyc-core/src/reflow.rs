@@ -31,6 +31,8 @@ impl Screen {
         let history_len = self.scrollback.len() - suffix;
         let cursor = self.primary.cursor;
         let saved = self.primary.saved_cursor;
+        let wrap_pending = self.primary.wrap_pending;
+        let saved_wrap_pending = saved.wrap_pending;
         let last_used = self
             .primary
             .cells
@@ -38,19 +40,21 @@ impl Screen {
             .rposition(|row| row.iter().any(|c| *c != Cell::default()))
             .unwrap_or(0);
         let last_used = last_used.max(cursor.row).max(saved.cursor.row);
-        let mut input: Vec<_> = self
+        // Copy the small live grid first so the history drain below can be
+        // chained directly instead of collected into a temporary row vector.
+        let grid: Vec<(Vec<Cell>, bool)> = self
+            .primary
+            .cells
+            .chunks(self.columns)
+            .take(last_used + 1)
+            .enumerate()
+            .map(|(i, row)| (row.to_vec(), self.primary.wrapped[i]))
+            .collect();
+        let input = self
             .scrollback
             .drain(..history_len)
             .zip(self.scrollback_wrapped.drain(..history_len))
-            .collect();
-        input.extend(
-            self.primary
-                .cells
-                .chunks(self.columns)
-                .take(last_used + 1)
-                .enumerate()
-                .map(|(i, row)| (row.to_vec(), self.primary.wrapped[i])),
-        );
+            .chain(grid);
         let cursor_row = history_len + cursor.row;
         let saved_row = history_len + saved.cursor.row;
         let limit =
@@ -76,8 +80,8 @@ impl Screen {
                     .map_or(0, |i| i + 1)
             };
             for (i, (at, column, pending)) in [
-                (cursor_row, cursor.column, self.primary.wrap_pending),
-                (saved_row, saved.cursor.column, saved.wrap_pending),
+                (cursor_row, cursor.column, wrap_pending),
+                (saved_row, saved.cursor.column, saved_wrap_pending),
             ]
             .into_iter()
             .enumerate()
@@ -89,16 +93,20 @@ impl Screen {
                     marks[i] = Some(logical.len() + offset - padding);
                 }
             }
-            logical.extend(
-                row[..used.min(row.len())]
-                    .iter()
-                    .filter(|c| !c.wrap_padding)
-                    .copied(),
-            );
-            if !wrapped {
-                pack(&logical, columns, &mut output, marks, &mut positions);
-                logical.clear();
+            let end = used.min(row.len());
+            // A complete logical line in a single row with no wrap padding is
+            // exactly what the staging buffer would hold, so pack it straight
+            // from the source row and skip a full copy of every cell.
+            if !wrapped && logical.is_empty() && !row[..end].iter().any(|c| c.wrap_padding) {
+                pack(&row[..end], columns, &mut output, marks, &mut positions);
                 marks = [None, None];
+            } else {
+                logical.extend(row[..end].iter().filter(|c| !c.wrap_padding).copied());
+                if !wrapped {
+                    pack(&logical, columns, &mut output, marks, &mut positions);
+                    logical.clear();
+                    marks = [None, None];
+                }
             }
         }
         if !logical.is_empty() {
@@ -156,8 +164,8 @@ impl Screen {
         self.primary = primary;
         // Repacked pre-alt history goes back in front of the untouched alt
         // suffix (which the post-reflow width pass still adjusts).
-        let mut rows_out = VecDeque::new();
-        let mut wraps_out = VecDeque::new();
+        let mut rows_out = VecDeque::with_capacity(start);
+        let mut wraps_out = VecDeque::with_capacity(start);
         for (row, wrap) in output.rows.drain(..start) {
             rows_out.push_back(row);
             wraps_out.push_back(wrap);
@@ -208,15 +216,20 @@ fn pack(
     let mut column = 0;
     let mut index = 0;
     loop {
-        let width = cells.get(index).map_or(0, |cell| {
-            let wide =
-                cells.get(index + 1).is_some_and(|c| c.wide_cont) || cell.display_width() == 2;
-            if wide {
-                2.min(columns)
-            } else {
-                1
+        let (width, has_cont) = match cells.get(index) {
+            None => (0, false),
+            Some(cell) => {
+                let has_cont = cells.get(index + 1).is_some_and(|c| c.wide_cont);
+                // Plain ASCII without cluster flags is always single-column,
+                // which skips the unicode-width table lookup on the hot path.
+                // Regional indicators and VS16/ZWJ clusters keep flag bits or
+                // non-ASCII bases, so they still take the full width check.
+                let wide = has_cont
+                    || ((cell.cluster_flags != 0 || cell.character as u32 >= 0x80)
+                        && cell.display_width() == 2);
+                (if wide { 2.min(columns) } else { 1 }, has_cont)
             }
-        });
+        };
         if index < cells.len() && column + width > columns {
             for cell in row.iter_mut().skip(column) {
                 cell.wrap_padding = true;
@@ -246,7 +259,6 @@ fn pack(
             continue;
         }
         row[column] = cell;
-        let has_cont = cells.get(index + 1).is_some_and(|c| c.wide_cont);
         if width == 2 {
             let mut continuation = Cell::wide_continuation(cell.style);
             continuation.hyperlink = cell.hyperlink;
@@ -418,5 +430,28 @@ mod tests {
         s.resize_reflow(6, 4);
         write(&mut s, "!");
         assert!(logical(&s).starts_with("fi!st"), "{}", logical(&s));
+    }
+    #[test]
+    fn long_soft_wrapped_history_rejoins_across_alternating_widths() {
+        // Soft-wrap-heavy companion to the profile `reflow_long` case: every
+        // logical line spans several physical rows, so repacking must join
+        // wrapped rows through the staging buffer at both widths.
+        let mut s = Screen::new(80, 24, 10_000);
+        for i in 0..200 {
+            write(&mut s, &format!("long-{i:04}-"));
+            write(&mut s, &"x".repeat(280));
+            write(&mut s, "\n");
+        }
+        let before = logical(&s);
+        assert!(before.lines().next().unwrap().len() > 80);
+        for _ in 0..3 {
+            s.resize_reflow(96, 30);
+            assert_eq!(logical(&s), before);
+            s.resize_reflow(80, 24);
+            assert_eq!(logical(&s), before);
+        }
+        write(&mut s, "!");
+        assert!(logical(&s).ends_with('!'));
+        assert_eq!(s, Screen::import_state(s.export_state()).unwrap());
     }
 }

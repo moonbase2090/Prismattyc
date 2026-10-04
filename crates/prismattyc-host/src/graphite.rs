@@ -3149,6 +3149,7 @@ mod tests {
                     dot: Dot::Idle,
                     status: PaneStatus::Focused,
                     focused: true,
+                    handle_hover: false,
                 },
                 true,
                 cycle,
@@ -3216,6 +3217,7 @@ mod tests {
                         dot: Dot::Working,
                         status: PaneStatus::Focused,
                         focused: true,
+                        handle_hover: false,
                     },
                     true,
                     progress,
@@ -3879,6 +3881,8 @@ mod tests {
                     focused: false,
                     handle_hover,
                 },
+                false,
+                None,
                 false,
             );
             buffer

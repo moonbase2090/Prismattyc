@@ -130,9 +130,9 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey {
         name: "automatic_update_checks",
         group: ConfigGroup::Updates,
-        doc: "Check for signed app releases on launch and daily; the menu item always works",
+        doc: "Check for signed app releases on launch and daily; enabled by default",
         range: "true|false",
-        value: ConfigValue::Bool(false),
+        value: ConfigValue::Bool(true),
     },
     ConfigKey {
         name: "focus_border",

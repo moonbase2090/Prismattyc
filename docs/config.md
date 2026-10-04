@@ -30,9 +30,10 @@ host opt-out; the flag and env still hide the splash when `splash = true`.
 The top-level `install_agent_skills = false` opts out of the macOS app's once-per-version
 pmux Agent Skill install and the Linux archive installer's automatic skill
 install; `PRISMATTYC_NO_AGENT_SKILLS=1` also opts out and wins over the config
-value. The top-level `automatic_update_checks = true` enables a release check
-on app launch and daily; it defaults to `false`. The app menu's manual check
-works regardless of this setting. The classic `prismattyc` binary does not
+value. Automatic signed-release checks run on app launch and daily by default.
+Set the top-level `automatic_update_checks = false` or turn them off in the app
+menu to opt out. The app menu's manual check works regardless of this setting.
+The classic `prismattyc` binary does not
 read this file.
 
 ## Keys
@@ -64,8 +65,8 @@ hover_blend = 0.1
 install_agent_skills = true
 
 # -- updates --
-# Check for signed app releases on launch and daily; the menu item always works. true|false.
-automatic_update_checks = false
+# Check for signed app releases on launch and daily; enabled by default. true|false.
+automatic_update_checks = true
 
 # -- focus border --
 # Focus border color. coral amber yellow green blue violet ink, or 0-6.

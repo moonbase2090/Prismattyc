@@ -2339,7 +2339,7 @@ impl App {
             wake.clone(),
         )));
         #[cfg(target_os = "macos")]
-        let automatic_update_checks = file_config.automatic_update_checks.unwrap_or(false);
+        let automatic_update_checks = file_config.automatic_update_checks.unwrap_or(true);
         Ok(Self {
             cli,
             windows: std::collections::HashMap::new(),
@@ -2424,7 +2424,7 @@ impl App {
         }
         #[cfg(target_os = "macos")]
         {
-            let automatic_checks = self.file_config.automatic_update_checks.unwrap_or(false);
+            let automatic_checks = self.file_config.automatic_update_checks.unwrap_or(true);
             if automatic_checks != self.automatic_update_checks {
                 self.automatic_update_checks = automatic_checks;
                 self.next_automatic_update_check = automatic_checks.then(Instant::now);
@@ -14534,7 +14534,7 @@ fn main() -> Result<()> {
         // the File menu are live from the first window.
         macos_menu::install_main_menu(
             proxy.clone(),
-            file_config.automatic_update_checks.unwrap_or(false),
+            file_config.automatic_update_checks.unwrap_or(true),
         );
     }
 

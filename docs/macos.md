@@ -179,8 +179,8 @@ daemon with live sessions stays up; its restart waits until it is safe.
 When the app folder is not writable, the updater stops and explains how to
 move the app to `~/Applications` or retry with the required rights. A first
 install uses `/Applications` when writable, and `~/Applications` otherwise.
-Automatic checks are opt-in and can be changed in the app menu or with
-`automatic_update_checks` in `config.toml`.
+Automatic checks are enabled by default. Turn them off in the app menu or set
+`automatic_update_checks = false` in `config.toml` to opt out.
 
 On first launch and after an app update, Prismattyc links the bundled
 `Contents/MacOS/pmux` into `/usr/local/bin` when it can add the link there.

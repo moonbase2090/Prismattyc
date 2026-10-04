@@ -1285,6 +1285,49 @@ impl KeyMap {
         Ok(KeyMap { bindings })
     }
 
+    /// Actions whose macOS Command shortcut is suppressed by an explicit
+    /// non-empty `[keys]` entry that does not bind the Command chord.
+    /// Each entry is the action plus the suppressed macOS chord spelling.
+    /// Empty entries (`[]`) intentionally unbind the action and are skipped.
+    /// Unparseable user chords are skipped here; `from_config_with_macos`
+    /// still rejects them as load errors.
+    pub fn macos_suppressed_actions(
+        keys: Option<&BTreeMap<String, KeysValue>>,
+    ) -> Vec<(Action, String)> {
+        let Some(keys) = keys else {
+            return Vec::new();
+        };
+        let mut suppressed = Vec::new();
+        for action in Action::all() {
+            let Some(macos) = macos_chord(action) else {
+                continue;
+            };
+            let Some(value) = keys.get(&action.name()) else {
+                continue;
+            };
+            let texts = value.chords();
+            if texts.is_empty() {
+                continue;
+            }
+            let Ok(expected) = Chord::parse(macos) else {
+                continue;
+            };
+            let mut keeps_macos = false;
+            for text in texts {
+                if let Ok(chord) = Chord::parse(text) {
+                    if chord == expected {
+                        keeps_macos = true;
+                        break;
+                    }
+                }
+            }
+            if !keeps_macos {
+                suppressed.push((action, macos.to_string()));
+            }
+        }
+        suppressed
+    }
+
     /// One row per host action, including actions without an active chord.
     pub fn listing(&self) -> String {
         Action::all()
@@ -1909,6 +1952,45 @@ mod tests {
         assert!(custom.chords(Action::Copy).is_empty());
         assert!(custom.chords(Action::Quit).is_empty());
         assert_eq!(custom.spellings(Action::NewWindow), vec!["ctrl+alt+n"]);
+    }
+
+    #[test]
+    fn macos_suppressed_actions_reports_overrides_but_not_unbinds() {
+        // No table: nothing is suppressed.
+        assert!(KeyMap::macos_suppressed_actions(None).is_empty());
+
+        // The issue example: an explicit copy binding without super+c.
+        let overrides =
+            BTreeMap::from([("copy".to_string(), KeysValue::One("ctrl+shift+c".into()))]);
+        let suppressed = KeyMap::macos_suppressed_actions(Some(&overrides));
+        assert_eq!(suppressed, vec![(Action::Copy, "super+c".to_string())]);
+        // The replacement rule itself is unchanged: only the explicit chord.
+        let map = KeyMap::from_config_with_macos(Some(&overrides), true).unwrap();
+        assert_eq!(map.spellings(Action::Copy), vec!["ctrl+shift+c"]);
+
+        // Keeping the Command chord (alone or as an alias) is not suppressed.
+        let keeps = BTreeMap::from([
+            (
+                "copy".to_string(),
+                KeysValue::Many(vec!["ctrl+shift+c".into(), "super+c".into()]),
+            ),
+            ("paste".to_string(), KeysValue::One("super+v".into())),
+        ]);
+        assert!(KeyMap::macos_suppressed_actions(Some(&keeps)).is_empty());
+
+        // Intentional unbinding with [] stays silent.
+        let unbound = BTreeMap::from([
+            ("copy".to_string(), KeysValue::Many(vec![])),
+            ("new_tab".to_string(), KeysValue::Many(vec![])),
+        ]);
+        assert!(KeyMap::macos_suppressed_actions(Some(&unbound)).is_empty());
+
+        // Actions without a macOS chord never report, even when overridden.
+        let other = BTreeMap::from([(
+            "split_right".to_string(),
+            KeysValue::One("ctrl+alt+enter".into()),
+        )]);
+        assert!(KeyMap::macos_suppressed_actions(Some(&other)).is_empty());
     }
 
     #[test]

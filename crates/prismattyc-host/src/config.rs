@@ -280,6 +280,26 @@ impl ConfigFile {
         self.macos_shortcuts.unwrap_or(false)
     }
 
+    /// Human-readable warnings for explicit `[keys]` entries that suppress
+    /// the macOS Command shortcuts enabled by `macos_shortcuts = true`.
+    /// Empty when the flag is off or every explicit entry keeps (or
+    /// intentionally unbinds with `[]`) its Command chord.
+    pub fn macos_override_warnings(&self) -> Vec<String> {
+        if !self.macos_shortcuts() {
+            return Vec::new();
+        }
+        crate::keybind::KeyMap::macos_suppressed_actions(self.keys.as_ref())
+            .into_iter()
+            .map(|(action, chord)| {
+                format!(
+                    "keys.{} replaces the macOS shortcut {chord}; add {chord:?} to keep both, or use {} = [] to leave it unbound",
+                    action.name(),
+                    action.name()
+                )
+            })
+            .collect()
+    }
+
     pub fn loaded_theme(&self) -> crate::theme::Theme {
         self.resolved_theme
             .clone()
@@ -1101,6 +1121,35 @@ mod tests {
         };
         assert_eq!(high.overlay_opacity(), 1.0);
         assert_eq!(low.overlay_opacity(), 0.0);
+    }
+
+    #[test]
+    fn macos_override_warnings_name_suppressed_command_shortcuts() {
+        let dir = temp_dir("macos-warnings");
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "macos_shortcuts = true\n[keys]\ncopy = \"ctrl+shift+c\"\n",
+        )
+        .unwrap();
+        let config = load(&path).unwrap();
+        let warnings = config.macos_override_warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("keys.copy"), "{}", warnings[0]);
+        assert!(warnings[0].contains("super+c"), "{}", warnings[0]);
+
+        // Keeping the Command chord (or unbinding with []) stays silent.
+        std::fs::write(
+            &path,
+            "macos_shortcuts = true\n[keys]\ncopy = [\"ctrl+shift+c\", \"super+c\"]\npaste = []\n",
+        )
+        .unwrap();
+        assert!(load(&path).unwrap().macos_override_warnings().is_empty());
+
+        // Flag off: explicit entries never warn.
+        std::fs::write(&path, "[keys]\ncopy = \"ctrl+shift+c\"\n").unwrap();
+        assert!(load(&path).unwrap().macos_override_warnings().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

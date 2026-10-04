@@ -693,7 +693,9 @@ Cmd+Q (quit) and Cmd+N (new window) are available by default.
 (copy, paste, select all), Cmd+F (find), Cmd+K (clear screen and scrollback),
 Cmd+Shift+= (larger font), Cmd+- (smaller font), and Cmd+0 (reset font size). Use
 `prismattyc-host --list-bindings` to print the active chords after config
-overrides.
+overrides. An explicit `[keys]` entry that drops its Command chord keeps only
+the listed chords; the host prints a warning naming the suppressed shortcut
+so it can be added back as an alias. `[]` unbinds without warning.
 
 Any action can be rebound by its name in `[keys]`; a string binds one chord,
 an array binds aliases, and `[]` disables it. The list command shows actions

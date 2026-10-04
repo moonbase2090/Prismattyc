@@ -2446,6 +2446,9 @@ impl App {
         {
             // Rebuild the key table; the chord strip labels repaint with it.
             self.keymap = Arc::new(self.file_config.loaded_keymap());
+            for warning in self.file_config.macos_override_warnings() {
+                eprintln!("prismattyc-host: warning: {warning}");
+            }
             for host in self.windows.values_mut() {
                 host.keymap = self.keymap.clone();
                 host.dirty = true;
@@ -14695,6 +14698,9 @@ fn main() -> Result<()> {
     if cli.list_bindings {
         let file_config = config::load(&config::config_path())?;
         println!("{}", file_config.loaded_keymap().listing());
+        for warning in file_config.macos_override_warnings() {
+            eprintln!("prismattyc-host: warning: {warning}");
+        }
         return Ok(());
     }
     #[cfg(target_os = "macos")]
@@ -14715,6 +14721,9 @@ fn main() -> Result<()> {
         startup_config_error = Some(format!("{error:#}"));
         config::ConfigFile::default()
     });
+    for warning in file_config.macos_override_warnings() {
+        eprintln!("prismattyc-host: warning: {warning}");
+    }
     cli.apply_config(&file_config);
     #[cfg(target_os = "macos")]
     agent_skills::start(file_config.install_agent_skills(), pmux_bin());

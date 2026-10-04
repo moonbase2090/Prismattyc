@@ -105,6 +105,9 @@ pub(crate) struct HostGeom {
     /// Reserved thickness of the spaces rail: a row height on the bottom or
     /// top edge, `rail_chip_cols` cells on the left or right edge.
     pub rail_px: usize,
+    /// Reserved width of the combined sidebar tree (issue #113). Nonzero
+    /// only for graphite `layout = "sidebar"`; the rail it replaces is 0.
+    pub sidebar_px: usize,
     /// Fixed chip width of the spaces rail in cells.
     pub rail_chip_cols: usize,
     /// Graphite chrome sizing (#104). [`ChromeGeom::CLASSIC`] adds nothing.
@@ -400,6 +403,7 @@ impl HostGeom {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            sidebar_px: 0,
             chrome: ChromeGeom::CLASSIC,
         }
     }
@@ -432,13 +436,14 @@ impl HostGeom {
         }
     }
 
-    /// Chrome reserved left of the pane area (a left rail).
+    /// Chrome reserved left of the pane area (a left rail, or the sidebar).
     pub(crate) fn chrome_left(self) -> usize {
         if self.rail_side == RailSide::Left {
             self.rail_px
         } else {
             0
         }
+        .saturating_add(self.sidebar_px)
     }
 
     /// Chrome reserved right of the pane area (a right rail).
@@ -2093,6 +2098,28 @@ impl MuxRuntime {
             .domain
             .rename_window(target.active_window(), "Terminal")?;
         Ok(destination)
+    }
+
+    /// Per-tab pane mail depths in [`Self::tab_infos`] order (issue #113):
+    /// one entry per layout pane, so the sidebar tree can badge panes.
+    pub(crate) fn tab_pane_mail(&self) -> Vec<Vec<u32>> {
+        self.window_ids()
+            .into_iter()
+            .map(|window| {
+                self.domain
+                    .window(window)
+                    .map(|win| win.layout.panes())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|pane| {
+                        self.panes
+                            .get(pane)
+                            .map(|runtime| runtime.mail_depth)
+                            .unwrap_or(0)
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     pub(crate) fn tab_infos(&self) -> Vec<TabInfo> {
@@ -4812,6 +4839,7 @@ mod tests {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            sidebar_px: 0,
             chrome: ChromeGeom::CLASSIC,
         };
         let rect = CellRect {
@@ -4869,6 +4897,7 @@ mod tests {
                     rail_side: RailSide::Off,
                     rail_px: 0,
                     rail_chip_cols: 0,
+                    sidebar_px: 0,
                     chrome: ChromeGeom::CLASSIC,
                 };
                 let rect = CellRect {
@@ -4928,6 +4957,7 @@ mod tests {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            sidebar_px: 0,
             chrome: ChromeGeom::CLASSIC,
         };
         runtime.set_geom(base).unwrap();
@@ -4997,6 +5027,7 @@ mod tests {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            sidebar_px: 0,
             chrome: ChromeGeom::CLASSIC,
         };
         runtime.set_geom(chrome).unwrap();
@@ -5044,6 +5075,7 @@ mod tests {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            sidebar_px: 0,
             chrome: ChromeGeom::CLASSIC,
         };
 
@@ -5459,6 +5491,19 @@ mod tests {
         );
         assert_eq!(runtime.active_pane_count(), 2);
         assert_eq!(layout_shape(&runtime.active_layout()), "[H L L]");
+    }
+
+    #[test]
+    fn tab_pane_mail_aligns_with_tab_infos() {
+        let runtime = spawn_n_panes(2, 80, 24);
+        let infos = runtime.tab_infos();
+        let mail = runtime.tab_pane_mail();
+        assert_eq!(mail.len(), infos.len());
+        for (info, panes) in infos.iter().zip(mail.iter()) {
+            let n = if info.handles == 0 { 1 } else { info.handles };
+            assert_eq!(panes.len(), n);
+            assert!(panes.iter().all(|&depth| depth == 0));
+        }
     }
 
     #[test]
@@ -6341,6 +6386,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                sidebar_px: 0,
                 chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
@@ -6457,6 +6503,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                sidebar_px: 0,
                 chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
@@ -6532,6 +6579,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                sidebar_px: 0,
                 chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
@@ -6641,6 +6689,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                sidebar_px: 0,
                 chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
@@ -6797,6 +6846,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                sidebar_px: 0,
                 chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
@@ -6836,6 +6886,7 @@ mod tests {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            sidebar_px: 0,
             chrome: ChromeGeom::CLASSIC,
         };
         runtime.set_geom(split).unwrap();
@@ -6905,6 +6956,7 @@ mod tests {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            sidebar_px: 0,
             chrome: ChromeGeom::CLASSIC,
         };
         runtime.set_geom(geom).unwrap();
@@ -6963,6 +7015,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                sidebar_px: 0,
                 chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
@@ -7135,6 +7188,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                sidebar_px: 0,
                 chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();

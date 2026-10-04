@@ -3906,6 +3906,35 @@ pub const THEME_PICKER_HINT_ROOT: &str = "Up/Down | Right open | Enter apply | E
 /// Family submenu hint. Same 50-cell budget as [`THEME_PICKER_HINT_ROOT`].
 pub const THEME_PICKER_HINT_FAMILY: &str = "Up/Down | Left back | Enter apply | Esc cancel";
 
+/// Fixed theme-picker list capacity: window-derived only, capped like the
+/// command palette, so the panel keeps one height no matter how many themes
+/// match (issue #106). The ANSI swatch footer stays outside the list area.
+fn theme_picker_list_capacity(
+    font: &FontMetrics,
+    stride_px: usize,
+    buffer_height_px: usize,
+) -> usize {
+    if font.cell_h == 0 || buffer_height_px < font.cell_h.saturating_mul(8) {
+        return 0;
+    }
+    let window_cols = stride_px / font.cell_w.max(1);
+    let window_rows = buffer_height_px / font.cell_h;
+    let geom = palette_geom(window_cols.max(1), window_rows.max(1), font.cell_h);
+    let margin_y = font.cell_h.max(4);
+    let available_height = buffer_height_px
+        .saturating_sub(margin_y.saturating_mul(2))
+        .min(font.cell_h.saturating_mul(PALETTE_FIXED_HEIGHT_CELLS));
+    let header_px = font
+        .cell_h
+        .saturating_mul(4)
+        .saturating_add(if geom.compact { 0 } else { font.cell_h });
+    available_height
+        .saturating_sub(header_px)
+        .saturating_sub(font.cell_h)
+        .checked_div(geom.row_pitch_px.max(1))
+        .unwrap_or(0)
+}
+
 /// Return the number of theme rows that fit between the picker header and
 /// ANSI preview. The picker uses this same calculation for rendering and
 /// selection scrolling so the selected row stays visible after resizing.
@@ -3915,29 +3944,15 @@ pub fn theme_picker_visible_rows(
     stride_px: usize,
     buffer_height_px: usize,
 ) -> usize {
-    if theme_count == 0 || font.cell_h == 0 || buffer_height_px < font.cell_h.saturating_mul(8) {
+    if theme_count == 0 {
         return 0;
     }
-    let window_cols = stride_px / font.cell_w.max(1);
-    let window_rows = buffer_height_px / font.cell_h;
-    let geom = palette_geom(window_cols.max(1), window_rows.max(1), font.cell_h);
-    let pitch = geom.row_pitch_px;
-    let margin_y = font.cell_h.max(4);
-    let available_height = buffer_height_px.saturating_sub(margin_y.saturating_mul(2));
-    let header_px = font
-        .cell_h
-        .saturating_mul(4)
-        .saturating_add(if geom.compact { 0 } else { font.cell_h });
-    let list_budget = available_height.saturating_sub(header_px);
-    let fitted = theme_count
-        .saturating_mul(pitch)
-        .saturating_add(header_px)
-        .min(available_height);
-    fitted
-        .saturating_sub(header_px)
-        .min(list_budget)
-        .checked_div(pitch.max(1))
-        .unwrap_or(0)
+    theme_count
+        .min(theme_picker_list_capacity(
+            font,
+            stride_px,
+            buffer_height_px,
+        ))
         .max(1)
 }
 
@@ -3972,11 +3987,15 @@ pub fn rasterize_theme_picker(
         .cell_w
         .saturating_mul(52)
         .min(stride_px.saturating_sub(margin_x.saturating_mul(2)));
+    // Fixed panel: the list capacity derives from the window, not the row
+    // count, so short theme lists no longer shrink the dialog (issue #106).
+    // Extra rows scroll inside via `theme_picker_visible_rows` below.
+    let capacity = theme_picker_list_capacity(font, stride_px, buffer_height_px);
     let height = font
         .cell_h
         .saturating_mul(4)
         .saturating_add(if geom.compact { 0 } else { font.cell_h })
-        .saturating_add(geom.row_pitch_px.saturating_mul(rows.len()))
+        .saturating_add(geom.row_pitch_px.saturating_mul(capacity))
         .saturating_add(font.cell_h)
         .min(buffer_height_px.saturating_sub(margin_y.saturating_mul(2)));
     let x = (stride_px.saturating_sub(width)) / 2;
@@ -11705,6 +11724,122 @@ mod tests {
                 .iter()
                 .any(|&pixel| pixel != pack_rgb(theme.default_bg)),
             "compact panel must paint"
+        );
+    }
+
+    #[test]
+    fn fixed_height_short_prompts_keep_one_panel_height() {
+        // Session/restore prompts (issue #106): two or three rows must share
+        // the same fixed panel while every row keeps a layout rect.
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let width = 120 * font.cell_w;
+        let height = 40 * font.cell_h;
+        let layout_for = |rows: &[crate::palette::PaletteRow]| {
+            let sections = [PaletteSection {
+                header: "Restore last space?",
+                subtitle: "Previous window",
+                rows,
+            }];
+            let frame = PaletteFrame {
+                layout_mode: PaletteLayoutMode::FixedHeight,
+                query: None,
+                chips: None,
+                sections: &sections,
+                selected: 0,
+                scroll: 0,
+                detail: None,
+                footer: "Enter choose · Esc start fresh",
+            };
+            palette_layout(&font, &frame, width, height).expect("roomy panel")
+        };
+        let two = [
+            crate::palette::PaletteRow::plain("Restore".into(), "Reconnect".into(), "R".into()),
+            crate::palette::PaletteRow::plain("Start fresh".into(), "Keep".into(), "Esc".into()),
+        ];
+        let three = [
+            crate::palette::PaletteRow::plain("Create".into(), "Accept".into(), "Enter".into()),
+            crate::palette::PaletteRow::plain("Blank".into(), "Shell".into(), String::new()),
+            crate::palette::PaletteRow::plain("Cancel".into(), "Keep".into(), "Esc".into()),
+        ];
+        let short = layout_for(&two);
+        let long = layout_for(&three);
+        assert_eq!(
+            (short.panel_x, short.panel_y, short.panel_w, short.panel_h),
+            (long.panel_x, long.panel_y, long.panel_w, long.panel_h),
+            "fixed prompts must not resize with the row count"
+        );
+        for (layout, count) in [(&short, 2), (&long, 3)] {
+            let globals: Vec<usize> = layout.rows.iter().map(|row| row.global).collect();
+            assert_eq!(
+                globals,
+                (0..count).collect::<Vec<_>>(),
+                "every prompt row stays visible"
+            );
+        }
+    }
+
+    #[test]
+    fn theme_picker_panel_height_ignores_row_count() {
+        // Theme picker (issue #106): capacity derives from the window, so a
+        // 3-row list and a 100-row list share one panel and scroll inside.
+        let Ok(font) = FontMetrics::load(16.0) else {
+            return;
+        };
+        let width = 120 * font.cell_w;
+        let height = 50 * font.cell_h;
+        let capacity = |count: usize| theme_picker_visible_rows(&font, count, width, height);
+        assert_eq!(capacity(3), 3);
+        assert_eq!(
+            capacity(100),
+            capacity(30),
+            "overflowing lists share one window-derived capacity"
+        );
+        assert!(
+            capacity(100) > 3,
+            "roomy window fits more than the short list"
+        );
+        let bbox = |count: usize| {
+            let theme = default_theme();
+            let labels: Vec<String> = (0..count).map(|i| format!("theme-{i:03}")).collect();
+            let rows: Vec<ThemePickerRow<'_>> = labels
+                .iter()
+                .map(|label| ThemePickerRow {
+                    label,
+                    branch: false,
+                })
+                .collect();
+            let mut buffer = vec![pack_rgb(theme.default_bg); width * height];
+            rasterize_theme_picker(
+                &font,
+                &rows,
+                None,
+                0,
+                theme,
+                THEME_PICKER_HINT_ROOT,
+                OverlaySurface::default(),
+                &mut buffer,
+                width,
+                height,
+                [240, 100, 20],
+            );
+            let mut bbox = (width, height, 0, 0);
+            for (index, &pixel) in buffer.iter().enumerate() {
+                if pixel != pack_rgb(theme.default_bg) {
+                    let (x, y) = (index % width, index / width);
+                    bbox.0 = bbox.0.min(x);
+                    bbox.1 = bbox.1.min(y);
+                    bbox.2 = bbox.2.max(x + 1);
+                    bbox.3 = bbox.3.max(y + 1);
+                }
+            }
+            bbox
+        };
+        assert_eq!(
+            bbox(3),
+            bbox(30),
+            "short and long theme lists paint the same panel"
         );
     }
 

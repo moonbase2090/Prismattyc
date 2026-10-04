@@ -971,6 +971,7 @@ mod tests {
         "focus_border_animation_head",
         "splash",
         "splash_animation",
+        "reduced_motion",
         "install_agent_skills",
         "automatic_update_checks",
         "font",

@@ -88,6 +88,15 @@ pub enum Action {
     PresetMainVertical,
     /// Focused pane top; remaining panes in a row below (PT-132).
     PresetMainHorizontal,
+    /// Arrange the tab as one pane: growing is a retile, shrinking zooms
+    /// the focused pane and never closes one (issue #107).
+    ArrangeSingle,
+    /// Arrange the tab as a side-by-side split, spawning empty shells to
+    /// fill it; extra panes zoom instead of closing (issue #107).
+    ArrangeSplit,
+    /// Arrange the tab as a 2×2 grid, spawning empty shells to fill it;
+    /// extra panes zoom instead of closing (issue #107).
+    ArrangeGrid,
     /// Toggle the focused pane between its split slot and the whole tab
     /// (client-local view, PT-57).
     ZoomPane,
@@ -191,6 +200,9 @@ impl Action {
             Action::PresetGrid,
             Action::PresetMainVertical,
             Action::PresetMainHorizontal,
+            Action::ArrangeSingle,
+            Action::ArrangeSplit,
+            Action::ArrangeGrid,
             Action::ZoomPane,
             Action::NewWindow,
             Action::Quit,
@@ -274,6 +286,9 @@ impl Action {
             Action::PresetGrid => "preset_grid".into(),
             Action::PresetMainVertical => "preset_main_vertical".into(),
             Action::PresetMainHorizontal => "preset_main_horizontal".into(),
+            Action::ArrangeSingle => "arrange_single".into(),
+            Action::ArrangeSplit => "arrange_split".into(),
+            Action::ArrangeGrid => "arrange_grid".into(),
             Action::ZoomPane => "zoom_pane".into(),
             Action::NewWindow => "new_window".into(),
             Action::Quit => "quit".into(),
@@ -369,6 +384,16 @@ impl Action {
             }
             Action::PresetMainHorizontal => {
                 "retile: focused pane on top, others in a row below".into()
+            }
+            Action::ArrangeSingle => {
+                "arrange the tab as one pane; extra panes zoom instead of closing".into()
+            }
+            Action::ArrangeSplit => {
+                "arrange the tab as a side-by-side split; extra panes zoom instead of closing"
+                    .into()
+            }
+            Action::ArrangeGrid => {
+                "arrange the tab as a 2×2 grid; extra panes zoom instead of closing".into()
             }
             Action::ZoomPane => {
                 "zoom the focused pane to the whole tab; again restores the split".into()
@@ -485,7 +510,10 @@ impl Action {
             | Action::PresetSplitV
             | Action::PresetGrid
             | Action::PresetMainVertical
-            | Action::PresetMainHorizontal => ActionGroup::Layout,
+            | Action::PresetMainHorizontal
+            | Action::ArrangeSingle
+            | Action::ArrangeSplit
+            | Action::ArrangeGrid => ActionGroup::Layout,
             Action::AgentMessages
             | Action::TerminalSwitcher
             | Action::OpenSpace
@@ -545,6 +573,9 @@ impl Action {
             | Action::PresetMainVertical
             | Action::PresetMainHorizontal => {
                 Some("Retiles existing panes only; nothing spawns or closes.")
+            }
+            Action::ArrangeSingle | Action::ArrangeSplit | Action::ArrangeGrid => {
+                Some("Growing spawns empty shells with focus unchanged; shrinking zooms the focused pane and never closes one.")
             }
             Action::OpenSpace => {
                 Some("Picks from pmux space ls; opens tabs and panes in this window.")
@@ -1107,7 +1138,10 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         | Action::PresetSplitV
         | Action::PresetGrid
         | Action::PresetMainVertical
-        | Action::PresetMainHorizontal => vec![],
+        | Action::PresetMainHorizontal
+        | Action::ArrangeSingle
+        | Action::ArrangeSplit
+        | Action::ArrangeGrid => vec![],
         // Ctrl+Shift+Fn, plus the pre-ADR aliases: Alt co-held (some boards
         // report it with Fn), Cmd+Shift+Fn and Ctrl+Alt+digit for macOS,
         // which steals Control-F2…F8.
@@ -1457,6 +1491,9 @@ mod tests {
                 | Action::PresetGrid
                 | Action::PresetMainVertical
                 | Action::PresetMainHorizontal
+                | Action::ArrangeSingle
+                | Action::ArrangeSplit
+                | Action::ArrangeGrid
                 | Action::RenamePane
                 | Action::MoveTabLeft
                 | Action::MoveTabRight
@@ -1555,6 +1592,35 @@ mod tests {
             vec!["ctrl+alt+g".to_string()]
         );
         assert!(bound.chords(Action::PresetSingle).is_empty());
+    }
+
+    #[test]
+    fn arrange_actions_exist_with_no_default_chord() {
+        let map = KeyMap::default();
+        for action in [
+            Action::ArrangeSingle,
+            Action::ArrangeSplit,
+            Action::ArrangeGrid,
+        ] {
+            assert_eq!(Action::from_name(&action.name()), Some(action));
+            assert!(
+                map.chords(action).is_empty(),
+                "{} must ship unbound",
+                action.name()
+            );
+            assert_eq!(map.label(action), "");
+            assert_eq!(action.group(), ActionGroup::Layout);
+            assert!(action.note().is_some_and(|note| !note.is_empty()));
+        }
+        assert_eq!(Action::ArrangeSingle.name(), "arrange_single");
+        assert_eq!(Action::ArrangeSplit.name(), "arrange_split");
+        assert_eq!(Action::ArrangeGrid.name(), "arrange_grid");
+        let bound = KeyMap::from_config(Some(&one("arrange_grid", "ctrl+alt+g"))).unwrap();
+        assert_eq!(
+            bound.spellings(Action::ArrangeGrid),
+            vec!["ctrl+alt+g".to_string()]
+        );
+        assert!(bound.chords(Action::ArrangeSingle).is_empty());
     }
 
     #[test]

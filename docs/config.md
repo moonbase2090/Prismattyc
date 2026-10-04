@@ -342,6 +342,12 @@ layout_9 = ["ctrl+shift+f9", "ctrl+shift+alt+f9", "super+shift+f9", "ctrl+alt+9"
 # preset_main_vertical = []
 # retile: focused pane on top, others in a row below.
 # preset_main_horizontal = []
+# arrange the tab as one pane; extra panes zoom instead of closing.
+# arrange_single = []
+# arrange the tab as a side-by-side split; extra panes zoom instead of closing.
+# arrange_split = []
+# arrange the tab as a 2×2 grid; extra panes zoom instead of closing.
+# arrange_grid = []
 # zoom the focused pane to the whole tab; again restores the split.
 zoom_pane = "ctrl+shift+z"
 # open a new OS window.
@@ -715,6 +721,12 @@ focused pane on the left and stacks the others on the right.
 in a row below. Zoom is cleared first, as for other retiles. A retile
 that cannot satisfy pane minima leaves the layout unchanged and shows
 a status message.
+
+Arrange actions (`arrange_single`, `arrange_split`, `arrange_grid`,
+unbound by default) grow or shrink the tab instead of only retiling it.
+Growing spawns empty shells to fill the target with focus unchanged;
+shrinking never closes panes, it zooms the focused pane and shows a
+"still running" toast (Ctrl+Shift+Z restores the split).
 
 ## Spaces rail
 

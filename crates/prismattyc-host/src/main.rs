@@ -10648,6 +10648,9 @@ enum MuxCommand {
     EvenColumns(usize),
     /// Spawn until four panes, then a 2×2 grid (C-S-F4).
     EvenQuadrants,
+    /// Arrange single/split/2×2 (issue #107): grow spawns empty shells,
+    /// shrink zooms the focused pane and never closes one.
+    Arrange(mux::ArrangeTarget),
     /// Retile existing panes (PT-70). Does not spawn or close.
     Preset(mux::LayoutPreset),
     /// Toggle the focused pane's client-local zoom (PT-57).
@@ -10725,6 +10728,9 @@ fn mux_command_plan(command: &MuxCommand) -> MuxCommandPlan {
         }
         MuxCommand::EvenQuadrants => MuxCommandPlan::Layout(MuxLayoutCommand::EvenQuadrants),
         MuxCommand::ZoomPane => MuxCommandPlan::Layout(MuxLayoutCommand::ZoomPane),
+        MuxCommand::Arrange(_) => {
+            unreachable!("arrange is applied directly in handle_mux_command")
+        }
         MuxCommand::Close => MuxCommandPlan::Layout(MuxLayoutCommand::Close),
         MuxCommand::Focus(direction) => {
             MuxCommandPlan::Navigation(MuxNavigationCommand::Focus(*direction))
@@ -10792,6 +10798,9 @@ fn mux_command_for(action: keybind::Action) -> Option<MuxCommand> {
         Action::MoveTabRight => MuxCommand::MoveTab(1),
         Action::Layout(4) => MuxCommand::EvenQuadrants,
         Action::Layout(n) => MuxCommand::EvenColumns(usize::from(n)),
+        Action::ArrangeSingle => MuxCommand::Arrange(mux::ArrangeTarget::Single),
+        Action::ArrangeSplit => MuxCommand::Arrange(mux::ArrangeTarget::Split),
+        Action::ArrangeGrid => MuxCommand::Arrange(mux::ArrangeTarget::Grid),
         Action::PresetSingle => MuxCommand::Preset(mux::LayoutPreset::Single),
         Action::PresetSplitH => MuxCommand::Preset(mux::LayoutPreset::SplitH),
         Action::PresetSplitV => MuxCommand::Preset(mux::LayoutPreset::SplitV),
@@ -10975,6 +10984,70 @@ fn spawn_owned_space_pane(
     Ok(())
 }
 
+/// Arrange single/split/2×2 from the palette (issue #107; the tabs-bar
+/// buttons follow the foundation). Growing spawns empty shells directly
+/// (no session prompt); shrinking zooms and toasts instead of closing.
+/// Always returns false: arrange never exits the host window.
+fn apply_arrange_command(
+    host: &mut HostState,
+    action: keybind::Action,
+    target: mux::ArrangeTarget,
+    program: &str,
+    child_args: &[String],
+) -> bool {
+    if host.space_rail.current.is_some() {
+        while host.mux.active_pane_count() < target.capacity() {
+            if let Err(error) =
+                spawn_owned_space_pane(host, Some(prismattyc_mux::Axis::Horizontal), None)
+            {
+                eprintln!("prismattyc-host: mux command failed: {error:#}");
+                host.window.set_title(&format!("Prismattyc — {error}"));
+                host.dirty = true;
+                observe_host_action(host, action, false);
+                return false;
+            }
+        }
+    }
+    let before = host.mux.active_pane_ids();
+    let arranged = host.mux.arrange(target, program, child_args);
+    if let Ok(mux::ArrangeOutcome::Applied { .. }) = arranged {
+        register_even_layout_attaches(host, &before, program, child_args);
+    }
+    match arranged {
+        Ok(mux::ArrangeOutcome::Applied { .. }) | Ok(mux::ArrangeOutcome::Zoomed { .. }) => {
+            mark_layout_dirty(host);
+            App::refit_geom(host, host.window.inner_size(), Some("mux change"));
+            host.app_mouse_button = None;
+            host.last_app_mouse_cell = None;
+            host.window
+                .set_title(&window_title(&host.mux, show_tab_strip(host)));
+            if let Ok(mux::ArrangeOutcome::Zoomed { hidden, .. }) = arranged {
+                let label = if hidden == 1 {
+                    "1 pane still running · Ctrl Shift Z restores".to_string()
+                } else {
+                    format!("{hidden} panes still running · Ctrl Shift Z restores")
+                };
+                rail_toast(host, &label);
+            }
+            host.dirty = true;
+            observe_host_action(host, action, true);
+        }
+        Ok(mux::ArrangeOutcome::Unchanged) => {
+            host.window
+                .set_title("Prismattyc — already in that arrangement");
+            host.dirty = true;
+            observe_host_action(host, action, true);
+        }
+        Err(error) => {
+            eprintln!("prismattyc-host: mux command failed: {error:#}");
+            host.window.set_title(&format!("Prismattyc — {error}"));
+            host.dirty = true;
+            observe_host_action(host, action, false);
+        }
+    }
+    false
+}
+
 fn apply_mux_layout_command(
     host: &mut HostState,
     command: MuxLayoutCommand,
@@ -11134,6 +11207,9 @@ fn handle_mux_command(
         MuxCommand::EvenQuadrants if host.mux.active_pane_count() < 4 => {
             session_prompt::create_layout(host, 4, true);
             return false;
+        }
+        MuxCommand::Arrange(target) => {
+            return apply_arrange_command(host, action, target, program, child_args);
         }
         _ => {}
     }

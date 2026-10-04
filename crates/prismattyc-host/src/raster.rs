@@ -3179,7 +3179,7 @@ fn palette_chrome_px(
         .saturating_add(cell_h)
 }
 
-fn palette_collect_lines(frame: &PaletteFrame<'_>) -> (Vec<PaletteLine>, usize) {
+pub(crate) fn palette_collect_lines(frame: &PaletteFrame<'_>) -> (Vec<PaletteLine>, usize) {
     let mut lines = Vec::new();
     let mut global = 0;
     let mut selected_line = 0;
@@ -3260,7 +3260,8 @@ fn wrap_lines(text: &str, max_cells: usize, lines: usize) -> Vec<String> {
     out
 }
 
-enum PaletteLine {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaletteLine {
     Header(usize),
     Row(usize, usize),
 }
@@ -7350,10 +7351,42 @@ fn paint_overlay_surface(
     rgb: [u8; 3],
     surface: OverlaySurface,
 ) {
+    paint_overlay_surface_with_radius(buffer, stride, x0, y0, w, h, 0.0, rgb, surface);
+}
+
+/// Blend an overlay surface through a rounded clip, preserving the pixels
+/// outside the corner radius. Graphite dialogs use this on translucent windows.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_overlay_surface_rounded(
+    buffer: &mut [u32],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    w: usize,
+    h: usize,
+    radius: f32,
+    rgb: [u8; 3],
+    surface: OverlaySurface,
+) {
+    paint_overlay_surface_with_radius(buffer, stride, x0, y0, w, h, radius, rgb, surface);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_overlay_surface_with_radius(
+    buffer: &mut [u32],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    w: usize,
+    h: usize,
+    radius: f32,
+    rgb: [u8; 3],
+    surface: OverlaySurface,
+) {
     if w == 0 || h == 0 {
         return;
     }
-    if surface.is_opaque() {
+    if surface.is_opaque() && radius <= 0.0 {
         fill_rect(buffer, stride, x0, y0, w, h, rgb);
         return;
     }
@@ -7380,6 +7413,10 @@ fn paint_overlay_surface(
     };
     for y in 0..h {
         for x in 0..w {
+            let coverage = round_rect_coverage(x, y, w, h, radius);
+            if coverage <= 0.0 {
+                continue;
+            }
             let idx = (y0.saturating_add(y))
                 .saturating_mul(stride)
                 .saturating_add(x0.saturating_add(x));
@@ -7396,8 +7433,39 @@ fn paint_overlay_surface(
                 })
                 .unwrap_or(dest_rgb);
             let backdrop_px = pack_argb(alpha_of(dest), backdrop_rgb);
-            buffer[idx] = blend_pixel(backdrop_px, rgb, OPAQUE_ALPHA, fg_weight);
+            let weight = (f32::from(fg_weight) * coverage).round() as u16;
+            buffer[idx] = blend_pixel(backdrop_px, rgb, OPAQUE_ALPHA, weight);
         }
+    }
+}
+
+fn round_rect_coverage(x: usize, y: usize, width: usize, height: usize, radius: f32) -> f32 {
+    let radius = radius.min(width as f32 / 2.0).min(height as f32 / 2.0);
+    if radius <= 0.0 {
+        return 1.0;
+    }
+    let px = x as f32 + 0.5;
+    let py = y as f32 + 0.5;
+    let cx = if px < radius {
+        Some(radius)
+    } else if px > width as f32 - radius {
+        Some(width as f32 - radius)
+    } else {
+        None
+    };
+    let cy = if py < radius {
+        Some(radius)
+    } else if py > height as f32 - radius {
+        Some(height as f32 - radius)
+    } else {
+        None
+    };
+    match (cx, cy) {
+        (Some(cx), Some(cy)) => {
+            let distance = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
+            (radius - distance + 0.5).clamp(0.0, 1.0)
+        }
+        _ => 1.0,
     }
 }
 

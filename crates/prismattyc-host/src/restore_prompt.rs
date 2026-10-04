@@ -214,6 +214,7 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
     host.palette_layout = paint_palette_overlay(
         &host.font,
         &host.theme,
+        host.mux.geom().chrome,
         focus_border_rgb(host.focus_border),
         &frame,
         host_overlay_surface(host),

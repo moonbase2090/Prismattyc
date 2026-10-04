@@ -41,6 +41,8 @@ A completed job must report a successful status and exit code. Record the
 revision you tested and distinguish passing checks from skipped or pending
 checks. Keep generated reports in ignored build directories or CI artifacts.
 
+The Jev PR triage workflow is advisory only: it can add `triage:*` labels and one comment, and it never blocks a merge.
+
 ## Version a change
 
 Each PR merged to `main` advances the workspace patch version. Update:

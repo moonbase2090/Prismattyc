@@ -359,7 +359,12 @@ class JevClient:
         self.gateway_id = gateway_id.strip() if gateway_id and gateway_id.strip() else None
         self.last_request: float | None = None
 
-    def call(self, state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
+    def call(
+        self,
+        state: dict[str, Any],
+        questions: dict[str, Any],
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         body = json.dumps({"model": MODEL, "input": {"state": state, "questions": questions}}).encode()
         headers = {
             "Authorization": f"Bearer {self.api_token}",
@@ -368,6 +373,10 @@ class JevClient:
         }
         if self.gateway_id:
             headers["cf-aig-gateway-id"] = self.gateway_id
+        for key, value in (extra_headers or {}).items():
+            if any(char in f"{key}{value}" for char in "\r\n"):
+                raise ValueError("Jev request header contains a line break")
+            headers[str(key)] = str(value)
         for attempt in range(6):
             if self.last_request is not None:
                 delay = 1.0 - (time.monotonic() - self.last_request)

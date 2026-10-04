@@ -1947,6 +1947,68 @@ impl Screen {
     }
 
     pub fn put_char(&mut self, character: char) {
+        // Fast path: printable ASCII is always width 1, never an emoji
+        // modifier or regional indicator, and (with no live cluster tails)
+        // never a ZWJ continuation — so it skips the width table, the
+        // previous-row lookups, and the wide-pair helper calls. Everything
+        // else keeps the slow path below unchanged.
+        if matches!(character, ' '..='~') && self.clusters.len() == 0 {
+            self.put_ascii_narrow(character);
+            return;
+        }
+        self.put_char_slow(character);
+    }
+
+    /// Width-1 ASCII write without width tables or wide-pair helper calls.
+    ///
+    /// Callers guarantee `character` is printable ASCII (`' '..='~'`) and the
+    /// cluster store is empty, so the ZWJ, emoji-modifier, and
+    /// regional-indicator checks cannot trigger. Overwriting either half of a
+    /// wide pair still clears both; without a wide flag the glyph store below
+    /// replaces the default store, so no separate clearing store is needed.
+    fn put_ascii_narrow(&mut self, character: char) {
+        debug_assert!(matches!(character, ' '..='~'));
+        if self.autowrap && self.active().wrap_pending {
+            self.mark_row_wrapped();
+            self.carriage_return();
+            self.line_feed();
+        }
+        let columns = self.columns;
+        let hyperlink = self.active_hyperlink;
+        let autowrap = self.autowrap;
+        let (old_cursor, new_cursor) = {
+            let buf = self.active_mut();
+            let row = buf.cursor.row;
+            let col = buf.cursor.column;
+            let style = buf.style;
+            let cells = buf.cells.row_mut(row);
+            if cells[col].wide_cont {
+                if col > 0 && !cells[col - 1].wide_cont {
+                    cells[col - 1] = Cell::default();
+                }
+            } else if col + 1 < columns && cells[col + 1].wide_cont {
+                cells[col + 1] = Cell::default();
+            }
+            cells[col] = Cell::glyph(character, style).with_hyperlink(hyperlink);
+            let old_cursor = Cursor { row, column: col };
+            let next_col = col + 1;
+            if next_col >= columns {
+                if autowrap {
+                    buf.wrap_pending = true;
+                }
+                // Stay on last column (overwrite next put when wrap off).
+                buf.cursor.column = columns.saturating_sub(1);
+            } else {
+                buf.cursor.column = next_col;
+            }
+            (old_cursor, buf.cursor)
+        };
+        self.mark_cursor_cells(old_cursor, new_cursor);
+        // Cell mutation: epoch consumers see put_char, not only scroll/alt.
+        self.bump_epoch();
+    }
+
+    fn put_char_slow(&mut self, character: char) {
         // wide text grapheme slice: non-spacing marks, emoji modifiers, and
         // ZWJ-joined bases attach to the previous cell without advancing.
         let width = char_display_width(character);
@@ -6085,6 +6147,36 @@ mod tests {
         assert!(!row[0].wide_cont);
         assert!(!row[1].wide_cont);
         assert_eq!(row[1].character, ' ');
+    }
+
+    #[test]
+    fn put_char_ascii_narrow_preserves_overwrite_wrap_and_control() {
+        // ASCII narrow path: overwriting a wide continuation clears its lead.
+        let mut screen = Screen::new(4, 2, 0);
+        screen.put_char('中');
+        screen.set_cursor_position(0, 1);
+        screen.put_char('Y');
+        let row = screen.row(0).unwrap();
+        assert_eq!(row[0].character, ' ');
+        assert!(!row[0].wide_cont);
+        assert_eq!(row[1].character, 'Y');
+        assert!(!row[1].wide_cont);
+        // Last-column write arms wrap; the next ASCII char wraps to row 1.
+        let mut screen = Screen::new(3, 2, 0);
+        for character in "abc".chars() {
+            screen.put_char(character);
+        }
+        assert_eq!(screen.cursor(), Cursor { row: 0, column: 2 });
+        screen.put_char('d');
+        assert_eq!(screen.cursor(), Cursor { row: 1, column: 1 });
+        assert_eq!(screen.row(0).unwrap()[2].character, 'c');
+        assert_eq!(screen.row(1).unwrap()[0].character, 'd');
+        // Control scalars stay on the attach path: no grid or cursor change.
+        let mut screen = Screen::new(3, 1, 0);
+        let before = screen.cursor();
+        screen.put_char('\u{0007}');
+        assert_eq!(screen.cursor(), before);
+        assert_eq!(screen.row(0).unwrap()[0].character, ' ');
     }
 
     #[test]

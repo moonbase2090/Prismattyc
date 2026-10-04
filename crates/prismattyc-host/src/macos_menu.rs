@@ -12,7 +12,10 @@ use objc2::ffi as objc2_ffi;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Sel};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
+use objc2_app_kit::{
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSControlStateValueOff,
+    NSControlStateValueOn, NSEventModifierFlags, NSMenu, NSMenuItem,
+};
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
 use winit::event_loop::EventLoopProxy;
 
@@ -56,6 +59,24 @@ define_class!(
         fn new_window(&self, _sender: Option<&AnyObject>) {
             let _ = self.ivars().proxy.send_event(UserAction::NewWindow);
         }
+
+        #[unsafe(method(checkForUpdates:))]
+        fn check_for_updates(&self, _sender: Option<&AnyObject>) {
+            let _ = self.ivars().proxy.send_event(UserAction::CheckForUpdates);
+        }
+
+        #[unsafe(method(toggleAutomaticUpdateChecks:))]
+        fn toggle_automatic_update_checks(&self, _sender: Option<&AnyObject>) {
+            let _ = self
+                .ivars()
+                .proxy
+                .send_event(UserAction::ToggleAutomaticUpdateChecks);
+        }
+
+        #[unsafe(method(rollbackUpdate:))]
+        fn rollback_update(&self, _sender: Option<&AnyObject>) {
+            let _ = self.ivars().proxy.send_event(UserAction::RollbackUpdate);
+        }
     }
 );
 
@@ -83,12 +104,20 @@ unsafe impl Sync for MainThreadOnlyBox {}
 /// retain arbitrary targets the way they retain submenus.
 static NEW_WINDOW_TARGET: OnceLock<MainThreadOnlyBox> = OnceLock::new();
 
+struct MainThreadOnlyMenuItemBox(#[allow(dead_code)] Retained<NSMenuItem>);
+// SAFETY: the item is created and read only while a MainThreadMarker exists.
+unsafe impl Send for MainThreadOnlyMenuItemBox {}
+// SAFETY: see above.
+unsafe impl Sync for MainThreadOnlyMenuItemBox {}
+
+static AUTOMATIC_UPDATE_ITEM: OnceLock<MainThreadOnlyMenuItemBox> = OnceLock::new();
+
 /// Installs the real macOS menu bar: an application submenu (required by
 /// AppKit for `NSApp.mainMenu` to behave) plus a File menu with "New Window".
 /// Keyboard shortcuts are handled by the configurable host keymap. Must run
 /// on the main thread, before or shortly after launch so the
 /// menu and key equivalent are live from the first window (Task 5).
-pub fn install_main_menu(proxy: EventLoopProxy<UserAction>) {
+pub fn install_main_menu(proxy: EventLoopProxy<UserAction>, automatic_checks: bool) {
     let Some(mtm) = MainThreadMarker::new() else {
         eprintln!("prismattyc-host: menu bar: not main thread; skipping install");
         return;
@@ -103,6 +132,39 @@ pub fn install_main_menu(proxy: EventLoopProxy<UserAction>) {
     // carry a submenu for the app menu (bold app name) to render correctly.
     let app_menu_item = NSMenuItem::new(mtm);
     let app_menu = NSMenu::new(mtm);
+    let check_item = NSMenuItem::new(mtm);
+    check_item.setTitle(&NSString::from_str("Check for Updates…"));
+    // SAFETY: `target` is retained for the app lifetime and implements this
+    // selector with AppKit's one-argument action signature.
+    unsafe {
+        check_item.setTarget(Some(&target));
+        check_item.setAction(Some(sel!(checkForUpdates:)));
+    }
+    app_menu.addItem(&check_item);
+
+    let automatic_item = NSMenuItem::new(mtm);
+    automatic_item.setTitle(&NSString::from_str("Automatically Check for Updates"));
+    automatic_item.setState(if automatic_checks {
+        NSControlStateValueOn
+    } else {
+        NSControlStateValueOff
+    });
+    unsafe {
+        automatic_item.setTarget(Some(&target));
+        automatic_item.setAction(Some(sel!(toggleAutomaticUpdateChecks:)));
+    }
+    let _ = AUTOMATIC_UPDATE_ITEM.set(MainThreadOnlyMenuItemBox(automatic_item.clone()));
+    app_menu.addItem(&automatic_item);
+
+    let rollback_item = NSMenuItem::new(mtm);
+    rollback_item.setTitle(&NSString::from_str("Roll Back Last Update…"));
+    unsafe {
+        rollback_item.setTarget(Some(&target));
+        rollback_item.setAction(Some(sel!(rollbackUpdate:)));
+    }
+    app_menu.addItem(&rollback_item);
+    app_menu.addItem(&NSMenuItem::separatorItem(mtm));
+
     let quit_item = NSMenuItem::new(mtm);
     quit_item.setTitle(&NSString::from_str("Quit Prismattyc"));
     quit_item.setKeyEquivalent(&NSString::from_str(""));
@@ -139,7 +201,67 @@ pub fn install_main_menu(proxy: EventLoopProxy<UserAction>) {
     main_menu.addItem(&file_menu_item);
 
     NSApplication::sharedApplication(mtm).setMainMenu(Some(&main_menu));
-    eprintln!("prismattyc-host: menu bar installed (File > New Window)");
+    eprintln!("prismattyc-host: menu bar installed (Check for Updates)");
+}
+
+pub fn set_automatic_checks_enabled(enabled: bool) {
+    let Some(_mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    if let Some(item) = AUTOMATIC_UPDATE_ITEM.get() {
+        item.0.setState(if enabled {
+            NSControlStateValueOn
+        } else {
+            NSControlStateValueOff
+        });
+    }
+}
+
+pub fn prompt_update(version: &str, release_notes: &str) -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(&format!(
+        "Prismattyc {version} is available"
+    )));
+    let notes = release_notes.trim();
+    let notes = if notes.is_empty() {
+        "No release notes were published.".to_string()
+    } else if notes.chars().count() > 8_000 {
+        format!("{}…", notes.chars().take(8_000).collect::<String>())
+    } else {
+        notes.to_string()
+    };
+    alert.setInformativeText(&NSString::from_str(&notes));
+    alert.addButtonWithTitle(&NSString::from_str("Install and Relaunch"));
+    alert.addButtonWithTitle(&NSString::from_str("Later"));
+    alert.runModal() == NSAlertFirstButtonReturn
+}
+
+pub fn confirm_rollback() -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str("Roll Back Prismattyc?"));
+    alert.setInformativeText(&NSString::from_str(&format!(
+        "Restore the previous verified release. The app will restart."
+    )));
+    alert.addButtonWithTitle(&NSString::from_str("Roll Back"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    alert.runModal() == NSAlertFirstButtonReturn
+}
+
+pub fn show_update_message(title: &str, message: &str) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(message));
+    alert.addButtonWithTitle(&NSString::from_str("OK"));
+    let _ = alert.runModal();
 }
 
 /// The `applicationDockMenu:` implementation added to winit's delegate

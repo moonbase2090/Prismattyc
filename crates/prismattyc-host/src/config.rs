@@ -125,6 +125,8 @@ pub struct ConfigFile {
     /// Install the pmux Agent Skill for detected agents on the first launch
     /// of each app version. Default true; `PRISMATTYC_NO_AGENT_SKILLS=1` wins.
     pub install_agent_skills: Option<bool>,
+    /// Check for signed app releases automatically on launch and daily. Default true.
+    pub automatic_update_checks: Option<bool>,
     /// Primary font path. `PRISMATTYC_HOST_FONT` still wins when set.
     pub font: Option<PathBuf>,
     /// Extra fallback faces, tried after the built-in chain.

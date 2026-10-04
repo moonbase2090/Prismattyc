@@ -11419,6 +11419,10 @@ fn apply_transparency_live(
     let chrome_changed = writes
         .iter()
         .any(|write| matches!(write, transparency::Write::ChromeOpacity(_)));
+    // macOS-only: every read of this flag lives behind `#[cfg(target_os =
+    // "macos")]` below, so the binding is gated too and Linux builds never
+    // see an unused variable.
+    #[cfg(target_os = "macos")]
     let blur_changed = writes
         .iter()
         .any(|write| matches!(write, transparency::Write::WindowBlur(_)));

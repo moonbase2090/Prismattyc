@@ -10275,8 +10275,8 @@ fn handle_pane_handle_press(host: &mut HostState, button: MouseButton) -> bool {
     if !host.mux.geom().chrome.graphite {
         return false;
     }
-    if !matches!(button, MouseButton::Left)
-        && !(button == MouseButton::Right && !host.modifiers.shift_key())
+    if !(matches!(button, MouseButton::Left)
+        || button == MouseButton::Right && !host.modifiers.shift_key())
     {
         return false;
     }

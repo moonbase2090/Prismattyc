@@ -2846,6 +2846,8 @@ pub const PALETTE_COMPACT_MAX_CELLS: usize = 90;
 pub const PALETTE_MAX_CELLS: usize = 120;
 /// Compact list-line cap.
 pub const PALETTE_LIST_LINES: usize = 14;
+/// Fixed command-palette height cap, measured in terminal cell rows.
+pub const PALETTE_FIXED_HEIGHT_CELLS: usize = 30;
 /// Inner inset on each side when the panel is not compact (PT-201).
 pub const PALETTE_INSET_CELLS: usize = 2;
 /// Extra pixels between list rows when the panel is not compact.
@@ -2949,9 +2951,19 @@ impl OverlaySurface {
     }
 }
 
+/// Layout behavior for a palette-style overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteLayoutMode {
+    /// Let the panel fit the content, for short-lived prompts and menus.
+    ContentFit,
+    /// Keep a fixed-height panel and scroll rows inside its viewport.
+    FixedHeight,
+}
+
 /// Everything `rasterize_palette` paints. Pickers that reuse the panel pass
 /// no chips and no detail.
 pub struct PaletteFrame<'a> {
+    pub layout_mode: PaletteLayoutMode,
     /// Optional query row. Context menus omit it so the section header is first.
     pub query: Option<&'a str>,
     /// Chip labels and the selected chip; `None` hides the chip row.
@@ -3035,6 +3047,27 @@ pub struct PaletteLayout {
     pub more_line: bool,
     pub rows: Vec<PaletteLaidRow>,
     pub filter_chips: Vec<PaletteLaidChip>,
+    pub list_viewport: PaletteListViewport,
+    /// Fixed detail panel top. `None` for content-fit overlays.
+    pub detail_y: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaletteListViewport {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+impl PaletteListViewport {
+    #[must_use]
+    pub fn contains(self, x: usize, y: usize) -> bool {
+        x >= self.x
+            && x < self.x.saturating_add(self.width)
+            && y >= self.y
+            && y < self.y.saturating_add(self.height)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3244,6 +3277,9 @@ pub fn palette_layout(
     if geom.width_cells < 20 {
         return None;
     }
+    if frame.layout_mode == PaletteLayoutMode::FixedHeight {
+        return palette_fixed_layout(font, frame, stride_px, buffer_height_px, geom);
+    }
     let has_query = frame.query.is_some();
     let has_chips = frame.chips.is_some();
     let has_detail = frame.detail.is_some();
@@ -3294,39 +3330,11 @@ pub fn palette_layout(
         row_y = row_y.saturating_add(geom.query_h_px);
         row_y = row_y.saturating_add(blank);
     }
-    let mut filter_chips = Vec::new();
-    if let Some((labels, _)) = frame.chips {
-        let text_x = x.saturating_add(font.cell_w.saturating_mul(geom.inset_cells));
-        let text_right = x
-            .saturating_add(width)
-            .saturating_sub(font.cell_w.saturating_mul(geom.inset_cells));
-        let hint_cells = text_cells("C-←/→ filter");
-        let hint_x = text_right.saturating_sub(hint_cells.saturating_mul(font.cell_w));
-        let mut chip_x = text_x.saturating_add(font.cell_w);
-        for (index, label) in labels.iter().enumerate() {
-            let chip_width = text_cells(label)
-                .saturating_add(2)
-                .saturating_mul(font.cell_w);
-            if chip_x
-                .saturating_add(chip_width)
-                .saturating_add(font.cell_w)
-                > hint_x
-            {
-                break;
-            }
-            filter_chips.push(PaletteLaidChip {
-                index,
-                x: chip_x,
-                y: row_y,
-                width: chip_width,
-                height: font.cell_h,
-            });
-            chip_x = chip_x
-                .saturating_add(chip_width)
-                .saturating_add(font.cell_w);
-        }
+    let filter_chips = palette_filter_chips(font, frame, geom, x, width, row_y);
+    if frame.chips.is_some() {
         row_y = row_y.saturating_add(font.cell_h).saturating_add(blank);
     }
+    let list_y = row_y;
     let mut rows = Vec::new();
     let mut global = 0;
     for line in lines.iter().take(start) {
@@ -3355,6 +3363,150 @@ pub fn palette_layout(
         more_line,
         rows,
         filter_chips,
+        list_viewport: PaletteListViewport {
+            x,
+            y: list_y,
+            width,
+            height: list_px,
+        },
+        detail_y: None,
+    })
+}
+
+fn palette_filter_chips(
+    font: &FontMetrics,
+    frame: &PaletteFrame<'_>,
+    geom: PaletteGeom,
+    x: usize,
+    width: usize,
+    y: usize,
+) -> Vec<PaletteLaidChip> {
+    let mut chips = Vec::new();
+    let Some((labels, _)) = frame.chips else {
+        return chips;
+    };
+    let text_x = x.saturating_add(font.cell_w.saturating_mul(geom.inset_cells));
+    let text_right = x
+        .saturating_add(width)
+        .saturating_sub(font.cell_w.saturating_mul(geom.inset_cells));
+    let hint_cells = text_cells("C-←/→ filter");
+    let hint_x = text_right.saturating_sub(hint_cells.saturating_mul(font.cell_w));
+    let mut chip_x = text_x.saturating_add(font.cell_w);
+    for (index, label) in labels.iter().enumerate() {
+        let chip_width = text_cells(label)
+            .saturating_add(2)
+            .saturating_mul(font.cell_w);
+        if chip_x
+            .saturating_add(chip_width)
+            .saturating_add(font.cell_w)
+            > hint_x
+        {
+            break;
+        }
+        chips.push(PaletteLaidChip {
+            index,
+            x: chip_x,
+            y,
+            width: chip_width,
+            height: font.cell_h,
+        });
+        chip_x = chip_x
+            .saturating_add(chip_width)
+            .saturating_add(font.cell_w);
+    }
+    chips
+}
+
+fn palette_fixed_layout(
+    font: &FontMetrics,
+    frame: &PaletteFrame<'_>,
+    stride_px: usize,
+    buffer_height_px: usize,
+    geom: PaletteGeom,
+) -> Option<PaletteLayout> {
+    let margin_y = font.cell_h.max(4);
+    let height = buffer_height_px
+        .saturating_sub(margin_y.saturating_mul(2))
+        .min(font.cell_h.saturating_mul(PALETTE_FIXED_HEIGHT_CELLS));
+    let width = font.cell_w.saturating_mul(geom.width_cells);
+    if width < font.cell_w.saturating_mul(12) || height < font.cell_h.saturating_mul(8) {
+        return None;
+    }
+
+    let x = stride_px.saturating_sub(width) / 2;
+    let y = buffer_height_px.saturating_sub(height) / 2;
+    let bottom = y.saturating_add(height);
+    let blank = if geom.compact { 0 } else { font.cell_h };
+    let mut list_y = y.saturating_add(font.cell_h / 2);
+    if frame.query.is_some() {
+        list_y = list_y.saturating_add(geom.query_h_px).saturating_add(blank);
+    }
+    let filter_chips = palette_filter_chips(font, frame, geom, x, width, list_y);
+    if frame.chips.is_some() {
+        list_y = list_y.saturating_add(font.cell_h).saturating_add(blank);
+    }
+
+    let footer_y = bottom.saturating_sub(font.cell_h.saturating_mul(3) / 2);
+    let detail_y = footer_y.saturating_sub(font.cell_h.saturating_mul(4));
+    let list_bottom = detail_y.saturating_sub(font.cell_h);
+    let list_height = list_bottom.saturating_sub(list_y);
+    let reserved_header_gap = if geom.compact { 0 } else { font.cell_h };
+    let line_slots = list_height.saturating_sub(reserved_header_gap) / geom.row_pitch_px.max(1);
+    if line_slots == 0 {
+        return None;
+    }
+
+    let (lines, selected_line) = palette_collect_lines(frame);
+    let total = lines.len();
+    let more_line = total > line_slots;
+    if more_line && line_slots < 2 {
+        return None;
+    }
+    let shown = if more_line { line_slots - 1 } else { total };
+    let start = if total <= shown {
+        0
+    } else {
+        palette_scroll_for_selection(frame.scroll, selected_line, shown, total)
+    };
+    let mut row_y = list_y;
+    let mut rows = Vec::new();
+    let mut global = lines
+        .iter()
+        .take(start)
+        .filter(|line| matches!(line, PaletteLine::Row(..)))
+        .count();
+    for (visible, line) in lines.iter().skip(start).take(shown).enumerate() {
+        if !geom.compact && visible > 0 && matches!(line, PaletteLine::Header(_)) {
+            row_y = row_y.saturating_add(font.cell_h);
+        }
+        if row_y.saturating_add(geom.row_pitch_px) > list_bottom {
+            break;
+        }
+        if let PaletteLine::Row(..) = line {
+            rows.push(PaletteLaidRow { global, y: row_y });
+            global += 1;
+        }
+        row_y = row_y.saturating_add(geom.row_pitch_px);
+    }
+
+    Some(PaletteLayout {
+        geom,
+        panel_x: x,
+        panel_y: y,
+        panel_w: width,
+        panel_h: height,
+        start,
+        shown,
+        more_line,
+        rows,
+        filter_chips,
+        list_viewport: PaletteListViewport {
+            x,
+            y: list_y,
+            width,
+            height: list_bottom.saturating_sub(list_y),
+        },
+        detail_y: Some(detail_y),
     })
 }
 
@@ -3416,6 +3568,10 @@ pub fn rasterize_palette_with_hover(
     let shown = layout.shown;
     let more_line = layout.more_line;
     let total = lines.len();
+    let list_bottom = layout
+        .list_viewport
+        .y
+        .saturating_add(layout.list_viewport.height);
     let text_x = x.saturating_add(font.cell_w.saturating_mul(geom.inset_cells));
     let text_right = x
         .saturating_add(width)
@@ -3522,7 +3678,7 @@ pub fn rasterize_palette_with_hover(
         if !geom.compact && visible > 0 && matches!(line, PaletteLine::Header(_)) {
             row_y = row_y.saturating_add(font.cell_h);
         }
-        if row_y.saturating_add(geom.row_pitch_px) > bottom.saturating_sub(font.cell_h) {
+        if row_y.saturating_add(geom.row_pitch_px) > list_bottom {
             break;
         }
         let text_y = row_y.saturating_add(geom.row_pitch_px.saturating_sub(font.cell_h) / 2);
@@ -3630,7 +3786,7 @@ pub fn rasterize_palette_with_hover(
         }
         row_y = row_y.saturating_add(geom.row_pitch_px);
     }
-    if more_line {
+    if more_line && row_y.saturating_add(font.cell_h) <= list_bottom {
         let below = total.saturating_sub(start + shown);
         let text = if below > 0 {
             format!("▾ {below} more")
@@ -3650,73 +3806,77 @@ pub fn rasterize_palette_with_hover(
         row_y = row_y.saturating_add(geom.row_pitch_px);
     }
 
-    if let Some(detail) = frame.detail {
-        row_y = row_y.saturating_add(font.cell_h);
+    let detail_y = layout
+        .detail_y
+        .or_else(|| frame.detail.map(|_| row_y.saturating_add(font.cell_h)));
+    if let Some(detail_y) = detail_y {
         let box_x = x.saturating_add(font.cell_w.saturating_mul(geom.inset_cells) / 2);
         let box_w = width.saturating_sub(font.cell_w.saturating_mul(geom.inset_cells));
         fill_rect(
             buffer,
             stride_px,
             box_x,
-            row_y,
+            detail_y,
             box_w,
             font.cell_h.saturating_mul(3),
             theme.overlay_bg,
         );
-        let inner = inner_cells.saturating_sub(2);
-        let body = format!("{} — {}", detail.name, detail.text);
-        let text_lines = wrap_lines(&body, inner, 2);
-        let mut line_y = row_y;
-        for (index, line) in text_lines.iter().enumerate() {
-            let lx = text_x.saturating_add(font.cell_w);
-            draw_theme_text(
-                buffer,
-                stride_px,
-                font,
-                line,
-                lx,
-                line_y,
-                theme.chrome_fg,
-                text_right,
-            );
-            if index == 0 {
-                // Faux bold for the name: a second pass one pixel right.
-                let name = ellipsized(&detail.name, inner);
+        if let Some(detail) = frame.detail {
+            let inner = inner_cells.saturating_sub(2);
+            let body = format!("{} — {}", detail.name, detail.text);
+            let text_lines = wrap_lines(&body, inner, 2);
+            let mut line_y = detail_y;
+            for (index, line) in text_lines.iter().enumerate() {
+                let lx = text_x.saturating_add(font.cell_w);
                 draw_theme_text(
                     buffer,
                     stride_px,
                     font,
-                    &name,
-                    lx.saturating_add(1),
+                    line,
+                    lx,
                     line_y,
                     theme.chrome_fg,
                     text_right,
                 );
+                if index == 0 {
+                    // Faux bold for the name: a second pass one pixel right.
+                    let name = ellipsized(&detail.name, inner);
+                    draw_theme_text(
+                        buffer,
+                        stride_px,
+                        font,
+                        &name,
+                        lx.saturating_add(1),
+                        line_y,
+                        theme.chrome_fg,
+                        text_right,
+                    );
+                }
+                line_y = line_y.saturating_add(font.cell_h);
             }
-            line_y = line_y.saturating_add(font.cell_h);
-        }
-        if !detail.chords.is_empty() || !detail.config_key.is_empty() {
-            let meta_y = row_y.saturating_add(font.cell_h.saturating_mul(2));
-            let lx = text_x.saturating_add(font.cell_w);
-            let lead = "chords: ";
-            draw_theme_text(buffer, stride_px, font, lead, lx, meta_y, muted, text_right);
-            let chords_x = lx.saturating_add(font.cell_w.saturating_mul(text_cells(lead)));
-            draw_theme_text(
-                buffer,
-                stride_px,
-                font,
-                &detail.chords,
-                chords_x,
-                meta_y,
-                focus_rgb,
-                text_right,
-            );
-            let key_x =
-                chords_x.saturating_add(font.cell_w.saturating_mul(text_cells(&detail.chords)));
-            let key = format!(" · config key: {}", detail.config_key);
-            draw_theme_text(
-                buffer, stride_px, font, &key, key_x, meta_y, muted, text_right,
-            );
+            if !detail.chords.is_empty() || !detail.config_key.is_empty() {
+                let meta_y = detail_y.saturating_add(font.cell_h.saturating_mul(2));
+                let lx = text_x.saturating_add(font.cell_w);
+                let lead = "chords: ";
+                draw_theme_text(buffer, stride_px, font, lead, lx, meta_y, muted, text_right);
+                let chords_x = lx.saturating_add(font.cell_w.saturating_mul(text_cells(lead)));
+                draw_theme_text(
+                    buffer,
+                    stride_px,
+                    font,
+                    &detail.chords,
+                    chords_x,
+                    meta_y,
+                    focus_rgb,
+                    text_right,
+                );
+                let key_x =
+                    chords_x.saturating_add(font.cell_w.saturating_mul(text_cells(&detail.chords)));
+                let key = format!(" · config key: {}", detail.config_key);
+                draw_theme_text(
+                    buffer, stride_px, font, &key, key_x, meta_y, muted, text_right,
+                );
+            }
         }
     }
 
@@ -10914,6 +11074,7 @@ mod tests {
             config_key: "split_right".into(),
         };
         let frame = PaletteFrame {
+            layout_mode: PaletteLayoutMode::FixedHeight,
             query: Some("split"),
             chips: Some((&chips, 1)),
             sections: &sections,
@@ -10935,11 +11096,10 @@ mod tests {
             height,
             FOCUS_BORDER_PALETTE[0].1,
         );
-        // Compact 80×24: today's 76-cell panel and cell-height rows.
-        // fixed rows: query, chips, blank, detail 3, footer, padding = 8;
-        // list: header + 2 rows = 3 → 11 rows tall.
+        // Compact 80×24: the palette fills the available height, capped at
+        // the fixed command-palette height, independent of the result count.
         let panel_w = 76 * font.cell_w;
-        let panel_h = 11 * font.cell_h;
+        let panel_h = 22 * font.cell_h;
         let panel_x = (width - panel_w) / 2;
         let panel_y = (height - panel_h) / 2;
         let pad = font.cell_h / 2;
@@ -11164,6 +11324,7 @@ mod tests {
             rows: &palette_rows,
         }];
         let palette_frame = PaletteFrame {
+            layout_mode: PaletteLayoutMode::ContentFit,
             query: Some("split"),
             chips: None,
             sections: &palette_sections,
@@ -11184,6 +11345,7 @@ mod tests {
             rows: &picker_rows,
         }];
         let picker_frame = PaletteFrame {
+            layout_mode: PaletteLayoutMode::ContentFit,
             query: None,
             chips: None,
             sections: &picker_sections,
@@ -11213,6 +11375,7 @@ mod tests {
             rows: &space_menu_rows,
         }];
         let space_menu_frame = PaletteFrame {
+            layout_mode: PaletteLayoutMode::ContentFit,
             query: None,
             chips: None,
             sections: &space_menu_sections,
@@ -11234,6 +11397,7 @@ mod tests {
             rows: &pane_menu_rows,
         }];
         let pane_menu_frame = PaletteFrame {
+            layout_mode: PaletteLayoutMode::ContentFit,
             query: None,
             chips: None,
             sections: &pane_menu_sections,
@@ -11266,6 +11430,7 @@ mod tests {
         let height = 40 * font.cell_h;
         let paint = |query: &str| {
             let frame = PaletteFrame {
+                layout_mode: PaletteLayoutMode::ContentFit,
                 query: Some(query),
                 chips: None,
                 sections: &sections,
@@ -11506,6 +11671,7 @@ mod tests {
             rows: &rows,
         }];
         let frame = PaletteFrame {
+            layout_mode: PaletteLayoutMode::ContentFit,
             query: Some(""),
             chips: None,
             sections: &sections,
@@ -11554,6 +11720,7 @@ mod tests {
             rows: &rows,
         }];
         let frame = PaletteFrame {
+            layout_mode: PaletteLayoutMode::ContentFit,
             query: Some(""),
             chips: None,
             sections: &sections,

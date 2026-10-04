@@ -123,9 +123,9 @@ use raster::{
     rasterize_space_rail, rasterize_splash, rasterize_tab_strip_with_theme, rasterize_theme_picker,
     rasterize_walkthrough_caption, scrollbar_layout, scrollbar_scroll_from_thumb_y,
     scrollbar_thumb_y_for_pointer, set_rect_alpha, theme_picker_visible_rows, FontMetrics,
-    OverlaySurface, PaletteFrame, PaletteLayout, PalettePointerTarget, PaletteSection, ScreenPaint,
-    ScrollbarLayout, ThemePickerRow, TitleRowStyle, DEFAULT_FOCUS_BORDER_INDEX, OPAQUE_ALPHA,
-    THEME_PICKER_HINT_FAMILY, THEME_PICKER_HINT_ROOT,
+    OverlaySurface, PaletteFrame, PaletteLayout, PaletteLayoutMode, PalettePointerTarget,
+    PaletteSection, ScreenPaint, ScrollbarLayout, ThemePickerRow, TitleRowStyle,
+    DEFAULT_FOCUS_BORDER_INDEX, OPAQUE_ALPHA, THEME_PICKER_HINT_FAMILY, THEME_PICKER_HINT_ROOT,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -5901,9 +5901,10 @@ fn rasterize_frame(
         let footer = match palette.awaiting_digit {
             Some(palette::PaletteEntry::SelectTabFamily) => "press the tab digit 1–9 · Esc back",
             Some(palette::PaletteEntry::LayoutFamily) => "press the column count 2–9 · Esc back",
-            _ => "Enter run · Esc close · ↑↓ move · C-←/→ filter",
+            _ => "Enter run · Esc close · ↑↓/wheel move · C-←/→ filter",
         };
         let frame = PaletteFrame {
+            layout_mode: PaletteLayoutMode::FixedHeight,
             query: Some(&palette.query),
             chips: Some((&chips, palette.chip_index())),
             sections: &sections,
@@ -5935,6 +5936,9 @@ fn rasterize_frame(
             palette.scroll = layout.start;
         }
         host.palette_layout = Some(layout);
+        if sync_chrome_hover(host) {
+            host.window.request_redraw();
+        }
     }
     let painted_space = if let Some(picker) = host.space_picker.as_ref() {
         let focus = focus_border_rgb(host.focus_border);
@@ -6028,6 +6032,7 @@ fn rasterize_frame(
                 config_key: String::new(),
             });
         let frame = PaletteFrame {
+            layout_mode: PaletteLayoutMode::ContentFit,
             query: Some(&query),
             chips: None,
             sections: &sections,
@@ -6095,6 +6100,7 @@ fn rasterize_frame(
                 }]
             };
             let frame = PaletteFrame {
+                layout_mode: PaletteLayoutMode::ContentFit,
                 query: None,
                 chips: None,
                 sections: &sections,
@@ -6143,6 +6149,7 @@ fn rasterize_frame(
             rows: &rows,
         }];
         let frame = PaletteFrame {
+            layout_mode: PaletteLayoutMode::ContentFit,
             query: Some(&edit.buffer),
             chips: None,
             sections: &sections,
@@ -8547,6 +8554,38 @@ fn activate_palette_at_pointer(
             }
         }
     }
+}
+
+fn scroll_palette_with_wheel(host: &mut HostState, delta: &MouseScrollDelta) -> bool {
+    let Some((x, y)) = host
+        .pointer_px
+        .filter(|(x, y)| x.is_finite() && y.is_finite() && *x >= 0.0 && *y >= 0.0)
+    else {
+        return false;
+    };
+    let Some(layout) = host.palette_layout.as_ref() else {
+        return false;
+    };
+    if !layout.list_viewport.contains(x as usize, y as usize) {
+        return false;
+    }
+    let row_pitch = layout.geom.row_pitch_px;
+    let delta_milli_px = match delta {
+        MouseScrollDelta::LineDelta(_, rows) => {
+            (*rows as f64 * 3.0 * row_pitch as f64 * 1_000.0).round() as i64
+        }
+        MouseScrollDelta::PixelDelta(position) => (position.y * 1_000.0).round() as i64,
+    };
+    let keymap = host.keymap.clone();
+    let rich = host.experimental_rich;
+    let changed = host
+        .palette
+        .as_mut()
+        .is_some_and(|palette| palette.scroll_by_wheel(delta_milli_px, row_pitch, &keymap, rich));
+    if changed {
+        host.dirty = true;
+    }
+    changed
 }
 
 fn pointer_hover_blocked(host: &HostState) -> bool {
@@ -13519,8 +13558,12 @@ impl ApplicationHandler<UserAction> for App {
                     host.cursor_cell = None;
                     host.last_app_mouse_cell = None;
                 }
-                WindowEvent::MouseWheel { .. } => {
-                    apply_palette_pointer(host);
+                WindowEvent::MouseWheel { delta, .. } => {
+                    if host.palette.is_some() {
+                        scroll_palette_with_wheel(host, delta);
+                    } else {
+                        apply_palette_pointer(host);
+                    }
                 }
                 WindowEvent::MouseInput { state, button, .. } => {
                     if rail_resize::button(host, *state, *button) {

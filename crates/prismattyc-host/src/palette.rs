@@ -238,6 +238,8 @@ pub struct Palette {
     /// First visible list line. Independent of `selected` so hover does not
     /// jump a scrolled window.
     pub scroll: usize,
+    /// Sub-row wheel distance, in thousandths of a physical pixel.
+    wheel_remainder_milli_px: i64,
     /// `None` is the All chip.
     pub filter: Option<ActionGroup>,
     /// Enter was pressed on a family row; the next digit picks the member.
@@ -293,6 +295,7 @@ impl Palette {
         self.filter = filter;
         self.selected = 0;
         self.scroll = 0;
+        self.wheel_remainder_milli_px = 0;
         self.awaiting_digit = None;
         true
     }
@@ -431,6 +434,7 @@ impl Palette {
                 if appended {
                     self.selected = 0;
                     self.scroll = 0;
+                    self.wheel_remainder_milli_px = 0;
                 }
                 PaletteVerdict::Consumed
             }
@@ -444,6 +448,7 @@ impl Palette {
                     self.query.push(' ');
                     self.selected = 0;
                     self.scroll = 0;
+                    self.wheel_remainder_milli_px = 0;
                     PaletteVerdict::Consumed
                 }
                 NamedKey::Escape => PaletteVerdict::Close,
@@ -482,6 +487,41 @@ impl Palette {
             }
             None => PaletteVerdict::Consumed,
         }
+    }
+
+    /// Move the selected row by accumulated wheel distance without wrapping.
+    /// Positive deltas are upward, matching winit's wheel direction.
+    pub fn scroll_by_wheel(
+        &mut self,
+        delta_milli_px: i64,
+        row_pitch_px: usize,
+        keymap: &KeyMap,
+        rich: bool,
+    ) -> bool {
+        if row_pitch_px == 0 || delta_milli_px == 0 {
+            return false;
+        }
+        let row_distance = (row_pitch_px as i64).saturating_mul(1_000).max(1);
+        self.wheel_remainder_milli_px =
+            self.wheel_remainder_milli_px.saturating_add(delta_milli_px);
+        let rows = self.wheel_remainder_milli_px / row_distance;
+        if rows == 0 {
+            return false;
+        }
+        self.wheel_remainder_milli_px %= row_distance;
+
+        let count = self.view(keymap, rich).len();
+        if count == 0 {
+            return false;
+        }
+        let last = count.saturating_sub(1) as i128;
+        let next = (self.selected.min(count - 1) as i128 - rows as i128).clamp(0, last) as usize;
+        self.awaiting_digit = None;
+        if next == self.selected {
+            return false;
+        }
+        self.selected = next;
+        true
     }
 
     fn clamp(&mut self, keymap: &KeyMap, rich: bool) {

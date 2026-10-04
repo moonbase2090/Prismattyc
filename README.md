@@ -150,7 +150,10 @@ Useful desktop shortcuts:
 | Expand the current pane, or restore its size | Ctrl+Shift+Z |
 
 The command palette lists available actions and their shortcuts. You can
-change shortcuts in the configuration file.
+change shortcuts in the configuration file. Click a command or category tab,
+or use the arrow keys and mouse wheel or trackpad to move through the list. The
+palette keeps a fixed, window-capped height while its rows scroll; the query,
+tabs, selected-command details, and footer stay in place.
 
 ## Build from source
 

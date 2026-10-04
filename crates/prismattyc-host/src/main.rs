@@ -59,6 +59,7 @@ mod render_window_tests;
 mod restore_prompt;
 mod rich;
 mod session_prompt;
+mod sidebar;
 mod space_open;
 #[cfg(test)]
 #[cfg(target_os = "linux")]

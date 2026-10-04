@@ -109,6 +109,17 @@ pub enum PaneTitlesMode {
     Hover,
 }
 
+/// Chrome arrangement (issue #113). `bars` (default) keeps the tabs rail
+/// plus spaces bar; `sidebar` replaces both with one collapsible tree.
+/// Only read when `chrome_style = "graphite"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LayoutMode {
+    #[default]
+    Bars,
+    Sidebar,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigFile {
@@ -122,6 +133,9 @@ pub struct ConfigFile {
     /// Graphite bar background: `graphite` (default), `harbor`, `moss`, or
     /// `plum` (Sand on light themes). Only read for `graphite` chrome.
     pub bar_color: Option<BarColor>,
+    /// Chrome arrangement: `bars` (default) or `sidebar` (issue #113).
+    /// Only read when `chrome_style = "graphite"`.
+    pub layout: Option<LayoutMode>,
     /// Render timing output. Default `off`; hot-reloaded.
     pub render_timer: Option<RenderTimer>,
     /// Log every rendered frame when `render_timer` includes `log`. Default false.
@@ -357,6 +371,13 @@ impl ConfigFile {
 
     pub fn chrome_style(&self) -> ChromeStyle {
         self.chrome_style.unwrap_or_default()
+    }
+
+    // #113 stacks with the render (PR2) PR, which reads this; allow the
+    // unused-code lint until then.
+    #[allow(dead_code)]
+    pub fn layout(&self) -> LayoutMode {
+        self.layout.unwrap_or_default()
     }
 
     pub fn bar_color(&self) -> BarColor {
@@ -1112,6 +1133,9 @@ mod tests {
         assert_eq!(load(&path).unwrap().pane_titles(), PaneTitlesMode::Hover);
         std::fs::write(&path, "chrome_style = \"graphite\"\n").unwrap();
         assert_eq!(load(&path).unwrap().chrome_style(), ChromeStyle::Graphite);
+        assert_eq!(ConfigFile::default().layout(), LayoutMode::Bars);
+        std::fs::write(&path, "layout = \"sidebar\"\n").unwrap();
+        assert_eq!(load(&path).unwrap().layout(), LayoutMode::Sidebar);
         assert_eq!(ConfigFile::default().reduced_motion, None);
         assert!(!load(&path).unwrap().reduced_motion.unwrap_or(false));
         std::fs::write(&path, "reduced_motion = true\n").unwrap();

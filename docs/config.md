@@ -61,6 +61,8 @@ tab_strip = "auto"
 chrome_style = "classic"
 # Graphite bar background: graphite, harbor, moss, or plum (Sand on light themes). graphite|harbor|moss|plum.
 bar_color = "graphite"
+# Graphite chrome arrangement: bars, or the opt-in sidebar tree. bars|sidebar.
+layout = "bars"
 # Multi-pane title row: focused pane OSC title, or handle hover only. focused|hover.
 pane_titles = "focused"
 # Immediate hover blend for interactive strip, rail, and scrollbar chrome. 0.0-0.3.

@@ -12787,10 +12787,55 @@ fn recreate_session(host: &HostState, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Host-owned keyboard selection gesture inside a guest alternate screen
+/// (issue #74). Super (Command) plus a primary-screen selection key selects
+/// host-visible text; without Super the key still goes to the child TUI.
+/// Extend requires Shift so bare Super+arrow navigation stays with the child.
+fn guest_alt_select_gesture(logical: &Key, modifiers: ModifiersState) -> bool {
+    if !modifiers.super_key() {
+        return false;
+    }
+    if is_mark_key(logical, modifiers) {
+        return true;
+    }
+    selection_motion(logical).is_some() && modifiers.shift_key()
+}
+
 fn handle_selection_key(host: &mut HostState, logical: &Key) -> bool {
     // Guest alt (vim/less): refuse host selection so Ctrl+C interrupts the child.
     // Attach 1049+7700 is chrome, not a guest TUI.
     if guest_alt_blocks_host_select(&host.emulator) {
+        // Explicit host-owned gesture for alternate-screen apps: Super plus
+        // the primary-screen mark/extend keys. Each step needs Super (no
+        // sticky keyboard-select mode), so ordinary Shift+arrow and Ctrl+Space
+        // keep flowing to the child TUI.
+        if guest_alt_select_gesture(logical, host.modifiers) {
+            if is_mark_key(logical, host.modifiers) {
+                let (row, column) = {
+                    let screen = host.emulator.screen();
+                    let caret = screen.cursor();
+                    (screen.abs_row_at_view(0, caret.row), caret.column)
+                };
+                host.selection.begin(row, column);
+                host.selection.dragged = true;
+                host.dirty = true;
+                return true;
+            }
+            if let Some(motion) = selection_motion(logical) {
+                let scroll = host.view_scroll;
+                let changed = {
+                    let pane = host.mux.focused_mut();
+                    extend_selection_keyboard(
+                        &mut pane.selection,
+                        pane.emulator.screen(),
+                        scroll,
+                        motion,
+                    )
+                };
+                host.dirty |= changed;
+                return true;
+            }
+        }
         let had = {
             let pane = host.mux.focused_mut();
             clear_guest_alt_selection_for_key(
@@ -18054,6 +18099,43 @@ mod tests {
             true,
             mods(true, true),
         ));
+    }
+
+    #[test]
+    fn guest_alt_keyboard_selection_gesture_owns_only_super_held_keys() {
+        let arrow = Key::Named(NamedKey::ArrowRight);
+        let space = Key::Named(NamedKey::Space);
+        let two = Key::Character("2".into());
+        let enter = Key::Named(NamedKey::Enter);
+
+        let mut super_shift = ModifiersState::empty();
+        super_shift.set(ModifiersState::SUPER, true);
+        super_shift.set(ModifiersState::SHIFT, true);
+        let mut ctrl_super = ModifiersState::empty();
+        ctrl_super.set(ModifiersState::CONTROL, true);
+        ctrl_super.set(ModifiersState::SUPER, true);
+        let mut shift_only = ModifiersState::empty();
+        shift_only.set(ModifiersState::SHIFT, true);
+        let mut super_only = ModifiersState::empty();
+        super_only.set(ModifiersState::SUPER, true);
+
+        // Extend path: Super+Shift+arrow is host-owned in a guest alt screen.
+        assert!(guest_alt_select_gesture(&arrow, super_shift));
+        // Mark path: Ctrl with Super co-held starts a selection.
+        assert!(guest_alt_select_gesture(&space, ctrl_super));
+        assert!(guest_alt_select_gesture(&two, ctrl_super));
+
+        // Both ordinary paths keep flowing to the child TUI.
+        assert!(!guest_alt_select_gesture(&arrow, shift_only));
+        assert!(!guest_alt_select_gesture(&space, mods(true, false)));
+        assert!(!guest_alt_select_gesture(&two, mods(true, false)));
+
+        // Bare Super+arrow (no Shift) stays with the child: navigation first.
+        assert!(!guest_alt_select_gesture(&arrow, super_only));
+
+        // Non-selection keys never become host-owned, even with Super.
+        assert!(!guest_alt_select_gesture(&enter, super_shift));
+        assert!(!guest_alt_select_gesture(&enter, super_only));
     }
 
     #[test]

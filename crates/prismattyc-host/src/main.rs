@@ -6109,7 +6109,7 @@ fn rasterize_frame(
                 config_key: String::new(),
             });
         let frame = PaletteFrame {
-            layout_mode: PaletteLayoutMode::ContentFit,
+            layout_mode: PaletteLayoutMode::FixedHeight,
             query: Some(&query),
             chips: None,
             sections: &sections,

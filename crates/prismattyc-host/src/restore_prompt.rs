@@ -194,7 +194,7 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
         rows: &rows,
     }];
     let frame = PaletteFrame {
-        layout_mode: PaletteLayoutMode::ContentFit,
+        layout_mode: PaletteLayoutMode::FixedHeight,
         query: None,
         chips: None,
         sections: &sections,

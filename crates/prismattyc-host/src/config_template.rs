@@ -1088,6 +1088,8 @@ mod tests {
         assert_eq!(parsed.install_agent_skills, Some(true));
         assert_eq!(parsed.tab_strip(), crate::config::TabStripMode::Auto);
         assert_eq!(parsed.chrome_style(), crate::config::ChromeStyle::Classic);
+        assert!(template.contains("chrome_style = \"classic\""));
+        assert!(!template.contains("chrome_style = \"graphite\""));
         assert_eq!(parsed.bar_color(), crate::config::BarColor::Graphite);
         assert_eq!(parsed.pane_titles(), crate::config::PaneTitlesMode::Focused);
         assert!(parsed.splash());

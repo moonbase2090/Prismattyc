@@ -16793,10 +16793,10 @@ impl ApplicationHandler<UserAction> for App {
                 self.update_check_inflight = None;
                 match result {
                     Ok(check) if check.update_available => {
-                        if !automatic || self.automatic_update_checks {
-                            if macos_menu::prompt_update(&check.available, &check.release_notes) {
-                                macos_update::start_install(self.event_proxy.clone(), false);
-                            }
+                        if (!automatic || self.automatic_update_checks)
+                            && macos_menu::prompt_update(&check.available, &check.release_notes)
+                        {
+                            macos_update::start_install(self.event_proxy.clone(), false);
                         }
                     }
                     Ok(check) if !automatic => macos_menu::show_update_message(

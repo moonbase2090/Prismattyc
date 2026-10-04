@@ -188,6 +188,11 @@ pub struct RailLayout {
     pub pad: usize,
     /// Text inset within each chip. Side rails align with the first tab title.
     pub label_inset: usize,
+    /// Graphite `+ New space` width; `None` keeps the classic one-cell `+`.
+    pub plus_px: Option<usize>,
+    /// Graphite close target width at a chip's right edge; `None` keeps the
+    /// classic one-cell close.
+    pub close_px: Option<usize>,
 }
 
 impl RailLayout {
@@ -237,6 +242,8 @@ impl RailLayout {
                 effective_tab_end_pad(geom.window_pad, width)
                     .saturating_add(RAIL_LABEL_INSET.max(geom.inner_pad))
             },
+            plus_px: None,
+            close_px: None,
         };
         let layout = match geom.rail_side {
             RailSide::Off => return None,
@@ -286,6 +293,9 @@ impl RailLayout {
     /// both sides. A side rail keeps it column-wide so the column stays
     /// left-aligned.
     pub fn plus_w(&self) -> usize {
+        if let Some(px) = self.plus_px {
+            return px;
+        }
         if self.side.horizontal() {
             self.cell_w
                 .saturating_add(RAIL_LABEL_INSET.saturating_mul(2))
@@ -417,6 +427,9 @@ impl RailLayout {
 
     /// Left edge of the close cell inside a chip, if the chip can hold it.
     pub fn close_left(&self, x0: usize, width: usize) -> Option<usize> {
+        if let Some(close) = self.close_px {
+            return (width > close).then(|| x0 + width - close);
+        }
         tab_close_left(x0, width, self.cell_w)
     }
 
@@ -575,7 +588,23 @@ impl SpaceRail {
             .collect();
         let mut layout =
             RailLayout::for_window(geom, width, height, &labels)?.with_pane_names(details);
-        if details && layout.side.horizontal() {
+        let graphite = geom.chrome.graphite && layout.side.horizontal();
+        if graphite {
+            // Graphite chips fit the proportional label; pane names stay in
+            // the chip's context menu (#104 keeps the bar one row).
+            let current = self.current_index();
+            layout.chip_px = labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| {
+                    crate::graphite::rail_chip_width(geom.chrome, label, current == Some(index))
+                })
+                .collect();
+            layout.plus_px = Some(crate::graphite::rail_plus_width(geom.chrome));
+            layout.close_px = Some(crate::graphite::rail_close_width(geom.chrome));
+            layout.gap = geom.chrome.px(4.0);
+            layout.pad = geom.chrome.px(10.0);
+        } else if details && layout.side.horizontal() {
             for (index, name) in self.names.iter().enumerate() {
                 if let Some(names) = self.live_pane_names.get(name) {
                     let detail_cells =

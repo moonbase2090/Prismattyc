@@ -74,6 +74,17 @@ pub enum TabStripMode {
     Multi,
 }
 
+/// Host chrome look (#104). `classic` (default) keeps the original chrome;
+/// `graphite` opts into the Graphite tabs bar, pane title rows, and spaces
+/// bar while the redesign lands behind this setting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChromeStyle {
+    #[default]
+    Classic,
+    Graphite,
+}
+
 /// Multi-pane title row (PT-190). `focused` shows the focused pane's OSC
 /// title; `hover` keeps the PT-148 handle-hover preview only.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -92,6 +103,8 @@ pub struct ConfigFile {
     /// Multi-pane title row: `focused` (default) or `hover`. Sibling of
     /// `tab_strip` because TOML cannot nest a table under `tab_strip = "auto"`.
     pub pane_titles: Option<PaneTitlesMode>,
+    /// Host chrome look: `classic` (default) or `graphite`. Hot-reloaded.
+    pub chrome_style: Option<ChromeStyle>,
     /// Render timing output. Default `off`; hot-reloaded.
     pub render_timer: Option<RenderTimer>,
     /// Log every rendered frame when `render_timer` includes `log`. Default false.
@@ -320,6 +333,10 @@ impl ConfigFile {
 
     pub fn pane_titles(&self) -> PaneTitlesMode {
         self.pane_titles.unwrap_or_default()
+    }
+
+    pub fn chrome_style(&self) -> ChromeStyle {
+        self.chrome_style.unwrap_or_default()
     }
 
     /// Show the launch splash on a bare first window. Default true.
@@ -1052,9 +1069,12 @@ mod tests {
         );
         assert!(!ConfigFile::default().window_blur());
         assert_eq!(ConfigFile::default().hover_blend(), DEFAULT_HOVER_BLEND);
+        assert_eq!(ConfigFile::default().chrome_style(), ChromeStyle::Classic);
         assert_eq!(ConfigFile::default().pane_titles(), PaneTitlesMode::Focused);
         std::fs::write(&path, "pane_titles = \"hover\"\n").unwrap();
         assert_eq!(load(&path).unwrap().pane_titles(), PaneTitlesMode::Hover);
+        std::fs::write(&path, "chrome_style = \"graphite\"\n").unwrap();
+        assert_eq!(load(&path).unwrap().chrome_style(), ChromeStyle::Graphite);
         // chrome_opacity follows window_opacity unless set explicitly.
         let follows = ConfigFile {
             window_opacity: Some(0.8),
@@ -1200,6 +1220,7 @@ mod tests {
             "hover_blend = 0.31",
             "[a11y]\nnot_a_setting = true",
             "pane_titles = \"always\"",
+            "chrome_style = \"glass\"",
         ] {
             std::fs::write(&path, bad).unwrap();
             assert!(load(&path).is_err(), "should reject: {bad}");

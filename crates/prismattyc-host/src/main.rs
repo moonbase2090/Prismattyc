@@ -18,6 +18,7 @@ mod frame_damage;
 mod git_info;
 #[cfg(feature = "gpu")]
 mod gpu;
+mod graphite;
 mod hyperlink;
 mod icon;
 mod keybind;
@@ -169,6 +170,21 @@ struct PaneSpacing {
     space_rail_chip_cols: usize,
     space_rail_width_cols: usize,
     space_rail_pane_names: bool,
+    /// `chrome_style` (#104). Classic keeps every pre-Graphite size.
+    chrome_style: config::ChromeStyle,
+    /// Window scale factor × 1000; only Graphite design sizes read it.
+    ui_scale_milli: u32,
+    /// `window_padding_px`, `pane_gap_px`, `pane_padding_px` were set in the
+    /// config. Graphite keeps a set value and uses its own default otherwise.
+    explicit_spacing: [bool; 3],
+}
+
+impl PaneSpacing {
+    /// The same spacing at a window scale factor (Graphite sizes only).
+    fn at_scale(mut self, scale_factor: f64) -> Self {
+        self.ui_scale_milli = (scale_factor.max(0.25) * 1000.0).round() as u32;
+        self
+    }
 }
 
 impl From<&config::ConfigFile> for PaneSpacing {
@@ -181,6 +197,13 @@ impl From<&config::ConfigFile> for PaneSpacing {
             space_rail_chip_cols: config.space_rail_chip_cols(),
             space_rail_width_cols: config.space_rail_width_cols.unwrap_or(18),
             space_rail_pane_names: config.space_rail_pane_names.unwrap_or(true),
+            chrome_style: config.chrome_style(),
+            ui_scale_milli: 1000,
+            explicit_spacing: [
+                config.window_padding_px.is_some(),
+                config.pane_gap_px.is_some(),
+                config.pane_padding_px.is_some(),
+            ],
         }
     }
 }
@@ -2697,7 +2720,8 @@ impl App {
             let font_changed = self.file_config.font != prior.font
                 || self.file_config.font_fallback != prior.font_fallback
                 || self.file_config.font_px != prior.font_px;
-            let requested_spacing = PaneSpacing::from(&self.file_config);
+            let requested_spacing =
+                PaneSpacing::from(&self.file_config).at_scale(host.window.scale_factor());
             let spacing_changed = requested_spacing != host.spacing;
             let tab_strip_changed = self.file_config.tab_strip != prior.tab_strip;
             let mut geometry_applied = false;
@@ -3115,7 +3139,7 @@ impl App {
             self.file_config.font.as_deref(),
             &fallbacks,
         )?;
-        let spacing = PaneSpacing::from(&self.file_config);
+        let spacing = PaneSpacing::from(&self.file_config).at_scale(window.scale_factor());
         let theme = self.file_config.loaded_theme();
         // Claim ownership before reading the shared layout. A second host
         // must not use the registered host's grouping cache for startup.
@@ -4806,12 +4830,58 @@ fn unbounded_chrome_state(host: &HostState, geom: mux::HostGeom) -> String {
         })
         .collect();
     panes.sort_unstable_by_key(|(id, ..)| *id);
-    format!(
+    let state = format!(
         "strip={} attention={} rail_side={:?} tabs={tabs:?} rail={rail:?} panes={panes:?}",
         show_tab_strip(host),
         host.attention_badge,
         geom.rail_side,
-    )
+    );
+    if geom.chrome.graphite {
+        // Graphite title rows and status counts live outside the bounded
+        // boxes; any change repaints the frame.
+        format!("{state} graphite={:?}", graphite_chrome_state(host))
+    } else {
+        state
+    }
+}
+
+/// One Graphite title row as it feeds the damage signature (#104): pane id,
+/// name, detail, attention, mail depth, unseen, running, focused.
+type GraphiteRowState = (u64, String, Option<String>, bool, u32, bool, bool, bool);
+
+/// What the Graphite title rows and spaces-bar status show.
+fn graphite_chrome_state(host: &HostState) -> Vec<GraphiteRowState> {
+    let now = Instant::now();
+    let focused = host.mux.focused_id();
+    let mut rows: Vec<GraphiteRowState> = host
+        .mux
+        .panes_and_rects()
+        .map(|(id, pane, _rect)| {
+            let (name, meta) = host.mux.pane_header_text(id);
+            (
+                id.get(),
+                name,
+                meta,
+                pane.attention.is_some(),
+                pane.mail_depth,
+                pane.unseen_output,
+                pane.is_active_at(now),
+                id == focused,
+            )
+        })
+        .collect();
+    rows.sort_unstable_by_key(|row| row.0);
+    rows.push((
+        u64::MAX,
+        host.mux.active_count().to_string(),
+        Some(host.mux.attention_count().to_string()),
+        false,
+        0,
+        false,
+        false,
+        false,
+    ));
+    rows
 }
 
 struct FrameDamageSnapshot {
@@ -5073,7 +5143,12 @@ fn rasterize_frame(
         // shared gaps keep `window_alpha`. `pane_backdrop` is painted again under
         // each content rect as the blend target a dimmed pane recedes toward
         // (PT-98). PT-87: the ground carries `window_alpha`.
-        let bg = pack_argb(host.window_alpha, host.theme.pane_backdrop);
+        let ground = if geom.chrome.graphite {
+            graphite::tokens(host.theme.variant).ground
+        } else {
+            host.theme.pane_backdrop
+        };
+        let bg = pack_argb(host.window_alpha, ground);
         let cache_meta = host.background.as_ref().map(|cache| BackgroundCacheMeta {
             width: cache.w,
             height: cache.h,
@@ -5162,19 +5237,23 @@ fn rasterize_frame(
                 Some(HoverTarget::Rail(hit)) => Some(hit),
                 _ => None,
             };
-            rasterize_space_rail(
-                &host.theme,
-                &host.font,
-                &layout,
-                &host.space_rail.views(),
-                buffer,
-                width as usize,
-                focus_border_rgb(host.focus_border),
-                focus_border_rgb(0),
-                rail_hover,
-                host.hover_blend,
-                host.chrome_alpha,
-            );
+            if geom.chrome.graphite && layout.side.horizontal() {
+                paint_graphite_rail(host, buffer, width as usize, geom, &layout, rail_hover);
+            } else {
+                rasterize_space_rail(
+                    &host.theme,
+                    &host.font,
+                    &layout,
+                    &host.space_rail.views(),
+                    buffer,
+                    width as usize,
+                    focus_border_rgb(host.focus_border),
+                    focus_border_rgb(0),
+                    rail_hover,
+                    host.hover_blend,
+                    host.chrome_alpha,
+                );
+            }
             raster::rasterize_rail_destinations(
                 &host.theme,
                 &host.font,
@@ -5189,7 +5268,7 @@ fn rasterize_frame(
                 host.chrome_alpha,
             );
         }
-        if host.background.is_none() {
+        if host.background.is_none() && !geom.chrome.graphite {
             let inner_x = geom
                 .window_pad
                 .saturating_add(geom.chrome_left())
@@ -5230,45 +5309,49 @@ fn rasterize_frame(
                 tab.attention = false;
             }
         }
-        let strip_start = geom
-            .tab_strip_y()
-            .saturating_mul(width as usize)
-            .min(buffer.len());
-        rasterize_tab_strip_with_theme(
-            &host.theme,
-            &host.font,
-            &tabs,
-            &mut buffer[strip_start..],
-            width as usize,
-            geom.top_chrome_px,
-            focus_border_rgb(host.focus_border),
-            editing,
-            geom.window_pad,
-            geom.rail_gap,
-            geom.inner_pad,
-            reserve_strip_end(host),
-            match host.hover_target {
-                Some(HoverTarget::Strip(hit)) => Some(hit),
-                _ => None,
-            },
-            host.hover_blend,
-            host.chrome_alpha,
-            TitleRowStyle {
-                mode: host.pane_titles,
-                notice: host.title_notice.as_ref().and_then(|notice| {
-                    (Instant::now() < notice.until).then_some((
-                        notice.tab,
-                        notice.handle,
-                        notice.title.as_str(),
-                    ))
-                }),
-            },
-            pulse_phase_if(
-                host.mux.active_count() > 0
-                    && pulse_live(host.window_focused, host.window_occluded),
-                host.last_pulse_step,
-            ),
-        );
+        if geom.chrome.graphite {
+            paint_graphite_tabs_bar(host, buffer, width as usize, geom, &tabs);
+        } else {
+            let strip_start = geom
+                .tab_strip_y()
+                .saturating_mul(width as usize)
+                .min(buffer.len());
+            rasterize_tab_strip_with_theme(
+                &host.theme,
+                &host.font,
+                &tabs,
+                &mut buffer[strip_start..],
+                width as usize,
+                geom.top_chrome_px,
+                focus_border_rgb(host.focus_border),
+                editing,
+                geom.window_pad,
+                geom.rail_gap,
+                geom.inner_pad,
+                reserve_strip_end(host),
+                match host.hover_target {
+                    Some(HoverTarget::Strip(hit)) => Some(hit),
+                    _ => None,
+                },
+                host.hover_blend,
+                host.chrome_alpha,
+                TitleRowStyle {
+                    mode: host.pane_titles,
+                    notice: host.title_notice.as_ref().and_then(|notice| {
+                        (Instant::now() < notice.until).then_some((
+                            notice.tab,
+                            notice.handle,
+                            notice.title.as_str(),
+                        ))
+                    }),
+                },
+                pulse_phase_if(
+                    host.mux.active_count() > 0
+                        && pulse_live(host.window_focused, host.window_occluded),
+                    host.last_pulse_step,
+                ),
+            );
+        }
     }
     for (pane_id, pane, rect) in host.mux.panes_and_rects() {
         let (slot_x, slot_y, slot_width, slot_height) = geom.pane_slot_px(rect);
@@ -5298,7 +5381,28 @@ fn rasterize_frame(
         // Whole-slot damage must restore the surface as well as terminal rows.
         // Otherwise old light-cycle heads remain inside the border padding.
         if pane_full {
-            if host.background.is_none() {
+            if host.background.is_none() && geom.chrome.graphite {
+                graphite::paint_pane_surface(
+                    buffer,
+                    width as usize,
+                    geom.chrome,
+                    graphite::Rect::new(slot_x, slot_y, slot_width, slot_height),
+                    graphite::tokens(host.theme.variant).ground,
+                    host.window_alpha,
+                    host.theme.default_bg,
+                    surface_alpha,
+                );
+                fill_rect_argb(
+                    buffer,
+                    width as usize,
+                    content_x,
+                    content_y,
+                    content_w,
+                    content_h,
+                    host.theme.pane_backdrop,
+                    surface_alpha,
+                );
+            } else if host.background.is_none() {
                 fill_rect_argb(
                     buffer,
                     width as usize,
@@ -5782,7 +5886,40 @@ fn rasterize_frame(
                 focus_border_rgb(host.focus_border),
             );
         }
-        if host.mux.pane_count() > 1 {
+        if geom.chrome.graphite {
+            let (name, meta) = host.mux.pane_header_text(pane_id);
+            let attention = host.attention_badge && pane.attention.is_some();
+            let running = pane.is_active_at(frame_now);
+            let multi = host.mux.pane_count() > 1;
+            let tok = graphite::tokens(host.theme.variant);
+            graphite::paint_pane_chrome(
+                buffer,
+                width as usize,
+                geom.chrome,
+                tok,
+                graphite::accent(tok, focus_border_rgb(host.focus_border)),
+                graphite::Rect::new(slot_x, slot_y, slot_width, slot_height),
+                host.theme.default_bg,
+                &graphite::PaneHeader {
+                    name: &name,
+                    meta: meta.as_deref(),
+                    dot: graphite::Dot::for_tab(
+                        attention,
+                        running,
+                        pane.unseen_output || pane.mail_depth > 0,
+                    ),
+                    status: graphite::PaneStatus::decide(
+                        attention,
+                        pane.mail_depth,
+                        pane.unseen_output,
+                        running,
+                        multi && pane_id == focused,
+                    ),
+                    focused: pane_id == focused,
+                },
+                multi,
+            );
+        } else if host.mux.pane_count() > 1 {
             if pane_id == focused && cycle_progress.is_some_and(|progress| progress < 1.0) {
                 host.border_underlay.capture(
                     buffer,
@@ -5811,7 +5948,7 @@ fn rasterize_frame(
                 surface_alpha,
             );
         }
-        if pane.mail_depth > 0 {
+        if pane.mail_depth > 0 && !geom.chrome.graphite {
             let (ox, oy, ow, oh) = if host.mux.pane_count() > 1 {
                 (slot_x, slot_y, slot_width, slot_height)
             } else {
@@ -6307,6 +6444,8 @@ impl App {
     /// `ScaleFactorChanged` some compositors send costs nothing. Grid refit
     /// is left to the `Resized` event winit sends right after.
     fn refit_font_for_scale(host: &mut HostState, scale_factor: f64) {
+        // Graphite design sizes follow the window scale; classic ignores it.
+        host.spacing = host.spacing.at_scale(scale_factor);
         let px = scaled_font_px(
             (host.font_base_px + f32::from(host.font_zoom_steps)).clamp(6.0, 72.0),
             scale_factor,
@@ -9041,8 +9180,10 @@ fn drag_toast_target(hit: Option<mux::StripHit>, titles: &[String]) -> String {
                 None => "→ (no target)".to_string(),
             }
         }
-        Some(mux::StripHit::EmptyEnd) => "→ new tab".to_string(),
-        None => "→ (no target)".to_string(),
+        Some(mux::StripHit::EmptyEnd) | Some(mux::StripHit::NewTab) => "→ new tab".to_string(),
+        Some(mux::StripHit::SpaceMenu) | Some(mux::StripHit::Command) | None => {
+            "→ (no target)".to_string()
+        }
     }
 }
 
@@ -9144,6 +9285,226 @@ fn divider_axis_for_cursor(host: &HostState) -> Option<prismattyc_mux::Axis> {
         })
 }
 
+/// Graphite spaces bar (#104), bottom or top: the rail layout already holds
+/// Graphite chip widths, so paint and hit-testing agree.
+fn paint_graphite_rail(
+    host: &HostState,
+    buffer: &mut [u32],
+    stride: usize,
+    geom: mux::HostGeom,
+    layout: &space_rail::RailLayout,
+    hover: Option<space_rail::RailHit>,
+) {
+    let tok = graphite::tokens(host.theme.variant);
+    let accent = graphite::accent(tok, focus_border_rgb(host.focus_border));
+    let bar = graphite::Rect::new(layout.x, layout.y, layout.w, layout.h);
+    graphite::paint_rail_bar(
+        buffer,
+        stride,
+        tok,
+        bar,
+        layout.side == space_rail::RailSide::Bottom,
+        host.chrome_alpha,
+    );
+    let views = host.space_rail.views();
+    let n = host.space_rail.names.len();
+    let mut right_most = bar.x;
+    for (index, view) in views.iter().enumerate() {
+        let Some((x, y, w, h)) = layout.chip_bounds(index, n) else {
+            continue;
+        };
+        let slot = graphite::Rect::new(x, y, w, h);
+        right_most = right_most.max(slot.right());
+        if view.plus {
+            let label = view
+                .editing
+                .map_or(graphite::RAIL_PLUS.to_string(), |_| view.label.clone());
+            graphite::paint_rail_button(
+                buffer,
+                stride,
+                geom.chrome,
+                tok,
+                slot,
+                &label,
+                hover == Some(space_rail::RailHit::Plus),
+            );
+            continue;
+        }
+        graphite::paint_rail_chip(
+            buffer,
+            stride,
+            geom.chrome,
+            tok,
+            accent,
+            &graphite::RailChip {
+                slot,
+                label: &view.label,
+                current: view.current,
+                focused: view.focused,
+                editing: view.editing.is_some() || view.confirm,
+                hovered: matches!(hover, Some(space_rail::RailHit::Chip { index: at, .. }) if at == index),
+                close_hovered: hover == Some(space_rail::RailHit::Chip { index, close: true }),
+            },
+        );
+    }
+    if layout.overflow {
+        if let Some((x, y, w, h)) = layout.chip_bounds(n + 1, n) {
+            let slot = graphite::Rect::new(x, y, w, h);
+            right_most = right_most.max(slot.right());
+            graphite::paint_rail_button(
+                buffer,
+                stride,
+                geom.chrome,
+                tok,
+                slot,
+                "All spaces",
+                hover == Some(space_rail::RailHit::Overflow),
+            );
+        }
+    }
+    for index in 0..host.space_rail.destinations.len() {
+        if let Some((x, _, w, _)) = layout.dest_bounds(index, n) {
+            right_most = right_most.max(x + w);
+        }
+    }
+    graphite::paint_rail_status(
+        buffer,
+        stride,
+        geom.chrome,
+        tok,
+        bar,
+        right_most,
+        host.mux.active_count(),
+        if host.attention_badge {
+            host.mux.attention_count()
+        } else {
+            0
+        },
+    );
+}
+
+/// Graphite tabs bar (#104): lay out from the live tab model, record the
+/// layout for hit-testing, and paint it.
+fn paint_graphite_tabs_bar(
+    host: &mut HostState,
+    buffer: &mut [u32],
+    stride: usize,
+    geom: mux::HostGeom,
+    tabs: &[mux::TabInfo],
+) {
+    let editing = host
+        .tab_rename
+        .as_ref()
+        .map(|edit| (edit.index, edit.buffer.clone(), edit.selected));
+    let hover = match host.hover_target {
+        Some(HoverTarget::Strip(hit)) => Some(hit),
+        _ => None,
+    };
+    let texts: Vec<graphite::TabText> = tabs
+        .iter()
+        .enumerate()
+        .map(|(index, tab)| graphite_tab_text(host, index, tab, hover))
+        .collect();
+    let space = host
+        .space_rail
+        .current
+        .clone()
+        .or_else(|| host.mux.space_id.clone())
+        .unwrap_or_else(|| "Prismattyc".to_string());
+    let chord = graphite_chord_label(&host.keymap, keybind::Action::CommandPalette);
+    let layout = graphite::bar_layout(
+        geom.chrome,
+        stride,
+        geom.tab_strip_y(),
+        &space,
+        &texts,
+        &chord,
+    );
+    let tok = graphite::tokens(host.theme.variant);
+    graphite::paint_tabs_bar(
+        buffer,
+        stride,
+        &graphite::BarPaint {
+            layout: &layout,
+            tok,
+            accent: graphite::accent(tok, focus_border_rgb(host.focus_border)),
+            hover,
+            bar_alpha: host.chrome_alpha,
+            editing: editing
+                .as_ref()
+                .map(|(index, text, all)| (*index, text.as_str(), *all)),
+        },
+    );
+    host.mux.set_graphite_bar(Some(layout));
+}
+
+/// Chip text for one tab: the same label the classic strip decides, the
+/// pane count, and the status dot.
+fn graphite_tab_text(
+    host: &HostState,
+    index: usize,
+    tab: &mux::TabInfo,
+    hover: Option<mux::StripHit>,
+) -> graphite::TabText {
+    let hover_handle = match hover {
+        Some(mux::StripHit::Pane { tab, handle, .. }) if tab == index => Some(handle),
+        _ => None,
+    };
+    let decided = title_row::title_row_decision(
+        host.pane_titles,
+        tab.handles,
+        tab.title.as_str(),
+        tab.pane_title.as_deref(),
+        &tab.handle_titles,
+        hover_handle,
+        None,
+    );
+    let meta = match (tab.handles > 1, tab.zoomed) {
+        (true, true) => Some(format!("{} panes · zoomed", tab.handles)),
+        (true, false) => Some(format!("{} panes", tab.handles)),
+        (false, true) => Some("zoomed".to_string()),
+        (false, false) => None,
+    };
+    let attention = tab.attention && host.attention_badge;
+    graphite::TabText {
+        label: decided.label.to_string(),
+        meta,
+        dot: graphite::Dot::for_tab(attention, tab.active, tab.unseen),
+        attention,
+        selected: tab.selected,
+    }
+}
+
+/// `Ctrl Shift P` for the first chord bound to `action`; empty when unbound.
+fn graphite_chord_label(keymap: &keybind::KeyMap, action: keybind::Action) -> String {
+    let Some(chord) = keymap.chords(action).into_iter().next() else {
+        return String::new();
+    };
+    chord
+        .to_string()
+        .split('+')
+        .filter(|part| !part.is_empty())
+        .map(|part| match part {
+            "ctrl" => "Ctrl".to_string(),
+            "shift" => "Shift".to_string(),
+            "alt" => if cfg!(target_os = "macos") {
+                "Option"
+            } else {
+                "Alt"
+            }
+            .to_string(),
+            "super" => if cfg!(target_os = "macos") {
+                "Cmd"
+            } else {
+                "Super"
+            }
+            .to_string(),
+            key => key.to_uppercase(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn show_tab_strip(host: &HostState) -> bool {
     tab_strip_visible(
         host.tab_strip_mode,
@@ -9161,6 +9522,8 @@ enum StripClickResult {
     NotHandled,
     Handled,
     Exit,
+    /// A Graphite bar button: run this action as if its chord were pressed.
+    Action(keybind::Action),
 }
 
 fn close_tab_from_strip(host: &mut HostState, index: usize) -> StripClickResult {
@@ -9191,7 +9554,9 @@ fn close_tab_from_strip(host: &mut HostState, index: usize) -> StripClickResult 
             host.dirty = true;
             StripClickResult::Handled
         }
-        Ok(StripClickResult::NotHandled) => StripClickResult::NotHandled,
+        Ok(StripClickResult::NotHandled) | Ok(StripClickResult::Action(_)) => {
+            StripClickResult::NotHandled
+        }
         Err(error) => {
             eprintln!("prismattyc-host: tab close failed: {error:#}");
             StripClickResult::Handled
@@ -9201,9 +9566,16 @@ fn close_tab_from_strip(host: &mut HostState, index: usize) -> StripClickResult 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StripClickHit {
-    Tab { index: usize, close: bool },
-    Pane { tab: usize },
+    Tab {
+        index: usize,
+        close: bool,
+    },
+    Pane {
+        tab: usize,
+    },
     EmptyEnd,
+    /// A Graphite bar button that runs an action.
+    Button(keybind::Action),
 }
 
 fn strip_click_hit(hit: mux::StripHit) -> StripClickHit {
@@ -9211,6 +9583,9 @@ fn strip_click_hit(hit: mux::StripHit) -> StripClickHit {
         mux::StripHit::Tab { index, close } => StripClickHit::Tab { index, close },
         mux::StripHit::Pane { tab, .. } => StripClickHit::Pane { tab },
         mux::StripHit::EmptyEnd => StripClickHit::EmptyEnd,
+        mux::StripHit::SpaceMenu => StripClickHit::Button(keybind::Action::OpenSpace),
+        mux::StripHit::NewTab => StripClickHit::Button(keybind::Action::NewTab),
+        mux::StripHit::Command => StripClickHit::Button(keybind::Action::CommandPalette),
     }
 }
 
@@ -9224,6 +9599,7 @@ enum StripClickDecision {
     StartPaneDrag { tab: usize, x: f64, y: f64 },
     RenameTab(usize),
     RenamePane { tab: usize },
+    Run(keybind::Action),
 }
 
 fn strip_click_decision(
@@ -9251,12 +9627,15 @@ fn strip_click_decision(
                 close: false,
             } => StripClickDecision::StartTabDrag { index, x, y },
             StripClickHit::Pane { tab } => StripClickDecision::StartPaneDrag { tab, x, y },
+            StripClickHit::Button(action) => StripClickDecision::Run(action),
             StripClickHit::EmptyEnd | StripClickHit::Tab { .. } => StripClickDecision::Handled,
         },
         MouseButton::Right => match hit {
             StripClickHit::Tab { index, .. } if title_row => StripClickDecision::RenameTab(index),
             StripClickHit::Pane { tab } => StripClickDecision::RenamePane { tab },
-            StripClickHit::Tab { .. } | StripClickHit::EmptyEnd => StripClickDecision::Handled,
+            StripClickHit::Tab { .. } | StripClickHit::EmptyEnd | StripClickHit::Button(_) => {
+                StripClickDecision::Handled
+            }
         },
         MouseButton::Middle => {
             if tab_rename_active && matches!(hit, StripClickHit::EmptyEnd) {
@@ -9265,7 +9644,7 @@ fn strip_click_decision(
             let tab = match hit {
                 StripClickHit::Tab { index, .. } => Some(index),
                 StripClickHit::Pane { tab } => Some(tab),
-                StripClickHit::EmptyEnd => None,
+                StripClickHit::EmptyEnd | StripClickHit::Button(_) => None,
             };
             tab.map_or(StripClickDecision::Handled, StripClickDecision::CloseTab)
         }
@@ -9293,9 +9672,11 @@ fn handle_strip_click(host: &mut HostState, button: MouseButton) -> StripClickRe
     let hit = host
         .mux
         .tab_strip_hit(x as usize, y as usize, stride, reserve_strip_end(host));
-    let title_row = (y as usize)
-        .checked_sub(host.mux.geom().tab_strip_y())
-        .is_some_and(|local_y| local_y < host.font.cell_h.max(1));
+    // Graphite has no handle row: the whole bar is the title row.
+    let title_row = host.mux.geom().chrome.graphite
+        || (y as usize)
+            .checked_sub(host.mux.geom().tab_strip_y())
+            .is_some_and(|local_y| local_y < host.font.cell_h.max(1));
     match strip_click_decision(
         button,
         hit.map(strip_click_hit),
@@ -9336,6 +9717,10 @@ fn handle_strip_click(host: &mut HostState, button: MouseButton) -> StripClickRe
                 active: false,
             });
             StripClickResult::Handled
+        }
+        StripClickDecision::Run(action) => {
+            cancel_tab_rename(host);
+            StripClickResult::Action(action)
         }
         StripClickDecision::RenamePane { tab } => {
             let Some(mux::StripHit::Pane { pane, .. }) = hit else {
@@ -9417,7 +9802,7 @@ fn finish_strip_drag(host: &mut HostState) -> bool {
         (StripDragKind::Tab(from), Some(mux::StripHit::Tab { index: to, .. })) => {
             host.mux.reorder_tab(from, to).unwrap_or(false)
         }
-        (StripDragKind::Tab(from), Some(mux::StripHit::EmptyEnd)) => {
+        (StripDragKind::Tab(from), Some(mux::StripHit::EmptyEnd | mux::StripHit::NewTab)) => {
             let last = host.mux.tab_count().saturating_sub(1);
             host.mux.reorder_tab(from, last).unwrap_or(false)
         }
@@ -9426,9 +9811,10 @@ fn finish_strip_drag(host: &mut HostState) -> bool {
             .window_at_tab(index)
             .map(|dest| host.mux.move_pane_to_window(pane, dest).unwrap_or(false))
             .unwrap_or(false),
-        (StripDragKind::Pane { pane, .. }, Some(mux::StripHit::EmptyEnd)) => {
-            host.mux.move_pane_to_new_tab(pane).unwrap_or(false)
-        }
+        (
+            StripDragKind::Pane { pane, .. },
+            Some(mux::StripHit::EmptyEnd | mux::StripHit::NewTab),
+        ) => host.mux.move_pane_to_new_tab(pane).unwrap_or(false),
         _ => false,
     };
     if changed {
@@ -10442,30 +10828,58 @@ fn host_geom(
     } else {
         spacing.space_rail_width_cols
     };
-    mux::HostGeom {
-        cell_w: font.cell_w,
-        cell_h: font.cell_h,
-        window_pad: spacing.window_padding_px,
-        slack_x: 0,
-        slack_y: 0,
-        pane_gap: if multi_pane { spacing.pane_gap_px } else { 0 },
-        rail_gap: spacing.pane_gap_px,
-        inner_pad: spacing.pane_padding_px,
-        top_chrome_px: if show_tabs {
-            font.cell_h.saturating_mul(if handle_row { 2 } else { 1 })
+    let chrome = if spacing.chrome_style == config::ChromeStyle::Graphite {
+        mux::ChromeGeom {
+            graphite: true,
+            scale_milli: spacing.ui_scale_milli,
+        }
+    } else {
+        mux::ChromeGeom::CLASSIC
+    };
+    // Graphite design defaults stand in for spacing the user left unset.
+    let graphite_default = |explicit: bool, value: usize, design: graphite::Design| {
+        if chrome.graphite && !explicit {
+            design.px(chrome)
         } else {
-            0
-        },
-        scrollbar_gutter_px: mux::scrollbar_gutter_for(spacing.pane_padding_px),
-        rail_side: spacing.space_rail,
-        rail_px: space_rail::rail_thickness_px(
+            value
+        }
+    };
+    let [window_set, gap_set, pad_set] = spacing.explicit_spacing;
+    let window_pad = graphite_default(window_set, spacing.window_padding_px, graphite::WINDOW_PAD);
+    let gap = graphite_default(gap_set, spacing.pane_gap_px, graphite::PANE_GAP);
+    let inner_pad = graphite_default(pad_set, spacing.pane_padding_px, graphite::PANE_PAD);
+    let rail_px = if chrome.graphite && spacing.space_rail.horizontal() {
+        graphite::RAIL_H.px(chrome)
+    } else {
+        space_rail::rail_thickness_px(
             spacing.space_rail,
             font.cell_w,
             font.cell_h
                 .saturating_mul(if spacing.space_rail_pane_names { 2 } else { 1 }),
             rail_column_cols,
-        ),
+        )
+    };
+    mux::HostGeom {
+        cell_w: font.cell_w,
+        cell_h: font.cell_h,
+        window_pad,
+        slack_x: 0,
+        slack_y: 0,
+        pane_gap: if multi_pane { gap } else { 0 },
+        rail_gap: gap,
+        inner_pad,
+        top_chrome_px: if show_tabs && chrome.graphite {
+            graphite::TABS_BAR_H.px(chrome)
+        } else if show_tabs {
+            font.cell_h.saturating_mul(if handle_row { 2 } else { 1 })
+        } else {
+            0
+        },
+        scrollbar_gutter_px: mux::scrollbar_gutter_for(inner_pad),
+        rail_side: spacing.space_rail,
+        rail_px,
         rail_chip_cols: rail_chip_cap,
+        chrome,
     }
 }
 
@@ -14457,6 +14871,32 @@ impl ApplicationHandler<UserAction> for App {
                             host.left_button_down = false;
                             host.rich_pointer = None;
                             host.app_mouse_button = None;
+                            sync_chrome_hover(host);
+                            host.window.request_redraw();
+                            return;
+                        }
+                        StripClickResult::Action(action) => {
+                            host.left_button_down = false;
+                            host.rich_pointer = None;
+                            host.app_mouse_button = None;
+                            match dispatch_action(
+                                host,
+                                action,
+                                &self.cli.program,
+                                &self.cli.child_args,
+                            ) {
+                                Dispatch::Exit => {
+                                    event_loop.exit();
+                                    return;
+                                }
+                                Dispatch::OpenWindow => {
+                                    let _ = self.event_proxy.send_event(UserAction::NewWindow);
+                                }
+                                Dispatch::OpenConfig => {
+                                    let _ = self.event_proxy.send_event(UserAction::OpenConfig);
+                                }
+                                Dispatch::Handled => {}
+                            }
                             sync_chrome_hover(host);
                             host.window.request_redraw();
                             return;
@@ -19474,6 +19914,68 @@ session mail (id 15)
         cli.focus_border_pinned = false;
     }
 
+    /// #104: classic geometry is independent of the Graphite fields, and
+    /// Graphite adds its bar, title row, spacing, and spaces bar.
+    #[test]
+    fn classic_geometry_ignores_graphite_and_graphite_adds_its_chrome() {
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let classic = PaneSpacing {
+            window_padding_px: 3,
+            pane_gap_px: 3,
+            pane_padding_px: 5,
+            space_rail: space_rail::RailSide::Bottom,
+            space_rail_chip_cols: 0,
+            space_rail_width_cols: 18,
+            space_rail_pane_names: true,
+            chrome_style: config::ChromeStyle::Classic,
+            ui_scale_milli: 1000,
+            explicit_spacing: [false; 3],
+        };
+        let base = host_geom(&font, true, true, true, classic, 10);
+        let retina = host_geom(&font, true, true, true, classic.at_scale(2.0), 10);
+        assert_eq!(base, retina, "classic never reads the window scale");
+        assert_eq!(base.chrome, mux::ChromeGeom::CLASSIC);
+        assert_eq!(base.top_chrome_px, font.cell_h * 2);
+        assert_eq!(base.rail_px, font.cell_h * 2);
+        assert_eq!((base.window_pad, base.pane_gap, base.inner_pad), (3, 3, 5));
+        let rect = prismattyc_mux::CellRect {
+            col: 0,
+            row: 0,
+            cols: 40,
+            rows: 20,
+        };
+        assert_eq!(base.chrome.pane_header(), 0);
+
+        let graphite = PaneSpacing {
+            chrome_style: config::ChromeStyle::Graphite,
+            ..classic
+        }
+        .at_scale(2.0);
+        let geom = host_geom(&font, true, true, true, graphite, 10);
+        assert!(geom.chrome.graphite);
+        assert_eq!(geom.top_chrome_px, 88, "44 px bar at 2x, no handle row");
+        assert_eq!(geom.rail_px, 60, "30 px spaces bar at 2x");
+        assert_eq!(
+            (geom.window_pad, geom.pane_gap, geom.inner_pad),
+            (16, 16, 24)
+        );
+        let (_, slot_y, _, _) = geom.pane_slot_px(rect);
+        let (_, content_y, _, _) = geom.pane_content_px(rect);
+        assert!(
+            content_y >= slot_y + geom.inner_pad + 56,
+            "28 px title row at 2x"
+        );
+        // A spacing the user set wins over the Graphite default.
+        let explicit = PaneSpacing {
+            explicit_spacing: [true, false, true],
+            ..graphite
+        };
+        let geom = host_geom(&font, true, true, true, explicit, 10);
+        assert_eq!((geom.window_pad, geom.pane_gap, geom.inner_pad), (3, 16, 5));
+    }
+
     /// Leftover pixels the cell grid cannot fill are split between both
     /// edges, so the frame is even left/right and top/bottom rather than
     /// piling every spare pixel on the right and bottom.
@@ -19490,6 +19992,9 @@ session mail (id 15)
             space_rail_chip_cols: 16,
             space_rail_width_cols: 18,
             space_rail_pane_names: false,
+            chrome_style: config::ChromeStyle::Classic,
+            ui_scale_milli: 1000,
+            explicit_spacing: [false; 3],
         };
         let mut geom = host_geom(&font, false, false, false, spacing, 0);
         // Deliberately awkward: not a whole number of cells in either axis.
@@ -19549,6 +20054,9 @@ session mail (id 15)
             space_rail_chip_cols: 16,
             space_rail_width_cols: 18,
             space_rail_pane_names: false,
+            chrome_style: config::ChromeStyle::Classic,
+            ui_scale_milli: 1000,
+            explicit_spacing: [false; 3],
         };
         let auto = host_geom(
             &font,
@@ -19583,6 +20091,9 @@ session mail (id 15)
             space_rail_chip_cols: 16,
             space_rail_width_cols: 18,
             space_rail_pane_names: false,
+            chrome_style: config::ChromeStyle::Classic,
+            ui_scale_milli: 1000,
+            explicit_spacing: [false; 3],
         };
         let off = host_geom(&font, false, false, false, base, 0);
         assert_eq!(off.rail_px, 0);
@@ -19668,6 +20179,9 @@ session mail (id 15)
             space_rail_chip_cols: 16,
             space_rail_width_cols: 18,
             space_rail_pane_names: false,
+            chrome_style: config::ChromeStyle::Classic,
+            ui_scale_milli: 1000,
+            explicit_spacing: [false; 3],
         };
         let geom = host_geom(&font, false, false, false, spacing, 0);
         assert_eq!(geom.scrollbar_gutter_px, mux::SCROLLBAR_GUTTER_PX);

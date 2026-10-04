@@ -55,6 +55,8 @@ splash = true
 splash_animation = true
 # Tab strip visibility: auto and always show one tab; multi needs two tabs. auto|always|multi.
 tab_strip = "auto"
+# Host chrome look: classic, or the opt-in Graphite redesign. classic|graphite.
+chrome_style = "classic"
 # Multi-pane title row: focused pane OSC title, or handle hover only. focused|hover.
 pane_titles = "focused"
 # Immediate hover blend for interactive strip, rail, and scrollbar chrome. 0.0-0.3.

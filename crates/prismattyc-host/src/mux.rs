@@ -107,6 +107,41 @@ pub(crate) struct HostGeom {
     pub rail_px: usize,
     /// Fixed chip width of the spaces rail in cells.
     pub rail_chip_cols: usize,
+    /// Graphite chrome sizing (#104). [`ChromeGeom::CLASSIC`] adds nothing.
+    pub chrome: ChromeGeom,
+}
+
+/// Graphite chrome geometry (#104). Classic leaves every field at its
+/// [`ChromeGeom::CLASSIC`] value, so classic layout and hit-testing are
+/// byte-for-byte what they were before the setting existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChromeGeom {
+    /// `chrome_style = "graphite"`.
+    pub graphite: bool,
+    /// Window scale factor × 1000; Graphite design pixels scale by it.
+    pub scale_milli: u32,
+}
+
+impl ChromeGeom {
+    pub(crate) const CLASSIC: Self = Self {
+        graphite: false,
+        scale_milli: 1000,
+    };
+
+    /// Physical pixels for a Graphite design size at this window scale.
+    pub(crate) fn px(self, design: f32) -> usize {
+        (design * self.scale_milli as f32 / 1000.0).round().max(0.0) as usize
+    }
+
+    /// Graphite pane title row, inside the top of every pane slot. Zero in
+    /// classic.
+    pub(crate) fn pane_header(self) -> usize {
+        if self.graphite {
+            self.px(crate::graphite::PANE_HEADER_H)
+        } else {
+            0
+        }
+    }
 }
 
 /// Overlay width of the host scrollback scrollbar (matches raster).
@@ -262,6 +297,12 @@ pub(crate) enum StripHit {
     },
     /// Trailing empty drop target (new tab / move tab to end).
     EmptyEnd,
+    /// Graphite: the Space dropdown at the bar's left edge.
+    SpaceMenu,
+    /// Graphite: the `+` button after the last tab.
+    NewTab,
+    /// Graphite: the `Run a command` field.
+    Command,
 }
 
 /// One draggable gap between the two halves of a split (PT-133).
@@ -359,6 +400,7 @@ impl HostGeom {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            chrome: ChromeGeom::CLASSIC,
         }
     }
 
@@ -419,6 +461,7 @@ impl HostGeom {
         self.inner_pad
             .saturating_mul(2)
             .saturating_add(self.pane_gap)
+            .saturating_add(self.chrome.pane_header())
     }
 
     fn cells_for_pixels(pixels: usize, cell: usize) -> usize {
@@ -464,11 +507,14 @@ impl HostGeom {
     /// down to whole cells.
     fn pane_avail_px(self, rect: CellRect) -> (usize, usize, usize, usize) {
         let (x, y, width, height) = self.pane_slot_px(rect);
+        let header = self.chrome.pane_header();
         (
             x.saturating_add(self.inner_pad),
-            y.saturating_add(self.inner_pad),
+            y.saturating_add(self.inner_pad).saturating_add(header),
             width.saturating_sub(self.inner_pad.saturating_mul(2)),
-            height.saturating_sub(self.inner_pad.saturating_mul(2)),
+            height
+                .saturating_sub(self.inner_pad.saturating_mul(2))
+                .saturating_sub(header),
         )
     }
 
@@ -1685,6 +1731,9 @@ pub(crate) struct MuxRuntime {
     git_info: crate::git_info::Cache,
     /// Previously focused pane per window, for `focus_last_pane` (PT-127).
     last_pane: HashMap<WindowId, PaneId>,
+    /// Graphite tabs bar as last painted (#104). Hit-testing reads it so a
+    /// click lands on the chip the user saw. `None` in classic.
+    graphite_bar: Option<crate::graphite::BarLayout>,
     /// Previously selected tab, for `select_last_tab` (PT-127).
     last_window: Option<WindowId>,
     domain: Domain,
@@ -1830,6 +1879,7 @@ impl MuxRuntime {
             pending_attentions: Vec::new(),
             pending_toasts: Vec::new(),
             last_pane: HashMap::new(),
+            graphite_bar: None,
             last_window: None,
             zoomed: None,
         })
@@ -2861,6 +2911,45 @@ impl MuxRuntime {
             .unwrap_or(0)
     }
 
+    /// Panes holding an agent attention request (Graphite status counts).
+    pub(crate) fn attention_count(&self) -> usize {
+        self.panes
+            .values()
+            .filter(|pane| pane.attention.is_some())
+            .count()
+    }
+
+    /// Graphite pane title row text: the session or pane name, then muted
+    /// detail (the OSC title under a session name, else the git label).
+    /// Names come from the same fields as the classic handle titles.
+    pub(crate) fn pane_header_text(&self, pane: PaneId) -> (String, Option<String>) {
+        let runtime = self.panes.get(&pane);
+        let index = self
+            .domain
+            .window(self.active_window())
+            .map(|win| win.layout.panes())
+            .and_then(|panes| panes.iter().position(|id| *id == pane))
+            .unwrap_or(0);
+        let named =
+            runtime.and_then(|r| r.attach_name.clone().or_else(|| r.attach_session.clone()));
+        let title = runtime
+            .and_then(|r| r.title.clone())
+            .filter(|t| !t.is_empty());
+        match named {
+            Some(name) => {
+                let detail = title.filter(|t| *t != name);
+                (
+                    name,
+                    detail.or_else(|| self.git_info.label(pane).map(str::to_string)),
+                )
+            }
+            None => (
+                title.unwrap_or_else(|| format!("pane {}", index + 1)),
+                self.git_info.label(pane).map(str::to_string),
+            ),
+        }
+    }
+
     pub(crate) fn unseen_count(&self) -> usize {
         self.panes
             .values()
@@ -3506,6 +3595,11 @@ impl MuxRuntime {
         Ok(true)
     }
 
+    /// Record the Graphite tabs bar just painted; `None` drops it.
+    pub(crate) fn set_graphite_bar(&mut self, bar: Option<crate::graphite::BarLayout>) {
+        self.graphite_bar = bar;
+    }
+
     /// Presentation index for a pixel in the top tab strip, if any.
     /// Slots sit in the window-padded content box so they stay aligned
     /// with `rasterize_tab_strip`. `close` is the right-edge close target.
@@ -3533,6 +3627,15 @@ impl MuxRuntime {
         stride_px: usize,
         reserve_end: bool,
     ) -> Option<StripHit> {
+        if self.geom.chrome.graphite {
+            if self.geom.top_chrome_px == 0 {
+                return None;
+            }
+            return self
+                .graphite_bar
+                .as_ref()
+                .and_then(|bar| crate::graphite::bar_hit(bar, px, py, reserve_end));
+        }
         let n = self.tab_count();
         let chrome = self.geom.top_chrome_px;
         let py = py.checked_sub(self.geom.tab_strip_y())?;
@@ -4709,6 +4812,7 @@ mod tests {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            chrome: ChromeGeom::CLASSIC,
         };
         let rect = CellRect {
             col: 2,
@@ -4765,6 +4869,7 @@ mod tests {
                     rail_side: RailSide::Off,
                     rail_px: 0,
                     rail_chip_cols: 0,
+                    chrome: ChromeGeom::CLASSIC,
                 };
                 let rect = CellRect {
                     col: 0,
@@ -4823,6 +4928,7 @@ mod tests {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            chrome: ChromeGeom::CLASSIC,
         };
         runtime.set_geom(base).unwrap();
         assert_eq!(runtime.active_pane_count(), 2);
@@ -4891,6 +4997,7 @@ mod tests {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            chrome: ChromeGeom::CLASSIC,
         };
         runtime.set_geom(chrome).unwrap();
         assert_eq!(runtime.geom().pane_gap, 0);
@@ -4937,6 +5044,7 @@ mod tests {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            chrome: ChromeGeom::CLASSIC,
         };
 
         runtime.resize_with_geom(80, 24, geom).unwrap();
@@ -6233,6 +6341,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
         let stride = 200;
@@ -6348,6 +6457,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
 
@@ -6422,6 +6532,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
         assert_eq!(
@@ -6530,6 +6641,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
         assert_eq!(
@@ -6685,6 +6797,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
         assert_eq!(runtime.tab_index_at_px(x0, 4, stride), Some(0));
@@ -6723,6 +6836,7 @@ mod tests {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            chrome: ChromeGeom::CLASSIC,
         };
         runtime.set_geom(split).unwrap();
         assert_eq!(runtime.active_pane_count(), 2);
@@ -6791,6 +6905,7 @@ mod tests {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            chrome: ChromeGeom::CLASSIC,
         };
         runtime.set_geom(geom).unwrap();
         let stride = 160;
@@ -6848,6 +6963,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
 
@@ -7019,6 +7135,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
         let dividers = runtime.dividers();

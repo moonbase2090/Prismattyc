@@ -825,7 +825,8 @@ fn cluster_occupies_two_cells(cluster: &str) -> bool {
 
 /// JetBrains Mono Nerd Font (SIL OFL 1.1) — bundled primary mono + icon face.
 /// License: `assets/fonts/JetBrainsMonoNerdFont-OFL.txt`.
-const BAKED_MONO: &[u8] = include_bytes!("../assets/fonts/JetBrainsMonoNerdFont-Regular.ttf");
+pub(crate) const BAKED_MONO: &[u8] =
+    include_bytes!("../assets/fonts/JetBrainsMonoNerdFont-Regular.ttf");
 const BAKED_MONO_NAME: &str = "<bundled JetBrainsMonoNerdFont-Regular.ttf>";
 
 /// DejaVu Sans Mono (Bitstream Vera / DejaVu license) — bundled glyph fallback
@@ -7514,7 +7515,7 @@ pub fn pack_argb(alpha: u8, rgb: [u8; 3]) -> u32 {
         | u32::from(rgb[2])
 }
 
-fn unpack_rgb(px: u32) -> [u8; 3] {
+pub(crate) fn unpack_rgb(px: u32) -> [u8; 3] {
     [
         ((px >> 16) & 0xff) as u8,
         ((px >> 8) & 0xff) as u8,
@@ -7527,7 +7528,7 @@ pub fn alpha_of(px: u32) -> u8 {
 }
 
 /// Raise `dest` alpha toward opaque by glyph/image coverage `cover`.
-fn raise_alpha(dest: u8, cover: u8) -> u8 {
+pub(crate) fn raise_alpha(dest: u8, cover: u8) -> u8 {
     let dest = u32::from(dest);
     (dest + (255 - dest) * u32::from(cover) / 255) as u8
 }

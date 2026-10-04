@@ -2890,16 +2890,12 @@ pub(crate) struct SidebarRow<'a> {
 pub(crate) struct SidebarLayout {
     pub column: Rect,
     pub head: Rect,
-    // PR3 hit-testing reads the viewport and the clamped offset; unit
-    // tests cover them meanwhile.
-    #[allow(dead_code)]
     pub list: Rect,
     pub rows: Vec<Rect>,
     pub thumb: Option<Rect>,
     pub foot: Rect,
     pub actions: [Rect; 3],
     /// First visible row after clamping `scroll`.
-    #[allow(dead_code)]
     pub first_row: usize,
 }
 
@@ -3275,6 +3271,53 @@ fn chevron_right(
     );
 }
 
+/// What the pointer hits in the sidebar: a tree row, a footer action, an
+/// arrangement button, or the list thumb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarHit {
+    Row(usize),
+    Action(usize),
+    Arrange(usize),
+    Thumb,
+}
+
+/// Hit-test the painted sidebar: thumb first (it overlaps the list edge),
+/// then rows, footer actions, and header buttons.
+pub(crate) fn sidebar_hit(
+    rows: &[Rect],
+    actions: &[Rect; 3],
+    arrange: &[Rect; 3],
+    thumb: Option<Rect>,
+    px: usize,
+    py: usize,
+) -> Option<SidebarHit> {
+    if thumb.is_some_and(|thumb| thumb.contains(px, py)) {
+        return Some(SidebarHit::Thumb);
+    }
+    if let Some(row) = rows.iter().position(|row| row.contains(px, py)) {
+        return Some(SidebarHit::Row(row));
+    }
+    if let Some(action) = actions.iter().position(|slot| slot.contains(px, py)) {
+        return Some(SidebarHit::Action(action));
+    }
+    if let Some(button) = arrange.iter().position(|slot| slot.contains(px, py)) {
+        return Some(SidebarHit::Arrange(button));
+    }
+    None
+}
+
+/// Largest first-row offset for `row_count` rows in a column `column_h`
+/// tall: the clamped offset a huge scroll settles on.
+pub(crate) fn sidebar_max_scroll(chrome: ChromeGeom, column_h: usize, row_count: usize) -> usize {
+    sidebar_layout(
+        chrome,
+        Rect::new(0, 0, SIDEBAR_W.px(chrome), column_h),
+        row_count,
+        usize::MAX,
+    )
+    .first_row
+}
+
 /// The 44 px header over the panes: breadcrumb plus arrangement buttons.
 pub(crate) struct SidebarHeaderPaint<'a> {
     pub chrome: ChromeGeom,
@@ -3478,6 +3521,56 @@ mod sidebar_render_tests {
                 },
             )
             .collect()
+    }
+
+    #[test]
+    fn sidebar_hit_prefers_thumb_then_rows_then_buttons() {
+        let chrome = chrome();
+        let layout = sidebar_layout(chrome, column(600), 60, 0);
+        let header = sidebar_header_layout(chrome, Rect::new(256, 0, 768, 44));
+        let hit = |x: usize, y: usize| {
+            sidebar_hit(
+                &layout.rows,
+                &layout.actions,
+                &header.buttons,
+                layout.thumb,
+                x,
+                y,
+            )
+        };
+        let thumb = layout.thumb.expect("overflow thumbs for hit priority");
+        assert_eq!(hit(thumb.x + 1, thumb.y + 2), Some(SidebarHit::Thumb));
+        let row = layout.rows[3];
+        // A row away from the thumb edge hits the row, not the thumb.
+        assert_eq!(hit(row.x + 4, row.y + row.h / 2), Some(SidebarHit::Row(3)));
+        assert_eq!(
+            hit(layout.actions[1].x + 4, layout.actions[1].y + 4),
+            Some(SidebarHit::Action(1))
+        );
+        assert_eq!(
+            hit(header.buttons[0].x + 4, header.buttons[0].y + 4),
+            Some(SidebarHit::Arrange(0))
+        );
+        assert_eq!(hit(900, 500), None, "pane area is no sidebar hit");
+        assert_eq!(hit(layout.column.x, layout.column.y), None);
+    }
+
+    #[test]
+    fn sidebar_max_scroll_is_the_last_page_offset() {
+        let chrome = chrome();
+        assert_eq!(sidebar_max_scroll(chrome, 600, 4), 0);
+        let max = sidebar_max_scroll(chrome, 600, 60);
+        assert!(max > 0);
+        assert_eq!(
+            sidebar_layout(chrome, column(600), 60, max).first_row,
+            max,
+            "the max offset shows a full last page"
+        );
+        assert_eq!(
+            sidebar_layout(chrome, column(600), 60, max + 10).first_row,
+            max,
+            "larger offsets clamp back to it"
+        );
     }
 
     #[test]

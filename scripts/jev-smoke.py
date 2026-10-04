@@ -33,6 +33,18 @@ QUESTIONS = {
     }
 }
 
+SYNTHETIC_MUTANT = {
+    "name": "src/lib.rs:3:5: replace add -> u32 with 0",
+    "package": "example",
+    "file": "src/lib.rs",
+    "function": "add",
+    "genre": "FnValue",
+    "span": {"start": {"line": 3, "column": 5}, "end": {"line": 3, "column": 10}},
+    "replacement": "0",
+    "diff": "--- src/lib.rs\n+++ replace add -> u32 with 0\n@@ -3 +3 @@\n-    a + b\n+    0\n",
+    "function_context": "pub fn add(a: u32, b: u32) -> u32 {\n    a + b\n}\n",
+}
+
 
 def load_shadow() -> Any:
     path = Path(__file__).with_name("jev-shadow.py")
@@ -149,6 +161,11 @@ def probe(account_id: str, api_token: str, gateway_id: str, gateway_token: str, 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--probe", action="store_true", help="run read-only checks and header variants")
+    parser.add_argument(
+        "--nightly-questions",
+        action="store_true",
+        help="send a small synthetic mutant with the nightly's prediction and triage questions",
+    )
     args = parser.parse_args()
 
     account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
@@ -164,9 +181,18 @@ def main() -> int:
     if args.probe:
         return probe(account_id, api_token, gateway_id, gateway_token, shadow)
 
+    state: Any = STATE
+    questions = QUESTIONS
+    if args.nightly_questions:
+        repo = Path(__file__).resolve().parent.parent
+        state = {"mutant": SYNTHETIC_MUTANT}
+        questions = {
+            **shadow.prediction_questions(shadow.workspace_packages(repo, [])),
+            **shadow.triage_questions(),
+        }
     client = shadow.JevClient(account_id, api_token, gateway_id or None, gateway_token)
     try:
-        result = client.call(STATE, QUESTIONS)
+        result = client.call(state, questions)
     except RuntimeError as exc:
         print(f"FAIL: {exc}")
         return 1

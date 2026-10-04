@@ -19783,6 +19783,68 @@ session mail (id 15)
         cli.focus_border_pinned = false;
     }
 
+    /// #104: classic geometry is independent of the Graphite fields, and
+    /// Graphite adds its bar, title row, spacing, and spaces bar.
+    #[test]
+    fn classic_geometry_ignores_graphite_and_graphite_adds_its_chrome() {
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let classic = PaneSpacing {
+            window_padding_px: 3,
+            pane_gap_px: 3,
+            pane_padding_px: 5,
+            space_rail: space_rail::RailSide::Bottom,
+            space_rail_chip_cols: 0,
+            space_rail_width_cols: 18,
+            space_rail_pane_names: true,
+            chrome_style: config::ChromeStyle::Classic,
+            ui_scale_milli: 1000,
+            explicit_spacing: [false; 3],
+        };
+        let base = host_geom(&font, true, true, true, classic, 10);
+        let retina = host_geom(&font, true, true, true, classic.at_scale(2.0), 10);
+        assert_eq!(base, retina, "classic never reads the window scale");
+        assert_eq!(base.chrome, mux::ChromeGeom::CLASSIC);
+        assert_eq!(base.top_chrome_px, font.cell_h * 2);
+        assert_eq!(base.rail_px, font.cell_h * 2);
+        assert_eq!((base.window_pad, base.pane_gap, base.inner_pad), (3, 3, 5));
+        let rect = prismattyc_mux::CellRect {
+            col: 0,
+            row: 0,
+            cols: 40,
+            rows: 20,
+        };
+        assert_eq!(base.chrome.pane_header(), 0);
+
+        let graphite = PaneSpacing {
+            chrome_style: config::ChromeStyle::Graphite,
+            ..classic
+        }
+        .at_scale(2.0);
+        let geom = host_geom(&font, true, true, true, graphite, 10);
+        assert!(geom.chrome.graphite);
+        assert_eq!(geom.top_chrome_px, 88, "44 px bar at 2x, no handle row");
+        assert_eq!(geom.rail_px, 60, "30 px spaces bar at 2x");
+        assert_eq!(
+            (geom.window_pad, geom.pane_gap, geom.inner_pad),
+            (16, 16, 24)
+        );
+        let (_, slot_y, _, _) = geom.pane_slot_px(rect);
+        let (_, content_y, _, _) = geom.pane_content_px(rect);
+        assert!(
+            content_y >= slot_y + geom.inner_pad + 56,
+            "28 px title row at 2x"
+        );
+        // A spacing the user set wins over the Graphite default.
+        let explicit = PaneSpacing {
+            explicit_spacing: [true, false, true],
+            ..graphite
+        };
+        let geom = host_geom(&font, true, true, true, explicit, 10);
+        assert_eq!((geom.window_pad, geom.pane_gap, geom.inner_pad), (3, 16, 5));
+    }
+
     /// Leftover pixels the cell grid cannot fill are split between both
     /// edges, so the frame is even left/right and top/bottom rather than
     /// piling every spare pixel on the right and bottom.

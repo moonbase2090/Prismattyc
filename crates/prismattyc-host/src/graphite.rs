@@ -2146,6 +2146,70 @@ mod tests {
     }
 
     #[test]
+    fn pane_chrome_rings_the_focused_pane_and_outlines_the_rest() {
+        let (w, h) = (300usize, 200usize);
+        let slot = Rect::new(20, 20, 260, 160);
+        let accent = rgb(0x5aa2ff);
+        let paint = |focused: bool| {
+            let mut buffer = vec![pack_argb(0xff, DARK.ground); w * h];
+            paint_pane_surface(
+                &mut buffer,
+                w,
+                scale(1000),
+                slot,
+                DARK.ground,
+                0xff,
+                rgb(0x121214),
+                0xff,
+            );
+            paint_pane_chrome(
+                &mut buffer,
+                w,
+                scale(1000),
+                &DARK,
+                accent,
+                slot,
+                rgb(0x121214),
+                &PaneHeader {
+                    name: "notes",
+                    meta: Some("release-lab"),
+                    dot: Dot::Working,
+                    status: PaneStatus::decide(false, 0, false, false, focused),
+                    focused,
+                },
+                true,
+            );
+            buffer
+        };
+        let top_mid = slot.y * w + slot.x + slot.w / 2;
+        let focused = paint(true);
+        assert_eq!(
+            unpack_rgb(focused[top_mid]),
+            accent,
+            "ring on the slot edge"
+        );
+        assert_eq!(
+            unpack_rgb(focused[top_mid - w]),
+            accent,
+            "and one pixel outside"
+        );
+        // Title row carries the focus tint just inside the ring.
+        assert_eq!(
+            unpack_rgb(focused[(slot.y + 4) * w + slot.x + slot.w - 4]),
+            DARK.title_focus
+        );
+        let quiet = paint(false);
+        assert_eq!(unpack_rgb(quiet[top_mid]), DARK.hairline);
+        assert_eq!(
+            unpack_rgb(quiet[top_mid - w]),
+            DARK.ground,
+            "no ring outside"
+        );
+        // The corner pixel stays ground: the card is rounded.
+        assert_eq!(unpack_rgb(quiet[slot.y * w + slot.x]), DARK.ground);
+    }
+
+    #[test]
     fn paint_draws_the_active_underline_in_the_accent() {
         let tabs = vec![tab("grid", true), tab("codex", false)];
         let layout = bar_layout(scale(1000), 800, 0, "lab", &tabs, "");

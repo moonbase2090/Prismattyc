@@ -137,6 +137,10 @@ pub(crate) struct Tokens {
     pub title_focus: Rgb,
     pub title_focus_line: Rgb,
     pub muted_focus: Rgb,
+    /// Handle hover fill behind the header dot and name (issue #109).
+    pub title_hover: Rgb,
+    /// Hover outline around the pane whose handle is hovered.
+    pub hover_outline: Rgb,
     /// Unseen/mail status as text (the dot colour fails AA on light).
     pub unseen_text: Rgb,
     /// Light-cycle vehicle head at the sweep's leading edge.
@@ -174,6 +178,8 @@ pub(crate) const DARK: Tokens = Tokens {
     title_focus: rgb(0x1c2330),
     title_focus_line: rgb(0x2a3140),
     muted_focus: rgb(0xb4bcc9),
+    title_hover: rgb(0x252a33),
+    hover_outline: rgb(0x3d5f8f),
     unseen_text: rgb(0xf2b84b),
     cycle_head: rgb(0xd6e8ff),
 };
@@ -209,6 +215,8 @@ pub(crate) const LIGHT: Tokens = Tokens {
     title_focus: rgb(0xeaf1fc),
     title_focus_line: rgb(0xcddcf3),
     muted_focus: rgb(0x4a525e),
+    title_hover: rgb(0xe2e6eb),
+    hover_outline: rgb(0x9dbbe8),
     unseen_text: rgb(0x9a6200),
     cycle_head: rgb(0x163f80),
 };
@@ -982,12 +990,22 @@ pub(crate) fn bar_hit(
     (reserve_end && after_tabs).then_some(StripHit::EmptyEnd)
 }
 
+/// Drop highlight during a pane-header drag (issue #109). `Tab` outlines
+/// the tab chip that would receive the pane; `NewTab` draws the dashed
+/// slot past `+`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DropTarget {
+    Tab(usize),
+    NewTab,
+}
+
 /// Inputs for one tabs-bar paint.
 pub(crate) struct BarPaint<'a> {
     pub layout: &'a BarLayout,
     pub tok: &'a Tokens,
     pub accent: Rgb,
     pub hover: Option<StripHit>,
+    pub drop_target: Option<DropTarget>,
     /// `chrome_opacity` for the bar ground; chips, text, and dots stay opaque.
     pub bar_alpha: u8,
     /// Inline rename: tab index, buffer, select-all.
@@ -1153,6 +1171,50 @@ pub(crate) fn paint_tabs_bar(buffer: &mut [u32], stride: usize, paint: &BarPaint
                 tok.key_text,
                 key.x,
                 key.right(),
+            );
+        }
+    }
+
+    // Drop highlight for a pane-header drag (issue #109): a dashed
+    // "New tab" slot past `+`, where the bar_hit EmptyEnd region starts.
+    if paint.drop_target == Some(DropTarget::NewTab) {
+        let chip_h = p(CHIP_H).min(bar.h);
+        let target = Rect::new(
+            layout.plus.x,
+            bar.y + bar.h.saturating_sub(chip_h) / 2,
+            bar.right()
+                .saturating_sub(layout.plus.x)
+                .saturating_sub(p(BAR_PAD_X)),
+            chip_h,
+        );
+        if target.w >= p(24.0) && target.h >= p(12.0) {
+            paint_dashed_round_rect(
+                buffer,
+                stride,
+                target,
+                s(CHIP_RADIUS),
+                s(6.0),
+                s(4.0),
+                s(1.5),
+                paint.accent,
+            );
+            let label = ellipsize(
+                Face::Regular,
+                s(TAB_TEXT),
+                "New tab",
+                target.w as f32 - 2.0 * s(CHIP_PAD_X),
+            );
+            draw_text(
+                buffer,
+                stride,
+                target.x as f32 + s(CHIP_PAD_X),
+                target.center_y(),
+                Face::Regular,
+                s(TAB_TEXT),
+                &label,
+                tok.tab_text,
+                target.x,
+                target.right(),
             );
         }
     }
@@ -1357,6 +1419,21 @@ fn paint_tab(buffer: &mut [u32], stride: usize, paint: &BarPaint<'_>, index: usi
         );
         fill_round_rect(buffer, stride, under, s(1.0), paint.accent, 0xff);
     }
+    // Drop highlight for a pane-header drag (issue #109): the tab that
+    // would receive the pane gets the accent outline.
+    if paint.drop_target == Some(DropTarget::Tab(index)) {
+        stroke_round_rect(
+            buffer,
+            stride,
+            chip.x as f32 - 1.0,
+            chip.y as f32 - 1.0,
+            chip.right() as f32 + 1.0,
+            (chip.y + chip.h) as f32 + 1.0,
+            s(CHIP_RADIUS) + 1.0,
+            s(2.0),
+            paint.accent,
+        );
+    }
 }
 
 fn grid_icon(buffer: &mut [u32], stride: usize, x: f32, cy: f32, size: f32, width: f32, ink: Rgb) {
@@ -1526,6 +1603,179 @@ fn stroke_round_rect(
     );
 }
 
+/// Dashed rounded-rectangle stroke for drag slots and drop targets
+/// (issue #109). Dashes run along the straight edges; corners stay open.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_dashed_round_rect(
+    buffer: &mut [u32],
+    stride: usize,
+    rect: Rect,
+    radius: f32,
+    dash: f32,
+    gap: f32,
+    width: f32,
+    ink: Rgb,
+) {
+    if rect.w < 4 || rect.h < 4 || dash <= 0.0 {
+        return;
+    }
+    let r = radius.min(rect.w as f32 / 2.0).min(rect.h as f32 / 2.0);
+    let (x0, y0) = (rect.x as f32, rect.y as f32);
+    let (x1, y1) = (rect.right() as f32, (rect.y + rect.h) as f32);
+    let step = dash + gap.max(1.0);
+    let mut run = |ax: f32, ay: f32, bx: f32, by: f32| {
+        let len = (bx - ax).hypot(by - ay);
+        if len <= 0.0 {
+            return;
+        }
+        let mut t = 0.0;
+        while t < len {
+            let e = (t + dash).min(len);
+            stroke_line(
+                buffer,
+                stride,
+                ax + (bx - ax) * t / len,
+                ay + (by - ay) * t / len,
+                ax + (bx - ax) * e / len,
+                ay + (by - ay) * e / len,
+                width,
+                ink,
+            );
+            t += step;
+        }
+    };
+    let c = (width / 2.0).max(0.5);
+    run(x0 + r, y0 + c, x1 - r, y0 + c);
+    run(x0 + r, y1 - c, x1 - r, y1 - c);
+    run(x0 + c, y0 + r, x0 + c, y1 - r);
+    run(x1 - c, y0 + r, x1 - c, y1 - r);
+}
+
+fn paint_header_dot(
+    buffer: &mut [u32],
+    stride: usize,
+    chrome: ChromeGeom,
+    cx: f32,
+    cy: f32,
+    dot: Dot,
+    tok: &Tokens,
+) {
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    let dot_r = s(HEADER_DOT) / 2.0;
+    match dot {
+        Dot::Idle => stroke_circle(buffer, stride, cx, cy, dot_r - s(0.6), s(1.2), tok.idle),
+        Dot::Working => fill_circle(buffer, stride, cx, cy, dot_r, tok.working),
+        Dot::Unseen => fill_circle(buffer, stride, cx, cy, dot_r, tok.unseen),
+        Dot::Attention => fill_circle(buffer, stride, cx, cy, dot_r, tok.attention),
+    }
+}
+
+/// Dot-and-name handle zone inside a pane header, shared by hover hit
+/// testing and the hover fill (issue #109). `focus_row` must match the
+/// face rule in `paint_pane_chrome` so the zone ends where the name does.
+pub(crate) fn pane_handle_rect(
+    chrome: ChromeGeom,
+    slot: Rect,
+    name: &str,
+    status: PaneStatus,
+    focus_row: bool,
+) -> Option<Rect> {
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    let p = |d: f32| chrome.px(d);
+    let head_h = p(PANE_HEADER_H).min(slot.h);
+    if slot.w < p(40.0) || head_h == 0 {
+        return None;
+    }
+    let x0 = slot.x as f32 + s(HEADER_PAD_X);
+    let px = s(HEADER_TEXT);
+    let status_w = status_width(chrome, status);
+    let text_end = slot
+        .right()
+        .saturating_sub(p(HEADER_PAD_X) + status_w.ceil() as usize + p(INNER_GAP))
+        as f32;
+    let text_x = x0 + s(HEADER_DOT) + s(INNER_GAP);
+    let face = if focus_row {
+        Face::SemiBold
+    } else {
+        Face::Regular
+    };
+    let shown = ellipsize(face, px, name, (text_end - text_x).max(0.0));
+    let end = (text_x + text_width(face, px, &shown)).ceil() as usize;
+    let end = end.min(text_end.ceil() as usize).max(x0.ceil() as usize);
+    Some(Rect::new(
+        x0.ceil() as usize,
+        slot.y,
+        end.saturating_sub(x0.ceil() as usize),
+        head_h,
+    ))
+}
+
+/// Drag chip for a header drag: the dot and name on a lifted chip centered
+/// at the pointer (issue #109). Clamped into the buffer; returns its rect.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_drag_chip(
+    buffer: &mut [u32],
+    stride: usize,
+    chrome: ChromeGeom,
+    tok: &Tokens,
+    dot: Dot,
+    name: &str,
+    cx: usize,
+    cy: usize,
+) -> Rect {
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    let p = |d: f32| chrome.px(d);
+    let px = s(HEADER_TEXT);
+    let shown = ellipsize(Face::Regular, px, name, s(200.0));
+    let w = (s(HEADER_PAD_X)
+        + s(HEADER_DOT)
+        + s(INNER_GAP)
+        + text_width(Face::Regular, px, &shown)
+        + s(HEADER_PAD_X))
+    .ceil() as usize;
+    let h = p(PANE_HEADER_H).max(8);
+    let height = buffer.len() / stride.max(1);
+    let x = cx.saturating_sub(w / 2).min(stride.saturating_sub(w));
+    let y = cy.saturating_sub(h / 2).min(height.saturating_sub(h));
+    let chip = Rect::new(x, y, w.min(stride), h.min(height));
+    if chip.w < 8 || chip.h < 8 {
+        return chip;
+    }
+    outlined_round_rect(
+        buffer,
+        stride,
+        chip,
+        s(CHIP_RADIUS),
+        tok.hairline,
+        tok.tab_active,
+    );
+    let cy_f = chip.center_y();
+    let mut x = chip.x as f32 + s(HEADER_PAD_X);
+    paint_header_dot(
+        buffer,
+        stride,
+        chrome,
+        x + s(HEADER_DOT) / 2.0,
+        cy_f,
+        dot,
+        tok,
+    );
+    x += s(HEADER_DOT) + s(INNER_GAP);
+    draw_text(
+        buffer,
+        stride,
+        x,
+        cy_f,
+        Face::Regular,
+        px,
+        &shown,
+        tok.text_strong,
+        chip.x,
+        chip.right(),
+    );
+    chip
+}
+
 // ---------------------------------------------------------------------------
 // Panes
 
@@ -1571,6 +1821,9 @@ pub(crate) struct PaneHeader<'a> {
     pub dot: Dot,
     pub status: PaneStatus,
     pub focused: bool,
+    /// The header handle (dot and name) is hovered: fill behind it and
+    /// outline the pane (issue #109).
+    pub handle_hover: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1738,6 +1991,19 @@ pub(crate) fn paint_pane_chrome(
     let focus_row = header.focused && ring;
     // Title row ground: the focus tint, or the pane surface.
     let row_fill = if focus_row { tok.title_focus } else { surface };
+    // Handle hover fill sits under the dot and name (issue #109).
+    if header.handle_hover {
+        if let Some(zone) = pane_handle_rect(chrome, slot, header.name, header.status, focus_row) {
+            fill_round_rect(
+                buffer,
+                stride,
+                Rect::new(zone.x, slot.y + 2, zone.w, head_h.saturating_sub(4)),
+                s(6.0),
+                tok.title_hover,
+                0xff,
+            );
+        }
+    }
     let head = Rect::new(slot.x, slot.y, slot.w, head_h);
     fill_round_rect(buffer, stride, head, r, row_fill, 0xff);
     let lower = Rect::new(slot.x, slot.y + head_h / 2, slot.w, head_h - head_h / 2);
@@ -1763,21 +2029,15 @@ pub(crate) fn paint_pane_chrome(
     // Dot, name, meta.
     let cy = slot.y as f32 + (head_h - 1) as f32 / 2.0;
     let mut x = slot.x as f32 + s(HEADER_PAD_X);
-    let dot_r = s(HEADER_DOT) / 2.0;
-    match header.dot {
-        Dot::Idle => stroke_circle(
-            buffer,
-            stride,
-            x + dot_r,
-            cy,
-            dot_r - s(0.6),
-            s(1.2),
-            tok.idle,
-        ),
-        Dot::Working => fill_circle(buffer, stride, x + dot_r, cy, dot_r, tok.working),
-        Dot::Unseen => fill_circle(buffer, stride, x + dot_r, cy, dot_r, tok.unseen),
-        Dot::Attention => fill_circle(buffer, stride, x + dot_r, cy, dot_r, tok.attention),
-    }
+    paint_header_dot(
+        buffer,
+        stride,
+        chrome,
+        x + s(HEADER_DOT) / 2.0,
+        cy,
+        header.dot,
+        tok,
+    );
     x += s(HEADER_DOT) + s(INNER_GAP);
     let px = s(HEADER_TEXT);
     let status_w = status_width(chrome, header.status);
@@ -1920,6 +2180,8 @@ pub(crate) fn paint_pane_chrome(
                 accent,
             );
         }
+    } else if header.handle_hover {
+        stroke_round_rect(buffer, stride, x0, y0, x1, y1, r, 2.0, tok.hover_outline);
     } else {
         stroke_round_rect(buffer, stride, x0, y0, x1, y1, r, 1.0, tok.hairline);
     }
@@ -3016,6 +3278,7 @@ mod tests {
                     dot: Dot::Working,
                     status: PaneStatus::decide(false, 0, false, false, focused),
                     focused,
+                    handle_hover: false,
                 },
                 true,
                 None,
@@ -3065,6 +3328,7 @@ mod tests {
                 tok: &DARK,
                 accent,
                 hover: None,
+                drop_target: None,
                 bar_alpha: 0xff,
                 editing: None,
             },
@@ -3368,6 +3632,7 @@ mod tests {
                     dot,
                     status,
                     focused,
+                    handle_hover: false,
                 },
                 true,
                 None,
@@ -3432,6 +3697,7 @@ mod tests {
                 tok,
                 accent: accent_color,
                 hover: None,
+                drop_target: None,
                 bar_alpha: 0xff,
                 editing: None,
             },
@@ -3539,5 +3805,170 @@ mod tests {
                 show_pane_names: true,
             },
         );
+    }
+    #[test]
+    fn handle_tokens_match_the_brief() {
+        assert_eq!(DARK.title_hover, rgb(0x252a33));
+        assert_eq!(DARK.hover_outline, rgb(0x3d5f8f));
+        assert_eq!(LIGHT.title_hover, rgb(0xe2e6eb));
+        assert_eq!(LIGHT.hover_outline, rgb(0x9dbbe8));
+        for tok in [&DARK, &LIGHT] {
+            assert!(
+                contrast_ratio(tok.text, tok.title_hover) >= 4.5,
+                "name text on the hover fill"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_handle_zone_covers_dot_and_name_only() {
+        let chrome = scale(1000);
+        let slot = Rect::new(8, 40, 400, 200);
+        let zone = pane_handle_rect(chrome, slot, "review", PaneStatus::Quiet, false)
+            .expect("handle zone");
+        assert_eq!(zone.y, slot.y);
+        assert_eq!(zone.h, chrome.px(PANE_HEADER_H).min(slot.h));
+        assert!(zone.x >= slot.x && zone.right() <= slot.right());
+        let dot_cx = slot.x + chrome.px(HEADER_PAD_X) + chrome.px(HEADER_DOT) / 2;
+        assert!(zone.contains(dot_cx, slot.y + 1), "dot stays a handle");
+        assert!(
+            !zone.contains(slot.right() - 2, slot.y + 1),
+            "status side is not a handle"
+        );
+        assert!(
+            !zone.contains(zone.x, slot.y + zone.h + 1),
+            "zone ends at the header"
+        );
+        let dot_only =
+            pane_handle_rect(chrome, slot, "", PaneStatus::Quiet, false).expect("dot-only zone");
+        assert!(dot_only.contains(dot_cx, slot.y + 1));
+        assert!(dot_only.w < zone.w, "a name widens the zone");
+        assert!(
+            pane_handle_rect(
+                chrome,
+                Rect::new(0, 0, 10, 200),
+                "review",
+                PaneStatus::Quiet,
+                false
+            )
+            .is_none(),
+            "narrow slots have no handle"
+        );
+    }
+
+    #[test]
+    fn pane_chrome_handle_hover_paints_fill_and_outline() {
+        let (w, h) = (300usize, 200usize);
+        let slot = Rect::new(20, 20, 260, 160);
+        let accent = rgb(0x5aa2ff);
+        let paint = |handle_hover: bool| {
+            let mut buffer = vec![crate::raster::pack_argb(0xff, DARK.ground); w * h];
+            paint_pane_chrome(
+                &mut buffer,
+                w,
+                scale(1000),
+                &DARK,
+                accent,
+                slot,
+                rgb(0x121214),
+                &PaneHeader {
+                    name: "notes",
+                    meta: None,
+                    dot: Dot::Idle,
+                    status: PaneStatus::Quiet,
+                    focused: false,
+                    handle_hover,
+                },
+                false,
+            );
+            buffer
+        };
+        let rest = paint(false);
+        let hovered = paint(true);
+        assert_ne!(rest, hovered, "hover must repaint the header");
+        let outline = crate::raster::pack_argb(0xff, DARK.hover_outline);
+        assert!(
+            hovered.contains(&outline),
+            "hover outline reaches the frame"
+        );
+        assert!(!rest.contains(&outline), "rest keeps the hairline");
+    }
+
+    #[test]
+    fn drag_helpers_paint_inside_the_frame() {
+        let chrome = scale(1000);
+        let (w, h) = (800usize, 600usize);
+        let mut buffer = vec![0u32; w * h];
+        paint_dashed_round_rect(
+            &mut buffer,
+            w,
+            Rect::new(10, 10, 200, 60),
+            8.0,
+            6.0,
+            4.0,
+            1.5,
+            DARK.hover_outline,
+        );
+        assert!(buffer.iter().any(|&px| px != 0), "dashes paint");
+        paint_dashed_round_rect(
+            &mut buffer,
+            w,
+            Rect::new(0, 0, 2, 2),
+            8.0,
+            6.0,
+            4.0,
+            1.5,
+            DARK.hover_outline,
+        );
+        let chip = paint_drag_chip(
+            &mut buffer,
+            w,
+            chrome,
+            &DARK,
+            Dot::Working,
+            "review",
+            400,
+            300,
+        );
+        assert!(chip.w > 0 && chip.h > 0);
+        assert!(chip.right() <= w && chip.y + chip.h <= h);
+        let corner = paint_drag_chip(&mut buffer, w, chrome, &DARK, Dot::Idle, "review", 5, 5);
+        assert!(corner.x == 0 && corner.y == 0, "chip clamps into the frame");
+        assert!(corner.right() <= w && corner.y + corner.h <= h);
+    }
+
+    #[test]
+    fn drop_target_highlights_the_tab_or_the_new_tab_slot() {
+        let tabs = vec![tab("grid", true), tab("review", false)];
+        let layout = bar_layout(scale(1000), 1440, 0, "lab", &tabs, "");
+        let paint_with = |drop_target: Option<DropTarget>| {
+            let mut buffer = vec![0u32; 1440 * layout.bar.h];
+            paint_tabs_bar(
+                &mut buffer,
+                1440,
+                &BarPaint {
+                    layout: &layout,
+                    tok: &DARK,
+                    accent: rgb(0x5aa2ff),
+                    hover: None,
+                    drop_target,
+                    bar_alpha: 0xff,
+                    editing: None,
+                },
+            );
+            buffer
+        };
+        let plain = paint_with(None);
+        let on_tab = paint_with(Some(DropTarget::Tab(1)));
+        assert_ne!(plain, on_tab, "drop-on-tab outlines the chip");
+        let chip = layout.tabs[1].chip;
+        let edge = chip.y * 1440 + chip.x + chip.w / 2;
+        assert_eq!(
+            unpack_rgb(on_tab[edge]),
+            rgb(0x5aa2ff),
+            "accent on the chip edge"
+        );
+        let on_end = paint_with(Some(DropTarget::NewTab));
+        assert_ne!(plain, on_end, "drop past + draws the dashed slot");
     }
 }

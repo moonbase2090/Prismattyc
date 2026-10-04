@@ -1366,6 +1366,8 @@ enum HoverTarget {
     Transparency {
         dragging: bool,
     },
+    /// Graphite pane-header handle (dot and name), issue #109.
+    PaneHandle(PaneId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6001,6 +6003,10 @@ fn rasterize_frame(
                         multi && pane_id == focused,
                     ),
                     focused: pane_id == focused,
+                    handle_hover: matches!(
+                        host.hover_target,
+                        Some(HoverTarget::PaneHandle(id)) if id == pane_id
+                    ),
                 },
                 multi,
                 sweep,
@@ -6052,6 +6058,15 @@ fn rasterize_frame(
                 true,
                 pane_id == focused && focus_border_name(host.focus_border) == "amber",
             );
+        }
+    }
+    // Header-drag chip and dashed slot (issue #109, graphite only). The
+    // drop itself reuses the strip drag-to-move routing.
+    if geom.chrome.graphite {
+        if let Some(drag) = host.strip_drag.as_ref().filter(|drag| drag.active) {
+            if let StripDragKind::Pane { pane, .. } = drag.kind {
+                paint_header_drag_overlay(host, buffer, width as usize, geom, pane);
+            }
         }
     }
     if let Some(label) = git_hover_label(host) {
@@ -8934,6 +8949,42 @@ fn pointer_hover_blocked(host: &HostState) -> bool {
             .is_some_and(|edit| edit.target.is_none())
 }
 
+/// Pane-header handle (dot and name) under the pointer, graphite only
+/// (issue #109). Classic keeps today's header behavior.
+fn pane_handle_hit(host: &HostState, px: usize, py: usize) -> Option<PaneId> {
+    let geom = host.mux.geom();
+    if !geom.chrome.graphite {
+        return None;
+    }
+    let focused = host.mux.focused_id();
+    let multi = host.mux.pane_count() > 1;
+    let now = Instant::now();
+    host.mux
+        .panes_and_rects()
+        .find_map(|(pane_id, pane, rect)| {
+            let (slot_x, slot_y, slot_w, slot_h) = geom.pane_slot_px(rect);
+            let (name, _) = host.mux.pane_header_text(pane_id);
+            let attention = host.attention_badge && pane.attention.is_some();
+            let running = pane.is_active_at(now);
+            let focus_row = multi && pane_id == focused;
+            let status = graphite::PaneStatus::decide(
+                attention,
+                pane.mail_depth,
+                pane.unseen_output,
+                running,
+                focus_row,
+            );
+            let zone = graphite::pane_handle_rect(
+                geom.chrome,
+                graphite::Rect::new(slot_x, slot_y, slot_w, slot_h),
+                &name,
+                status,
+                focus_row,
+            )?;
+            zone.contains(px, py).then_some(pane_id)
+        })
+}
+
 fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
     if let Some(dialog) = host.transparency.as_ref() {
         let (x, y) = host
@@ -9049,9 +9100,13 @@ fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
     if let Some(index) = bell_toast_at_pointer(host, px, py) {
         return Some(HoverTarget::ToastDismiss(index));
     }
-    pane_scrollbar_at(host, px, py)
+    if let Some(thumb) = pane_scrollbar_at(host, px, py)
         .filter(|(_, bar, _)| bar.thumb_contains(py))
         .map(|(pane, _, _)| HoverTarget::ScrollbarThumb(pane))
+    {
+        return Some(thumb);
+    }
+    pane_handle_hit(host, px, py).map(HoverTarget::PaneHandle)
 }
 
 /// Classic keeps the left-right resize cursor. Graphite uses col-resize on
@@ -9097,6 +9152,7 @@ fn cursor_for_hover(
                 | Some(HoverTarget::ContextMenuRow(_))
                 | Some(HoverTarget::DialogButton(_))
                 | Some(HoverTarget::ToastDismiss(_))
+                | Some(HoverTarget::PaneHandle(_))
         )
     {
         CursorIcon::Pointer
@@ -9770,6 +9826,84 @@ fn graphite_tabs_span(geom: mux::HostGeom, stride: usize) -> (usize, usize) {
 
 /// Graphite tabs bar (#104): lay out from the live tab model, record the
 /// layout for hit-testing, and paint it.
+/// Drop highlight for an active pane-header drag (issue #109): the tab
+/// under the pointer, or the new-tab slot past `+`. Tab drags keep the
+/// existing toast-only feedback.
+fn pane_drag_drop_target(host: &HostState) -> Option<graphite::DropTarget> {
+    let drag = host.strip_drag.as_ref().filter(|drag| drag.active)?;
+    let StripDragKind::Pane { .. } = drag.kind else {
+        return None;
+    };
+    if !host.mux.geom().chrome.graphite {
+        return None;
+    }
+    let (x, y) = host.pointer_px?;
+    if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+        return None;
+    }
+    let stride = host.window.inner_size().width as usize;
+    match host.mux.tab_strip_hit(x as usize, y as usize, stride, true) {
+        Some(mux::StripHit::Tab { index, .. }) => Some(graphite::DropTarget::Tab(index)),
+        Some(mux::StripHit::EmptyEnd | mux::StripHit::NewTab) => Some(graphite::DropTarget::NewTab),
+        _ => None,
+    }
+}
+
+/// Chip at the pointer and a dashed slot where the dragged pane sits
+/// (issue #109, graphite only).
+fn paint_header_drag_overlay(
+    host: &HostState,
+    buffer: &mut [u32],
+    stride: usize,
+    geom: mux::HostGeom,
+    pane: prismattyc_mux::PaneId,
+) {
+    let Some((_, pane_rt, rect)) = host.mux.panes_and_rects().find(|(id, _, _)| *id == pane) else {
+        return;
+    };
+    let (slot_x, slot_y, slot_w, slot_h) = geom.pane_slot_px(rect);
+    let tok = graphite::tokens(host.theme.variant);
+    let milli = geom.chrome.scale_milli as f32 / 1000.0;
+    graphite::paint_dashed_round_rect(
+        buffer,
+        stride,
+        graphite::Rect::new(
+            slot_x + 3,
+            slot_y + 3,
+            slot_w.saturating_sub(6),
+            slot_h.saturating_sub(6),
+        ),
+        8.0 * milli,
+        6.0 * milli,
+        4.0 * milli,
+        1.5 * milli,
+        graphite::accent(tok, focus_border_rgb(host.focus_border)),
+    );
+    let Some((x, y)) = host.pointer_px else {
+        return;
+    };
+    if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+        return;
+    }
+    let (name, _) = host.mux.pane_header_text(pane);
+    let attention = host.attention_badge && pane_rt.attention.is_some();
+    let dot = graphite::Dot::for_tab(
+        attention,
+        pane_rt.is_active_at(Instant::now()),
+        pane_rt.unseen_output || pane_rt.mail_depth > 0,
+    );
+    graphite::paint_drag_chip(
+        buffer,
+        stride,
+        geom.chrome,
+        tok,
+        dot,
+        &name,
+        x as usize,
+        y as usize,
+    );
+}
+
 fn paint_graphite_tabs_bar(
     host: &mut HostState,
     buffer: &mut [u32],
@@ -9818,6 +9952,7 @@ fn paint_graphite_tabs_bar(
             tok: &tok,
             accent: graphite::accent(&tok, focus_border_rgb(host.focus_border)),
             hover,
+            drop_target: pane_drag_drop_target(host),
             bar_alpha: host.chrome_alpha,
             editing: editing
                 .as_ref()
@@ -10133,6 +10268,55 @@ fn handle_strip_click(host: &mut HostState, button: MouseButton) -> StripClickRe
     }
 }
 
+/// Left press on a graphite pane-header handle focuses the pane and arms a
+/// header drag; right press focuses and opens the pane menu (issue #109).
+/// Drop routing and the menu reuse today's strip drag-to-move behavior.
+fn handle_pane_handle_press(host: &mut HostState, button: MouseButton) -> bool {
+    if !host.mux.geom().chrome.graphite {
+        return false;
+    }
+    if !matches!(button, MouseButton::Left)
+        && !(button == MouseButton::Right && !host.modifiers.shift_key())
+    {
+        return false;
+    }
+    let Some((x, y)) = host.pointer_px else {
+        return false;
+    };
+    if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+        return false;
+    }
+    let Some(pane) = pane_handle_hit(host, x as usize, y as usize) else {
+        return false;
+    };
+    if host.mux.focus(pane) {
+        mark_layout_dirty(host);
+        host.window
+            .set_title(&window_title(&host.mux, show_tab_strip(host)));
+    }
+    if button == MouseButton::Left {
+        let tab = host
+            .mux
+            .pane_window(pane)
+            .and_then(|window| host.mux.window_ids().iter().position(|id| *id == window));
+        if let Some(tab) = tab {
+            host.strip_drag = Some(StripDrag {
+                kind: StripDragKind::Pane { tab, pane },
+                start_x: x,
+                start_y: y,
+                active: false,
+            });
+        }
+    } else {
+        open_context_menu(host, ContextMenuTarget::Pane(pane));
+    }
+    host.left_button_down = false;
+    host.rich_pointer = None;
+    host.app_mouse_button = None;
+    sync_chrome_hover(host);
+    true
+}
+
 fn handle_strip_drag_move(host: &mut HostState) -> bool {
     let Some((x, y)) = host.pointer_px else {
         return false;
@@ -10141,6 +10325,8 @@ fn handle_strip_drag_move(host: &mut HostState) -> bool {
         return false;
     };
     if drag.active {
+        // The chip and drop highlight follow the pointer every move.
+        host.dirty = true;
         return true;
     }
     let dx = x - drag.start_x;
@@ -15749,6 +15935,10 @@ impl ApplicationHandler<UserAction> for App {
                     host.window.request_redraw();
                     return;
                 }
+                if state == ElementState::Pressed && handle_pane_handle_press(host, button) {
+                    host.window.request_redraw();
+                    return;
+                }
                 if state == ElementState::Released && finish_strip_drag(host) {
                     sync_chrome_hover(host);
                     host.window.request_redraw();
@@ -21301,9 +21491,15 @@ session mail (id 15)
             .unwrap()
             .focused_id();
         let scrollbar = Some(HoverTarget::ScrollbarThumb(pane));
+        let handle = Some(HoverTarget::PaneHandle(pane));
         assert_eq!(
             cursor_for_hover(tab, false, false, None, false),
             CursorIcon::Pointer
+        );
+        assert_eq!(
+            cursor_for_hover(handle, false, false, None, false),
+            CursorIcon::Pointer,
+            "pane-header handle hovers with the pointing hand"
         );
         assert_eq!(
             cursor_for_hover(rail, false, false, None, false),

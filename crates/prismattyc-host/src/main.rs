@@ -2205,6 +2205,13 @@ impl MultiClick {
 
 /// `NewWindow` requests a bare later window. `OpenConfig` requests a bare later
 /// window whose only pane runs the user's editor.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateCheckOrigin {
+    Automatic,
+    Manual,
+}
+
 #[derive(Debug)]
 enum UserAction {
     Wake,
@@ -2222,7 +2229,6 @@ enum UserAction {
     RollbackUpdate,
     #[cfg(target_os = "macos")]
     UpdateCheckFinished {
-        automatic: bool,
         result: Result<macos_update::ReleaseCheck, String>,
     },
     #[cfg(target_os = "macos")]
@@ -2296,7 +2302,7 @@ struct App {
     #[cfg(target_os = "macos")]
     next_automatic_update_check: Option<Instant>,
     #[cfg(target_os = "macos")]
-    update_check_inflight: bool,
+    update_check_inflight: Option<UpdateCheckOrigin>,
     #[cfg(target_os = "macos")]
     update_restart_notice: Option<String>,
     #[cfg(windows)]
@@ -2358,7 +2364,7 @@ impl App {
             #[cfg(target_os = "macos")]
             next_automatic_update_check: automatic_update_checks.then(Instant::now),
             #[cfg(target_os = "macos")]
-            update_check_inflight: false,
+            update_check_inflight: None,
             #[cfg(target_os = "macos")]
             update_restart_notice: None,
             #[cfg(windows)]
@@ -2894,9 +2900,9 @@ impl App {
                 .is_some_and(|deadline| deadline <= now)
             {
                 self.next_automatic_update_check = Some(now + Duration::from_secs(24 * 60 * 60));
-                if !self.update_check_inflight {
-                    self.update_check_inflight = true;
-                    macos_update::start_check(self.event_proxy.clone(), true);
+                if self.update_check_inflight.is_none() {
+                    self.update_check_inflight = Some(UpdateCheckOrigin::Automatic);
+                    macos_update::start_check(self.event_proxy.clone());
                 }
             }
             if let Some(deadline) = self.next_automatic_update_check {
@@ -14360,12 +14366,16 @@ impl ApplicationHandler<UserAction> for App {
                 }
             }
             #[cfg(target_os = "macos")]
-            UserAction::CheckForUpdates => {
-                if !self.update_check_inflight {
-                    self.update_check_inflight = true;
-                    macos_update::start_check(self.event_proxy.clone(), false);
+            UserAction::CheckForUpdates => match self.update_check_inflight {
+                None => {
+                    self.update_check_inflight = Some(UpdateCheckOrigin::Manual);
+                    macos_update::start_check(self.event_proxy.clone());
                 }
-            }
+                Some(UpdateCheckOrigin::Automatic) => {
+                    self.update_check_inflight = Some(UpdateCheckOrigin::Manual);
+                }
+                Some(UpdateCheckOrigin::Manual) => {}
+            },
             #[cfg(target_os = "macos")]
             UserAction::ToggleAutomaticUpdateChecks => {
                 let enabled = !self.automatic_update_checks;
@@ -14393,8 +14403,9 @@ impl ApplicationHandler<UserAction> for App {
                 }
             }
             #[cfg(target_os = "macos")]
-            UserAction::UpdateCheckFinished { automatic, result } => {
-                self.update_check_inflight = false;
+            UserAction::UpdateCheckFinished { result } => {
+                let automatic = self.update_check_inflight == Some(UpdateCheckOrigin::Automatic);
+                self.update_check_inflight = None;
                 match result {
                     Ok(check) if check.update_available => {
                         if !automatic || self.automatic_update_checks {

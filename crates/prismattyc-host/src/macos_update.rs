@@ -40,10 +40,10 @@ struct RestartComponent {
     status: String,
 }
 
-pub(super) fn start_check(proxy: EventLoopProxy<UserAction>, automatic: bool) {
+pub(super) fn start_check(proxy: EventLoopProxy<UserAction>) {
     thread::spawn(move || {
         let result = check_release().map_err(|error| format!("{error:#}"));
-        let _ = proxy.send_event(UserAction::UpdateCheckFinished { automatic, result });
+        let _ = proxy.send_event(UserAction::UpdateCheckFinished { result });
     });
 }
 

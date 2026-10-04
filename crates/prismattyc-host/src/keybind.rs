@@ -33,6 +33,10 @@ pub enum Action {
     FocusDown,
     FocusBorderNext,
     FocusBorderPrev,
+    /// Cycle the Graphite bar background preset (#108). Gated on
+    /// `chrome_style = "graphite"`; the default chord is Ctrl+Shift+B.
+    BarColorNext,
+    BarColorPrev,
     /// Exchange the focused pane with the previous one in layout order (PT-125).
     SwapPanePrev,
     /// Exchange the focused pane with the next one in layout order (PT-125).
@@ -161,6 +165,8 @@ impl Action {
             Action::FocusDown,
             Action::FocusBorderNext,
             Action::FocusBorderPrev,
+            Action::BarColorNext,
+            Action::BarColorPrev,
             Action::SwapPanePrev,
             Action::SwapPaneNext,
             Action::RotatePanes,
@@ -250,6 +256,8 @@ impl Action {
             Action::FocusDown => "focus_down".into(),
             Action::FocusBorderNext => "focus_border_next".into(),
             Action::FocusBorderPrev => "focus_border_prev".into(),
+            Action::BarColorNext => "bar_color_next".into(),
+            Action::BarColorPrev => "bar_color_prev".into(),
             Action::SwapPanePrev => "swap_pane_prev".into(),
             Action::SwapPaneNext => "swap_pane_next".into(),
             Action::RotatePanes => "rotate_panes".into(),
@@ -340,6 +348,8 @@ impl Action {
             Action::FocusDown => "focus the pane below".into(),
             Action::FocusBorderNext => "cycle the focus border color forward".into(),
             Action::FocusBorderPrev => "cycle the focus border color back".into(),
+            Action::BarColorNext => "cycle the Graphite bar color forward".into(),
+            Action::BarColorPrev => "cycle the Graphite bar color back".into(),
             Action::SwapPanePrev => "swap the focused pane with the previous pane".into(),
             Action::SwapPaneNext => "swap the focused pane with the next pane".into(),
             Action::RotatePanes => "rotate every pane one slot forward".into(),
@@ -478,6 +488,8 @@ impl Action {
             | Action::FocusDown
             | Action::FocusBorderNext
             | Action::FocusBorderPrev
+            | Action::BarColorNext
+            | Action::BarColorPrev
             | Action::SwapPanePrev
             | Action::SwapPaneNext
             | Action::RotatePanes
@@ -1102,6 +1114,8 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         Action::FocusDown => vec!["alt+down"],
         Action::FocusBorderNext => vec!["ctrl+shift+]"],
         Action::FocusBorderPrev => vec!["ctrl+shift+["],
+        Action::BarColorNext => vec!["ctrl+shift+b"],
+        Action::BarColorPrev => vec![],
         Action::NewTab => vec!["ctrl+shift+t"],
         Action::NewBlankTab => vec!["ctrl+alt+shift+t"],
         Action::NewSessionTab => vec!["ctrl+alt+shift+n"],
@@ -1523,6 +1537,7 @@ mod tests {
                 | Action::IncreaseFontSize
                 | Action::DecreaseFontSize
                 | Action::ResetFontSize
+                | Action::BarColorPrev
         )
     }
 

@@ -121,6 +121,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         value: ConfigValue::String("classic"),
     },
     ConfigKey {
+        name: "bar_color",
+        group: ConfigGroup::Appearance,
+        doc: "Graphite bar background: graphite, harbor, moss, or plum (Sand on light themes)",
+        range: "graphite|harbor|moss|plum",
+        value: ConfigValue::String("graphite"),
+    },
+    ConfigKey {
         name: "pane_titles",
         group: ConfigGroup::Appearance,
         doc: "Multi-pane title row: focused pane OSC title, or handle hover only",
@@ -964,6 +971,7 @@ mod tests {
         "render_timer_log_every_frame",
         "tab_strip",
         "chrome_style",
+        "bar_color",
         "pane_titles",
         "focus_border",
         "focus_border_animation",
@@ -1072,6 +1080,7 @@ mod tests {
         assert_eq!(parsed.install_agent_skills, Some(true));
         assert_eq!(parsed.tab_strip(), crate::config::TabStripMode::Auto);
         assert_eq!(parsed.chrome_style(), crate::config::ChromeStyle::Classic);
+        assert_eq!(parsed.bar_color(), crate::config::BarColor::Graphite);
         assert_eq!(parsed.pane_titles(), crate::config::PaneTitlesMode::Focused);
         assert!(parsed.splash());
         assert_eq!(parsed.splash, Some(true));

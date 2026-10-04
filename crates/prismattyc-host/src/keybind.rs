@@ -1960,10 +1960,8 @@ mod tests {
         assert!(KeyMap::macos_suppressed_actions(None).is_empty());
 
         // The issue example: an explicit copy binding without super+c.
-        let overrides = BTreeMap::from([(
-            "copy".to_string(),
-            KeysValue::One("ctrl+shift+c".into()),
-        )]);
+        let overrides =
+            BTreeMap::from([("copy".to_string(), KeysValue::One("ctrl+shift+c".into()))]);
         let suppressed = KeyMap::macos_suppressed_actions(Some(&overrides));
         assert_eq!(suppressed, vec![(Action::Copy, "super+c".to_string())]);
         // The replacement rule itself is unchanged: only the explicit chord.

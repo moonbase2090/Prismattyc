@@ -53,6 +53,8 @@ render_timer_log_every_frame = false
 splash = true
 # Animate the launch splash word art. true|false.
 splash_animation = true
+# Skip focus-change animation; the focus ring appears instantly. true|false.
+reduced_motion = false
 # Tab strip visibility: auto and always show one tab; multi needs two tabs. auto|always|multi.
 tab_strip = "auto"
 # Host chrome look: classic, or the opt-in Graphite redesign. classic|graphite.
@@ -847,6 +849,8 @@ the file applies changes on the next poll tick:
   to `"none"` (or deleting the key) settles any in-progress sweep.
 - `focus_border_animation_ms` / `focus_border_animation_head` — apply from
   the next sweep; deleting a key restores its default (280ms / head on).
+- `reduced_motion` — applies immediately; `true` settles any in-progress
+  sweep into the ring, deleting the key restores the sweep.
 - `splash` — startup only; a reload does not show or hide an already-open
   splash. Default true. `--no-splash` and `PRISMATTYC_NO_SPLASH` still hide
   it when this key is true.

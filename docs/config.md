@@ -59,6 +59,8 @@ reduced_motion = false
 tab_strip = "auto"
 # Host chrome look: classic, or the opt-in Graphite redesign. classic|graphite.
 chrome_style = "classic"
+# Graphite bar background: graphite, harbor, moss, or plum (Sand on light themes). graphite|harbor|moss|plum.
+bar_color = "graphite"
 # Multi-pane title row: focused pane OSC title, or handle hover only. focused|hover.
 pane_titles = "focused"
 # Immediate hover blend for interactive strip, rail, and scrollbar chrome. 0.0-0.3.
@@ -246,6 +248,10 @@ focus_down = "alt+down"
 focus_border_next = "ctrl+shift+]"
 # cycle the focus border color back.
 focus_border_prev = "ctrl+shift+["
+# cycle the Graphite bar color forward.
+bar_color_next = "ctrl+shift+b"
+# cycle the Graphite bar color back.
+# bar_color_prev = []
 # swap the focused pane with the previous pane.
 # swap_pane_prev = []
 # swap the focused pane with the next pane.

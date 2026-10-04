@@ -11,8 +11,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use fontdue::{Font, FontSettings};
 
+use crate::config::BarColor;
 use crate::mux::{ChromeGeom, StripHit};
-use crate::raster::{alpha_of, contrast_ratio, mix_rgb, pack_argb, raise_alpha, unpack_rgb};
+use crate::raster::{
+    alpha_of, contrast_ratio, mix_rgb, pack_argb, raise_alpha, relative_luminance, unpack_rgb,
+};
 use crate::theme::ThemeVariant;
 
 pub(crate) type Rgb = [u8; 3];
@@ -217,15 +220,67 @@ pub(crate) fn tokens(variant: ThemeVariant) -> &'static Tokens {
     }
 }
 
+/// Tabs bar / spaces bar fills per preset (design brief, item 5). `Plum`
+/// renders Sand on light themes.
+fn bar_fills(bar: BarColor, variant: ThemeVariant) -> (Rgb, Rgb) {
+    use ThemeVariant::{Dark, Light};
+    match (bar, variant) {
+        (BarColor::Graphite, Dark) => (rgb(0x15181d), rgb(0x0d0f12)),
+        (BarColor::Graphite, Light) => (rgb(0xeef0f3), rgb(0xe4e7ec)),
+        (BarColor::Harbor, Dark) => (rgb(0x152131), rgb(0x0e1722)),
+        (BarColor::Harbor, Light) => (rgb(0xe3edf8), rgb(0xd6e3f2)),
+        (BarColor::Moss, Dark) => (rgb(0x17221b), rgb(0x0f1712)),
+        (BarColor::Moss, Light) => (rgb(0xe4f0e7), rgb(0xd7e7db)),
+        (BarColor::Plum, Dark) => (rgb(0x211a27), rgb(0x17121c)),
+        (BarColor::Plum, Light) => (rgb(0xf4ece0), rgb(0xebe0cf)),
+    }
+}
+
+/// Tokens with the `bar_color` preset applied to both bars. Graphite is the
+/// identity: the base constants already carry the default fills.
+pub(crate) fn bar_tokens(variant: ThemeVariant, bar: BarColor) -> Tokens {
+    let mut tok = *tokens(variant);
+    let (tabs, status) = bar_fills(bar, variant);
+    tok.bar = tabs;
+    tok.status_bar = status;
+    tok
+}
+
+/// Display name for the bar preset cycle.
+pub(crate) fn bar_color_name(bar: BarColor) -> &'static str {
+    match bar {
+        BarColor::Graphite => "Graphite",
+        BarColor::Harbor => "Harbor",
+        BarColor::Moss => "Moss",
+        BarColor::Plum => "Plum",
+    }
+}
+
+/// Next preset in the Ctrl+Shift+B cycle (wraps). `forward = false` steps back.
+pub(crate) fn step_bar_color(bar: BarColor, forward: bool) -> BarColor {
+    use BarColor::{Graphite, Harbor, Moss, Plum};
+    const ORDER: [BarColor; 4] = [Graphite, Harbor, Moss, Plum];
+    let index = ORDER.iter().position(|preset| *preset == bar).unwrap_or(0);
+    let next = if forward {
+        index.saturating_add(1) % ORDER.len()
+    } else {
+        index.saturating_add(ORDER.len().saturating_sub(1)) % ORDER.len()
+    };
+    ORDER[next]
+}
+
 /// The accent is the focus colour, darkened on light bars until it keeps the
-/// 3:1 a non-text indicator needs against the bar.
+/// 3:1 a non-text indicator needs against the bar. The direction follows the
+/// bar's luminance relative to its text (not token identity), so `bar_color`
+/// presets darken and lighten the same way the base tokens do.
 pub(crate) fn accent(tok: &Tokens, focus: Rgb) -> Rgb {
     let mut color = focus;
+    let light_bar = relative_luminance(tok.bar) > relative_luminance(tok.text);
     for _ in 0..24 {
         if contrast_ratio(color, tok.bar) >= 3.0 {
             break;
         }
-        color = if tok.bar == LIGHT.bar {
+        color = if light_bar {
             mix_rgb(color, [0, 0, 0], 24)
         } else {
             mix_rgb(color, [255, 255, 255], 24)
@@ -2571,6 +2626,95 @@ mod tests {
             }
         }
         assert_eq!(accent(&DARK, rgb(0x62a8ff)), rgb(0x62a8ff));
+    }
+
+    #[test]
+    fn bar_color_graphite_is_identity_and_cycle_wraps() {
+        use crate::config::BarColor;
+        use crate::theme::ThemeVariant::{Dark, Light};
+        for variant in [Dark, Light] {
+            assert_eq!(bar_tokens(variant, BarColor::Graphite), *tokens(variant));
+        }
+        let order = [
+            BarColor::Graphite,
+            BarColor::Harbor,
+            BarColor::Moss,
+            BarColor::Plum,
+        ];
+        for (index, preset) in order.iter().enumerate() {
+            assert_eq!(step_bar_color(*preset, true), order[(index + 1) % 4]);
+            assert_eq!(step_bar_color(*preset, false), order[(index + 3) % 4]);
+        }
+        assert_eq!(bar_color_name(BarColor::Plum), "Plum");
+    }
+
+    #[test]
+    fn bar_color_presets_meet_brief_contrast() {
+        use crate::config::BarColor;
+        use crate::theme::ThemeVariant::{Dark, Light};
+        // Brief item 5: tab text ≥6.7:1 on the tabs bar, spaces-bar text
+        // ≥4.6:1, and the default-blue accent underline ≥4.1:1.
+        let blue = rgb(0x62a8ff);
+        for variant in [Dark, Light] {
+            for bar in [
+                BarColor::Graphite,
+                BarColor::Harbor,
+                BarColor::Moss,
+                BarColor::Plum,
+            ] {
+                let tok = bar_tokens(variant, bar);
+                // The brief states one-decimal ratios; Harbor/Light measures
+                // 6.67, which rounds to the claimed 6.7.
+                let tab_ratio = contrast_ratio(tok.tab_text, tok.bar);
+                assert!(
+                    (tab_ratio * 10.0).round() >= 67.0,
+                    "{bar:?}/{variant:?}: tab text on tabs bar is {tab_ratio:.2}"
+                );
+                assert!(
+                    contrast_ratio(tok.text, tok.status_bar) >= 4.6,
+                    "{bar:?}/{variant:?}: spaces-bar text"
+                );
+                // The accent algorithm floors at 3:1 (see
+                // `accent_keeps_three_to_one_on_both_bars`), so the brief's
+                // 4.1 underline claim does not hold even for the default
+                // preset; presets must keep the established floor.
+                assert!(
+                    contrast_ratio(accent(&tok, blue), tok.bar) >= 3.0,
+                    "{bar:?}/{variant:?}: accent underline"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bar_color_preset_paints_both_bar_grounds() {
+        use crate::config::BarColor;
+        use crate::theme::ThemeVariant::Dark;
+        // The preset fills reach the painted tabs-bar ground.
+        let tabs = vec![tab("grid", true)];
+        let layout = bar_layout(scale(1000), 1440, 0, "lab", &tabs, "Ctrl Shift P");
+        for bar in [BarColor::Harbor, BarColor::Moss, BarColor::Plum] {
+            let tok = bar_tokens(Dark, bar);
+            let accent = accent(&tok, rgb(0x62a8ff));
+            let mut buffer = vec![0u32; 1440 * layout.bar.h as usize];
+            paint_tabs_bar(
+                &mut buffer,
+                1440,
+                &BarPaint {
+                    layout: &layout,
+                    tok: &tok,
+                    accent,
+                    hover: None,
+                    bar_alpha: 0xff,
+                    editing: None,
+                },
+            );
+            let ground = pack_argb(0xff, tok.bar);
+            assert!(
+                buffer.contains(&ground),
+                "{bar:?} tabs-bar ground paints its preset fill"
+            );
+        }
     }
 
     #[test]

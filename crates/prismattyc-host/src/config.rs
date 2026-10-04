@@ -85,6 +85,20 @@ pub enum ChromeStyle {
     Graphite,
 }
 
+/// Graphite bar background preset (#108). `graphite` (default) is the
+/// shipped look; `harbor` and `moss` recolor both bars, and `plum` renders
+/// Plum on dark themes and Sand on light ones. Only read when
+/// `chrome_style = "graphite"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BarColor {
+    #[default]
+    Graphite,
+    Harbor,
+    Moss,
+    Plum,
+}
+
 /// Multi-pane title row (PT-190). `focused` shows the focused pane's OSC
 /// title; `hover` keeps the PT-148 handle-hover preview only.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -105,6 +119,9 @@ pub struct ConfigFile {
     pub pane_titles: Option<PaneTitlesMode>,
     /// Host chrome look: `classic` (default) or `graphite`. Hot-reloaded.
     pub chrome_style: Option<ChromeStyle>,
+    /// Graphite bar background: `graphite` (default), `harbor`, `moss`, or
+    /// `plum` (Sand on light themes). Only read for `graphite` chrome.
+    pub bar_color: Option<BarColor>,
     /// Render timing output. Default `off`; hot-reloaded.
     pub render_timer: Option<RenderTimer>,
     /// Log every rendered frame when `render_timer` includes `log`. Default false.
@@ -340,6 +357,10 @@ impl ConfigFile {
 
     pub fn chrome_style(&self) -> ChromeStyle {
         self.chrome_style.unwrap_or_default()
+    }
+
+    pub fn bar_color(&self) -> BarColor {
+        self.bar_color.unwrap_or_default()
     }
 
     /// Show the launch splash on a bare first window. Default true.
@@ -1082,6 +1103,9 @@ mod tests {
         assert!(!load(&path).unwrap().reduced_motion.unwrap_or(false));
         std::fs::write(&path, "reduced_motion = true\n").unwrap();
         assert!(load(&path).unwrap().reduced_motion.unwrap_or(false));
+        assert_eq!(ConfigFile::default().bar_color(), BarColor::Graphite);
+        std::fs::write(&path, "bar_color = \"harbor\"\n").unwrap();
+        assert_eq!(load(&path).unwrap().bar_color(), BarColor::Harbor);
         // chrome_opacity follows window_opacity unless set explicitly.
         let follows = ConfigFile {
             window_opacity: Some(0.8),
@@ -1228,6 +1252,7 @@ mod tests {
             "[a11y]\nnot_a_setting = true",
             "pane_titles = \"always\"",
             "chrome_style = \"glass\"",
+            "bar_color = \"teal\"",
         ] {
             std::fs::write(&path, bad).unwrap();
             assert!(load(&path).is_err(), "should reject: {bad}");

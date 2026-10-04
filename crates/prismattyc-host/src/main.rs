@@ -986,6 +986,9 @@ struct HostState {
     experimental_rich: bool,
     /// Brand spectrum index for the focused-pane border (thin, 1px).
     focus_border: usize,
+    /// Graphite bar background preset (#108). Only painted when
+    /// `chrome_style` is graphite; classic ignores it.
+    bar_color: config::BarColor,
     /// Configured tab-strip visibility mode.
     tab_strip_mode: config::TabStripMode,
     /// Multi-pane title row: focused pane OSC title, or handle hover only.
@@ -3471,6 +3474,7 @@ impl App {
                 keymap: self.keymap.clone(),
                 experimental_rich: self.cli.experimental_rich,
                 focus_border: self.cli.focus_border,
+                bar_color: self.file_config.bar_color(),
                 tab_strip_mode,
                 pane_titles: self.file_config.pane_titles(),
                 spacing,
@@ -5170,7 +5174,7 @@ fn rasterize_frame(
         // each content rect as the blend target a dimmed pane recedes toward
         // (PT-98). PT-87: the ground carries `window_alpha`.
         let ground = if geom.chrome.graphite {
-            graphite::tokens(host.theme.variant).ground
+            graphite::bar_tokens(host.theme.variant, host.bar_color).ground
         } else {
             host.theme.pane_backdrop
         };
@@ -5417,7 +5421,7 @@ fn rasterize_frame(
                     width as usize,
                     geom.chrome,
                     graphite::Rect::new(slot_x, slot_y, slot_width, slot_height),
-                    graphite::tokens(host.theme.variant).ground,
+                    graphite::bar_tokens(host.theme.variant, host.bar_color).ground,
                     host.window_alpha,
                     host.theme.default_bg,
                     surface_alpha,
@@ -5921,7 +5925,7 @@ fn rasterize_frame(
             let attention = host.attention_badge && pane.attention.is_some();
             let running = pane.is_active_at(frame_now);
             let multi = host.mux.pane_count() > 1;
-            let tok = graphite::tokens(host.theme.variant);
+            let tok = graphite::bar_tokens(host.theme.variant, host.bar_color);
             // Graphite light-cycle (issue #111): the same focus-change
             // sweep progress the classic border uses, traced round the
             // 8 px ring. The underlay budget covers the 3 px head.
@@ -5937,8 +5941,8 @@ fn rasterize_frame(
                 buffer,
                 width as usize,
                 geom.chrome,
-                tok,
-                graphite::accent(tok, focus_border_rgb(host.focus_border)),
+                &tok,
+                graphite::accent(&tok, focus_border_rgb(host.focus_border)),
                 graphite::Rect::new(slot_x, slot_y, slot_width, slot_height),
                 host.theme.default_bg,
                 &graphite::PaneHeader {
@@ -6039,7 +6043,12 @@ fn rasterize_frame(
     // sits above a bottom spaces rail, never over it (PT-91).
     let footer_bottom = (height as usize).saturating_sub(host.mux.geom().chrome_bottom());
     if footer_visible {
-        let help = chord_help_text(&host.mux, &host.keymap, show_tab_strip(host));
+        let help = chord_help_text(
+            &host.mux,
+            &host.keymap,
+            show_tab_strip(host),
+            host.spacing.chrome_style == config::ChromeStyle::Graphite,
+        );
         rasterize_footer(
             &host.font,
             &help,
@@ -9474,13 +9483,13 @@ fn paint_graphite_rail(
     layout: &space_rail::RailLayout,
     hover: Option<space_rail::RailHit>,
 ) {
-    let tok = graphite::tokens(host.theme.variant);
-    let accent = graphite::accent(tok, focus_border_rgb(host.focus_border));
+    let tok = graphite::bar_tokens(host.theme.variant, host.bar_color);
+    let accent = graphite::accent(&tok, focus_border_rgb(host.focus_border));
     let bar = graphite::Rect::new(layout.x, layout.y, layout.w, layout.h);
     graphite::paint_rail_bar(
         buffer,
         stride,
-        tok,
+        &tok,
         bar,
         layout.side == space_rail::RailSide::Bottom,
         host.chrome_alpha,
@@ -9502,7 +9511,7 @@ fn paint_graphite_rail(
                 buffer,
                 stride,
                 geom.chrome,
-                tok,
+                &tok,
                 slot,
                 &label,
                 hover == Some(space_rail::RailHit::Plus),
@@ -9513,7 +9522,7 @@ fn paint_graphite_rail(
             buffer,
             stride,
             geom.chrome,
-            tok,
+            &tok,
             accent,
             &graphite::RailChip {
                 slot,
@@ -9534,7 +9543,7 @@ fn paint_graphite_rail(
                 buffer,
                 stride,
                 geom.chrome,
-                tok,
+                &tok,
                 slot,
                 "All spaces",
                 hover == Some(space_rail::RailHit::Overflow),
@@ -9550,7 +9559,7 @@ fn paint_graphite_rail(
         buffer,
         stride,
         geom.chrome,
-        tok,
+        &tok,
         bar,
         right_most,
         host.mux.active_count(),
@@ -9720,14 +9729,14 @@ fn paint_graphite_tabs_bar(
         ),
         origin,
     );
-    let tok = graphite::tokens(host.theme.variant);
+    let tok = graphite::bar_tokens(host.theme.variant, host.bar_color);
     graphite::paint_tabs_bar(
         buffer,
         stride,
         &graphite::BarPaint {
             layout: &layout,
-            tok,
-            accent: graphite::accent(tok, focus_border_rgb(host.focus_border)),
+            tok: &tok,
+            accent: graphite::accent(&tok, focus_border_rgb(host.focus_border)),
             hover,
             bar_alpha: host.chrome_alpha,
             editing: editing
@@ -10143,7 +10152,12 @@ fn layouts_share_pattern(keymap: &keybind::KeyMap) -> bool {
     })
 }
 
-fn chord_help_text(mux: &mux::MuxRuntime, keymap: &keybind::KeyMap, show_tabs: bool) -> String {
+fn chord_help_text(
+    mux: &mux::MuxRuntime,
+    keymap: &keybind::KeyMap,
+    show_tabs: bool,
+    graphite: bool,
+) -> String {
     use keybind::Action;
     let unseen = mux.unseen_count();
     let active = mux.active_count();
@@ -10236,6 +10250,13 @@ fn chord_help_text(mux: &mux::MuxRuntime, keymap: &keybind::KeyMap, show_tabs: b
         pair(Action::FocusBorderPrev, Action::FocusBorderNext),
         "color",
     ));
+    // Bar presets (#108) sit right after focus color, graphite only.
+    if graphite {
+        out.push_str(&seg(
+            pair(Action::BarColorPrev, Action::BarColorNext),
+            "bars",
+        ));
+    }
     if !focus.is_empty() {
         out.push_str(&format!(" | {focus}"));
     }
@@ -11528,6 +11549,8 @@ fn mux_command_for(action: keybind::Action) -> Option<MuxCommand> {
         Action::ZoomPane => MuxCommand::ZoomPane,
         Action::NewWindow
         | Action::Quit
+        | Action::BarColorNext
+        | Action::BarColorPrev
         | Action::OpenConfig
         | Action::CommandPalette
         | Action::PaletteFilterNext
@@ -14048,6 +14071,19 @@ fn change_font_size(host: &mut HostState, delta: i8) {
     App::refit_geom(host, host.window.inner_size(), Some("font size"));
 }
 
+/// Step the Graphite bar preset (#108). Gated on graphite chrome: classic
+/// keeps its theme bars and the chord is a no-op there.
+fn cycle_bar_color(host: &mut HostState, forward: bool) {
+    if host.spacing.chrome_style != config::ChromeStyle::Graphite {
+        return;
+    }
+    host.bar_color = graphite::step_bar_color(host.bar_color, forward);
+    let name = graphite::bar_color_name(host.bar_color);
+    host.window
+        .set_title(&format!("Prismattyc — bar color: {name}"));
+    host.dirty = true;
+}
+
 fn dispatch_action(
     host: &mut HostState,
     action: keybind::Action,
@@ -14079,6 +14115,10 @@ fn dispatch_action(
     }
     if action == A::TerminalSwitcher {
         terminal_switcher::open(host);
+        return Dispatch::Handled;
+    }
+    if action == A::BarColorNext || action == A::BarColorPrev {
+        cycle_bar_color(host, action == A::BarColorNext);
         return Dispatch::Handled;
     }
     match action_route(action) {
@@ -19623,10 +19663,20 @@ session mail (id 15)
     #[test]
     fn chord_help_lists_detach() {
         let runtime = mux::MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
-        let help = chord_help_text(&runtime, &keybind::KeyMap::default(), true);
+        let help = chord_help_text(&runtime, &keybind::KeyMap::default(), true, false);
         assert!(
             help.contains("C-S-X detach"),
             "footer must name detach: {help}"
+        );
+        assert!(
+            !help.contains("bars"),
+            "classic legend has no bar presets: {help}"
+        );
+        // Graphite adds the bar key right after focus color.
+        let graphite_help = chord_help_text(&runtime, &keybind::KeyMap::default(), true, true);
+        assert!(
+            graphite_help.contains("C-S-[/] color | C-S-B bars | Alt+arrow"),
+            "{graphite_help}"
         );
         // Defaults render the same strip as before user keybindings.
         assert!(help.contains("C-S-, themes | C-S-V paste | C-S-C copy | C-S-\\/E split> | C-S--/D splitv | C-S-Fn/C-A-n even | C-S-W close | C-S-X detach | C-S-[/] color | Alt+arrow"), "{help}");
@@ -19642,6 +19692,7 @@ session mail (id 15)
             &runtime,
             &keybind::KeyMap::from_config(Some(&keys)).unwrap(),
             true,
+            false,
         );
         assert!(
             custom.contains("C-A-D detach") && !custom.contains("themes"),
@@ -19656,6 +19707,7 @@ session mail (id 15)
             &runtime,
             &keybind::KeyMap::from_config(Some(&keys)).unwrap(),
             true,
+            false,
         );
         assert!(
             odd.contains("C-A-Z\u{2026} even") && !odd.contains("Fn"),

@@ -2088,7 +2088,7 @@ mod tests {
 
     #[test]
     fn layout_and_hit_test_agree() {
-        let tabs = vec![tab("grid", true), tab("codex", false), tab("muse", false)];
+        let tabs = vec![tab("grid", true), tab("review", false), tab("notes", false)];
         let layout = bar_layout(scale(1000), 1440, 0, "release-lab", &tabs, "Ctrl Shift P");
         assert_eq!(layout.tabs.len(), 3);
         assert!(layout.command.is_some());
@@ -2212,7 +2212,7 @@ mod tests {
 
     #[test]
     fn paint_draws_the_active_underline_in_the_accent() {
-        let tabs = vec![tab("grid", true), tab("codex", false)];
+        let tabs = vec![tab("grid", true), tab("review", false)];
         let layout = bar_layout(scale(1000), 800, 0, "lab", &tabs, "");
         let mut buffer = vec![0u32; 800 * layout.bar.h];
         let accent = rgb(0x5aa2ff);

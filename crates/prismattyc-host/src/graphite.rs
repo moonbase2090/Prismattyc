@@ -29,6 +29,25 @@ impl Design {
 
 /// Tabs bar height.
 pub(crate) const TABS_BAR_H: Design = Design(44.0);
+/// Pane title row height, inside the pane slot.
+pub(crate) const PANE_HEADER_H: f32 = 28.0;
+/// Bottom (or top) spaces bar height.
+pub(crate) const RAIL_H: Design = Design(30.0);
+/// Window edge, pane gap, and pane padding defaults when the user has not
+/// set `window_padding_px`, `pane_gap_px`, or `pane_padding_px`.
+pub(crate) const WINDOW_PAD: Design = Design(8.0);
+pub(crate) const PANE_GAP: Design = Design(8.0);
+pub(crate) const PANE_PAD: Design = Design(12.0);
+const PANE_RADIUS: f32 = 8.0;
+const HEADER_PAD_X: f32 = 12.0;
+const HEADER_TEXT: f32 = 12.0;
+const HEADER_DOT: f32 = 6.0;
+const RAIL_CHIP_H: f32 = 22.0;
+const RAIL_CHIP_PAD_X: f32 = 9.0;
+const RAIL_TEXT: f32 = 12.0;
+const RAIL_DOT: f32 = 6.0;
+const RAIL_CLOSE_W: f32 = 18.0;
+const RAIL_PLUS_LABEL: &str = "+ New space";
 
 const BAR_PAD_X: f32 = 10.0;
 const CHIP_H: f32 = 30.0;
@@ -90,6 +109,20 @@ pub(crate) struct Tokens {
     pub key: Rgb,
     pub key_line: Rgb,
     pub key_text: Rgb,
+    /// Bottom spaces bar fill, its hairline, and the current-Space chip.
+    pub status_bar: Rgb,
+    pub status_line: Rgb,
+    pub chip_active: Rgb,
+    /// The `·` between status counts.
+    pub separator: Rgb,
+    /// Pane outline, title-row rule, and the focused pane's title row.
+    pub hairline: Rgb,
+    pub title_line: Rgb,
+    pub title_focus: Rgb,
+    pub title_focus_line: Rgb,
+    pub muted_focus: Rgb,
+    /// Unseen/mail status as text (the dot colour fails AA on light).
+    pub unseen_text: Rgb,
 }
 
 pub(crate) const DARK: Tokens = Tokens {
@@ -114,6 +147,16 @@ pub(crate) const DARK: Tokens = Tokens {
     key: rgb(0x1f232a),
     key_line: rgb(0x2f343d),
     key_text: rgb(0xc6ccd6),
+    status_bar: rgb(0x0d0f12),
+    status_line: rgb(0x1e2228),
+    chip_active: rgb(0x1f232a),
+    separator: rgb(0x3a404a),
+    hairline: rgb(0x262a32),
+    title_line: rgb(0x22262d),
+    title_focus: rgb(0x1c2330),
+    title_focus_line: rgb(0x2a3140),
+    muted_focus: rgb(0xb4bcc9),
+    unseen_text: rgb(0xf2b84b),
 };
 
 pub(crate) const LIGHT: Tokens = Tokens {
@@ -138,6 +181,16 @@ pub(crate) const LIGHT: Tokens = Tokens {
     key: rgb(0xf4f6f8),
     key_line: rgb(0xc9ced6),
     key_text: rgb(0x1f2329),
+    status_bar: rgb(0xe4e7ec),
+    status_line: rgb(0xd5d9df),
+    chip_active: rgb(0xffffff),
+    separator: rgb(0xa9b0ba),
+    hairline: rgb(0xd5d9df),
+    title_line: rgb(0xe3e6ea),
+    title_focus: rgb(0xeaf1fc),
+    title_focus_line: rgb(0xcddcf3),
+    muted_focus: rgb(0x4a525e),
+    unseen_text: rgb(0x9a6200),
 };
 
 pub(crate) fn tokens(variant: ThemeVariant) -> &'static Tokens {
@@ -1298,6 +1351,672 @@ fn search_icon(
         width,
         ink,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Rounded outlines
+
+/// Signed distance from a pixel centre to a rounded rectangle's edge
+/// (negative inside).
+fn round_rect_sd(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> f32 {
+    let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    let (bx, by) = ((x1 - x0) / 2.0 - r, (y1 - y0) / 2.0 - r);
+    let (qx, qy) = ((x - cx).abs() - bx, (y - cy).abs() - by);
+    let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
+    outside + qx.max(qy).min(0.0) - r
+}
+
+/// Anti-aliased `width`-pixel band just inside a rounded rectangle's edge.
+/// Only the edge strips are visited, so cost scales with the perimeter.
+fn stroke_round_rect(
+    buffer: &mut [u32],
+    stride: usize,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    radius: f32,
+    width: f32,
+    ink: Rgb,
+) {
+    if x1 - x0 < 2.0 || y1 - y0 < 2.0 {
+        return;
+    }
+    let r = radius.min((x1 - x0) / 2.0).min((y1 - y0) / 2.0);
+    let coverage = |x: f32, y: f32| {
+        let sd = round_rect_sd(x, y, x0, y0, x1, y1, r);
+        (0.5 - sd).min(sd + width + 0.5).clamp(0.0, 1.0)
+    };
+    let reach = r + width + 1.0;
+    // Top and bottom bands (corners included), then the straight sides.
+    shade(
+        buffer,
+        stride,
+        x0 - 1.0,
+        y0 - 1.0,
+        x1 + 1.0,
+        y0 + reach,
+        ink,
+        coverage,
+    );
+    shade(
+        buffer,
+        stride,
+        x0 - 1.0,
+        y1 - reach,
+        x1 + 1.0,
+        y1 + 1.0,
+        ink,
+        coverage,
+    );
+    shade(
+        buffer,
+        stride,
+        x0 - 1.0,
+        y0 + reach,
+        x0 + width + 1.0,
+        y1 - reach,
+        ink,
+        coverage,
+    );
+    shade(
+        buffer,
+        stride,
+        x1 - width - 1.0,
+        y0 + reach,
+        x1 + 1.0,
+        y1 - reach,
+        ink,
+        coverage,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Panes
+
+/// Right-hand status in a pane title row, most urgent first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaneStatus {
+    Attention,
+    Mail(u32),
+    Unseen,
+    Running,
+    Focused,
+    Quiet,
+}
+
+impl PaneStatus {
+    pub(crate) fn decide(
+        attention: bool,
+        mail: u32,
+        unseen: bool,
+        running: bool,
+        focused: bool,
+    ) -> Self {
+        if attention {
+            Self::Attention
+        } else if mail > 0 {
+            Self::Mail(mail)
+        } else if unseen {
+            Self::Unseen
+        } else if running {
+            Self::Running
+        } else if focused {
+            Self::Focused
+        } else {
+            Self::Quiet
+        }
+    }
+}
+
+/// One pane title row.
+pub(crate) struct PaneHeader<'a> {
+    pub name: &'a str,
+    pub meta: Option<&'a str>,
+    pub dot: Dot,
+    pub status: PaneStatus,
+    pub focused: bool,
+}
+
+/// The pane slot as a rounded card: `ground` fills the corners, `surface`
+/// the inside. Run before the terminal rows are painted.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_pane_surface(
+    buffer: &mut [u32],
+    stride: usize,
+    chrome: ChromeGeom,
+    slot: Rect,
+    ground: Rgb,
+    ground_alpha: u8,
+    surface: Rgb,
+    surface_alpha: u8,
+) {
+    let r = chrome.px(PANE_RADIUS);
+    let ground_px = pack_argb(ground_alpha, ground);
+    // Only the corner squares can show ground; the rest is the card.
+    for (cx, cy) in [
+        (slot.x, slot.y),
+        (slot.right().saturating_sub(r), slot.y),
+        (slot.x, (slot.y + slot.h).saturating_sub(r)),
+        (
+            slot.right().saturating_sub(r),
+            (slot.y + slot.h).saturating_sub(r),
+        ),
+    ] {
+        for y in cy..cy + r {
+            for x in cx..cx + r {
+                set(buffer, stride, x, y, ground_px);
+            }
+        }
+    }
+    fill_round_rect(buffer, stride, slot, r as f32, surface, surface_alpha);
+}
+
+/// Title row, outline, and (multi-pane) focus ring, painted after the
+/// terminal rows. The 2-pixel ring is 1 pixel on the slot edge and 1 in the
+/// gap outside it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_pane_chrome(
+    buffer: &mut [u32],
+    stride: usize,
+    chrome: ChromeGeom,
+    tok: &Tokens,
+    accent: Rgb,
+    slot: Rect,
+    surface: Rgb,
+    header: &PaneHeader<'_>,
+    ring: bool,
+) {
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    let p = |d: f32| chrome.px(d);
+    let r = s(PANE_RADIUS);
+    let head_h = p(PANE_HEADER_H).min(slot.h);
+    if slot.w < p(40.0) || head_h == 0 {
+        return;
+    }
+    let focus_row = header.focused && ring;
+    // Title row ground: the focus tint, or the pane surface.
+    let row_fill = if focus_row { tok.title_focus } else { surface };
+    let head = Rect::new(slot.x, slot.y, slot.w, head_h);
+    fill_round_rect(buffer, stride, head, r, row_fill, 0xff);
+    let lower = Rect::new(slot.x, slot.y + head_h / 2, slot.w, head_h - head_h / 2);
+    for y in lower.y..lower.y + lower.h {
+        for x in lower.x..lower.right() {
+            set(buffer, stride, x, y, pack_argb(0xff, row_fill));
+        }
+    }
+    let rule = if focus_row {
+        tok.title_focus_line
+    } else {
+        tok.title_line
+    };
+    for x in slot.x..slot.right() {
+        set(
+            buffer,
+            stride,
+            x,
+            slot.y + head_h - 1,
+            pack_argb(0xff, rule),
+        );
+    }
+    // Dot, name, meta.
+    let cy = slot.y as f32 + (head_h - 1) as f32 / 2.0;
+    let mut x = slot.x as f32 + s(HEADER_PAD_X);
+    let dot_r = s(HEADER_DOT) / 2.0;
+    match header.dot {
+        Dot::Idle => stroke_circle(
+            buffer,
+            stride,
+            x + dot_r,
+            cy,
+            dot_r - s(0.6),
+            s(1.2),
+            tok.idle,
+        ),
+        Dot::Working => fill_circle(buffer, stride, x + dot_r, cy, dot_r, tok.working),
+        Dot::Unseen => fill_circle(buffer, stride, x + dot_r, cy, dot_r, tok.unseen),
+        Dot::Attention => fill_circle(buffer, stride, x + dot_r, cy, dot_r, tok.attention),
+    }
+    x += s(HEADER_DOT) + s(INNER_GAP);
+    let px = s(HEADER_TEXT);
+    let status_w = status_width(chrome, header.status);
+    let text_end = slot
+        .right()
+        .saturating_sub(p(HEADER_PAD_X) + status_w.ceil() as usize + p(INNER_GAP));
+    let (face, name_ink) = if focus_row {
+        (Face::SemiBold, tok.text_strong)
+    } else {
+        (Face::Regular, tok.text)
+    };
+    let name = ellipsize(face, px, header.name, (text_end as f32 - x).max(0.0));
+    x = draw_text(
+        buffer, stride, x, cy, face, px, &name, name_ink, slot.x, text_end,
+    );
+    if let Some(meta) = header.meta.filter(|m| !m.is_empty()) {
+        let start = x + s(INNER_GAP);
+        let meta = ellipsize(Face::Regular, px, meta, (text_end as f32 - start).max(0.0));
+        let ink = if focus_row {
+            tok.muted_focus
+        } else {
+            tok.muted
+        };
+        draw_text(
+            buffer,
+            stride,
+            start,
+            cy,
+            Face::Regular,
+            px,
+            &meta,
+            ink,
+            slot.x,
+            text_end,
+        );
+    }
+    // Status on the right.
+    let mut sx = slot.right() as f32 - s(HEADER_PAD_X) - status_w;
+    let muted = if focus_row {
+        tok.muted_focus
+    } else {
+        tok.muted
+    };
+    match header.status {
+        PaneStatus::Attention => {
+            draw_text(
+                buffer,
+                stride,
+                sx,
+                cy,
+                Face::SemiBold,
+                px,
+                "needs you",
+                tok.attention,
+                slot.x,
+                slot.right(),
+            );
+        }
+        PaneStatus::Mail(count) => {
+            envelope(buffer, stride, sx, cy, s(14.0), s(1.3), tok.unseen);
+            sx += s(14.0) + s(6.0);
+            draw_text(
+                buffer,
+                stride,
+                sx,
+                cy,
+                Face::Regular,
+                px,
+                &count.to_string(),
+                tok.unseen_text,
+                slot.x,
+                slot.right(),
+            );
+        }
+        PaneStatus::Unseen => {
+            draw_text(
+                buffer,
+                stride,
+                sx,
+                cy,
+                Face::Regular,
+                px,
+                "new output",
+                tok.unseen_text,
+                slot.x,
+                slot.right(),
+            );
+        }
+        PaneStatus::Running => {
+            draw_text(
+                buffer,
+                stride,
+                sx,
+                cy,
+                Face::Regular,
+                px,
+                "running",
+                muted,
+                slot.x,
+                slot.right(),
+            );
+        }
+        PaneStatus::Focused => {
+            draw_text(
+                buffer,
+                stride,
+                sx,
+                cy,
+                Face::Regular,
+                px,
+                "focused",
+                muted,
+                slot.x,
+                slot.right(),
+            );
+        }
+        PaneStatus::Quiet => {}
+    }
+    // Outline, then the focus ring over it.
+    let (x0, y0) = (slot.x as f32, slot.y as f32);
+    let (x1, y1) = (slot.right() as f32, (slot.y + slot.h) as f32);
+    if ring && header.focused {
+        stroke_round_rect(
+            buffer,
+            stride,
+            x0 - 1.0,
+            y0 - 1.0,
+            x1 + 1.0,
+            y1 + 1.0,
+            r + 1.0,
+            2.0,
+            accent,
+        );
+    } else {
+        stroke_round_rect(buffer, stride, x0, y0, x1, y1, r, 1.0, tok.hairline);
+    }
+}
+
+fn status_width(chrome: ChromeGeom, status: PaneStatus) -> f32 {
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    let px = s(HEADER_TEXT);
+    match status {
+        PaneStatus::Attention => text_width(Face::SemiBold, px, "needs you"),
+        PaneStatus::Mail(count) => {
+            s(14.0) + s(6.0) + text_width(Face::Regular, px, &count.to_string())
+        }
+        PaneStatus::Unseen => text_width(Face::Regular, px, "new output"),
+        PaneStatus::Running => text_width(Face::Regular, px, "running"),
+        PaneStatus::Focused => text_width(Face::Regular, px, "focused"),
+        PaneStatus::Quiet => 0.0,
+    }
+}
+
+fn envelope(buffer: &mut [u32], stride: usize, x: f32, cy: f32, w: f32, width: f32, ink: Rgb) {
+    let h = w * 11.0 / 14.0;
+    let (x0, y0, x1, y1) = (
+        x + width / 2.0,
+        cy - h / 2.0 + width / 2.0,
+        x + w - width / 2.0,
+        cy + h / 2.0 - width / 2.0,
+    );
+    stroke_line(buffer, stride, x0, y0, x1, y0, width, ink);
+    stroke_line(buffer, stride, x1, y0, x1, y1, width, ink);
+    stroke_line(buffer, stride, x1, y1, x0, y1, width, ink);
+    stroke_line(buffer, stride, x0, y1, x0, y0, width, ink);
+    let mid = (x0 + x1) / 2.0;
+    stroke_line(buffer, stride, x0, y0, mid, cy + h * 0.1, width, ink);
+    stroke_line(buffer, stride, mid, cy + h * 0.1, x1, y0, width, ink);
+}
+
+// ---------------------------------------------------------------------------
+// Spaces bar (bottom or top)
+
+/// Chip width for a Space name. The right `RAIL_CLOSE_W` is the close
+/// target, drawn only on hover.
+pub(crate) fn rail_chip_width(chrome: ChromeGeom, label: &str, current: bool) -> usize {
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    let dot = if current { s(RAIL_DOT) + s(7.0) } else { 0.0 };
+    (s(RAIL_CHIP_PAD_X)
+        + dot
+        + text_width(Face::Regular, s(RAIL_TEXT), label)
+        + s(6.0)
+        + s(RAIL_CLOSE_W))
+    .ceil() as usize
+}
+
+pub(crate) fn rail_close_width(chrome: ChromeGeom) -> usize {
+    chrome.px(RAIL_CLOSE_W)
+}
+
+pub(crate) fn rail_plus_width(chrome: ChromeGeom) -> usize {
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    (2.0 * s(RAIL_CHIP_PAD_X) + text_width(Face::Regular, s(RAIL_TEXT), RAIL_PLUS_LABEL)).ceil()
+        as usize
+}
+
+/// One chip on the spaces bar.
+pub(crate) struct RailChip<'a> {
+    /// The rail's full-height slot for this chip.
+    pub slot: Rect,
+    pub label: &'a str,
+    pub current: bool,
+    /// Keyboard focus (`space_rail_focus`).
+    pub focused: bool,
+    pub editing: bool,
+    pub hovered: bool,
+    pub close_hovered: bool,
+}
+
+fn rail_chip_rect(chrome: ChromeGeom, slot: Rect) -> Rect {
+    let h = chrome.px(RAIL_CHIP_H).min(slot.h);
+    Rect::new(slot.x, slot.y + (slot.h - h) / 2, slot.w, h)
+}
+
+/// Bar ground with its hairline on the pane side.
+pub(crate) fn paint_rail_bar(
+    buffer: &mut [u32],
+    stride: usize,
+    tok: &Tokens,
+    bar: Rect,
+    line_on_top: bool,
+    alpha: u8,
+) {
+    let ground = pack_argb(alpha, tok.status_bar);
+    for y in bar.y..bar.y + bar.h {
+        for x in bar.x..bar.right() {
+            set(buffer, stride, x, y, ground);
+        }
+    }
+    let line_y = if line_on_top {
+        bar.y
+    } else {
+        (bar.y + bar.h).saturating_sub(1)
+    };
+    for x in bar.x..bar.right() {
+        set(buffer, stride, x, line_y, pack_argb(0xff, tok.status_line));
+    }
+}
+
+pub(crate) fn paint_rail_chip(
+    buffer: &mut [u32],
+    stride: usize,
+    chrome: ChromeGeom,
+    tok: &Tokens,
+    accent: Rgb,
+    chip: &RailChip<'_>,
+) {
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    let rect = rail_chip_rect(chrome, chip.slot);
+    if chip.editing || chip.focused {
+        let fill = if chip.current {
+            tok.chip_active
+        } else {
+            tok.status_bar
+        };
+        outlined_round_rect(buffer, stride, rect, s(5.0), accent, fill);
+    } else if chip.current {
+        fill_round_rect(buffer, stride, rect, s(5.0), tok.chip_active, 0xff);
+    } else if chip.hovered {
+        fill_round_rect(buffer, stride, rect, s(5.0), tok.tab_hover, 0xff);
+    }
+    let cy = rect.center_y();
+    let mut x = rect.x as f32 + s(RAIL_CHIP_PAD_X);
+    if chip.current {
+        fill_circle(
+            buffer,
+            stride,
+            x + s(RAIL_DOT) / 2.0,
+            cy,
+            s(RAIL_DOT) / 2.0,
+            accent,
+        );
+        x += s(RAIL_DOT) + s(7.0);
+    }
+    let close_x = rect.right().saturating_sub(chrome.px(RAIL_CLOSE_W));
+    let ink = if chip.current || chip.editing {
+        tok.text
+    } else {
+        tok.muted
+    };
+    let label = ellipsize(
+        Face::Regular,
+        s(RAIL_TEXT),
+        chip.label,
+        (close_x as f32 - x).max(0.0),
+    );
+    draw_text(
+        buffer,
+        stride,
+        x,
+        cy,
+        Face::Regular,
+        s(RAIL_TEXT),
+        &label,
+        ink,
+        rect.x,
+        close_x,
+    );
+    if chip.hovered && !chip.editing {
+        let ccx = close_x as f32 + s(RAIL_CLOSE_W) / 2.0 - s(2.0);
+        if chip.close_hovered {
+            fill_circle(
+                buffer,
+                stride,
+                ccx,
+                cy,
+                s(7.0),
+                mix_rgb(tok.chip_active, tok.text, 40),
+            );
+        }
+        let arm = s(3.0);
+        let ink = if chip.close_hovered {
+            tok.text_strong
+        } else {
+            tok.muted
+        };
+        stroke_line(
+            buffer,
+            stride,
+            ccx - arm,
+            cy - arm,
+            ccx + arm,
+            cy + arm,
+            s(1.3),
+            ink,
+        );
+        stroke_line(
+            buffer,
+            stride,
+            ccx + arm,
+            cy - arm,
+            ccx - arm,
+            cy + arm,
+            s(1.3),
+            ink,
+        );
+    }
+}
+
+/// `+ New space` (or the overflow chip's label).
+pub(crate) fn paint_rail_button(
+    buffer: &mut [u32],
+    stride: usize,
+    chrome: ChromeGeom,
+    tok: &Tokens,
+    slot: Rect,
+    label: &str,
+    hovered: bool,
+) {
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    let rect = rail_chip_rect(chrome, slot);
+    if hovered {
+        fill_round_rect(buffer, stride, rect, s(5.0), tok.tab_hover, 0xff);
+    }
+    draw_text(
+        buffer,
+        stride,
+        rect.x as f32 + s(RAIL_CHIP_PAD_X),
+        rect.center_y(),
+        Face::Regular,
+        s(RAIL_TEXT),
+        label,
+        tok.muted,
+        rect.x,
+        rect.right(),
+    );
+}
+
+pub(crate) const RAIL_PLUS: &str = RAIL_PLUS_LABEL;
+
+/// Right-aligned status: `N working · N needs you · Hold Ctrl Shift for
+/// shortcuts`. Items drop from the left when the chips leave no room.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_rail_status(
+    buffer: &mut [u32],
+    stride: usize,
+    chrome: ChromeGeom,
+    tok: &Tokens,
+    bar: Rect,
+    left_limit: usize,
+    working: usize,
+    attention: usize,
+) {
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    let px = s(RAIL_TEXT);
+    let mut items: Vec<(Option<Rgb>, String)> = Vec::new();
+    if working > 0 {
+        items.push((Some(tok.working), format!("{working} working")));
+    }
+    if attention > 0 {
+        items.push((Some(tok.attention), format!("{attention} needs you")));
+    }
+    items.push((None, "Hold Ctrl Shift for shortcuts".to_string()));
+    let dot_w = s(RAIL_DOT) + s(6.0);
+    let sep_w = s(18.0);
+    let item_w = |item: &(Option<Rgb>, String)| {
+        text_width(Face::Regular, px, &item.1) + if item.0.is_some() { dot_w } else { 0.0 }
+    };
+    let right = bar.right() as f32 - s(10.0);
+    let room = right - left_limit as f32 - s(16.0);
+    while !items.is_empty() {
+        let total: f32 = items.iter().map(item_w).sum::<f32>() + sep_w * (items.len() - 1) as f32;
+        if total <= room {
+            break;
+        }
+        items.remove(0);
+    }
+    let total: f32 =
+        items.iter().map(item_w).sum::<f32>() + sep_w * items.len().saturating_sub(1) as f32;
+    let cy = bar.center_y();
+    let mut x = right - total;
+    for (index, (dot, text)) in items.iter().enumerate() {
+        if index > 0 {
+            fill_circle(buffer, stride, x + sep_w / 2.0, cy, s(1.3), tok.separator);
+            x += sep_w;
+        }
+        if let Some(color) = dot {
+            fill_circle(
+                buffer,
+                stride,
+                x + s(RAIL_DOT) / 2.0,
+                cy,
+                s(RAIL_DOT) / 2.0,
+                *color,
+            );
+            x += dot_w;
+        }
+        x = draw_text(
+            buffer,
+            stride,
+            x,
+            cy,
+            Face::Regular,
+            px,
+            text,
+            tok.muted,
+            left_limit,
+            bar.right(),
+        );
+    }
 }
 
 #[cfg(test)]

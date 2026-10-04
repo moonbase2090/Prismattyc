@@ -132,6 +132,16 @@ impl ChromeGeom {
     pub(crate) fn px(self, design: f32) -> usize {
         (design * self.scale_milli as f32 / 1000.0).round().max(0.0) as usize
     }
+
+    /// Graphite pane title row, inside the top of every pane slot. Zero in
+    /// classic.
+    pub(crate) fn pane_header(self) -> usize {
+        if self.graphite {
+            self.px(crate::graphite::PANE_HEADER_H)
+        } else {
+            0
+        }
+    }
 }
 
 /// Overlay width of the host scrollback scrollbar (matches raster).
@@ -419,6 +429,7 @@ impl HostGeom {
         self.inner_pad
             .saturating_mul(2)
             .saturating_add(self.pane_gap)
+            .saturating_add(self.chrome.pane_header())
     }
 
     fn cells_for_pixels(pixels: usize, cell: usize) -> usize {
@@ -464,11 +475,14 @@ impl HostGeom {
     /// down to whole cells.
     fn pane_avail_px(self, rect: CellRect) -> (usize, usize, usize, usize) {
         let (x, y, width, height) = self.pane_slot_px(rect);
+        let header = self.chrome.pane_header();
         (
             x.saturating_add(self.inner_pad),
-            y.saturating_add(self.inner_pad),
+            y.saturating_add(self.inner_pad).saturating_add(header),
             width.saturating_sub(self.inner_pad.saturating_mul(2)),
-            height.saturating_sub(self.inner_pad.saturating_mul(2)),
+            height
+                .saturating_sub(self.inner_pad.saturating_mul(2))
+                .saturating_sub(header),
         )
     }
 
@@ -2807,6 +2821,45 @@ impl MuxRuntime {
             .window(self.active_window())
             .map(|win| win.layout.panes().len())
             .unwrap_or(0)
+    }
+
+    /// Panes holding an agent attention request (Graphite status counts).
+    pub(crate) fn attention_count(&self) -> usize {
+        self.panes
+            .values()
+            .filter(|pane| pane.attention.is_some())
+            .count()
+    }
+
+    /// Graphite pane title row text: the session or pane name, then muted
+    /// detail (the OSC title under a session name, else the git label).
+    /// Names come from the same fields as the classic handle titles.
+    pub(crate) fn pane_header_text(&self, pane: PaneId) -> (String, Option<String>) {
+        let runtime = self.panes.get(&pane);
+        let index = self
+            .domain
+            .window(self.active_window())
+            .map(|win| win.layout.panes())
+            .and_then(|panes| panes.iter().position(|id| *id == pane))
+            .unwrap_or(0);
+        let named =
+            runtime.and_then(|r| r.attach_name.clone().or_else(|| r.attach_session.clone()));
+        let title = runtime
+            .and_then(|r| r.title.clone())
+            .filter(|t| !t.is_empty());
+        match named {
+            Some(name) => {
+                let detail = title.filter(|t| *t != name);
+                (
+                    name,
+                    detail.or_else(|| self.git_info.label(pane).map(str::to_string)),
+                )
+            }
+            None => (
+                title.unwrap_or_else(|| format!("pane {}", index + 1)),
+                self.git_info.label(pane).map(str::to_string),
+            ),
+        }
     }
 
     pub(crate) fn unseen_count(&self) -> usize {

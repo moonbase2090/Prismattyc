@@ -3956,6 +3956,73 @@ pub fn theme_picker_visible_rows(
         .max(1)
 }
 
+/// Map a pointer onto a painted theme picker row. Mirrors the panel geometry
+/// in [`rasterize_theme_picker`]; the hit band is the row pitch.
+pub fn theme_picker_hit(
+    font: &FontMetrics,
+    row_count: usize,
+    scroll: usize,
+    stride_px: usize,
+    buffer_height_px: usize,
+    pointer_x: usize,
+    pointer_y: usize,
+) -> Option<usize> {
+    if row_count == 0
+        || stride_px < font.cell_w.saturating_mul(24)
+        || buffer_height_px < font.cell_h.saturating_mul(8)
+    {
+        return None;
+    }
+    let margin_x = font.cell_w.max(4);
+    let margin_y = font.cell_h.max(4);
+    let window_cols = stride_px / font.cell_w.max(1);
+    let window_rows = buffer_height_px / font.cell_h.max(1);
+    let geom = palette_geom(window_cols, window_rows, font.cell_h);
+    let width = font
+        .cell_w
+        .saturating_mul(52)
+        .min(stride_px.saturating_sub(margin_x.saturating_mul(2)));
+    let height = font
+        .cell_h
+        .saturating_mul(4)
+        .saturating_add(if geom.compact { 0 } else { font.cell_h })
+        .saturating_add(geom.row_pitch_px.saturating_mul(row_count))
+        .saturating_add(font.cell_h)
+        .min(buffer_height_px.saturating_sub(margin_y.saturating_mul(2)));
+    let x = (stride_px.saturating_sub(width)) / 2;
+    let y = (buffer_height_px.saturating_sub(height)) / 2;
+    if width < 4 || height < 4 {
+        return None;
+    }
+    if pointer_x < x.saturating_add(1)
+        || pointer_x >= x.saturating_add(1).saturating_add(width.saturating_sub(2))
+    {
+        return None;
+    }
+    let mut row_y = y.saturating_add(font.cell_h / 2);
+    row_y = row_y.saturating_add(font.cell_h);
+    row_y = row_y.saturating_add(font.cell_h);
+    if !geom.compact {
+        row_y = row_y.saturating_add(font.cell_h);
+    }
+    let swatch_y = y
+        .saturating_add(height)
+        .saturating_sub(font.cell_h.saturating_add(font.cell_h / 2));
+    let visible_rows = theme_picker_visible_rows(font, row_count, stride_px, buffer_height_px);
+    let max_scroll = row_count.saturating_sub(visible_rows);
+    let scroll = scroll.min(max_scroll);
+    for index in (scroll..row_count).take(visible_rows) {
+        if row_y.saturating_add(geom.row_pitch_px) > swatch_y {
+            break;
+        }
+        if pointer_y >= row_y && pointer_y < row_y.saturating_add(geom.row_pitch_px) {
+            return Some(index);
+        }
+        row_y = row_y.saturating_add(geom.row_pitch_px);
+    }
+    None
+}
+
 /// Centered host-owned theme settings. The selected theme paints its own
 /// preview chrome and all 16 ANSI swatches; it never changes pane geometry.
 #[allow(clippy::too_many_arguments)]
@@ -9915,6 +9982,49 @@ mod tests {
             [0x12, 0x34, 0x56],
             "guest truecolor passes through unchanged"
         );
+    }
+
+    #[test]
+    fn theme_picker_hit_bands_are_ordered_and_scrolled() {
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let (stride, height) = (1280, 800);
+        let count = 6;
+        // The panel is centered, so the middle column always crosses it.
+        let x = stride / 2;
+        let rows: Vec<usize> = (0..height)
+            .filter_map(|y| theme_picker_hit(&font, count, 0, stride, height, x, y))
+            .collect();
+        assert!(!rows.is_empty(), "middle column crosses list rows");
+        for window in rows.windows(2) {
+            assert!(window[0] <= window[1], "hit rows run top to bottom");
+        }
+        assert!(rows.iter().all(|row| *row < count));
+        assert_eq!(rows.first(), Some(&0));
+        assert_eq!(rows.last(), Some(&(count - 1)));
+        // A scrolled list reports absolute row indices (enough rows to scroll).
+        let many = 100;
+        let scrolled: Vec<usize> = (0..height)
+            .filter_map(|y| theme_picker_hit(&font, many, 7, stride, height, x, y))
+            .collect();
+        assert!(!scrolled.is_empty());
+        assert_eq!(scrolled.first(), Some(&7));
+        assert!(scrolled.iter().all(|row| *row >= 7 && *row < many));
+        // Outside the panel, an empty list, and a tiny window all miss.
+        assert_eq!(
+            theme_picker_hit(&font, count, 0, stride, height, 0, 0),
+            None
+        );
+        assert_eq!(
+            theme_picker_hit(&font, count, 0, stride, height, stride - 1, height - 1),
+            None
+        );
+        assert_eq!(
+            theme_picker_hit(&font, 0, 0, stride, height, x, height / 2),
+            None
+        );
+        assert_eq!(theme_picker_hit(&font, count, 0, 100, 100, 50, 50), None);
     }
 
     #[test]

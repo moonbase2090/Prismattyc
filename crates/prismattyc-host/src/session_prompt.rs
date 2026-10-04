@@ -88,6 +88,18 @@ fn button_count(prompt: &Prompt) -> usize {
     }
 }
 
+/// Button row under the pointer for hover cursors. Read-only: selection
+/// follows the pointer in [`handle_pointer`]; this only reports the row.
+pub(super) fn hover_button(host: &HostState) -> Option<usize> {
+    let prompt = host.session_prompt.as_ref()?;
+    let (x, y) = host.pointer_px?;
+    if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+        return None;
+    }
+    palette_hit(host.palette_layout.as_ref()?, x as usize, y as usize)
+        .filter(|row| *row < button_count(prompt))
+}
+
 fn begin_creation(host: &mut HostState, target: Target, name: String) {
     let mode = config::load(&config::config_path())
         .unwrap_or_default()
@@ -436,6 +448,7 @@ pub(super) fn handle_pointer(host: &mut HostState, event: &WindowEvent) -> bool 
                     host.session_prompt.as_mut().unwrap().button = row;
                 }
             }
+            sync_chrome_hover(host);
         }
         WindowEvent::CursorLeft { .. } => host.pointer_px = None,
         WindowEvent::MouseInput {

@@ -4840,13 +4840,15 @@ fn unbounded_chrome_state(host: &HostState, geom: mux::HostGeom) -> String {
     }
 }
 
+/// One Graphite title row as it feeds the damage signature (#104): pane id,
+/// name, detail, attention, mail depth, unseen, running, focused.
+type GraphiteRowState = (u64, String, Option<String>, bool, u32, bool, bool, bool);
+
 /// What the Graphite title rows and spaces-bar status show.
-fn graphite_chrome_state(
-    host: &HostState,
-) -> Vec<(u64, String, Option<String>, bool, u32, bool, bool, bool)> {
+fn graphite_chrome_state(host: &HostState) -> Vec<GraphiteRowState> {
     let now = Instant::now();
     let focused = host.mux.focused_id();
-    let mut rows: Vec<_> = host
+    let mut rows: Vec<GraphiteRowState> = host
         .mux
         .panes_and_rects()
         .map(|(id, pane, _rect)| {

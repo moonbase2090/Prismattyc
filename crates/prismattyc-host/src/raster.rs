@@ -11086,7 +11086,7 @@ mod tests {
         let width = 80 * font.cell_w;
         let height = 24 * font.cell_h;
         let mut buffer = vec![pack_rgb(theme.default_bg); width * height];
-        rasterize_palette(
+        let layout = rasterize_palette(
             &font,
             &frame,
             theme,
@@ -11095,7 +11095,8 @@ mod tests {
             width,
             height,
             FOCUS_BORDER_PALETTE[0].1,
-        );
+        )
+        .expect("fixed palette layout");
         // Compact 80×24: the palette fills the available height, capped at
         // the fixed command-palette height, independent of the result count.
         let panel_w = 76 * font.cell_w;
@@ -11126,7 +11127,7 @@ mod tests {
             "selected chip is inverse"
         );
         // The detail box is overlay_bg.
-        let detail_y = panel_y + pad + 7 * font.cell_h + font.cell_h / 2;
+        let detail_y = layout.detail_y.expect("fixed detail panel");
         assert_eq!(
             buffer[detail_y * width + panel_x + font.cell_w],
             pack_rgb(theme.overlay_bg),

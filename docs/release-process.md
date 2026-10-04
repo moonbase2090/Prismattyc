@@ -95,14 +95,17 @@ Amazon Linux 2023. The Windows package supports Windows 10 version 1809 or
 newer, or Windows 11. The macOS app supports macOS 11 or newer.
 
 On Linux and Windows, `pmux update` replaces the six installed binaries.
-On macOS it downloads the universal zip, verifies `SHA256SUMS-macos` and the
-code signature, and replaces `Prismattyc.app`. Releases from v0.2.21 onward
-can be installed this way. The macOS manifest is an extra check when a
-release publishes it. `prismattyc update` runs the same installer.
+On macOS it downloads the universal zip, verifies `SHA256SUMS-macos`, the
+macOS manifest when published, the Developer ID Team ID, and Gatekeeper
+notarization before replacing `Prismattyc.app`. It keeps the previous app for
+rollback. Releases from v0.2.21 onward can be installed this way.
+`prismattyc update` runs the same installer.
 
 After publication, check the complete asset list and the combined checksums.
 On a disposable Linux installation, run `pmux update --check`, install the
 release, test a coordinated restart, and verify rollback. On macOS, run
-`pmux update --check`, install the release, quit Prismattyc, and reopen it
-from the Dock. Confirm the old app was removed and
-`pmux update --rollback` reports that rollback is not supported.
+`pmux update --check`, install the release from the app menu, and confirm the
+host reconnects to its saved pmux views. When the daemon has no active
+sessions, confirm it restarts on the new build. With live sessions, confirm
+the restart is deferred and those sessions continue. Run
+`pmux update --rollback` and verify that the previous signed app is restored.

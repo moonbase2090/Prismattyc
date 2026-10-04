@@ -169,19 +169,18 @@ executables under `~/.cargo/bin` only.
 Quit Prismattyc.app (Cmd+Q) and reopen it from the Dock after an update, or the
 old image stays in memory.
 
-A published build updates with `pmux update` or `prismattyc update`. The
-command downloads the universal zip, checks it against `SHA256SUMS-macos`,
-verifies the code signature, and replaces `Prismattyc.app`. After the new
-app is in place, the old app is deleted. The update replaces the app that
-is already installed. When that app's folder is not writable, the command
-stops and explains how to run it with admin rights or move the app to
-`~/Applications`. The installed app stays where it is. A first install
-uses `/Applications` when that folder is writable, and `~/Applications`
-otherwise. Rollback is not supported. To
-reinstall a specific version, download its DMG from the
-[releases page](https://github.com/moonbase2090/Prismattyc/releases)
-and replace `/Applications/Prismattyc.app`. Quit and reopen the app. Mux
-sessions keep running.
+A published build updates from the app menu or with `pmux update` and
+`prismattyc update`. The updater checks the universal zip against
+`SHA256SUMS-macos`, verifies Developer ID Team ID `S24C53PD3Y`, and checks
+Gatekeeper notarization before replacing `Prismattyc.app`. It keeps the
+previous verified bundle for `pmux update --rollback`. The app menu updates
+the host through the safe restart path and reconnects saved pmux views. A
+daemon with live sessions stays up; its restart waits until it is safe.
+When the app folder is not writable, the updater stops and explains how to
+move the app to `~/Applications` or retry with the required rights. A first
+install uses `/Applications` when writable, and `~/Applications` otherwise.
+Automatic checks are enabled by default. Turn them off in the app menu or set
+`automatic_update_checks = false` in `config.toml` to opt out.
 
 On first launch and after an app update, Prismattyc links the bundled
 `Contents/MacOS/pmux` into `/usr/local/bin` when it can add the link there.
@@ -200,8 +199,8 @@ mkdir -p ~/.local/bin
 ln -s /Applications/Prismattyc.app/Contents/MacOS/pmux ~/.local/bin/pmux
 ```
 
-Signing and notarization stay out of the first slice. This section is also
-the reference for when distribution starts.
+The app menu checks for a release on launch and daily when automatic checks
+are enabled. Manual checks remain available when automatic checks are off.
 
 ### Signing vs. notarization
 

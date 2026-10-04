@@ -11,6 +11,19 @@ Double-click to select a word. Triple-click to select a row. Copy removes
 trailing spaces from each selected row. The host clears a finished selection
 when new child output would make it stale.
 
+Keyboard selection works on the primary screen: Ctrl+Space or Ctrl+2 starts
+a selection at the caret, Shift+arrow (and Home/End/PageUp/PageDown)
+extends it, and plain arrows keep extending while select mode is on.
+Escape cancels.
+
+Full-screen apps (vim, less) own the alternate screen, so ordinary
+Shift+arrow and Ctrl+Space keep going to the app. Hold Command (Super) with
+those keys to select host-visible text instead: Command+Shift+arrow starts
+from the caret and extends, Ctrl+Command+Space marks. Every step needs
+Command held; without it keys return to the app. Command+C copies the
+selection. On macOS, Ctrl+Command+Space may open the system emoji picker
+instead; Command+Shift+arrow always works.
+
 Use the [configuration reference](config.md) for shortcuts and overrides.
 Use the [compatibility matrix](fidelity-matrix-v1.md) for supported behaviors
 and their regression tests.

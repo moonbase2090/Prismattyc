@@ -50,6 +50,7 @@ mod restart;
 mod terminal_switcher;
 #[cfg(test)]
 mod test_support;
+mod transparency;
 // cargo-mutants 27.1 does not recognize nested cfg(all(test, ...)).
 // Keep cfg(test) separate so mutation targets exclude the test fixture.
 #[cfg(test)]
@@ -785,6 +786,8 @@ Direct mux keys: Ctrl+Shift+\\ or Ctrl+Shift+E  split right;
                  Ctrl+Shift+] / Ctrl+Shift+[ cycle focus border color
                  forward / back (brand spectrum).
                  Ctrl+Shift+, open theme settings (preview + apply).
+                 The palette action transparency opens a 760×460 dialog
+                 only when chrome_style is graphite.
                  Super+N (Linux) / Cmd+N (macOS) open a new OS window.
 Paste:           Ctrl+Shift+V or Shift+Insert (not plain Ctrl+V).
 Scroll chrome:   bottom-right `N/M` chip + window title while in history
@@ -940,6 +943,8 @@ struct HostState {
     /// spectrum remains independent of the selected theme.
     theme: theme::Theme,
     theme_picker: Option<ThemePicker>,
+    /// Graphite transparency dialog (#112). Classic chrome leaves this empty.
+    transparency: Option<transparency::Dialog>,
     palette: Option<Palette>,
     /// Last painted palette / space-picker list geometry (PT-201).
     palette_layout: Option<PaletteLayout>,
@@ -1356,6 +1361,11 @@ enum HoverTarget {
     ContextMenuRow(usize),
     DialogButton(usize),
     ToastDismiss(usize),
+    /// A control in the transparency dialog. `dragging` is a slider or the
+    /// scrollbar thumb, which takes the grab cursor.
+    Transparency {
+        dragging: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3438,6 +3448,7 @@ impl App {
                 clipboard,
                 theme,
                 theme_picker: None,
+                transparency: None,
                 palette: None,
                 palette_layout: None,
                 palette_recent: palette_recent_path
@@ -3999,6 +4010,13 @@ fn chrome_overlay(host: &HostState) -> a11y::OverlayKind {
         };
         return a11y::OverlayKind::Splash { rows, selected };
     }
+    if let Some(dialog) = host.transparency.as_ref() {
+        return a11y::OverlayKind::Choices {
+            title: "Transparency".into(),
+            rows: dialog.row_labels(),
+            selected: dialog.selected,
+        };
+    }
     if let Some(palette) = host.palette.as_ref() {
         let view = palette.view(&host.keymap, host.experimental_rich);
         let rows = (0..view.len())
@@ -4061,6 +4079,20 @@ fn dispatch_overlay_activate(
     program: &str,
     child_args: &[String],
 ) -> Dispatch {
+    if host.transparency.is_some() {
+        let count = host
+            .transparency
+            .as_ref()
+            .map(|dialog| dialog.row_labels().len())
+            .unwrap_or(0);
+        if let Some(dialog) = host.transparency.as_mut() {
+            if index < count {
+                dialog.selected = index;
+            }
+        }
+        apply_transparency_input(host, transparency::Input::Enter);
+        return Dispatch::Handled;
+    }
     if host.space_panel.is_some() {
         space_panel::activate(host, index);
         return Dispatch::Handled;
@@ -4112,6 +4144,10 @@ fn dispatch_overlay_activate(
                     .set_title(&window_title(&host.mux, show_tab_strip(host)));
                 host.dirty = true;
                 host.window.request_redraw();
+                if action == keybind::Action::Transparency {
+                    let _ = open_transparency(host);
+                    return Dispatch::Handled;
+                }
                 return dispatch_action(host, action, program, child_args);
             }
         }
@@ -4626,6 +4662,7 @@ struct TransientOverlayState {
     /// `+` / save_space modal. The rail chip stays `+`, so chrome snapshots
     /// do not see the typed name (#364).
     save_space: bool,
+    transparency: bool,
 }
 
 /// Return whether host-drawn transient pixels are present in this frame.
@@ -4652,6 +4689,7 @@ fn transient_overlay_visible(state: TransientOverlayState) -> bool {
         || state.title_notice
         || state.hover_target
         || state.save_space
+        || state.transparency
 }
 
 /// True when the `+` chip / `save_space` name prompt is the host-drawn overlay.
@@ -5089,6 +5127,7 @@ fn rasterize_frame(
         title_notice: host.title_notice.is_some(),
         hover_target: host.hover_target.is_some(),
         save_space: save_space_modal_open(host.space_rail.edit.as_ref()),
+        transparency: host.transparency.is_some(),
     };
     render_diagnostics::record_overlay_guards(&mut host.render_frame.guards, overlay_state);
     let transient_overlay = transient_overlay_visible(overlay_state);
@@ -5237,6 +5276,7 @@ fn rasterize_frame(
     let ime_modal = host.restore_prompt.is_some()
         || host.session_prompt.is_some()
         || host.splash.is_some()
+        || host.transparency.is_some()
         || host.theme_picker.is_some()
         || host.palette.is_some()
         || host.context_menu.is_some()
@@ -6468,6 +6508,22 @@ fn rasterize_frame(
     }
     restore_prompt::paint(host, buffer, width as usize, height as usize);
     session_prompt::paint(host, buffer, width as usize, height as usize);
+    if let Some(dialog) = host.transparency.as_ref() {
+        let laid = transparency::layout(
+            dialog,
+            host.mux.geom().chrome,
+            width as usize,
+            height as usize,
+        );
+        transparency::paint(
+            buffer,
+            width as usize,
+            height as usize,
+            host.theme.variant,
+            dialog,
+            &laid,
+        );
+    }
     // Visual bell (PT-39): invert the whole frame while the flash is lit.
     // A post-pass keeps every painter above unaware of the flash, and works
     // identically on the softbuffer and wgpu present paths.
@@ -8865,6 +8921,7 @@ fn scroll_palette_with_wheel(host: &mut HostState, delta: &MouseScrollDelta) -> 
 fn pointer_hover_blocked(host: &HostState) -> bool {
     host.restore_prompt.is_some()
         || host.session_prompt.is_some()
+        || host.transparency.is_some()
         || host.theme_picker.is_some()
         || host.palette.is_some()
         || host.space_picker.is_some()
@@ -8878,6 +8935,23 @@ fn pointer_hover_blocked(host: &HostState) -> bool {
 }
 
 fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
+    if let Some(dialog) = host.transparency.as_ref() {
+        let (x, y) = host
+            .pointer_px
+            .filter(|(x, y)| x.is_finite() && y.is_finite() && *x >= 0.0 && *y >= 0.0)?;
+        let size = host.window.inner_size();
+        let laid = transparency::layout(
+            dialog,
+            host.mux.geom().chrome,
+            size.width as usize,
+            size.height as usize,
+        );
+        if dialog.dragging() {
+            return Some(HoverTarget::Transparency { dragging: true });
+        }
+        return transparency::hit(&laid, x as usize, y as usize)
+            .map(|_| HoverTarget::Transparency { dragging: false });
+    }
     if host.palette.is_some() {
         let (x, y) = host
             .pointer_px
@@ -9001,6 +9075,12 @@ fn cursor_for_hover(
         match axis {
             prismattyc_mux::Axis::Horizontal => CursorIcon::ColResize,
             prismattyc_mux::Axis::Vertical => CursorIcon::RowResize,
+        }
+    } else if let Some(HoverTarget::Transparency { dragging }) = hover {
+        match transparency::cursor(Some(transparency::Hit::Close), dragging) {
+            transparency::CursorKind::Grab => CursorIcon::Grab,
+            transparency::CursorKind::Pointer => CursorIcon::Pointer,
+            transparency::CursorKind::Default => CursorIcon::Default,
         }
     } else if strip_dragging || scrollbar_dragging {
         CursorIcon::Grab
@@ -10670,7 +10750,7 @@ fn apply_space_picker_verdict(
 /// Modal command palette. While open, every pressed key remains host-owned.
 /// Enter closes the palette before the selected action is dispatched.
 fn open_command_palette(host: &mut HostState, action: keybind::Action) {
-    if host.theme_picker.is_some() || host.find.active {
+    if host.theme_picker.is_some() || host.find.active || host.transparency.is_some() {
         return;
     }
     if host.palette.is_some() {
@@ -10678,6 +10758,7 @@ fn open_command_palette(host: &mut HostState, action: keybind::Action) {
         return;
     }
     let mut palette = Palette::with_recent(host.palette_recent.clone());
+    palette.show_graphite = transparency::opens_for(host.spacing.chrome_style);
     match action {
         keybind::Action::PaletteFilterNext => palette.cycle_filter(1),
         keybind::Action::PaletteFilterPrev => palette.cycle_filter(-1),
@@ -10721,7 +10802,8 @@ fn handle_palette_key(
                 | Some(keybind::Action::PaletteFilterNext)
                 | Some(keybind::Action::PaletteFilterPrev)
         );
-        if host.theme_picker.is_some() || host.find.active || !opens {
+        if host.theme_picker.is_some() || host.transparency.is_some() || host.find.active || !opens
+        {
             return PaletteVerdict::NotHandled;
         }
         open_command_palette(host, action.unwrap_or(keybind::Action::CommandPalette));
@@ -11076,6 +11158,340 @@ fn handle_theme_picker_key(
         host.dirty = true;
     }
     true
+}
+
+fn present_uses_gpu(host: &HostState) -> bool {
+    #[cfg(feature = "gpu")]
+    {
+        matches!(host.present, Some(PresentBackend::Gpu(_)))
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let _ = host;
+        false
+    }
+}
+
+fn session_limits(host: &HostState) -> transparency::SessionLimits {
+    transparency::SessionLimits {
+        alpha: host.alpha_visual,
+        gpu: present_uses_gpu(host),
+    }
+}
+
+/// Open the transparency dialog. Classic chrome and the splash refuse it.
+fn open_transparency(host: &mut HostState) -> bool {
+    if !transparency::opens_for(host.spacing.chrome_style) || host.splash.is_some() {
+        return false;
+    }
+    let file = config::load(&config::config_path()).unwrap_or_default();
+    host.palette = None;
+    host.palette_layout = None;
+    host.theme_picker = None;
+    host.context_menu = None;
+    host.context_menu_target = None;
+    host.space_picker = None;
+    host.move_target = None;
+    host.terminal_targets = None;
+    host.space_panel = None;
+    close_find(&mut host.find);
+    host.tab_rename = None;
+    host.transparency = Some(transparency::Dialog::from_config(
+        &file,
+        session_limits(host),
+    ));
+    host.window.set_title("Prismattyc — transparency");
+    host.dirty = true;
+    host.pending_full_repaint = Some(FullRepaintReason::Fallback);
+    sync_chrome_hover(host);
+    true
+}
+
+fn handle_transparency_key(
+    host: &mut HostState,
+    event: &winit::event::KeyEvent,
+    action: Option<keybind::Action>,
+) -> bool {
+    if host.transparency.is_none() {
+        if action != Some(keybind::Action::Transparency) {
+            return false;
+        }
+        return open_transparency(host);
+    }
+    if let Some(input) = transparency_key_input(event) {
+        apply_transparency_input(host, input);
+    }
+    true
+}
+
+fn transparency_key_input(event: &winit::event::KeyEvent) -> Option<transparency::Input> {
+    use transparency::Input;
+    match event.key_without_modifiers() {
+        Key::Named(NamedKey::Escape) => Some(Input::Escape),
+        Key::Named(NamedKey::ArrowUp) => Some(Input::Up),
+        Key::Named(NamedKey::ArrowDown) => Some(Input::Down),
+        Key::Named(NamedKey::ArrowLeft) => Some(Input::Left),
+        Key::Named(NamedKey::ArrowRight) => Some(Input::Right),
+        Key::Named(NamedKey::Enter) => Some(Input::Enter),
+        Key::Named(NamedKey::Backspace) => Some(Input::Backspace),
+        Key::Named(NamedKey::Home) => Some(Input::Home),
+        Key::Named(NamedKey::End) => Some(Input::End),
+        Key::Named(NamedKey::PageUp) => Some(Input::PageUp),
+        Key::Named(NamedKey::PageDown) => Some(Input::PageDown),
+        Key::Character(text) => text
+            .chars()
+            .next()
+            .filter(|ch| !ch.is_control())
+            .map(Input::Char),
+        _ => event
+            .text
+            .as_deref()
+            .and_then(|text| text.chars().next())
+            .filter(|ch| !ch.is_control())
+            .map(Input::Char),
+    }
+}
+
+fn handle_transparency_pointer(host: &mut HostState, event: &WindowEvent) {
+    match event {
+        WindowEvent::CursorMoved { position, .. } => {
+            host.pointer_px = Some((position.x, position.y));
+            host.cursor_cell = None;
+            if host
+                .transparency
+                .as_ref()
+                .is_some_and(|dialog| dialog.dragging())
+            {
+                apply_transparency_input(
+                    host,
+                    transparency::Input::PointerMove(
+                        position.x.max(0.0) as usize,
+                        position.y.max(0.0) as usize,
+                    ),
+                );
+            }
+        }
+        WindowEvent::CursorLeft { .. } => {
+            host.pointer_px = None;
+            host.cursor_cell = None;
+            if host
+                .transparency
+                .as_ref()
+                .is_some_and(|dialog| dialog.dragging())
+            {
+                apply_transparency_input(host, transparency::Input::PointerUp);
+            }
+        }
+        WindowEvent::MouseWheel { delta, .. } => {
+            let rows = match delta {
+                MouseScrollDelta::LineDelta(_, y) => (-*y).round() as i32,
+                MouseScrollDelta::PixelDelta(position) => (-position.y / 48.0).round() as i32,
+            };
+            if rows != 0 {
+                apply_transparency_input(host, transparency::Input::Wheel(rows));
+            }
+        }
+        WindowEvent::MouseInput { state, button, .. } => {
+            if *button != MouseButton::Left {
+                return;
+            }
+            if *state == ElementState::Pressed {
+                if let Some((x, y)) = host.pointer_px {
+                    if x.is_finite() && y.is_finite() && x >= 0.0 && y >= 0.0 {
+                        apply_transparency_input(
+                            host,
+                            transparency::Input::PointerDown(x as usize, y as usize),
+                        );
+                    }
+                }
+            } else {
+                apply_transparency_input(host, transparency::Input::PointerUp);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn apply_transparency_input(host: &mut HostState, input: transparency::Input) {
+    let (close, writes, values) = {
+        let Some(dialog) = host.transparency.as_mut() else {
+            return;
+        };
+        let size = host.window.inner_size();
+        let edit = dialog.edit(
+            input,
+            host.mux.geom().chrome,
+            size.width as usize,
+            size.height as usize,
+        );
+        (edit.close, edit.writes, dialog.values.clone())
+    };
+    if close {
+        host.transparency = None;
+        host.window
+            .set_title(&window_title(&host.mux, show_tab_strip(host)));
+    }
+    if !writes.is_empty() {
+        match persist_transparency(&writes) {
+            Ok(()) => apply_transparency_live(host, &values, &writes),
+            Err(error) => {
+                let message = format!("transparency save failed: {error:#}");
+                eprintln!("prismattyc-host: {message}");
+                host.config_error = Some(message);
+            }
+        }
+    }
+    host.dirty = true;
+    sync_chrome_hover(host);
+}
+
+fn persist_transparency(writes: &[transparency::Write]) -> Result<()> {
+    let path = config::config_path();
+    for write in writes {
+        match write {
+            transparency::Write::WindowOpacity(value) => {
+                config::save_preference(
+                    &path,
+                    "window_opacity",
+                    toml_edit::value(f64::from(*value)),
+                )?;
+            }
+            transparency::Write::ChromeOpacity(None) => {
+                config::clear_preference(&path, "chrome_opacity")?;
+            }
+            transparency::Write::ChromeOpacity(Some(value)) => {
+                config::save_preference(
+                    &path,
+                    "chrome_opacity",
+                    toml_edit::value(f64::from(*value)),
+                )?;
+            }
+            transparency::Write::WindowBlur(value) => {
+                config::save_preference(&path, "window_blur", toml_edit::value(*value))?;
+            }
+            transparency::Write::PaneActive(value) => {
+                config::save_preference(
+                    &path,
+                    "pane_opacity_active",
+                    toml_edit::value(f64::from(*value)),
+                )?;
+            }
+            transparency::Write::PaneInactive(value) => {
+                config::save_preference(
+                    &path,
+                    "pane_opacity_inactive",
+                    toml_edit::value(f64::from(*value)),
+                )?;
+            }
+            transparency::Write::BackgroundImage(None) => {
+                config::clear_preference(&path, "background_image")?;
+            }
+            transparency::Write::BackgroundImage(Some(image)) => {
+                config::save_preference(&path, "background_image", toml_edit::value(image))?;
+            }
+            transparency::Write::ImageOpacity(value) => {
+                config::save_preference(
+                    &path,
+                    "background_opacity",
+                    toml_edit::value(f64::from(*value)),
+                )?;
+            }
+            transparency::Write::ImageBlur(value) => {
+                config::save_preference(
+                    &path,
+                    "background_blur_px",
+                    toml_edit::value(i64::from(*value)),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_transparency_live(
+    host: &mut HostState,
+    values: &transparency::Values,
+    writes: &[transparency::Write],
+) {
+    let window_changed = writes
+        .iter()
+        .any(|write| matches!(write, transparency::Write::WindowOpacity(_)));
+    let chrome_changed = writes
+        .iter()
+        .any(|write| matches!(write, transparency::Write::ChromeOpacity(_)));
+    let blur_changed = writes
+        .iter()
+        .any(|write| matches!(write, transparency::Write::WindowBlur(_)));
+    let image_changed = writes
+        .iter()
+        .any(|write| matches!(write, transparency::Write::BackgroundImage(_)));
+    let image_look_changed = writes.iter().any(|write| {
+        matches!(
+            write,
+            transparency::Write::ImageOpacity(_) | transparency::Write::ImageBlur(_)
+        )
+    });
+    let pane_changed = writes.iter().any(|write| {
+        matches!(
+            write,
+            transparency::Write::PaneActive(_) | transparency::Write::PaneInactive(_)
+        )
+    });
+    if image_changed {
+        let image = values.background_image.as_deref().map(std::path::Path::new);
+        host.background_png = load_background_png(image);
+        host.background = None;
+    }
+    if image_changed || image_look_changed {
+        host.background_opacity = values.background_opacity;
+        host.background_blur_px = values.background_blur_px;
+        host.background = None;
+    }
+    if pane_changed {
+        host.pane_opacity_active = values.pane_opacity_active;
+        host.pane_opacity_inactive = values.pane_opacity_inactive;
+    }
+    #[cfg(target_os = "macos")]
+    if window_changed || chrome_changed || blur_changed {
+        let wants =
+            values.window_blur || values.window_opacity < 1.0 || values.chrome_opacity < 1.0;
+        host.window.set_transparent(wants);
+    }
+    if host.alpha_visual && (window_changed || chrome_changed) {
+        let chrome = if values.chrome_follows {
+            values.window_opacity
+        } else {
+            values.chrome_opacity
+        };
+        host.window_alpha = opacity_to_alpha(values.window_opacity);
+        host.chrome_alpha = opacity_to_alpha(chrome);
+        host.background = None;
+    }
+    if !host.alpha_visual && window_changed && values.window_opacity < 1.0 {
+        eprintln!(
+            "prismattyc-host: window_opacity changed to {}; restart the host to \
+             recreate the window with an alpha visual",
+            values.window_opacity
+        );
+    }
+    #[cfg(target_os = "macos")]
+    if blur_changed {
+        let active = if values.window_blur && host.alpha_visual {
+            macos_window::set_window_blur(&host.window, true)
+        } else {
+            let _ = macos_window::set_window_blur(&host.window, false);
+            false
+        };
+        host.window_blur_active = active;
+    }
+    #[cfg(target_os = "macos")]
+    if blur_changed || window_changed {
+        macos_window::sync_titlebar_background(
+            &host.window,
+            macos_window::titlebar_needs_fill(values.window_opacity, values.window_blur),
+        );
+    }
+    host.dirty = true;
 }
 
 fn open_theme_picker(host: &mut HostState) {
@@ -11556,6 +11972,7 @@ fn mux_command_for(action: keybind::Action) -> Option<MuxCommand> {
         | Action::PaletteFilterNext
         | Action::PaletteFilterPrev
         | Action::ThemePicker
+        | Action::Transparency
         | Action::Find
         | Action::ClearScrollback
         | Action::IncreaseFontSize
@@ -12819,7 +13236,11 @@ fn pane_scrollbar_at(
     px: usize,
     py: usize,
 ) -> Option<(PaneId, ScrollbarLayout, usize)> {
-    if host.theme_picker.is_some() || host.palette.is_some() || host.splash.is_some() {
+    if host.theme_picker.is_some()
+        || host.transparency.is_some()
+        || host.palette.is_some()
+        || host.splash.is_some()
+    {
         return None;
     }
     let geom = host.mux.geom();
@@ -12850,6 +13271,7 @@ fn pane_scrollbar_at(
 
 fn walkthrough_overlay_open(host: &HostState) -> bool {
     host.palette.is_some()
+        || host.transparency.is_some()
         || host.theme_picker.is_some()
         || host.find.active
         || host.space_picker.is_some()
@@ -13986,9 +14408,11 @@ fn action_route(action: keybind::Action) -> ActionRoute {
         Action::IncreaseFontSize => ActionRoute::IncreaseFontSize,
         Action::DecreaseFontSize => ActionRoute::DecreaseFontSize,
         Action::ResetFontSize => ActionRoute::ResetFontSize,
-        Action::ThemePicker | Action::OpenSpace | Action::DeleteSpace | Action::MovePaneToSpace => {
-            ActionRoute::Noop
-        }
+        Action::ThemePicker
+        | Action::Transparency
+        | Action::OpenSpace
+        | Action::DeleteSpace
+        | Action::MovePaneToSpace => ActionRoute::Noop,
         Action::SpaceRailFocus => ActionRoute::SpaceRailFocus,
         Action::SpaceSettings => ActionRoute::SpaceSettings,
         Action::UndoSpaceChange => ActionRoute::UndoSpaceChange,
@@ -14219,6 +14643,10 @@ fn dispatch_palette_mouse_action(
 ) -> Dispatch {
     if action == keybind::Action::ThemePicker {
         open_theme_picker(host);
+        return Dispatch::Handled;
+    }
+    if action == keybind::Action::Transparency {
+        let _ = open_transparency(host);
         return Dispatch::Handled;
     }
     if open_space_picker(host, Some(action)) {
@@ -14541,6 +14969,20 @@ impl ApplicationHandler<UserAction> for App {
         if restore_prompt::handle_pointer(host, &event) {
             return;
         }
+        if host.transparency.is_some()
+            && matches!(
+                &event,
+                WindowEvent::CursorMoved { .. }
+                    | WindowEvent::CursorLeft { .. }
+                    | WindowEvent::MouseWheel { .. }
+                    | WindowEvent::MouseInput { .. }
+            )
+        {
+            handle_transparency_pointer(host, &event);
+            sync_chrome_hover(host);
+            host.window.request_redraw();
+            return;
+        }
 
         if (host.theme_picker.is_some()
             || host.palette.is_some()
@@ -14750,6 +15192,10 @@ impl ApplicationHandler<UserAction> for App {
                 let keymap = self.keymap.clone();
                 let action_any = event_action(&keymap, &event, host.modifiers);
                 let action = if event.repeat { None } else { action_any };
+                if handle_transparency_key(host, &event, action) {
+                    host.window.request_redraw();
+                    return;
+                }
                 match handle_palette_key(host, &event, action) {
                     PaletteVerdict::NotHandled => {}
                     PaletteVerdict::Consumed | PaletteVerdict::Close => {
@@ -14757,7 +15203,8 @@ impl ApplicationHandler<UserAction> for App {
                         return;
                     }
                     PaletteVerdict::Run(selected) => {
-                        let modal = handle_theme_picker_key(host, &event, Some(selected))
+                        let modal = handle_transparency_key(host, &event, Some(selected))
+                            || handle_theme_picker_key(host, &event, Some(selected))
                             || handle_space_picker_key(host, &event, Some(selected))
                             || handle_find_key(host, &event, Some(selected));
                         if !modal {
@@ -15882,6 +16329,7 @@ mod tests {
             (Action::DecreaseFontSize, ActionRoute::DecreaseFontSize),
             (Action::ResetFontSize, ActionRoute::ResetFontSize),
             (Action::ThemePicker, ActionRoute::Noop),
+            (Action::Transparency, ActionRoute::Noop),
             (Action::OpenSpace, ActionRoute::Noop),
             (Action::DeleteSpace, ActionRoute::Noop),
             (Action::MovePaneToSpace, ActionRoute::Noop),
@@ -17319,6 +17767,13 @@ mod tests {
                 "save-space",
                 TransientOverlayState {
                     save_space: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "transparency",
+                TransientOverlayState {
+                    transparency: true,
                     ..Default::default()
                 },
             ),
@@ -20860,12 +21315,24 @@ session mail (id 15)
             Some(HoverTarget::ContextMenuRow(1)),
             Some(HoverTarget::DialogButton(0)),
             Some(HoverTarget::ToastDismiss(0)),
+            Some(HoverTarget::Transparency { dragging: false }),
         ] {
             assert_eq!(
                 cursor_for_hover(hover, false, false, None, false),
                 CursorIcon::Pointer
             );
         }
+        assert_eq!(
+            cursor_for_hover(
+                Some(HoverTarget::Transparency { dragging: true }),
+                false,
+                false,
+                None,
+                false
+            ),
+            CursorIcon::Grab,
+            "a transparency slider drag uses the grab cursor"
+        );
         assert_eq!(
             cursor_for_hover(tab, true, false, None, true),
             CursorIcon::Grab

@@ -246,6 +246,8 @@ pub struct Palette {
     pub awaiting_digit: Option<PaletteEntry>,
     /// Most recent first, concrete actions only.
     pub recent: Vec<Action>,
+    /// Graphite chrome lists `transparency`. Classic palettes leave it out.
+    pub show_graphite: bool,
 }
 
 impl Palette {
@@ -314,10 +316,10 @@ impl Palette {
     }
 
     /// Every selectable entry in documentation order, families collapsed.
-    fn entries(rich: bool) -> Vec<PaletteEntry> {
+    fn entries(rich: bool, graphite: bool) -> Vec<PaletteEntry> {
         let mut entries = Vec::new();
         for action in Action::all() {
-            if excluded(action, rich) {
+            if excluded(action, rich, graphite) {
                 continue;
             }
             match action {
@@ -346,7 +348,7 @@ impl Palette {
             .recent
             .iter()
             .copied()
-            .filter(|action| !excluded(*action, rich))
+            .filter(|action| !excluded(*action, rich, self.show_graphite))
             .map(PaletteEntry::Action)
             .filter(|entry| self.passes(*entry, &query).is_some())
             .take(RECENT_CAP)
@@ -354,7 +356,10 @@ impl Palette {
             .collect();
 
         let mut ranked = Vec::new();
-        for (order, entry) in Self::entries(rich).into_iter().enumerate() {
+        for (order, entry) in Self::entries(rich, self.show_graphite)
+            .into_iter()
+            .enumerate()
+        {
             if let Some(score) = self.passes(entry, &query) {
                 ranked.push((score, order, entry));
             }
@@ -866,11 +871,12 @@ impl SpacePicker {
     }
 }
 
-fn excluded(action: Action, rich: bool) -> bool {
+fn excluded(action: Action, rich: bool, graphite: bool) -> bool {
     matches!(
         action,
         Action::CommandPalette | Action::PaletteFilterNext | Action::PaletteFilterPrev
     ) || (!rich && action == Action::RichFocus)
+        || (!graphite && action == Action::Transparency)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1118,12 +1124,23 @@ mod tests {
 
     #[test]
     fn empty_query_returns_documentation_order_with_families_collapsed() {
+        let graphite = Palette {
+            show_graphite: true,
+            ..Palette::default()
+        };
+        let graphite_view = graphite.view(&keymap(), false);
+        let graphite_names = names(&graphite_view.matches);
+        assert!(graphite_names.contains(&"transparency"));
         let view = Palette::default().view(&keymap(), false);
         let names = names(&view.matches);
         assert_eq!(names.first(), Some(&"split_right"));
         assert!(!names.contains(&"rich_focus"));
         assert!(!names.contains(&"command_palette"));
         assert!(!names.contains(&"palette_filter_next"));
+        assert!(
+            !names.contains(&"transparency"),
+            "classic palettes hide the graphite dialog"
+        );
         assert_eq!(
             names.iter().filter(|n| n.starts_with("select_tab")).count(),
             1

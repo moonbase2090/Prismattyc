@@ -47,6 +47,21 @@ const TAB_MARKER_OPACITY: f32 = 0.7;
 pub(crate) const TAB_LABEL_INSET: usize = 4;
 /// Suffix on a tab label whose pane is zoomed (PT-57), like tmux `Z`.
 const TAB_ZOOM_MARK: &str = "[Z]";
+
+/// Chip label for a tab. A zoomed tab holding more than one pane reads
+/// "N panes · zoomed" (issue #107); a zoomed single pane keeps its title
+/// plus the zoom mark; anything else keeps the decided label.
+fn zoomed_label<'a>(label: &'a str, zoomed: bool, handles: usize, buf: &'a mut String) -> &'a str {
+    if zoomed && handles > 1 {
+        *buf = format!("{handles} panes · zoomed");
+        return buf;
+    }
+    if zoomed {
+        *buf = format!("{label} {TAB_ZOOM_MARK}");
+        return buf;
+    }
+    label
+}
 #[cfg(test)]
 const PANE_BORDER: [u8; 3] = [0x45, 0x4a, 0x57];
 #[cfg(test)]
@@ -4763,7 +4778,7 @@ pub fn rasterize_tab_strip_with_theme(
             } else {
                 TAB_LABEL_INSET
             });
-        let zoomed_title;
+        let mut zoomed_title = String::new();
         let hover_handle = match hover {
             Some(crate::mux::StripHit::Pane {
                 tab: hit_tab,
@@ -4787,14 +4802,7 @@ pub fn rasterize_tab_strip_with_theme(
         );
         let label = match editing.and_then(|(idx, text, _)| (idx == i).then_some(text)) {
             Some(text) => text,
-            None => {
-                if tab.zoomed {
-                    zoomed_title = format!("{} {TAB_ZOOM_MARK}", decided.label);
-                    zoomed_title.as_str()
-                } else {
-                    decided.label
-                }
-            }
+            None => zoomed_label(decided.label, tab.zoomed, tab.handles, &mut zoomed_title),
         };
         let git_label = if !editing_here {
             tab.git_label.as_deref().map(|git| {
@@ -12493,6 +12501,15 @@ mod tests {
         let title_same = (0..bar_h)
             .all(|y| (end_pad..mark_x).all(|x| zoomed[y * width + x] == plain[y * width + x]));
         assert!(title_same, "the title itself must not move");
+    }
+
+    #[test]
+    fn zoomed_multi_pane_tab_reads_pane_count() {
+        let mut buf = String::new();
+        assert_eq!(zoomed_label("main", true, 4, &mut buf), "4 panes · zoomed");
+        assert_eq!(zoomed_label("main", true, 2, &mut buf), "2 panes · zoomed");
+        assert_eq!(zoomed_label("main", true, 0, &mut buf), "main [Z]");
+        assert_eq!(zoomed_label("main", false, 4, &mut buf), "main");
     }
 
     #[test]

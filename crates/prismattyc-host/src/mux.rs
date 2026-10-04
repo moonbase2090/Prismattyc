@@ -145,6 +145,38 @@ pub(crate) enum PresetOutcome {
     Unchanged(&'static str),
 }
 
+/// Arrange target for the tabs-bar Arrange buttons (issue #107): one pane,
+/// a side-by-side split, or a 2×2 grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArrangeTarget {
+    Single,
+    Split,
+    Grid,
+}
+
+impl ArrangeTarget {
+    /// Pane slots the target holds.
+    pub(crate) fn capacity(self) -> usize {
+        match self {
+            ArrangeTarget::Single => 1,
+            ArrangeTarget::Split => 2,
+            ArrangeTarget::Grid => 4,
+        }
+    }
+}
+
+/// Outcome of [`MuxRuntime::arrange`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArrangeOutcome {
+    /// Retiled (and grew) to the target; `spawned` empty shells were added.
+    Applied { spawned: usize },
+    /// Shrinking never closes panes: the focused pane zoomed while `hidden`
+    /// siblings keep running.
+    Zoomed { total: usize, hidden: usize },
+    /// Already in the target state (single pane, or zoomed on the focus).
+    Unchanged,
+}
+
 /// Attach pane after its child exited (PT-68).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Placeholder {
@@ -2346,6 +2378,62 @@ impl MuxRuntime {
             return Err(error);
         }
         Ok(PresetOutcome::Applied)
+    }
+
+    /// Arrange the active tab as single, side-by-side split, or 2×2 grid
+    /// (issue #107). Growing spawns empty shells to fill the target with
+    /// focus unchanged; shrinking never closes panes, it zooms the focused
+    /// pane. Callers that spawn owned Space panes must pre-spawn those
+    /// first; this only spawns local shells.
+    pub(crate) fn arrange(
+        &mut self,
+        target: ArrangeTarget,
+        program: &str,
+        child_args: &[String],
+    ) -> Result<ArrangeOutcome> {
+        let focused = self.focused_id();
+        let n = self.active_pane_count();
+        let capacity = target.capacity();
+        if n < capacity {
+            match target {
+                ArrangeTarget::Single => {
+                    unreachable!("single capacity holds one pane; growing is impossible")
+                }
+                ArrangeTarget::Split => {
+                    self.ensure_even_columns(program, child_args, 2)?;
+                }
+                ArrangeTarget::Grid => {
+                    self.ensure_even_quadrants(program, child_args)?;
+                }
+            }
+            self.focus(focused);
+            return Ok(ArrangeOutcome::Applied {
+                spawned: capacity - n,
+            });
+        }
+        if n == capacity {
+            match target {
+                ArrangeTarget::Single => {
+                    self.apply_preset(LayoutPreset::Single)?;
+                }
+                ArrangeTarget::Split => {
+                    self.ensure_even_columns(program, child_args, 2)?;
+                }
+                ArrangeTarget::Grid => {
+                    self.ensure_even_quadrants(program, child_args)?;
+                }
+            }
+            return Ok(ArrangeOutcome::Applied { spawned: 0 });
+        }
+        if self.zoomed_here() == Some(focused) {
+            return Ok(ArrangeOutcome::Unchanged);
+        }
+        self.set_zoom(Some(focused))?;
+        let total = self.active_pane_count();
+        Ok(ArrangeOutcome::Zoomed {
+            total,
+            hidden: total.saturating_sub(1),
+        })
     }
 
     /// Toggle the client-local zoom of the focused pane (PT-57). Zoom is a
@@ -5238,6 +5326,82 @@ mod tests {
         );
         assert_eq!(runtime.zoomed_pane(), zoomed);
         assert_eq!(runtime.active_layout(), prior);
+    }
+
+    #[test]
+    fn arrange_grow_spawns_shells_and_keeps_focus() {
+        let mut runtime = spawn_n_panes(1, 80, 24);
+        let first = runtime.focused_id();
+        assert_eq!(
+            runtime
+                .arrange(ArrangeTarget::Grid, "/bin/sh", &[])
+                .unwrap(),
+            ArrangeOutcome::Applied { spawned: 3 }
+        );
+        assert_eq!(runtime.active_pane_count(), 4);
+        assert_eq!(runtime.focused_id(), first, "growing keeps focus");
+        assert!(!runtime.is_zoomed());
+
+        let mut runtime = spawn_n_panes(1, 80, 24);
+        assert_eq!(
+            runtime
+                .arrange(ArrangeTarget::Split, "/bin/sh", &[])
+                .unwrap(),
+            ArrangeOutcome::Applied { spawned: 1 }
+        );
+        assert_eq!(runtime.active_pane_count(), 2);
+        assert_eq!(layout_shape(&runtime.active_layout()), "[H L L]");
+    }
+
+    #[test]
+    fn arrange_shrink_zooms_without_closing() {
+        let mut runtime = spawn_n_panes(1, 80, 24);
+        runtime
+            .arrange(ArrangeTarget::Grid, "/bin/sh", &[])
+            .unwrap();
+        assert_eq!(runtime.active_pane_count(), 4);
+        let focused = runtime.focused_id();
+        assert_eq!(
+            runtime
+                .arrange(ArrangeTarget::Single, "/bin/sh", &[])
+                .unwrap(),
+            ArrangeOutcome::Zoomed {
+                total: 4,
+                hidden: 3
+            }
+        );
+        assert_eq!(runtime.active_pane_count(), 4, "shrinking never closes");
+        assert_eq!(runtime.zoomed_pane(), Some(focused));
+        assert_eq!(
+            runtime
+                .arrange(ArrangeTarget::Single, "/bin/sh", &[])
+                .unwrap(),
+            ArrangeOutcome::Unchanged,
+            "repeating the shrink is a no-op"
+        );
+
+        let mut runtime = spawn_n_panes(1, 80, 24);
+        runtime
+            .arrange(ArrangeTarget::Grid, "/bin/sh", &[])
+            .unwrap();
+        assert_eq!(
+            runtime
+                .arrange(ArrangeTarget::Split, "/bin/sh", &[])
+                .unwrap(),
+            ArrangeOutcome::Zoomed {
+                total: 4,
+                hidden: 3
+            }
+        );
+        assert_eq!(runtime.active_pane_count(), 4);
+        assert_eq!(
+            runtime
+                .arrange(ArrangeTarget::Grid, "/bin/sh", &[])
+                .unwrap(),
+            ArrangeOutcome::Applied { spawned: 0 },
+            "regrowing retile-unzooms"
+        );
+        assert!(!runtime.is_zoomed());
     }
 
     #[test]

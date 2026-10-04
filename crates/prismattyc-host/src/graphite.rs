@@ -33,6 +33,19 @@ pub(crate) const TABS_BAR_H: Design = Design(44.0);
 pub(crate) const PANE_HEADER_H: f32 = 28.0;
 /// Bottom (or top) spaces bar height.
 pub(crate) const RAIL_H: Design = Design(30.0);
+/// Left/right column width at the default `space_rail_width_cols` (18).
+/// Other widths scale by `cols / 18` so the resize grip still saves that key.
+pub(crate) const SIDE_RAIL_W: Design = Design(220.0);
+/// `space_rail_width_cols` value that maps to [`SIDE_RAIL_W`].
+pub(crate) const SIDE_RAIL_DEFAULT_COLS: f32 = 18.0;
+const SIDE_HEADER_H: f32 = 44.0;
+const SIDE_FOOTER_H: f32 = 56.0;
+const SIDE_CHIP_H: f32 = 44.0;
+const SIDE_CHIP_H_COMPACT: f32 = 28.0;
+const SIDE_GAP: f32 = 4.0;
+const SIDE_PAD: f32 = 8.0;
+const SIDE_THUMB_W: f32 = 8.0;
+const SIDE_THUMB_MIN_H: f32 = 18.0;
 /// Window edge, pane gap, and pane padding defaults when the user has not
 /// set `window_padding_px`, `pane_gap_px`, or `pane_padding_px`.
 pub(crate) const WINDOW_PAD: Design = Design(8.0);
@@ -855,6 +868,28 @@ pub(crate) fn bar_layout(
         chord: chord.to_string(),
         chrome,
     }
+}
+
+/// Move a bar laid out at x = 0 so it sits beside a left spaces column.
+pub(crate) fn shift_bar(mut layout: BarLayout, dx: usize) -> BarLayout {
+    if dx == 0 {
+        return layout;
+    }
+    let shift = |rect: &mut Rect| {
+        rect.x = rect.x.saturating_add(dx);
+    };
+    shift(&mut layout.bar);
+    shift(&mut layout.dropdown);
+    layout.divider_x = layout.divider_x.saturating_add(dx);
+    for tab in &mut layout.tabs {
+        shift(&mut tab.chip);
+        shift(&mut tab.close);
+    }
+    shift(&mut layout.plus);
+    if let Some(command) = layout.command.as_mut() {
+        shift(command);
+    }
+    layout
 }
 
 /// What sits under a window pixel in the tabs bar.
@@ -1751,6 +1786,57 @@ fn envelope(buffer: &mut [u32], stride: usize, x: f32, cy: f32, w: f32, width: f
 // ---------------------------------------------------------------------------
 // Spaces bar (bottom or top)
 
+/// Pixel width of a Graphite left/right column for `space_rail_width_cols`.
+pub(crate) fn side_rail_px(chrome: ChromeGeom, cols: usize) -> usize {
+    let cols = (cols as f32).clamp(8.0, 60.0);
+    chrome.px(SIDE_RAIL_W.0 * cols / SIDE_RAIL_DEFAULT_COLS)
+}
+
+pub(crate) fn side_header_px(chrome: ChromeGeom) -> usize {
+    chrome.px(SIDE_HEADER_H)
+}
+
+pub(crate) fn side_footer_px(chrome: ChromeGeom) -> usize {
+    chrome.px(SIDE_FOOTER_H)
+}
+
+pub(crate) fn side_chip_px(chrome: ChromeGeom, pane_names: bool) -> usize {
+    chrome.px(if pane_names {
+        SIDE_CHIP_H
+    } else {
+        SIDE_CHIP_H_COMPACT
+    })
+}
+
+pub(crate) fn side_gap_px(chrome: ChromeGeom) -> usize {
+    chrome.px(SIDE_GAP)
+}
+
+pub(crate) fn side_pad_px(chrome: ChromeGeom) -> usize {
+    chrome.px(SIDE_PAD)
+}
+
+pub(crate) fn side_thumb_px(chrome: ChromeGeom) -> usize {
+    chrome.px(SIDE_THUMB_W).max(1)
+}
+
+pub(crate) fn side_thumb_min_px(chrome: ChromeGeom) -> usize {
+    chrome.px(SIDE_THUMB_MIN_H).max(1)
+}
+
+/// Columns saved by a drag to `px`, so 220 design px lands on 18 columns.
+pub(crate) fn side_cols_for_px(px: f64, scale_milli: u32, max_cols: usize) -> usize {
+    let scale = f64::from(scale_milli.max(1)) / 1000.0;
+    let per = f64::from(SIDE_RAIL_W.0) / f64::from(SIDE_RAIL_DEFAULT_COLS) * scale;
+    let cols = if per <= f64::EPSILON {
+        SIDE_RAIL_DEFAULT_COLS as usize
+    } else {
+        (px / per).round() as usize
+    };
+    let max_cols = max_cols.clamp(8, 60);
+    cols.clamp(8, max_cols)
+}
+
 /// Chip width for a Space name. The right `RAIL_CLOSE_W` is the close
 /// target, drawn only on hover.
 pub(crate) fn rail_chip_width(chrome: ChromeGeom, label: &str, current: bool) -> usize {
@@ -2020,6 +2106,298 @@ pub(crate) fn paint_rail_status(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Side column (left or right): fixed header and footer, scrolling list
+
+/// One two-line Space chip in the side column.
+pub(crate) struct SideChip<'a> {
+    pub slot: Rect,
+    pub label: &'a str,
+    pub panes: &'a str,
+    pub current: bool,
+    pub focused: bool,
+    pub editing: bool,
+    pub hovered: bool,
+    pub close_hovered: bool,
+}
+
+/// Everything the side column paints. The list viewport is the band between
+/// the header and the footer; chips outside it are not passed in.
+pub(crate) struct SideRailPaint<'a> {
+    pub column: Rect,
+    /// Hairline on the edge that faces the panes.
+    pub inner_on_right: bool,
+    pub header_h: usize,
+    pub footer_h: usize,
+    pub tok: &'a Tokens,
+    pub accent: Rgb,
+    pub chrome: ChromeGeom,
+    pub alpha: u8,
+    pub plus: Option<Rect>,
+    pub plus_label: &'a str,
+    pub plus_hovered: bool,
+    pub chips: &'a [SideChip<'a>],
+    pub working: usize,
+    pub attention: usize,
+    pub thumb: Option<Rect>,
+    pub show_pane_names: bool,
+}
+
+pub(crate) fn paint_side_rail(buffer: &mut [u32], stride: usize, paint: &SideRailPaint<'_>) {
+    let tok = paint.tok;
+    let column = paint.column;
+    let ground = pack_argb(paint.alpha, tok.status_bar);
+    for y in column.y..column.y.saturating_add(column.h) {
+        for x in column.x..column.right() {
+            set(buffer, stride, x, y, ground);
+        }
+    }
+    let line_x = if paint.inner_on_right {
+        column.right().saturating_sub(1)
+    } else {
+        column.x
+    };
+    let line = pack_argb(0xff, tok.status_line);
+    for y in column.y..column.y.saturating_add(column.h) {
+        set(buffer, stride, line_x, y, line);
+    }
+    let header_bottom = column.y.saturating_add(paint.header_h.min(column.h));
+    for x in column.x..column.right() {
+        set(buffer, stride, x, header_bottom.saturating_sub(1), line);
+    }
+    let footer_top = column
+        .y
+        .saturating_add(column.h)
+        .saturating_sub(paint.footer_h.min(column.h));
+    if footer_top > column.y {
+        for x in column.x..column.right() {
+            set(buffer, stride, x, footer_top, line);
+        }
+    }
+    let s = |d: f32| d * paint.chrome.scale_milli as f32 / 1000.0;
+    let pad = paint.chrome.px(SIDE_PAD);
+    let title_right = paint
+        .plus
+        .map(|plus| plus.x.saturating_sub(pad))
+        .unwrap_or(column.right().saturating_sub(pad));
+    draw_text(
+        buffer,
+        stride,
+        column.x as f32 + pad as f32,
+        column.y as f32 + paint.header_h as f32 / 2.0,
+        Face::SemiBold,
+        s(TAB_TEXT),
+        "Spaces",
+        tok.text,
+        column.x,
+        title_right,
+    );
+    if let Some(slot) = paint.plus {
+        paint_rail_button(
+            buffer,
+            stride,
+            paint.chrome,
+            tok,
+            slot,
+            paint.plus_label,
+            paint.plus_hovered,
+        );
+    }
+    for chip in paint.chips {
+        paint_side_chip(buffer, stride, paint, chip);
+    }
+    if let Some(thumb) = paint.thumb {
+        fill_round_rect(buffer, stride, thumb, s(3.0), tok.separator, 0xff);
+    }
+    paint_side_footer(buffer, stride, paint, footer_top);
+}
+
+fn paint_side_chip(
+    buffer: &mut [u32],
+    stride: usize,
+    paint: &SideRailPaint<'_>,
+    chip: &SideChip<'_>,
+) {
+    let s = |d: f32| d * paint.chrome.scale_milli as f32 / 1000.0;
+    let tok = paint.tok;
+    let rect = chip.slot;
+    if chip.editing || chip.focused {
+        let fill = if chip.current {
+            tok.chip_active
+        } else {
+            tok.status_bar
+        };
+        outlined_round_rect(buffer, stride, rect, s(6.0), paint.accent, fill);
+    } else if chip.current {
+        fill_round_rect(buffer, stride, rect, s(6.0), tok.chip_active, 0xff);
+    } else if chip.hovered {
+        fill_round_rect(buffer, stride, rect, s(6.0), tok.tab_hover, 0xff);
+    }
+    let close_x = rect.right().saturating_sub(paint.chrome.px(RAIL_CLOSE_W));
+    let name_y = if paint.show_pane_names {
+        rect.y as f32 + rect.h as f32 * 0.34
+    } else {
+        rect.center_y()
+    };
+    let mut x = rect.x as f32 + s(RAIL_CHIP_PAD_X);
+    if chip.current {
+        fill_circle(
+            buffer,
+            stride,
+            x + s(RAIL_DOT) / 2.0,
+            name_y,
+            s(RAIL_DOT) / 2.0,
+            paint.accent,
+        );
+        x += s(RAIL_DOT) + s(7.0);
+    }
+    let ink = if chip.current || chip.editing {
+        tok.text
+    } else {
+        tok.muted
+    };
+    let label = ellipsize(
+        Face::Regular,
+        s(RAIL_TEXT),
+        chip.label,
+        (close_x as f32 - x).max(0.0),
+    );
+    draw_text(
+        buffer,
+        stride,
+        x,
+        name_y,
+        Face::Regular,
+        s(RAIL_TEXT),
+        &label,
+        ink,
+        rect.x,
+        close_x,
+    );
+    if paint.show_pane_names && !chip.panes.is_empty() && !chip.editing {
+        let panes = ellipsize(
+            Face::Regular,
+            s(11.0),
+            chip.panes,
+            (close_x as f32 - rect.x as f32 - s(RAIL_CHIP_PAD_X)).max(0.0),
+        );
+        draw_text(
+            buffer,
+            stride,
+            rect.x as f32 + s(RAIL_CHIP_PAD_X),
+            rect.y as f32 + rect.h as f32 * 0.72,
+            Face::Regular,
+            s(11.0),
+            &panes,
+            tok.muted,
+            rect.x,
+            close_x,
+        );
+    }
+    if chip.hovered && !chip.editing {
+        let cy = name_y;
+        let ccx = close_x as f32 + s(RAIL_CLOSE_W) / 2.0 - s(2.0);
+        if chip.close_hovered {
+            fill_circle(
+                buffer,
+                stride,
+                ccx,
+                cy,
+                s(7.0),
+                mix_rgb(tok.chip_active, tok.text, 40),
+            );
+        }
+        let arm = s(3.0);
+        let ink = if chip.close_hovered {
+            tok.text_strong
+        } else {
+            tok.muted
+        };
+        stroke_line(
+            buffer,
+            stride,
+            ccx - arm,
+            cy - arm,
+            ccx + arm,
+            cy + arm,
+            s(1.3),
+            ink,
+        );
+        stroke_line(
+            buffer,
+            stride,
+            ccx + arm,
+            cy - arm,
+            ccx - arm,
+            cy + arm,
+            s(1.3),
+            ink,
+        );
+    }
+}
+
+fn paint_side_footer(
+    buffer: &mut [u32],
+    stride: usize,
+    paint: &SideRailPaint<'_>,
+    footer_top: usize,
+) {
+    let s = |d: f32| d * paint.chrome.scale_milli as f32 / 1000.0;
+    let tok = paint.tok;
+    let px = s(RAIL_TEXT);
+    let pad = paint.chrome.px(SIDE_PAD) as f32;
+    let left = paint.column.x as f32 + pad;
+    let right = paint
+        .column
+        .right()
+        .saturating_sub(paint.chrome.px(SIDE_PAD));
+    let footer_h = paint.column.y + paint.column.h - footer_top;
+    let mut rows: Vec<(Option<Rgb>, String)> = Vec::new();
+    if paint.working > 0 {
+        rows.push((Some(tok.working), format!("{} working", paint.working)));
+    }
+    if paint.attention > 0 {
+        rows.push((
+            Some(tok.attention),
+            format!("{} needs you", paint.attention),
+        ));
+    }
+    rows.push((None, "Hold Ctrl Shift for shortcuts".to_string()));
+    let row_h = if rows.len() <= 1 {
+        footer_h as f32
+    } else {
+        footer_h as f32 / rows.len() as f32
+    };
+    for (index, (dot, text)) in rows.iter().enumerate() {
+        let cy = footer_top as f32 + row_h * (index as f32 + 0.5);
+        let mut x = left;
+        if let Some(color) = dot {
+            fill_circle(
+                buffer,
+                stride,
+                x + s(RAIL_DOT) / 2.0,
+                cy,
+                s(RAIL_DOT) / 2.0,
+                *color,
+            );
+            x += s(RAIL_DOT) + s(6.0);
+        }
+        let label = ellipsize(Face::Regular, px, text, (right as f32 - x).max(0.0));
+        draw_text(
+            buffer,
+            stride,
+            x,
+            cy,
+            Face::Regular,
+            px,
+            &label,
+            tok.muted,
+            paint.column.x,
+            right,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2234,5 +2612,467 @@ mod tests {
         assert_eq!(unpack_rgb(buffer[y * 800 + x]), accent);
         // Bar ground in the gap left of the first chip.
         assert_eq!(unpack_rgb(buffer[2 * 800 + 1]), DARK.bar);
+    }
+
+    #[test]
+    fn side_column_is_220px_at_the_default_width_and_tracks_the_grip() {
+        assert_eq!(side_rail_px(scale(1000), 18), 220);
+        assert_eq!(side_rail_px(scale(2000), 18), 440);
+        assert_eq!(side_rail_px(scale(1000), 36), 440);
+        assert_eq!(side_cols_for_px(220.0, 1000, 60), 18);
+        assert_eq!(side_cols_for_px(440.0, 2000, 60), 18);
+        assert_eq!(side_header_px(scale(1000)), 44);
+        assert_eq!(side_chip_px(scale(1000), true), 44);
+        assert_eq!(side_chip_px(scale(1000), false), 28);
+    }
+
+    #[test]
+    fn shift_bar_keeps_hits_on_the_moved_chips() {
+        let tabs = vec![tab("grid", true)];
+        let layout = shift_bar(bar_layout(scale(1000), 800, 0, "lab", &tabs, ""), 220);
+        assert_eq!(layout.bar.x, 220);
+        assert_eq!(layout.bar.w, 800);
+        let (x, y) = (
+            layout.tabs[0].chip.x + 4,
+            layout.tabs[0].chip.y + layout.tabs[0].chip.h / 2,
+        );
+        assert_eq!(
+            bar_hit(&layout, x, y, false),
+            Some(StripHit::Tab {
+                index: 0,
+                close: false
+            })
+        );
+        assert_eq!(bar_hit(&layout, 10, y, false), None, "inside the column");
+    }
+
+    #[test]
+    fn horizontal_rail_hairline_sits_on_the_pane_side() {
+        let mut bottom = vec![0u32; 40 * 30];
+        paint_rail_bar(&mut bottom, 40, &DARK, Rect::new(0, 0, 40, 30), true, 0xff);
+        assert_eq!(
+            unpack_rgb(bottom[0]),
+            DARK.status_line,
+            "bottom bar: line on top"
+        );
+        assert_eq!(unpack_rgb(bottom[29 * 40]), DARK.status_bar);
+        let mut top = vec![0u32; 40 * 30];
+        paint_rail_bar(&mut top, 40, &DARK, Rect::new(0, 0, 40, 30), false, 0xff);
+        assert_eq!(
+            unpack_rgb(top[29 * 40 + 3]),
+            DARK.status_line,
+            "top bar: line on bottom"
+        );
+        assert_eq!(unpack_rgb(top[3]), DARK.status_bar);
+    }
+
+    #[test]
+    fn side_column_paints_header_list_footer_and_an_inner_grip_line() {
+        let (w, h) = (220usize, 400usize);
+        let mut buffer = vec![pack_argb(0xff, DARK.ground); w * h];
+        let chip = SideChip {
+            slot: Rect::new(8, 52, 188, 44),
+            label: "release-lab",
+            panes: "build · review",
+            current: true,
+            focused: false,
+            editing: false,
+            hovered: false,
+            close_hovered: false,
+        };
+        paint_side_rail(
+            &mut buffer,
+            w,
+            &SideRailPaint {
+                column: Rect::new(0, 0, w, h),
+                inner_on_right: true,
+                header_h: 44,
+                footer_h: 56,
+                tok: &DARK,
+                accent: rgb(0x5aa2ff),
+                chrome: scale(1000),
+                alpha: 0xff,
+                plus: Some(Rect::new(120, 11, 90, 22)),
+                plus_label: "+ New space",
+                plus_hovered: false,
+                chips: &[chip],
+                working: 2,
+                attention: 1,
+                thumb: Some(Rect::new(206, 80, 8, 40)),
+                show_pane_names: true,
+            },
+        );
+        assert_eq!(unpack_rgb(buffer[10 * w + 10]), DARK.status_bar);
+        assert_eq!(
+            unpack_rgb(buffer[20 * w + (w - 1)]),
+            DARK.status_line,
+            "grip hairline on the inner edge"
+        );
+        assert_eq!(
+            unpack_rgb(buffer[43 * w + 8]),
+            DARK.status_line,
+            "header rule"
+        );
+        // Current chip fill sits inside the rounded rect, not on the corner.
+        assert_eq!(unpack_rgb(buffer[70 * w + 40]), DARK.chip_active);
+        assert_eq!(unpack_rgb(buffer[(h - 8) * w + 40]), DARK.status_bar);
+        let footer_y = h - 24;
+        let footer_ink = buffer[footer_y * w + 12..footer_y * w + 180]
+            .iter()
+            .any(|px| {
+                let rgb = unpack_rgb(*px);
+                rgb != DARK.status_bar && rgb != DARK.status_line
+            });
+        assert!(footer_ink, "footer hint is painted");
+    }
+
+    use crate::mux::HostGeom;
+    use crate::space_rail::{RailSide, SpaceRail};
+
+    /// The ten position boards (bottom/top/left/right/off, dark and light).
+    /// Set `PRISMATTYC_GRAPHITE_SHOTS` to a directory to write them. Unset,
+    /// this test does not touch the filesystem.
+    #[test]
+    fn position_boards_write_when_shots_are_requested() {
+        let Some(dir) = std::env::var_os("PRISMATTYC_GRAPHITE_SHOTS") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).expect("shot directory");
+        let (w, h) = (1280usize, 600usize);
+        for (theme, light) in [("dark", false), ("light", true)] {
+            for side in [
+                RailSide::Bottom,
+                RailSide::Top,
+                RailSide::Left,
+                RailSide::Right,
+                RailSide::Off,
+            ] {
+                let buffer = paint_position_board(w, h, side, light);
+                let tok = if light { &LIGHT } else { &DARK };
+                let rail_px = shot_geom(side).rail_px;
+                let (index, expected) = match side {
+                    RailSide::Left => (10 * w + 12, tok.status_bar),
+                    RailSide::Right => (10 * w + w - rail_px + 12, tok.status_bar),
+                    RailSide::Top => (8 * w + 8, tok.status_bar),
+                    RailSide::Bottom | RailSide::Off => (8 * w + 8, tok.bar),
+                };
+                assert_eq!(unpack_rgb(buffer[index]), expected, "{theme} {side:?}");
+                let path = dir.join(format!("{}-{theme}.png", side.as_str()));
+                super::super::write_present_png(&path, &buffer, w as u32, h as u32)
+                    .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+            }
+        }
+    }
+
+    fn shot_chrome() -> ChromeGeom {
+        ChromeGeom {
+            graphite: true,
+            scale_milli: 1000,
+        }
+    }
+
+    fn shot_geom(side: RailSide) -> HostGeom {
+        let chrome = shot_chrome();
+        let mut geom = HostGeom::tight(8, 16);
+        geom.window_pad = 8;
+        geom.rail_side = side;
+        geom.chrome = chrome;
+        geom.top_chrome_px = TABS_BAR_H.px(chrome);
+        geom.rail_px = match side {
+            RailSide::Off => 0,
+            RailSide::Bottom | RailSide::Top => RAIL_H.px(chrome),
+            RailSide::Left | RailSide::Right => side_rail_px(chrome, 18),
+        };
+        geom
+    }
+
+    fn sample_rail() -> SpaceRail {
+        let mut rail = SpaceRail::new(Some("release-lab".into()));
+        rail.names = [
+            "release-lab",
+            "build",
+            "review",
+            "notes",
+            "mail",
+            "deploy",
+            "docs",
+            "ci",
+            "design",
+            "ops",
+            "staging",
+            "prod",
+            "archive",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        rail.live_pane_names
+            .insert("release-lab".into(), vec!["build".into(), "review".into()]);
+        rail.live_pane_names
+            .insert("mail".into(), vec!["inbox".into()]);
+        rail.live_pane_names
+            .insert("deploy".into(), vec!["ship".into(), "logs".into()]);
+        rail
+    }
+
+    fn paint_position_board(w: usize, h: usize, side: RailSide, light: bool) -> Vec<u32> {
+        let tok = if light { &LIGHT } else { &DARK };
+        let focus = if light { rgb(0x2f6fd0) } else { rgb(0x5aa2ff) };
+        let accent_color = accent(tok, focus);
+        let mut buffer = vec![pack_argb(0xff, tok.ground); w * h];
+        paint_shot_panes(&mut buffer, w, h, side, tok, accent_color, light);
+        paint_shot_tabs(&mut buffer, w, side, tok, accent_color);
+        paint_shot_rail(&mut buffer, w, h, side, tok, accent_color);
+        buffer
+    }
+
+    fn content_area(side: RailSide, w: usize, h: usize) -> Rect {
+        let chrome = shot_chrome();
+        let rail_px = shot_geom(side).rail_px;
+        let tabs = TABS_BAR_H.px(chrome);
+        let left = if side == RailSide::Left { rail_px } else { 0 };
+        let right = if side == RailSide::Right {
+            w.saturating_sub(rail_px)
+        } else {
+            w
+        };
+        let top = if side == RailSide::Top {
+            rail_px + tabs
+        } else {
+            tabs
+        };
+        let bottom = if side == RailSide::Bottom {
+            h.saturating_sub(rail_px)
+        } else {
+            h
+        };
+        let pad = 8usize;
+        Rect::new(
+            left + pad,
+            top + pad,
+            right.saturating_sub(left).saturating_sub(pad * 2),
+            bottom.saturating_sub(top).saturating_sub(pad * 2),
+        )
+    }
+
+    fn paint_shot_panes(
+        buffer: &mut [u32],
+        w: usize,
+        h: usize,
+        side: RailSide,
+        tok: &Tokens,
+        accent_color: Rgb,
+        light: bool,
+    ) {
+        let area = content_area(side, w, h);
+        if area.w < 80 || area.h < 80 {
+            return;
+        }
+        let chrome = shot_chrome();
+        let gap = 8usize;
+        let pane_w = area.w.saturating_sub(gap) / 2;
+        let surface = if light { rgb(0xffffff) } else { rgb(0x181b21) };
+        let slots = [
+            (
+                Rect::new(area.x, area.y, pane_w, area.h),
+                "build",
+                Dot::Working,
+                PaneStatus::decide(false, 0, false, true, true),
+                true,
+            ),
+            (
+                Rect::new(area.x + pane_w + gap, area.y, area.w - pane_w - gap, area.h),
+                "review",
+                Dot::Unseen,
+                PaneStatus::decide(false, 0, true, false, false),
+                false,
+            ),
+        ];
+        for (slot, name, dot, status, focused) in slots {
+            paint_pane_surface(buffer, w, chrome, slot, tok.ground, 0xff, surface, 0xff);
+            paint_pane_chrome(
+                buffer,
+                w,
+                chrome,
+                tok,
+                accent_color,
+                slot,
+                surface,
+                &PaneHeader {
+                    name,
+                    meta: Some("release-lab"),
+                    dot,
+                    status,
+                    focused,
+                },
+                true,
+            );
+        }
+    }
+
+    fn paint_shot_tabs(
+        buffer: &mut [u32],
+        w: usize,
+        side: RailSide,
+        tok: &Tokens,
+        accent_color: Rgb,
+    ) {
+        let chrome = shot_chrome();
+        let geom = shot_geom(side);
+        let tabs = vec![
+            TabText {
+                label: "grid".into(),
+                meta: Some("2 panes".into()),
+                dot: Dot::Working,
+                attention: false,
+                selected: true,
+            },
+            TabText {
+                label: "review".into(),
+                meta: None,
+                dot: Dot::Attention,
+                attention: true,
+                selected: false,
+            },
+            TabText {
+                label: "notes".into(),
+                meta: None,
+                dot: Dot::Idle,
+                attention: false,
+                selected: false,
+            },
+        ];
+        let (origin, bar_w) = match side {
+            RailSide::Left => (geom.rail_px, w.saturating_sub(geom.rail_px)),
+            RailSide::Right => (0, w.saturating_sub(geom.rail_px)),
+            _ => (0, w),
+        };
+        let layout = shift_bar(
+            bar_layout(
+                chrome,
+                bar_w,
+                geom.tab_strip_y(),
+                "release-lab",
+                &tabs,
+                "Ctrl Shift P",
+            ),
+            origin,
+        );
+        paint_tabs_bar(
+            buffer,
+            w,
+            &BarPaint {
+                layout: &layout,
+                tok,
+                accent: accent_color,
+                hover: None,
+                bar_alpha: 0xff,
+                editing: None,
+            },
+        );
+    }
+
+    fn paint_shot_rail(
+        buffer: &mut [u32],
+        w: usize,
+        h: usize,
+        side: RailSide,
+        tok: &Tokens,
+        accent_color: Rgb,
+    ) {
+        if side == RailSide::Off {
+            return;
+        }
+        let chrome = shot_chrome();
+        let rail = sample_rail();
+        let Some(layout) = rail.layout(shot_geom(side), w, h, true) else {
+            return;
+        };
+        let n = rail.names.len();
+        let views = rail.views();
+        let bar = Rect::new(layout.x, layout.y, layout.w, layout.h);
+        if side.horizontal() {
+            paint_rail_bar(buffer, w, tok, bar, side == RailSide::Bottom, 0xff);
+            let mut right_most = bar.x;
+            for (index, view) in views.iter().enumerate() {
+                let Some((x, y, cw, ch)) = layout.chip_bounds(index, n) else {
+                    continue;
+                };
+                let slot = Rect::new(x, y, cw, ch);
+                right_most = right_most.max(slot.right());
+                if view.plus {
+                    paint_rail_button(buffer, w, chrome, tok, slot, RAIL_PLUS, false);
+                } else {
+                    paint_rail_chip(
+                        buffer,
+                        w,
+                        chrome,
+                        tok,
+                        accent_color,
+                        &RailChip {
+                            slot,
+                            label: &view.label,
+                            current: view.current,
+                            focused: view.focused,
+                            editing: view.editing.is_some(),
+                            hovered: false,
+                            close_hovered: false,
+                        },
+                    );
+                }
+            }
+            if layout.overflow {
+                if let Some((x, y, cw, ch)) = layout.chip_bounds(n + 1, n) {
+                    let slot = Rect::new(x, y, cw, ch);
+                    right_most = right_most.max(slot.right());
+                    paint_rail_button(buffer, w, chrome, tok, slot, "All spaces", false);
+                }
+            }
+            paint_rail_status(buffer, w, chrome, tok, bar, right_most, 2, 1);
+            return;
+        }
+        let chips: Vec<SideChip<'_>> = views
+            .iter()
+            .enumerate()
+            .take(n)
+            .filter_map(|(index, view)| {
+                let (x, y, cw, ch) = layout.chip_bounds(index, n)?;
+                Some(SideChip {
+                    slot: Rect::new(x, y, cw, ch),
+                    label: view.label.as_str(),
+                    panes: view.pane_names.as_str(),
+                    current: view.current,
+                    focused: view.focused,
+                    editing: view.editing.is_some(),
+                    hovered: false,
+                    close_hovered: false,
+                })
+            })
+            .collect();
+        paint_side_rail(
+            buffer,
+            w,
+            &SideRailPaint {
+                column: bar,
+                inner_on_right: side == RailSide::Left,
+                header_h: layout.list_top,
+                footer_h: layout.list_bottom,
+                tok,
+                accent: accent_color,
+                chrome,
+                alpha: 0xff,
+                plus: layout
+                    .chip_bounds(n, n)
+                    .map(|(x, y, cw, ch)| Rect::new(x, y, cw, ch)),
+                plus_label: RAIL_PLUS,
+                plus_hovered: false,
+                chips: &chips,
+                working: 2,
+                attention: 1,
+                thumb: layout.thumb.map(|(x, y, cw, ch)| Rect::new(x, y, cw, ch)),
+                show_pane_names: true,
+            },
+        );
     }
 }

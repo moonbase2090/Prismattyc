@@ -755,12 +755,22 @@ space_rail_pane_names = true # show live session names in a second row
 - `left` / `right`: a fixed-width column with chips stacked from the top.
   Drag the inner edge to resize it. The width is saved as
   `space_rail_width_cols`. A long name does not resize the terminal area.
+  With `chrome_style = "graphite"`, the column is 220 px at the default
+  width of 18 (other widths scale by `cols / 18`, and with the window
+  scale). A 44 px header lines up with the tabs bar. Each Space is a
+  two-line chip (the name, then live pane names) and the list scrolls
+  inside the column, so every Space stays reachable. The working count,
+  the attention count, and the "Hold Ctrl Shift" hint stay in the footer.
+  The inner edge uses the col-resize cursor. Classic columns are unchanged
+  and still omit chips that do not fit.
 - With `space_rail_pane_names = true`, each chip shows live session names in a
   second row at the terminal font size. Names update after a session moves or is renamed. A name disappears
   when its last live pane exits.
   Long lists are clipped inside the chip. Open its context menu for full names.
 - The rail is part of the host geometry: pane content shrinks by the rail's
-  row or column, and PTY sizes follow. Chips that do not fit are not shown.
+  row or column, and PTY sizes follow. Chips that do not fit are not shown,
+  except a Graphite left or right column, which scrolls them inside the
+  fixed column instead.
 - Chips are listed oldest first. Saving or renaming keeps their order. The
   current space sits on `tab_active_bg` (the same lift as the active tab)
   with a focus-colour title, a marker line, and a dot where the `×` would

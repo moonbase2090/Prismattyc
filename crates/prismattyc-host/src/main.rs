@@ -909,6 +909,8 @@ struct HostState {
     mux: mux::MuxRuntime,
     local_views: local_views::Views,
     rail_resizing: bool,
+    /// Graphite side-list thumb drag: pointer y and scroll at press.
+    rail_thumb_drag: Option<(f64, usize)>,
     terminal_targets: Option<Vec<terminal_switcher::Entry>>,
     terminal_messages: bool,
     move_target: Option<move_target::Target>,
@@ -3431,6 +3433,7 @@ impl App {
                 space_polish: Default::default(),
                 local_views: Default::default(),
                 rail_resizing: false,
+                rail_thumb_drag: None,
                 terminal_targets: None,
                 terminal_messages: false,
                 move_target: None,
@@ -5239,6 +5242,8 @@ fn rasterize_frame(
             };
             if geom.chrome.graphite && layout.side.horizontal() {
                 paint_graphite_rail(host, buffer, width as usize, geom, &layout, rail_hover);
+            } else if geom.chrome.graphite {
+                paint_graphite_side_rail(host, buffer, width as usize, geom, &layout, rail_hover);
             } else {
                 rasterize_space_rail(
                     &host.theme,
@@ -5254,19 +5259,21 @@ fn rasterize_frame(
                     host.chrome_alpha,
                 );
             }
-            raster::rasterize_rail_destinations(
-                &host.theme,
-                &host.font,
-                &layout,
-                host.space_rail.names.len(),
-                &host.space_rail.destinations,
-                buffer,
-                width as usize,
-                focus_border_rgb(host.focus_border),
-                rail_hover,
-                host.hover_blend,
-                host.chrome_alpha,
-            );
+            if !geom.chrome.graphite || layout.side.horizontal() {
+                raster::rasterize_rail_destinations(
+                    &host.theme,
+                    &host.font,
+                    &layout,
+                    host.space_rail.names.len(),
+                    &host.space_rail.destinations,
+                    buffer,
+                    width as usize,
+                    focus_border_rgb(host.focus_border),
+                    rail_hover,
+                    host.hover_blend,
+                    host.chrome_alpha,
+                );
+            }
         }
         if host.background.is_none() && !geom.chrome.graphite {
             let inner_x = geom
@@ -8600,6 +8607,7 @@ fn handle_space_rail_key(host: &mut HostState, event: &winit::event::KeyEvent) -
         }
         SpaceRailKeyDecision::Key(key) => {
             let verdict = host.space_rail.key(key);
+            reveal_graphite_side_focus(host);
             apply_rail_verdict(host, verdict);
             true
         }
@@ -8913,6 +8921,9 @@ fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
             Some(space_rail::RailHit::Destination(index)) => {
                 return Some(HoverTarget::Rail(space_rail::RailHit::Destination(index)))
             }
+            Some(space_rail::RailHit::Thumb) => {
+                return Some(HoverTarget::Rail(space_rail::RailHit::Thumb));
+            }
             Some(space_rail::RailHit::Empty) | None => {}
         }
     }
@@ -8922,6 +8933,16 @@ fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
     pane_scrollbar_at(host, px, py)
         .filter(|(_, bar, _)| bar.thumb_contains(py))
         .map(|(pane, _, _)| HoverTarget::ScrollbarThumb(pane))
+}
+
+/// Classic keeps the left-right resize cursor. Graphite uses col-resize on
+/// the rail grip, as the design brief specifies.
+fn rail_grip_cursor(graphite: bool) -> CursorIcon {
+    if graphite {
+        CursorIcon::ColResize
+    } else {
+        CursorIcon::EwResize
+    }
 }
 
 fn cursor_for_hover(
@@ -9019,13 +9040,13 @@ fn sync_chrome_hover(host: &mut HostState) -> bool {
     let cursor = cursor_for_hover(
         next,
         strip_dragging,
-        host.scrollbar_drag.is_some(),
+        host.scrollbar_drag.is_some() || host.rail_thumb_drag.is_some(),
         divider_axis,
         hyperlink,
     );
     host.window
         .set_cursor(if rail_resize::at_edge(host) || host.rail_resizing {
-            CursorIcon::EwResize
+            rail_grip_cursor(host.spacing.chrome_style == config::ChromeStyle::Graphite)
         } else {
             cursor
         });
@@ -9035,6 +9056,124 @@ fn sync_chrome_hover(host: &mut HostState) -> bool {
     }
     host.hover_target = next;
     host.dirty = true;
+    true
+}
+
+fn reveal_graphite_side_focus(host: &mut HostState) {
+    let geom = host.mux.geom();
+    if !geom.chrome.graphite
+        || geom.rail_side.horizontal()
+        || geom.rail_side == space_rail::RailSide::Off
+    {
+        return;
+    }
+    let Some(focus) = host.space_rail.focus else {
+        return;
+    };
+    if focus >= host.space_rail.names.len() {
+        return;
+    }
+    let size = host.window.inner_size();
+    let Some(layout) = host.space_rail.layout(
+        geom,
+        size.width as usize,
+        size.height as usize,
+        host.spacing.space_rail_pane_names,
+    ) else {
+        return;
+    };
+    let Some(visible) = layout.visible_rows else {
+        return;
+    };
+    let next = space_rail::revealed_scroll(
+        host.space_rail.side_scroll(),
+        focus,
+        visible,
+        layout.max_scroll,
+    );
+    if next != host.space_rail.side_scroll() {
+        host.space_rail.set_side_scroll(next, layout.max_scroll);
+        host.dirty = true;
+    }
+}
+
+/// Wheel over the Graphite side list scrolls that list and does not reach
+/// the pane underneath.
+fn scroll_graphite_side_rail(host: &mut HostState, delta: &MouseScrollDelta) -> bool {
+    if host.spacing.chrome_style != config::ChromeStyle::Graphite {
+        return false;
+    }
+    let Some((x, y)) = host.pointer_px else {
+        return false;
+    };
+    if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+        return false;
+    }
+    let size = host.window.inner_size();
+    let Some(layout) = host.space_rail.layout(
+        host.mux.geom(),
+        size.width as usize,
+        size.height as usize,
+        host.spacing.space_rail_pane_names,
+    ) else {
+        return false;
+    };
+    let (px, py) = (x as usize, y as usize);
+    if px < layout.x || px >= layout.x.saturating_add(layout.w) || !layout.in_side_list(py) {
+        return false;
+    }
+    let lines = match delta {
+        MouseScrollDelta::LineDelta(_, rows) => (-rows).round() as i32,
+        MouseScrollDelta::PixelDelta(position) => {
+            if position.y > 0.0 {
+                -1
+            } else if position.y < 0.0 {
+                1
+            } else {
+                0
+            }
+        }
+    };
+    if lines != 0 {
+        let next = space_rail::scroll_by(host.space_rail.side_scroll(), lines, layout.max_scroll);
+        if next != host.space_rail.side_scroll() {
+            host.space_rail.set_side_scroll(next, layout.max_scroll);
+            host.dirty = true;
+        }
+    }
+    true
+}
+
+fn drag_graphite_side_thumb(host: &mut HostState) -> bool {
+    let Some((origin_y, origin_scroll)) = host.rail_thumb_drag else {
+        return false;
+    };
+    let Some((_, y)) = host.pointer_px else {
+        return true;
+    };
+    let size = host.window.inner_size();
+    let Some(layout) = host.space_rail.layout(
+        host.mux.geom(),
+        size.width as usize,
+        size.height as usize,
+        host.spacing.space_rail_pane_names,
+    ) else {
+        return true;
+    };
+    let Some((_, _, _, thumb_h)) = layout.thumb else {
+        return true;
+    };
+    let list_h = layout
+        .h
+        .saturating_sub(layout.list_top)
+        .saturating_sub(layout.list_bottom);
+    let travel = list_h.saturating_sub(thumb_h);
+    let next =
+        space_rail::thumb_scroll_from_drag(origin_y, y, origin_scroll, layout.max_scroll, travel);
+    if next != host.space_rail.side_scroll() {
+        host.space_rail.set_side_scroll(next, layout.max_scroll);
+        host.dirty = true;
+    }
     true
 }
 
@@ -9111,6 +9250,10 @@ fn handle_rail_click(host: &mut HostState, button: MouseButton) -> bool {
             MouseButton::Right,
             RailHit::Empty | RailHit::Plus | RailHit::Overflow | RailHit::Destination(_),
         ) => space_panel::settings(host),
+        (MouseButton::Left, RailHit::Thumb) => {
+            host.rail_thumb_drag = Some((y, host.space_rail.side_scroll()));
+            host.dirty = true;
+        }
         (MouseButton::Left, RailHit::Plus) => {
             if was_edit.as_ref().is_some_and(|edit| edit.target.is_none()) {
                 return true;
@@ -9383,6 +9526,123 @@ fn paint_graphite_rail(
     );
 }
 
+struct PaintedSideChip {
+    slot: graphite::Rect,
+    label: String,
+    panes: String,
+    current: bool,
+    focused: bool,
+    editing: bool,
+    hovered: bool,
+    close_hovered: bool,
+}
+
+/// Graphite left/right column (#110). The layout already scrolled the list,
+/// so paint and hit-testing share one geometry.
+fn paint_graphite_side_rail(
+    host: &HostState,
+    buffer: &mut [u32],
+    stride: usize,
+    geom: mux::HostGeom,
+    layout: &space_rail::RailLayout,
+    hover: Option<space_rail::RailHit>,
+) {
+    let tok = graphite::tokens(host.theme.variant);
+    let accent = graphite::accent(tok, focus_border_rgb(host.focus_border));
+    let views = host.space_rail.views();
+    let n = host.space_rail.names.len();
+    let mut owned = Vec::new();
+    for (index, view) in views.iter().enumerate().take(n) {
+        let Some((x, y, w, h)) = layout.chip_bounds(index, n) else {
+            continue;
+        };
+        owned.push(PaintedSideChip {
+            slot: graphite::Rect::new(x, y, w, h),
+            label: view.label.clone(),
+            panes: view.pane_names.clone(),
+            current: view.current,
+            focused: view.focused,
+            editing: view.editing.is_some() || view.confirm,
+            hovered: matches!(hover, Some(space_rail::RailHit::Chip { index: at, .. }) if at == index),
+            close_hovered: hover == Some(space_rail::RailHit::Chip { index, close: true }),
+        });
+    }
+    for (index, dest) in host.space_rail.destinations.iter().enumerate() {
+        let Some((x, y, w, h)) = layout.dest_bounds(index, n) else {
+            continue;
+        };
+        owned.push(PaintedSideChip {
+            slot: graphite::Rect::new(x, y, w, h),
+            label: format!("{} {}", dest.status.glyph(), dest.label),
+            panes: String::new(),
+            current: false,
+            focused: false,
+            editing: false,
+            hovered: hover == Some(space_rail::RailHit::Destination(index)),
+            close_hovered: false,
+        });
+    }
+    let side_chips: Vec<graphite::SideChip<'_>> = owned
+        .iter()
+        .map(|chip| graphite::SideChip {
+            slot: chip.slot,
+            label: &chip.label,
+            panes: &chip.panes,
+            current: chip.current,
+            focused: chip.focused,
+            editing: chip.editing,
+            hovered: chip.hovered,
+            close_hovered: chip.close_hovered,
+        })
+        .collect();
+    let plus = layout
+        .chip_bounds(n, n)
+        .map(|(x, y, w, h)| graphite::Rect::new(x, y, w, h));
+    let thumb = layout
+        .thumb
+        .map(|(x, y, w, h)| graphite::Rect::new(x, y, w, h));
+    graphite::paint_side_rail(
+        buffer,
+        stride,
+        &graphite::SideRailPaint {
+            column: graphite::Rect::new(layout.x, layout.y, layout.w, layout.h),
+            inner_on_right: layout.side == space_rail::RailSide::Left,
+            header_h: layout.list_top,
+            footer_h: layout.list_bottom,
+            tok,
+            accent,
+            chrome: geom.chrome,
+            alpha: host.chrome_alpha,
+            plus,
+            plus_label: graphite::RAIL_PLUS,
+            plus_hovered: hover == Some(space_rail::RailHit::Plus),
+            chips: &side_chips,
+            working: host.mux.active_count(),
+            attention: if host.attention_badge {
+                host.mux.attention_count()
+            } else {
+                0
+            },
+            thumb,
+            show_pane_names: host.spacing.space_rail_pane_names,
+        },
+    );
+}
+
+/// Tabs bar span beside a Graphite side column. Classic and the horizontal
+/// Graphite bar keep the full window width.
+fn graphite_tabs_span(geom: mux::HostGeom, stride: usize) -> (usize, usize) {
+    if geom.chrome.graphite {
+        match geom.rail_side {
+            space_rail::RailSide::Left => (geom.rail_px, stride.saturating_sub(geom.rail_px)),
+            space_rail::RailSide::Right => (0, stride.saturating_sub(geom.rail_px)),
+            _ => (0, stride),
+        }
+    } else {
+        (0, stride)
+    }
+}
+
 /// Graphite tabs bar (#104): lay out from the live tab model, record the
 /// layout for hit-testing, and paint it.
 fn paint_graphite_tabs_bar(
@@ -9412,13 +9672,17 @@ fn paint_graphite_tabs_bar(
         .or_else(|| host.mux.space_id.clone())
         .unwrap_or_else(|| "Prismattyc".to_string());
     let chord = graphite_chord_label(&host.keymap, keybind::Action::CommandPalette);
-    let layout = graphite::bar_layout(
-        geom.chrome,
-        stride,
-        geom.tab_strip_y(),
-        &space,
-        &texts,
-        &chord,
+    let (origin, bar_w) = graphite_tabs_span(geom, stride);
+    let layout = graphite::shift_bar(
+        graphite::bar_layout(
+            geom.chrome,
+            bar_w,
+            geom.tab_strip_y(),
+            &space,
+            &texts,
+            &chord,
+        ),
+        origin,
     );
     let tok = graphite::tokens(host.theme.variant);
     graphite::paint_tabs_bar(
@@ -10848,8 +11112,12 @@ fn host_geom(
     let window_pad = graphite_default(window_set, spacing.window_padding_px, graphite::WINDOW_PAD);
     let gap = graphite_default(gap_set, spacing.pane_gap_px, graphite::PANE_GAP);
     let inner_pad = graphite_default(pad_set, spacing.pane_padding_px, graphite::PANE_PAD);
-    let rail_px = if chrome.graphite && spacing.space_rail.horizontal() {
+    let rail_px = if spacing.space_rail == space_rail::RailSide::Off {
+        0
+    } else if chrome.graphite && spacing.space_rail.horizontal() {
         graphite::RAIL_H.px(chrome)
+    } else if chrome.graphite {
+        graphite::side_rail_px(chrome, spacing.space_rail_width_cols)
     } else {
         space_rail::rail_thickness_px(
             spacing.space_rail,
@@ -13678,6 +13946,7 @@ fn apply_space_rail_focus_action(host: &mut HostState) {
     if host.mux.geom().rail_side != space_rail::RailSide::Off {
         cancel_tab_rename(host);
         host.space_rail.focus_rail();
+        reveal_graphite_side_focus(host);
         host.dirty = true;
     }
 }
@@ -14628,6 +14897,11 @@ impl ApplicationHandler<UserAction> for App {
                 }
                 host.pointer_px = Some((position.x, position.y));
                 host.cursor_cell = cell_at_position(position, &host.font, &host.mux);
+                if drag_graphite_side_thumb(host) {
+                    sync_chrome_hover(host);
+                    host.window.request_redraw();
+                    return;
+                }
                 if handle_divider_drag_move(host) {
                     sync_chrome_hover(host);
                     host.window.request_redraw();
@@ -14723,6 +14997,10 @@ impl ApplicationHandler<UserAction> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if scroll_graphite_side_rail(host, &delta) {
+                    host.window.request_redraw();
+                    return;
+                }
                 let shift = host.modifiers.shift_key();
                 let focused_pane = host.mux.focused_id();
                 let pane_id = wheel_target_pane(
@@ -14830,6 +15108,9 @@ impl ApplicationHandler<UserAction> for App {
                 host.window.request_redraw();
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                if state == ElementState::Released && button == MouseButton::Left {
+                    host.rail_thumb_drag = None;
+                }
                 if rail_resize::button(host, state, button) {
                     return;
                 }
@@ -20164,6 +20445,94 @@ session mail (id 15)
         assert_eq!(layout.y, 0);
         assert_eq!(tabbed.tab_strip_y(), layout.h);
         assert_eq!(tabbed.chrome_top(), tabbed.top_chrome_px + font.cell_h);
+    }
+
+    #[test]
+    fn graphite_side_rail_is_220px_and_classic_columns_stay_in_cells() {
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let classic = PaneSpacing {
+            window_padding_px: 5,
+            pane_gap_px: 5,
+            pane_padding_px: 5,
+            space_rail: space_rail::RailSide::Left,
+            space_rail_chip_cols: 0,
+            space_rail_width_cols: 18,
+            space_rail_pane_names: true,
+            chrome_style: config::ChromeStyle::Classic,
+            ui_scale_milli: 1000,
+            explicit_spacing: [false; 3],
+        };
+        let classic_geom = host_geom(&font, false, true, false, classic, 0);
+        assert_eq!(classic_geom.rail_px, font.cell_w * 18);
+        assert!(!classic_geom.chrome.graphite);
+
+        let graphite = PaneSpacing {
+            chrome_style: config::ChromeStyle::Graphite,
+            ..classic
+        };
+        let left = host_geom(&font, false, true, false, graphite, 0);
+        assert_eq!(left.rail_px, 220);
+        assert_eq!(left.top_chrome_px, 44);
+        assert_eq!(graphite_tabs_span(left, 1280), (220, 1060));
+        let right = host_geom(
+            &font,
+            false,
+            true,
+            false,
+            PaneSpacing {
+                space_rail: space_rail::RailSide::Right,
+                ..graphite
+            },
+            0,
+        );
+        assert_eq!(right.rail_px, 220);
+        assert_eq!(graphite_tabs_span(right, 1280), (0, 1060));
+        let top = host_geom(
+            &font,
+            false,
+            true,
+            false,
+            PaneSpacing {
+                space_rail: space_rail::RailSide::Top,
+                ..graphite
+            },
+            0,
+        );
+        assert_eq!(top.rail_px, 30);
+        assert_eq!(top.tab_strip_y(), 30);
+        assert_eq!(graphite_tabs_span(top, 1280), (0, 1280));
+        let off = host_geom(
+            &font,
+            false,
+            true,
+            false,
+            PaneSpacing {
+                space_rail: space_rail::RailSide::Off,
+                ..graphite
+            },
+            0,
+        );
+        assert_eq!(off.rail_px, 0);
+        assert_eq!(
+            rail_grip_cursor(true),
+            CursorIcon::ColResize,
+            "Graphite grip"
+        );
+        assert_eq!(rail_grip_cursor(false), CursorIcon::EwResize);
+        let wide = host_geom(
+            &font,
+            false,
+            true,
+            false,
+            PaneSpacing {
+                space_rail_width_cols: 36,
+                ..graphite
+            },
+            0,
+        );
+        assert_eq!(wide.rail_px, 440, "width scales with space_rail_width_cols");
     }
 
     #[test]

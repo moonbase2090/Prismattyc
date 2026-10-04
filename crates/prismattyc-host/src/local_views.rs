@@ -79,6 +79,7 @@ pub(super) fn switch(host: &mut HostState, owner: Option<String>) -> Result<bool
     host.strip_drag = None;
     host.divider_drag = None;
     host.rail_resizing = false;
+    host.rail_thumb_drag = None;
     host.scrollbar_drag = None;
     host.left_button_down = false;
     host.app_mouse_button = None;

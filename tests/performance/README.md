@@ -109,9 +109,10 @@ round to limit timing drift from a fixed case order.
 Cases are `ascii` (plain lines), `scroll` (one-character lines with history
 disabled), `history` (steady eviction with a warmed 10,000-row scrollback),
 `unicode` (wide characters, combining marks, and joined emoji), `sgr` (styled
-text), and `reflow` (alternating 80x24 and 96x30 with warmed 10,000-row
-history). The reflow input uses 34-column hard-broken ASCII lines, so it does
-not measure soft-wrap-heavy reflow. Setup and warm history are outside the
+text), `reflow` (alternating 80x24 and 96x30 with warmed 10,000-row history
+of 34-column hard-broken ASCII lines), and `reflow_long` (the same alternating
+resizes with warmed 10,000-row history of ~291-column logical lines that
+soft-wrap at both widths). Setup and warm history are outside the
 timed interval. Feed timing covers `Emulator::feed`; reflow timing covers
 `Emulator::resize`. The result
 JSON records input size, duration, throughput where applicable, final cursor,

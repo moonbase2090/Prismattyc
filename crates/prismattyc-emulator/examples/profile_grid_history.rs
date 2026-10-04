@@ -19,7 +19,9 @@ fn workload_line(name: &str) -> &'static [u8] {
         "history" => b"scrollback row: retain and evict a fixed 10000-line history\r\n",
         "unicode" => "表情🙂 café e\u{301} Ελληνικά 日本語 👩\u{200d}💻\r\n".as_bytes(),
         "sgr" => b"\x1b[38;2;12;143;229mblue\x1b[0m \x1b[1;4mbold underline\x1b[0m plain\r\n",
-        _ => panic!("workload must be ascii, scroll, history, unicode, sgr, or reflow"),
+        _ => {
+            panic!("workload must be ascii, scroll, history, unicode, sgr, reflow, or reflow_long")
+        }
     }
 }
 
@@ -39,6 +41,21 @@ fn warm_history(emulator: &mut Emulator) {
     }
 }
 
+/// Warm history with long logical lines that soft-wrap at both resize
+/// widths, so `reflow_long` measures join-heavy repacking rather than the
+/// short hard-broken lines of `reflow`.
+fn warm_history_long(emulator: &mut Emulator) {
+    let filler = "x".repeat(280);
+    let mut warm = Vec::new();
+    for index in 0..HISTORY_ROWS + ROWS {
+        let line = format!("long {index:05} {filler}\r\n");
+        warm.extend_from_slice(line.as_bytes());
+    }
+    for chunk in warm.chunks(8192) {
+        black_box(emulator.feed(black_box(chunk)));
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     assert_eq!(
@@ -50,7 +67,7 @@ fn main() {
     let units: usize = args[2].parse().expect("units must be an integer");
     assert!(units > 0, "units must be positive");
 
-    let history_limit = if matches!(workload, "history" | "reflow") {
+    let history_limit = if matches!(workload, "history" | "reflow" | "reflow_long") {
         HISTORY_ROWS
     } else {
         0
@@ -58,15 +75,17 @@ fn main() {
     let mut emulator = Emulator::new(COLUMNS, ROWS, history_limit);
     if matches!(workload, "history" | "reflow") {
         warm_history(&mut emulator);
+    } else if workload == "reflow_long" {
+        warm_history_long(&mut emulator);
     }
 
-    let block = if workload == "reflow" {
+    let block = if matches!(workload, "reflow" | "reflow_long") {
         Vec::new()
     } else {
         input_block(workload_line(workload))
     };
     let started = Instant::now();
-    if workload == "reflow" {
+    if matches!(workload, "reflow" | "reflow_long") {
         for index in 0..units {
             if index % 2 == 0 {
                 emulator.resize(96, 30);

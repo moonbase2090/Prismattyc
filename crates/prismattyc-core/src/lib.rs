@@ -2274,7 +2274,6 @@ impl Screen {
     /// Outside the scrolling region, advances within the screen only — never
     /// jumps backward into the region (VT100 IND/LF outside margins).
     pub fn line_feed(&mut self) {
-        let columns = self.columns;
         let rows = self.rows;
         let alt_active = self.alt_active;
         let max_scrollback = self.max_scrollback;
@@ -2315,10 +2314,11 @@ impl Screen {
 
             // At bottom margin: scroll the region only.
             // Fill scrolled-in row with space + current SGR (xterm/VT; matches erase_*).
+            // The fill addresses the recycled physical row directly instead of
+            // going through logical range indexing.
             buf.cells.scroll_up(top, bottom, 1);
-            let blank_start = bottom * columns;
             let blank = Cell::glyph(' ', buf.style);
-            buf.cells[blank_start..blank_start + columns].fill(blank);
+            buf.cells.row_mut(bottom).fill(blank);
             // Flags travel with their rows. The freed bottom row starts clean.
             if bottom < buf.wrapped.len() {
                 buf.wrapped.copy_within(top + 1..=bottom, top);
@@ -2332,7 +2332,12 @@ impl Screen {
             bottom,
             delta: 1,
         });
-        self.damage.mark_row_cells(bottom);
+        if !self.damage.scroll_overflowed() {
+            // Overflow already marks the whole viewport dirty (see
+            // `GridDamage::push_scroll`), so the fresh row needs no extra
+            // mark with identical dirty bits.
+            self.damage.mark_row_cells(bottom);
+        }
         // Any region scroll bumps the content epoch (selection invalidation).
         self.bump_epoch();
         // Absolute primary-row translation stays primary-only, even when
@@ -4351,6 +4356,50 @@ mod tests {
             assert_eq!(cell.character, ' ');
             assert_eq!(cell.style, style);
         }
+    }
+
+    #[test]
+    fn line_feed_short_scroll_moves_rows_and_marks_damage() {
+        // Short-line scroll: rows move up, the freed bottom row is blank,
+        // one scroll event is recorded, and the fresh row is dirty.
+        let mut screen = Screen::new(3, 3, 0);
+        for (row, ch) in ['a', 'b', 'c'].iter().enumerate() {
+            screen.set_cursor_position(row, 0);
+            screen.put_char(*ch);
+        }
+        screen.set_cursor_position(2, 1);
+        screen.line_feed(); // at bottom → scroll
+        assert_eq!(text(&screen, 0), "b  ");
+        assert_eq!(text(&screen, 1), "c  ");
+        assert_eq!(text(&screen, 2), "   ");
+        assert_eq!(screen.scrolled_lines(), 1);
+        let damage = screen.damage();
+        assert_eq!(damage.scroll_events().len(), 1);
+        assert_eq!(
+            damage.scroll_events()[0],
+            ScrollDamage {
+                top: 0,
+                bottom: 2,
+                delta: 1
+            }
+        );
+        for col in 0..3 {
+            assert!(damage.is_cell_dirty(2, col));
+        }
+        // Past the scroll-event cap the viewport is fully dirty, so the
+        // fresh row stays dirty with identical bits and no scroll records.
+        for _ in 0..300 {
+            screen.line_feed();
+        }
+        let damage = screen.damage();
+        assert!(damage.scroll_overflowed());
+        assert!(damage.scroll_events().is_empty());
+        for row in 0..3 {
+            for col in 0..3 {
+                assert!(damage.is_cell_dirty(row, col));
+            }
+        }
+        assert_eq!(text(&screen, 2), "   ");
     }
 
     #[test]

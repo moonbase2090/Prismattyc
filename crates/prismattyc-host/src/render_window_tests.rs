@@ -804,6 +804,7 @@ fn verify_pixels_and_overlays(host: &mut HostState) {
         selected: Some(0),
         family: None,
         scroll: 0,
+        wheel_remainder_milli_px: 0,
     });
     assert_ne!(
         frame(host),

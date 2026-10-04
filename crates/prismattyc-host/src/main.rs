@@ -19,6 +19,7 @@ mod git_info;
 #[cfg(feature = "gpu")]
 mod gpu;
 mod graphite;
+mod graphite_overlays;
 mod hyperlink;
 mod icon;
 mod keybind;
@@ -1378,6 +1379,7 @@ enum HoverTarget {
     Rail(space_rail::RailHit),
     ScrollbarThumb(PaneId),
     ThemePickerRow(usize),
+    ThemePickerClose,
     ContextMenuRow(usize),
     DialogButton(usize),
     ToastDismiss(usize),
@@ -2067,6 +2069,8 @@ struct ThemePicker {
     family: Option<String>,
     /// First row shown in the current list when the window cannot fit all rows.
     scroll: usize,
+    /// Accumulated sub-row trackpad motion in thousandths of a pixel.
+    wheel_remainder_milli_px: i64,
 }
 
 /// One breath of the active dot, and how many repaints it costs at most.
@@ -2168,6 +2172,47 @@ fn bell_toast_chip_rect(
     let chip_h = cell_h.min(guest_h);
     let x0 = content_x.saturating_add(content_w.saturating_sub(chip_w));
     Some((x0, guest_y, chip_w, chip_h))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_bell_toast_for_style(
+    font: &FontMetrics,
+    chrome: mux::ChromeGeom,
+    variant: theme::ThemeVariant,
+    label: &str,
+    buffer: &mut [u32],
+    stride: usize,
+    origin_x: usize,
+    origin_y: usize,
+    clip_w: usize,
+    clip_h: usize,
+    bg: [u8; 3],
+    fg: [u8; 3],
+) {
+    if chrome.graphite {
+        if let Some((x, y, w, h)) = bell_toast_chip_rect(
+            label,
+            font.cell_w,
+            font.cell_h,
+            origin_x,
+            origin_y,
+            clip_w,
+            clip_h,
+        ) {
+            graphite_overlays::toast(
+                chrome,
+                variant,
+                label,
+                graphite::Rect::new(x, y, w, h),
+                buffer,
+                stride,
+            );
+        }
+    } else {
+        rasterize_bell_toast(
+            font, label, buffer, stride, origin_x, origin_y, clip_w, clip_h, bg, fg,
+        );
+    }
 }
 
 /// Earlier of two optional deadlines (footer bar, bell flash).
@@ -5232,8 +5277,13 @@ fn rasterize_frame(
     }
     if let Some(picker) = host.theme_picker.as_mut() {
         let count = picker_items(picker.family.as_deref()).len();
-        let visible_rows =
-            theme_picker_visible_rows(&host.font, count, width as usize, height as usize);
+        let visible_rows = theme_picker_visible_rows_for_style(
+            &host.font,
+            geom.chrome,
+            count,
+            width as usize,
+            height as usize,
+        );
         picker.scroll =
             theme_picker_scroll_for_selection(picker.scroll, picker.selected, visible_rows, count);
     }
@@ -5840,18 +5890,41 @@ fn rasterize_frame(
                 } else {
                     format!(" {scroll}/{max} ")
                 };
-                rasterize_scroll_chip(
-                    &host.font,
-                    &label,
-                    buffer,
-                    width as usize,
-                    clip.x,
-                    clip.y,
-                    clip.w,
-                    clip.h,
-                    host.theme.default_fg,
-                    host.theme.default_bg,
-                );
+                if geom.chrome.graphite {
+                    let chip_w = label
+                        .chars()
+                        .count()
+                        .max(1)
+                        .saturating_mul(host.font.cell_w)
+                        .min(clip.w);
+                    let chip_h = host.font.cell_h.min(clip.h);
+                    graphite_overlays::toast(
+                        geom.chrome,
+                        host.theme.variant,
+                        &label,
+                        graphite::Rect::new(
+                            clip.x.saturating_add(clip.w.saturating_sub(chip_w)),
+                            clip.y.saturating_add(clip.h.saturating_sub(chip_h)),
+                            chip_w,
+                            chip_h,
+                        ),
+                        buffer,
+                        width as usize,
+                    );
+                } else {
+                    rasterize_scroll_chip(
+                        &host.font,
+                        &label,
+                        buffer,
+                        width as usize,
+                        clip.x,
+                        clip.y,
+                        clip.w,
+                        clip.h,
+                        host.theme.default_fg,
+                        host.theme.default_bg,
+                    );
+                }
             }
         }
         if overlay.paint_find_prompt {
@@ -5868,19 +5941,37 @@ fn rasterize_frame(
                     0
                 };
                 let label = find_prompt_label(&host.find.query, host.find.rank);
-                rasterize_find_prompt(
-                    &host.font,
-                    &label,
-                    buffer,
-                    width as usize,
-                    clip.x,
-                    clip.y,
-                    clip.w,
-                    clip.h,
-                    chip_reserve,
-                    host.theme.default_fg,
-                    host.theme.default_bg,
-                );
+                if geom.chrome.graphite {
+                    let field_h = host.font.cell_h.min(clip.h);
+                    let field_w = clip.w.saturating_sub(chip_reserve).max(1);
+                    graphite_overlays::find_prompt(
+                        geom.chrome,
+                        host.theme.variant,
+                        &label,
+                        graphite::Rect::new(
+                            clip.x,
+                            clip.y.saturating_add(clip.h.saturating_sub(field_h)),
+                            field_w,
+                            field_h,
+                        ),
+                        buffer,
+                        width as usize,
+                    );
+                } else {
+                    rasterize_find_prompt(
+                        &host.font,
+                        &label,
+                        buffer,
+                        width as usize,
+                        clip.x,
+                        clip.y,
+                        clip.w,
+                        clip.h,
+                        chip_reserve,
+                        host.theme.default_fg,
+                        host.theme.default_bg,
+                    );
+                }
             }
         }
         let (bar_x, _, bar_w, _) = geom.scrollbar_px(rect);
@@ -5917,8 +6008,10 @@ fn rasterize_frame(
         let mut toast_rows = 0usize;
         if let Some(toast) = host.bell_toasts.iter().find(|toast| toast.pane == pane_id) {
             let fill = focus_border_rgb(host.focus_border);
-            rasterize_bell_toast(
+            paint_bell_toast_for_style(
                 &host.font,
+                geom.chrome,
+                host.theme.variant,
                 &toast.label,
                 buffer,
                 width as usize,
@@ -5938,8 +6031,10 @@ fn rasterize_frame(
         if let Some((w, h)) = prismattyc_mux::remote_size_chip(pane.size_owner, None, replica) {
             let fill = focus_border_rgb(host.focus_border);
             let chip_y = guest_y.saturating_add(toast_rows.saturating_mul(host.font.cell_h));
-            rasterize_bell_toast(
+            paint_bell_toast_for_style(
                 &host.font,
+                geom.chrome,
+                host.theme.variant,
                 &format!(" remote {w}x{h} "),
                 buffer,
                 width as usize,
@@ -6129,8 +6224,10 @@ fn rasterize_frame(
                 break;
             }
             let bg = focus_border_rgb(host.focus_border);
-            rasterize_bell_toast(
+            paint_bell_toast_for_style(
                 &host.font,
+                geom.chrome,
+                host.theme.variant,
                 line,
                 buffer,
                 width as usize,
@@ -6153,16 +6250,29 @@ fn rasterize_frame(
             show_tab_strip(host),
             host.spacing.chrome_style == config::ChromeStyle::Graphite,
         );
-        rasterize_footer(
-            &host.font,
-            &help,
-            buffer,
-            width as usize,
-            footer_bottom,
-            CHROME_OVERLAY_ROWS,
-            focus_border_rgb(host.focus_border),
-            host.chrome_alpha,
-        );
+        if geom.chrome.graphite {
+            graphite_overlays::legend(
+                geom.chrome,
+                host.theme.variant,
+                &help,
+                buffer,
+                width as usize,
+                footer_bottom,
+                CHROME_OVERLAY_ROWS,
+                host.chrome_alpha,
+            );
+        } else {
+            rasterize_footer(
+                &host.font,
+                &help,
+                buffer,
+                width as usize,
+                footer_bottom,
+                CHROME_OVERLAY_ROWS,
+                focus_border_rgb(host.focus_border),
+                host.chrome_alpha,
+            );
+        }
     } else if host.config_path.is_some() || host.config_error.is_some() {
         let notice = match (host.config_path.as_deref(), host.config_error.as_deref()) {
             (Some(path), Some(error)) => {
@@ -6177,16 +6287,29 @@ fn rasterize_frame(
         } else {
             (focus_border_rgb(host.focus_border), host.chrome_alpha)
         };
-        rasterize_footer(
-            &host.font,
-            &notice,
-            buffer,
-            width as usize,
-            footer_bottom,
-            CHROME_OVERLAY_ROWS,
-            fill,
-            alpha,
-        );
+        if geom.chrome.graphite {
+            graphite_overlays::legend(
+                geom.chrome,
+                host.theme.variant,
+                &notice,
+                buffer,
+                width as usize,
+                footer_bottom,
+                CHROME_OVERLAY_ROWS,
+                alpha,
+            );
+        } else {
+            rasterize_footer(
+                &host.font,
+                &notice,
+                buffer,
+                width as usize,
+                footer_bottom,
+                CHROME_OVERLAY_ROWS,
+                fill,
+                alpha,
+            );
+        }
     }
     if let (Some(view), Some(band)) = (walkthrough_caption_view(host), walkthrough_band(host)) {
         rasterize_walkthrough_caption(
@@ -6206,8 +6329,10 @@ fn rasterize_frame(
             let fill = focus_border_rgb(host.focus_border);
             let chip_h = host.font.cell_h.min(footer_bottom);
             let pad = host.mux.geom().window_pad;
-            rasterize_bell_toast(
+            paint_bell_toast_for_style(
                 &host.font,
+                geom.chrome,
+                host.theme.variant,
                 &label,
                 buffer,
                 width as usize,
@@ -6240,19 +6365,42 @@ fn rasterize_frame(
         } else {
             THEME_PICKER_HINT_ROOT
         };
-        rasterize_theme_picker(
-            &host.font,
-            &rows,
-            picker.selected,
-            picker.scroll,
-            &host.theme,
-            hint,
-            overlay_surface,
-            buffer,
-            width as usize,
-            height as usize,
-            focus_border_rgb(host.focus_border),
-        );
+        if geom.chrome.graphite {
+            let hovered_row = match host.hover_target {
+                Some(HoverTarget::ThemePickerRow(index)) => Some(index),
+                _ => None,
+            };
+            graphite_overlays::theme_picker(
+                geom.chrome,
+                host.theme.variant,
+                &rows,
+                picker.selected,
+                picker.scroll,
+                &host.theme,
+                hint,
+                overlay_surface,
+                buffer,
+                width as usize,
+                height as usize,
+                focus_border_rgb(host.focus_border),
+                hovered_row,
+                host.hover_target == Some(HoverTarget::ThemePickerClose),
+            );
+        } else {
+            rasterize_theme_picker(
+                &host.font,
+                &rows,
+                picker.selected,
+                picker.scroll,
+                &host.theme,
+                hint,
+                overlay_surface,
+                buffer,
+                width as usize,
+                height as usize,
+                focus_border_rgb(host.focus_border),
+            );
+        }
     }
     // Palette is a global layer. The decision function owns the per-pane
     // gates; HostState is authoritative for this single global paint pass.
@@ -6295,6 +6443,7 @@ fn rasterize_frame(
         paint_palette_overlay_with_hover(
             &host.font,
             &host.theme,
+            geom.chrome,
             focus,
             &frame,
             overlay_surface,
@@ -6419,6 +6568,7 @@ fn rasterize_frame(
         paint_palette_overlay(
             &host.font,
             &host.theme,
+            geom.chrome,
             focus,
             &frame,
             overlay_surface,
@@ -6487,6 +6637,7 @@ fn rasterize_frame(
             paint_palette_overlay(
                 &host.font,
                 &host.theme,
+                geom.chrome,
                 focus,
                 &frame,
                 overlay_surface,
@@ -6536,6 +6687,7 @@ fn rasterize_frame(
         paint_palette_overlay(
             &host.font,
             &host.theme,
+            geom.chrome,
             focus,
             &frame,
             overlay_surface,
@@ -8834,6 +8986,7 @@ fn host_overlay_surface(host: &HostState) -> OverlaySurface {
 fn paint_palette_overlay(
     font: &FontMetrics,
     theme: &theme::Theme,
+    chrome: mux::ChromeGeom,
     focus_rgb: [u8; 3],
     frame: &PaletteFrame<'_>,
     surface: OverlaySurface,
@@ -8841,15 +8994,31 @@ fn paint_palette_overlay(
     width: usize,
     height: usize,
 ) -> Option<PaletteLayout> {
-    rasterize_palette(
-        font, frame, theme, surface, buffer, width, height, focus_rgb,
-    )
+    if chrome.graphite {
+        graphite_overlays::palette(
+            font,
+            theme.variant,
+            chrome,
+            focus_rgb,
+            frame,
+            surface,
+            buffer,
+            width,
+            height,
+            None,
+        )
+    } else {
+        rasterize_palette(
+            font, frame, theme, surface, buffer, width, height, focus_rgb,
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn paint_palette_overlay_with_hover(
     font: &FontMetrics,
     theme: &theme::Theme,
+    chrome: mux::ChromeGeom,
     focus_rgb: [u8; 3],
     frame: &PaletteFrame<'_>,
     surface: OverlaySurface,
@@ -8858,17 +9027,32 @@ fn paint_palette_overlay_with_hover(
     height: usize,
     hovered_filter: Option<usize>,
 ) -> Option<PaletteLayout> {
-    rasterize_palette_with_hover(
-        font,
-        frame,
-        theme,
-        surface,
-        buffer,
-        width,
-        height,
-        focus_rgb,
-        hovered_filter,
-    )
+    if chrome.graphite {
+        graphite_overlays::palette(
+            font,
+            theme.variant,
+            chrome,
+            focus_rgb,
+            frame,
+            surface,
+            buffer,
+            width,
+            height,
+            hovered_filter,
+        )
+    } else {
+        rasterize_palette_with_hover(
+            font,
+            frame,
+            theme,
+            surface,
+            buffer,
+            width,
+            height,
+            focus_rgb,
+            hovered_filter,
+        )
+    }
 }
 
 fn apply_palette_pointer(host: &mut HostState) {
@@ -8982,6 +9166,85 @@ fn scroll_palette_with_wheel(host: &mut HostState, delta: &MouseScrollDelta) -> 
     changed
 }
 
+fn scroll_theme_picker_with_wheel(host: &mut HostState, delta: &MouseScrollDelta) -> bool {
+    let chrome = host.mux.geom().chrome;
+    if !chrome.graphite {
+        return false;
+    }
+    let Some((x, y)) = host
+        .pointer_px
+        .filter(|(x, y)| x.is_finite() && y.is_finite() && *x >= 0.0 && *y >= 0.0)
+    else {
+        return false;
+    };
+    let size = host.window.inner_size();
+    let family = host
+        .theme_picker
+        .as_ref()
+        .and_then(|picker| picker.family.clone());
+    let count = picker_items(family.as_deref()).len();
+    let Some(scroll) = host.theme_picker.as_ref().map(|picker| picker.scroll) else {
+        return false;
+    };
+    let Some(layout) = graphite_overlays::theme_picker_layout(
+        chrome,
+        count,
+        scroll,
+        size.width as usize,
+        size.height as usize,
+    ) else {
+        return false;
+    };
+    if !layout.list.contains(x as usize, y as usize) {
+        return false;
+    }
+    let delta_milli_px = match delta {
+        MouseScrollDelta::LineDelta(_, rows) => {
+            (*rows as f64 * 3.0 * layout.row_h as f64 * 1_000.0).round() as i64
+        }
+        MouseScrollDelta::PixelDelta(position) => (position.y * 1_000.0).round() as i64,
+    };
+    if delta_milli_px == 0 || layout.row_h == 0 {
+        return false;
+    }
+    let row_distance = (layout.row_h as i64).saturating_mul(1_000).max(1);
+    let rows = {
+        let picker = host.theme_picker.as_mut().expect("picker is open");
+        picker.wheel_remainder_milli_px = picker
+            .wheel_remainder_milli_px
+            .saturating_add(delta_milli_px);
+        let rows = picker.wheel_remainder_milli_px / row_distance;
+        if rows == 0 {
+            return false;
+        }
+        picker.wheel_remainder_milli_px %= row_distance;
+        rows
+    };
+    let selected = host
+        .theme_picker
+        .as_ref()
+        .and_then(|picker| picker.selected)
+        .unwrap_or(0);
+    let next = (selected as i128 - rows as i128).clamp(0, count.saturating_sub(1) as i128) as usize;
+    if next == selected {
+        return false;
+    }
+    let items = picker_items(family.as_deref());
+    if let Some(item) = items.get(next) {
+        preview_picker_row(host, item);
+    }
+    let picker = host.theme_picker.as_mut().expect("picker is open");
+    picker.selected = Some(next);
+    picker.scroll = theme_picker_scroll_for_selection(
+        picker.scroll,
+        picker.selected,
+        layout.visible_rows,
+        count,
+    );
+    host.dirty = true;
+    true
+}
+
 fn pointer_hover_blocked(host: &HostState) -> bool {
     host.restore_prompt.is_some()
         || host.session_prompt.is_some()
@@ -9082,8 +9345,9 @@ fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
             .filter(|(x, y)| x.is_finite() && y.is_finite() && *x >= 0.0 && *y >= 0.0)?;
         let size = host.window.inner_size();
         let count = picker_items(picker.family.as_deref()).len();
-        if let Some(row) = theme_picker_hit(
+        if let Some(hit) = theme_picker_hit_for_style(
             &host.font,
+            host.mux.geom().chrome,
             count,
             picker.scroll,
             size.width as usize,
@@ -9091,7 +9355,12 @@ fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
             x as usize,
             y as usize,
         ) {
-            return Some(HoverTarget::ThemePickerRow(row));
+            return match hit {
+                graphite_overlays::ThemePickerHit::Close => Some(HoverTarget::ThemePickerClose),
+                graphite_overlays::ThemePickerHit::Row(row) => {
+                    Some(HoverTarget::ThemePickerRow(row))
+                }
+            };
         }
     }
     if pointer_hover_blocked(host) {
@@ -9209,6 +9478,7 @@ fn cursor_for_hover(
                 | Some(HoverTarget::Rail(_))
                 | Some(HoverTarget::ScrollbarThumb(_))
                 | Some(HoverTarget::ThemePickerRow(_))
+                | Some(HoverTarget::ThemePickerClose)
                 | Some(HoverTarget::ContextMenuRow(_))
                 | Some(HoverTarget::DialogButton(_))
                 | Some(HoverTarget::ToastDismiss(_))
@@ -11747,6 +12017,39 @@ fn theme_picker_scroll_for_selection(
     scroll.min(max_scroll)
 }
 
+fn theme_picker_visible_rows_for_style(
+    font: &FontMetrics,
+    chrome: mux::ChromeGeom,
+    count: usize,
+    width: usize,
+    height: usize,
+) -> usize {
+    if chrome.graphite {
+        graphite_overlays::theme_picker_visible_rows(chrome, count, width, height)
+    } else {
+        theme_picker_visible_rows(font, count, width, height)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn theme_picker_hit_for_style(
+    font: &FontMetrics,
+    chrome: mux::ChromeGeom,
+    count: usize,
+    scroll: usize,
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+) -> Option<graphite_overlays::ThemePickerHit> {
+    if chrome.graphite {
+        graphite_overlays::theme_picker_hit(chrome, count, scroll, width, height, x, y)
+    } else {
+        theme_picker_hit(font, count, scroll, width, height, x, y)
+            .map(graphite_overlays::ThemePickerHit::Row)
+    }
+}
+
 /// Modal theme settings. While open, every pressed key remains host-owned;
 /// arrows preview, Enter persists through the config seam, and Escape restores
 /// the exact pre-picker theme (including a custom file theme).
@@ -11817,8 +12120,13 @@ fn handle_theme_picker_key(
     let items = picker_items(family.as_deref());
     let count = items.len();
     let size = host.window.inner_size();
-    let visible_rows =
-        theme_picker_visible_rows(&host.font, count, size.width as usize, size.height as usize);
+    let visible_rows = theme_picker_visible_rows_for_style(
+        &host.font,
+        host.mux.geom().chrome,
+        count,
+        size.width as usize,
+        size.height as usize,
+    );
     let current = host
         .theme_picker
         .as_ref()
@@ -11838,6 +12146,7 @@ fn handle_theme_picker_key(
             picker.family = Some(key.clone());
             picker.selected = Some(inner);
             picker.scroll = 0;
+            picker.wheel_remainder_milli_px = 0;
             host.theme = theme::builtins()[theme_index].clone();
             host.dirty = true;
         }
@@ -11850,6 +12159,7 @@ fn handle_theme_picker_key(
             picker.family = None;
             picker.selected = row;
             picker.scroll = 0;
+            picker.wheel_remainder_milli_px = 0;
             host.dirty = true;
         }
         return true;
@@ -12225,18 +12535,104 @@ fn open_theme_picker(host: &mut HostState) {
     let selected = picker_root_row_for_theme(&host.theme.id);
     let count = picker_items(None).len();
     let size = host.window.inner_size();
-    let visible_rows =
-        theme_picker_visible_rows(&host.font, count, size.width as usize, size.height as usize);
+    let visible_rows = theme_picker_visible_rows_for_style(
+        &host.font,
+        host.mux.geom().chrome,
+        count,
+        size.width as usize,
+        size.height as usize,
+    );
     host.theme_picker = Some(ThemePicker {
         original: host.theme.clone(),
         selected,
         family: None,
         scroll: theme_picker_scroll_for_selection(0, selected, visible_rows, count),
+        wheel_remainder_milli_px: 0,
     });
     host.tab_rename = None;
     host.window.set_title("Prismattyc — theme settings");
     host.dirty = true;
     sync_chrome_hover(host);
+}
+
+fn cancel_theme_picker(host: &mut HostState) {
+    if let Some(picker) = host.theme_picker.take() {
+        host.theme = picker.original;
+        host.window
+            .set_title(&window_title(&host.mux, show_tab_strip(host)));
+        host.dirty = true;
+        sync_chrome_hover(host);
+    }
+}
+
+fn activate_theme_picker_at_pointer(host: &mut HostState, x: usize, y: usize) -> bool {
+    let chrome = host.mux.geom().chrome;
+    if !chrome.graphite {
+        return false;
+    }
+    let Some(picker) = host.theme_picker.as_ref() else {
+        return false;
+    };
+    let family = picker.family.clone();
+    let count = picker_items(family.as_deref()).len();
+    let size = host.window.inner_size();
+    let Some(hit) = theme_picker_hit_for_style(
+        &host.font,
+        chrome,
+        count,
+        picker.scroll,
+        size.width as usize,
+        size.height as usize,
+        x,
+        y,
+    ) else {
+        return false;
+    };
+    match hit {
+        graphite_overlays::ThemePickerHit::Close => cancel_theme_picker(host),
+        graphite_overlays::ThemePickerHit::Row(index) => {
+            let items = picker_items(family.as_deref());
+            let Some(item) = items.get(index) else {
+                return false;
+            };
+            if let theme::PickerItem::Family { key, members, .. } = item {
+                let current_theme = &host.theme.id;
+                let selected = members
+                    .iter()
+                    .position(|&member| theme::builtins()[member].id == current_theme.as_str())
+                    .unwrap_or(0);
+                let theme_index = members[selected];
+                let picker = host.theme_picker.as_mut().expect("picker is open");
+                picker.family = Some(key.clone());
+                picker.selected = Some(selected);
+                picker.scroll = 0;
+                picker.wheel_remainder_milli_px = 0;
+                host.theme = theme::builtins()[theme_index].clone();
+            } else {
+                preview_picker_row(host, item);
+                let size = host.window.inner_size();
+                let count = items.len();
+                let visible = theme_picker_visible_rows_for_style(
+                    &host.font,
+                    chrome,
+                    count,
+                    size.width as usize,
+                    size.height as usize,
+                );
+                let picker = host.theme_picker.as_mut().expect("picker is open");
+                picker.selected = Some(index);
+                picker.scroll = theme_picker_scroll_for_selection(
+                    picker.scroll,
+                    picker.selected,
+                    visible,
+                    count,
+                );
+            }
+            host.dirty = true;
+            sync_chrome_hover(host);
+        }
+    }
+    true
 }
 
 fn window_title(mux: &mux::MuxRuntime, show_tabs: bool) -> String {
@@ -15749,6 +16145,8 @@ impl ApplicationHandler<UserAction> for App {
                 WindowEvent::MouseWheel { delta, .. } => {
                     if host.palette.is_some() {
                         scroll_palette_with_wheel(host, delta);
+                    } else if host.theme_picker.is_some() {
+                        scroll_theme_picker_with_wheel(host, delta);
                     } else {
                         apply_palette_pointer(host);
                     }
@@ -15788,6 +16186,17 @@ impl ApplicationHandler<UserAction> for App {
                                 }
                                 Dispatch::Handled => {}
                             }
+                        }
+                    }
+                    if host.theme_picker.is_some()
+                        && host.mux.geom().chrome.graphite
+                        && *state == ElementState::Pressed
+                        && *button == MouseButton::Left
+                    {
+                        if let Some((x, y)) = host.pointer_px.filter(|(x, y)| {
+                            x.is_finite() && y.is_finite() && *x >= 0.0 && *y >= 0.0
+                        }) {
+                            activate_theme_picker_at_pointer(host, x as usize, y as usize);
                         }
                     }
                     if host.context_menu.is_some()
@@ -22223,6 +22632,7 @@ session mail (id 15)
         );
         for hover in [
             Some(HoverTarget::ThemePickerRow(0)),
+            Some(HoverTarget::ThemePickerClose),
             Some(HoverTarget::ContextMenuRow(1)),
             Some(HoverTarget::DialogButton(0)),
             Some(HoverTarget::ToastDismiss(0)),

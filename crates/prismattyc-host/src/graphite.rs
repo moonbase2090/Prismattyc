@@ -2946,8 +2946,12 @@ pub(crate) fn sidebar_layout(
         let thumb_y = if max_scroll == 0 {
             list.y
         } else {
-            list.y
-                .saturating_add(travel.saturating_mul(first_row) / max_scroll)
+            list.y.saturating_add(
+                travel
+                    .saturating_mul(first_row)
+                    .checked_div(max_scroll)
+                    .unwrap_or(0),
+            )
         };
         let thumb_w = chrome.px(SIDEBAR_THUMB_W).min(list.w);
         Some(Rect::new(

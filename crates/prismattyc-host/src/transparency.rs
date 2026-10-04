@@ -742,7 +742,7 @@ pub(crate) fn layout(
         let thumb_h =
             (track_h * track_h / metrics.content_h.max(1)).clamp(chrome.px(24.0), track_h);
         let travel = track_h.saturating_sub(thumb_h);
-        let thumb_y = list.y + scroll * travel / max;
+        let thumb_y = list.y + scroll.saturating_mul(travel).checked_div(max).unwrap_or(0);
         Some(Rect::new(
             list.right().saturating_sub(chrome.px(SCROLLBAR_W)),
             thumb_y,

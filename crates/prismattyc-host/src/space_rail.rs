@@ -106,6 +106,8 @@ pub enum RailHit {
     Overflow,
     /// A configured SSH destination chip (`[[remote]]`, issue #24).
     Destination(usize),
+    /// Scrollbar thumb of a Graphite side list.
+    Thumb,
     /// Inside the rail, on no chip.
     Empty,
 }
@@ -193,6 +195,26 @@ pub struct RailLayout {
     /// Graphite close target width at a chip's right edge; `None` keeps the
     /// classic one-cell close.
     pub close_px: Option<usize>,
+    /// Graphite side column: pixels reserved above the chip list (the header
+    /// that lines up with the tabs bar). Zero on classic and horizontal bars.
+    pub list_top: usize,
+    /// Pixels reserved under the chip list (counts and the hint).
+    pub list_bottom: usize,
+    /// First visible row when [`Self::visible_rows`] is set. Ignored otherwise,
+    /// where chips that do not fit are dropped.
+    pub scroll: usize,
+    /// Rows that fit in the list. `None` keeps the classic drop-to-fit rail.
+    pub visible_rows: Option<usize>,
+    /// How far [`Self::scroll`] can move. Zero when every row fits.
+    pub max_scroll: usize,
+    /// Scrollbar thumb, present only when the list is taller than the viewport.
+    pub thumb: Option<(usize, usize, usize, usize)>,
+    /// Left edge and width of a scrolling row. Unused when `visible_rows` is
+    /// `None` (classic side chips still fill the column).
+    pub row_x: usize,
+    pub row_w: usize,
+    /// Header `+` height. Zero outside the Graphite side column.
+    pub plus_h: usize,
 }
 
 impl RailLayout {
@@ -244,6 +266,15 @@ impl RailLayout {
             },
             plus_px: None,
             close_px: None,
+            list_top: 0,
+            list_bottom: 0,
+            scroll: 0,
+            visible_rows: None,
+            max_scroll: 0,
+            thumb: None,
+            row_x: 0,
+            row_w: 0,
+            plus_h: 0,
         };
         let layout = match geom.rail_side {
             RailSide::Off => return None,
@@ -338,6 +369,13 @@ impl RailLayout {
             return None;
         }
         let plus = index == n;
+        if self.visible_rows.is_some() {
+            return if plus {
+                self.header_plus_bounds()
+            } else {
+                self.row_bounds(index)
+            };
+        }
         if self.side.horizontal() {
             let before: usize = self.chip_px[..index].iter().sum();
             let x = self
@@ -380,6 +418,9 @@ impl RailLayout {
         let count = self.dest_px.len();
         if index >= count {
             return None;
+        }
+        if self.visible_rows.is_some() {
+            return self.row_bounds(n + index);
         }
         let (plus_x, plus_y, plus_w, plus_h) = self.chip_bounds(n, n)?;
         let sep = DESTINATION_SEPARATOR_PX;
@@ -442,6 +483,11 @@ impl RailLayout {
         {
             return None;
         }
+        if let Some((x0, y0, w, h)) = self.thumb {
+            if px >= x0 && px < x0.saturating_add(w) && py >= y0 && py < y0.saturating_add(h) {
+                return Some(RailHit::Thumb);
+            }
+        }
         for index in 0..=n + usize::from(self.overflow) {
             let Some((x0, y0, w, h)) = self.chip_bounds(index, n) else {
                 continue;
@@ -467,6 +513,86 @@ impl RailLayout {
         }
         Some(RailHit::Empty)
     }
+
+    /// `+ New space` in the Graphite side header, always visible.
+    fn header_plus_bounds(&self) -> Option<(usize, usize, usize, usize)> {
+        let pw = self.plus_px?;
+        let ph = self.plus_h.max(1).min(self.list_top.max(1));
+        let y = self.y + self.list_top.saturating_sub(ph) / 2;
+        let x = self.x + self.w - self.pad - pw;
+        (x >= self.x && pw > 0).then_some((x, y, pw, ph))
+    }
+
+    /// One fully visible row of the scrolling side list.
+    fn row_bounds(&self, row: usize) -> Option<(usize, usize, usize, usize)> {
+        let visible = self.visible_rows?;
+        if self.row_w == 0 || self.cell_h == 0 || row < self.scroll || row >= self.scroll + visible
+        {
+            return None;
+        }
+        let step = self.cell_h.saturating_add(self.gap);
+        let y = self.y + self.list_top + self.pad + (row - self.scroll) * step;
+        let bottom = self.y + self.h - self.list_bottom;
+        if y.saturating_add(self.cell_h) > bottom {
+            return None;
+        }
+        Some((self.row_x, y, self.row_w, self.cell_h))
+    }
+
+    /// True when `py` is inside the scrolling list, between header and footer.
+    pub fn in_side_list(&self, py: usize) -> bool {
+        self.visible_rows.is_some()
+            && py >= self.y + self.list_top
+            && py < self.y + self.h - self.list_bottom
+    }
+}
+
+/// Rows that fit in a side list of `list_h` pixels.
+pub fn visible_row_count(list_h: usize, chip_h: usize, gap: usize, pad: usize) -> usize {
+    if chip_h == 0 {
+        return 0;
+    }
+    let inner = list_h.saturating_sub(pad.saturating_mul(2));
+    if inner < chip_h {
+        0
+    } else {
+        1 + (inner - chip_h) / chip_h.saturating_add(gap).max(1)
+    }
+}
+
+/// Move a row scroll by `delta`, clamped to `0..=max_scroll`.
+pub fn scroll_by(scroll: usize, delta: i32, max_scroll: usize) -> usize {
+    (scroll as i32 + delta).clamp(0, max_scroll as i32) as usize
+}
+
+/// Scroll that puts `row` inside a window of `visible` rows.
+pub fn revealed_scroll(scroll: usize, row: usize, visible: usize, max_scroll: usize) -> usize {
+    if visible == 0 {
+        return scroll.min(max_scroll);
+    }
+    let next = if row < scroll {
+        row
+    } else if row >= scroll.saturating_add(visible) {
+        row + 1 - visible
+    } else {
+        scroll
+    };
+    next.min(max_scroll)
+}
+
+/// Scroll thumb drag. `travel` is the track length minus the thumb.
+pub fn thumb_scroll_from_drag(
+    origin_y: f64,
+    y: f64,
+    origin_scroll: usize,
+    max_scroll: usize,
+    travel: usize,
+) -> usize {
+    if travel == 0 || max_scroll == 0 {
+        return origin_scroll.min(max_scroll);
+    }
+    let delta = ((y - origin_y) * max_scroll as f64 / travel as f64).round() as i32;
+    scroll_by(origin_scroll, delta, max_scroll)
 }
 
 /// One keystroke inside the inline name editor.
@@ -545,6 +671,8 @@ pub struct SpaceRail {
     /// Focus arrived by keyboard (`space_rail_focus`); a mouse-started edit
     /// or confirm hands the keyboard back to the pane when it ends.
     pub keyboard: bool,
+    /// First visible row of a Graphite side list. Classic rails ignore it.
+    side_scroll: usize,
     last_poll: Option<Instant>,
     dir_stamp: Option<SystemTime>,
     /// Inputs of the last [`Self::infer_current`] scan: directory stamp and
@@ -567,6 +695,7 @@ impl SpaceRail {
             save_status: String::new(),
             notice: None,
             keyboard: false,
+            side_scroll: 0,
             last_poll: None,
             dir_stamp: None,
             infer_tried: None,
@@ -586,8 +715,13 @@ impl SpaceRail {
             .iter()
             .map(|name| self.attention_label(name))
             .collect();
-        let mut layout =
-            RailLayout::for_window(geom, width, height, &labels)?.with_pane_names(details);
+        let mut layout = RailLayout::for_window(geom, width, height, &labels)?;
+        let graphite_side = geom.chrome.graphite && !layout.side.horizontal();
+        if graphite_side {
+            self.layout_graphite_side(&mut layout, geom, height, details);
+            return Some(layout);
+        }
+        layout = layout.with_pane_names(details);
         let graphite = geom.chrome.graphite && layout.side.horizontal();
         if graphite {
             // Graphite chips fit the proportional label; pane names stay in
@@ -670,6 +804,90 @@ impl SpaceRail {
             }
         }
         Some(layout)
+    }
+
+    /// Graphite left/right column (#110): a fixed header and footer, and every
+    /// Space reachable by scrolling instead of dropping chips that do not fit.
+    fn layout_graphite_side(
+        &self,
+        layout: &mut RailLayout,
+        geom: HostGeom,
+        height: usize,
+        details: bool,
+    ) {
+        let chrome = geom.chrome;
+        layout.y = 0;
+        layout.h = height;
+        layout.cell_h = crate::graphite::side_chip_px(chrome, details);
+        layout.gap = crate::graphite::side_gap_px(chrome);
+        layout.pad = crate::graphite::side_pad_px(chrome);
+        layout.list_top = crate::graphite::side_header_px(chrome).min(height);
+        layout.list_bottom =
+            crate::graphite::side_footer_px(chrome).min(height.saturating_sub(layout.list_top));
+        layout.close_px = Some(crate::graphite::rail_close_width(chrome));
+        layout.plus_h = crate::graphite::side_chip_px(chrome, false).min(layout.list_top.max(1));
+        let plus = crate::graphite::rail_plus_width(chrome);
+        let max_plus = layout.w.saturating_sub(layout.pad.saturating_mul(2)).max(1);
+        layout.plus_px = Some(plus.min(max_plus));
+
+        let list_h = layout
+            .h
+            .saturating_sub(layout.list_top)
+            .saturating_sub(layout.list_bottom);
+        let visible = visible_row_count(list_h, layout.cell_h, layout.gap, layout.pad);
+        let total = self.names.len() + self.destinations.len();
+        let max_scroll = total.saturating_sub(visible);
+        let scroll = self.side_scroll.min(max_scroll);
+        layout.scroll = scroll;
+        layout.visible_rows = Some(visible);
+        layout.max_scroll = max_scroll;
+        layout.overflow = false;
+
+        let thumb_w = if max_scroll > 0 {
+            crate::graphite::side_thumb_px(chrome)
+        } else {
+            0
+        };
+        let inner_left = layout.x + layout.pad;
+        let inner_right = layout.x + layout.w - layout.pad;
+        let (row_x, row_w, thumb_x) = if layout.side == RailSide::Right {
+            let row_x = inner_left + thumb_w + usize::from(thumb_w > 0) * layout.gap;
+            (row_x, inner_right.saturating_sub(row_x), inner_left)
+        } else {
+            let thumb_x = inner_right.saturating_sub(thumb_w);
+            let row_right = if thumb_w > 0 {
+                thumb_x.saturating_sub(layout.gap)
+            } else {
+                inner_right
+            };
+            (inner_left, row_right.saturating_sub(inner_left), thumb_x)
+        };
+        layout.row_x = row_x;
+        layout.row_w = row_w.max(1);
+        layout.chip_px = vec![layout.row_w; self.names.len()];
+        layout.dest_px = vec![layout.row_w; self.destinations.len()];
+        if thumb_w > 0 && visible > 0 && total > 0 {
+            let track_h = list_h.max(1);
+            let min_thumb = crate::graphite::side_thumb_min_px(chrome)
+                .min(track_h)
+                .max(1);
+            let thumb_h = (track_h * visible / total).clamp(min_thumb, track_h);
+            let travel = track_h.saturating_sub(thumb_h);
+            let offset = travel
+                .checked_mul(scroll)
+                .and_then(|product| product.checked_div(max_scroll))
+                .unwrap_or(0);
+            let thumb_y = layout.y + layout.list_top + offset;
+            layout.thumb = Some((thumb_x, thumb_y, thumb_w, thumb_h));
+        }
+    }
+
+    pub fn side_scroll(&self) -> usize {
+        self.side_scroll
+    }
+
+    pub fn set_side_scroll(&mut self, scroll: usize, max_scroll: usize) {
+        self.side_scroll = scroll.min(max_scroll);
     }
 
     /// Reload the chip list from `dir`. Returns whether anything changed.
@@ -1841,6 +2059,99 @@ mod tests {
         // poll is throttled: an immediate second poll does nothing.
         assert!(!rail.poll(&dir, Instant::now()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn graphite_geom(side: RailSide) -> HostGeom {
+        let mut geom = HostGeom::tight(8, 16);
+        geom.window_pad = 8;
+        geom.rail_side = side;
+        geom.chrome = crate::mux::ChromeGeom {
+            graphite: true,
+            scale_milli: 1000,
+        };
+        geom.top_chrome_px = 44;
+        geom.rail_px = if side.horizontal() {
+            30
+        } else {
+            crate::graphite::side_rail_px(geom.chrome, 18)
+        };
+        geom
+    }
+
+    #[test]
+    fn graphite_side_list_scrolls_every_space_instead_of_dropping_chips() {
+        let names: Vec<String> = (0..13).map(|i| format!("space-{i}")).collect();
+        let mut rail = SpaceRail::new(Some("space-0".into()));
+        rail.names = names;
+        rail.live_pane_names
+            .insert("space-0".into(), vec!["build".into(), "review".into()]);
+        let geom = graphite_geom(RailSide::Left);
+        assert_eq!(geom.rail_px, 220);
+        let layout = rail.layout(geom, 1280, 600, true).unwrap();
+        assert!(!layout.overflow, "nothing is dropped");
+        assert_eq!(layout.y, 0, "header lines up with the tabs bar");
+        assert_eq!(layout.h, 600);
+        assert_eq!(layout.w, 220);
+        assert_eq!(layout.list_top, 44);
+        assert!(layout.list_bottom >= 56);
+        assert!(layout.visible_rows.unwrap() < 13);
+        assert!(layout.max_scroll > 0);
+        assert!(layout.thumb.is_some());
+        assert!(layout.chip_bounds(0, 13).is_some());
+        assert!(
+            layout.chip_bounds(12, 13).is_none(),
+            "the last space is below the viewport"
+        );
+        let plus = layout.chip_bounds(13, 13).unwrap();
+        assert!(plus.1 < layout.list_top, "+ stays in the header");
+        assert_eq!(layout.hit(plus.0 + 2, plus.1 + 2, 13), Some(RailHit::Plus));
+        let footer_y = layout.y + layout.h - 4;
+        assert_eq!(
+            layout.hit(layout.x + 20, footer_y, 13),
+            Some(RailHit::Empty),
+            "the footer is not a chip"
+        );
+        let (tx, ty, tw, th) = layout.thumb.unwrap();
+        assert_eq!(
+            layout.hit(tx + tw / 2, ty + th / 2, 13),
+            Some(RailHit::Thumb)
+        );
+
+        rail.set_side_scroll(layout.max_scroll, layout.max_scroll);
+        let scrolled = rail.layout(geom, 1280, 600, true).unwrap();
+        assert!(
+            scrolled.chip_bounds(12, 13).is_some(),
+            "scroll reveals space-12"
+        );
+        assert!(scrolled.chip_bounds(0, 13).is_none());
+        let right = graphite_geom(RailSide::Right);
+        let right_layout = rail.layout(right, 1280, 600, true).unwrap();
+        assert_eq!(right_layout.x, 1280 - 220);
+        assert!(right_layout.thumb.unwrap().0 < right_layout.x + 40);
+    }
+
+    #[test]
+    fn graphite_horizontal_bar_still_drops_chips_that_do_not_fit() {
+        let mut rail = SpaceRail::new(None);
+        rail.names = (0..30).map(|i| format!("space-{i:02}")).collect();
+        let layout = rail
+            .layout(graphite_geom(RailSide::Bottom), 640, 400, true)
+            .unwrap();
+        assert!(layout.overflow);
+        assert!(layout.visible_rows.is_none());
+        assert_eq!(layout.h, 30);
+        assert!(layout.chip_px.contains(&0));
+    }
+
+    #[test]
+    fn side_scroll_clamps_and_reveals_the_focused_row() {
+        assert_eq!(scroll_by(2, -5, 10), 0);
+        assert_eq!(scroll_by(2, 20, 10), 10);
+        assert_eq!(revealed_scroll(0, 12, 10, 3), 3);
+        assert_eq!(revealed_scroll(3, 4, 10, 3), 3);
+        assert_eq!(revealed_scroll(3, 0, 10, 3), 0);
+        assert_eq!(thumb_scroll_from_drag(10.0, 10.0, 1, 6, 100), 1);
+        assert_eq!(thumb_scroll_from_drag(0.0, 100.0, 0, 6, 100), 6);
     }
 }
 

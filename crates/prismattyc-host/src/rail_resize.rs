@@ -19,7 +19,12 @@ pub(super) fn at_edge(host: &HostState) -> bool {
         space_rail::RailSide::Right => host.window.inner_size().width as f64 - geom.rail_px as f64,
         _ => return false,
     };
-    y >= geom.top_chrome_px as f64 && (x - edge).abs() <= 5.0
+    let top = if host.spacing.chrome_style == config::ChromeStyle::Graphite {
+        0.0
+    } else {
+        geom.top_chrome_px as f64
+    };
+    y >= top && (x - edge).abs() <= 5.0
 }
 pub(super) fn motion(host: &mut HostState, x: f64, y: f64) -> bool {
     if !host.rail_resizing {
@@ -32,8 +37,23 @@ pub(super) fn motion(host: &mut HostState, x: f64, y: f64) -> bool {
     } else {
         x
     };
-    let max = ((width / host.font.cell_w as f64) as usize / 2).clamp(8, 60);
-    let cols = ((px / host.font.cell_w as f64).round() as usize).clamp(8, max);
+    let graphite = host.spacing.chrome_style == config::ChromeStyle::Graphite;
+    let max = if graphite {
+        let per = 220.0 / 18.0 * host.spacing.ui_scale_milli as f64 / 1000.0;
+        if per <= f64::EPSILON {
+            60
+        } else {
+            ((width / 2.0) / per).floor() as usize
+        }
+    } else {
+        (width / host.font.cell_w as f64) as usize / 2
+    };
+    let max = max.clamp(8, 60);
+    let cols = if graphite {
+        graphite::side_cols_for_px(px, host.spacing.ui_scale_milli, max)
+    } else {
+        ((px / host.font.cell_w as f64).round() as usize).clamp(8, max)
+    };
     if cols != host.spacing.space_rail_width_cols {
         host.spacing.space_rail_width_cols = cols;
         App::refit_geom(host, host.window.inner_size(), Some("rail width"));

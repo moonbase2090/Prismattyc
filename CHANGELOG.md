@@ -18,7 +18,10 @@ writes `chrome_style = "classic"`. Graphite adds the redesigned tabs bar, pane
 title rows, a scrolling spaces column in every rail position, the light-cycle
 focus ring, Ctrl+Shift+B bar colors, pane-header drag handles, arrangement
 actions, the transparency dialog, and a pointing-hand cursor on clickable
-chrome. `layout = "sidebar"` opts into the combined sidebar tree.
+chrome. `layout = "sidebar"` is Graphite only. It replaces the bars with one
+sidebar tree: space rows collapse, live rows select their tab, saved rows open
+a Space, and the footer runs the same new-tab, palette, and arrange actions.
+The pointer changes on those rows, and the panel scrolls.
 
 ### Command palette and dialogs
 

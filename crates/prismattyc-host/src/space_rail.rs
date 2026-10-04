@@ -900,8 +900,6 @@ impl SpaceRail {
     }
 
     /// Collapse (`true`) or expand (`false`) one space in the sidebar tree.
-    // PR3 wires the toggles; allow the unused-code lint until then.
-    #[allow(dead_code)]
     pub fn set_collapsed(&mut self, name: &str, collapsed: bool) {
         if collapsed {
             self.collapsed_spaces.insert(name.to_string());

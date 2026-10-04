@@ -924,6 +924,21 @@ struct HostState {
     rail_resizing: bool,
     /// Graphite side-list thumb drag: pointer y and scroll at press.
     rail_thumb_drag: Option<(f64, usize)>,
+    /// Combined sidebar hit state (#113): painted rows with their tree
+    /// indices, footer and header buttons, list viewport and thumb, and
+    /// the row count behind the current scroll offset.
+    sidebar_rows: Vec<(graphite::Rect, sidebar::TreeRow)>,
+    sidebar_actions: [graphite::Rect; 3],
+    sidebar_arrange: [graphite::Rect; 3],
+    sidebar_list: graphite::Rect,
+    sidebar_thumb: Option<graphite::Rect>,
+    sidebar_row_count: usize,
+    /// Tree behind the stored rows; clicks resolve names through it.
+    sidebar_tree: sidebar::SidebarTree,
+    /// First visible tree row; the paint layout clamps a stale offset.
+    sidebar_scroll: usize,
+    /// Sidebar list thumb drag: pointer y and scroll at press.
+    sidebar_thumb_drag: Option<(f64, usize)>,
     terminal_targets: Option<Vec<terminal_switcher::Entry>>,
     terminal_messages: bool,
     move_target: Option<move_target::Target>,
@@ -1373,6 +1388,9 @@ enum HoverTarget {
     },
     /// Graphite pane-header handle (dot and name), issue #109.
     PaneHandle(PaneId),
+    /// Combined sidebar tree row, footer action, arrangement button, or
+    /// list thumb (issue #113).
+    Sidebar(graphite::SidebarHit),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3470,6 +3488,15 @@ impl App {
                 local_views: Default::default(),
                 rail_resizing: false,
                 rail_thumb_drag: None,
+                sidebar_rows: Vec::new(),
+                sidebar_actions: [graphite::Rect::new(0, 0, 0, 0); 3],
+                sidebar_arrange: [graphite::Rect::new(0, 0, 0, 0); 3],
+                sidebar_list: graphite::Rect::new(0, 0, 0, 0),
+                sidebar_thumb: None,
+                sidebar_row_count: 0,
+                sidebar_tree: sidebar::SidebarTree::default(),
+                sidebar_scroll: 0,
+                sidebar_thumb_drag: None,
                 terminal_targets: None,
                 terminal_messages: false,
                 move_target: None,
@@ -9083,7 +9110,16 @@ fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
     }
     let size = host.window.inner_size();
     let stride = size.width as usize;
-    if show_tab_strip(host) {
+    // Sidebar mode replaces the strip: stale bar layouts must not produce
+    // phantom strip hovers over the header. The rail needs no gate — its
+    // layout is `None` while the sidebar zeroes `rail_px`.
+    let geom = host.mux.geom();
+    let sidebar = geom.chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar;
+    if sidebar {
+        if let Some(hit) = sidebar_hit_at(host, px, py) {
+            return Some(HoverTarget::Sidebar(hit));
+        }
+    } else if show_tab_strip(host) {
         if let Some(hit) = host
             .mux
             .tab_strip_hit(px, py, stride, reserve_strip_end(host))
@@ -9145,6 +9181,7 @@ fn cursor_for_hover(
     hover: Option<HoverTarget>,
     strip_dragging: bool,
     scrollbar_dragging: bool,
+    sidebar_thumb_dragging: bool,
     divider_axis: Option<prismattyc_mux::Axis>,
     hyperlink: bool,
 ) -> CursorIcon {
@@ -9159,7 +9196,7 @@ fn cursor_for_hover(
             transparency::CursorKind::Pointer => CursorIcon::Pointer,
             transparency::CursorKind::Default => CursorIcon::Default,
         }
-    } else if strip_dragging || scrollbar_dragging {
+    } else if strip_dragging || scrollbar_dragging || sidebar_thumb_dragging {
         CursorIcon::Grab
     } else if hyperlink
         || matches!(
@@ -9168,6 +9205,7 @@ fn cursor_for_hover(
                 | Some(HoverTarget::PaletteFilter(_))
                 | Some(HoverTarget::Caption(Some(_)))
                 | Some(HoverTarget::Strip(_))
+                | Some(HoverTarget::Sidebar(_))
                 | Some(HoverTarget::Rail(_))
                 | Some(HoverTarget::ScrollbarThumb(_))
                 | Some(HoverTarget::ThemePickerRow(_))
@@ -9244,6 +9282,7 @@ fn sync_chrome_hover(host: &mut HostState) -> bool {
         next,
         strip_dragging,
         host.scrollbar_drag.is_some() || host.rail_thumb_drag.is_some(),
+        host.sidebar_thumb_drag.is_some(),
         divider_axis,
         hyperlink,
     );
@@ -9478,6 +9517,202 @@ fn handle_rail_click(host: &mut HostState, button: MouseButton) -> bool {
                 host.dirty = true;
             }
         }
+    }
+    true
+}
+
+/// What a sidebar press does. Pure decision; the handler below applies it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SidebarClick {
+    ToggleCollapse(String),
+    SelectTab(usize),
+    OpenSpace(String),
+    BeginNewSpace,
+    StartThumbDrag,
+    Run(keybind::Action),
+    Ignore,
+}
+
+/// Route a sidebar hit: space rows toggle collapse, live rows select
+/// their tab, saved rows open their space, footer and header buttons run
+/// the same actions as their bars-mode twins.
+fn sidebar_click_decision(
+    hit: graphite::SidebarHit,
+    row: Option<(&sidebar::TreeRow, &str, bool)>,
+    saved: bool,
+) -> SidebarClick {
+    use graphite::SidebarHit;
+    match (hit, row) {
+        (SidebarHit::Row(_), Some((clicked, name, current))) => match clicked.kind {
+            sidebar::RowKind::Space => SidebarClick::ToggleCollapse(name.to_string()),
+            sidebar::RowKind::Tab | sidebar::RowKind::Pane => {
+                if current {
+                    clicked
+                        .tab
+                        .map(SidebarClick::SelectTab)
+                        .unwrap_or(SidebarClick::Ignore)
+                } else if saved {
+                    SidebarClick::OpenSpace(name.to_string())
+                } else {
+                    SidebarClick::Ignore
+                }
+            }
+        },
+        (SidebarHit::Action(0), _) => SidebarClick::Run(keybind::Action::NewTab),
+        (SidebarHit::Action(1), _) => SidebarClick::BeginNewSpace,
+        (SidebarHit::Action(2), _) => SidebarClick::Run(keybind::Action::CommandPalette),
+        (SidebarHit::Arrange(0), _) => SidebarClick::Run(keybind::Action::ArrangeSingle),
+        (SidebarHit::Arrange(1), _) => SidebarClick::Run(keybind::Action::ArrangeSplit),
+        (SidebarHit::Arrange(2), _) => SidebarClick::Run(keybind::Action::ArrangeGrid),
+        (SidebarHit::Thumb, _) => SidebarClick::StartThumbDrag,
+        _ => SidebarClick::Ignore,
+    }
+}
+
+/// Left press on the combined sidebar (#113): collapse toggles, tab and
+/// space selection, footer and header actions. Anything else is
+/// `NotHandled` so presses fall through to the pane handlers.
+fn handle_sidebar_click(host: &mut HostState, button: MouseButton) -> StripClickResult {
+    let geom = host.mux.geom();
+    if !(geom.chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar) {
+        return StripClickResult::NotHandled;
+    }
+    let Some((x, y)) = host.pointer_px else {
+        return StripClickResult::NotHandled;
+    };
+    if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+        return StripClickResult::NotHandled;
+    }
+    if button != MouseButton::Left {
+        return StripClickResult::NotHandled;
+    }
+    let Some(hit) = sidebar_hit_at(host, x as usize, y as usize) else {
+        return StripClickResult::NotHandled;
+    };
+    cancel_tab_rename(host);
+    let row: Option<(sidebar::TreeRow, String, bool, bool)> = match hit {
+        graphite::SidebarHit::Row(index) => {
+            host.sidebar_rows.get(index).and_then(|(_, clicked)| {
+                host.sidebar_tree.spaces.get(clicked.space).map(|space| {
+                    (
+                        clicked.clone(),
+                        space.name.clone(),
+                        space.current,
+                        host.space_rail.names.contains(&space.name),
+                    )
+                })
+            })
+        }
+        _ => None,
+    };
+    // Resolve through the pure decision first so the borrow ends before
+    // the mutations below.
+    let decision = match &row {
+        Some((clicked, name, current, saved)) => {
+            sidebar_click_decision(hit, Some((clicked, name.as_str(), *current)), *saved)
+        }
+        None => sidebar_click_decision(hit, None, false),
+    };
+    match decision {
+        SidebarClick::ToggleCollapse(name) => {
+            // Per-window collapse memory from PR1.
+            let collapsed = host.space_rail.is_collapsed(&name);
+            host.space_rail.set_collapsed(&name, !collapsed);
+            host.dirty = true;
+            StripClickResult::Handled
+        }
+        SidebarClick::SelectTab(tab) => {
+            let _ = host.mux.select_tab(tab);
+            host.dirty = true;
+            StripClickResult::Handled
+        }
+        SidebarClick::OpenSpace(name) => {
+            // Saved tabs have no live panes: open the space.
+            apply_rail_verdict(host, space_rail::RailVerdict::Open(name));
+            host.dirty = true;
+            StripClickResult::Handled
+        }
+        SidebarClick::BeginNewSpace => {
+            // Same inline `+` editor the spaces rail opens.
+            host.space_rail.begin_new();
+            host.dirty = true;
+            StripClickResult::Handled
+        }
+        SidebarClick::StartThumbDrag => {
+            host.sidebar_thumb_drag = Some((y, host.sidebar_scroll));
+            host.dirty = true;
+            StripClickResult::Handled
+        }
+        SidebarClick::Run(action) => StripClickResult::Action(action),
+        SidebarClick::Ignore => StripClickResult::NotHandled,
+    }
+}
+
+/// Wheel over the sidebar list scrolls the tree and does not reach the
+/// pane underneath.
+fn scroll_graphite_sidebar(host: &mut HostState, delta: &MouseScrollDelta) -> bool {
+    let geom = host.mux.geom();
+    if !(geom.chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar) {
+        return false;
+    }
+    let Some((x, y)) = host.pointer_px else {
+        return false;
+    };
+    if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+        return false;
+    }
+    let list = host.sidebar_list;
+    if !(list.contains(x as usize, y as usize)) {
+        return false;
+    }
+    let lines = match delta {
+        MouseScrollDelta::LineDelta(_, rows) => (-rows).round() as i32,
+        MouseScrollDelta::PixelDelta(position) => {
+            if position.y > 0.0 {
+                -1
+            } else if position.y < 0.0 {
+                1
+            } else {
+                0
+            }
+        }
+    };
+    if lines != 0 {
+        let size = host.window.inner_size();
+        let max =
+            graphite::sidebar_max_scroll(geom.chrome, size.height as usize, host.sidebar_row_count);
+        let next = space_rail::scroll_by(host.sidebar_scroll, lines, max);
+        if next != host.sidebar_scroll {
+            host.sidebar_scroll = next;
+            host.dirty = true;
+        }
+    }
+    true
+}
+
+/// Sidebar thumb drag: the pointer offset from press maps onto the scroll
+/// range, mirroring the side-rail thumb.
+fn drag_graphite_sidebar_thumb(host: &mut HostState) -> bool {
+    let Some((origin_y, origin_scroll)) = host.sidebar_thumb_drag else {
+        return false;
+    };
+    let Some((_, y)) = host.pointer_px else {
+        return true;
+    };
+    let Some(thumb) = host.sidebar_thumb else {
+        return true;
+    };
+    let size = host.window.inner_size();
+    let max = graphite::sidebar_max_scroll(
+        host.mux.geom().chrome,
+        size.height as usize,
+        host.sidebar_row_count,
+    );
+    let travel = host.sidebar_list.h.saturating_sub(thumb.h);
+    let next = space_rail::thumb_scroll_from_drag(origin_y, y, origin_scroll, max, travel);
+    if next != host.sidebar_scroll {
+        host.sidebar_scroll = next;
+        host.dirty = true;
     }
     true
 }
@@ -10119,8 +10354,17 @@ fn paint_graphite_sidebar(
     let tree = graphite_sidebar_tree(host, &tabs, &mail);
     let visible = sidebar::visible_rows(&tree);
     let column = graphite::Rect::new(0, 0, geom.sidebar_px, height);
-    // Fixed panel, internal scroll: PR3 owns the offset; PR2 paints the top.
-    let layout = graphite::sidebar_layout(geom.chrome, column, visible.len(), 0);
+    let layout = graphite::sidebar_layout(geom.chrome, column, visible.len(), host.sidebar_scroll);
+    let (hover_row, hover_action, hover_arrange) = match host.hover_target {
+        Some(HoverTarget::Sidebar(graphite::SidebarHit::Row(row))) => (Some(row), None, None),
+        Some(HoverTarget::Sidebar(graphite::SidebarHit::Action(action))) => {
+            (None, Some(action), None)
+        }
+        Some(HoverTarget::Sidebar(graphite::SidebarHit::Arrange(button))) => {
+            (None, None, Some(button))
+        }
+        _ => (None, None, None),
+    };
     // Owned labels outlive the rows that borrow them.
     let mut labels: Vec<String> = Vec::new();
     let mut dots: Vec<Option<graphite::Dot>> = Vec::new();
@@ -10199,7 +10443,7 @@ fn paint_graphite_sidebar(
                     _ => 0,
                 },
                 selected: selected_tabs[index],
-                hovered: false,
+                hovered: hover_row == Some(index),
             }
         })
         .collect();
@@ -10220,7 +10464,7 @@ fn paint_graphite_sidebar(
                 graphite::SIDEBAR_ACTIONS[2],
             ],
             commands_hint: &graphite_chord_label(&host.keymap, keybind::Action::CommandPalette),
-            action_hovered: None,
+            action_hovered: hover_action,
             alpha: host.chrome_alpha,
         },
     );
@@ -10257,10 +10501,39 @@ fn paint_graphite_sidebar(
             tok: &tok,
             layout: &header,
             crumb: &crumb,
-            arrange_hovered: None,
+            arrange_hovered: hover_arrange,
             alpha: host.chrome_alpha,
         },
     );
+    // Hit state for the pointer handlers: painted rows with their tree
+    // indices, buttons, viewport, and the row count behind the scroll.
+    host.sidebar_rows = visible
+        .iter()
+        .zip(layout.rows.iter())
+        .map(|(row, slot)| (*slot, row.clone()))
+        .collect();
+    host.sidebar_actions = layout.actions;
+    host.sidebar_arrange = header.buttons;
+    host.sidebar_list = layout.list;
+    host.sidebar_thumb = layout.thumb;
+    host.sidebar_row_count = visible.len();
+    host.sidebar_tree = tree;
+}
+
+/// Hit-test the stored sidebar paint, if this frame painted one.
+fn sidebar_hit_at(host: &HostState, px: usize, py: usize) -> Option<graphite::SidebarHit> {
+    if host.sidebar_row_count == 0 {
+        return None;
+    }
+    let rows: Vec<graphite::Rect> = host.sidebar_rows.iter().map(|(slot, _)| *slot).collect();
+    graphite::sidebar_hit(
+        &rows,
+        &host.sidebar_actions,
+        &host.sidebar_arrange,
+        host.sidebar_thumb,
+        px,
+        py,
+    )
 }
 
 /// `Ctrl Shift P` for the first chord bound to `action`; empty when unbound.
@@ -15888,6 +16161,11 @@ impl ApplicationHandler<UserAction> for App {
                     host.window.request_redraw();
                     return;
                 }
+                if drag_graphite_sidebar_thumb(host) {
+                    sync_chrome_hover(host);
+                    host.window.request_redraw();
+                    return;
+                }
                 if handle_divider_drag_move(host) {
                     sync_chrome_hover(host);
                     host.window.request_redraw();
@@ -15983,6 +16261,10 @@ impl ApplicationHandler<UserAction> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if scroll_graphite_sidebar(host, &delta) {
+                    host.window.request_redraw();
+                    return;
+                }
                 if scroll_graphite_side_rail(host, &delta) {
                     host.window.request_redraw();
                     return;
@@ -16096,6 +16378,7 @@ impl ApplicationHandler<UserAction> for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 if state == ElementState::Released && button == MouseButton::Left {
                     host.rail_thumb_drag = None;
+                    host.sidebar_thumb_drag = None;
                 }
                 if rail_resize::button(host, state, button) {
                     return;
@@ -16129,7 +16412,17 @@ impl ApplicationHandler<UserAction> for App {
                 if state == ElementState::Pressed
                     && !(button == MouseButton::Right && host.modifiers.shift_key())
                 {
-                    match handle_strip_click(host, button) {
+                    // Sidebar mode routes presses through the tree instead
+                    // of the (unpainted, possibly stale) tab strip.
+                    let geom = host.mux.geom();
+                    let sidebar =
+                        geom.chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar;
+                    let click = if sidebar {
+                        handle_sidebar_click(host, button)
+                    } else {
+                        handle_strip_click(host, button)
+                    };
+                    match click {
                         StripClickResult::Exit => {
                             event_loop.exit();
                             return;
@@ -21803,13 +22096,93 @@ session mail (id 15)
     }
 
     #[test]
+    fn sidebar_click_decision_routes_rows_and_buttons() {
+        use graphite::SidebarHit;
+        let row = |kind, tab| sidebar::TreeRow {
+            depth: 1,
+            kind,
+            space: 0,
+            tab,
+            pane: None,
+        };
+        let live_tab = row(sidebar::RowKind::Tab, Some(1));
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::Row(4), Some((&live_tab, "lab", true)), true),
+            SidebarClick::SelectTab(1)
+        );
+        let live_pane = row(sidebar::RowKind::Pane, Some(0));
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::Row(5), Some((&live_pane, "lab", true)), true),
+            SidebarClick::SelectTab(0)
+        );
+        let space = sidebar::TreeRow {
+            depth: 0,
+            kind: sidebar::RowKind::Space,
+            space: 1,
+            tab: None,
+            pane: None,
+        };
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::Row(0), Some((&space, "mail", false)), true),
+            SidebarClick::ToggleCollapse("mail".to_string())
+        );
+        let saved_tab = row(sidebar::RowKind::Tab, None);
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::Row(7), Some((&saved_tab, "mail", false)), true),
+            SidebarClick::OpenSpace("mail".to_string())
+        );
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::Row(7), Some((&saved_tab, "gone", false)), false),
+            SidebarClick::Ignore,
+            "rows from unloaded spaces do nothing"
+        );
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::Row(99), None, false),
+            SidebarClick::Ignore,
+            "a stale row index never panics"
+        );
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::Action(0), None, false),
+            SidebarClick::Run(keybind::Action::NewTab)
+        );
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::Action(1), None, false),
+            SidebarClick::BeginNewSpace
+        );
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::Action(2), None, false),
+            SidebarClick::Run(keybind::Action::CommandPalette)
+        );
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::Arrange(0), None, false),
+            SidebarClick::Run(keybind::Action::ArrangeSingle)
+        );
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::Arrange(1), None, false),
+            SidebarClick::Run(keybind::Action::ArrangeSplit)
+        );
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::Arrange(2), None, false),
+            SidebarClick::Run(keybind::Action::ArrangeGrid)
+        );
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::Thumb, None, false),
+            SidebarClick::StartThumbDrag
+        );
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::Action(3), None, false),
+            SidebarClick::Ignore
+        );
+    }
+
+    #[test]
     fn chrome_cursor_matches_hover_and_drag_state() {
         let tab = Some(HoverTarget::Strip(mux::StripHit::Tab {
             index: 0,
             close: false,
         }));
         assert_eq!(
-            cursor_for_hover(None, false, false, None, true),
+            cursor_for_hover(None, false, false, false, None, true),
             CursorIcon::Pointer
         );
         let rail = Some(HoverTarget::Rail(space_rail::RailHit::Plus));
@@ -21818,23 +22191,35 @@ session mail (id 15)
             .focused_id();
         let scrollbar = Some(HoverTarget::ScrollbarThumb(pane));
         let handle = Some(HoverTarget::PaneHandle(pane));
+        let row = Some(HoverTarget::Sidebar(graphite::SidebarHit::Row(2)));
+        let arrange = Some(HoverTarget::Sidebar(graphite::SidebarHit::Arrange(0)));
         assert_eq!(
-            cursor_for_hover(tab, false, false, None, false),
+            cursor_for_hover(tab, false, false, false, None, false),
             CursorIcon::Pointer
         );
         assert_eq!(
-            cursor_for_hover(handle, false, false, None, false),
+            cursor_for_hover(handle, false, false, false, None, false),
             CursorIcon::Pointer,
             "pane-header handle hovers with the pointing hand"
         );
         assert_eq!(
-            cursor_for_hover(rail, false, false, None, false),
+            cursor_for_hover(rail, false, false, false, None, false),
             CursorIcon::Pointer
         );
         assert_eq!(
-            cursor_for_hover(scrollbar, false, false, None, false),
+            cursor_for_hover(scrollbar, false, false, false, None, false),
             CursorIcon::Pointer,
             "scrollbar thumb hovers with the pointing hand"
+        );
+        assert_eq!(
+            cursor_for_hover(row, false, false, false, None, false),
+            CursorIcon::Pointer,
+            "sidebar rows hover with the pointing hand"
+        );
+        assert_eq!(
+            cursor_for_hover(arrange, false, false, false, None, false),
+            CursorIcon::Pointer,
+            "sidebar buttons hover with the pointing hand"
         );
         for hover in [
             Some(HoverTarget::ThemePickerRow(0)),
@@ -21844,13 +22229,14 @@ session mail (id 15)
             Some(HoverTarget::Transparency { dragging: false }),
         ] {
             assert_eq!(
-                cursor_for_hover(hover, false, false, None, false),
+                cursor_for_hover(hover, false, false, false, None, false),
                 CursorIcon::Pointer
             );
         }
         assert_eq!(
             cursor_for_hover(
                 Some(HoverTarget::Transparency { dragging: true }),
+                false,
                 false,
                 false,
                 None,
@@ -21860,20 +22246,26 @@ session mail (id 15)
             "a transparency slider drag uses the grab cursor"
         );
         assert_eq!(
-            cursor_for_hover(tab, true, false, None, true),
+            cursor_for_hover(tab, true, false, false, None, true),
             CursorIcon::Grab
         );
         assert_eq!(
-            cursor_for_hover(scrollbar, false, true, None, true),
+            cursor_for_hover(scrollbar, false, true, false, None, true),
             CursorIcon::Grab
         );
         assert_eq!(
-            cursor_for_hover(None, false, false, None, false),
+            cursor_for_hover(row, false, false, true, None, false),
+            CursorIcon::Grab,
+            "a sidebar thumb drag uses the grab cursor"
+        );
+        assert_eq!(
+            cursor_for_hover(None, false, false, false, None, false),
             CursorIcon::Default
         );
         assert_eq!(
             cursor_for_hover(
                 tab,
+                false,
                 false,
                 false,
                 Some(prismattyc_mux::Axis::Horizontal),

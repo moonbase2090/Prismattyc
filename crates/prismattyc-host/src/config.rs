@@ -147,8 +147,13 @@ pub struct ConfigFile {
     /// for `graphite` chrome.
     pub bar_color: Option<BarColor>,
     /// Chrome arrangement: `bars` (default) or `sidebar` (issue #113).
-    /// Only read when `chrome_style = "graphite"`.
+    /// Graphite and classic both honor `sidebar`.
     pub layout: Option<LayoutMode>,
+    /// Expanded Spaces sidebar width in design pixels (issue #174). Default 256.
+    /// The collapsed strip uses a fixed width and does not write this key.
+    pub sidebar_width_px: Option<u32>,
+    /// Spaces sidebar collapsed to the icon strip (issue #174). Default false.
+    pub sidebar_collapsed: Option<bool>,
     /// Render timing output. Default `off`; hot-reloaded.
     pub render_timer: Option<RenderTimer>,
     /// Log every rendered frame when `render_timer` includes `log`. Default false.
@@ -813,6 +818,12 @@ fn parse(raw: &str, path: &Path) -> Result<ConfigFile> {
         anyhow::ensure!(
             (8..=60).contains(&cols),
             "space_rail_width_cols must be between 8 and 60"
+        );
+    }
+    if let Some(px) = config.sidebar_width_px {
+        anyhow::ensure!(
+            crate::sidebar_width::stored_width_ok(px),
+            "sidebar_width_px must be between 200 and 2000"
         );
     }
     if let Some(cols) = config.space_rail_chip_cols {

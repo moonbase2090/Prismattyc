@@ -191,6 +191,40 @@ pub fn visible_rows(tree: &SidebarTree) -> Vec<TreeRow> {
     rows
 }
 
+/// Icon-strip rows. A collapsed space still lists its tabs and panes: the
+/// strip is navigation, and the per-space chevron is a separate control.
+pub fn icon_rows(tree: &SidebarTree) -> Vec<TreeRow> {
+    let mut rows = Vec::new();
+    for (space_index, space) in tree.spaces.iter().enumerate() {
+        rows.push(TreeRow {
+            depth: 0,
+            kind: RowKind::Space,
+            space: space_index,
+            tab: None,
+            pane: None,
+        });
+        for (tab_index, tab) in space.tabs.iter().enumerate() {
+            rows.push(TreeRow {
+                depth: 1,
+                kind: RowKind::Tab,
+                space: space_index,
+                tab: Some(tab_index),
+                pane: None,
+            });
+            for (pane_index, _) in tab.panes.iter().enumerate() {
+                rows.push(TreeRow {
+                    depth: 2,
+                    kind: RowKind::Pane,
+                    space: space_index,
+                    tab: Some(tab_index),
+                    pane: Some(pane_index),
+                });
+            }
+        }
+    }
+    rows
+}
+
 impl SidebarTree {
     /// Build the tree in rail order. Saved spaces with no recorded tabs
     /// show one tab per session.
@@ -343,6 +377,17 @@ mod tests {
                 (0, RowKind::Space, 1),
             ]
         );
+        let icons = icon_rows(&tree);
+        assert!(
+            icons.len() > rows.len(),
+            "a collapsed space still contributes its sessions"
+        );
+        assert!(icons
+            .iter()
+            .any(|row| row.space == 1 && row.kind == RowKind::Tab));
+        assert!(icons
+            .iter()
+            .any(|row| row.space == 1 && row.kind == RowKind::Pane));
     }
 
     #[test]

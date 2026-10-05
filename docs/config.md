@@ -65,8 +65,12 @@ tab_strip = "auto"
 # chrome_style = "graphite"
 # Graphite bar background: omit to follow the theme, or graphite, harbor, moss, or plum (Sand on light themes). graphite|harbor|moss|plum.
 # bar_color = "graphite"
-# Graphite chrome arrangement: bars, or the sidebar tree. bars|sidebar.
+# Chrome arrangement: bars, or the sidebar tree. Classic honors sidebar too. bars|sidebar.
 # layout = "bars"
+# Expanded Spaces sidebar width in pixels. Names ellipsize; the width does not follow them. 200-2000.
+sidebar_width_px = 256
+# Collapse the Spaces sidebar to the icon strip. true|false.
+sidebar_collapsed = false
 # Multi-pane title row: focused pane OSC title, or handle hover only. focused|hover.
 pane_titles = "focused"
 # Immediate hover blend for interactive strip, rail, and scrollbar chrome. 0.0-0.3.
@@ -430,6 +434,8 @@ scroll_line_down = "ctrl+shift+down"
 # transparency = []
 # choose the Bars or Sidebar layout (graphite chrome only).
 # chrome_layout = []
+# collapse or expand the spaces sidebar.
+sidebar_collapse = "ctrl+alt+shift+s"
 # toggle rich focus (--experimental-rich).
 rich_focus = "ctrl+shift+g"
 
@@ -818,15 +824,37 @@ shrinking never closes panes, it zooms the focused pane and shows a
 
 ## Layout
 
-With Graphite chrome, `layout` picks the arrangement. `bars` (the default)
-shows the tabs bar and the spaces bar. `sidebar` replaces both with one tree
-of Spaces and their tabs. Classic chrome ignores the key.
+`layout` picks the arrangement. `bars` (the default) shows the tabs bar and
+the spaces bar. `sidebar` replaces both with one tree of Spaces and their
+tabs. Graphite and classic both honor `sidebar`.
 
 Open the command palette and run `chrome_layout`, or open
 **Spaces settings…**. Both show **Layout: Bars** and **Layout: Sidebar**, only
-with Graphite chrome. A choice applies to the window at once, with no
-restart. It is saved to `layout` in this configuration, so other open windows
-follow it.
+with Graphite chrome. Classic sets `layout` in this file. A choice applies to
+the window at once, with no restart. It is saved to `layout`, so other open
+windows follow it.
+
+With `layout = "sidebar"`, drag the inner edge to resize the tree. The pointer
+uses the column-resize cursor in Graphite and the left-right resize cursor in
+classic, and the edge highlights while the pointer is on it. The width is
+saved as `sidebar_width_px` (200–2000, default 256). A long name does not
+change the width: names ellipsize, and the list scrolls. Double-click the
+edge to return to 256. Dragging narrower than 200 snaps the sidebar closed.
+Panes reflow on a short interval during the drag, and once more when the
+button is released.
+
+The sidebar can collapse to a 52 px icon strip. Use the chevron in the
+sidebar header, `sidebar_collapse` (`Ctrl+Alt+Shift+S`, also in the command
+palette), or drag the edge below 200. The strip shows an icon for each space
+and each session, with the status dot and a tooltip for the full name. Click
+a space icon to open that space. Click a session icon to focus that pane.
+`+ New tab`, `+ New space`, and Commands sit at the bottom as icons. The strip
+scrolls inside its fixed width. Expanding restores the last dragged width.
+The collapsed state is saved as `sidebar_collapsed`.
+
+`space_rail = "right"` docks that sidebar on the right, with the grip on its
+left edge. Other `space_rail` values keep the sidebar on the left. The spaces
+rail itself is not drawn while the sidebar is showing.
 
 ## Spaces rail
 

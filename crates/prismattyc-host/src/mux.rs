@@ -105,8 +105,9 @@ pub(crate) struct HostGeom {
     /// Reserved thickness of the spaces rail: a row height on the bottom or
     /// top edge, `rail_chip_cols` cells on the left or right edge.
     pub rail_px: usize,
-    /// Reserved width of the combined sidebar tree (issue #113). Nonzero
-    /// only for graphite `layout = "sidebar"`; the rail it replaces is 0.
+    /// Reserved width of a left-docked sidebar (issue #113). Graphite and
+    /// classic both honor `layout = "sidebar"`. A right dock stores the
+    /// width in `rail_px` instead, and the rail it replaces is 0.
     pub sidebar_px: usize,
     /// Fixed chip width of the spaces rail in cells.
     pub rail_chip_cols: usize,

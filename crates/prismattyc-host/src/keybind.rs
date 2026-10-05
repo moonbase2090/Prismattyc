@@ -154,6 +154,8 @@ pub enum Action {
     /// Open the Layout settings (Bars or Sidebar). Unbound. The palette lists
     /// it only when `chrome_style` is graphite (#150).
     ChromeLayout,
+    /// Collapse or expand the Spaces sidebar (issue #174).
+    SidebarCollapse,
     RichFocus,
 }
 
@@ -246,6 +248,7 @@ impl Action {
             Action::ScrollLineDown,
             Action::Transparency,
             Action::ChromeLayout,
+            Action::SidebarCollapse,
             Action::RichFocus,
         ]);
         all
@@ -336,6 +339,7 @@ impl Action {
             Action::ScrollLineDown => "scroll_line_down".into(),
             Action::Transparency => "transparency".into(),
             Action::ChromeLayout => "chrome_layout".into(),
+            Action::SidebarCollapse => "sidebar_collapse".into(),
             Action::RichFocus => "rich_focus".into(),
         }
     }
@@ -450,6 +454,7 @@ impl Action {
             Action::ChromeLayout => {
                 "choose the Bars or Sidebar layout (graphite chrome only)".into()
             }
+            Action::SidebarCollapse => "collapse or expand the spaces sidebar".into(),
             Action::RichFocus => "toggle rich focus (--experimental-rich)".into(),
         }
     }
@@ -573,6 +578,7 @@ impl Action {
             | Action::ScrollLineDown
             | Action::Transparency
             | Action::ChromeLayout
+            | Action::SidebarCollapse
             | Action::RichFocus => ActionGroup::ViewEdit,
         }
     }
@@ -630,6 +636,9 @@ impl Action {
             ),
             Action::ChromeLayout => Some(
                 "Writes the layout key and applies it at once. Listed in the palette only when chrome_style is graphite.",
+            ),
+            Action::SidebarCollapse => Some(
+                "Saves the collapsed state with the sidebar width. Applies when layout is sidebar.",
             ),
             _ => None,
         }
@@ -1278,6 +1287,7 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         Action::ScrollLineDown => vec!["ctrl+shift+down"],
         Action::Transparency => vec![],
         Action::ChromeLayout => vec![],
+        Action::SidebarCollapse => vec!["ctrl+alt+shift+s"],
         Action::RichFocus => vec!["ctrl+shift+g"],
     }
 }

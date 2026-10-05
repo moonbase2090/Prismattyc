@@ -3072,8 +3072,23 @@ const SIDEBAR_FOOT_PAD: f32 = 8.0;
 /// Scrollbar thumb width and minimum height.
 const SIDEBAR_THUMB_W: f32 = 6.0;
 const SIDEBAR_THUMB_MIN: f32 = 24.0;
-/// Arrangement buttons in the header over the panes.
+/// Arrangement buttons in the header over the panes, in button order. The
+/// buttons paint icons (#162); these names are the tooltips and the
+/// accessible names.
 pub(crate) const SIDEBAR_ARRANGE: [&str; 3] = ["Single", "Split", "Grid"];
+/// Arrange control: a fixed track of three equal icon segments, so the
+/// control never resizes when the selection changes.
+const ARRANGE_SEG_W: f32 = 32.0;
+const ARRANGE_H: f32 = 28.0;
+const ARRANGE_INSET: f32 = 2.0;
+/// Icon box inside a segment, and its interior tint.
+const ARRANGE_ICON_W: f32 = 16.0;
+const ARRANGE_ICON_H: f32 = 12.0;
+const ARRANGE_TINT: f32 = 0.3;
+/// Tooltip chip under a hovered arrangement button.
+const TOOLTIP_H: f32 = 22.0;
+const TOOLTIP_PAD_X: f32 = 8.0;
+const TOOLTIP_GAP: f32 = 6.0;
 /// Footer actions at the bottom of the tree column.
 pub(crate) const SIDEBAR_ACTIONS: [&str; 3] = ["+ New tab", "+ New space", "Commands"];
 
@@ -3218,30 +3233,52 @@ pub(crate) fn sidebar_rows_in_view<'a, T>(
 pub(crate) struct SidebarHeaderLayout {
     pub span: Rect,
     pub crumb: Rect,
+    /// The Arrange control's track; `buttons` are its segments.
+    pub track: Rect,
     pub buttons: [Rect; 3],
 }
 
 pub(crate) fn sidebar_header_layout(chrome: ChromeGeom, span: Rect) -> SidebarHeaderLayout {
-    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
-    let button_h = chrome.px(28.0);
-    let button_y = span.y.saturating_add(span.h.saturating_sub(button_h) / 2);
-    let mut x = span.right().saturating_sub(chrome.px(12.0));
+    let inset = chrome.px(ARRANGE_INSET);
+    let seg_w = chrome.px(ARRANGE_SEG_W);
+    let track_h = chrome.px(ARRANGE_H);
+    let track_w = seg_w
+        .saturating_mul(SIDEBAR_ARRANGE.len())
+        .saturating_add(inset.saturating_mul(2));
+    let track = Rect::new(
+        span.right()
+            .saturating_sub(chrome.px(12.0))
+            .saturating_sub(track_w),
+        span.y.saturating_add(span.h.saturating_sub(track_h) / 2),
+        track_w,
+        track_h,
+    );
     let mut buttons = [Rect::new(0, 0, 0, 0); 3];
-    for (index, label) in SIDEBAR_ARRANGE.iter().enumerate().rev() {
-        let w = text_width(Face::Regular, s(SIDEBAR_TEXT), label).ceil() as usize + chrome.px(20.0);
-        x = x.saturating_sub(w);
-        buttons[index] = Rect::new(x, button_y, w, button_h);
-        x = x.saturating_sub(chrome.px(8.0));
+    for (index, slot) in buttons.iter_mut().enumerate() {
+        *slot = Rect::new(
+            track
+                .x
+                .saturating_add(inset)
+                .saturating_add(index.saturating_mul(seg_w)),
+            track.y.saturating_add(inset),
+            seg_w,
+            track_h.saturating_sub(inset.saturating_mul(2)),
+        );
     }
+    let crumb_x = span.x.saturating_add(chrome.px(12.0));
     let crumb = Rect::new(
-        span.x.saturating_add(chrome.px(12.0)),
+        crumb_x,
         span.y,
-        x.saturating_sub(span.x.saturating_add(chrome.px(12.0))),
+        track
+            .x
+            .saturating_sub(chrome.px(8.0))
+            .saturating_sub(crumb_x),
         span.h,
     );
     SidebarHeaderLayout {
         span,
         crumb,
+        track,
         buttons,
     }
 }
@@ -3559,6 +3596,11 @@ pub(crate) struct SidebarHeaderPaint<'a> {
     pub tok: &'a Tokens,
     pub layout: &'a SidebarHeaderLayout,
     pub crumb: &'a str,
+    /// Outline of the selected arrangement segment.
+    pub accent: Rgb,
+    /// Button for the active tab's current arrangement; `None` when the
+    /// panes match none of the three.
+    pub arrange_selected: Option<usize>,
     pub arrange_hovered: Option<usize>,
     pub alpha: u8,
 }
@@ -3601,26 +3643,138 @@ pub(crate) fn paint_sidebar_header(
         span.x,
         paint.layout.crumb.right(),
     );
+    // Opaque track and segments keep the icons readable over translucent
+    // chrome.
+    outlined_round_rect(
+        buffer,
+        stride,
+        paint.layout.track,
+        s(7.0),
+        tok.field_line,
+        tok.field,
+    );
     for (index, slot) in paint.layout.buttons.iter().enumerate() {
-        let fill = if paint.arrange_hovered == Some(index) {
-            tok.tab_hover
-        } else {
-            tok.field
-        };
-        fill_round_rect(buffer, stride, *slot, s(6.0), fill, 0xff);
-        draw_text(
+        if paint.arrange_selected == Some(index) {
+            // A 1 design-px accent ring (2 px on a 2x window) so the
+            // selection reads even where the active fill matches the track.
+            fill_round_rect(buffer, stride, *slot, s(5.0), tok.tab_active, 0xff);
+            stroke_round_rect(
+                buffer,
+                stride,
+                slot.x as f32,
+                slot.y as f32,
+                slot.right() as f32,
+                (slot.y + slot.h) as f32,
+                s(5.0),
+                paint.chrome.px(1.0).max(1) as f32,
+                paint.accent,
+            );
+        } else if paint.arrange_hovered == Some(index) {
+            fill_round_rect(buffer, stride, *slot, s(5.0), tok.tab_hover, 0xff);
+        }
+        arrange_icon(buffer, stride, paint.chrome, index, *slot, tok.text);
+    }
+}
+
+/// Arrange icon (#162), centred in `slot`: a rounded outline in `ink` with
+/// a light tint inside. Single is the bare box, Split adds a vertical
+/// divider, and Grid adds both dividers.
+fn arrange_icon(
+    buffer: &mut [u32],
+    stride: usize,
+    chrome: ChromeGeom,
+    kind: usize,
+    slot: Rect,
+    ink: Rgb,
+) {
+    let line = chrome.px(1.0).max(1);
+    // Sizes share the line's parity, so each divider covers whole pixels.
+    let fit = |d: f32| {
+        let v = chrome.px(d);
+        (v + (v + line) % 2) as f32
+    };
+    let (w, h) = (fit(ARRANGE_ICON_W), fit(ARRANGE_ICON_H));
+    let x0 = (slot.x + slot.w / 2) as f32 - (w / 2.0).floor();
+    let y0 = (slot.y + slot.h / 2) as f32 - (h / 2.0).floor();
+    let (x1, y1) = (x0 + w, y0 + h);
+    let line = line as f32;
+    let radius = line * 2.0;
+    shade(buffer, stride, x0, y0, x1, y1, ink, |x, y| {
+        (0.5 - round_rect_sd(x, y, x0, y0, x1, y1, radius)).clamp(0.0, 1.0) * ARRANGE_TINT
+    });
+    stroke_round_rect(buffer, stride, x0, y0, x1, y1, radius, line, ink);
+    let (mid_x, mid_y) = (x0 + w / 2.0, y0 + h / 2.0);
+    // Square-ended bars between the outline's inner edges.
+    let bar = |buffer: &mut [u32], bx0: f32, by0: f32, bx1: f32, by1: f32| {
+        let overlap = |c: f32, lo: f32, hi: f32| ((c + 0.5).min(hi) - (c - 0.5).max(lo)).max(0.0);
+        shade(buffer, stride, bx0, by0, bx1, by1, ink, |x, y| {
+            overlap(x, bx0, bx1) * overlap(y, by0, by1)
+        });
+    };
+    if kind >= 1 {
+        bar(
             buffer,
-            stride,
-            slot.x as f32 + paint.chrome.px(10.0) as f32,
-            slot.center_y(),
-            Face::Regular,
-            s(SIDEBAR_TEXT),
-            SIDEBAR_ARRANGE[index],
-            tok.text,
-            slot.x,
-            slot.right(),
+            mid_x - line / 2.0,
+            y0 + line,
+            mid_x + line / 2.0,
+            y1 - line,
         );
     }
+    if kind >= 2 {
+        bar(
+            buffer,
+            x0 + line,
+            mid_y - line / 2.0,
+            x1 - line,
+            mid_y + line / 2.0,
+        );
+    }
+}
+
+/// Tooltip chip with `text`, centred under `anchor` (a gap below its
+/// bottom edge) and kept inside the buffer. Returns the painted rect.
+pub(crate) fn paint_tooltip(
+    buffer: &mut [u32],
+    stride: usize,
+    chrome: ChromeGeom,
+    tok: &Tokens,
+    anchor: Rect,
+    text: &str,
+) -> Rect {
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    let height = buffer.len() / stride.max(1);
+    let w =
+        (text_width(Face::Regular, s(SIDEBAR_TEXT), text) + s(TOOLTIP_PAD_X) * 2.0).ceil() as usize;
+    let h = chrome.px(TOOLTIP_H);
+    let x = (anchor.x + anchor.w / 2)
+        .saturating_sub(w / 2)
+        .min(stride.saturating_sub(w));
+    let y = (anchor.y + anchor.h + chrome.px(TOOLTIP_GAP)).min(height.saturating_sub(h));
+    let chip = Rect::new(x, y, w.min(stride), h.min(height));
+    if chip.w == 0 || chip.h == 0 {
+        return chip;
+    }
+    outlined_round_rect(
+        buffer,
+        stride,
+        chip,
+        s(5.0),
+        tok.tab_active_line.unwrap_or(tok.field_line),
+        tok.tab_active,
+    );
+    draw_text(
+        buffer,
+        stride,
+        chip.x as f32 + s(TOOLTIP_PAD_X),
+        chip.center_y(),
+        Face::Regular,
+        s(SIDEBAR_TEXT),
+        text,
+        tok.text_strong,
+        chip.x,
+        chip.right(),
+    );
+    chip
 }
 
 /// PNG writer for the job-only still tests (`mod tests` and the sidebar
@@ -3738,6 +3892,141 @@ mod sidebar_render_tests {
         assert!(
             header.crumb.x + header.crumb.w <= header.buttons[0].x,
             "crumb never runs under the buttons"
+        );
+    }
+
+    #[test]
+    fn arrange_control_is_a_fixed_track_of_equal_segments() {
+        for milli in [1000, 1500, 2000] {
+            let chrome = ChromeGeom {
+                graphite: true,
+                scale_milli: milli,
+            };
+            let span = Rect::new(256, 0, 1024, chrome.px(44.0));
+            let header = sidebar_header_layout(chrome, span);
+            let track = header.track;
+            assert_eq!(track.w, chrome.px(32.0) * 3 + chrome.px(2.0) * 2);
+            assert_eq!(track.h, chrome.px(28.0));
+            assert_eq!(track.right(), span.right() - chrome.px(12.0));
+            for (index, button) in header.buttons.iter().enumerate() {
+                assert_eq!(button.w, chrome.px(32.0), "segment {index} width");
+                assert!(track.contains(button.x, button.y));
+                assert!(
+                    button.right() <= track.right() && button.y + button.h <= track.y + track.h
+                );
+            }
+            for pair in header.buttons.windows(2) {
+                assert_eq!(pair[1].x, pair[0].right(), "segments abut, no dead gap");
+            }
+        }
+    }
+
+    fn header_pixels(
+        selected: Option<usize>,
+        hovered: Option<usize>,
+    ) -> (Vec<u32>, usize, SidebarHeaderLayout) {
+        let chrome = chrome();
+        let (w, h) = (768usize, 44usize);
+        let header = sidebar_header_layout(chrome, Rect::new(0, 0, w, h));
+        let mut buffer = vec![pack_argb(0xff, DARK.ground); w * h];
+        paint_sidebar_header(
+            &mut buffer,
+            w,
+            &SidebarHeaderPaint {
+                chrome,
+                tok: &DARK,
+                layout: &header,
+                crumb: "lab / notes",
+                accent: rgb(0x5aa2ff),
+                arrange_selected: selected,
+                arrange_hovered: hovered,
+                alpha: 0xff,
+            },
+        );
+        (buffer, w, header)
+    }
+
+    #[test]
+    fn arrange_icons_draw_in_text_ink_with_dividers() {
+        let (buffer, w, header) = header_pixels(None, None);
+        let ink = pack_argb(0xff, DARK.text);
+        let at = |x: usize, y: usize| buffer[y * w + x];
+        for (index, slot) in header.buttons.iter().enumerate() {
+            let (cx, cy) = (slot.x + slot.w / 2, slot.y + slot.h / 2);
+            let inked = (slot.y..slot.y + slot.h)
+                .flat_map(|y| (slot.x..slot.right()).map(move |x| (x, y)))
+                .filter(|&(x, y)| at(x, y) == ink)
+                .count();
+            assert!(
+                inked > 20,
+                "button {index} draws an outline in the text color"
+            );
+            // The centre pixel sits on Split's divider and Grid's cross;
+            // Single's centre is the tinted interior.
+            if index == 0 {
+                assert_ne!(at(cx, cy), ink, "Single has no divider");
+                assert_ne!(at(cx, cy), pack_argb(0xff, DARK.field), "Single is tinted");
+            } else {
+                assert_eq!(at(cx, cy), ink, "button {index} divides down the middle");
+            }
+            if index == 2 {
+                assert_eq!(at(cx - 4, cy), ink, "Grid divides across");
+            } else {
+                assert_ne!(at(cx - 4, cy), ink, "button {index} has no cross bar");
+            }
+        }
+    }
+
+    #[test]
+    fn arrange_selected_segment_is_outlined_and_filled() {
+        let (plain, w, header) = header_pixels(None, None);
+        let (picked, _, _) = header_pixels(Some(1), None);
+        let slot = header.buttons[1];
+        let accent = pack_argb(0xff, rgb(0x5aa2ff));
+        assert_eq!(
+            picked[(slot.y + slot.h / 2) * w + slot.x],
+            accent,
+            "accent outline"
+        );
+        assert_eq!(
+            picked[(slot.y + 2) * w + slot.x + 3],
+            pack_argb(0xff, DARK.tab_active),
+            "active fill"
+        );
+        assert_eq!(
+            plain[(slot.y + 2) * w + slot.x + 3],
+            pack_argb(0xff, DARK.field)
+        );
+        // Selection never moves the control.
+        let (_, _, again) = header_pixels(Some(2), Some(0));
+        assert_eq!(again.track, header.track);
+        assert_eq!(again.buttons, header.buttons);
+        let (hovered, _, _) = header_pixels(None, Some(0));
+        let first = header.buttons[0];
+        assert_eq!(
+            hovered[(first.y + 2) * w + first.x + 3],
+            pack_argb(0xff, DARK.tab_hover)
+        );
+    }
+
+    #[test]
+    fn tooltip_names_the_button_under_it_and_stays_on_screen() {
+        let chrome = chrome();
+        let (w, h) = (400usize, 200usize);
+        let mut buffer = vec![pack_argb(0xff, DARK.ground); w * h];
+        let anchor = Rect::new(w - 34, 8, 32, 24);
+        let chip = paint_tooltip(&mut buffer, w, chrome, &DARK, anchor, "Grid");
+        assert!(chip.right() <= w, "clamped to the right edge");
+        assert_eq!(chip.y, anchor.y + anchor.h + 6);
+        assert!(chip.w as f32 >= text_width(Face::Regular, SIDEBAR_TEXT, "Grid"));
+        assert!(
+            (chip.y..chip.y + chip.h)
+                .flat_map(|y| (chip.x..chip.right()).map(move |x| (x, y)))
+                .any(
+                    |(x, y)| buffer[y * w + x] != pack_argb(0xff, DARK.tab_active)
+                        && buffer[y * w + x] != pack_argb(0xff, DARK.ground)
+                ),
+            "the name is drawn on the chip"
         );
     }
 
@@ -3963,9 +4252,19 @@ mod sidebar_render_tests {
                         tok,
                         layout: &header,
                         crumb: "lab / notes",
-                        arrange_hovered: None,
+                        accent,
+                        arrange_selected: Some(1),
+                        arrange_hovered: Some(2),
                         alpha: 0xff,
                     },
+                );
+                paint_tooltip(
+                    &mut buffer,
+                    w,
+                    chrome,
+                    tok,
+                    Rect::new(header.buttons[2].x, 0, header.buttons[2].w, span.h),
+                    SIDEBAR_ARRANGE[2],
                 );
                 write_still_png(
                     &dir.join(format!("sidebar-{name}-{still}.png")),

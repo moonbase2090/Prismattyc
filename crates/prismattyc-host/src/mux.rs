@@ -193,6 +193,15 @@ pub(crate) enum ArrangeTarget {
 }
 
 impl ArrangeTarget {
+    /// Position in the sidebar's Arrange control (`graphite::SIDEBAR_ARRANGE`).
+    pub(crate) fn button(self) -> usize {
+        match self {
+            ArrangeTarget::Single => 0,
+            ArrangeTarget::Split => 1,
+            ArrangeTarget::Grid => 2,
+        }
+    }
+
     /// Pane slots the target holds.
     pub(crate) fn capacity(self) -> usize {
         match self {
@@ -2590,6 +2599,15 @@ impl MuxRuntime {
         self.zoomed_here().is_some()
     }
 
+    /// The Arrange target the active tab shows now, for the sidebar's
+    /// selected button (issue #162). A zoom counts as Single.
+    pub(crate) fn current_arrange(&self) -> Option<ArrangeTarget> {
+        if self.zoomed_here().is_some() {
+            return Some(ArrangeTarget::Single);
+        }
+        arrange_shape(&self.domain.window(self.active_window())?.layout)
+    }
+
     /// The zoomed pane when it lives in the active tab. Zoom on another
     /// tab is left alone by edits made here.
     fn zoomed_here(&self) -> Option<PaneId> {
@@ -4208,6 +4226,28 @@ fn ranges_overlap(a_start: usize, a_end: usize, b_start: usize, b_end: usize) ->
     a_start < b_end && b_start < a_end
 }
 
+/// Which Arrange target a layout's shape matches: one leaf is Single, two
+/// side-by-side leaves are Split, two rows of two are Grid. Ratios are
+/// ignored so a dragged divider keeps the match; any other shape is `None`.
+fn arrange_shape(layout: &PaneLayout) -> Option<ArrangeTarget> {
+    let pair = |node: &PaneLayout| {
+        matches!(node, PaneLayout::Split(split)
+            if split.axis == Axis::Horizontal
+                && matches!(*split.first, PaneLayout::Leaf(_))
+                && matches!(*split.second, PaneLayout::Leaf(_)))
+    };
+    match layout {
+        PaneLayout::Leaf(_) => Some(ArrangeTarget::Single),
+        _ if pair(layout) => Some(ArrangeTarget::Split),
+        PaneLayout::Split(split)
+            if split.axis == Axis::Vertical && pair(&split.first) && pair(&split.second) =>
+        {
+            Some(ArrangeTarget::Grid)
+        }
+        PaneLayout::Split(_) => None,
+    }
+}
+
 /// Visible rects for `window`. A `zoomed` pane that lives in `window`
 /// projects as a single leaf over the whole area; the split tree in the
 /// domain is not consulted for its siblings (mux architecture zoom-as-view).
@@ -5606,6 +5646,63 @@ mod tests {
             assert_eq!(panes.len(), n);
             assert!(panes.iter().all(|&depth| depth == 0));
         }
+    }
+
+    #[test]
+    fn current_arrange_follows_the_active_tab_shape() {
+        let mut runtime = spawn_n_panes(1, 80, 24);
+        assert_eq!(runtime.current_arrange(), Some(ArrangeTarget::Single));
+        runtime
+            .arrange(ArrangeTarget::Split, "/bin/sh", &[])
+            .unwrap();
+        assert_eq!(runtime.current_arrange(), Some(ArrangeTarget::Split));
+        runtime
+            .arrange(ArrangeTarget::Grid, "/bin/sh", &[])
+            .unwrap();
+        assert_eq!(runtime.current_arrange(), Some(ArrangeTarget::Grid));
+        runtime
+            .arrange(ArrangeTarget::Single, "/bin/sh", &[])
+            .unwrap();
+        assert_eq!(
+            runtime.current_arrange(),
+            Some(ArrangeTarget::Single),
+            "a zoomed grid shows one pane"
+        );
+        // Three side-by-side panes match no button.
+        let runtime = spawn_n_panes(3, 120, 24);
+        assert_eq!(runtime.current_arrange(), None);
+    }
+
+    #[test]
+    fn arrange_shape_ignores_ratios_and_rejects_other_trees() {
+        let ids = spawn_n_panes(4, 160, 24).active_pane_ids();
+        let leaf = |index: usize| PaneLayout::leaf(ids[index]);
+        let split = |axis, ratio, first, second| {
+            PaneLayout::Split(prismattyc_mux::Split {
+                axis,
+                ratio,
+                first: Box::new(first),
+                second: Box::new(second),
+            })
+        };
+        let dragged = split(Axis::Horizontal, 0.3, leaf(0), leaf(1));
+        assert_eq!(arrange_shape(&dragged), Some(ArrangeTarget::Split));
+        let stacked = split(Axis::Vertical, 0.5, leaf(0), leaf(1));
+        assert_eq!(arrange_shape(&stacked), None, "top/bottom is not Split");
+        let grid = split(
+            Axis::Vertical,
+            0.6,
+            split(Axis::Horizontal, 0.5, leaf(0), leaf(1)),
+            split(Axis::Horizontal, 0.4, leaf(2), leaf(3)),
+        );
+        assert_eq!(arrange_shape(&grid), Some(ArrangeTarget::Grid));
+        let ragged = split(
+            Axis::Vertical,
+            0.5,
+            split(Axis::Horizontal, 0.5, leaf(0), leaf(1)),
+            leaf(2),
+        );
+        assert_eq!(arrange_shape(&ragged), None);
     }
 
     #[test]

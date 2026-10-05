@@ -3861,6 +3861,17 @@ impl App {
                             host.window.request_redraw();
                             None
                         }
+                        Some(a11y::ChromeAction::Arrange(index)) => arrange_button_action(index)
+                            .map(|action| {
+                                let outcome = dispatch_strip_action(
+                                    host,
+                                    action,
+                                    &self.cli.program,
+                                    &self.cli.child_args,
+                                );
+                                host.window.request_redraw();
+                                outcome
+                            }),
                         None => None,
                     }
                 };
@@ -4044,7 +4055,22 @@ fn chrome_snapshot(host: &HostState, live: Option<a11y::LiveSnap>) -> a11y::Chro
                 format!("{} {}", view.caption, view.line2)
             }
         }),
+        arrange: if sidebar_header_shown(host) {
+            graphite::SIDEBAR_ARRANGE
+                .iter()
+                .map(|name| name.to_string())
+                .collect()
+        } else {
+            Vec::new()
+        },
+        arrange_current: host.mux.current_arrange().map(mux::ArrangeTarget::button),
     }
+}
+
+/// Graphite sidebar layout: the header over the panes shows the Arrange
+/// control instead of the tabs bar.
+fn sidebar_header_shown(host: &HostState) -> bool {
+    host.mux.geom().chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar
 }
 
 /// Focused pane viewport as one document (accessibility D-A4). Scrollback stays
@@ -6409,6 +6435,23 @@ fn rasterize_frame(
                 paint_header_drag_overlay(host, buffer, width as usize, geom, pane);
             }
         }
+    }
+    // Arrange tooltip (#162), over the panes below the sidebar header.
+    if let Some((button, name)) = arrange_tooltip(host) {
+        let below_header = graphite::Rect::new(
+            button.x,
+            button.y,
+            button.w,
+            geom.top_chrome_px.saturating_sub(button.y),
+        );
+        graphite::paint_tooltip(
+            buffer,
+            width as usize,
+            geom.chrome,
+            &graphite::bar_tokens(&host.theme, host.bar_color),
+            below_header,
+            name,
+        );
     }
     if let Some(label) = git_hover_label(host) {
         let cols = (width as usize / host.font.cell_w.max(1))
@@ -9903,6 +9946,17 @@ fn hyperlink_hover_at_pointer(host: &mut HostState) -> bool {
     hit
 }
 
+/// Hovered sidebar Arrange button and its name, for the tooltip (#162).
+fn arrange_tooltip(host: &HostState) -> Option<(graphite::Rect, &'static str)> {
+    match host.hover_target {
+        Some(HoverTarget::Sidebar(graphite::SidebarHit::Arrange(button))) => Some((
+            *host.sidebar_arrange.get(button)?,
+            *graphite::SIDEBAR_ARRANGE.get(button)?,
+        )),
+        _ => None,
+    }
+}
+
 /// Refresh chrome hover after geometry or pointer state changes. Raw motion
 /// inside one target does not dirty the frame.
 fn git_hover_label(host: &HostState) -> Option<String> {
@@ -10444,6 +10498,16 @@ enum SidebarClick {
     Ignore,
 }
 
+/// Action behind each sidebar Arrange button, in `SIDEBAR_ARRANGE` order.
+fn arrange_button_action(button: usize) -> Option<keybind::Action> {
+    match button {
+        0 => Some(keybind::Action::ArrangeSingle),
+        1 => Some(keybind::Action::ArrangeSplit),
+        2 => Some(keybind::Action::ArrangeGrid),
+        _ => None,
+    }
+}
+
 /// Route a sidebar hit: space rows toggle collapse, live rows select
 /// their tab, saved rows open their space, footer and header buttons run
 /// the same actions as their bars-mode twins.
@@ -10472,9 +10536,9 @@ fn sidebar_click_decision(
         (SidebarHit::Action(0), _) => SidebarClick::Run(keybind::Action::NewTab),
         (SidebarHit::Action(1), _) => SidebarClick::BeginNewSpace,
         (SidebarHit::Action(2), _) => SidebarClick::Run(keybind::Action::CommandPalette),
-        (SidebarHit::Arrange(0), _) => SidebarClick::Run(keybind::Action::ArrangeSingle),
-        (SidebarHit::Arrange(1), _) => SidebarClick::Run(keybind::Action::ArrangeSplit),
-        (SidebarHit::Arrange(2), _) => SidebarClick::Run(keybind::Action::ArrangeGrid),
+        (SidebarHit::Arrange(button), _) => arrange_button_action(button)
+            .map(SidebarClick::Run)
+            .unwrap_or(SidebarClick::Ignore),
         (SidebarHit::Thumb, _) => SidebarClick::StartThumbDrag,
         _ => SidebarClick::Ignore,
     }
@@ -11598,6 +11662,8 @@ fn paint_graphite_sidebar(
             tok: &tok,
             layout: &header,
             crumb: &crumb,
+            accent: graphite::accent(&tok, focus_border_rgb(host.focus_border)),
+            arrange_selected: host.mux.current_arrange().map(mux::ArrangeTarget::button),
             arrange_hovered: hover_arrange,
             alpha: graphite_bar_alpha(host),
         },

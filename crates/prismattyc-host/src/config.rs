@@ -223,7 +223,8 @@ pub struct ConfigFile {
     pub alt_screen_scrollback: Option<bool>,
     /// Show live pane names below each Space name. Default true.
     pub space_rail_pane_names: Option<bool>,
-    /// Save changed Space layouts after a short idle period. Default false.
+    /// Legacy flat opt-out. `[spaces].autosave` wins when it is set.
+    /// Missing both means on.
     pub space_autosave: Option<bool>,
     /// Ask for session names or assign suggested names automatically.
     pub session_naming: Option<String>,
@@ -301,6 +302,9 @@ pub struct ConfigFile {
     /// `[a11y]` (accessibility). Defaults on when the table is absent.
     #[serde(default)]
     pub a11y: Option<A11ySection>,
+    /// `[spaces]` arrangement autosave. See [`ConfigFile::space_autosave_enabled`].
+    #[serde(default)]
+    pub spaces: SpacesSection,
     /// `[theme_overrides]` (PT-207). Recolours keys of the named theme;
     /// applied by [`load`] so hot reload and the picker both keep them.
     #[serde(default)]
@@ -317,6 +321,14 @@ pub struct ConfigFile {
 pub struct A11ySection {
     pub os_tree: Option<bool>,
     pub announce: Option<bool>,
+}
+
+/// Space arrangement autosave (issue #161).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpacesSection {
+    /// Save after a structural change. `None` follows [`ConfigFile::space_autosave`], then on.
+    pub autosave: Option<bool>,
 }
 
 impl ConfigFile {
@@ -437,6 +449,16 @@ impl ConfigFile {
 
     pub fn pane_padding_px(&self) -> usize {
         self.pane_padding_px.unwrap_or(DEFAULT_PANE_PADDING_PX)
+    }
+
+    /// `[spaces] autosave` when set, otherwise the legacy `space_autosave`
+    /// key, otherwise on.
+    pub fn space_autosave_enabled(&self) -> bool {
+        match (self.spaces.autosave, self.space_autosave) {
+            (Some(value), _) => value,
+            (None, Some(value)) => value,
+            (None, None) => true,
+        }
     }
 
     /// Validated by [`load`]; an unknown spelling never reaches here.
@@ -616,6 +638,24 @@ pub fn save_theme(path: &Path, theme_id: &str) -> Result<()> {
 pub fn save_preference(path: &Path, key: &str, value: toml_edit::Item) -> Result<()> {
     mutate_preference(path, |document| {
         document[key] = value;
+    })
+}
+
+/// Write `[spaces] autosave` without rewriting the rest of the file.
+pub fn save_spaces_autosave(path: &Path, enabled: bool) -> Result<()> {
+    mutate_preference(path, |document| {
+        if document
+            .get("spaces")
+            .and_then(|item| item.as_table())
+            .is_none()
+        {
+            let mut table = toml_edit::Table::new();
+            table.set_implicit(false);
+            document["spaces"] = toml_edit::Item::Table(table);
+        }
+        if let Some(table) = document["spaces"].as_table_mut() {
+            table["autosave"] = toml_edit::value(enabled);
+        }
     })
 }
 
@@ -1475,6 +1515,7 @@ mod tests {
         assert_eq!(config.session_naming.as_deref(), Some("auto"));
         assert_eq!(config.space_rail(), crate::space_rail::RailSide::Right);
         assert_eq!(config.space_autosave, Some(true));
+        assert!(config.space_autosave_enabled());
         let before = std::fs::read_to_string(&path).unwrap();
         assert!(before.contains("# keep"));
         assert!(before.contains("font_px = 17.0"));
@@ -1482,6 +1523,40 @@ mod tests {
         assert!(save_preference(&path, "session_naming", toml_edit::value("invalid")).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn space_autosave_defaults_on_and_the_spaces_table_wins() {
+        assert!(ConfigFile::default().space_autosave_enabled());
+        let dir = temp_dir("space-autosave-precedence");
+        let path = dir.join("config.toml");
+        let load_text = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            load(&path).unwrap()
+        };
+        assert!(
+            !load_text("space_autosave = false\n").space_autosave_enabled(),
+            "a legacy flat opt-out stays off when [spaces] is absent"
+        );
+        assert!(load_text("space_autosave = true\n").space_autosave_enabled());
+        assert!(
+            !load_text("space_autosave = true\n\n[spaces]\nautosave = false\n")
+                .space_autosave_enabled(),
+            "[spaces] autosave wins over the flat key"
+        );
+        assert!(
+            load_text("space_autosave = false\n\n[spaces]\nautosave = true\n")
+                .space_autosave_enabled()
+        );
+        assert!(!load_text("[spaces]\nautosave = false\n").space_autosave_enabled());
+        std::fs::write(&path, "# keep\nfont_px = 17.0\nspace_autosave = false\n").unwrap();
+        save_spaces_autosave(&path, true).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# keep"), "{raw}");
+        assert!(raw.contains("font_px = 17.0"), "{raw}");
+        assert!(raw.contains("autosave = true"), "{raw}");
+        assert!(load(&path).unwrap().space_autosave_enabled());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

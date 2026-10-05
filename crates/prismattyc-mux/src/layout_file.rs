@@ -29,6 +29,7 @@ pub const OWNED_SPACE_VERSION: u32 = 2;
 
 const SPACE_ORDER_FILE: &str = ".space-order";
 static SPACE_ORDER_WRITE_ID: AtomicU64 = AtomicU64::new(0);
+static SPACE_WRITE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Inclusive clamp so [`crate::ControlRequest::Split`] accepts the ratio.
 const MIN_RATIO: f64 = 0.01;
@@ -704,11 +705,10 @@ pub fn save_space(dir: &Path, name: &str, space: &SavedSpace) -> Result<PathBuf>
             }),
     );
     let body = serde_json::to_string_pretty(&space).context("serialize space")?;
-    let mut file = fs::File::create(&path).with_context(|| format!("write {}", path.display()))?;
-    file.write_all(body.as_bytes())
-        .with_context(|| format!("write {}", path.display()))?;
-    file.write_all(b"\n")
-        .with_context(|| format!("write {}", path.display()))?;
+    let mut bytes = body.into_bytes();
+    bytes.push(b'\n');
+    // A crash mid-write must leave the previous space file intact.
+    write_space_atomic(dir, &path, &bytes)?;
     if append_to_custom_order {
         let mut order = list_spaces(dir)?
             .into_iter()
@@ -958,6 +958,37 @@ fn read_space_order(dir: &Path) -> Result<Vec<String>> {
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
     serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))
+}
+
+/// Write `bytes` to a sibling temp file, fsync, then rename over `path`.
+fn write_space_atomic(dir: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+    let nonce = SPACE_WRITE_ID.fetch_add(1, Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("space.json");
+    let temporary = dir.join(format!(".{file_name}.{}.{nonce}.tmp", std::process::id()));
+    let result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| format!("write {}", temporary.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("write {}", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync {}", temporary.display()))?;
+        drop(file);
+        crate::platform::replace_file(&temporary, path)
+            .with_context(|| format!("replace {}", path.display()))?;
+        crate::platform::sync_directory(dir)
+            .with_context(|| format!("sync directory {}", dir.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn write_space_order(dir: &Path, names: &[String]) -> Result<()> {
@@ -1624,6 +1655,60 @@ mod tests {
             Some("fable-pc")
         );
         assert_eq!(space_bind_agent(None, "").as_deref(), None);
+    }
+
+    #[test]
+    fn save_space_replaces_the_file_without_leaving_a_partial_write() {
+        let dir = std::env::temp_dir().join(format!(
+            "prism-space-atomic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("desk.json");
+        fs::write(&path, b"GARBAGE-NOT-A-SPACE-PARTIAL").unwrap();
+        let mut session = stub_space_session("alpha");
+        session.windows[0].title = "first".into();
+        let first = SavedSpace {
+            version: SAVED_SPACE_VERSION,
+            id: Some("desk".into()),
+            created_at_unix_ms: Some(42),
+            saved_at_unix: 1,
+            sessions: vec![session],
+            tabs: vec![],
+            active_tab: 0,
+            focused_session: None,
+        };
+        save_space(&dir, "desk", &first).unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("GARBAGE"), "{raw}");
+        assert!(raw.ends_with('\n'));
+        let loaded: SavedSpace = serde_json::from_str(&raw).unwrap();
+        assert_eq!(loaded.sessions[0].windows[0].title, "first");
+        assert_eq!(loaded.created_at_unix_ms, Some(42));
+
+        let mut second = loaded;
+        second.sessions[0].windows[0].title = "second".into();
+        second.saved_at_unix = 9;
+        save_space(&dir, "desk", &second).unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("first"), "{raw}");
+        assert!(raw.contains("second"), "{raw}");
+        let loaded = load_space(&dir, "desk").unwrap();
+        assert_eq!(loaded.sessions[0].windows[0].title, "second");
+        assert_eq!(loaded.created_at_unix_ms, Some(42));
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp"))
+            .map(|entry| entry.path())
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

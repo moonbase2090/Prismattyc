@@ -250,11 +250,11 @@ impl Panel {
                     "Recreate fresh shells, working directories, and split layouts on restore",
                     Choice::Preference("restore_blank_terminals".into(), (!restore).to_string()),
                 );
-                let enabled = config.space_autosave.unwrap_or(false);
+                let enabled = config.space_autosave_enabled();
                 self.row(
                     format!("Autosave: {}", if enabled { "on" } else { "off" }),
-                    "Save changed layouts after two idle seconds",
-                    Choice::Preference("space_autosave".into(), (!enabled).to_string()),
+                    "Save the arrangement after a short idle",
+                    Choice::Preference("spaces.autosave".into(), (!enabled).to_string()),
                 );
                 for (value, label, detail) in [
                     (
@@ -812,12 +812,17 @@ pub(super) fn activate(host: &mut HostState, index: usize) {
             panel.rebuild();
         }
         Choice::Preference(key, value) => {
-            let item = if key == "space_autosave" || key == "restore_blank_terminals" {
-                toml_edit::value(value == "true")
+            let saved = if key == "spaces.autosave" {
+                config::save_spaces_autosave(&config::config_path(), value == "true")
             } else {
-                toml_edit::value(value)
+                let item = if key == "space_autosave" || key == "restore_blank_terminals" {
+                    toml_edit::value(value == "true")
+                } else {
+                    toml_edit::value(value)
+                };
+                config::save_preference(&config::config_path(), &key, item)
             };
-            match config::save_preference(&config::config_path(), &key, item) {
+            match saved {
                 Ok(()) => panel.rebuild(),
                 Err(error) => {
                     panel.page = Page::Text(format!("Could not save preference: {error}"));

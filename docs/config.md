@@ -119,8 +119,8 @@ pane_padding_px = 5
 space_rail = "bottom"
 # Enable drag and Shift+arrow reordering for saved spaces. true | false.
 space_reorder = false
-# Save changed Space layouts after two idle seconds. true | false.
-space_autosave = false
+# Save changed Space arrangements after a short idle. true | false.
+space_autosave = true
 # Choose naming prompts, automatic sessions, or blank terminals. "ask" | "auto" | "blank".
 session_naming = "ask"
 # Startup choice; restore reconnects live sessions without launching stopped ones. "ask" | "restore" | "fresh".
@@ -437,6 +437,11 @@ rich_focus = "ctrl+shift+g"
 os_tree = true
 # Speak mail, attention, pane-title notices, and cursor-line changes (PT-175). true|false.
 announce = true
+
+# -- spaces --
+[spaces]
+# Save the arrangement whenever it changes, after a short idle. true|false.
+autosave = true
 
 # -- remote spaces --
 # SSH destinations whose running Spaces the host can list (issue #24).
@@ -800,6 +805,15 @@ space_rail_chip_cols = 0     # horizontal chip limit, 6-40; 0 = 28
 space_rail_width_cols = 18   # side rail width in cells, 8-60
 space_rail_pane_names = true # show live session names in a second row
 ```
+
+`[spaces] autosave` defaults to true. Adding or closing a tab, terminal, or
+agent session, changing a split or its ratio, using Arrange, dragging tabs
+or panes, or moving a session between spaces saves the arrangement after a
+short idle, about one second. The rail shows Saving…, then Saved. Manual
+Save writes the same file immediately. `[spaces] autosave = false` opts out.
+When that key is absent, the legacy `space_autosave` value applies. When
+both are absent, autosave stays on. Autosave does not run while a space is
+opening or being restored.
 
 Set `space_reorder = true` to drag saved Space chips in any rail or Graphite
 sidebar, or focus the rail and use `Shift+Left` / `Shift+Right` (horizontal)

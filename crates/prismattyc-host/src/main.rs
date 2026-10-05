@@ -5151,6 +5151,98 @@ fn settle_pane_bells(host: &mut HostState, now: Instant) {
     });
 }
 
+struct GraphitePaneChrome {
+    slot: PixelRect,
+    name: String,
+    meta: Option<String>,
+    attention: bool,
+    mail_depth: u32,
+    unseen_output: bool,
+    running: bool,
+    focused: bool,
+    handle_hover: bool,
+}
+
+/// Capture every Graphite slot, then stroke every pane's chrome.
+///
+/// The hairline and focus ring blend. A second stroke on the retained buffer
+/// darkens the edge, so partial frames restore the pre-chrome strips and paint
+/// the ring once. Slots are captured before any ring so a shared gap keeps the
+/// cell surface, not the previous pane's stroke. Panes the cell loop skipped
+/// still get their ring back, because the restore erased every captured slot.
+fn paint_retained_graphite_panes(
+    host: &mut HostState,
+    buffer: &mut [u32],
+    width: usize,
+    geom: mux::HostGeom,
+    frame_now: Instant,
+    cycle_progress: Option<f32>,
+    focused: PaneId,
+) {
+    if !geom.chrome.graphite {
+        return;
+    }
+    let multi = host.mux.pane_count() > 1;
+    let hover_pane = match host.hover_target {
+        Some(HoverTarget::PaneHandle(id)) => Some(id),
+        _ => None,
+    };
+    let mut panes = Vec::new();
+    for (pane_id, pane, rect) in host.mux.panes_and_rects() {
+        let (slot_x, slot_y, slot_width, slot_height) = geom.pane_slot_px(rect);
+        let (name, meta) = host.mux.pane_header_text(pane_id);
+        panes.push(GraphitePaneChrome {
+            slot: PixelRect::new(slot_x, slot_y, slot_width, slot_height),
+            name,
+            meta,
+            attention: host.attention_badge && pane.attention.is_some(),
+            mail_depth: pane.mail_depth,
+            unseen_output: pane.unseen_output,
+            running: pane.is_active_at(frame_now),
+            focused: pane_id == focused,
+            handle_hover: hover_pane == Some(pane_id),
+        });
+    }
+    let tok = graphite::bar_tokens(host.theme.variant, host.bar_color);
+    let accent = graphite::accent(&tok, focus_border_rgb(host.focus_border));
+    for (index, pane) in panes.iter().enumerate() {
+        host.border_underlay
+            .capture_graphite(buffer, width, pane.slot, index == 0);
+    }
+    for pane in &panes {
+        graphite::paint_pane_chrome(
+            buffer,
+            width,
+            geom.chrome,
+            &tok,
+            accent,
+            graphite::Rect::new(pane.slot.x, pane.slot.y, pane.slot.width, pane.slot.height),
+            host.theme.default_bg,
+            &graphite::PaneHeader {
+                name: &pane.name,
+                meta: pane.meta.as_deref(),
+                dot: graphite::Dot::for_tab(
+                    pane.attention,
+                    pane.running,
+                    pane.unseen_output || pane.mail_depth > 0,
+                ),
+                status: graphite::PaneStatus::decide(
+                    pane.attention,
+                    pane.mail_depth,
+                    pane.unseen_output,
+                    pane.running,
+                    multi && pane.focused,
+                ),
+                focused: pane.focused,
+                handle_hover: pane.handle_hover,
+            },
+            multi,
+            cycle_progress.filter(|_| pane.focused),
+            host.light_cycle_head,
+        );
+    }
+}
+
 /// A focus change starts the light-cycle sweep only when the animation is
 /// opted in, motion is allowed, and more than one pane needs the ring.
 /// Reduced motion (and a single pane) shows the ring instantly.
@@ -5262,15 +5354,14 @@ fn rasterize_frame(
     // underlay independently carries cleanup damage until the next paint.
     host.pane_bells
         .restore(buffer, width as usize, &mut frame_damage);
-    host.border_underlay
-        .restore(buffer, width as usize, &mut frame_damage);
-    if empty_partial_skips_paint(
-        full,
-        &frame_damage,
-        host.pane_damage.values().all(damage_is_empty),
-    ) {
+    let pane_damage_empty = host.pane_damage.values().all(damage_is_empty);
+    // Idle frames keep the settled Graphite ring. Restoring it here would
+    // erase the antialiased edge and publish border damage on every tick.
+    if empty_partial_skips_paint(full, &frame_damage, pane_damage_empty) {
         return frame_damage;
     }
+    host.border_underlay
+        .restore(buffer, width as usize, &mut frame_damage);
     let overlay_surface = host_overlay_surface(host);
     if host.find.active && host.emulator.screen().alt_active() {
         close_find(&mut host.find);
@@ -6106,57 +6197,7 @@ fn rasterize_frame(
                 focus_border_rgb(host.focus_border),
             );
         }
-        if geom.chrome.graphite {
-            let (name, meta) = host.mux.pane_header_text(pane_id);
-            let attention = host.attention_badge && pane.attention.is_some();
-            let running = pane.is_active_at(frame_now);
-            let multi = host.mux.pane_count() > 1;
-            let tok = graphite::bar_tokens(host.theme.variant, host.bar_color);
-            // Graphite light-cycle (issue #111): the same focus-change
-            // sweep progress the classic border uses, traced round the
-            // 8 px ring. The underlay budget covers the 3 px head.
-            let sweep = cycle_progress.filter(|_| pane_id == focused);
-            if sweep.is_some_and(|progress| progress < 1.0) {
-                host.border_underlay.capture(
-                    buffer,
-                    width as usize,
-                    PixelRect::new(slot_x, slot_y, slot_width, slot_height),
-                );
-            }
-            graphite::paint_pane_chrome(
-                buffer,
-                width as usize,
-                geom.chrome,
-                &tok,
-                graphite::accent(&tok, focus_border_rgb(host.focus_border)),
-                graphite::Rect::new(slot_x, slot_y, slot_width, slot_height),
-                host.theme.default_bg,
-                &graphite::PaneHeader {
-                    name: &name,
-                    meta: meta.as_deref(),
-                    dot: graphite::Dot::for_tab(
-                        attention,
-                        running,
-                        pane.unseen_output || pane.mail_depth > 0,
-                    ),
-                    status: graphite::PaneStatus::decide(
-                        attention,
-                        pane.mail_depth,
-                        pane.unseen_output,
-                        running,
-                        multi && pane_id == focused,
-                    ),
-                    focused: pane_id == focused,
-                    handle_hover: matches!(
-                        host.hover_target,
-                        Some(HoverTarget::PaneHandle(id)) if id == pane_id
-                    ),
-                },
-                multi,
-                sweep,
-                host.light_cycle_head,
-            );
-        } else if host.mux.pane_count() > 1 {
+        if !geom.chrome.graphite && host.mux.pane_count() > 1 {
             if pane_id == focused && cycle_progress.is_some_and(|progress| progress < 1.0) {
                 host.border_underlay.capture(
                     buffer,
@@ -6204,6 +6245,15 @@ fn rasterize_frame(
             );
         }
     }
+    paint_retained_graphite_panes(
+        host,
+        buffer,
+        width as usize,
+        geom,
+        frame_now,
+        cycle_progress,
+        focused,
+    );
     // Header-drag chip and dashed slot (issue #109, graphite only). The
     // drop itself reuses the strip drag-to-move routing.
     if geom.chrome.graphite {

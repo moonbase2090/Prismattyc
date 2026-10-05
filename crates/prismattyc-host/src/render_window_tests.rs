@@ -470,13 +470,15 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
         assert!(host.attach_pane_sessions.is_empty());
         let pixels = frame(host);
         let size = host.window.inner_size();
-        let rail = space_rail::RailLayout::for_window(
-            host.mux.geom(),
-            size.width as usize,
-            size.height as usize,
-            &host.space_rail.names,
-        )
-        .unwrap();
+        let rail = host
+            .space_rail
+            .layout(
+                host.mux.geom(),
+                size.width as usize,
+                size.height as usize,
+                host.spacing.space_rail_pane_names,
+            )
+            .unwrap();
         let (x, y, _, _) = rail
             .chip_bounds(host.space_rail.names.len(), host.space_rail.names.len())
             .unwrap();

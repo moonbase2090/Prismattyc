@@ -1753,19 +1753,28 @@ fn verify_decision_handlers(host: &mut HostState) {
 
     host.tab_strip_mode = config::TabStripMode::Always;
     App::refit_geom(host, host.window.inner_size(), Some("decision test"));
+    // Graphite hit-testing uses the bar stored by the last paint. Classic
+    // derives the close from the cell grid and does not need that cache.
+    frame(host);
     let stride = host.window.inner_size().width as usize;
-    let close_x = (0..stride).find(|x| {
-        matches!(
-            host.mux.tab_strip_hit(*x, 0, stride, false),
-            Some(mux::StripHit::Tab { close: true, .. })
-        )
+    let geom = host.mux.geom();
+    let strip_top = geom.tab_strip_y();
+    let strip_h = geom.top_chrome_px;
+    let close = (strip_top..strip_top.saturating_add(strip_h)).find_map(|y| {
+        (0..stride).find_map(|x| {
+            matches!(
+                host.mux.tab_strip_hit(x, y, stride, false),
+                Some(mux::StripHit::Tab { close: true, .. })
+            )
+            .then_some((x, y))
+        })
     });
-    let Some(close_x) = close_x else {
-        panic!("real tab strip must expose a close hit for the decision test");
+    let Some((close_x, close_y)) = close else {
+        panic!("real tab strip must expose a close hit (y={strip_top} h={strip_h})");
     };
 
     host.tab_rename = None;
-    host.pointer_px = Some((close_x as f64, 0.0));
+    host.pointer_px = Some((close_x as f64, close_y as f64));
     assert_eq!(
         handle_strip_click(host, MouseButton::Right),
         StripClickResult::Handled
@@ -1776,14 +1785,23 @@ fn verify_decision_handlers(host: &mut HostState) {
     );
     cancel_tab_rename(host);
 
-    host.pointer_px = Some((close_x as f64, host.font.cell_h as f64));
-    assert_eq!(
-        handle_strip_click(host, MouseButton::Right),
-        StripClickResult::Handled
-    );
+    // Classic keeps a handle row under the title. Graphite's whole bar is
+    // the title row, so the first pixel under the bar is outside the strip.
+    let below_y = if geom.chrome.graphite {
+        strip_top.saturating_add(strip_h)
+    } else {
+        host.font.cell_h
+    };
+    host.pointer_px = Some((close_x as f64, below_y as f64));
+    let below = handle_strip_click(host, MouseButton::Right);
+    if geom.chrome.graphite {
+        assert_eq!(below, StripClickResult::NotHandled);
+    } else {
+        assert_eq!(below, StripClickResult::Handled);
+    }
     assert!(
         host.tab_rename.is_none(),
-        "the first row after the title must not rename the tab"
+        "a click off the title row must not rename the tab"
     );
 
     verify_mux_apply_wrappers(host, &args);

@@ -1035,9 +1035,10 @@ struct HostState {
     experimental_rich: bool,
     /// Brand spectrum index for the focused-pane border (thin, 1px).
     focus_border: usize,
-    /// Graphite bar background preset (#108). Only painted when
-    /// `chrome_style` is graphite; classic ignores it.
-    bar_color: config::BarColor,
+    /// Graphite bar background preset (#108). `None` follows the theme's
+    /// chrome (#160). Only painted when `chrome_style` is graphite; classic
+    /// ignores it.
+    bar_color: Option<config::BarColor>,
     /// Configured tab-strip visibility mode.
     tab_strip_mode: config::TabStripMode,
     /// Multi-pane title row: focused pane OSC title, or handle hover only.
@@ -2223,7 +2224,7 @@ fn bell_toast_chip_rect(
 fn paint_bell_toast_for_style(
     font: &FontMetrics,
     chrome: mux::ChromeGeom,
-    variant: theme::ThemeVariant,
+    theme: &theme::Theme,
     label: &str,
     buffer: &mut [u32],
     stride: usize,
@@ -2246,7 +2247,7 @@ fn paint_bell_toast_for_style(
         ) {
             graphite_overlays::toast(
                 chrome,
-                variant,
+                &graphite::theme_tokens(theme),
                 label,
                 graphite::Rect::new(x, y, w, h),
                 buffer,
@@ -3619,7 +3620,7 @@ impl App {
                 keymap: self.keymap.clone(),
                 experimental_rich: self.cli.experimental_rich,
                 focus_border: self.cli.focus_border,
-                bar_color: self.file_config.bar_color(),
+                bar_color: self.file_config.bar_color,
                 tab_strip_mode,
                 pane_titles: self.file_config.pane_titles(),
                 spacing,
@@ -5277,7 +5278,7 @@ fn paint_retained_graphite_panes(
             handle_hover: hover_pane == Some(pane_id),
         });
     }
-    let tok = graphite::bar_tokens(host.theme.variant, host.bar_color);
+    let tok = graphite::bar_tokens(&host.theme, host.bar_color);
     let accent = graphite::accent(&tok, focus_border_rgb(host.focus_border));
     for (index, pane) in panes.iter().enumerate() {
         host.border_underlay
@@ -5532,7 +5533,7 @@ fn rasterize_frame(
         // each content rect as the blend target a dimmed pane recedes toward
         // (PT-98). PT-87: the ground carries `window_alpha`.
         let ground = if geom.chrome.graphite {
-            graphite::bar_tokens(host.theme.variant, host.bar_color).ground
+            graphite::bar_tokens(&host.theme, host.bar_color).ground
         } else {
             host.theme.pane_backdrop
         };
@@ -5798,7 +5799,7 @@ fn rasterize_frame(
                     width as usize,
                     geom.chrome,
                     graphite::Rect::new(slot_x, slot_y, slot_width, slot_height),
-                    graphite::bar_tokens(host.theme.variant, host.bar_color).ground,
+                    graphite::bar_tokens(&host.theme, host.bar_color).ground,
                     host.window_alpha,
                     host.theme.default_bg,
                     surface_alpha,
@@ -6136,7 +6137,7 @@ fn rasterize_frame(
                     let chip_h = host.font.cell_h.min(clip.h);
                     graphite_overlays::toast(
                         geom.chrome,
-                        host.theme.variant,
+                        &graphite::theme_tokens(&host.theme),
                         &label,
                         graphite::Rect::new(
                             clip.x.saturating_add(clip.w.saturating_sub(chip_w)),
@@ -6182,7 +6183,7 @@ fn rasterize_frame(
                     let field_w = clip.w.saturating_sub(chip_reserve).max(1);
                     graphite_overlays::find_prompt(
                         geom.chrome,
-                        host.theme.variant,
+                        &graphite::theme_tokens(&host.theme),
                         &label,
                         graphite::Rect::new(
                             clip.x,
@@ -6247,7 +6248,7 @@ fn rasterize_frame(
             paint_bell_toast_for_style(
                 &host.font,
                 geom.chrome,
-                host.theme.variant,
+                &host.theme,
                 &toast.label,
                 buffer,
                 width as usize,
@@ -6270,7 +6271,7 @@ fn rasterize_frame(
             paint_bell_toast_for_style(
                 &host.font,
                 geom.chrome,
-                host.theme.variant,
+                &host.theme,
                 &format!(" remote {w}x{h} "),
                 buffer,
                 width as usize,
@@ -6423,7 +6424,7 @@ fn rasterize_frame(
             paint_bell_toast_for_style(
                 &host.font,
                 geom.chrome,
-                host.theme.variant,
+                &host.theme,
                 line,
                 buffer,
                 width as usize,
@@ -6447,7 +6448,7 @@ fn rasterize_frame(
             let runs = chord_help(&host.mux, &host.keymap, show_tabs, graphite).1;
             graphite_overlays::legend_keys(
                 geom.chrome,
-                host.theme.variant,
+                &graphite::theme_tokens(&host.theme),
                 &runs,
                 buffer,
                 width as usize,
@@ -6485,7 +6486,7 @@ fn rasterize_frame(
         if geom.chrome.graphite {
             graphite_overlays::legend(
                 geom.chrome,
-                host.theme.variant,
+                &graphite::theme_tokens(&host.theme),
                 &notice,
                 buffer,
                 width as usize,
@@ -6515,7 +6516,7 @@ fn rasterize_frame(
             graphite_overlays::walkthrough_caption(
                 &host.font,
                 geom.chrome,
-                host.theme.variant,
+                &graphite::theme_tokens(&host.theme),
                 &view,
                 band,
                 host_overlay_surface(host),
@@ -6546,7 +6547,7 @@ fn rasterize_frame(
             paint_bell_toast_for_style(
                 &host.font,
                 geom.chrome,
-                host.theme.variant,
+                &host.theme,
                 &label,
                 buffer,
                 width as usize,
@@ -6586,7 +6587,7 @@ fn rasterize_frame(
             };
             graphite_overlays::theme_picker(
                 geom.chrome,
-                host.theme.variant,
+                &graphite::theme_tokens(&host.theme),
                 &rows,
                 picker.selected,
                 picker.scroll,
@@ -6950,7 +6951,7 @@ fn rasterize_frame(
             graphite_overlays::splash(
                 &host.font,
                 geom.chrome,
-                host.theme.variant,
+                &graphite::theme_tokens(&host.theme),
                 splash.page,
                 &lines,
                 animation_ms,
@@ -6985,7 +6986,7 @@ fn rasterize_frame(
             buffer,
             width as usize,
             height as usize,
-            host.theme.variant,
+            &graphite::theme_tokens(&host.theme),
             dialog,
             &laid,
         );
@@ -9347,7 +9348,7 @@ fn paint_palette_overlay_anchored(
     if chrome.graphite {
         graphite_overlays::palette(
             font,
-            theme.variant,
+            &graphite::theme_tokens(theme),
             chrome,
             focus_rgb,
             frame,
@@ -9381,7 +9382,7 @@ fn paint_palette_overlay_with_hover(
     if chrome.graphite {
         graphite_overlays::palette(
             font,
-            theme.variant,
+            &graphite::theme_tokens(theme),
             chrome,
             focus_rgb,
             frame,
@@ -10763,7 +10764,7 @@ fn paint_graphite_rail(
     layout: &space_rail::RailLayout,
     hover: Option<space_rail::RailHit>,
 ) {
-    let tok = graphite::bar_tokens(host.theme.variant, host.bar_color);
+    let tok = graphite::bar_tokens(&host.theme, host.bar_color);
     let accent = graphite::accent(&tok, focus_border_rgb(host.focus_border));
     let bar = graphite::Rect::new(layout.x, layout.y, layout.w, layout.h);
     graphite::paint_rail_bar(
@@ -10872,7 +10873,7 @@ fn paint_graphite_side_rail(
     layout: &space_rail::RailLayout,
     hover: Option<space_rail::RailHit>,
 ) {
-    let tok = graphite::tokens(host.theme.variant);
+    let tok = &graphite::theme_tokens(&host.theme);
     let accent = graphite::accent(tok, focus_border_rgb(host.focus_border));
     let views = host.space_rail.views();
     let n = host.space_rail.names.len();
@@ -11053,13 +11054,13 @@ fn paint_space_reorder_overlay(
         return;
     }
     let accent = if geom.chrome.graphite {
-        let tok = graphite::bar_tokens(host.theme.variant, host.bar_color);
+        let tok = graphite::bar_tokens(&host.theme, host.bar_color);
         graphite::accent(&tok, focus_border_rgb(host.focus_border))
     } else {
         focus_border_rgb(host.focus_border)
     };
     let gutter = if geom.chrome.graphite {
-        graphite::bar_tokens(host.theme.variant, host.bar_color).status_bar
+        graphite::bar_tokens(&host.theme, host.bar_color).status_bar
     } else {
         host.theme.pane_backdrop
     };
@@ -11124,7 +11125,7 @@ fn paint_space_reorder_overlay(
         .saturating_sub(drag.grab_y)
         .min(height.saturating_sub(source.3));
     if geom.chrome.graphite {
-        let tok = graphite::bar_tokens(host.theme.variant, host.bar_color);
+        let tok = graphite::bar_tokens(&host.theme, host.bar_color);
         graphite::paint_rail_chip(
             buffer,
             stride,
@@ -11167,7 +11168,7 @@ fn paint_header_drag_overlay(
         return;
     };
     let (slot_x, slot_y, slot_w, slot_h) = geom.pane_slot_px(rect);
-    let tok = graphite::tokens(host.theme.variant);
+    let tok = &graphite::theme_tokens(&host.theme);
     let milli = geom.chrome.scale_milli as f32 / 1000.0;
     graphite::paint_dashed_round_rect(
         buffer,
@@ -11248,7 +11249,7 @@ fn paint_graphite_tabs_bar(
         ),
         origin,
     );
-    let tok = graphite::bar_tokens(host.theme.variant, host.bar_color);
+    let tok = graphite::bar_tokens(&host.theme, host.bar_color);
     graphite::paint_tabs_bar(
         buffer,
         stride,
@@ -11520,7 +11521,7 @@ fn paint_graphite_sidebar(
             }
         })
         .collect();
-    let tok = graphite::bar_tokens(host.theme.variant, host.bar_color);
+    let tok = graphite::bar_tokens(&host.theme, host.bar_color);
     graphite::paint_sidebar(
         buffer,
         stride,
@@ -16571,7 +16572,8 @@ fn cycle_bar_color(host: &mut HostState, forward: bool) {
     if host.spacing.chrome_style != config::ChromeStyle::Graphite {
         return;
     }
-    host.bar_color = graphite::step_bar_color(host.bar_color, forward);
+    host.bar_color =
+        graphite::step_bar_color(host.bar_color, forward, !graphite::uses_brief(&host.theme));
     let name = graphite::bar_color_name(host.bar_color);
     host.window
         .set_title(&format!("Prismattyc — bar color: {name}"));

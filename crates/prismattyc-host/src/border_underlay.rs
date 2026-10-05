@@ -182,10 +182,7 @@ mod tests {
             graphite: true,
             scale_milli: 1000,
         };
-        let tok = graphite::bar_tokens(
-            crate::theme::ThemeVariant::Dark,
-            crate::config::BarColor::Graphite,
-        );
+        let tok = graphite::DARK;
         let stride = 96;
         let slot = PixelRect::new(10, 8, 70, 48);
         let surface = vec![0xff1c1e20; stride * 64];
@@ -236,10 +233,7 @@ mod tests {
             graphite: true,
             scale_milli: 1000,
         };
-        let tok = graphite::bar_tokens(
-            crate::theme::ThemeVariant::Dark,
-            crate::config::BarColor::Graphite,
-        );
+        let tok = graphite::DARK;
         let stride = 180;
         let height = 72;
         let left = PixelRect::new(1, 1, 70, 48);

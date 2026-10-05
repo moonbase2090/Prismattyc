@@ -63,7 +63,7 @@ reduced_motion = false
 tab_strip = "auto"
 # Host chrome look. Omit this key to follow the app default (graphite). classic|graphite.
 # chrome_style = "graphite"
-# Graphite bar background: graphite, harbor, moss, or plum (Sand on light themes). graphite|harbor|moss|plum.
+# Graphite bar background: omit to follow the theme, or graphite, harbor, moss, or plum (Sand on light themes). graphite|harbor|moss|plum.
 # bar_color = "graphite"
 # Graphite chrome arrangement: bars, or the sidebar tree. bars|sidebar.
 # layout = "bars"
@@ -655,6 +655,18 @@ one palette; it falls back to Dark when the system reports nothing.
 the earlier palette and stays available by name. Any other theme, a theme file,
 or `[theme_overrides]` keeps its own colors; overrides are re-applied after an
 appearance switch.
+
+The Graphite chrome follows the selected theme too. The three Prismattyc
+themes paint the design brief's tokens exactly. Every other theme, and a
+Prismattyc theme whose `chrome_bg` or `chrome_fg` is overridden, derives them:
+the tabs bar, spaces bar, side rail, and sidebar from `chrome_bg` (the spaces
+bar a shade off it), text from `chrome_fg`, the active chip from
+`tab_active_bg`, panes, title rows, and dialogs from `default_bg`, and the
+status dots from the theme's badge colors. Derived text is nudged toward
+readable contrast when a theme's pair is too close. An explicit `bar_color`
+still recolors both bars; without one, the bars follow the theme, and
+`Ctrl+Shift+B` cycles Theme, Graphite, Harbor, Moss, and Plum. The focus-ring
+spectrum and the light-cycle head stay brand chrome.
 
 The Omarchy themes use palettes from the official Omarchy repository, with
 window-control colors mapped to Prismattyc. Their [MIT notice](../crates/prismattyc-host/themes/OMARCHY-LICENSE.txt)

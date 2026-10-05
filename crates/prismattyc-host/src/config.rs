@@ -142,8 +142,9 @@ pub struct ConfigFile {
     /// A missing key follows this default, so a later flip reaches installs
     /// that did not pin the key.
     pub chrome_style: Option<ChromeStyle>,
-    /// Graphite bar background: `graphite` (default), `harbor`, `moss`, or
-    /// `plum` (Sand on light themes). Only read for `graphite` chrome.
+    /// Graphite bar background: `graphite`, `harbor`, `moss`, or `plum` (Sand
+    /// on light themes). Unset follows the theme's chrome (#160). Only read
+    /// for `graphite` chrome.
     pub bar_color: Option<BarColor>,
     /// Chrome arrangement: `bars` (default) or `sidebar` (issue #113).
     /// Only read when `chrome_style = "graphite"`.
@@ -389,10 +390,6 @@ impl ConfigFile {
 
     pub fn layout(&self) -> LayoutMode {
         self.layout.unwrap_or_default()
-    }
-
-    pub fn bar_color(&self) -> BarColor {
-        self.bar_color.unwrap_or_default()
     }
 
     /// Show the launch splash on a bare first window. Default true.
@@ -1157,9 +1154,9 @@ mod tests {
         assert!(!load(&path).unwrap().reduced_motion.unwrap_or(false));
         std::fs::write(&path, "reduced_motion = true\n").unwrap();
         assert!(load(&path).unwrap().reduced_motion.unwrap_or(false));
-        assert_eq!(ConfigFile::default().bar_color(), BarColor::Graphite);
+        assert_eq!(ConfigFile::default().bar_color, None);
         std::fs::write(&path, "bar_color = \"harbor\"\n").unwrap();
-        assert_eq!(load(&path).unwrap().bar_color(), BarColor::Harbor);
+        assert_eq!(load(&path).unwrap().bar_color, Some(BarColor::Harbor));
         // chrome_opacity follows window_opacity unless set explicitly.
         let follows = ConfigFile {
             window_opacity: Some(0.8),

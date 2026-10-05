@@ -239,6 +239,7 @@ mod tests {
             tabs: vec![attach_tabs::AttachTabRecord {
                 title: "saved".into(),
                 sessions: vec!["gone".into()],
+                layout: None,
             }],
             ..Default::default()
         })
@@ -251,7 +252,8 @@ mod tests {
         assert!(RestorePrompt::new(attach_tabs::AttachTabsFile {
             tabs: vec![attach_tabs::AttachTabRecord {
                 title: "empty".into(),
-                sessions: vec![]
+                sessions: vec![],
+                layout: None,
             }],
             ..Default::default()
         })

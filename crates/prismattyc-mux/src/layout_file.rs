@@ -125,10 +125,15 @@ pub struct SavedSpace {
 }
 
 /// One host tab inside a [`SavedSpace`]: session names in pane order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `layout` is the host split tree. Leaves name sessions. Absent on a
+/// single-pane tab and on files written before the tree was stored.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedSpaceTab {
     pub title: String,
     pub sessions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<crate::attach_tabs::TabLayoutNode>,
 }
 
 /// Session names in host tab order, then any saved session not in a tab.
@@ -193,6 +198,7 @@ pub fn space_add_session(
     space.tabs.push(SavedSpaceTab {
         title,
         sessions: vec![name],
+        layout: None,
     });
     space.saved_at_unix = now_unix();
     Ok(())
@@ -209,6 +215,13 @@ pub fn space_remove_session(space: &mut SavedSpace, session: &str) -> Result<()>
     space.sessions.retain(|entry| entry.name != session);
     for tab in &mut space.tabs {
         tab.sessions.retain(|name| name != session);
+        let kept = tab.sessions.clone();
+        tab.layout = tab.layout.as_ref().and_then(|node| {
+            crate::attach_tabs::remap_layout(node, |name| {
+                (name != session).then(|| name.to_string())
+            })
+        });
+        tab.layout = crate::attach_tabs::layout_for_sessions(tab.layout.take(), &kept);
     }
     space.tabs.retain(|tab| !tab.sessions.is_empty());
     if space.focused_session.as_deref() == Some(session) {
@@ -1372,6 +1385,7 @@ mod tests {
             tabs: vec![SavedSpaceTab {
                 title: "t1".into(),
                 sessions: vec!["b".into(), "a".into()],
+                layout: None,
             }],
             active_tab: 0,
             focused_session: Some("a".into()),
@@ -1500,6 +1514,7 @@ mod tests {
             tabs: vec![SavedSpaceTab {
                 title: name.into(),
                 sessions: vec![name.into()],
+                layout: None,
             }],
             active_tab: 0,
             focused_session: Some(name.into()),

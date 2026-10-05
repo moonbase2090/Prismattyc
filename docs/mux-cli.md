@@ -560,10 +560,12 @@ does not exist. It adds the saved windows when `TARGET` exists. `TARGET`
 defaults to `NAME`. It does not bind an agent unless you pass `--agent`
 (the target session name).
 
-`space save` also copies the host cache's active tab index and focused
-session name into the space file. `space open` writes them back so the
-opened host selects that tab and pane and unzooms. Missing or unknown
-values fall back to the first tab and its first pane.
+`space save` also copies the host cache's active tab index, focused
+session name, and each tab's split tree into the space file. `space open`
+writes them back so the opened host selects that tab and pane, restores
+the saved axes and ratios, and unzooms. A tab with no saved tree (a single
+pane, or a file from an older build) still opens as a left-to-right row.
+Missing or unknown focus falls back to the first tab and its first pane.
 
 With no `SESSION` list and a non-empty attach-tabs cache, `space save`
 saves the sessions the live window shows (cache tab order). Detached but

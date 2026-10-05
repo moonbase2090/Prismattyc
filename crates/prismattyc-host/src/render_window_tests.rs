@@ -1052,9 +1052,25 @@ fn verify_mail_scroll_during_sweep(host: &mut HostState) {
         .unwrap();
     let focused = host.mux.focused_id();
     let rect = host.mux.rects().find(|(id, _)| *id == focused).unwrap().1;
+    // Pad, gap, and gutter are zero, so the grid shares the slot's x and
+    // width. Graphite keeps the title row above that grid and centres the
+    // leftover pixels that are not a whole cell row.
+    let geom = host.mux.geom();
+    let (sx, sy, sw, sh) = geom.pane_slot_px(rect);
+    let header = geom.chrome.pane_header();
+    assert!(header > 0, "graphite pane header sits above the grid");
+    let avail_h = sh.saturating_sub(header);
+    let cell_h = geom.cell_h.max(1);
+    let used_h = (avail_h / cell_h).saturating_mul(cell_h);
+    let extra_h = avail_h.saturating_sub(used_h);
     assert_eq!(
-        host.mux.geom().pane_slot_px(rect),
-        host.mux.geom().pane_content_px(rect)
+        geom.pane_content_px(rect),
+        (
+            sx,
+            sy.saturating_add(header).saturating_add(extra_h / 2),
+            sw,
+            used_h,
+        )
     );
     let pane = host.mux.focused_mut();
     pane.mail_depth = 1;

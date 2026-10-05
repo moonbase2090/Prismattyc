@@ -141,9 +141,16 @@ fn verify_rename_and_rail(host: &mut HostState) {
         MouseButton::Left
     ));
     assert!(host.rail_resizing);
+    // Classic columns are terminal cells. Graphite's side column is 220
+    // design px at 18 columns, independent of the cell width.
+    let drag_x = if geom.chrome.graphite {
+        super::graphite::side_rail_px(geom.chrome, 18) as f64
+    } else {
+        (host.font.cell_w * 18) as f64
+    };
     assert!(rail_resize::motion(
         host,
-        (host.font.cell_w * 18) as f64,
+        drag_x,
         (geom.top_chrome_px + 10) as f64
     ));
     assert_eq!(host.spacing.space_rail_width_cols, 18);

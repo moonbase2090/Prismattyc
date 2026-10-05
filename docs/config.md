@@ -34,7 +34,9 @@ value. Automatic signed-release checks run on app launch and daily by default.
 Set the top-level `automatic_update_checks = false` or turn them off in the app
 menu to opt out. The app menu's manual check works regardless of this setting.
 The classic `prismattyc` binary does not
-read this file.
+read this file. `chrome_style` defaults to `graphite`. Leave that key
+commented, or omit it, to follow the app default. `chrome_style = "classic"`
+keeps the previous chrome and applies live.
 
 ## Keys
 
@@ -57,12 +59,12 @@ splash_animation = true
 reduced_motion = false
 # Tab strip visibility: auto and always show one tab; multi needs two tabs. auto|always|multi.
 tab_strip = "auto"
-# Host chrome look: classic, or the opt-in Graphite redesign. classic|graphite.
-chrome_style = "classic"
+# Host chrome look. Omit this key to follow the app default (graphite). classic|graphite.
+# chrome_style = "graphite"
 # Graphite bar background: graphite, harbor, moss, or plum (Sand on light themes). graphite|harbor|moss|plum.
-bar_color = "graphite"
-# Graphite chrome arrangement: bars, or the opt-in sidebar tree. bars|sidebar.
-layout = "bars"
+# bar_color = "graphite"
+# Graphite chrome arrangement: bars, or the sidebar tree. bars|sidebar.
+# layout = "bars"
 # Multi-pane title row: focused pane OSC title, or handle hover only. focused|hover.
 pane_titles = "focused"
 # Immediate hover blend for interactive strip, rail, and scrollbar chrome. 0.0-0.3.

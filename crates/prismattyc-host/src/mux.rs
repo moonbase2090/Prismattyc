@@ -4868,6 +4868,51 @@ mod tests {
     }
 
     #[test]
+    fn graphite_header_insets_the_grid_below_the_slot() {
+        // Linux paint CI (cell 10×19, header 28): slot (8, 52, 410, 494)
+        // and content (8, 85, 410, 456). 466px remain under the title row,
+        // 24 rows use 456, and the 10px surplus is split 5 above the grid.
+        let geom = HostGeom {
+            cell_w: 10,
+            cell_h: 19,
+            window_pad: 8,
+            slack_x: 0,
+            slack_y: 44,
+            pane_gap: 0,
+            rail_gap: 0,
+            inner_pad: 0,
+            top_chrome_px: 0,
+            scrollbar_gutter_px: 0,
+            rail_side: RailSide::Off,
+            rail_px: 0,
+            rail_chip_cols: 0,
+            sidebar_px: 0,
+            chrome: ChromeGeom {
+                graphite: true,
+                scale_milli: 1000,
+            },
+        };
+        let rect = CellRect {
+            col: 0,
+            row: 0,
+            cols: 41,
+            rows: 26,
+        };
+        assert_eq!(geom.chrome.pane_header(), 28);
+        assert_eq!(geom.pane_slot_px(rect), (8, 52, 410, 494));
+        assert_eq!(geom.pane_content_px(rect), (8, 85, 410, 456));
+        let (sx, sy, sw, sh) = geom.pane_slot_px(rect);
+        let header = geom.chrome.pane_header();
+        let avail_h = sh - header;
+        let used_h = (avail_h / geom.cell_h) * geom.cell_h;
+        let extra_h = avail_h - used_h;
+        assert_eq!(
+            geom.pane_content_px(rect),
+            (sx, sy + header + extra_h / 2, sw, used_h)
+        );
+    }
+
+    #[test]
     fn scrollbar_gutter_sits_in_padding_when_inner_pad_fits() {
         assert_eq!(scrollbar_gutter_for(0), SCROLLBAR_GUTTER_PX);
         assert_eq!(scrollbar_gutter_for(7), SCROLLBAR_GUTTER_PX);

@@ -2189,6 +2189,33 @@ pub(crate) fn paint_pane_chrome(
     }
 }
 
+/// Header regions that change when a pane starts or stops running.
+///
+/// Both rects stay inside the title row. They are not chrome boxes: a stable
+/// box would be republished on every pulse, and a box that appears only while
+/// the pane is running would expand to the whole slot when it disappears.
+pub(crate) fn activity_header_rects(chrome: ChromeGeom, slot: Rect) -> Vec<Rect> {
+    let head_h = chrome.px(PANE_HEADER_H).min(slot.h);
+    if slot.w < chrome.px(40.0) || head_h == 0 {
+        return Vec::new();
+    }
+    let pad = chrome.px(HEADER_PAD_X);
+    let dot = chrome.px(HEADER_DOT).max(1);
+    let cx = slot.x.saturating_add(pad).saturating_add(dot / 2);
+    let dot_left = cx.saturating_sub(dot / 2 + 2).max(slot.x);
+    let dot_right = cx.saturating_add(dot / 2 + 3).min(slot.right());
+    let dot_rect = Rect::new(dot_left, slot.y, dot_right.saturating_sub(dot_left), head_h);
+    // Wider than "needs you" / "new output" plus the right pad, at 1x and up.
+    let status_w = chrome.px(168.0).min(slot.w);
+    let status = Rect::new(
+        slot.right().saturating_sub(status_w),
+        slot.y,
+        status_w,
+        head_h,
+    );
+    vec![dot_rect, status]
+}
+
 fn status_width(chrome: ChromeGeom, status: PaneStatus) -> f32 {
     let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
     let px = s(HEADER_TEXT);
@@ -3743,6 +3770,36 @@ mod tests {
             attention: false,
             selected,
         }
+    }
+
+    #[test]
+    fn activity_header_rects_cover_the_dot_and_the_status_label() {
+        let chrome = scale(1000);
+        let slot = Rect::new(10, 20, 400, 200);
+        let rects = activity_header_rects(chrome, slot);
+        assert_eq!(rects.len(), 2);
+        let head = chrome.px(PANE_HEADER_H);
+        for rect in &rects {
+            assert!(rect.y >= slot.y && rect.y + rect.h <= slot.y + head);
+            assert!(rect.x >= slot.x && rect.right() <= slot.right());
+        }
+        let dot = rects[0];
+        let cx = slot.x + chrome.px(HEADER_PAD_X) + chrome.px(HEADER_DOT) / 2;
+        let cy = slot.y + head.saturating_sub(1) / 2;
+        assert!(dot.contains(cx, cy));
+        let widest = [
+            PaneStatus::Attention,
+            PaneStatus::Mail(999),
+            PaneStatus::Unseen,
+            PaneStatus::Running,
+            PaneStatus::Focused,
+        ]
+        .into_iter()
+        .map(|status| status_width(chrome, status).ceil() as usize)
+        .max()
+        .unwrap();
+        assert!(rects[1].w >= widest + chrome.px(HEADER_PAD_X));
+        assert!(activity_header_rects(chrome, Rect::new(0, 0, 20, 10)).is_empty());
     }
 
     #[test]

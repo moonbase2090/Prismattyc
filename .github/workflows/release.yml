@@ -325,6 +325,6 @@ jobs:
             --notes-file release-notes.md
           )
           if [[ "$RELEASE_TAG" == *-* ]]; then
-            args+=(--prerelease)
+            args+=(--prerelease --latest=false)
           fi
           gh "${args[@]}" dist/*

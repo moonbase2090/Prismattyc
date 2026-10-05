@@ -9,6 +9,16 @@ The desktop application is `prismattyc-host`. The `pmux` command manages
 sessions from a terminal. A background process, `pmuxd`, keeps those
 sessions running when you detach.
 
+Graphite is the default chrome as of 0.3.0-rc.1. To keep the previous look,
+add this line to `~/.config/prismattyc/config.toml`. It applies live:
+
+```toml
+chrome_style = "classic"
+```
+
+Rolling back to 0.2.30 keeps that config working. See the
+[v0.3.0-rc.1 release notes](docs/release-notes-v0.3.0-rc.1.md).
+
 ## What you can do
 
 - Open terminal tabs and split them into panes.
@@ -177,8 +187,8 @@ troubleshooting, compatibility, and application integration.
 
 ## Version
 
-The workspace package version is **`0.2.30`**. See the
-[v0.2.30 release notes](docs/release-notes-v0.2.30.md) for this version's
+The workspace package version is **`0.3.0-rc.1`**. See the
+[v0.3.0-rc.1 release notes](docs/release-notes-v0.3.0-rc.1.md) for this version's
 changes. A version in source does not necessarily have a published download.
 Use [GitHub Releases](https://github.com/moonbase2090/Prismattyc/releases) to
 find published builds.

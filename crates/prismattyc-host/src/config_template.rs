@@ -48,6 +48,8 @@ pub enum ConfigValue {
     U64(u64),
     F32(f32),
     String(&'static str),
+    /// Shown in the template, but commented so a fresh install does not pin it.
+    CommentedString(&'static str),
     StringArray(&'static [&'static str]),
     CommentedPath(&'static str),
 }
@@ -116,23 +118,23 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey {
         name: "chrome_style",
         group: ConfigGroup::Appearance,
-        doc: "Host chrome look: classic, or the opt-in Graphite redesign",
+        doc: "Host chrome look. Omit this key to follow the app default (graphite)",
         range: "classic|graphite",
-        value: ConfigValue::String("classic"),
+        value: ConfigValue::CommentedString("graphite"),
     },
     ConfigKey {
         name: "bar_color",
         group: ConfigGroup::Appearance,
         doc: "Graphite bar background: graphite, harbor, moss, or plum (Sand on light themes)",
         range: "graphite|harbor|moss|plum",
-        value: ConfigValue::String("graphite"),
+        value: ConfigValue::CommentedString("graphite"),
     },
     ConfigKey {
         name: "layout",
         group: ConfigGroup::Appearance,
-        doc: "Graphite chrome arrangement: bars, or the opt-in sidebar tree",
+        doc: "Graphite chrome arrangement: bars, or the sidebar tree",
         range: "bars|sidebar",
-        value: ConfigValue::String("bars"),
+        value: ConfigValue::CommentedString("bars"),
     },
     ConfigKey {
         name: "pane_titles",
@@ -488,7 +490,7 @@ fn format_value(value: ConfigValue) -> String {
                 format!("{v}")
             }
         }
-        ConfigValue::String(v) => format!("\"{v}\""),
+        ConfigValue::String(v) | ConfigValue::CommentedString(v) => format!("\"{v}\""),
         ConfigValue::StringArray(items) => {
             let inner = items
                 .iter()
@@ -508,7 +510,7 @@ fn emit_key(out: &mut String, key: &ConfigKey) {
         ConfigValue::CommentedPath(_) if key.name == "font_fallback" => {
             out.push_str(&format!("# {} = [{rendered}]\n", key.name));
         }
-        ConfigValue::CommentedPath(_) => {
+        ConfigValue::CommentedPath(_) | ConfigValue::CommentedString(_) => {
             out.push_str(&format!("# {} = {rendered}\n", key.name));
         }
         _ => out.push_str(&format!("{} = {rendered}\n", key.name)),
@@ -761,6 +763,9 @@ fn insert_toml_value(document: &mut toml_edit::DocumentMut, key: &ConfigKey) {
         }
         ConfigValue::F32(v) => document[key.name] = toml_edit::value(f64::from(v)),
         ConfigValue::String(v) => document[key.name] = toml_edit::value(v),
+        ConfigValue::CommentedString(value) => {
+            insert_commented_root_key(document, key.name, value, false);
+        }
         ConfigValue::StringArray(items) => {
             let mut array = toml_edit::Array::new();
             for item in items {
@@ -1087,9 +1092,27 @@ mod tests {
         assert!(!parsed.render_timer_log_every_frame());
         assert_eq!(parsed.install_agent_skills, Some(true));
         assert_eq!(parsed.tab_strip(), crate::config::TabStripMode::Auto);
-        assert_eq!(parsed.chrome_style(), crate::config::ChromeStyle::Classic);
-        assert!(template.contains("chrome_style = \"classic\""));
-        assert!(!template.contains("chrome_style = \"graphite\""));
+        assert_eq!(parsed.chrome_style(), crate::config::ChromeStyle::Graphite);
+        assert!(
+            template
+                .lines()
+                .any(|line| line == "# chrome_style = \"graphite\""),
+            "fresh installs show the default without pinning it"
+        );
+        assert!(
+            !template
+                .lines()
+                .any(|line| line.starts_with("chrome_style =")),
+            "a live chrome_style line would pin the default"
+        );
+        assert!(template
+            .lines()
+            .any(|line| line == "# bar_color = \"graphite\""));
+        assert!(!template.lines().any(|line| line.starts_with("bar_color =")));
+        assert!(template.lines().any(|line| line == "# layout = \"bars\""));
+        assert!(!template.lines().any(|line| line.starts_with("layout =")));
+        let classic = load_from_str("chrome_style = \"classic\"\n");
+        assert_eq!(classic.chrome_style(), crate::config::ChromeStyle::Classic);
         assert_eq!(parsed.bar_color(), crate::config::BarColor::Graphite);
         assert_eq!(parsed.pane_titles(), crate::config::PaneTitlesMode::Focused);
         assert!(parsed.splash());

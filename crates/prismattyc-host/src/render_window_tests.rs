@@ -470,13 +470,15 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
         assert!(host.attach_pane_sessions.is_empty());
         let pixels = frame(host);
         let size = host.window.inner_size();
-        let rail = space_rail::RailLayout::for_window(
-            host.mux.geom(),
-            size.width as usize,
-            size.height as usize,
-            &host.space_rail.names,
-        )
-        .unwrap();
+        let rail = host
+            .space_rail
+            .layout(
+                host.mux.geom(),
+                size.width as usize,
+                size.height as usize,
+                host.spacing.space_rail_pane_names,
+            )
+            .unwrap();
         let (x, y, _, _) = rail
             .chip_bounds(host.space_rail.names.len(), host.space_rail.names.len())
             .unwrap();
@@ -1050,9 +1052,25 @@ fn verify_mail_scroll_during_sweep(host: &mut HostState) {
         .unwrap();
     let focused = host.mux.focused_id();
     let rect = host.mux.rects().find(|(id, _)| *id == focused).unwrap().1;
+    // Pad, gap, and gutter are zero, so the grid shares the slot's x and
+    // width. Graphite keeps the title row above that grid and centres the
+    // leftover pixels that are not a whole cell row.
+    let geom = host.mux.geom();
+    let (sx, sy, sw, sh) = geom.pane_slot_px(rect);
+    let header = geom.chrome.pane_header();
+    assert!(header > 0, "graphite pane header sits above the grid");
+    let avail_h = sh.saturating_sub(header);
+    let cell_h = geom.cell_h.max(1);
+    let used_h = (avail_h / cell_h).saturating_mul(cell_h);
+    let extra_h = avail_h.saturating_sub(used_h);
     assert_eq!(
-        host.mux.geom().pane_slot_px(rect),
-        host.mux.geom().pane_content_px(rect)
+        geom.pane_content_px(rect),
+        (
+            sx,
+            sy.saturating_add(header).saturating_add(extra_h / 2),
+            sw,
+            used_h,
+        )
     );
     let pane = host.mux.focused_mut();
     pane.mail_depth = 1;
@@ -1069,7 +1087,30 @@ fn verify_mail_scroll_during_sweep(host: &mut HostState) {
     let _ = host.mux.focused_mut().emulator.feed(b"\x1b[T");
     let scrolled = paint_retained(host, &mut retained);
     assert_eq!(scrolled.full_repaint_reason, None);
-    assert_eq!(scrolled.rows_scrolled_as_blit, 0);
+    // Multi-pane mail is a 20px chip at the slot corner. The Graphite title
+    // row is taller than that chip, so the chip sits above the grid and a
+    // cell scroll may blit. A chip that still covers the grid must not.
+    let (cx, cy, cw, ch) = geom.pane_content_px(rect);
+    let mail = super::frame_damage::mail_chrome_box(
+        super::frame_damage::PixelRect::new(sx, sy, sw, sh),
+        super::frame_damage::PixelRect::new(cx, cy, cw, ch),
+        host.mux.pane_count() > 1,
+    );
+    let mail_on_grid = mail.x < cx.saturating_add(cw)
+        && cx < mail.x.saturating_add(mail.width)
+        && mail.y < cy.saturating_add(ch)
+        && cy < mail.y.saturating_add(mail.height);
+    if mail_on_grid {
+        assert_eq!(
+            scrolled.rows_scrolled_as_blit, 0,
+            "mail on the grid must not be copied by a scroll blit"
+        );
+    } else {
+        assert!(
+            scrolled.rows_scrolled_as_blit > 0,
+            "mail above the grid leaves the cell scroll free to blit"
+        );
+    }
     assert!(scrolled.cells_painted > 0);
     assert!(scrolled.cells_painted < render_cells_painted(host));
     assert_eq!(
@@ -1712,19 +1753,32 @@ fn verify_decision_handlers(host: &mut HostState) {
 
     host.tab_strip_mode = config::TabStripMode::Always;
     App::refit_geom(host, host.window.inner_size(), Some("decision test"));
+    // Graphite hit-testing uses the bar stored by the last paint. Classic
+    // derives the close from the cell grid and does not need that cache.
+    // The paint must not replace the raster the status snapshot publishes:
+    // that raster still carries the preedit and OSD guards.
+    let saved_frame = host.render_frame;
+    frame(host);
+    host.render_frame = saved_frame;
     let stride = host.window.inner_size().width as usize;
-    let close_x = (0..stride).find(|x| {
-        matches!(
-            host.mux.tab_strip_hit(*x, 0, stride, false),
-            Some(mux::StripHit::Tab { close: true, .. })
-        )
+    let geom = host.mux.geom();
+    let strip_top = geom.tab_strip_y();
+    let strip_h = geom.top_chrome_px;
+    let close = (strip_top..strip_top.saturating_add(strip_h)).find_map(|y| {
+        (0..stride).find_map(|x| {
+            matches!(
+                host.mux.tab_strip_hit(x, y, stride, false),
+                Some(mux::StripHit::Tab { close: true, .. })
+            )
+            .then_some((x, y))
+        })
     });
-    let Some(close_x) = close_x else {
-        panic!("real tab strip must expose a close hit for the decision test");
+    let Some((close_x, close_y)) = close else {
+        panic!("real tab strip must expose a close hit (y={strip_top} h={strip_h})");
     };
 
     host.tab_rename = None;
-    host.pointer_px = Some((close_x as f64, 0.0));
+    host.pointer_px = Some((close_x as f64, close_y as f64));
     assert_eq!(
         handle_strip_click(host, MouseButton::Right),
         StripClickResult::Handled
@@ -1735,14 +1789,23 @@ fn verify_decision_handlers(host: &mut HostState) {
     );
     cancel_tab_rename(host);
 
-    host.pointer_px = Some((close_x as f64, host.font.cell_h as f64));
-    assert_eq!(
-        handle_strip_click(host, MouseButton::Right),
-        StripClickResult::Handled
-    );
+    // Classic keeps a handle row under the title. Graphite's whole bar is
+    // the title row, so the first pixel under the bar is outside the strip.
+    let below_y = if geom.chrome.graphite {
+        strip_top.saturating_add(strip_h)
+    } else {
+        host.font.cell_h
+    };
+    host.pointer_px = Some((close_x as f64, below_y as f64));
+    let below = handle_strip_click(host, MouseButton::Right);
+    if geom.chrome.graphite {
+        assert_eq!(below, StripClickResult::NotHandled);
+    } else {
+        assert_eq!(below, StripClickResult::Handled);
+    }
     assert!(
         host.tab_rename.is_none(),
-        "the first row after the title must not rename the tab"
+        "a click off the title row must not rename the tab"
     );
 
     verify_mux_apply_wrappers(host, &args);

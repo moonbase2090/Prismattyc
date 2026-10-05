@@ -86,7 +86,7 @@ fn write_config_prints_template_and_exits_zero() {
     let out = host(&["--write-config", "-"]);
     assert!(out.status.success(), "{:?}", out.status.code());
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("theme = \"prismattyc-default\""));
+    assert!(text.contains("theme = \"prismattyc\""));
     assert!(text.contains("[mux]"));
     assert!(text.contains("[keys]"));
     assert!(text.contains("split_right"));
@@ -105,7 +105,7 @@ fn write_config_without_path_prints_template_and_exits_zero() {
     let out = host(&["--write-config"]);
     assert!(out.status.success(), "{:?}", out.status.code());
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("theme = \"prismattyc-default\""));
+    assert!(text.contains("theme = \"prismattyc\""));
     assert!(text.contains("\n[mux]\n"));
     assert!(text.contains("\n[keys]\n"));
     assert!(text.contains("\n[a11y]\n"));

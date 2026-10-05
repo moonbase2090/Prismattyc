@@ -510,6 +510,24 @@ jobs:
             fi
           fi
 
+      - name: Restore previous Jev calibration
+        if: ${{ steps.gate.outputs.live == 'true' }}
+        uses: actions/cache/restore@0c907a75c2c80ebcb7f088228285e798b750cf8f # v4.2.1
+        with:
+          path: build/jev-shadow/calibration.json
+          key: jev-shadow-calibration-${{ github.run_id }}
+          restore-keys: jev-shadow-calibration-
+
+      - name: Seed and record Jev calibration
+        if: ${{ steps.gate.outputs.live == 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/jev-shadow
+          if [[ ! -s build/jev-shadow/calibration.json ]]; then
+            cp scripts/jev-shadow-calibration.json build/jev-shadow/calibration.json
+          fi
+          cp build/jev-shadow/calibration.json build/jev-shadow/prior-calibration.json
+
       - name: Prepare no-network dry-run report
         if: ${{ steps.gate.outputs.live != 'true' }}
         run: |
@@ -539,9 +557,22 @@ jobs:
             --outcomes build/mutant-shards \
             --repo cycle-source \
             --labels scripts/jev-shadow-labels.json \
+            --calibration build/jev-shadow/calibration.json \
+            --next-calibration build/jev-shadow/next-calibration.json \
             --output build/jev-shadow/predictions.json \
             --summary build/jev-shadow/summary.md
           cat build/jev-shadow/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Prepare calibration for the next shadow run
+        if: ${{ steps.gate.outputs.live == 'true' && success() }}
+        run: cp build/jev-shadow/next-calibration.json build/jev-shadow/calibration.json
+
+      - name: Save Jev calibration for the next shadow run
+        if: ${{ steps.gate.outputs.live == 'true' && success() }}
+        uses: actions/cache/save@0c907a75c2c80ebcb7f088228285e798b750cf8f # v4.2.1
+        with:
+          path: build/jev-shadow/calibration.json
+          key: jev-shadow-calibration-${{ github.run_id }}
 
       - name: Archive Jev shadow report
         if: always()
@@ -551,4 +582,6 @@ jobs:
           path: |
             build/jev-shadow/predictions.json
             build/jev-shadow/summary.md
+            build/jev-shadow/prior-calibration.json
+            build/jev-shadow/next-calibration.json
           if-no-files-found: warn

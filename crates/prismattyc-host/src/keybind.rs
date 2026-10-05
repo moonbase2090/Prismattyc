@@ -428,7 +428,7 @@ impl Action {
             Action::OpenSpace => "open a saved space".into(),
             Action::DeleteSpace => "delete a saved space".into(),
             Action::MovePaneToSpace => "move the focused pane to another saved space".into(),
-            Action::SpaceRailFocus => "focus the spaces rail".into(),
+            Action::SpaceRailFocus => "focus and reorder saved spaces".into(),
             Action::SpaceSettings => "choose rail position, autosave, and startup behavior".into(),
             Action::UndoSpaceChange => "undo the last session removal or move".into(),
             Action::SpaceRailNext => "open the next saved space".into(),
@@ -613,7 +613,7 @@ impl Action {
                 Some("Move the focused pane to another saved Space. Blank terminals keep their local shell.")
             }
             Action::SpaceRailFocus => {
-                Some("Arrows move, Enter opens, F2 renames, Delete asks, Esc returns to the pane.")
+                Some("Arrows move; when space_reorder is enabled, Shift+arrows reorder. Enter opens, F2 renames, Delete asks, Esc returns to the pane.")
             }
             Action::SpaceRailNext | Action::SpaceRailPrev => {
                 Some("Wraps around the rail; the chip becomes current.")

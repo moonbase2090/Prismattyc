@@ -90,8 +90,16 @@ spaces_e2e() {
   docker cp "$NATIVE/spaces-e2e.sh" "$cid:/home/tester/spaces-e2e.sh"
   docker start "$cid" >/dev/null
   sleep 1
+  local status=0 evidence="$REPO/build/space-reorder-e2e"
   docker exec -u tester -e DISPLAY=:99 -e WIGGLE="${WIGGLE:-0}" \
-    "$cid" bash /home/tester/spaces-e2e.sh
+    "$cid" bash /home/tester/spaces-e2e.sh || status=$?
+  mkdir -p "$evidence"
+  docker cp "$cid:/home/tester/work/space-reorder-proof/." "$evidence/" || {
+    echo "ERROR: could not copy horizontal/vertical Space reorder screenshots" >&2
+    return 1
+  }
+  echo "Space reorder screenshots: $evidence"
+  return "$status"
 }
 
 # PT-295: double-click [show me] on a walkthrough caption. Same X11 test

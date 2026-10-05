@@ -448,10 +448,12 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
             attach_tabs::AttachTabRecord {
                 title: "one".into(),
                 sessions: vec!["missing-one".into()],
+                layout: None,
             },
             attach_tabs::AttachTabRecord {
                 title: "two".into(),
                 sessions: vec!["missing-two".into()],
+                layout: None,
             },
         ],
         active_tab: 1,
@@ -2053,6 +2055,145 @@ pub(super) fn session_naming_in_private_window() {
     };
     let app = App::new(cli, config, None, event_loop.create_proxy()).unwrap();
     let mut proof = NamingProof {
+        app,
+        completed: false,
+    };
+    event_loop.run_app(&mut proof).unwrap();
+    assert!(proof.completed);
+    std::fs::write(std::env::var_os(RESULT_ENV).unwrap(), b"complete").unwrap();
+}
+
+/// Issue #139: a press on the Graphite Space dropdown opens the picker, and
+/// the `+` and command field reach their actions the same way.
+#[test]
+fn graphite_tabs_bar_clicks_open_their_actions() {
+    if std::env::var_os(CHILD_ENV).is_none() {
+        run_in_private_display("render_window_tests::graphite_tabs_bar_clicks_open_their_actions");
+        return;
+    }
+
+    struct ClickProof {
+        app: App,
+        completed: bool,
+    }
+    impl ApplicationHandler<UserAction> for ClickProof {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            let id = self.app.open_window(event_loop, false).unwrap();
+            let host = self.app.windows.get_mut(&id).unwrap();
+            assert!(
+                host.mux.geom().chrome.graphite,
+                "default chrome is Graphite"
+            );
+            assert_ne!(host.spacing.layout, config::LayoutMode::Sidebar);
+            frame(host);
+            let stride = host.window.inner_size().width as usize;
+            let find = |host: &HostState, want: mux::StripHit| -> (usize, usize) {
+                let geom = host.mux.geom();
+                let top = geom.tab_strip_y();
+                let bottom = top.saturating_add(geom.top_chrome_px);
+                for y in top..bottom {
+                    for x in 0..stride {
+                        if host
+                            .mux
+                            .tab_strip_hit(x, y, stride, reserve_strip_end(host))
+                            == Some(want)
+                        {
+                            return (x, y);
+                        }
+                    }
+                }
+                panic!("tabs bar missing {want:?}");
+            };
+            let press = |host: &mut HostState, at: (usize, usize), action: keybind::Action| {
+                host.pointer_px = Some((at.0 as f64 + 0.5, at.1 as f64 + 0.5));
+                host.tab_rename = None;
+                assert_eq!(
+                    handle_strip_click(host, MouseButton::Left),
+                    StripClickResult::Action(action),
+                    "{action:?}"
+                );
+                assert_eq!(
+                    dispatch_strip_action(host, action, "/bin/cat", &[]),
+                    Dispatch::Handled,
+                    "{action:?}"
+                );
+            };
+
+            let space = find(host, mux::StripHit::SpaceMenu);
+            press(host, space, keybind::Action::OpenSpace);
+            assert!(
+                host.space_picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.kind == palette::SpacePickerKind::Open),
+                "Space dropdown must open the space picker"
+            );
+            assert!(host.palette.is_none());
+            frame(host);
+            let (panel_x, panel_y, panel_w, panel_h) = {
+                let layout = host
+                    .palette_layout
+                    .as_ref()
+                    .expect("open picker paints a palette");
+                (
+                    layout.panel_x,
+                    layout.panel_y,
+                    layout.panel_w,
+                    layout.panel_h,
+                )
+            };
+            let (width, height) = (
+                host.window.inner_size().width as usize,
+                host.window.inner_size().height as usize,
+            );
+            let (left, top) = space_picker_anchor(host).expect("bars layout anchors the picker");
+            assert_eq!(panel_x, left.min(width.saturating_sub(panel_w)));
+            assert_eq!(panel_y, top.min(height.saturating_sub(panel_h)));
+            host.space_picker = None;
+            host.palette_layout = None;
+
+            let command = find(host, mux::StripHit::Command);
+            press(host, command, keybind::Action::CommandPalette);
+            assert!(
+                host.palette.is_some(),
+                "command field must open the palette"
+            );
+            assert!(host.space_picker.is_none());
+            host.palette = None;
+            host.palette_layout = None;
+
+            let tabs = host.mux.tab_count();
+            let plus = find(host, mux::StripHit::NewTab);
+            press(host, plus, keybind::Action::NewTab);
+            assert!(
+                host.session_prompt.is_some() || host.mux.tab_count() > tabs,
+                "+ must start a new tab"
+            );
+            assert!(host.space_picker.is_none());
+            assert!(host.palette.is_none());
+
+            self.completed = true;
+            self.app.windows.clear();
+            event_loop.exit();
+        }
+
+        fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+    }
+
+    let event_loop = EventLoop::<UserAction>::with_user_event()
+        .with_x11()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
+    let cli = Cli::parse(["--no-splash", "/bin/cat"].into_iter().map(String::from)).unwrap();
+    let config = config::ConfigFile {
+        a11y: Some(config::A11ySection {
+            os_tree: Some(false),
+            announce: Some(false),
+        }),
+        ..config::ConfigFile::default()
+    };
+    let app = App::new(cli, config, None, event_loop.create_proxy()).unwrap();
+    let mut proof = ClickProof {
         app,
         completed: false,
     };

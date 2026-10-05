@@ -110,7 +110,50 @@ fn draw_panel(
     );
 }
 
+/// Slide a centered palette so its top-left sits at `(left, top)` when the
+/// panel fits. Otherwise pin it to the nearest edge that stays on screen.
+/// Row, chip, and viewport coordinates move with the panel.
+fn move_palette_layout(
+    layout: &mut PaletteLayout,
+    left: usize,
+    top: usize,
+    window_w: usize,
+    window_h: usize,
+) {
+    let x = left.min(window_w.saturating_sub(layout.panel_w));
+    let y = top.min(window_h.saturating_sub(layout.panel_h));
+    let dx = x as isize - layout.panel_x as isize;
+    let dy = y as isize - layout.panel_y as isize;
+    if dx == 0 && dy == 0 {
+        return;
+    }
+    let shift = |value: usize, delta: isize| -> usize {
+        if delta >= 0 {
+            value.saturating_add(delta as usize)
+        } else {
+            value.saturating_sub(delta.unsigned_abs())
+        }
+    };
+    layout.panel_x = shift(layout.panel_x, dx);
+    layout.panel_y = shift(layout.panel_y, dy);
+    for row in &mut layout.rows {
+        row.y = shift(row.y, dy);
+    }
+    for chip in &mut layout.filter_chips {
+        chip.x = shift(chip.x, dx);
+        chip.y = shift(chip.y, dy);
+    }
+    layout.list_viewport.x = shift(layout.list_viewport.x, dx);
+    layout.list_viewport.y = shift(layout.list_viewport.y, dy);
+    if let Some(detail_y) = layout.detail_y.as_mut() {
+        *detail_y = shift(*detail_y, dy);
+    }
+}
+
 /// Paint the shared fixed-height palette geometry with Graphite tokens.
+///
+/// `anchor`, when set, places the panel's top-left at that point instead of
+/// centering it. The Space dropdown passes the point just under its chip.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn palette(
     font: &FontMetrics,
@@ -123,8 +166,12 @@ pub(crate) fn palette(
     width: usize,
     height: usize,
     hovered_filter: Option<usize>,
+    anchor: Option<(usize, usize)>,
 ) -> Option<PaletteLayout> {
-    let layout = raster::palette_layout(font, frame, width, height)?;
+    let mut layout = raster::palette_layout(font, frame, width, height)?;
+    if let Some((left, top)) = anchor {
+        move_palette_layout(&mut layout, left, top, width, height);
+    }
     let tok = graphite::tokens(variant);
     let accent = graphite::accent(tok, focus_rgb);
     let x = layout.panel_x;
@@ -1526,6 +1573,7 @@ mod tests {
             1280,
             800,
             Some(1),
+            None,
         )
         .expect("small palette fits");
         let many_layout = palette(
@@ -1539,6 +1587,7 @@ mod tests {
             1280,
             800,
             Some(1),
+            None,
         )
         .expect("large palette fits");
         assert_eq!(
@@ -1570,6 +1619,83 @@ mod tests {
                 &many_layout,
                 many_layout.panel_x + 8,
                 row.y + many_layout.geom.row_pitch_px / 2,
+            ),
+            Some(PalettePointerTarget::Row(0))
+        );
+    }
+
+    #[test]
+    fn palette_anchor_sits_under_the_dropdown_and_keeps_row_hits() {
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let chrome = graphite_chrome();
+        let rows = vec![PaletteRow::plain(
+            "demo".into(),
+            "2 sessions".into(),
+            String::new(),
+        )];
+        let sections = [crate::raster::PaletteSection {
+            header: "OPEN SPACE",
+            subtitle: "",
+            rows: &rows,
+        }];
+        let frame = PaletteFrame {
+            layout_mode: PaletteLayoutMode::FixedHeight,
+            query: Some(""),
+            chips: None,
+            sections: &sections,
+            selected: 0,
+            scroll: 0,
+            detail: None,
+            footer: "Enter open · Esc close",
+        };
+        let mut buffer = vec![pack_argb(255, [24, 27, 33]); 1280 * 800];
+        let centered = palette(
+            &font,
+            ThemeVariant::Dark,
+            chrome,
+            [98, 168, 255],
+            &frame,
+            OverlaySurface::default(),
+            &mut buffer,
+            1280,
+            800,
+            None,
+            None,
+        )
+        .expect("centered palette");
+        let anchored = palette(
+            &font,
+            ThemeVariant::Dark,
+            chrome,
+            [98, 168, 255],
+            &frame,
+            OverlaySurface::default(),
+            &mut buffer,
+            1280,
+            800,
+            None,
+            Some((36, 52)),
+        )
+        .expect("anchored palette");
+        assert_eq!(
+            (anchored.panel_w, anchored.panel_h),
+            (centered.panel_w, centered.panel_h)
+        );
+        assert_eq!(anchored.panel_x, 36);
+        assert_eq!(anchored.panel_y, 52);
+        let row = anchored.rows[0];
+        let centered_row = centered.rows[0];
+        assert_eq!(
+            row.y as isize - centered_row.y as isize,
+            anchored.panel_y as isize - centered.panel_y as isize
+        );
+        assert_eq!(
+            raster::palette_pointer_hit(
+                &anchored,
+                anchored.panel_x + 8,
+                row.y + anchored.geom.row_pitch_px / 2,
             ),
             Some(PalettePointerTarget::Row(0))
         );
@@ -1690,6 +1816,7 @@ mod tests {
                 1280,
                 800,
                 Some(1),
+                None,
             )
             .expect("palette render path");
             assert!(palette_layout.panel_w > 0 && palette_layout.panel_h > 0);

@@ -876,7 +876,7 @@ fn excluded(action: Action, rich: bool, graphite: bool) -> bool {
         action,
         Action::CommandPalette | Action::PaletteFilterNext | Action::PaletteFilterPrev
     ) || (!rich && action == Action::RichFocus)
-        || (!graphite && action == Action::Transparency)
+        || (!graphite && matches!(action, Action::Transparency | Action::ChromeLayout))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

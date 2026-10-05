@@ -3021,6 +3021,21 @@ pub(crate) fn sidebar_layout(
     }
 }
 
+/// Pair each painted sidebar slot with the corresponding absolute row index.
+/// `sidebar_layout` starts its slots at `first_row` when the list is scrolled.
+pub(crate) fn sidebar_rows_in_view<'a, T>(
+    rows: &'a [T],
+    layout: &SidebarLayout,
+) -> Vec<(usize, &'a T, Rect)> {
+    rows.iter()
+        .enumerate()
+        .skip(layout.first_row)
+        .take(layout.rows.len())
+        .zip(layout.rows.iter().copied())
+        .map(|((index, row), slot)| (index, row, slot))
+        .collect()
+}
+
 /// Header over the panes: breadcrumb plus the three arrangement buttons.
 pub(crate) struct SidebarHeaderLayout {
     pub span: Rect,
@@ -3503,6 +3518,29 @@ mod sidebar_render_tests {
         let thumb = scrolled.thumb.expect("still overflowing");
         assert!(thumb.y > tall.list.y, "thumb follows the offset down");
         assert!(thumb.y + thumb.h <= tall.list.y + tall.list.h);
+    }
+
+    #[test]
+    fn sidebar_rows_in_view_follow_scrolled_layout_slots() {
+        let items: Vec<_> = (0..60).collect();
+        let layout = sidebar_layout(chrome(), column(600), items.len(), 1000);
+        let rows = sidebar_rows_in_view(&items, &layout);
+        assert_eq!(rows.len(), layout.rows.len());
+        assert_eq!(
+            rows.first().map(|(index, item, _)| (*index, **item)),
+            Some((layout.first_row, layout.first_row))
+        );
+        assert_eq!(
+            rows.last().map(|(index, item, _)| (*index, **item)),
+            Some((
+                layout.first_row + rows.len() - 1,
+                layout.first_row + rows.len() - 1
+            ))
+        );
+        assert!(rows
+            .iter()
+            .zip(layout.rows.iter())
+            .all(|((_, _, slot), expected)| slot == expected));
     }
 
     #[test]

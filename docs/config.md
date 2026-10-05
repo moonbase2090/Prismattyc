@@ -117,6 +117,8 @@ pane_gap_px = 3
 pane_padding_px = 5
 # Edge that shows the saved-spaces rail; off hides it. "bottom" | "left" | "top" | "right" | "off".
 space_rail = "bottom"
+# Enable drag and Shift+arrow reordering for saved spaces. true | false.
+space_reorder = false
 # Save changed Space layouts after two idle seconds. true | false.
 space_autosave = false
 # Choose naming prompts, automatic sessions, or blank terminals. "ask" | "auto" | "blank".
@@ -386,7 +388,7 @@ theme_picker = "ctrl+shift+,"
 # delete_space = []
 # move the focused pane to another saved space.
 # move_pane_to_space = []
-# focus the spaces rail.
+# focus and reorder saved spaces.
 # space_rail_focus = []
 # choose rail position, autosave, and startup behavior.
 # space_settings = []
@@ -424,6 +426,8 @@ scroll_line_up = "ctrl+shift+up"
 scroll_line_down = "ctrl+shift+down"
 # open transparency settings (graphite chrome only).
 # transparency = []
+# choose the Bars or Sidebar layout (graphite chrome only).
+# chrome_layout = []
 # toggle rich focus (--experimental-rich).
 rich_focus = "ctrl+shift+g"
 
@@ -767,6 +771,18 @@ Growing spawns empty shells to fill the target with focus unchanged;
 shrinking never closes panes, it zooms the focused pane and shows a
 "still running" toast (Ctrl+Shift+Z restores the split).
 
+## Layout
+
+With Graphite chrome, `layout` picks the arrangement. `bars` (the default)
+shows the tabs bar and the spaces bar. `sidebar` replaces both with one tree
+of Spaces and their tabs. Classic chrome ignores the key.
+
+Open the command palette and run `chrome_layout`, or open
+**Spaces settings…**. Both show **Layout: Bars** and **Layout: Sidebar**, only
+with Graphite chrome. A choice applies to the window at once, with no
+restart. It is saved to `layout` in this configuration, so other open windows
+follow it.
+
 ## Spaces rail
 
 The rail shows the saved spaces (`spaces/*.json`, see `pmux space ls`) as
@@ -779,10 +795,16 @@ configuration and apply to the running windows.
 
 ```toml
 space_rail = "bottom"        # bottom (default) | left | top | right | off
+space_reorder = false         # enable mouse and Shift+arrow reordering
 space_rail_chip_cols = 0     # horizontal chip limit, 6-40; 0 = 28
 space_rail_width_cols = 18   # side rail width in cells, 8-60
 space_rail_pane_names = true # show live session names in a second row
 ```
+
+Set `space_reorder = true` to drag saved Space chips in any rail or Graphite
+sidebar, or focus the rail and use `Shift+Left` / `Shift+Right` (horizontal)
+or `Shift+Up` / `Shift+Down` (vertical). The shared order is stored separately
+from each Space layout and is also used by `pmux space ls`.
 
 - `bottom` / `top`: one row of chips under the panes (above the Ctrl+Shift
   chord strip) or above the tab strip. Chips start at the left edge; each

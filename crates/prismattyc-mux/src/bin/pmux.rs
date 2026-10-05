@@ -1698,6 +1698,7 @@ fn play_boss_verdict(client: &mut Client, socket: &Path) -> Result<BossVerdict> 
             .map(|tab| SavedSpaceTab {
                 title: tab.title,
                 sessions: tab.sessions,
+                layout: tab.layout,
             })
             .collect::<Vec<_>>()
     });
@@ -5360,6 +5361,7 @@ fn tab_untabbed_sessions(space: &mut SavedSpace, saved_names: &[String]) {
         space.tabs.push(SavedSpaceTab {
             title: name.clone(),
             sessions: vec![name],
+            layout: None,
         });
     }
 }
@@ -5383,11 +5385,33 @@ fn apply_attach_records_to_space(
             })
             .filter(|name| saved_names.contains(name))
             .collect();
-        (!sessions.is_empty()).then_some((tab.title.clone(), sessions))
+        if sessions.is_empty() {
+            return None;
+        }
+        let layout = tab.layout.as_ref().and_then(|node| {
+            attach_tabs::remap_layout(node, |id| {
+                snapshot
+                    .sessions
+                    .iter()
+                    .find(|session| session.id.to_string() == id)
+                    .map(|session| session.name.clone())
+                    .filter(|name| saved_names.iter().any(|saved| saved == name))
+            })
+        });
+        let layout = attach_tabs::layout_for_sessions(layout, &sessions);
+        Some(attach_tabs::RemappedTab {
+            title: tab.title.clone(),
+            sessions,
+            layout,
+        })
     });
     space.tabs = kept
         .into_iter()
-        .map(|(title, sessions)| SavedSpaceTab { title, sessions })
+        .map(|tab| SavedSpaceTab {
+            title: tab.title,
+            sessions: tab.sessions,
+            layout: tab.layout,
+        })
         .collect();
     space.active_tab = active_tab;
     space.focused_session = file.focused_session.as_ref().and_then(|id| {
@@ -5414,6 +5438,7 @@ fn attach_file_from_space(space: &SavedSpace, snapshot: &Snapshot) -> attach_tab
             .map(|session| SavedSpaceTab {
                 title: session.name.clone(),
                 sessions: vec![session.name.clone()],
+                layout: None,
             })
             .collect();
         &one_per_session
@@ -5432,11 +5457,32 @@ fn attach_file_from_space(space: &SavedSpace, snapshot: &Snapshot) -> attach_tab
                     .map(|session| session.id.to_string())
             })
             .collect();
-        (!sessions.is_empty()).then_some((tab.title.clone(), sessions))
+        if sessions.is_empty() {
+            return None;
+        }
+        let layout = tab.layout.as_ref().and_then(|node| {
+            attach_tabs::remap_layout(node, |name| {
+                snapshot
+                    .sessions
+                    .iter()
+                    .find(|session| session.name == name)
+                    .map(|session| session.id.to_string())
+            })
+        });
+        let layout = attach_tabs::layout_for_sessions(layout, &sessions);
+        Some(attach_tabs::RemappedTab {
+            title: tab.title.clone(),
+            sessions,
+            layout,
+        })
     });
     let tabs: Vec<attach_tabs::AttachTabRecord> = kept
         .into_iter()
-        .map(|(title, sessions)| attach_tabs::AttachTabRecord { title, sessions })
+        .map(|tab| attach_tabs::AttachTabRecord {
+            title: tab.title,
+            sessions: tab.sessions,
+            layout: tab.layout,
+        })
         .collect();
     let focused_session = space.focused_session.as_ref().and_then(|name| {
         snapshot
@@ -9261,6 +9307,7 @@ mod tests {
             tabs: vec![SavedSpaceTab {
                 title: "seats".into(),
                 sessions: vec!["beta".into(), "alpha".into()],
+                layout: None,
             }],
             active_tab: 0,
             focused_session: Some("alpha".into()),
@@ -9553,10 +9600,12 @@ mod tests {
                 attach_tabs::AttachTabRecord {
                     title: "seats".into(),
                     sessions: vec!["3".into(), "2".into(), "4".into()],
+                    layout: None,
                 },
                 attach_tabs::AttachTabRecord {
                     title: "other".into(),
                     sessions: vec!["9".into(), "77".into()],
+                    layout: None,
                 },
             ],
             active_tab: 0,
@@ -9586,6 +9635,7 @@ mod tests {
             vec![SavedSpaceTab {
                 title: "seats".into(),
                 sessions: vec!["fable-pc".into(), "grok-pc".into(), "kiro-pc".into()],
+                layout: None,
             }],
             "tabs outside the space and unknown ids are dropped"
         );
@@ -9599,6 +9649,7 @@ mod tests {
             vec![attach_tabs::AttachTabRecord {
                 title: "seats".into(),
                 sessions: vec!["12".into(), "14".into(), "13".into()],
+                layout: None,
             }]
         );
         assert_eq!(restored.focused_session.as_deref(), Some("14"));
@@ -9644,10 +9695,12 @@ mod tests {
                 attach_tabs::AttachTabRecord {
                     title: "beta".into(),
                     sessions: vec!["8".into()],
+                    layout: None,
                 },
                 attach_tabs::AttachTabRecord {
                     title: "alpha".into(),
                     sessions: vec!["7".into()],
+                    layout: None,
                 },
             ],
             "one tab per live space session; sessions outside the space are not pulled in"

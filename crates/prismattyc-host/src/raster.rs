@@ -5105,6 +5105,57 @@ fn rasterize_rail_names(
     }
 }
 
+/// Lifted classic-rail label during a Space reorder. The caller supplies the
+/// original slot so the chip keeps its size for the entire drag.
+pub fn rasterize_space_reorder_chip(
+    theme: &Theme,
+    font: &FontMetrics,
+    label: &str,
+    buffer: &mut [u32],
+    stride_px: usize,
+    rect: (usize, usize, usize, usize),
+    accent: [u8; 3],
+) {
+    let (x, y, w, h) = rect;
+    if stride_px == 0 || w < 8 || h < 8 {
+        return;
+    }
+    let height = buffer.len() / stride_px;
+    let x = x.min(stride_px.saturating_sub(w));
+    let y = y.min(height.saturating_sub(h));
+    let fill = theme.tab_active_bg;
+    fill_rect(buffer, stride_px, x, y, w, h, fill);
+    fill_rect(buffer, stride_px, x, y, w, 1, accent);
+    fill_rect(buffer, stride_px, x, y + h - 1, w, 1, accent);
+    fill_rect(buffer, stride_px, x, y, 1, h, accent);
+    fill_rect(buffer, stride_px, x + w - 1, y, 1, h, accent);
+
+    let cell_w = font.cell_w.max(1);
+    let cell_h = font.cell_h.max(1).min(h.saturating_sub(2));
+    let clip_start = x.saturating_add(4);
+    let clip_end = x.saturating_add(w).saturating_sub(4);
+    let max_width = clip_end.saturating_sub(clip_start);
+    let baseline_y = y.saturating_add(h.saturating_sub(cell_h) / 2);
+    let ink = contrast_ink(fill);
+    let mut used = 0usize;
+    let mut shown: Vec<char> = Vec::new();
+    for ch in label.chars() {
+        let width = prismattyc_core::char_display_width(ch).max(1) * cell_w;
+        if used.saturating_add(width) > max_width {
+            break;
+        }
+        shown.push(ch);
+        used += width;
+    }
+    let mut text_x = clip_start;
+    for ch in shown {
+        blit_glyph_in(
+            buffer, stride_px, font, ch, text_x, baseline_y, ink, clip_start, clip_end, false,
+        );
+        text_x = text_x.saturating_add(prismattyc_core::char_display_width(ch).max(1) * cell_w);
+    }
+}
+
 /// Spaces rail (PT-91): label-sized chips on one window edge, the same
 /// visual family as the tab strip. `views` is rail order with the `+` chip
 /// last; `layout` says where every chip sits. Chips that do not fit are

@@ -270,6 +270,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         value: ConfigValue::String(DEFAULT_SPACE_RAIL),
     },
     ConfigKey {
+        name: "space_reorder",
+        group: ConfigGroup::Layout,
+        doc: "Enable drag and Shift+arrow reordering for saved spaces",
+        range: "true | false",
+        value: ConfigValue::Bool(false),
+    },
+    ConfigKey {
         name: "space_autosave",
         group: ConfigGroup::Layout,
         doc: "Save changed Space layouts after two idle seconds",
@@ -1006,6 +1013,7 @@ mod tests {
         "pane_gap_px",
         "pane_padding_px",
         "space_rail",
+        "space_reorder",
         "space_autosave",
         "session_naming",
         "space_startup",
@@ -1106,6 +1114,7 @@ mod tests {
         assert_eq!(parsed.install_agent_skills, Some(true));
         assert_eq!(parsed.tab_strip(), crate::config::TabStripMode::Auto);
         assert_eq!(parsed.chrome_style(), crate::config::ChromeStyle::Graphite);
+        assert_eq!(parsed.space_reorder, Some(false));
         assert!(
             template
                 .lines()

@@ -663,6 +663,7 @@ pub fn space_from_pane_counts(session_count: usize, panes_per_tab: &[usize]) -> 
         tabs.push(SavedSpaceTab {
             title: format!("tab-{tab_i}"),
             sessions: names,
+            layout: None,
         });
     }
     while sessions.len() < session_count {
@@ -1191,10 +1192,12 @@ expect = { kind = "space_event", event = "teleport" }
             SavedSpaceTab {
                 title: "pair".into(),
                 sessions: vec!["seat-1".into(), "seat-2".into()],
+                layout: None,
             },
             SavedSpaceTab {
                 title: "solo".into(),
                 sessions: vec!["seat-3".into()],
+                layout: None,
             },
         ];
         let scoped = scoped_boss_space(live, Some(&tabs));

@@ -544,7 +544,7 @@ jobs:
           host_root="/tmp/prismattyc-spaces-e2e-$$"
           trap "dkr run --rm -v /tmp:/tmp alpine:latest rm -rf '$host_root'" EXIT
           dkr run --rm -v "$host_root:$host_root" alpine:latest \
-            mkdir -p "$host_root/bins" "$host_root/tests/native/docker"
+            mkdir -p "$host_root/bins" "$host_root/tests/native/docker" "$host_root/build/space-reorder-e2e"
           tar -C "$PWD/target/debug" -cf - pmux pmuxd pmux-attach prismattyc-host \
             | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
               tar -C "$host_root/bins" -xf -
@@ -555,6 +555,7 @@ jobs:
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$host_root:$host_root" \
             -v "$PWD/build/host-ux-e2e:$host_root/build/host-ux-e2e" \
+            -v "$PWD/build/space-reorder-e2e:$host_root/build/space-reorder-e2e" \
             -e PRISMATTYC_BINS="$host_root/bins" \
             -e WIGGLE="${WIGGLE:-0}" \
             -w "$host_root" \
@@ -564,6 +565,14 @@ jobs:
           # The nested artifact mount writes to the host checkout. It survives
           # removal of both job containers and the temporary staging path.
           echo "Host UX artifacts: $PWD/build/host-ux-e2e"
+
+      - name: Upload Space reorder screenshots
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0, Node 24
+        with:
+          name: space-reorder-screenshots
+          path: build/space-reorder-e2e/
+          if-no-files-found: warn
 
       - name: Release heavy-job lock
         if: always()

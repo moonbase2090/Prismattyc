@@ -1934,6 +1934,59 @@ impl MuxRuntime {
             .map(|win| win.layout.pane_count())
     }
 
+    pub(crate) fn window_layout(&self, window: WindowId) -> Option<PaneLayout> {
+        self.domain.window(window).map(|win| win.layout.clone())
+    }
+
+    /// Replace `window`'s split tree when it names exactly the panes already
+    /// in that window. `Ok(false)` leaves the tree alone (unknown pane, extra
+    /// pane, or the ratios do not fit). The active window is refit; a
+    /// background window is applied the next time it is selected.
+    pub(crate) fn install_window_layout(
+        &mut self,
+        window: WindowId,
+        layout: PaneLayout,
+    ) -> Result<bool> {
+        let Some(current) = self.domain.window(window).map(|win| win.layout.clone()) else {
+            return Ok(false);
+        };
+        let have = current.panes();
+        let want = layout.panes();
+        if have.len() != want.len()
+            || want.iter().any(|pane| !have.contains(pane))
+            || have.iter().any(|pane| !want.contains(pane))
+        {
+            return Ok(false);
+        }
+        let bounds = CellRect {
+            col: 0,
+            row: 0,
+            cols: self.cols,
+            rows: self.rows,
+        };
+        if layout_to_rects(&layout, bounds, self.geom.min_cols(), self.geom.min_rows()).is_err() {
+            return Ok(false);
+        }
+        self.domain
+            .set_layout(window, layout)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        if self.view.window == Some(window) {
+            match self.window_rects(window) {
+                Ok(rects) => {
+                    if let Err(error) = self.apply_rects(rects, self.geom) {
+                        let _ = self.domain.set_layout(window, current);
+                        return Err(error);
+                    }
+                }
+                Err(_) => {
+                    let _ = self.domain.set_layout(window, current);
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
     pub(crate) fn tab_layouts(&self) -> Vec<(String, String)> {
         self.window_ids()
             .iter()
@@ -3625,6 +3678,10 @@ impl MuxRuntime {
     /// Record the Graphite tabs bar just painted; `None` drops it.
     pub(crate) fn set_graphite_bar(&mut self, bar: Option<crate::graphite::BarLayout>) {
         self.graphite_bar = bar;
+    }
+
+    pub(crate) fn graphite_bar(&self) -> Option<&crate::graphite::BarLayout> {
+        self.graphite_bar.as_ref()
     }
 
     /// Presentation index for a pixel in the top tab strip, if any.

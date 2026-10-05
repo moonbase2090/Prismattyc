@@ -307,6 +307,7 @@ mod tests {
         let tabs = vec![SavedSpaceTab {
             title: "main".to_string(),
             sessions: vec!["shell".to_string()],
+            layout: None,
         }];
         let tree = SidebarTree::build(&[
             SpaceInput {
@@ -349,6 +350,7 @@ mod tests {
         let tabs = vec![SavedSpaceTab {
             title: "main".to_string(),
             sessions: vec!["shell".to_string(), "logs".to_string()],
+            layout: None,
         }];
         let extra = vec!["scratch".to_string()];
         let tree = SidebarTree::build(&[

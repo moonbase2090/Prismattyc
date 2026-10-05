@@ -120,6 +120,16 @@ pub enum LayoutMode {
     Sidebar,
 }
 
+impl LayoutMode {
+    /// The `layout` value as written in the config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LayoutMode::Bars => "bars",
+            LayoutMode::Sidebar => "sidebar",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigFile {
@@ -198,6 +208,8 @@ pub struct ConfigFile {
     pub pane_padding_px: Option<usize>,
     /// Spaces rail edge: `bottom` (default), `left`, `top`, `right`, `off`.
     pub space_rail: Option<String>,
+    /// Enable dragging and keyboard reordering of saved spaces. Default false.
+    pub space_reorder: Option<bool>,
     /// Widest spaces-rail chip in cells (6–40); chips fit their labels up
     /// to it. `0` (default) means 28.
     pub space_rail_chip_cols: Option<usize>,
@@ -962,6 +974,10 @@ mod tests {
         let path = dir.join("config.toml");
         assert_eq!(load(&path).unwrap(), ConfigFile::default());
         assert!(ConfigFile::default().install_agent_skills.unwrap_or(true));
+        assert!(!ConfigFile::default().space_reorder.unwrap_or(false));
+
+        std::fs::write(&path, "space_reorder = true\n").unwrap();
+        assert!(load(&path).unwrap().space_reorder.unwrap_or(false));
 
         std::fs::write(&path, "install_agent_skills = false\n").unwrap();
         assert!(!load(&path).unwrap().install_agent_skills.unwrap_or(true));

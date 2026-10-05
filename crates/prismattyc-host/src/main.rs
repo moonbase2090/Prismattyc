@@ -680,12 +680,12 @@ fn attach_boot_command(
 /// group) and return which mux session each pane attached.
 fn open_attach_session_tabs(
     mux: &mut mux::MuxRuntime,
-    groups: &[(String, Vec<AttachTarget>)],
+    grouped: &attach_tabs::AttachGroups,
 ) -> Result<Vec<(PaneId, String)>> {
     let mux_bin = find_mux_bin();
     let mux_bin = mux_bin.to_string_lossy();
     let mut pane_sessions = Vec::new();
-    for (index, (title, members)) in groups.iter().enumerate() {
+    for (index, (title, members)) in grouped.groups.iter().enumerate() {
         let start = if index == 0 {
             mux.rename_window(mux.active_window(), title)?;
             let pane = mux.focused_id();
@@ -712,7 +712,25 @@ fn open_attach_session_tabs(
             pane_sessions.push((pane, target.session.clone()));
         }
         let count = mux.active_pane_count();
-        if count > 1 {
+        let window = mux.active_window();
+        let restored = if let Some(layout) = grouped
+            .layouts
+            .get(index)
+            .and_then(|layout| layout.as_ref())
+        {
+            let pane_of = |session: &str| {
+                pane_sessions.iter().find_map(|(pane, id)| {
+                    (id == session && mux.pane_window(*pane) == Some(window)).then_some(*pane)
+                })
+            };
+            match attach_tabs::pane_layout_from_tab(layout, &pane_of) {
+                Some(tree) => mux.install_window_layout(window, tree)?,
+                None => false,
+            }
+        } else {
+            false
+        };
+        if count > 1 && !restored {
             mux.ensure_even_columns(&mux_bin, &[], count)?;
         }
     }
@@ -1118,6 +1136,10 @@ struct HostState {
     scrollbar_drag: Option<ScrollbarDrag>,
     /// Tab-strip drag (PT-69). None when the pointer is not capturing the strip.
     strip_drag: Option<StripDrag>,
+    /// A Space chip drag in any rail or in the Graphite sidebar (#140).
+    space_reorder_drag: Option<SpaceReorderDrag>,
+    /// Opt-in gate for saved-space reordering (#140; trunk ships disabled).
+    space_reorder_enabled: bool,
     /// Divider drag (PT-133): the split whose ratio follows the pointer.
     divider_drag: Option<mux::Divider>,
     /// A resize cursor is showing (over a divider or while dragging one).
@@ -1372,6 +1394,24 @@ struct StripDrag {
     kind: StripDragKind,
     start_x: f64,
     start_y: f64,
+    active: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpaceReorderOrigin {
+    Rail,
+    Sidebar,
+}
+
+#[derive(Debug, Clone)]
+struct SpaceReorderDrag {
+    name: String,
+    origin: SpaceReorderOrigin,
+    start_x: f64,
+    start_y: f64,
+    grab_x: usize,
+    grab_y: usize,
+    source_rect: (usize, usize, usize, usize),
     active: bool,
 }
 
@@ -2587,6 +2627,14 @@ impl App {
         };
 
         for host in self.windows.values_mut() {
+            let space_reorder_enabled = self.file_config.space_reorder.unwrap_or(false);
+            if host.space_reorder_enabled != space_reorder_enabled {
+                host.space_reorder_enabled = space_reorder_enabled;
+                if !space_reorder_enabled {
+                    host.space_reorder_drag = None;
+                }
+                host.dirty = true;
+            }
             let render_timer = self.file_config.render_timer();
             let render_timer_log_every_frame = self.file_config.render_timer_log_every_frame();
             if render_timer != prior.render_timer()
@@ -3449,7 +3497,7 @@ impl App {
                 mux.split_focused(&self.cli.program, &self.cli.child_args, axis, 0.5)?;
             }
         } else {
-            let pane_sessions = open_attach_session_tabs(&mut mux, attach_groups)?;
+            let pane_sessions = open_attach_session_tabs(&mut mux, &grouped)?;
             seed_attach_focus(&mut mux, &grouped, &pane_sessions);
             attach_pane_sessions = pane_sessions.into_iter().collect();
         }
@@ -3617,6 +3665,8 @@ impl App {
                 hover_blend: self.file_config.hover_blend(),
                 scrollbar_drag: None,
                 strip_drag: None,
+                space_reorder_drag: None,
+                space_reorder_enabled: self.file_config.space_reorder.unwrap_or(false),
                 divider_drag: None,
                 divider_cursor: false,
                 attach_layout: None,
@@ -6349,6 +6399,7 @@ fn rasterize_frame(
         cycle_progress,
         focused,
     );
+    paint_space_reorder_overlay(host, buffer, width as usize, height as usize, geom);
     // Header-drag chip and dashed slot (issue #109, graphite only). The
     // drop itself reuses the strip drag-to-move routing.
     if geom.chrome.graphite {
@@ -6627,6 +6678,15 @@ fn rasterize_frame(
             host.window.request_redraw();
         }
     }
+    let space_anchor = if host
+        .space_picker
+        .as_ref()
+        .is_some_and(|picker| picker.kind == SpacePickerKind::Open)
+    {
+        space_picker_anchor(host)
+    } else {
+        None
+    };
     let painted_space = if let Some(picker) = host.space_picker.as_ref() {
         let focus = focus_border_rgb(host.focus_border);
         let spaces = terminal_switcher::rows(host, picker.kind);
@@ -6728,7 +6788,7 @@ fn rasterize_frame(
             detail: detail.as_ref(),
             footer,
         };
-        paint_palette_overlay(
+        paint_palette_overlay_anchored(
             &host.font,
             &host.theme,
             geom.chrome,
@@ -6738,6 +6798,7 @@ fn rasterize_frame(
             buffer,
             width as usize,
             height as usize,
+            space_anchor,
         )
     } else {
         None
@@ -6787,8 +6848,18 @@ fn rasterize_frame(
                     rows: &rows,
                 }]
             };
+            // Settings pages are fixed size and scroll inside (Graphite rule).
+            let layout_mode = if host
+                .space_panel
+                .as_ref()
+                .is_some_and(space_panel::Panel::fixed_size)
+            {
+                PaletteLayoutMode::FixedHeight
+            } else {
+                PaletteLayoutMode::ContentFit
+            };
             let frame = PaletteFrame {
-                layout_mode: PaletteLayoutMode::ContentFit,
+                layout_mode,
                 query: None,
                 chips: None,
                 sections: &sections,
@@ -8001,6 +8072,43 @@ fn refresh_rail(host: &mut HostState) {
     }
 }
 
+fn persist_space_order(host: &mut HostState, names: &[String]) -> bool {
+    let dir = spaces_dir();
+    let focused_name = host
+        .space_rail
+        .focus
+        .and_then(|index| host.space_rail.names.get(index))
+        .cloned();
+    match prismattyc_mux::reorder_spaces(&dir, names) {
+        Ok(true) => {
+            let changed = host.space_rail.refresh(&dir);
+            if let Some(name) = focused_name {
+                if let Some(index) = host
+                    .space_rail
+                    .names
+                    .iter()
+                    .position(|saved| saved == &name)
+                {
+                    host.space_rail.focus = Some(index);
+                }
+            }
+            if changed {
+                rail_changed(host);
+            } else {
+                host.dirty = true;
+                sync_chrome_hover(host);
+            }
+            true
+        }
+        Ok(false) => false,
+        Err(error) => {
+            eprintln!("prismattyc-host: reorder spaces: {error:#}");
+            rail_toast(host, " Space order could not be saved ");
+            false
+        }
+    }
+}
+
 fn maybe_space_rail_hint(host: &mut HostState) {
     if host.mux.geom().rail_side == space_rail::RailSide::Off || host.space_rail.names.is_empty() {
         return;
@@ -8637,6 +8745,20 @@ fn apply_rail_verdict(host: &mut HostState, verdict: space_rail::RailVerdict) {
                 }
             }
         }
+        RailVerdict::Reorder { name, to } => {
+            if let Some(from) = host
+                .space_rail
+                .names
+                .iter()
+                .position(|saved| saved == &name)
+            {
+                if let Some(order) =
+                    space_rail::move_space_to_index(&host.space_rail.names, from, to)
+                {
+                    persist_space_order(host, &order);
+                }
+            }
+        }
         RailVerdict::Delete(name) => {
             if let Err(error) = run_pmux_space(&["space".into(), "rm".into(), name.clone()]) {
                 eprintln!("prismattyc-host: delete space {name}: {error:#}");
@@ -9061,6 +9183,10 @@ fn space_rail_key_decision(
         Key::Named(NamedKey::Escape) => RailKey::Escape,
         Key::Named(NamedKey::Delete) => RailKey::Delete,
         Key::Named(NamedKey::F2) => RailKey::Rename,
+        Key::Named(NamedKey::ArrowLeft) if !vertical && modifiers.shift_key() => RailKey::MovePrev,
+        Key::Named(NamedKey::ArrowRight) if !vertical && modifiers.shift_key() => RailKey::MoveNext,
+        Key::Named(NamedKey::ArrowUp) if vertical && modifiers.shift_key() => RailKey::MovePrev,
+        Key::Named(NamedKey::ArrowDown) if vertical && modifiers.shift_key() => RailKey::MoveNext,
         Key::Named(NamedKey::ArrowLeft) if !vertical => RailKey::Prev,
         Key::Named(NamedKey::ArrowRight) if !vertical => RailKey::Next,
         Key::Named(NamedKey::ArrowUp) if vertical => RailKey::Prev,
@@ -9087,12 +9213,39 @@ fn space_rail_key_decision(
     SpaceRailKeyDecision::Key(key)
 }
 
+fn apply_space_reorder_key_gate(
+    decision: SpaceRailKeyDecision,
+    enabled: bool,
+) -> SpaceRailKeyDecision {
+    if enabled {
+        return decision;
+    }
+    match decision {
+        SpaceRailKeyDecision::Key(space_rail::RailKey::MovePrev) => {
+            SpaceRailKeyDecision::Key(space_rail::RailKey::Prev)
+        }
+        SpaceRailKeyDecision::Key(space_rail::RailKey::MoveNext) => {
+            SpaceRailKeyDecision::Key(space_rail::RailKey::Next)
+        }
+        other => other,
+    }
+}
+
 fn handle_space_rail_key(host: &mut HostState, event: &winit::event::KeyEvent) -> bool {
-    let decision = space_rail_key_decision(
-        host.space_rail.is_active(),
-        host.mux.geom().rail_side,
-        host.modifiers,
-        &event.logical_key,
+    let geom = host.mux.geom();
+    let side = if geom.chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar {
+        space_rail::RailSide::Left
+    } else {
+        geom.rail_side
+    };
+    let decision = apply_space_reorder_key_gate(
+        space_rail_key_decision(
+            host.space_rail.is_active(),
+            side,
+            host.modifiers,
+            &event.logical_key,
+        ),
+        host.space_reorder_enabled,
     );
     match decision {
         SpaceRailKeyDecision::Unhandled => false,
@@ -9103,8 +9256,8 @@ fn handle_space_rail_key(host: &mut HostState, event: &winit::event::KeyEvent) -
         }
         SpaceRailKeyDecision::Key(key) => {
             let verdict = host.space_rail.key(key);
-            reveal_graphite_side_focus(host);
             apply_rail_verdict(host, verdict);
+            reveal_graphite_side_focus(host);
             true
         }
     }
@@ -9173,6 +9326,24 @@ fn paint_palette_overlay(
     width: usize,
     height: usize,
 ) -> Option<PaletteLayout> {
+    paint_palette_overlay_anchored(
+        font, theme, chrome, focus_rgb, frame, surface, buffer, width, height, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_palette_overlay_anchored(
+    font: &FontMetrics,
+    theme: &theme::Theme,
+    chrome: mux::ChromeGeom,
+    focus_rgb: [u8; 3],
+    frame: &PaletteFrame<'_>,
+    surface: OverlaySurface,
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    anchor: Option<(usize, usize)>,
+) -> Option<PaletteLayout> {
     if chrome.graphite {
         graphite_overlays::palette(
             font,
@@ -9185,6 +9356,7 @@ fn paint_palette_overlay(
             width,
             height,
             None,
+            anchor,
         )
     } else {
         rasterize_palette(
@@ -9218,6 +9390,7 @@ fn paint_palette_overlay_with_hover(
             width,
             height,
             hovered_filter,
+            None,
         )
     } else {
         rasterize_palette_with_hover(
@@ -9724,7 +9897,11 @@ fn git_hover_label(host: &HostState) -> Option<String> {
 
 fn sync_chrome_hover(host: &mut HostState) -> bool {
     let next = hover_target_at_pointer(host);
-    let strip_dragging = host.strip_drag.as_ref().is_some_and(|drag| drag.active);
+    let strip_dragging = host.strip_drag.as_ref().is_some_and(|drag| drag.active)
+        || host
+            .space_reorder_drag
+            .as_ref()
+            .is_some_and(|drag| drag.active);
     let divider_axis = divider_axis_for_cursor(host);
     let hyperlink = next.is_none() && hyperlink_hover_at_pointer(host);
     let cursor = cursor_for_hover(
@@ -9752,16 +9929,42 @@ fn sync_chrome_hover(host: &mut HostState) -> bool {
 
 fn reveal_graphite_side_focus(host: &mut HostState) {
     let geom = host.mux.geom();
-    if !geom.chrome.graphite
-        || geom.rail_side.horizontal()
-        || geom.rail_side == space_rail::RailSide::Off
-    {
+    if !geom.chrome.graphite {
         return;
     }
     let Some(focus) = host.space_rail.focus else {
         return;
     };
     if focus >= host.space_rail.names.len() {
+        return;
+    }
+    if host.spacing.layout == config::LayoutMode::Sidebar {
+        let visible = sidebar::visible_rows(&host.sidebar_tree);
+        let Some(row) = visible
+            .iter()
+            .position(|row| row.kind == sidebar::RowKind::Space && row.space == focus)
+        else {
+            return;
+        };
+        let size = host.window.inner_size();
+        let column = graphite::Rect::new(0, 0, geom.sidebar_px, size.height as usize);
+        let layout =
+            graphite::sidebar_layout(geom.chrome, column, visible.len(), host.sidebar_scroll);
+        let visible_rows = layout.rows.len().max(1);
+        let scroll = if row < layout.first_row {
+            row
+        } else if row >= layout.first_row.saturating_add(visible_rows) {
+            row + 1 - visible_rows
+        } else {
+            layout.first_row
+        };
+        if scroll != host.sidebar_scroll {
+            host.sidebar_scroll = scroll;
+            host.dirty = true;
+        }
+        return;
+    }
+    if geom.rail_side.horizontal() || geom.rail_side == space_rail::RailSide::Off {
         return;
     }
     let size = host.window.inner_size();
@@ -9870,6 +10073,241 @@ fn drag_graphite_side_thumb(host: &mut HostState) -> bool {
 
 /// Pointer press on the spaces rail. Returns whether the press was inside
 /// the rail. A press anywhere else drops the rail's keyboard focus.
+fn begin_space_reorder_drag(
+    host: &mut HostState,
+    name: String,
+    origin: SpaceReorderOrigin,
+    rect: (usize, usize, usize, usize),
+    x: f64,
+    y: f64,
+) {
+    host.space_reorder_drag = Some(SpaceReorderDrag {
+        name,
+        origin,
+        start_x: x,
+        start_y: y,
+        grab_x: (x as usize)
+            .saturating_sub(rect.0)
+            .min(rect.2.saturating_sub(1)),
+        grab_y: (y as usize)
+            .saturating_sub(rect.1)
+            .min(rect.3.saturating_sub(1)),
+        source_rect: rect,
+        active: false,
+    });
+    host.dirty = true;
+}
+
+/// Arm Space dragging before the normal click handlers run. The release
+/// handler preserves the original click behavior when the pointer did not
+/// cross the drag threshold.
+fn handle_space_reorder_press(host: &mut HostState, button: MouseButton) -> bool {
+    if !host.space_reorder_enabled
+        || button != MouseButton::Left
+        || host.space_reorder_drag.is_some()
+    {
+        return false;
+    }
+    let Some((x, y)) = host.pointer_px else {
+        return false;
+    };
+    if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+        return false;
+    }
+    let px = x as usize;
+    let py = y as usize;
+    let geom = host.mux.geom();
+    if geom.chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar {
+        let Some(graphite::SidebarHit::Row(index)) = sidebar_hit_at(host, px, py) else {
+            return false;
+        };
+        let Some((slot, row)) = host.sidebar_rows.get(index) else {
+            return false;
+        };
+        if row.kind != sidebar::RowKind::Space {
+            return false;
+        }
+        let Some(space) = host.sidebar_tree.spaces.get(row.space) else {
+            return false;
+        };
+        let (slot, name) = (*slot, space.name.clone());
+        if !host.space_rail.names.contains(&name) {
+            return false;
+        }
+        cancel_tab_rename(host);
+        begin_space_reorder_drag(
+            host,
+            name,
+            SpaceReorderOrigin::Sidebar,
+            (slot.x, slot.y, slot.w, slot.h),
+            x,
+            y,
+        );
+        return true;
+    }
+    if host.space_rail.edit.is_some() || host.space_rail.confirm.is_some() {
+        return false;
+    }
+    let size = host.window.inner_size();
+    let Some(layout) = host.space_rail.layout(
+        geom,
+        size.width as usize,
+        size.height as usize,
+        host.spacing.space_rail_pane_names,
+    ) else {
+        return false;
+    };
+    let n = host.space_rail.names.len();
+    let Some(space_rail::RailHit::Chip {
+        index,
+        close: false,
+    }) = layout.hit(px, py, n)
+    else {
+        return false;
+    };
+    let Some(name) = host.space_rail.names.get(index).cloned() else {
+        return false;
+    };
+    let Some(rect) = layout.chip_bounds(index, n) else {
+        return false;
+    };
+    cancel_tab_rename(host);
+    begin_space_reorder_drag(host, name, SpaceReorderOrigin::Rail, rect, x, y);
+    true
+}
+
+fn sidebar_space_drop(
+    host: &HostState,
+    px: usize,
+    py: usize,
+) -> Option<(Option<String>, graphite::Rect)> {
+    let graphite::SidebarHit::Row(index) = sidebar_hit_at(host, px, py)? else {
+        return None;
+    };
+    let (slot, row) = host.sidebar_rows.get(index)?;
+    if row.kind != sidebar::RowKind::Space {
+        return None;
+    }
+    let space = host.sidebar_tree.spaces.get(row.space)?;
+    let before = if py < slot.y + slot.h / 2 {
+        Some(space.name.clone())
+    } else {
+        host.sidebar_tree
+            .spaces
+            .get(row.space + 1)
+            .map(|next| next.name.clone())
+    };
+    let y = if py < slot.y + slot.h / 2 {
+        slot.y.saturating_sub(1)
+    } else {
+        slot.y.saturating_add(slot.h).saturating_sub(1)
+    };
+    let marker = graphite::Rect::new(slot.x.saturating_add(8), y, slot.w.saturating_sub(16), 2);
+    Some((before, marker))
+}
+
+fn reorder_space_before(
+    names: &[String],
+    moving: &str,
+    before: Option<&str>,
+) -> Option<Vec<String>> {
+    let from = names.iter().position(|name| name == moving)?;
+    let mut reordered = names.to_vec();
+    let name = reordered.remove(from);
+    let insertion = if before == Some(moving) {
+        from
+    } else {
+        before
+            .and_then(|target| reordered.iter().position(|name| name == target))
+            .unwrap_or(reordered.len())
+    };
+    reordered.insert(insertion, name);
+    Some(reordered)
+}
+
+fn handle_space_reorder_drag_move(host: &mut HostState) -> bool {
+    let Some((x, y)) = host.pointer_px else {
+        return host.space_reorder_drag.is_some();
+    };
+    let Some(drag) = host.space_reorder_drag.as_mut() else {
+        return false;
+    };
+    if !drag.active {
+        let dx = x - drag.start_x;
+        let dy = y - drag.start_y;
+        if dx * dx + dy * dy < 16.0 {
+            return true;
+        }
+        drag.active = true;
+    }
+    host.pending_full_repaint = Some(FullRepaintReason::Fallback);
+    host.dirty = true;
+    true
+}
+
+fn finish_space_reorder_drag(host: &mut HostState) -> bool {
+    let Some(drag) = host.space_reorder_drag.take() else {
+        return false;
+    };
+    host.pending_full_repaint = Some(FullRepaintReason::Fallback);
+    if !drag.active {
+        match drag.origin {
+            SpaceReorderOrigin::Rail => {
+                host.space_rail.leave();
+                apply_rail_verdict(host, space_rail::RailVerdict::Open(drag.name));
+            }
+            SpaceReorderOrigin::Sidebar => {
+                let collapsed = host.space_rail.is_collapsed(&drag.name);
+                host.space_rail.set_collapsed(&drag.name, !collapsed);
+                host.dirty = true;
+            }
+        }
+        return true;
+    }
+    let Some((x, y)) = host
+        .pointer_px
+        .filter(|(x, y)| x.is_finite() && y.is_finite() && *x >= 0.0 && *y >= 0.0)
+    else {
+        host.dirty = true;
+        return true;
+    };
+    let target_order = match drag.origin {
+        SpaceReorderOrigin::Rail => {
+            let size = host.window.inner_size();
+            host.space_rail
+                .layout(
+                    host.mux.geom(),
+                    size.width as usize,
+                    size.height as usize,
+                    host.spacing.space_rail_pane_names,
+                )
+                .and_then(|layout| {
+                    let insertion = layout.insertion_index_at(
+                        x as usize,
+                        y as usize,
+                        host.space_rail.names.len(),
+                    )?;
+                    let from = host
+                        .space_rail
+                        .names
+                        .iter()
+                        .position(|name| name == &drag.name)?;
+                    space_rail::move_space_to_insertion(&host.space_rail.names, from, insertion)
+                })
+        }
+        SpaceReorderOrigin::Sidebar => {
+            sidebar_space_drop(host, x as usize, y as usize).and_then(|(before, _)| {
+                reorder_space_before(&host.space_rail.names, &drag.name, before.as_deref())
+            })
+        }
+    };
+    if let Some(order) = target_order {
+        persist_space_order(host, &order);
+    }
+    host.dirty = true;
+    true
+}
+
 fn handle_rail_click(host: &mut HostState, button: MouseButton) -> bool {
     use space_rail::{RailHit, RailVerdict};
     let Some((x, y)) = host.pointer_px else {
@@ -10555,6 +10993,167 @@ fn pane_drag_drop_target(host: &HostState) -> Option<graphite::DropTarget> {
     }
 }
 
+/// Hollow source slot, insertion marker, and fixed-size chip for a saved
+/// Space drag in any rail or in the Graphite sidebar (#140).
+fn paint_space_reorder_overlay(
+    host: &HostState,
+    buffer: &mut [u32],
+    stride: usize,
+    height: usize,
+    geom: mux::HostGeom,
+) {
+    let Some(drag) = host.space_reorder_drag.as_ref().filter(|drag| drag.active) else {
+        return;
+    };
+    let Some((pointer_x, pointer_y)) = host
+        .pointer_px
+        .filter(|(x, y)| x.is_finite() && y.is_finite() && *x >= 0.0 && *y >= 0.0)
+    else {
+        return;
+    };
+    let pointer_x = pointer_x as usize;
+    let pointer_y = pointer_y as usize;
+    let sidebar = drag.origin == SpaceReorderOrigin::Sidebar;
+    let source = match drag.origin {
+        SpaceReorderOrigin::Rail => {
+            let index = host
+                .space_rail
+                .names
+                .iter()
+                .position(|name| name == &drag.name);
+            let size = host.window.inner_size();
+            index
+                .and_then(|index| {
+                    host.space_rail
+                        .layout(
+                            geom,
+                            size.width as usize,
+                            size.height as usize,
+                            host.spacing.space_rail_pane_names,
+                        )?
+                        .chip_bounds(index, host.space_rail.names.len())
+                })
+                .unwrap_or(drag.source_rect)
+        }
+        SpaceReorderOrigin::Sidebar => host
+            .sidebar_rows
+            .iter()
+            .find_map(|(slot, row)| {
+                (row.kind == sidebar::RowKind::Space
+                    && host
+                        .sidebar_tree
+                        .spaces
+                        .get(row.space)
+                        .is_some_and(|space| space.name == drag.name))
+                .then_some((slot.x, slot.y, slot.w, slot.h))
+            })
+            .unwrap_or(drag.source_rect),
+    };
+    if source.2 == 0 || source.3 == 0 {
+        return;
+    }
+    let accent = if geom.chrome.graphite {
+        let tok = graphite::bar_tokens(host.theme.variant, host.bar_color);
+        graphite::accent(&tok, focus_border_rgb(host.focus_border))
+    } else {
+        focus_border_rgb(host.focus_border)
+    };
+    let gutter = if geom.chrome.graphite {
+        graphite::bar_tokens(host.theme.variant, host.bar_color).status_bar
+    } else {
+        host.theme.pane_backdrop
+    };
+    raster::fill_rect_argb(
+        buffer,
+        stride,
+        source.0,
+        source.1,
+        source.2,
+        source.3,
+        gutter,
+        host.chrome_alpha,
+    );
+    let source_rect = graphite::Rect::new(source.0, source.1, source.2, source.3);
+    let scale = geom.chrome.scale_milli as f32 / 1000.0;
+    graphite::paint_dashed_round_rect(
+        buffer,
+        stride,
+        graphite::Rect::new(
+            source_rect.x.saturating_add(1),
+            source_rect.y.saturating_add(1),
+            source_rect.w.saturating_sub(2),
+            source_rect.h.saturating_sub(2),
+        ),
+        5.0 * scale,
+        5.0 * scale,
+        3.0 * scale,
+        1.5 * scale,
+        accent,
+    );
+
+    if sidebar {
+        if let Some((_, marker)) = sidebar_space_drop(host, pointer_x, pointer_y) {
+            raster::fill_rect_argb(
+                buffer, stride, marker.x, marker.y, marker.w, marker.h, accent, 0xff,
+            );
+        }
+    } else {
+        let size = host.window.inner_size();
+        if let Some(layout) = host.space_rail.layout(
+            geom,
+            size.width as usize,
+            size.height as usize,
+            host.spacing.space_rail_pane_names,
+        ) {
+            if let Some(insertion) =
+                layout.insertion_index_at(pointer_x, pointer_y, host.space_rail.names.len())
+            {
+                if let Some((x, y, w, h)) =
+                    layout.insertion_marker(insertion, host.space_rail.names.len())
+                {
+                    raster::fill_rect_argb(buffer, stride, x, y, w, h, accent, 0xff);
+                }
+            }
+        }
+    }
+
+    let x = pointer_x
+        .saturating_sub(drag.grab_x)
+        .min(stride.saturating_sub(source.2));
+    let y = pointer_y
+        .saturating_sub(drag.grab_y)
+        .min(height.saturating_sub(source.3));
+    if geom.chrome.graphite {
+        let tok = graphite::bar_tokens(host.theme.variant, host.bar_color);
+        graphite::paint_rail_chip(
+            buffer,
+            stride,
+            geom.chrome,
+            &tok,
+            accent,
+            &graphite::RailChip {
+                slot: graphite::Rect::new(x, y, source.2, source.3),
+                label: &drag.name,
+                current: true,
+                focused: true,
+                editing: false,
+                hovered: false,
+                close_hovered: false,
+            },
+        );
+    } else {
+        raster::rasterize_space_reorder_chip(
+            &host.theme,
+            &host.font,
+            &drag.name,
+            buffer,
+            stride,
+            (x, y, source.2, source.3),
+            accent,
+        );
+    }
+}
+
 /// Chip at the pointer and a dashed slot where the dragged pane sits
 /// (issue #109, graphite only).
 fn paint_header_drag_overlay(
@@ -10803,7 +11402,29 @@ fn paint_graphite_sidebar(
     let tree = graphite_sidebar_tree(host, &tabs, &mail);
     let visible = sidebar::visible_rows(&tree);
     let column = graphite::Rect::new(0, 0, geom.sidebar_px, height);
-    let layout = graphite::sidebar_layout(geom.chrome, column, visible.len(), host.sidebar_scroll);
+    let mut layout =
+        graphite::sidebar_layout(geom.chrome, column, visible.len(), host.sidebar_scroll);
+    if host.space_rail.keyboard {
+        if let Some(focus) = host.space_rail.focus {
+            if let Some(row) = visible
+                .iter()
+                .position(|row| row.kind == sidebar::RowKind::Space && row.space == focus)
+            {
+                let visible_rows = layout.rows.len().max(1);
+                let scroll = if row < layout.first_row {
+                    row
+                } else if row >= layout.first_row.saturating_add(visible_rows) {
+                    row + 1 - visible_rows
+                } else {
+                    layout.first_row
+                };
+                if scroll != host.sidebar_scroll {
+                    host.sidebar_scroll = scroll;
+                    layout = graphite::sidebar_layout(geom.chrome, column, visible.len(), scroll);
+                }
+            }
+        }
+    }
     let (hover_row, hover_action, hover_arrange) = match host.hover_target {
         Some(HoverTarget::Sidebar(graphite::SidebarHit::Row(row))) => (Some(row), None, None),
         Some(HoverTarget::Sidebar(graphite::SidebarHit::Action(action))) => {
@@ -10867,11 +11488,11 @@ fn paint_graphite_sidebar(
             }
         }
     }
-    let rows: Vec<graphite::SidebarRow> = visible
+    let painted_rows = graphite::sidebar_rows_in_view(&visible, &layout);
+    let rows: Vec<graphite::SidebarRow> = painted_rows
         .iter()
-        .zip(layout.rows.iter())
         .enumerate()
-        .map(|(index, (row, slot))| {
+        .map(|(slot_index, (row_index, row, slot))| {
             let space = &tree.spaces[row.space];
             graphite::SidebarRow {
                 slot: *slot,
@@ -10884,15 +11505,18 @@ fn paint_graphite_sidebar(
                     sidebar::RowKind::Space => Some(space.collapsed),
                     _ => None,
                 },
-                dot: dots[index],
-                label: labels[index].as_str(),
-                mail: mails[index],
+                dot: dots[*row_index],
+                label: labels[*row_index].as_str(),
+                mail: mails[*row_index],
                 needs_you: match row.kind {
                     sidebar::RowKind::Space => space.attention,
                     _ => 0,
                 },
-                selected: selected_tabs[index],
-                hovered: hover_row == Some(index),
+                selected: selected_tabs[*row_index]
+                    || row.kind == sidebar::RowKind::Space
+                        && host.space_rail.keyboard
+                        && host.space_rail.focus == Some(row.space),
+                hovered: hover_row == Some(slot_index),
             }
         })
         .collect();
@@ -10956,10 +11580,9 @@ fn paint_graphite_sidebar(
     );
     // Hit state for the pointer handlers: painted rows with their tree
     // indices, buttons, viewport, and the row count behind the scroll.
-    host.sidebar_rows = visible
+    host.sidebar_rows = painted_rows
         .iter()
-        .zip(layout.rows.iter())
-        .map(|(row, slot)| (*slot, row.clone()))
+        .map(|(_, row, slot)| (*slot, (*row).clone()))
         .collect();
     host.sidebar_actions = layout.actions;
     host.sidebar_arrange = header.buttons;
@@ -11954,6 +12577,21 @@ fn open_space_picker(host: &mut HostState, action: Option<keybind::Action>) -> b
     sync_chrome_hover(host);
     true
 }
+
+/// Top-left of the open-space picker: just under the tabs-bar dropdown.
+/// Sidebar and classic have no dropdown, so the picker stays centered.
+fn space_picker_anchor(host: &HostState) -> Option<(usize, usize)> {
+    if host.spacing.layout == config::LayoutMode::Sidebar || !host.mux.geom().chrome.graphite {
+        return None;
+    }
+    let dropdown = host.mux.graphite_bar()?.dropdown;
+    let gap = host.mux.geom().chrome.px(4.0).max(2);
+    Some((
+        dropdown.x,
+        dropdown.y.saturating_add(dropdown.h).saturating_add(gap),
+    ))
+}
+
 fn apply_space_picker_verdict(
     host: &mut HostState,
     kind: SpacePickerKind,
@@ -13385,6 +14023,7 @@ fn mux_command_for(action: keybind::Action) -> Option<MuxCommand> {
         | Action::PaletteFilterPrev
         | Action::ThemePicker
         | Action::Transparency
+        | Action::ChromeLayout
         | Action::Find
         | Action::ClearScrollback
         | Action::IncreaseFontSize
@@ -15822,6 +16461,7 @@ fn action_route(action: keybind::Action) -> ActionRoute {
         Action::ResetFontSize => ActionRoute::ResetFontSize,
         Action::ThemePicker
         | Action::Transparency
+        | Action::ChromeLayout
         | Action::OpenSpace
         | Action::DeleteSpace
         | Action::MovePaneToSpace => ActionRoute::Noop,
@@ -15838,7 +16478,9 @@ fn action_route(action: keybind::Action) -> ActionRoute {
 }
 
 fn apply_space_rail_focus_action(host: &mut HostState) {
-    if host.mux.geom().rail_side != space_rail::RailSide::Off {
+    let geom = host.mux.geom();
+    let sidebar = geom.chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar;
+    if sidebar || geom.rail_side != space_rail::RailSide::Off {
         cancel_tab_rename(host);
         host.space_rail.focus_rail();
         reveal_graphite_side_focus(host);
@@ -15907,6 +16549,22 @@ fn change_font_size(host: &mut HostState, delta: i8) {
     App::refit_geom(host, host.window.inner_size(), Some("font size"));
 }
 
+/// Switch the Graphite chrome between the tabs and spaces bars and the
+/// combined sidebar (#150). Refits this window at once. Other windows follow
+/// the saved `layout` key through the config reload.
+fn apply_chrome_layout(host: &mut HostState, layout: config::LayoutMode) {
+    if host.spacing.layout == layout {
+        return;
+    }
+    host.spacing.layout = layout;
+    host.left_button_down = false;
+    host.cursor_cell = None;
+    host.pending_full_repaint = Some(FullRepaintReason::Resize);
+    host.dirty = true;
+    App::refit_geom(host, host.window.inner_size(), Some("layout"));
+    host.window.request_redraw();
+}
+
 /// Step the Graphite bar preset (#108). Gated on graphite chrome: classic
 /// keeps its theme bars and the chord is a no-op there.
 fn cycle_bar_color(host: &mut HostState, forward: bool) {
@@ -15955,6 +16613,10 @@ fn dispatch_action(
     }
     if action == A::BarColorNext || action == A::BarColorPrev {
         cycle_bar_color(host, action == A::BarColorNext);
+        return Dispatch::Handled;
+    }
+    if action == A::ChromeLayout {
+        space_panel::layout(host);
         return Dispatch::Handled;
     }
     match action_route(action) {
@@ -16045,6 +16707,21 @@ fn dispatch_action(
             }
         }
     }
+}
+
+/// Bar and sidebar buttons that open a picker do so before the generic
+/// dispatcher. `OpenSpace` is a no-op there: the keyboard path opens the
+/// picker itself, so a strip click must not drop it.
+fn dispatch_strip_action(
+    host: &mut HostState,
+    action: keybind::Action,
+    program: &str,
+    child_args: &[String],
+) -> Dispatch {
+    if open_space_picker(host, Some(action)) {
+        return Dispatch::Handled;
+    }
+    dispatch_action(host, action, program, child_args)
 }
 
 fn dispatch_palette_mouse_action(
@@ -16853,6 +17530,11 @@ impl ApplicationHandler<UserAction> for App {
                 }
                 host.pointer_px = Some((position.x, position.y));
                 host.cursor_cell = cell_at_position(position, &host.font, &host.mux);
+                if handle_space_reorder_drag_move(host) {
+                    sync_chrome_hover(host);
+                    host.window.request_redraw();
+                    return;
+                }
                 if drag_graphite_side_thumb(host) {
                     sync_chrome_hover(host);
                     host.window.request_redraw();
@@ -17098,6 +17780,14 @@ impl ApplicationHandler<UserAction> for App {
                         return;
                     }
                 }
+                if state == ElementState::Pressed && handle_space_reorder_press(host, button) {
+                    host.left_button_down = false;
+                    host.rich_pointer = None;
+                    host.app_mouse_button = None;
+                    sync_chrome_hover(host);
+                    host.window.request_redraw();
+                    return;
+                }
                 if state == ElementState::Pressed && handle_rail_click(host, button) {
                     host.left_button_down = false;
                     host.rich_pointer = None;
@@ -17136,7 +17826,7 @@ impl ApplicationHandler<UserAction> for App {
                             host.left_button_down = false;
                             host.rich_pointer = None;
                             host.app_mouse_button = None;
-                            match dispatch_action(
+                            match dispatch_strip_action(
                                 host,
                                 action,
                                 &self.cli.program,
@@ -17199,6 +17889,11 @@ impl ApplicationHandler<UserAction> for App {
                     return;
                 }
                 if state == ElementState::Pressed && handle_pane_handle_press(host, button) {
+                    host.window.request_redraw();
+                    return;
+                }
+                if state == ElementState::Released && finish_space_reorder_drag(host) {
+                    sync_chrome_hover(host);
                     host.window.request_redraw();
                     return;
                 }
@@ -17649,6 +18344,27 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
+    fn sidebar_drop_reorders_before_or_after_a_space_row() {
+        let names = ["alpha", "beta", "gamma"].map(str::to_owned);
+        assert_eq!(
+            reorder_space_before(&names, "gamma", Some("beta")).unwrap(),
+            ["alpha", "gamma", "beta"].map(str::to_owned)
+        );
+        assert_eq!(
+            reorder_space_before(&names, "alpha", Some("gamma")).unwrap(),
+            ["beta", "alpha", "gamma"].map(str::to_owned)
+        );
+        assert_eq!(
+            reorder_space_before(&names, "alpha", None).unwrap(),
+            ["beta", "gamma", "alpha"].map(str::to_owned)
+        );
+        assert_eq!(
+            reorder_space_before(&names, "beta", Some("beta")).unwrap(),
+            names
+        );
+    }
+
+    #[test]
     fn softbuffer_partial_raster_requires_the_previous_frame() {
         assert!(!softbuffer_partial_raster_allowed(true, 0, false));
         assert!(softbuffer_partial_raster_allowed(true, 1, false));
@@ -17787,6 +18503,7 @@ mod tests {
             (Action::ResetFontSize, ActionRoute::ResetFontSize),
             (Action::ThemePicker, ActionRoute::Noop),
             (Action::Transparency, ActionRoute::Noop),
+            (Action::ChromeLayout, ActionRoute::Noop),
             (Action::OpenSpace, ActionRoute::Noop),
             (Action::DeleteSpace, ActionRoute::Noop),
             (Action::MovePaneToSpace, ActionRoute::Noop),
@@ -17957,10 +18674,38 @@ mod tests {
             ),
             (
                 true,
+                space_rail::RailSide::Bottom,
+                shift,
+                Key::Named(NamedKey::ArrowLeft),
+                SpaceRailKeyDecision::Key(space_rail::RailKey::MovePrev),
+            ),
+            (
+                true,
+                space_rail::RailSide::Bottom,
+                shift,
+                Key::Named(NamedKey::ArrowRight),
+                SpaceRailKeyDecision::Key(space_rail::RailKey::MoveNext),
+            ),
+            (
+                true,
                 space_rail::RailSide::Left,
                 plain,
                 Key::Named(NamedKey::ArrowUp),
                 SpaceRailKeyDecision::Key(space_rail::RailKey::Prev),
+            ),
+            (
+                true,
+                space_rail::RailSide::Left,
+                shift,
+                Key::Named(NamedKey::ArrowUp),
+                SpaceRailKeyDecision::Key(space_rail::RailKey::MovePrev),
+            ),
+            (
+                true,
+                space_rail::RailSide::Left,
+                shift,
+                Key::Named(NamedKey::ArrowDown),
+                SpaceRailKeyDecision::Key(space_rail::RailKey::MoveNext),
             ),
             (
                 true,
@@ -18087,6 +18832,28 @@ mod tests {
                 "{active:?}, {side:?}, {key:?}"
             );
         }
+    }
+
+    #[test]
+    fn gated_off_space_reorder_keeps_shift_arrow_navigation() {
+        use space_rail::RailKey;
+
+        assert_eq!(
+            apply_space_reorder_key_gate(SpaceRailKeyDecision::Key(RailKey::MovePrev), false),
+            SpaceRailKeyDecision::Key(RailKey::Prev)
+        );
+        assert_eq!(
+            apply_space_reorder_key_gate(SpaceRailKeyDecision::Key(RailKey::MoveNext), false),
+            SpaceRailKeyDecision::Key(RailKey::Next)
+        );
+        assert_eq!(
+            apply_space_reorder_key_gate(SpaceRailKeyDecision::Key(RailKey::MovePrev), true),
+            SpaceRailKeyDecision::Key(RailKey::MovePrev)
+        );
+        assert_eq!(
+            apply_space_reorder_key_gate(SpaceRailKeyDecision::Leave, false),
+            SpaceRailKeyDecision::Leave
+        );
     }
 
     #[test]
@@ -18219,12 +18986,95 @@ mod tests {
                 false,
                 StripClickDecision::NotHandled,
             ),
+            (
+                MouseButton::Left,
+                Some(StripClickHit::Button(keybind::Action::OpenSpace)),
+                true,
+                false,
+                StripClickDecision::Run(keybind::Action::OpenSpace),
+            ),
+            (
+                MouseButton::Left,
+                Some(StripClickHit::Button(keybind::Action::NewTab)),
+                true,
+                false,
+                StripClickDecision::Run(keybind::Action::NewTab),
+            ),
+            (
+                MouseButton::Left,
+                Some(StripClickHit::Button(keybind::Action::CommandPalette)),
+                true,
+                false,
+                StripClickDecision::Run(keybind::Action::CommandPalette),
+            ),
         ];
         for (button, hit, title_row, rename_active, expected) in cases {
             assert_eq!(
                 strip_click_decision(button, hit, title_row, rename_active, 10.0, 5.0),
                 expected,
                 "{button:?}, {hit:?}"
+            );
+        }
+    }
+
+    /// Issue #139: the Graphite dropdown, `+`, and command field are clicks,
+    /// not drags. Classic chrome never builds this bar.
+    #[test]
+    fn graphite_bar_buttons_run_open_space_new_tab_and_command_palette() {
+        let chrome = mux::ChromeGeom {
+            graphite: true,
+            scale_milli: 1000,
+        };
+        let tabs = vec![graphite::TabText {
+            label: "demo".into(),
+            meta: None,
+            dot: graphite::Dot::Idle,
+            attention: false,
+            selected: true,
+        }];
+        let layout = graphite::bar_layout(chrome, 1440, 0, "demo", &tabs, "Ctrl Shift P");
+        let mid = |rect: graphite::Rect| (rect.x + rect.w / 2, rect.y + rect.h / 2);
+        let command = layout.command.expect("wide bar keeps the command field");
+        let cases = [
+            (
+                mid(layout.dropdown),
+                mux::StripHit::SpaceMenu,
+                keybind::Action::OpenSpace,
+            ),
+            (
+                mid(layout.plus),
+                mux::StripHit::NewTab,
+                keybind::Action::NewTab,
+            ),
+            (
+                mid(command),
+                mux::StripHit::Command,
+                keybind::Action::CommandPalette,
+            ),
+        ];
+        for ((x, y), hit, action) in cases {
+            assert_eq!(graphite::bar_hit(&layout, x, y, false), Some(hit));
+            assert_eq!(
+                strip_click_decision(
+                    MouseButton::Left,
+                    Some(strip_click_hit(hit)),
+                    true,
+                    false,
+                    x as f64,
+                    y as f64,
+                ),
+                StripClickDecision::Run(action)
+            );
+            assert_eq!(
+                cursor_for_hover(
+                    Some(HoverTarget::Strip(hit)),
+                    false,
+                    false,
+                    false,
+                    None,
+                    false,
+                ),
+                CursorIcon::Pointer
             );
         }
     }

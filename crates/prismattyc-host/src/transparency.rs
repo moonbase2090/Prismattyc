@@ -12,7 +12,8 @@ use crate::mux::ChromeGeom;
 use crate::raster::{alpha_of, opacity_to_alpha, pack_argb, unpack_rgb};
 use crate::theme::ThemeVariant;
 
-/// Design size of the dialog. It does not grow with its contents.
+/// Design size of the dialog. It does not grow or shrink with its contents.
+/// A shorter window clamps the frame; the list scrolls either way.
 pub(crate) const DIALOG_W: f32 = 760.0;
 pub(crate) const DIALOG_H: f32 = 460.0;
 
@@ -284,7 +285,7 @@ impl Dialog {
             }
             Input::Char(_) => {}
             Input::Wheel(rows) => {
-                let metrics = metrics(chrome);
+                let metrics = metrics(chrome, window_w, window_h);
                 let max = max_scroll(metrics.list_h, metrics.content_h);
                 self.scroll = scroll_by(self.scroll, rows * metrics.row_h as i32, max);
             }
@@ -344,7 +345,7 @@ impl Dialog {
         // A wheel moves the list under a fixed selection. Keyboard and
         // pointer selection still bring the current row into the viewport.
         if !matches!(input, Input::Wheel(_)) {
-            self.reveal(chrome);
+            self.reveal(chrome, window_w, window_h);
         }
         Edit {
             close,
@@ -502,8 +503,8 @@ impl Dialog {
         };
     }
 
-    fn reveal(&mut self, chrome: ChromeGeom) {
-        let metrics = metrics(chrome);
+    fn reveal(&mut self, chrome: ChromeGeom, window_w: usize, window_h: usize) {
+        let metrics = metrics(chrome, window_w, window_h);
         let top = self.selected * metrics.row_h;
         let bottom = top + metrics.row_h;
         if top < self.scroll {
@@ -577,10 +578,35 @@ struct Metrics {
     content_h: usize,
 }
 
-fn metrics(chrome: ChromeGeom) -> Metrics {
+fn layout_chrome(scale_milli: u32) -> ChromeGeom {
+    ChromeGeom {
+        graphite: true,
+        scale_milli,
+    }
+}
+
+/// Design type size in device pixels. Geometry already follows
+/// `scale_milli`; leaving type at a raw 13 px makes the dialog unreadably
+/// small on a 2× display.
+fn type_px(chrome: ChromeGeom, design: f32) -> f32 {
+    chrome.px(design).max(1) as f32
+}
+
+/// Fixed 760×460 design frame, clamped so a short window still shows it.
+/// The size does not depend on which rows or values are visible.
+fn dialog_size(chrome: ChromeGeom, window_w: usize, window_h: usize) -> (usize, usize) {
+    let margin = chrome.px(PAD);
+    let fit = |design: f32, window: usize| {
+        let max = window.saturating_sub(margin.saturating_mul(2)).max(1);
+        chrome.px(design).min(max).max(1)
+    };
+    (fit(DIALOG_W, window_w), fit(DIALOG_H, window_h))
+}
+
+fn metrics(chrome: ChromeGeom, window_w: usize, window_h: usize) -> Metrics {
     let row_h = chrome.px(ROW_H).max(1);
-    let list_h = chrome
-        .px(DIALOG_H)
+    let (_, dialog_h) = dialog_size(chrome, window_w, window_h);
+    let list_h = dialog_h
         .saturating_sub(chrome.px(HEADER_H))
         .saturating_sub(chrome.px(FOOTER_H));
     let content_h = row_h * ROWS.len() + chrome.px(LIMITS_H);
@@ -673,9 +699,8 @@ pub(crate) fn layout(
     window_w: usize,
     window_h: usize,
 ) -> Layout {
-    let metrics = metrics(chrome);
-    let dialog_w = chrome.px(DIALOG_W);
-    let dialog_h = chrome.px(DIALOG_H);
+    let metrics = metrics(chrome, window_w, window_h);
+    let (dialog_w, dialog_h) = dialog_size(chrome, window_w, window_h);
     let origin = Rect::new(
         window_w.saturating_sub(dialog_w) / 2,
         window_h.saturating_sub(dialog_h) / 2,
@@ -936,26 +961,28 @@ fn paint_header(
     card: [u8; 3],
 ) {
     let _ = (dialog, card);
+    let chrome = layout_chrome(layout.scale_milli);
     graphite::draw_text(
         buffer,
         stride,
         layout.list.x as f32,
         mid_y(layout.close),
         Face::SemiBold,
-        16.0,
+        type_px(chrome, 16.0),
         "Transparency",
         tok.text_strong,
         layout.dialog.x,
         layout.close.x,
     );
     graphite::fill_round_rect(buffer, stride, layout.close, 6.0, tok.field, 255);
+    let mark = type_px(chrome, 14.0);
     graphite::draw_text(
         buffer,
         stride,
-        layout.close.x as f32 + (layout.close.w as f32 - 8.0) / 2.0,
+        layout.close.x as f32 + (layout.close.w as f32 - mark) / 2.0,
         mid_y(layout.close),
         Face::Regular,
-        14.0,
+        mark,
         "×",
         tok.text,
         layout.close.x,
@@ -979,14 +1006,15 @@ fn paint_footer(
     } else {
         tok.muted
     };
-    let y = layout.dialog.y + layout.dialog.h - 18;
+    let chrome = layout_chrome(layout.scale_milli);
+    let y = layout.dialog.y + layout.dialog.h - chrome.px(FOOTER_H) / 2;
     graphite::draw_text(
         buffer,
         stride,
         layout.list.x as f32,
         y as f32,
         Face::Regular,
-        12.0,
+        type_px(chrome, 12.0),
         text,
         ink,
         layout.dialog.x,
@@ -1057,7 +1085,10 @@ fn paint_limits(
     tok: &graphite::Tokens,
     layout: &Layout,
 ) {
-    let top = ROWS.len() * layout.row_h + 8;
+    let chrome = layout_chrome(layout.scale_milli);
+    let pad = chrome.px(8.0);
+    let line_h = chrome.px(22.0).max(1);
+    let top = ROWS.len() * layout.row_h + pad;
     for (index, line) in LIMIT_LINES.iter().enumerate() {
         let face = if index == 0 {
             Face::SemiBold
@@ -1065,17 +1096,17 @@ fn paint_limits(
             Face::Regular
         };
         let ink = if index == 0 { tok.text } else { tok.muted };
-        let y = top + index * 22;
-        if y + 12 >= height {
+        let y = top + index * line_h;
+        if y + line_h >= height {
             break;
         }
         graphite::draw_text(
             buffer,
             stride,
-            8.0,
-            y as f32 + 8.0,
+            pad as f32,
+            y as f32 + pad as f32,
             face,
-            12.0,
+            type_px(chrome, 12.0),
             line,
             ink,
             0,
@@ -1097,21 +1128,23 @@ fn paint_row(
     row: Rect,
 ) {
     let label_y = row.y as f32 + (row.h as f32 * 0.32);
-    let value = row_value(dialog, id);
-    let value_w = graphite::text_width(Face::Regular, 12.0, &value);
+    let value = row_value(dialog, id, chrome);
+    let value_px = type_px(chrome, 12.0);
+    let value_w = graphite::text_width(Face::Regular, value_px, &value);
+    let inset = type_px(chrome, 8.0);
     let value_right = if id == RowId::BackgroundImage {
         clear_rect(row, chrome).x
     } else {
         row.right()
     };
-    let value_x = value_right as f32 - value_w - 12.0;
+    let value_x = value_right as f32 - value_w - type_px(chrome, 12.0);
     graphite::draw_text(
         buffer,
         stride,
-        row.x as f32 + 8.0,
+        row.x as f32 + inset,
         label_y,
         Face::Regular,
-        13.0,
+        type_px(chrome, 13.0),
         row_title(id),
         tok.text,
         row.x,
@@ -1123,7 +1156,7 @@ fn paint_row(
         value_x,
         label_y,
         Face::Regular,
-        12.0,
+        value_px,
         &value,
         tok.muted,
         row.x,
@@ -1172,10 +1205,10 @@ fn paint_row(
         graphite::draw_text(
             buffer,
             stride,
-            toggle.x as f32 + 8.0,
+            toggle.x as f32 + type_px(chrome, 8.0),
             mid_y(toggle),
             Face::Regular,
-            11.0,
+            type_px(chrome, 11.0),
             label,
             if on { [255, 255, 255] } else { tok.text },
             toggle.x,
@@ -1188,10 +1221,10 @@ fn paint_row(
         graphite::draw_text(
             buffer,
             stride,
-            clear.x as f32 + 10.0,
+            clear.x as f32 + type_px(chrome, 10.0),
             mid_y(clear),
             Face::Regular,
-            12.0,
+            type_px(chrome, 12.0),
             "Clear",
             tok.text,
             clear.x,
@@ -1213,7 +1246,7 @@ fn row_title(id: RowId) -> &'static str {
     }
 }
 
-fn row_value(dialog: &Dialog, id: RowId) -> String {
+fn row_value(dialog: &Dialog, id: RowId, chrome: ChromeGeom) -> String {
     match id {
         RowId::WindowOpacity => fmt_opacity(dialog.values.window_opacity),
         RowId::ChromeOpacity if dialog.values.chrome_follows => "Follow".into(),
@@ -1229,13 +1262,13 @@ fn row_value(dialog: &Dialog, id: RowId) -> String {
         RowId::PaneInactive => fmt_opacity(dialog.values.pane_opacity_inactive),
         RowId::BackgroundImage => graphite::ellipsize(
             Face::Regular,
-            12.0,
+            type_px(chrome, 12.0),
             dialog
                 .path_edit
                 .as_deref()
                 .or(dialog.values.background_image.as_deref())
                 .unwrap_or("None"),
-            180.0,
+            type_px(chrome, 180.0),
         ),
         RowId::ImageOpacity => fmt_opacity(dialog.values.background_opacity),
         RowId::ImageBlur => format!("{} px", dialog.values.background_blur_px),
@@ -1538,28 +1571,30 @@ fn paint_preview(
     fill_solid(buffer, stride, height, parts.dot, tok.working);
     fill_solid(buffer, stride, height, parts.text, tok.text);
     fill_solid(buffer, stride, height, parts.cursor, accent);
+    let ui = layout_chrome(layout.scale_milli);
+    let inset = type_px(ui, 8.0);
     graphite::draw_text(
         buffer,
         stride,
-        parts.badge.x as f32 + 8.0,
+        parts.badge.x as f32 + inset,
         mid_y(parts.badge),
         Face::SemiBold,
-        9.0,
+        type_px(ui, 9.0),
         "needs you",
         tok.on_attention,
-        parts.badge.x + 8,
+        parts.badge.x + ui.px(4.0),
         parts.badge.right(),
     );
     graphite::draw_text(
         buffer,
         stride,
-        parts.field.x as f32 + 8.0,
+        parts.field.x as f32 + inset,
         mid_y(parts.field),
         Face::Regular,
-        9.0,
+        type_px(ui, 9.0),
         "Run",
         tok.muted,
-        parts.field.x + 8,
+        parts.field.x + ui.px(4.0),
         parts.field.right(),
     );
 }
@@ -1664,6 +1699,33 @@ mod tests {
         assert_eq!(scrolled.dialog, first.dialog);
         assert_eq!(scrolled.list, first.list);
         assert!(scrolled.scroll <= scrolled.max_scroll);
+    }
+
+    #[test]
+    fn retina_type_scales_and_a_short_window_does_not_resize_the_dialog() {
+        let dialog = sample_dialog();
+        let retina = ChromeGeom {
+            graphite: true,
+            scale_milli: 2000,
+        };
+        assert_eq!(type_px(retina, 13.0), 26.0);
+        assert_eq!(type_px(chrome(), 13.0), 13.0);
+        let large = layout(&dialog, retina, 2400, 1600);
+        assert_eq!((large.dialog.w, large.dialog.h), (1520, 920));
+        assert!(large.max_scroll > 0, "limits still scroll inside the frame");
+        let short = layout(&dialog, retina, 1000, 700);
+        assert!(short.dialog.w <= 1000 - 64);
+        assert!(short.dialog.h <= 700 - 64);
+        assert!(short.dialog.right() <= 1000);
+        assert!(short.dialog.y + short.dialog.h <= 700);
+        assert!(short.dialog.w < large.dialog.w);
+        let mut scrolled = dialog.clone();
+        let _ = scrolled.edit(Input::Wheel(5), retina, 1000, 700);
+        assert!(scrolled.scroll > 0);
+        let after = layout(&scrolled, retina, 1000, 700);
+        assert_eq!(after.dialog, short.dialog);
+        assert_eq!(after.list.w, short.list.w);
+        assert_eq!(after.list.h, short.list.h);
     }
 
     #[test]
@@ -1800,6 +1862,21 @@ mod tests {
             paint(&mut buffer, 1200, 800, variant, dialog, &laid);
             let path = root.join(name);
             write_rgba_png(&path, &buffer, 1200, 800)
+                .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+        }
+        let retina = ChromeGeom {
+            graphite: true,
+            scale_milli: 2000,
+        };
+        for (variant, name) in [
+            (ThemeVariant::Dark, "graphite-transparency-dark-2x.png"),
+            (ThemeVariant::Light, "graphite-transparency-light-2x.png"),
+        ] {
+            let laid = layout(dialog, retina, 1800, 1200);
+            let mut buffer = vec![pack_argb(255, [32, 36, 44]); 1800 * 1200];
+            paint(&mut buffer, 1800, 1200, variant, dialog, &laid);
+            let path = root.join(name);
+            write_rgba_png(&path, &buffer, 1800, 1200)
                 .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
         }
     }

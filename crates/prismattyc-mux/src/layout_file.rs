@@ -6,10 +6,11 @@
 //! pane stays `first`; the new pane is `second`.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -25,6 +26,9 @@ pub const SAVED_LAYOUT_VERSION: u32 = 1;
 pub const SAVED_SPACE_VERSION: u32 = 1;
 /// Version with a stable Space identity and exclusive live ownership.
 pub const OWNED_SPACE_VERSION: u32 = 2;
+
+const SPACE_ORDER_FILE: &str = ".space-order";
+static SPACE_ORDER_WRITE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Inclusive clamp so [`crate::ControlRequest::Split`] accepts the ratio.
 const MIN_RATIO: f64 = 0.01;
@@ -125,10 +129,15 @@ pub struct SavedSpace {
 }
 
 /// One host tab inside a [`SavedSpace`]: session names in pane order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `layout` is the host split tree. Leaves name sessions. Absent on a
+/// single-pane tab and on files written before the tree was stored.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedSpaceTab {
     pub title: String,
     pub sessions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<crate::attach_tabs::TabLayoutNode>,
 }
 
 /// Session names in host tab order, then any saved session not in a tab.
@@ -193,6 +202,7 @@ pub fn space_add_session(
     space.tabs.push(SavedSpaceTab {
         title,
         sessions: vec![name],
+        layout: None,
     });
     space.saved_at_unix = now_unix();
     Ok(())
@@ -209,6 +219,13 @@ pub fn space_remove_session(space: &mut SavedSpace, session: &str) -> Result<()>
     space.sessions.retain(|entry| entry.name != session);
     for tab in &mut space.tabs {
         tab.sessions.retain(|name| name != session);
+        let kept = tab.sessions.clone();
+        tab.layout = tab.layout.as_ref().and_then(|node| {
+            crate::attach_tabs::remap_layout(node, |name| {
+                (name != session).then(|| name.to_string())
+            })
+        });
+        tab.layout = crate::attach_tabs::layout_for_sessions(tab.layout.take(), &kept);
     }
     space.tabs.retain(|tab| !tab.sessions.is_empty());
     if space.focused_session.as_deref() == Some(session) {
@@ -671,6 +688,7 @@ fn spaces_dir_from(xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsStr
 /// Write `space` as pretty JSON. Creates `dir` when missing.
 pub fn save_space(dir: &Path, name: &str, space: &SavedSpace) -> Result<PathBuf> {
     let path = layout_path(dir, name)?;
+    let append_to_custom_order = !path.exists() && space_order_path(dir).exists();
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let mut space = space.clone();
     space.created_at_unix_ms = Some(
@@ -691,6 +709,15 @@ pub fn save_space(dir: &Path, name: &str, space: &SavedSpace) -> Result<PathBuf>
         .with_context(|| format!("write {}", path.display()))?;
     file.write_all(b"\n")
         .with_context(|| format!("write {}", path.display()))?;
+    if append_to_custom_order {
+        let mut order = list_spaces(dir)?
+            .into_iter()
+            .map(|entry| entry.name)
+            .filter(|saved_name| saved_name != name)
+            .collect::<Vec<_>>();
+        order.push(name.to_owned());
+        write_space_order(dir, &order)?;
+    }
     Ok(path)
 }
 
@@ -708,7 +735,16 @@ pub fn remove_named_json(dir: &Path, name: &str) -> Result<PathBuf> {
 
 /// Delete a space file. Same name rules as [`save_space`].
 pub fn remove_space(dir: &Path, name: &str) -> Result<PathBuf> {
-    remove_named_json(dir, name)
+    let removed = remove_named_json(dir, name)?;
+    let order_path = space_order_path(dir);
+    if order_path.exists() {
+        let order = read_space_order(dir)?
+            .into_iter()
+            .filter(|saved_name| saved_name != name)
+            .collect::<Vec<_>>();
+        write_space_order(dir, &order)?;
+    }
+    Ok(removed)
 }
 
 /// Delete a layout file. Same name rules as [`save_layout`].
@@ -728,7 +764,23 @@ pub fn rename_space(dir: &Path, old: &str, new: &str) -> Result<PathBuf> {
         bail!("space {new:?} already exists at {}", to.display());
     }
     match fs::rename(&from, &to) {
-        Ok(()) => Ok(to),
+        Ok(()) => {
+            let order_path = space_order_path(dir);
+            if order_path.exists() {
+                let order = read_space_order(dir)?
+                    .into_iter()
+                    .map(|saved_name| {
+                        if saved_name == old {
+                            new.to_owned()
+                        } else {
+                            saved_name
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                write_space_order(dir, &order)?;
+            }
+            Ok(to)
+        }
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             bail!("no such space {old:?} at {}", from.display())
         }
@@ -788,9 +840,61 @@ fn creation_time_ms(path: &Path, space: &SavedSpace) -> u64 {
     })
 }
 
-/// List spaces oldest first. Missing dir yields an empty list.
-/// Legacy files use filesystem creation time, then their saved timestamp.
+/// List spaces in their persisted custom order. Unlisted spaces follow in
+/// creation order, so newly discovered files append before the rail's `+`.
+/// When there is no custom order file, legacy creation order is preserved.
 pub fn list_spaces(dir: &Path) -> Result<Vec<SpaceListEntry>> {
+    let mut entries = list_spaces_by_creation(dir)?;
+    let order = read_space_order(dir)?;
+    if order.is_empty() {
+        return Ok(entries);
+    }
+
+    let indexes = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.name.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let mut included = HashSet::with_capacity(entries.len());
+    let mut ordered = Vec::with_capacity(entries.len());
+    for name in order {
+        if let Some(&index) = indexes.get(name.as_str()) {
+            if included.insert(index) {
+                ordered.push(entries[index].clone());
+            }
+        }
+    }
+    for (index, entry) in entries.drain(..).enumerate() {
+        if included.insert(index) {
+            ordered.push(entry);
+        }
+    }
+    Ok(ordered)
+}
+
+/// Persist one exact permutation of the saved spaces. The space JSON files
+/// are untouched; list consumers all read the same small order file.
+pub fn reorder_spaces(dir: &Path, names: &[String]) -> Result<bool> {
+    let existing = list_spaces(dir)?;
+    let existing_names = existing
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect::<HashSet<_>>();
+    let requested_names = names.iter().map(String::as_str).collect::<HashSet<_>>();
+    if names.len() != existing.len() || requested_names.len() != names.len() {
+        bail!("space order must contain each saved space exactly once");
+    }
+    if requested_names != existing_names {
+        bail!("space order does not match the saved spaces");
+    }
+    if existing.iter().map(|entry| &entry.name).eq(names.iter()) {
+        return Ok(false);
+    }
+    write_space_order(dir, names)?;
+    Ok(true)
+}
+
+fn list_spaces_by_creation(dir: &Path) -> Result<Vec<SpaceListEntry>> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -840,6 +944,53 @@ pub fn list_spaces(dir: &Path) -> Result<Vec<SpaceListEntry>> {
     }
     out.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.name.cmp(&b.1.name)));
     Ok(out.into_iter().map(|(_, entry)| entry).collect())
+}
+
+fn space_order_path(dir: &Path) -> PathBuf {
+    dir.join(SPACE_ORDER_FILE)
+}
+
+fn read_space_order(dir: &Path) -> Result<Vec<String>> {
+    let path = space_order_path(dir);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))
+}
+
+fn write_space_order(dir: &Path, names: &[String]) -> Result<()> {
+    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = space_order_path(dir);
+    let nonce = SPACE_ORDER_WRITE_ID.fetch_add(1, Ordering::Relaxed);
+    let temporary = dir.join(format!(
+        ".{SPACE_ORDER_FILE}.{}.{nonce}.tmp",
+        std::process::id()
+    ));
+    let mut bytes = serde_json::to_vec_pretty(names).context("serialize space order")?;
+    bytes.push(b'\n');
+    let result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| format!("write {}", temporary.display()))?;
+        file.write_all(&bytes)
+            .with_context(|| format!("write {}", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync {}", temporary.display()))?;
+        drop(file);
+        crate::platform::replace_file(&temporary, &path)
+            .with_context(|| format!("replace {}", path.display()))?;
+        crate::platform::sync_directory(dir)
+            .with_context(|| format!("sync directory {}", dir.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 /// Agent id to bind when applying a space session.
@@ -1274,6 +1425,71 @@ mod tests {
     }
 
     #[test]
+    fn custom_space_order_round_trips_and_new_spaces_append() {
+        let dir = std::env::temp_dir().join(format!(
+            "prism-space-order-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        for (name, created_at) in [("Alpha", 10), ("Beta", 20), ("Gamma", 30)] {
+            let mut space = one_session_space(name);
+            space.created_at_unix_ms = Some(created_at);
+            save_space(&dir, name, &space).unwrap();
+        }
+
+        let order = ["Gamma", "Alpha", "Beta"].map(str::to_owned);
+        assert!(reorder_spaces(&dir, &order).unwrap());
+        assert_eq!(
+            serde_json::from_slice::<Vec<String>>(&fs::read(space_order_path(&dir)).unwrap())
+                .unwrap(),
+            order
+        );
+        assert_eq!(
+            list_spaces(&dir)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect::<Vec<_>>(),
+            ["Gamma", "Alpha", "Beta"]
+        );
+
+        let mut new_space = one_session_space("Delta");
+        new_space.created_at_unix_ms = Some(1);
+        save_space(&dir, "Delta", &new_space).unwrap();
+        assert_eq!(
+            list_spaces(&dir)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect::<Vec<_>>(),
+            ["Gamma", "Alpha", "Beta", "Delta"]
+        );
+        let appended_order = ["Gamma", "Alpha", "Beta", "Delta"].map(str::to_owned);
+        assert!(!reorder_spaces(&dir, &appended_order).unwrap());
+        assert!(reorder_spaces(
+            &dir,
+            &["Gamma", "Alpha", "Alpha", "Delta"].map(str::to_owned)
+        )
+        .is_err());
+
+        rename_space(&dir, "Delta", "Epsilon").unwrap();
+        remove_space(&dir, "Gamma").unwrap();
+        assert_eq!(
+            list_spaces(&dir)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect::<Vec<_>>(),
+            ["Alpha", "Beta", "Epsilon"]
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn space_round_trip_skips_empty_agent_and_lists() {
         let grok = three_pane_session();
         let mut fable = three_pane_session();
@@ -1372,6 +1588,7 @@ mod tests {
             tabs: vec![SavedSpaceTab {
                 title: "t1".into(),
                 sessions: vec!["b".into(), "a".into()],
+                layout: None,
             }],
             active_tab: 0,
             focused_session: Some("a".into()),
@@ -1500,6 +1717,7 @@ mod tests {
             tabs: vec![SavedSpaceTab {
                 title: name.into(),
                 sessions: vec![name.into()],
+                layout: None,
             }],
             active_tab: 0,
             focused_session: Some(name.into()),

@@ -2982,6 +2982,8 @@ pub struct PaletteFrame<'a> {
     pub layout_mode: PaletteLayoutMode,
     /// Optional query row. Context menus omit it so the section header is first.
     pub query: Option<&'a str>,
+    /// The search field owns the caret. A click on that field sets this.
+    pub query_focused: bool,
     /// Chip labels and the selected chip; `None` hides the chip row.
     pub chips: Option<(&'a [&'a str], usize)>,
     pub sections: &'a [PaletteSection<'a>],
@@ -3064,6 +3066,8 @@ pub struct PaletteLayout {
     pub rows: Vec<PaletteLaidRow>,
     pub filter_chips: Vec<PaletteLaidChip>,
     pub list_viewport: PaletteListViewport,
+    /// Search field bounds. `None` when the frame has no query row.
+    pub query_bounds: Option<PaletteListViewport>,
     /// Fixed detail panel top. `None` for content-fit overlays.
     pub detail_y: Option<usize>,
 }
@@ -3142,6 +3146,33 @@ pub fn palette_pointer_hit(
         })
         .map(|chip| PalettePointerTarget::Filter(chip.index))
         .or_else(|| palette_hit(layout, pointer_x, pointer_y).map(PalettePointerTarget::Row))
+}
+
+/// Hit target for the Spaces dropdown. Rows, the search field, the panel
+/// chrome, and the area outside the panel are distinct so a click can open,
+/// focus, or dismiss.
+pub fn space_menu_target(
+    layout: &PaletteLayout,
+    pointer_x: usize,
+    pointer_y: usize,
+) -> crate::palette::SpaceMenuTarget {
+    let in_panel = pointer_x >= layout.panel_x
+        && pointer_x < layout.panel_x.saturating_add(layout.panel_w)
+        && pointer_y >= layout.panel_y
+        && pointer_y < layout.panel_y.saturating_add(layout.panel_h);
+    if !in_panel {
+        return crate::palette::SpaceMenuTarget::Outside;
+    }
+    if layout
+        .query_bounds
+        .is_some_and(|bounds| bounds.contains(pointer_x, pointer_y))
+    {
+        return crate::palette::SpaceMenuTarget::Query;
+    }
+    if let Some(row) = palette_hit(layout, pointer_x, pointer_y) {
+        return crate::palette::SpaceMenuTarget::Row(row);
+    }
+    crate::palette::SpaceMenuTarget::Inside
 }
 
 fn palette_chrome_px(
@@ -3343,10 +3374,16 @@ pub fn palette_layout(
     let y = buffer_height_px.saturating_sub(height) / 2;
     let blank = if geom.compact { 0 } else { font.cell_h };
     let mut row_y = y.saturating_add(font.cell_h / 2);
-    if has_query {
-        row_y = row_y.saturating_add(geom.query_h_px);
-        row_y = row_y.saturating_add(blank);
-    }
+    let query_bounds = has_query.then(|| {
+        let bounds = PaletteListViewport {
+            x,
+            y: row_y,
+            width,
+            height: geom.query_h_px,
+        };
+        row_y = row_y.saturating_add(geom.query_h_px).saturating_add(blank);
+        bounds
+    });
     let filter_chips = palette_filter_chips(font, frame, geom, x, width, row_y);
     if frame.chips.is_some() {
         row_y = row_y.saturating_add(font.cell_h).saturating_add(blank);
@@ -3386,6 +3423,7 @@ pub fn palette_layout(
             width,
             height: list_px,
         },
+        query_bounds,
         detail_y: None,
     })
 }
@@ -3455,9 +3493,16 @@ fn palette_fixed_layout(
     let bottom = y.saturating_add(height);
     let blank = if geom.compact { 0 } else { font.cell_h };
     let mut list_y = y.saturating_add(font.cell_h / 2);
-    if frame.query.is_some() {
+    let query_bounds = frame.query.is_some().then(|| {
+        let bounds = PaletteListViewport {
+            x,
+            y: list_y,
+            width,
+            height: geom.query_h_px,
+        };
         list_y = list_y.saturating_add(geom.query_h_px).saturating_add(blank);
-    }
+        bounds
+    });
     let filter_chips = palette_filter_chips(font, frame, geom, x, width, list_y);
     if frame.chips.is_some() {
         list_y = list_y.saturating_add(font.cell_h).saturating_add(blank);
@@ -3523,6 +3568,7 @@ fn palette_fixed_layout(
             width,
             height: list_bottom.saturating_sub(list_y),
         },
+        query_bounds,
         detail_y: Some(detail_y),
     })
 }
@@ -3618,7 +3664,11 @@ pub fn rasterize_palette_with_hover(
     let blank = if geom.compact { 0 } else { font.cell_h };
     let mut row_y = y.saturating_add(font.cell_h / 2);
     if let Some(query) = frame.query {
-        let query_line = format!("> {}█", query);
+        let query_line = if frame.query_focused {
+            format!("> {query}█")
+        } else {
+            format!("> {query}")
+        };
         let query_text_y = row_y.saturating_add(geom.query_h_px.saturating_sub(font.cell_h) / 2);
         draw_theme_text(
             buffer,
@@ -3630,6 +3680,20 @@ pub fn rasterize_palette_with_hover(
             theme.chrome_fg,
             text_right,
         );
+        if frame.query_focused {
+            if let Some(bounds) = layout.query_bounds {
+                let rule_y = bounds.y.saturating_add(bounds.height).saturating_sub(1);
+                fill_rect(
+                    buffer,
+                    stride_px,
+                    bounds.x.saturating_add(1),
+                    rule_y,
+                    bounds.width.saturating_sub(2),
+                    1,
+                    focus_rgb,
+                );
+            }
+        }
         row_y = row_y.saturating_add(geom.query_h_px).saturating_add(blank);
     }
 
@@ -11381,6 +11445,7 @@ mod tests {
         let frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::FixedHeight,
             query: Some("split"),
+            query_focused: true,
             chips: Some((&chips, 1)),
             sections: &sections,
             selected: 0,
@@ -11632,6 +11697,7 @@ mod tests {
         let palette_frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::ContentFit,
             query: Some("split"),
+            query_focused: true,
             chips: None,
             sections: &palette_sections,
             selected: 0,
@@ -11653,6 +11719,7 @@ mod tests {
         let picker_frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::ContentFit,
             query: None,
+            query_focused: false,
             chips: None,
             sections: &picker_sections,
             selected: 1,
@@ -11683,6 +11750,7 @@ mod tests {
         let space_menu_frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::ContentFit,
             query: None,
+            query_focused: false,
             chips: None,
             sections: &space_menu_sections,
             selected: 2,
@@ -11705,6 +11773,7 @@ mod tests {
         let pane_menu_frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::ContentFit,
             query: None,
+            query_focused: false,
             chips: None,
             sections: &pane_menu_sections,
             selected: 1,
@@ -11738,6 +11807,7 @@ mod tests {
             let frame = PaletteFrame {
                 layout_mode: PaletteLayoutMode::ContentFit,
                 query: Some(query),
+                query_focused: true,
                 chips: None,
                 sections: &sections,
                 selected: 0,
@@ -11979,6 +12049,7 @@ mod tests {
         let frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::ContentFit,
             query: Some(""),
+            query_focused: true,
             chips: None,
             sections: &sections,
             selected: 0,
@@ -12031,6 +12102,7 @@ mod tests {
             let frame = PaletteFrame {
                 layout_mode: PaletteLayoutMode::FixedHeight,
                 query: None,
+                query_focused: false,
                 chips: None,
                 sections: &sections,
                 selected: 0,
@@ -12144,6 +12216,7 @@ mod tests {
         let frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::ContentFit,
             query: Some(""),
+            query_focused: true,
             chips: None,
             sections: &sections,
             selected: 0,
@@ -12185,6 +12258,228 @@ mod tests {
         assert_eq!(hit, Some(0));
         let miss = palette_hit(&layout, sample_x, selected.y + layout.geom.row_pitch_px);
         assert_ne!(miss, Some(0));
+    }
+
+    fn space_menu_name(index: usize) -> String {
+        match index {
+            0 => "cairn".to_string(),
+            1 => "scorecard".to_string(),
+            2 => "rookrunner".to_string(),
+            3 => "Prismattyc".to_string(),
+            4 => "Codemap".to_string(),
+            5 => "Dogfood".to_string(),
+            other => format!("space-{other}"),
+        }
+    }
+
+    fn space_menu_rows(count: usize) -> Vec<crate::palette::PaletteRow> {
+        (0..count)
+            .map(|index| {
+                crate::palette::PaletteRow::plain(
+                    space_menu_name(index),
+                    "2 sessions".into(),
+                    String::new(),
+                )
+            })
+            .collect()
+    }
+
+    fn space_menu_spaces(count: usize) -> Vec<crate::palette::SpacePickerRow> {
+        (0..count)
+            .map(|index| crate::palette::SpacePickerRow {
+                name: space_menu_name(index),
+                sessions: 2,
+                saved_at_unix: index as u64,
+            })
+            .collect()
+    }
+
+    fn space_menu_frame<'a>(
+        sections: &'a [PaletteSection<'a>],
+        selected: usize,
+        scroll: usize,
+        focused: bool,
+    ) -> PaletteFrame<'a> {
+        PaletteFrame {
+            layout_mode: PaletteLayoutMode::FixedHeight,
+            query: Some(""),
+            query_focused: focused,
+            chips: None,
+            sections,
+            selected,
+            scroll,
+            detail: None,
+            footer: "Click or Enter open · Esc close · ↑↓/wheel move",
+        }
+    }
+
+    #[test]
+    fn space_menu_hits_rows_opens_on_click_and_outside_click_closes() {
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let theme = default_theme();
+        let width = 140 * font.cell_w;
+        let height = 42 * font.cell_h;
+        let short_rows = space_menu_rows(2);
+        let long_rows = space_menu_rows(40);
+        let short_sections = [PaletteSection {
+            header: "OPEN SPACE",
+            subtitle: "",
+            rows: &short_rows,
+        }];
+        let long_sections = [PaletteSection {
+            header: "OPEN SPACE",
+            subtitle: "",
+            rows: &long_rows,
+        }];
+        let short_frame = space_menu_frame(&short_sections, 0, 0, true);
+        let mut long_frame = space_menu_frame(&long_sections, 0, 0, true);
+        let short = palette_layout(&font, &short_frame, width, height).expect("short menu");
+        let long = palette_layout(&font, &long_frame, width, height).expect("long menu");
+        assert_eq!(
+            (short.panel_x, short.panel_y, short.panel_w, short.panel_h),
+            (long.panel_x, long.panel_y, long.panel_w, long.panel_h),
+            "the menu keeps one size when the list overflows"
+        );
+        assert!(
+            long.rows.len() < 40,
+            "the long list scrolls inside the panel"
+        );
+        let query = long.query_bounds.expect("search field");
+        let query_x = query.x + query.width / 2;
+        let query_y = query.y + query.height / 2;
+        assert_eq!(
+            space_menu_target(&long, query_x, query_y),
+            crate::palette::SpaceMenuTarget::Query
+        );
+        assert_eq!(
+            space_menu_target(&long, 0, 0),
+            crate::palette::SpaceMenuTarget::Outside
+        );
+        assert_eq!(
+            space_menu_target(&long, long.panel_x.saturating_sub(1), long.panel_y + 4),
+            crate::palette::SpaceMenuTarget::Outside
+        );
+        let header_y = long.list_viewport.y + long.geom.row_pitch_px / 2;
+        assert_eq!(
+            space_menu_target(&long, long.panel_x + 8, header_y),
+            crate::palette::SpaceMenuTarget::Inside,
+            "the section header is not a space row"
+        );
+
+        let spaces = space_menu_spaces(40);
+        let mut picker = crate::palette::SpacePicker::new(crate::palette::SpacePickerKind::Open);
+        picker.query_focused = false;
+        assert_eq!(
+            picker.pointer(space_menu_target(&long, query_x, query_y), &spaces),
+            crate::palette::SpacePickerVerdict::Consumed
+        );
+        assert!(picker.query_focused);
+        assert_eq!(
+            picker.pointer(
+                space_menu_target(&long, long.panel_x + 8, header_y),
+                &spaces
+            ),
+            crate::palette::SpacePickerVerdict::Consumed
+        );
+        let row = long.rows.iter().find(|row| row.global == 1).expect("row 1");
+        let row_x = long.panel_x + 8;
+        let row_y = row.y + long.geom.row_pitch_px / 2;
+        assert_eq!(
+            space_menu_target(&long, row_x, row_y),
+            crate::palette::SpaceMenuTarget::Row(1)
+        );
+        assert_eq!(
+            picker.pointer(crate::palette::SpaceMenuTarget::Row(1), &spaces),
+            crate::palette::SpacePickerVerdict::Open("scorecard".into())
+        );
+        let mut picker = crate::palette::SpacePicker::new(crate::palette::SpacePickerKind::Open);
+        assert_eq!(
+            picker.pointer(space_menu_target(&long, 0, 0), &spaces),
+            crate::palette::SpacePickerVerdict::Close
+        );
+
+        let mut plain = vec![pack_rgb(theme.default_bg); width * height];
+        let mut marked = plain.clone();
+        rasterize_palette(
+            &font,
+            &long_frame,
+            theme,
+            OverlaySurface::default(),
+            &mut plain,
+            width,
+            height,
+            FOCUS_BORDER_PALETTE[0].1,
+        );
+        long_frame.selected = 1;
+        rasterize_palette(
+            &font,
+            &long_frame,
+            theme,
+            OverlaySurface::default(),
+            &mut marked,
+            width,
+            height,
+            FOCUS_BORDER_PALETTE[0].1,
+        );
+        long_frame.selected = 0;
+        let selected_bg = pack_rgb(theme.selection_bg.unwrap_or(theme.default_fg));
+        let sample = row_y * width + row_x;
+        assert_ne!(plain[sample], selected_bg);
+        assert_eq!(
+            marked[sample], selected_bg,
+            "hover uses the keyboard selection highlight"
+        );
+
+        let mut frosted = gradient_backdrop(width, height);
+        long_frame.selected = 1;
+        rasterize_palette(
+            &font,
+            &long_frame,
+            theme,
+            OverlaySurface::from_window(0.72, 8, true),
+            &mut frosted,
+            width,
+            height,
+            FOCUS_BORDER_PALETTE[0].1,
+        );
+        long_frame.selected = 0;
+        assert_eq!(
+            frosted[sample], selected_bg,
+            "translucency keeps the row highlight opaque"
+        );
+
+        assert!(picker.scroll_by_wheel(
+            -((long.geom.row_pitch_px as i64) * 4 * 1_000),
+            long.geom.row_pitch_px,
+            long.shown,
+            spaces.len(),
+        ));
+        let mut scrolled = long_frame;
+        scrolled.scroll = picker.scroll;
+        scrolled.selected = picker.selected;
+        let scrolled_layout =
+            palette_layout(&font, &scrolled, width, height).expect("scrolled menu");
+        assert_eq!(scrolled_layout.panel_h, long.panel_h);
+        assert_eq!(scrolled_layout.start, picker.scroll);
+        let visible = scrolled_layout.rows[0];
+        assert!(visible.global > 0, "wheel reveals a later space");
+        assert_eq!(
+            space_menu_target(
+                &scrolled_layout,
+                scrolled_layout.panel_x + 8,
+                visible.y + scrolled_layout.geom.row_pitch_px / 2,
+            ),
+            crate::palette::SpaceMenuTarget::Row(visible.global)
+        );
+        assert_eq!(
+            picker.pointer(
+                crate::palette::SpaceMenuTarget::Row(visible.global),
+                &spaces
+            ),
+            crate::palette::SpacePickerVerdict::Open(space_menu_name(visible.global))
+        );
     }
 
     #[test]

@@ -137,6 +137,10 @@ fn move_palette_layout(
     }
     layout.list_viewport.x = shift(layout.list_viewport.x, dx);
     layout.list_viewport.y = shift(layout.list_viewport.y, dy);
+    if let Some(bounds) = layout.query_bounds.as_mut() {
+        bounds.x = shift(bounds.x, dx);
+        bounds.y = shift(bounds.y, dy);
+    }
     if let Some(detail_y) = layout.detail_y.as_mut() {
         *detail_y = shift(*detail_y, dy);
     }
@@ -196,8 +200,17 @@ pub(crate) fn palette(
         );
         graphite::fill_round_rect(buffer, width, query_rect, 6.0, tok.field, 255);
         let field_line = Rect::new(query_rect.x, query_rect.y, query_rect.w, 1);
-        graphite::fill_round_rect(buffer, width, field_line, 0.0, tok.field_line, 255);
-        let value = format!("Search  {query}|");
+        let rule = if frame.query_focused {
+            accent
+        } else {
+            tok.field_line
+        };
+        graphite::fill_round_rect(buffer, width, field_line, 0.0, rule, 255);
+        let value = if frame.query_focused {
+            format!("Search  {query}|")
+        } else {
+            format!("Search  {query}")
+        };
         draw_text(
             buffer,
             width,
@@ -1531,6 +1544,7 @@ mod tests {
         let small_frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::FixedHeight,
             query: Some("open"),
+            query_focused: true,
             chips: Some((&labels, 0)),
             sections: &small_sections,
             selected: 0,
@@ -1624,6 +1638,7 @@ mod tests {
         let frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::FixedHeight,
             query: Some(""),
+            query_focused: true,
             chips: None,
             sections: &sections,
             selected: 0,
@@ -1680,6 +1695,417 @@ mod tests {
             ),
             Some(PalettePointerTarget::Row(0))
         );
+    }
+
+    fn issue_space_rows(count: usize) -> Vec<PaletteRow> {
+        (0..count)
+            .map(|index| {
+                let name = match index {
+                    0 => "cairn".to_string(),
+                    1 => "scorecard".to_string(),
+                    2 => "rookrunner".to_string(),
+                    3 => "Prismattyc".to_string(),
+                    4 => "Codemap".to_string(),
+                    5 => "Dogfood".to_string(),
+                    _ => format!("space-{index}"),
+                };
+                PaletteRow::plain(name, "2 sessions".into(), String::new())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn graphite_space_menu_click_opens_and_outside_click_closes() {
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let chrome = graphite_chrome();
+        let rows = issue_space_rows(24);
+        let sections = [crate::raster::PaletteSection {
+            header: "OPEN SPACE",
+            subtitle: "",
+            rows: &rows,
+        }];
+        let frame = PaletteFrame {
+            layout_mode: PaletteLayoutMode::FixedHeight,
+            query: Some(""),
+            query_focused: true,
+            chips: None,
+            sections: &sections,
+            selected: 1,
+            scroll: 0,
+            detail: None,
+            footer: "Click or Enter open · Esc close",
+        };
+        let width = 1280;
+        let height = 800;
+        let mut opaque = vec![pack_argb(255, [16, 18, 22]); width * height];
+        let anchored = palette(
+            &font,
+            &graphite::DARK,
+            chrome,
+            [98, 168, 255],
+            &frame,
+            OverlaySurface::default(),
+            &mut opaque,
+            width,
+            height,
+            None,
+            Some((36, 52)),
+        )
+        .expect("anchored space menu");
+        let mut centered_buf = opaque.clone();
+        let centered = palette(
+            &font,
+            &graphite::DARK,
+            chrome,
+            [98, 168, 255],
+            &frame,
+            OverlaySurface::default(),
+            &mut centered_buf,
+            width,
+            height,
+            None,
+            None,
+        )
+        .expect("centered space menu");
+        assert_eq!(
+            (anchored.panel_w, anchored.panel_h),
+            (centered.panel_w, centered.panel_h)
+        );
+        assert_eq!((anchored.panel_x, anchored.panel_y), (36, 52));
+        let query = anchored.query_bounds.expect("search field");
+        assert_eq!(
+            raster::space_menu_target(&anchored, query.x + 8, query.y + query.height / 2),
+            crate::palette::SpaceMenuTarget::Query
+        );
+        let row = anchored
+            .rows
+            .iter()
+            .find(|row| row.global == 1)
+            .expect("scorecard");
+        let row_x = anchored.panel_x + 16;
+        let row_y = row.y + anchored.geom.row_pitch_px / 2;
+        assert_eq!(
+            raster::space_menu_target(&anchored, row_x, row_y),
+            crate::palette::SpaceMenuTarget::Row(1)
+        );
+        assert_eq!(
+            raster::space_menu_target(&anchored, 0, 0),
+            crate::palette::SpaceMenuTarget::Outside
+        );
+        let spaces: Vec<crate::palette::SpacePickerRow> = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| crate::palette::SpacePickerRow {
+                name: row.name.clone(),
+                sessions: 2,
+                saved_at_unix: index as u64,
+            })
+            .collect();
+        let mut picker = crate::palette::SpacePicker::new(crate::palette::SpacePickerKind::Open);
+        picker.query_focused = false;
+        assert_eq!(
+            picker.pointer(
+                raster::space_menu_target(&anchored, query.x + 8, query.y + 2),
+                &spaces
+            ),
+            crate::palette::SpacePickerVerdict::Consumed
+        );
+        assert!(picker.query_focused);
+        assert_eq!(
+            picker.pointer(raster::space_menu_target(&anchored, row_x, row_y), &spaces),
+            crate::palette::SpacePickerVerdict::Open("scorecard".into())
+        );
+        let mut picker = crate::palette::SpacePicker::new(crate::palette::SpacePickerKind::Open);
+        assert_eq!(
+            picker.pointer(raster::space_menu_target(&anchored, 0, 0), &spaces),
+            crate::palette::SpacePickerVerdict::Close
+        );
+
+        let backdrop = pack_argb(255, [210, 48, 32]);
+        let mut frosted = vec![backdrop; width * height];
+        palette(
+            &font,
+            &graphite::DARK,
+            chrome,
+            [98, 168, 255],
+            &frame,
+            OverlaySurface::from_window(0.72, 8, true),
+            &mut frosted,
+            width,
+            height,
+            None,
+            Some((36, 52)),
+        );
+        let sample = row_y * width + row_x;
+        assert_eq!(
+            frosted[sample], opaque[sample],
+            "the hovered row paints the same highlight through translucency"
+        );
+        assert_ne!(frosted[sample], backdrop);
+    }
+
+    fn write_space_menu_png(path: &std::path::Path, pixels: &[u32], width: usize, height: usize) {
+        let file = std::fs::File::create(path).expect("space menu still");
+        let mut encoder = png::Encoder::new(file, width as u32, height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        let mut rgba = vec![0u8; width * height * 4];
+        for (index, pixel) in pixels.iter().enumerate() {
+            rgba[index * 4] = ((pixel >> 16) & 0xff) as u8;
+            rgba[index * 4 + 1] = ((pixel >> 8) & 0xff) as u8;
+            rgba[index * 4 + 2] = (pixel & 0xff) as u8;
+            rgba[index * 4 + 3] = ((pixel >> 24) & 0xff) as u8;
+        }
+        writer.write_image_data(&rgba).expect("png data");
+    }
+
+    fn crop_panel(
+        src: &[u32],
+        stride: usize,
+        layout: &PaletteLayout,
+        pad: usize,
+    ) -> (Vec<u32>, usize, usize) {
+        let x0 = layout.panel_x.saturating_sub(pad);
+        let y0 = layout.panel_y.saturating_sub(pad);
+        let x1 = layout
+            .panel_x
+            .saturating_add(layout.panel_w)
+            .saturating_add(pad)
+            .min(stride);
+        let height = src.len() / stride;
+        let y1 = layout
+            .panel_y
+            .saturating_add(layout.panel_h)
+            .saturating_add(pad)
+            .min(height);
+        let width = x1.saturating_sub(x0);
+        let crop_h = y1.saturating_sub(y0);
+        let mut out = vec![0; width * crop_h];
+        for row in 0..crop_h {
+            let start = (y0 + row) * stride + x0;
+            out[row * width..(row + 1) * width].copy_from_slice(&src[start..start + width]);
+        }
+        (out, width, crop_h)
+    }
+
+    fn shot_rows() -> Vec<PaletteRow> {
+        let names = [
+            "cairn",
+            "scorecard",
+            "rookrunner",
+            "Prismattyc",
+            "Codemap",
+            "Dogfood",
+        ];
+        (0..18)
+            .map(|index| {
+                let name = names
+                    .get(index)
+                    .map(|name| (*name).to_string())
+                    .unwrap_or_else(|| format!("space-{index}"));
+                PaletteRow::plain(name, "2 sessions".into(), String::new())
+            })
+            .collect()
+    }
+
+    fn shot_backdrop(width: usize, height: usize, split: bool) -> Vec<u32> {
+        let warm = pack_argb(255, [48, 36, 28]);
+        let cool = pack_argb(255, [24, 36, 64]);
+        let red = pack_argb(255, [210, 48, 32]);
+        let blue = pack_argb(255, [32, 64, 210]);
+        (0..height)
+            .flat_map(|y| {
+                let color = if split {
+                    if y < height / 2 {
+                        red
+                    } else {
+                        blue
+                    }
+                } else if y < height / 2 {
+                    warm
+                } else {
+                    cool
+                };
+                std::iter::repeat_n(color, width)
+            })
+            .collect()
+    }
+
+    /// Still frames for issue #170. Set `PRISMATTYC_SPACE_MENU_SHOTS` to the
+    /// output directory. The menu is cropped with a margin so the fixed panel
+    /// and the backdrop around it stay visible.
+    #[test]
+    fn space_menu_stills_when_dump_is_set() {
+        let Some(dir) = std::env::var_os("PRISMATTYC_SPACE_MENU_SHOTS") else {
+            return;
+        };
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).expect("shot directory");
+        let rows = shot_rows();
+        let sections = [crate::raster::PaletteSection {
+            header: "OPEN SPACE",
+            subtitle: "",
+            rows: &rows,
+        }];
+        let footer = "Click or Enter open · Esc close · ↑↓/wheel move";
+        let width = 1280;
+        let height = 800;
+        let chrome = graphite_chrome();
+        let mut frame = PaletteFrame {
+            layout_mode: PaletteLayoutMode::FixedHeight,
+            query: Some(""),
+            query_focused: true,
+            chips: None,
+            sections: &sections,
+            selected: 1,
+            scroll: 0,
+            detail: None,
+            footer,
+        };
+
+        let mut graphite_plain = shot_backdrop(width, height, false);
+        let graphite_hover = palette(
+            &font,
+            &graphite::DARK,
+            chrome,
+            [98, 168, 255],
+            &frame,
+            OverlaySurface::default(),
+            &mut graphite_plain,
+            width,
+            height,
+            None,
+            Some((48, 64)),
+        )
+        .expect("graphite hover");
+        let (pixels, crop_w, crop_h) = crop_panel(&graphite_plain, width, &graphite_hover, 28);
+        write_space_menu_png(&dir.join("graphite-hover.png"), &pixels, crop_w, crop_h);
+
+        let mut graphite_frost = shot_backdrop(width, height, true);
+        let graphite_frosted = palette(
+            &font,
+            &graphite::DARK,
+            chrome,
+            [98, 168, 255],
+            &frame,
+            OverlaySurface::from_window(0.72, 8, true),
+            &mut graphite_frost,
+            width,
+            height,
+            None,
+            Some((48, 64)),
+        )
+        .expect("graphite translucent");
+        assert_eq!(
+            (graphite_frosted.panel_w, graphite_frosted.panel_h),
+            (graphite_hover.panel_w, graphite_hover.panel_h)
+        );
+        let (pixels, crop_w, crop_h) = crop_panel(&graphite_frost, width, &graphite_frosted, 28);
+        write_space_menu_png(
+            &dir.join("graphite-translucent.png"),
+            &pixels,
+            crop_w,
+            crop_h,
+        );
+
+        frame.scroll = 8;
+        frame.selected = 8;
+        let mut graphite_scrolled_buf = shot_backdrop(width, height, false);
+        let graphite_scrolled = palette(
+            &font,
+            &graphite::DARK,
+            chrome,
+            [98, 168, 255],
+            &frame,
+            OverlaySurface::default(),
+            &mut graphite_scrolled_buf,
+            width,
+            height,
+            None,
+            Some((48, 64)),
+        )
+        .expect("graphite scrolled");
+        assert_eq!(
+            (graphite_scrolled.panel_w, graphite_scrolled.panel_h),
+            (graphite_hover.panel_w, graphite_hover.panel_h),
+            "graphite menu keeps one size while the list scrolls"
+        );
+        assert!(graphite_scrolled.start > 0);
+        let (pixels, crop_w, crop_h) =
+            crop_panel(&graphite_scrolled_buf, width, &graphite_scrolled, 28);
+        write_space_menu_png(&dir.join("graphite-scrolled.png"), &pixels, crop_w, crop_h);
+
+        frame.scroll = 0;
+        frame.selected = 1;
+        let theme = crate::theme::default_theme();
+        let mut classic_plain = shot_backdrop(width, height, false);
+        let classic_hover = crate::raster::rasterize_palette(
+            &font,
+            &frame,
+            theme,
+            OverlaySurface::default(),
+            &mut classic_plain,
+            width,
+            height,
+            [98, 168, 255],
+        )
+        .expect("classic hover");
+        let (pixels, crop_w, crop_h) = crop_panel(&classic_plain, width, &classic_hover, 28);
+        write_space_menu_png(&dir.join("classic-hover.png"), &pixels, crop_w, crop_h);
+
+        let mut classic_frost = shot_backdrop(width, height, true);
+        let classic_frosted = crate::raster::rasterize_palette(
+            &font,
+            &frame,
+            theme,
+            OverlaySurface::from_window(0.72, 8, true),
+            &mut classic_frost,
+            width,
+            height,
+            [98, 168, 255],
+        )
+        .expect("classic translucent");
+        assert_eq!(
+            (classic_frosted.panel_w, classic_frosted.panel_h),
+            (classic_hover.panel_w, classic_hover.panel_h)
+        );
+        let (pixels, crop_w, crop_h) = crop_panel(&classic_frost, width, &classic_frosted, 28);
+        write_space_menu_png(
+            &dir.join("classic-translucent.png"),
+            &pixels,
+            crop_w,
+            crop_h,
+        );
+
+        frame.scroll = 8;
+        frame.selected = 8;
+        let mut classic_scrolled_buf = shot_backdrop(width, height, false);
+        let classic_scrolled = crate::raster::rasterize_palette(
+            &font,
+            &frame,
+            theme,
+            OverlaySurface::default(),
+            &mut classic_scrolled_buf,
+            width,
+            height,
+            [98, 168, 255],
+        )
+        .expect("classic scrolled");
+        assert_eq!(
+            (classic_scrolled.panel_w, classic_scrolled.panel_h),
+            (classic_hover.panel_w, classic_hover.panel_h),
+            "classic menu keeps one size while the list scrolls"
+        );
+        assert!(classic_scrolled.start > 0);
+        let (pixels, crop_w, crop_h) =
+            crop_panel(&classic_scrolled_buf, width, &classic_scrolled, 28);
+        write_space_menu_png(&dir.join("classic-scrolled.png"), &pixels, crop_w, crop_h);
     }
 
     #[test]
@@ -1768,6 +2194,7 @@ mod tests {
         let frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::FixedHeight,
             query: Some("settings"),
+            query_focused: true,
             chips: Some((&labels, 0)),
             sections: &sections,
             selected: 0,

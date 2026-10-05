@@ -106,7 +106,7 @@ use frame_damage::{
 };
 use palette::{
     ContextMenu, ContextMenuKind, ContextMenuVerdict, Palette, PaletteRow, PaletteVerdict,
-    SpacePicker, SpacePickerKind, SpacePickerRow, SpacePickerVerdict,
+    SpaceMenuTarget, SpacePicker, SpacePickerKind, SpacePickerRow, SpacePickerVerdict,
 };
 use prismattyc_core::{
     encode_osc52_clipboard, Color, GridDamage, HistoryMatch, Screen, ScrollDamage, Selection, Style,
@@ -130,11 +130,11 @@ use raster::{
     rasterize_screen_at_with_theme_options_filtered, rasterize_scroll_chip, rasterize_scrollbar,
     rasterize_space_rail, rasterize_splash, rasterize_tab_strip_with_theme, rasterize_theme_picker,
     rasterize_walkthrough_caption, scrollbar_layout, scrollbar_scroll_from_thumb_y,
-    scrollbar_thumb_y_for_pointer, set_rect_alpha, theme_picker_hit, theme_picker_visible_rows,
-    FontMetrics, OverlaySurface, PaletteFrame, PaletteLayout, PaletteLayoutMode,
-    PalettePointerTarget, PaletteSection, ScreenPaint, ScrollbarLayout, ThemePickerRow,
-    TitleRowStyle, DEFAULT_FOCUS_BORDER_INDEX, OPAQUE_ALPHA, THEME_PICKER_HINT_FAMILY,
-    THEME_PICKER_HINT_ROOT,
+    scrollbar_thumb_y_for_pointer, set_rect_alpha, space_menu_target, theme_picker_hit,
+    theme_picker_visible_rows, FontMetrics, OverlaySurface, PaletteFrame, PaletteLayout,
+    PaletteLayoutMode, PalettePointerTarget, PaletteSection, ScreenPaint, ScrollbarLayout,
+    ThemePickerRow, TitleRowStyle, DEFAULT_FOCUS_BORDER_INDEX, OPAQUE_ALPHA,
+    THEME_PICKER_HINT_FAMILY, THEME_PICKER_HINT_ROOT,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -1431,6 +1431,10 @@ enum HoverTarget {
     ThemePickerRow(usize),
     ThemePickerClose,
     ContextMenuRow(usize),
+    /// A row in the Spaces dropdown. The index matches keyboard selection.
+    SpaceMenuRow(usize),
+    /// The Spaces dropdown search field.
+    SpaceMenuQuery,
     DialogButton(usize),
     ToastDismiss(usize),
     /// A control in the transparency dialog. `dragging` is a slider or the
@@ -6691,6 +6695,7 @@ fn rasterize_frame(
         let frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::FixedHeight,
             query: Some(&palette.query),
+            query_focused: true,
             chips: Some((&chips, palette.chip_index())),
             sections: &sections,
             selected: palette.selected,
@@ -6786,7 +6791,10 @@ fn rasterize_frame(
                 "FIND TERMINAL",
                 "Type Space, terminal, or directory · Enter focus · Esc close",
             ),
-            SpacePickerKind::Open => ("OPEN SPACE", "Enter open · Esc close · ↑↓ move"),
+            SpacePickerKind::Open => (
+                "OPEN SPACE",
+                "Click or Enter open · Esc close · ↑↓/wheel move",
+            ),
             SpacePickerKind::Delete => ("DELETE SPACE", "Enter delete · Esc close · ↑↓ move"),
             SpacePickerKind::MovePane => ("MOVE PANE TO SPACE", "Enter move · Esc close · ↑↓ move"),
             SpacePickerKind::MoveSession => {
@@ -6829,6 +6837,7 @@ fn rasterize_frame(
         let frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::FixedHeight,
             query: Some(&query),
+            query_focused: picker.query_focused,
             chips: None,
             sections: &sections,
             selected: picker.selected,
@@ -6856,6 +6865,9 @@ fn rasterize_frame(
             picker.scroll = layout.start;
         }
         host.palette_layout = Some(layout);
+        if sync_chrome_hover(host) {
+            host.window.request_redraw();
+        }
     }
     let painted_context = if host.context_menu.is_some() {
         let focus = focus_border_rgb(host.focus_border);
@@ -6909,6 +6921,7 @@ fn rasterize_frame(
             let frame = PaletteFrame {
                 layout_mode,
                 query: None,
+                query_focused: false,
                 chips: None,
                 sections: &sections,
                 selected,
@@ -6959,6 +6972,7 @@ fn rasterize_frame(
         let frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::ContentFit,
             query: Some(&edit.buffer),
+            query_focused: true,
             chips: None,
             sections: &sections,
             selected: 0,
@@ -9509,8 +9523,7 @@ fn apply_palette_pointer(host: &mut HostState) {
         }
     }
     if let Some(picker) = host.space_picker.as_mut() {
-        if picker.selected != row {
-            picker.selected = row;
+        if picker.hover_row(row) {
             host.dirty = true;
         }
     }
@@ -9587,6 +9600,68 @@ fn scroll_palette_with_wheel(host: &mut HostState, delta: &MouseScrollDelta) -> 
         host.dirty = true;
     }
     changed
+}
+
+fn scroll_space_picker_with_wheel(host: &mut HostState, delta: &MouseScrollDelta) -> bool {
+    let Some((x, y)) = host
+        .pointer_px
+        .filter(|(x, y)| x.is_finite() && y.is_finite() && *x >= 0.0 && *y >= 0.0)
+    else {
+        return false;
+    };
+    let Some(layout) = host.palette_layout.as_ref() else {
+        return false;
+    };
+    let px = x as usize;
+    let py = y as usize;
+    let on_menu = px >= layout.panel_x
+        && px < layout.panel_x.saturating_add(layout.panel_w)
+        && py >= layout.panel_y
+        && py < layout.panel_y.saturating_add(layout.panel_h);
+    if !on_menu {
+        return false;
+    }
+    let row_pitch = layout.geom.row_pitch_px;
+    let visible = layout.shown;
+    let delta_milli_px = match delta {
+        MouseScrollDelta::LineDelta(_, rows) => {
+            (*rows as f64 * 3.0 * row_pitch as f64 * 1_000.0).round() as i64
+        }
+        MouseScrollDelta::PixelDelta(position) => (position.y * 1_000.0).round() as i64,
+    };
+    let Some(kind) = host.space_picker.as_ref().map(|picker| picker.kind) else {
+        return false;
+    };
+    let spaces = terminal_switcher::rows(host, kind);
+    let row_count = host
+        .space_picker
+        .as_ref()
+        .map(|picker| picker.ranked(&spaces).len())
+        .unwrap_or(0);
+    let changed = host.space_picker.as_mut().is_some_and(|picker| {
+        picker.scroll_by_wheel(delta_milli_px, row_pitch, visible, row_count)
+    });
+    if changed {
+        host.dirty = true;
+    }
+    changed
+}
+
+fn activate_space_menu_at_pointer(host: &mut HostState, pointer_x: usize, pointer_y: usize) {
+    let Some(kind) = host.space_picker.as_ref().map(|picker| picker.kind) else {
+        return;
+    };
+    let spaces = terminal_switcher::rows(host, kind);
+    let target = host
+        .palette_layout
+        .as_ref()
+        .map(|layout| space_menu_target(layout, pointer_x, pointer_y))
+        .unwrap_or(SpaceMenuTarget::Inside);
+    let Some(picker) = host.space_picker.as_mut() else {
+        return;
+    };
+    let verdict = picker.pointer(target, &spaces);
+    apply_space_picker_verdict(host, kind, verdict);
 }
 
 fn scroll_theme_picker_with_wheel(host: &mut HostState, delta: &MouseScrollDelta) -> bool {
@@ -9747,6 +9822,17 @@ fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
             PalettePointerTarget::Filter(index) => Some(HoverTarget::PaletteFilter(index)),
         };
     }
+    if host.space_picker.is_some() {
+        let (x, y) = host
+            .pointer_px
+            .filter(|(x, y)| x.is_finite() && y.is_finite() && *x >= 0.0 && *y >= 0.0)?;
+        let layout = host.palette_layout.as_ref()?;
+        return match space_menu_target(layout, x as usize, y as usize) {
+            SpaceMenuTarget::Row(row) => Some(HoverTarget::SpaceMenuRow(row)),
+            SpaceMenuTarget::Query => Some(HoverTarget::SpaceMenuQuery),
+            SpaceMenuTarget::Inside | SpaceMenuTarget::Outside => None,
+        };
+    }
     if host.context_menu.is_some() {
         let (x, y) = host
             .pointer_px
@@ -9890,6 +9976,8 @@ fn cursor_for_hover(
         }
     } else if strip_dragging || scrollbar_dragging || sidebar_thumb_dragging {
         CursorIcon::Grab
+    } else if matches!(hover, Some(HoverTarget::SpaceMenuQuery)) {
+        CursorIcon::Text
     } else if hyperlink
         || matches!(
             hover,
@@ -9903,6 +9991,7 @@ fn cursor_for_hover(
                 | Some(HoverTarget::ThemePickerRow(_))
                 | Some(HoverTarget::ThemePickerClose)
                 | Some(HoverTarget::ContextMenuRow(_))
+                | Some(HoverTarget::SpaceMenuRow(_))
                 | Some(HoverTarget::DialogButton(_))
                 | Some(HoverTarget::ToastDismiss(_))
                 | Some(HoverTarget::PaneHandle(_))
@@ -17170,6 +17259,7 @@ impl ApplicationHandler<UserAction> for App {
 
         if (host.theme_picker.is_some()
             || host.palette.is_some()
+            || host.space_picker.is_some()
             || host.context_menu.is_some()
             || host.splash.is_some())
             && matches!(
@@ -17199,6 +17289,8 @@ impl ApplicationHandler<UserAction> for App {
                         scroll_palette_with_wheel(host, delta);
                     } else if host.theme_picker.is_some() {
                         scroll_theme_picker_with_wheel(host, delta);
+                    } else if host.space_picker.is_some() {
+                        scroll_space_picker_with_wheel(host, delta);
                     } else {
                         apply_palette_pointer(host);
                     }
@@ -17249,6 +17341,17 @@ impl ApplicationHandler<UserAction> for App {
                             x.is_finite() && y.is_finite() && *x >= 0.0 && *y >= 0.0
                         }) {
                             activate_theme_picker_at_pointer(host, x as usize, y as usize);
+                        }
+                    }
+                    if host.space_picker.is_some()
+                        && host.palette.is_none()
+                        && *state == ElementState::Pressed
+                        && *button == MouseButton::Left
+                    {
+                        if let Some((x, y)) = host.pointer_px.filter(|(x, y)| {
+                            x.is_finite() && y.is_finite() && *x >= 0.0 && *y >= 0.0
+                        }) {
+                            activate_space_menu_at_pointer(host, x as usize, y as usize);
                         }
                     }
                     if host.context_menu.is_some()
@@ -23942,6 +24045,30 @@ session mail (id 15)
             cursor_for_hover(arrange, false, false, false, None, false),
             CursorIcon::Pointer,
             "sidebar buttons hover with the pointing hand"
+        );
+        assert_eq!(
+            cursor_for_hover(
+                Some(HoverTarget::SpaceMenuRow(1)),
+                false,
+                false,
+                false,
+                None,
+                false
+            ),
+            CursorIcon::Pointer,
+            "a space-menu row hovers with the pointing hand"
+        );
+        assert_eq!(
+            cursor_for_hover(
+                Some(HoverTarget::SpaceMenuQuery),
+                false,
+                false,
+                false,
+                None,
+                false
+            ),
+            CursorIcon::Text,
+            "the space-menu search field hovers with the text cursor"
         );
         for hover in [
             Some(HoverTarget::ThemePickerRow(0)),

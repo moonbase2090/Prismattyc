@@ -6312,15 +6312,34 @@ fn rasterize_frame(
         }
     }
     if let (Some(view), Some(band)) = (walkthrough_caption_view(host), walkthrough_band(host)) {
-        rasterize_walkthrough_caption(
-            &host.font,
-            &view,
-            band,
-            buffer,
-            width as usize,
-            host.theme.chrome_bg,
-            host.theme.chrome_fg,
-        );
+        if geom.chrome.graphite {
+            let hovered = match host.hover_target {
+                Some(HoverTarget::Caption(hit)) => hit,
+                _ => None,
+            };
+            graphite_overlays::walkthrough_caption(
+                &host.font,
+                geom.chrome,
+                host.theme.variant,
+                &view,
+                band,
+                host_overlay_surface(host),
+                buffer,
+                width as usize,
+                focus_border_rgb(host.focus_border),
+                hovered,
+            );
+        } else {
+            rasterize_walkthrough_caption(
+                &host.font,
+                &view,
+                band,
+                buffer,
+                width as usize,
+                host.theme.chrome_bg,
+                host.theme.chrome_fg,
+            );
+        }
     }
     // Drag toast (PT-79): "Moving tab NAME → tab OTHER" at the bottom-right,
     // above a bottom rail, so it never covers the strip or the drop target.
@@ -6712,15 +6731,31 @@ fn rasterize_frame(
             animation_ms,
             splash.resume,
         );
-        rasterize_splash(
-            &host.font,
-            &lines,
-            buffer,
-            width as usize,
-            height as usize,
-            host.theme.default_bg,
-            animation_ms,
-        );
+        if geom.chrome.graphite {
+            graphite_overlays::splash(
+                &host.font,
+                geom.chrome,
+                host.theme.variant,
+                splash.page,
+                &lines,
+                animation_ms,
+                host_overlay_surface(host),
+                buffer,
+                width as usize,
+                height as usize,
+                focus_border_rgb(host.focus_border),
+            );
+        } else {
+            rasterize_splash(
+                &host.font,
+                &lines,
+                buffer,
+                width as usize,
+                height as usize,
+                host.theme.default_bg,
+                animation_ms,
+            );
+        }
     }
     restore_prompt::paint(host, buffer, width as usize, height as usize);
     session_prompt::paint(host, buffer, width as usize, height as usize);

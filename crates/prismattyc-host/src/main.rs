@@ -9168,6 +9168,24 @@ fn space_rail_key_decision(
     SpaceRailKeyDecision::Key(key)
 }
 
+fn apply_space_reorder_key_gate(
+    decision: SpaceRailKeyDecision,
+    enabled: bool,
+) -> SpaceRailKeyDecision {
+    if enabled {
+        return decision;
+    }
+    match decision {
+        SpaceRailKeyDecision::Key(space_rail::RailKey::MovePrev) => {
+            SpaceRailKeyDecision::Key(space_rail::RailKey::Prev)
+        }
+        SpaceRailKeyDecision::Key(space_rail::RailKey::MoveNext) => {
+            SpaceRailKeyDecision::Key(space_rail::RailKey::Next)
+        }
+        other => other,
+    }
+}
+
 fn handle_space_rail_key(host: &mut HostState, event: &winit::event::KeyEvent) -> bool {
     let geom = host.mux.geom();
     let side = if geom.chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar {
@@ -9175,26 +9193,14 @@ fn handle_space_rail_key(host: &mut HostState, event: &winit::event::KeyEvent) -
     } else {
         geom.rail_side
     };
-    let shift_reorder = host.modifiers.shift_key()
-        && if side.horizontal() {
-            matches!(
-                event.logical_key,
-                Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight)
-            )
-        } else {
-            matches!(
-                event.logical_key,
-                Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown)
-            )
-        };
-    if shift_reorder && !host.space_reorder_enabled {
-        return false;
-    }
-    let decision = space_rail_key_decision(
-        host.space_rail.is_active(),
-        side,
-        host.modifiers,
-        &event.logical_key,
+    let decision = apply_space_reorder_key_gate(
+        space_rail_key_decision(
+            host.space_rail.is_active(),
+            side,
+            host.modifiers,
+            &event.logical_key,
+        ),
+        host.space_reorder_enabled,
     );
     match decision {
         SpaceRailKeyDecision::Unhandled => false,
@@ -11417,11 +11423,11 @@ fn paint_graphite_sidebar(
             }
         }
     }
-    let rows: Vec<graphite::SidebarRow> = visible
+    let painted_rows = graphite::sidebar_rows_in_view(&visible, &layout);
+    let rows: Vec<graphite::SidebarRow> = painted_rows
         .iter()
-        .zip(layout.rows.iter())
         .enumerate()
-        .map(|(index, (row, slot))| {
+        .map(|(slot_index, (row_index, row, slot))| {
             let space = &tree.spaces[row.space];
             graphite::SidebarRow {
                 slot: *slot,
@@ -11434,18 +11440,18 @@ fn paint_graphite_sidebar(
                     sidebar::RowKind::Space => Some(space.collapsed),
                     _ => None,
                 },
-                dot: dots[index],
-                label: labels[index].as_str(),
-                mail: mails[index],
+                dot: dots[*row_index],
+                label: labels[*row_index].as_str(),
+                mail: mails[*row_index],
                 needs_you: match row.kind {
                     sidebar::RowKind::Space => space.attention,
                     _ => 0,
                 },
-                selected: selected_tabs[index]
+                selected: selected_tabs[*row_index]
                     || row.kind == sidebar::RowKind::Space
                         && host.space_rail.keyboard
                         && host.space_rail.focus == Some(row.space),
-                hovered: hover_row == Some(index),
+                hovered: hover_row == Some(slot_index),
             }
         })
         .collect();
@@ -11509,10 +11515,9 @@ fn paint_graphite_sidebar(
     );
     // Hit state for the pointer handlers: painted rows with their tree
     // indices, buttons, viewport, and the row count behind the scroll.
-    host.sidebar_rows = visible
+    host.sidebar_rows = painted_rows
         .iter()
-        .zip(layout.rows.iter())
-        .map(|(row, slot)| (*slot, row.clone()))
+        .map(|(_, row, slot)| (*slot, (*row).clone()))
         .collect();
     host.sidebar_actions = layout.actions;
     host.sidebar_arrange = header.buttons;
@@ -18669,6 +18674,28 @@ mod tests {
                 "{active:?}, {side:?}, {key:?}"
             );
         }
+    }
+
+    #[test]
+    fn gated_off_space_reorder_keeps_shift_arrow_navigation() {
+        use space_rail::RailKey;
+
+        assert_eq!(
+            apply_space_reorder_key_gate(SpaceRailKeyDecision::Key(RailKey::MovePrev), false),
+            SpaceRailKeyDecision::Key(RailKey::Prev)
+        );
+        assert_eq!(
+            apply_space_reorder_key_gate(SpaceRailKeyDecision::Key(RailKey::MoveNext), false),
+            SpaceRailKeyDecision::Key(RailKey::Next)
+        );
+        assert_eq!(
+            apply_space_reorder_key_gate(SpaceRailKeyDecision::Key(RailKey::MovePrev), true),
+            SpaceRailKeyDecision::Key(RailKey::MovePrev)
+        );
+        assert_eq!(
+            apply_space_reorder_key_gate(SpaceRailKeyDecision::Leave, false),
+            SpaceRailKeyDecision::Leave
+        );
     }
 
     #[test]

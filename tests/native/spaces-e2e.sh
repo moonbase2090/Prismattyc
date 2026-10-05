@@ -179,6 +179,9 @@ EOF
 
 launch_host() {
   mkdir -p "$HOME/work"
+  if [[ -n "$PRESENT_DUMP" ]]; then
+    rm -f "$PRESENT_DUMP" "${PRESENT_DUMP%.png}.json"
+  fi
   ( cd "$HOME/work"
     env -u WAYLAND_DISPLAY COLORTERM=truecolor WINIT_UNIX_BACKEND=x11 DISPLAY="$DISPLAY" \
       PRISMATTYC_CONFIG="${ACTIVE_CONFIG:-$PARTIAL_CONFIG}" \
@@ -742,22 +745,47 @@ space_order_names() {
 }
 
 expect_space_order() {
-  local first="$1" second="$2" actual
-  actual="$(space_order_names | awk 'NR <= 2 { printf "%s%s", $1, NR == 1 ? " " : "" }')"
-  if [[ "$actual" == "$first $second" ]]; then
-    pass "pmux space ls order=$actual"
-  else
-    fail "pmux space ls order wanted '$first $second', got '$actual'"
-  fi
+  local first="$1" second="$2" actual=""
+  for _ in $(seq 1 40); do
+    actual="$(space_order_names | awk 'NR <= 2 { printf "%s%s", $1, NR == 1 ? " " : "" }')"
+    [[ "$actual" == "$first $second" ]] && {
+      pass "pmux space ls order=$actual"
+      return 0
+    }
+    sleep 0.1
+  done
+  fail "pmux space ls order wanted '$first $second', got '$actual'"
 }
 
 drag_space_to_after() {
   local moving="$1" target="$2" axis="$3" proof="$4"
-  local wid status_tmp coordinates start_x start_y target_x target_y prior_seq
+  local wid status_tmp coordinates start_x start_y target_x target_y prior_seq ready
   wid="$(find_host)"
   [[ -n "$wid" ]] || { fail "no host window for Space drag"; return 1; }
   status_tmp="$(mktemp)"
-  pmux render-status --json >"$status_tmp"
+  ready=0
+  for _ in $(seq 1 30); do
+    pmux render-status --json >"$status_tmp" 2>/dev/null || true
+    if python3 - "$status_tmp" "$moving" "$target" "$axis" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+moving, target, axis = sys.argv[2:]
+window = data.get("windows", [{}])[0]
+chips = window.get("sidebar_space_rows" if axis == "sidebar" else "space_chips", [])
+names = {chip.get("name") for chip in chips}
+raise SystemExit(0 if moving in names and target in names else 1)
+PY
+    then
+      ready=1
+      break
+    fi
+    sleep 0.2
+  done
+  if (( ! ready )); then
+    rm -f "$status_tmp"
+    fail "Space drag coordinates were not ready for $axis"
+    return 1
+  fi
   coordinates="$(python3 - "$status_tmp" "$moving" "$target" "$axis" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
@@ -793,11 +821,18 @@ PY
   activate
   xdotool mousemove --sync --window "$wid" "$start_x" "$start_y"
   xdotool mousedown 1
+  prior_seq="$(python3 - "${PRESENT_DUMP%.png}.json" <<'PY'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("seq", 0))
+except (FileNotFoundError, json.JSONDecodeError):
+    print(0)
+PY
+)"
   xdotool mousemove --sync --window "$wid" "$target_x" "$target_y"
-  sleep 0.35
-  if [[ -n "$PRESENT_DUMP" ]]; then
-    local saved_seq=0
-    for _ in $(seq 1 30); do
+  if [[ -n "$PRESENT_DUMP" && -n "$proof" ]]; then
+    local saved_seq=0 drag_active=0
+    for _ in $(seq 1 60); do
       saved_seq="$(python3 - "${PRESENT_DUMP%.png}.json" <<'PY'
 import json, sys
 try:
@@ -806,13 +841,34 @@ except (FileNotFoundError, json.JSONDecodeError):
     print(0)
 PY
 )"
-      (( saved_seq > prior_seq )) && break
+      pmux render-status --json >"$status_tmp" 2>/dev/null || true
+      drag_active="$(python3 - "$status_tmp" <<'PY'
+import json, sys
+try:
+    windows = json.load(open(sys.argv[1])).get("windows", [])
+    print(int(bool(windows and windows[0].get("space_reorder_drag_active"))))
+except (FileNotFoundError, json.JSONDecodeError):
+    print(0)
+PY
+)"
+      if (( saved_seq > prior_seq && drag_active )); then
+        break
+      fi
       sleep 0.1
     done
+    if (( saved_seq <= prior_seq || ! drag_active )); then
+      xdotool mouseup 1
+      rm -f "$status_tmp"
+      fail "did not observe an active $axis Space drag frame"
+      return 1
+    fi
     cp "$PRESENT_DUMP" "$proof"
     pass "captured $axis rail drag screenshot: $proof"
+  else
+    sleep 0.35
   fi
   xdotool mouseup 1
+  rm -f "$status_tmp"
   sleep 0.2
 }
 

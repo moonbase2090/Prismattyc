@@ -312,6 +312,14 @@ impl App {
                     "sidebar_space_rows".into(),
                     serde_json::Value::Array(sidebar_spaces),
                 );
+                status.insert(
+                    "space_reorder_drag_active".into(),
+                    serde_json::Value::Bool(
+                        host.space_reorder_drag
+                            .as_ref()
+                            .is_some_and(|drag| drag.active),
+                    ),
+                );
             }
             status
         }).collect();

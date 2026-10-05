@@ -1122,6 +1122,20 @@ fn macos_chord(action: Action) -> Option<&'static str> {
     })
 }
 
+/// Runtime defaults. macOS moves pane focus off Option+Left/Right unless
+/// `[keys]` sets those actions. [`default_chords`] itself stays portable
+/// because the config template is generated from it.
+fn platform_default_chords(action: Action, mac_platform: bool) -> Vec<&'static str> {
+    if mac_platform {
+        match action {
+            Action::FocusLeft => return vec!["ctrl+alt+left"],
+            Action::FocusRight => return vec!["ctrl+alt+right"],
+            _ => {}
+        }
+    }
+    default_chords(action)
+}
+
 /// Default chords per action (keybindings D-K1). Reproduces the chords shipped
 /// before user keybindings, including the macOS layout alternates.
 pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
@@ -1291,9 +1305,25 @@ impl KeyMap {
 
     /// Build defaults with optional macOS Command shortcuts, then apply
     /// per-action config overrides. Config entries replace all defaults.
+    /// The portable map keeps `alt+left` / `alt+right`. The live host passes
+    /// [`Self::from_config_with_platform`] so macOS can move focus off Option.
     pub fn from_config_with_macos(
         keys: Option<&BTreeMap<String, KeysValue>>,
         macos_shortcuts: bool,
+    ) -> Result<KeyMap, String> {
+        Self::from_config_with_platform(keys, macos_shortcuts, false)
+    }
+
+    /// Same as [`Self::from_config_with_macos`], plus the macOS runtime
+    /// overlay. When `mac_platform` is set and `[keys]` omits
+    /// `focus_left` / `focus_right`, those defaults become
+    /// `ctrl+alt+left` / `ctrl+alt+right` so Option+Left/Right can reach
+    /// the shell as word jumps. The generated template leaves those two
+    /// keys commented; a live `focus_left = "alt+left"` still pins Option.
+    pub fn from_config_with_platform(
+        keys: Option<&BTreeMap<String, KeysValue>>,
+        macos_shortcuts: bool,
+        mac_platform: bool,
     ) -> Result<KeyMap, String> {
         let mut bindings: Vec<(Action, Chord)> = Vec::new();
         let mut user_chords: Vec<(Action, Chord)> = Vec::new();
@@ -1311,7 +1341,7 @@ impl KeyMap {
                     }
                 }
                 None => {
-                    for text in default_chords(action) {
+                    for text in platform_default_chords(action, mac_platform) {
                         let chord = Chord::parse(text).expect("default chord parses");
                         bindings.push((action, chord));
                     }
@@ -2040,6 +2070,11 @@ mod tests {
         );
         assert_eq!(mac.spellings(Action::Quit), vec!["super+q"]);
         assert_eq!(
+            mac.spellings(Action::FocusLeft),
+            vec!["alt+left"],
+            "the portable macOS-shortcuts map does not move focus"
+        );
+        assert_eq!(
             mac.spellings(Action::IncreaseFontSize),
             vec!["shift+super+="]
         );
@@ -2059,6 +2094,72 @@ mod tests {
         assert!(custom.chords(Action::Copy).is_empty());
         assert!(custom.chords(Action::Quit).is_empty());
         assert_eq!(custom.spellings(Action::NewWindow), vec!["ctrl+alt+n"]);
+    }
+
+    #[test]
+    fn macos_platform_moves_horizontal_focus_off_option_unless_overridden() {
+        let mac = KeyMap::from_config_with_platform(None, false, true).unwrap();
+        assert_eq!(mac.spellings(Action::FocusLeft), vec!["ctrl+alt+left"]);
+        assert_eq!(mac.spellings(Action::FocusRight), vec!["ctrl+alt+right"]);
+        assert_eq!(mac.spellings(Action::FocusUp), vec!["alt+up"]);
+        assert_eq!(mac.spellings(Action::FocusDown), vec!["alt+down"]);
+        assert_eq!(mac.label(Action::FocusLeft), "C-A-Left");
+        let alt = mods(false, false, true, false);
+        let ctrl_alt = mods(true, false, true, false);
+        assert_eq!(
+            mac.action(
+                &Key::Named(NamedKey::ArrowLeft),
+                PhysicalKey::Code(KeyCode::ArrowLeft),
+                alt
+            ),
+            None,
+            "Option+Left is free for the shell word jump"
+        );
+        assert_eq!(
+            mac.action(
+                &Key::Named(NamedKey::ArrowLeft),
+                PhysicalKey::Code(KeyCode::ArrowLeft),
+                ctrl_alt
+            ),
+            Some(Action::FocusLeft)
+        );
+        assert_eq!(
+            mac.action(
+                &Key::Named(NamedKey::ArrowUp),
+                PhysicalKey::Code(KeyCode::ArrowUp),
+                alt
+            ),
+            Some(Action::FocusUp)
+        );
+
+        let linux = KeyMap::from_config_with_platform(None, false, false).unwrap();
+        assert_eq!(linux, KeyMap::default());
+        assert_eq!(linux.spellings(Action::FocusLeft), vec!["alt+left"]);
+
+        let keep =
+            KeyMap::from_config_with_platform(Some(&one("focus_left", "alt+left")), false, true)
+                .unwrap();
+        assert_eq!(keep.spellings(Action::FocusLeft), vec!["alt+left"]);
+        assert_eq!(keep.spellings(Action::FocusRight), vec!["ctrl+alt+right"]);
+        assert_eq!(
+            keep.action(
+                &Key::Named(NamedKey::ArrowLeft),
+                PhysicalKey::Code(KeyCode::ArrowLeft),
+                alt
+            ),
+            Some(Action::FocusLeft),
+            "an explicit [keys] entry still consumes Option+Left"
+        );
+
+        let conflict = BTreeMap::from([(
+            "split_right".to_string(),
+            KeysValue::One("ctrl+alt+left".into()),
+        )]);
+        let err = KeyMap::from_config_with_platform(Some(&conflict), false, true).unwrap_err();
+        assert!(
+            err.contains("focus_left") && err.contains("split_right"),
+            "{err}"
+        );
     }
 
     #[test]

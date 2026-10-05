@@ -541,6 +541,24 @@ fn emit_keys_table(out: &mut String) {
             out.push_str(&format!("# {name} = []\n"));
             continue;
         }
+        // These two defaults differ by OS. A live line would pin the portable
+        // chord on macOS, so Option+Left/Right would stay pane focus and the
+        // word-jump bytes would never be sent for anyone with a generated
+        // config. Leave them commented; the loader fills in the platform
+        // default. Uncommenting is an explicit pin.
+        if matches!(action, Action::FocusLeft | Action::FocusRight) {
+            let macos = match action {
+                Action::FocusLeft => "ctrl+alt+left",
+                Action::FocusRight => "ctrl+alt+right",
+                _ => unreachable!(),
+            };
+            out.push_str(&format!(
+                "# Commented so this file does not pin a chord. Linux uses {}; macOS uses {macos}. Uncomment to pin.\n",
+                chords[0]
+            ));
+            out.push_str(&format!("# {name} = \"{}\"\n", chords[0]));
+            continue;
+        }
         if chords.len() == 1 {
             let escaped = toml_edit::value(chords[0]).to_string();
             out.push_str(&format!("{name} = {escaped}\n"));
@@ -1188,17 +1206,41 @@ mod tests {
         assert!(!parsed.window_blur());
         assert!(parsed.font.is_none());
         assert!(parsed.background_image.is_none());
-        assert_eq!(parsed.loaded_keymap(), KeyMap::default());
+        assert_eq!(
+            parsed.loaded_keymap(),
+            KeyMap::from_config_with_platform(None, false, cfg!(target_os = "macos")).unwrap()
+        );
+        assert!(
+            template
+                .lines()
+                .any(|line| line == "# focus_left = \"alt+left\""),
+            "focus_left stays commented at the portable chord"
+        );
+        assert!(
+            template
+                .lines()
+                .any(|line| line == "# focus_right = \"alt+right\""),
+            "focus_right stays commented at the portable chord"
+        );
+        assert!(
+            !template
+                .lines()
+                .any(|line| line.starts_with("focus_left =") || line.starts_with("focus_right =")),
+            "a live focus_left/right line would pin Option on macOS"
+        );
         for action in Action::all() {
             let listed = parsed
                 .keys
                 .as_ref()
                 .is_some_and(|keys| keys.contains_key(&action.name()));
+            // focus_left/right are bound, but the template leaves them
+            // commented so macOS can apply ctrl+alt+left/right.
+            let platform_commented = matches!(action, Action::FocusLeft | Action::FocusRight);
             let bound = !keybind::default_chords(action).is_empty();
             assert_eq!(
                 listed,
-                bound,
-                "{}: bound actions are live keys; unbound ones stay commented",
+                bound && !platform_commented,
+                "{}: bound actions are live keys; unbound ones stay commented; focus_left/right stay commented",
                 action.name()
             );
             if !bound {

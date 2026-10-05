@@ -808,7 +808,9 @@ Direct mux keys: Ctrl+Shift+\\ or Ctrl+Shift+E  split right;
                  (accessibility, Mission Control). Use Ctrl+Alt+2…9.
                  Ctrl+Shift+1…9 still select tabs.
                  Ctrl+Shift+W close pane; Ctrl+Shift+X detach session;
-                 Alt+Arrow focus pane;
+                 Alt+Arrow focus pane on Linux. On macOS, Ctrl+Option+Arrow
+                 focuses a pane unless [keys] sets focus_left / focus_right,
+                 and Option+Left/Right jump by word (ESC b / ESC f).
                  Ctrl+Shift+] / Ctrl+Shift+[ cycle focus border color
                  forward / back (brand spectrum).
                  Ctrl+Shift+, open theme settings (preview + apply).
@@ -824,7 +826,9 @@ Config file:     ~/.config/prismattyc/config.toml (or $PRISMATTYC_CONFIG), hot-r
                  First run writes the full template when the file is missing.
 Bindings:        --list-bindings prints the effective actions and chords.
                  Cmd+Q and Cmd+N are available by default; macos_shortcuts = true
-                 adds Cmd+T/W/C/V/A/F/K and Cmd+Plus/Minus/0 actions.
+                 adds Cmd+T/W/C/V/A/F/K and Cmd+Plus/Minus/0 actions. On macOS
+                 that flag also makes Cmd+Left/Right send ^A/^E and
+                 Cmd+Backspace send ^U.
                  [keys] rebinds or disables any action.
                  --write-config [PATH] prints (PATH omitted or -) or writes it;
                  --write-config --merge appends missing keys to an existing file.
@@ -17607,8 +17611,14 @@ impl ApplicationHandler<UserAction> for App {
                     event.physical_key,
                     text,
                     host.modifiers,
-                    host.emulator.keyboard_flags(),
-                    host.emulator.modify_other_keys(),
+                    keys::KeyModes {
+                        kitty_flags: host.emulator.keyboard_flags(),
+                        modify_other_keys: host.emulator.modify_other_keys(),
+                        cursor_keys_app: host.emulator.cursor_keys_app(),
+                        mac_line_edit: cfg!(target_os = "macos")
+                            && self.file_config.macos_shortcuts(),
+                        mac_word_jump: cfg!(target_os = "macos"),
+                    },
                 ) {
                     let _ = host.try_send_bytes(bytes);
                 }

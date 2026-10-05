@@ -245,9 +245,11 @@ close_pane = "ctrl+shift+w"
 # detach this session view (last tab exits).
 detach = "ctrl+shift+x"
 # focus the pane to the left.
-focus_left = "alt+left"
+# Commented so this file does not pin a chord. Linux uses alt+left; macOS uses ctrl+alt+left. Uncomment to pin.
+# focus_left = "alt+left"
 # focus the pane to the right.
-focus_right = "alt+right"
+# Commented so this file does not pin a chord. Linux uses alt+right; macOS uses ctrl+alt+right. Uncomment to pin.
+# focus_right = "alt+right"
 # focus the pane above.
 focus_up = "alt+up"
 # focus the pane below.
@@ -762,6 +764,32 @@ Cmd+Shift+= (larger font), Cmd+- (smaller font), and Cmd+0 (reset font size). Us
 overrides. An explicit `[keys]` entry that drops its Command chord keeps only
 the listed chords; the host prints a warning naming the suppressed shortcut
 so it can be added back as an alias. `[]` unbinds without warning.
+
+On macOS, with `macos_shortcuts = true`, Cmd+Left and Cmd+Right send `^A` and
+`^E` (line start and end) and Cmd+Backspace sends `^U`. The flag stays off by
+default. Those three are bytes for the shell, not host actions, so they do
+not appear in `[keys]`.
+
+Home, End, and the arrow keys follow DECCKM. When the child turns application
+cursor mode on (`CSI ? 1 h`, which `smkx` sends), unmodified keys use SS3
+(`ESC O H`, `ESC O F`, `ESC O A` through `ESC O D`). Otherwise they use CSI
+(`ESC [ H`, `ESC [ F`, `ESC [ A` through `ESC [ D`). A modifier keeps the
+xterm CSI form `ESC [ 1 ; mod letter` whether or not DECCKM is on. Kitty
+keyboard disambiguate also keeps the CSI form. Page Up, Page Down, Delete,
+Insert, and the function keys are unchanged.
+
+On macOS the runtime default for `focus_left` and `focus_right` is
+`ctrl+alt+left` and `ctrl+alt+right` (Ctrl+Option+Left / Ctrl+Option+Right)
+when `[keys]` does not set those actions. The generated template leaves
+both keys commented, so a fresh config follows that default and
+Option+Left / Option+Right reach the shell as word jumps (`ESC b` and
+`ESC f`), matching Terminal.app and iTerm2. Linux uses `alt+left` and
+`alt+right` when those keys are absent. Focus up and down stay
+Option+Up and Option+Down, and those lines stay live in the template.
+Uncommenting a line pins it on every OS: `focus_left = "alt+left"` focuses
+the pane and does not send `ESC b`. A config written by an older build has
+those two lines live at the portable chords; comment them out to follow
+the platform default.
 
 Any action can be rebound by its name in `[keys]`; a string binds one chord,
 an array binds aliases, and `[]` disables it. The list command shows actions

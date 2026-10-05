@@ -343,9 +343,13 @@ impl ConfigFile {
     }
 
     pub fn loaded_keymap(&self) -> crate::keybind::KeyMap {
-        crate::keybind::KeyMap::from_config_with_macos(
+        // macOS moves focus_left/right to Ctrl+Option+arrows unless [keys]
+        // sets them. The generated template leaves those two keys commented
+        // so this overlay applies to a fresh config on every OS.
+        crate::keybind::KeyMap::from_config_with_platform(
             self.keys.as_ref(),
             self.macos_shortcuts.unwrap_or(false),
+            cfg!(target_os = "macos"),
         )
         .unwrap_or_else(|_| crate::keybind::KeyMap::default())
     }
@@ -768,13 +772,12 @@ fn parse(raw: &str, path: &Path) -> Result<ConfigFile> {
             "panes {panes} outside 1..={MAX_INITIAL_PANES}"
         );
     }
-    if let Some(keys) = config.keys.as_ref() {
-        crate::keybind::KeyMap::from_config_with_macos(Some(keys), config.macos_shortcuts())
-            .map_err(|e| anyhow::anyhow!(e))?;
-    } else if config.macos_shortcuts() {
-        crate::keybind::KeyMap::from_config_with_macos(None, true)
-            .map_err(|e| anyhow::anyhow!(e))?;
-    }
+    crate::keybind::KeyMap::from_config_with_platform(
+        config.keys.as_ref(),
+        config.macos_shortcuts(),
+        cfg!(target_os = "macos"),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     for (name, value) in [
         ("window_padding_px", config.window_padding_px),
         ("pane_gap_px", config.pane_gap_px),
@@ -1074,7 +1077,12 @@ mod tests {
         );
         assert_eq!(
             ConfigFile::default().loaded_keymap(),
-            crate::keybind::KeyMap::default()
+            crate::keybind::KeyMap::from_config_with_platform(
+                None,
+                false,
+                cfg!(target_os = "macos")
+            )
+            .unwrap()
         );
         for bad in [
             "[keys]\nsplit_rite = \"ctrl+alt+enter\"\n",

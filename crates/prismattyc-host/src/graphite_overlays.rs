@@ -9,7 +9,7 @@ use crate::mux::ChromeGeom;
 use crate::raster::{
     self, FontMetrics, OverlaySurface, PaletteFrame, PaletteLayout, PaletteLine, ThemePickerRow,
 };
-use crate::theme::{Theme, ThemeVariant};
+use crate::theme::Theme;
 
 const PALETTE_RADIUS: f32 = 10.0;
 const THEME_DIALOG_W: f32 = 760.0;
@@ -18,13 +18,6 @@ const THEME_HEADER_H: f32 = 56.0;
 const THEME_FOOTER_H: f32 = 52.0;
 const THEME_PAD: f32 = 16.0;
 const THEME_ROW_H: f32 = 38.0;
-
-fn panel_color(variant: ThemeVariant) -> [u8; 3] {
-    match variant {
-        ThemeVariant::Dark => [0x18, 0x1b, 0x21],
-        ThemeVariant::Light => [0xff, 0xff, 0xff],
-    }
-}
 
 #[allow(clippy::too_many_arguments)]
 fn draw_text(
@@ -56,10 +49,9 @@ fn draw_panel(
     buffer: &mut [u32],
     stride: usize,
     panel: Rect,
-    variant: ThemeVariant,
+    tok: &graphite::Tokens,
     surface: OverlaySurface,
 ) {
-    let tok = graphite::tokens(variant);
     let shadow = Rect::new(
         panel.x.saturating_add(4),
         panel.y.saturating_add(6),
@@ -105,7 +97,7 @@ fn draw_panel(
         inner.w,
         inner.h,
         PALETTE_RADIUS - 1.0,
-        panel_color(variant),
+        tok.panel,
         surface,
     );
 }
@@ -157,7 +149,7 @@ fn move_palette_layout(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn palette(
     font: &FontMetrics,
-    variant: ThemeVariant,
+    tok: &graphite::Tokens,
     chrome: ChromeGeom,
     focus_rgb: [u8; 3],
     frame: &PaletteFrame<'_>,
@@ -172,7 +164,6 @@ pub(crate) fn palette(
     if let Some((left, top)) = anchor {
         move_palette_layout(&mut layout, left, top, width, height);
     }
-    let tok = graphite::tokens(variant);
     let accent = graphite::accent(tok, focus_rgb);
     let x = layout.panel_x;
     let y = layout.panel_y;
@@ -190,7 +181,7 @@ pub(crate) fn palette(
         buffer,
         width,
         Rect::new(x, y, layout.panel_w, layout.panel_h),
-        variant,
+        tok,
         surface,
     );
 
@@ -645,7 +636,7 @@ pub(crate) fn theme_picker_hit(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn theme_picker(
     chrome: ChromeGeom,
-    variant: ThemeVariant,
+    tok: &graphite::Tokens,
     rows: &[ThemePickerRow<'_>],
     selected: Option<usize>,
     scroll: usize,
@@ -660,10 +651,9 @@ pub(crate) fn theme_picker(
     hovered_close: bool,
 ) -> Option<ThemePickerLayout> {
     let layout = theme_picker_layout(chrome, rows.len(), scroll, width, height)?;
-    let tok = graphite::tokens(variant);
     let accent = graphite::accent(tok, focus_rgb);
     let panel = layout.panel;
-    draw_panel(buffer, width, panel, variant, surface);
+    draw_panel(buffer, width, panel, tok, surface);
     let pad = chrome.px(THEME_PAD);
     let text_x = panel.x.saturating_add(pad);
     let text_right = panel.right().saturating_sub(pad);
@@ -846,7 +836,7 @@ pub(crate) fn theme_picker(
 /// Paint small host feedback chips with the opaque Graphite text treatment.
 pub(crate) fn toast(
     chrome: ChromeGeom,
-    variant: ThemeVariant,
+    tok: &graphite::Tokens,
     label: &str,
     rect: Rect,
     buffer: &mut [u32],
@@ -855,7 +845,6 @@ pub(crate) fn toast(
     if rect.w == 0 || rect.h == 0 {
         return;
     }
-    let tok = graphite::tokens(variant);
     graphite::fill_round_rect(buffer, stride, rect, 6.0, tok.tab_active, 255);
     graphite::fill_round_rect(
         buffer,
@@ -892,7 +881,7 @@ pub(crate) fn toast(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn find_prompt(
     chrome: ChromeGeom,
-    variant: ThemeVariant,
+    tok: &graphite::Tokens,
     label: &str,
     rect: Rect,
     buffer: &mut [u32],
@@ -901,7 +890,6 @@ pub(crate) fn find_prompt(
     if rect.w == 0 || rect.h == 0 {
         return;
     }
-    let tok = graphite::tokens(variant);
     graphite::fill_round_rect(buffer, stride, rect, 5.0, tok.field, 255);
     graphite::fill_round_rect(
         buffer,
@@ -966,7 +954,7 @@ pub(crate) struct LegendPaint {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn legend(
     chrome: ChromeGeom,
-    variant: ThemeVariant,
+    tok: &graphite::Tokens,
     text: &str,
     buffer: &mut [u32],
     stride: usize,
@@ -977,7 +965,6 @@ pub(crate) fn legend(
     if stride == 0 || bottom == 0 || rows == 0 {
         return;
     }
-    let tok = graphite::tokens(variant);
     let row_h = chrome.px(22.0).max(16);
     let h = row_h.saturating_mul(rows).min(bottom);
     let y = bottom.saturating_sub(h);
@@ -1075,7 +1062,7 @@ fn legend_run_width(run: &LegendRun, metrics: &LegendMetrics) -> f32 {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn legend_keys(
     chrome: ChromeGeom,
-    variant: ThemeVariant,
+    tok: &graphite::Tokens,
     runs: &[LegendRun],
     buffer: &mut [u32],
     stride: usize,
@@ -1089,7 +1076,6 @@ pub(crate) fn legend_keys(
             captions: Vec::new(),
         };
     }
-    let tok = graphite::tokens(variant);
     let row_h = chrome.px(22.0).max(16);
     let bar_h = row_h.saturating_mul(rows).min(bottom);
     let y = bottom.saturating_sub(bar_h);
@@ -1204,8 +1190,7 @@ pub(crate) fn legend_keys(
     LegendPaint { chips, captions }
 }
 
-fn splash_ink(ink: [u8; 3], art: bool, variant: ThemeVariant, accent: graphite::Rgb) -> [u8; 3] {
-    let tok = graphite::tokens(variant);
+fn splash_ink(ink: [u8; 3], art: bool, tok: &graphite::Tokens, accent: graphite::Rgb) -> [u8; 3] {
     if art {
         return if ink == prismattyc_core::splash::INK {
             tok.text_strong
@@ -1254,7 +1239,7 @@ fn splash_line_style(
 pub(crate) fn splash(
     font: &FontMetrics,
     chrome: ChromeGeom,
-    variant: ThemeVariant,
+    tok: &graphite::Tokens,
     page: crate::splash::Page,
     lines: &[Vec<crate::splash::Span>],
     animation_ms: Option<u64>,
@@ -1267,8 +1252,6 @@ pub(crate) fn splash(
     if stride == 0 || height == 0 || font.cell_h == 0 {
         return;
     }
-
-    let tok = graphite::tokens(variant);
     let accent = graphite::accent(tok, focus_rgb);
     raster::paint_overlay_surface_rounded(
         buffer, stride, 0, 0, stride, height, 0.0, tok.ground, surface,
@@ -1317,7 +1300,7 @@ pub(crate) fn splash(
                 face,
                 px,
                 text,
-                splash_ink(*ink, index < art_rows, variant, accent),
+                splash_ink(*ink, index < art_rows, tok, accent),
                 x0,
                 stride,
             );
@@ -1332,7 +1315,7 @@ pub(crate) fn splash(
                     .map(|(text, ink)| {
                         (
                             text.clone(),
-                            splash_ink(*ink, index < art_rows, variant, accent),
+                            splash_ink(*ink, index < art_rows, tok, accent),
                         )
                     })
                     .collect()
@@ -1348,7 +1331,7 @@ pub(crate) fn splash(
 pub(crate) fn walkthrough_caption(
     font: &FontMetrics,
     chrome: ChromeGeom,
-    variant: ThemeVariant,
+    tok: &graphite::Tokens,
     view: &crate::walkthrough::CaptionView,
     band: crate::walkthrough::CaptionBand,
     surface: OverlaySurface,
@@ -1366,14 +1349,12 @@ pub(crate) fn walkthrough_caption(
         buffer,
         stride,
         Rect::new(band.x, band.y, band.w, band.h),
-        variant,
+        tok,
         OverlaySurface {
             opacity: surface.opacity * caption_opacity,
             blur_radius: surface.blur_radius,
         },
     );
-
-    let tok = graphite::tokens(variant);
     let accent = graphite::accent(tok, focus_rgb);
     let px = chrome.px(12.0).max(10) as f32;
     let small_px = chrome.px(10.5).max(9) as f32;
@@ -1406,7 +1387,7 @@ pub(crate) fn walkthrough_caption(
     paint_caption_button(
         buffer,
         stride,
-        variant,
+        tok,
         band.dismiss,
         "×",
         crate::walkthrough::CaptionHit::Dismiss,
@@ -1443,7 +1424,7 @@ pub(crate) fn walkthrough_caption(
         paint_caption_button(
             buffer,
             stride,
-            variant,
+            tok,
             rect,
             crate::walkthrough::SHOW_ME_LABEL,
             crate::walkthrough::CaptionHit::ShowMe,
@@ -1456,7 +1437,7 @@ pub(crate) fn walkthrough_caption(
         paint_caption_button(
             buffer,
             stride,
-            variant,
+            tok,
             rect,
             crate::walkthrough::SKIP_LABEL,
             crate::walkthrough::CaptionHit::Skip,
@@ -1471,7 +1452,7 @@ pub(crate) fn walkthrough_caption(
 fn paint_caption_button(
     buffer: &mut [u32],
     stride: usize,
-    variant: ThemeVariant,
+    tok: &graphite::Tokens,
     rect: crate::walkthrough::CaptionRect,
     label: &str,
     target: crate::walkthrough::CaptionHit,
@@ -1479,7 +1460,6 @@ fn paint_caption_button(
     accent: graphite::Rgb,
     px: f32,
 ) {
-    let tok = graphite::tokens(variant);
     let rect = Rect::new(rect.x, rect.y, rect.w, rect.h);
     if hovered == Some(target) {
         graphite::fill_round_rect(buffer, stride, rect, 4.0, tok.tab_hover, 255);
@@ -1508,6 +1488,7 @@ mod tests {
     use super::*;
     use crate::palette::PaletteRow;
     use crate::raster::{pack_argb, PaletteLayoutMode, PalettePointerTarget};
+    use crate::theme::ThemeVariant;
 
     fn graphite_chrome() -> ChromeGeom {
         ChromeGeom {
@@ -1564,7 +1545,7 @@ mod tests {
         let mut buffer = vec![pack_argb(255, [40, 40, 40]); 1280 * 800];
         let small_layout = palette(
             &font,
-            ThemeVariant::Dark,
+            &graphite::DARK,
             chrome,
             [98, 168, 255],
             &small_frame,
@@ -1578,7 +1559,7 @@ mod tests {
         .expect("small palette fits");
         let many_layout = palette(
             &font,
-            ThemeVariant::Dark,
+            &graphite::DARK,
             chrome,
             [98, 168, 255],
             &many_frame,
@@ -1653,7 +1634,7 @@ mod tests {
         let mut buffer = vec![pack_argb(255, [24, 27, 33]); 1280 * 800];
         let centered = palette(
             &font,
-            ThemeVariant::Dark,
+            &graphite::DARK,
             chrome,
             [98, 168, 255],
             &frame,
@@ -1667,7 +1648,7 @@ mod tests {
         .expect("centered palette");
         let anchored = palette(
             &font,
-            ThemeVariant::Dark,
+            &graphite::DARK,
             chrome,
             [98, 168, 255],
             &frame,
@@ -1804,7 +1785,7 @@ mod tests {
             let mut buffer = vec![pack_argb(255, [220, 32, 32]); 1280 * 800];
             let palette_layout = palette(
                 &font,
-                variant,
+                graphite::tokens(variant),
                 chrome,
                 [98, 168, 255],
                 &frame,
@@ -1822,7 +1803,7 @@ mod tests {
             assert!(palette_layout.panel_w > 0 && palette_layout.panel_h > 0);
             let picker_layout = theme_picker(
                 chrome,
-                variant,
+                graphite::tokens(variant),
                 &rows,
                 Some(4),
                 0,
@@ -1867,7 +1848,7 @@ mod tests {
         splash(
             &font,
             chrome,
-            ThemeVariant::Dark,
+            &graphite::DARK,
             page,
             &lines,
             Some(animation_ms),
@@ -1886,7 +1867,7 @@ mod tests {
         splash(
             &font,
             chrome,
-            ThemeVariant::Light,
+            &graphite::LIGHT,
             page,
             &lines,
             None,
@@ -1906,7 +1887,7 @@ mod tests {
         splash(
             &font,
             chrome,
-            ThemeVariant::Dark,
+            &graphite::DARK,
             page,
             &lines,
             Some(animation_ms + 1_500),
@@ -1951,7 +1932,7 @@ mod tests {
         walkthrough_caption(
             &font,
             chrome,
-            ThemeVariant::Dark,
+            &graphite::DARK,
             &view,
             band,
             OverlaySurface {
@@ -1972,7 +1953,7 @@ mod tests {
         );
         let expected_panel = raster::mix_rgb(
             shadow_rgb,
-            panel_color(ThemeVariant::Dark),
+            graphite::DARK.panel,
             raster::opacity_to_weight(surface_opacity),
         );
         assert_eq!(
@@ -1985,7 +1966,7 @@ mod tests {
         walkthrough_caption(
             &font,
             chrome,
-            ThemeVariant::Dark,
+            &graphite::DARK,
             &view,
             band,
             OverlaySurface {
@@ -2006,7 +1987,7 @@ mod tests {
         walkthrough_caption(
             &font,
             chrome,
-            ThemeVariant::Light,
+            &graphite::LIGHT,
             &view,
             band,
             OverlaySurface::default(),
@@ -2040,7 +2021,7 @@ mod tests {
         let mut buffer = vec![pack_argb(255, [255, 0, 0]); stride * height];
         let paint = legend_keys(
             graphite_chrome(),
-            variant,
+            graphite::tokens(variant),
             &focus_and_bar_runs(),
             &mut buffer,
             stride,
@@ -2163,7 +2144,7 @@ mod tests {
         let mut buffer = vec![pack_argb(255, [255, 0, 0]); stride * height];
         legend(
             graphite_chrome(),
-            ThemeVariant::Dark,
+            &graphite::DARK,
             " Prismattyc [1] | C-S-[/] color | C-S-B bars | Alt+arrow",
             &mut buffer,
             stride,

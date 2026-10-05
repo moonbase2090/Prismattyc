@@ -125,7 +125,7 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey {
         name: "bar_color",
         group: ConfigGroup::Appearance,
-        doc: "Graphite bar background: graphite, harbor, moss, or plum (Sand on light themes)",
+        doc: "Graphite bar background: omit to follow the theme, or graphite, harbor, moss, or plum (Sand on light themes)",
         range: "graphite|harbor|moss|plum",
         value: ConfigValue::CommentedString("graphite"),
     },
@@ -1135,7 +1135,7 @@ mod tests {
         assert!(!template.lines().any(|line| line.starts_with("layout =")));
         let classic = load_from_str("chrome_style = \"classic\"\n");
         assert_eq!(classic.chrome_style(), crate::config::ChromeStyle::Classic);
-        assert_eq!(parsed.bar_color(), crate::config::BarColor::Graphite);
+        assert_eq!(parsed.bar_color, None, "bars follow the theme");
         assert_eq!(parsed.pane_titles(), crate::config::PaneTitlesMode::Focused);
         assert!(parsed.splash());
         assert_eq!(parsed.splash, Some(true));

@@ -1392,7 +1392,7 @@ mod layout_tests {
         assert!(raw.contains("layout = \"sidebar\""), "{raw}");
         let loaded = config::load(&path).unwrap();
         assert_eq!(loaded.layout(), LayoutMode::Sidebar);
-        assert_eq!(loaded.bar_color(), config::BarColor::Moss);
+        assert_eq!(loaded.bar_color, Some(config::BarColor::Moss));
         save_layout(&path, LayoutMode::Bars).unwrap();
         assert_eq!(config::load(&path).unwrap().layout(), LayoutMode::Bars);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1411,7 +1411,7 @@ mod layout_tests {
             scale_milli: 1_000,
         };
         let (width, height) = (1200, 800);
-        let paint = |panel: &Panel, variant| {
+        let paint = |panel: &Panel, variant: theme::ThemeVariant| {
             let rows: Vec<PaletteRow> = panel
                 .rows
                 .iter()
@@ -1439,7 +1439,7 @@ mod layout_tests {
             let mut buffer = vec![crate::raster::pack_argb(255, [32, 36, 44]); width * height];
             let layout = graphite_overlays::palette(
                 &font,
-                variant,
+                crate::graphite::tokens(variant),
                 chrome,
                 [0x5b, 0x9b, 0xff],
                 &frame,

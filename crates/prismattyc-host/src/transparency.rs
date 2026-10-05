@@ -894,7 +894,7 @@ pub(crate) fn paint(
     buffer: &mut [u32],
     stride: usize,
     height: usize,
-    variant: ThemeVariant,
+    tok: &graphite::Tokens,
     dialog: &Dialog,
     layout: &Layout,
 ) {
@@ -902,12 +902,7 @@ pub(crate) fn paint(
         return;
     }
     dim(buffer, stride, height);
-    let tok = graphite::tokens(variant);
-    let card = if variant == ThemeVariant::Light {
-        [0xff, 0xff, 0xff]
-    } else {
-        [0x18, 0x1b, 0x21]
-    };
+    let card = tok.panel;
     graphite::fill_round_rect(
         buffer,
         stride,
@@ -924,7 +919,7 @@ pub(crate) fn paint(
     graphite::fill_round_rect(buffer, stride, layout.dialog, RADIUS, card, 255);
     let accent = graphite::accent(
         tok,
-        if variant == ThemeVariant::Light {
+        if tok.variant == ThemeVariant::Light {
             [0x2f, 0x6f, 0xd0]
         } else {
             [0x5a, 0xa2, 0xff]
@@ -932,7 +927,7 @@ pub(crate) fn paint(
     );
     paint_header(buffer, stride, tok, dialog, layout, card);
     paint_list(buffer, stride, height, tok, accent, dialog, layout, card);
-    paint_preview(buffer, stride, height, variant, tok, accent, dialog, layout);
+    paint_preview(buffer, stride, height, tok, accent, dialog, layout);
     paint_footer(buffer, stride, tok, dialog, layout);
 }
 
@@ -1497,7 +1492,6 @@ fn paint_preview(
     buffer: &mut [u32],
     stride: usize,
     height: usize,
-    variant: ThemeVariant,
     tok: &graphite::Tokens,
     accent: [u8; 3],
     dialog: &Dialog,
@@ -1513,16 +1507,7 @@ fn paint_preview(
     for (rgb, rect) in parts.stripes {
         fill_solid(buffer, stride, height, rect, rgb);
     }
-    let ground = if variant == ThemeVariant::Light {
-        [0xe9, 0xec, 0xf0]
-    } else {
-        tok.ground
-    };
-    let pane = if variant == ThemeVariant::Light {
-        [0xff, 0xff, 0xff]
-    } else {
-        [0x18, 0x1b, 0x21]
-    };
+    let (ground, pane) = (tok.ground, tok.panel);
     let window_a = opacity_to_alpha(dialog.values.window_opacity);
     let chrome = if dialog.values.chrome_follows {
         dialog.values.window_opacity
@@ -1560,12 +1545,7 @@ fn paint_preview(
         active_a,
     );
     // Opaque chrome: the chip, command field, badge, dot, text, and cursor.
-    let chip = if variant == ThemeVariant::Light {
-        [0xff, 0xff, 0xff]
-    } else {
-        tok.tab_active
-    };
-    fill_solid(buffer, stride, height, parts.chip, chip);
+    fill_solid(buffer, stride, height, parts.chip, tok.tab_active);
     fill_solid(buffer, stride, height, parts.field, tok.field);
     fill_solid(buffer, stride, height, parts.badge, tok.attention);
     fill_solid(buffer, stride, height, parts.dot, tok.working);
@@ -1797,7 +1777,7 @@ mod tests {
         let dialog = sample_dialog();
         let layout = frame(&dialog);
         let mut buffer = vec![pack_argb(255, [20, 20, 20]); 1200 * 800];
-        paint(&mut buffer, 1200, 800, ThemeVariant::Dark, &dialog, &layout);
+        paint(&mut buffer, 1200, 800, &graphite::DARK, &dialog, &layout);
         let ground = pixel(&buffer, 1200, layout.samples.ground);
         let mixed = composite(
             pack_argb(255, layout.samples.ground_under),
@@ -1859,7 +1839,14 @@ mod tests {
         ] {
             let mut buffer = vec![pack_argb(255, [32, 36, 44]); 1200 * 800];
             let laid = frame(dialog);
-            paint(&mut buffer, 1200, 800, variant, dialog, &laid);
+            paint(
+                &mut buffer,
+                1200,
+                800,
+                graphite::tokens(variant),
+                dialog,
+                &laid,
+            );
             let path = root.join(name);
             write_rgba_png(&path, &buffer, 1200, 800)
                 .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
@@ -1874,7 +1861,14 @@ mod tests {
         ] {
             let laid = layout(dialog, retina, 1800, 1200);
             let mut buffer = vec![pack_argb(255, [32, 36, 44]); 1800 * 1200];
-            paint(&mut buffer, 1800, 1200, variant, dialog, &laid);
+            paint(
+                &mut buffer,
+                1800,
+                1200,
+                graphite::tokens(variant),
+                dialog,
+                &laid,
+            );
             let path = root.join(name);
             write_rgba_png(&path, &buffer, 1800, 1200)
                 .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));

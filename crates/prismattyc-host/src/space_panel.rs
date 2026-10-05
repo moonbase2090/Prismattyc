@@ -1434,6 +1434,7 @@ mod layout_tests {
             let frame = PaletteFrame {
                 layout_mode: PaletteLayoutMode::FixedHeight,
                 query: None,
+                query_focused: false,
                 chips: None,
                 sections: &sections,
                 selected: 1,

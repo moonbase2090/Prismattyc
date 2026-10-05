@@ -662,6 +662,19 @@ pub struct SpacePickerRow {
     pub saved_at_unix: u64,
 }
 
+/// Where a pointer event landed on the Spaces dropdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceMenuTarget {
+    /// A space row. The index is the ranked row, matching keyboard selection.
+    Row(usize),
+    /// The search field.
+    Query,
+    /// Panel chrome that is not a row or the search field.
+    Inside,
+    /// Anywhere outside the panel.
+    Outside,
+}
+
 /// Filter/select/confirm state for open_space, delete_space, and
 /// move_pane_to_space.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -674,6 +687,10 @@ pub struct SpacePicker {
     /// When set, Enter confirms delete of this name.
     pub confirm: Option<String>,
     pub status: Option<String>,
+    /// The search field has the caret. Opening the menu focuses it.
+    pub query_focused: bool,
+    /// Sub-row wheel distance, in thousandths of a physical pixel.
+    wheel_remainder_milli_px: i64,
 }
 
 /// Result of a key while a space picker is open.
@@ -769,7 +786,102 @@ impl SpacePicker {
             scroll: 0,
             confirm: None,
             status: None,
+            query_focused: true,
+            wheel_remainder_milli_px: 0,
         }
+    }
+
+    /// Move the keyboard highlight onto a hovered row. The scroll window
+    /// stays put; the hovered row is already on screen.
+    pub fn hover_row(&mut self, row: usize) -> bool {
+        if self.selected == row {
+            return false;
+        }
+        self.confirm = None;
+        self.selected = row;
+        true
+    }
+
+    /// One click. A row acts as Enter. The search field takes focus.
+    /// A click outside the panel closes the menu.
+    #[must_use]
+    pub fn pointer(
+        &mut self,
+        target: SpaceMenuTarget,
+        spaces: &[SpacePickerRow],
+    ) -> SpacePickerVerdict {
+        match target {
+            SpaceMenuTarget::Outside => SpacePickerVerdict::Close,
+            SpaceMenuTarget::Query => {
+                self.query_focused = true;
+                self.confirm = None;
+                SpacePickerVerdict::Consumed
+            }
+            SpaceMenuTarget::Inside => SpacePickerVerdict::Consumed,
+            SpaceMenuTarget::Row(index) => {
+                if index >= self.ranked(spaces).len() {
+                    return SpacePickerVerdict::Consumed;
+                }
+                // A second click on the armed delete row confirms it. A click
+                // on a different row arms that row instead.
+                if self.confirm.is_some() && self.selected == index {
+                    return self.key(
+                        &Key::Named(NamedKey::Enter),
+                        ModifiersState::empty(),
+                        spaces,
+                    );
+                }
+                self.confirm = None;
+                self.selected = index;
+                self.query_focused = true;
+                self.key(
+                    &Key::Named(NamedKey::Enter),
+                    ModifiersState::empty(),
+                    spaces,
+                )
+            }
+        }
+    }
+
+    /// Scroll the fixed list. Positive deltas move toward the first row,
+    /// matching winit's wheel direction. The panel does not resize, and the
+    /// highlight stays inside the visible window so layout will not undo
+    /// the scroll.
+    pub fn scroll_by_wheel(
+        &mut self,
+        delta_milli_px: i64,
+        row_pitch_px: usize,
+        visible_lines: usize,
+        row_count: usize,
+    ) -> bool {
+        if row_pitch_px == 0 || delta_milli_px == 0 || row_count == 0 || visible_lines == 0 {
+            return false;
+        }
+        let row_distance = (row_pitch_px as i64).saturating_mul(1_000).max(1);
+        self.wheel_remainder_milli_px =
+            self.wheel_remainder_milli_px.saturating_add(delta_milli_px);
+        let steps = self.wheel_remainder_milli_px / row_distance;
+        if steps == 0 {
+            return false;
+        }
+        self.wheel_remainder_milli_px %= row_distance;
+        self.scroll_window(-steps, visible_lines, row_count)
+    }
+
+    fn scroll_window(&mut self, delta_lines: i64, visible_lines: usize, row_count: usize) -> bool {
+        let total = row_count.saturating_add(1);
+        let visible = visible_lines.max(1).min(total);
+        let max_scroll = total.saturating_sub(visible);
+        let next = (self.scroll as i64)
+            .saturating_add(delta_lines)
+            .clamp(0, max_scroll as i64) as usize;
+        let selected = selected_inside_window(self.selected, next, visible, row_count);
+        if next == self.scroll && selected == self.selected {
+            return false;
+        }
+        self.scroll = next;
+        self.selected = selected;
+        true
     }
 
     #[must_use]
@@ -869,6 +981,23 @@ impl SpacePicker {
             _ => SpacePickerVerdict::Consumed,
         }
     }
+}
+
+/// Keep the highlighted row's line inside `[scroll, scroll + visible)`.
+/// Line 0 is the section header. Row `n` is line `n + 1`.
+fn selected_inside_window(
+    selected: usize,
+    scroll: usize,
+    visible: usize,
+    row_count: usize,
+) -> usize {
+    if row_count == 0 {
+        return 0;
+    }
+    let last = row_count - 1;
+    let first_row = scroll.saturating_sub(1).min(last);
+    let last_row = scroll.saturating_add(visible).saturating_sub(2).min(last);
+    selected.clamp(first_row, last_row.max(first_row))
 }
 
 fn excluded(action: Action, rich: bool, graphite: bool) -> bool {
@@ -1614,6 +1743,100 @@ mod tests {
         assert_eq!(
             picker.key(&Key::Named(NamedKey::Enter), empty_mods(), &spaces),
             SpacePickerVerdict::Move("alpha".into())
+        );
+    }
+
+    #[test]
+    fn space_picker_click_opens_the_row_and_outside_click_closes() {
+        let spaces = sample_spaces();
+        let mut picker = SpacePicker::new(SpacePickerKind::Open);
+        assert!(picker.query_focused);
+        picker.query_focused = false;
+        assert_eq!(
+            picker.pointer(SpaceMenuTarget::Query, &spaces),
+            SpacePickerVerdict::Consumed
+        );
+        assert!(picker.query_focused, "clicking search focuses the field");
+        assert_eq!(
+            picker.pointer(SpaceMenuTarget::Inside, &spaces),
+            SpacePickerVerdict::Consumed
+        );
+        assert_eq!(
+            picker.pointer(SpaceMenuTarget::Row(1), &spaces),
+            SpacePickerVerdict::Open("beta".into())
+        );
+
+        let mut picker = SpacePicker::new(SpacePickerKind::Open);
+        assert_eq!(
+            picker.pointer(SpaceMenuTarget::Outside, &spaces),
+            SpacePickerVerdict::Close
+        );
+        assert_eq!(
+            picker.pointer(SpaceMenuTarget::Row(9), &spaces),
+            SpacePickerVerdict::Consumed,
+            "a row past the list does not open a space"
+        );
+    }
+
+    #[test]
+    fn space_picker_hover_moves_the_keyboard_highlight() {
+        let mut picker = SpacePicker::new(SpacePickerKind::Open);
+        picker.scroll = 4;
+        assert!(picker.hover_row(2));
+        assert_eq!(picker.selected, 2);
+        assert_eq!(picker.scroll, 4, "hover must not jump the scroll window");
+        assert!(!picker.hover_row(2));
+    }
+
+    #[test]
+    fn space_picker_wheel_scrolls_inside_the_window_and_does_not_wrap() {
+        let spaces: Vec<SpacePickerRow> = (0..30)
+            .map(|index| SpacePickerRow {
+                name: format!("space-{index}"),
+                sessions: 1,
+                saved_at_unix: index as u64,
+            })
+            .collect();
+        let mut picker = SpacePicker::new(SpacePickerKind::Open);
+        let visible = 8;
+        assert!(
+            !picker.scroll_by_wheel(4_000, 20, visible, spaces.len()),
+            "a partial row does not scroll"
+        );
+        assert_eq!(picker.scroll, 0);
+        assert!(
+            !picker.scroll_by_wheel(20_000, 20, visible, spaces.len()),
+            "wheel up at the top stays on the first row"
+        );
+        assert!(picker.scroll_by_wheel(-24_000, 20, visible, spaces.len()));
+        assert_eq!(picker.scroll, 1);
+        assert!(picker.scroll_by_wheel(-1_000_000_000, 20, visible, spaces.len()));
+        let max_scroll = (spaces.len() + 1).saturating_sub(visible);
+        assert_eq!(picker.scroll, max_scroll);
+        assert!(!picker.scroll_by_wheel(-20_000, 20, visible, spaces.len()));
+        assert_eq!(picker.scroll, max_scroll, "the list does not wrap");
+        let selected_line = picker.selected + 1;
+        assert!(selected_line >= picker.scroll);
+        assert!(selected_line < picker.scroll + visible);
+    }
+
+    #[test]
+    fn space_picker_delete_click_confirms_only_the_armed_row() {
+        let spaces = sample_spaces();
+        let mut picker = SpacePicker::new(SpacePickerKind::Delete);
+        assert_eq!(
+            picker.pointer(SpaceMenuTarget::Row(1), &spaces),
+            SpacePickerVerdict::Consumed
+        );
+        assert_eq!(picker.confirm.as_deref(), Some("beta"));
+        assert_eq!(
+            picker.pointer(SpaceMenuTarget::Row(0), &spaces),
+            SpacePickerVerdict::Consumed
+        );
+        assert_eq!(picker.confirm.as_deref(), Some("alpha"));
+        assert_eq!(
+            picker.pointer(SpaceMenuTarget::Row(0), &spaces),
+            SpacePickerVerdict::Deleted("alpha".into())
         );
     }
 

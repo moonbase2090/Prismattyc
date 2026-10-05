@@ -533,6 +533,7 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
     let frame = PaletteFrame {
         layout_mode: PaletteLayoutMode::FixedHeight,
         query: Some(&prompt.buffer),
+        query_focused: true,
         chips: None,
         sections: &sections,
         selected: prompt.button,

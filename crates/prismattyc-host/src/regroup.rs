@@ -11,7 +11,10 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use prismattyc_mux::{PaneId, WindowId};
 
-use crate::attach_tabs::{regroup_diff, AttachTabRecord, AttachTabsFile, AttachTabsMode};
+use crate::attach_tabs::{
+    layout_for_sessions, pane_layout_from_tab, regroup_diff, remap_layout, AttachTabRecord,
+    AttachTabsFile, AttachTabsMode,
+};
 use crate::mux::MuxRuntime;
 
 /// Apply `file` to the live tabs. Returns whether any move or attach ran.
@@ -196,6 +199,8 @@ pub fn apply_with_placeholders(
         }
     }
 
+    install_saved_layouts(mux, pane_sessions, &file, names)?;
+
     seed_focus(mux, pane_sessions, &file, names)?;
     Ok(changed)
 }
@@ -259,7 +264,7 @@ fn named_file(
         .tabs
         .iter()
         .map(|tab| {
-            let sessions = tab
+            let sessions: Vec<String> = tab
                 .sessions
                 .iter()
                 .map(|id| {
@@ -268,9 +273,15 @@ fn named_file(
                     name
                 })
                 .collect();
+            let layout = tab
+                .layout
+                .as_ref()
+                .and_then(|node| remap_layout(node, |id| Some(resolve_name(names, id))));
+            let layout = layout_for_sessions(layout, &sessions);
             AttachTabRecord {
                 title: tab.title.clone(),
                 sessions,
+                layout,
             }
         })
         .collect();
@@ -285,6 +296,69 @@ fn named_file(
         mode: file.mode,
         ..file.clone()
     }
+}
+
+/// After membership is in place, replace each tab's split chain with the
+/// saved tree. A tab with no tree, or a tree whose sessions are not exactly
+/// the window's panes, keeps the chain this function just built.
+fn install_saved_layouts(
+    mux: &mut MuxRuntime,
+    pane_sessions: &HashMap<PaneId, String>,
+    file: &AttachTabsFile,
+    names: &HashMap<String, String>,
+) -> Result<()> {
+    for tab in &file.tabs {
+        let Some(layout) = tab.layout.as_ref() else {
+            continue;
+        };
+        let mut window = None;
+        let mut located = Vec::new();
+        let mut split_across_windows = false;
+        for session in layout.sessions() {
+            let Some(pane) = pane_sessions.iter().find_map(|(pane, id)| {
+                (session_name(mux, *pane, id, names) == session).then_some(*pane)
+            }) else {
+                split_across_windows = true;
+                break;
+            };
+            let Some(owner) = mux.pane_window(pane) else {
+                split_across_windows = true;
+                break;
+            };
+            if let Some(prev) = window {
+                if prev != owner {
+                    split_across_windows = true;
+                    break;
+                }
+            }
+            window = Some(owner);
+            located.push(pane);
+        }
+        if split_across_windows {
+            continue;
+        }
+        let Some(window) = window else {
+            continue;
+        };
+        let Some(live) = mux.window_layout(window).map(|tree| tree.panes()) else {
+            continue;
+        };
+        if live.len() != located.len() || live.iter().any(|pane| !located.contains(pane)) {
+            continue;
+        }
+        let pane_of = |session: &str| {
+            located.iter().copied().find(|pane| {
+                pane_sessions
+                    .get(pane)
+                    .is_some_and(|id| session_name(mux, *pane, id, names) == session)
+            })
+        };
+        let Some(tree) = pane_layout_from_tab(layout, &pane_of) else {
+            continue;
+        };
+        mux.install_window_layout(window, tree)?;
+    }
+    Ok(())
 }
 
 fn attach_args(session: &str) -> Vec<String> {
@@ -415,6 +489,7 @@ mod tests {
                 .map(|(title, sessions)| AttachTabRecord {
                     title: (*title).into(),
                     sessions: sessions.iter().map(|s| (*s).to_string()).collect(),
+                    layout: None,
                 })
                 .collect(),
             active_tab,
@@ -878,5 +953,183 @@ mod tests {
             "add mode must keep s2: {live:?}"
         );
         assert_eq!(panes.len(), 2);
+    }
+
+    fn mark_four(mux: &mut MuxRuntime) -> HashMap<PaneId, String> {
+        for _ in 0..3 {
+            mux.split_focused(
+                "/bin/sleep",
+                &["30".to_string()],
+                prismattyc_mux::Axis::Horizontal,
+                0.5,
+            )
+            .unwrap();
+        }
+        let panes = mux.tab_panes()[0].1.clone();
+        assert_eq!(panes.len(), 4, "four panes before arrange");
+        let mut map = HashMap::new();
+        for (index, pane) in panes.iter().enumerate() {
+            let name = format!("s{}", index + 1);
+            mux.mark_attach_session(*pane, name.clone(), name.clone());
+            map.insert(*pane, name);
+        }
+        map
+    }
+
+    fn root_split(mux: &MuxRuntime) -> (prismattyc_mux::Axis, f64) {
+        let window = mux.window_ids()[0];
+        match mux.window_layout(window).unwrap() {
+            prismattyc_mux::PaneLayout::Split(split) => (split.axis, split.ratio),
+            other => panic!("expected a split, got {other:?}"),
+        }
+    }
+
+    fn reopen(saved: AttachTabsFile, fake: &str) -> (MuxRuntime, HashMap<PaneId, String>) {
+        let mut fresh = runtime();
+        let mut panes = HashMap::new();
+        apply(&mut fresh, &mut panes, &saved, fake, &HashMap::new()).unwrap();
+        (fresh, panes)
+    }
+
+    /// Save a host arrangement, drop that host, and open the saved tab.
+    /// Grid stays 2×2. Arrange Split keeps the even-column ratios. A dragged
+    /// ratio survives the space-file JSON. A file with no tree stays a row.
+    #[test]
+    fn save_then_open_restores_the_pane_tree() {
+        let fake = fake_mux_bin();
+
+        let mut single = runtime();
+        let pane = single.focused_id();
+        single.mark_attach_session(pane, "only".into(), "only".into());
+        let mut only = HashMap::new();
+        only.insert(pane, "only".into());
+        let saved = crate::attach_tabs::records_from_runtime(&single, &only);
+        assert!(
+            saved.tabs[0].layout.is_none(),
+            "a single pane stores no split tree"
+        );
+
+        let mut mux = runtime();
+        let sessions = mark_four(&mut mux);
+        assert!(matches!(
+            mux.apply_preset(crate::mux::LayoutPreset::Grid).unwrap(),
+            crate::mux::PresetOutcome::Applied
+        ));
+        let saved = crate::attach_tabs::records_from_runtime(&mux, &sessions);
+        let raw = serde_json::to_string(&prismattyc_mux::SavedSpaceTab {
+            title: saved.tabs[0].title.clone(),
+            sessions: saved.tabs[0].sessions.clone(),
+            layout: saved.tabs[0].layout.clone(),
+        })
+        .unwrap();
+        assert!(
+            raw.contains("\"vertical\""),
+            "the space file must record the grid: {raw}"
+        );
+        let back: prismattyc_mux::SavedSpaceTab = serde_json::from_str(&raw).unwrap();
+        drop(mux);
+        let (fresh, panes) = reopen(
+            AttachTabsFile {
+                tabs: vec![AttachTabRecord {
+                    title: back.title,
+                    sessions: back.sessions,
+                    layout: back.layout,
+                }],
+                ..Default::default()
+            },
+            &fake,
+        );
+        let (axis, ratio) = root_split(&fresh);
+        assert_eq!(
+            axis,
+            prismattyc_mux::Axis::Vertical,
+            "a 2x2 grid must not reopen as four columns"
+        );
+        assert!((ratio - 0.5).abs() < 1e-9);
+        match fresh.window_layout(fresh.window_ids()[0]).unwrap() {
+            prismattyc_mux::PaneLayout::Split(root) => {
+                assert!(matches!(
+                    root.first.as_ref(),
+                    prismattyc_mux::PaneLayout::Split(row)
+                        if row.axis == prismattyc_mux::Axis::Horizontal
+                ));
+                assert!(matches!(
+                    root.second.as_ref(),
+                    prismattyc_mux::PaneLayout::Split(row)
+                        if row.axis == prismattyc_mux::Axis::Horizontal
+                ));
+            }
+            other => panic!("grid root missing: {other:?}"),
+        }
+        let order: Vec<_> = fresh.tab_panes()[0]
+            .1
+            .iter()
+            .filter_map(|pane| panes.get(pane).cloned())
+            .collect();
+        assert_eq!(order, ["s1", "s2", "s3", "s4"]);
+
+        let mut mux = runtime();
+        let sessions = mark_four(&mut mux);
+        mux.apply_preset(crate::mux::LayoutPreset::SplitH).unwrap();
+        let saved = crate::attach_tabs::records_from_runtime(&mux, &sessions);
+        drop(mux);
+        let (fresh, _) = reopen(
+            AttachTabsFile {
+                tabs: saved.tabs,
+                ..Default::default()
+            },
+            &fake,
+        );
+        let (axis, ratio) = root_split(&fresh);
+        assert_eq!(axis, prismattyc_mux::Axis::Horizontal);
+        assert!(
+            (ratio - 0.25).abs() < 1e-9,
+            "Arrange Split must keep the even ratio, got {ratio}"
+        );
+
+        let mut mux = runtime();
+        let sessions = mark_four(&mut mux);
+        let ids = mux.tab_panes()[0].1.clone();
+        let custom = prismattyc_mux::PaneLayout::Split(prismattyc_mux::Split {
+            axis: prismattyc_mux::Axis::Vertical,
+            ratio: 0.3,
+            first: Box::new(prismattyc_mux::even_horizontal_row(&ids[..2]).unwrap()),
+            second: Box::new(prismattyc_mux::even_horizontal_row(&ids[2..]).unwrap()),
+        });
+        assert!(mux
+            .install_window_layout(mux.window_ids()[0], custom)
+            .unwrap());
+        let saved = crate::attach_tabs::records_from_runtime(&mux, &sessions);
+        let raw = serde_json::to_string(saved.tabs[0].layout.as_ref().unwrap()).unwrap();
+        let layout: crate::attach_tabs::TabLayoutNode = serde_json::from_str(&raw).unwrap();
+        drop(mux);
+        let (fresh, _) = reopen(
+            AttachTabsFile {
+                tabs: vec![AttachTabRecord {
+                    title: "seats".into(),
+                    sessions: ["s1", "s2", "s3", "s4"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                    layout: Some(layout),
+                }],
+                ..Default::default()
+            },
+            &fake,
+        );
+        let (axis, ratio) = root_split(&fresh);
+        assert_eq!(axis, prismattyc_mux::Axis::Vertical);
+        assert!(
+            (ratio - 0.3).abs() < 1e-6,
+            "free-form ratio must survive save and open, got {ratio}"
+        );
+
+        let (fresh, _) = reopen(file(&[("old", &["s1", "s2", "s3", "s4"])], 0, None), &fake);
+        let (axis, ratio) = root_split(&fresh);
+        assert_eq!(axis, prismattyc_mux::Axis::Horizontal);
+        assert!(
+            (ratio - 0.5).abs() < 1e-9,
+            "a file with no tree still opens as a left-to-right row, got {ratio}"
+        );
     }
 }

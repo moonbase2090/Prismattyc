@@ -448,10 +448,12 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
             attach_tabs::AttachTabRecord {
                 title: "one".into(),
                 sessions: vec!["missing-one".into()],
+                layout: None,
             },
             attach_tabs::AttachTabRecord {
                 title: "two".into(),
                 sessions: vec!["missing-two".into()],
+                layout: None,
             },
         ],
         active_tab: 1,

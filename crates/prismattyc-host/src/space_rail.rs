@@ -1946,6 +1946,7 @@ mod tests {
                 .map(|(title, members)| prismattyc_mux::SavedSpaceTab {
                     title: (*title).into(),
                     sessions: members.iter().map(|m| (*m).to_string()).collect(),
+                    layout: None,
                 })
                 .collect(),
             active_tab: 0,

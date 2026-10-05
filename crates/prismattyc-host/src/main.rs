@@ -680,12 +680,12 @@ fn attach_boot_command(
 /// group) and return which mux session each pane attached.
 fn open_attach_session_tabs(
     mux: &mut mux::MuxRuntime,
-    groups: &[(String, Vec<AttachTarget>)],
+    grouped: &attach_tabs::AttachGroups,
 ) -> Result<Vec<(PaneId, String)>> {
     let mux_bin = find_mux_bin();
     let mux_bin = mux_bin.to_string_lossy();
     let mut pane_sessions = Vec::new();
-    for (index, (title, members)) in groups.iter().enumerate() {
+    for (index, (title, members)) in grouped.groups.iter().enumerate() {
         let start = if index == 0 {
             mux.rename_window(mux.active_window(), title)?;
             let pane = mux.focused_id();
@@ -712,7 +712,25 @@ fn open_attach_session_tabs(
             pane_sessions.push((pane, target.session.clone()));
         }
         let count = mux.active_pane_count();
-        if count > 1 {
+        let window = mux.active_window();
+        let restored = if let Some(layout) = grouped
+            .layouts
+            .get(index)
+            .and_then(|layout| layout.as_ref())
+        {
+            let pane_of = |session: &str| {
+                pane_sessions.iter().find_map(|(pane, id)| {
+                    (id == session && mux.pane_window(*pane) == Some(window)).then_some(*pane)
+                })
+            };
+            match attach_tabs::pane_layout_from_tab(layout, &pane_of) {
+                Some(tree) => mux.install_window_layout(window, tree)?,
+                None => false,
+            }
+        } else {
+            false
+        };
+        if count > 1 && !restored {
             mux.ensure_even_columns(&mux_bin, &[], count)?;
         }
     }
@@ -3445,7 +3463,7 @@ impl App {
                 mux.split_focused(&self.cli.program, &self.cli.child_args, axis, 0.5)?;
             }
         } else {
-            let pane_sessions = open_attach_session_tabs(&mut mux, attach_groups)?;
+            let pane_sessions = open_attach_session_tabs(&mut mux, &grouped)?;
             seed_attach_focus(&mut mux, &grouped, &pane_sessions);
             attach_pane_sessions = pane_sessions.into_iter().collect();
         }

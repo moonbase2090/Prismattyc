@@ -74,6 +74,15 @@ impl From<AxisWire> for Axis {
     }
 }
 
+impl From<Axis> for AxisWire {
+    fn from(axis: Axis) -> Self {
+        match axis {
+            Axis::Horizontal => Self::Horizontal,
+            Axis::Vertical => Self::Vertical,
+        }
+    }
+}
+
 /// Wire-safe named arrangement (PT-132).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArrangementWire {

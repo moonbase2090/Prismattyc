@@ -120,6 +120,16 @@ pub enum LayoutMode {
     Sidebar,
 }
 
+impl LayoutMode {
+    /// The `layout` value as written in the config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LayoutMode::Bars => "bars",
+            LayoutMode::Sidebar => "sidebar",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigFile {

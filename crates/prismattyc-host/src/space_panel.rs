@@ -12,6 +12,7 @@ enum Choice {
     None,
     Settings,
     Preference(String, String),
+    Layout(config::LayoutMode),
     Back,
     Session(String),
     View(String),
@@ -42,6 +43,7 @@ enum Choice {
 enum Page {
     Maintenance,
     Settings,
+    Layout,
     Team,
     Session(String),
     Templates,
@@ -81,6 +83,9 @@ pub(super) struct Panel {
     pending: Option<Receiver<Result<Payload, String>>>,
     pub scroll: usize,
     columns: usize,
+    /// Live `layout` while Graphite chrome is on, else None. The Layout rows
+    /// are shown only when this is set (#150).
+    chrome_layout: Option<config::LayoutMode>,
 }
 
 impl Panel {
@@ -120,6 +125,36 @@ impl Panel {
                 choice,
             });
         }
+    }
+
+    /// Bars or Sidebar, with the live choice marked. Only for Graphite chrome.
+    fn layout_rows(&mut self) {
+        let Some(current) = self.chrome_layout else {
+            return;
+        };
+        for (mode, label, detail) in [
+            (
+                config::LayoutMode::Bars,
+                "Layout: Bars",
+                "Tabs bar and spaces bar",
+            ),
+            (
+                config::LayoutMode::Sidebar,
+                "Layout: Sidebar",
+                "One tree of Spaces and their tabs",
+            ),
+        ] {
+            self.row(
+                label,
+                if current == mode { "Selected" } else { detail },
+                Choice::Layout(mode),
+            );
+        }
+    }
+
+    /// Settings pages keep one panel size and scroll inside it.
+    pub(super) fn fixed_size(&self) -> bool {
+        self.input.is_none() && matches!(self.page, Page::Settings | Page::Layout)
     }
 
     fn rebuild(&mut self) {
@@ -187,7 +222,16 @@ impl Panel {
                     );
                 }
             }
+            Page::Layout => {
+                self.layout_rows();
+                self.row(
+                    "More settings…",
+                    "Rail, autosave, and startup",
+                    Choice::Settings,
+                );
+            }
             Page::Settings => {
+                self.layout_rows();
                 let config = config::load(&config::config_path()).unwrap_or_default();
                 for side in ["bottom", "left", "top", "right"] {
                     self.row(
@@ -461,6 +505,31 @@ pub(super) fn maintenance(host: &mut HostState) {
     }
 }
 
+/// Open the Layout page (#150). Graphite chrome only; classic has one layout.
+pub(super) fn layout(host: &mut HostState) {
+    if host.spacing.chrome_style != config::ChromeStyle::Graphite {
+        return;
+    }
+    settings(host);
+    let panel = host.space_panel.as_mut().unwrap();
+    panel.page = Page::Layout;
+    panel.rebuild();
+    let current = panel
+        .rows
+        .iter()
+        .position(|r| matches!(r.choice, Choice::Layout(mode) if Some(mode) == panel.chrome_layout))
+        .unwrap_or(0);
+    if let Some(menu) = host.context_menu.as_mut() {
+        menu.selected = current;
+    }
+}
+
+/// Write `layout` the same way the other settings rows save their keys.
+/// Comments and other keys in the file are kept.
+fn save_layout(path: &std::path::Path, mode: config::LayoutMode) -> anyhow::Result<()> {
+    config::save_preference(path, "layout", toml_edit::value(mode.as_str()))
+}
+
 pub(super) fn settings(host: &mut HostState) {
     open(host, host.space_rail.current.clone().unwrap_or_default());
     let panel = host.space_panel.as_mut().unwrap();
@@ -534,6 +603,8 @@ pub(super) fn open(host: &mut HostState, name: String) {
         scroll: 0,
         columns: (host.window.inner_size().width as usize / host.font.cell_w.max(1))
             .saturating_sub(10),
+        chrome_layout: (host.spacing.chrome_style == config::ChromeStyle::Graphite)
+            .then_some(host.spacing.layout),
     });
     command(
         host,
@@ -551,6 +622,7 @@ pub(super) fn rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
             Page::Maintenance => "UPDATE AND RESTART".into(),
             Page::Text(_) if panel.maintenance => "UPDATE AND RESTART RESULT".into(),
             Page::Settings => "SPACES SETTINGS".into(),
+            Page::Layout => "LAYOUT".into(),
             Page::Session(name) => format!("{} — {name}", panel.space),
             Page::Templates => "TEAM TEMPLATES".into(),
             Page::Preview(_, name) => format!("PREVIEW {name}"),
@@ -751,6 +823,16 @@ pub(super) fn activate(host: &mut HostState, index: usize) {
                     panel.page = Page::Text(format!("Could not save preference: {error}"));
                     panel.rebuild();
                 }
+            }
+        }
+        Choice::Layout(mode) => {
+            if let Err(error) = save_layout(&config::config_path(), mode) {
+                panel.page = Page::Text(format!("Could not save preference: {error}"));
+                panel.rebuild();
+            } else {
+                panel.chrome_layout = Some(mode);
+                panel.rebuild();
+                apply_chrome_layout(host, mode);
             }
         }
         Choice::Back => {
@@ -1201,5 +1283,225 @@ mod maintenance_tests {
             maintenance_result(r#"{"status":"updated","version":"0.2.1"}"#),
             "updated: 0.2.1"
         );
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use crate::config::LayoutMode;
+
+    fn panel(page: Page, chrome_layout: Option<LayoutMode>) -> Panel {
+        let mut panel = Panel {
+            space: "demo".into(),
+            maintenance: false,
+            owner: None,
+            details: None,
+            page,
+            rows: vec![],
+            input: None,
+            submitted: None,
+            pending: None,
+            scroll: 0,
+            columns: 100,
+            chrome_layout,
+        };
+        panel.rebuild();
+        panel
+    }
+
+    fn labels(panel: &Panel) -> Vec<(String, String)> {
+        panel
+            .rows
+            .iter()
+            .map(|r| (r.label.clone(), r.detail.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn layout_page_offers_bars_and_sidebar_and_marks_the_live_choice() {
+        let bars = panel(Page::Layout, Some(LayoutMode::Bars));
+        assert_eq!(
+            labels(&bars),
+            [
+                ("Layout: Bars".into(), "Selected".into()),
+                (
+                    "Layout: Sidebar".into(),
+                    "One tree of Spaces and their tabs".into()
+                ),
+                (
+                    "More settings…".into(),
+                    "Rail, autosave, and startup".into()
+                ),
+            ]
+        );
+        assert!(matches!(
+            bars.rows[1].choice,
+            Choice::Layout(LayoutMode::Sidebar)
+        ));
+        let sidebar = panel(Page::Layout, Some(LayoutMode::Sidebar));
+        assert_eq!(sidebar.rows[0].detail, "Tabs bar and spaces bar");
+        assert_eq!(sidebar.rows[1].detail, "Selected");
+    }
+
+    #[test]
+    fn settings_menu_lists_layout_first_only_for_graphite() {
+        let graphite = panel(Page::Settings, Some(LayoutMode::Sidebar));
+        assert_eq!(graphite.rows[0].label, "Layout: Bars");
+        assert_eq!(graphite.rows[1].label, "Layout: Sidebar");
+        assert_eq!(graphite.rows[1].detail, "Selected");
+        assert!(graphite.rows[2].label.starts_with("Rail: "));
+        let classic = panel(Page::Settings, None);
+        assert!(classic.rows[0].label.starts_with("Rail: "));
+        assert!(!classic
+            .rows
+            .iter()
+            .any(|r| matches!(r.choice, Choice::Layout(_))));
+    }
+
+    #[test]
+    fn settings_pages_are_fixed_size_and_other_pages_fit_content() {
+        assert!(panel(Page::Layout, Some(LayoutMode::Bars)).fixed_size());
+        assert!(panel(Page::Settings, None).fixed_size());
+        assert!(!panel(Page::Team, None).fixed_size());
+        assert!(!panel(Page::Maintenance, None).fixed_size());
+        let mut editing = panel(Page::Settings, None);
+        editing.input = Some(Input {
+            label: "Role".into(),
+            value: String::new(),
+            select_all: false,
+            choice: Choice::None,
+        });
+        assert!(!editing.fixed_size(), "a text field keeps its own prompt");
+    }
+
+    #[test]
+    fn choosing_a_layout_writes_the_layout_key_and_keeps_the_file() {
+        let dir = std::env::temp_dir().join(format!("prism-layout-setting-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "# my settings\nchrome_style = \"graphite\"\nbar_color = \"moss\"\n",
+        )
+        .unwrap();
+        save_layout(&path, LayoutMode::Sidebar).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# my settings"), "{raw}");
+        assert!(raw.contains("layout = \"sidebar\""), "{raw}");
+        let loaded = config::load(&path).unwrap();
+        assert_eq!(loaded.layout(), LayoutMode::Sidebar);
+        assert_eq!(loaded.bar_color(), config::BarColor::Moss);
+        save_layout(&path, LayoutMode::Bars).unwrap();
+        assert_eq!(config::load(&path).unwrap().layout(), LayoutMode::Bars);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The panel goes through the same Graphite palette painter as the app.
+    /// Its size does not depend on the page or the row count, and every
+    /// option row is a pointer target (the hand cursor).
+    #[test]
+    fn layout_panel_paints_at_the_settings_size_with_pointer_rows() {
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let chrome = mux::ChromeGeom {
+            graphite: true,
+            scale_milli: 1_000,
+        };
+        let (width, height) = (1200, 800);
+        let paint = |panel: &Panel, variant| {
+            let rows: Vec<PaletteRow> = panel
+                .rows
+                .iter()
+                .map(|r| PaletteRow::plain(r.label.clone(), r.detail.clone(), String::new()))
+                .collect();
+            let header = match panel.page {
+                Page::Layout => "LAYOUT",
+                _ => "SPACES SETTINGS",
+            };
+            let sections = [PaletteSection {
+                header,
+                subtitle: "",
+                rows: &rows,
+            }];
+            let frame = PaletteFrame {
+                layout_mode: PaletteLayoutMode::FixedHeight,
+                query: None,
+                chips: None,
+                sections: &sections,
+                selected: 1,
+                scroll: 0,
+                detail: None,
+                footer: "Enter select · Esc close · ↑↓ move",
+            };
+            let mut buffer = vec![crate::raster::pack_argb(255, [32, 36, 44]); width * height];
+            let layout = graphite_overlays::palette(
+                &font,
+                variant,
+                chrome,
+                [0x5b, 0x9b, 0xff],
+                &frame,
+                OverlaySurface::default(),
+                &mut buffer,
+                width,
+                height,
+                None,
+            )
+            .expect("layout panel paints");
+            (layout, buffer)
+        };
+        let layout_page = panel(Page::Layout, Some(LayoutMode::Bars));
+        let settings_page = panel(Page::Settings, Some(LayoutMode::Bars));
+        let (small, _) = paint(&layout_page, theme::ThemeVariant::Dark);
+        let (large, _) = paint(&settings_page, theme::ThemeVariant::Dark);
+        assert_eq!(
+            (small.panel_x, small.panel_y, small.panel_w, small.panel_h),
+            (large.panel_x, large.panel_y, large.panel_w, large.panel_h),
+            "fixed size: three rows and the full settings list share one panel"
+        );
+        // Pointing at each option hits that row, and a context-menu row
+        // shows the pointing hand.
+        for row in 0..2 {
+            let laid = small
+                .rows
+                .iter()
+                .find(|laid| laid.global == row)
+                .expect("option row is laid out");
+            let x = small.panel_x + small.panel_w / 2;
+            let hit = crate::raster::palette_hit(&small, x, laid.y + 1);
+            assert_eq!(hit, Some(row));
+            let hover = hit.map(HoverTarget::ContextMenuRow);
+            assert_eq!(
+                cursor_for_hover(hover, false, false, false, None, false),
+                CursorIcon::Pointer
+            );
+        }
+        let Some(dir) = std::env::var_os("PRISMATTYC_DUMP_LAYOUT_SETTING") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (panel, variant, name) in [
+            (
+                &layout_page,
+                theme::ThemeVariant::Dark,
+                "graphite-layout-dark.png",
+            ),
+            (
+                &layout_page,
+                theme::ThemeVariant::Light,
+                "graphite-layout-light.png",
+            ),
+            (
+                &settings_page,
+                theme::ThemeVariant::Dark,
+                "graphite-settings-layout-dark.png",
+            ),
+        ] {
+            let (_, buffer) = paint(panel, variant);
+            write_present_png(&dir.join(name), &buffer, width as u32, height as u32).unwrap();
+        }
     }
 }

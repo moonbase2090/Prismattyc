@@ -151,6 +151,9 @@ pub enum Action {
     /// Open the transparency dialog. Unbound. The palette lists it only when
     /// `chrome_style` is graphite (#112).
     Transparency,
+    /// Open the Layout settings (Bars or Sidebar). Unbound. The palette lists
+    /// it only when `chrome_style` is graphite (#150).
+    ChromeLayout,
     RichFocus,
 }
 
@@ -242,6 +245,7 @@ impl Action {
             Action::ScrollLineUp,
             Action::ScrollLineDown,
             Action::Transparency,
+            Action::ChromeLayout,
             Action::RichFocus,
         ]);
         all
@@ -331,6 +335,7 @@ impl Action {
             Action::ScrollLineUp => "scroll_line_up".into(),
             Action::ScrollLineDown => "scroll_line_down".into(),
             Action::Transparency => "transparency".into(),
+            Action::ChromeLayout => "chrome_layout".into(),
             Action::RichFocus => "rich_focus".into(),
         }
     }
@@ -442,6 +447,9 @@ impl Action {
             Action::ScrollLineUp => "scroll history up one line".into(),
             Action::ScrollLineDown => "scroll history down one line".into(),
             Action::Transparency => "open transparency settings (graphite chrome only)".into(),
+            Action::ChromeLayout => {
+                "choose the Bars or Sidebar layout (graphite chrome only)".into()
+            }
             Action::RichFocus => "toggle rich focus (--experimental-rich)".into(),
         }
     }
@@ -564,6 +572,7 @@ impl Action {
             | Action::ScrollLineUp
             | Action::ScrollLineDown
             | Action::Transparency
+            | Action::ChromeLayout
             | Action::RichFocus => ActionGroup::ViewEdit,
         }
     }
@@ -618,6 +627,9 @@ impl Action {
             Action::RichFocus => Some("Needs --experimental-rich."),
             Action::Transparency => Some(
                 "Writes the existing opacity keys. Listed in the palette only when chrome_style is graphite.",
+            ),
+            Action::ChromeLayout => Some(
+                "Writes the layout key and applies it at once. Listed in the palette only when chrome_style is graphite.",
             ),
             _ => None,
         }
@@ -1251,6 +1263,7 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         Action::ScrollLineUp => vec!["ctrl+shift+up"],
         Action::ScrollLineDown => vec!["ctrl+shift+down"],
         Action::Transparency => vec![],
+        Action::ChromeLayout => vec![],
         Action::RichFocus => vec!["ctrl+shift+g"],
     }
 }
@@ -1550,6 +1563,7 @@ mod tests {
                 | Action::ResetFontSize
                 | Action::BarColorPrev
                 | Action::Transparency
+                | Action::ChromeLayout
         )
     }
 

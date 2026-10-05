@@ -130,6 +130,35 @@ impl LayoutMode {
     }
 }
 
+/// Which status toasts show (#171). `all` (default) shows every status
+/// message; `errors` shows only failures; `off` shows none. Hidden messages
+/// stay in Recent messages. Bell, paste, and drag chips have their own keys.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToastLevel {
+    #[default]
+    All,
+    Errors,
+    Off,
+}
+
+impl ToastLevel {
+    pub fn parse(raw: &str) -> Option<Self> {
+        [ToastLevel::All, ToastLevel::Errors, ToastLevel::Off]
+            .into_iter()
+            .find(|level| level.as_str() == raw)
+    }
+
+    /// The `toasts` value as written in the config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToastLevel::All => "all",
+            ToastLevel::Errors => "errors",
+            ToastLevel::Off => "off",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigFile {
@@ -247,6 +276,8 @@ pub struct ConfigFile {
     /// Show "Moving tab NAME → …" while a tab chip or pane handle is being
     /// dragged (PT-79). Default true.
     pub drag_toaster: Option<bool>,
+    /// Status toasts: `all` (default), `errors`, or `off` (#171). Hot-reloaded.
+    pub toasts: Option<ToastLevel>,
     /// Raise an OS notification on BEL while the window is unfocused.
     /// Default false. Linux: `notify-send`; macOS: `osascript`.
     pub os_notify_bell: Option<bool>,
@@ -493,6 +524,10 @@ impl ConfigFile {
 
     pub fn drag_toaster(&self) -> bool {
         self.drag_toaster.unwrap_or(true)
+    }
+
+    pub fn toasts(&self) -> ToastLevel {
+        self.toasts.unwrap_or_default()
     }
 
     pub fn os_notify_bell(&self) -> bool {
@@ -1321,7 +1356,10 @@ mod tests {
         std::fs::write(&path, "# mine\nbell_toaster = false\n").unwrap();
         save_preference(&path, "toasts", toml_edit::value(ToastLevel::Off.as_str())).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("# mine") && raw.contains("toasts = \"off\""), "{raw}");
+        assert!(
+            raw.contains("# mine") && raw.contains("toasts = \"off\""),
+            "{raw}"
+        );
         let restarted = load(&path).unwrap();
         assert_eq!(restarted.toasts(), ToastLevel::Off);
         assert!(!restarted.bell_toaster());

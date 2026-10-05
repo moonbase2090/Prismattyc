@@ -836,6 +836,7 @@ fn verify_pixels_and_overlays(host: &mut HostState) {
 
     // #171: each `toasts` level gates status chips; history keeps them all.
     let recorded = host.status_history.newest_first().count();
+    let hidden = host.status_history.hidden();
     host.toasts = config::ToastLevel::Off;
     rail_toast(host, " cairn: view applied ");
     rail_error_toast(host, " move failed: gone ");
@@ -854,7 +855,7 @@ fn verify_pixels_and_overlays(host: &mut HostState) {
         recorded + 5,
         "every message reaches Recent messages"
     );
-    assert_eq!(host.status_history.hidden(), 3);
+    assert_eq!(host.status_history.hidden(), hidden + 3);
     host.bell_toasts.clear();
     host.toasts = config::ToastLevel::default();
     assert_eq!(frame(host), plain);

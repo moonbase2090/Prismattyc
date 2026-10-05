@@ -57,6 +57,9 @@ pub enum Action {
     TerminalSwitcher,
     AgentMessages,
     UpdateRestart,
+    /// Recent status messages, including toasts hidden by `toasts` (#171).
+    /// Unbound by default.
+    RecentMessages,
 
     CloseTab,
     RenameTab,
@@ -188,6 +191,7 @@ impl Action {
             Action::TerminalSwitcher,
             Action::AgentMessages,
             Action::UpdateRestart,
+            Action::RecentMessages,
             Action::CloseTab,
             Action::RenameTab,
             Action::RenamePane,
@@ -282,6 +286,7 @@ impl Action {
             Action::TerminalSwitcher => "terminal_switcher".into(),
             Action::AgentMessages => "agent_messages".into(),
             Action::UpdateRestart => "update_restart".into(),
+            Action::RecentMessages => "recent_messages".into(),
 
             Action::CloseTab => "close_tab".into(),
             Action::RenameTab => "rename_tab".into(),
@@ -376,6 +381,7 @@ impl Action {
             Action::TerminalSwitcher => "find a terminal across Spaces".into(),
             Action::AgentMessages => "view pending mail and pane input queue receipts".into(),
             Action::UpdateRestart => "update, restart components, and inspect versions".into(),
+            Action::RecentMessages => "show recent status messages, including hidden toasts".into(),
 
             Action::CloseTab => "close the active tab".into(),
             Action::RenameTab => "rename the active tab".into(),
@@ -552,6 +558,7 @@ impl Action {
             | Action::SpaceRailPrev
             | Action::SaveSpace => ActionGroup::Spaces,
             Action::UpdateRestart
+            | Action::RecentMessages
             | Action::NewWindow
             | Action::Quit
             | Action::OpenConfig
@@ -594,6 +601,7 @@ impl Action {
             Action::Layout(_) => Some("Enter, then press the column count. Spawns panes up to N."),
             Action::AgentMessages => Some("Read agent messages and inspect pending deliveries."),
             Action::UpdateRestart => Some("Check installed versions, update, or restart components."),
+            Action::RecentMessages => Some("Settings choose which toasts show: all, errors, or off."),
             Action::PresetSingle
             | Action::PresetSplitH
             | Action::PresetSplitV
@@ -1160,7 +1168,7 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         Action::SessionSplitRight => vec!["ctrl+alt+shift+r"],
         Action::SessionSplitDown => vec!["ctrl+alt+shift+b"],
         Action::TerminalSwitcher => vec!["ctrl+shift+o"],
-        Action::AgentMessages | Action::UpdateRestart => vec![],
+        Action::AgentMessages | Action::UpdateRestart | Action::RecentMessages => vec![],
 
         Action::CloseTab => vec!["ctrl+shift+q"],
         Action::RenameTab => vec!["ctrl+shift+r"],
@@ -1553,6 +1561,7 @@ mod tests {
             action,
             Action::AgentMessages
                 | Action::UpdateRestart
+                | Action::RecentMessages
                 | Action::PresetSingle
                 | Action::PresetSplitH
                 | Action::PresetSplitV

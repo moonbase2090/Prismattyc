@@ -362,6 +362,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         value: ConfigValue::Bool(true),
     },
     ConfigKey {
+        name: "toasts",
+        group: ConfigGroup::BellsAttention,
+        doc: "Status toasts: all, errors only, or off; hidden ones stay in Recent messages",
+        range: "all|errors|off",
+        value: ConfigValue::String("all"),
+    },
+    ConfigKey {
         name: "os_notify_bell",
         group: ConfigGroup::BellsAttention,
         doc: "OS notification on BEL while the window is unfocused",
@@ -1078,6 +1085,7 @@ mod tests {
         "bell_toaster",
         "bell_toaster_ms",
         "drag_toaster",
+        "toasts",
         "os_notify_bell",
         "attention_sound",
         "attention_badge",

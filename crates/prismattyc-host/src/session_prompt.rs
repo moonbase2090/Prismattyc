@@ -110,7 +110,7 @@ fn begin_creation(host: &mut HostState, target: Target, name: String) {
         finish_choice(host, true, mode == "blank");
         if let Some(prompt) = host.session_prompt.take() {
             if let Some(error) = prompt.error {
-                rail_toast(host, &format!("Could not create terminal: {error}"));
+                rail_error_toast(host, &format!("Could not create terminal: {error}"));
             }
         }
     }

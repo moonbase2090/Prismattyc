@@ -161,7 +161,7 @@ pub(super) fn finish(host: &mut HostState, accept: bool) {
             }
             Err(error) => {
                 eprintln!("prismattyc-host: could not restore last space: {error:#}");
-                rail_toast(host, &format!(" could not restore last space: {error:#} "));
+                rail_error_toast(host, &format!(" could not restore last space: {error:#} "));
             }
         }
     } else {

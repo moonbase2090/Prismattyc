@@ -178,6 +178,12 @@ pub struct Report {
 }
 
 impl Report {
+    /// A failed open toasts as an error (#171); unavailable sessions in an
+    /// applied view are routine.
+    pub fn is_error(&self) -> bool {
+        self.error.is_some()
+    }
+
     pub fn label(&self) -> String {
         if let Some(error) = &self.error {
             let view = match self.view {

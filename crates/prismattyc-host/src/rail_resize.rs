@@ -78,7 +78,7 @@ pub(super) fn button(host: &mut HostState, state: ElementState, button: MouseBut
             "space_rail_width_cols",
             toml_edit::value(host.spacing.space_rail_width_cols as i64),
         ) {
-            rail_toast(host, &format!("Could not save rail width: {error}"));
+            rail_error_toast(host, &format!("Could not save rail width: {error}"));
         }
         sync_chrome_hover(host);
         return true;

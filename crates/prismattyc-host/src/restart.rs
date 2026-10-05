@@ -68,7 +68,7 @@ pub(super) fn poll(app: &mut App) {
         let message = format!("{update} Restart deferred: {error:#}");
         let _ = requests::respond(&socket, &request, "deferred", &message);
         for host in app.windows.values_mut() {
-            rail_toast(host, &message);
+            rail_error_toast(host, &message);
         }
     }
 }

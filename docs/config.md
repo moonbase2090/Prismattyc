@@ -36,7 +36,9 @@ menu to opt out. The app menu's manual check works regardless of this setting.
 The classic `prismattyc` binary does not
 read this file. `chrome_style` defaults to `graphite`. Leave that key
 commented, or omit it, to follow the app default. `chrome_style = "classic"`
-keeps the previous chrome and applies live.
+keeps the previous chrome and applies live. `theme` defaults to `prismattyc`
+(follow the system appearance). Leave that key commented, or omit it, to
+follow the app default.
 
 ## Keys
 
@@ -45,8 +47,8 @@ keeps the previous chrome and applies live.
 # Edit in place. CLI flags and PRISMATTYC_* env vars still win.
 
 # -- appearance / theme --
-# Named theme: built-in slug, display name, sibling themes/ file, or absolute TOML path. theme slug or absolute path.
-theme = "prismattyc-default"
+# Named theme: built-in slug, display name, sibling themes/ file, or absolute TOML path. Omit this key to follow the app default (prismattyc). theme slug or absolute path.
+# theme = "prismattyc"
 # Render timings and counters. off|osd|log|both.
 render_timer = "off"
 # Log every render frame when render_timer includes log; use for benches only. true|false.
@@ -184,37 +186,37 @@ window_blur = false
 # values. Hot-reloaded with the rest of this file; the theme picker keeps them.
 [theme_overrides]
 # Terminal text. #RRGGBB.
-# default_fg = "#d0d0d0"
+# default_fg = "#d9dde4"
 # Terminal ground. #RRGGBB.
-# default_bg = "#121214"
+# default_bg = "#181b21"
 # Chrome text: tabs, rails, footer. #RRGGBB.
-# chrome_fg = "#e5e9f0"
+# chrome_fg = "#e6e9ee"
 # Chrome ground. #RRGGBB.
-# chrome_bg = "#1b1e26"
+# chrome_bg = "#15181d"
 # Active tab chip fill; follows the focus colour when unset. #RRGGBB.
-# tab_active_bg = "#2b2e36"
+# tab_active_bg = "#26292e"
 # Frame ground behind panes; pane opacity blends toward it. #RRGGBB.
-# pane_backdrop = "#0a0a0c"
+# pane_backdrop = "#101216"
 # Unfocused pane border. #RRGGBB.
-# pane_border = "#454a57"
+# pane_border = "#262a32"
 # Toast and overlay ground. #RRGGBB.
-# overlay_bg = "#2a364a"
+# overlay_bg = "#1a1d23"
 # Unseen-output tab badge. #RRGGBB.
-# unseen_badge = "#ffb454"
+# unseen_badge = "#f2b84b"
 # Mail envelope ink. #RRGGBB.
-# mail_letter = "#ffb454"
+# mail_letter = "#f2b84b"
 # Working tab badge and breathing handle chip. #RRGGBB.
-# active_badge = "#4cd18b"
+# active_badge = "#4cc98a"
 # Agent attention tab badge. #RRGGBB.
-# attention_badge = "#ff6b6b"
+# attention_badge = "#ff7a6b"
 # Cursor text; set together with cursor_bg. #RRGGBB.
-# cursor_fg = "#121214"
+# cursor_fg = "#181b21"
 # Cursor block; set together with cursor_fg. #RRGGBB.
-# cursor_bg = "#d0d0d0"
+# cursor_bg = "#e6e9ee"
 # Selection text; set together with selection_bg (unset: inverse video). #RRGGBB.
-# selection_fg = "#121214"
+# selection_fg = "#f2f4f7"
 # Selection ground; set together with selection_fg (unset: inverse video). #RRGGBB.
-# selection_bg = "#d0d0d0"
+# selection_bg = "#2a3a55"
 # ANSI colours 0-15. #RRGGBB.
 # ansi = ["#000000", "#cd0000", "#00cd00", "#cdcd00", "#0000ee", "#cd00cd", "#00cdcd", "#e5e5e5", "#7f7f7f", "#ff0000", "#00ff00", "#ffff00", "#5c5cff", "#ff00ff", "#00ffff", "#ffffff"]
 
@@ -607,11 +609,14 @@ chosen by contrast.
 
 ### Themes
 
-Prismattyc ships 29 built-in themes:
+Prismattyc ships 32 built-in themes:
 
 | Config slug | Display name |
 | --- | --- |
 | `prismattyc-default` | Prismattyc Default |
+| `prismattyc` | Prismattyc (match system) |
+| `prismattyc-dark` | Prismattyc Dark |
+| `prismattyc-light` | Prismattyc Light |
 | `catppuccin-mocha` | Catppuccin Mocha |
 | `tokyo-night` | Tokyo Night |
 | `rose-pine-moon` | Rosé Pine Moon |
@@ -640,6 +645,16 @@ Prismattyc ships 29 built-in themes:
 | `hive-monochromatic-light` | Hive Monochromatic Light |
 | `hive-tri-tone-light` | Hive Tri-Tone Light |
 | `hive-muted-professional-light` | Hive Muted Professional Light |
+
+`prismattyc` is the default for new installs and for a config without `theme`.
+It follows the OS appearance (macOS, Windows, and desktops that report one) and
+paints Prismattyc Dark or Prismattyc Light, so the Graphite chrome, the
+terminal ground, text, cursor, and selection, and the macOS title band all use
+one palette; it falls back to Dark when the system reports nothing.
+`prismattyc-dark` and `prismattyc-light` pin one side. `prismattyc-default` is
+the earlier palette and stays available by name. Any other theme, a theme file,
+or `[theme_overrides]` keeps its own colors; overrides are re-applied after an
+appearance switch.
 
 The Omarchy themes use palettes from the official Omarchy repository, with
 window-control colors mapped to Prismattyc. Their [MIT notice](../crates/prismattyc-host/themes/OMARCHY-LICENSE.txt)

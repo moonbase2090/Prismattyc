@@ -192,7 +192,9 @@ pub(crate) const LIGHT: Tokens = Tokens {
     bar_line: rgb(0xd5d9df),
     divider: rgb(0xd5d9df),
     tab_active: rgb(0xffffff),
-    tab_active_line: Some(rgb(0xd5d9df)),
+    // #145: #d5d9df read too faint on the light bar; a stronger rule keeps
+    // the white active chip legible at a glance. Dark stays unoutlined.
+    tab_active_line: Some(rgb(0xaab2bd)),
     tab_hover: rgb(0xe2e6eb),
     text: rgb(0x1f2329),
     text_strong: rgb(0x1f2329),
@@ -2386,7 +2388,10 @@ pub(crate) fn paint_rail_chip(
         };
         outlined_round_rect(buffer, stride, rect, s(5.0), accent, fill);
     } else if chip.current {
-        fill_round_rect(buffer, stride, rect, s(5.0), tok.chip_active, 0xff);
+        match tok.tab_active_line {
+            Some(line) => outlined_round_rect(buffer, stride, rect, s(5.0), line, tok.chip_active),
+            None => fill_round_rect(buffer, stride, rect, s(5.0), tok.chip_active, 0xff),
+        }
     } else if chip.hovered {
         fill_round_rect(buffer, stride, rect, s(5.0), tok.tab_hover, 0xff);
     }
@@ -2694,7 +2699,10 @@ fn paint_side_chip(
         };
         outlined_round_rect(buffer, stride, rect, s(6.0), paint.accent, fill);
     } else if chip.current {
-        fill_round_rect(buffer, stride, rect, s(6.0), tok.chip_active, 0xff);
+        match tok.tab_active_line {
+            Some(line) => outlined_round_rect(buffer, stride, rect, s(6.0), line, tok.chip_active),
+            None => fill_round_rect(buffer, stride, rect, s(6.0), tok.chip_active, 0xff),
+        }
     } else if chip.hovered {
         fill_round_rect(buffer, stride, rect, s(6.0), tok.tab_hover, 0xff);
     }
@@ -3177,7 +3185,10 @@ fn paint_sidebar_row(
     let s = |d: f32| d * paint.chrome.scale_milli as f32 / 1000.0;
     let slot = row.slot;
     if row.selected {
-        fill_round_rect(buffer, stride, slot, s(6.0), tok.tab_active, 0xff);
+        match tok.tab_active_line {
+            Some(line) => outlined_round_rect(buffer, stride, slot, s(6.0), line, tok.tab_active),
+            None => fill_round_rect(buffer, stride, slot, s(6.0), tok.tab_active, 0xff),
+        }
     } else if row.hovered {
         fill_round_rect(buffer, stride, slot, s(6.0), tok.tab_hover, 0xff);
     }
@@ -3863,6 +3874,35 @@ mod tests {
                 assert!(contrast_ratio(fg, bg) >= 4.5, "{fg:?} on {bg:?}");
             }
         }
+    }
+
+    /// #145: every Light surface a chip, pill, or bar sits on stays light,
+    /// and the active outline is visible against both light bars.
+    #[test]
+    fn light_chips_and_bars_stay_light_with_a_visible_active_outline() {
+        use crate::raster::relative_luminance;
+        for fill in [
+            LIGHT.bar,
+            LIGHT.status_bar,
+            LIGHT.ground,
+            LIGHT.tab_active,
+            LIGHT.chip_active,
+            LIGHT.field,
+            LIGHT.key,
+            LIGHT.tab_hover,
+            LIGHT.title_focus,
+        ] {
+            assert!(
+                relative_luminance(fill) > 0.75,
+                "{fill:?} reads dark on Light"
+            );
+        }
+        let line = LIGHT
+            .tab_active_line
+            .expect("Light outlines the active chip");
+        assert!(contrast_ratio(line, LIGHT.bar) >= 1.7);
+        assert!(contrast_ratio(line, LIGHT.status_bar) >= 1.5);
+        assert!(DARK.tab_active_line.is_none(), "Dark is unchanged");
     }
 
     #[test]

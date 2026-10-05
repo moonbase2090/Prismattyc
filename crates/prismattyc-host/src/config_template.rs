@@ -18,7 +18,7 @@ use crate::keybind::{self, Action};
 
 /// Default cell size in px before display scaling (`FONT_PX` in main).
 pub const DEFAULT_FONT_PX: f32 = 15.0;
-const DEFAULT_THEME: &str = "prismattyc-default";
+const DEFAULT_THEME: &str = "prismattyc";
 const DEFAULT_FOCUS_BORDER: &str = "blue";
 const DEFAULT_FOCUS_ANIMATION: &str = "none";
 const DEFAULT_FOCUS_ANIMATION_MS: u64 = 280;
@@ -69,9 +69,9 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         name: "theme",
         group: ConfigGroup::Appearance,
         doc:
-            "Named theme: built-in slug, display name, sibling themes/ file, or absolute TOML path",
+            "Named theme: built-in slug, display name, sibling themes/ file, or absolute TOML path. Omit this key to follow the app default (prismattyc)",
         range: "theme slug or absolute path",
-        value: ConfigValue::String(DEFAULT_THEME),
+        value: ConfigValue::CommentedString(DEFAULT_THEME),
     },
     ConfigKey {
         name: "render_timer",
@@ -619,8 +619,8 @@ const THEME_OVERRIDES_HEADER: &str = "# -- theme overrides --\n\
 
 /// Every `[theme_overrides]` key with the prismattyc-default value.
 pub fn theme_override_keys() -> Vec<ThemeOverrideKey> {
-    use crate::theme::{default_theme, hex};
-    let theme = default_theme();
+    use crate::theme::{hex, shipped_default};
+    let theme = &shipped_default();
     let quoted = |rgb: [u8; 3]| toml_edit::Value::from(hex(rgb)).to_string();
     let pair = |value: Option<[u8; 3]>, fallback: [u8; 3]| quoted(value.unwrap_or(fallback));
     let mut ansi = toml_edit::Array::new();
@@ -1095,7 +1095,20 @@ mod tests {
     fn generated_template_parses_to_builtin_defaults() {
         let template = render_template();
         let parsed = load_from_str(&template);
-        assert_eq!(parsed.theme.as_deref(), Some(DEFAULT_THEME));
+        assert!(
+            parsed.theme.is_none(),
+            "a fresh install follows the code default instead of pinning a theme name"
+        );
+        assert!(
+            template
+                .lines()
+                .any(|line| line == "# theme = \"prismattyc\""),
+            "fresh installs show the default without pinning it"
+        );
+        assert!(
+            !template.lines().any(|line| line.starts_with("theme =")),
+            "a live theme line would pin a name 0.2.30 cannot load"
+        );
         assert_eq!(parsed.render_timer(), crate::config::RenderTimer::Off);
         assert!(!parsed.render_timer_log_every_frame());
         assert_eq!(parsed.install_agent_skills, Some(true));
@@ -1167,7 +1180,7 @@ mod tests {
             Some(crate::theme::ThemeOverrides::default()),
             "the commented [theme_overrides] table parses empty"
         );
-        assert_eq!(parsed.loaded_theme(), *crate::theme::default_theme());
+        assert_eq!(parsed.loaded_theme(), crate::theme::shipped_default());
         for key in theme_override_keys() {
             assert!(
                 template.contains(&format!("# {} = {}", key.name, key.literal)),
@@ -1178,14 +1191,14 @@ mod tests {
     }
 
     /// PT-207: uncommenting an override recolours the named theme; the
-    /// example values are exactly the prismattyc-default palette.
+    /// example values are exactly the shipped Prismattyc palette.
     #[test]
     fn uncommented_theme_overrides_recolour_the_named_theme() {
         let template = render_template();
         let live = template.replace("# attention_badge = \"", "attention_badge = \"");
         assert_ne!(live, template);
         let parsed = load_from_str(&live);
-        assert_eq!(parsed.loaded_theme(), *crate::theme::default_theme());
+        assert_eq!(parsed.loaded_theme(), crate::theme::shipped_default());
 
         let all_live = theme_override_keys()
             .iter()
@@ -1193,23 +1206,23 @@ mod tests {
                 acc.replace(&format!("# {} = ", key.name), &format!("{} = ", key.name))
             });
         let parsed = load_from_str(&all_live);
-        let mut expected = crate::theme::default_theme().clone();
+        let mut expected = crate::theme::shipped_default();
         // Explicit keys: the chip stops following the focus colour and the
         // selection example (inverse video spelled out) becomes explicit.
         expected.tab_active_bg_explicit = true;
-        expected.selection_fg = Some(expected.default_bg);
-        expected.selection_bg = Some(expected.default_fg);
+        expected.selection_fg = Some(expected.selection_fg.unwrap_or(expected.default_bg));
+        expected.selection_bg = Some(expected.selection_bg.unwrap_or(expected.default_fg));
         assert_eq!(
             parsed.loaded_theme(),
             expected,
-            "every example value equals the prismattyc-default palette"
+            "every example value equals the shipped Prismattyc palette"
         );
 
         let recoloured = live.replace(
             &format!(
                 "attention_badge = {}",
                 toml_edit::Value::from(crate::theme::hex(
-                    crate::theme::default_theme().attention_badge
+                    crate::theme::shipped_default().attention_badge
                 ))
             ),
             "attention_badge = \"#123456\"",
@@ -1218,7 +1231,7 @@ mod tests {
         assert_eq!(parsed.loaded_theme().attention_badge, [0x12, 0x34, 0x56]);
         assert_eq!(
             parsed.loaded_theme().mail_letter,
-            crate::theme::default_theme().mail_letter,
+            crate::theme::shipped_default().mail_letter,
             "other keys keep the named theme"
         );
     }
@@ -1368,6 +1381,23 @@ mod tests {
         );
         let parsed = load_from_str(&merged);
         assert_eq!(parsed.theme.as_deref(), Some("dracula"));
+        let omitted = merge_template("panes = 3\n").unwrap();
+        assert!(
+            omitted
+                .lines()
+                .any(|line| line == "# theme = \"prismattyc\""),
+            "merge must comment a missing theme: {omitted}"
+        );
+        assert!(
+            !omitted.lines().any(|line| line.starts_with("theme =")),
+            "merge must not live-write the default theme: {omitted}"
+        );
+        let omitted_parsed = load_from_str(&omitted);
+        assert!(omitted_parsed.theme.is_none());
+        assert_eq!(
+            omitted_parsed.loaded_theme(),
+            crate::theme::shipped_default()
+        );
         assert_eq!(parsed.panes, Some(3));
         assert_eq!(parsed.font_px, Some(DEFAULT_FONT_PX));
         assert!(parsed.font.is_none());

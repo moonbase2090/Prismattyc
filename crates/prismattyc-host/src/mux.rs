@@ -2830,6 +2830,29 @@ impl MuxRuntime {
         }
     }
 
+    /// Sidebar session row (issue #175): select `tab`, then focus the pane
+    /// at `pane_index` in that tab's layout order. A pane hidden by zoom
+    /// comes back into view. The layout ratios are left alone, and nothing
+    /// is written to the pane. An unknown tab or pane does nothing.
+    pub(crate) fn focus_session_row(&mut self, tab: usize, pane_index: usize) -> bool {
+        let ids = self.window_ids();
+        let Some(&window) = ids.get(tab) else {
+            return false;
+        };
+        if self.view.window != Some(window) && self.select_tab(tab).ok() != Some(true) {
+            return false;
+        }
+        let panes = self
+            .domain
+            .window(window)
+            .map(|win| win.layout.panes())
+            .unwrap_or_default();
+        let Some(&pane) = panes.get(pane_index) else {
+            return false;
+        };
+        self.focus(pane)
+    }
+
     pub(crate) fn focus_neighbor(&mut self, direction: FocusDirection) -> bool {
         // Neighbors are hidden while zoomed; leave zoom, then navigate.
         if self.zoomed_here().is_some() && self.set_zoom(None).is_err() {
@@ -5965,6 +5988,43 @@ mod tests {
         assert!(runtime.focus(right));
         assert_eq!(runtime.zoomed_pane(), None);
         assert_eq!(runtime.rects().count(), 2);
+    }
+
+    #[test]
+    fn focus_session_row_switches_tabs_and_unzooms_without_retiling() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let first = runtime.focused_id();
+        let second = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        assert_eq!(runtime.active_pane_ids(), vec![first, second]);
+        let layout = runtime.active_layout();
+        assert!(runtime.toggle_zoom().unwrap());
+        assert_eq!(runtime.zoomed_pane(), Some(second));
+        assert!(runtime.focus_session_row(0, 1));
+        assert_eq!(runtime.focused_id(), second);
+        assert_eq!(
+            runtime.zoomed_pane(),
+            Some(second),
+            "the pane already on screen stays zoomed"
+        );
+        assert!(runtime.focus_session_row(0, 0));
+        assert_eq!(runtime.focused_id(), first);
+        assert_eq!(runtime.zoomed_pane(), None, "a hidden pane comes back");
+        assert_eq!(runtime.active_layout(), layout, "focus does not retile");
+
+        runtime.new_tab("/bin/sh", &[]).unwrap();
+        let third = runtime.focused_id();
+        assert!(runtime.focus_session_row(0, 0));
+        assert_eq!(runtime.selected_tab_index(), 0);
+        assert_eq!(runtime.focused_id(), first);
+        assert!(runtime.focus_session_row(1, 0));
+        assert_eq!(runtime.selected_tab_index(), 1);
+        assert_eq!(runtime.focused_id(), third);
+        assert!(!runtime.focus_session_row(9, 0));
+        assert_eq!(runtime.focused_id(), third, "an unknown tab is left alone");
+        assert!(!runtime.focus_session_row(1, 4));
+        assert_eq!(runtime.focused_id(), third, "an unknown pane is left alone");
     }
 
     #[test]

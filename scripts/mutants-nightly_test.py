@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for nightly rotation planning and partial-result handling."""
+"""Unit tests for nightly rotation planning, partial results, and argv."""
 
 from __future__ import annotations
 
@@ -7,6 +7,9 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -154,6 +157,68 @@ class NightlyPlanTests(unittest.TestCase):
             self.assertEqual(state["next_shard"], 1)
             self.assertEqual(state["metrics"]["prismattyc-core"]["build_seconds"], 4.0)
             self.assertEqual(state["metrics"]["prismattyc-core"]["test_seconds"], 2.0)
+
+
+class NightlyArgvTests(unittest.TestCase):
+    def dry_run(self, updates: dict[str, str], unset: tuple[str, ...] = ()) -> list[str]:
+        env = os.environ.copy()
+        for key in unset:
+            env.pop(key, None)
+        env.update(updates)
+        env["MUTANTS_DRY_RUN"] = "1"
+        script = Path(__file__).with_name("mutants-nightly.sh")
+        completed = subprocess.run(
+            ["bash", str(script)],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(completed.stderr, "")
+        return completed.stdout.splitlines()
+
+    def test_in_diff_supplies_shard_required_by_sharding(self) -> None:
+        args = self.dry_run(
+            {"MUTANTS_IN_DIFF_FILE": "build/mutants/nightly-in-diff.patch"},
+            unset=("MUTANTS_SHARD",),
+        )
+        self.assertEqual(args[0], "cargo")
+        self.assertEqual(args[args.index("--sharding") + 1], "round-robin")
+        self.assertEqual(
+            args[args.index("--in-diff") + 1],
+            "build/mutants/nightly-in-diff.patch",
+        )
+        self.assertEqual(args[args.index("--shard") + 1], "0/1")
+        self.assertEqual(args[args.index("--output") + 1], "build/mutants/in-diff")
+
+    def test_shard_path_keeps_its_shard_and_omits_in_diff(self) -> None:
+        args = self.dry_run({"MUTANTS_SHARD": "16/154"}, unset=("MUTANTS_IN_DIFF_FILE",))
+        self.assertNotIn("--in-diff", args)
+        self.assertEqual(args[args.index("--sharding") + 1], "round-robin")
+        self.assertEqual(args[args.index("--shard") + 1], "16/154")
+        self.assertEqual(args[args.index("--output") + 1], "build/mutants/shard-16")
+
+    def test_in_diff_argv_parses_on_installed_cargo_mutants(self) -> None:
+        if shutil.which("cargo-mutants") is None:
+            self.skipTest("cargo-mutants is not installed")
+        args = self.dry_run(
+            {"MUTANTS_IN_DIFF_FILE": "build/mutants/nightly-in-diff.patch"},
+            unset=("MUTANTS_SHARD",),
+        )
+        # `--` forwards the rest to cargo test, so --version must stay a mutants flag.
+        if "--" in args:
+            split = args.index("--")
+            args = [*args[:split], "--version", *args[split:]]
+        else:
+            args = [*args, "--version"]
+        completed = subprocess.run(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(completed.stdout.startswith("cargo-mutants "))
 
 
 if __name__ == "__main__":

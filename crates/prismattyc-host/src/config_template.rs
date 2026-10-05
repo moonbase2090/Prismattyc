@@ -1154,7 +1154,10 @@ mod tests {
         assert!(!parsed.window_blur());
         assert!(parsed.font.is_none());
         assert!(parsed.background_image.is_none());
-        assert_eq!(parsed.loaded_keymap(), KeyMap::default());
+        assert_eq!(
+            parsed.loaded_keymap(),
+            KeyMap::from_config_with_platform(None, false, cfg!(target_os = "macos")).unwrap()
+        );
         for action in Action::all() {
             let listed = parsed
                 .keys

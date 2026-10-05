@@ -20,7 +20,24 @@ pub fn encode_key_event(
     text: Option<&str>,
     modifiers: ModifiersState,
 ) -> Option<Vec<u8>> {
-    encode_key_event_with_modes(logical, physical, text, modifiers, 0, 0)
+    encode_key_event_with_modes(logical, physical, text, modifiers, KeyModes::default())
+}
+
+/// Keyboard modes that change how a key is written to the child PTY.
+///
+/// `cursor_keys_app` is DECCKM. `mac_line_edit` is true only when the host is
+/// macOS and `macos_shortcuts` is on. `mac_word_jump` is true on macOS.
+/// A matching host chord never reaches the encoder.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct KeyModes {
+    pub kitty_flags: u16,
+    pub modify_other_keys: u8,
+    /// DECCKM (`CSI ? 1 h`). Unmodified Home/End/arrows use SS3.
+    pub cursor_keys_app: bool,
+    /// Cmd+Left/Right/Backspace are ^A/^E/^U.
+    pub mac_line_edit: bool,
+    /// Option+Left/Right are word jumps (`ESC b` / `ESC f`).
+    pub mac_word_jump: bool,
 }
 
 /// Encode a host key event with the focused child's terminal keyboard modes.
@@ -33,14 +50,14 @@ pub fn encode_key_event_with_modes(
     physical: PhysicalKey,
     text: Option<&str>,
     modifiers: ModifiersState,
-    kitty_flags: u16,
-    modify_other_keys: u8,
+    modes: KeyModes,
 ) -> Option<Vec<u8>> {
     let shift = modifiers.shift_key();
     let alt = modifiers.alt_key();
     let ctrl = modifiers.control_key();
     let super_key = modifiers.super_key();
     let mod_param = xterm_mod_param(shift, alt, ctrl, super_key);
+    let flags = modes;
 
     // 1) Named keys (Space, Enter, arrows, F-keys, …) — do this before `text`
     // so Enter is always CR, not platform-dependent.
@@ -49,9 +66,14 @@ pub fn encode_key_event_with_modes(
             return None;
         }
         if *named == NamedKey::Enter {
-            return Some(encode_enter(mod_param, alt, kitty_flags, modify_other_keys));
+            return Some(encode_enter(
+                mod_param,
+                alt,
+                modes.kitty_flags,
+                modes.modify_other_keys,
+            ));
         }
-        if let Some(bytes) = encode_named(*named, mod_param, shift, ctrl) {
+        if let Some(bytes) = encode_named_with_flags(*named, mod_param, shift, ctrl, flags) {
             return Some(bytes);
         }
         // Unmapped named keys (media, browser, …): do not fall through to
@@ -75,15 +97,7 @@ pub fn encode_key_event_with_modes(
 
     // 4) Physical key code when logical is Unidentified (rare, but real).
     if let PhysicalKey::Code(code) = physical {
-        return encode_keycode_with_modes(
-            code,
-            mod_param,
-            shift,
-            ctrl,
-            alt,
-            kitty_flags,
-            modify_other_keys,
-        );
+        return encode_keycode_with_modes(code, mod_param, shift, ctrl, alt, modes);
     }
 
     None
@@ -193,7 +207,38 @@ fn ctrl_byte(c: char) -> Option<u8> {
     })
 }
 
+#[cfg(test)]
 fn encode_named(named: NamedKey, mod_param: u8, shift: bool, ctrl: bool) -> Option<Vec<u8>> {
+    encode_named_with_flags(named, mod_param, shift, ctrl, KeyModes::default())
+}
+
+fn encode_named_with_flags(
+    named: NamedKey,
+    mod_param: u8,
+    shift: bool,
+    ctrl: bool,
+    flags: KeyModes,
+) -> Option<Vec<u8>> {
+    // Super alone is xterm modifier 9 (1 + 8). Checked before Backspace,
+    // which otherwise ignores modifiers and always sends DEL.
+    if flags.mac_line_edit && mod_param == 9 {
+        match named {
+            NamedKey::ArrowLeft => return Some(vec![0x01]),
+            NamedKey::ArrowRight => return Some(vec![0x05]),
+            NamedKey::Backspace => return Some(vec![0x15]),
+            _ => {}
+        }
+    }
+    // Alt alone is xterm modifier 3. A modifier keeps cursor keys in CSI,
+    // so this replaces `CSI 1 ; 3 D/C` only when the macOS word-jump path
+    // is on. Alt+Up/Down stay CSI (and are usually host focus chords).
+    if flags.mac_word_jump && mod_param == 3 {
+        match named {
+            NamedKey::ArrowLeft => return Some(b"\x1bb".to_vec()),
+            NamedKey::ArrowRight => return Some(b"\x1bf".to_vec()),
+            _ => {}
+        }
+    }
     match named {
         NamedKey::Enter => Some(vec![b'\r']),
         NamedKey::Tab if shift => Some(b"\x1b[Z".to_vec()),
@@ -203,12 +248,12 @@ fn encode_named(named: NamedKey, mod_param: u8, shift: bool, ctrl: bool) -> Opti
         NamedKey::Backspace => Some(vec![0x7f]),
         NamedKey::Escape | NamedKey::Cancel => Some(vec![0x1b]),
 
-        NamedKey::ArrowUp => Some(csi_mod("1", b'A', mod_param)),
-        NamedKey::ArrowDown => Some(csi_mod("1", b'B', mod_param)),
-        NamedKey::ArrowRight => Some(csi_mod("1", b'C', mod_param)),
-        NamedKey::ArrowLeft => Some(csi_mod("1", b'D', mod_param)),
-        NamedKey::Home => Some(csi_mod("1", b'H', mod_param)),
-        NamedKey::End => Some(csi_mod("1", b'F', mod_param)),
+        NamedKey::ArrowUp => Some(encode_cursor_key(b'A', mod_param, flags)),
+        NamedKey::ArrowDown => Some(encode_cursor_key(b'B', mod_param, flags)),
+        NamedKey::ArrowRight => Some(encode_cursor_key(b'C', mod_param, flags)),
+        NamedKey::ArrowLeft => Some(encode_cursor_key(b'D', mod_param, flags)),
+        NamedKey::Home => Some(encode_cursor_key(b'H', mod_param, flags)),
+        NamedKey::End => Some(encode_cursor_key(b'F', mod_param, flags)),
         NamedKey::PageUp => Some(csi_mod("5", b'~', mod_param)),
         NamedKey::PageDown => Some(csi_mod("6", b'~', mod_param)),
         NamedKey::Delete => Some(csi_mod("3", b'~', mod_param)),
@@ -281,14 +326,18 @@ fn encode_keycode_with_modes(
     shift: bool,
     ctrl: bool,
     alt: bool,
-    kitty_flags: u16,
-    modify_other_keys: u8,
+    modes: KeyModes,
 ) -> Option<Vec<u8>> {
     if let Some(named) = physical_named_key(code) {
         if named == NamedKey::Enter {
-            return Some(encode_enter(mod_param, alt, kitty_flags, modify_other_keys));
+            return Some(encode_enter(
+                mod_param,
+                alt,
+                modes.kitty_flags,
+                modes.modify_other_keys,
+            ));
         }
-        return encode_named(named, mod_param, shift, ctrl);
+        return encode_named_with_flags(named, mod_param, shift, ctrl, modes);
     }
     let ch = physical_character(code, shift)?;
     encode_char(ch, ctrl, alt)
@@ -302,7 +351,17 @@ fn encode_keycode(
     ctrl: bool,
     alt: bool,
 ) -> Option<Vec<u8>> {
-    encode_keycode_with_modes(code, mod_param, shift, ctrl, alt, 0, 0)
+    encode_keycode_with_modes(code, mod_param, shift, ctrl, alt, KeyModes::default())
+}
+
+/// Unmodified Home/End/arrows: SS3 under DECCKM unless Kitty disambiguate
+/// is on. Any modifier stays the existing CSI `1 ; mod letter` form.
+fn encode_cursor_key(letter: u8, mod_param: u8, flags: KeyModes) -> Vec<u8> {
+    if mod_param == 1 && flags.cursor_keys_app && (flags.kitty_flags & KITTY_DISAMBIGUATE) == 0 {
+        vec![0x1b, b'O', letter]
+    } else {
+        csi_mod("1", letter, mod_param)
+    }
 }
 
 fn physical_named_key(code: KeyCode) -> Option<NamedKey> {
@@ -507,10 +566,48 @@ mod tests {
             PhysicalKey::Unidentified(winit::keyboard::NativeKeyCode::Unidentified),
             None,
             modifiers,
-            kitty_flags,
-            modify,
+            KeyModes {
+                kitty_flags,
+                modify_other_keys: modify,
+                ..KeyModes::default()
+            },
         )
         .expect("Enter is encoded")
+    }
+
+    fn mods_super() -> ModifiersState {
+        let mut m = ModifiersState::empty();
+        m.set(ModifiersState::SUPER, true);
+        m
+    }
+
+    fn mods_super_shift() -> ModifiersState {
+        let mut m = mods_super();
+        m.set(ModifiersState::SHIFT, true);
+        m
+    }
+
+    fn encode_modes(
+        key: NamedKey,
+        modifiers: ModifiersState,
+        cursor_app: bool,
+        mac_line_edit: bool,
+        mac_word_jump: bool,
+        kitty_flags: u16,
+    ) -> Option<Vec<u8>> {
+        encode_key_event_with_modes(
+            &named(key),
+            PhysicalKey::Unidentified(winit::keyboard::NativeKeyCode::Unidentified),
+            None,
+            modifiers,
+            KeyModes {
+                kitty_flags,
+                cursor_keys_app: cursor_app,
+                mac_line_edit,
+                mac_word_jump,
+                ..KeyModes::default()
+            },
+        )
     }
 
     #[test]
@@ -609,10 +706,155 @@ mod tests {
             PhysicalKey::Code(KeyCode::NumpadEnter),
             None,
             mods_ctrl(),
-            0,
-            2,
+            KeyModes {
+                modify_other_keys: 2,
+                ..KeyModes::default()
+            },
         );
         assert_eq!(bytes, Some(b"\x1b[27;5;13~".to_vec()));
+    }
+
+    #[test]
+    fn decckm_home_end_and_arrows_use_ss3_until_a_modifier_or_kitty() {
+        use prismattyc_emulator::KITTY_DISAMBIGUATE;
+
+        let plain = ModifiersState::empty();
+        for (key, csi, ss3) in [
+            (NamedKey::ArrowUp, &b"\x1b[A"[..], &b"\x1bOA"[..]),
+            (NamedKey::ArrowDown, &b"\x1b[B"[..], &b"\x1bOB"[..]),
+            (NamedKey::ArrowRight, &b"\x1b[C"[..], &b"\x1bOC"[..]),
+            (NamedKey::ArrowLeft, &b"\x1b[D"[..], &b"\x1bOD"[..]),
+            (NamedKey::Home, &b"\x1b[H"[..], &b"\x1bOH"[..]),
+            (NamedKey::End, &b"\x1b[F"[..], &b"\x1bOF"[..]),
+        ] {
+            assert_eq!(
+                encode_modes(key, plain, false, false, false, 0).as_deref(),
+                Some(csi),
+                "DECCKM off {key:?}"
+            );
+            assert_eq!(
+                encode_modes(key, plain, true, false, false, 0).as_deref(),
+                Some(ss3),
+                "DECCKM on {key:?}"
+            );
+            assert_eq!(
+                encode_modes(key, plain, true, false, false, KITTY_DISAMBIGUATE).as_deref(),
+                Some(csi),
+                "Kitty disambiguate keeps CSI {key:?}"
+            );
+        }
+
+        // Modifiers stay CSI `1 ; mod letter` with DECCKM on or off.
+        assert_eq!(
+            encode_modes(NamedKey::ArrowUp, mods_ctrl(), true, false, false, 0).as_deref(),
+            Some(&b"\x1b[1;5A"[..])
+        );
+        assert_eq!(
+            encode_modes(NamedKey::Home, mods_shift(), true, false, false, 0).as_deref(),
+            Some(&b"\x1b[1;2H"[..])
+        );
+        assert_eq!(
+            encode_modes(NamedKey::End, mods_shift(), false, false, false, 0).as_deref(),
+            Some(&b"\x1b[1;2F"[..])
+        );
+        // PageUp is not a cursor key.
+        assert_eq!(
+            encode_modes(NamedKey::PageUp, plain, true, false, false, 0).as_deref(),
+            Some(&b"\x1b[5~"[..])
+        );
+
+        let physical = encode_keycode_with_modes(
+            KeyCode::Home,
+            1,
+            false,
+            false,
+            false,
+            KeyModes {
+                cursor_keys_app: true,
+                ..KeyModes::default()
+            },
+        );
+        assert_eq!(physical.as_deref(), Some(&b"\x1bOH"[..]));
+    }
+
+    #[test]
+    fn macos_line_edit_and_word_jump_are_flagged() {
+        let plain = ModifiersState::empty();
+        // Off: Super+Left stays the xterm CSI form (modifier 9). Backspace
+        // ignores modifiers. Alt+Left stays CSI even under DECCKM.
+        assert_eq!(
+            encode_modes(NamedKey::ArrowLeft, mods_super(), false, false, false, 0).as_deref(),
+            Some(&b"\x1b[1;9D"[..])
+        );
+        assert_eq!(
+            encode_modes(NamedKey::ArrowRight, mods_super(), true, false, false, 0).as_deref(),
+            Some(&b"\x1b[1;9C"[..])
+        );
+        assert_eq!(
+            encode_modes(NamedKey::Backspace, mods_super(), false, false, false, 0).as_deref(),
+            Some(&[0x7f][..])
+        );
+        assert_eq!(
+            encode_modes(NamedKey::ArrowLeft, mods_alt(), true, false, false, 0).as_deref(),
+            Some(&b"\x1b[1;3D"[..])
+        );
+        assert_eq!(
+            encode_modes(NamedKey::ArrowRight, mods_alt(), true, false, false, 0).as_deref(),
+            Some(&b"\x1b[1;3C"[..])
+        );
+
+        // On: Cmd+Left/Right/Backspace and Option+Left/Right.
+        assert_eq!(
+            encode_modes(NamedKey::ArrowLeft, mods_super(), false, true, true, 0).as_deref(),
+            Some(&[0x01][..])
+        );
+        assert_eq!(
+            encode_modes(NamedKey::ArrowRight, mods_super(), true, true, true, 0).as_deref(),
+            Some(&[0x05][..])
+        );
+        assert_eq!(
+            encode_modes(NamedKey::Backspace, mods_super(), false, true, true, 0).as_deref(),
+            Some(&[0x15][..])
+        );
+        assert_eq!(
+            encode_modes(NamedKey::ArrowLeft, mods_alt(), true, true, true, 0).as_deref(),
+            Some(&b"\x1bb"[..])
+        );
+        assert_eq!(
+            encode_modes(NamedKey::ArrowRight, mods_alt(), false, false, true, 0).as_deref(),
+            Some(&b"\x1bf"[..])
+        );
+        // Extra modifiers do not take the macOS chords.
+        assert_eq!(
+            encode_modes(
+                NamedKey::ArrowLeft,
+                mods_super_shift(),
+                false,
+                true,
+                true,
+                0
+            )
+            .as_deref(),
+            Some(&b"\x1b[1;10D"[..])
+        );
+        assert_eq!(
+            encode_modes(NamedKey::ArrowLeft, mods_ctrl_alt(), false, true, true, 0).as_deref(),
+            Some(&b"\x1b[1;7D"[..])
+        );
+        // Alt+Up is not a word jump.
+        assert_eq!(
+            encode_modes(NamedKey::ArrowUp, mods_alt(), false, true, true, 0).as_deref(),
+            Some(&b"\x1b[1;3A"[..])
+        );
+        // Unmodified arrows still follow DECCKM when the macOS flags are on.
+        assert_eq!(
+            encode_modes(NamedKey::ArrowLeft, plain, true, true, true, 0).as_deref(),
+            Some(&b"\x1bOD"[..])
+        );
+        assert_eq!(
+            encode_modes(NamedKey::Home, plain, false, true, true, 0).as_deref(),
+            Some(&b"\x1b[H"[..])
+        );
     }
 
     #[test]

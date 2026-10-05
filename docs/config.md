@@ -746,6 +746,28 @@ overrides. An explicit `[keys]` entry that drops its Command chord keeps only
 the listed chords; the host prints a warning naming the suppressed shortcut
 so it can be added back as an alias. `[]` unbinds without warning.
 
+On macOS, with `macos_shortcuts = true`, Cmd+Left and Cmd+Right send `^A` and
+`^E` (line start and end) and Cmd+Backspace sends `^U`. The flag stays off by
+default. Those three are bytes for the shell, not host actions, so they do
+not appear in `[keys]`.
+
+Home, End, and the arrow keys follow DECCKM. When the child turns application
+cursor mode on (`CSI ? 1 h`, which `smkx` sends), unmodified keys use SS3
+(`ESC O H`, `ESC O F`, `ESC O A` through `ESC O D`). Otherwise they use CSI
+(`ESC [ H`, `ESC [ F`, `ESC [ A` through `ESC [ D`). A modifier keeps the
+xterm CSI form `ESC [ 1 ; mod letter` whether or not DECCKM is on. Kitty
+keyboard disambiguate also keeps the CSI form. Page Up, Page Down, Delete,
+Insert, and the function keys are unchanged.
+
+On macOS the runtime default for `focus_left` and `focus_right` is
+`ctrl+alt+left` and `ctrl+alt+right` (Ctrl+Option+Left / Ctrl+Option+Right)
+when `[keys]` does not set those actions. Option+Left and Option+Right then
+reach the shell as word jumps (`ESC b` and `ESC f`), matching Terminal.app
+and iTerm2. Focus up and down stay Option+Up and Option+Down. Linux and the
+generated template above keep `alt+left` and `alt+right`. An explicit entry
+wins and is not also sent to the shell: `focus_left = "alt+left"` focuses
+the pane and does not send `ESC b`.
+
 Any action can be rebound by its name in `[keys]`; a string binds one chord,
 an array binds aliases, and `[]` disables it. The list command shows actions
 with no active chord as `(unbound)`.

@@ -6738,6 +6738,7 @@ fn rasterize_frame(
                 host.theme.variant,
                 splash.page,
                 &lines,
+                animation_ms,
                 host_overlay_surface(host),
                 buffer,
                 width as usize,

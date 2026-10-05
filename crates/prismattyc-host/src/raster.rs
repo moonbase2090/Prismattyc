@@ -4250,6 +4250,51 @@ pub fn rasterize_splash(
         return;
     }
     fill_rect(buffer, stride_px, 0, 0, stride_px, buffer_height_px, bg);
+    rasterize_splash_lines(
+        font,
+        lines,
+        buffer,
+        stride_px,
+        buffer_height_px,
+        animation_ms,
+        false,
+    );
+}
+
+/// Paint only the splash word art and its pixel animation over the existing
+/// surface. Graphite uses this to keep the established art while changing the
+/// surrounding copy's face and colours.
+pub(crate) fn rasterize_splash_art(
+    font: &FontMetrics,
+    lines: &[Vec<(String, [u8; 3])>],
+    buffer: &mut [u32],
+    stride_px: usize,
+    buffer_height_px: usize,
+    animation_ms: Option<u64>,
+) {
+    rasterize_splash_lines(
+        font,
+        lines,
+        buffer,
+        stride_px,
+        buffer_height_px,
+        animation_ms,
+        true,
+    );
+}
+
+fn rasterize_splash_lines(
+    font: &FontMetrics,
+    lines: &[Vec<(String, [u8; 3])>],
+    buffer: &mut [u32],
+    stride_px: usize,
+    buffer_height_px: usize,
+    animation_ms: Option<u64>,
+    art_only: bool,
+) {
+    if stride_px == 0 || buffer_height_px == 0 {
+        return;
+    }
     let line_cols = |line: &[(String, [u8; 3])]| {
         line.iter()
             .map(|(text, _)| text.chars().count())
@@ -4278,7 +4323,10 @@ pub fn rasterize_splash(
     let art_bottom = row_y + ART.len() * font.cell_h;
     let art_left = col_x0 + ART_MARGIN_LEFT * font.cell_w;
     let art_right = col_x0 + (art_frame_width() - ART_MARGIN) * font.cell_w;
-    for line in lines {
+    for (line_index, line) in lines.iter().enumerate() {
+        if art_only && line_index >= ART.len() {
+            break;
+        }
         if row_y.saturating_add(font.cell_h) > buffer_height_px {
             break;
         }

@@ -80,7 +80,17 @@ fn draw_panel(
             blur_radius: 0,
         },
     );
-    graphite::fill_round_rect(buffer, stride, panel, PALETTE_RADIUS, tok.hairline, 255);
+    graphite::stroke_round_rect(
+        buffer,
+        stride,
+        panel.x as f32,
+        panel.y as f32,
+        panel.right() as f32,
+        panel.y.saturating_add(panel.h) as f32,
+        PALETTE_RADIUS,
+        1.0,
+        tok.hairline,
+    );
     let inner = Rect::new(
         panel.x.saturating_add(1),
         panel.y.saturating_add(1),
@@ -926,15 +936,27 @@ pub(crate) fn legend(
 }
 
 fn splash_ink(ink: [u8; 3], art: bool, variant: ThemeVariant, accent: graphite::Rgb) -> [u8; 3] {
-    if art {
-        return ink;
-    }
     let tok = graphite::tokens(variant);
+    if art {
+        return if ink == prismattyc_core::splash::INK {
+            tok.text_strong
+        } else {
+            ink
+        };
+    }
     match ink {
         crate::splash::DIM => tok.muted,
         crate::splash::ACCENT | prismattyc_core::splash::LINK => accent,
         prismattyc_core::splash::INK => tok.text_strong,
         other => other,
+    }
+}
+
+fn splash_text(text: &str) -> &str {
+    if text == "⏎" {
+        "Enter"
+    } else {
+        text
     }
 }
 
@@ -957,8 +979,8 @@ fn splash_line_style(
 }
 
 /// Paint the launch splash with Graphite ground, copy and chrome typography.
-/// The host monospace face remains on the word art so its cell alignment and
-/// spectrum animation match the CLI splash.
+/// The established monospace art painter keeps its flare placement and
+/// animation, while Graphite tokens make the fill readable in both variants.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn splash(
     font: &FontMetrics,
@@ -966,6 +988,7 @@ pub(crate) fn splash(
     variant: ThemeVariant,
     page: crate::splash::Page,
     lines: &[Vec<crate::splash::Span>],
+    animation_ms: Option<u64>,
     surface: OverlaySurface,
     buffer: &mut [u32],
     stride: usize,
@@ -993,7 +1016,7 @@ pub(crate) fn splash(
         .map(|(index, line)| {
             let (face, px) = splash_line_style(page, index, art_rows, font, chrome);
             line.iter()
-                .map(|(text, _)| graphite::text_width(face, px, text))
+                .map(|(text, _)| graphite::text_width(face, px, splash_text(text)))
                 .sum::<f32>()
                 .ceil() as usize
         })
@@ -1005,6 +1028,9 @@ pub(crate) fn splash(
     let y0 = height.saturating_sub(block_h) / 2;
 
     for (index, line) in lines.iter().enumerate() {
+        if index < art_rows {
+            continue;
+        }
         let row_y = y0.saturating_add(index.saturating_mul(line_h));
         if row_y >= height {
             break;
@@ -1013,6 +1039,7 @@ pub(crate) fn splash(
         let center_y = row_y as f32 + line_h as f32 / 2.0;
         let mut pen = x0 as f32;
         for (text, ink) in line {
+            let text = splash_text(text);
             pen = graphite::draw_text(
                 buffer,
                 stride,
@@ -1026,6 +1053,23 @@ pub(crate) fn splash(
                 stride,
             );
         }
+    }
+    if art_rows > 0 {
+        let art_lines: Vec<Vec<crate::splash::Span>> = lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                line.iter()
+                    .map(|(text, ink)| {
+                        (
+                            text.clone(),
+                            splash_ink(*ink, index < art_rows, variant, accent),
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        raster::rasterize_splash_art(font, &art_lines, buffer, stride, height, animation_ms);
     }
 }
 
@@ -1466,7 +1510,8 @@ mod tests {
         };
         let chrome = graphite_chrome();
         let page = crate::splash::Page::Main;
-        let lines = crate::splash::layout_with_resume(page, "0.3.0", 0, Some(1_500), false);
+        let animation_ms = prismattyc_core::splash::SETTLED_MS + 2_000;
+        let lines = crate::splash::layout_with_resume(page, "0.3.0", 0, Some(animation_ms), false);
         let (width, height) = (1100, 640);
         let backdrop = [180, 42, 76];
         let mut dark = vec![pack_argb(255, backdrop); width * height];
@@ -1476,6 +1521,7 @@ mod tests {
             ThemeVariant::Dark,
             page,
             &lines,
+            Some(animation_ms),
             OverlaySurface {
                 opacity: 0.72,
                 blur_radius: 0,
@@ -1494,6 +1540,7 @@ mod tests {
             ThemeVariant::Light,
             page,
             &lines,
+            None,
             OverlaySurface::default(),
             &mut light,
             width,
@@ -1505,6 +1552,28 @@ mod tests {
             "Graphite variants use different ground tokens"
         );
         assert_ne!(dark, light, "splash text and background follow the variant");
+
+        let mut later = vec![pack_argb(255, backdrop); width * height];
+        splash(
+            &font,
+            chrome,
+            ThemeVariant::Dark,
+            page,
+            &lines,
+            Some(animation_ms + 1_500),
+            OverlaySurface {
+                opacity: 0.72,
+                blur_radius: 0,
+            },
+            &mut later,
+            width,
+            height,
+            [98, 168, 255],
+        );
+        assert!(
+            dark.iter().zip(&later).any(|(early, late)| early != late),
+            "the Graphite flare responds to the splash clock"
+        );
     }
 
     #[test]
@@ -1546,9 +1615,21 @@ mod tests {
             None,
         );
         let panel_center = (band.y + band.h / 2) * width + band.x + band.w / 2;
-        assert_ne!(
-            idle[panel_center], backdrop,
-            "the Graphite caption paints its panel"
+        let surface_opacity = 0.76 * f32::from(crate::walkthrough::CAPTION_ALPHA) / 255.0;
+        let shadow_rgb = raster::mix_rgb(
+            [180, 42, 76],
+            [0, 0, 0],
+            raster::opacity_to_weight(surface_opacity * 0.22),
+        );
+        let expected_panel = raster::mix_rgb(
+            shadow_rgb,
+            panel_color(ThemeVariant::Dark),
+            raster::opacity_to_weight(surface_opacity),
+        );
+        assert_eq!(
+            idle[panel_center],
+            pack_argb(255, expected_panel),
+            "the translucent caption blends over its existing surface"
         );
 
         let mut hovered = vec![backdrop; width * height];

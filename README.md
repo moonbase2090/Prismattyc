@@ -17,7 +17,7 @@ chrome_style = "classic"
 ```
 
 Rolling back to 0.2.30 keeps that config working. See the
-[v0.3.0-rc.2 release notes](docs/release-notes-v0.3.0-rc.2.md).
+[v0.3.0-rc.3 release notes](docs/release-notes-v0.3.0-rc.3.md).
 
 ## What you can do
 
@@ -187,8 +187,8 @@ troubleshooting, compatibility, and application integration.
 
 ## Version
 
-The workspace package version is **`0.3.0-rc.2`**. See the
-[v0.3.0-rc.2 release notes](docs/release-notes-v0.3.0-rc.2.md) for this version's
+The workspace package version is **`0.3.0-rc.3`**. See the
+[v0.3.0-rc.3 release notes](docs/release-notes-v0.3.0-rc.3.md) for this version's
 changes. A version in source does not necessarily have a published download.
 Use [GitHub Releases](https://github.com/moonbase2090/Prismattyc/releases) to
 find published builds.

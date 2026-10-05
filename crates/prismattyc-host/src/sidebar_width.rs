@@ -360,8 +360,13 @@ pub fn icon_strip(
     let visible = (list_h / row_h).max(1) as usize;
     let max_scroll = row_count.saturating_sub(visible.min(row_count.max(1)));
     let first = scroll.min(max_scroll).min(row_count);
-    let icon = (column_w - 12).clamp(8, row_h - 2).max(1);
-    let toggle_size = (head_h - 8).clamp(8, column_w - 12).max(1);
+    // The empty strip stored before the first layout, and a very short row,
+    // can put the preferred maximum under the preferred minimum. `clamp`
+    // panics on that, which took down every real window at startup (#174).
+    let icon_hi = (row_h - 2).max(1);
+    let icon = (column_w - 12).clamp(8.min(icon_hi), icon_hi);
+    let toggle_hi = (column_w - 12).max(1);
+    let toggle_size = (head_h - 8).clamp(8.min(toggle_hi), toggle_hi);
     let toggle = PxBox {
         x: column_x + (column_w - toggle_size) / 2,
         y: (head_h - toggle_size) / 2,
@@ -598,6 +603,21 @@ mod tests {
         assert_eq!(seat_for(false, "muse"), Seat::Muse);
         assert_eq!(seat_for(false, "Composer 1"), Seat::Composer);
         assert_eq!(seat_for(false, "zsh"), Seat::Shell);
+    }
+
+    #[test]
+    fn empty_icon_strip_survives_the_metrics_stored_before_layout() {
+        let strip = icon_strip(0, 0, 0, 0, 1, 0, 0, 0);
+        assert!(strip.icons.is_empty());
+        assert_eq!(strip.toggle.w, 0);
+        assert_eq!(strip.toggle.h, 0);
+        assert_eq!(icon_hit(&strip, 0, 0), None);
+        // A short row used to invert the icon clamp (row height minus 2 < 8).
+        let short = icon_strip(0, 52, 80, 20, 8, 16, 1, 0);
+        assert_eq!(short.icons.len(), 1);
+        let slot = short.icons[0].1;
+        assert!(slot.w > 0 && slot.h > 0);
+        assert!(slot.y >= 0 && slot.y + slot.h <= 80);
     }
 
     #[test]

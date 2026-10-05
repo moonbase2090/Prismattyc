@@ -759,21 +759,48 @@ expect_space_order() {
 
 drag_space_to_after() {
   local moving="$1" target="$2" axis="$3" proof="$4"
-  local wid status_tmp coordinates start_x start_y target_x target_y prior_seq ready
+  local wid status_tmp stable_tmp coordinates start_x start_y target_x target_y prior_seq ready host_pid
   wid="$(find_host)"
   [[ -n "$wid" ]] || { fail "no host window for Space drag"; return 1; }
+  host_pid="$(cat /tmp/pt217-host.pid 2>/dev/null || true)"
+  [[ -n "$host_pid" ]] || { fail "no current host pid for Space drag"; return 1; }
   status_tmp="$(mktemp)"
+  stable_tmp="$(mktemp)"
   ready=0
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 60); do
     pmux render-status --json >"$status_tmp" 2>/dev/null || true
-    if python3 - "$status_tmp" "$moving" "$target" "$axis" <<'PY'
-import json, sys
-data = json.load(open(sys.argv[1]))
-moving, target, axis = sys.argv[2:]
-window = data.get("windows", [{}])[0]
+    if python3 - "$status_tmp" "$moving" "$target" "$axis" "$host_pid" "$stable_tmp" <<'PY'
+import json, sys, time
+status_path, moving, target, axis, expected_pid, state_path = sys.argv[1:]
+try:
+    data = json.load(open(status_path))
+    window = data.get("windows", [])[0]
+except (FileNotFoundError, IndexError, json.JSONDecodeError):
+    raise SystemExit(1)
 chips = window.get("sidebar_space_rows" if axis == "sidebar" else "space_chips", [])
 names = {chip.get("name") for chip in chips}
-raise SystemExit(0 if moving in names and target in names else 1)
+if (int(data.get("host_pid", 0)) != int(expected_pid)
+        or window.get("space_open_pending")
+        or moving not in names or target not in names):
+    open(state_path, "w").write("{}")
+    raise SystemExit(1)
+geometry = sorted([
+    chip.get("name"), chip.get("x"), chip.get("y"), chip.get("width"), chip.get("height")
+    ] for chip in chips if chip.get("name") is not None)
+now = time.monotonic()
+try:
+    state = json.load(open(state_path))
+except (FileNotFoundError, json.JSONDecodeError):
+    state = {}
+if geometry == state.get("geometry"):
+    count = int(state.get("count", 0)) + 1
+    since = float(state.get("since", now))
+else:
+    count = 1
+    since = now
+with open(state_path, "w") as out:
+    json.dump({"count": count, "since": since, "geometry": geometry}, out)
+raise SystemExit(0 if count >= 3 and now - since >= 2.0 else 1)
 PY
     then
       ready=1
@@ -782,8 +809,8 @@ PY
     sleep 0.2
   done
   if (( ! ready )); then
-    rm -f "$status_tmp"
-    fail "Space drag coordinates were not ready for $axis"
+    rm -f "$status_tmp" "$stable_tmp"
+    fail "fresh Space drag geometry did not stabilize for $axis"
     return 1
   fi
   coordinates="$(python3 - "$status_tmp" "$moving" "$target" "$axis" <<'PY'
@@ -842,11 +869,15 @@ except (FileNotFoundError, json.JSONDecodeError):
 PY
 )"
       pmux render-status --json >"$status_tmp" 2>/dev/null || true
-      drag_active="$(python3 - "$status_tmp" <<'PY'
+      drag_active="$(python3 - "$status_tmp" "$host_pid" <<'PY'
 import json, sys
 try:
-    windows = json.load(open(sys.argv[1])).get("windows", [])
-    print(int(bool(windows and windows[0].get("space_reorder_drag_active"))))
+    data = json.load(open(sys.argv[1]))
+    windows = data.get("windows", [])
+    print(int(
+        int(data.get("host_pid", 0)) == int(sys.argv[2])
+        and bool(windows and windows[0].get("space_reorder_drag_active"))
+    ))
 except (FileNotFoundError, json.JSONDecodeError):
     print(0)
 PY
@@ -869,6 +900,7 @@ PY
   fi
   xdotool mouseup 1
   rm -f "$status_tmp"
+  rm -f "$stable_tmp"
   sleep 0.2
 }
 

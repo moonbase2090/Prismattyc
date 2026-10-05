@@ -487,6 +487,97 @@ pub(crate) fn strip_chrome_changed(prior: &ChromeSnapshot, current: &ChromeSnaps
     prior.pulse_step != current.pulse_step || strip_markers_of(prior) != strip_markers_of(current)
 }
 
+/// Graphite pane-header running bit. Kept out of [`ChromeSnapshot::boxes`] so
+/// a pulse does not pay the header area, and a bit flip does not look like a
+/// removed box (that path expands to the whole pane slot).
+pub(crate) const GRAPHITE_HEADER_MARKER_PREFIX: u64 = 1 << 61;
+/// Spaces-bar working and attention counts. The caller damages the rail when
+/// this word changes; it is not a chrome box.
+pub(crate) const RAIL_STATUS_MARKER_PREFIX: u64 = 1 << 60;
+
+/// Marker for one Graphite pane header. `running` is `PaneRuntime::is_active_at`.
+pub(crate) fn graphite_header_marker(pane_id: u64, running: bool) -> (u64, u64) {
+    let id = pane_id & !GRAPHITE_HEADER_MARKER_PREFIX;
+    (GRAPHITE_HEADER_MARKER_PREFIX | id, u64::from(running))
+}
+
+/// Pane id stored by [`graphite_header_marker`], if `key` is one of those markers.
+pub(crate) fn graphite_header_pane_id(key: u64) -> Option<u64> {
+    (key & GRAPHITE_HEADER_MARKER_PREFIX != 0).then_some(key & !GRAPHITE_HEADER_MARKER_PREFIX)
+}
+
+fn graphite_header_words(snapshot: &ChromeSnapshot) -> Vec<(u64, u64)> {
+    snapshot
+        .markers
+        .iter()
+        .copied()
+        .filter(|(key, _)| graphite_header_pane_id(*key).is_some())
+        .collect()
+}
+
+/// Pane ids whose Graphite running bit changed. Empty when there is no prior
+/// snapshot; the first frame is already a full paint.
+pub(crate) fn changed_graphite_header_panes(
+    prior: Option<&ChromeSnapshot>,
+    current: &ChromeSnapshot,
+) -> Vec<u64> {
+    let Some(prior) = prior else {
+        return Vec::new();
+    };
+    let prior_words = graphite_header_words(prior);
+    let current_words = graphite_header_words(current);
+    let mut ids = Vec::new();
+    for (key, word) in &current_words {
+        let previous = prior_words
+            .iter()
+            .find(|(prior_key, _)| prior_key == key)
+            .map(|(_, prior_word)| *prior_word);
+        if previous != Some(*word) {
+            if let Some(id) = graphite_header_pane_id(*key) {
+                ids.push(id);
+            }
+        }
+    }
+    for (key, word) in &prior_words {
+        if *word != 0
+            && current_words
+                .iter()
+                .all(|(current_key, _)| current_key != key)
+        {
+            if let Some(id) = graphite_header_pane_id(*key) {
+                ids.push(id);
+            }
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Rail status word: working count in the high half, attention count in the low.
+pub(crate) fn rail_status_marker(working: usize, attention: usize) -> (u64, u64) {
+    (
+        RAIL_STATUS_MARKER_PREFIX,
+        ((working as u64) << 32) | (attention as u64 & u32::MAX as u64),
+    )
+}
+
+fn rail_status_word(snapshot: &ChromeSnapshot) -> Option<u64> {
+    snapshot
+        .markers
+        .iter()
+        .find(|(key, _)| *key == RAIL_STATUS_MARKER_PREFIX)
+        .map(|(_, word)| *word)
+}
+
+/// True when the spaces-bar working or attention count changed.
+pub(crate) fn rail_status_marker_changed(
+    prior: Option<&ChromeSnapshot>,
+    current: &ChromeSnapshot,
+) -> bool {
+    prior.is_some_and(|prior| rail_status_word(prior) != rail_status_word(current))
+}
+
 /// Tab-active marker for one strip slot.
 pub(crate) fn strip_tab_marker(tab_index: usize, active: bool) -> (u64, u64) {
     (
@@ -1464,6 +1555,41 @@ mod tests {
         assert_eq!(light_cycle_step_for_snapshot(false, 3), None);
         assert_eq!(pulse_phase_if(true, 8), Some(0.5));
         assert_eq!(pulse_phase_if(false, 8), None);
+    }
+
+    #[test]
+    fn graphite_activity_markers_do_not_promote_or_join_the_strip() {
+        let running = graphite_header_marker(7, true);
+        let idle = graphite_header_marker(7, false);
+        let rail_on = rail_status_marker(1, 2);
+        let rail_off = rail_status_marker(0, 2);
+        assert!(!strip_marker_key(running.0));
+        assert!(!strip_marker_key(rail_on.0));
+        assert_eq!(graphite_header_pane_id(running.0), Some(7));
+        assert_eq!(graphite_header_pane_id(rail_on.0), None);
+        let prior = ChromeSnapshot {
+            markers: vec![running, rail_on],
+            ..ChromeSnapshot::default()
+        };
+        let current = ChromeSnapshot {
+            markers: vec![idle, rail_off],
+            ..ChromeSnapshot::default()
+        };
+        assert_eq!(
+            changed_graphite_header_panes(Some(&prior), &current),
+            vec![7]
+        );
+        assert!(rail_status_marker_changed(Some(&prior), &current));
+        assert!(changed_graphite_header_panes(Some(&current), &current).is_empty());
+        assert!(!rail_status_marker_changed(Some(&current), &current));
+        assert!(changed_graphite_header_panes(None, &current).is_empty());
+        assert!(!rail_status_marker_changed(None, &current));
+        let layout = layout();
+        assert_eq!(
+            compose_frame_damage(Some(&layout), &layout, Some(&prior), &current, &[], false,),
+            FrameDamage::rects(),
+            "running and rail counts stay partial; the caller adds their rects"
+        );
     }
 
     #[test]

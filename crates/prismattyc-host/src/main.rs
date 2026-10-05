@@ -93,11 +93,13 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use frame_damage::{
-    append_tab_strip_markers, assignment_changed_content, chrome_geometry_changed,
-    compose_frame_damage, composer_promotes_to_full, empty_partial_skips_paint, focus_affects_pane,
-    frame_damage_covers, layout_transition, light_cycle_step_for_snapshot, pane_chrome_bits,
-    pane_marker_word, pane_paint_required, pulse_live, pulse_phase_if, pulse_step_for_snapshot,
-    push_pane_chrome_boxes, push_tab_strip_handle_boxes, scrollbar_marker, should_paint_tab_strip,
+    append_tab_strip_markers, assignment_changed_content, changed_graphite_header_panes,
+    chrome_geometry_changed, compose_frame_damage, composer_promotes_to_full,
+    empty_partial_skips_paint, focus_affects_pane, frame_damage_covers, graphite_header_marker,
+    layout_transition, light_cycle_step_for_snapshot, pane_chrome_bits, pane_marker_word,
+    pane_paint_required, pulse_live, pulse_phase_if, pulse_step_for_snapshot,
+    push_pane_chrome_boxes, push_tab_strip_handle_boxes, rail_status_marker,
+    rail_status_marker_changed, scrollbar_marker, should_paint_tab_strip,
     should_record_scrollbar_box, snapshot_dirty_rows, strip_chrome_changed, tab_strip_badge_box,
     tab_strip_inner_stride, tab_strip_visible_for_damage, ChromeSnapshot, FrameDamage,
     LayoutSnapshot, PaneDamageSnapshot, PaneLayoutSnapshot, PixelRect, TabStripHandlePlan,
@@ -4905,6 +4907,18 @@ fn frame_chrome_snapshot(
             pane_chrome_bits(pane.mail_depth > 0, unseen, active),
             scrollbar_marker(max_scroll, scroll),
         ));
+        if geom.chrome.graphite {
+            // Running lives here, not in `boxes`: see `activity_header_rects`.
+            markers.push(graphite_header_marker(id.get(), pane.is_active_at(now)));
+        }
+    }
+    if geom.chrome.graphite {
+        let attention = if host.attention_badge {
+            mux.attention_count()
+        } else {
+            0
+        };
+        markers.push(rail_status_marker(mux.active_count(), attention));
     }
     append_tab_strip_chrome(host, geom, &mut boxes, &mut markers);
     ChromeSnapshot {
@@ -4977,8 +4991,8 @@ fn unbounded_chrome_state(host: &HostState, geom: mux::HostGeom) -> String {
         geom.rail_side,
     );
     if geom.chrome.graphite {
-        // Graphite title rows and status counts live outside the bounded
-        // boxes; any change repaints the frame.
+        // Names, mail, and attention still have no bounded rect. Running and
+        // the spaces-bar working count are markers; see `push_graphite_activity_damage`.
         format!("{state} graphite={:?}", graphite_chrome_state(host))
     } else {
         state
@@ -4986,12 +5000,16 @@ fn unbounded_chrome_state(host: &HostState, geom: mux::HostGeom) -> String {
 }
 
 /// One Graphite title row as it feeds the damage signature (#104): pane id,
-/// name, detail, attention, mail depth, unseen, running, focused.
-type GraphiteRowState = (u64, String, Option<String>, bool, u32, bool, bool, bool);
+/// name, detail, attention, mail depth, unseen, focused.
+///
+/// Running is [`frame_damage::graphite_header_marker`]. The working count is
+/// [`frame_damage::rail_status_marker`]. Neither promotes the frame to full.
+type GraphiteRowState = (u64, String, Option<String>, bool, u32, bool, bool);
 
-/// What the Graphite title rows and spaces-bar status show.
+/// Graphite title fields that still require a full frame: name, detail,
+/// attention, mail, unseen, and focus. Running and the working count are not
+/// included.
 fn graphite_chrome_state(host: &HostState) -> Vec<GraphiteRowState> {
-    let now = Instant::now();
     let focused = host.mux.focused_id();
     let mut rows: Vec<GraphiteRowState> = host
         .mux
@@ -5005,19 +5023,18 @@ fn graphite_chrome_state(host: &HostState) -> Vec<GraphiteRowState> {
                 pane.attention.is_some(),
                 pane.mail_depth,
                 pane.unseen_output,
-                pane.is_active_at(now),
                 id == focused,
             )
         })
         .collect();
     rows.sort_unstable_by_key(|row| row.0);
+    // Attention count stays unbounded. The working count is the rail marker.
     rows.push((
         u64::MAX,
-        host.mux.active_count().to_string(),
+        String::new(),
         Some(host.mux.attention_count().to_string()),
         false,
         0,
-        false,
         false,
         false,
     ));
@@ -5250,6 +5267,57 @@ fn sweep_armed(light_cycle: bool, reduced_motion: bool, panes: usize) -> bool {
     light_cycle && !reduced_motion && panes > 1
 }
 
+/// Publish Graphite running and spaces-bar damage that the composer does not
+/// map onto chrome boxes.
+fn push_graphite_activity_damage(
+    host: &HostState,
+    geom: mux::HostGeom,
+    width: u32,
+    height: u32,
+    headers: &[u64],
+    rail_status_changed: bool,
+    frame_damage: &mut FrameDamage,
+) {
+    if !geom.chrome.graphite || (headers.is_empty() && !rail_status_changed) {
+        return;
+    }
+    for pane_id in headers {
+        let Some((_, _, rect)) = host
+            .mux
+            .panes_and_rects()
+            .find(|(id, _, _)| id.get() == *pane_id)
+        else {
+            continue;
+        };
+        let (x, y, w, h) = geom.pane_slot_px(rect);
+        for rect in graphite::activity_header_rects(geom.chrome, graphite::Rect::new(x, y, w, h)) {
+            frame_damage.push_rect(PixelRect::new(rect.x, rect.y, rect.w, rect.h));
+        }
+    }
+    if rail_status_changed {
+        if let Some(layout) = host.space_rail.layout(
+            geom,
+            width as usize,
+            height as usize,
+            host.spacing.space_rail_pane_names,
+        ) {
+            frame_damage.push_rect(PixelRect::new(layout.x, layout.y, layout.w, layout.h));
+        }
+    }
+    if tab_strip_visible_for_damage(show_tab_strip(host), geom.top_chrome_px) {
+        let (x, span) = graphite_tabs_span(geom, width as usize);
+        frame_damage.push_rect(PixelRect::new(
+            x,
+            geom.tab_strip_y(),
+            span,
+            geom.top_chrome_px,
+        ));
+    }
+    if host.spacing.layout == config::LayoutMode::Sidebar && geom.sidebar_px > 0 {
+        frame_damage.push_rect(PixelRect::new(0, 0, geom.sidebar_px, height as usize));
+    }
+}
+
 fn rasterize_frame(
     host: &mut HostState,
     buffer: &mut [u32],
@@ -5267,6 +5335,11 @@ fn rasterize_frame(
     let frame_now = Instant::now();
     settle_pane_bells(host, frame_now);
     let damage_snapshot = frame_damage_snapshot(host, geom, focused, frame_now);
+    // Captured before compose replaces `last_chrome_snapshot`.
+    let graphite_headers =
+        changed_graphite_header_panes(host.last_chrome_snapshot.as_ref(), &damage_snapshot.chrome);
+    let rail_status_changed =
+        rail_status_marker_changed(host.last_chrome_snapshot.as_ref(), &damage_snapshot.chrome);
     let layout_changed = damage_snapshot.layout_changed;
     let chrome_changed = damage_snapshot.chrome_changed;
     let strip_changed = host
@@ -5349,6 +5422,20 @@ fn rasterize_frame(
         reason = Some(FullRepaintReason::Fallback);
         host.render_frame.full_repaint_reason = reason;
         host.render_frame.cells_painted = render_cells_painted(host);
+    }
+    if !full {
+        // Header and rail rects are not chrome boxes. A box would be counted
+        // twice against the damage budget on every pulse, and removing it
+        // would expand to the whole pane slot.
+        push_graphite_activity_damage(
+            host,
+            geom,
+            width,
+            height,
+            &graphite_headers,
+            rail_status_changed,
+            &mut frame_damage,
+        );
     }
     // A sweep may begin and finish between chrome snapshots. Its retained
     // underlay independently carries cleanup damage until the next paint.
@@ -5471,7 +5558,8 @@ fn rasterize_frame(
     let cycle_progress = host.border_anim.map(|start| {
         (start.elapsed().as_millis() as f32 / host.light_cycle_ms.max(1) as f32).min(1.0)
     });
-    if full {
+    let graphite_activity = !graphite_headers.is_empty() || rail_status_changed;
+    if full || graphite_activity {
         if let Some(layout) = host.space_rail.layout(
             geom,
             width as usize,
@@ -5517,30 +5605,30 @@ fn rasterize_frame(
                 );
             }
         }
-        if host.background.is_none() && !geom.chrome.graphite {
-            let inner_x = geom
-                .window_pad
-                .saturating_add(geom.chrome_left())
-                .min(width as usize);
-            let inner_y = geom
-                .window_pad
-                .saturating_add(geom.chrome_top())
-                .min(height as usize);
-            fill_rect_argb(
-                buffer,
-                width as usize,
-                inner_x,
-                inner_y,
-                (width as usize)
-                    .saturating_sub(inner_x)
-                    .saturating_sub(geom.window_pad.saturating_add(geom.chrome_right())),
-                (height as usize)
-                    .saturating_sub(inner_y)
-                    .saturating_sub(geom.window_pad.saturating_add(geom.chrome_bottom())),
-                host.theme.default_bg,
-                host.window_alpha,
-            );
-        }
+    }
+    if full && host.background.is_none() && !geom.chrome.graphite {
+        let inner_x = geom
+            .window_pad
+            .saturating_add(geom.chrome_left())
+            .min(width as usize);
+        let inner_y = geom
+            .window_pad
+            .saturating_add(geom.chrome_top())
+            .min(height as usize);
+        fill_rect_argb(
+            buffer,
+            width as usize,
+            inner_x,
+            inner_y,
+            (width as usize)
+                .saturating_sub(inner_x)
+                .saturating_sub(geom.window_pad.saturating_add(geom.chrome_right())),
+            (height as usize)
+                .saturating_sub(inner_y)
+                .saturating_sub(geom.window_pad.saturating_add(geom.chrome_bottom())),
+            host.theme.default_bg,
+            host.window_alpha,
+        );
     }
     // The sidebar replaces both bars (issue #113): same damage condition
     // the tabs bar used, so partial repaints behave the way the strip did.
@@ -5551,7 +5639,7 @@ fn rasterize_frame(
         && should_paint_tab_strip(
             show_tab_strip(host),
             geom.top_chrome_px,
-            full,
+            full || graphite_activity,
             strip_changed,
         )
     {
@@ -5561,7 +5649,7 @@ fn rasterize_frame(
         && should_paint_tab_strip(
             show_tab_strip(host),
             geom.top_chrome_px,
-            full,
+            full || graphite_activity,
             strip_changed,
         )
     {

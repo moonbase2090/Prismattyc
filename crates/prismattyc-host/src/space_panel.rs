@@ -1364,6 +1364,70 @@ mod layout_tests {
             .any(|r| matches!(r.choice, Choice::Layout(_))));
     }
 
+    /// #171: three Toasts rows mark the saved level, and Recent messages
+    /// opens the history page.
+    #[test]
+    fn settings_offer_toast_levels_and_recent_messages() {
+        let mut settings = panel(Page::Settings, None);
+        settings.rows.clear();
+        settings.toast_rows(config::ToastLevel::Errors);
+        assert_eq!(
+            labels(&settings),
+            [
+                (
+                    "Toasts: all".into(),
+                    "Show every status message".into()
+                ),
+                ("Toasts: errors".into(), "Selected".into()),
+                (
+                    "Toasts: off".into(),
+                    "Hide status messages; keep them in Recent messages".into()
+                ),
+                (
+                    "Recent messages…".into(),
+                    "Status messages, including hidden ones".into()
+                ),
+            ]
+        );
+        for (row, value) in settings.rows.iter().zip(["all", "errors", "off"]) {
+            assert!(
+                matches!(&row.choice, Choice::Preference(key, v) if key == "toasts" && v == value),
+                "{}",
+                row.label
+            );
+        }
+        assert!(matches!(settings.rows[3].choice, Choice::Messages));
+        let full = panel(Page::Settings, None);
+        assert!(full.rows.iter().any(|r| r.label == "Toasts: off"));
+        assert!(full
+            .rows
+            .iter()
+            .any(|r| matches!(r.choice, Choice::Messages)));
+    }
+
+    #[test]
+    fn recent_messages_page_lists_history_newest_first_with_a_way_back() {
+        let page = panel(
+            Page::Messages(vec![
+                ("Save failed".into(), "2m ago · error · hidden".into()),
+                ("cairn: view applied".into(), "3m ago · hidden".into()),
+            ]),
+            None,
+        );
+        assert_eq!(
+            labels(&page),
+            [
+                ("Save failed: 2m ago · error · hidden".into(), String::new()),
+                ("cairn: view applied: 3m ago · hidden".into(), String::new()),
+                ("Back to settings".into(), String::new()),
+            ]
+        );
+        assert!(matches!(page.rows[2].choice, Choice::Settings));
+        assert!(page.fixed_size());
+        let empty = panel(Page::Messages(vec![]), None);
+        assert_eq!(empty.rows[0].label, "No status messages yet");
+    }
+
     #[test]
     fn settings_pages_are_fixed_size_and_other_pages_fit_content() {
         assert!(panel(Page::Layout, Some(LayoutMode::Bars)).fixed_size());

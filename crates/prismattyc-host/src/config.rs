@@ -1302,6 +1302,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `toasts` (#171): default all; each mode loads; a Settings save
+    /// survives a restart (a fresh load of the same file).
+    #[test]
+    fn toasts_level_defaults_to_all_and_round_trips_through_save() {
+        assert_eq!(ConfigFile::default().toasts(), ToastLevel::All);
+        let dir = temp_dir("toasts");
+        let path = dir.join("config.toml");
+        for (raw, level) in [
+            ("all", ToastLevel::All),
+            ("errors", ToastLevel::Errors),
+            ("off", ToastLevel::Off),
+        ] {
+            std::fs::write(&path, format!("toasts = \"{raw}\"\n")).unwrap();
+            assert_eq!(load(&path).unwrap().toasts(), level);
+            assert_eq!(level.as_str(), raw);
+        }
+        std::fs::write(&path, "# mine\nbell_toaster = false\n").unwrap();
+        save_preference(&path, "toasts", toml_edit::value(ToastLevel::Off.as_str())).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# mine") && raw.contains("toasts = \"off\""), "{raw}");
+        let restarted = load(&path).unwrap();
+        assert_eq!(restarted.toasts(), ToastLevel::Off);
+        assert!(!restarted.bell_toaster());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn invalid_values_and_unknown_keys_are_rejected() {
         let dir = temp_dir("invalid");
@@ -1352,6 +1378,8 @@ mod tests {
             "pane_titles = \"always\"",
             "chrome_style = \"glass\"",
             "bar_color = \"teal\"",
+            "toasts = \"some\"",
+            "toasts = false",
         ] {
             std::fs::write(&path, bad).unwrap();
             assert!(load(&path).is_err(), "should reject: {bad}");

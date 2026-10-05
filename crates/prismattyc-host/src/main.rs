@@ -70,6 +70,7 @@ mod space_panel;
 mod space_rail;
 mod space_view;
 mod spaces_polish;
+mod status_toasts;
 mod splash;
 mod system_fonts;
 mod theme;

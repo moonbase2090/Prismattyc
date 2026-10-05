@@ -1695,6 +1695,17 @@ mod tests {
     }
 
     #[test]
+    fn recent_messages_action_is_listed_and_unbound() {
+        let map = KeyMap::default();
+        let action = Action::RecentMessages;
+        assert_eq!(action.name(), "recent_messages");
+        assert_eq!(Action::from_name("recent_messages"), Some(action));
+        assert!(map.chords(action).is_empty());
+        assert_eq!(action.group(), ActionGroup::ViewEdit);
+        assert!(action.describe().contains("hidden"));
+    }
+
+    #[test]
     fn space_rail_actions_exist_with_no_default_chord() {
         let map = KeyMap::default();
         for action in [

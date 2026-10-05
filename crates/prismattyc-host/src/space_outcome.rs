@@ -238,6 +238,26 @@ mod tests {
         )])
     }
 
+    /// #171: a routine open is info; only a failed open is an error toast.
+    #[test]
+    fn only_a_failed_open_is_an_error() {
+        let observation = || Observation {
+            saved: vec![("worker".into(), 1)],
+            before: Some(live(7, 1, 1)),
+        };
+        let fine = observation().finish("team".into(), View::Applied, None, Some(live(7, 1, 1)));
+        assert!(!fine.is_error(), "{}", fine.label());
+        let unavailable = observation().finish("team".into(), View::Applied, None, None);
+        assert!(!unavailable.is_error(), "{}", unavailable.label());
+        let failed = observation().finish(
+            "team".into(),
+            View::NotApplied,
+            Some("socket closed".into()),
+            None,
+        );
+        assert!(failed.is_error(), "{}", failed.label());
+    }
+
     #[test]
     fn retained_three_pane_session_is_not_reported_as_saved_two_pane_layout() {
         let observation = Observation {

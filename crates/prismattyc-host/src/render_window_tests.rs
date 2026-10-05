@@ -1755,7 +1755,11 @@ fn verify_decision_handlers(host: &mut HostState) {
     App::refit_geom(host, host.window.inner_size(), Some("decision test"));
     // Graphite hit-testing uses the bar stored by the last paint. Classic
     // derives the close from the cell grid and does not need that cache.
+    // The paint must not replace the raster the status snapshot publishes:
+    // that raster still carries the preedit and OSD guards.
+    let saved_frame = host.render_frame;
     frame(host);
+    host.render_frame = saved_frame;
     let stride = host.window.inner_size().width as usize;
     let geom = host.mux.geom();
     let strip_top = geom.tab_strip_y();

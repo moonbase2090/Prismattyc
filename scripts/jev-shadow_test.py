@@ -122,7 +122,9 @@ class JevShadowTests(unittest.TestCase):
                     self.assertEqual(jev.main(args), 0)
             result = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(result["mode"], "dry-run")
-            self.assertEqual(result["planned_prediction_calls"], 2)
+            self.assertEqual(result["planned_prediction_calls"], 4)
+            self.assertEqual(result["planned_test_package_calls"], 2)
+            self.assertEqual(result["planned_miss_score_calls"], 2)
             self.assertEqual(result["planned_triage_calls"], 1)
             self.assertEqual(result["live_requests"], 0)
             self.assertNotIn("must-not-be-read", output.read_text(encoding="utf-8"))
@@ -161,6 +163,99 @@ class JevShadowTests(unittest.TestCase):
             self.assertIn("fn render", state["mutant"]["function_context"])
             self.assertEqual(set(state), {"mutant"})
             self.assertNotIn("outcome", state)
+
+    def test_miss_score_state_uses_the_selected_package_and_richer_features(self) -> None:
+        mutant_row = mutant("render::true", 2, "true")
+        mutant_row["package"] = "prismattyc"
+        mutant_row["function"]["function_name"] = "handle_host_key_with_pending"
+        state = jev.scoring_state({"mutant": {"diff": "x"}}, mutant_row, "prismattyc")
+        self.assertEqual(state["scoring_features"]["crate"], "prismattyc")
+        self.assertEqual(state["scoring_features"]["chosen_test_package"], "prismattyc")
+        self.assertEqual(state["scoring_features"]["mutant_kind"], "Replace bool literal")
+        self.assertEqual(state["scoring_features"]["hot_path_signal"]["level"], "known-hot")
+        self.assertNotIn("outcome", state)
+        self.assertEqual(set(jev.miss_score_questions()), {"likely_missed"})
+
+    def test_run_live_scores_after_package_pick_and_passes_labeled_examples(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, _, mutants_path, _ = self.fixture(root)
+            mutant_row = jev.mutants_from(jev.read_json(mutants_path))[0]
+            mutant_row["package"] = "prismattyc"
+            mutant_row["function"]["function_name"] = "handle_host_key_with_pending"
+            row = {
+                "mutant_id": "mutant-1",
+                "mutant": mutant_row,
+                "state": jev.model_state(mutant_row, repo),
+                "outcome": "MissedMutant",
+                "triage_sample": True,
+            }
+            calls = []
+
+            class FakeClient:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                def call(self, state, questions):
+                    calls.append((state, questions))
+                    if "test_package" in questions:
+                        return {
+                            "model": "jev-1.13.0",
+                            "answers": {"test_package": {"choice": "prismattyc"}},
+                            "usage": {"input_tokens": 3, "output_tokens": 1},
+                        }
+                    if "likely_missed" in questions:
+                        return {
+                            "model": "jev-1.13.0",
+                            "answers": {"likely_missed": {"score": 3.2}},
+                            "usage": {"input_tokens": 4, "output_tokens": 1},
+                        }
+                    return {
+                        "model": "jev-1.13.0",
+                        "answers": {"likely_equivalent_or_gap": {"choice": "real-test-gap"}},
+                        "usage": {"input_tokens": 2, "output_tokens": 1},
+                    }
+
+            examples = [{
+                "crate": "pmux-mcp",
+                "mutant_kind": "FnValue",
+                "mutation_pattern": "empty success result",
+                "label": "real-test-gap",
+                "rationale": "The public tool no longer performs its operation.",
+            }]
+            with patch.object(jev, "JevClient", FakeClient):
+                result = jev.run_live(
+                    jev.argparse.Namespace(repo=repo),
+                    {"cycle_sha": "abc123", "selected_shards": [0]},
+                    [row],
+                    [row],
+                    {"labels": {"mutant-1": "real-test-gap"}, "examples": examples},
+                    {"schema_version": 1, "runs": [{
+                        "run_id": "prior",
+                        "model_version": "jev-1.13.0",
+                        "prompt_version": 1,
+                        "bins": [
+                            {"count": 16, "missed": 1, "mean_probability": 0.164375},
+                            {"count": 415, "missed": 45, "mean_probability": 0.3235783133},
+                            {"count": 1017, "missed": 314, "mean_probability": 0.5012659784},
+                            {"count": 762, "missed": 440, "mean_probability": 0.6840583989},
+                            {"count": 74, "missed": 65, "mean_probability": 0.824222973},
+                        ],
+                    }]},
+                    "run-2",
+                )
+            self.assertEqual(len(calls), 3)
+            self.assertIn("test_package", calls[0][1])
+            score_state = calls[1][0]
+            self.assertEqual(score_state["scoring_features"]["chosen_test_package"], "prismattyc")
+            self.assertEqual(score_state["scoring_features"]["crate"], "prismattyc")
+            self.assertEqual(score_state["scoring_features"]["hot_path_signal"]["level"], "known-hot")
+            self.assertNotIn("outcome", score_state)
+            self.assertEqual(calls[2][0]["prior_human_examples"], examples)
+            self.assertEqual(result["planned_prediction_calls"], 2)
+            self.assertEqual(result["metrics"]["triage_precision"]["precision"], 1.0)
+            self.assertIsNotNone(result["records"][0]["calibrated_missed_probability"])
+            self.assertEqual(result["next_calibration"]["runs"][0]["prompt_version"], 1)
 
     def test_live_request_sends_gateway_auth_header_and_keeps_api_authorization(self) -> None:
         response = {
@@ -249,16 +344,16 @@ class JevShadowTests(unittest.TestCase):
                 "CLOUDFLARE_API_TOKEN": "api-token",
                 "CLOUDFLARE_AI_GATEWAY_TOKEN": "gateway-token",
                 "CLOUDFLARE_AI_GATEWAY_ID": "gateway-1",
-            }), patch.object(jev.urllib.request, "urlopen", side_effect=error):
+            }), patch.object(jev.urllib.request, "urlopen", side_effect=error), patch.object(jev.time, "sleep"):
                 result = jev.run_live(
                     jev.argparse.Namespace(repo=repo),
                     {"cycle_sha": "abc123", "selected_shards": [0]},
                     inputs,
                     [],
-                    {},
+                    {"labels": {}, "examples": []},
                 )
             summary = jev.make_summary(result)
-            self.assertIn("1 request: Cloudflare Jev request failed with HTTP 403", summary)
+            self.assertIn("request errors: 2", summary)
             self.assertIn("Unified Billing requires gateway authentication", summary)
             self.assertNotIn("gateway-token", summary)
             self.assertNotIn("api-token", summary)
@@ -269,16 +364,43 @@ class JevShadowTests(unittest.TestCase):
 
     def test_calibration_and_labeled_triage_precision(self) -> None:
         score = jev.calibration([
-            {"missed_probability": 0.9, "outcome": "MissedMutant"},
-            {"missed_probability": 0.1, "outcome": "CaughtMutant"},
+            {"raw_missed_probability": 0.9, "calibrated_missed_probability": 0.8, "outcome": "MissedMutant"},
+            {"raw_missed_probability": 0.1, "calibrated_missed_probability": 0.2, "outcome": "CaughtMutant"},
         ])
         self.assertAlmostEqual(score["brier"], 0.01)
+        self.assertAlmostEqual(score["calibrated_brier"], 0.04)
         rows = [
             {"mutant_id": "a", "triage_sample": True, "triage_choice": "real-test-gap"},
             {"mutant_id": "b", "triage_sample": True, "triage_choice": "real-test-gap"},
         ]
         result = jev.triage_precision(rows, {"a": "real-test-gap", "b": "likely-equivalent"})
         self.assertEqual(result["precision"], 0.5)
+
+    def test_calibration_state_rolls_forward_only_after_enough_scores(self) -> None:
+        records = [
+            {
+                "raw_missed_probability": index / 100,
+                "outcome": "MissedMutant" if index % 2 else "CaughtMutant",
+                "model_version": "jev-1.13.0",
+            }
+            for index in range(100)
+        ]
+        state = jev.next_calibration_state({"schema_version": 1, "runs": []}, records, "run-3")
+        self.assertEqual(state["runs"][0]["prompt_version"], jev.SCORE_PROMPT_VERSION)
+        self.assertEqual(state["runs"][0]["score_count"], 100)
+        curve = jev.calibration_curve(state, "jev-1.13.0")
+        self.assertIsNotNone(curve)
+        self.assertLessEqual(
+            curve["points"][0]["calibrated_probability"],
+            curve["points"][-1]["calibrated_probability"],
+        )
+
+    def test_label_fixture_includes_25_adjudicated_positive_examples(self) -> None:
+        fixture = jev.load_label_fixture(Path(__file__).with_name("jev-shadow-labels.json"))
+        self.assertEqual(len(fixture["labels"]), 25)
+        self.assertEqual(set(fixture["labels"].values()), {"real-test-gap"})
+        self.assertEqual(fixture["historical_metrics"]["precision"], 1.0)
+        self.assertGreaterEqual(len(fixture["examples"]), 1)
 
 
 if __name__ == "__main__":

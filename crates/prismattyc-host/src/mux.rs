@@ -3627,6 +3627,10 @@ impl MuxRuntime {
         self.graphite_bar = bar;
     }
 
+    pub(crate) fn graphite_bar(&self) -> Option<&crate::graphite::BarLayout> {
+        self.graphite_bar.as_ref()
+    }
+
     /// Presentation index for a pixel in the top tab strip, if any.
     /// Slots sit in the window-padded content box so they stay aligned
     /// with `rasterize_tab_strip`. `close` is the right-edge close target.

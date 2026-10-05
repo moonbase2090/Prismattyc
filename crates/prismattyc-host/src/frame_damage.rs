@@ -1756,6 +1756,13 @@ mod tests {
             mail_chrome_box(slot, content, true),
             PixelRect::new(10, 20, 20, 20)
         );
+        // Linux paint geometry: header 28, chip 20, content starts at y=85.
+        // The chip ends at y=72, entirely above the grid.
+        let graphite_slot = PixelRect::new(8, 52, 410, 494);
+        let graphite_content = PixelRect::new(8, 85, 410, 456);
+        let graphite_mail = mail_chrome_box(graphite_slot, graphite_content, true);
+        assert_eq!(graphite_mail, PixelRect::new(8, 52, 20, 20));
+        assert!(graphite_mail.y + graphite_mail.height <= graphite_content.y);
         assert_eq!(
             mail_chrome_box(slot, content, false),
             PixelRect::new(12, 22, 20, 20)

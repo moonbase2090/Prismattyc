@@ -1087,7 +1087,30 @@ fn verify_mail_scroll_during_sweep(host: &mut HostState) {
     let _ = host.mux.focused_mut().emulator.feed(b"\x1b[T");
     let scrolled = paint_retained(host, &mut retained);
     assert_eq!(scrolled.full_repaint_reason, None);
-    assert_eq!(scrolled.rows_scrolled_as_blit, 0);
+    // Multi-pane mail is a 20px chip at the slot corner. The Graphite title
+    // row is taller than that chip, so the chip sits above the grid and a
+    // cell scroll may blit. A chip that still covers the grid must not.
+    let (cx, cy, cw, ch) = geom.pane_content_px(rect);
+    let mail = super::frame_damage::mail_chrome_box(
+        super::frame_damage::PixelRect::new(sx, sy, sw, sh),
+        super::frame_damage::PixelRect::new(cx, cy, cw, ch),
+        host.mux.pane_count() > 1,
+    );
+    let mail_on_grid = mail.x < cx.saturating_add(cw)
+        && cx < mail.x.saturating_add(mail.width)
+        && mail.y < cy.saturating_add(ch)
+        && cy < mail.y.saturating_add(mail.height);
+    if mail_on_grid {
+        assert_eq!(
+            scrolled.rows_scrolled_as_blit, 0,
+            "mail on the grid must not be copied by a scroll blit"
+        );
+    } else {
+        assert!(
+            scrolled.rows_scrolled_as_blit > 0,
+            "mail above the grid leaves the cell scroll free to blit"
+        );
+    }
     assert!(scrolled.cells_painted > 0);
     assert!(scrolled.cells_painted < render_cells_painted(host));
     assert_eq!(

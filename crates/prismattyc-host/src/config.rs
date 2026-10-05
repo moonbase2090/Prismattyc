@@ -352,7 +352,7 @@ impl ConfigFile {
     pub fn loaded_theme(&self) -> crate::theme::Theme {
         self.resolved_theme
             .clone()
-            .unwrap_or_else(|| crate::theme::default_theme().clone())
+            .unwrap_or_else(crate::theme::shipped_default)
     }
 
     pub fn render_timer(&self) -> RenderTimer {
@@ -1326,7 +1326,7 @@ mod tests {
         std::fs::write(&path, "[theme_overrides]\n").unwrap();
         assert_eq!(
             load(&path).unwrap().loaded_theme(),
-            *crate::theme::default_theme(),
+            crate::theme::shipped_default(),
             "an empty table changes nothing"
         );
 
@@ -1340,7 +1340,9 @@ mod tests {
                 "must list 16 colours",
             ),
             (
-                "[theme_overrides]\nselection_fg = \"#000000\"\n",
+                // prismattyc-default ships no selection pair, so half of one
+                // is still rejected.
+                "theme = \"prismattyc-default\"\n[theme_overrides]\nselection_fg = \"#000000\"\n",
                 "selection_fg and selection_bg",
             ),
             (

@@ -965,6 +965,9 @@ struct HostState {
     /// Terminal defaults, ANSI 0-15, and host chrome colors. The brand focus
     /// spectrum remains independent of the selected theme.
     theme: theme::Theme,
+    /// `[theme_overrides]` from the config, re-applied when the follow-OS
+    /// Prismattyc theme switches between Dark and Light (#145).
+    theme_overrides: Option<theme::ThemeOverrides>,
     theme_picker: Option<ThemePicker>,
     /// Graphite transparency dialog (#112). Classic chrome leaves this empty.
     transparency: Option<transparency::Dialog>,
@@ -2633,7 +2636,8 @@ impl App {
             let reloaded_theme = self.file_config.loaded_theme();
             if reloaded_theme != prior.loaded_theme() {
                 eprintln!("prismattyc-host: theme reloaded: {}", reloaded_theme.name);
-                host.theme = reloaded_theme;
+                host.theme_overrides = self.file_config.theme_overrides.clone();
+                apply_host_theme(host, reloaded_theme);
                 host.pending_full_repaint = Some(FullRepaintReason::Theme);
                 host.background = None;
                 host.dirty = true;
@@ -3519,6 +3523,7 @@ impl App {
                 multi_click: MultiClick::default(),
                 clipboard,
                 theme,
+                theme_overrides: self.file_config.theme_overrides.clone(),
                 theme_picker: None,
                 transparency: None,
                 palette: None,
@@ -3659,6 +3664,8 @@ impl App {
             },
         );
         if let Some(host) = self.windows.get_mut(&id) {
+            let configured = host.theme.clone();
+            apply_host_theme(host, configured);
             host.cache_writer = !config_editor;
             host.local_views.fresh = self.file_config.space_startup.as_deref() == Some("fresh");
             if host.restore_prompt.is_some() {
@@ -10327,7 +10334,7 @@ fn paint_graphite_rail(
         &tok,
         bar,
         layout.side == space_rail::RailSide::Bottom,
-        host.chrome_alpha,
+        graphite_bar_alpha(host),
     );
     let views = host.space_rail.views();
     let n = host.space_rail.names.len();
@@ -10492,7 +10499,7 @@ fn paint_graphite_side_rail(
             tok,
             accent,
             chrome: geom.chrome,
-            alpha: host.chrome_alpha,
+            alpha: graphite_bar_alpha(host),
             plus,
             plus_label: graphite::RAIL_PLUS,
             plus_hovered: hover == Some(space_rail::RailHit::Plus),
@@ -10652,7 +10659,7 @@ fn paint_graphite_tabs_bar(
             accent: graphite::accent(&tok, focus_border_rgb(host.focus_border)),
             hover,
             drop_target: pane_drag_drop_target(host),
-            bar_alpha: host.chrome_alpha,
+            bar_alpha: graphite_bar_alpha(host),
             editing: editing
                 .as_ref()
                 .map(|(index, text, all)| (*index, text.as_str(), *all)),
@@ -10907,7 +10914,7 @@ fn paint_graphite_sidebar(
             ],
             commands_hint: &graphite_chord_label(&host.keymap, keybind::Action::CommandPalette),
             action_hovered: hover_action,
-            alpha: host.chrome_alpha,
+            alpha: graphite_bar_alpha(host),
         },
     );
     let span = graphite::Rect::new(
@@ -10944,7 +10951,7 @@ fn paint_graphite_sidebar(
             layout: &header,
             crumb: &crumb,
             arrange_hovered: hover_arrange,
-            alpha: host.chrome_alpha,
+            alpha: graphite_bar_alpha(host),
         },
     );
     // Hit state for the pointer handlers: painted rows with their tree
@@ -11006,6 +11013,38 @@ fn graphite_chord_label(keymap: &keybind::KeyMap, action: keybind::Action) -> St
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Paint with `theme` (#145). The follow-OS Prismattyc theme resolves to
+/// Prismattyc Dark or Light from the window's system appearance; every other
+/// theme pins the window appearance to its own variant so the native title
+/// band matches the chrome and terminal below it.
+fn apply_host_theme(host: &mut HostState, theme: theme::Theme) {
+    let follow = theme::follows_os(&theme);
+    host.window.set_theme(if follow {
+        None
+    } else {
+        Some(match theme.variant {
+            theme::ThemeVariant::Dark => winit::window::Theme::Dark,
+            theme::ThemeVariant::Light => winit::window::Theme::Light,
+        })
+    });
+    let os_light = follow && host.window.theme() == Some(winit::window::Theme::Light);
+    host.theme = theme::resolve_follow_os(&theme, os_light, host.theme_overrides.as_ref());
+    host.background = None;
+    host.pending_full_repaint = Some(FullRepaintReason::Theme);
+    host.dirty = true;
+}
+
+/// Bar and sidebar ground alpha. Light Graphite bars stay opaque so a dark
+/// desktop never washes them to mid-grey (#145); panes and the window ground
+/// still take `window_opacity`. Dark keeps `chrome_opacity`.
+fn graphite_bar_alpha(host: &HostState) -> u8 {
+    if host.theme.variant == theme::ThemeVariant::Light {
+        OPAQUE_ALPHA
+    } else {
+        host.chrome_alpha
+    }
 }
 
 fn show_tab_strip(host: &HostState) -> bool {
@@ -12235,7 +12274,7 @@ fn preview_picker_row(host: &mut HostState, item: &theme::PickerItem) {
     let Some(index) = item.preview_index(&host.theme.id, theme::builtins()) else {
         return;
     };
-    host.theme = theme::builtins()[index].clone();
+    apply_host_theme(host, theme::builtins()[index].clone());
 }
 
 fn theme_picker_scroll_for_selection(
@@ -12310,7 +12349,7 @@ fn handle_theme_picker_key(
     let logical = event.key_without_modifiers();
     if matches!(logical, Key::Named(NamedKey::Escape)) {
         let picker = host.theme_picker.take().expect("picker is open");
-        host.theme = picker.original;
+        apply_host_theme(host, picker.original);
         host.window
             .set_title(&window_title(&host.mux, show_tab_strip(host)));
         host.dirty = true;
@@ -12338,7 +12377,7 @@ fn handle_theme_picker_key(
         let chosen = &theme::builtins()[theme_index];
         match config::save_theme(&config::config_path(), &chosen.id) {
             Ok(()) => {
-                host.theme = chosen.clone();
+                apply_host_theme(host, chosen.clone());
                 host.theme_picker = None;
                 host.window
                     .set_title(&window_title(&host.mux, show_tab_strip(host)));
@@ -12388,7 +12427,7 @@ fn handle_theme_picker_key(
             picker.selected = Some(inner);
             picker.scroll = 0;
             picker.wheel_remainder_milli_px = 0;
-            host.theme = theme::builtins()[theme_index].clone();
+            apply_host_theme(host, theme::builtins()[theme_index].clone());
             host.dirty = true;
         }
         return true;
@@ -12798,7 +12837,7 @@ fn open_theme_picker(host: &mut HostState) {
 
 fn cancel_theme_picker(host: &mut HostState) {
     if let Some(picker) = host.theme_picker.take() {
-        host.theme = picker.original;
+        apply_host_theme(host, picker.original);
         host.window
             .set_title(&window_title(&host.mux, show_tab_strip(host)));
         host.dirty = true;
@@ -12848,7 +12887,7 @@ fn activate_theme_picker_at_pointer(host: &mut HostState, x: usize, y: usize) ->
                 picker.selected = Some(selected);
                 picker.scroll = 0;
                 picker.wheel_remainder_milli_px = 0;
-                host.theme = theme::builtins()[theme_index].clone();
+                apply_host_theme(host, theme::builtins()[theme_index].clone());
             } else {
                 preview_picker_row(host, item);
                 let size = host.window.inner_size();
@@ -16495,6 +16534,14 @@ impl ApplicationHandler<UserAction> for App {
             // `Resized` after this event, so here we only swap in a font
             // rasterized at the new scale; the `Resized` arm refits the grid
             // with the new cell metrics.
+            WindowEvent::ThemeChanged(_) => {
+                // Only the follow-OS Prismattyc theme reacts (#145).
+                if theme::follows_os(&host.theme) {
+                    let current = host.theme.clone();
+                    apply_host_theme(host, current);
+                    host.window.request_redraw();
+                }
+            }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 Self::refit_font_for_scale(host, scale_factor);
                 host.window.request_redraw();

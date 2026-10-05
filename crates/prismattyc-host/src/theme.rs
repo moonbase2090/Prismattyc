@@ -88,6 +88,15 @@ const BUILTIN_FILES: &[(&str, &str)] = &[
         "prismattyc-default",
         include_str!("../themes/prismattyc-default.toml"),
     ),
+    ("prismattyc", include_str!("../themes/prismattyc.toml")),
+    (
+        "prismattyc-dark",
+        include_str!("../themes/prismattyc-dark.toml"),
+    ),
+    (
+        "prismattyc-light",
+        include_str!("../themes/prismattyc-light.toml"),
+    ),
     (
         "catppuccin-mocha",
         include_str!("../themes/catppuccin-mocha.toml"),
@@ -195,6 +204,55 @@ pub fn builtins() -> &'static [Theme] {
     BUILTINS.as_slice()
 }
 
+/// Theme id that follows the OS appearance (#145): the host paints
+/// Prismattyc Dark or Prismattyc Light from the system setting.
+pub const FOLLOW_OS_ID: &str = "prismattyc";
+
+/// What a new install, or a config with no `theme`, gets: Prismattyc
+/// matching the system appearance. The legacy `prismattyc-default` palette
+/// stays available by name.
+pub fn shipped_default() -> Theme {
+    BUILTINS
+        .iter()
+        .find(|theme| theme.id == FOLLOW_OS_ID)
+        .cloned()
+        .unwrap_or_else(|| default_theme().clone())
+}
+
+/// `theme = "prismattyc"`: the palette tracks the OS appearance.
+pub fn follows_os(theme: &Theme) -> bool {
+    theme.id == FOLLOW_OS_ID
+}
+
+/// The palette to paint for `theme` under the OS appearance. Themes that do
+/// not follow the OS come back unchanged; the follow-OS theme takes Prismattyc
+/// Light or Dark and keeps its own id, with `overrides` applied on top so a
+/// user's `[theme_overrides]` survive an appearance change.
+pub fn resolve_follow_os(
+    theme: &Theme,
+    os_light: bool,
+    overrides: Option<&ThemeOverrides>,
+) -> Theme {
+    if !follows_os(theme) {
+        return theme.clone();
+    }
+    let id = if os_light {
+        "prismattyc-light"
+    } else {
+        "prismattyc-dark"
+    };
+    let Some(base) = BUILTINS.iter().find(|candidate| candidate.id == id) else {
+        return theme.clone();
+    };
+    let mut resolved = base.clone();
+    resolved.id = theme.id.clone();
+    resolved.name = theme.name.clone();
+    if let Some(overrides) = overrides {
+        let _ = apply_overrides(&mut resolved, overrides);
+    }
+    resolved
+}
+
 /// First hyphen-separated token of a theme id (`omarchy-osaka-jade` → `omarchy`).
 pub fn family_key(id: &str) -> &str {
     id.split('-')
@@ -289,7 +347,7 @@ pub fn status_rgb(theme: &Theme, tone: prismattyc_protocol::StatusTone) -> Rgb {
 /// launch directory cannot change theme resolution.
 pub fn load(spec: Option<&str>, config_path: &Path) -> Result<Theme> {
     let Some(spec) = spec.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(default_theme().clone());
+        return Ok(shipped_default());
     };
     let path = Path::new(spec);
     if path.is_absolute() {
@@ -656,9 +714,46 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    /// #145: the shipped default follows the OS and resolves to the Graphite
+    /// Dark or Light palette for chrome and terminal alike; other themes and
+    /// overrides are left alone.
+    #[test]
+    fn prismattyc_follows_the_os_appearance() {
+        let shipped = shipped_default();
+        assert_eq!(shipped.id, FOLLOW_OS_ID);
+        assert!(follows_os(&shipped));
+        assert_eq!(
+            load(None, Path::new("/nonexistent/config.toml")).unwrap(),
+            shipped
+        );
+        let light = resolve_follow_os(&shipped, true, None);
+        assert_eq!(light.variant, ThemeVariant::Light);
+        assert_eq!(light.id, FOLLOW_OS_ID, "keeps following after resolution");
+        assert_eq!(
+            (light.default_bg, light.default_fg),
+            ([0xff; 3], [0x1f, 0x23, 0x29])
+        );
+        assert_eq!(light.chrome_bg, [0xee, 0xf0, 0xf3]);
+        let dark = resolve_follow_os(&light, false, None);
+        assert_eq!(dark.variant, ThemeVariant::Dark);
+        assert_eq!(dark.default_bg, [0x18, 0x1b, 0x21]);
+        assert_eq!(dark.chrome_bg, [0x15, 0x18, 0x1d]);
+        // A user's override survives the appearance switch.
+        let overrides = ThemeOverrides {
+            default_bg: Some("#123456".into()),
+            ..ThemeOverrides::default()
+        };
+        let tinted = resolve_follow_os(&shipped, true, Some(&overrides));
+        assert_eq!(tinted.default_bg, [0x12, 0x34, 0x56]);
+        assert_eq!(tinted.variant, ThemeVariant::Light);
+        // A theme that does not follow the OS is never swapped.
+        let dracula = builtins().iter().find(|t| t.id == "dracula").unwrap();
+        assert_eq!(&resolve_follow_os(dracula, true, None), dracula);
+    }
+
     #[test]
     fn all_embedded_themes_are_valid_and_unique() {
-        assert_eq!(builtins().len(), 29);
+        assert_eq!(builtins().len(), 32);
         for (index, theme) in builtins().iter().enumerate() {
             assert!(theme.ansi.iter().any(|color| color != &theme.ansi[0]));
             assert!(builtins()[..index]
@@ -807,6 +902,7 @@ mod tests {
         assert_eq!(
             families,
             vec![
+                ("prismattyc", "Prismattyc", 4),
                 ("monokai", "Monokai", 6),
                 ("omarchy", "Omarchy", 3),
                 ("hive", "Hive", 13)
@@ -814,8 +910,8 @@ mod tests {
         );
         assert_eq!(
             rows.len(),
-            builtins().len() - 5 - 2 - 12,
-            "Monokai, Omarchy, and Hive collapse to one root row each"
+            builtins().len() - 3 - 5 - 2 - 12,
+            "Prismattyc, Monokai, Omarchy, and Hive collapse to one root row each"
         );
         let members = match &rows
             .iter()

@@ -86,13 +86,15 @@ They're labeled **Arrange** in the tabs bar, before the command field, and each 
 | spaces bar | `#0d0f12` | `#e4e7ec` |
 | pane / focused pane | `#181b21` / `#1b1f26` | `#ffffff` / `#ffffff` |
 | focused title row | `#1c2330` | `#eaf1fc` |
-| active tab chip | `#252a33` | `#ffffff` + `#d5d9df` border |
+| active tab chip | `#252a33` | `#ffffff` + `#aab2bd` border (#145; was `#d5d9df`) |
 | hairline | `#262a32` | `#d5d9df` |
 | text / muted / tab text | `#e6e9ee` / `#a3abb8` / `#aeb5c1` | `#1f2329` / `#5b6472` / `#4a525e` |
 | accent (= focus color) | `#5aa2ff` | `#2f6fd0` |
 | working / unseen / attention | `#4cc98a` / `#f2b84b` / `#ff7a6b` | `#1f8a55` / `#b87a0a` (text `#9a6200`) / `#c2392b` |
 | handle hover fill / hover outline | `#252a33` / `#3d5f8f` | `#e2e6eb` / `#9dbbe8` |
 | light-cycle head | `#d6e8ff` | `#163f80` |
+
+Prismattyc ships these tokens as themes (#145): **Prismattyc Dark** and **Prismattyc Light** set the terminal ground, text, cursor, and selection from the same column as the chrome, and **Prismattyc (match system)** (`theme = "prismattyc"`, the default for new installs) switches between them with the OS appearance. On Light, the tabs bar, spaces bar, and sidebar stay opaque under `window_opacity` so a dark desktop cannot grey them; panes and the window ground still go translucent.
 
 Spacing, radius and type are unchanged from A: 8 px gaps, 6/8/10 px radii, IBM Plex Sans for the chrome, the user's mono font for terminal text, a 44 px tabs bar, a 30 px spaces bar, a 28 px pane title row, and a 760×460 dialog.
 

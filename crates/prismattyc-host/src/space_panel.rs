@@ -1448,6 +1448,7 @@ mod layout_tests {
                 width,
                 height,
                 None,
+                None,
             )
             .expect("layout panel paints");
             (layout, buffer)

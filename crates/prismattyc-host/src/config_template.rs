@@ -132,9 +132,23 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey {
         name: "layout",
         group: ConfigGroup::Appearance,
-        doc: "Graphite chrome arrangement: bars, or the sidebar tree",
+        doc: "Chrome arrangement: bars, or the sidebar tree. Classic honors sidebar too",
         range: "bars|sidebar",
         value: ConfigValue::CommentedString("bars"),
+    },
+    ConfigKey {
+        name: "sidebar_width_px",
+        group: ConfigGroup::Appearance,
+        doc: "Expanded Spaces sidebar width in pixels. Names ellipsize; the width does not follow them",
+        range: "200-2000",
+        value: ConfigValue::U32(256),
+    },
+    ConfigKey {
+        name: "sidebar_collapsed",
+        group: ConfigGroup::Appearance,
+        doc: "Collapse the Spaces sidebar to the icon strip",
+        range: "true|false",
+        value: ConfigValue::Bool(false),
     },
     ConfigKey {
         name: "pane_titles",
@@ -1050,6 +1064,8 @@ mod tests {
         "chrome_style",
         "bar_color",
         "layout",
+        "sidebar_width_px",
+        "sidebar_collapsed",
         "pane_titles",
         "focus_border",
         "focus_border_animation",

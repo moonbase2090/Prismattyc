@@ -48,6 +48,8 @@ mod remote_catalog;
 mod remote_rail;
 mod render_diagnostics;
 mod restart;
+mod sidebar_resize;
+mod sidebar_width;
 mod terminal_switcher;
 #[cfg(test)]
 mod test_support;
@@ -187,6 +189,12 @@ struct PaneSpacing {
     /// `window_padding_px`, `pane_gap_px`, `pane_padding_px` were set in the
     /// config. Graphite keeps a set value and uses its own default otherwise.
     explicit_spacing: [bool; 3],
+    /// Expanded sidebar width in design pixels (issue #174).
+    sidebar_width_px: u32,
+    /// Sidebar collapsed to the icon strip.
+    sidebar_collapsed: bool,
+    /// Window width used to keep pane room. Zero skips that clamp.
+    sidebar_clamp_window_px: u32,
 }
 
 impl PaneSpacing {
@@ -199,6 +207,11 @@ impl PaneSpacing {
 
 impl From<&config::ConfigFile> for PaneSpacing {
     fn from(config: &config::ConfigFile) -> Self {
+        let sidebar = sidebar_width::from_persisted(
+            config.sidebar_width_px.map(i64::from),
+            config.sidebar_collapsed.unwrap_or(false),
+            sidebar_width::dock_for_rail(config.space_rail()),
+        );
         Self {
             window_padding_px: config.window_padding_px(),
             pane_gap_px: config.pane_gap_px(),
@@ -215,6 +228,9 @@ impl From<&config::ConfigFile> for PaneSpacing {
                 config.pane_gap_px.is_some(),
                 config.pane_padding_px.is_some(),
             ],
+            sidebar_width_px: sidebar.expanded_px.round() as u32,
+            sidebar_collapsed: sidebar.collapsed,
+            sidebar_clamp_window_px: 0,
         }
     }
 }
@@ -966,6 +982,16 @@ struct HostState {
     sidebar_scroll: usize,
     /// Sidebar list thumb drag: pointer y and scroll at press.
     sidebar_thumb_drag: Option<(f64, usize)>,
+    /// Header (or strip) control that collapses the sidebar.
+    sidebar_toggle: graphite::Rect,
+    /// Collapsed-strip hit boxes from the last paint.
+    sidebar_icons: sidebar_width::IconStrip,
+    /// Grip drag. The struct owns the pending width between reflows.
+    sidebar_drag: Option<sidebar_width::Drag>,
+    sidebar_drag_at: Option<Instant>,
+    /// Previous grip press, for the double-click reset.
+    sidebar_grip_at: Option<Instant>,
+    sidebar_grip_hot: bool,
     terminal_targets: Option<Vec<terminal_switcher::Entry>>,
     terminal_messages: bool,
     move_target: Option<move_target::Target>,
@@ -2943,7 +2969,10 @@ impl App {
                             host.mux.active_pane_count() > 1,
                             show_tab_strip(host),
                             strip_handle_row(host),
-                            requested_spacing,
+                            PaneSpacing {
+                                sidebar_clamp_window_px: host.window.inner_size().width,
+                                ..requested_spacing
+                            },
                             host.space_rail.longest_name_cells(),
                         );
                         let (cols, rows) = size_to_cells(host.window.inner_size(), &font, geom);
@@ -2977,7 +3006,10 @@ impl App {
                     host.mux.active_pane_count() > 1,
                     show_tab_strip(host),
                     strip_handle_row(host),
-                    requested_spacing,
+                    PaneSpacing {
+                        sidebar_clamp_window_px: host.window.inner_size().width,
+                        ..requested_spacing
+                    },
                     host.space_rail.longest_name_cells(),
                 );
                 let (cols, rows) = size_to_cells(host.window.inner_size(), &host.font, geom);
@@ -3647,6 +3679,12 @@ impl App {
                 sidebar_tree: sidebar::SidebarTree::default(),
                 sidebar_scroll: 0,
                 sidebar_thumb_drag: None,
+                sidebar_toggle: graphite::Rect::new(0, 0, 0, 0),
+                sidebar_icons: sidebar_width::icon_strip(0, 0, 0, 0, 1, 0, 0, 0),
+                sidebar_drag: None,
+                sidebar_drag_at: None,
+                sidebar_grip_at: None,
+                sidebar_grip_hot: false,
                 terminal_targets: None,
                 terminal_messages: false,
                 move_target: None,
@@ -4118,10 +4156,25 @@ fn chrome_snapshot(host: &HostState, live: Option<a11y::LiveSnap>) -> a11y::Chro
     }
 }
 
-/// Graphite sidebar layout: the header over the panes shows the Arrange
-/// control instead of the tabs bar.
+/// Sidebar layout. Graphite and classic both honor `layout = "sidebar"`.
+/// The header over the panes shows Arrange instead of the tabs bar.
+fn sidebar_mode(host: &HostState) -> bool {
+    host.spacing.layout == config::LayoutMode::Sidebar
+}
+
+/// Column origin and width for the sidebar. A right dock stores the width in
+/// `rail_px` so the pane grid already steps aside.
+fn sidebar_column_px(geom: mux::HostGeom, stride: usize) -> (usize, usize) {
+    if geom.sidebar_px > 0 {
+        (0, geom.sidebar_px)
+    } else {
+        let width = geom.rail_px;
+        (stride.saturating_sub(width), width)
+    }
+}
+
 fn sidebar_header_shown(host: &HostState) -> bool {
-    host.mux.geom().chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar
+    sidebar_mode(host)
 }
 
 /// Focused pane viewport as one document (accessibility D-A4). Scrollback stays
@@ -5448,8 +5501,11 @@ fn push_graphite_activity_damage(
             geom.top_chrome_px,
         ));
     }
-    if host.spacing.layout == config::LayoutMode::Sidebar && geom.sidebar_px > 0 {
-        frame_damage.push_rect(PixelRect::new(0, 0, geom.sidebar_px, height as usize));
+    if host.spacing.layout == config::LayoutMode::Sidebar {
+        let (x, width) = sidebar_column_px(geom, width as usize);
+        if width > 0 {
+            frame_damage.push_rect(PixelRect::new(x, 0, width, height as usize));
+        }
     }
 }
 
@@ -5695,12 +5751,17 @@ fn rasterize_frame(
     });
     let graphite_activity = !graphite_headers.is_empty() || rail_status_changed;
     if full || graphite_activity {
-        if let Some(layout) = host.space_rail.layout(
-            geom,
-            width as usize,
-            height as usize,
-            host.spacing.space_rail_pane_names,
-        ) {
+        if let Some(layout) = (host.spacing.layout != config::LayoutMode::Sidebar)
+            .then(|| {
+                host.space_rail.layout(
+                    geom,
+                    width as usize,
+                    height as usize,
+                    host.spacing.space_rail_pane_names,
+                )
+            })
+            .flatten()
+        {
             let rail_hover = match host.hover_target {
                 Some(HoverTarget::Rail(hit)) => Some(hit),
                 _ => None,
@@ -5767,9 +5828,9 @@ fn rasterize_frame(
     }
     // The sidebar replaces both bars (issue #113): same damage condition
     // the tabs bar used, so partial repaints behave the way the strip did.
-    // The spaces rail needs no gate: its layout is `None` while `rail_px`
-    // is zero, which the sidebar geometry guarantees.
-    let sidebar_mode = geom.chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar;
+    // A right dock keeps `rail_px`, so the spaces-rail painter is skipped
+    // above whenever layout is sidebar.
+    let sidebar_mode = sidebar_mode(host);
     if sidebar_mode
         && should_paint_tab_strip(
             show_tab_strip(host),
@@ -6504,6 +6565,16 @@ fn rasterize_frame(
             name,
         );
     }
+    if let Some((anchor, label)) = sidebar_icon_tooltip(host) {
+        graphite::paint_tooltip(
+            buffer,
+            width as usize,
+            geom.chrome,
+            &graphite::bar_tokens(&host.theme, host.bar_color),
+            anchor,
+            &label,
+        );
+    }
     if let Some(label) = git_hover_label(host) {
         let cols = (width as usize / host.font.cell_w.max(1))
             .saturating_sub(2)
@@ -7153,12 +7224,16 @@ impl App {
     /// layout (not cached rects). Tab create/switch must go through here
     /// so a 1-pane tab does not permanently zero `pane_gap`.
     fn refit_geom(host: &mut HostState, physical: PhysicalSize<u32>, why: Option<&str>) {
+        let spacing = PaneSpacing {
+            sidebar_clamp_window_px: physical.width,
+            ..host.spacing
+        };
         let geom = host_geom(
             &host.font,
             host.mux.active_pane_count() > 1,
             show_tab_strip(host),
             strip_handle_row(host),
-            host.spacing,
+            spacing,
             host.space_rail.longest_name_cells(),
         );
         let (cols, rows) = size_to_cells(physical, &host.font, geom);
@@ -9388,8 +9463,12 @@ fn apply_space_reorder_key_gate(
 
 fn handle_space_rail_key(host: &mut HostState, event: &winit::event::KeyEvent) -> bool {
     let geom = host.mux.geom();
-    let side = if geom.chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar {
-        space_rail::RailSide::Left
+    let side = if sidebar_mode(host) {
+        if sidebar_width::dock_for_rail(host.spacing.space_rail) == sidebar_width::Dock::Right {
+            space_rail::RailSide::Right
+        } else {
+            space_rail::RailSide::Left
+        }
     } else {
         geom.rail_side
     };
@@ -9958,11 +10037,10 @@ fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
     }
     let size = host.window.inner_size();
     let stride = size.width as usize;
-    // Sidebar mode replaces the strip: stale bar layouts must not produce
-    // phantom strip hovers over the header. The rail needs no gate — its
-    // layout is `None` while the sidebar zeroes `rail_px`.
-    let geom = host.mux.geom();
-    let sidebar = geom.chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar;
+    // Sidebar mode replaces the strip and the spaces rail. A right-docked
+    // sidebar stores its width in `rail_px`, so the rail layout must not
+    // win a hover in the gaps between icons.
+    let sidebar = sidebar_mode(host);
     if sidebar {
         if let Some(hit) = sidebar_hit_at(host, px, py) {
             return Some(HoverTarget::Sidebar(hit));
@@ -9975,32 +10053,34 @@ fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
             return Some(HoverTarget::Strip(hit));
         }
     }
-    if let Some(layout) = host.space_rail.layout(
-        host.mux.geom(),
-        stride,
-        size.height as usize,
-        host.spacing.space_rail_pane_names,
-    ) {
-        match layout.hit(px, py, host.space_rail.names.len()) {
-            Some(space_rail::RailHit::Chip { index, close }) => {
-                return Some(HoverTarget::Rail(space_rail::RailHit::Chip {
-                    index,
-                    close,
-                }));
+    if !sidebar {
+        if let Some(layout) = host.space_rail.layout(
+            host.mux.geom(),
+            stride,
+            size.height as usize,
+            host.spacing.space_rail_pane_names,
+        ) {
+            match layout.hit(px, py, host.space_rail.names.len()) {
+                Some(space_rail::RailHit::Chip { index, close }) => {
+                    return Some(HoverTarget::Rail(space_rail::RailHit::Chip {
+                        index,
+                        close,
+                    }));
+                }
+                Some(space_rail::RailHit::Plus) => {
+                    return Some(HoverTarget::Rail(space_rail::RailHit::Plus));
+                }
+                Some(space_rail::RailHit::Overflow) => {
+                    return Some(HoverTarget::Rail(space_rail::RailHit::Overflow))
+                }
+                Some(space_rail::RailHit::Destination(index)) => {
+                    return Some(HoverTarget::Rail(space_rail::RailHit::Destination(index)))
+                }
+                Some(space_rail::RailHit::Thumb) => {
+                    return Some(HoverTarget::Rail(space_rail::RailHit::Thumb));
+                }
+                Some(space_rail::RailHit::Empty) | None => {}
             }
-            Some(space_rail::RailHit::Plus) => {
-                return Some(HoverTarget::Rail(space_rail::RailHit::Plus));
-            }
-            Some(space_rail::RailHit::Overflow) => {
-                return Some(HoverTarget::Rail(space_rail::RailHit::Overflow))
-            }
-            Some(space_rail::RailHit::Destination(index)) => {
-                return Some(HoverTarget::Rail(space_rail::RailHit::Destination(index)))
-            }
-            Some(space_rail::RailHit::Thumb) => {
-                return Some(HoverTarget::Rail(space_rail::RailHit::Thumb));
-            }
-            Some(space_rail::RailHit::Empty) | None => {}
         }
     }
     if let Some(index) = bell_toast_at_pointer(host, px, py) {
@@ -10109,6 +10189,55 @@ fn hyperlink_hover_at_pointer(host: &mut HostState) -> bool {
     hit
 }
 
+/// Name under a collapsed-strip icon, or the collapse control's label.
+fn sidebar_icon_tooltip(host: &HostState) -> Option<(graphite::Rect, String)> {
+    if !sidebar_mode(host) {
+        return None;
+    }
+    match host.hover_target {
+        Some(HoverTarget::Sidebar(graphite::SidebarHit::Toggle)) => Some((
+            host.sidebar_toggle,
+            if host.spacing.sidebar_collapsed {
+                "Expand sidebar".to_string()
+            } else {
+                "Collapse sidebar".to_string()
+            },
+        )),
+        Some(HoverTarget::Sidebar(graphite::SidebarHit::Row(index)))
+            if host.spacing.sidebar_collapsed =>
+        {
+            let (slot, row) = host.sidebar_rows.get(index)?;
+            let space = host.sidebar_tree.spaces.get(row.space)?;
+            let label = match row.kind {
+                sidebar::RowKind::Space => space.name.clone(),
+                sidebar::RowKind::Tab => row
+                    .tab
+                    .and_then(|tab| space.tabs.get(tab))
+                    .map(|tab| tab.title.clone())
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or_else(|| "Tab".to_string()),
+                sidebar::RowKind::Pane => row
+                    .tab
+                    .and_then(|tab| space.tabs.get(tab))
+                    .and_then(|tab| row.pane.and_then(|pane| tab.panes.get(pane)))
+                    .map(|pane| pane.title.clone())
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or_else(|| "Session".to_string()),
+            };
+            Some((*slot, label))
+        }
+        Some(HoverTarget::Sidebar(graphite::SidebarHit::Action(index)))
+            if host.spacing.sidebar_collapsed =>
+        {
+            Some((
+                *host.sidebar_actions.get(index)?,
+                (*graphite::SIDEBAR_ACTIONS.get(index)?).to_string(),
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// Hovered sidebar Arrange button and its name, for the tooltip (#162).
 fn arrange_tooltip(host: &HostState) -> Option<(graphite::Rect, &'static str)> {
     match host.hover_target {
@@ -10153,14 +10282,18 @@ fn sync_chrome_hover(host: &mut HostState) -> bool {
         divider_axis,
         hyperlink,
     );
-    host.window
-        .set_cursor(if rail_resize::at_edge(host) || host.rail_resizing {
+    let grip = host.sidebar_drag.is_some() || sidebar_resize::grip_hot(host);
+    host.window.set_cursor(
+        if rail_resize::at_edge(host) || host.rail_resizing || grip {
             rail_grip_cursor(host.spacing.chrome_style == config::ChromeStyle::Graphite)
         } else {
             cursor
-        });
+        },
+    );
     host.divider_cursor = divider_axis.is_some();
-    if host.hover_target == next {
+    let grip_changed = host.sidebar_grip_hot != grip;
+    host.sidebar_grip_hot = grip;
+    if host.hover_target == next && !grip_changed {
         return false;
     }
     host.hover_target = next;
@@ -10170,17 +10303,18 @@ fn sync_chrome_hover(host: &mut HostState) -> bool {
 
 fn reveal_graphite_side_focus(host: &mut HostState) {
     let geom = host.mux.geom();
-    if !geom.chrome.graphite {
-        return;
-    }
     let Some(focus) = host.space_rail.focus else {
         return;
     };
     if focus >= host.space_rail.names.len() {
         return;
     }
-    if host.spacing.layout == config::LayoutMode::Sidebar {
-        let visible = sidebar::visible_rows(&host.sidebar_tree);
+    if sidebar_mode(host) {
+        let visible = if host.spacing.sidebar_collapsed {
+            sidebar::icon_rows(&host.sidebar_tree)
+        } else {
+            sidebar::visible_rows(&host.sidebar_tree)
+        };
         let Some(row) = visible
             .iter()
             .position(|row| row.kind == sidebar::RowKind::Space && row.space == focus)
@@ -10188,16 +10322,40 @@ fn reveal_graphite_side_focus(host: &mut HostState) {
             return;
         };
         let size = host.window.inner_size();
-        let column = graphite::Rect::new(0, 0, geom.sidebar_px, size.height as usize);
-        let layout =
-            graphite::sidebar_layout(geom.chrome, column, visible.len(), host.sidebar_scroll);
-        let visible_rows = layout.rows.len().max(1);
-        let scroll = if row < layout.first_row {
-            row
-        } else if row >= layout.first_row.saturating_add(visible_rows) {
-            row + 1 - visible_rows
+        let (origin, column_w) = sidebar_column_px(geom, size.width as usize);
+        let column = graphite::Rect::new(origin, 0, column_w, size.height as usize);
+        let scroll = if host.spacing.sidebar_collapsed {
+            let chrome = geom.chrome;
+            let strip = sidebar_width::icon_strip(
+                column.x as i32,
+                column.w as i32,
+                column.h as i32,
+                chrome.px(graphite::TABS_BAR_H.0) as i32,
+                chrome.px(36.0) as i32,
+                chrome.px(32.0) as i32,
+                visible.len(),
+                host.sidebar_scroll,
+            );
+            let shown = strip.icons.len().max(1);
+            let first = strip.first;
+            if row < first {
+                row
+            } else if row >= first.saturating_add(shown) {
+                row + 1 - shown
+            } else {
+                first
+            }
         } else {
-            layout.first_row
+            let layout =
+                graphite::sidebar_layout(geom.chrome, column, visible.len(), host.sidebar_scroll);
+            let shown = layout.rows.len().max(1);
+            if row < layout.first_row {
+                row
+            } else if row >= layout.first_row.saturating_add(shown) {
+                row + 1 - shown
+            } else {
+                layout.first_row
+            }
         };
         if scroll != host.sidebar_scroll {
             host.sidebar_scroll = scroll;
@@ -10205,7 +10363,10 @@ fn reveal_graphite_side_focus(host: &mut HostState) {
         }
         return;
     }
-    if geom.rail_side.horizontal() || geom.rail_side == space_rail::RailSide::Off {
+    if !geom.chrome.graphite
+        || geom.rail_side.horizontal()
+        || geom.rail_side == space_rail::RailSide::Off
+    {
         return;
     }
     let size = host.window.inner_size();
@@ -10235,7 +10396,7 @@ fn reveal_graphite_side_focus(host: &mut HostState) {
 /// Wheel over the Graphite side list scrolls that list and does not reach
 /// the pane underneath.
 fn scroll_graphite_side_rail(host: &mut HostState, delta: &MouseScrollDelta) -> bool {
-    if host.spacing.chrome_style != config::ChromeStyle::Graphite {
+    if host.spacing.chrome_style != config::ChromeStyle::Graphite || sidebar_mode(host) {
         return false;
     }
     let Some((x, y)) = host.pointer_px else {
@@ -10358,7 +10519,7 @@ fn handle_space_reorder_press(host: &mut HostState, button: MouseButton) -> bool
     let px = x as usize;
     let py = y as usize;
     let geom = host.mux.geom();
-    if geom.chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar {
+    if sidebar_mode(host) {
         let Some(graphite::SidebarHit::Row(index)) = sidebar_hit_at(host, px, py) else {
             return false;
         };
@@ -10550,6 +10711,9 @@ fn finish_space_reorder_drag(host: &mut HostState) -> bool {
 }
 
 fn handle_rail_click(host: &mut HostState, button: MouseButton) -> bool {
+    if sidebar_mode(host) {
+        return false;
+    }
     use space_rail::{RailHit, RailVerdict};
     let Some((x, y)) = host.pointer_px else {
         return false;
@@ -10654,9 +10818,15 @@ fn handle_rail_click(host: &mut HostState, button: MouseButton) -> bool {
 enum SidebarClick {
     ToggleCollapse(String),
     SelectTab(usize),
+    /// Collapsed-strip session: select the tab and focus that pane.
+    FocusSession {
+        tab: usize,
+        pane: Option<usize>,
+    },
     OpenSpace(String),
     BeginNewSpace,
     StartThumbDrag,
+    ToggleStrip,
     Run(keybind::Action),
     Ignore,
 }
@@ -10702,17 +10872,79 @@ fn sidebar_click_decision(
         (SidebarHit::Arrange(button), _) => arrange_button_action(button)
             .map(SidebarClick::Run)
             .unwrap_or(SidebarClick::Ignore),
+        (SidebarHit::Toggle, _) => SidebarClick::ToggleStrip,
         (SidebarHit::Thumb, _) => SidebarClick::StartThumbDrag,
         _ => SidebarClick::Ignore,
     }
+}
+
+/// Collapsed-strip hits. A space icon opens that space. A session icon on
+/// the current space focuses that pane; anywhere else it opens the space.
+fn icon_click_decision(
+    hit: graphite::SidebarHit,
+    row: Option<(&sidebar::TreeRow, &str, bool)>,
+) -> SidebarClick {
+    use graphite::SidebarHit;
+    match hit {
+        SidebarHit::Toggle => SidebarClick::ToggleStrip,
+        SidebarHit::Row(_) => match row {
+            Some((clicked, _name, true)) => match clicked.kind {
+                sidebar::RowKind::Space => SidebarClick::Ignore,
+                sidebar::RowKind::Tab | sidebar::RowKind::Pane => clicked
+                    .tab
+                    .map(|tab| SidebarClick::FocusSession {
+                        tab,
+                        pane: clicked.pane,
+                    })
+                    .unwrap_or(SidebarClick::Ignore),
+            },
+            Some((_, name, false)) => SidebarClick::OpenSpace(name.to_string()),
+            None => SidebarClick::Ignore,
+        },
+        SidebarHit::Action(0) => SidebarClick::Run(keybind::Action::NewTab),
+        SidebarHit::Action(1) => SidebarClick::BeginNewSpace,
+        SidebarHit::Action(2) => SidebarClick::Run(keybind::Action::CommandPalette),
+        SidebarHit::Arrange(button) => arrange_button_action(button)
+            .map(SidebarClick::Run)
+            .unwrap_or(SidebarClick::Ignore),
+        SidebarHit::Thumb => SidebarClick::StartThumbDrag,
+        SidebarHit::Action(_) => SidebarClick::Ignore,
+    }
+}
+
+/// Select a tab from the collapsed strip and focus the named pane.
+fn focus_sidebar_session(host: &mut HostState, tab: usize, pane: Option<usize>) {
+    let _ = host.mux.select_tab(tab);
+    let ids = host.mux.active_pane_ids();
+    let target = match pane {
+        Some(index) => ids.get(index).copied(),
+        None => {
+            let handle = host
+                .mux
+                .tab_infos()
+                .into_iter()
+                .find(|info| info.selected)
+                .and_then(|info| info.focused_handle);
+            handle
+                .and_then(|index| ids.get(index).copied())
+                .or_else(|| ids.first().copied())
+        }
+    };
+    if let Some(id) = target {
+        let _ = host.mux.focus(id);
+    }
+    mark_layout_dirty(host);
+    App::refit_geom(host, host.window.inner_size(), Some("sidebar focus"));
+    host.window
+        .set_title(&window_title(&host.mux, show_tab_strip(host)));
+    host.dirty = true;
 }
 
 /// Left press on the combined sidebar (#113): collapse toggles, tab and
 /// space selection, footer and header actions. Anything else is
 /// `NotHandled` so presses fall through to the pane handlers.
 fn handle_sidebar_click(host: &mut HostState, button: MouseButton) -> StripClickResult {
-    let geom = host.mux.geom();
-    if !(geom.chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar) {
+    if !sidebar_mode(host) {
         return StripClickResult::NotHandled;
     }
     let Some((x, y)) = host.pointer_px else {
@@ -10745,11 +10977,20 @@ fn handle_sidebar_click(host: &mut HostState, button: MouseButton) -> StripClick
     };
     // Resolve through the pure decision first so the borrow ends before
     // the mutations below.
-    let decision = match &row {
-        Some((clicked, name, current, saved)) => {
-            sidebar_click_decision(hit, Some((clicked, name.as_str(), *current)), *saved)
+    let decision = if host.spacing.sidebar_collapsed {
+        match &row {
+            Some((clicked, name, current, _)) => {
+                icon_click_decision(hit, Some((clicked, name.as_str(), *current)))
+            }
+            None => icon_click_decision(hit, None),
         }
-        None => sidebar_click_decision(hit, None, false),
+    } else {
+        match &row {
+            Some((clicked, name, current, saved)) => {
+                sidebar_click_decision(hit, Some((clicked, name.as_str(), *current)), *saved)
+            }
+            None => sidebar_click_decision(hit, None, false),
+        }
     };
     match decision {
         SidebarClick::ToggleCollapse(name) => {
@@ -10762,6 +11003,14 @@ fn handle_sidebar_click(host: &mut HostState, button: MouseButton) -> StripClick
         SidebarClick::SelectTab(tab) => {
             let _ = host.mux.select_tab(tab);
             host.dirty = true;
+            StripClickResult::Handled
+        }
+        SidebarClick::FocusSession { tab, pane } => {
+            focus_sidebar_session(host, tab, pane);
+            StripClickResult::Handled
+        }
+        SidebarClick::ToggleStrip => {
+            sidebar_resize::toggle(host);
             StripClickResult::Handled
         }
         SidebarClick::OpenSpace(name) => {
@@ -10786,11 +11035,29 @@ fn handle_sidebar_click(host: &mut HostState, button: MouseButton) -> StripClick
     }
 }
 
+fn sidebar_scroll_max(host: &HostState, column_h: usize) -> usize {
+    let chrome = host.mux.geom().chrome;
+    if host.spacing.sidebar_collapsed {
+        sidebar_width::icon_strip(
+            0,
+            sidebar_width::COLLAPSED_DESIGN_PX as i32,
+            column_h as i32,
+            chrome.px(graphite::TABS_BAR_H.0) as i32,
+            chrome.px(36.0) as i32,
+            chrome.px(32.0) as i32,
+            host.sidebar_row_count,
+            usize::MAX,
+        )
+        .first
+    } else {
+        graphite::sidebar_max_scroll(chrome, column_h, host.sidebar_row_count)
+    }
+}
+
 /// Wheel over the sidebar list scrolls the tree and does not reach the
 /// pane underneath.
 fn scroll_graphite_sidebar(host: &mut HostState, delta: &MouseScrollDelta) -> bool {
-    let geom = host.mux.geom();
-    if !(geom.chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar) {
+    if !sidebar_mode(host) {
         return false;
     }
     let Some((x, y)) = host.pointer_px else {
@@ -10817,8 +11084,7 @@ fn scroll_graphite_sidebar(host: &mut HostState, delta: &MouseScrollDelta) -> bo
     };
     if lines != 0 {
         let size = host.window.inner_size();
-        let max =
-            graphite::sidebar_max_scroll(geom.chrome, size.height as usize, host.sidebar_row_count);
+        let max = sidebar_scroll_max(host, size.height as usize);
         let next = space_rail::scroll_by(host.sidebar_scroll, lines, max);
         if next != host.sidebar_scroll {
             host.sidebar_scroll = next;
@@ -10841,11 +11107,7 @@ fn drag_graphite_sidebar_thumb(host: &mut HostState) -> bool {
         return true;
     };
     let size = host.window.inner_size();
-    let max = graphite::sidebar_max_scroll(
-        host.mux.geom().chrome,
-        size.height as usize,
-        host.sidebar_row_count,
-    );
+    let max = sidebar_scroll_max(host, size.height as usize);
     let travel = host.sidebar_list.h.saturating_sub(thumb.h);
     let next = space_rail::thumb_scroll_from_drag(origin_y, y, origin_scroll, max, travel);
     if next != host.sidebar_scroll {
@@ -11651,11 +11913,18 @@ fn paint_graphite_sidebar(
     }
     let mail = host.mux.tab_pane_mail();
     let tree = graphite_sidebar_tree(host, &tabs, &mail);
-    let visible = sidebar::visible_rows(&tree);
-    let column = graphite::Rect::new(0, 0, geom.sidebar_px, height);
+    let collapsed = host.spacing.sidebar_collapsed;
+    let visible = if collapsed {
+        sidebar::icon_rows(&tree)
+    } else {
+        sidebar::visible_rows(&tree)
+    };
+    let (origin, column_w) = sidebar_column_px(geom, stride);
+    let column = graphite::Rect::new(origin, 0, column_w, height);
+    let dock_right = origin > 0;
     let mut layout =
         graphite::sidebar_layout(geom.chrome, column, visible.len(), host.sidebar_scroll);
-    if host.space_rail.keyboard {
+    if !collapsed && host.space_rail.keyboard {
         if let Some(focus) = host.space_rail.focus {
             if let Some(row) = visible
                 .iter()
@@ -11686,6 +11955,10 @@ fn paint_graphite_sidebar(
         }
         _ => (None, None, None),
     };
+    let toggle_hovered = matches!(
+        host.hover_target,
+        Some(HoverTarget::Sidebar(graphite::SidebarHit::Toggle))
+    );
     // Owned labels outlive the rows that borrow them.
     let mut labels: Vec<String> = Vec::new();
     let mut dots: Vec<Option<graphite::Dot>> = Vec::new();
@@ -11739,65 +12012,181 @@ fn paint_graphite_sidebar(
             }
         }
     }
-    let painted_rows = graphite::sidebar_rows_in_view(&visible, &layout);
-    let rows: Vec<graphite::SidebarRow> = painted_rows
-        .iter()
-        .enumerate()
-        .map(|(slot_index, (row_index, row, slot))| {
-            let space = &tree.spaces[row.space];
-            graphite::SidebarRow {
-                slot: *slot,
-                depth: match row.kind {
-                    sidebar::RowKind::Space => 0,
-                    sidebar::RowKind::Tab => 1,
-                    sidebar::RowKind::Pane => 2,
-                },
-                chevron: match row.kind {
-                    sidebar::RowKind::Space => Some(space.collapsed),
-                    _ => None,
-                },
-                dot: dots[*row_index],
-                label: labels[*row_index].as_str(),
-                mail: mails[*row_index],
-                needs_you: match row.kind {
-                    sidebar::RowKind::Space => space.attention,
-                    _ => 0,
-                },
-                selected: selected_tabs[*row_index]
-                    || row.kind == sidebar::RowKind::Space
-                        && host.space_rail.keyboard
-                        && host.space_rail.focus == Some(row.space),
-                hovered: hover_row == Some(slot_index),
-            }
-        })
-        .collect();
     let tok = graphite::bar_tokens(&host.theme, host.bar_color);
-    graphite::paint_sidebar(
-        buffer,
-        stride,
-        &graphite::SidebarPaint {
-            chrome: geom.chrome,
-            tok: &tok,
-            accent: graphite::accent(&tok, focus_border_rgb(host.focus_border)),
-            layout: &layout,
-            title: "Spaces",
-            rows: &rows,
-            actions: [
-                graphite::SIDEBAR_ACTIONS[0],
-                graphite::SIDEBAR_ACTIONS[1],
-                graphite::SIDEBAR_ACTIONS[2],
-            ],
-            commands_hint: &graphite_chord_label(&host.keymap, keybind::Action::CommandPalette),
-            action_hovered: hover_action,
-            alpha: graphite_bar_alpha(host),
-        },
-    );
-    let span = graphite::Rect::new(
-        geom.sidebar_px,
-        0,
-        stride.saturating_sub(geom.sidebar_px),
-        geom.top_chrome_px,
-    );
+    let accent = graphite::accent(&tok, focus_border_rgb(host.focus_border));
+    let px_box = |slot: sidebar_width::PxBox| {
+        graphite::Rect::new(
+            slot.x.max(0) as usize,
+            slot.y.max(0) as usize,
+            slot.w.max(0) as usize,
+            slot.h.max(0) as usize,
+        )
+    };
+    if collapsed {
+        let strip = sidebar_width::icon_strip(
+            column.x as i32,
+            column.w as i32,
+            column.h as i32,
+            geom.chrome.px(graphite::TABS_BAR_H.0) as i32,
+            geom.chrome.px(36.0) as i32,
+            geom.chrome.px(32.0) as i32,
+            visible.len(),
+            host.sidebar_scroll,
+        );
+        let icons: Vec<graphite::IconMark> = strip
+            .icons
+            .iter()
+            .enumerate()
+            .filter_map(|(slot_index, (absolute, slot))| {
+                let row = visible.get(*absolute)?;
+                let space = tree.spaces.get(row.space)?;
+                let label = labels.get(*absolute).map(String::as_str).unwrap_or("");
+                let selected = match row.kind {
+                    sidebar::RowKind::Space => space.current,
+                    sidebar::RowKind::Tab => selected_tabs.get(*absolute).copied().unwrap_or(false),
+                    sidebar::RowKind::Pane => {
+                        space.current
+                            && row
+                                .tab
+                                .and_then(|tab| space.tabs.get(tab))
+                                .and_then(|tab| row.pane.and_then(|pane| tab.panes.get(pane)))
+                                .is_some_and(|pane| pane.focused)
+                    }
+                };
+                let dot = match row.kind {
+                    sidebar::RowKind::Space => {
+                        (space.attention > 0).then_some(graphite::Dot::Attention)
+                    }
+                    sidebar::RowKind::Tab => dots.get(*absolute).copied().flatten(),
+                    sidebar::RowKind::Pane => {
+                        if mails.get(*absolute).copied().unwrap_or(0) > 0 {
+                            Some(graphite::Dot::Attention)
+                        } else {
+                            Some(graphite::Dot::Idle)
+                        }
+                    }
+                };
+                Some(graphite::IconMark {
+                    slot: px_box(*slot),
+                    seat: sidebar_width::seat_for(row.kind == sidebar::RowKind::Space, label),
+                    dot,
+                    selected,
+                    hovered: hover_row == Some(slot_index),
+                })
+            })
+            .collect();
+        let actions = strip.actions.map(px_box);
+        let toggle = px_box(strip.toggle);
+        graphite::paint_icon_strip(
+            buffer,
+            stride,
+            &graphite::IconStripPaint {
+                chrome: geom.chrome,
+                tok: &tok,
+                accent,
+                column,
+                toggle,
+                icons: &icons,
+                actions: &actions,
+                action_hovered: hover_action,
+                toggle_hovered,
+                grip_hot: host.sidebar_grip_hot || host.sidebar_drag.is_some(),
+                dock_right,
+                alpha: graphite_bar_alpha(host),
+            },
+        );
+        host.sidebar_rows = strip
+            .icons
+            .iter()
+            .filter_map(|(absolute, slot)| {
+                visible
+                    .get(*absolute)
+                    .map(|row| (px_box(*slot), row.clone()))
+            })
+            .collect();
+        host.sidebar_actions = actions;
+        host.sidebar_list = px_box(strip.list);
+        host.sidebar_thumb = None;
+        host.sidebar_toggle = toggle;
+        host.sidebar_icons = strip;
+    } else {
+        let painted_rows = graphite::sidebar_rows_in_view(&visible, &layout);
+        let rows: Vec<graphite::SidebarRow> = painted_rows
+            .iter()
+            .enumerate()
+            .map(|(slot_index, (row_index, row, slot))| {
+                let space = &tree.spaces[row.space];
+                graphite::SidebarRow {
+                    slot: *slot,
+                    depth: match row.kind {
+                        sidebar::RowKind::Space => 0,
+                        sidebar::RowKind::Tab => 1,
+                        sidebar::RowKind::Pane => 2,
+                    },
+                    chevron: match row.kind {
+                        sidebar::RowKind::Space => Some(space.collapsed),
+                        _ => None,
+                    },
+                    dot: dots[*row_index],
+                    label: labels[*row_index].as_str(),
+                    mail: mails[*row_index],
+                    needs_you: match row.kind {
+                        sidebar::RowKind::Space => space.attention,
+                        _ => 0,
+                    },
+                    selected: selected_tabs[*row_index]
+                        || row.kind == sidebar::RowKind::Space
+                            && host.space_rail.keyboard
+                            && host.space_rail.focus == Some(row.space),
+                    hovered: hover_row == Some(slot_index),
+                }
+            })
+            .collect();
+        let toggle = graphite::sidebar_toggle_rect(geom.chrome, column, layout.head, dock_right);
+        graphite::paint_sidebar(
+            buffer,
+            stride,
+            &graphite::SidebarPaint {
+                chrome: geom.chrome,
+                tok: &tok,
+                accent,
+                layout: &layout,
+                title: "Spaces",
+                rows: &rows,
+                actions: [
+                    graphite::SIDEBAR_ACTIONS[0],
+                    graphite::SIDEBAR_ACTIONS[1],
+                    graphite::SIDEBAR_ACTIONS[2],
+                ],
+                commands_hint: &graphite_chord_label(&host.keymap, keybind::Action::CommandPalette),
+                action_hovered: hover_action,
+                alpha: graphite_bar_alpha(host),
+                grip_hot: host.sidebar_grip_hot || host.sidebar_drag.is_some(),
+                dock_right,
+                toggle,
+                toggle_hovered,
+            },
+        );
+        host.sidebar_rows = painted_rows
+            .iter()
+            .map(|(_, row, slot)| (*slot, (*row).clone()))
+            .collect();
+        host.sidebar_actions = layout.actions;
+        host.sidebar_list = layout.list;
+        host.sidebar_thumb = layout.thumb;
+        host.sidebar_toggle = toggle;
+        host.sidebar_icons = sidebar_width::icon_strip(0, 0, 0, 0, 1, 0, 0, 0);
+    }
+    let span = if dock_right {
+        graphite::Rect::new(0, 0, origin, geom.top_chrome_px)
+    } else {
+        graphite::Rect::new(
+            column.right(),
+            0,
+            stride.saturating_sub(column.right()),
+            geom.top_chrome_px,
+        )
+    };
     let header = graphite::sidebar_header_layout(geom.chrome, span);
     let crumb = host
         .space_rail
@@ -11831,23 +12220,25 @@ fn paint_graphite_sidebar(
             alpha: graphite_bar_alpha(host),
         },
     );
-    // Hit state for the pointer handlers: painted rows with their tree
-    // indices, buttons, viewport, and the row count behind the scroll.
-    host.sidebar_rows = painted_rows
-        .iter()
-        .map(|(_, row, slot)| (*slot, (*row).clone()))
-        .collect();
-    host.sidebar_actions = layout.actions;
+    // Each branch stored its own rows, actions, list, and thumb. The header
+    // buttons and the tree are shared.
     host.sidebar_arrange = header.buttons;
-    host.sidebar_list = layout.list;
-    host.sidebar_thumb = layout.thumb;
     host.sidebar_row_count = visible.len();
     host.sidebar_tree = tree;
 }
 
 /// Hit-test the stored sidebar paint, if this frame painted one.
 fn sidebar_hit_at(host: &HostState, px: usize, py: usize) -> Option<graphite::SidebarHit> {
-    if host.sidebar_row_count == 0 {
+    if host.spacing.sidebar_collapsed {
+        if let Some(target) = sidebar_width::icon_hit(&host.sidebar_icons, px as i32, py as i32) {
+            return Some(match target {
+                sidebar_width::IconTarget::Toggle => graphite::SidebarHit::Toggle,
+                sidebar_width::IconTarget::Row(index) => graphite::SidebarHit::Row(index),
+                sidebar_width::IconTarget::Action(index) => graphite::SidebarHit::Action(index),
+            });
+        }
+    }
+    if host.sidebar_row_count == 0 && !host.spacing.sidebar_collapsed {
         return None;
     }
     let rows: Vec<graphite::Rect> = host.sidebar_rows.iter().map(|(slot, _)| *slot).collect();
@@ -11856,6 +12247,7 @@ fn sidebar_hit_at(host: &HostState, px: usize, py: usize) -> Option<graphite::Si
         &host.sidebar_actions,
         &host.sidebar_arrange,
         host.sidebar_thumb,
+        host.sidebar_toggle,
         px,
         py,
     )
@@ -13879,15 +14271,34 @@ fn host_geom(
     let window_pad = graphite_default(window_set, spacing.window_padding_px, graphite::WINDOW_PAD);
     let gap = graphite_default(gap_set, spacing.pane_gap_px, graphite::PANE_GAP);
     let inner_pad = graphite_default(pad_set, spacing.pane_padding_px, graphite::PANE_PAD);
-    // The sidebar replaces both bars (issue #113): graphite only, and the
-    // default bars path below is byte-for-byte what it was.
-    let sidebar = chrome.graphite && spacing.layout == config::LayoutMode::Sidebar;
-    let sidebar_px = if sidebar {
-        graphite::SIDEBAR_W.px(chrome)
+    // The sidebar replaces both bars (issue #113). Classic honors it too.
+    // A right-docked sidebar reuses the right-rail column so `chrome_right`
+    // reserves the pixels without a new geometry field.
+    let sidebar = spacing.layout == config::LayoutMode::Sidebar;
+    let dock_right =
+        sidebar && sidebar_width::dock_for_rail(spacing.space_rail) == sidebar_width::Dock::Right;
+    let sidebar_model = sidebar_width::Chrome {
+        expanded_px: spacing.sidebar_width_px as f32,
+        collapsed: spacing.sidebar_collapsed,
+        dock: if dock_right {
+            sidebar_width::Dock::Right
+        } else {
+            sidebar_width::Dock::Left
+        },
+    };
+    let sidebar_width = if sidebar {
+        sidebar_model.physical_px(chrome.scale_milli, spacing.sidebar_clamp_window_px as f32)
     } else {
         0
     };
-    let rail_px = if sidebar || spacing.space_rail == space_rail::RailSide::Off {
+    let sidebar_px = if sidebar && !dock_right {
+        sidebar_width
+    } else {
+        0
+    };
+    let rail_px = if dock_right {
+        sidebar_width
+    } else if sidebar || spacing.space_rail == space_rail::RailSide::Off {
         0
     } else if chrome.graphite && spacing.space_rail.horizontal() {
         graphite::RAIL_H.px(chrome)
@@ -13911,7 +14322,7 @@ fn host_geom(
         pane_gap: if multi_pane { gap } else { 0 },
         rail_gap: gap,
         inner_pad,
-        top_chrome_px: if (show_tabs || sidebar) && chrome.graphite {
+        top_chrome_px: if sidebar || (show_tabs && chrome.graphite) {
             graphite::TABS_BAR_H.px(chrome)
         } else if show_tabs {
             font.cell_h.saturating_mul(if handle_row { 2 } else { 1 })
@@ -13919,7 +14330,11 @@ fn host_geom(
             0
         },
         scrollbar_gutter_px: mux::scrollbar_gutter_for(inner_pad),
-        rail_side: spacing.space_rail,
+        rail_side: if dock_right {
+            space_rail::RailSide::Right
+        } else {
+            spacing.space_rail
+        },
         rail_px,
         rail_chip_cols: rail_chip_cap,
         sidebar_px,
@@ -14277,6 +14692,7 @@ fn mux_command_for(action: keybind::Action) -> Option<MuxCommand> {
         | Action::ThemePicker
         | Action::Transparency
         | Action::ChromeLayout
+        | Action::SidebarCollapse
         | Action::Find
         | Action::ClearScrollback
         | Action::IncreaseFontSize
@@ -16739,7 +17155,7 @@ fn action_route(action: keybind::Action) -> ActionRoute {
 
 fn apply_space_rail_focus_action(host: &mut HostState) {
     let geom = host.mux.geom();
-    let sidebar = geom.chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar;
+    let sidebar = sidebar_mode(host);
     if sidebar || geom.rail_side != space_rail::RailSide::Off {
         cancel_tab_rename(host);
         host.space_rail.focus_rail();
@@ -16792,7 +17208,10 @@ fn change_font_size(host: &mut HostState, delta: i8) {
         host.mux.active_pane_count() > 1,
         show_tab_strip(host),
         strip_handle_row(host),
-        host.spacing,
+        PaneSpacing {
+            sidebar_clamp_window_px: host.window.inner_size().width,
+            ..host.spacing
+        },
         host.space_rail.longest_name_cells(),
     );
     let (cols, rows) = size_to_cells(host.window.inner_size(), &font, geom);
@@ -16882,6 +17301,10 @@ fn dispatch_action(
     }
     if action == A::ChromeLayout {
         space_panel::layout(host);
+        return Dispatch::Handled;
+    }
+    if action == A::SidebarCollapse {
+        sidebar_resize::toggle(host);
         return Dispatch::Handled;
     }
     match action_route(action) {
@@ -17377,6 +17800,9 @@ impl ApplicationHandler<UserAction> for App {
                     }
                 }
                 WindowEvent::MouseInput { state, button, .. } => {
+                    if sidebar_resize::button(host, *state, *button) {
+                        return;
+                    }
                     if rail_resize::button(host, *state, *button) {
                         return;
                     }
@@ -17810,6 +18236,9 @@ impl ApplicationHandler<UserAction> for App {
                 host.window.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
+                if sidebar_resize::motion(host, position.x, position.y) {
+                    return;
+                }
                 if rail_resize::motion(host, position.x, position.y) {
                     return;
                 }
@@ -18044,6 +18473,9 @@ impl ApplicationHandler<UserAction> for App {
                     host.rail_thumb_drag = None;
                     host.sidebar_thumb_drag = None;
                 }
+                if sidebar_resize::button(host, state, button) {
+                    return;
+                }
                 if rail_resize::button(host, state, button) {
                     return;
                 }
@@ -18086,9 +18518,7 @@ impl ApplicationHandler<UserAction> for App {
                 {
                     // Sidebar mode routes presses through the tree instead
                     // of the (unpainted, possibly stale) tab strip.
-                    let geom = host.mux.geom();
-                    let sidebar =
-                        geom.chrome.graphite && host.spacing.layout == config::LayoutMode::Sidebar;
+                    let sidebar = sidebar_mode(host);
                     let click = if sidebar {
                         handle_sidebar_click(host, button)
                     } else {
@@ -18789,6 +19219,7 @@ mod tests {
             (Action::ThemePicker, ActionRoute::Noop),
             (Action::Transparency, ActionRoute::Noop),
             (Action::ChromeLayout, ActionRoute::Noop),
+            (Action::SidebarCollapse, ActionRoute::Noop),
             (Action::OpenSpace, ActionRoute::Noop),
             (Action::DeleteSpace, ActionRoute::Noop),
             (Action::MovePaneToSpace, ActionRoute::Noop),
@@ -23447,6 +23878,9 @@ session mail (id 15)
             layout: config::LayoutMode::Bars,
             ui_scale_milli: 1000,
             explicit_spacing: [false; 3],
+            sidebar_width_px: 256,
+            sidebar_collapsed: false,
+            sidebar_clamp_window_px: 0,
         };
         let base = host_geom(&font, true, true, true, classic, 10);
         let retina = host_geom(&font, true, true, true, classic.at_scale(2.0), 10);
@@ -23512,6 +23946,9 @@ session mail (id 15)
             layout: config::LayoutMode::Bars,
             ui_scale_milli: 1000,
             explicit_spacing: [false; 3],
+            sidebar_width_px: 256,
+            sidebar_collapsed: false,
+            sidebar_clamp_window_px: 0,
         };
         let geom = host_geom(&font, true, true, true, bars, 10);
         assert_eq!(geom.sidebar_px, 0);
@@ -23533,8 +23970,50 @@ session mail (id 15)
             ..sidebar
         };
         let geom = host_geom(&font, true, true, true, classic, 10);
-        assert_eq!(geom.sidebar_px, 0, "classic ignores the sidebar");
-        assert!(geom.rail_px > 0);
+        assert_eq!(geom.sidebar_px, 256, "classic honors the sidebar");
+        assert_eq!(geom.rail_px, 0, "classic sidebar replaces the spaces rail");
+        assert_eq!(
+            geom.top_chrome_px, 44,
+            "classic sidebar keeps the header band"
+        );
+        let wide = PaneSpacing {
+            sidebar_width_px: 320,
+            ..sidebar
+        };
+        assert_eq!(
+            host_geom(&font, true, true, true, wide, 10).sidebar_px,
+            320,
+            "the saved width is the column"
+        );
+        let collapsed = PaneSpacing {
+            sidebar_collapsed: true,
+            ..sidebar
+        };
+        assert_eq!(
+            host_geom(&font, true, true, true, collapsed, 10).sidebar_px,
+            52,
+            "the icon strip is a fixed 52 px"
+        );
+        let clamped = PaneSpacing {
+            sidebar_width_px: 400,
+            sidebar_clamp_window_px: 600,
+            ..sidebar
+        };
+        assert_eq!(
+            host_geom(&font, true, true, true, clamped, 10).sidebar_px,
+            280,
+            "panes keep 320 px; the stored width stays 400"
+        );
+        let right = PaneSpacing {
+            space_rail: space_rail::RailSide::Right,
+            sidebar_width_px: 280,
+            ..sidebar
+        };
+        let geom = host_geom(&font, true, true, true, right, 10);
+        assert_eq!(geom.sidebar_px, 0, "a right dock uses the rail column");
+        assert_eq!(geom.rail_px, 280);
+        assert_eq!(geom.rail_side, space_rail::RailSide::Right);
+        assert_eq!(geom.chrome_right(), 280);
     }
 
     /// Leftover pixels the cell grid cannot fill are split between both
@@ -23557,6 +24036,9 @@ session mail (id 15)
             layout: config::LayoutMode::Bars,
             ui_scale_milli: 1000,
             explicit_spacing: [false; 3],
+            sidebar_width_px: 256,
+            sidebar_collapsed: false,
+            sidebar_clamp_window_px: 0,
         };
         let mut geom = host_geom(&font, false, false, false, spacing, 0);
         // Deliberately awkward: not a whole number of cells in either axis.
@@ -23620,6 +24102,9 @@ session mail (id 15)
             layout: config::LayoutMode::Bars,
             ui_scale_milli: 1000,
             explicit_spacing: [false; 3],
+            sidebar_width_px: 256,
+            sidebar_collapsed: false,
+            sidebar_clamp_window_px: 0,
         };
         let auto = host_geom(
             &font,
@@ -23658,6 +24143,9 @@ session mail (id 15)
             layout: config::LayoutMode::Bars,
             ui_scale_milli: 1000,
             explicit_spacing: [false; 3],
+            sidebar_width_px: 256,
+            sidebar_collapsed: false,
+            sidebar_clamp_window_px: 0,
         };
         let off = host_geom(&font, false, false, false, base, 0);
         assert_eq!(off.rail_px, 0);
@@ -23747,6 +24235,9 @@ session mail (id 15)
             layout: config::LayoutMode::Bars,
             ui_scale_milli: 1000,
             explicit_spacing: [false; 3],
+            sidebar_width_px: 256,
+            sidebar_collapsed: false,
+            sidebar_clamp_window_px: 0,
         };
         let classic_geom = host_geom(&font, false, true, false, classic, 0);
         assert_eq!(classic_geom.rail_px, font.cell_w * 18);
@@ -23837,6 +24328,9 @@ session mail (id 15)
             layout: config::LayoutMode::Bars,
             ui_scale_milli: 1000,
             explicit_spacing: [false; 3],
+            sidebar_width_px: 256,
+            sidebar_collapsed: false,
+            sidebar_clamp_window_px: 0,
         };
         let geom = host_geom(&font, false, false, false, spacing, 0);
         assert_eq!(geom.scrollbar_gutter_px, mux::SCROLLBAR_GUTTER_PX);
@@ -24077,6 +24571,70 @@ session mail (id 15)
         );
         assert_eq!(
             sidebar_click_decision(SidebarHit::Action(3), None, false),
+            SidebarClick::Ignore
+        );
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::Toggle, None, false),
+            SidebarClick::ToggleStrip
+        );
+    }
+
+    #[test]
+    fn icon_click_decision_opens_spaces_and_focuses_sessions() {
+        use graphite::SidebarHit;
+        let row = |kind, tab, pane| sidebar::TreeRow {
+            depth: 1,
+            kind,
+            space: 0,
+            tab,
+            pane,
+        };
+        let current_space = row(sidebar::RowKind::Space, None, None);
+        assert_eq!(
+            icon_click_decision(SidebarHit::Row(0), Some((&current_space, "lab", true))),
+            SidebarClick::Ignore,
+            "the open space is already showing"
+        );
+        assert_eq!(
+            icon_click_decision(SidebarHit::Row(0), Some((&current_space, "mail", false))),
+            SidebarClick::OpenSpace("mail".to_string())
+        );
+        let tab = row(sidebar::RowKind::Tab, Some(2), None);
+        assert_eq!(
+            icon_click_decision(SidebarHit::Row(1), Some((&tab, "lab", true))),
+            SidebarClick::FocusSession { tab: 2, pane: None }
+        );
+        let pane = row(sidebar::RowKind::Pane, Some(1), Some(3));
+        assert_eq!(
+            icon_click_decision(SidebarHit::Row(2), Some((&pane, "lab", true))),
+            SidebarClick::FocusSession {
+                tab: 1,
+                pane: Some(3)
+            }
+        );
+        assert_eq!(
+            icon_click_decision(SidebarHit::Row(2), Some((&pane, "mail", false))),
+            SidebarClick::OpenSpace("mail".to_string()),
+            "a session on another space opens that space"
+        );
+        assert_eq!(
+            icon_click_decision(SidebarHit::Toggle, None),
+            SidebarClick::ToggleStrip
+        );
+        assert_eq!(
+            icon_click_decision(SidebarHit::Action(0), None),
+            SidebarClick::Run(keybind::Action::NewTab)
+        );
+        assert_eq!(
+            icon_click_decision(SidebarHit::Action(1), None),
+            SidebarClick::BeginNewSpace
+        );
+        assert_eq!(
+            icon_click_decision(SidebarHit::Action(2), None),
+            SidebarClick::Run(keybind::Action::CommandPalette)
+        );
+        assert_eq!(
+            icon_click_decision(SidebarHit::Action(9), None),
             SidebarClick::Ignore
         );
     }

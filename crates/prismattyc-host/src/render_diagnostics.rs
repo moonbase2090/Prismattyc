@@ -245,8 +245,18 @@ impl App {
                         "name": host.space_rail.names.get(index), "x":x,"y":y,"width":w,"height":h
                     }))
                 })).collect();
+            let sidebar_spaces: Vec<_> = host.sidebar_rows.iter().filter_map(|(slot, row)| {
+                if row.kind != crate::sidebar::RowKind::Space {
+                    return None;
+                }
+                let name = &host.sidebar_tree.spaces.get(row.space)?.name;
+                Some(serde_json::json!({
+                    "name": name, "x": slot.x, "y": slot.y,
+                    "width": slot.w, "height": slot.h
+                }))
+            }).collect();
             let frame = host.render_frame;
-            serde_json::json!({
+            let mut status = serde_json::json!({
                 "window_id": format!("{id:?}"),
                 "focused": host.window_focused,
                 "occluded": host.window_occluded,
@@ -296,7 +306,14 @@ impl App {
                     "cells_painted": frame.cells_painted,
                     "rows_scrolled_as_blit": frame.rows_scrolled_as_blit,
                 },
-            })
+            });
+            if let Some(status) = status.as_object_mut() {
+                status.insert(
+                    "sidebar_space_rows".into(),
+                    serde_json::Value::Array(sidebar_spaces),
+                );
+            }
+            status
         }).collect();
         let status = serde_json::json!({
             "schema_version": 1,

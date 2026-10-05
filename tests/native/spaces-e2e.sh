@@ -13,6 +13,7 @@ CACHE="${SOCK%.sock}.attach-tabs.json"
 SPACES="${XDG_DATA_HOME:-$HOME/.local/share}/prismattyc/spaces"
 HOST_LOG="${TMPDIR:-/tmp}/pt217-host.log"
 PARTIAL_CONFIG="${TMPDIR:-/tmp}/pt217-host-config-$$.toml"
+REORDER_CONFIG="${TMPDIR:-/tmp}/pt140-reorder-config-$$.toml"
 TUI_SCRIPT="${TMPDIR:-/tmp}/pt244-scroll-tui-$$.py"
 PT298_LOG="${TMPDIR:-/tmp}/pt298-four-pane-$$.log"
 PT298_CONFIG="${TMPDIR:-/tmp}/pt298-four-pane-$$.toml"
@@ -23,6 +24,9 @@ PT298_AFTER="${TMPDIR:-/tmp}/pt298-four-pane-$$-after.png"
 # frames can use partial raster. Keep an environment override for branch tests.
 PT287_ALT_TUI_SCROLL="${PT287_ALT_TUI_SCROLL:-1}"
 WIGGLE="${WIGGLE:-0}"
+ACTIVE_CONFIG=""
+PRESENT_DUMP=""
+SPACE_REORDER_PROOF_DIR="${SPACE_REORDER_PROOF_DIR:-$HOME/work/space-reorder-proof}"
 PASSES=0
 FAILS=0
 
@@ -177,7 +181,9 @@ launch_host() {
   mkdir -p "$HOME/work"
   ( cd "$HOME/work"
     env -u WAYLAND_DISPLAY COLORTERM=truecolor WINIT_UNIX_BACKEND=x11 DISPLAY="$DISPLAY" \
-      PRISMATTYC_CONFIG="$PARTIAL_CONFIG" PRISMATTYC_BELL_TOASTER=0 prismattyc-host >"$HOST_LOG" 2>&1 & echo $! >/tmp/pt217-host.pid )
+      PRISMATTYC_CONFIG="${ACTIVE_CONFIG:-$PARTIAL_CONFIG}" \
+      PRISMATTYC_DUMP_PRESENT="$PRESENT_DUMP" PRISMATTYC_BELL_TOASTER=0 \
+      prismattyc-host >"$HOST_LOG" 2>&1 & echo $! >/tmp/pt217-host.pid )
   local i
   for i in $(seq 1 50); do
     [[ -n "$(find_host)" ]] && break
@@ -731,12 +737,186 @@ click_rail_plus() {
   click_rail_index plus
 }
 
+space_order_names() {
+  pmux space ls | awk '{ print $1 }'
+}
+
+expect_space_order() {
+  local first="$1" second="$2" actual
+  actual="$(space_order_names | awk 'NR <= 2 { printf "%s%s", $1, NR == 1 ? " " : "" }')"
+  if [[ "$actual" == "$first $second" ]]; then
+    pass "pmux space ls order=$actual"
+  else
+    fail "pmux space ls order wanted '$first $second', got '$actual'"
+  fi
+}
+
+drag_space_to_after() {
+  local moving="$1" target="$2" axis="$3" proof="$4"
+  local wid status_tmp coordinates start_x start_y target_x target_y prior_seq
+  wid="$(find_host)"
+  [[ -n "$wid" ]] || { fail "no host window for Space drag"; return 1; }
+  status_tmp="$(mktemp)"
+  pmux render-status --json >"$status_tmp"
+  coordinates="$(python3 - "$status_tmp" "$moving" "$target" "$axis" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+moving, target, axis = sys.argv[2:]
+window = data["windows"][0]
+if axis == "sidebar":
+    chips = window["sidebar_space_rows"]
+else:
+    chips = window["space_chips"]
+by_name = {chip["name"]: chip for chip in chips if chip["name"] is not None}
+a, b = by_name[moving], by_name[target]
+if axis == "horizontal":
+    print(a["x"] + max(2, a["width"] // 3), a["y"] + max(1, a["height"] // 2),
+          b["x"] + b["width"] - 2, b["y"] + max(1, b["height"] // 2))
+elif axis == "sidebar":
+    print(a["x"] + max(2, a["width"] // 3), a["y"] + max(1, a["height"] // 2),
+          b["x"] + b["width"] // 2, b["y"] + (b["height"] * 3) // 4)
+else:
+    print(a["x"] + max(1, a["width"] // 2), a["y"] + max(2, a["height"] // 3),
+          b["x"] + max(1, b["width"] // 2), b["y"] + b["height"] - 2)
+PY
+)" || { rm -f "$status_tmp"; fail "cannot locate Space drag chips"; return 1; }
+  rm -f "$status_tmp"
+  read -r start_x start_y target_x target_y <<<"$coordinates"
+  prior_seq="$(python3 - "${PRESENT_DUMP%.png}.json" <<'PY'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("seq", 0))
+except (FileNotFoundError, json.JSONDecodeError):
+    print(0)
+PY
+)"
+  activate
+  xdotool mousemove --sync --window "$wid" "$start_x" "$start_y"
+  xdotool mousedown 1
+  xdotool mousemove --sync --window "$wid" "$target_x" "$target_y"
+  sleep 0.35
+  if [[ -n "$PRESENT_DUMP" ]]; then
+    local saved_seq=0
+    for _ in $(seq 1 30); do
+      saved_seq="$(python3 - "${PRESENT_DUMP%.png}.json" <<'PY'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("seq", 0))
+except (FileNotFoundError, json.JSONDecodeError):
+    print(0)
+PY
+)"
+      (( saved_seq > prior_seq )) && break
+      sleep 0.1
+    done
+    cp "$PRESENT_DUMP" "$proof"
+    pass "captured $axis rail drag screenshot: $proof"
+  fi
+  xdotool mouseup 1
+  sleep 0.2
+}
+
+run_space_reorder_e2e() {
+  local names first second
+  mapfile -t names < <(space_order_names)
+  if (( ${#names[@]} < 2 )); then
+    fail "Space reorder needs at least two saved spaces"
+    return 0
+  fi
+  first="${names[0]}"
+  second="${names[1]}"
+  mkdir -p "$SPACE_REORDER_PROOF_DIR"
+  rm -f "$SPACE_REORDER_PROOF_DIR/horizontal.png" "$SPACE_REORDER_PROOF_DIR/vertical.png" \
+    "$SPACE_REORDER_PROOF_DIR/sidebar.png"
+  cat >"$REORDER_CONFIG" <<'EOF'
+chrome_style = "graphite"
+space_rail = "bottom"
+panes = 1
+bell_toaster = false
+EOF
+  ACTIVE_CONFIG="$REORDER_CONFIG"
+  PRESENT_DUMP=""
+  stop_host
+  launch_host
+  drag_space_to_after "$first" "$second" horizontal ""
+  expect_space_order "$first" "$second"
+
+  cat >"$REORDER_CONFIG" <<'EOF'
+chrome_style = "graphite"
+space_rail = "bottom"
+space_reorder = true
+panes = 1
+bell_toaster = false
+EOF
+  ACTIVE_CONFIG="$REORDER_CONFIG"
+  PRESENT_DUMP="$HOME/work/issue-140-live.png"
+  stop_host
+  launch_host
+  drag_space_to_after "$first" "$second" horizontal "$SPACE_REORDER_PROOF_DIR/horizontal.png"
+  expect_space_order "$second" "$first"
+
+  cat >"$REORDER_CONFIG" <<'EOF'
+chrome_style = "graphite"
+space_rail = "right"
+space_reorder = true
+panes = 1
+bell_toaster = false
+EOF
+  stop_host
+  launch_host
+  drag_space_to_after "$second" "$first" vertical "$SPACE_REORDER_PROOF_DIR/vertical.png"
+  expect_space_order "$first" "$second"
+
+  cat >"$REORDER_CONFIG" <<'EOF'
+chrome_style = "graphite"
+layout = "sidebar"
+space_rail = "bottom"
+space_reorder = true
+panes = 1
+bell_toaster = false
+EOF
+  stop_host
+  launch_host
+  drag_space_to_after "$first" "$second" sidebar "$SPACE_REORDER_PROOF_DIR/sidebar.png"
+  expect_space_order "$second" "$first"
+  pass "Graphite sidebar Space drag exercised"
+
+  cat >"$REORDER_CONFIG" <<'EOF'
+chrome_style = "classic"
+space_rail = "top"
+space_reorder = true
+panes = 1
+bell_toaster = false
+EOF
+  stop_host
+  launch_host
+  drag_space_to_after "$second" "$first" horizontal ""
+  expect_space_order "$first" "$second"
+
+  cat >"$REORDER_CONFIG" <<'EOF'
+chrome_style = "classic"
+space_rail = "left"
+space_reorder = true
+panes = 1
+bell_toaster = false
+EOF
+  stop_host
+  launch_host
+  drag_space_to_after "$first" "$second" vertical ""
+  expect_space_order "$second" "$first"
+  rm -f "$PRESENT_DUMP" "${PRESENT_DUMP%.png}.json"
+  PRESENT_DUMP=""
+  ACTIVE_CONFIG=""
+  pass "all four Space rail positions, Graphite sidebar, and default-off gate exercised"
+}
+
 cleanup() {
   stop_host
   rm -f "$PARTIAL_CONFIG" "$TUI_SCRIPT" "$PT298_LOG" "$PT298_CONFIG" \
-    "$PT298_DUMP" "${PT298_DUMP%.png}.json" "$PT298_BEFORE" "$PT298_AFTER"
+    "$REORDER_CONFIG" "$PT298_DUMP" "${PT298_DUMP%.png}.json" "$PT298_BEFORE" "$PT298_AFTER"
+  rm -f "$SPACES"/.space-order "$HOME/work/issue-140-live.png" "$HOME/work/issue-140-live.json"
   rm -f "$PT298_LOG".pane-*.size
-  rm -f "$SPACES"/alpha.json "$SPACES"/beta.json "$SPACES"/probe.json "$SPACES"/fromplus.json
+  rm -f "$SPACES"/alpha.json "$SPACES"/alpha2.json "$SPACES"/beta.json "$SPACES"/probe.json "$SPACES"/fromplus.json
 }
 trap cleanup EXIT
 
@@ -755,7 +935,7 @@ if [[ "$ready" -ne 1 ]]; then
   exit 1
 fi
 mkdir -p "$SPACES" "$HOME/work"
-rm -f "$SPACES"/alpha.json "$SPACES"/beta.json "$SPACES"/probe.json "$SPACES"/fromplus.json
+rm -f "$SPACES"/alpha.json "$SPACES"/alpha2.json "$SPACES"/beta.json "$SPACES"/probe.json "$SPACES"/fromplus.json "$SPACES"/.space-order
 
 # Hermetic seats. Do not use the entrypoint's claude/kiro/work.
 ( cd "$HOME/work" && pmux new a --no-agent --no-attach -- bash --norc >/dev/null )
@@ -1148,6 +1328,9 @@ if [[ ! -f "$SPACES/fromplus.json" ]]; then
 else
   fail "fromplus.json still present"
 fi
+
+log "horizontal and vertical Space reorder"
+run_space_reorder_e2e
 
 log "move pane to next tab (when the window has tabs)"
 activate

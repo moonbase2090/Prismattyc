@@ -1315,11 +1315,11 @@ impl KeyMap {
     }
 
     /// Same as [`Self::from_config_with_macos`], plus the macOS runtime
-    /// overlay. When `mac_platform` is set and the user did not bind
+    /// overlay. When `mac_platform` is set and `[keys]` omits
     /// `focus_left` / `focus_right`, those defaults become
     /// `ctrl+alt+left` / `ctrl+alt+right` so Option+Left/Right can reach
-    /// the shell as word jumps. The generated config template stays on
-    /// [`default_chords`] (`alt+left` / `alt+right`) on every OS.
+    /// the shell as word jumps. The generated template leaves those two
+    /// keys commented; a live `focus_left = "alt+left"` still pins Option.
     pub fn from_config_with_platform(
         keys: Option<&BTreeMap<String, KeysValue>>,
         macos_shortcuts: bool,

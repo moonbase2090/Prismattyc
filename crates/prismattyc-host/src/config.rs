@@ -331,8 +331,8 @@ impl ConfigFile {
 
     pub fn loaded_keymap(&self) -> crate::keybind::KeyMap {
         // macOS moves focus_left/right to Ctrl+Option+arrows unless [keys]
-        // sets them. KeyMap::default() stays the portable alt+arrow map so
-        // the generated template matches on every OS.
+        // sets them. The generated template leaves those two keys commented
+        // so this overlay applies to a fresh config on every OS.
         crate::keybind::KeyMap::from_config_with_platform(
             self.keys.as_ref(),
             self.macos_shortcuts.unwrap_or(false),

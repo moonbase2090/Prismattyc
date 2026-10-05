@@ -369,7 +369,7 @@ pub(super) fn persist_and_restore(host: &mut HostState, closing: bool) {
                 }
                 Err(error) => {
                     host.local_views.pending.insert(owner, recipe);
-                    rail_toast(host, &format!("Could not restore blank terminals: {error}"));
+                    rail_error_toast(host, &format!("Could not restore blank terminals: {error}"));
                     return;
                 }
             }
@@ -407,7 +407,7 @@ pub(super) fn persist_and_restore(host: &mut HostState, closing: bool) {
         Ok(())
     };
     if let Err(error) = write() {
-        rail_toast(
+        rail_error_toast(
             host,
             &format!("Could not save blank terminal layout: {error}"),
         );

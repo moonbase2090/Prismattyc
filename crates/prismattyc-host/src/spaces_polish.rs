@@ -34,7 +34,7 @@ pub(super) fn undo_path(host: &HostState) -> PathBuf {
 
 pub(super) fn undo(host: &mut HostState) {
     let Some(path) = host.space_polish.undo.clone() else {
-        rail_toast(host, " Nothing to undo ");
+        rail_error_toast(host, " Nothing to undo ");
         return;
     };
     match run_pmux_space(&[
@@ -49,7 +49,7 @@ pub(super) fn undo(host: &mut HostState) {
             refresh_rail(host);
             rail_toast(host, " Membership restored; sessions kept running ");
         }
-        Err(error) => rail_toast(host, &format!(" Could not undo: {error} ")),
+        Err(error) => rail_error_toast(host, &format!(" Could not undo: {error} ")),
     }
 }
 

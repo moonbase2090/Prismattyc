@@ -147,6 +147,8 @@ bell_toaster = true
 bell_toaster_ms = 10000
 # Show 'Moving tab NAME → target' while a tab or pane is dragged. true|false.
 drag_toaster = true
+# Status toasts: all, errors only, or off; hidden ones stay in Recent messages. all|errors|off.
+toasts = "all"
 # OS notification on BEL while the window is unfocused. true|false.
 os_notify_bell = false
 # Play the attention cue on OSC 9 / 777 / 99. true|false.
@@ -292,6 +294,8 @@ terminal_switcher = "ctrl+shift+o"
 # agent_messages = []
 # update, restart components, and inspect versions.
 # update_restart = []
+# show recent status messages, including hidden toasts.
+# recent_messages = []
 # close the active tab.
 close_tab = "ctrl+shift+q"
 # rename the active tab.
@@ -1019,6 +1023,14 @@ the file applies changes on the next poll tick:
   its handle. Deleting the key restores `focused`.
 - `drag_toaster` — applies to the next drag; deleting the key restores
   `true`.
+- `toasts` — hot-reloaded, default `all`. Status toasts are the chips that
+  answer Space, move, save, and restore actions ("cairn: view applied; 3
+  reused sessions…"). `errors` shows only failures and refused requests;
+  `off` shows none. A stricter level clears a live status chip it now
+  hides. Every status message, shown or hidden, stays in Recent messages:
+  Settings → Recent messages…, or the `recent_messages` palette action.
+  Bell, pasted-image, write-fail, and drag chips keep their own keys.
+  Settings → Toasts writes this key; deleting it restores `all`.
 - `visual_bell` / `audible_bell` / `bell_toaster` / `bell_toaster_ms` /
   `os_notify_bell` — apply to the next BEL; deleting a key restores its
   default (flash, sound, and toaster on, 10s linger; OS notification off).

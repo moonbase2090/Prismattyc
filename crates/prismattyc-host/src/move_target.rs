@@ -138,7 +138,7 @@ pub(super) fn begin(host: &mut HostState) -> bool {
             true
         }
         Err(error) => {
-            rail_toast(host, &format!("Move unavailable: {error}"));
+            rail_error_toast(host, &format!("Move unavailable: {error}"));
             false
         }
     }

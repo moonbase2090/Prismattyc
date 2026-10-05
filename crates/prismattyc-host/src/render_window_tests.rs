@@ -633,6 +633,7 @@ fn verify_config_reload(app: &mut App, id: WindowId) {
 
     let mut reloaded = app.file_config.clone();
     reloaded.render_timer = Some(config::RenderTimer::Log);
+    reloaded.toasts = Some(config::ToastLevel::Errors);
     {
         let host = app.windows.get_mut(&id).unwrap();
         host.render_timer = config::RenderTimer::Off;
@@ -646,6 +647,7 @@ fn verify_config_reload(app: &mut App, id: WindowId) {
     assert_eq!(app.file_config, reloaded);
     let host = app.windows.get(&id).unwrap();
     assert_eq!(host.render_timer, config::RenderTimer::Log);
+    assert_eq!(host.toasts, config::ToastLevel::Errors);
     assert!(host.dirty);
     assert_eq!(host.pending_full_repaint, Some(FullRepaintReason::Fallback));
 }
@@ -822,6 +824,7 @@ fn verify_pixels_and_overlays(host: &mut HostState) {
         pane: host.mux.focused_id(),
         until: Instant::now() + Duration::from_secs(10),
         label: " test bell ".into(),
+        status: None,
     });
     assert_ne!(
         frame(host),
@@ -829,6 +832,32 @@ fn verify_pixels_and_overlays(host: &mut HostState) {
         "pane bell toast must reach the framebuffer"
     );
     host.bell_toasts.clear();
+    assert_eq!(frame(host), plain);
+
+    // #171: each `toasts` level gates status chips; history keeps them all.
+    let recorded = host.status_history.newest_first().count();
+    let hidden = host.status_history.hidden();
+    host.toasts = config::ToastLevel::Off;
+    rail_toast(host, " cairn: view applied ");
+    rail_error_toast(host, " move failed: gone ");
+    assert!(host.bell_toasts.is_empty(), "off hides every status toast");
+    assert_eq!(frame(host), plain, "a hidden toast paints nothing");
+    host.toasts = config::ToastLevel::Errors;
+    rail_toast(host, " Saved ");
+    assert!(host.bell_toasts.is_empty(), "errors hides info toasts");
+    rail_error_toast(host, " Save failed ");
+    assert_ne!(frame(host), plain, "errors still shows an error toast");
+    host.toasts = config::ToastLevel::All;
+    rail_toast(host, " opening space cairn ");
+    assert_eq!(host.bell_toasts[0].label, " opening space cairn ");
+    assert_eq!(
+        host.status_history.newest_first().count(),
+        recorded + 5,
+        "every message reaches Recent messages"
+    );
+    assert_eq!(host.status_history.hidden(), hidden + 3);
+    host.bell_toasts.clear();
+    host.toasts = config::ToastLevel::default();
     assert_eq!(frame(host), plain);
 }
 

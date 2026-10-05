@@ -71,6 +71,7 @@ mod space_rail;
 mod space_view;
 mod spaces_polish;
 mod splash;
+mod status_toasts;
 mod system_fonts;
 mod theme;
 mod title_row;
@@ -136,6 +137,7 @@ use raster::{
     ThemePickerRow, TitleRowStyle, DEFAULT_FOCUS_BORDER_INDEX, OPAQUE_ALPHA,
     THEME_PICKER_HINT_FAMILY, THEME_PICKER_HINT_ROOT,
 };
+use status_toasts::ToastKind;
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
@@ -1101,6 +1103,10 @@ struct HostState {
     /// Config `drag_toaster` (default true): "Moving tab NAME → …" chip
     /// while a strip drag is in progress (PT-79).
     drag_toaster: bool,
+    /// Config `toasts` (default all): which status toasts show (#171).
+    toasts: config::ToastLevel,
+    /// Every status message, shown or hidden, for Recent messages (#171).
+    status_history: status_toasts::History,
     /// Config `os_notify_bell` (default false): OS notification on BEL while
     /// the window is unfocused.
     os_notify_bell: bool,
@@ -2155,6 +2161,8 @@ struct BellToast {
     pane: PaneId,
     until: Instant,
     label: String,
+    /// Set for status toasts (#171); `None` for bell, paste, and write-fail.
+    status: Option<ToastKind>,
 }
 
 /// Writer-death chip text is not a BEL toast (PT-119).
@@ -2178,8 +2186,14 @@ fn apply_write_fail_toasts(
             Some(toast) => {
                 toast.label = label;
                 toast.until = until;
+                toast.status = None;
             }
-            None => bell_toasts.push(BellToast { pane, until, label }),
+            None => bell_toasts.push(BellToast {
+                pane,
+                until,
+                label,
+                status: None,
+            }),
         }
     }
     true
@@ -2189,6 +2203,25 @@ fn apply_write_fail_toasts(
 fn settle_bell_toasts_on_toaster_off(bell_toasts: &mut Vec<BellToast>) -> bool {
     let before = bell_toasts.len();
     bell_toasts.retain(|toast| is_write_fail_toast(&toast.label));
+    bell_toasts.len() != before
+}
+
+/// Apply a `toasts` value picked in Settings without waiting for the
+/// config watcher (#171).
+fn apply_toast_level(host: &mut HostState, raw: &str) {
+    let Some(level) = config::ToastLevel::parse(raw) else {
+        return;
+    };
+    host.toasts = level;
+    if settle_status_toasts(&mut host.bell_toasts, level) {
+        host.dirty = true;
+    }
+}
+
+/// Drop status chips that `level` no longer shows. Other chips stay.
+fn settle_status_toasts(bell_toasts: &mut Vec<BellToast>, level: config::ToastLevel) -> bool {
+    let before = bell_toasts.len();
+    bell_toasts.retain(|toast| status_toasts::keeps_chip(level, toast.status));
     bell_toasts.len() != before
 }
 
@@ -2862,6 +2895,14 @@ impl App {
             if host.drag_toaster != drag_toaster {
                 host.drag_toaster = drag_toaster;
                 host.dirty = true;
+            }
+            let toasts = self.file_config.toasts();
+            if host.toasts != toasts {
+                host.toasts = toasts;
+                // A stricter level clears the status chips it now hides.
+                if settle_status_toasts(&mut host.bell_toasts, toasts) {
+                    host.dirty = true;
+                }
             }
             let attention_badge = self.file_config.attention_badge();
             if host.attention_badge != attention_badge {
@@ -3654,6 +3695,8 @@ impl App {
                 bell_toaster_ms: Duration::from_millis(self.file_config.bell_toaster_ms()),
                 bell_toasts: Vec::new(),
                 drag_toaster: self.file_config.drag_toaster(),
+                toasts: self.file_config.toasts(),
+                status_history: Default::default(),
                 os_notify_bell: self.file_config.os_notify_bell(),
                 attention_sound: self.file_config.attention_sound(),
                 attention_badge: self.file_config.attention_badge(),
@@ -7217,11 +7260,13 @@ impl App {
                         Some(toast) => {
                             toast.label = BELL_TOAST_LABEL.to_string();
                             toast.until = until;
+                            toast.status = None;
                         }
                         None => host.bell_toasts.push(BellToast {
                             pane: *pane,
                             until,
                             label: BELL_TOAST_LABEL.to_string(),
+                            status: None,
                         }),
                     }
                     host.dirty = true;
@@ -7481,7 +7526,7 @@ fn begin_pane_rename_for(host: &mut HostState, index: usize, pane: PaneId) {
         return;
     }
     if !show_tab_strip(host) {
-        rail_toast(
+        rail_error_toast(
             host,
             " pane titles need the tab strip (tab_strip = always) ",
         );
@@ -7882,7 +7927,7 @@ fn commit_tab_rename(host: &mut HostState) {
                 .status();
             pane_ok = matches!(status, Ok(status) if status.success());
             if !pane_ok {
-                rail_toast(host, " pmux rename-pane failed; see the log ");
+                rail_error_toast(host, " pmux rename-pane failed; see the log ");
             }
         }
         host.dirty = true;
@@ -8003,20 +8048,41 @@ fn set_current_space(host: &mut HostState, name: Option<String>) {
     host.dirty = true;
 }
 
-/// Feedback chip for a rail action, anchored to the focused pane. Not a
-/// bell, so not gated on `bell_toaster` (same rule as the write-fail toast).
+/// Status toast for a confirmation or progress note. Hidden unless
+/// `toasts = "all"`; always kept in Recent messages (#171).
 fn rail_toast(host: &mut HostState, label: &str) {
+    status_toast(host, ToastKind::Info, label);
+}
+
+/// Status toast for a failure or a refused request. Shown unless
+/// `toasts = "off"`; always kept in Recent messages (#171).
+fn rail_error_toast(host: &mut HostState, label: &str) {
+    status_toast(host, ToastKind::Error, label);
+}
+
+/// Feedback chip anchored to the focused pane. Not a bell, so not gated on
+/// `bell_toaster` (same rule as the write-fail toast); `toasts` gates it.
+fn status_toast(host: &mut HostState, kind: ToastKind, label: &str) {
+    let now = Instant::now();
+    if !host.status_history.record(host.toasts, kind, label, now) {
+        if !label.trim().is_empty() {
+            eprintln!("prismattyc-host: toast hidden: {}", label.trim());
+        }
+        return;
+    }
     let pane = host.mux.focused_id();
-    let until = Instant::now() + host.bell_toaster_ms;
+    let until = now + host.bell_toaster_ms;
     match host.bell_toasts.iter_mut().find(|toast| toast.pane == pane) {
         Some(toast) => {
             toast.label = label.to_string();
             toast.until = until;
+            toast.status = Some(kind);
         }
         None => host.bell_toasts.push(BellToast {
             pane,
             until,
             label: label.to_string(),
+            status: Some(kind),
         }),
     }
     host.dirty = true;
@@ -8088,7 +8154,7 @@ fn open_remote_attach(
     name: &str,
 ) {
     let Some(destination) = host.remote.borrow().destination(&key.destination).cloned() else {
-        rail_toast(host, " That destination is no longer configured ");
+        rail_error_toast(host, " That destination is no longer configured ");
         return;
     };
     let (program, args) = remote_catalog::attach_command(&destination, session, &key.space);
@@ -8098,7 +8164,7 @@ fn open_remote_attach(
             let _ = host.mux.rename_window(host.mux.active_window(), &title);
             host.dirty = true;
         }
-        Err(error) => rail_toast(host, &format!(" Remote attach failed: {error:#} ")),
+        Err(error) => rail_error_toast(host, &format!(" Remote attach failed: {error:#} ")),
     }
 }
 
@@ -8116,7 +8182,7 @@ fn choose_remote_row(host: &mut HostState, name: &str) -> bool {
             false
         }
         Some((remote_rail::RemoteRowKind::Unavailable, detail)) => {
-            rail_toast(host, &format!(" {name}: {detail} "));
+            rail_error_toast(host, &format!(" {name}: {detail} "));
             false
         }
         Some((remote_rail::RemoteRowKind::Space { key, session, .. }, _)) => {
@@ -8165,7 +8231,7 @@ fn persist_space_order(host: &mut HostState, names: &[String]) -> bool {
         Ok(false) => false,
         Err(error) => {
             eprintln!("prismattyc-host: reorder spaces: {error:#}");
-            rail_toast(host, " Space order could not be saved ");
+            rail_error_toast(host, " Space order could not be saved ");
             false
         }
     }
@@ -8413,7 +8479,11 @@ fn report_space_open(host: &mut HostState, completed: space_open::Completion) {
         }
     }
     eprintln!("prismattyc-host: {label}");
-    rail_toast(host, &format!(" {label} "));
+    if report.is_error() {
+        rail_error_toast(host, &format!(" {label} "));
+    } else {
+        rail_toast(host, &format!(" {label} "));
+    }
     host.last_space_open = Some(report);
 }
 
@@ -8599,7 +8669,7 @@ fn refresh_space_views(host: &mut HostState) {
             App::refit_geom(host, host.window.inner_size(), Some("space ownership"));
             host.dirty = true;
         }
-        Err(error) => rail_toast(host, &format!(" space view update failed: {error} ")),
+        Err(error) => rail_error_toast(host, &format!(" space view update failed: {error} ")),
     }
 }
 
@@ -8631,7 +8701,7 @@ fn poll_host_attach_tabs(host: &mut HostState) {
             host.attach_cache_stamp = now;
             host.space_opens
                 .cache_applied(now, file.space.as_deref(), file.mode, false);
-            rail_toast(host, " space ownership could not be verified ");
+            rail_error_toast(host, " space ownership could not be verified ");
             return;
         }
     }
@@ -8648,7 +8718,7 @@ fn poll_host_attach_tabs(host: &mut HostState) {
             host.attach_cache_stamp = now;
             host.space_opens
                 .cache_applied(now, file.space.as_deref(), file.mode, false);
-            rail_toast(host, &format!("Could not switch Space view: {error}"));
+            rail_error_toast(host, &format!("Could not switch Space view: {error}"));
             return;
         }
     };
@@ -8755,13 +8825,13 @@ fn save_space_from_host_quiet(host: &mut HostState, name: &str) -> bool {
 fn save_space_from_host_with(host: &mut HostState, name: &str, toast: bool) -> bool {
     if host.space_rail.current.as_deref() != Some(name) {
         if toast {
-            rail_toast(host, " open this space before saving it ");
+            rail_error_toast(host, " open this space before saving it ");
         }
         return false;
     }
     if host.space_opens.blocks_persist() {
         if toast {
-            rail_toast(host, " wait for the space layout to apply before saving ");
+            rail_error_toast(host, " wait for the space layout to apply before saving ");
         }
         return false;
     }
@@ -8799,7 +8869,7 @@ fn save_space_from_host_with(host: &mut HostState, name: &str, toast: bool) -> b
             host.space_polish.failed = true;
             host.space_polish.armed = false;
             if toast {
-                rail_toast(host, " Save failed — use Save current space to retry ");
+                rail_error_toast(host, " Save failed — use Save current space to retry ");
             }
             false
         }
@@ -9114,7 +9184,7 @@ fn apply_pane_context_action(
         PaneContextAction::MoveToSpace | PaneContextAction::MoveSessionToSpace
     ) && host.mux.focused_id() != pane
     {
-        rail_toast(
+        rail_error_toast(
             host,
             "Move cancelled: the selected pane is no longer available",
         );
@@ -9154,7 +9224,7 @@ fn apply_pane_context_action(
             if let Some(name) = host.space_rail.current.clone() {
                 save_space_from_host(host, &name);
             } else {
-                rail_toast(host, " create or open a space first ");
+                rail_error_toast(host, " create or open a space first ");
             }
             None
         }
@@ -12548,18 +12618,18 @@ fn remove_session_from_space(host: &mut HostState, pane: PaneId, kill: bool) {
         .or_else(|| host.mux.attach_session_of(pane))
         .map(str::to_string)
     else {
-        rail_toast(host, " this pane is not an attached session ");
+        rail_error_toast(host, " this pane is not an attached session ");
         return;
     };
     let Some(space) = resolve_host_space(host) else {
-        rail_toast(host, " open a saved space first ");
+        rail_error_toast(host, " open a saved space first ");
         return;
     };
     let Some(name) = host.space_rail.current.clone() else {
         return;
     };
     if !space.sessions.iter().any(|saved| saved.name == session) {
-        rail_toast(host, " this session is not saved in the current space ");
+        rail_error_toast(host, " this session is not saved in the current space ");
         return;
     }
     let target = if kill {
@@ -12589,7 +12659,7 @@ fn remove_session_from_space(host: &mut HostState, pane: PaneId, kill: bool) {
         ]);
     }
     if let Err(error) = run_pmux_space(&args) {
-        rail_toast(host, &format!(" remove failed: {error} "));
+        rail_error_toast(host, &format!(" remove failed: {error} "));
         return;
     }
     if !kill && undo_file.exists() {
@@ -12621,7 +12691,7 @@ fn remove_session_from_space(host: &mut HostState, pane: PaneId, kill: bool) {
             }
         });
         if let Err(error) = result {
-            rail_toast(
+            rail_error_toast(
                 host,
                 &format!(" removed from {name}; view refresh failed: {error} "),
             );
@@ -12652,13 +12722,13 @@ fn move_to_space_from_host(host: &mut HostState, target: &str, whole_session: bo
     let selected = match move_target::take_valid(host) {
         Ok(target) => target,
         Err(error) => {
-            rail_toast(host, &format!("Move cancelled: {error}"));
+            rail_error_toast(host, &format!("Move cancelled: {error}"));
             return;
         }
     };
     let Some(remote) = selected.remote.as_ref() else {
         if let Err(error) = local_views::move_blank(host, target) {
-            rail_toast(host, &format!("Move failed: {error}"));
+            rail_error_toast(host, &format!("Move failed: {error}"));
         }
         return;
     };
@@ -12688,7 +12758,7 @@ fn move_to_space_from_host(host: &mut HostState, target: &str, whole_session: bo
             // reconcile against the same daemon ownership snapshot.
             if !selected.viewers.is_empty() {
                 if let Err(error) = move_target::detach_viewer(&selected) {
-                    rail_toast(
+                    rail_error_toast(
                         host,
                         &format!("Moved; could not detach nested viewer: {error}"),
                     );
@@ -12699,11 +12769,11 @@ fn move_to_space_from_host(host: &mut HostState, target: &str, whole_session: bo
                 }
                 if host.mux.active_pane_count() == 1 && host.mux.tab_count() == 1 {
                     if let Err(error) = host.mux.empty_space_view(pane) {
-                        rail_toast(host, &format!(" moved; view refresh failed: {error} "));
+                        rail_error_toast(host, &format!(" moved; view refresh failed: {error} "));
                         return;
                     }
                 } else if let Err(error) = host.mux.close_focused() {
-                    rail_toast(host, &format!(" moved; view refresh failed: {error} "));
+                    rail_error_toast(host, &format!(" moved; view refresh failed: {error} "));
                     return;
                 }
                 host.attach_pane_sessions.remove(&pane);
@@ -12713,7 +12783,7 @@ fn move_to_space_from_host(host: &mut HostState, target: &str, whole_session: bo
             refresh_rail(host);
             rail_toast(host, &format!(" moved to {target} · Undo: Spaces menu "));
         }
-        Err(error) => rail_toast(host, &format!(" move failed: {error} ")),
+        Err(error) => rail_error_toast(host, &format!(" move failed: {error} ")),
     }
 }
 
@@ -12829,7 +12899,7 @@ fn apply_space_picker_verdict(
         }
         SpacePickerVerdict::Deleted(name) => {
             if let Err(error) = run_pmux_space(&["space".into(), "rm".into(), name.clone()]) {
-                rail_toast(host, &format!(" delete failed: {error} "));
+                rail_error_toast(host, &format!(" delete failed: {error} "));
             }
             refresh_rail(host);
             if let Some(picker) = host.space_picker.as_mut() {
@@ -14237,7 +14307,8 @@ fn mux_command_for(action: keybind::Action) -> Option<MuxCommand> {
         | Action::SessionSplitDown
         | Action::TerminalSwitcher
         | Action::AgentMessages
-        | Action::UpdateRestart => return None,
+        | Action::UpdateRestart
+        | Action::RecentMessages => return None,
     })
 }
 
@@ -15191,8 +15262,14 @@ fn show_paste_toast(host: &mut HostState, path: &Path) {
         Some(toast) => {
             toast.label = label;
             toast.until = until;
+            toast.status = None;
         }
-        None => host.bell_toasts.push(BellToast { pane, until, label }),
+        None => host.bell_toasts.push(BellToast {
+            pane,
+            until,
+            label,
+            status: None,
+        }),
     }
     host.dirty = true;
 }
@@ -16143,7 +16220,7 @@ fn handle_placeholder_key(host: &mut HostState, event: &winit::event::KeyEvent) 
         PlaceholderReopen::Attach { id } => reopen_attach(host, pane, &id, &name),
         PlaceholderReopen::Recreate { name } => {
             if let Err(error) = recreate_session(host, &name) {
-                rail_toast(host, &format!(" could not reopen {name}: {error:#} "));
+                rail_error_toast(host, &format!(" could not reopen {name}: {error:#} "));
                 return true;
             }
             let live = live_sessions();
@@ -16170,7 +16247,7 @@ fn reopen_attach(host: &mut HostState, pane: PaneId, id: &str, name: &str) {
         .reopen_placeholder(pane, &mux_bin.to_string_lossy(), &args)
     {
         eprintln!("prismattyc-host: reopen attach failed: {error:#}");
-        rail_toast(host, &format!(" could not reopen {name}: {error:#} "));
+        rail_error_toast(host, &format!(" could not reopen {name}: {error:#} "));
         return;
     }
     host.mux
@@ -16789,6 +16866,10 @@ fn dispatch_action(
     }
     if action == A::UpdateRestart {
         space_panel::maintenance(host);
+        return Dispatch::Handled;
+    }
+    if action == A::RecentMessages {
+        space_panel::messages(host);
         return Dispatch::Handled;
     }
     if action == A::TerminalSwitcher {

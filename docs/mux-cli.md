@@ -1229,17 +1229,24 @@ Right-click an empty part of the rail to open the same settings.
 
 - Select **Rail: bottom**, **Rail: left**, **Rail: top**, or **Rail: right**.
   The rail moves immediately. The preference applies to all windows.
-- Select **Autosave** to turn it on or off. It is off by default.
-  When enabled, changed tab arrangements and session layouts save after
-  two idle seconds. Saving does not run saved commands.
+- Select **Autosave** to turn it on or off. It is on by default.
+  Adding or closing a tab, terminal, or agent session, changing a split
+  or its ratio, using Arrange, dragging tabs or panes, or moving a session
+  between spaces saves the arrangement after a short idle, about one second.
+  The rail shows **Saving…**, then **Saved**. Saving does not run saved
+  commands. `[spaces] autosave = false` opts out. When that key is absent,
+  `space_autosave` applies. When both are absent, autosave stays on.
 - Select **Startup: ask**, **Startup: restore**, or **Startup: fresh**.
   The default is **ask**. Restore reconnects running sessions.
   Stopped sessions stay stopped until you explicitly reopen them.
 
-The current Space chip shows its save state. **Unsaved** means the current
-arrangement differs from its saved definition. **Save failed** requires a
-retry with **Save current space**. Autosave stops retrying after a failure.
-Normal terminal output and focus changes do not trigger layout saves.
+The current Space chip shows its save state. **Saving…** means a change is
+waiting out the short idle. **Saved** means the file matches the live
+arrangement. **Unsaved** means autosave is off and the arrangement differs
+from the file. **Save failed** requires a retry with **Save current space**.
+Autosave stops retrying after a failure. **Save current space** still writes
+immediately. Normal terminal output and focus changes do not trigger layout
+saves. Autosave waits while a space is opening or being restored.
 
 Crowded chips show a shortened session list and a **+N more** count.
 Use **Team details** to inspect the full session list. Select **…** on a

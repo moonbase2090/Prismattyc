@@ -279,9 +279,9 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey {
         name: "space_autosave",
         group: ConfigGroup::Layout,
-        doc: "Save changed Space layouts after two idle seconds",
+        doc: "Save changed Space arrangements after a short idle",
         range: "true | false",
-        value: ConfigValue::Bool(false),
+        value: ConfigValue::Bool(true),
     },
     ConfigKey {
         name: "session_naming",
@@ -579,7 +579,17 @@ pub fn render_template() -> String {
     out.push('\n');
     out.push_str(&render_a11y_section());
     out.push('\n');
+    out.push_str(&render_spaces_section());
+    out.push('\n');
     out.push_str(REMOTE_SECTION);
+    out
+}
+
+fn render_spaces_section() -> String {
+    let mut out = String::from("# -- spaces --\n");
+    out.push_str("[spaces]\n");
+    out.push_str("# Save the arrangement whenever it changes, after a short idle. true|false.\n");
+    out.push_str("autosave = true\n");
     out
 }
 
@@ -874,6 +884,10 @@ pub fn merge_template(existing: &str) -> Result<String> {
     let mut document = existing
         .parse::<toml_edit::DocumentMut>()
         .context("parse existing config for merge")?;
+    // A file that already chose `space_autosave` keeps that choice. Inserting
+    // `[spaces] autosave = true` would override a legacy `false`.
+    let insert_spaces =
+        !document.contains_key("space_autosave") && !document.contains_key("spaces");
     for key in CONFIG_KEYS {
         insert_toml_value(&mut document, key);
     }
@@ -881,7 +895,21 @@ pub fn merge_template(existing: &str) -> Result<String> {
     merge_mux_section(&mut document);
     merge_keys_table(&mut document);
     merge_a11y_section(&mut document);
+    if insert_spaces {
+        merge_spaces_section(&mut document);
+    }
     Ok(document.to_string())
+}
+
+fn merge_spaces_section(document: &mut toml_edit::DocumentMut) {
+    if document.contains_key("spaces") {
+        return;
+    }
+    let mut table = toml_edit::Table::new();
+    table.set_implicit(false);
+    table.decor_mut().set_prefix("\n");
+    table.insert("autosave", toml_edit::value(true));
+    document["spaces"] = toml_edit::Item::Table(table);
 }
 
 fn merge_a11y_section(document: &mut toml_edit::DocumentMut) {
@@ -970,6 +998,11 @@ pub fn help_lines() -> Vec<String> {
         "    a11y.announce                Speak mail, attention, pane-title notices, and cursor-line changes (true|false)"
             .to_string(),
     );
+    lines.push("    [spaces]".to_string());
+    lines.push(
+        "    spaces.autosave              Save the arrangement after a short idle (true|false)"
+            .to_string(),
+    );
     lines
 }
 
@@ -1046,6 +1079,7 @@ mod tests {
         "mux",
         "keys",
         "a11y",
+        "spaces",
         "theme_overrides",
         "remote",
     ];
@@ -1060,7 +1094,7 @@ mod tests {
             assert!(present, "template missing {field}");
             if !matches!(
                 *field,
-                "mux" | "keys" | "a11y" | "theme_overrides" | "remote"
+                "mux" | "keys" | "a11y" | "spaces" | "theme_overrides" | "remote"
             ) {
                 assert!(
                     CONFIG_KEYS.iter().any(|key| key.name == *field),
@@ -1293,6 +1327,8 @@ mod tests {
             "mux.instance",
             "[a11y]",
             "a11y.os_tree",
+            "[spaces]",
+            "spaces.autosave",
         ] {
             assert!(
                 lines.iter().any(|line| line.contains(expected)),
@@ -1412,6 +1448,21 @@ mod tests {
         let end = body.find("```").expect("closing fence");
         let example = &body[..end];
         assert_eq!(example, render_template());
+    }
+
+    #[test]
+    fn merge_keeps_a_legacy_autosave_opt_out() {
+        let opted_out = merge_template("space_autosave = false\n").unwrap();
+        assert!(
+            !opted_out.contains("[spaces]"),
+            "merge must not override a legacy opt-out: {opted_out}"
+        );
+        assert!(!load_from_str(&opted_out).space_autosave_enabled());
+        let fresh = merge_template("panes = 1\n").unwrap();
+        assert!(fresh.contains("[spaces]"), "{fresh}");
+        assert!(fresh.contains("autosave = true"), "{fresh}");
+        assert!(load_from_str(&fresh).space_autosave_enabled());
+        assert!(load_from_str(&render_template()).space_autosave_enabled());
     }
 
     fn load_from_str(raw: &str) -> ConfigFile {

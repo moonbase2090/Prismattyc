@@ -8682,13 +8682,27 @@ fn poll_host_attach_tabs(host: &mut HostState) {
 
 /// Save the current Space from this window's live arrangement.
 fn save_space_from_host(host: &mut HostState, name: &str) {
+    let _ = save_space_from_host_with(host, name, true);
+}
+
+/// Autosave uses the same write as manual Save and skips the toast.
+/// The rail shows the result. Returns whether the file was replaced.
+fn save_space_from_host_quiet(host: &mut HostState, name: &str) -> bool {
+    save_space_from_host_with(host, name, false)
+}
+
+fn save_space_from_host_with(host: &mut HostState, name: &str, toast: bool) -> bool {
     if host.space_rail.current.as_deref() != Some(name) {
-        rail_toast(host, " open this space before saving it ");
-        return;
+        if toast {
+            rail_toast(host, " open this space before saving it ");
+        }
+        return false;
     }
     if host.space_opens.blocks_persist() {
-        rail_toast(host, " wait for the space layout to apply before saving ");
-        return;
+        if toast {
+            rail_toast(host, " wait for the space layout to apply before saving ");
+        }
+        return false;
     }
     persist_attach_layout_from_live(host);
     match std::process::Command::new(pmux_bin())
@@ -8713,11 +8727,20 @@ fn save_space_from_host(host: &mut HostState, name: &str) {
             refresh_rail(host);
             set_current_space(host, Some(name.to_string()));
             host.space_polish.failed = false;
-            rail_toast(host, " Saved ");
+            host.space_polish.changed = None;
+            host.space_polish.armed = false;
+            if toast {
+                rail_toast(host, " Saved ");
+            }
+            true
         }
         Ok(_) | Err(_) => {
             host.space_polish.failed = true;
-            rail_toast(host, " Save failed — use Save current space to retry ");
+            host.space_polish.armed = false;
+            if toast {
+                rail_toast(host, " Save failed — use Save current space to retry ");
+            }
+            false
         }
     }
 }

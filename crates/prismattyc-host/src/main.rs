@@ -6620,6 +6620,15 @@ fn rasterize_frame(
             host.window.request_redraw();
         }
     }
+    let space_anchor = if host
+        .space_picker
+        .as_ref()
+        .is_some_and(|picker| picker.kind == SpacePickerKind::Open)
+    {
+        space_picker_anchor(host)
+    } else {
+        None
+    };
     let painted_space = if let Some(picker) = host.space_picker.as_ref() {
         let focus = focus_border_rgb(host.focus_border);
         let spaces = terminal_switcher::rows(host, picker.kind);
@@ -6721,7 +6730,7 @@ fn rasterize_frame(
             detail: detail.as_ref(),
             footer,
         };
-        paint_palette_overlay(
+        paint_palette_overlay_anchored(
             &host.font,
             &host.theme,
             geom.chrome,
@@ -6731,6 +6740,7 @@ fn rasterize_frame(
             buffer,
             width as usize,
             height as usize,
+            space_anchor,
         )
     } else {
         None
@@ -9166,6 +9176,24 @@ fn paint_palette_overlay(
     width: usize,
     height: usize,
 ) -> Option<PaletteLayout> {
+    paint_palette_overlay_anchored(
+        font, theme, chrome, focus_rgb, frame, surface, buffer, width, height, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_palette_overlay_anchored(
+    font: &FontMetrics,
+    theme: &theme::Theme,
+    chrome: mux::ChromeGeom,
+    focus_rgb: [u8; 3],
+    frame: &PaletteFrame<'_>,
+    surface: OverlaySurface,
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    anchor: Option<(usize, usize)>,
+) -> Option<PaletteLayout> {
     if chrome.graphite {
         graphite_overlays::palette(
             font,
@@ -9178,6 +9206,7 @@ fn paint_palette_overlay(
             width,
             height,
             None,
+            anchor,
         )
     } else {
         rasterize_palette(
@@ -9211,6 +9240,7 @@ fn paint_palette_overlay_with_hover(
             width,
             height,
             hovered_filter,
+            None,
         )
     } else {
         rasterize_palette_with_hover(
@@ -11915,6 +11945,21 @@ fn open_space_picker(host: &mut HostState, action: Option<keybind::Action>) -> b
     sync_chrome_hover(host);
     true
 }
+
+/// Top-left of the open-space picker: just under the tabs-bar dropdown.
+/// Sidebar and classic have no dropdown, so the picker stays centered.
+fn space_picker_anchor(host: &HostState) -> Option<(usize, usize)> {
+    if host.spacing.layout == config::LayoutMode::Sidebar || !host.mux.geom().chrome.graphite {
+        return None;
+    }
+    let dropdown = host.mux.graphite_bar()?.dropdown;
+    let gap = host.mux.geom().chrome.px(4.0).max(2);
+    Some((
+        dropdown.x,
+        dropdown.y.saturating_add(dropdown.h).saturating_add(gap),
+    ))
+}
+
 fn apply_space_picker_verdict(
     host: &mut HostState,
     kind: SpacePickerKind,
@@ -16008,6 +16053,21 @@ fn dispatch_action(
     }
 }
 
+/// Bar and sidebar buttons that open a picker do so before the generic
+/// dispatcher. `OpenSpace` is a no-op there: the keyboard path opens the
+/// picker itself, so a strip click must not drop it.
+fn dispatch_strip_action(
+    host: &mut HostState,
+    action: keybind::Action,
+    program: &str,
+    child_args: &[String],
+) -> Dispatch {
+    if open_space_picker(host, Some(action)) {
+        return Dispatch::Handled;
+    }
+    dispatch_action(host, action, program, child_args)
+}
+
 fn dispatch_palette_mouse_action(
     host: &mut HostState,
     action: keybind::Action,
@@ -17089,7 +17149,7 @@ impl ApplicationHandler<UserAction> for App {
                             host.left_button_down = false;
                             host.rich_pointer = None;
                             host.app_mouse_button = None;
-                            match dispatch_action(
+                            match dispatch_strip_action(
                                 host,
                                 action,
                                 &self.cli.program,
@@ -18172,12 +18232,95 @@ mod tests {
                 false,
                 StripClickDecision::NotHandled,
             ),
+            (
+                MouseButton::Left,
+                Some(StripClickHit::Button(keybind::Action::OpenSpace)),
+                true,
+                false,
+                StripClickDecision::Run(keybind::Action::OpenSpace),
+            ),
+            (
+                MouseButton::Left,
+                Some(StripClickHit::Button(keybind::Action::NewTab)),
+                true,
+                false,
+                StripClickDecision::Run(keybind::Action::NewTab),
+            ),
+            (
+                MouseButton::Left,
+                Some(StripClickHit::Button(keybind::Action::CommandPalette)),
+                true,
+                false,
+                StripClickDecision::Run(keybind::Action::CommandPalette),
+            ),
         ];
         for (button, hit, title_row, rename_active, expected) in cases {
             assert_eq!(
                 strip_click_decision(button, hit, title_row, rename_active, 10.0, 5.0),
                 expected,
                 "{button:?}, {hit:?}"
+            );
+        }
+    }
+
+    /// Issue #139: the Graphite dropdown, `+`, and command field are clicks,
+    /// not drags. Classic chrome never builds this bar.
+    #[test]
+    fn graphite_bar_buttons_run_open_space_new_tab_and_command_palette() {
+        let chrome = mux::ChromeGeom {
+            graphite: true,
+            scale_milli: 1000,
+        };
+        let tabs = vec![graphite::TabText {
+            label: "demo".into(),
+            meta: None,
+            dot: graphite::Dot::Idle,
+            attention: false,
+            selected: true,
+        }];
+        let layout = graphite::bar_layout(chrome, 1440, 0, "demo", &tabs, "Ctrl Shift P");
+        let mid = |rect: graphite::Rect| (rect.x + rect.w / 2, rect.y + rect.h / 2);
+        let command = layout.command.expect("wide bar keeps the command field");
+        let cases = [
+            (
+                mid(layout.dropdown),
+                mux::StripHit::SpaceMenu,
+                keybind::Action::OpenSpace,
+            ),
+            (
+                mid(layout.plus),
+                mux::StripHit::NewTab,
+                keybind::Action::NewTab,
+            ),
+            (
+                mid(command),
+                mux::StripHit::Command,
+                keybind::Action::CommandPalette,
+            ),
+        ];
+        for ((x, y), hit, action) in cases {
+            assert_eq!(graphite::bar_hit(&layout, x, y, false), Some(hit));
+            assert_eq!(
+                strip_click_decision(
+                    MouseButton::Left,
+                    Some(strip_click_hit(hit)),
+                    true,
+                    false,
+                    x as f64,
+                    y as f64,
+                ),
+                StripClickDecision::Run(action)
+            );
+            assert_eq!(
+                cursor_for_hover(
+                    Some(HoverTarget::Strip(hit)),
+                    false,
+                    false,
+                    false,
+                    None,
+                    false,
+                ),
+                CursorIcon::Pointer
             );
         }
     }

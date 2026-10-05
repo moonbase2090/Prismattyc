@@ -6379,20 +6379,18 @@ fn rasterize_frame(
         }
     }
     // Chord cheat-sheet while Ctrl+Shift is held, then a short linger. It
-    // sits above a bottom spaces rail, never over it (PT-91).
+    // sits above a bottom spaces rail, never over it (PT-91). Graphite draws
+    // the same shortcuts as keycap chips; classic keeps the sentence.
     let footer_bottom = (height as usize).saturating_sub(host.mux.geom().chrome_bottom());
     if footer_visible {
-        let help = chord_help_text(
-            &host.mux,
-            &host.keymap,
-            show_tab_strip(host),
-            host.spacing.chrome_style == config::ChromeStyle::Graphite,
-        );
+        let show_tabs = show_tab_strip(host);
+        let graphite = host.spacing.chrome_style == config::ChromeStyle::Graphite;
         if geom.chrome.graphite {
-            graphite_overlays::legend(
+            let runs = chord_help(&host.mux, &host.keymap, show_tabs, graphite).1;
+            graphite_overlays::legend_keys(
                 geom.chrome,
                 host.theme.variant,
-                &help,
+                &runs,
                 buffer,
                 width as usize,
                 footer_bottom,
@@ -6400,6 +6398,7 @@ fn rasterize_frame(
                 host.chrome_alpha,
             );
         } else {
+            let help = chord_help_text(&host.mux, &host.keymap, show_tabs, graphite);
             rasterize_footer(
                 &host.font,
                 &help,
@@ -11404,77 +11403,128 @@ fn chord_help_text(
     show_tabs: bool,
     graphite: bool,
 ) -> String {
+    chord_help(mux, keymap, show_tabs, graphite).0
+}
+
+struct ChordHelp {
+    out: String,
+    runs: Vec<graphite_overlays::LegendRun>,
+}
+
+impl ChordHelp {
+    /// ` | {strip} {caption}`, including the trailing space when the caption
+    /// is empty. That is the classic footer sentence.
+    fn action(&mut self, strip: String, caps: Vec<String>, caption: &str) {
+        if strip.is_empty() {
+            return;
+        }
+        self.out.push_str(&format!(" | {strip} {caption}"));
+        let caps = if caps.is_empty() { vec![strip] } else { caps };
+        self.runs.push(graphite_overlays::LegendRun::Keys {
+            caps,
+            caption: caption.to_string(),
+        });
+    }
+
+    fn bare_text(&mut self, label: String) {
+        if label.is_empty() {
+            return;
+        }
+        self.out.push_str(&format!(" | {label}"));
+        self.runs.push(graphite_overlays::LegendRun::Text(label));
+    }
+
+    fn bare_key(&mut self, label: String) {
+        if label.is_empty() {
+            return;
+        }
+        self.out.push_str(&format!(" | {label}"));
+        self.runs.push(graphite_overlays::LegendRun::Keys {
+            caps: vec![label],
+            caption: String::new(),
+        });
+    }
+}
+
+fn action_binding(keymap: &keybind::KeyMap, action: keybind::Action) -> (String, Vec<String>) {
+    (
+        keymap.label(action),
+        keymap
+            .chords(action)
+            .iter()
+            .map(|chord| chord.label())
+            .collect(),
+    )
+}
+
+/// Classic pair spelling (`C-S-[/]`, `C-S-PgUp/PgDn`) plus one chip per bound side.
+fn pair_binding(
+    keymap: &keybind::KeyMap,
+    first: keybind::Action,
+    second: keybind::Action,
+) -> (String, Vec<String>) {
+    let left = keymap.label(first);
+    let right = keymap.label(second);
+    let strip = match (left.is_empty(), right.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => left.clone(),
+        (true, false) => right.clone(),
+        (false, false) => format!("{left}/{}", right.rsplit('-').next().unwrap_or(&right)),
+    };
+    let caps = [left, right]
+        .into_iter()
+        .filter(|label| !label.is_empty())
+        .collect();
+    (strip, caps)
+}
+
+/// Chord-strip sentence plus the Graphite keycap runs for the same shortcuts.
+/// Classic paints only the sentence. An unbound action leaves no segment.
+fn chord_help(
+    mux: &mux::MuxRuntime,
+    keymap: &keybind::KeyMap,
+    show_tabs: bool,
+    graphite: bool,
+) -> (String, Vec<graphite_overlays::LegendRun>) {
     use keybind::Action;
     let unseen = mux.unseen_count();
     let active = mux.active_count();
-    let mut badge = String::new();
-    if active > 0 {
-        badge.push_str(&format!(" | *{active}"));
-    }
-    if unseen > 0 {
-        badge.push_str(&format!(" | !{unseen}"));
-    }
-    // One segment per bound action; an unbound action leaves no segment.
-    let seg = |label: String, what: &str| {
-        if label.is_empty() {
-            String::new()
-        } else {
-            format!(" | {label} {what}")
-        }
-    };
-    // Pair labels sharing a prefix: "C-S-[/]", "C-S-PgUp/PgDn".
-    let pair = |first: Action, second: Action| {
-        let (a, b) = (keymap.label(first), keymap.label(second));
-        match (a.is_empty(), b.is_empty()) {
-            (true, true) => String::new(),
-            (false, true) => a,
-            (true, false) => b,
-            (false, false) => format!("{a}/{}", b.rsplit('-').next().unwrap_or(&b)),
-        }
-    };
     // Even layouts: one summary from layout_2 ("C-S-Fn/C-A-n") when every
     // layout_N follows the same pattern; otherwise the layout_2 label with
     // an ellipsis, so a rebinding of one layout is not implied for all. The
     // macOS Cmd+Shift and the Alt-co-held aliases are omitted from the strip.
-    let even = if layouts_share_pattern(keymap) {
-        keymap
+    let (even, even_caps) = if layouts_share_pattern(keymap) {
+        let caps: Vec<String> = keymap
             .chords(Action::Layout(2))
             .iter()
-            .filter(|c| !(c.super_key || (c.shift && c.alt)))
-            .map(|c| c.label().replace("F2", "Fn").replace('2', "n"))
-            .collect::<Vec<_>>()
-            .join("/")
+            .filter(|chord| !(chord.super_key || (chord.shift && chord.alt)))
+            .map(|chord| chord.label().replace("F2", "Fn").replace('2', "n"))
+            .collect();
+        let strip = caps.join("/");
+        (strip, caps)
     } else {
         let label = keymap.label(Action::Layout(2));
         if label.is_empty() {
-            label
+            (label, Vec::new())
         } else {
-            format!("{label}\u{2026}")
+            let strip = format!("{label}\u{2026}");
+            let caps = vec![strip.clone()];
+            (strip, caps)
         }
     };
     let focus = {
-        let default_alt_arrow = keymap.chords(Action::FocusLeft).iter().any(|c| {
-            c.alt
-                && !c.ctrl
-                && !c.shift
-                && !c.super_key
-                && c.key == keybind::KeySpec::Named(NamedKey::ArrowLeft)
+        let default_alt_arrow = keymap.chords(Action::FocusLeft).iter().any(|chord| {
+            chord.alt
+                && !chord.ctrl
+                && !chord.shift
+                && !chord.super_key
+                && chord.key == keybind::KeySpec::Named(NamedKey::ArrowLeft)
         });
         if default_alt_arrow {
             "Alt+arrow".to_string()
         } else {
             keymap.label(Action::FocusLeft).replace("Left", "arrow")
         }
-    };
-    let tabs = if show_tabs {
-        format!(
-            "{}{}{}",
-            seg(keymap.label(Action::NewTab), "tab"),
-            seg(keymap.label(Action::RenameTab), "rename"),
-            seg(pair(Action::PrevTab, Action::NextTab), "")
-        )
-    } else {
-        String::new()
     };
     // Zoomed: the domain pane count plus a Z (tmux style), not the one
     // visible rect, so the strip still says how many panes the tab holds.
@@ -11483,32 +11533,50 @@ fn chord_help_text(
     } else {
         mux.pane_count().to_string()
     };
-    let mut out = format!(" Prismattyc [{panes}]");
-    out.push_str(&seg(keymap.label(Action::ThemePicker), "themes"));
-    out.push_str(&seg(keymap.label(Action::Paste), "paste"));
-    out.push_str(&seg(keymap.label(Action::Copy), "copy"));
-    out.push_str(&seg(keymap.label(Action::SplitRight), "split>"));
-    out.push_str(&seg(keymap.label(Action::SplitDown), "splitv"));
-    out.push_str(&seg(even, "even"));
-    out.push_str(&seg(keymap.label(Action::ClosePane), "close"));
-    out.push_str(&seg(keymap.label(Action::Detach), "detach"));
-    out.push_str(&seg(
-        pair(Action::FocusBorderPrev, Action::FocusBorderNext),
-        "color",
-    ));
+    let mut help = ChordHelp {
+        out: format!(" Prismattyc [{panes}]"),
+        runs: vec![graphite_overlays::LegendRun::Text(format!(
+            "Prismattyc [{panes}]"
+        ))],
+    };
+    let (strip, caps) = action_binding(keymap, Action::ThemePicker);
+    help.action(strip, caps, "themes");
+    let (strip, caps) = action_binding(keymap, Action::Paste);
+    help.action(strip, caps, "paste");
+    let (strip, caps) = action_binding(keymap, Action::Copy);
+    help.action(strip, caps, "copy");
+    let (strip, caps) = action_binding(keymap, Action::SplitRight);
+    help.action(strip, caps, "split>");
+    let (strip, caps) = action_binding(keymap, Action::SplitDown);
+    help.action(strip, caps, "splitv");
+    help.action(even, even_caps, "even");
+    let (strip, caps) = action_binding(keymap, Action::ClosePane);
+    help.action(strip, caps, "close");
+    let (strip, caps) = action_binding(keymap, Action::Detach);
+    help.action(strip, caps, "detach");
+    let (strip, caps) = pair_binding(keymap, Action::FocusBorderPrev, Action::FocusBorderNext);
+    help.action(strip, caps, "color");
     // Bar presets (#108) sit right after focus color, graphite only.
     if graphite {
-        out.push_str(&seg(
-            pair(Action::BarColorPrev, Action::BarColorNext),
-            "bars",
-        ));
+        let (strip, caps) = pair_binding(keymap, Action::BarColorPrev, Action::BarColorNext);
+        help.action(strip, caps, "bars");
     }
-    if !focus.is_empty() {
-        out.push_str(&format!(" | {focus}"));
+    help.bare_key(focus);
+    if show_tabs {
+        let (strip, caps) = action_binding(keymap, Action::NewTab);
+        help.action(strip, caps, "tab");
+        let (strip, caps) = action_binding(keymap, Action::RenameTab);
+        help.action(strip, caps, "rename");
+        let (strip, caps) = pair_binding(keymap, Action::PrevTab, Action::NextTab);
+        help.action(strip, caps, "");
     }
-    out.push_str(&tabs);
-    out.push_str(&badge);
-    out.trim_end().to_string()
+    if active > 0 {
+        help.bare_text(format!("*{active}"));
+    }
+    if unseen > 0 {
+        help.bare_text(format!("!{unseen}"));
+    }
+    (help.out.trim_end().to_string(), help.runs)
 }
 
 /// Fixed find fallbacks (keybindings D-K3): punctuation chords that match the
@@ -21511,6 +21579,43 @@ session mail (id 15)
             "{odd}"
         );
         assert!(layouts_share_pattern(&keybind::KeyMap::default()));
+
+        let (sentence, runs) = chord_help(&runtime, &keybind::KeyMap::default(), true, true);
+        assert_eq!(sentence, graphite_help);
+        let keys: Vec<(&Vec<String>, &str)> = runs
+            .iter()
+            .filter_map(|run| match run {
+                graphite_overlays::LegendRun::Keys { caps, caption } => {
+                    Some((caps, caption.as_str()))
+                }
+                graphite_overlays::LegendRun::Text(_) => None,
+            })
+            .collect();
+        let color = keys
+            .iter()
+            .position(|(_, caption)| *caption == "color")
+            .expect("focus color");
+        let bars = keys
+            .iter()
+            .position(|(_, caption)| *caption == "bars")
+            .expect("bar color");
+        assert_eq!(
+            bars,
+            color + 1,
+            "bar key sits immediately after focus color"
+        );
+        assert_eq!(keys[color].0.as_slice(), ["C-S-[", "C-S-]"]);
+        assert_eq!(keys[bars].0.as_slice(), ["C-S-B"]);
+        assert_eq!(
+            keys[bars + 1],
+            (&vec!["Alt+arrow".to_string()], ""),
+            "focus movement stays the next shortcut"
+        );
+        let classic_runs = chord_help(&runtime, &keybind::KeyMap::default(), true, false).1;
+        assert!(classic_runs.iter().all(|run| match run {
+            graphite_overlays::LegendRun::Keys { caption, .. } => caption != "bars",
+            graphite_overlays::LegendRun::Text(_) => true,
+        }));
     }
 
     #[test]

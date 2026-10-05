@@ -91,9 +91,9 @@ const PILL_TEXT: f32 = 11.0;
 const PILL_PAD_X: f32 = 6.0;
 const PILL_H: f32 = 16.0;
 const CMD_TEXT: f32 = 12.5;
-const KEY_TEXT: f32 = 11.0;
-const KEY_PAD_X: f32 = 6.0;
-const KEY_H: f32 = 18.0;
+pub(crate) const KEY_TEXT: f32 = 11.0;
+pub(crate) const KEY_PAD_X: f32 = 6.0;
+pub(crate) const KEY_H: f32 = 18.0;
 
 const fn rgb(hex: u32) -> Rgb {
     [(hex >> 16) as u8, (hex >> 8) as u8, hex as u8]
@@ -615,7 +615,7 @@ pub(crate) fn fill_round_rect(
 }
 
 /// A round rectangle with a 1-pixel `line` border around `fill`.
-fn outlined_round_rect(
+pub(crate) fn outlined_round_rect(
     buffer: &mut [u32],
     stride: usize,
     rect: Rect,

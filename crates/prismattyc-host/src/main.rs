@@ -6790,8 +6790,18 @@ fn rasterize_frame(
                     rows: &rows,
                 }]
             };
+            // Settings pages are fixed size and scroll inside (Graphite rule).
+            let layout_mode = if host
+                .space_panel
+                .as_ref()
+                .is_some_and(space_panel::Panel::fixed_size)
+            {
+                PaletteLayoutMode::FixedHeight
+            } else {
+                PaletteLayoutMode::ContentFit
+            };
             let frame = PaletteFrame {
-                layout_mode: PaletteLayoutMode::ContentFit,
+                layout_mode,
                 query: None,
                 chips: None,
                 sections: &sections,
@@ -13391,6 +13401,7 @@ fn mux_command_for(action: keybind::Action) -> Option<MuxCommand> {
         | Action::PaletteFilterPrev
         | Action::ThemePicker
         | Action::Transparency
+        | Action::ChromeLayout
         | Action::Find
         | Action::ClearScrollback
         | Action::IncreaseFontSize
@@ -15828,6 +15839,7 @@ fn action_route(action: keybind::Action) -> ActionRoute {
         Action::ResetFontSize => ActionRoute::ResetFontSize,
         Action::ThemePicker
         | Action::Transparency
+        | Action::ChromeLayout
         | Action::OpenSpace
         | Action::DeleteSpace
         | Action::MovePaneToSpace => ActionRoute::Noop,
@@ -15913,6 +15925,22 @@ fn change_font_size(host: &mut HostState, delta: i8) {
     App::refit_geom(host, host.window.inner_size(), Some("font size"));
 }
 
+/// Switch the Graphite chrome between the tabs and spaces bars and the
+/// combined sidebar (#150). Refits this window at once. Other windows follow
+/// the saved `layout` key through the config reload.
+fn apply_chrome_layout(host: &mut HostState, layout: config::LayoutMode) {
+    if host.spacing.layout == layout {
+        return;
+    }
+    host.spacing.layout = layout;
+    host.left_button_down = false;
+    host.cursor_cell = None;
+    host.pending_full_repaint = Some(FullRepaintReason::Resize);
+    host.dirty = true;
+    App::refit_geom(host, host.window.inner_size(), Some("layout"));
+    host.window.request_redraw();
+}
+
 /// Step the Graphite bar preset (#108). Gated on graphite chrome: classic
 /// keeps its theme bars and the chord is a no-op there.
 fn cycle_bar_color(host: &mut HostState, forward: bool) {
@@ -15961,6 +15989,10 @@ fn dispatch_action(
     }
     if action == A::BarColorNext || action == A::BarColorPrev {
         cycle_bar_color(host, action == A::BarColorNext);
+        return Dispatch::Handled;
+    }
+    if action == A::ChromeLayout {
+        space_panel::layout(host);
         return Dispatch::Handled;
     }
     match action_route(action) {
@@ -17800,6 +17832,7 @@ mod tests {
             (Action::ResetFontSize, ActionRoute::ResetFontSize),
             (Action::ThemePicker, ActionRoute::Noop),
             (Action::Transparency, ActionRoute::Noop),
+            (Action::ChromeLayout, ActionRoute::Noop),
             (Action::OpenSpace, ActionRoute::Noop),
             (Action::DeleteSpace, ActionRoute::Noop),
             (Action::MovePaneToSpace, ActionRoute::Noop),

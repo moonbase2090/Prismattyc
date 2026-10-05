@@ -422,6 +422,8 @@ scroll_line_up = "ctrl+shift+up"
 scroll_line_down = "ctrl+shift+down"
 # open transparency settings (graphite chrome only).
 # transparency = []
+# choose the Bars or Sidebar layout (graphite chrome only).
+# chrome_layout = []
 # toggle rich focus (--experimental-rich).
 rich_focus = "ctrl+shift+g"
 
@@ -751,6 +753,18 @@ unbound by default) grow or shrink the tab instead of only retiling it.
 Growing spawns empty shells to fill the target with focus unchanged;
 shrinking never closes panes, it zooms the focused pane and shows a
 "still running" toast (Ctrl+Shift+Z restores the split).
+
+## Layout
+
+With Graphite chrome, `layout` picks the arrangement. `bars` (the default)
+shows the tabs bar and the spaces bar. `sidebar` replaces both with one tree
+of Spaces and their tabs. Classic chrome ignores the key.
+
+Open the command palette and run `chrome_layout`, or open
+**Spaces settings…**. Both show **Layout: Bars** and **Layout: Sidebar**, only
+with Graphite chrome. A choice applies to the window at once, with no
+restart. It is saved to `layout` in this configuration, so other open windows
+follow it.
 
 ## Spaces rail
 

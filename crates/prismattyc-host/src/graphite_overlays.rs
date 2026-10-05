@@ -888,7 +888,34 @@ pub(crate) fn find_prompt(
     );
 }
 
-/// Paint the one-row Graphite shortcut legend above the spaces rail.
+/// One piece of the Ctrl+Shift legend, in chord-strip order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LegendRun {
+    /// Status that is not a shortcut (`Prismattyc [1]`, `*2`, `!1`).
+    Text(String),
+    /// Keycap chips for one shortcut, then its caption. The caption may be empty.
+    Keys { caps: Vec<String>, caption: String },
+}
+
+/// A keycap the legend drew. A chip that does not fit the row is absent,
+/// and a shortcut is omitted whole rather than cut through a chip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LegendChip {
+    pub rect: Rect,
+    pub label: String,
+}
+
+/// Chips and captions actually drawn for one legend row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LegendPaint {
+    pub chips: Vec<LegendChip>,
+    pub captions: Vec<String>,
+}
+
+/// Paint a plain one-row Graphite notice above the spaces rail.
+///
+/// Config errors and the edit-config hint use this path. The Ctrl+Shift
+/// shortcut overlay is [`legend_keys`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn legend(
     chrome: ChromeGeom,
@@ -933,6 +960,201 @@ pub(crate) fn legend(
         0,
         stride,
     );
+}
+
+struct LegendMetrics {
+    key_px: f32,
+    label_px: f32,
+    pad: f32,
+    key_h: usize,
+    radius: f32,
+    chip_gap: f32,
+    caption_gap: f32,
+    group_gap: f32,
+}
+
+fn legend_metrics(chrome: ChromeGeom, bar_h: usize) -> LegendMetrics {
+    let scale = chrome.scale_milli as f32 / 1000.0;
+    LegendMetrics {
+        key_px: graphite::KEY_TEXT * scale,
+        label_px: chrome.px(11.0).max(9) as f32,
+        pad: graphite::KEY_PAD_X * scale,
+        key_h: chrome.px(graphite::KEY_H).clamp(1, bar_h.max(1)),
+        radius: 4.0 * scale,
+        chip_gap: 4.0 * scale,
+        caption_gap: 6.0 * scale,
+        group_gap: 12.0 * scale,
+    }
+}
+
+fn legend_chip_width(label: &str, metrics: &LegendMetrics) -> f32 {
+    (graphite::text_width(Face::Mono, metrics.key_px, label) + 2.0 * metrics.pad)
+        .ceil()
+        .max((metrics.pad * 2.0).ceil())
+}
+
+fn legend_run_width(run: &LegendRun, metrics: &LegendMetrics) -> f32 {
+    match run {
+        LegendRun::Text(text) if text.is_empty() => 0.0,
+        LegendRun::Text(text) => graphite::text_width(Face::Regular, metrics.label_px, text),
+        LegendRun::Keys { caps, caption } => {
+            if caps.is_empty() {
+                return 0.0;
+            }
+            let mut width = 0.0;
+            for (index, cap) in caps.iter().enumerate() {
+                if index > 0 {
+                    width += metrics.chip_gap;
+                }
+                width += legend_chip_width(cap, metrics);
+            }
+            if !caption.is_empty() {
+                width += metrics.caption_gap;
+                width += graphite::text_width(Face::Regular, metrics.label_px, caption);
+            }
+            width
+        }
+    }
+}
+
+/// Paint the one-row Graphite Ctrl+Shift keycap legend above the spaces rail.
+///
+/// Chips match the command-field keycap: mono text on `key`, a `key_line`
+/// outline, `key_text` ink. Labels stay the compact chord-strip spellings
+/// (`C-S-B`, `C-S-[`, `C-S-]`), so the focus-ring `[` and `]` keys are two
+/// chips beside the color caption and the bar-background chip is the next
+/// group. A group that does not fit is left off the row. The painter does
+/// not ellipsize through a chip.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn legend_keys(
+    chrome: ChromeGeom,
+    variant: ThemeVariant,
+    runs: &[LegendRun],
+    buffer: &mut [u32],
+    stride: usize,
+    bottom: usize,
+    rows: usize,
+    alpha: u8,
+) -> LegendPaint {
+    if stride == 0 || bottom == 0 || rows == 0 {
+        return LegendPaint {
+            chips: Vec::new(),
+            captions: Vec::new(),
+        };
+    }
+    let tok = graphite::tokens(variant);
+    let row_h = chrome.px(22.0).max(16);
+    let bar_h = row_h.saturating_mul(rows).min(bottom);
+    let y = bottom.saturating_sub(bar_h);
+    raster::fill_rect_argb(buffer, stride, 0, y, stride, bar_h, tok.status_bar, alpha);
+    graphite::fill_round_rect(
+        buffer,
+        stride,
+        Rect::new(0, y, stride, 1),
+        0.0,
+        tok.status_line,
+        255,
+    );
+    let metrics = legend_metrics(chrome, bar_h);
+    let key_y = y + bar_h.saturating_sub(metrics.key_h) / 2;
+    let limit = stride.saturating_sub(chrome.px(8.0)) as f32;
+    let mut pen = chrome.px(12.0) as f32;
+    let mut started = false;
+    let mut chips = Vec::new();
+    let mut captions = Vec::new();
+    for run in runs {
+        let width = legend_run_width(run, &metrics);
+        if width <= 0.0 {
+            continue;
+        }
+        let start = if started {
+            pen + metrics.group_gap
+        } else {
+            pen
+        };
+        if start + width > limit {
+            break;
+        }
+        match run {
+            LegendRun::Text(text) => {
+                draw_text(
+                    buffer,
+                    stride,
+                    Rect::new(start.round() as usize, y, width.ceil() as usize, bar_h),
+                    Face::Regular,
+                    metrics.label_px,
+                    text,
+                    tok.text,
+                    0,
+                    stride,
+                );
+            }
+            LegendRun::Keys { caps, caption } => {
+                let mut chip_pen = start;
+                for (index, cap) in caps.iter().enumerate() {
+                    if index > 0 {
+                        chip_pen += metrics.chip_gap;
+                    }
+                    let chip_w = legend_chip_width(cap, &metrics) as usize;
+                    let rect = Rect::new(chip_pen.round() as usize, key_y, chip_w, metrics.key_h);
+                    graphite::outlined_round_rect(
+                        buffer,
+                        stride,
+                        rect,
+                        metrics.radius,
+                        tok.key_line,
+                        tok.key,
+                    );
+                    let pad = metrics.pad.round() as usize;
+                    draw_text(
+                        buffer,
+                        stride,
+                        Rect::new(
+                            rect.x.saturating_add(pad),
+                            rect.y,
+                            rect.w.saturating_sub(pad),
+                            rect.h,
+                        ),
+                        Face::Mono,
+                        metrics.key_px,
+                        cap,
+                        tok.key_text,
+                        rect.x,
+                        rect.right(),
+                    );
+                    chips.push(LegendChip {
+                        rect,
+                        label: cap.clone(),
+                    });
+                    chip_pen += chip_w as f32;
+                }
+                if !caption.is_empty() {
+                    chip_pen += metrics.caption_gap;
+                    let caption_w = graphite::text_width(Face::Regular, metrics.label_px, caption);
+                    draw_text(
+                        buffer,
+                        stride,
+                        Rect::new(
+                            chip_pen.round() as usize,
+                            y,
+                            caption_w.ceil() as usize,
+                            bar_h,
+                        ),
+                        Face::Regular,
+                        metrics.label_px,
+                        caption,
+                        tok.text,
+                        0,
+                        stride,
+                    );
+                    captions.push(caption.clone());
+                }
+            }
+        }
+        pen = start + width;
+        started = true;
+    }
+    LegendPaint { chips, captions }
 }
 
 fn splash_ink(ink: [u8; 3], art: bool, variant: ThemeVariant, accent: graphite::Rgb) -> [u8; 3] {
@@ -1670,5 +1892,160 @@ mod tests {
             idle, light,
             "caption panel and text follow dark/light tokens"
         );
+    }
+
+    fn focus_and_bar_runs() -> Vec<LegendRun> {
+        vec![
+            LegendRun::Text("Prismattyc [1]".into()),
+            LegendRun::Keys {
+                caps: vec!["C-S-[".into(), "C-S-]".into()],
+                caption: "color".into(),
+            },
+            LegendRun::Keys {
+                caps: vec!["C-S-B".into()],
+                caption: "bars".into(),
+            },
+        ]
+    }
+
+    fn paint_legend(variant: ThemeVariant, stride: usize) -> (Vec<u32>, LegendPaint) {
+        let height = 48;
+        let mut buffer = vec![pack_argb(255, [255, 0, 0]); stride * height];
+        let paint = legend_keys(
+            graphite_chrome(),
+            variant,
+            &focus_and_bar_runs(),
+            &mut buffer,
+            stride,
+            height,
+            1,
+            255,
+        );
+        (buffer, paint)
+    }
+
+    #[test]
+    fn legend_keys_draw_focus_color_and_bar_keycaps() {
+        let stride = 2400;
+        let (buffer, paint) = paint_legend(ThemeVariant::Dark, stride);
+        let labels: Vec<&str> = paint.chips.iter().map(|chip| chip.label.as_str()).collect();
+        assert_eq!(labels, ["C-S-[", "C-S-]", "C-S-B"]);
+        assert_eq!(paint.captions, ["color", "bars"]);
+        let key = pack_argb(255, graphite::DARK.key);
+        let line = pack_argb(255, graphite::DARK.key_line);
+        let bar = pack_argb(255, graphite::DARK.status_bar);
+        for chip in &paint.chips {
+            assert!(chip.rect.right() <= stride, "chip stays inside the row");
+            let mid_y = chip.rect.y + chip.rect.h / 2;
+            assert_eq!(
+                buffer[mid_y * stride + chip.rect.x],
+                line,
+                "keycap {} keeps its outline",
+                chip.label
+            );
+            let fill = chip.rect.y.saturating_add(2)
+                ..chip.rect.y.saturating_add(chip.rect.h.saturating_sub(2));
+            let filled = fill
+                .map(|y| {
+                    (chip.rect.x.saturating_add(2)..chip.rect.right().saturating_sub(2))
+                        .filter(|x| buffer[y * stride + x] == key)
+                        .count()
+                })
+                .sum::<usize>();
+            assert!(
+                filled > chip.rect.w,
+                "keycap {} has a solid key fill",
+                chip.label
+            );
+        }
+        let left = &paint.chips[0].rect;
+        let right = &paint.chips[1].rect;
+        assert!(right.x > left.right(), "[ and ] are separate chips");
+        let gap_x = left.right() + (right.x - left.right()) / 2;
+        let gap_y = left.y + left.h / 2;
+        assert_eq!(
+            buffer[gap_y * stride + gap_x],
+            bar,
+            "the focus-color chips are separated by the legend bar"
+        );
+        let bars_index = paint
+            .chips
+            .iter()
+            .position(|chip| chip.label == "C-S-B")
+            .expect("bar chip");
+        assert!(paint.chips[bars_index].rect.x > right.right());
+
+        let (light, light_paint) = paint_legend(ThemeVariant::Light, stride);
+        assert_eq!(
+            light_paint
+                .chips
+                .iter()
+                .map(|chip| chip.label.as_str())
+                .collect::<Vec<_>>(),
+            ["C-S-[", "C-S-]", "C-S-B"]
+        );
+        let light_key = pack_argb(255, graphite::LIGHT.key);
+        let chip = &light_paint.chips[2];
+        let mid_y = chip.rect.y + chip.rect.h / 2;
+        assert_eq!(light[mid_y * stride + chip.rect.x + 2], light_key);
+    }
+
+    #[test]
+    fn legend_keys_drop_a_shortcut_that_does_not_fit() {
+        let expected = ["C-S-[", "C-S-]", "C-S-B"];
+        let mut saw_pair = false;
+        for stride in (40..900).step_by(5) {
+            let (buffer, paint) = paint_legend(ThemeVariant::Dark, stride);
+            let labels: Vec<&str> = paint.chips.iter().map(|chip| chip.label.as_str()).collect();
+            assert_eq!(
+                labels,
+                &expected[..labels.len()],
+                "clipped row keeps a prefix of whole shortcuts at width {stride}"
+            );
+            assert_ne!(
+                labels,
+                ["C-S-["],
+                "the focus-color pair is not split across the edge"
+            );
+            let key = pack_argb(255, graphite::DARK.key);
+            for (index, pixel) in buffer.iter().enumerate() {
+                if *pixel != key {
+                    continue;
+                }
+                let x = index % stride;
+                let y = index / stride;
+                assert!(
+                    paint.chips.iter().any(|chip| chip.rect.contains(x, y)),
+                    "key fill outside a chip at {x},{y} width {stride}"
+                );
+            }
+            if labels.len() >= 2 {
+                saw_pair = true;
+            }
+            if labels.len() == 3 {
+                break;
+            }
+        }
+        assert!(saw_pair, "a wider row shows both focus-color keycaps");
+    }
+
+    #[test]
+    fn legend_notice_does_not_draw_keycaps() {
+        let stride = 2400;
+        let height = 48;
+        let mut buffer = vec![pack_argb(255, [255, 0, 0]); stride * height];
+        legend(
+            graphite_chrome(),
+            ThemeVariant::Dark,
+            " Prismattyc [1] | C-S-[/] color | C-S-B bars | Alt+arrow",
+            &mut buffer,
+            stride,
+            height,
+            1,
+            255,
+        );
+        let key = pack_argb(255, graphite::DARK.key);
+        let line = pack_argb(255, graphite::DARK.key_line);
+        assert!(buffer.iter().all(|pixel| *pixel != key && *pixel != line));
     }
 }

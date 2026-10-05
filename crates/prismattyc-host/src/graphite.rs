@@ -1542,7 +1542,7 @@ fn round_rect_sd(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> 
 /// Anti-aliased `width`-pixel band just inside a rounded rectangle's edge.
 /// Only the edge strips are visited, so cost scales with the perimeter.
 #[allow(clippy::too_many_arguments)]
-fn stroke_round_rect(
+pub(crate) fn stroke_round_rect(
     buffer: &mut [u32],
     stride: usize,
     x0: f32,

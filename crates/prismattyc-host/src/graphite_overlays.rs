@@ -80,7 +80,17 @@ fn draw_panel(
             blur_radius: 0,
         },
     );
-    graphite::fill_round_rect(buffer, stride, panel, PALETTE_RADIUS, tok.hairline, 255);
+    graphite::stroke_round_rect(
+        buffer,
+        stride,
+        panel.x as f32,
+        panel.y as f32,
+        panel.right() as f32,
+        panel.y.saturating_add(panel.h) as f32,
+        PALETTE_RADIUS,
+        1.0,
+        tok.hairline,
+    );
     let inner = Rect::new(
         panel.x.saturating_add(1),
         panel.y.saturating_add(1),
@@ -925,6 +935,305 @@ pub(crate) fn legend(
     );
 }
 
+fn splash_ink(ink: [u8; 3], art: bool, variant: ThemeVariant, accent: graphite::Rgb) -> [u8; 3] {
+    let tok = graphite::tokens(variant);
+    if art {
+        return if ink == prismattyc_core::splash::INK {
+            tok.text_strong
+        } else {
+            ink
+        };
+    }
+    match ink {
+        crate::splash::DIM => tok.muted,
+        crate::splash::ACCENT | prismattyc_core::splash::LINK => accent,
+        prismattyc_core::splash::INK => tok.text_strong,
+        other => other,
+    }
+}
+
+fn splash_text(text: &str) -> &str {
+    if text == "⏎" {
+        "Enter"
+    } else {
+        text
+    }
+}
+
+fn splash_line_style(
+    page: crate::splash::Page,
+    line: usize,
+    art_rows: usize,
+    font: &FontMetrics,
+    chrome: ChromeGeom,
+) -> (Face, f32) {
+    if line < art_rows {
+        (Face::Mono, font.px)
+    } else if (page == crate::splash::Page::Main && line == art_rows + 1)
+        || (page != crate::splash::Page::Main && line == 0)
+    {
+        (Face::SemiBold, chrome.px(16.0).max(12) as f32)
+    } else {
+        (Face::Regular, chrome.px(13.0).max(10) as f32)
+    }
+}
+
+/// Paint the launch splash with Graphite ground, copy and chrome typography.
+/// The established monospace art painter keeps its flare placement and
+/// animation, while Graphite tokens make the fill readable in both variants.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn splash(
+    font: &FontMetrics,
+    chrome: ChromeGeom,
+    variant: ThemeVariant,
+    page: crate::splash::Page,
+    lines: &[Vec<crate::splash::Span>],
+    animation_ms: Option<u64>,
+    surface: OverlaySurface,
+    buffer: &mut [u32],
+    stride: usize,
+    height: usize,
+    focus_rgb: [u8; 3],
+) {
+    if stride == 0 || height == 0 || font.cell_h == 0 {
+        return;
+    }
+
+    let tok = graphite::tokens(variant);
+    let accent = graphite::accent(tok, focus_rgb);
+    raster::paint_overlay_surface_rounded(
+        buffer, stride, 0, 0, stride, height, 0.0, tok.ground, surface,
+    );
+
+    let art_rows = if page == crate::splash::Page::Main {
+        prismattyc_core::splash::ART.len()
+    } else {
+        0
+    };
+    let line_widths: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let (face, px) = splash_line_style(page, index, art_rows, font, chrome);
+            line.iter()
+                .map(|(text, _)| graphite::text_width(face, px, splash_text(text)))
+                .sum::<f32>()
+                .ceil() as usize
+        })
+        .collect();
+    let block_w = line_widths.iter().copied().max().unwrap_or(0).min(stride);
+    let line_h = font.cell_h.max(chrome.px(20.0));
+    let block_h = line_h.saturating_mul(lines.len()).min(height);
+    let x0 = stride.saturating_sub(block_w) / 2;
+    let y0 = height.saturating_sub(block_h) / 2;
+
+    for (index, line) in lines.iter().enumerate() {
+        if index < art_rows {
+            continue;
+        }
+        let row_y = y0.saturating_add(index.saturating_mul(line_h));
+        if row_y >= height {
+            break;
+        }
+        let (face, px) = splash_line_style(page, index, art_rows, font, chrome);
+        let center_y = row_y as f32 + line_h as f32 / 2.0;
+        let mut pen = x0 as f32;
+        for (text, ink) in line {
+            let text = splash_text(text);
+            pen = graphite::draw_text(
+                buffer,
+                stride,
+                pen,
+                center_y,
+                face,
+                px,
+                text,
+                splash_ink(*ink, index < art_rows, variant, accent),
+                x0,
+                stride,
+            );
+        }
+    }
+    if art_rows > 0 {
+        let art_lines: Vec<Vec<crate::splash::Span>> = lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                line.iter()
+                    .map(|(text, ink)| {
+                        (
+                            text.clone(),
+                            splash_ink(*ink, index < art_rows, variant, accent),
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        raster::rasterize_splash_art(font, &art_lines, buffer, stride, height, animation_ms);
+    }
+}
+
+/// Paint the walkthrough caption using the same rounded Graphite surface and
+/// tokens as the dialogs while retaining the classic caption's hit geometry.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn walkthrough_caption(
+    font: &FontMetrics,
+    chrome: ChromeGeom,
+    variant: ThemeVariant,
+    view: &crate::walkthrough::CaptionView,
+    band: crate::walkthrough::CaptionBand,
+    surface: OverlaySurface,
+    buffer: &mut [u32],
+    stride: usize,
+    focus_rgb: [u8; 3],
+    hovered: Option<crate::walkthrough::CaptionHit>,
+) {
+    if band.w == 0 || band.h == 0 || font.cell_w == 0 || font.cell_h == 0 {
+        return;
+    }
+
+    let caption_opacity = f32::from(crate::walkthrough::CAPTION_ALPHA) / 255.0;
+    draw_panel(
+        buffer,
+        stride,
+        Rect::new(band.x, band.y, band.w, band.h),
+        variant,
+        OverlaySurface {
+            opacity: surface.opacity * caption_opacity,
+            blur_radius: surface.blur_radius,
+        },
+    );
+
+    let tok = graphite::tokens(variant);
+    let accent = graphite::accent(tok, focus_rgb);
+    let px = chrome.px(12.0).max(10) as f32;
+    let small_px = chrome.px(10.5).max(9) as f32;
+    let pad_x = font.cell_w;
+    let pad_y = font.cell_h / 4 + 1;
+    let line1_y = band.y.saturating_add(pad_y);
+    let line2_y = line1_y.saturating_add(font.cell_h);
+    let line1_x = band.x.saturating_add(pad_x);
+    let line1_right = band.dismiss.x.saturating_sub(chrome.px(8.0));
+    if line1_right > line1_x {
+        let caption = graphite::ellipsize(
+            Face::SemiBold,
+            px,
+            &view.caption,
+            line1_right.saturating_sub(line1_x) as f32,
+        );
+        draw_text(
+            buffer,
+            stride,
+            Rect::new(line1_x, line1_y, line1_right - line1_x, font.cell_h),
+            Face::SemiBold,
+            px,
+            &caption,
+            tok.text_strong,
+            line1_x,
+            line1_right,
+        );
+    }
+
+    paint_caption_button(
+        buffer,
+        stride,
+        variant,
+        band.dismiss,
+        "×",
+        crate::walkthrough::CaptionHit::Dismiss,
+        hovered,
+        accent,
+        small_px,
+    );
+
+    let line2_right = band
+        .show_me
+        .or(band.skip)
+        .map(|rect| rect.x.saturating_sub(font.cell_w / 2))
+        .unwrap_or(band.x.saturating_add(band.w).saturating_sub(pad_x));
+    if line2_right > line1_x {
+        let line2 = graphite::ellipsize(
+            Face::Regular,
+            small_px,
+            &view.line2,
+            line2_right.saturating_sub(line1_x) as f32,
+        );
+        draw_text(
+            buffer,
+            stride,
+            Rect::new(line1_x, line2_y, line2_right - line1_x, font.cell_h),
+            Face::Regular,
+            small_px,
+            &line2,
+            tok.muted,
+            line1_x,
+            line2_right,
+        );
+    }
+    if let Some(rect) = band.show_me {
+        paint_caption_button(
+            buffer,
+            stride,
+            variant,
+            rect,
+            crate::walkthrough::SHOW_ME_LABEL,
+            crate::walkthrough::CaptionHit::ShowMe,
+            hovered,
+            accent,
+            small_px,
+        );
+    }
+    if let Some(rect) = band.skip {
+        paint_caption_button(
+            buffer,
+            stride,
+            variant,
+            rect,
+            crate::walkthrough::SKIP_LABEL,
+            crate::walkthrough::CaptionHit::Skip,
+            hovered,
+            accent,
+            small_px,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_caption_button(
+    buffer: &mut [u32],
+    stride: usize,
+    variant: ThemeVariant,
+    rect: crate::walkthrough::CaptionRect,
+    label: &str,
+    target: crate::walkthrough::CaptionHit,
+    hovered: Option<crate::walkthrough::CaptionHit>,
+    accent: graphite::Rgb,
+    px: f32,
+) {
+    let tok = graphite::tokens(variant);
+    let rect = Rect::new(rect.x, rect.y, rect.w, rect.h);
+    if hovered == Some(target) {
+        graphite::fill_round_rect(buffer, stride, rect, 4.0, tok.tab_hover, 255);
+    }
+    let color = if target == crate::walkthrough::CaptionHit::Dismiss {
+        tok.muted
+    } else {
+        accent
+    };
+    let label = graphite::ellipsize(Face::Regular, px, label, rect.w as f32);
+    draw_text(
+        buffer,
+        stride,
+        rect,
+        Face::Regular,
+        px,
+        &label,
+        color,
+        rect.x,
+        rect.right(),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1191,6 +1500,175 @@ mod tests {
         assert_ne!(
             themes[0], themes[1],
             "dark and light panels use their tokens"
+        );
+    }
+
+    #[test]
+    fn splash_uses_graphite_tokens_and_blends_the_ground() {
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let chrome = graphite_chrome();
+        let page = crate::splash::Page::Main;
+        let animation_ms = prismattyc_core::splash::SETTLED_MS + 2_000;
+        let lines = crate::splash::layout_with_resume(page, "0.3.0", 0, Some(animation_ms), false);
+        let (width, height) = (1100, 640);
+        let backdrop = [180, 42, 76];
+        let mut dark = vec![pack_argb(255, backdrop); width * height];
+        splash(
+            &font,
+            chrome,
+            ThemeVariant::Dark,
+            page,
+            &lines,
+            Some(animation_ms),
+            OverlaySurface {
+                opacity: 0.72,
+                blur_radius: 0,
+            },
+            &mut dark,
+            width,
+            height,
+            [98, 168, 255],
+        );
+        assert_ne!(dark[0], pack_argb(255, backdrop));
+
+        let mut light = vec![pack_argb(255, backdrop); width * height];
+        splash(
+            &font,
+            chrome,
+            ThemeVariant::Light,
+            page,
+            &lines,
+            None,
+            OverlaySurface::default(),
+            &mut light,
+            width,
+            height,
+            [98, 168, 255],
+        );
+        assert_ne!(
+            dark[0], light[0],
+            "Graphite variants use different ground tokens"
+        );
+        assert_ne!(dark, light, "splash text and background follow the variant");
+
+        let mut later = vec![pack_argb(255, backdrop); width * height];
+        splash(
+            &font,
+            chrome,
+            ThemeVariant::Dark,
+            page,
+            &lines,
+            Some(animation_ms + 1_500),
+            OverlaySurface {
+                opacity: 0.72,
+                blur_radius: 0,
+            },
+            &mut later,
+            width,
+            height,
+            [98, 168, 255],
+        );
+        assert!(
+            dark.iter().zip(&later).any(|(early, late)| early != late),
+            "the Graphite flare responds to the splash clock"
+        );
+    }
+
+    #[test]
+    fn walkthrough_caption_uses_graphite_surface_and_hover_treatment() {
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let chrome = graphite_chrome();
+        let view = crate::walkthrough::CaptionView {
+            caption: "Open the command palette".into(),
+            line2: "Ctrl+Shift+P".into(),
+            show_me: true,
+            skip: true,
+        };
+        let band = crate::walkthrough::caption_band(
+            (100, 100, 900, 500),
+            font.cell_w,
+            font.cell_h,
+            chrome.px(8.0),
+            &view,
+        )
+        .expect("caption band fits");
+        let (width, height) = (1200, 800);
+        let backdrop = pack_argb(255, [180, 42, 76]);
+        let mut idle = vec![backdrop; width * height];
+        walkthrough_caption(
+            &font,
+            chrome,
+            ThemeVariant::Dark,
+            &view,
+            band,
+            OverlaySurface {
+                opacity: 0.76,
+                blur_radius: 0,
+            },
+            &mut idle,
+            width,
+            [98, 168, 255],
+            None,
+        );
+        let panel_center = (band.y + band.h / 2) * width + band.x + band.w / 2;
+        let surface_opacity = 0.76 * f32::from(crate::walkthrough::CAPTION_ALPHA) / 255.0;
+        let shadow_rgb = raster::mix_rgb(
+            [180, 42, 76],
+            [0, 0, 0],
+            raster::opacity_to_weight(surface_opacity * 0.22),
+        );
+        let expected_panel = raster::mix_rgb(
+            shadow_rgb,
+            panel_color(ThemeVariant::Dark),
+            raster::opacity_to_weight(surface_opacity),
+        );
+        assert_eq!(
+            idle[panel_center],
+            pack_argb(255, expected_panel),
+            "the translucent caption blends over its existing surface"
+        );
+
+        let mut hovered = vec![backdrop; width * height];
+        walkthrough_caption(
+            &font,
+            chrome,
+            ThemeVariant::Dark,
+            &view,
+            band,
+            OverlaySurface {
+                opacity: 0.76,
+                blur_radius: 0,
+            },
+            &mut hovered,
+            width,
+            [98, 168, 255],
+            Some(crate::walkthrough::CaptionHit::Skip),
+        );
+        assert_ne!(
+            idle, hovered,
+            "hovering a clickable caption control is visible"
+        );
+
+        let mut light = vec![backdrop; width * height];
+        walkthrough_caption(
+            &font,
+            chrome,
+            ThemeVariant::Light,
+            &view,
+            band,
+            OverlaySurface::default(),
+            &mut light,
+            width,
+            [98, 168, 255],
+            None,
+        );
+        assert_ne!(
+            idle, light,
+            "caption panel and text follow dark/light tokens"
         );
     }
 }

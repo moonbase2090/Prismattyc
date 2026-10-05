@@ -190,8 +190,8 @@ pub fn key_action(page: Page, key: &Key, modifiers: ModifiersState) -> Option<Ac
 /// One styled run of text on a splash line.
 pub type Span = (String, [u8; 3]);
 
-const DIM: [u8; 3] = [0x80, 0x80, 0x80];
-const ACCENT: [u8; 3] = [0x50, 0xc8, 0xff];
+pub(crate) const DIM: [u8; 3] = [0x80, 0x80, 0x80];
+pub(crate) const ACCENT: [u8; 3] = [0x50, 0xc8, 0xff];
 
 /// Build the visible lines for a page as styled spans. Art rows come from
 /// the attract-mode animation at `Some(elapsed_ms)`, or the static art for

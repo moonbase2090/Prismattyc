@@ -36,7 +36,9 @@ menu to opt out. The app menu's manual check works regardless of this setting.
 The classic `prismattyc` binary does not
 read this file. `chrome_style` defaults to `graphite`. Leave that key
 commented, or omit it, to follow the app default. `chrome_style = "classic"`
-keeps the previous chrome and applies live.
+keeps the previous chrome and applies live. `theme` defaults to `prismattyc`
+(follow the system appearance). Leave that key commented, or omit it, to
+follow the app default.
 
 ## Keys
 
@@ -45,8 +47,8 @@ keeps the previous chrome and applies live.
 # Edit in place. CLI flags and PRISMATTYC_* env vars still win.
 
 # -- appearance / theme --
-# Named theme: built-in slug, display name, sibling themes/ file, or absolute TOML path. theme slug or absolute path.
-theme = "prismattyc"
+# Named theme: built-in slug, display name, sibling themes/ file, or absolute TOML path. Omit this key to follow the app default (prismattyc). theme slug or absolute path.
+# theme = "prismattyc"
 # Render timings and counters. off|osd|log|both.
 render_timer = "off"
 # Log every render frame when render_timer includes log; use for benches only. true|false.

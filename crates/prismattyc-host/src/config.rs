@@ -74,14 +74,14 @@ pub enum TabStripMode {
     Multi,
 }
 
-/// Host chrome look (#104). `classic` (default) keeps the original chrome;
-/// `graphite` opts into the Graphite tabs bar, pane title rows, and spaces
-/// bar while the redesign lands behind this setting.
+/// Host chrome look (#104, #114). `graphite` (default) is the tabs bar, pane
+/// title rows, and spaces bar. `classic` keeps the original chrome and stays
+/// selectable.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChromeStyle {
-    #[default]
     Classic,
+    #[default]
     Graphite,
 }
 
@@ -128,7 +128,9 @@ pub struct ConfigFile {
     /// Multi-pane title row: `focused` (default) or `hover`. Sibling of
     /// `tab_strip` because TOML cannot nest a table under `tab_strip = "auto"`.
     pub pane_titles: Option<PaneTitlesMode>,
-    /// Host chrome look: `classic` (default) or `graphite`. Hot-reloaded.
+    /// Host chrome look: `graphite` (default) or `classic`. Hot-reloaded.
+    /// A missing key follows this default, so a later flip reaches installs
+    /// that did not pin the key.
     pub chrome_style: Option<ChromeStyle>,
     /// Graphite bar background: `graphite` (default), `harbor`, `moss`, or
     /// `plum` (Sand on light themes). Only read for `graphite` chrome.
@@ -1124,10 +1126,12 @@ mod tests {
         );
         assert!(!ConfigFile::default().window_blur());
         assert_eq!(ConfigFile::default().hover_blend(), DEFAULT_HOVER_BLEND);
-        assert_eq!(ConfigFile::default().chrome_style(), ChromeStyle::Classic);
+        assert_eq!(ConfigFile::default().chrome_style(), ChromeStyle::Graphite);
         assert_eq!(ConfigFile::default().pane_titles(), PaneTitlesMode::Focused);
         std::fs::write(&path, "pane_titles = \"hover\"\n").unwrap();
         assert_eq!(load(&path).unwrap().pane_titles(), PaneTitlesMode::Hover);
+        std::fs::write(&path, "chrome_style = \"classic\"\n").unwrap();
+        assert_eq!(load(&path).unwrap().chrome_style(), ChromeStyle::Classic);
         std::fs::write(&path, "chrome_style = \"graphite\"\n").unwrap();
         assert_eq!(load(&path).unwrap().chrome_style(), ChromeStyle::Graphite);
         assert_eq!(ConfigFile::default().layout(), LayoutMode::Bars);

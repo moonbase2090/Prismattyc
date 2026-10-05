@@ -43,7 +43,7 @@
 //! pmux stop                     ShutdownServer, then TERM/KILL fallback
 //! pmux --session NAME stop      destroy one session; server stays up
 //! pmux restart [--host|--daemon|--mcp|--all]  cooperative component restart
-//! pmux update [--check|--rollback]  install verified release artifacts
+//! pmux update [--check|--rollback|--pre]  install verified release artifacts
 //! pmux completions <shell>      emit bash/zsh/fish completions
 //! ```
 //!
@@ -179,7 +179,7 @@ session
     skills install [--agent codex|claude|cursor|muse|kiro|detected|all]
         [--check] [--force]         install the pmux agent skill
     config init [--merge]         write [mux] keys into config.toml
-    update [--check|--rollback]  install verified GitHub release artifacts
+    update [--check|--rollback|--pre]  install verified GitHub release artifacts
     completions <bash|zsh|fish>   print shell completion script
 
 tab
@@ -764,7 +764,7 @@ _prismattyc_mux() {
     arrange) COMPREPLY=( $(compgen -W "main-vertical main-horizontal even-h even-v grid" -- "$cur") ); return ;;
     stop|kick|doctor) COMPREPLY=( $(compgen -W "--session" -- "$cur") ); return ;;
     restart) COMPREPLY=( $(compgen -W "--all --host --daemon --mcp --plan --stop-sessions --json --help" -- "$cur") ); return ;;
-    update) COMPREPLY=( $(compgen -W "--check --rollback --bin-dir --json --source --host --mux --all --help" -- "$cur") ); return ;;
+    update) COMPREPLY=( $(compgen -W "--check --rollback --pre --bin-dir --json --source --host --mux --all --help" -- "$cur") ); return ;;
   esac
   if [[ "$cur" == -* ]]; then
     COMPREPLY=( $(compgen -W "--instance --socket --session --help" -- "$cur") )
@@ -832,7 +832,7 @@ case $state in
       join-pane) _arguments '--to[Window id]:id:' '-h' '-v' '1:pane:' ;;
       arrange) _arguments '1:session:' '2:kind:(main-vertical main-horizontal even-h even-v grid)' ;;
       restart) _arguments '--all' '--host' '--daemon' '--mcp' '--plan' '--stop-sessions' '--json' '--help' ;;
-      update) _arguments '--check' '--rollback' '--bin-dir[Install directory]:directory:_files -/' '--json' '--source' '--host' '--mux' '--all' '--help' ;;
+      update) _arguments '--check' '--rollback' '--pre' '--bin-dir[Install directory]:directory:_files -/' '--json' '--source' '--host' '--mux' '--all' '--help' ;;
     esac
     ;;
 esac

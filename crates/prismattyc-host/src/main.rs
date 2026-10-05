@@ -21931,6 +21931,43 @@ session mail (id 15)
         cli.focus_border_pinned = false;
     }
 
+    /// #114: classic still loads from a config file and still paints the
+    /// pre-Graphite frame. An omitted key follows the Graphite default.
+    #[test]
+    fn classic_config_still_loads_and_renders_the_pre_graphite_frame() {
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let path = std::env::temp_dir().join(format!(
+            "prismattyc-classic-style-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&path, "chrome_style = \"classic\"\n").unwrap();
+        let loaded = config::load(&path).expect("classic config loads");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(loaded.chrome_style(), config::ChromeStyle::Classic);
+        let geom = host_geom(&font, true, true, true, PaneSpacing::from(&loaded), 10);
+        assert_eq!(geom.chrome, mux::ChromeGeom::CLASSIC);
+        assert!(!geom.chrome.graphite);
+        assert_eq!(geom.top_chrome_px, font.cell_h * 2);
+        let omitted = host_geom(
+            &font,
+            true,
+            true,
+            true,
+            PaneSpacing::from(&config::ConfigFile::default()),
+            10,
+        );
+        assert!(
+            omitted.chrome.graphite,
+            "an omitted chrome_style renders Graphite"
+        );
+    }
+
     /// #104: classic geometry is independent of the Graphite fields, and
     /// Graphite adds its bar, title row, spacing, and spaces bar.
     #[test]

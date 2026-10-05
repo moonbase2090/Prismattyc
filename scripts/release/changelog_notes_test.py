@@ -66,7 +66,21 @@ class ChangelogNotesTests(unittest.TestCase):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("scripts/release/changelog_notes.py CHANGELOG.md", text)
         self.assertIn("--notes-file release-notes.md", text)
+        self.assertIn("--prerelease --latest=false", text)
         self.assertNotIn('args=(release create "$RELEASE_TAG" --repo', text)
+
+    def test_script_prints_the_rc_escape_hatch(self):
+        result = subprocess.run(
+            ["python3", str(SCRIPT), str(CHANGELOG), "0.3.0-rc.1"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('chrome_style = "classic"', result.stdout)
+        self.assertIn("0.2.30", result.stdout)
+        self.assertIn("--latest=false", result.stdout)
+        self.assertNotIn("## [0.2.30]", result.stdout)
 
 
 if __name__ == "__main__":

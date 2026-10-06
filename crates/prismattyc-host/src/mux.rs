@@ -1227,6 +1227,15 @@ impl PaneRuntime {
                         self.selection.clear();
                         self.keyboard_select_mode = false;
                     }
+                    if self.attention.is_some() {
+                        if let Some(message) = self.emulator.take_pending_attention() {
+                            self.attention = Some(message);
+                        } else {
+                            // Later PTY output without a new attention OSC means the
+                            // agent moved on (issue #184).
+                            self.attention = None;
+                        }
+                    }
                     dirty = true;
                     if i + 1 == MAX_PTY_DRAIN_PER_PANE {
                         more = true;

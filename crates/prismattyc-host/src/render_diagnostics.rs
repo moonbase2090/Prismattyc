@@ -289,6 +289,8 @@ impl App {
                     "target": host.context_menu_target.map(|target| match target {
                         super::ContextMenuTarget::SpaceChip(_) => "space",
                         super::ContextMenuTarget::Pane(_) => "pane",
+                        super::ContextMenuTarget::RailSpace(_) => "rail-space",
+                        super::ContextMenuTarget::RailSession(_) => "rail-session",
                     }),
                 })),
                 "space_session_names": host.space_rail.live_pane_names,

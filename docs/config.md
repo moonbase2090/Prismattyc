@@ -400,6 +400,8 @@ theme_picker = "ctrl+shift+,"
 # move_pane_to_space = []
 # focus and reorder saved spaces.
 # space_rail_focus = []
+# open the sidebar or vertical-rail context menu for the focused row.
+# space_rail_context_menu = []
 # choose rail position, autosave, and startup behavior.
 # space_settings = []
 # undo the last session removal or move.
@@ -943,6 +945,7 @@ Keyboard (palette actions, unbound by default; bind them under `[keys]`):
 | Action | Effect |
 |---|---|
 | `space_rail_focus` | move focus to the rail: ←/→ (↑/↓ on a side rail) or Tab step over the chips and `+`, Enter opens (or creates a fresh Space on `+`), F2 renames, Delete asks, Esc returns to the pane |
+| `space_rail_context_menu` | open the same menu as right-click on a space or session row in the sidebar or vertical rail; Menu or Shift+F10 while the rail is focused also works |
 | `space_rail_next` / `space_rail_prev` | open the neighbour of the current space, wrapping |
 | `save_space` | save the current Space arrangement |
 | `open_space` / `delete_space` | the filtered pickers over the same files |

@@ -708,6 +708,10 @@ pub enum SpacePickerVerdict {
 pub enum ContextMenuKind {
     SpaceChip,
     Pane,
+    /// Sidebar / vertical-rail space row (issue #181).
+    RailSpace,
+    /// Sidebar session or pane row (issue #181).
+    RailSession,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1417,6 +1421,7 @@ mod tests {
             names(&view.matches),
             vec![
                 "space_rail_focus",
+                "space_rail_context_menu",
                 "space_settings",
                 "space_rail_next",
                 "space_rail_prev",
@@ -1842,7 +1847,12 @@ mod tests {
 
     #[test]
     fn context_menus_wrap_consume_modifiers_and_confirm_for_both_targets() {
-        for kind in [ContextMenuKind::SpaceChip, ContextMenuKind::Pane] {
+        for kind in [
+            ContextMenuKind::SpaceChip,
+            ContextMenuKind::Pane,
+            ContextMenuKind::RailSpace,
+            ContextMenuKind::RailSession,
+        ] {
             let mut menu = ContextMenu::new(kind);
             assert_eq!(
                 menu.key(&Key::Named(NamedKey::ArrowUp), empty_mods(), 3),

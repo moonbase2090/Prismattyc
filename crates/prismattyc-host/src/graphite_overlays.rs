@@ -2583,4 +2583,60 @@ mod tests {
         let line = pack_argb(255, graphite::DARK.key_line);
         assert!(buffer.iter().all(|pixel| *pixel != key && *pixel != line));
     }
+
+    #[test]
+    fn rail_context_menu_rows_paint_like_other_graphite_menus() {
+        use crate::palette::{ContextMenuKind, PaletteRow};
+        use crate::rail_context_menu;
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let chrome = graphite_chrome();
+        let rows: Vec<PaletteRow> = (0..rail_context_menu::RAIL_SPACE_ROWS)
+            .filter_map(|index| {
+                rail_context_menu::space_label(index).map(|(label, describe)| {
+                    PaletteRow::plain(label.to_string(), describe.to_string(), String::new())
+                })
+            })
+            .collect();
+        assert_eq!(rows.len(), rail_context_menu::RAIL_SPACE_ROWS);
+        assert_eq!(rows[4].name, "Close space…");
+        let sections = [crate::raster::PaletteSection {
+            header: "cairn · space",
+            subtitle: "",
+            rows: &rows,
+        }];
+        let frame = PaletteFrame {
+            layout_mode: PaletteLayoutMode::FixedHeight,
+            query: None,
+            query_focused: false,
+            chips: None,
+            sections: &sections,
+            selected: 0,
+            scroll: 0,
+            detail: None,
+            footer: "Enter activate · Esc close",
+        };
+        let width = 640;
+        let height = 400;
+        let mut buffer = vec![pack_argb(255, [16, 18, 22]); width * height];
+        let layout = palette(
+            &font,
+            &graphite::DARK,
+            chrome,
+            [98, 168, 255],
+            &frame,
+            OverlaySurface::default(),
+            &mut buffer,
+            width,
+            height,
+            None,
+            Some((24, 40)),
+        )
+        .expect("rail context menu");
+        assert!(
+            layout.rows.len() >= rail_context_menu::row_count(ContextMenuKind::RailSpace).unwrap(),
+            "every rail space action is painted"
+        );
+    }
 }

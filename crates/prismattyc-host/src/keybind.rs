@@ -128,6 +128,8 @@ pub enum Action {
     MovePaneToSpace,
     /// Move keyboard focus onto the spaces rail (PT-91). Unbound by default.
     SpaceRailFocus,
+    /// Open the rail context menu for the focused chip or sidebar row (#181).
+    SpaceRailContextMenu,
     SpaceSettings,
     UndoSpaceChange,
     /// Open the space after the current one in the rail (PT-91). Unbound.
@@ -233,6 +235,7 @@ impl Action {
             Action::DeleteSpace,
             Action::MovePaneToSpace,
             Action::SpaceRailFocus,
+            Action::SpaceRailContextMenu,
             Action::SpaceSettings,
             Action::UndoSpaceChange,
             Action::SpaceRailNext,
@@ -325,6 +328,7 @@ impl Action {
             Action::DeleteSpace => "delete_space".into(),
             Action::MovePaneToSpace => "move_pane_to_space".into(),
             Action::SpaceRailFocus => "space_rail_focus".into(),
+            Action::SpaceRailContextMenu => "space_rail_context_menu".into(),
             Action::SpaceSettings => "space_settings".into(),
             Action::UndoSpaceChange => "undo_space_change".into(),
             Action::SpaceRailNext => "space_rail_next".into(),
@@ -439,6 +443,7 @@ impl Action {
             Action::DeleteSpace => "delete a saved space".into(),
             Action::MovePaneToSpace => "move the focused pane to another saved space".into(),
             Action::SpaceRailFocus => "focus and reorder saved spaces".into(),
+            Action::SpaceRailContextMenu => "open the spaces rail context menu".into(),
             Action::SpaceSettings => "choose rail position, autosave, and startup behavior".into(),
             Action::UndoSpaceChange => "undo the last session removal or move".into(),
             Action::SpaceRailNext => "open the next saved space".into(),
@@ -557,6 +562,7 @@ impl Action {
             | Action::DeleteSpace
             | Action::MovePaneToSpace
             | Action::SpaceRailFocus
+            | Action::SpaceRailContextMenu
             | Action::SpaceSettings
             | Action::UndoSpaceChange
             | Action::SpaceRailNext
@@ -628,6 +634,9 @@ impl Action {
             }
             Action::SpaceRailFocus => {
                 Some("Arrows move; when space_reorder is enabled, Shift+arrows reorder. Enter opens, F2 renames, Delete asks, Esc returns to the pane.")
+            }
+            Action::SpaceRailContextMenu => {
+                Some("Same menu as right-click on a space or session row. Menu or Shift+F10 while the rail is focused.")
             }
             Action::SpaceRailNext | Action::SpaceRailPrev => {
                 Some("Wraps around the rail; the chip becomes current.")
@@ -1281,7 +1290,10 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         Action::RotatePanesBack => vec![],
         Action::FocusLastPane => vec![],
         Action::LastTab => vec![],
-        Action::SpaceRailFocus | Action::SpaceSettings | Action::UndoSpaceChange => vec![],
+        Action::SpaceRailFocus
+        | Action::SpaceRailContextMenu
+        | Action::SpaceSettings
+        | Action::UndoSpaceChange => vec![],
         Action::SpaceRailNext => vec![],
         Action::SpaceRailPrev => vec![],
         Action::SaveSpace => vec![],

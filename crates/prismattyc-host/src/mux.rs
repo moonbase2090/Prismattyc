@@ -2185,6 +2185,63 @@ impl MuxRuntime {
             .collect()
     }
 
+    /// Per-pane agent-attention flags, aligned with [`Self::tab_pane_mail`].
+    pub(crate) fn tab_pane_attention(&self) -> Vec<Vec<bool>> {
+        self.window_ids()
+            .into_iter()
+            .map(|window| {
+                self.domain
+                    .window(window)
+                    .map(|win| win.layout.panes())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|pane| {
+                        self.panes
+                            .get(pane)
+                            .is_some_and(|runtime| runtime.attention.is_some())
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Panes with agent attention in tab order, then layout pane order.
+    pub(crate) fn attention_panes_in_order(&self) -> Vec<PaneId> {
+        let mut out = Vec::new();
+        for window in self.window_ids() {
+            let panes = self
+                .domain
+                .window(window)
+                .map(|win| win.layout.panes())
+                .unwrap_or_default();
+            for pane in panes {
+                if self
+                    .panes
+                    .get(&pane)
+                    .is_some_and(|runtime| runtime.attention.is_some())
+                {
+                    out.push(pane);
+                }
+            }
+        }
+        out
+    }
+
+    /// Focus the next pane that needs attention, wrapping after the current
+    /// focus. Returns false when none need attention.
+    pub(crate) fn focus_next_attention_pane(&mut self) -> bool {
+        let order = self.attention_panes_in_order();
+        let Some(next) = order
+            .iter()
+            .position(|pane| *pane == self.focused_id())
+            .and_then(|index| order.get(index + 1).or(order.first()))
+            .or(order.first())
+        else {
+            return false;
+        };
+        self.focus(*next)
+    }
+
     pub(crate) fn tab_infos(&self) -> Vec<TabInfo> {
         let active = self.active_window();
         self.window_ids()
@@ -5670,6 +5727,39 @@ mod tests {
             assert_eq!(panes.len(), n);
             assert!(panes.iter().all(|&depth| depth == 0));
         }
+    }
+
+    #[test]
+    fn tab_pane_attention_aligns_with_tab_infos() {
+        let runtime = spawn_n_panes(2, 80, 24);
+        let infos = runtime.tab_infos();
+        let attention = runtime.tab_pane_attention();
+        assert_eq!(attention.len(), infos.len());
+        for (info, panes) in infos.iter().zip(attention.iter()) {
+            let n = if info.handles == 0 { 1 } else { info.handles };
+            assert_eq!(panes.len(), n);
+            assert!(panes.iter().all(|flag| !*flag));
+        }
+    }
+
+    #[test]
+    fn focus_next_attention_pane_cycles_layout_order() {
+        let mut runtime = MuxRuntime::spawn("/bin/cat", &[], 80, 24).unwrap();
+        let first = runtime.focused_id();
+        let second = runtime
+            .split_focused("/bin/cat", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        runtime.focus(first);
+        for pane in [second, first] {
+            runtime.panes.get_mut(&pane).unwrap().attention = Some("needs input".to_string());
+        }
+        assert!(runtime.focus_next_attention_pane());
+        assert_eq!(runtime.focused_id(), second);
+        assert!(runtime.panes[&second].attention.is_none());
+        assert!(runtime.focus_next_attention_pane());
+        assert_eq!(runtime.focused_id(), first);
+        assert!(runtime.panes[&first].attention.is_none());
+        assert!(!runtime.focus_next_attention_pane());
     }
 
     #[test]

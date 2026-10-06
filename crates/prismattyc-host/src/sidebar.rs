@@ -15,6 +15,8 @@ pub struct PaneNode {
     pub active: bool,
     /// Waiting mail count (the mail badge).
     pub mail: u32,
+    /// Agent attention is waiting on this pane.
+    pub attention: bool,
 }
 
 /// One tab row with its panes.
@@ -44,6 +46,7 @@ pub struct SpaceNode {
 pub struct LiveTab<'a> {
     pub info: &'a TabInfo,
     pub mail: &'a [u32],
+    pub attention: &'a [bool],
 }
 
 /// Tabs for one space: live info for the attached space, saved file content
@@ -73,9 +76,9 @@ pub struct SidebarTree {
 }
 
 impl TabNode {
-    /// Live tab from the attached space; `mail` holds per-pane waiting
-    /// counts aligned with the layout panes (empty means none).
-    pub fn live(info: &TabInfo, mail: &[u32]) -> Self {
+    /// Live tab from the attached space; `mail` and `attention` align with
+    /// layout panes (empty means none / false).
+    pub fn live(info: &TabInfo, mail: &[u32], attention: &[bool]) -> Self {
         let panes = if info.handles == 0 {
             vec![PaneNode {
                 title: info
@@ -85,6 +88,7 @@ impl TabNode {
                 focused: info.selected,
                 active: info.active,
                 mail: mail.first().copied().unwrap_or(0),
+                attention: attention.first().copied().unwrap_or(false),
             }]
         } else {
             info.handle_titles
@@ -95,6 +99,7 @@ impl TabNode {
                     focused: info.focused_handle == Some(index),
                     active: info.handle_active.get(index).copied().unwrap_or(false),
                     mail: mail.get(index).copied().unwrap_or(0),
+                    attention: attention.get(index).copied().unwrap_or(false),
                 })
                 .collect()
         };
@@ -123,6 +128,7 @@ impl TabNode {
                     focused: false,
                     active: false,
                     mail: 0,
+                    attention: false,
                 })
                 .collect(),
         }
@@ -138,7 +144,7 @@ pub fn session_row_selected(current_space: bool, pane_focused: bool) -> bool {
 
 /// Titles in the same order as the pane rows [`TabNode::live`] builds.
 pub fn session_titles(info: &TabInfo) -> Vec<String> {
-    TabNode::live(info, &[])
+    TabNode::live(info, &[], &[])
         .panes
         .into_iter()
         .map(|pane| pane.title)
@@ -277,6 +283,27 @@ pub fn icon_rows(tree: &SidebarTree) -> Vec<TreeRow> {
     rows
 }
 
+/// Needs-you badge weight for one flattened tree row (0 hides the marker).
+pub fn row_needs_you(tree: &SidebarTree, row: &TreeRow) -> usize {
+    let space = tree.spaces.get(row.space);
+    match (space, row.kind) {
+        (Some(space), RowKind::Space) => space.attention,
+        (Some(space), RowKind::Tab) => {
+            let tab = row.tab.and_then(|index| space.tabs.get(index));
+            tab.map(|tab| usize::from(tab.attention || tab.panes.iter().any(|pane| pane.attention)))
+                .unwrap_or(0)
+        }
+        (Some(space), RowKind::Pane) => {
+            let tab = row.tab.and_then(|index| space.tabs.get(index));
+            let pane = row
+                .pane
+                .and_then(|index| tab.and_then(|tab| tab.panes.get(index)));
+            usize::from(pane.is_some_and(|pane| pane.attention))
+        }
+        _ => 0,
+    }
+}
+
 impl SidebarTree {
     /// Build the tree in rail order. Saved spaces with no recorded tabs
     /// show one tab per session.
@@ -286,7 +313,7 @@ impl SidebarTree {
             let tabs = match &space.tabs {
                 TabsSource::Live(tabs) => tabs
                     .iter()
-                    .map(|tab| TabNode::live(tab.info, tab.mail))
+                    .map(|tab| TabNode::live(tab.info, tab.mail, tab.attention))
                     .collect(),
                 TabsSource::Saved {
                     tabs,
@@ -348,7 +375,7 @@ mod tests {
 
     #[test]
     fn live_tabs_expand_handles_with_focus_and_activity() {
-        let infos = vec![
+        let infos = [
             live_tab(
                 "grid",
                 true,
@@ -358,10 +385,16 @@ mod tests {
             live_tab("notes", false, vec![], None),
         ];
         let mails: Vec<Vec<u32>> = vec![vec![0, 3], vec![]];
+        let attentions: Vec<Vec<bool>> = vec![vec![false, true], vec![]];
         let tabs: Vec<LiveTab<'_>> = infos
             .iter()
             .zip(mails.iter())
-            .map(|(info, mail)| LiveTab { info, mail })
+            .zip(attentions.iter())
+            .map(|((info, mail), attention)| LiveTab {
+                info,
+                mail,
+                attention,
+            })
             .collect();
         let tree = SidebarTree::build(&[SpaceInput {
             name: "lab",
@@ -381,6 +414,8 @@ mod tests {
         assert!(grid.panes[1].focused && !grid.panes[1].active);
         assert_eq!(grid.panes[0].mail, 0);
         assert_eq!(grid.panes[1].mail, 3, "waiting mail rides the pane");
+        assert!(grid.panes[1].attention);
+        assert!(!grid.panes[0].attention);
         // A single-pane tab shows its own title as the one pane.
         let notes = &space.tabs[1];
         assert_eq!(notes.panes.len(), 1);
@@ -508,6 +543,46 @@ mod tests {
                 .all(|row| row.kind != RowKind::Pane),
             "closing back to one pane removes pane rows"
         );
+    }
+
+    #[test]
+    fn row_needs_you_marks_space_tab_and_pane_rows() {
+        let tree = SidebarTree {
+            spaces: vec![SpaceNode {
+                name: "lab".to_string(),
+                current: true,
+                collapsed: false,
+                attention: 2,
+                tabs: vec![TabNode {
+                    title: "grid".to_string(),
+                    selected: true,
+                    unseen: false,
+                    attention: true,
+                    zoomed: false,
+                    panes: vec![
+                        PaneNode {
+                            title: "a".into(),
+                            focused: false,
+                            active: false,
+                            mail: 0,
+                            attention: false,
+                        },
+                        PaneNode {
+                            title: "b".into(),
+                            focused: true,
+                            active: false,
+                            mail: 0,
+                            attention: true,
+                        },
+                    ],
+                }],
+            }],
+        };
+        let rows = visible_rows(&tree);
+        assert_eq!(row_needs_you(&tree, &rows[0]), 2);
+        assert_eq!(row_needs_you(&tree, &rows[1]), 1);
+        assert_eq!(row_needs_you(&tree, &rows[2]), 0);
+        assert_eq!(row_needs_you(&tree, &rows[3]), 1);
     }
 
     #[test]

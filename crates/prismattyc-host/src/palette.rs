@@ -1434,6 +1434,7 @@ mod tests {
                 "move_pane_to_space",
                 "undo_space_change",
                 "save_space",
+                "jump_needs_you",
                 "terminal_switcher"
             ]
         );

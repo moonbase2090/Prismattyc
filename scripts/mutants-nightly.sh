@@ -20,21 +20,23 @@ fi
 export PATH="${HOME}/.cargo/bin:${PATH}"
 
 in_diff_file="${MUTANTS_IN_DIFF_FILE:-}"
+shard="${MUTANTS_SHARD:-0/1}"
+if [[ ! "$shard" =~ ^([0-9]+)/([1-9][0-9]*)$ ]]; then
+  echo "error: MUTANTS_SHARD must have the form k/N, got '$shard'" >&2
+  exit 2
+fi
+shard_index="${BASH_REMATCH[1]}"
+shard_count="${BASH_REMATCH[2]}"
+if (( shard_index >= shard_count )); then
+  echo "error: shard index $shard_index must be less than $shard_count" >&2
+  exit 2
+fi
+
 if [ -n "$in_diff_file" ]; then
-  shard="in-diff"
+  shard_label="in-diff (${shard})"
   out="build/mutants/in-diff"
 else
-  shard="${MUTANTS_SHARD:-0/1}"
-  if [[ ! "$shard" =~ ^([0-9]+)/([1-9][0-9]*)$ ]]; then
-    echo "error: MUTANTS_SHARD must have the form k/N, got '$shard'" >&2
-    exit 2
-  fi
-  shard_index="${BASH_REMATCH[1]}"
-  shard_count="${BASH_REMATCH[2]}"
-  if (( shard_index >= shard_count )); then
-    echo "error: shard index $shard_index must be less than $shard_count" >&2
-    exit 2
-  fi
+  shard_label="$shard"
   out="build/mutants/shard-${shard_index}"
 fi
 
@@ -55,8 +57,8 @@ mutant_args=(
   --test-workspace=false --workspace -vV --annotations=none
 )
 if [ -n "$in_diff_file" ]; then
-  # cargo-mutants 27: --sharding requires --shard. Shard 0/1 keeps every in-diff mutant.
-  mutant_args+=(--in-diff "$in_diff_file" --shard 0/1)
+  # Keep the required worktree shard in this slice of the in-diff pass.
+  mutant_args+=(--in-diff "$in_diff_file" --shard "$shard")
 else
   mutant_args+=(--shard "$shard")
 fi
@@ -97,7 +99,7 @@ mkdir -p "$(dirname "$out")"
 oom_events="${MUTANTS_OOM_EVENTS:-/sys/fs/cgroup/memory.events}"
 oom_before="$(python3 "$ROOT/scripts/mutants-gate.py" --read-oom-kill --oom-events "$oom_events")"
 
-echo "== mutants nightly: ${shard} =="
+echo "== mutants nightly: ${shard_label} =="
 echo "== nextest ${nextest_profile} profile; package-local tests; timeout ${timeout_seconds}s =="
 set +e
 cargo "${mutant_args[@]}"

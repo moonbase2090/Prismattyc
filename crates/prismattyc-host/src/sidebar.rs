@@ -526,7 +526,11 @@ mod tests {
                 current: true,
                 collapsed: false,
                 attention: 0,
-                tabs: TabsSource::Live(&[LiveTab { info, mail: &[] }]),
+                tabs: TabsSource::Live(&[LiveTab {
+                    info,
+                    mail: &[],
+                    attention: &[],
+                }]),
             }])
         };
         assert_eq!(

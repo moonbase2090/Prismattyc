@@ -7393,13 +7393,9 @@ impl App {
                     host.mux.pane(pane).and_then(|runtime| runtime.child_pid()),
                     None,
                 );
-                let agent = match detected {
-                    prismattyc_mux::InjectAgent::Claude => "Claude".to_string(),
-                    prismattyc_mux::InjectAgent::Grok => "Grok".to_string(),
-                    prismattyc_mux::InjectAgent::Cursor => "Cursor".to_string(),
-                    prismattyc_mux::InjectAgent::Codex => "Codex".to_string(),
-                    prismattyc_mux::InjectAgent::Kiro => "Kiro".to_string(),
-                    prismattyc_mux::InjectAgent::Unknown => host
+                let agent = match prismattyc_mux::inject_agent_slug(detected) {
+                    Some(slug) => title_agent_slug(slug),
+                    None => host
                         .mux
                         .pane_tab_title(pane)
                         .unwrap_or_else(|| "Agent".to_string()),
@@ -19163,6 +19159,17 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Title-case the shared inject slug (`muse` → `Muse`).
+fn title_agent_slug(slug: &str) -> String {
+    let mut titled = String::with_capacity(slug.len());
+    let mut chars = slug.chars();
+    if let Some(first) = chars.next() {
+        titled.extend(first.to_uppercase());
+    }
+    titled.push_str(chars.as_str());
+    titled
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod chrome_contract_tests;
 #[cfg(test)]
@@ -19172,6 +19179,16 @@ mod modifier_tests;
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn muse_attention_title_comes_from_the_shared_slug() {
+        assert_eq!(
+            prismattyc_mux::inject_agent_slug(prismattyc_mux::InjectAgent::Muse),
+            Some("muse")
+        );
+        assert_eq!(title_agent_slug("muse"), "Muse");
+        assert_eq!(title_agent_slug("claude"), "Claude");
+    }
 
     #[test]
     fn sidebar_drop_reorders_before_or_after_a_space_row() {

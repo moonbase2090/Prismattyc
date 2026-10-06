@@ -115,19 +115,24 @@ fn pane_write_chunks(
         PaneWriteSubmit::None => Ok(vec![data.as_bytes().to_vec()]),
         PaneWriteSubmit::Enter => Ok(vec![format!("{data}\r").into_bytes()]),
         PaneWriteSubmit::Auto => {
-            if agent == crate::InjectAgent::Unknown {
-                return Err(ControlError::new(
-                    ControlErrorCode::InvalidRequest,
-                    "no supported foreground agent; select submit enter or none explicitly",
-                ));
-            }
             // Paste the body as text, then submit using the existing guest
             // adapter. Mail's fixed-token injection remains unchanged.
             let body = format!("\x1b[200~{data}\x1b[201~").into_bytes();
             let submit = match agent {
-                crate::InjectAgent::Cursor => vec![crate::inject_submit::CURSOR_SUBMIT.to_vec()],
+                crate::InjectAgent::Unknown => {
+                    return Err(ControlError::new(
+                        ControlErrorCode::InvalidRequest,
+                        "no supported foreground agent; select submit enter or none explicitly",
+                    ));
+                }
+                crate::InjectAgent::Cursor => {
+                    vec![crate::inject_submit::CURSOR_SUBMIT.to_vec()]
+                }
                 crate::InjectAgent::Codex => vec![vec![b'\r'], vec![b'\r']],
-                _ => vec![vec![b'\r']],
+                crate::InjectAgent::Claude
+                | crate::InjectAgent::Grok
+                | crate::InjectAgent::Kiro
+                | crate::InjectAgent::Muse => vec![vec![b'\r']],
             };
             Ok(std::iter::once(body).chain(submit).collect())
         }
@@ -197,6 +202,7 @@ mod tests {
             (Grok, vec![b"\r".to_vec()]),
             (Claude, vec![b"\r".to_vec()]),
             (Kiro, vec![b"\r".to_vec()]),
+            (Muse, vec![b"\r".to_vec()]),
             (Codex, vec![b"\r".to_vec(), b"\r".to_vec()]),
             (Cursor, vec![crate::inject_submit::CURSOR_SUBMIT.to_vec()]),
         ] {

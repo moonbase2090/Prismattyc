@@ -5002,6 +5002,38 @@ mod tests {
         assert!(!runtime.panes[&second].unseen_output);
     }
 
+    #[test]
+    fn attention_clears_when_unfocused_pane_outputs_again() {
+        let mut runtime = MuxRuntime::spawn("/bin/cat", &[], 80, 24).unwrap();
+        let first = runtime.focused_id();
+        let second = runtime
+            .split_focused("/bin/cat", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        runtime.focus(first);
+        let _ = runtime
+            .panes
+            .get_mut(&second)
+            .unwrap()
+            .emulator
+            .feed(b"\x1b]9;permission needed\x07");
+        let _ = runtime.drain_all();
+        assert!(runtime.panes[&second].attention.is_some());
+        runtime
+            .panes
+            .get(&second)
+            .unwrap()
+            .send_bytes(b"printf 'resumed\\n'\n".to_vec())
+            .unwrap();
+        for _ in 0..8 {
+            let _ = runtime.drain_all();
+            if runtime.panes[&second].attention.is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(runtime.panes[&second].attention.is_none());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn proc_stat_detects_zombie_state() {

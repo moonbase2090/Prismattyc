@@ -3498,8 +3498,7 @@ fn paint_sidebar_row(
         );
         right -= badge_w + s(8.0);
     }
-    if row.needs_you > 0 {
-        let badge = format!("{} needs you", row.needs_you);
+    if let Some(badge) = sidebar_needs_you_label(row.depth, row.needs_you) {
         let badge_w = text_width(Face::SemiBold, s(SIDEBAR_TEXT), &badge);
         draw_text(
             buffer,
@@ -3947,6 +3946,8 @@ fn paint_action_icon(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidebarHit {
     Row(usize),
+    /// The trailing "needs you" badge on a tree row (issue #184).
+    NeedsYou(usize),
     Action(usize),
     Arrange(usize),
     Toggle,
@@ -3973,28 +3974,86 @@ pub(crate) fn sidebar_toggle_rect(
 
 /// Hit-test the painted sidebar: thumb first (it overlaps the list edge),
 /// then rows, footer actions, and header buttons.
+pub(crate) fn sidebar_needs_you_label(depth: usize, count: usize) -> Option<String> {
+    if count == 0 {
+        None
+    } else if depth == 0 && count > 1 {
+        Some(format!("{count} needs you"))
+    } else {
+        Some("needs you".into())
+    }
+}
+
+/// Hit box of the trailing needs-you badge, when one is painted.
+pub(crate) fn sidebar_needs_you_hit_rect(chrome: ChromeGeom, row: &SidebarRow<'_>) -> Option<Rect> {
+    let label = sidebar_needs_you_label(row.depth, row.needs_you)?;
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    let slot = row.slot;
+    let mut right = slot.right().saturating_sub(chrome.px(12.0)) as f32;
+    if row.mail > 0 {
+        let count = row.mail.to_string();
+        let badge_w = s(14.0) + s(6.0) + text_width(Face::Regular, s(SIDEBAR_TEXT), &count);
+        right -= badge_w + s(8.0);
+    }
+    let badge_w = text_width(Face::SemiBold, s(SIDEBAR_TEXT), &label);
+    let left = (right - badge_w).max(slot.x as f32) as usize;
+    let width = badge_w.ceil() as usize;
+    Some(Rect::new(left, slot.y, width.min(slot.w), slot.h))
+}
+
+/// Hit-test inputs for [`sidebar_hit`].
+pub(crate) struct SidebarHitTargets<'a> {
+    pub rows: &'a [Rect],
+    pub needs_you: &'a [(usize, Rect)],
+    pub actions: &'a [Rect; 3],
+    pub arrange: &'a [Rect; 3],
+    pub thumb: Option<Rect>,
+    pub toggle: Rect,
+}
+
 pub(crate) fn sidebar_hit(
-    rows: &[Rect],
-    actions: &[Rect; 3],
-    arrange: &[Rect; 3],
-    thumb: Option<Rect>,
-    toggle: Rect,
+    targets: &SidebarHitTargets<'_>,
     px: usize,
     py: usize,
 ) -> Option<SidebarHit> {
-    if thumb.is_some_and(|thumb| thumb.contains(px, py)) {
+    if targets
+        .thumb
+        .is_some_and(|thumb| thumb.contains(px, py))
+    {
         return Some(SidebarHit::Thumb);
     }
-    if toggle.w > 0 && toggle.h > 0 && toggle.contains(px, py) {
+    if targets.toggle.w > 0
+        && targets.toggle.h > 0
+        && targets.toggle.contains(px, py)
+    {
         return Some(SidebarHit::Toggle);
     }
-    if let Some(row) = rows.iter().position(|row| row.contains(px, py)) {
+    if let Some((row, _)) = targets
+        .needs_you
+        .iter()
+        .find(|(_, rect)| rect.contains(px, py))
+    {
+        return Some(SidebarHit::NeedsYou(*row));
+    }
+    if let Some(row) = targets
+        .rows
+        .iter()
+        .position(|row| row.contains(px, py))
+    {
         return Some(SidebarHit::Row(row));
     }
-    if let Some(action) = actions.iter().position(|slot| slot.contains(px, py)) {
+    if let Some(action) = targets
+        .actions
+        .iter()
+        .position(|slot| slot.contains(px, py))
+    {
         return Some(SidebarHit::Action(action));
     }
-    if let Some(button) = arrange.iter().position(|slot| slot.contains(px, py)) {
+    if let Some(button) = targets
+        .arrange
+        .iter()
+        .position(|slot| slot.contains(px, py))
+    {
         return Some(SidebarHit::Arrange(button));
     }
     None
@@ -4493,6 +4552,48 @@ mod sidebar_render_tests {
     }
 
     #[test]
+    fn sidebar_needs_you_label_counts_only_space_rows() {
+        assert_eq!(
+            sidebar_needs_you_label(0, 2).as_deref(),
+            Some("2 needs you")
+        );
+        assert_eq!(sidebar_needs_you_label(1, 1).as_deref(), Some("needs you"));
+        assert_eq!(sidebar_needs_you_label(2, 1).as_deref(), Some("needs you"));
+        assert!(sidebar_needs_you_label(0, 0).is_none());
+    }
+
+    #[test]
+    fn sidebar_needs_you_hit_beats_the_row_behind_it() {
+        let chrome = chrome();
+        let slot = Rect::new(0, 40, 240, 28);
+        let row = SidebarRow {
+            slot,
+            depth: 0,
+            chevron: None,
+            dot: None,
+            label: "lab",
+            mail: 0,
+            needs_you: 2,
+            selected: false,
+            hovered: false,
+        };
+        let badge = sidebar_needs_you_hit_rect(chrome, &row).expect("badge rect");
+        let hit = sidebar_hit(
+            &SidebarHitTargets {
+                rows: &[slot],
+                needs_you: &[(0, badge)],
+                actions: &[Rect::new(0, 0, 0, 0); 3],
+                arrange: &[Rect::new(0, 0, 0, 0); 3],
+                thumb: None,
+                toggle: Rect::new(0, 0, 0, 0),
+            },
+            badge.x + 2,
+            badge.y + badge.h / 2,
+        );
+        assert_eq!(hit, Some(SidebarHit::NeedsYou(0)));
+    }
+
+    #[test]
     fn sidebar_hit_prefers_thumb_then_rows_then_buttons() {
         let chrome = chrome();
         let layout = sidebar_layout(chrome, column(600), 60, 0);
@@ -4500,11 +4601,14 @@ mod sidebar_render_tests {
         let toggle = sidebar_toggle_rect(chrome, layout.column, layout.head, false);
         let hit = |x: usize, y: usize| {
             sidebar_hit(
-                &layout.rows,
-                &layout.actions,
-                &header.buttons,
-                layout.thumb,
-                toggle,
+                &SidebarHitTargets {
+                    rows: &layout.rows,
+                    needs_you: &[],
+                    actions: &layout.actions,
+                    arrange: &header.buttons,
+                    thumb: layout.thumb,
+                    toggle,
+                },
                 x,
                 y,
             )

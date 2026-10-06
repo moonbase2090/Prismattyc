@@ -971,6 +971,8 @@ struct HostState {
     /// indices, footer and header buttons, list viewport and thumb, and
     /// the row count behind the current scroll offset.
     sidebar_rows: Vec<(graphite::Rect, sidebar::TreeRow)>,
+    /// Trailing needs-you badge hit boxes from the last sidebar paint.
+    sidebar_needs_you_hits: Vec<(usize, graphite::Rect)>,
     sidebar_actions: [graphite::Rect; 3],
     sidebar_arrange: [graphite::Rect; 3],
     sidebar_list: graphite::Rect,
@@ -3674,6 +3676,7 @@ impl App {
                 rail_resizing: false,
                 rail_thumb_drag: None,
                 sidebar_rows: Vec::new(),
+                sidebar_needs_you_hits: Vec::new(),
                 sidebar_actions: [graphite::Rect::new(0, 0, 0, 0); 3],
                 sidebar_arrange: [graphite::Rect::new(0, 0, 0, 0); 3],
                 sidebar_list: graphite::Rect::new(0, 0, 0, 0),
@@ -10848,6 +10851,8 @@ enum SidebarClick {
     StartThumbDrag,
     ToggleStrip,
     Run(keybind::Action),
+    /// Focus the next pane that needs attention in the current Space.
+    JumpNeedsYou,
     Ignore,
 }
 
@@ -10872,6 +10877,10 @@ fn sidebar_click_decision(
 ) -> SidebarClick {
     use graphite::SidebarHit;
     match (hit, row) {
+        (SidebarHit::NeedsYou(_), Some((_, name, current))) if !current => {
+            SidebarClick::OpenSpace(name.to_string())
+        }
+        (SidebarHit::NeedsYou(_), _) => SidebarClick::JumpNeedsYou,
         (SidebarHit::Row(_), Some((clicked, name, current))) => match clicked.kind {
             sidebar::RowKind::Space => SidebarClick::ToggleCollapse(name.to_string()),
             sidebar::RowKind::Tab => {
@@ -10965,6 +10974,7 @@ fn icon_click_decision(
             .map(SidebarClick::Run)
             .unwrap_or(SidebarClick::Ignore),
         SidebarHit::Thumb => SidebarClick::StartThumbDrag,
+        SidebarHit::NeedsYou(_) => SidebarClick::JumpNeedsYou,
         SidebarHit::Action(_) => SidebarClick::Ignore,
     }
 }
@@ -11052,7 +11062,7 @@ fn handle_sidebar_click(host: &mut HostState, button: MouseButton) -> StripClick
     };
     cancel_tab_rename(host);
     let row: Option<(sidebar::TreeRow, String, bool, bool)> = match hit {
-        graphite::SidebarHit::Row(index) => {
+        graphite::SidebarHit::Row(index) | graphite::SidebarHit::NeedsYou(index) => {
             host.sidebar_rows.get(index).and_then(|(_, clicked)| {
                 host.sidebar_tree.spaces.get(clicked.space).map(|space| {
                     (
@@ -11143,6 +11153,12 @@ fn handle_sidebar_click(host: &mut HostState, button: MouseButton) -> StripClick
             StripClickResult::Handled
         }
         SidebarClick::Run(action) => StripClickResult::Action(action),
+        SidebarClick::JumpNeedsYou => {
+            if host.mux.focus_next_attention_pane() {
+                host.dirty = true;
+            }
+            StripClickResult::Handled
+        }
         SidebarClick::Ignore => StripClickResult::NotHandled,
     }
 }
@@ -11936,6 +11952,7 @@ fn graphite_sidebar_tree(
     host: &HostState,
     tabs: &[mux::TabInfo],
     mail: &[Vec<u32>],
+    attention: &[Vec<bool>],
 ) -> sidebar::SidebarTree {
     let current = host
         .space_rail
@@ -11948,6 +11965,7 @@ fn graphite_sidebar_tree(
         .map(|(index, info)| sidebar::LiveTab {
             info,
             mail: mail.get(index).map(Vec::as_slice).unwrap_or(&[]),
+            attention: attention.get(index).map(Vec::as_slice).unwrap_or(&[]),
         })
         .collect();
     // Saved spaces stay alive for the build below; the tree copies titles.
@@ -12024,7 +12042,8 @@ fn paint_graphite_sidebar(
         }
     }
     let mail = host.mux.tab_pane_mail();
-    let tree = graphite_sidebar_tree(host, &tabs, &mail);
+    let attention = host.mux.tab_pane_attention();
+    let tree = graphite_sidebar_tree(host, &tabs, &mail, &attention);
     let collapsed = host.spacing.sidebar_collapsed;
     let visible = if collapsed {
         sidebar::icon_rows(&tree)
@@ -12174,7 +12193,12 @@ fn paint_graphite_sidebar(
                     }
                     sidebar::RowKind::Tab => dots.get(*absolute).copied().flatten(),
                     sidebar::RowKind::Pane => {
-                        if mails.get(*absolute).copied().unwrap_or(0) > 0 {
+                        let needs = row
+                            .tab
+                            .and_then(|tab| space.tabs.get(tab))
+                            .and_then(|tab| row.pane.and_then(|pane| tab.panes.get(pane)))
+                            .is_some_and(|pane| pane.attention);
+                        if needs {
                             Some(graphite::Dot::Attention)
                         } else {
                             Some(graphite::Dot::Idle)
@@ -12224,6 +12248,7 @@ fn paint_graphite_sidebar(
         host.sidebar_thumb = None;
         host.sidebar_toggle = toggle;
         host.sidebar_icons = strip;
+        host.sidebar_needs_you_hits.clear();
     } else {
         let painted_rows = graphite::sidebar_rows_in_view(&visible, &layout);
         let rows: Vec<graphite::SidebarRow> = painted_rows
@@ -12245,16 +12270,20 @@ fn paint_graphite_sidebar(
                     dot: dots[*row_index],
                     label: labels[*row_index].as_str(),
                     mail: mails[*row_index],
-                    needs_you: match row.kind {
-                        sidebar::RowKind::Space => space.attention,
-                        _ => 0,
-                    },
+                    needs_you: sidebar::row_needs_you(&tree, row),
                     selected: selected_tabs[*row_index]
                         || row.kind == sidebar::RowKind::Space
                             && host.space_rail.keyboard
                             && host.space_rail.focus == Some(row.space),
                     hovered: hover_row == Some(slot_index),
                 }
+            })
+            .collect();
+        host.sidebar_needs_you_hits = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                graphite::sidebar_needs_you_hit_rect(geom.chrome, row).map(|rect| (index, rect))
             })
             .collect();
         let toggle = graphite::sidebar_toggle_rect(geom.chrome, column, layout.head, dock_right);
@@ -12358,11 +12387,14 @@ fn sidebar_hit_at(host: &HostState, px: usize, py: usize) -> Option<graphite::Si
     }
     let rows: Vec<graphite::Rect> = host.sidebar_rows.iter().map(|(slot, _)| *slot).collect();
     graphite::sidebar_hit(
-        &rows,
-        &host.sidebar_actions,
-        &host.sidebar_arrange,
-        host.sidebar_thumb,
-        host.sidebar_toggle,
+        &graphite::SidebarHitTargets {
+            rows: &rows,
+            needs_you: &host.sidebar_needs_you_hits,
+            actions: &host.sidebar_actions,
+            arrange: &host.sidebar_arrange,
+            thumb: host.sidebar_thumb,
+            toggle: host.sidebar_toggle,
+        },
         px,
         py,
     )
@@ -14838,6 +14870,7 @@ fn mux_command_for(action: keybind::Action) -> Option<MuxCommand> {
         | Action::SessionSplitDown
         | Action::TerminalSwitcher
         | Action::AgentMessages
+        | Action::JumpNeedsYou
         | Action::UpdateRestart
         | Action::RecentMessages => return None,
     })
@@ -17225,6 +17258,7 @@ enum ActionRoute {
     UndoSpaceChange,
     SpaceRailMove(i32),
     SaveSpace,
+    JumpNeedsYou,
     Mux(MuxCommand),
 }
 
@@ -17262,6 +17296,7 @@ fn action_route(action: keybind::Action) -> ActionRoute {
         Action::SpaceRailNext => ActionRoute::SpaceRailMove(1),
         Action::SpaceRailPrev => ActionRoute::SpaceRailMove(-1),
         Action::SaveSpace => ActionRoute::SaveSpace,
+        Action::JumpNeedsYou => ActionRoute::JumpNeedsYou,
         other => mux_command_for(other)
             .map(ActionRoute::Mux)
             .unwrap_or(ActionRoute::Noop),
@@ -17500,6 +17535,12 @@ fn dispatch_action(
         }
         ActionRoute::SaveSpace => {
             apply_save_space_action(host);
+            Dispatch::Handled
+        }
+        ActionRoute::JumpNeedsYou => {
+            if host.mux.focus_next_attention_pane() {
+                host.dirty = true;
+            }
             Dispatch::Handled
         }
         ActionRoute::Mux(command) => {
@@ -19342,6 +19383,7 @@ mod tests {
             (Action::SpaceRailNext, ActionRoute::SpaceRailMove(1)),
             (Action::SpaceRailPrev, ActionRoute::SpaceRailMove(-1)),
             (Action::SaveSpace, ActionRoute::SaveSpace),
+            (Action::JumpNeedsYou, ActionRoute::JumpNeedsYou),
             (
                 Action::SplitRight,
                 ActionRoute::Mux(MuxCommand::Split(prismattyc_mux::Axis::Horizontal)),
@@ -24863,12 +24905,14 @@ session mail (id 15)
                             focused: false,
                             active: false,
                             mail: 0,
+                            attention: false,
                         },
                         sidebar::PaneNode {
                             title: "composer-2".to_string(),
                             focused: true,
                             active: false,
                             mail: 0,
+                            attention: false,
                         },
                     ],
                 }],
@@ -24887,11 +24931,14 @@ session mail (id 15)
             .expect("composer row");
         let slot = layout.rows[pane_row];
         let hit = graphite::sidebar_hit(
-            &layout.rows,
-            &layout.actions,
-            &[graphite::Rect::new(0, 0, 0, 0); 3],
-            layout.thumb,
-            graphite::Rect::new(0, 0, 0, 0),
+            &graphite::SidebarHitTargets {
+                rows: &layout.rows,
+                needs_you: &[],
+                actions: &layout.actions,
+                arrange: &[graphite::Rect::new(0, 0, 0, 0); 3],
+                thumb: layout.thumb,
+                toggle: graphite::Rect::new(0, 0, 0, 0),
+            },
             slot.x + 8,
             slot.y + slot.h / 2,
         );

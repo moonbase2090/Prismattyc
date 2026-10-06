@@ -55,6 +55,15 @@ pub fn space_action(index: usize) -> Option<RailSpaceAction> {
     }
 }
 
+/// Visible menu rows for a space. Close space applies only to the current space.
+pub fn space_menu_row_indices(is_current_space: bool) -> impl Iterator<Item = usize> + Clone {
+    (0..RAIL_SPACE_ROWS).filter(move |&index| is_current_space || index != 4)
+}
+
+pub fn space_menu_action_index(is_current_space: bool, visible_index: usize) -> Option<usize> {
+    space_menu_row_indices(is_current_space).nth(visible_index)
+}
+
 pub fn session_action(index: usize) -> Option<RailSessionAction> {
     match index {
         0 => Some(RailSessionAction::Focus),
@@ -172,6 +181,18 @@ mod tests {
         assert_eq!(pane_action(2), None);
         assert_eq!(row_count(ContextMenuKind::RailPane), Some(RAIL_PANE_ROWS));
         assert_eq!(pane_label(1).map(|(label, _)| label), Some("Close pane…"));
+    }
+
+    #[test]
+    fn close_space_row_only_when_space_is_current() {
+        let other: Vec<_> = space_menu_row_indices(false).collect();
+        assert_eq!(other.len(), RAIL_SPACE_ROWS - 1);
+        assert!(!other.contains(&4));
+        assert_eq!(
+            space_menu_row_indices(true).collect::<Vec<_>>().len(),
+            RAIL_SPACE_ROWS
+        );
+        assert_eq!(space_menu_action_index(false, 4), Some(5));
     }
 
     #[test]

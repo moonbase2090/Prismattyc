@@ -1613,15 +1613,47 @@ fn context_menu_action(target: ContextMenuTarget, index: usize) -> ContextMenuAc
     }
 }
 
-fn context_menu_needs_confirmation(kind: ContextMenuKind, index: usize, confirmed: bool) -> bool {
-    if rail_context_menu::needs_confirmation(kind, index, confirmed) {
+fn context_menu_needs_confirmation(
+    host: &HostState,
+    target: ContextMenuTarget,
+    kind: ContextMenuKind,
+    visible_index: usize,
+    confirmed: bool,
+) -> bool {
+    let action_index =
+        rail_space_menu_action_index(host, target, kind, visible_index).unwrap_or(visible_index);
+    if rail_context_menu::needs_confirmation(kind, action_index, confirmed) {
         return true;
     }
     !confirmed
         && matches!(
-            (kind, index),
+            (kind, visible_index),
             (ContextMenuKind::SpaceChip, 3 | 6) | (ContextMenuKind::Pane, 11)
         )
+}
+
+fn rail_space_menu_action_index(
+    host: &HostState,
+    target: ContextMenuTarget,
+    kind: ContextMenuKind,
+    visible_index: usize,
+) -> Option<usize> {
+    let ContextMenuTarget::RailSpace(chip) = target else {
+        return None;
+    };
+    if kind != ContextMenuKind::RailSpace {
+        return None;
+    }
+    let name = host.space_rail.names.get(chip)?;
+    let is_current = host.space_rail.current.as_deref() == Some(name.as_str());
+    rail_context_menu::space_menu_action_index(is_current, visible_index)
+}
+
+fn space_rail_chip_for_name(host: &HostState, space_name: &str) -> Option<usize> {
+    host.space_rail
+        .names
+        .iter()
+        .position(|saved| saved == space_name)
 }
 
 fn context_menu_kind(target: ContextMenuTarget) -> ContextMenuKind {
@@ -9246,11 +9278,12 @@ fn context_menu_rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
         ContextMenuTarget::RailSpace(chip) => {
             let name = host.space_rail.names.get(chip)?.clone();
             let header = format!("{name} · space");
-            let count = rail_context_menu::row_count(ContextMenuKind::RailSpace).unwrap_or(0);
-            let rows = (0..count)
-                .filter_map(|index| {
+            let is_current = host.space_rail.current.as_deref() == Some(name.as_str());
+            let rows = rail_context_menu::space_menu_row_indices(is_current)
+                .enumerate()
+                .filter_map(|(visible, index)| {
                     rail_context_menu::space_label(index).map(|(label, description)| {
-                        let describe = if menu.confirm == Some(index) {
+                        let describe = if menu.confirm == Some(visible) {
                             format!("{description} · press Enter again to confirm")
                         } else {
                             description.to_string()
@@ -9569,7 +9602,7 @@ fn activate_context_menu(
         .context_menu
         .as_ref()
         .is_some_and(|menu| menu.confirm == Some(index));
-    if context_menu_needs_confirmation(kind, index, confirmed) {
+    if context_menu_needs_confirmation(host, target, kind, index, confirmed) {
         if let Some(menu) = host.context_menu.as_mut() {
             menu.confirm = Some(index);
         }
@@ -9580,11 +9613,15 @@ fn activate_context_menu(
     close_context_menu(host);
     match target {
         ContextMenuTarget::RailSpace(chip) => {
-            if let (Some(action), Some(name)) = (
-                rail_context_menu::space_action(index),
-                host.space_rail.names.get(chip).cloned(),
-            ) {
-                apply_rail_space_action(host, chip, &name, action);
+            if let Some(name) = host.space_rail.names.get(chip).cloned() {
+                let is_current = host.space_rail.current.as_deref() == Some(name.as_str());
+                if let Some(action_index) =
+                    rail_context_menu::space_menu_action_index(is_current, index)
+                {
+                    if let Some(action) = rail_context_menu::space_action(action_index) {
+                        apply_rail_space_action(host, chip, &name, action);
+                    }
+                }
             }
             Dispatch::Handled
         }
@@ -11287,13 +11324,9 @@ fn apply_pending_session_focus(host: &mut HostState) {
 fn open_sidebar_context_menu(host: &mut HostState, row: &sidebar::TreeRow, space_name: &str) {
     match row.kind {
         sidebar::RowKind::Space => {
-            let chip = host
-                .space_rail
-                .names
-                .iter()
-                .position(|saved| saved == space_name)
-                .unwrap_or(row.space);
-            open_rail_space_menu(host, chip);
+            if let Some(chip) = space_rail_chip_for_name(host, space_name) {
+                open_rail_space_menu(host, chip);
+            }
         }
         sidebar::RowKind::Tab => {
             if let Some(pane) = pane_for_sidebar_row(host, row) {
@@ -19766,9 +19799,14 @@ mod tests {
             (ContextMenuKind::Pane, 11, true, false),
         ];
         for (kind, index, confirmed, expected) in cases {
+            let got = rail_context_menu::needs_confirmation(kind, index, confirmed)
+                || (!confirmed
+                    && matches!(
+                        (kind, index),
+                        (ContextMenuKind::SpaceChip, 3 | 6) | (ContextMenuKind::Pane, 11)
+                    ));
             assert_eq!(
-                context_menu_needs_confirmation(kind, index, confirmed),
-                expected,
+                got, expected,
                 "{kind:?}, row {index}, confirmed={confirmed}"
             );
         }

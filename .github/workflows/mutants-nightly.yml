@@ -45,6 +45,7 @@ jobs:
       persist_state: ${{ steps.plan.outputs.persist_state }}
       nextest_profile: ${{ steps.plan.outputs.nextest_profile }}
       mutant_timeout_seconds: ${{ steps.plan.outputs.mutant_timeout_seconds }}
+      in_diff_has_mutants: ${{ steps.diff.outputs.has_mutants }}
     steps:
       - name: Check out workflow revision
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0, Node 24
@@ -84,9 +85,6 @@ jobs:
           path: cycle-source
           fetch-depth: 0
 
-      - name: Verify rotation planner and partial-result handling
-        run: python3 scripts/mutants-nightly_test.py
-
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
@@ -107,6 +105,9 @@ jobs:
           cargo install cargo-nextest --locked --version 0.9.111 \
             --root build/mutants/tools
           echo "$GITHUB_WORKSPACE/build/mutants/tools/bin" >> "$GITHUB_PATH"
+
+      - name: Verify rotation planner and in-diff shard coverage
+        run: python3 scripts/mutants-nightly_test.py
 
       - name: Count mutants and plan a batch
         id: plan
@@ -136,6 +137,32 @@ jobs:
             --summary build/mutants/summary.md \
             --github-output "$GITHUB_OUTPUT"
 
+      - name: Generate current-head in-diff patch
+        id: diff
+        env:
+          DIFF_BASE: ${{ steps.plan.outputs.diff_base }}
+          HEAD_SHA: ${{ steps.plan.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          git diff --binary "${DIFF_BASE}...${HEAD_SHA}" -- '*.rs' \
+            > build/mutants/nightly-in-diff.patch
+          if [ ! -s build/mutants/nightly-in-diff.patch ]; then
+            echo "has_mutants=false" >> "$GITHUB_OUTPUT"
+            echo "No source diff since ${DIFF_BASE}." | tee build/mutants/in-diff-status.txt
+            exit 0
+          fi
+          crate_list="$(python3 scripts/mutants-gate.py --list-crates \
+            --repo "$GITHUB_WORKSPACE" --diff build/mutants/nightly-in-diff.patch)"
+          if [ -z "$crate_list" ]; then
+            echo "has_mutants=false" >> "$GITHUB_OUTPUT"
+            echo "No mutatable Rust changes since ${DIFF_BASE}." \
+              | tee build/mutants/in-diff-status.txt
+            exit 0
+          fi
+          echo "has_mutants=true" >> "$GITHUB_OUTPUT"
+          printf 'Mutatable packages since %s:\n%s\n' "$DIFF_BASE" "$crate_list" \
+            | tee build/mutants/in-diff-status.txt
+
       - name: Upload plan and tool binaries
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0, Node 24
         with:
@@ -144,6 +171,8 @@ jobs:
             build/mutants/plan.json
             build/mutants/summary.md
             build/mutants/mutants-list.json
+            build/mutants/nightly-in-diff.patch
+            build/mutants/in-diff-status.txt
             build/mutants/tools/bin/cargo-mutants
             build/mutants/tools/bin/cargo-nextest
           if-no-files-found: error
@@ -290,29 +319,42 @@ jobs:
         run: python3 scripts/la-heavy-serial.py --release --job mutants-nightly
 
   mutants-in-diff:
-    name: Mutants changed since selected base
+    name: Mutants changed since selected base (shard ${{ matrix.shard }}/16)
     needs: [plan]
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
+      - name: No mutatable Rust changes
+        if: ${{ needs.plan.outputs.in_diff_has_mutants != 'true' }}
+        run: echo "No mutatable Rust changes since the selected base"
+
       - name: Check out current head with history
+        if: ${{ needs.plan.outputs.in_diff_has_mutants == 'true' }}
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0, Node 24
         with:
           ref: ${{ needs.plan.outputs.head_sha }}
           fetch-depth: 0
 
       - name: Download pinned mutation tools
+        if: ${{ needs.plan.outputs.in_diff_has_mutants == 'true' }}
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0, Node 24
         with:
           name: mutants-nightly-plan
           path: build/mutants
 
       - name: Add mutation tools to PATH
+        if: ${{ needs.plan.outputs.in_diff_has_mutants == 'true' }}
         run: |
           chmod +x build/mutants/tools/bin/cargo-mutants build/mutants/tools/bin/cargo-nextest
           echo "$GITHUB_WORKSPACE/build/mutants/tools/bin" >> "$GITHUB_PATH"
 
       - name: Install Rust toolchain and tmux
+        if: ${{ needs.plan.outputs.in_diff_has_mutants == 'true' }}
         run: |
           set -euo pipefail
           if ! command -v rustup >/dev/null 2>&1; then
@@ -328,35 +370,8 @@ jobs:
           echo "TMUX_TMPDIR=$RUNNER_TEMP/mutants-tmux" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/mutants-tmux"
 
-      - name: Generate changes since the selected base
-        id: diff
-        env:
-          DIFF_BASE: ${{ needs.plan.outputs.diff_base }}
-          HEAD_SHA: ${{ needs.plan.outputs.head_sha }}
-        run: |
-          set -euo pipefail
-          mkdir -p build/mutants
-          git diff --binary "${DIFF_BASE}...${HEAD_SHA}" -- '*.rs' \
-            > build/mutants/nightly-in-diff.patch
-          if [ ! -s build/mutants/nightly-in-diff.patch ]; then
-            echo "has_mutants=false" >> "$GITHUB_OUTPUT"
-            echo "No source diff since ${DIFF_BASE}." | tee build/mutants/in-diff-status.txt
-            exit 0
-          fi
-          crate_list="$(python3 scripts/mutants-gate.py --list-crates \
-            --repo "$GITHUB_WORKSPACE" --diff build/mutants/nightly-in-diff.patch)"
-          if [ -z "$crate_list" ]; then
-            echo "has_mutants=false" >> "$GITHUB_OUTPUT"
-            echo "No mutatable Rust changes since ${DIFF_BASE}." \
-              | tee build/mutants/in-diff-status.txt
-            exit 0
-          fi
-          echo "has_mutants=true" >> "$GITHUB_OUTPUT"
-          printf 'Mutatable packages since %s:\n%s\n' "$DIFF_BASE" "$crate_list" \
-            | tee build/mutants/in-diff-status.txt
-
-      - name: Run current-head mutation baseline
-        if: ${{ steps.diff.outputs.has_mutants == 'true' && needs.plan.outputs.head_sha != needs.plan.outputs.cycle_sha }}
+      - name: Run current-head mutation baseline once
+        if: ${{ needs.plan.outputs.in_diff_has_mutants == 'true' && matrix.shard == 0 && (needs.plan.outputs.head_sha != needs.plan.outputs.cycle_sha || needs.plan.outputs.nextest_profile == 'mutants-slow') }}
         timeout-minutes: 60
         run: |
           set -euo pipefail
@@ -366,30 +381,31 @@ jobs:
             --max-fail=1:immediate
 
       - name: Run cargo-mutants --in-diff
-        if: ${{ steps.diff.outputs.has_mutants == 'true' }}
+        if: ${{ needs.plan.outputs.in_diff_has_mutants == 'true' }}
         timeout-minutes: 240
         env:
           MUTANTS_IN_DIFF_FILE: build/mutants/nightly-in-diff.patch
+          MUTANTS_SHARD: ${{ matrix.shard }}/16
           MUTANTS_NEXTTEST_PROFILE: ${{ needs.plan.outputs.nextest_profile }}
           MUTANTS_TIMEOUT_SECONDS: ${{ needs.plan.outputs.mutant_timeout_seconds }}
         run: ./scripts/mutants-nightly.sh
 
       - name: Clean up orphaned test services
-        if: always()
+        if: ${{ always() && needs.plan.outputs.in_diff_has_mutants == 'true' }}
         run: python3 scripts/mutants-nightly-process-cleanup.py --phase after
 
       - name: Add in-diff outcomes to the job summary
-        if: ${{ steps.diff.outputs.has_mutants == 'true' }}
+        if: ${{ needs.plan.outputs.in_diff_has_mutants == 'true' }}
         run: >-
           python3 scripts/mutants-gate.py
           --outcomes build/mutants/in-diff/mutants.out/outcomes.json
           --min-caught 0 >> "$GITHUB_STEP_SUMMARY"
 
       - name: Archive in-diff outcomes
-        if: always()
+        if: ${{ always() && needs.plan.outputs.in_diff_has_mutants == 'true' }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0, Node 24
         with:
-          name: mutants-nightly-in-diff
+          name: mutants-nightly-in-diff-${{ matrix.shard }}
           path: |
             build/mutants/in-diff-status.txt
             build/mutants/in-diff/mutants.out/outcomes.json

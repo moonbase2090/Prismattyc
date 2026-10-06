@@ -114,13 +114,10 @@ jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Check out repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-
-      - name: Check nightly mutants argv
-        run: python3 scripts/mutants-nightly_test.py
 
       - name: Install Rust toolchain
         run: |
@@ -137,6 +134,17 @@ jobs:
           fi
           rustup toolchain install 1.90.0 --profile minimal
           rustup default 1.90.0
+
+      - name: Install pinned cargo-mutants for nightly argv tests
+        run: |
+          set -euo pipefail
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then . "$cargo_env"; fi
+          cargo install cargo-mutants --locked --version 27.1.0
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+
+      - name: Check nightly mutants argv and sharding
+        run: python3 scripts/mutants-nightly_test.py
 
       - name: Check workspace
         run: |

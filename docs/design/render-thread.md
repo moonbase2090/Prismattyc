@@ -336,7 +336,7 @@ flag on is its own PR. "Scenario" refers to the isolated harness above.
 | # | PR | Issue | Proof |
 | --- | --- | --- | --- |
 | 1 | Per-phase pump timing in `render_timer` and `render-status` (the spike's phase list) | #190 | Scenario (a) and (c) tables from `render-status --json`; frame time unchanged with timing off |
-| 2 | macOS Wake starvation fix (pump once per turn from `about_to_wait`) **plus** drain time budget (default per decision A) | new + #193 (1) | Scenario (b) paints > 0; flood table; #183 regression tests pass |
+| 2 | macOS Wake starvation fix (pump once per turn from `about_to_wait`) **plus** drain time budget (default per decision A) | new + #193 (1) | Scenario (b) paints > 0; flood table; a new regression test (filed with the new starvation issue) that sustained `Wake`s still reach `RedrawRequested`; existing child-EOF wake and exit-cascade tests pass |
 | 3 | Long-lived pmuxd snapshot client and cache; migrate periodic callers | #192 (1) | Scenario (d): no pump over the budget while pmuxd is stopped; 0 connects per second in steady state |
 | 4 | Space poll and autosave on the client thread; use `file_config` instead of `config::load` | #191 | Scenario (c): Space phases under 1 ms at p99; autosave state tests |
 | 5 | File-writer thread for render status, attach-tabs cache, and the component heartbeat (drop the heartbeat `fsync` or move it off main) | #195 (3) + new | Scenario (a): `restart::poll` and `publish_render_status` under 0.1 ms |
@@ -387,7 +387,10 @@ Recommended after PR 10. The commit is 17 ms at 6.2 Mpx on any thread.
 This spike has no Linux numbers.
 
 **H. Treat the starvation fix as a pure fix, so it needs no feature flag.**
-Recommended. It restores intended behavior (#183) and is measurable. The
+Recommended. It restores the intended "one drain pass per event-loop
+cycle, then yield" behavior described in the comment at
+`crates/prismattyc-host/src/main.rs:3225` (that comment's "#183" is an
+older tracker number, not GitHub #183), and it is measurable. The
 drain budget value is the only tunable.
 
 ## Reusable findings for lunatui

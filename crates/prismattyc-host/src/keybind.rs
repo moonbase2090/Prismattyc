@@ -1185,7 +1185,7 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         Action::SessionSplitDown => vec!["ctrl+alt+shift+b"],
         Action::TerminalSwitcher => vec!["ctrl+shift+o"],
         Action::AgentMessages | Action::UpdateRestart | Action::RecentMessages => vec![],
-        Action::JumpNeedsYou => vec!["ctrl+shift+!"],
+        Action::JumpNeedsYou => vec!["ctrl+shift+u"],
 
         Action::CloseTab => vec!["ctrl+shift+q"],
         Action::RenameTab => vec!["ctrl+shift+r"],

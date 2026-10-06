@@ -4016,16 +4016,10 @@ pub(crate) fn sidebar_hit(
     px: usize,
     py: usize,
 ) -> Option<SidebarHit> {
-    if targets
-        .thumb
-        .is_some_and(|thumb| thumb.contains(px, py))
-    {
+    if targets.thumb.is_some_and(|thumb| thumb.contains(px, py)) {
         return Some(SidebarHit::Thumb);
     }
-    if targets.toggle.w > 0
-        && targets.toggle.h > 0
-        && targets.toggle.contains(px, py)
-    {
+    if targets.toggle.w > 0 && targets.toggle.h > 0 && targets.toggle.contains(px, py) {
         return Some(SidebarHit::Toggle);
     }
     if let Some((row, _)) = targets
@@ -4035,11 +4029,7 @@ pub(crate) fn sidebar_hit(
     {
         return Some(SidebarHit::NeedsYou(*row));
     }
-    if let Some(row) = targets
-        .rows
-        .iter()
-        .position(|row| row.contains(px, py))
-    {
+    if let Some(row) = targets.rows.iter().position(|row| row.contains(px, py)) {
         return Some(SidebarHit::Row(row));
     }
     if let Some(action) = targets

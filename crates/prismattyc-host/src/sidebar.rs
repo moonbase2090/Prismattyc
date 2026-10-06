@@ -508,6 +508,7 @@ mod tests {
         assert_eq!(row_needs_you(&tree, &rows[3]), 1);
     }
 
+    #[test]
     fn saved_spaces_expand_files_and_hide_collapsed_tabs() {
         let tabs = vec![SavedSpaceTab {
             title: "main".to_string(),

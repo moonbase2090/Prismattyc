@@ -8575,31 +8575,29 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn detach_fixture_process() {
-        let Some(ready) = std::env::var_os("PMUX_DETACH_FIXTURE_READY") else {
-            return;
-        };
-        std::fs::write(ready, b"ready").unwrap();
-        std::thread::sleep(Duration::from_secs(30));
-    }
-
     fn spawn_fake_attach(dir: &Path, sock: &Path) -> ReapChild {
         use prismattyc_mux::platform::Exec;
         let ready = dir.join("attach-ready");
-        // A native test process retains argv0 on macOS. Python framework
-        // launchers replace it during startup, making the scan race exec.
+        let fixture_source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/detach-process.rs");
+        let fixture_bin = dir.join("pmux-attach-fixture");
+        let compiled = Command::new("rustc")
+            .arg("--edition=2021")
+            .arg(&fixture_source)
+            .arg("-o")
+            .arg(&fixture_bin)
+            .output()
+            .expect("compile detach process fixture");
+        assert!(
+            compiled.status.success(),
+            "detach fixture compilation failed: {}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
         let mut child = ReapChild::new(
-            Command::new(std::env::current_exe().unwrap())
+            Command::new(&fixture_bin)
                 .arg0("pmux-attach")
-                .args([
-                    "--exact",
-                    "tests::detach_fixture_process",
-                    "--nocapture",
-                    "--",
-                    "--socket",
-                    sock.to_str().unwrap(),
-                ])
+                .arg("--socket")
+                .arg(sock)
                 .env("PMUX_DETACH_FIXTURE_READY", &ready)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())

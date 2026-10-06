@@ -3884,27 +3884,61 @@ mod tests {
     #[test]
     fn fuzz_corpus_adversarial_inputs_do_not_panic() {
         let seeds = [
-            "",
-            "Prismattyc",
-            "Prismattyc;",
-            "Prismattyc;update",
-            "Prismattyc;update;id=1",
-            "Prismattyc;update;id=0;text=x",
-            "Prismattyc;update;id=1;id=2;text=x",
-            "Prismattyc;attach;viewport;id=1;row=0;col=0;rows=1;cols=1;text=x;text=y",
-            "Prismattyc;attach;viewport;id=1;row=0;col=0;rows=0;cols=1;text=x",
-            "Prismattyc;attach;cell_rect;id=1;row=0;col=0;rows=1;cols=1;runs=",
-            "Prismattyc;attach;cell_rect;id=1;row=0;col=0;rows=1;cols=4;runs=t:Hi+b:2",
-            "Prismattyc;cap;r;id=1;v=0.2;limit.regions=64;limit.regions=8",
-            "Prismattyc;cap;r;id=1;v=0.2;limit.regions=nope",
-            &format!("Prismattyc;cap;q;id=1;max=0.1;pad={}", "x".repeat(5000)),
-            "Prismattyc;cap;q;id=1;max=0.1\x7f",
+            ("", Some(DecodeError::Empty)),
+            ("Prismattyc", Some(DecodeError::UnknownFamily)),
+            ("Prismattyc;", Some(DecodeError::UnknownFamily)),
+            ("Prismattyc;update", Some(DecodeError::MissingField("id"))),
+            (
+                "Prismattyc;update;id=1",
+                Some(DecodeError::MissingField("text")),
+            ),
+            ("Prismattyc;update;id=0;text=x", Some(DecodeError::ZeroId)),
+            (
+                "Prismattyc;update;id=1;id=2;text=x",
+                Some(DecodeError::DuplicateField("id")),
+            ),
+            (
+                "Prismattyc;attach;viewport;id=1;row=0;col=0;rows=1;cols=1;text=x;text=y",
+                Some(DecodeError::DuplicateField("text")),
+            ),
+            (
+                "Prismattyc;attach;viewport;id=1;row=0;col=0;rows=0;cols=1;text=x",
+                Some(DecodeError::InvalidField("rows/cols")),
+            ),
+            (
+                "Prismattyc;attach;cell_rect;id=1;row=0;col=0;rows=1;cols=1;runs=",
+                Some(DecodeError::InvalidField("runs")),
+            ),
+            (
+                "Prismattyc;attach;cell_rect;id=1;row=0;col=0;rows=1;cols=4;runs=t:Hi+b:2",
+                Some(DecodeError::InvalidField("runs")),
+            ),
+            (
+                "Prismattyc;cap;r;id=1;v=0.2;limit.regions=64;limit.regions=8",
+                Some(DecodeError::DuplicateField("limit.regions")),
+            ),
+            (
+                "Prismattyc;cap;r;id=1;v=0.2;limit.regions=nope",
+                Some(DecodeError::InvalidField("limit")),
+            ),
+            (
+                &format!("Prismattyc;cap;q;id=1;max=0.1;pad={}", "x".repeat(5000)),
+                Some(DecodeError::Oversized),
+            ),
+            (
+                "Prismattyc;cap;q;id=1;max=0.1\x7f",
+                Some(DecodeError::NonPrintableAscii),
+            ),
+            ("Prismattyc;update;id=1;text=x", None),
         ];
-        for body in seeds {
-            let _ = decode_body(body);
+        for (body, expected_error) in seeds {
+            match expected_error {
+                Some(error) => assert_eq!(decode_body(body), Err(error), "{body:?}"),
+                None => assert!(decode_body(body).is_ok(), "expected a valid body: {body:?}"),
+            }
         }
         let mut rng = 0x9e37_79b9_7f4a_7c15u64;
-        for _ in 0..256 {
+        for seed_index in 0..256 {
             rng ^= rng << 13;
             rng ^= rng >> 7;
             rng ^= rng << 17;
@@ -3914,7 +3948,10 @@ mod tests {
                 let b = 0x20 + ((rng.wrapping_add(i as u64 * 17) % 95) as u8);
                 body.push(b as char);
             }
-            let _ = decode_body(&body);
+            assert!(
+                decode_body(&body).is_err(),
+                "generated adversarial seed {seed_index} unexpectedly decoded: {body:?}"
+            );
         }
     }
 

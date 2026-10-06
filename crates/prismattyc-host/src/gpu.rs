@@ -447,12 +447,22 @@ mod tests {
     }
 
     #[test]
-    fn instance_constructs_without_a_window() {
-        // Compile + link proof. Adapter presence is machine-dependent; CI
-        // has no GPU, so we only require that Instance::new does not panic.
-        let _instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+    fn instance_enumerates_adapters_without_a_window() {
+        let backends = wgpu::Backends::NOOP;
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends,
+            backend_options: wgpu::BackendOptions {
+                noop: wgpu::NoopBackendOptions { enable: true },
+                ..Default::default()
+            },
             ..Default::default()
         });
+        let adapters = instance.enumerate_adapters(backends);
+        assert_eq!(
+            adapters.len(),
+            1,
+            "the enabled noop backend has one adapter"
+        );
+        assert_eq!(adapters[0].get_info().backend, wgpu::Backend::Noop);
     }
 }

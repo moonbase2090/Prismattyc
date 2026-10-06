@@ -680,7 +680,11 @@ fn attach_all_passes_session_id_not_ambiguous_name() {
             ids.push(pair[1].to_string());
         }
     }
-    assert!(ids.len() >= 2, "expected generated ids: {text}");
+    assert_eq!(
+        ids.len(),
+        2,
+        "expected exactly the two created session ids: {text}"
+    );
 
     let ambiguous = umbrella(&socket, &["attach", "1", "--json"]);
     assert!(!ambiguous.status.success(), "{}", stderr(&ambiguous));

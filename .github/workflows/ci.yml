@@ -196,12 +196,21 @@ jobs:
       - name: Install real-window test display
         run: ./scripts/install-render-test-deps.sh
 
+      - name: Install CJK test font
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-noto-cjk
+          fc-cache -f
+
       - name: Test workspace
         run: |
           cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
           [ -f "$cargo_env" ] && . "$cargo_env"
           [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
           cargo test --workspace --locked
+
+      - name: Test GPU adapter enumeration without hardware
+        run: cargo test -p prismattyc-host --features gpu,wgpu/noop --bin prismattyc-host instance_enumerates_adapters_without_a_window
 
   # Frozen rich harness pin. Not a light-stage / PRD §5.6 / A-6 gate.
   # Hand / Local Actions: --event pull_request --job phase3-rich

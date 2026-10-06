@@ -974,7 +974,7 @@ fn is_help_flag(arg: &String) -> bool {
 }
 
 fn print_update_help() {
-    println!("pmux update [--check] [--json] [--pre] [--bin-dir PATH]\nprismattyc update [--check] [--json] [--pre] [--bin-dir PATH]\npmux update --rollback\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\n--pre includes immutable prereleases such as v0.3.0-rc.3. The default channel and the app menu stay on stable releases.\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together. --rollback restores that previous installation.\nOn macOS, verify SHA256SUMS-macos, Developer ID Team ID S24C53PD3Y, and Gatekeeper notarization. Keep the previous verified app for --rollback.\nprismattyc update is the same command as pmux update.\nUpdating does not stop sessions. The app menu restarts the host and safely restarts the daemon when it has no active sessions.\n--source is an explicit development-only source build.");
+    println!("pmux update [--check] [--json] [--pre] [--bin-dir PATH]\nprismattyc update [--check] [--json] [--pre] [--bin-dir PATH]\npmux update --rollback\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\n--pre includes immutable prereleases such as v0.3.0-rc.3. The default channel and the app menu stay on stable releases such as v0.3.0.\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together. --rollback restores that previous installation.\nOn macOS, verify SHA256SUMS-macos, Developer ID Team ID S24C53PD3Y, and Gatekeeper notarization. Keep the previous verified app for --rollback.\nprismattyc update is the same command as pmux update.\nUpdating does not stop sessions. The app menu restarts the host and safely restarts the daemon when it has no active sessions.\n--source is an explicit development-only source build.");
 }
 
 /// Fetch the latest release, compare versions, and either report or install.
@@ -2525,18 +2525,25 @@ mod tests {
         let releases = vec![
             bare_release("v0.3.0-rc.3", true, false, true),
             bare_release("v0.3.0-rc.3", false, false, true),
+            bare_release("v0.3.0", false, false, true),
             bare_release("v0.2.30", false, false, true),
             bare_release("v0.2.29", false, false, true),
         ];
         let stable = best_release_index(&releases, false).unwrap();
-        assert_eq!(releases[stable].tag_name, "v0.2.30");
+        assert_eq!(releases[stable].tag_name, "v0.3.0");
         let pre = best_release_index(&releases, true).unwrap();
-        assert_eq!(releases[pre].tag_name, "v0.3.0-rc.3");
-        let rc = &releases[pre];
+        assert_eq!(releases[pre].tag_name, "v0.3.0");
+        let rc = &releases[0];
         assert!(accepted_version(rc, false).is_err());
         assert_eq!(
             accepted_version(rc, true).unwrap().to_string(),
             "0.3.0-rc.3"
+        );
+        assert_eq!(
+            accepted_version(&releases[stable], false)
+                .unwrap()
+                .to_string(),
+            "0.3.0"
         );
     }
 
@@ -2545,10 +2552,11 @@ mod tests {
         let releases = vec![
             bare_release("v0.3.0-rc.3", true, true, true),
             bare_release("v0.3.0-rc.1", true, false, false),
+            bare_release("v0.3.0", false, false, true),
             bare_release("v0.2.30", false, false, true),
         ];
         let pre = best_release_index(&releases, true).unwrap();
-        assert_eq!(releases[pre].tag_name, "v0.2.30");
+        assert_eq!(releases[pre].tag_name, "v0.3.0");
     }
 
     fn fixture() -> Release {

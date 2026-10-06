@@ -201,6 +201,11 @@ pub struct TreeRow {
     pub pane: Option<usize>,
 }
 
+/// Pane rows appear only when a session splits into multiple panes (#181).
+pub fn show_pane_rows(pane_count: usize) -> bool {
+    pane_count > 1
+}
+
 /// Rows in paint order: every space, then tabs and panes of expanded ones.
 pub fn visible_rows(tree: &SidebarTree) -> Vec<TreeRow> {
     let mut rows = Vec::new();
@@ -220,14 +225,16 @@ pub fn visible_rows(tree: &SidebarTree) -> Vec<TreeRow> {
                 tab: Some(tab_index),
                 pane: None,
             });
-            for (pane_index, _) in tab.panes.iter().enumerate() {
-                rows.push(TreeRow {
-                    depth: 2,
-                    kind: RowKind::Pane,
-                    space: space_index,
-                    tab: Some(tab_index),
-                    pane: Some(pane_index),
-                });
+            if show_pane_rows(tab.panes.len()) {
+                for (pane_index, _) in tab.panes.iter().enumerate() {
+                    rows.push(TreeRow {
+                        depth: 2,
+                        kind: RowKind::Pane,
+                        space: space_index,
+                        tab: Some(tab_index),
+                        pane: Some(pane_index),
+                    });
+                }
             }
         }
     }
@@ -254,14 +261,16 @@ pub fn icon_rows(tree: &SidebarTree) -> Vec<TreeRow> {
                 tab: Some(tab_index),
                 pane: None,
             });
-            for (pane_index, _) in tab.panes.iter().enumerate() {
-                rows.push(TreeRow {
-                    depth: 2,
-                    kind: RowKind::Pane,
-                    space: space_index,
-                    tab: Some(tab_index),
-                    pane: Some(pane_index),
-                });
+            if show_pane_rows(tab.panes.len()) {
+                for (pane_index, _) in tab.panes.iter().enumerate() {
+                    rows.push(TreeRow {
+                        depth: 2,
+                        kind: RowKind::Pane,
+                        space: space_index,
+                        tab: Some(tab_index),
+                        pane: Some(pane_index),
+                    });
+                }
             }
         }
     }
@@ -416,9 +425,9 @@ mod tests {
             vec![
                 (0, RowKind::Space, 0),
                 (1, RowKind::Tab, 0),
-                (2, RowKind::Pane, 0),
                 (0, RowKind::Space, 1),
-            ]
+            ],
+            "a single-pane session does not get a pane row"
         );
         let icons = icon_rows(&tree);
         assert!(
@@ -428,9 +437,77 @@ mod tests {
         assert!(icons
             .iter()
             .any(|row| row.space == 1 && row.kind == RowKind::Tab));
-        assert!(icons
-            .iter()
-            .any(|row| row.space == 1 && row.kind == RowKind::Pane));
+        assert!(
+            !icons
+                .iter()
+                .any(|row| row.kind == RowKind::Pane && row.space == 0),
+            "solo panes hide under the session row in the icon strip too"
+        );
+    }
+
+    #[test]
+    fn multi_pane_tab_keeps_pane_rows_in_sidebar_and_icon_strip() {
+        let tabs = vec![SavedSpaceTab {
+            title: "grid".to_string(),
+            sessions: vec!["build".to_string(), "review".to_string()],
+            layout: None,
+        }];
+        let tree = SidebarTree::build(&[SpaceInput {
+            name: "lab",
+            current: true,
+            collapsed: false,
+            attention: 0,
+            tabs: TabsSource::Saved {
+                tabs: &tabs,
+                extra_sessions: &[],
+            },
+        }]);
+        let pane_rows: Vec<_> = visible_rows(&tree)
+            .into_iter()
+            .filter(|row| row.kind == RowKind::Pane)
+            .collect();
+        assert_eq!(pane_rows.len(), 2);
+        assert_eq!(
+            icon_rows(&tree)
+                .into_iter()
+                .filter(|row| row.kind == RowKind::Pane)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn pane_row_visibility_tracks_live_split_and_close() {
+        let split = live_tab(
+            "grid",
+            true,
+            vec![("build", true), ("review", false)],
+            Some(0),
+        );
+        let solo = live_tab("grid", true, vec![("build", true)], Some(0));
+        let build = |info: &TabInfo| {
+            SidebarTree::build(&[SpaceInput {
+                name: "lab",
+                current: true,
+                collapsed: false,
+                attention: 0,
+                tabs: TabsSource::Live(&[LiveTab { info, mail: &[] }]),
+            }])
+        };
+        assert_eq!(
+            visible_rows(&build(&split))
+                .into_iter()
+                .filter(|row| row.kind == RowKind::Pane)
+                .count(),
+            2,
+            "splitting adds pane rows"
+        );
+        assert!(
+            visible_rows(&build(&solo))
+                .into_iter()
+                .all(|row| row.kind != RowKind::Pane),
+            "closing back to one pane removes pane rows"
+        );
     }
 
     #[test]

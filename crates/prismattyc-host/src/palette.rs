@@ -712,6 +712,8 @@ pub enum ContextMenuKind {
     RailSpace,
     /// Sidebar session (tab) row (issue #181).
     RailSession,
+    /// Sidebar session row when the tab has only one pane (#181).
+    RailSessionSolo,
     /// Sidebar pane row under a session (issue #181).
     RailPane,
 }
@@ -1854,6 +1856,7 @@ mod tests {
             ContextMenuKind::Pane,
             ContextMenuKind::RailSpace,
             ContextMenuKind::RailSession,
+            ContextMenuKind::RailSessionSolo,
             ContextMenuKind::RailPane,
         ] {
             let mut menu = ContextMenu::new(kind);

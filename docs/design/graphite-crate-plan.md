@@ -18,9 +18,7 @@
 
 #164 and #169 both found the chrome separable, and both said to wait until after 0.3.0 because there was no second Rust consumer and the release was still a candidate. 0.3.0 has shipped. The approved lunatui PRD names the second consumer (Scorecard's TUI) and the crate split (`graphite-core`, `graphite-tui`).
 
-This plan starts the core extraction now, and starts the TUI crate only when lunatui can host it. Pixel painters stay in Prismattyc for the whole sequence. A ratatui adapter is not part of the sequence. Lunatui is the cell backend. Prismattyc does not take a lunatui dependency here. The in-process Prismattyc sink from lunatui PRD phase 8 is a later plan.
-
-Lightwell can take a token export later if that product asks. It is not a PR in this sequence. Cairn and Rookrunner are Python trees today; they are not consumers of this crate.
+This plan starts the core extraction now, and starts the TUI crate only when lunatui can host it. Pixel painters stay in Prismattyc for the whole sequence. A ratatui adapter is not part of the sequence. Lunatui is the cell backend. Prismattyc does not take a lunatui dependency here. The in-process Prismattyc sink from lunatui PRD phase 8 is a later plan. Scorecard's TUI, through lunatui, is the consumer this sequence builds toward.
 
 ## 3. API boundary
 
@@ -88,7 +86,7 @@ Core hit enums carry indexes, not mux ids. `bar_hit` today returns `StripHit::Sp
 | `graphite-tui` | Matches the lunatui crate it depends on (PRD recommendation: edition 2024, MSRV 1.88) |
 | Prismattyc | Stays edition 2021, MSRV 1.90. A 1.85 core is a legal dependency. |
 
-Scorecard and Lightwell declare Rust 1.85. The core stays on that MSRV so either can depend on tokens without a toolchain bump. `graphite-tui` will not be a Prismattyc dependency, so it can follow lunatui.
+Scorecard declares Rust 1.85. The core stays on that MSRV so Scorecard can depend on tokens without a toolchain bump. `graphite-tui` will not be a Prismattyc dependency, so it can follow lunatui.
 
 On 2026-10-05 the crates.io index showed `graphite` taken and `graphite-core`, `graphite-tui`, `moonbase-graphite`, `graphite-chrome`, `prismattyc-graphite`, and `moonbase-chrome` free (#164). A recheck from this session got HTTP 403 from the crates.io API, so the publish PR has to check again. Nothing in this sequence publishes.
 
@@ -201,7 +199,7 @@ T2 through T5 can follow T1 one at a time. T6 follows T1 (a re-export can land a
 | The public API grows Prismattyc types | `TabInfo`, `PaneId`, `KeyMap`, and `Theme` are convenient and wrong. | Review rejects any core signature that names those types. Inputs are labels, flags, colors, and indexes. |
 | Classic chrome moves by accident | P2 touches helpers that classic also calls. | P2's diff is the forward plus imports. Classic tests listed on that row stay green. Later PRs do not edit classic layout. |
 | Two copies of a function | A host wrapper that still contains the old body will diverge. | Each P-PR deletes the old body. The P8 search is the check. |
-| MSRV split | Prismattyc is 1.90. Scorecard and Lightwell are 1.85. Lunatui's PRD targets 1.88. | Core stays 1.85 and edition 2021, with no newer crates. `graphite-tui` is not a Prismattyc dependency. |
+| MSRV split | Prismattyc is 1.90. Scorecard is 1.85. Lunatui's PRD targets 1.88. | Core stays 1.85 and edition 2021, with no newer crates. `graphite-tui` is not a Prismattyc dependency. |
 | Font license leaves the host | The Plex blobs are SIL OFL and easy to sweep into a new crate with the painter. | Painters and `include_bytes!` stay in `prismattyc-host`. Review rejects a `fonts/` directory in the Graphite repo. |
 | Pixel parity is promised to Scorecard | Cell widgets cannot reproduce SDF rounded rects or subpixel text. | `graphite-tui` acceptance is styled snapshots. The plan says the two renderers share models and tokens, and they do not share pixels. |
 | Scorecard's batch CLI grows a TUI | `sc-cli` is clap and anstyle today. | S1 is default-off. The default `cargo tree` has no lunatui edge. |
@@ -216,12 +214,11 @@ T2 through T5 can follow T1 one at a time. T6 follows T1 (a re-export can land a
 | Q1 | GitHub repo name. `graphite` sits next to the Graphite editor's brand. #164 preferred a single crate `moonbase-graphite`. #169 preferred `prism-chrome`. | Use `github.com/moonbase2090/graphite` with crates `graphite-core` and `graphite-tui`, as D11 already does. `prism-chrome` would tie the look to one host and fight the Scorecard consumer. A single crate would put lunatui on the core graph. Confirm the org repo name at G0. |
 | Q2 | Should P2 retarget classic color helpers, or should the core vendor its own WCAG copy and leave `raster.rs` alone? | Forward the helpers. One formula is the way to keep Graphite derivation and classic contrast from drifting. The PR stays behavior-preserving and lists the classic tests. If review wants classic untouched, the fallback is a duplicated formula plus a differential test against `raster::contrast_ratio` on a fixed set of pairs, deleted when a later PR forwards. Prefer the forward. |
 | Q3 | When does `graphite-tui` start relative to Prismattyc? | After G3 the models are real enough to design widgets, and the code waits until lunatui PRs 26 and 28 have landed. Prismattyc P1–P8 do not wait on lunatui. |
-| Q4 | Lightwell token JSON. | Out of this sequence. Add an optional `serde` feature on `graphite-core` only after Lightwell asks, in its own PR, default off. The core's default build stays free of serde. |
-| Q5 | When to publish to crates.io. | After P3 (Prismattyc derives tokens from the published revision) and T1 (a second crate maps those tokens). Still a separate PR, still `publish = false` until that PR. Recheck crates.io in that PR. |
-| Q6 | Does this sign-off PR bump Prismattyc's workspace version? | No. It is docs-only and it is not a merge request. The version bump belongs to each later code PR that merges, per `CONTRIBUTING.md`. |
-| Q7 | Should Prismattyc grow a `tests-first` CI job like lunatui's? | Not in this sequence. Each code PR links the red commit in the body. A CI job that enforces it would be its own trunk PR if MB2090 wants it after the first extraction PR shows the habit. |
-| Q8 | Where does `BarLayout` live once `mux.rs` stores it? | The core owns the layout struct. `mux.rs` stores that struct. Scale for painters is `scale_milli` on the layout. `ChromeGeom` remains the host's classic-or-graphite flag and is not a field of the core layout. |
-| Q9 | Who is the second consumer if Scorecard's TUI slips? | Prismattyc is consumer one. `graphite-tui`'s snapshot tests are consumer two for the models. Scorecard S1 is still required before calling the extraction finished, because D11 names Scorecard. Slipping S1 does not revert P1–P8. |
+| Q4 | When to publish to crates.io. | After P3 (Prismattyc derives tokens from the published revision) and T1 (a second crate maps those tokens). Still a separate PR, still `publish = false` until that PR. Recheck crates.io in that PR. |
+| Q5 | Does this sign-off PR bump Prismattyc's workspace version? | No. It is docs-only and it is not a merge request. The version bump belongs to each later code PR that merges, per `CONTRIBUTING.md`. |
+| Q6 | Should Prismattyc grow a `tests-first` CI job like lunatui's? | Not in this sequence. Each code PR links the red commit in the body. A CI job that enforces it would be its own trunk PR if MB2090 wants it after the first extraction PR shows the habit. |
+| Q7 | Where does `BarLayout` live once `mux.rs` stores it? | The core owns the layout struct. `mux.rs` stores that struct. Scale for painters is `scale_milli` on the layout. `ChromeGeom` remains the host's classic-or-graphite flag and is not a field of the core layout. |
+| Q8 | Who is the second consumer if Scorecard's TUI slips? | Prismattyc is consumer one. `graphite-tui`'s snapshot tests are consumer two for the models. Scorecard S1 is still required before calling the extraction finished, because D11 names Scorecard. Slipping S1 does not revert P1–P8. |
 
 ## 8. What sign-off authorizes
 

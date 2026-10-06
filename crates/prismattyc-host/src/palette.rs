@@ -710,8 +710,10 @@ pub enum ContextMenuKind {
     Pane,
     /// Sidebar / vertical-rail space row (issue #181).
     RailSpace,
-    /// Sidebar session or pane row (issue #181).
+    /// Sidebar session (tab) row (issue #181).
     RailSession,
+    /// Sidebar pane row under a session (issue #181).
+    RailPane,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1852,6 +1854,7 @@ mod tests {
             ContextMenuKind::Pane,
             ContextMenuKind::RailSpace,
             ContextMenuKind::RailSession,
+            ContextMenuKind::RailPane,
         ] {
             let mut menu = ContextMenu::new(kind);
             assert_eq!(

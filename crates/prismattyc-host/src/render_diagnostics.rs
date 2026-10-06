@@ -291,6 +291,7 @@ impl App {
                         super::ContextMenuTarget::Pane(_) => "pane",
                         super::ContextMenuTarget::RailSpace(_) => "rail-space",
                         super::ContextMenuTarget::RailSession(_) => "rail-session",
+                        super::ContextMenuTarget::RailPane(_) => "rail-pane",
                     }),
                 })),
                 "space_session_names": host.space_rail.live_pane_names,

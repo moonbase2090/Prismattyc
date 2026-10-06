@@ -1,12 +1,14 @@
 //! Sidebar and vertical-rail context menus (issue #181).
 //!
 //! Pure row model: labels, action mapping, and confirmation gating. The host
-//! maps [`RailSpaceAction`] / [`RailSessionAction`] onto existing command paths.
+//! maps [`RailSpaceAction`] / [`RailSessionAction`] / [`RailPaneAction`] onto
+//! existing command paths.
 
 use crate::palette::ContextMenuKind;
 
 pub const RAIL_SPACE_ROWS: usize = 6;
 pub const RAIL_SESSION_ROWS: usize = 4;
+pub const RAIL_PANE_ROWS: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RailSpaceAction {
@@ -26,10 +28,17 @@ pub enum RailSessionAction {
     MoveToSpace,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RailPaneAction {
+    Focus,
+    ClosePane,
+}
+
 pub fn row_count(kind: ContextMenuKind) -> Option<usize> {
     match kind {
         ContextMenuKind::RailSpace => Some(RAIL_SPACE_ROWS),
         ContextMenuKind::RailSession => Some(RAIL_SESSION_ROWS),
+        ContextMenuKind::RailPane => Some(RAIL_PANE_ROWS),
         _ => None,
     }
 }
@@ -56,6 +65,14 @@ pub fn session_action(index: usize) -> Option<RailSessionAction> {
     }
 }
 
+pub fn pane_action(index: usize) -> Option<RailPaneAction> {
+    match index {
+        0 => Some(RailPaneAction::Focus),
+        1 => Some(RailPaneAction::ClosePane),
+        _ => None,
+    }
+}
+
 pub fn needs_confirmation(kind: ContextMenuKind, index: usize, confirmed: bool) -> bool {
     if confirmed {
         return false;
@@ -63,6 +80,7 @@ pub fn needs_confirmation(kind: ContextMenuKind, index: usize, confirmed: bool) 
     match kind {
         ContextMenuKind::RailSpace => matches!(index, 4 | 5),
         ContextMenuKind::RailSession => index == 2,
+        ContextMenuKind::RailPane => index == 1,
         _ => false,
     }
 }
@@ -91,6 +109,14 @@ pub fn session_label(index: usize) -> Option<(&'static str, &'static str)> {
             "Move to space…",
             "move the session into another saved space",
         )),
+        _ => None,
+    }
+}
+
+pub fn pane_label(index: usize) -> Option<(&'static str, &'static str)> {
+    match index {
+        0 => Some(("Focus", "bring this pane to the keyboard")),
+        1 => Some(("Close pane…", "close this pane in the layout")),
         _ => None,
     }
 }
@@ -137,6 +163,18 @@ mod tests {
     }
 
     #[test]
+    fn pane_menu_lists_focus_and_close_in_order() {
+        let expected = [RailPaneAction::Focus, RailPaneAction::ClosePane];
+        for (index, action) in expected.into_iter().enumerate() {
+            assert_eq!(pane_action(index), Some(action), "row {index}");
+            assert!(pane_label(index).is_some(), "label {index}");
+        }
+        assert_eq!(pane_action(2), None);
+        assert_eq!(row_count(ContextMenuKind::RailPane), Some(RAIL_PANE_ROWS));
+        assert_eq!(pane_label(1).map(|(label, _)| label), Some("Close pane…"));
+    }
+
+    #[test]
     fn destructive_rows_require_confirmation_once() {
         for index in [4, 5] {
             assert!(
@@ -152,5 +190,8 @@ mod tests {
         assert!(needs_confirmation(ContextMenuKind::RailSession, 2, false));
         assert!(!needs_confirmation(ContextMenuKind::RailSession, 2, true));
         assert!(!needs_confirmation(ContextMenuKind::RailSession, 1, false));
+        assert!(needs_confirmation(ContextMenuKind::RailPane, 1, false));
+        assert!(!needs_confirmation(ContextMenuKind::RailPane, 1, true));
+        assert!(!needs_confirmation(ContextMenuKind::RailPane, 0, false));
     }
 }

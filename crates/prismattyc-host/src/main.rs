@@ -1501,6 +1501,7 @@ enum ContextMenuTarget {
     /// Chip index into [`HostState::space_rail`]. The name is read at activate time.
     RailSpace(usize),
     RailSession(PaneId),
+    RailPane(PaneId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1588,7 +1589,9 @@ fn context_menu_choice(kind: ContextMenuKind, index: usize) -> ContextMenuChoice
             };
             ContextMenuChoice::Pane(action)
         }
-        ContextMenuKind::RailSpace | ContextMenuKind::RailSession => ContextMenuChoice::Noop,
+        ContextMenuKind::RailSpace | ContextMenuKind::RailSession | ContextMenuKind::RailPane => {
+            ContextMenuChoice::Noop
+        }
     }
 }
 
@@ -1604,9 +1607,9 @@ fn context_menu_action(target: ContextMenuTarget, index: usize) -> ContextMenuAc
             ContextMenuChoice::Pane(action) => ContextMenuAction::Pane { pane, action },
             ContextMenuChoice::Space(_) | ContextMenuChoice::Noop => ContextMenuAction::Noop,
         },
-        ContextMenuTarget::RailSpace(_) | ContextMenuTarget::RailSession(_) => {
-            ContextMenuAction::Noop
-        }
+        ContextMenuTarget::RailSpace(_)
+        | ContextMenuTarget::RailSession(_)
+        | ContextMenuTarget::RailPane(_) => ContextMenuAction::Noop,
     }
 }
 
@@ -1627,6 +1630,7 @@ fn context_menu_kind(target: ContextMenuTarget) -> ContextMenuKind {
         ContextMenuTarget::Pane(_) => ContextMenuKind::Pane,
         ContextMenuTarget::RailSpace(_) => ContextMenuKind::RailSpace,
         ContextMenuTarget::RailSession(_) => ContextMenuKind::RailSession,
+        ContextMenuTarget::RailPane(_) => ContextMenuKind::RailPane,
     }
 }
 
@@ -9282,6 +9286,28 @@ fn context_menu_rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
                 .collect();
             (header, rows)
         }
+        ContextMenuTarget::RailPane(pane) => {
+            let header = host
+                .mux
+                .attach_name_of(pane)
+                .or_else(|| host.mux.attach_session_of(pane))
+                .map(|name| format!("{name} · pane"))
+                .unwrap_or_else(|| "pane".to_string());
+            let count = rail_context_menu::row_count(ContextMenuKind::RailPane).unwrap_or(0);
+            let rows = (0..count)
+                .filter_map(|index| {
+                    rail_context_menu::pane_label(index).map(|(label, description)| {
+                        let describe = if menu.confirm == Some(index) {
+                            "Enter: close pane · Esc: cancel".to_string()
+                        } else {
+                            description.to_string()
+                        };
+                        PaletteRow::plain(label.to_string(), describe, String::new())
+                    })
+                })
+                .collect();
+            (header, rows)
+        }
     };
     Some(rows)
 }
@@ -9403,6 +9429,31 @@ fn apply_rail_session_action(
             program,
             child_args,
         ),
+    }
+}
+
+fn apply_rail_pane_action(
+    host: &mut HostState,
+    pane: PaneId,
+    action: rail_context_menu::RailPaneAction,
+    program: &str,
+    child_args: &[String],
+) -> Dispatch {
+    match action {
+        rail_context_menu::RailPaneAction::Focus => {
+            let tab = focused_tab_index(host, pane);
+            let pane_index = host
+                .mux
+                .tab_panes()
+                .get(tab)
+                .and_then(|(_, panes)| panes.iter().position(|id| *id == pane))
+                .unwrap_or(0);
+            focus_sidebar_session(host, tab, Some(pane_index));
+            Dispatch::Handled
+        }
+        rail_context_menu::RailPaneAction::ClosePane => {
+            apply_pane_context_action(host, pane, PaneContextAction::Close, program, child_args)
+        }
     }
 }
 
@@ -9540,6 +9591,12 @@ fn activate_context_menu(
         ContextMenuTarget::RailSession(pane) => {
             if let Some(action) = rail_context_menu::session_action(index) {
                 return apply_rail_session_action(host, pane, action, program, child_args);
+            }
+            Dispatch::Handled
+        }
+        ContextMenuTarget::RailPane(pane) => {
+            if let Some(action) = rail_context_menu::pane_action(index) {
+                return apply_rail_pane_action(host, pane, action, program, child_args);
             }
             Dispatch::Handled
         }
@@ -11238,9 +11295,14 @@ fn open_sidebar_context_menu(host: &mut HostState, row: &sidebar::TreeRow, space
                 .unwrap_or(row.space);
             open_rail_space_menu(host, chip);
         }
-        sidebar::RowKind::Tab | sidebar::RowKind::Pane => {
+        sidebar::RowKind::Tab => {
             if let Some(pane) = pane_for_sidebar_row(host, row) {
                 open_context_menu(host, ContextMenuTarget::RailSession(pane));
+            }
+        }
+        sidebar::RowKind::Pane => {
+            if let Some(pane) = pane_for_sidebar_row(host, row) {
+                open_context_menu(host, ContextMenuTarget::RailPane(pane));
             }
         }
     }

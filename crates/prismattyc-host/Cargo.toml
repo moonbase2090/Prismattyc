@@ -95,7 +95,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-foundation]
 version = "0.3.2"
 default-features = false
-features = ["std", "CFData", "CFCGTypes"]
+features = ["std", "CFData", "CFCGTypes", "CFNumber", "CFDictionary", "CFString"]
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-graphics]
 version = "0.3.2"
@@ -105,7 +105,17 @@ features = ["std", "objc2", "CGColorSpace", "CGDataProvider", "CGImage"]
 [target.'cfg(target_os = "macos")'.dependencies.objc2-quartz-core]
 version = "0.3.2"
 default-features = false
-features = ["std", "CALayer", "CATransaction", "objc2-core-foundation"]
+features = ["std", "CALayer", "CATransaction", "objc2-core-foundation", "CAMetalLayer", "objc2-metal"]
+
+# SPIKE (spike/present-cost): IOSurface and Metal present experiments.
+[target.'cfg(target_os = "macos")'.dependencies.objc2-io-surface]
+version = "0.3.2"
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-metal]
+version = "0.3.2"
+
+[target.'cfg(target_os = "macos")'.dependencies.libc]
+version = "0.2"
 
 [target.'cfg(unix)'.dev-dependencies]
 rustix = { version = "1.1", features = ["process"] }

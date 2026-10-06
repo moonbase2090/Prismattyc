@@ -41,6 +41,8 @@ mod palette;
 mod pane_bell;
 mod pixel_alpha;
 #[cfg(target_os = "macos")]
+mod present_surface;
+#[cfg(target_os = "macos")]
 mod present_thread;
 #[cfg(any(target_os = "macos", test))]
 mod present_tiles;
@@ -5748,6 +5750,7 @@ fn rasterize_frame(
     host.render_frame.rows_scrolled_as_blit = 0;
     let (mut frame_damage, composed_paint_rows) =
         compose_host_frame_damage(host, damage_snapshot, full);
+    let mut stages = spike_timing::DamageStages::new(width, height, &frame_damage);
     if composer_promotes_to_full(full, &frame_damage) {
         full = true;
         reason = Some(FullRepaintReason::Fallback);
@@ -5768,10 +5771,12 @@ fn rasterize_frame(
             &mut frame_damage,
         );
     }
+    stages.mark("activity", &frame_damage);
     // A sweep may begin and finish between chrome snapshots. Its retained
     // underlay independently carries cleanup damage until the next paint.
     host.pane_bells
         .restore(buffer, width as usize, &mut frame_damage);
+    stages.mark("bells", &frame_damage);
     let pane_damage_empty = host.pane_damage.values().all(damage_is_empty);
     // Idle frames keep the settled Graphite ring. Restoring it here would
     // erase the antialiased edge and publish border damage on every tick.
@@ -5780,6 +5785,7 @@ fn rasterize_frame(
     }
     host.border_underlay
         .restore(buffer, width as usize, &mut frame_damage);
+    stages.mark("underlay", &frame_damage);
     let overlay_surface = host_overlay_surface(host);
     if host.find.active && host.emulator.screen().alt_active() {
         close_find(&mut host.find);
@@ -7317,11 +7323,13 @@ fn rasterize_frame(
             *px ^= 0x00FF_FFFF;
         }
     }
-    if full {
+    let frame_damage = if full {
         FrameDamage::Full
     } else {
         frame_damage
-    }
+    };
+    stages.finish(&frame_damage);
+    frame_damage
 }
 
 impl App {

@@ -43,6 +43,12 @@ pub struct MacPresent {
     /// SPIKE: `PRISMATTYC_SPIKE_PRESENT_THREAD=1` moves image build and
     /// commit to a present thread. Declared last so it joins after use.
     thread: Option<crate::present_thread::PresentThread>,
+    /// SPIKE (present-cost): last presented straight pixels for the tile
+    /// diff oracle (`PRISMATTYC_SPIKE_TILE_DIFF=1`).
+    previous: Option<Vec<u32>>,
+    /// SPIKE (present-cost): `PRISMATTYC_SPIKE_PRESENT=iosurface`.
+    surface: Option<crate::present_surface::SurfaceRing>,
+    frames: u64,
 }
 
 impl MacPresent {
@@ -69,6 +75,8 @@ impl MacPresent {
         layer.setZPosition(1.0);
         layer.setContentsGravity(unsafe { kCAGravityTopLeft });
         root_layer.addSublayer(&layer);
+        let surface = (std::env::var("PRISMATTYC_SPIKE_PRESENT").as_deref() == Ok("iosurface"))
+            .then(|| crate::present_surface::SurfaceRing::new(&layer));
         CATransaction::commit();
         Ok(Self {
             layer,
@@ -86,6 +94,9 @@ impl MacPresent {
             height: 0,
             window,
             _main_thread: main_thread,
+            previous: None,
+            surface,
+            frames: 0,
             thread: std::env::var_os("PRISMATTYC_SPIKE_PRESENT_THREAD")
                 .map(|_| crate::present_thread::PresentThread::spawn()),
         })
@@ -125,7 +136,11 @@ impl MacPresent {
         } else {
             damage
         };
+        if self.surface.is_some() {
+            return self.present_surface(damage);
+        }
         let dirty = damaged_tiles(&self.tile_rects, &damage);
+        let dirty = self.spike_tile_diff(dirty);
         if self.thread.is_some() {
             return self.present_threaded(dirty);
         }
@@ -191,6 +206,7 @@ impl MacPresent {
             unsafe { self.tile_layers[index].setContents(Some(image.as_ref())) };
         }
         CATransaction::commit();
+        spike_flush();
         crate::spike_timing::record("present.ca_commit", commit_started.elapsed());
         self.scale = scale;
         self.rebuild_layers = false;
@@ -199,7 +215,101 @@ impl MacPresent {
     }
 }
 
+/// SPIKE (present-cost): `PRISMATTYC_SPIKE_FLUSH=1` flushes after commit so
+/// main-thread timing includes work AppKit's implicit transaction would
+/// otherwise defer to the run-loop observer.
+fn spike_flush() {
+    if std::env::var_os("PRISMATTYC_SPIKE_FLUSH").is_some() {
+        CATransaction::flush();
+    }
+}
+
 impl MacPresent {
+    /// SPIKE (present-cost): IOSurface ring instead of CGImage tiles.
+    fn present_surface(&mut self, damage: FrameDamage) -> Result<()> {
+        let scale = self.window.scale_factor();
+        let ring = self.surface.as_mut().expect("surface present");
+        if self.rebuild_layers || self.scale != scale {
+            CATransaction::begin();
+            CATransaction::setDisableActions(true);
+            self.layer.setFrame(self.root_layer.bounds());
+            let view_rect = CGRect::new(
+                CGPoint::new(0.0, 0.0),
+                CGSize::new(self.width as f64 / scale, self.height as f64 / scale),
+            );
+            let root_rect = self.view.convertRectToLayer(view_rect);
+            let frame = self
+                .layer
+                .convertRect_fromLayer(root_rect, Some(&self.root_layer));
+            let resized = ring.resize(self.width, self.height, frame, scale);
+            CATransaction::commit();
+            resized?;
+        }
+        let started = std::time::Instant::now();
+        ring.present(&self.pixels, &damage)?;
+        spike_flush();
+        crate::spike_timing::record("present.surface_total", started.elapsed());
+        self.frames += 1;
+        if std::env::var_os("PRISMATTYC_SPIKE_VERIFY").is_some() && self.frames % 30 == 0 {
+            let dump = std::env::var_os("PRISMATTYC_DUMP_PRESENT").map(std::path::PathBuf::from);
+            let mismatches = ring.verify(&self.pixels, dump.as_deref());
+            crate::spike_timing::value("present.verify_mismatched_pixels", mismatches as u64);
+        }
+        self.scale = scale;
+        self.rebuild_layers = false;
+        self.retained = true;
+        Ok(())
+    }
+
+    /// SPIKE (present-cost): count dirty tiles whose pixels really changed
+    /// since the last present, optionally present only those, and audit
+    /// undamaged tiles for changes the damage missed.
+    fn spike_tile_diff(&mut self, dirty: Vec<usize>) -> Vec<usize> {
+        if std::env::var_os("PRISMATTYC_SPIKE_TILE_DIFF").is_none() {
+            return dirty;
+        }
+        let len = self.pixels.len();
+        let Some(previous) = self.previous.as_mut().filter(|p| p.len() == len) else {
+            self.previous = Some(self.pixels.clone());
+            return dirty;
+        };
+        let started = std::time::Instant::now();
+        let width = self.width;
+        let differs = |tile: PixelRect, a: &[u32], b: &[u32]| {
+            (tile.y..tile.y + tile.height).any(|y| {
+                let row = y * width + tile.x..y * width + tile.x + tile.width;
+                a[row.clone()] != b[row]
+            })
+        };
+        let changed: Vec<usize> = dirty
+            .iter()
+            .copied()
+            .filter(|&index| differs(self.tile_rects[index], &self.pixels, previous))
+            .collect();
+        crate::spike_timing::record("present.diff", started.elapsed());
+        crate::spike_timing::value("present.oracle_dirty_tiles", dirty.len() as u64);
+        crate::spike_timing::value("present.oracle_changed_tiles", changed.len() as u64);
+        if std::env::var_os("PRISMATTYC_SPIKE_DAMAGE_AUDIT").is_some() {
+            let missed = (0..self.tile_rects.len())
+                .filter(|index| !dirty.contains(index))
+                .filter(|&index| differs(self.tile_rects[index], &self.pixels, previous))
+                .count();
+            crate::spike_timing::value("present.audit_undamaged_changed_tiles", missed as u64);
+        }
+        for &index in &dirty {
+            let tile = self.tile_rects[index];
+            for y in tile.y..tile.y + tile.height {
+                let row = y * width + tile.x..y * width + tile.x + tile.width;
+                previous[row.clone()].copy_from_slice(&self.pixels[row]);
+            }
+        }
+        if std::env::var_os("PRISMATTYC_SPIKE_SKIP_UNCHANGED").is_some() && !self.rebuild_layers {
+            changed
+        } else {
+            dirty
+        }
+    }
+
     /// SPIKE: geometry on main, pixels to the present thread.
     fn present_threaded(&mut self, dirty: Vec<usize>) -> Result<()> {
         let scale = self.window.scale_factor();

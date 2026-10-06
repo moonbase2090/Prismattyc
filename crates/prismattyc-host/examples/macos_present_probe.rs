@@ -17,11 +17,21 @@ mod macos_window;
 mod pixel_alpha;
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
+#[path = "../src/present_surface.rs"]
+mod present_surface;
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
 #[path = "../src/present_thread.rs"]
 mod present_thread;
 #[cfg(target_os = "macos")]
 #[path = "../src/present_tiles.rs"]
 mod present_tiles;
+/// The host's PNG dump is not part of this probe.
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+fn write_present_png(_: &std::path::Path, _: &[u32], _: u32, _: u32) -> anyhow::Result<()> {
+    Ok(())
+}
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
 #[path = "../src/spike_timing.rs"]

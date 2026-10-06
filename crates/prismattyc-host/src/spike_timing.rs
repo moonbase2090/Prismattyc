@@ -150,3 +150,86 @@ fn report(state: &Recorder) -> String {
     }
     out
 }
+
+/// SPIKE (present-cost): marginal 512x128 tiles each damage stage adds.
+/// `PRISMATTYC_SPIKE_DAMAGE_STAGES=1` enables it (macOS tile grid).
+pub struct DamageStages {
+    active: bool,
+    width: usize,
+    height: usize,
+    last: usize,
+}
+
+impl DamageStages {
+    pub fn new(width: u32, height: u32, damage: &crate::frame_damage::FrameDamage) -> Self {
+        let active = enabled() && std::env::var_os("PRISMATTYC_SPIKE_DAMAGE_STAGES").is_some();
+        let mut stages = Self {
+            active,
+            width: width as usize,
+            height: height as usize,
+            last: 0,
+        };
+        stages.mark("compose", damage);
+        stages
+    }
+
+    fn tiles(&self, damage: &crate::frame_damage::FrameDamage) -> usize {
+        #[cfg(target_os = "macos")]
+        {
+            let grid = crate::present_tiles::tiles(self.width, self.height);
+            crate::present_tiles::damaged_tiles(&grid, damage).len()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = damage;
+            0
+        }
+    }
+
+    pub fn mark(&mut self, stage: &str, damage: &crate::frame_damage::FrameDamage) {
+        if !self.active {
+            return;
+        }
+        let now = self.tiles(damage);
+        count_value(
+            "damage.added_tiles",
+            stage,
+            now.saturating_sub(self.last) as u64,
+        );
+        self.last = now;
+    }
+
+    /// Final damage, including pane rows and blits added while painting.
+    pub fn finish(&mut self, damage: &crate::frame_damage::FrameDamage) {
+        if !self.active {
+            return;
+        }
+        let full = matches!(damage, crate::frame_damage::FrameDamage::Full);
+        self.mark(if full { "promoted_full" } else { "panes" }, damage);
+        value("damage.final_tiles", self.last as u64);
+        if let crate::frame_damage::FrameDamage::Rects(rects) = damage {
+            value("damage.rects", rects.len() as u64);
+            let area: usize = rects.iter().map(|r| r.width * r.height).sum();
+            value(
+                "damage.rect_area_pct",
+                (area * 100 / (self.width * self.height).max(1)) as u64,
+            );
+        }
+    }
+}
+
+/// Record a value under a runtime label (interned; spike only).
+pub fn count_value(prefix: &str, label: &str, v: u64) {
+    if !enabled() {
+        return;
+    }
+    static NAMES: OnceLock<Mutex<BTreeMap<String, &'static str>>> = OnceLock::new();
+    let key = format!("{prefix}.{label}");
+    let name = *NAMES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .entry(key.clone())
+        .or_insert_with(|| Box::leak(key.into_boxed_str()));
+    value(name, v);
+}

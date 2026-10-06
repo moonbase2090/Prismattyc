@@ -1,0 +1,8 @@
+opaque       copy               p50_us=   390 p95_us=   441 (6.2 Mpx)
+opaque       copy+premultiply   p50_us=  2942 p95_us=  3140 (6.2 Mpx)
+opaque       copy+opaque-skip   p50_us=   872 p95_us=   944 (6.2 Mpx)
+opaque       copy+branchless    p50_us=  2079 p95_us=  2106 (6.2 Mpx)
+translucent  copy               p50_us=   319 p95_us=   346 (6.2 Mpx)
+translucent  copy+premultiply   p50_us=  3224 p95_us=  3287 (6.2 Mpx)
+translucent  copy+opaque-skip   p50_us=  3454 p95_us=  3485 (6.2 Mpx)
+translucent  copy+branchless    p50_us=  2080 p95_us=  2106 (6.2 Mpx)

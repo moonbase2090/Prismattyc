@@ -32,6 +32,7 @@ pub enum ConfigGroup {
     Updates,
     FocusBorder,
     Font,
+    Input,
     Layout,
     BellsAttention,
     Background,
@@ -163,6 +164,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         doc: "Immediate hover blend for interactive strip, rail, and scrollbar chrome",
         range: "0.0-0.3",
         value: ConfigValue::F32(crate::config::DEFAULT_HOVER_BLEND),
+    },
+    ConfigKey {
+        name: "link_click",
+        group: ConfigGroup::Input,
+        doc: "Open links on plain clicks; Cmd/Ctrl-click always remains available",
+        range: "plain|modifier",
+        value: ConfigValue::String("plain"),
     },
     ConfigKey {
         name: "install_agent_skills",
@@ -496,6 +504,7 @@ fn group_header(group: ConfigGroup) -> &'static str {
         ConfigGroup::Updates => "updates",
         ConfigGroup::FocusBorder => "focus border",
         ConfigGroup::Font => "font",
+        ConfigGroup::Input => "input",
         ConfigGroup::Layout => "layout",
         ConfigGroup::BellsAttention => "bells and attention",
         ConfigGroup::Background => "background",
@@ -1061,6 +1070,7 @@ mod tests {
         "render_timer",
         "render_timer_log_every_frame",
         "tab_strip",
+        "link_click",
         "chrome_style",
         "bar_color",
         "layout",
@@ -1189,6 +1199,7 @@ mod tests {
         assert!(!parsed.render_timer_log_every_frame());
         assert_eq!(parsed.install_agent_skills, Some(true));
         assert_eq!(parsed.tab_strip(), crate::config::TabStripMode::Auto);
+        assert_eq!(parsed.link_click(), crate::link_click::Mode::Plain);
         assert_eq!(parsed.chrome_style(), crate::config::ChromeStyle::Graphite);
         assert_eq!(parsed.space_reorder, Some(false));
         assert!(

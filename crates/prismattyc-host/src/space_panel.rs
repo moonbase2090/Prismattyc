@@ -184,6 +184,27 @@ impl Panel {
         );
     }
 
+    fn link_click_rows(&mut self, current: crate::link_click::Mode) {
+        for (mode, value, detail) in [
+            (
+                crate::link_click::Mode::Plain,
+                "plain",
+                "Open links with a plain click",
+            ),
+            (
+                crate::link_click::Mode::Modifier,
+                "modifier",
+                "Require Cmd/Ctrl-click to open links",
+            ),
+        ] {
+            self.row(
+                format!("Link clicks: {value}"),
+                if current == mode { "Selected" } else { detail },
+                Choice::Preference("link_click".into(), value.into()),
+            );
+        }
+    }
+
     /// Settings pages keep one panel size and scroll inside it.
     pub(super) fn fixed_size(&self) -> bool {
         self.input.is_none()
@@ -335,6 +356,7 @@ impl Panel {
                         Choice::Preference("space_startup".into(), value.into()),
                     );
                 }
+                self.link_click_rows(config.link_click());
                 self.toast_rows(config.toasts());
             }
             Page::Messages(rows) => {
@@ -601,6 +623,18 @@ pub(super) fn settings(host: &mut HostState) {
     panel.pending = None;
     panel.page = Page::Settings;
     panel.rebuild();
+}
+
+pub(super) fn refresh_settings_link_click(host: &mut HostState) {
+    let refresh = host
+        .space_panel
+        .as_mut()
+        .filter(|panel| matches!(panel.page, Page::Settings))
+        .map(|panel| panel.rebuild())
+        .is_some();
+    if refresh {
+        host.dirty = true;
+    }
 }
 
 fn command(host: &mut HostState, args: Vec<String>, kind: &'static str) {
@@ -894,6 +928,14 @@ pub(super) fn activate(host: &mut HostState, index: usize) {
                     panel.rebuild();
                     // Apply now; the config watcher confirms it shortly.
                     apply_toast_level(host, &value);
+                }
+                Ok(()) if key == "link_click" => {
+                    panel.rebuild();
+                    host.link_click_mode = if value == "modifier" {
+                        crate::link_click::Mode::Modifier
+                    } else {
+                        crate::link_click::Mode::Plain
+                    };
                 }
                 Ok(()) => panel.rebuild(),
                 Err(error) => {
@@ -1434,6 +1476,27 @@ mod layout_tests {
             .rows
             .iter()
             .any(|r| matches!(r.choice, Choice::Layout(_))));
+    }
+
+    #[test]
+    fn settings_offer_plain_and_modifier_link_click_modes() {
+        let mut settings = panel(Page::Settings, None);
+        settings.rows.clear();
+        settings.link_click_rows(crate::link_click::Mode::Plain);
+        assert_eq!(
+            labels(&settings),
+            [
+                ("Link clicks: plain".into(), "Selected".into()),
+                (
+                    "Link clicks: modifier".into(),
+                    "Require Cmd/Ctrl-click to open links".into()
+                ),
+            ]
+        );
+        assert!(matches!(
+            &settings.rows[1].choice,
+            Choice::Preference(key, value) if key == "link_click" && value == "modifier"
+        ));
     }
 
     /// #171: three Toasts rows mark the saved level, and Recent messages

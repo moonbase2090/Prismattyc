@@ -12,6 +12,8 @@ use std::thread;
 use prismattyc_core::{Screen, MAX_HYPERLINK_URI_BYTES};
 use winit::keyboard::ModifiersState;
 
+use crate::link_click::{Identity, Target};
+
 /// Trailing characters stripped from a detected run (spike SGR-safe set).
 const TRAILING_PUNCT: &[char] = &[',', '.', ';', ':', '!', '?', ')', ']', '`'];
 
@@ -60,15 +62,54 @@ pub fn click_owns_url(open_gesture: bool, hit: bool) -> bool {
 
 /// URL covering viewport cell `(row, col)` under `scroll`, if any.
 pub fn url_at(screen: &Screen, scroll: usize, row: usize, col: usize) -> Option<String> {
+    target_at(screen, scroll, row, col).map(|target| target.url)
+}
+
+/// Link target and occurrence identity covering viewport cell `(row, col)`.
+pub fn target_at(screen: &Screen, scroll: usize, row: usize, col: usize) -> Option<Target> {
     let scroll = scroll.min(screen.max_view_scroll());
-    if let Some(uri) = screen.hyperlink_uri_at_view(scroll, row, col) {
-        return is_allowed_http_url(uri).then(|| uri.to_owned());
-    }
     let columns = screen.columns();
+    let rows = screen.rows();
+    if columns == 0 || rows == 0 {
+        return None;
+    }
+    if let Some(id) = screen.view_cell(scroll, row, col).hyperlink_id() {
+        let uri = screen.hyperlink_uri_at_view(scroll, row, col)?;
+        if !is_allowed_http_url(uri) {
+            return None;
+        }
+        let index = row.saturating_mul(columns).saturating_add(col);
+        let count = rows.saturating_mul(columns);
+        let id_at = |index: usize| {
+            (index < count).then(|| {
+                screen
+                    .view_cell(scroll, index / columns, index % columns)
+                    .hyperlink_id()
+            })
+        };
+        let mut start = index;
+        while start > 0 && id_at(start - 1) == Some(Some(id)) {
+            start -= 1;
+        }
+        let mut end = index;
+        while end + 1 < count && id_at(end + 1) == Some(Some(id)) {
+            end += 1;
+        }
+        return Some(Target {
+            url: uri.to_owned(),
+            identity: Identity::Osc8 { id, start, end },
+        });
+    }
     detect_urls(screen, scroll)
         .into_iter()
         .find(|found| found.contains(columns, row, col))
-        .map(|found| found.url)
+        .map(|found| Target {
+            url: found.url,
+            identity: Identity::Detected {
+                start: found.start,
+                end: found.end,
+            },
+        })
 }
 
 pub fn detect_urls(screen: &Screen, scroll: usize) -> Vec<DetectedUrl> {
@@ -330,6 +371,26 @@ mod tests {
             );
         }
         assert_eq!(url_at(emulator.screen(), 0, 0, 4), None);
+    }
+
+    #[test]
+    fn click_target_identity_covers_osc8_and_detected_url_runs() {
+        let mut screen = Screen::new(40, 1, 0);
+        fill(&mut screen, "https://example.com");
+        assert_eq!(
+            target_at(&screen, 0, 0, 1),
+            target_at(&screen, 0, 0, 12),
+            "every cell of a detected URL shares one click target"
+        );
+
+        let mut emulator = Emulator::new(20, 1, 0);
+        let _ = emulator.feed(b"\x1b]8;id=docs;https://example.com/manual\x1b\\docs\x1b]8;;\x1b\\");
+        assert_eq!(
+            target_at(emulator.screen(), 0, 0, 0),
+            target_at(emulator.screen(), 0, 0, 3),
+            "every cell of an OSC 8 run shares one click target"
+        );
+        assert_eq!(target_at(emulator.screen(), 0, 0, 4), None);
     }
 
     #[test]

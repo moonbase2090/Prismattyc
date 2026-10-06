@@ -76,6 +76,10 @@ pane_titles = "focused"
 # Immediate hover blend for interactive strip, rail, and scrollbar chrome. 0.0-0.3.
 hover_blend = 0.1
 
+# -- input --
+# Open links on plain clicks; Cmd/Ctrl-click always remains available. plain|modifier.
+link_click = "plain"
+
 # -- agent integration --
 # Install the pmux Agent Skill for detected agents once per app version. true|false.
 install_agent_skills = true
@@ -1049,6 +1053,12 @@ the file applies changes on the next poll tick:
   the PT-148 handle-hover preview only. An unfocused pane whose title
   changes still lingers in the title row for `bell_toaster_ms` and tints
   its handle. Deleting the key restores `focused`.
+- `link_click` — hot-reloaded, default `plain`. This applies to OSC 8 links
+  and detected HTTP(S) URLs. A click opens after release only when press and
+  release stay on the same link within half a cell; drags select text and
+  double/triple-clicks select a word/line. `modifier` requires Ctrl-click on
+  Linux or Command-click on macOS. Unmodified clicks still go to programs
+  using mouse reporting.
 - `drag_toaster` — applies to the next drag; deleting the key restores
   `true`.
 - `toasts` — hot-reloaded, default `all`. Status toasts are the chips that

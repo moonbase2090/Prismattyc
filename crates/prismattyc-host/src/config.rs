@@ -164,6 +164,8 @@ impl ToastLevel {
 pub struct ConfigFile {
     /// Tab strip visibility: `auto`, `always`, or `multi` (default `auto`).
     pub tab_strip: Option<TabStripMode>,
+    /// Open links with a plain click (default) or require Cmd/Ctrl-click.
+    pub link_click: Option<crate::link_click::Mode>,
     /// Multi-pane title row: `focused` (default) or `hover`. Sibling of
     /// `tab_strip` because TOML cannot nest a table under `tab_strip = "auto"`.
     pub pane_titles: Option<PaneTitlesMode>,
@@ -533,6 +535,10 @@ impl ConfigFile {
 
     pub fn toasts(&self) -> ToastLevel {
         self.toasts.unwrap_or_default()
+    }
+
+    pub fn link_click(&self) -> crate::link_click::Mode {
+        self.link_click.unwrap_or_default()
     }
 
     pub fn os_notify_bell(&self) -> bool {
@@ -1020,6 +1026,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn link_click_defaults_to_plain_and_accepts_modifier_mode() {
+        assert_eq!(
+            ConfigFile::default().link_click(),
+            crate::link_click::Mode::Plain
+        );
+        let dir = temp_dir("link-click");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "link_click = \"modifier\"\n").unwrap();
+        assert_eq!(
+            load(&path).unwrap().link_click(),
+            crate::link_click::Mode::Modifier
+        );
+        std::fs::write(&path, "link_click = \"unsupported\"\n").unwrap();
+        assert!(load(&path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

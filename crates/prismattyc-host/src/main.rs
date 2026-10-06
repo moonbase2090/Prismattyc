@@ -24,6 +24,7 @@ mod hyperlink;
 mod icon;
 mod keybind;
 mod keys;
+mod link_click;
 mod local_views;
 #[cfg(target_os = "macos")]
 mod mac_present;
@@ -151,7 +152,7 @@ use winit::window::{CursorIcon, Window, WindowId};
 const MAX_COLS: usize = 512;
 const MAX_ROWS: usize = 256;
 const FONT_PX: f32 = 15.0;
-const MULTI_CLICK_MS: u128 = 500;
+const MULTI_CLICK_MS: u128 = link_click::MULTI_CLICK_MS;
 const MAX_INITIAL_PANES: usize = 8;
 /// No permanent chrome row: the PTY grid owns the full window. Chord help is a
 /// temporary bottom **overlay** (does not resize the child) while Ctrl+Shift is
@@ -1012,6 +1013,7 @@ struct HostState {
     /// Last reported application-mouse cell; pane-aware so focus changes do not deduplicate.
     last_app_mouse_cell: Option<(PaneId, usize, usize)>,
     multi_click: MultiClick,
+    link_click_gesture: link_click::Gesture<PaneId>,
     /// Kept alive for Linux selection ownership; see arboard's X11/Wayland contract.
     clipboard: Option<arboard::Clipboard>,
     /// Terminal defaults, ANSI 0-15, and host chrome colors. The brand focus
@@ -1133,6 +1135,8 @@ struct HostState {
     drag_toaster: bool,
     /// Config `toasts` (default all): which status toasts show (#171).
     toasts: config::ToastLevel,
+    /// Plain link click is the default; modifier restores the original gesture.
+    link_click_mode: link_click::Mode,
     /// Every status message, shown or hidden, for Recent messages (#171).
     status_history: status_toasts::History,
     /// Config `os_notify_bell` (default false): OS notification on BEL while
@@ -2932,6 +2936,11 @@ impl App {
                     host.dirty = true;
                 }
             }
+            let link_click_mode = self.file_config.link_click();
+            if host.link_click_mode != link_click_mode {
+                host.link_click_mode = link_click_mode;
+                space_panel::refresh_settings_link_click(host);
+            }
             let attention_badge = self.file_config.attention_badge();
             if host.attention_badge != attention_badge {
                 host.attention_badge = attention_badge;
@@ -3207,6 +3216,10 @@ impl App {
                 more = true;
             }
             maybe_e2e_dismiss_splash(host);
+            let due_link_opens = host.link_click_gesture.take_due(Instant::now());
+            for url in due_link_opens {
+                let _ = open_url(&url);
+            }
             if let Some(at) = host.e2e_second_dump_at {
                 if Instant::now() >= at {
                     host.e2e_second_dump_at = None;
@@ -3261,7 +3274,10 @@ impl App {
                 earliest(host.footer_until, flash_end),
                 earliest(
                     earliest(toast_end, notice_end),
-                    earliest(splash_frame, cache_poll),
+                    earliest(
+                        earliest(splash_frame, cache_poll),
+                        host.link_click_gesture.deadline(),
+                    ),
                 ),
             );
             if let ControlFlow::WaitUntil(when) = next_control_flow(
@@ -3654,6 +3670,7 @@ impl App {
                 app_mouse_button: None,
                 last_app_mouse_cell: None,
                 multi_click: MultiClick::default(),
+                link_click_gesture: link_click::Gesture::default(),
                 clipboard,
                 theme,
                 theme_overrides: self.file_config.theme_overrides.clone(),
@@ -3738,6 +3755,7 @@ impl App {
                 bell_toasts: Vec::new(),
                 drag_toaster: self.file_config.drag_toaster(),
                 toasts: self.file_config.toasts(),
+                link_click_mode: self.file_config.link_click(),
                 status_history: Default::default(),
                 os_notify_bell: self.file_config.os_notify_bell(),
                 attention_sound: self.file_config.attention_sound(),
@@ -15914,43 +15932,43 @@ fn try_send_chunk_until<T: From<Vec<u8>>>(
     }
 }
 
-/// Ctrl/Cmd+left-press on a detected http(s) URL: open and consume the gesture.
-///
-/// Hit wins: no selection (text selection) and no app-mouse report (mouse input).
-fn try_open_url_at_cursor(host: &mut HostState) -> bool {
-    let open_gesture = hyperlink::is_open_url_click(host.modifiers);
-    if !open_gesture {
-        return false;
-    }
-    let Some((pane, row, col)) = host.cursor_cell else {
-        return false;
-    };
+fn link_target_at_cursor(host: &HostState) -> Option<link_click::Target> {
+    let (pane, row, col) = host.cursor_cell?;
     if pane != host.mux.focused_id() {
-        return false;
+        return None;
     }
-    let url = {
-        let screen = host.emulator.screen();
-        let scroll = host.view_scroll.min(screen.max_view_scroll());
-        hyperlink::url_at(screen, scroll, row, col)
-    };
-    let Some(url) = url else {
-        return false;
-    };
-    if !hyperlink::click_owns_url(open_gesture, true) {
-        return false;
-    }
-    if !hyperlink::spawn_open(&url) {
+    let screen = host.emulator.screen();
+    let scroll = host.view_scroll.min(screen.max_view_scroll());
+    hyperlink::target_at(screen, scroll, row, col)
+}
+
+/// Send the captured http(s) URI through the allowlisted platform opener.
+fn open_url(url: &str) -> bool {
+    if hyperlink::spawn_open(url) {
+        true
+    } else {
         hyperlink::ring_host_bell();
+        false
     }
-    host.left_button_down = false;
-    host.suppress_left_release = true;
-    true
 }
 
 fn begin_pointer_selection(host: &mut HostState, pane: PaneId, row: usize, col: usize) {
+    let clicks = host.multi_click.on_left_down(pane, row, col);
+    begin_pointer_selection_with_clicks(host, pane, row, col, clicks);
+}
+
+fn begin_pointer_selection_with_clicks(
+    host: &mut HostState,
+    pane: PaneId,
+    row: usize,
+    col: usize,
+    clicks: u8,
+) {
+    if pane != host.mux.focused_id() || host.mux.pane(pane).is_none() {
+        return;
+    }
     host.keyboard_select_mode = false;
     host.left_button_down = true;
-    let clicks = host.multi_click.on_left_down(pane, row, col);
     let (abs, range) = {
         let screen = host.emulator.screen();
         let scroll = host.view_scroll.min(screen.max_view_scroll());
@@ -18359,6 +18377,21 @@ impl ApplicationHandler<UserAction> for App {
                 }
                 host.pointer_px = Some((position.x, position.y));
                 host.cursor_cell = cell_at_position(position, &host.font, &host.mux);
+                if let Some(anchor) = host.link_click_gesture.moved(position.x, position.y) {
+                    begin_pointer_selection_with_clicks(
+                        host,
+                        anchor.pane,
+                        anchor.row,
+                        anchor.col,
+                        1,
+                    );
+                }
+                if host.link_click_gesture.owns_pointer()
+                    && !host.link_click_gesture.selecting_drag()
+                {
+                    host.window.request_redraw();
+                    return;
+                }
                 if handle_space_reorder_drag_move(host) {
                     sync_chrome_hover(host);
                     host.window.request_redraw();
@@ -18416,8 +18449,9 @@ impl ApplicationHandler<UserAction> for App {
                     host.window.request_redraw();
                     return;
                 }
-                let app_owns_mouse =
-                    host.emulator.mouse_tracking().is_on() && !host.modifiers.shift_key();
+                let app_owns_mouse = host.emulator.mouse_tracking().is_on()
+                    && !host.modifiers.shift_key()
+                    && !host.link_click_gesture.selecting_drag();
                 if app_owns_mouse {
                     if let Some((pane, row, col)) =
                         host.cursor_cell.filter(|(pane, _, _)| *pane == focused)
@@ -18461,6 +18495,15 @@ impl ApplicationHandler<UserAction> for App {
                 host.pointer_px = None;
                 host.cursor_cell = None;
                 host.last_app_mouse_cell = None;
+                if let Some(anchor) = host.link_click_gesture.cancel_press_for_drag() {
+                    begin_pointer_selection_with_clicks(
+                        host,
+                        anchor.pane,
+                        anchor.row,
+                        anchor.col,
+                        1,
+                    );
+                }
                 if let Some(gesture) = host.rich_pointer.as_mut() {
                     gesture.cancelled = true;
                 }
@@ -18737,6 +18780,43 @@ impl ApplicationHandler<UserAction> for App {
                     host.window.request_redraw();
                     return;
                 }
+                if button == MouseButton::Left && state == ElementState::Released {
+                    if host.link_click_gesture.selecting_drag() {
+                        host.link_click_gesture.finish_drag();
+                        finish_pointer_selection(host);
+                        host.window.request_redraw();
+                        return;
+                    }
+                    let (x, y) = host.pointer_px.unwrap_or((f64::NAN, f64::NAN));
+                    let target = link_target_at_cursor(host);
+                    match host.link_click_gesture.release(
+                        host.mux.focused_id(),
+                        target.as_ref(),
+                        x,
+                        y,
+                        Instant::now(),
+                    ) {
+                        link_click::Release::Deferred => {
+                            host.left_button_down = false;
+                            host.window.request_redraw();
+                            return;
+                        }
+                        link_click::Release::Select(anchor) => {
+                            begin_pointer_selection_with_clicks(
+                                host,
+                                anchor.pane,
+                                anchor.row,
+                                anchor.col,
+                                1,
+                            );
+                            finish_pointer_selection(host);
+                            host.link_click_gesture.finish_drag();
+                            host.window.request_redraw();
+                            return;
+                        }
+                        link_click::Release::Ignore => {}
+                    }
+                }
                 let shift = host.modifiers.shift_key();
                 let workspace_hit = host.pointer_px.and_then(|(x, y)| {
                     workspace_hit_at_position(PhysicalPosition::new(x, y), &host.font, &host.mux)
@@ -18763,20 +18843,24 @@ impl ApplicationHandler<UserAction> for App {
                             && hit.action_id == gesture.hit.action_id
                     }),
                 });
-                let url_openable = if button == MouseButton::Left
+                let link_target = if button == MouseButton::Left
                     && state == ElementState::Pressed
-                    && hyperlink::is_open_url_click(host.modifiers)
+                    && host.cursor_cell.is_some_and(|(pane, _, _)| pane == focused)
                 {
-                    host.cursor_cell
-                        .filter(|(pane, _, _)| *pane == focused)
-                        .is_some_and(|(_, row, col)| {
-                            let screen = host.emulator.screen();
-                            let scroll = host.view_scroll.min(screen.max_view_scroll());
-                            hyperlink::url_at(screen, scroll, row, col).is_some()
-                        })
+                    link_target_at_cursor(host)
                 } else {
-                    false
+                    None
                 };
+                let open_gesture = hyperlink::is_open_url_click(host.modifiers);
+                let link_click_allowed = link_click::open_allowed(
+                    host.link_click_mode,
+                    host.modifiers.is_empty(),
+                    open_gesture,
+                    shift,
+                    host.emulator.mouse_tracking().is_on(),
+                );
+                let url_openable =
+                    hyperlink::click_owns_url(link_click_allowed, link_target.is_some());
                 let decision = mouse_input_decision(MouseInputContext {
                     state,
                     button,
@@ -18842,8 +18926,35 @@ impl ApplicationHandler<UserAction> for App {
                         host.window.request_redraw();
                     }
                     MouseInputDecision::OpenUrl => {
-                        // The pure predicate owns the gesture; opener failure must not fall through to selection.
-                        let _ = try_open_url_at_cursor(host);
+                        let (pane, row, col) = host.cursor_cell.expect("openable link hit");
+                        let target = link_target.expect("openable link target");
+                        let clicks = host.multi_click.on_left_down(pane, row, col);
+                        if clicks > 1 {
+                            host.link_click_gesture
+                                .on_multi_click(pane, row, col, clicks);
+                            begin_pointer_selection_with_clicks(host, pane, row, col, clicks);
+                        } else {
+                            let (x, y) = host.pointer_px.unwrap_or((0.0, 0.0));
+                            host.link_click_gesture.start(
+                                &target,
+                                link_click::Anchor {
+                                    pane,
+                                    row,
+                                    col,
+                                    x,
+                                    y,
+                                    threshold: link_click::drag_threshold(
+                                        host.font.cell_w,
+                                        host.font.cell_h,
+                                    ),
+                                },
+                                Instant::now(),
+                            );
+                            host.selection.clear();
+                            host.keyboard_select_mode = false;
+                            host.left_button_down = true;
+                            host.dirty = true;
+                        }
                         host.window.request_redraw();
                     }
                     MouseInputDecision::SuppressLeftRelease => {
@@ -18926,6 +19037,7 @@ impl ApplicationHandler<UserAction> for App {
                         close_context_menu(host);
                     }
                     host.left_button_down = false;
+                    host.link_click_gesture.cancel_press();
                     host.suppress_left_release = false;
                     host.rich_pointer = None;
                     host.scrollbar_drag = None;
@@ -21893,6 +22005,35 @@ mod tests {
         for (name, context, expected) in cases {
             assert_eq!(mouse_input_decision(context), expected, "{name}");
         }
+        let plain_link =
+            link_click::open_allowed(link_click::Mode::Plain, true, false, false, true);
+        assert!(
+            !plain_link,
+            "plain links do not steal a reporting TUI click"
+        );
+        assert_eq!(
+            mouse_input_decision(MouseInputContext {
+                url_openable: plain_link,
+                tracking: prismattyc_emulator::MouseTracking::Click,
+                cursor_cell: Some((pane, 0, 0)),
+                ..base(ElementState::Pressed, MouseButton::Left)
+            }),
+            MouseInputDecision::App { button: Some(0) }
+        );
+        let modified_link =
+            link_click::open_allowed(link_click::Mode::Plain, false, true, false, true);
+        assert!(
+            modified_link,
+            "Cmd/Ctrl remains an override while reporting"
+        );
+        assert_eq!(
+            mouse_input_decision(MouseInputContext {
+                url_openable: modified_link,
+                tracking: prismattyc_emulator::MouseTracking::Click,
+                ..base(ElementState::Pressed, MouseButton::Left)
+            }),
+            MouseInputDecision::OpenUrl
+        );
     }
 
     #[test]

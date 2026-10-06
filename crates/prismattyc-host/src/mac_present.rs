@@ -40,6 +40,9 @@ pub struct MacPresent {
     window: Arc<Window>,
     // AppKit operations, including Drop, stay on the main thread.
     _main_thread: MainThreadMarker,
+    /// SPIKE: `PRISMATTYC_SPIKE_PRESENT_THREAD=1` moves image build and
+    /// commit to a present thread. Declared last so it joins after use.
+    thread: Option<crate::present_thread::PresentThread>,
 }
 
 impl MacPresent {
@@ -83,6 +86,8 @@ impl MacPresent {
             height: 0,
             window,
             _main_thread: main_thread,
+            thread: std::env::var_os("PRISMATTYC_SPIKE_PRESENT_THREAD")
+                .map(|_| crate::present_thread::PresentThread::spawn()),
         })
     }
 
@@ -121,8 +126,16 @@ impl MacPresent {
             damage
         };
         let dirty = damaged_tiles(&self.tile_rects, &damage);
+        if self.thread.is_some() {
+            return self.present_threaded(dirty);
+        }
         // Prepare every replacement before changing the layer tree. Images own
         // immutable data, so reuse of scratch never races the compositor.
+        let images_started = std::time::Instant::now();
+        crate::spike_timing::record(
+            "present.dirty_tiles",
+            std::time::Duration::from_micros(dirty.len() as u64),
+        );
         let mut images = Vec::with_capacity(dirty.len());
         for index in dirty {
             let tile = self.tile_rects[index];
@@ -133,6 +146,8 @@ impl MacPresent {
                 alpha_image(&self.scratch, tile.width, tile.height, &self.color_space)?,
             ));
         }
+        crate::spike_timing::record("present.tile_images", images_started.elapsed());
+        let commit_started = std::time::Instant::now();
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         self.layer.setFrame(self.root_layer.bounds());
@@ -176,6 +191,77 @@ impl MacPresent {
             unsafe { self.tile_layers[index].setContents(Some(image.as_ref())) };
         }
         CATransaction::commit();
+        crate::spike_timing::record("present.ca_commit", commit_started.elapsed());
+        self.scale = scale;
+        self.rebuild_layers = false;
+        self.retained = true;
+        Ok(())
+    }
+}
+
+impl MacPresent {
+    /// SPIKE: geometry on main, pixels to the present thread.
+    fn present_threaded(&mut self, dirty: Vec<usize>) -> Result<()> {
+        let scale = self.window.scale_factor();
+        if self.rebuild_layers || self.scale != scale {
+            let thread = self.thread.as_ref().expect("threaded present");
+            thread.wait_idle();
+            let started = std::time::Instant::now();
+            CATransaction::begin();
+            CATransaction::setDisableActions(true);
+            self.layer.setFrame(self.root_layer.bounds());
+            if self.rebuild_layers {
+                for layer in self.tile_layers.drain(..) {
+                    layer.removeFromSuperlayer();
+                }
+                for _ in &self.tile_rects {
+                    let layer = CALayer::new();
+                    layer.setOpaque(false);
+                    layer.setAnchorPoint(CGPoint::new(0.0, 0.0));
+                    layer.setGeometryFlipped(true);
+                    layer.setContentsGravity(unsafe { kCAGravityTopLeft });
+                    self.layer.addSublayer(&layer);
+                    self.tile_layers.push(layer);
+                }
+            }
+            for (layer, tile) in self.tile_layers.iter().zip(&self.tile_rects) {
+                let view_rect = CGRect::new(
+                    CGPoint::new(tile.x as f64 / scale, tile.y as f64 / scale),
+                    CGSize::new(tile.width as f64 / scale, tile.height as f64 / scale),
+                );
+                let root_rect = self.view.convertRectToLayer(view_rect);
+                let frame = self
+                    .layer
+                    .convertRect_fromLayer(root_rect, Some(&self.root_layer));
+                layer.setFrame(frame);
+                layer.setContentsScale(scale);
+            }
+            CATransaction::commit();
+            thread.set_layers(self.tile_layers.clone());
+            crate::spike_timing::record("present.main_geometry", started.elapsed());
+        }
+        let started = std::time::Instant::now();
+        let tiles = dirty
+            .into_iter()
+            .map(|index| {
+                let tile = self.tile_rects[index];
+                let mut pixels = Vec::new();
+                copy_tile(&self.pixels, self.width, tile, &mut pixels);
+                (
+                    index,
+                    crate::present_thread::TilePixels {
+                        width: tile.width,
+                        height: tile.height,
+                        pixels,
+                    },
+                )
+            })
+            .collect();
+        crate::spike_timing::record("present.main_copy", started.elapsed());
+        self.thread
+            .as_ref()
+            .expect("threaded present")
+            .submit(tiles);
         self.scale = scale;
         self.rebuild_layers = false;
         self.retained = true;
@@ -185,12 +271,14 @@ impl MacPresent {
 
 impl Drop for MacPresent {
     fn drop(&mut self) {
+        // Join the present thread before the layers leave the tree.
+        self.thread = None;
         crate::macos_window::set_window_blur(&self.window, false);
         self.layer.removeFromSuperlayer();
     }
 }
 
-fn alpha_image(
+pub(crate) fn alpha_image(
     pixels: &[u32],
     width: usize,
     height: usize,

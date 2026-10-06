@@ -40,6 +40,8 @@ mod notify;
 mod palette;
 mod pane_bell;
 mod pixel_alpha;
+#[cfg(target_os = "macos")]
+mod present_thread;
 #[cfg(any(target_os = "macos", test))]
 mod present_tiles;
 mod rail_context_menu;
@@ -52,6 +54,7 @@ mod render_diagnostics;
 mod restart;
 mod sidebar_resize;
 mod sidebar_width;
+mod spike_timing;
 mod terminal_switcher;
 #[cfg(test)]
 mod test_support;
@@ -1998,15 +2001,18 @@ impl PresentBackend {
         match self {
             #[cfg(target_os = "macos")]
             Self::Mac(mac) => {
-                let retained = mac.prepare(width, height)?;
+                let retained =
+                    spike_timing::time("paint.mac_prepare", || mac.prepare(width, height))?;
                 let raster_started = Instant::now();
-                let damage = rasterize_frame(
-                    host,
-                    mac.pixels_mut(),
-                    width,
-                    height,
-                    partial_allowed && retained,
-                );
+                let damage = spike_timing::time("paint.rasterize_frame", || {
+                    rasterize_frame(
+                        host,
+                        mac.pixels_mut(),
+                        width,
+                        height,
+                        partial_allowed && retained,
+                    )
+                });
                 if host.render_timer.shows_osd() {
                     rasterize_render_timer(
                         mac.pixels_mut(),
@@ -2027,7 +2033,18 @@ impl PresentBackend {
                     host.render_frame.full_repaint_reason,
                 );
                 let present_started = Instant::now();
-                mac.present(damage)?;
+                spike_timing::value("paint.frame_kpx", u64::from(width * height) / 1000);
+                spike_timing::count(
+                    "paint.reason",
+                    host.render_frame
+                        .full_repaint_reason
+                        .map_or("partial", FullRepaintReason::as_str),
+                );
+                spike_timing::value(
+                    "paint.cells_painted",
+                    host.render_frame.cells_painted as u64,
+                );
+                spike_timing::time("paint.mac_present", || mac.present(damage))?;
                 host.render_frame.timing.present_us = present_started.elapsed().as_micros() as u64;
             }
             #[cfg(all(test, target_os = "linux"))]
@@ -3213,11 +3230,15 @@ impl App {
 
     fn poll_attach_tabs(&mut self) {
         for host in self.windows.values_mut() {
-            poll_host_attach_tabs(host);
-            advance_space_opens(host);
-            refresh_space_views(host);
-            local_views::persist_and_restore(host, false);
-            apply_pending_session_focus(host);
+            spike_timing::time("pump.attach_tabs.poll", || poll_host_attach_tabs(host));
+            spike_timing::time("pump.attach_tabs.space_opens", || advance_space_opens(host));
+            spike_timing::time("pump.attach_tabs.space_views", || refresh_space_views(host));
+            spike_timing::time("pump.attach_tabs.local_views", || {
+                local_views::persist_and_restore(host, false)
+            });
+            spike_timing::time("pump.attach_tabs.session_focus", || {
+                apply_pending_session_focus(host)
+            });
         }
     }
 
@@ -3232,10 +3253,11 @@ impl App {
         // wake; the resulting user_event re-enters pump next cycle. Clearing the
         // flag *before* drain still avoids dropping a child-EOF wake that
         // arrives while we are inside pump (live cascade).
+        let pump_started = Instant::now();
         self.wake_pending.store(false, Ordering::Relaxed);
-        restart::poll(self);
-        self.poll_config_reload();
-        self.poll_attach_tabs();
+        spike_timing::time("pump.restart_poll", || restart::poll(self));
+        spike_timing::time("pump.config_reload", || self.poll_config_reload());
+        spike_timing::time("pump.attach_tabs", || self.poll_attach_tabs());
         let mut more = false;
         let mut closed: Vec<WindowId> = Vec::new();
         let mut next_deadline: Option<Instant> = None;
@@ -3256,27 +3278,46 @@ impl App {
                 next_deadline = Some(deadline);
             }
         }
-        self.retry_register_host_pid();
+        spike_timing::time("pump.register_host_pid", || self.retry_register_host_pid());
         let rail_now = Instant::now();
-        let remote_changed = self.remote.borrow_mut().poll();
+        let remote_changed =
+            spike_timing::time("pump.remote_poll", || self.remote.borrow_mut().poll());
         for (id, host) in self.windows.iter_mut() {
-            if host.space_rail.poll(&spaces_dir(), rail_now) {
-                rail_changed(host);
+            let window_started = Instant::now();
+            if spike_timing::time("pump.space_rail_poll", || {
+                host.space_rail.poll(&spaces_dir(), rail_now)
+            }) {
+                spike_timing::time("pump.rail_changed", || rail_changed(host));
             }
-            sync_remote_rail(host, remote_changed);
-            adopt_nested_attaches(host, rail_now);
+            spike_timing::time("pump.sync_remote_rail", || {
+                sync_remote_rail(host, remote_changed)
+            });
+            spike_timing::time("pump.adopt_nested", || {
+                adopt_nested_attaches(host, rail_now)
+            });
             if !host.space_opens.blocks_persist()
                 && host.space_rail.current_index().is_none()
                 && !host.space_rail.names.is_empty()
             {
                 let live = live_tab_session_names(host);
-                if host.space_rail.infer_current(&spaces_dir(), &live) {
+                if spike_timing::time("pump.infer_current", || {
+                    host.space_rail.infer_current(&spaces_dir(), &live)
+                }) {
                     let inferred = host.space_rail.current.clone();
                     host.space_rail.current = None;
                     set_current_space(host, inferred);
                 }
             }
-            if Self::drain_pty(host) {
+            // SPIKE: with a budget, keep draining until it is spent.
+            let drain_started = Instant::now();
+            let mut host_more = spike_timing::time("pump.drain_pty", || Self::drain_pty(host));
+            while host_more
+                && spike_timing::drain_budget().is_some_and(|b| drain_started.elapsed() < b)
+            {
+                host_more = Self::drain_pty(host);
+            }
+            spike_timing::record("pump.drain_budgeted", drain_started.elapsed());
+            if host_more {
                 more = true;
             }
             maybe_e2e_dismiss_splash(host);
@@ -3297,6 +3338,7 @@ impl App {
                 closed.push(*id);
                 continue;
             }
+            spike_timing::record("pump.window_total", window_started.elapsed());
             let now = Instant::now();
             if let Some(until) = host.footer_until {
                 if now >= until {
@@ -3369,12 +3411,21 @@ impl App {
             event_loop.exit();
             return;
         }
-        self.publish_render_status();
+        spike_timing::time("pump.publish_render_status", || {
+            self.publish_render_status()
+        });
+        spike_timing::record("pump.total", pump_started.elapsed());
+        spike_timing::maybe_flush();
+        // SPIKE: winit 0.30 macOS drains user events with try_iter() inside
+        // cleared(), so a Wake that re-sends Wake never lets RedrawRequested
+        // or AboutToWait run. With the flag, leftover work polls instead.
+        let poll_more = more && spike_timing::poll_drain();
         event_loop.set_control_flow(match next_deadline {
+            _ if poll_more => ControlFlow::Poll,
             Some(when) => ControlFlow::WaitUntil(when),
             None => ControlFlow::Wait,
         });
-        if more || self.wake_pending.load(Ordering::Relaxed) {
+        if (more && !poll_more) || self.wake_pending.load(Ordering::Relaxed) {
             (self.wake)();
         }
     }
@@ -3609,7 +3660,7 @@ impl App {
         let (init_cols, init_rows) = if show_splash {
             splash::window_cells(80, 24)
         } else {
-            (80, 24)
+            spike_timing::initial_cells().unwrap_or((80, 24))
         };
         let _ = window.request_inner_size(initial_window_size(&font, geom, init_cols, init_rows));
         let present = open_present_backend(
@@ -7363,8 +7414,8 @@ impl App {
         let prior_tabs = host.mux.tab_count();
         let prior_active = host.mux.active_count();
         let parse_started = Instant::now();
-        let parked_more = local_views::drain(host);
-        let (pty_dirty, more) = host.mux.drain_all();
+        let parked_more = spike_timing::time("drain.local_views", || local_views::drain(host));
+        let (pty_dirty, more) = spike_timing::time("drain.parse", || host.mux.drain_all());
         if pty_dirty {
             host.hyperlink_hover = None;
         }
@@ -18299,12 +18350,15 @@ impl ApplicationHandler<UserAction> for App {
         if matches!(event, WindowEvent::RedrawRequested) {
             // Drain on the paint path so a child-EOF wake that only
             // produced a redraw still runs the exit cascade.
-            self.pump(event_loop);
+            let redraw_started = Instant::now();
+            spike_timing::time("redraw.pump", || self.pump(event_loop));
             if let Some(host) = self.windows.get_mut(&id) {
                 // Output and scrollback can change the link under a stationary pointer.
-                sync_chrome_hover(host);
+                spike_timing::time("redraw.sync_chrome_hover", || sync_chrome_hover(host));
                 let dirty = host.dirty;
-                if let Err(e) = Self::paint(host) {
+                let paint_result = spike_timing::time("redraw.paint", || Self::paint(host));
+                spike_timing::record("redraw.total", redraw_started.elapsed());
+                if let Err(e) = paint_result {
                     eprintln!("prismattyc-host: paint error: {e:#}");
                 } else if dirty && host.a11y.is_some() {
                     // D-A3: focus and chrome names follow the host. A
@@ -19534,6 +19588,9 @@ impl ApplicationHandler<UserAction> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserAction) {
         match event {
+            // SPIKE: pump once per run-loop turn from about_to_wait so the
+            // user-event drain ends (wake_pending stays set until that pump).
+            UserAction::Wake if spike_timing::poll_drain() => {}
             UserAction::Wake => self.pump(event_loop),
             UserAction::NewWindow => {
                 if let Err(e) = self.open_window(event_loop, false) {
@@ -19643,7 +19700,7 @@ impl ApplicationHandler<UserAction> for App {
                 persist_attach_layout_from_live(host);
             }
         }
-        self.pump(event_loop);
+        spike_timing::time("about_to_wait.pump", || self.pump(event_loop));
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
@@ -19668,6 +19725,7 @@ fn main() -> Result<()> {
     // Parse first so --help / --version / --write-config never create
     // the default config path (PT-84 review).
     let mut cli = Cli::parse(std::env::args().skip(1))?;
+    spike_timing::init();
     if cli.list_bindings {
         let file_config = config::load(&config::config_path())?;
         println!("{}", file_config.loaded_keymap().listing());

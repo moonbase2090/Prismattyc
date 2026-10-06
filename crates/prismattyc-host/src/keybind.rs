@@ -443,7 +443,9 @@ impl Action {
             Action::DeleteSpace => "delete a saved space".into(),
             Action::MovePaneToSpace => "move the focused pane to another saved space".into(),
             Action::SpaceRailFocus => "focus and reorder saved spaces".into(),
-            Action::SpaceRailContextMenu => "open the spaces rail context menu".into(),
+            Action::SpaceRailContextMenu => {
+                "open the sidebar or vertical-rail context menu for the focused row".into()
+            }
             Action::SpaceSettings => "choose rail position, autosave, and startup behavior".into(),
             Action::UndoSpaceChange => "undo the last session removal or move".into(),
             Action::SpaceRailNext => "open the next saved space".into(),
@@ -636,7 +638,7 @@ impl Action {
                 Some("Arrows move; when space_reorder is enabled, Shift+arrows reorder. Enter opens, F2 renames, Delete asks, Esc returns to the pane.")
             }
             Action::SpaceRailContextMenu => {
-                Some("Same menu as right-click on a space or session row. Menu or Shift+F10 while the rail is focused.")
+                Some("Same menu as right-click on a space, session, or pane row in the sidebar or vertical rail. Menu or Shift+F10 while the rail is focused.")
             }
             Action::SpaceRailNext | Action::SpaceRailPrev => {
                 Some("Wraps around the rail; the chip becomes current.")
@@ -1608,6 +1610,7 @@ mod tests {
                 | Action::FocusLastPane
                 | Action::LastTab
                 | Action::SpaceRailFocus
+                | Action::SpaceRailContextMenu
                 | Action::SpaceSettings
                 | Action::UndoSpaceChange
                 | Action::SpaceRailNext

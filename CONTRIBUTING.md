@@ -31,6 +31,9 @@ See [test requirements](docs/testing-policy.md),
 [native UI testing](docs/testing-ux.md), and
 [acceptance tests](docs/acceptance-pipeline.md) for the remaining checks.
 
+Every test must fail when the behavior it covers breaks. AGENTS.md lists
+the tautological tests that review rejects.
+
 ## Run CI locally
 
 The workflows can run through Local Actions. On a machine with limited

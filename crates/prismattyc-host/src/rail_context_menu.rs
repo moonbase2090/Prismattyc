@@ -8,6 +8,7 @@ use crate::palette::ContextMenuKind;
 
 pub const RAIL_SPACE_ROWS: usize = 6;
 pub const RAIL_SESSION_ROWS: usize = 4;
+pub const RAIL_SESSION_SOLO_ROWS: usize = 5;
 pub const RAIL_PANE_ROWS: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,10 +35,21 @@ pub enum RailPaneAction {
     ClosePane,
 }
 
+/// Session row when the tab has a single pane: session plus pane actions (#181).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RailSessionSoloAction {
+    Focus,
+    Rename,
+    ClosePane,
+    Stop,
+    MoveToSpace,
+}
+
 pub fn row_count(kind: ContextMenuKind) -> Option<usize> {
     match kind {
         ContextMenuKind::RailSpace => Some(RAIL_SPACE_ROWS),
         ContextMenuKind::RailSession => Some(RAIL_SESSION_ROWS),
+        ContextMenuKind::RailSessionSolo => Some(RAIL_SESSION_SOLO_ROWS),
         ContextMenuKind::RailPane => Some(RAIL_PANE_ROWS),
         _ => None,
     }
@@ -82,6 +94,17 @@ pub fn pane_action(index: usize) -> Option<RailPaneAction> {
     }
 }
 
+pub fn session_solo_action(index: usize) -> Option<RailSessionSoloAction> {
+    match index {
+        0 => Some(RailSessionSoloAction::Focus),
+        1 => Some(RailSessionSoloAction::Rename),
+        2 => Some(RailSessionSoloAction::ClosePane),
+        3 => Some(RailSessionSoloAction::Stop),
+        4 => Some(RailSessionSoloAction::MoveToSpace),
+        _ => None,
+    }
+}
+
 pub fn needs_confirmation(kind: ContextMenuKind, index: usize, confirmed: bool) -> bool {
     if confirmed {
         return false;
@@ -89,6 +112,7 @@ pub fn needs_confirmation(kind: ContextMenuKind, index: usize, confirmed: bool) 
     match kind {
         ContextMenuKind::RailSpace => matches!(index, 4 | 5),
         ContextMenuKind::RailSession => index == 2,
+        ContextMenuKind::RailSessionSolo => matches!(index, 2 | 3),
         ContextMenuKind::RailPane => index == 1,
         _ => false,
     }
@@ -126,6 +150,20 @@ pub fn pane_label(index: usize) -> Option<(&'static str, &'static str)> {
     match index {
         0 => Some(("Focus", "bring this pane to the keyboard")),
         1 => Some(("Close pane…", "close this pane in the layout")),
+        _ => None,
+    }
+}
+
+pub fn session_solo_label(index: usize) -> Option<(&'static str, &'static str)> {
+    match index {
+        0 => Some(("Focus", "bring this session to the keyboard")),
+        1 => Some(("Rename", "change the tab or session title")),
+        2 => Some(("Close pane…", "close this pane in the layout")),
+        3 => Some(("Stop…", "remove from the space and stop its processes")),
+        4 => Some((
+            "Move to space…",
+            "move the session into another saved space",
+        )),
         _ => None,
     }
 }
@@ -214,5 +252,39 @@ mod tests {
         assert!(needs_confirmation(ContextMenuKind::RailPane, 1, false));
         assert!(!needs_confirmation(ContextMenuKind::RailPane, 1, true));
         assert!(!needs_confirmation(ContextMenuKind::RailPane, 0, false));
+        assert!(needs_confirmation(
+            ContextMenuKind::RailSessionSolo,
+            2,
+            false
+        ));
+        assert!(needs_confirmation(
+            ContextMenuKind::RailSessionSolo,
+            3,
+            false
+        ));
+        assert!(!needs_confirmation(
+            ContextMenuKind::RailSessionSolo,
+            2,
+            true
+        ));
+    }
+
+    #[test]
+    fn solo_session_menu_merges_session_and_pane_actions() {
+        let expected = [
+            RailSessionSoloAction::Focus,
+            RailSessionSoloAction::Rename,
+            RailSessionSoloAction::ClosePane,
+            RailSessionSoloAction::Stop,
+            RailSessionSoloAction::MoveToSpace,
+        ];
+        for (index, action) in expected.into_iter().enumerate() {
+            assert_eq!(session_solo_action(index), Some(action), "row {index}");
+            assert!(session_solo_label(index).is_some(), "label {index}");
+        }
+        assert_eq!(
+            row_count(ContextMenuKind::RailSessionSolo),
+            Some(RAIL_SESSION_SOLO_ROWS)
+        );
     }
 }

@@ -1,0 +1,52 @@
+=== sidebar::tests ===
+   Compiling prismattyc-core v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-core)
+   Compiling prismattyc-render v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-render)
+   Compiling prismattyc-emulator v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-emulator)
+   Compiling prismattyc-mux v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-mux)
+   Compiling prismattyc-host v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-host)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.37s
+     Running unittests src/main.rs (target/debug/deps/prismattyc_host-2075890f80059f4d)
+
+running 7 tests
+test sidebar::tests::session_highlight_follows_the_focused_pane_in_the_current_space ... ok
+test sidebar::tests::visible_rows_flatten_in_paint_order ... ok
+test sidebar::tests::saved_spaces_expand_files_and_hide_collapsed_tabs ... ok
+test sidebar::tests::multi_pane_tab_keeps_pane_rows_in_sidebar_and_icon_strip ... ok
+test sidebar::tests::live_tabs_expand_handles_with_focus_and_activity ... ok
+test sidebar::tests::pane_row_visibility_tracks_live_split_and_close ... ok
+test sidebar::tests::pending_session_lands_on_the_matching_title_after_the_space_switches ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 981 filtered out; finished in 0.00s
+
+     Running tests/version.rs (target/debug/deps/version-ab876f966fa38d9a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+=== rail_context ===
+   Compiling prismattyc-core v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-core)
+   Compiling prismattyc-render v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-render)
+   Compiling prismattyc-emulator v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-emulator)
+   Compiling prismattyc-mux v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-mux)
+   Compiling prismattyc-host v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-host)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.24s
+     Running unittests src/main.rs (target/debug/deps/prismattyc_host-2075890f80059f4d)
+
+running 7 tests
+test rail_context_menu::tests::destructive_rows_require_confirmation_once ... ok
+test rail_context_menu::tests::solo_session_menu_merges_session_and_pane_actions ... ok
+test rail_context_menu::tests::session_menu_lists_every_action_in_order ... ok
+test rail_context_menu::tests::space_menu_lists_every_action_in_order ... ok
+test rail_context_menu::tests::pane_menu_lists_focus_and_close_in_order ... ok
+test rail_context_menu::tests::close_space_row_only_when_space_is_current ... ok
+test graphite_overlays::tests::rail_context_menu_rows_paint_like_other_graphite_menus ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 981 filtered out; finished in 0.62s
+
+     Running tests/version.rs (target/debug/deps/version-ab876f966fa38d9a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+

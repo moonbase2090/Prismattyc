@@ -291,6 +291,7 @@ impl App {
                         super::ContextMenuTarget::Pane(_) => "pane",
                         super::ContextMenuTarget::RailSpace(_) => "rail-space",
                         super::ContextMenuTarget::RailSession(_) => "rail-session",
+                        super::ContextMenuTarget::RailSessionSolo(_) => "rail-session-solo",
                         super::ContextMenuTarget::RailPane(_) => "rail-pane",
                     }),
                 })),

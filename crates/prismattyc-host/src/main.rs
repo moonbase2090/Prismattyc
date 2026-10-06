@@ -42,6 +42,7 @@ mod pane_bell;
 mod pixel_alpha;
 #[cfg(any(target_os = "macos", test))]
 mod present_tiles;
+mod rail_context_menu;
 mod rail_resize;
 mod raster;
 mod regroup;
@@ -1501,6 +1502,10 @@ struct HyperlinkHoverKey {
 enum ContextMenuTarget {
     SpaceChip(usize),
     Pane(PaneId),
+    /// Chip index into [`HostState::space_rail`]. The name is read at activate time.
+    RailSpace(usize),
+    RailSession(PaneId),
+    RailPane(PaneId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1588,6 +1593,9 @@ fn context_menu_choice(kind: ContextMenuKind, index: usize) -> ContextMenuChoice
             };
             ContextMenuChoice::Pane(action)
         }
+        ContextMenuKind::RailSpace | ContextMenuKind::RailSession | ContextMenuKind::RailPane => {
+            ContextMenuChoice::Noop
+        }
     }
 }
 
@@ -1603,15 +1611,67 @@ fn context_menu_action(target: ContextMenuTarget, index: usize) -> ContextMenuAc
             ContextMenuChoice::Pane(action) => ContextMenuAction::Pane { pane, action },
             ContextMenuChoice::Space(_) | ContextMenuChoice::Noop => ContextMenuAction::Noop,
         },
+        ContextMenuTarget::RailSpace(_)
+        | ContextMenuTarget::RailSession(_)
+        | ContextMenuTarget::RailPane(_) => ContextMenuAction::Noop,
     }
 }
 
-fn context_menu_needs_confirmation(kind: ContextMenuKind, index: usize, confirmed: bool) -> bool {
+fn context_menu_needs_confirmation(
+    host: &HostState,
+    target: ContextMenuTarget,
+    kind: ContextMenuKind,
+    visible_index: usize,
+    confirmed: bool,
+) -> bool {
+    let action_index =
+        rail_space_menu_action_index(host, target, kind, visible_index).unwrap_or(visible_index);
+    if rail_context_menu::needs_confirmation(kind, action_index, confirmed) {
+        return true;
+    }
     !confirmed
         && matches!(
-            (kind, index),
+            (kind, visible_index),
             (ContextMenuKind::SpaceChip, 3 | 6) | (ContextMenuKind::Pane, 11)
         )
+}
+
+fn rail_space_menu_action_index(
+    host: &HostState,
+    target: ContextMenuTarget,
+    kind: ContextMenuKind,
+    visible_index: usize,
+) -> Option<usize> {
+    let ContextMenuTarget::RailSpace(chip) = target else {
+        return None;
+    };
+    if kind != ContextMenuKind::RailSpace {
+        return None;
+    }
+    let name = host.space_rail.names.get(chip)?;
+    let is_current = host.space_rail.current.as_deref() == Some(name.as_str());
+    rail_context_menu::space_menu_action_index(is_current, visible_index)
+}
+
+fn space_rail_chip_for_name(host: &HostState, space_name: &str) -> Option<usize> {
+    host.space_rail
+        .names
+        .iter()
+        .position(|saved| saved == space_name)
+}
+
+fn context_menu_kind(target: ContextMenuTarget) -> ContextMenuKind {
+    match target {
+        ContextMenuTarget::SpaceChip(_) => ContextMenuKind::SpaceChip,
+        ContextMenuTarget::Pane(_) => ContextMenuKind::Pane,
+        ContextMenuTarget::RailSpace(_) => ContextMenuKind::RailSpace,
+        ContextMenuTarget::RailSession(_) => ContextMenuKind::RailSession,
+        ContextMenuTarget::RailPane(_) => ContextMenuKind::RailPane,
+    }
+}
+
+fn rail_oriented_space_menu(host: &HostState) -> bool {
+    sidebar_mode(host) || !host.mux.geom().rail_side.horizontal()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -8983,7 +9043,13 @@ fn apply_rail_verdict(host: &mut HostState, verdict: space_rail::RailVerdict) {
     use space_rail::RailVerdict;
     match verdict {
         RailVerdict::Consumed | RailVerdict::Leave | RailVerdict::Invalid(_) => {}
-        RailVerdict::Menu { index } => open_context_menu(host, ContextMenuTarget::SpaceChip(index)),
+        RailVerdict::Menu { index } => {
+            if rail_oriented_space_menu(host) {
+                open_rail_space_menu(host, index);
+            } else {
+                open_context_menu(host, ContextMenuTarget::SpaceChip(index));
+            }
+        }
         RailVerdict::Open(name) => open_space_from_host(host, &name, SpaceOpenMode::Switch),
         RailVerdict::Rename { old, new } => {
             match run_pmux_space(&["space".into(), "rename".into(), old.clone(), new.clone()]) {
@@ -9027,11 +9093,15 @@ fn apply_rail_verdict(host: &mut HostState, verdict: space_rail::RailVerdict) {
     host.dirty = true;
 }
 
+fn open_rail_space_menu(host: &mut HostState, chip: usize) {
+    if host.space_rail.names.get(chip).is_none() {
+        return;
+    }
+    open_context_menu(host, ContextMenuTarget::RailSpace(chip));
+}
+
 fn open_context_menu(host: &mut HostState, target: ContextMenuTarget) {
-    let kind = match target {
-        ContextMenuTarget::SpaceChip(_) => ContextMenuKind::SpaceChip,
-        ContextMenuTarget::Pane(_) => ContextMenuKind::Pane,
-    };
+    let kind = context_menu_kind(target);
     host.context_menu = Some(ContextMenu::new(kind));
     host.context_menu_target = Some(target);
     host.palette = None;
@@ -9219,6 +9289,72 @@ fn context_menu_rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
                     .collect(),
             )
         }
+        ContextMenuTarget::RailSpace(chip) => {
+            let name = host.space_rail.names.get(chip)?.clone();
+            let header = format!("{name} · space");
+            let is_current = host.space_rail.current.as_deref() == Some(name.as_str());
+            let rows = rail_context_menu::space_menu_row_indices(is_current)
+                .enumerate()
+                .filter_map(|(visible, index)| {
+                    rail_context_menu::space_label(index).map(|(label, description)| {
+                        let describe = if menu.confirm == Some(visible) {
+                            format!("{description} · press Enter again to confirm")
+                        } else {
+                            description.to_string()
+                        };
+                        PaletteRow::plain(label.to_string(), describe, String::new())
+                    })
+                })
+                .collect();
+            (header, rows)
+        }
+        ContextMenuTarget::RailSession(pane) => {
+            let header = host
+                .mux
+                .attach_name_of(pane)
+                .or_else(|| host.mux.attach_session_of(pane))
+                .map(|session| {
+                    let spaces = saved_space_names_for_session(&spaces_dir(), session);
+                    pane_space_membership(session, &spaces)
+                })
+                .unwrap_or_else(|| "session".to_string());
+            let count = rail_context_menu::row_count(ContextMenuKind::RailSession).unwrap_or(0);
+            let rows = (0..count)
+                .filter_map(|index| {
+                    rail_context_menu::session_label(index).map(|(label, description)| {
+                        let describe = if menu.confirm == Some(index) {
+                            "Enter: stop session · Esc: cancel".to_string()
+                        } else {
+                            description.to_string()
+                        };
+                        PaletteRow::plain(label.to_string(), describe, String::new())
+                    })
+                })
+                .collect();
+            (header, rows)
+        }
+        ContextMenuTarget::RailPane(pane) => {
+            let header = host
+                .mux
+                .attach_name_of(pane)
+                .or_else(|| host.mux.attach_session_of(pane))
+                .map(|name| format!("{name} · pane"))
+                .unwrap_or_else(|| "pane".to_string());
+            let count = rail_context_menu::row_count(ContextMenuKind::RailPane).unwrap_or(0);
+            let rows = (0..count)
+                .filter_map(|index| {
+                    rail_context_menu::pane_label(index).map(|(label, description)| {
+                        let describe = if menu.confirm == Some(index) {
+                            "Enter: close pane · Esc: cancel".to_string()
+                        } else {
+                            description.to_string()
+                        };
+                        PaletteRow::plain(label.to_string(), describe, String::new())
+                    })
+                })
+                .collect();
+            (header, rows)
+        }
     };
     Some(rows)
 }
@@ -9240,6 +9376,132 @@ fn focused_tab_index(host: &HostState, pane: PaneId) -> usize {
         .iter()
         .position(|(_, panes)| panes.contains(&pane))
         .unwrap_or(0)
+}
+
+fn pane_for_sidebar_row(host: &HostState, row: &sidebar::TreeRow) -> Option<PaneId> {
+    let tab = row.tab?;
+    let pane_index = match row.kind {
+        sidebar::RowKind::Pane => row.pane?,
+        sidebar::RowKind::Tab => host
+            .mux
+            .tab_infos()
+            .get(tab)
+            .and_then(|info| info.focused_handle)
+            .unwrap_or(0),
+        sidebar::RowKind::Space => return None,
+    };
+    host.mux
+        .tab_panes()
+        .get(tab)
+        .and_then(|(_, panes)| panes.get(pane_index).copied())
+}
+
+fn close_space_from_host(host: &mut HostState, name: &str) {
+    if host.space_rail.current.as_deref() != Some(name) {
+        rail_error_toast(host, &format!(" open {name} before closing it "));
+        return;
+    }
+    let panes: Vec<PaneId> = host
+        .mux
+        .tab_panes()
+        .into_iter()
+        .flat_map(|(_, panes)| panes)
+        .collect();
+    for pane in panes {
+        if host.mux.attach_name_of(pane).is_some() || host.mux.attach_session_of(pane).is_some() {
+            remove_session_from_space(host, pane, true);
+        }
+    }
+    set_current_space(host, None);
+    persist_attach_layout_from_live(host);
+    refresh_rail(host);
+    rail_toast(host, &format!(" closed space {name} "));
+}
+
+fn apply_rail_space_action(
+    host: &mut HostState,
+    chip: usize,
+    name: &str,
+    action: rail_context_menu::RailSpaceAction,
+) {
+    match action {
+        rail_context_menu::RailSpaceAction::OpenFocus => {
+            open_space_from_host(host, name, SpaceOpenMode::Switch);
+        }
+        rail_context_menu::RailSpaceAction::Rename => {
+            host.space_rail.begin_rename(chip);
+            host.dirty = true;
+        }
+        rail_context_menu::RailSpaceAction::SaveNow => save_space_from_host(host, name),
+        rail_context_menu::RailSpaceAction::AddSession => {
+            session_prompt::add_to_space(host, name.to_string())
+        }
+        rail_context_menu::RailSpaceAction::CloseSpace => close_space_from_host(host, name),
+        rail_context_menu::RailSpaceAction::RemoveSaved => {
+            apply_space_context_action(host, chip, SpaceContextAction::Delete)
+        }
+    }
+}
+
+fn apply_rail_session_action(
+    host: &mut HostState,
+    pane: PaneId,
+    action: rail_context_menu::RailSessionAction,
+    program: &str,
+    child_args: &[String],
+) -> Dispatch {
+    match action {
+        rail_context_menu::RailSessionAction::Focus => {
+            let tab = focused_tab_index(host, pane);
+            let pane_index = host
+                .mux
+                .tab_panes()
+                .get(tab)
+                .and_then(|(_, panes)| panes.iter().position(|id| *id == pane))
+                .unwrap_or(0);
+            focus_sidebar_session(host, tab, Some(pane_index));
+            Dispatch::Handled
+        }
+        rail_context_menu::RailSessionAction::Rename => {
+            apply_pane_context_action(host, pane, PaneContextAction::Rename, program, child_args)
+        }
+        rail_context_menu::RailSessionAction::Stop => {
+            remove_session_from_space(host, pane, true);
+            Dispatch::Handled
+        }
+        rail_context_menu::RailSessionAction::MoveToSpace => apply_pane_context_action(
+            host,
+            pane,
+            PaneContextAction::MoveSessionToSpace,
+            program,
+            child_args,
+        ),
+    }
+}
+
+fn apply_rail_pane_action(
+    host: &mut HostState,
+    pane: PaneId,
+    action: rail_context_menu::RailPaneAction,
+    program: &str,
+    child_args: &[String],
+) -> Dispatch {
+    match action {
+        rail_context_menu::RailPaneAction::Focus => {
+            let tab = focused_tab_index(host, pane);
+            let pane_index = host
+                .mux
+                .tab_panes()
+                .get(tab)
+                .and_then(|(_, panes)| panes.iter().position(|id| *id == pane))
+                .unwrap_or(0);
+            focus_sidebar_session(host, tab, Some(pane_index));
+            Dispatch::Handled
+        }
+        rail_context_menu::RailPaneAction::ClosePane => {
+            apply_pane_context_action(host, pane, PaneContextAction::Close, program, child_args)
+        }
+    }
 }
 
 fn apply_space_context_action(host: &mut HostState, chip: usize, action: SpaceContextAction) {
@@ -9349,15 +9611,12 @@ fn activate_context_menu(
     let Some(target) = host.context_menu_target else {
         return Dispatch::Handled;
     };
-    let kind = match target {
-        ContextMenuTarget::SpaceChip(_) => ContextMenuKind::SpaceChip,
-        ContextMenuTarget::Pane(_) => ContextMenuKind::Pane,
-    };
+    let kind = context_menu_kind(target);
     let confirmed = host
         .context_menu
         .as_ref()
         .is_some_and(|menu| menu.confirm == Some(index));
-    if context_menu_needs_confirmation(kind, index, confirmed) {
+    if context_menu_needs_confirmation(host, target, kind, index, confirmed) {
         if let Some(menu) = host.context_menu.as_mut() {
             menu.confirm = Some(index);
         }
@@ -9366,15 +9625,42 @@ fn activate_context_menu(
         return Dispatch::Handled;
     }
     close_context_menu(host);
-    match context_menu_action(target, index) {
-        ContextMenuAction::Space { chip, action } => {
-            apply_space_context_action(host, chip, action);
+    match target {
+        ContextMenuTarget::RailSpace(chip) => {
+            if let Some(name) = host.space_rail.names.get(chip).cloned() {
+                let is_current = host.space_rail.current.as_deref() == Some(name.as_str());
+                if let Some(action_index) =
+                    rail_context_menu::space_menu_action_index(is_current, index)
+                {
+                    if let Some(action) = rail_context_menu::space_action(action_index) {
+                        apply_rail_space_action(host, chip, &name, action);
+                    }
+                }
+            }
             Dispatch::Handled
         }
-        ContextMenuAction::Pane { pane, action } => {
-            apply_pane_context_action(host, pane, action, program, child_args)
+        ContextMenuTarget::RailSession(pane) => {
+            if let Some(action) = rail_context_menu::session_action(index) {
+                return apply_rail_session_action(host, pane, action, program, child_args);
+            }
+            Dispatch::Handled
         }
-        ContextMenuAction::Noop => Dispatch::Handled,
+        ContextMenuTarget::RailPane(pane) => {
+            if let Some(action) = rail_context_menu::pane_action(index) {
+                return apply_rail_pane_action(host, pane, action, program, child_args);
+            }
+            Dispatch::Handled
+        }
+        other => match context_menu_action(other, index) {
+            ContextMenuAction::Space { chip, action } => {
+                apply_space_context_action(host, chip, action);
+                Dispatch::Handled
+            }
+            ContextMenuAction::Pane { pane, action } => {
+                apply_pane_context_action(host, pane, action, program, child_args)
+            }
+            ContextMenuAction::Noop => Dispatch::Handled,
+        },
     }
 }
 
@@ -10824,7 +11110,11 @@ fn handle_rail_click(host: &mut HostState, button: MouseButton) -> bool {
         }
         (MouseButton::Right, RailHit::Chip { index, .. }) => {
             host.space_rail.leave();
-            open_context_menu(host, ContextMenuTarget::SpaceChip(index));
+            if rail_oriented_space_menu(host) {
+                open_rail_space_menu(host, index);
+            } else {
+                open_context_menu(host, ContextMenuTarget::SpaceChip(index));
+            }
         }
         (MouseButton::Middle, RailHit::Chip { index, .. }) => {
             host.space_rail.begin_confirm(index);
@@ -11045,6 +11335,50 @@ fn apply_pending_session_focus(host: &mut HostState) {
     focus_sidebar_session(host, tab, Some(pane));
 }
 
+fn open_sidebar_context_menu(host: &mut HostState, row: &sidebar::TreeRow, space_name: &str) {
+    match row.kind {
+        sidebar::RowKind::Space => {
+            if let Some(chip) = space_rail_chip_for_name(host, space_name) {
+                open_rail_space_menu(host, chip);
+            }
+        }
+        sidebar::RowKind::Tab => {
+            if let Some(pane) = pane_for_sidebar_row(host, row) {
+                open_context_menu(host, ContextMenuTarget::RailSession(pane));
+            }
+        }
+        sidebar::RowKind::Pane => {
+            if let Some(pane) = pane_for_sidebar_row(host, row) {
+                open_context_menu(host, ContextMenuTarget::RailPane(pane));
+            }
+        }
+    }
+}
+
+fn try_open_rail_context_menu(host: &mut HostState) -> bool {
+    if sidebar_mode(host) {
+        if let Some(HoverTarget::Sidebar(graphite::SidebarHit::Row(index))) = host.hover_target {
+            let menu_row = host.sidebar_rows.get(index).and_then(|(_, row)| {
+                host.sidebar_tree
+                    .spaces
+                    .get(row.space)
+                    .map(|space| (row.clone(), space.name.clone()))
+            });
+            if let Some((row, name)) = menu_row {
+                open_sidebar_context_menu(host, &row, &name);
+                return true;
+            }
+        }
+    }
+    if host.space_rail.is_active() || sidebar_mode(host) {
+        if let Some(focus) = host.space_rail.focus {
+            open_rail_space_menu(host, focus);
+            return true;
+        }
+    }
+    false
+}
+
 /// Left press on the combined sidebar (#113): collapse toggles, tab and
 /// space selection, footer and header actions. Anything else is
 /// `NotHandled` so presses fall through to the pane handlers.
@@ -11056,6 +11390,24 @@ fn handle_sidebar_click(host: &mut HostState, button: MouseButton) -> StripClick
         return StripClickResult::NotHandled;
     };
     if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+        return StripClickResult::NotHandled;
+    }
+    if button == MouseButton::Right {
+        let Some(hit) = sidebar_hit_at(host, x as usize, y as usize) else {
+            return StripClickResult::NotHandled;
+        };
+        if let graphite::SidebarHit::Row(index) = hit {
+            let menu_row = host.sidebar_rows.get(index).and_then(|(_, row)| {
+                host.sidebar_tree
+                    .spaces
+                    .get(row.space)
+                    .map(|space| (row.clone(), space.name.clone()))
+            });
+            if let Some((row, name)) = menu_row {
+                open_sidebar_context_menu(host, &row, &name);
+                return StripClickResult::Handled;
+            }
+        }
         return StripClickResult::NotHandled;
     }
     if button != MouseButton::Left {
@@ -14838,6 +15190,7 @@ fn mux_command_for(action: keybind::Action) -> Option<MuxCommand> {
         | Action::DeleteSpace
         | Action::MovePaneToSpace
         | Action::SpaceRailFocus
+        | Action::SpaceRailContextMenu
         | Action::SpaceSettings
         | Action::UndoSpaceChange
         | Action::SpaceRailNext
@@ -17235,6 +17588,7 @@ enum ActionRoute {
     ResetFontSize,
     Noop,
     SpaceRailFocus,
+    SpaceRailContextMenu,
     SpaceSettings,
     UndoSpaceChange,
     SpaceRailMove(i32),
@@ -17271,6 +17625,7 @@ fn action_route(action: keybind::Action) -> ActionRoute {
         | Action::DeleteSpace
         | Action::MovePaneToSpace => ActionRoute::Noop,
         Action::SpaceRailFocus => ActionRoute::SpaceRailFocus,
+        Action::SpaceRailContextMenu => ActionRoute::SpaceRailContextMenu,
         Action::SpaceSettings => ActionRoute::SpaceSettings,
         Action::UndoSpaceChange => ActionRoute::UndoSpaceChange,
         Action::SpaceRailNext => ActionRoute::SpaceRailMove(1),
@@ -17506,6 +17861,12 @@ fn dispatch_action(
         }
         ActionRoute::SpaceRailFocus => {
             apply_space_rail_focus_action(host);
+            Dispatch::Handled
+        }
+        ActionRoute::SpaceRailContextMenu => {
+            if try_open_rail_context_menu(host) {
+                host.dirty = true;
+            }
             Dispatch::Handled
         }
         ActionRoute::SpaceRailMove(delta) => {
@@ -19468,6 +19829,10 @@ mod tests {
             (Action::DeleteSpace, ActionRoute::Noop),
             (Action::MovePaneToSpace, ActionRoute::Noop),
             (Action::SpaceRailFocus, ActionRoute::SpaceRailFocus),
+            (
+                Action::SpaceRailContextMenu,
+                ActionRoute::SpaceRailContextMenu,
+            ),
             (Action::SpaceRailNext, ActionRoute::SpaceRailMove(1)),
             (Action::SpaceRailPrev, ActionRoute::SpaceRailMove(-1)),
             (Action::SaveSpace, ActionRoute::SaveSpace),
@@ -19563,9 +19928,14 @@ mod tests {
             (ContextMenuKind::Pane, 11, true, false),
         ];
         for (kind, index, confirmed, expected) in cases {
+            let got = rail_context_menu::needs_confirmation(kind, index, confirmed)
+                || (!confirmed
+                    && matches!(
+                        (kind, index),
+                        (ContextMenuKind::SpaceChip, 3 | 6) | (ContextMenuKind::Pane, 11)
+                    ));
             assert_eq!(
-                context_menu_needs_confirmation(kind, index, confirmed),
-                expected,
+                got, expected,
                 "{kind:?}, row {index}, confirmed={confirmed}"
             );
         }

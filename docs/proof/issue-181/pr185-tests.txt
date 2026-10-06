@@ -1,0 +1,78 @@
+=== rail_context ===
+   Compiling prismattyc-core v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-core)
+   Compiling prismattyc-emulator v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-emulator)
+   Compiling prismattyc-render v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-render)
+   Compiling prismattyc-mux v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-mux)
+   Compiling prismattyc-host v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-host)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.09s
+     Running unittests src/main.rs (target/debug/deps/prismattyc_host-2075890f80059f4d)
+
+running 6 tests
+test rail_context_menu::tests::destructive_rows_require_confirmation_once ... ok
+test rail_context_menu::tests::session_menu_lists_every_action_in_order ... ok
+test rail_context_menu::tests::space_menu_lists_every_action_in_order ... ok
+test rail_context_menu::tests::pane_menu_lists_focus_and_close_in_order ... ok
+test rail_context_menu::tests::close_space_row_only_when_space_is_current ... ok
+test graphite_overlays::tests::rail_context_menu_rows_paint_like_other_graphite_menus ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 979 filtered out; finished in 0.59s
+
+     Running tests/version.rs (target/debug/deps/version-ab876f966fa38d9a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+=== context_menu ===
+   Compiling prismattyc-core v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-core)
+   Compiling prismattyc-emulator v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-emulator)
+   Compiling prismattyc-render v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-render)
+   Compiling prismattyc-mux v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-mux)
+   Compiling prismattyc-host v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-host)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.15s
+     Running unittests src/main.rs (target/debug/deps/prismattyc_host-2075890f80059f4d)
+
+running 10 tests
+test rail_context_menu::tests::destructive_rows_require_confirmation_once ... ok
+test tests::context_menu_confirmation_table_covers_destructive_actions ... ok
+test rail_context_menu::tests::space_menu_lists_every_action_in_order ... ok
+test rail_context_menu::tests::session_menu_lists_every_action_in_order ... ok
+test tests::context_menu_choice_tables_cover_space_and_pane_rows ... ok
+test rail_context_menu::tests::pane_menu_lists_focus_and_close_in_order ... ok
+test palette::tests::context_menus_wrap_consume_modifiers_and_confirm_for_both_targets ... ok
+test rail_context_menu::tests::close_space_row_only_when_space_is_current ... ok
+test graphite_overlays::tests::rail_context_menu_rows_paint_like_other_graphite_menus ... ok
+test raster::tests::palette_pickers_and_context_menus_keep_gradient_goldens ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 975 filtered out; finished in 0.94s
+
+     Running tests/version.rs (target/debug/deps/version-ab876f966fa38d9a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+=== sidebar (subset) ===
+   Compiling prismattyc-core v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-core)
+   Compiling prismattyc-emulator v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-emulator)
+   Compiling prismattyc-render v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-render)
+   Compiling prismattyc-mux v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-mux)
+   Compiling prismattyc-host v0.3.0 (/private/tmp/prismattyc-181/crates/prismattyc-host)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.17s
+     Running unittests src/main.rs (target/debug/deps/prismattyc_host-2075890f80059f4d)
+
+running 5 tests
+test sidebar::tests::session_highlight_follows_the_focused_pane_in_the_current_space ... ok
+test sidebar::tests::saved_spaces_expand_files_and_hide_collapsed_tabs ... ok
+test sidebar::tests::visible_rows_flatten_in_paint_order ... ok
+test sidebar::tests::live_tabs_expand_handles_with_focus_and_activity ... ok
+test sidebar::tests::pending_session_lands_on_the_matching_title_after_the_space_switches ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 980 filtered out; finished in 0.00s
+
+     Running tests/version.rs (target/debug/deps/version-ab876f966fa38d9a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+

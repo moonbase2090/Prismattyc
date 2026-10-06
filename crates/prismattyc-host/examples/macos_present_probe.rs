@@ -16,8 +16,16 @@ mod macos_window;
 #[path = "../src/pixel_alpha.rs"]
 mod pixel_alpha;
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
+#[path = "../src/present_thread.rs"]
+mod present_thread;
+#[cfg(target_os = "macos")]
 #[path = "../src/present_tiles.rs"]
 mod present_tiles;
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+#[path = "../src/spike_timing.rs"]
+mod spike_timing;
 
 #[cfg(target_os = "macos")]
 fn main() {

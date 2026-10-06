@@ -1,0 +1,21 @@
+window_s=22.6
+phase                                 count   total_ms   p50_us   p95_us   p99_us   max_us
+drain.local_views                     20166        0.0        0        0        0        0
+drain.parse                           20166    22253.6     1104     1140     1168     1216
+pump.adopt_nested                     20166        2.1        0        0        0      111
+pump.attach_tabs                      20166      133.3        1        2        2     7725
+pump.attach_tabs.local_views          20166        5.5        0        0        0      277
+pump.attach_tabs.poll                 20166        0.8        0        0        1       12
+pump.attach_tabs.session_focus        20166        0.0        0        0        0        0
+pump.attach_tabs.space_opens          20166        0.1        0        0        0       14
+pump.attach_tabs.space_views          20166      106.3        0        0        0     7723
+pump.config_reload                    20166        0.0        0        0        0        0
+pump.drain_pty                        20166    22286.8     1105     1142     1170     1218
+pump.publish_render_status            20166        5.8        0        0        0      297
+pump.register_host_pid                20166        0.0        0        0        0        2
+pump.remote_poll                      20166        0.0        0        0        0        0
+pump.restart_poll                     20166       99.8        0        0        0     5375
+pump.space_rail_poll                  20166        0.1        0        0        0        6
+pump.sync_remote_rail                 20166        0.0        0        0        0        0
+pump.total                            20166    22570.3     1109     1147     1179     8855
+pump.window_total                     20166    22308.3     1106     1144     1172     1285

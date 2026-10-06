@@ -339,10 +339,15 @@ pub(crate) fn live_snapshot() -> Option<Snapshot> {
 }
 
 fn live_snapshot_at(socket: &Path) -> Option<Snapshot> {
-    let mut client = Client::connect(socket, REQUEST_TIMEOUT).ok()?;
-    match client.request(|request_id| ControlRequest::Snapshot {
-        version: PROTOCOL_VERSION,
-        request_id,
+    let mut client = crate::spike_timing::time("pmuxd.connect_register", || {
+        Client::connect(socket, REQUEST_TIMEOUT)
+    })
+    .ok()?;
+    match crate::spike_timing::time("pmuxd.snapshot_request", || {
+        client.request(|request_id| ControlRequest::Snapshot {
+            version: PROTOCOL_VERSION,
+            request_id,
+        })
     }) {
         Ok(ControlResponseData::Snapshot { snapshot }) => Some(snapshot),
         _ => None,

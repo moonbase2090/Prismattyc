@@ -129,6 +129,49 @@ impl TabNode {
     }
 }
 
+/// A session row is highlighted only while its space is current and that
+/// pane has keyboard focus. The tab row uses the tab's own selected flag,
+/// so both can be highlighted at once.
+pub fn session_row_selected(current_space: bool, pane_focused: bool) -> bool {
+    current_space && pane_focused
+}
+
+/// Titles in the same order as the pane rows [`TabNode::live`] builds.
+pub fn session_titles(info: &TabInfo) -> Vec<String> {
+    TabNode::live(info, &[])
+        .panes
+        .into_iter()
+        .map(|pane| pane.title)
+        .collect()
+}
+
+/// A session row clicked in a space that is not current. The host opens
+/// the space, then focuses the pane whose title matches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSession {
+    pub space: String,
+    pub title: String,
+}
+
+/// Where to focus once `current_space` is the pending space and a live
+/// pane carries `title`. Nothing matches until the space has actually
+/// switched, so the click cannot focus a pane in the space being left.
+pub fn pending_session_slot(
+    pending: &PendingSession,
+    current_space: Option<&str>,
+    tabs: &[Vec<&str>],
+) -> Option<(usize, usize)> {
+    if current_space != Some(pending.space.as_str()) || pending.title.is_empty() {
+        return None;
+    }
+    for (tab, panes) in tabs.iter().enumerate() {
+        if let Some(pane) = panes.iter().position(|title| *title == pending.title) {
+            return Some((tab, pane));
+        }
+    }
+    None
+}
+
 impl SpaceNode {
     /// Tabs the tree shows: none while collapsed.
     pub fn visible_tabs(&self) -> &[TabNode] {
@@ -432,5 +475,46 @@ mod tests {
         assert_eq!(mail.tabs[0].title, "scratch");
         assert!(mail.visible_tabs().is_empty());
         assert_eq!(lab.visible_tabs().len(), 1);
+    }
+
+    #[test]
+    fn session_highlight_follows_the_focused_pane_in_the_current_space() {
+        assert!(session_row_selected(true, true));
+        assert!(!session_row_selected(true, false));
+        assert!(
+            !session_row_selected(false, true),
+            "another space does not show a live focus highlight"
+        );
+    }
+
+    #[test]
+    fn pending_session_lands_on_the_matching_title_after_the_space_switches() {
+        let mut notes = live_tab("notes", true, vec![], None);
+        notes.pane_title = Some("composer-2".to_string());
+        assert_eq!(
+            session_titles(&notes),
+            vec!["composer-2".to_string()],
+            "a single pane uses the same title the row paints"
+        );
+        let pending = PendingSession {
+            space: "mail".to_string(),
+            title: "composer-2".to_string(),
+        };
+        let tabs = [vec!["prismattyc-1", "prismattyc-3"], vec!["composer-2"]];
+        assert_eq!(
+            pending_session_slot(&pending, Some("lab"), &tabs),
+            None,
+            "the space being left is not focused"
+        );
+        assert_eq!(
+            pending_session_slot(&pending, Some("mail"), &tabs),
+            Some((1, 0))
+        );
+        assert_eq!(pending_session_slot(&pending, None, &tabs), None);
+        let missing = PendingSession {
+            space: "mail".to_string(),
+            title: String::new(),
+        };
+        assert_eq!(pending_session_slot(&missing, Some("mail"), &tabs), None);
     }
 }

@@ -4589,6 +4589,81 @@ mod sidebar_render_tests {
         assert_eq!(spot, pack_argb(0xff, accent), "selected marker in accent");
     }
 
+    /// The focused session row carries the same accent marker as its tab.
+    /// Set `PRISMATTYC_SIDEBAR_FOCUS_SHOTS` to write the still. A normal
+    /// test run only checks pixels.
+    #[test]
+    fn focused_session_row_shares_the_tab_accent() {
+        let chrome = chrome();
+        let layout = sidebar_layout(chrome, column(640), 5, 0);
+        let labels = [
+            "lab".to_string(),
+            "prismattyc-3".to_string(),
+            "prismattyc-1".to_string(),
+            "prismattyc-3".to_string(),
+            "composer-2".to_string(),
+        ];
+        let specs = [
+            (0usize, Some(false), false, false),
+            (1, None, true, false),
+            (2, None, false, false),
+            (2, None, true, false),
+            (2, None, false, true),
+        ];
+        let rows: Vec<SidebarRow<'_>> = specs
+            .iter()
+            .zip(layout.rows.iter())
+            .zip(labels.iter())
+            .map(
+                |((&(depth, chevron, selected, hovered), slot), label)| SidebarRow {
+                    slot: *slot,
+                    depth,
+                    chevron,
+                    dot: (depth == 2).then_some(Dot::Idle),
+                    label: label.as_str(),
+                    mail: 0,
+                    needs_you: 0,
+                    selected,
+                    hovered,
+                },
+            )
+            .collect();
+        let accent = rgb(0x5aa2ff);
+        let (w, h) = (1024usize, 640usize);
+        let mut buffer = vec![pack_argb(0xff, DARK.ground); w * h];
+        paint_sidebar(
+            &mut buffer,
+            w,
+            &SidebarPaint {
+                chrome,
+                tok: &DARK,
+                accent,
+                layout: &layout,
+                title: "Spaces",
+                rows: &rows,
+                actions: ["+ New tab", "+ New space", "Commands"],
+                commands_hint: "Ctrl Shift P",
+                action_hovered: None,
+                alpha: 0xff,
+                grip_hot: false,
+                dock_right: false,
+                toggle: Rect::new(0, 0, 0, 0),
+                toggle_hovered: false,
+            },
+        );
+        let focused = layout.rows[3];
+        let idle = layout.rows[2];
+        let spot = buffer[(focused.y + focused.h / 2) * w + focused.x + 3];
+        assert_eq!(spot, pack_argb(0xff, accent), "focused session marker");
+        let other = buffer[(idle.y + idle.h / 2) * w + idle.x + 3];
+        assert_ne!(other, spot, "an unfocused session has no accent marker");
+        if let Some(dir) = std::env::var_os("PRISMATTYC_SIDEBAR_FOCUS_SHOTS") {
+            let dir = std::path::PathBuf::from(dir);
+            std::fs::create_dir_all(&dir).expect("stills dir");
+            write_still_png(&dir.join("focused-session.png"), &buffer, w, h);
+        }
+    }
+
     /// Job-only stills for design review (issue #113): set
     /// `PRISMATTYC_DUMP_SIDEBAR` to a directory to paint the tree column
     /// and the header over the panes, dark and light, top and scrolled. A

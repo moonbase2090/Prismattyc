@@ -978,6 +978,8 @@ struct HostState {
     sidebar_row_count: usize,
     /// Tree behind the stored rows; clicks resolve names through it.
     sidebar_tree: sidebar::SidebarTree,
+    /// Session clicked in another space, focused once that space is current.
+    pending_session_focus: Option<sidebar::PendingSession>,
     /// First visible tree row; the paint layout clamps a stale offset.
     sidebar_scroll: usize,
     /// Sidebar list thumb drag: pointer y and scroll at press.
@@ -3142,6 +3144,7 @@ impl App {
             advance_space_opens(host);
             refresh_space_views(host);
             local_views::persist_and_restore(host, false);
+            apply_pending_session_focus(host);
         }
     }
 
@@ -3677,6 +3680,7 @@ impl App {
                 sidebar_thumb: None,
                 sidebar_row_count: 0,
                 sidebar_tree: sidebar::SidebarTree::default(),
+                pending_session_focus: None,
                 sidebar_scroll: 0,
                 sidebar_thumb_drag: None,
                 sidebar_toggle: graphite::Rect::new(0, 0, 0, 0),
@@ -8495,6 +8499,15 @@ fn advance_space_opens(host: &mut HostState) {
 
 /// Keep the result after its toast expires. Render status exposes the receipt.
 fn report_space_open(host: &mut HostState, completed: space_open::Completion) {
+    if completed.mode == SpaceOpenMode::Switch
+        && completed.applied != Some(true)
+        && host
+            .pending_session_focus
+            .as_ref()
+            .is_some_and(|pending| pending.space == completed.name)
+    {
+        host.pending_session_focus = None;
+    }
     if completed.mode == SpaceOpenMode::Create && completed.applied.is_none() {
         if let (Some(name), Some(error)) = (&completed.session_name, &completed.error) {
             // A failed create must remain editable. Do not retry after the
@@ -10818,10 +10831,17 @@ fn handle_rail_click(host: &mut HostState, button: MouseButton) -> bool {
 enum SidebarClick {
     ToggleCollapse(String),
     SelectTab(usize),
-    /// Collapsed-strip session: select the tab and focus that pane.
+    /// Session row or icon: select its tab, then focus that pane.
+    /// `pane` is `None` for a tab icon, which keeps the tab's own focus.
+    /// Does not type into the pane.
     FocusSession {
         tab: usize,
         pane: Option<usize>,
+    },
+    /// Session in another space: open it, then focus the pane named `title`.
+    OpenSession {
+        space: String,
+        title: String,
     },
     OpenSpace(String),
     BeginNewSpace,
@@ -10848,12 +10868,13 @@ fn sidebar_click_decision(
     hit: graphite::SidebarHit,
     row: Option<(&sidebar::TreeRow, &str, bool)>,
     saved: bool,
+    session_title: Option<&str>,
 ) -> SidebarClick {
     use graphite::SidebarHit;
     match (hit, row) {
         (SidebarHit::Row(_), Some((clicked, name, current))) => match clicked.kind {
             sidebar::RowKind::Space => SidebarClick::ToggleCollapse(name.to_string()),
-            sidebar::RowKind::Tab | sidebar::RowKind::Pane => {
+            sidebar::RowKind::Tab => {
                 if current {
                     clicked
                         .tab
@@ -10861,6 +10882,28 @@ fn sidebar_click_decision(
                         .unwrap_or(SidebarClick::Ignore)
                 } else if saved {
                     SidebarClick::OpenSpace(name.to_string())
+                } else {
+                    SidebarClick::Ignore
+                }
+            }
+            sidebar::RowKind::Pane => {
+                if current {
+                    match (clicked.tab, clicked.pane) {
+                        (Some(tab), Some(pane)) => SidebarClick::FocusSession {
+                            tab,
+                            pane: Some(pane),
+                        },
+                        (Some(tab), None) => SidebarClick::SelectTab(tab),
+                        _ => SidebarClick::Ignore,
+                    }
+                } else if saved {
+                    match session_title {
+                        Some(title) if !title.is_empty() => SidebarClick::OpenSession {
+                            space: name.to_string(),
+                            title: title.to_string(),
+                        },
+                        _ => SidebarClick::OpenSpace(name.to_string()),
+                    }
                 } else {
                     SidebarClick::Ignore
                 }
@@ -10879,10 +10922,12 @@ fn sidebar_click_decision(
 }
 
 /// Collapsed-strip hits. A space icon opens that space. A session icon on
-/// the current space focuses that pane; anywhere else it opens the space.
+/// the current space focuses that pane. A session icon on another space
+/// opens it and, when the icon has a title, focuses that pane once live.
 fn icon_click_decision(
     hit: graphite::SidebarHit,
     row: Option<(&sidebar::TreeRow, &str, bool)>,
+    session_title: Option<&str>,
 ) -> SidebarClick {
     use graphite::SidebarHit;
     match hit {
@@ -10898,7 +10943,19 @@ fn icon_click_decision(
                     })
                     .unwrap_or(SidebarClick::Ignore),
             },
-            Some((_, name, false)) => SidebarClick::OpenSpace(name.to_string()),
+            Some((clicked, name, false)) => {
+                if clicked.kind == sidebar::RowKind::Pane {
+                    match session_title {
+                        Some(title) if !title.is_empty() => SidebarClick::OpenSession {
+                            space: name.to_string(),
+                            title: title.to_string(),
+                        },
+                        _ => SidebarClick::OpenSpace(name.to_string()),
+                    }
+                } else {
+                    SidebarClick::OpenSpace(name.to_string())
+                }
+            }
             None => SidebarClick::Ignore,
         },
         SidebarHit::Action(0) => SidebarClick::Run(keybind::Action::NewTab),
@@ -10912,32 +10969,66 @@ fn icon_click_decision(
     }
 }
 
-/// Select a tab from the collapsed strip and focus the named pane.
+/// Pane title for a session row, in the same order the tree paints.
+fn session_title_of(tree: &sidebar::SidebarTree, row: &sidebar::TreeRow) -> Option<String> {
+    if row.kind != sidebar::RowKind::Pane {
+        return None;
+    }
+    let space = tree.spaces.get(row.space)?;
+    let tab = space.tabs.get(row.tab?)?;
+    Some(tab.panes.get(row.pane?)?.title.clone())
+}
+
+/// Select the session's tab and focus that pane. `None` keeps the tab's
+/// own focused pane (a tab icon). `focus_session_row` leaves zoom when the
+/// pane is hidden, and does not write to the pane.
 fn focus_sidebar_session(host: &mut HostState, tab: usize, pane: Option<usize>) {
-    let _ = host.mux.select_tab(tab);
-    let ids = host.mux.active_pane_ids();
-    let target = match pane {
-        Some(index) => ids.get(index).copied(),
+    let index = match pane {
+        Some(index) => index,
         None => {
-            let handle = host
-                .mux
+            if host.mux.selected_tab_index() != tab && host.mux.select_tab(tab).ok() != Some(true) {
+                host.dirty = true;
+                return;
+            }
+            if host.mux.selected_tab_index() != tab {
+                host.dirty = true;
+                return;
+            }
+            host.mux
                 .tab_infos()
                 .into_iter()
                 .find(|info| info.selected)
-                .and_then(|info| info.focused_handle);
-            handle
-                .and_then(|index| ids.get(index).copied())
-                .or_else(|| ids.first().copied())
+                .and_then(|info| info.focused_handle)
+                .unwrap_or(0)
         }
     };
-    if let Some(id) = target {
-        let _ = host.mux.focus(id);
+    if host.mux.focus_session_row(tab, index) {
+        mark_layout_dirty(host);
+        App::refit_geom(host, host.window.inner_size(), Some("sidebar focus"));
+        host.window
+            .set_title(&window_title(&host.mux, show_tab_strip(host)));
     }
-    mark_layout_dirty(host);
-    App::refit_geom(host, host.window.inner_size(), Some("sidebar focus"));
-    host.window
-        .set_title(&window_title(&host.mux, show_tab_strip(host)));
     host.dirty = true;
+}
+
+/// Focus a session once its space is current and a live pane has its title.
+fn apply_pending_session_focus(host: &mut HostState) {
+    let Some(pending) = host.pending_session_focus.clone() else {
+        return;
+    };
+    let infos = host.mux.tab_infos();
+    let titles: Vec<Vec<String>> = infos.iter().map(sidebar::session_titles).collect();
+    let borrowed: Vec<Vec<&str>> = titles
+        .iter()
+        .map(|panes| panes.iter().map(String::as_str).collect())
+        .collect();
+    let Some((tab, pane)) =
+        sidebar::pending_session_slot(&pending, host.space_rail.current.as_deref(), &borrowed)
+    else {
+        return;
+    };
+    host.pending_session_focus = None;
+    focus_sidebar_session(host, tab, Some(pane));
 }
 
 /// Left press on the combined sidebar (#113): collapse toggles, tab and
@@ -10976,20 +11067,30 @@ fn handle_sidebar_click(host: &mut HostState, button: MouseButton) -> StripClick
         _ => None,
     };
     // Resolve through the pure decision first so the borrow ends before
-    // the mutations below.
+    // the mutations below. A click replaces any session focus still waiting
+    // on a space switch. The collapsed strip uses the icon decisions.
+    let session_title = row
+        .as_ref()
+        .and_then(|(clicked, _, _, _)| session_title_of(&host.sidebar_tree, clicked));
+    host.pending_session_focus = None;
     let decision = if host.spacing.sidebar_collapsed {
         match &row {
-            Some((clicked, name, current, _)) => {
-                icon_click_decision(hit, Some((clicked, name.as_str(), *current)))
-            }
-            None => icon_click_decision(hit, None),
+            Some((clicked, name, current, _)) => icon_click_decision(
+                hit,
+                Some((clicked, name.as_str(), *current)),
+                session_title.as_deref(),
+            ),
+            None => icon_click_decision(hit, None, None),
         }
     } else {
         match &row {
-            Some((clicked, name, current, saved)) => {
-                sidebar_click_decision(hit, Some((clicked, name.as_str(), *current)), *saved)
-            }
-            None => sidebar_click_decision(hit, None, false),
+            Some((clicked, name, current, saved)) => sidebar_click_decision(
+                hit,
+                Some((clicked, name.as_str(), *current)),
+                *saved,
+                session_title.as_deref(),
+            ),
+            None => sidebar_click_decision(hit, None, false, None),
         }
     };
     match decision {
@@ -11006,11 +11107,22 @@ fn handle_sidebar_click(host: &mut HostState, button: MouseButton) -> StripClick
             StripClickResult::Handled
         }
         SidebarClick::FocusSession { tab, pane } => {
+            // Handled: the press never reaches the pane, so it cannot type
+            // into it or interrupt the agent.
             focus_sidebar_session(host, tab, pane);
             StripClickResult::Handled
         }
         SidebarClick::ToggleStrip => {
             sidebar_resize::toggle(host);
+            StripClickResult::Handled
+        }
+        SidebarClick::OpenSession { space, title } => {
+            host.pending_session_focus = Some(sidebar::PendingSession {
+                space: space.clone(),
+                title,
+            });
+            apply_rail_verdict(host, space_rail::RailVerdict::Open(space));
+            host.dirty = true;
             StripClickResult::Handled
         }
         SidebarClick::OpenSpace(name) => {
@@ -12008,7 +12120,10 @@ fn paint_graphite_sidebar(
                 labels.push(pane.map(|pane| pane.title.clone()).unwrap_or_default());
                 dots.push(None);
                 mails.push(pane.map(|pane| pane.mail).unwrap_or(0));
-                selected_tabs.push(false);
+                selected_tabs.push(sidebar::session_row_selected(
+                    space.current,
+                    pane.is_some_and(|pane| pane.focused),
+                ));
             }
         }
     }
@@ -24507,13 +24622,66 @@ session mail (id 15)
         };
         let live_tab = row(sidebar::RowKind::Tab, Some(1));
         assert_eq!(
-            sidebar_click_decision(SidebarHit::Row(4), Some((&live_tab, "lab", true)), true),
+            sidebar_click_decision(
+                SidebarHit::Row(4),
+                Some((&live_tab, "lab", true)),
+                true,
+                None
+            ),
             SidebarClick::SelectTab(1)
         );
         let live_pane = row(sidebar::RowKind::Pane, Some(0));
         assert_eq!(
-            sidebar_click_decision(SidebarHit::Row(5), Some((&live_pane, "lab", true)), true),
-            SidebarClick::SelectTab(0)
+            sidebar_click_decision(
+                SidebarHit::Row(5),
+                Some((&live_pane, "lab", true)),
+                true,
+                None
+            ),
+            SidebarClick::SelectTab(0),
+            "a pane row with no index still selects the tab"
+        );
+        let session = sidebar::TreeRow {
+            depth: 2,
+            kind: sidebar::RowKind::Pane,
+            space: 0,
+            tab: Some(1),
+            pane: Some(2),
+        };
+        assert_eq!(
+            sidebar_click_decision(
+                SidebarHit::Row(6),
+                Some((&session, "lab", true)),
+                true,
+                None
+            ),
+            SidebarClick::FocusSession {
+                tab: 1,
+                pane: Some(2),
+            }
+        );
+        assert_eq!(
+            sidebar_click_decision(
+                SidebarHit::Row(6),
+                Some((&session, "mail", false)),
+                true,
+                Some("composer-2"),
+            ),
+            SidebarClick::OpenSession {
+                space: "mail".to_string(),
+                title: "composer-2".to_string(),
+            },
+            "a session in another space opens that space, then focuses the pane"
+        );
+        assert_eq!(
+            sidebar_click_decision(
+                SidebarHit::Row(6),
+                Some((&session, "mail", false)),
+                true,
+                None
+            ),
+            SidebarClick::OpenSpace("mail".to_string()),
+            "a session row with no title still opens the space"
         );
         let space = sidebar::TreeRow {
             depth: 0,
@@ -24523,58 +24691,73 @@ session mail (id 15)
             pane: None,
         };
         assert_eq!(
-            sidebar_click_decision(SidebarHit::Row(0), Some((&space, "mail", false)), true),
+            sidebar_click_decision(
+                SidebarHit::Row(0),
+                Some((&space, "mail", false)),
+                true,
+                None
+            ),
             SidebarClick::ToggleCollapse("mail".to_string())
         );
         let saved_tab = row(sidebar::RowKind::Tab, None);
         assert_eq!(
-            sidebar_click_decision(SidebarHit::Row(7), Some((&saved_tab, "mail", false)), true),
+            sidebar_click_decision(
+                SidebarHit::Row(7),
+                Some((&saved_tab, "mail", false)),
+                true,
+                None
+            ),
             SidebarClick::OpenSpace("mail".to_string())
         );
         assert_eq!(
-            sidebar_click_decision(SidebarHit::Row(7), Some((&saved_tab, "gone", false)), false),
+            sidebar_click_decision(
+                SidebarHit::Row(7),
+                Some((&saved_tab, "gone", false)),
+                false,
+                None
+            ),
             SidebarClick::Ignore,
             "rows from unloaded spaces do nothing"
         );
         assert_eq!(
-            sidebar_click_decision(SidebarHit::Row(99), None, false),
+            sidebar_click_decision(SidebarHit::Row(99), None, false, None),
             SidebarClick::Ignore,
             "a stale row index never panics"
         );
         assert_eq!(
-            sidebar_click_decision(SidebarHit::Action(0), None, false),
+            sidebar_click_decision(SidebarHit::Action(0), None, false, None),
             SidebarClick::Run(keybind::Action::NewTab)
         );
         assert_eq!(
-            sidebar_click_decision(SidebarHit::Action(1), None, false),
+            sidebar_click_decision(SidebarHit::Action(1), None, false, None),
             SidebarClick::BeginNewSpace
         );
         assert_eq!(
-            sidebar_click_decision(SidebarHit::Action(2), None, false),
+            sidebar_click_decision(SidebarHit::Action(2), None, false, None),
             SidebarClick::Run(keybind::Action::CommandPalette)
         );
         assert_eq!(
-            sidebar_click_decision(SidebarHit::Arrange(0), None, false),
+            sidebar_click_decision(SidebarHit::Arrange(0), None, false, None),
             SidebarClick::Run(keybind::Action::ArrangeSingle)
         );
         assert_eq!(
-            sidebar_click_decision(SidebarHit::Arrange(1), None, false),
+            sidebar_click_decision(SidebarHit::Arrange(1), None, false, None),
             SidebarClick::Run(keybind::Action::ArrangeSplit)
         );
         assert_eq!(
-            sidebar_click_decision(SidebarHit::Arrange(2), None, false),
+            sidebar_click_decision(SidebarHit::Arrange(2), None, false, None),
             SidebarClick::Run(keybind::Action::ArrangeGrid)
         );
         assert_eq!(
-            sidebar_click_decision(SidebarHit::Thumb, None, false),
+            sidebar_click_decision(SidebarHit::Thumb, None, false, None),
             SidebarClick::StartThumbDrag
         );
         assert_eq!(
-            sidebar_click_decision(SidebarHit::Action(3), None, false),
+            sidebar_click_decision(SidebarHit::Action(3), None, false, None),
             SidebarClick::Ignore
         );
         assert_eq!(
-            sidebar_click_decision(SidebarHit::Toggle, None, false),
+            sidebar_click_decision(SidebarHit::Toggle, None, false, None),
             SidebarClick::ToggleStrip
         );
     }
@@ -24591,51 +24774,141 @@ session mail (id 15)
         };
         let current_space = row(sidebar::RowKind::Space, None, None);
         assert_eq!(
-            icon_click_decision(SidebarHit::Row(0), Some((&current_space, "lab", true))),
+            icon_click_decision(
+                SidebarHit::Row(0),
+                Some((&current_space, "lab", true)),
+                None
+            ),
             SidebarClick::Ignore,
             "the open space is already showing"
         );
         assert_eq!(
-            icon_click_decision(SidebarHit::Row(0), Some((&current_space, "mail", false))),
+            icon_click_decision(
+                SidebarHit::Row(0),
+                Some((&current_space, "mail", false)),
+                None
+            ),
             SidebarClick::OpenSpace("mail".to_string())
         );
         let tab = row(sidebar::RowKind::Tab, Some(2), None);
         assert_eq!(
-            icon_click_decision(SidebarHit::Row(1), Some((&tab, "lab", true))),
+            icon_click_decision(SidebarHit::Row(1), Some((&tab, "lab", true)), None),
             SidebarClick::FocusSession { tab: 2, pane: None }
         );
         let pane = row(sidebar::RowKind::Pane, Some(1), Some(3));
         assert_eq!(
-            icon_click_decision(SidebarHit::Row(2), Some((&pane, "lab", true))),
+            icon_click_decision(SidebarHit::Row(2), Some((&pane, "lab", true)), None),
             SidebarClick::FocusSession {
                 tab: 1,
                 pane: Some(3)
             }
         );
         assert_eq!(
-            icon_click_decision(SidebarHit::Row(2), Some((&pane, "mail", false))),
+            icon_click_decision(SidebarHit::Row(2), Some((&pane, "mail", false)), None),
             SidebarClick::OpenSpace("mail".to_string()),
             "a session on another space opens that space"
         );
         assert_eq!(
-            icon_click_decision(SidebarHit::Toggle, None),
+            icon_click_decision(
+                SidebarHit::Row(2),
+                Some((&pane, "mail", false)),
+                Some("composer-2")
+            ),
+            SidebarClick::OpenSession {
+                space: "mail".to_string(),
+                title: "composer-2".to_string(),
+            },
+            "a titled session icon focuses that pane after the space opens"
+        );
+        assert_eq!(
+            icon_click_decision(SidebarHit::Toggle, None, None),
             SidebarClick::ToggleStrip
         );
         assert_eq!(
-            icon_click_decision(SidebarHit::Action(0), None),
+            icon_click_decision(SidebarHit::Action(0), None, None),
             SidebarClick::Run(keybind::Action::NewTab)
         );
         assert_eq!(
-            icon_click_decision(SidebarHit::Action(1), None),
+            icon_click_decision(SidebarHit::Action(1), None, None),
             SidebarClick::BeginNewSpace
         );
         assert_eq!(
-            icon_click_decision(SidebarHit::Action(2), None),
+            icon_click_decision(SidebarHit::Action(2), None, None),
             SidebarClick::Run(keybind::Action::CommandPalette)
         );
         assert_eq!(
-            icon_click_decision(SidebarHit::Action(9), None),
+            icon_click_decision(SidebarHit::Action(9), None, None),
             SidebarClick::Ignore
+        );
+    }
+
+    #[test]
+    fn session_row_hit_focuses_that_pane() {
+        use graphite::SidebarHit;
+        let tree = sidebar::SidebarTree {
+            spaces: vec![sidebar::SpaceNode {
+                name: "lab".to_string(),
+                current: true,
+                collapsed: false,
+                attention: 0,
+                tabs: vec![sidebar::TabNode {
+                    title: "prismattyc-3".to_string(),
+                    selected: true,
+                    unseen: false,
+                    attention: false,
+                    zoomed: false,
+                    panes: vec![
+                        sidebar::PaneNode {
+                            title: "prismattyc-1".to_string(),
+                            focused: false,
+                            active: false,
+                            mail: 0,
+                        },
+                        sidebar::PaneNode {
+                            title: "composer-2".to_string(),
+                            focused: true,
+                            active: false,
+                            mail: 0,
+                        },
+                    ],
+                }],
+            }],
+        };
+        let rows = sidebar::visible_rows(&tree);
+        let chrome = mux::ChromeGeom {
+            graphite: true,
+            scale_milli: 1000,
+        };
+        let column = graphite::Rect::new(0, 0, 256, 640);
+        let layout = graphite::sidebar_layout(chrome, column, rows.len(), 0);
+        let pane_row = rows
+            .iter()
+            .position(|row| row.kind == sidebar::RowKind::Pane && row.pane == Some(1))
+            .expect("composer row");
+        let slot = layout.rows[pane_row];
+        let hit = graphite::sidebar_hit(
+            &layout.rows,
+            &layout.actions,
+            &[graphite::Rect::new(0, 0, 0, 0); 3],
+            layout.thumb,
+            graphite::Rect::new(0, 0, 0, 0),
+            slot.x + 8,
+            slot.y + slot.h / 2,
+        );
+        assert_eq!(hit, Some(SidebarHit::Row(pane_row)));
+        let clicked = &rows[pane_row];
+        assert_eq!(
+            sidebar_click_decision(hit.unwrap(), Some((clicked, "lab", true)), true, None),
+            SidebarClick::FocusSession {
+                tab: 0,
+                pane: Some(1),
+            },
+            "the hit pane, not the tab, is what gets focus"
+        );
+        assert_eq!(clicked.tab, Some(0));
+        assert_eq!(
+            session_title_of(&tree, clicked).as_deref(),
+            Some("composer-2")
         );
     }
 

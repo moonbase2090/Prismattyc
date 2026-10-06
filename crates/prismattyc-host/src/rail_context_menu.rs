@@ -73,7 +73,10 @@ pub fn space_label(index: usize) -> Option<(&'static str, &'static str)> {
         1 => Some(("Rename", "change the space name")),
         2 => Some(("Save now", "write the live layout to disk")),
         3 => Some(("Add session…", "create a new shell session")),
-        4 => Some(("Close space…", "stop sessions and close this window’s views")),
+        4 => Some((
+            "Close space…",
+            "stop sessions and close this window’s views",
+        )),
         5 => Some(("Remove saved space…", "delete the space file from disk")),
         _ => None,
     }
@@ -84,7 +87,10 @@ pub fn session_label(index: usize) -> Option<(&'static str, &'static str)> {
         0 => Some(("Focus", "bring this session to the keyboard")),
         1 => Some(("Rename", "change the tab or session title")),
         2 => Some(("Stop…", "remove from the space and stop its processes")),
-        3 => Some(("Move to space…", "move the session into another saved space")),
+        3 => Some((
+            "Move to space…",
+            "move the session into another saved space",
+        )),
         _ => None,
     }
 }
@@ -124,7 +130,10 @@ mod tests {
             assert!(session_label(index).is_some(), "label {index}");
         }
         assert_eq!(session_action(4), None);
-        assert_eq!(row_count(ContextMenuKind::RailSession), Some(RAIL_SESSION_ROWS));
+        assert_eq!(
+            row_count(ContextMenuKind::RailSession),
+            Some(RAIL_SESSION_ROWS)
+        );
     }
 
     #[test]

@@ -9242,8 +9242,7 @@ fn context_menu_rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
         ContextMenuTarget::RailSpace(chip) => {
             let name = host.space_rail.names.get(chip)?.clone();
             let header = format!("{name} · space");
-            let count = rail_context_menu::row_count(ContextMenuKind::RailSpace)
-                .unwrap_or(0);
+            let count = rail_context_menu::row_count(ContextMenuKind::RailSpace).unwrap_or(0);
             let rows = (0..count)
                 .filter_map(|index| {
                     rail_context_menu::space_label(index).map(|(label, description)| {
@@ -9268,8 +9267,7 @@ fn context_menu_rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
                     pane_space_membership(session, &spaces)
                 })
                 .unwrap_or_else(|| "session".to_string());
-            let count = rail_context_menu::row_count(ContextMenuKind::RailSession)
-                .unwrap_or(0);
+            let count = rail_context_menu::row_count(ContextMenuKind::RailSession).unwrap_or(0);
             let rows = (0..count)
                 .filter_map(|index| {
                     rail_context_menu::session_label(index).map(|(label, description)| {
@@ -9347,7 +9345,12 @@ fn close_space_from_host(host: &mut HostState, name: &str) {
     rail_toast(host, &format!(" closed space {name} "));
 }
 
-fn apply_rail_space_action(host: &mut HostState, chip: usize, name: &str, action: rail_context_menu::RailSpaceAction) {
+fn apply_rail_space_action(
+    host: &mut HostState,
+    chip: usize,
+    name: &str,
+    action: rail_context_menu::RailSpaceAction,
+) {
     match action {
         rail_context_menu::RailSpaceAction::OpenFocus => {
             open_space_from_host(host, name, SpaceOpenMode::Switch);
@@ -9357,13 +9360,13 @@ fn apply_rail_space_action(host: &mut HostState, chip: usize, name: &str, action
             host.dirty = true;
         }
         rail_context_menu::RailSpaceAction::SaveNow => save_space_from_host(host, name),
-        rail_context_menu::RailSpaceAction::AddSession => session_prompt::add_to_space(host, name.to_string()),
+        rail_context_menu::RailSpaceAction::AddSession => {
+            session_prompt::add_to_space(host, name.to_string())
+        }
         rail_context_menu::RailSpaceAction::CloseSpace => close_space_from_host(host, name),
-        rail_context_menu::RailSpaceAction::RemoveSaved => apply_space_context_action(
-            host,
-            chip,
-            SpaceContextAction::Delete,
-        ),
+        rail_context_menu::RailSpaceAction::RemoveSaved => {
+            apply_space_context_action(host, chip, SpaceContextAction::Delete)
+        }
     }
 }
 
@@ -9393,15 +9396,13 @@ fn apply_rail_session_action(
             remove_session_from_space(host, pane, true);
             Dispatch::Handled
         }
-        rail_context_menu::RailSessionAction::MoveToSpace => {
-            apply_pane_context_action(
-                host,
-                pane,
-                PaneContextAction::MoveSessionToSpace,
-                program,
-                child_args,
-            )
-        }
+        rail_context_menu::RailSessionAction::MoveToSpace => apply_pane_context_action(
+            host,
+            pane,
+            PaneContextAction::MoveSessionToSpace,
+            program,
+            child_args,
+        ),
     }
 }
 
@@ -19604,7 +19605,10 @@ mod tests {
             (Action::DeleteSpace, ActionRoute::Noop),
             (Action::MovePaneToSpace, ActionRoute::Noop),
             (Action::SpaceRailFocus, ActionRoute::SpaceRailFocus),
-            (Action::SpaceRailContextMenu, ActionRoute::SpaceRailContextMenu),
+            (
+                Action::SpaceRailContextMenu,
+                ActionRoute::SpaceRailContextMenu,
+            ),
             (Action::SpaceRailNext, ActionRoute::SpaceRailMove(1)),
             (Action::SpaceRailPrev, ActionRoute::SpaceRailMove(-1)),
             (Action::SaveSpace, ActionRoute::SaveSpace),

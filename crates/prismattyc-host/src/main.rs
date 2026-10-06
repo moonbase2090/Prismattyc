@@ -25226,8 +25226,6 @@ session mail (id 15)
     #[test]
     fn user_action_variants_are_distinct() {
         assert_ne!(UserAction::Wake, UserAction::NewWindow);
-        assert_eq!(UserAction::Wake, UserAction::Wake);
-        assert_eq!(UserAction::NewWindow, UserAction::NewWindow);
     }
 
     #[test]

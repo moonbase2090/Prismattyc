@@ -187,8 +187,15 @@ mod tests {
     }
 
     #[test]
-    fn covering_face_skips_when_no_cjk_installed() {
-        // Must not panic. Returns Some only if the host has a CJK face.
-        let _ = covering_face('中');
+    fn covering_face_finds_installed_cjk_glyph() {
+        let face = covering_face('中').expect("test environment must provide a CJK face");
+        assert!(
+            face.path.is_file(),
+            "font file is missing: {}",
+            face.path.display()
+        );
+        assert!(!is_last_resort(&face.path));
+        assert_eq!(face_index_covering(&face.path, '中'), Some(face.index));
+        assert_eq!(covering_face('中'), Some(face));
     }
 }

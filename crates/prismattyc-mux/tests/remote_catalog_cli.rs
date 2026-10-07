@@ -6,6 +6,7 @@ use prismattyc_mux::{
     save_space, stub_space_session, ControlRequest, ControlResponse, ControlResponseBody,
     ControlResponseData, SavedSpace, Snapshot, PROTOCOL_VERSION, SAVED_SPACE_VERSION,
 };
+use sha2::{Digest, Sha256};
 use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
@@ -119,6 +120,14 @@ impl Fixture {
         }
     }
 
+    fn spaces_dir(&self) -> PathBuf {
+        let identity = std::fs::canonicalize(&self.socket).unwrap_or_else(|_| self.socket.clone());
+        let digest = Sha256::digest(identity.to_string_lossy().as_bytes());
+        self.dir
+            .join("prismattyc/spaces/instances")
+            .join(format!("sha256-{digest:x}"))
+    }
+
     fn save_legacy_space(&self, name: &str, session: &str) {
         let space = SavedSpace {
             version: SAVED_SPACE_VERSION,
@@ -130,7 +139,7 @@ impl Fixture {
             active_tab: 0,
             focused_session: None,
         };
-        save_space(&self.dir.join("prismattyc/spaces"), name, &space).unwrap();
+        save_space(&self.spaces_dir(), name, &space).unwrap();
     }
 }
 
@@ -145,7 +154,7 @@ fn catalog_lists_owned_live_sessions_and_explains_the_rest_without_side_effects(
     let before = f.snapshot();
     let owner = |space: &str| {
         let saved: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(f.dir.join(format!("prismattyc/spaces/{space}.json"))).unwrap(),
+            &std::fs::read(f.spaces_dir().join(format!("{space}.json"))).unwrap(),
         )
         .unwrap();
         saved["id"].as_str().unwrap().to_string()

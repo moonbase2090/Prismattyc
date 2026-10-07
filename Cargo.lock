@@ -1381,6 +1381,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "graphite-core"
+version = "0.1.0"
+source = "git+https://github.com/moonbase2090/graphite?rev=7dc6d05e7266707a24ae1d3a2a7fe3cae8123d11#7dc6d05e7266707a24ae1d3a2a7fe3cae8123d11"
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2567,6 +2572,7 @@ dependencies = [
  "arboard",
  "fontdue",
  "getrandom 0.3.4",
+ "graphite-core",
  "memmap2",
  "mutants",
  "objc2 0.6.4",

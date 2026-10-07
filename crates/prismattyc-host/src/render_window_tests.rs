@@ -6,7 +6,7 @@ use std::process::{Child, Command, Stdio};
 use winit::platform::x11::EventLoopBuilderExtX11;
 
 const CHILD_ENV: &str = "PRISMATTYC_RENDER_TEST_CHILD";
-const RESULT_ENV: &str = "PRISMATTYC_RENDER_TEST_RESULT";
+pub(super) const RESULT_ENV: &str = "PRISMATTYC_RENDER_TEST_RESULT";
 const TEST_NAME: &str = "render_window_tests::real_window_paint_reaches_the_backend";
 
 const RED_PNG: &[u8] = &[
@@ -373,6 +373,7 @@ fn paint_in_real_window(restore_only: bool) {
             verify_decision_handlers(host);
             self.app.register_host_pid();
             self.app.publish_render_status();
+            test_support::wait_for_render_status(&self.app);
             let snapshot =
                 prismattyc_mux::host_render_status::read(&host_mux_socket().unwrap()).unwrap();
             let guards = snapshot["windows"][0]["last_raster"]["guards"]
@@ -577,6 +578,7 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
         .rename_window(host.mux.active_window(), "Locally renamed")
         .unwrap();
     persist_attach_layout_from_live(host);
+    test_support::wait_for_attach_write(host);
     let written = attach_tabs::load(&path).unwrap();
     assert_eq!(written.tabs[written.active_tab].title, "Locally renamed");
     assert_ne!(written, updated);

@@ -14,6 +14,7 @@ mod attach_tabs;
 mod border_underlay;
 mod config;
 mod config_template;
+mod file_writer;
 mod frame_damage;
 mod git_info;
 #[cfg(feature = "gpu")]
@@ -55,6 +56,7 @@ mod render_diagnostics;
 mod restart;
 mod sidebar_resize;
 mod sidebar_width;
+mod snapshot_client;
 mod terminal_switcher;
 #[cfg(test)]
 mod test_support;
@@ -171,7 +173,6 @@ const PASTE_SEND_BUDGET: Duration = Duration::from_millis(250);
 /// Extra wait to close a partially-delivered bracketed paste (`CSI 201 ~`).
 const PASTE_BRACKET_CLOSE_TIMEOUT: Duration = Duration::from_millis(50);
 const PASTE_POLL_INTERVAL: Duration = Duration::from_millis(2);
-const EXIT_CLEANUP_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PaneSpacing {
@@ -966,6 +967,8 @@ struct HostState {
     font_features: Vec<String>,
     render_timer: config::RenderTimer,
     render_timer_log_every_frame: bool,
+    /// Periodic pmuxd snapshot cache. `None` when `snapshot_client` is off.
+    snapshot_client: Option<Arc<snapshot_client::SnapshotClient>>,
     render_frame: RenderFrame,
     render_window: RenderWindow,
     render_osd: RenderWindowSummary,
@@ -1226,6 +1229,9 @@ struct HostState {
     attach_pane_sessions: HashMap<PaneId, String>,
     /// Clean-exit Space cleanup commands that should be retried on the next pump.
     pending_exited_cleanups: Vec<(String, String)>,
+    /// When this window bound the pane to that session. Absent means the
+    /// binding predates the timestamp and a snapshot may judge it.
+    attach_bound_at: HashMap<PaneId, SystemTime>,
     /// Panes whose local shell runs a nested `pmux-attach` (PT-210).
     adopted: attach_adopt::Adopted,
     /// Serialize helpers and fence cache writes until their layout applies.
@@ -1238,6 +1244,10 @@ struct HostState {
     attach_cache_stamp: Option<(SystemTime, u64)>,
     /// Stamp of a cache write this host made; the poll ignores it.
     attach_own_stamp: Option<(SystemTime, u64)>,
+    file_writer: file_writer::Handle,
+    pending_attach_write: Option<u64>,
+    attach_write_retry_used: bool,
+    force_attach_write: bool,
     /// This window may persist its view file. Only the registered default
     /// window uses the global CLI target; other windows use private paths.
     cache_writer: bool,
@@ -2608,6 +2618,7 @@ impl PartialEq for UserAction {
 
 struct App {
     cli: Cli,
+    file_writer: file_writer::FileWriter,
     /// One entry per OS window, keyed by winit's `WindowId`. Empty means no
     /// windows remain and the process exits (see `pump`/`window_event`).
     windows: std::collections::HashMap<WindowId, HostState>,
@@ -2623,6 +2634,9 @@ struct App {
     _config_watcher: Option<config::ConfigWatch>,
     /// Coalesced wake from PTY reader threads and the config watcher.
     wake: mux::Wake,
+    /// Process-wide snapshot cache. `None` when `snapshot_client` is off.
+    /// Startup only: config reload does not start or stop it.
+    snapshot_client: Option<Arc<snapshot_client::SnapshotClient>>,
     /// `[[remote]]` destinations and their catalogs (issue #24).
     remote: Rc<RefCell<remote_rail::RemoteRail>>,
     wake_pending: Arc<AtomicBool>,
@@ -2676,7 +2690,13 @@ impl App {
                 (None, None)
             }
         };
+        let snapshot_client = snapshot_client::start_snapshot_client(
+            file_config.snapshot_client_enabled(),
+            wake.clone(),
+        );
         let keymap = Arc::new(file_config.loaded_keymap());
+        let file_writer =
+            file_writer::FileWriter::new(wake.clone(), file_config.async_file_writes())?;
         // `config::load` already rejected invalid entries.
         let remote = Rc::new(RefCell::new(remote_rail::RemoteRail::new(
             file_config.remote_destinations().unwrap_or_default(),
@@ -2686,6 +2706,7 @@ impl App {
         let automatic_update_checks = file_config.automatic_update_checks.unwrap_or(true);
         Ok(Self {
             cli,
+            file_writer,
             windows: std::collections::HashMap::new(),
             exit_code: 0,
             file_config,
@@ -2693,6 +2714,7 @@ impl App {
             startup_config_error,
             _config_watcher: watcher,
             wake,
+            snapshot_client,
             remote,
             wake_pending,
             keymap,
@@ -2752,7 +2774,11 @@ impl App {
                 }
             }
         }
-        let Some(newest) = newest else { return };
+        let Some(mut newest) = newest else { return };
+        if newest.async_file_writes() != self.file_config.async_file_writes() {
+            eprintln!("prismattyc-host: async_file_writes changes take effect after restart");
+            newest.async_file_writes = self.file_config.async_file_writes;
+        }
         if newest == self.file_config {
             return;
         }
@@ -3256,6 +3282,75 @@ impl App {
         }
     }
 
+    fn poll_file_writer(&mut self) {
+        for completion in self.file_writer.drain() {
+            match completion.kind {
+                file_writer::CompletionKind::AttachTabs { path } => {
+                    let host = self
+                        .windows
+                        .values_mut()
+                        .find(|host| host.attach_layout_path.as_deref() == Some(path.as_path()));
+                    let Some(host) = host else {
+                        if let Err(error) = completion.result {
+                            eprintln!("prismattyc-host: could not save attach tab layout: {error}");
+                        }
+                        continue;
+                    };
+                    if host
+                        .pending_attach_write
+                        .is_some_and(|id| id == completion.id)
+                    {
+                        host.pending_attach_write = None;
+                        match completion.result {
+                            Ok(()) => {
+                                host.attach_cache_stamp = completion.stamp;
+                                host.attach_own_stamp = completion.stamp;
+                                host.attach_write_retry_used = false;
+                                host.force_attach_write = false;
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "prismattyc-host: could not save attach tab layout: {error}"
+                                );
+                                if host.attach_write_retry_used {
+                                    host.attach_write_retry_used = false;
+                                    host.force_attach_write = true;
+                                } else if let Some(file) = host.attach_layout.clone() {
+                                    host.attach_write_retry_used = true;
+                                    match host.file_writer.attach_tabs(path.clone(), file) {
+                                        Ok(id) => {
+                                            host.pending_attach_write = Some(id);
+                                            host.force_attach_write = false;
+                                        }
+                                        Err(retry_error) => {
+                                            host.attach_write_retry_used = false;
+                                            host.force_attach_write = true;
+                                            eprintln!("prismattyc-host: could not queue attach tab retry: {retry_error}");
+                                        }
+                                    }
+                                } else {
+                                    host.force_attach_write = true;
+                                }
+                            }
+                        }
+                    } else if let Err(error) = completion.result {
+                        eprintln!("prismattyc-host: could not save attach tab layout: {error}");
+                    }
+                }
+                file_writer::CompletionKind::RenderStatus => {
+                    if let Err(error) = completion.result {
+                        eprintln!("prismattyc-host: could not publish render status: {error}");
+                    }
+                }
+                file_writer::CompletionKind::ComponentHeartbeat => {
+                    if let Err(error) = completion.result {
+                        eprintln!("prismattyc-host: could not write component heartbeat: {error}");
+                    }
+                }
+            }
+        }
+    }
+
     fn poll_attach_tabs(&mut self) {
         let timing = &mut self.pump_timing;
         for host in self.windows.values_mut() {
@@ -3315,6 +3410,7 @@ impl App {
         let external_us = self.pump_timing.begin_pump(pump_started);
         let pump_io = existing_io_scope.unwrap_or_else(pump_timing::PumpIoScope::begin);
         self.wake_pending.store(false, Ordering::Relaxed);
+        self.poll_file_writer();
         let phase_started = Instant::now();
         restart::poll(self);
         self.pump_timing
@@ -3408,18 +3504,7 @@ impl App {
                 host.window.request_redraw();
             }
             if host.mux.all_children_exited() {
-                if host.pending_exited_cleanups.is_empty() {
-                    closed.push(*id);
-                } else {
-                    // Keep the final window alive while a failed Space cleanup
-                    // retries. Without this owner, the pending queue would be
-                    // dropped together with the HostState.
-                    let retry = Instant::now() + EXIT_CLEANUP_RETRY_INTERVAL;
-                    next_deadline = Some(match next_deadline {
-                        Some(existing) => existing.min(retry),
-                        None => retry,
-                    });
-                }
+                closed.push(*id);
                 timing.record_phase(
                     pump_timing::Phase::WindowBookkeeping,
                     phase_started.elapsed(),
@@ -3780,6 +3865,7 @@ impl App {
 
         let (cols, rows) = size_to_cells(window.inner_size(), &font, geom);
         let mut attach_pane_sessions: HashMap<PaneId, String> = HashMap::new();
+        let mut attach_bound_at: HashMap<PaneId, SystemTime> = HashMap::new();
         let mut mux = mux::MuxRuntime::spawn_with_geom(
             &boot_program,
             &boot_args,
@@ -3805,6 +3891,12 @@ impl App {
             let pane_sessions = open_attach_session_tabs(&mut mux, &grouped)?;
             seed_attach_focus(&mut mux, &grouped, &pane_sessions);
             attach_pane_sessions = pane_sessions.into_iter().collect();
+            // Stamp at creation. An empty map would let a process-wide cache
+            // from before this window treat the new attachment as already gone.
+            let bound_at = SystemTime::now();
+            for pane in attach_pane_sessions.keys() {
+                attach_bound_at.insert(*pane, bound_at);
+            }
         }
         if let Ok(raw) = std::env::var("PRISMATTYC_MAIL_ATTENTION") {
             if let Ok(depth) = raw.parse::<u32>() {
@@ -3852,6 +3944,7 @@ impl App {
                 font_features: self.file_config.font_features(),
                 render_timer: self.file_config.render_timer(),
                 render_timer_log_every_frame: self.file_config.render_timer_log_every_frame(),
+                snapshot_client: self.snapshot_client.clone(),
                 render_frame: RenderFrame::default(),
                 render_window: RenderWindow::default(),
                 render_osd: RenderWindowSummary::default(),
@@ -3993,6 +4086,7 @@ impl App {
                 attach_layout_path,
                 attach_pane_sessions,
                 pending_exited_cleanups: Vec::new(),
+                attach_bound_at,
                 adopted: attach_adopt::Adopted::default(),
                 space_opens: space_open::Opens::default(),
                 space_open_observation: None,
@@ -4001,6 +4095,10 @@ impl App {
                 observed_space_sessions: Default::default(),
                 attach_cache_stamp: startup_cache_stamp,
                 attach_own_stamp: None,
+                file_writer: self.file_writer.handle(),
+                pending_attach_write: None,
+                attach_write_retry_used: false,
+                force_attach_write: false,
                 cache_writer: false,
                 background_png: load_background_png(self.file_config.background_image.as_deref()),
                 background_opacity: self.file_config.background_opacity(),
@@ -7995,6 +8093,7 @@ fn observe_boss_walkthrough(host: &mut HostState) {
 }
 
 fn sync_attach_pane_sessions(host: &mut HostState) {
+    let before = host.attach_pane_sessions.clone();
     host.attach_pane_sessions = host
         .mux
         .tab_panes()
@@ -8006,6 +8105,46 @@ fn sync_attach_pane_sessions(host: &mut HostState) {
                 .map(|id| (pane, id.to_string()))
         })
         .collect();
+    note_attach_bindings(host, &before);
+}
+
+/// Stamp bindings that appeared or changed since `before`. An unchanged
+/// pair keeps its old time, including pairs that were never stamped.
+pub(crate) fn note_attach_bindings(host: &mut HostState, before: &HashMap<PaneId, String>) {
+    let now = SystemTime::now();
+    let sessions = &host.attach_pane_sessions;
+    host.attach_bound_at
+        .retain(|pane, _| sessions.get(pane) == before.get(pane));
+    let changed: Vec<PaneId> = sessions
+        .iter()
+        .filter(|(pane, id)| before.get(pane) != Some(*id))
+        .map(|(pane, _)| *pane)
+        .collect();
+    for pane in changed {
+        host.attach_bound_at.insert(pane, now);
+    }
+}
+
+pub(crate) fn bind_attach_pane(host: &mut HostState, pane: PaneId, id: String) {
+    if host.attach_pane_sessions.get(&pane) != Some(&id) {
+        host.attach_bound_at.insert(pane, SystemTime::now());
+    }
+    host.attach_pane_sessions.insert(pane, id);
+}
+
+pub(crate) fn unbind_attach_pane(host: &mut HostState, pane: PaneId) -> Option<String> {
+    host.attach_bound_at.remove(&pane);
+    host.attach_pane_sessions.remove(&pane)
+}
+
+/// A snapshot read before a binding was created is not evidence that the
+/// pane has disappeared.
+fn snapshot_covers_attachments<'a>(
+    bound_at: &HashMap<PaneId, SystemTime>,
+    mut panes: impl Iterator<Item = &'a PaneId>,
+    snapshot_at: SystemTime,
+) -> bool {
+    panes.all(|pane| bound_at.get(pane).is_none_or(|bound| *bound <= snapshot_at))
 }
 
 /// Once a second: mark panes whose shell runs a nested `pmux-attach` on
@@ -8027,7 +8166,7 @@ fn adopt_nested_attaches(host: &mut HostState, now: Instant) {
     let gone = attach_adopt::clear_gone(&mut host.mux, &mut host.adopted, &live_panes);
     if !gone.is_empty() {
         for pane in gone {
-            host.attach_pane_sessions.remove(&pane);
+            unbind_attach_pane(host, pane);
         }
         changed = true;
     }
@@ -8065,7 +8204,7 @@ fn adopt_nested_attaches(host: &mut HostState, now: Instant) {
             );
             for (pane, _pid, id, _name) in assignments {
                 apply_attach_title_pin(host, pane, &id);
-                host.attach_pane_sessions.insert(pane, id);
+                bind_attach_pane(host, pane, id);
                 changed = true;
             }
         }
@@ -8086,7 +8225,7 @@ fn register_spawned_attach(host: &mut HostState, pane: PaneId, program: &str, ar
         return;
     };
     host.mux.mark_attach_session(pane, id.clone(), name);
-    host.attach_pane_sessions.insert(pane, id.clone());
+    bind_attach_pane(host, pane, id.clone());
     apply_attach_title_pin(host, pane, &id);
 }
 
@@ -8114,7 +8253,8 @@ fn spawned_attach_registration(
 }
 
 fn apply_attach_title_pin(host: &mut HostState, pane: PaneId, session_key: &str) {
-    let Some(snapshot) = attach_log::live_snapshot() else {
+    let Some(snapshot) = snapshot_client::snapshot_for_periodic(host.snapshot_client.as_deref())
+    else {
         return;
     };
     let Some((title, pinned)) = attach_log::session_title_pin(&snapshot, session_key) else {
@@ -8157,18 +8297,40 @@ fn persist_attach_layout_from_live(host: &mut HostState) {
         return;
     }
     let new = attach_records_from_live(host);
-    match attach_tabs::persist_if_changed(&path, &mut host.attach_layout, new) {
-        Ok(true) => {
-            let stamp = cache_stamp(&path);
-            host.attach_own_stamp = stamp;
-            host.attach_cache_stamp = stamp;
-        }
-        Ok(false) => {}
+    match enqueue_attach_tabs(host, &path, new) {
+        Ok(()) => {}
         Err(error) => {
             eprintln!("prismattyc-host: could not save attach tab layout: {error}");
+            host.layout_dirty = true;
+            return;
         }
     }
     host.layout_dirty = false;
+}
+
+fn enqueue_attach_tabs(
+    host: &mut HostState,
+    path: &Path,
+    file: attach_tabs::AttachTabsFile,
+) -> std::io::Result<()> {
+    if host.attach_layout.as_ref() == Some(&file) && !host.force_attach_write {
+        return Ok(());
+    }
+    let id = host
+        .file_writer
+        .attach_tabs(path.to_path_buf(), file.clone())?;
+    host.attach_layout = Some(file.clone());
+    if host.file_writer.is_asynchronous() {
+        host.pending_attach_write = Some(id);
+    } else {
+        let stamp = cache_stamp(path);
+        host.attach_cache_stamp = stamp;
+        host.attach_own_stamp = stamp;
+        host.pending_attach_write = None;
+    }
+    host.attach_write_retry_used = false;
+    host.force_attach_write = false;
+    Ok(())
 }
 
 /// Startup attach grouping is allowed to read the shared cache only for the
@@ -8246,7 +8408,7 @@ fn persist_attach_selection(host: &mut HostState) {
     if !may_write_shared_cache(host.cache_writer) {
         return;
     }
-    let Some(path) = host.attach_layout_path.as_ref() else {
+    let Some(path) = host.attach_layout_path.clone() else {
         return;
     };
     let Some(mut file) = host.attach_layout.clone() else {
@@ -8270,15 +8432,12 @@ fn persist_attach_selection(host: &mut HostState) {
             .get(&host.mux.focused_id())
             .cloned(),
     );
-    match attach_tabs::persist_if_changed(path, &mut host.attach_layout, file) {
-        Ok(true) => {
-            let stamp = cache_stamp(path);
-            host.attach_own_stamp = stamp;
-            host.attach_cache_stamp = stamp;
-        }
-        Ok(false) => {}
+    match enqueue_attach_tabs(host, &path, file) {
+        Ok(()) => {}
         Err(error) => {
             eprintln!("prismattyc-host: could not save attach tab layout: {error}");
+            host.layout_dirty = true;
+            return;
         }
     }
     host.layout_dirty = false;
@@ -8908,11 +9067,14 @@ fn refresh_space_views(host: &mut HostState) {
         return;
     }
     host.last_space_refresh = Some(now);
-    let snapshot = attach_log::live_snapshot();
-    if host.mux.refresh_git_info(snapshot.as_ref()) {
+    let observed = snapshot_client::snapshot_observed(host.snapshot_client.as_deref());
+    if host
+        .mux
+        .refresh_git_info(observed.as_ref().map(|(_, snapshot)| snapshot))
+    {
         host.dirty = true;
     }
-    let Some(snapshot) = snapshot else {
+    let Some((snapshot_at, snapshot)) = observed else {
         if !host.space_rail.attention_counts.is_empty() {
             host.space_rail.attention_counts.clear();
             host.dirty = true;
@@ -8973,6 +9135,13 @@ fn refresh_space_views(host: &mut HostState) {
         return;
     };
     host.mux.space_id = Some(owner.to_string());
+    if !snapshot_covers_attachments(
+        &host.attach_bound_at,
+        host.attach_pane_sessions.keys(),
+        snapshot_at,
+    ) {
+        return;
+    }
     let exited: Vec<_> = host
         .attach_pane_sessions
         .iter()
@@ -9022,7 +9191,7 @@ fn refresh_space_views(host: &mut HostState) {
             eprintln!("prismattyc-host: detach moved pane: {error}");
             return;
         }
-        host.attach_pane_sessions.remove(&pane);
+        unbind_attach_pane(host, pane);
         host.dirty = true;
     }
     sync_attach_pane_sessions(host);
@@ -9051,6 +9220,7 @@ fn refresh_space_views(host: &mut HostState) {
         .collect();
     host.mux.space_id = Some(owner.to_string());
     let focused = host.mux.focused_id();
+    let before_bindings = host.attach_pane_sessions.clone();
     match regroup::apply(
         &mut host.mux,
         &mut host.attach_pane_sessions,
@@ -9059,13 +9229,17 @@ fn refresh_space_views(host: &mut HostState) {
         &names,
     ) {
         Ok(_) => {
+            note_attach_bindings(host, &before_bindings);
             local_views::restore_local_focus(host, focused);
             host.attach_layout = Some(desired);
             persist_attach_layout_from_live(host);
             App::refit_geom(host, host.window.inner_size(), Some("space ownership"));
             host.dirty = true;
         }
-        Err(error) => rail_error_toast(host, &format!(" space view update failed: {error} ")),
+        Err(error) => {
+            note_attach_bindings(host, &before_bindings);
+            rail_error_toast(host, &format!(" space view update failed: {error} "));
+        }
     }
 }
 
@@ -9077,6 +9251,9 @@ fn poll_host_attach_tabs(host: &mut HostState) {
     let Some(path) = host.attach_layout_path.clone() else {
         return;
     };
+    if host.file_writer.attach_tabs_write_pending(&path) {
+        return;
+    }
     let now = cache_stamp(&path);
     if now == host.attach_cache_stamp {
         return;
@@ -9088,18 +9265,39 @@ fn poll_host_attach_tabs(host: &mut HostState) {
     let Some(mut file) = attach_tabs::load(&path) else {
         return;
     };
-    if let Some(name) = file.space.as_deref() {
-        let permitted = load_space(&spaces_dir(), name)
-            .ok()
-            .zip(attach_log::live_snapshot())
-            .is_some_and(|(space, snapshot)| space_view::permits_layout(&space, &snapshot, &file));
-        if !permitted {
-            host.attach_cache_stamp = now;
-            host.space_opens
-                .cache_applied(now, file.space.as_deref(), file.mode, false);
-            rail_error_toast(host, " space ownership could not be verified ");
-            return;
+    if file.space.is_some() {
+        let space = file
+            .space
+            .as_deref()
+            .and_then(|name| load_space(&spaces_dir(), name).ok());
+        let observed = snapshot_client::snapshot_observed(host.snapshot_client.as_deref());
+        match space_view::layout_ownership(
+            space.as_ref(),
+            observed.as_ref(),
+            &file,
+            now.map(|(mtime, _)| mtime),
+            host.snapshot_client.is_some(),
+        ) {
+            // An older or missing cache cannot prove this file is foreign.
+            // Leave the stamp pending so the next fresh snapshot can retry it.
+            space_view::LayoutOwnership::Pending => return,
+            space_view::LayoutOwnership::Deny => {
+                host.attach_cache_stamp = now;
+                host.space_opens
+                    .cache_applied(now, file.space.as_deref(), file.mode, false);
+                rail_error_toast(host, " space ownership could not be verified ");
+                return;
+            }
+            space_view::LayoutOwnership::Allow => {}
         }
+    }
+    if host.attach_layout.as_ref() == Some(&file) {
+        host.attach_cache_stamp = now;
+        host.attach_own_stamp = now;
+        host.space_opens
+            .cache_applied(now, file.space.as_deref(), file.mode, true);
+        touch_host_attach_ack();
+        return;
     }
     let prior_owner = host.mux.space_id.clone();
     let prior_name = host.space_rail.current.clone();
@@ -9126,7 +9324,9 @@ fn poll_host_attach_tabs(host: &mut HostState) {
             .space
             .as_deref()
             .and_then(|name| load_space(&spaces_dir(), name).ok())
-            .zip(attach_log::live_snapshot())
+            .zip(snapshot_client::snapshot_for_periodic(
+                host.snapshot_client.as_deref(),
+            ))
         {
             file = local_views::layout(
                 host,
@@ -9139,7 +9339,8 @@ fn poll_host_attach_tabs(host: &mut HostState) {
     }
     let focused = host.mux.focused_id();
     let mux_bin = find_mux_bin();
-    let names = attach_log::session_names();
+    let names = snapshot_client::periodic_session_names(host.snapshot_client.as_deref());
+    let before_bindings = host.attach_pane_sessions.clone();
     let result = if preserve_view && file.tabs == current.tabs {
         Ok(false)
     } else {
@@ -9151,6 +9352,7 @@ fn poll_host_attach_tabs(host: &mut HostState) {
             &names,
         )
     };
+    note_attach_bindings(host, &before_bindings);
     host.attach_cache_stamp = now;
     host.space_opens
         .cache_applied(now, file.space.as_deref(), file.mode, result.is_ok());
@@ -9181,12 +9383,7 @@ fn poll_host_attach_tabs(host: &mut HostState) {
             host.window
                 .set_title(&window_title(&host.mux, show_tab_strip(host)));
             host.window.focus_window();
-            if let Some(socket) = host_mux_socket() {
-                let ack = prismattyc_mux::host_ack_path_from_socket(&socket);
-                if let Err(error) = prismattyc_mux::touch_host_ack(&ack) {
-                    eprintln!("prismattyc-host: could not ack attach-tabs reload: {error}");
-                }
-            }
+            touch_host_attach_ack();
             App::refit_geom(host, host.window.inner_size(), Some("space regroup"));
         }
         Err(error) => {
@@ -9203,6 +9400,15 @@ fn poll_host_attach_tabs(host: &mut HostState) {
             }
             host.dirty = true;
             eprintln!("prismattyc-host: attach-tabs regroup failed: {error:#}");
+        }
+    }
+}
+
+fn touch_host_attach_ack() {
+    if let Some(socket) = host_mux_socket() {
+        let ack = prismattyc_mux::host_ack_path_from_socket(&socket);
+        if let Err(error) = prismattyc_mux::touch_host_ack(&ack) {
+            eprintln!("prismattyc-host: could not ack attach-tabs reload: {error}");
         }
     }
 }
@@ -13994,7 +14200,7 @@ fn remove_session_from_space(host: &mut HostState, pane: PaneId, kill: bool) {
             );
             return;
         }
-        if let Some(id) = host.attach_pane_sessions.remove(&pane) {
+        if let Some(id) = unbind_attach_pane(host, pane) {
             host.observed_space_sessions.remove(&id);
         }
     }
@@ -14073,7 +14279,7 @@ fn move_to_space_from_host(host: &mut HostState, target: &str, whole_session: bo
                     rail_error_toast(host, &format!(" moved; view refresh failed: {error} "));
                     return;
                 }
-                host.attach_pane_sessions.remove(&pane);
+                unbind_attach_pane(host, pane);
             }
             persist_attach_layout_from_live(host);
             host.last_space_refresh = None;
@@ -15761,7 +15967,7 @@ fn spawn_owned_space_pane(
         let title = space_view::session_title(&space, session);
         host.mux.rename_window(host.mux.active_window(), &title)?;
     }
-    host.attach_pane_sessions.insert(pane, id);
+    bind_attach_pane(host, pane, id);
     if empty {
         host.mux.focus(old);
         host.mux.close_focused()?;
@@ -17668,7 +17874,7 @@ fn reopen_attach(host: &mut HostState, pane: PaneId, id: &str, name: &str) {
     }
     host.mux
         .mark_attach_session(pane, id.to_string(), name.to_string());
-    host.attach_pane_sessions.insert(pane, id.to_string());
+    bind_attach_pane(host, pane, id.to_string());
     mark_layout_dirty(host);
     observe_walkthrough(
         host,

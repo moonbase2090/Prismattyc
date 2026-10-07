@@ -907,6 +907,7 @@ fn verify_pane_damage_and_chrome(host: &mut HostState) {
     let first = host.mux.focused_id();
     verify_split_panes(host, first);
     verify_steady_four_pane_partial(host);
+    verify_selective_border_rings(host);
     verify_pane_local_bell(host);
     verify_cursor_only_partial_frames(host);
     verify_same_layout_tab_switch(host);
@@ -1428,6 +1429,63 @@ fn verify_steady_four_pane_partial(host: &mut HostState) {
     assert!(partial.cells_painted > 0);
     assert!(partial.cells_painted < render_cells_painted(host));
     assert_eq!(retained, full_frame_oracle(host));
+}
+
+/// Flag-on partial frames leave settled rings alone and still match a full paint.
+fn verify_selective_border_rings(host: &mut HostState) {
+    let saved_flag = host.selective_border_rings;
+    let saved_focus = host.window_focused;
+    let saved_cycle = host.light_cycle;
+    host.selective_border_rings = true;
+    host.window_focused = false;
+    host.light_cycle = false;
+    let now = Instant::now();
+    for id in host.mux.active_pane_ids() {
+        if let Some(pane) = host.mux.pane_mut(id) {
+            pane.last_output_at = Some(now);
+        }
+    }
+    let mut retained = frame(host);
+    let _ = host
+        .mux
+        .focused_mut()
+        .emulator
+        .feed(b"\x1b[3;2Hsteady ring");
+    let partial = paint_retained(host, &mut retained);
+    assert_eq!(
+        partial.full_repaint_reason, None,
+        "steady output stays partial with selective rings"
+    );
+    assert_eq!(
+        host.border_underlay.last_restored_slots, 0,
+        "a cell update must not restore settled rings"
+    );
+    assert_eq!(retained, full_frame_oracle(host));
+
+    let focused = host.mux.focused_id();
+    let other = host
+        .mux
+        .active_pane_ids()
+        .into_iter()
+        .find(|id| *id != focused)
+        .expect("split fixture");
+    assert!(host.mux.focus(other));
+    let moved = paint_retained(host, &mut retained);
+    assert_eq!(moved.full_repaint_reason, None);
+    assert!(
+        host.border_underlay.last_restored_slots >= 1,
+        "a focus change restores the rings that moved"
+    );
+    assert_eq!(
+        retained,
+        full_frame_oracle(host),
+        "focus rings must match a full repaint"
+    );
+
+    host.selective_border_rings = saved_flag;
+    host.window_focused = saved_focus;
+    host.light_cycle = saved_cycle;
+    frame(host);
 }
 
 fn verify_same_layout_tab_switch(host: &mut HostState) {

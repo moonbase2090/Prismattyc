@@ -28,6 +28,9 @@ pub(crate) struct ChildWrite {
     pub bytes: Vec<u8>,
     /// Applied to [`RichSession`] only after a successful PTY write.
     pub capability_grant: Option<CapabilityGrant>,
+    /// An `async_paste` paste: its bytes (maybe still being produced) and
+    /// where the writer reports the outcome. `bytes` is empty when set.
+    pub paste: Option<crate::paste_job::PasteTicket>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +44,15 @@ impl ChildWrite {
         Self {
             bytes,
             capability_grant: None,
+            paste: None,
+        }
+    }
+
+    pub(crate) fn paste(ticket: crate::paste_job::PasteTicket) -> Self {
+        Self {
+            bytes: Vec::new(),
+            capability_grant: None,
+            paste: Some(ticket),
         }
     }
 
@@ -48,6 +60,7 @@ impl ChildWrite {
         Self {
             bytes,
             capability_grant: Some(grant),
+            paste: None,
         }
     }
 }

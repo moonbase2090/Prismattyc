@@ -173,6 +173,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         value: ConfigValue::String("plain"),
     },
     ConfigKey {
+        name: "async_paste",
+        group: ConfigGroup::Input,
+        doc: "Hand pastes to the pane writer thread so large pastes never pause the window",
+        range: "true | false",
+        value: ConfigValue::Bool(false),
+    },
+    ConfigKey {
         name: "install_agent_skills",
         group: ConfigGroup::AgentSkills,
         doc: "Install the pmux Agent Skill for detected agents once per app version",
@@ -295,6 +302,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         name: "space_reorder",
         group: ConfigGroup::Layout,
         doc: "Enable drag and Shift+arrow reordering for saved spaces",
+        range: "true | false",
+        value: ConfigValue::Bool(false),
+    },
+    ConfigKey {
+        name: "selective_border_rings",
+        group: ConfigGroup::Layout,
+        doc: "Restore and re-stroke only border rings that change",
         range: "true | false",
         value: ConfigValue::Bool(false),
     },
@@ -1071,6 +1085,7 @@ mod tests {
         "render_timer_log_every_frame",
         "tab_strip",
         "link_click",
+        "async_paste",
         "chrome_style",
         "bar_color",
         "layout",
@@ -1098,6 +1113,7 @@ mod tests {
         "pane_padding_px",
         "space_rail",
         "space_reorder",
+        "selective_border_rings",
         "space_autosave",
         "session_naming",
         "space_startup",
@@ -1202,6 +1218,7 @@ mod tests {
         assert_eq!(parsed.link_click(), crate::link_click::Mode::Plain);
         assert_eq!(parsed.chrome_style(), crate::config::ChromeStyle::Graphite);
         assert_eq!(parsed.space_reorder, Some(false));
+        assert_eq!(parsed.selective_border_rings, Some(false));
         assert!(
             template
                 .lines()

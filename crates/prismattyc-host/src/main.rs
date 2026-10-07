@@ -108,8 +108,8 @@ use prismattyc_core::{
 };
 use prismattyc_emulator::{CursorShape, Emulator};
 use prismattyc_mux::{
-    layout_path, load_space, plan, space_bind_agent, spaces_dir, PaneId, SavedSpaceSession,
-    WindowId as MuxWindowId,
+    layout_path, list_spaces, load_space, plan, space_bind_agent, spaces_dir, PaneId,
+    SavedSpaceSession, WindowId as MuxWindowId,
 };
 use prismattyc_protocol::{InputModifiers, PointerPhase};
 use prismattyc_render::paint_display_row;
@@ -1094,6 +1094,8 @@ struct HostState {
     /// Attach pane → mux session id, so tab membership can be re-derived
     /// from the live tabs after a pane moves (PT-60).
     attach_pane_sessions: HashMap<PaneId, String>,
+    /// Clean-exit Space cleanup commands that should be retried on the next pump.
+    pending_exited_cleanups: Vec<(String, String)>,
     /// Panes whose local shell runs a nested `pmux-attach` (PT-210).
     adopted: attach_adopt::Adopted,
     /// Serialize helpers and fence cache writes until their layout applies.
@@ -3523,6 +3525,7 @@ impl App {
                 attach_layout: None,
                 attach_layout_path,
                 attach_pane_sessions,
+                pending_exited_cleanups: Vec::new(),
                 adopted: attach_adopt::Adopted::default(),
                 space_opens: space_open::Opens::default(),
                 space_open_observation: None,
@@ -6582,7 +6585,37 @@ impl App {
         let prior_active = host.mux.active_count();
         let parse_started = Instant::now();
         let parked_more = local_views::drain(host);
+        let mut retry_cleanups = Vec::new();
+        for (session, session_id) in std::mem::take(&mut host.pending_exited_cleanups) {
+            if remove_exited_session_from_space(host, &session, &session_id).is_err() {
+                retry_cleanups.push((session, session_id));
+            }
+        }
         let (pty_dirty, more) = host.mux.drain_all();
+        let exited_attaches = host.mux.take_exited_attach_sessions();
+        for (pane, session_id, session) in &exited_attaches {
+            host.mux.clear_attach_session(*pane);
+            host.attach_pane_sessions.remove(pane);
+            host.observed_space_sessions.remove(session_id);
+            if let Err(error) = remove_exited_session_from_space(host, session, session_id) {
+                retry_cleanups.push((session.clone(), session_id.clone()));
+                rail_toast(
+                    host,
+                    &format!(" clean exit cleanup failed; retrying: {error} "),
+                );
+            }
+        }
+        host.pending_exited_cleanups.extend(retry_cleanups);
+        if !exited_attaches.is_empty() {
+            persist_attach_layout_from_live(host);
+            host.last_space_refresh = None;
+            refresh_rail(host);
+            App::refit_geom(
+                host,
+                host.window.inner_size(),
+                Some("clean attached session exit"),
+            );
+        }
         if pty_dirty {
             host.hyperlink_hover = None;
         }
@@ -10544,6 +10577,57 @@ fn run_pmux_space(args: &[String]) -> Result<(), String> {
         Ok(status) => Err(format!("pmux {} exited {status}", args.join(" "))),
         Err(error) => Err(format!("could not run pmux: {error}")),
     }
+}
+
+/// Release saved membership after an attached client exits cleanly.
+///
+/// The attach pane has already been closed by `MuxRuntime`; this helper updates
+/// the durable Space record and destroys a still-live daemon session. Failed
+/// cleanup is returned so the host can retry it on a later pump.
+fn remove_exited_session_from_space(
+    host: &mut HostState,
+    session: &str,
+    session_id: &str,
+) -> Result<(), String> {
+    let space_name = host
+        .space_rail
+        .current
+        .clone()
+        .filter(|name| {
+            load_space(&spaces_dir(), name)
+                .ok()
+                .is_some_and(|space| space.sessions.iter().any(|saved| saved.name == session))
+        })
+        .or_else(|| {
+            list_spaces(&spaces_dir())
+                .ok()?
+                .into_iter()
+                .find_map(|entry| {
+                    let space = load_space(&spaces_dir(), &entry.name).ok()?;
+                    space
+                        .sessions
+                        .iter()
+                        .any(|saved| saved.name == session)
+                        .then_some(entry.name)
+                })
+        });
+    if let Some(space_name) = space_name {
+        let args = vec![
+            "space".into(),
+            "remove".into(),
+            space_name.clone(),
+            "--session".into(),
+            session.to_string(),
+            "--kill".into(),
+        ];
+        return run_pmux_space(&args).map_err(|error| {
+            format!("could not remove {session} from Space {space_name}: {error}")
+        });
+    }
+
+    let args = vec!["stop".into(), session_id.to_string()];
+    run_pmux_space(&args)
+        .map_err(|error| format!("could not stop direct session {session_id}: {error}"))
 }
 
 /// Release saved membership, then detach every local view of that session.

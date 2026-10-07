@@ -27,9 +27,6 @@ struct CapturedSlot {
     slot: PixelRect,
     rects: Vec<PixelRect>,
     pixels: Vec<u32>,
-    /// Times `pixels` grew. Reuse keeps this small across frames.
-    #[cfg(test)]
-    pixel_grows: usize,
 }
 
 #[derive(Default)]
@@ -45,6 +42,10 @@ pub(crate) struct BorderUnderlay {
     /// Slots whose strips were written back. Full frames record 0.
     #[cfg(test)]
     pub(crate) last_restored_slots: usize,
+    /// Times a pixel buffer grew. The count stays here so dropping the slot
+    /// shells cannot hide a fresh allocation on the next capture.
+    #[cfg(test)]
+    pub(crate) pixel_grows: usize,
 }
 
 impl BorderUnderlay {
@@ -120,21 +121,31 @@ impl BorderUnderlay {
                 slot,
                 rects: Vec::new(),
                 pixels: Vec::new(),
-                #[cfg(test)]
-                pixel_grows: 0,
             });
         }
-        let captured = &mut self.slots[self.active];
-        captured.slot = slot;
-        captured.rects.clear();
-        captured.pixels.clear();
-        for rect in border_strips(slot) {
-            store_rect(buffer, stride, rect, captured);
-        }
-        if outset > 0 {
-            for rect in outer_frame(slot, outset) {
-                store_rect(buffer, stride, rect, captured);
+        let added = {
+            let captured = &mut self.slots[self.active];
+            captured.slot = slot;
+            captured.rects.clear();
+            captured.pixels.clear();
+            let mut added = 0usize;
+            for rect in border_strips(slot) {
+                added += store_rect(buffer, stride, rect, captured);
             }
+            if outset > 0 {
+                for rect in outer_frame(slot, outset) {
+                    added += store_rect(buffer, stride, rect, captured);
+                }
+            }
+            added
+        };
+        #[cfg(test)]
+        {
+            self.pixel_grows += added;
+        }
+        #[cfg(not(test))]
+        {
+            let _ = added;
         }
         self.active += 1;
     }
@@ -211,13 +222,13 @@ impl BorderUnderlay {
         }
         let live = self.active;
         let mut refresh = vec![false; live];
-        for index in 0..live {
-            if self.slots[index]
+        for (slot, on) in self.slots[..live].iter().zip(&mut refresh) {
+            if slot
                 .rects
                 .iter()
                 .any(|rect| frame_damage_intersects(damage, *rect))
             {
-                refresh[index] = true;
+                *on = true;
             }
         }
         let mut pending: Vec<usize> = refresh
@@ -226,25 +237,25 @@ impl BorderUnderlay {
             .filter_map(|(index, on)| on.then_some(index))
             .collect();
         while let Some(index) = pending.pop() {
-            for other in 0..live {
-                if refresh[other] || !live_slots_share(&self.slots, index, other) {
+            for (other, on) in refresh.iter_mut().enumerate() {
+                if *on || !live_slots_share(&self.slots, index, other) {
                     continue;
                 }
-                refresh[other] = true;
+                *on = true;
                 pending.push(other);
             }
         }
         let mut ordered = Vec::with_capacity(self.slots.len());
         let mut restored = Vec::new();
-        for index in 0..live {
-            if refresh[index] {
+        for (index, on) in refresh.iter().enumerate() {
+            if *on {
                 continue;
             }
             ordered.push(std::mem::replace(&mut self.slots[index], empty_slot()));
         }
         let kept = ordered.len();
-        for index in 0..live {
-            if !refresh[index] {
+        for (index, on) in refresh.iter().enumerate() {
+            if !*on {
                 continue;
             }
             let slot = std::mem::replace(&mut self.slots[index], empty_slot());
@@ -252,8 +263,8 @@ impl BorderUnderlay {
             restored.push(slot.slot);
             ordered.push(cleared_slot(slot));
         }
-        for index in live..self.slots.len() {
-            ordered.push(std::mem::replace(&mut self.slots[index], empty_slot()));
+        for slot in &mut self.slots[live..] {
+            ordered.push(std::mem::replace(slot, empty_slot()));
         }
         self.slots.clear();
         self.note_restored(restored.len());
@@ -268,8 +279,6 @@ fn empty_slot() -> CapturedSlot {
         slot: PixelRect::new(0, 0, 0, 0),
         rects: Vec::new(),
         pixels: Vec::new(),
-        #[cfg(test)]
-        pixel_grows: 0,
     }
 }
 
@@ -293,11 +302,20 @@ fn live_slots_share(slots: &[CapturedSlot], index: usize, other: usize) -> bool 
     slots_share_pixels(left, right)
 }
 
-fn store_rect(buffer: &[u32], stride: usize, rect: PixelRect, captured: &mut CapturedSlot) {
+fn store_rect(
+    buffer: &[u32],
+    stride: usize,
+    rect: PixelRect,
+    captured: &mut CapturedSlot,
+) -> usize {
     let Some(rect) = rect.clipped(stride, buffer.len() / stride) else {
-        return;
+        return 0;
     };
     captured.rects.push(rect);
+    #[cfg(test)]
+    let mut grows = 0usize;
+    #[cfg(not(test))]
+    let grows = 0usize;
     for y in rect.y..rect.y + rect.height {
         let start = y * stride + rect.x;
         let row = &buffer[start..start + rect.width];
@@ -306,9 +324,10 @@ fn store_rect(buffer: &[u32], stride: usize, rect: PixelRect, captured: &mut Cap
         captured.pixels.extend_from_slice(row);
         #[cfg(test)]
         if captured.pixels.capacity() > before {
-            captured.pixel_grows += 1;
+            grows += 1;
         }
     }
+    grows
 }
 
 fn rects_overlap(left: PixelRect, right: PixelRect) -> bool {
@@ -562,8 +581,9 @@ mod tests {
     }
 
     /// The flag-off path calls `restore` then `capture` every partial frame.
-    /// Reused shells must not allocate a new pixel buffer per frame. The
-    /// unfixed `mem::take` / `slots.clear` path grows once per capture.
+    /// Reused shells must not allocate a new pixel buffer per frame. The count
+    /// lives on the underlay, so the sweep can end on `restore` (no slots left)
+    /// and a `discard_slots` that drops those shells still fails the bound.
     #[test]
     fn default_off_restore_reuses_pixel_buffers() {
         let mut grows = 0usize;
@@ -588,16 +608,12 @@ mod tests {
                 }
                 retained.clone_from(&surface);
             }
-            grows += underlay
-                .slots
-                .iter()
-                .map(|slot| slot.pixel_grows)
-                .sum::<usize>();
+            grows += underlay.pixel_grows;
         }
         eprintln!("border.pixel_grows.default_off={grows}");
         assert!(
             grows <= 24,
-            "pixel buffers grew {grows} times across the sweep; reuse measured 18 and a fresh Vec per frame measured 720"
+            "pixel buffers grew {grows} times across the sweep; reuse measured 18 and dropping the shells each frame allocates again"
         );
     }
 

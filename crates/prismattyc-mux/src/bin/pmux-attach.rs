@@ -6036,6 +6036,8 @@ fn dump_styled_json(client: &mut Client, client_id: u64, pane_id: u64, watch: bo
 fn main() -> Result<()> {
     prismattyc_mux::release_update::forward_installed("pmux-attach")?;
     let cli = Cli::parse(std::env::args().skip(1))?;
+    // Keep Space reads aligned with the socket selected by this attach client.
+    std::env::set_var("PRISMATTYC_SPACES_SOCKET", &cli.socket);
     diagnose_socket(&cli.socket)?;
     let mut client = Client::connect(&cli.socket)?;
     let registered = client.request(|request_id| ControlRequest::RegisterClient {

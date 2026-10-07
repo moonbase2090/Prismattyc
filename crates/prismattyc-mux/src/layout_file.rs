@@ -16,6 +16,7 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::control::{AxisWire, LayoutSnapshot, PaneSnapshot, SessionSnapshot};
 
@@ -670,9 +671,50 @@ pub fn list_layouts(dir: &Path) -> Result<Vec<LayoutListEntry>> {
 }
 
 /// `$XDG_DATA_HOME/prismattyc/spaces`, else `$HOME/.local/share/prismattyc/spaces`.
+///
+/// The default daemon retains this historical location. When the selected
+/// socket (from `PRISMATTYC_SPACES_SOCKET` or `PMUX_SOCKET`) names another
+/// daemon, its Spaces live below an identity derived from that socket so
+/// separate daemons cannot claim the same saved session.
 #[must_use]
 pub fn spaces_dir() -> PathBuf {
+    match std::env::var_os("PRISMATTYC_SPACES_SOCKET")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("PMUX_SOCKET").filter(|value| !value.is_empty()))
+    {
+        Some(socket) => spaces_dir_for_socket(Path::new(&socket)),
+        None => spaces_dir_default(),
+    }
+}
+
+/// Return the Spaces directory owned by `socket`.
+///
+/// The default socket keeps the historical directory for backwards
+/// compatibility. Explicit sockets get a stable, private subdirectory whose
+/// name is a digest of the complete socket path; using the complete path avoids
+/// collisions between two sockets with the same filename in different parent
+/// directories.
+#[must_use]
+pub fn spaces_dir_for_socket(socket: &Path) -> PathBuf {
+    let base = spaces_dir_default();
+    let default_socket = crate::default_socket_path("default").ok();
+    spaces_dir_for_socket_with_default(socket, default_socket.as_deref(), &base)
+}
+
+fn spaces_dir_default() -> PathBuf {
     spaces_dir_from(crate::platform::data_home(), crate::platform::home_dir())
+}
+
+fn spaces_dir_for_socket_with_default(
+    socket: &Path,
+    default_socket: Option<&Path>,
+    base: &Path,
+) -> PathBuf {
+    if default_socket == Some(socket) {
+        return base.to_path_buf();
+    }
+    let digest = Sha256::digest(socket.to_string_lossy().as_bytes());
+    base.join("instances").join(format!("sha256-{digest:x}"))
 }
 
 fn spaces_dir_from(xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> PathBuf {
@@ -1744,6 +1786,24 @@ mod tests {
             home,
             PathBuf::from("/home/me/.local/share/prismattyc/spaces")
         );
+    }
+
+    #[test]
+    fn spaces_dir_scopes_explicit_sockets_but_preserves_default() {
+        let base = Path::new("/xdg/prismattyc/spaces");
+        let default = Path::new("/run/user/1000/prismattyc/pmux.sock");
+        let first = Path::new("/tmp/pmux-a.sock");
+        let second = Path::new("/tmp/pmux-b.sock");
+
+        assert_eq!(
+            spaces_dir_for_socket_with_default(default, Some(default), base),
+            base
+        );
+        let first_dir = spaces_dir_for_socket_with_default(first, Some(default), base);
+        let second_dir = spaces_dir_for_socket_with_default(second, Some(default), base);
+        assert_ne!(first_dir, second_dir);
+        assert!(first_dir.starts_with(base.join("instances")));
+        assert!(second_dir.starts_with(base.join("instances")));
     }
 
     #[test]

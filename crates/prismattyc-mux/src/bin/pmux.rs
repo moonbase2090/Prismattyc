@@ -509,6 +509,11 @@ fn main() -> Result<()> {
     });
     let (instance, socket_override) = resolve_mux_target(cli_instance, cli_socket, &file)?;
     let paths = Paths::resolve(&instance, socket_override)?;
+    // Space storage follows the daemon selected by this invocation. Keep the
+    // resolved socket in a private process variable so the many space
+    // helpers, and any host/attach child they launch, use the same identity
+    // without changing PMUX_SOCKET's caller-identity semantics.
+    std::env::set_var("PRISMATTYC_SPACES_SOCKET", &paths.socket);
     match verb {
         Verb::Up => {
             reject_session_flag(cli_session.as_deref(), "up")?;

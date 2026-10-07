@@ -184,7 +184,7 @@ pub(crate) fn adopt_candidates(
     };
     for (pane, pid, id, name) in &assignments {
         mux.mark_attach_session(*pane, id.clone(), name.clone());
-        let promoted = match mux.promote_to_log_replica(*pane, id, name, socket) {
+        let promoted = match mux.promote_to_log_replica(*pane, id, name, socket, Some(*pid)) {
             Ok(ok) => ok,
             Err(error) => {
                 eprintln!("prismattyc-host: promote session {id} failed: {error:#}");

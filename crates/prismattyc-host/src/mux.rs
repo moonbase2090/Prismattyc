@@ -745,9 +745,19 @@ enum ConnectKind {
         to_child_rx: mpsc::Receiver<ChildWrite>,
         space_id: Option<String>,
         fallback: PtyFallback,
+        /// The pmuxd pane this open targets when the argv names it
+        /// (`--host-pane-id`), so callers can match the pane before the
+        /// connect lands.
+        target_pane: Option<u64>,
     },
     /// A PTY pane whose nested attach is being replaced by a log replica.
-    Promote { session_name: String },
+    /// The result applies only while the adoption it was started for is
+    /// still the pane's: same attach mark generation, attach process alive.
+    Promote {
+        session_name: String,
+        generation: u64,
+        attach_pid: Option<u32>,
+    },
 }
 
 /// What to run when an attach connect fails and the pane may use a PTY child.
@@ -834,6 +844,9 @@ pub(crate) struct PaneRuntime {
     attach_name: Option<String>,
     /// Shown after an attach child exits; the layout slot stays.
     placeholder: Option<Placeholder>,
+    /// Bumped whenever the pane's attach mark is set or cleared, so a pending
+    /// promote can tell the adoption it started for has ended.
+    attach_generation: u64,
     /// Pmuxd connection running off the main thread (PR 7 of the render
     /// thread plan). `None` unless async pane connect is on.
     connect: Option<PaneConnect>,
@@ -914,10 +927,12 @@ impl PaneRuntime {
                 };
                 let name = plan.session_key.clone();
                 let space_id = plan.space_id.clone();
+                let target_pane = plan.exact.map(|(pane, _)| pane);
                 return Self::spawn_connecting(
                     name,
                     move || plan.connect(),
                     space_id,
+                    target_pane,
                     fallback,
                     cols,
                     rows,
@@ -1127,6 +1142,7 @@ impl PaneRuntime {
         name: String,
         connect: impl FnOnce() -> Result<attach_log::LogConnection> + Send + 'static,
         space_id: Option<String>,
+        target_pane: Option<u64>,
         fallback: PtyFallback,
         cols: usize,
         rows: usize,
@@ -1164,6 +1180,7 @@ impl PaneRuntime {
                 to_child_rx,
                 space_id,
                 fallback,
+                target_pane,
             },
         });
         Ok(runtime)
@@ -1177,8 +1194,10 @@ impl PaneRuntime {
         socket: PathBuf,
         session_key: String,
         session_name: String,
+        attach_pid: Option<u32>,
         wake: Option<Wake>,
     ) -> Result<()> {
+        let generation = self.attach_generation;
         let rx = start_connect(
             format!("prism-pane-{pane}-promote"),
             wake.clone(),
@@ -1187,9 +1206,23 @@ impl PaneRuntime {
         self.connect = Some(PaneConnect {
             rx,
             wake,
-            kind: ConnectKind::Promote { session_name },
+            kind: ConnectKind::Promote {
+                session_name,
+                generation,
+                attach_pid,
+            },
         });
         Ok(())
+    }
+
+    fn remote_id(&self) -> Option<u64> {
+        if let Some(log) = self.log.as_ref() {
+            return Some(log.pane_id);
+        }
+        match self.connect.as_ref().map(|connect| &connect.kind) {
+            Some(ConnectKind::Open { target_pane, .. }) => *target_pane,
+            _ => None,
+        }
     }
 
     /// Apply a finished connect, if any. Never blocks. True when the pane's
@@ -1213,10 +1246,13 @@ impl PaneRuntime {
                 to_child_rx,
                 space_id,
                 fallback,
+                target_pane: _,
             } => self.finish_open(result, to_child_rx, space_id, fallback, connect.wake),
-            ConnectKind::Promote { session_name } => {
-                self.finish_promote(result, &session_name, connect.wake)
-            }
+            ConnectKind::Promote {
+                session_name,
+                generation,
+                attach_pid,
+            } => self.finish_promote(result, &session_name, generation, attach_pid, connect.wake),
         }
     }
 
@@ -1228,11 +1264,14 @@ impl PaneRuntime {
         fallback: PtyFallback,
         wake: Option<Wake>,
     ) -> bool {
-        let error = match result
-            .and_then(|connection| self.install_log(connection, to_child_rx, wake.clone()))
-        {
-            Ok(()) => return true,
-            Err(error) => error,
+        // A connection that fails to start its threads has already consumed
+        // the queue; a failed connect leaves it for the PTY fallback.
+        let (error, queued) = match result {
+            Ok(connection) => match self.install_log(connection, to_child_rx, wake.clone()) {
+                Ok(()) => return true,
+                Err(error) => (error, None),
+            },
+            Err(error) => (error, Some(to_child_rx)),
         };
         if space_id.is_some() {
             self.show_error_placeholder(&fallback.child_args, &format!("{error:#}"));
@@ -1253,6 +1292,10 @@ impl PaneRuntime {
             self.cell_h,
         ) {
             Ok(mut pty) => {
+                // Keys accepted while "Connecting..." showed go to the child.
+                for write in queued.iter().flat_map(|queue| queue.try_iter()) {
+                    let _ = pty.to_child_tx.try_send(write);
+                }
                 pty.attach_session = self.attach_session.take();
                 pty.attach_name = self.attach_name.take();
                 *self = pty;
@@ -1280,15 +1323,25 @@ impl PaneRuntime {
         &mut self,
         result: Result<attach_log::LogConnection>,
         session_name: &str,
+        generation: u64,
+        attach_pid: Option<u32>,
         wake: Option<Wake>,
     ) -> bool {
-        // The nested attach may have exited, been replaced, or been promoted
-        // by another path while the connect ran; the PTY is the only thing a
-        // promote may replace.
+        // The adoption may have ended, or the nested attach or shell exited,
+        // while the connect ran. Replacing the PTY then would install a
+        // session the user left and kill the shell they are still using, so
+        // check the live process state, not only what the last drain saw.
+        let child_exited = self
+            .session
+            .as_mut()
+            .is_some_and(|session| session.try_wait().ok().flatten().is_some());
         if self.session.is_none()
             || self.log.is_some()
             || !self.child_alive
             || self.placeholder.is_some()
+            || child_exited
+            || self.attach_generation != generation
+            || attach_pid.is_some_and(|pid| !prismattyc_mux::procinfo::pid_alive(pid))
         {
             return false;
         }
@@ -1433,6 +1486,7 @@ impl PaneRuntime {
             attach_session: None,
             attach_name: None,
             placeholder: None,
+            attach_generation: 0,
             connect: None,
             keep_local: false,
             unseen_output: false,
@@ -1585,9 +1639,16 @@ impl PaneRuntime {
     }
 
     fn drain(&mut self) -> (bool, bool, bool) {
-        let swapped = self.poll_connect();
+        // Observe the backing first (EOF, child exit) so a finished connect
+        // is judged against what the pane is doing now. A swap asks for
+        // another pass to read the new replica's first frames.
         let (dirty, content_changed, more) = self.drain_backing();
-        (dirty || swapped, content_changed || swapped, more)
+        let swapped = self.poll_connect();
+        (
+            dirty || swapped,
+            content_changed || swapped,
+            more || swapped,
+        )
     }
 
     fn drain_backing(&mut self) -> (bool, bool, bool) {
@@ -3855,6 +3916,7 @@ impl MuxRuntime {
         if let Some(runtime) = self.panes.get_mut(&pane) {
             runtime.attach_session = Some(id);
             runtime.attach_name = Some(name);
+            runtime.attach_generation += 1;
         }
     }
 
@@ -3906,8 +3968,22 @@ impl MuxRuntime {
         self.async_connect = enabled;
     }
 
+    /// The pmuxd pane this pane shows: the log replica's, or, while an async
+    /// open is still connecting, the pane its argv named.
     pub(crate) fn remote_pane_id(&self, pane: PaneId) -> Option<u64> {
-        self.panes.get(&pane)?.log.as_ref().map(|log| log.pane_id)
+        self.panes.get(&pane)?.remote_id()
+    }
+
+    /// The pane in the active window set that shows `remote` of `session`,
+    /// including one whose async open is still connecting.
+    pub(crate) fn pane_for_remote(&self, session: &str, remote: Option<u64>) -> Option<PaneId> {
+        self.tab_panes()
+            .into_iter()
+            .flat_map(|(_, panes)| panes)
+            .find(|pane| {
+                self.attach_session_of(*pane) == Some(session)
+                    && self.remote_pane_id(*pane) == remote
+            })
     }
 
     /// True when the pane paints from a pane-log subscription (PT-111).
@@ -3927,6 +4003,7 @@ impl MuxRuntime {
         session_key: &str,
         session_name: &str,
         socket: &Path,
+        attach_pid: Option<u32>,
     ) -> Result<bool> {
         if attach_log::pty_fallback_requested() {
             return Ok(false);
@@ -3948,6 +4025,7 @@ impl MuxRuntime {
                         socket.to_path_buf(),
                         session_key.to_owned(),
                         session_name.to_owned(),
+                        attach_pid,
                         wake,
                     )?;
                 }
@@ -3995,6 +4073,14 @@ impl MuxRuntime {
         if let Some(runtime) = self.panes.get_mut(&pane) {
             runtime.attach_session = None;
             runtime.attach_name = None;
+            runtime.attach_generation += 1;
+            // The adoption a pending promote was started for is over.
+            if matches!(
+                runtime.connect.as_ref().map(|connect| &connect.kind),
+                Some(ConnectKind::Promote { .. })
+            ) {
+                runtime.connect = None;
+            }
         }
     }
 
@@ -5173,7 +5259,7 @@ mod tests {
         let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
         let pane = runtime.focused_id();
         assert!(runtime
-            .promote_to_log_replica(pane, name, name, &server.socket)
+            .promote_to_log_replica(pane, name, name, &server.socket, None)
             .unwrap());
         runtime
     }
@@ -5334,18 +5420,21 @@ mod tests {
         assert_eq!(runtime.attach_session_of(pane), Some(session_id.as_str()));
     }
 
-    fn async_pane_runtime_on(
+    fn async_pane_runtime_with(
         pane: PaneId,
         connect: impl FnOnce() -> Result<attach_log::LogConnection> + Send + 'static,
         space_id: Option<&str>,
+        target_pane: Option<u64>,
+        fallback_program: &str,
     ) -> PaneRuntime {
         PaneRuntime::spawn_connecting(
             "mail".into(),
             connect,
             space_id.map(str::to_owned),
+            target_pane,
             PtyFallback {
                 pane,
-                program: "/bin/sh".into(),
+                program: fallback_program.into(),
                 child_args: Vec::new(),
                 cwd: None,
             },
@@ -5358,6 +5447,14 @@ mod tests {
             1,
         )
         .unwrap()
+    }
+
+    fn async_pane_runtime_on(
+        pane: PaneId,
+        connect: impl FnOnce() -> Result<attach_log::LogConnection> + Send + 'static,
+        space_id: Option<&str>,
+    ) -> PaneRuntime {
+        async_pane_runtime_with(pane, connect, space_id, None, "/bin/sh")
     }
 
     fn async_pane_runtime(
@@ -5516,7 +5613,13 @@ mod tests {
         runtime.mark_attach_session(pane, "async-promote".into(), "async-promote".into());
         assert!(
             !runtime
-                .promote_to_log_replica(pane, "async-promote", "async-promote", &server.socket)
+                .promote_to_log_replica(
+                    pane,
+                    "async-promote",
+                    "async-promote",
+                    &server.socket,
+                    None
+                )
                 .unwrap(),
             "an async promote has not replaced the PTY yet"
         );
@@ -5546,7 +5649,7 @@ mod tests {
         thread::sleep(Duration::from_millis(300));
         runtime.panes.get_mut(&pane).unwrap().child_alive = false;
         runtime
-            .promote_to_log_replica(pane, "async-exited", "async-exited", &server.socket)
+            .promote_to_log_replica(pane, "async-exited", "async-exited", &server.socket, None)
             .unwrap();
         let deadline = Instant::now() + Duration::from_millis(1500);
         while Instant::now() < deadline {
@@ -5602,6 +5705,211 @@ mod tests {
         );
         assert!(adopted.by_pane.is_empty());
         assert_eq!(runtime.attach_session_of(pane), Some(session_id.as_str()));
+    }
+
+    /// Start a real nested attach, stop pmuxd so the promote's connect waits,
+    /// and return what the adoption needs. The returned pid is the attach.
+    fn pending_real_promote(
+        server: &PrivateMuxServer,
+    ) -> (MuxRuntime, PaneId, u32, crate::attach_adopt::Adopted) {
+        // The shell outlives the attach, like an interactive shell the user
+        // detached from.
+        let command = format!("{}; exec sleep 999", real_attach_command(&server.socket));
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &["-c".into(), command], 80, 24).unwrap();
+        runtime.set_async_connect(true);
+        let pane = runtime.focused_id();
+        let root = runtime.panes[&pane].child_pid().expect("shell pid");
+        let mut adopted = crate::attach_adopt::Adopted::default();
+        let directory = crate::attach_log::session_directory_at(&server.socket);
+        assert!(!directory.is_empty());
+        signal_server(server, "-STOP");
+        let deadline = Instant::now() + Duration::from_secs(12);
+        while runtime.panes[&pane].connect.is_none() {
+            let _ = crate::attach_adopt::adopt_candidates(
+                &mut runtime,
+                &mut adopted,
+                &[(pane, root)],
+                &server.socket,
+                &directory,
+            );
+            assert!(Instant::now() < deadline, "promote never started");
+            thread::sleep(Duration::from_millis(25));
+        }
+        let attach = adopted.by_pane[&pane];
+        (runtime, pane, attach, adopted)
+    }
+
+    fn settle_without_promotion(runtime: &mut MuxRuntime, pane: PaneId) {
+        let deadline = Instant::now() + Duration::from_millis(2500);
+        while Instant::now() < deadline {
+            let _ = runtime.drain_all();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !runtime.is_log_backed(pane),
+            "a promote for an ended adoption must not install"
+        );
+        assert!(
+            runtime.panes[&pane].session.is_some() && runtime.panes[&pane].child_pid().is_some(),
+            "the shell the user is in must survive"
+        );
+    }
+
+    #[test]
+    fn async_promote_is_dropped_when_the_nested_attach_is_killed_mid_connect() {
+        let server = private_mux_server();
+        let (mut runtime, pane, attach, mut adopted) = pending_real_promote(&server);
+        let status = Command::new("kill")
+            .args(["-KILL", &attach.to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while prismattyc_mux::procinfo::pid_alive(attach) {
+            assert!(Instant::now() < deadline, "attach did not exit");
+            thread::sleep(Duration::from_millis(10));
+        }
+        signal_server(&server, "-CONT");
+        // The host's once-a-second adoption sweep has not run yet.
+        settle_without_promotion(&mut runtime, pane);
+        let gone = crate::attach_adopt::clear_gone(&mut runtime, &mut adopted, &[pane]);
+        assert_eq!(gone, vec![pane]);
+        assert_eq!(runtime.attach_session_of(pane), None);
+    }
+
+    #[test]
+    fn async_promote_is_cancelled_when_the_adoption_ends() {
+        let server = private_mux_server();
+        let (mut runtime, pane, attach, _adopted) = pending_real_promote(&server);
+        assert!(prismattyc_mux::procinfo::pid_alive(attach));
+        runtime.clear_attach_session(pane);
+        assert!(
+            runtime.panes[&pane].connect.is_none(),
+            "clearing the mark must cancel the pending promote"
+        );
+        signal_server(&server, "-CONT");
+        settle_without_promotion(&mut runtime, pane);
+        assert_eq!(runtime.attach_session_of(pane), None);
+    }
+
+    #[test]
+    fn async_promote_is_dropped_when_a_new_adoption_replaced_the_one_it_started_for() {
+        let server = private_mux_server();
+        let (mut runtime, pane, attach, _adopted) = pending_real_promote(&server);
+        assert!(prismattyc_mux::procinfo::pid_alive(attach));
+        // The mark was cleared and set again for another session; the
+        // pending connect belongs to the first adoption.
+        runtime.mark_attach_session(pane, "another".into(), "another".into());
+        signal_server(&server, "-CONT");
+        settle_without_promotion(&mut runtime, pane);
+        assert_eq!(runtime.attach_session_of(pane), Some("another"));
+    }
+
+    #[test]
+    fn async_promote_does_not_replace_a_child_that_exited_before_the_next_drain() {
+        let server = private_mux_server();
+        create_scrollback_session(&server, "async-exit-order");
+        let mut runtime =
+            MuxRuntime::spawn("/bin/sh", &["-c".into(), "sleep 0.4".into()], 80, 24).unwrap();
+        runtime.set_async_connect(true);
+        let pane = runtime.focused_id();
+        runtime.mark_attach_session(pane, "async-exit-order".into(), "async-exit-order".into());
+        signal_server(&server, "-STOP");
+        runtime
+            .promote_to_log_replica(
+                pane,
+                "async-exit-order",
+                "async-exit-order",
+                &server.socket,
+                None,
+            )
+            .unwrap();
+        // The child exits and the connect finishes with no drain in between,
+        // so the pane's cached state still says the child is alive.
+        thread::sleep(Duration::from_millis(700));
+        signal_server(&server, "-CONT");
+        thread::sleep(Duration::from_millis(700));
+        assert!(runtime.panes[&pane].child_alive, "no drain has run yet");
+        let _ = runtime.drain_all();
+        assert!(
+            !runtime.is_log_backed(pane),
+            "an exited child must not be replaced"
+        );
+    }
+
+    #[test]
+    fn queued_input_reaches_the_pty_fallback_when_the_connect_fails() {
+        let (release, gate) = mpsc::channel::<()>();
+        let pane = MuxRuntime::spawn("/bin/sh", &[], 80, 24)
+            .unwrap()
+            .focused_id();
+        let mut runtime = async_pane_runtime_with(
+            pane,
+            move || {
+                gate.recv_timeout(Duration::from_secs(10))?;
+                anyhow::bail!("daemon unavailable")
+            },
+            None,
+            None,
+            "/bin/cat",
+        );
+        runtime
+            .to_child_tx
+            .send(ChildWrite {
+                bytes: b"QUEUED_FOR_THE_PTY_CHILD\n".to_vec(),
+                capability_grant: None,
+                paste: None,
+            })
+            .unwrap();
+        release.send(()).unwrap();
+        drain_runtime_until(&mut runtime, |runtime| {
+            runtime.session.is_some() && visible_text(runtime).contains("QUEUED_FOR_THE_PTY_CHILD")
+        });
+        assert!(runtime.log.is_none());
+    }
+
+    #[test]
+    fn a_connecting_open_reports_the_pane_it_targets() {
+        let server = private_mux_server();
+        create_scrollback_session(&server, "async-target");
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let pane = runtime.focused_id();
+        let (release, gate) = mpsc::channel::<()>();
+        let socket = server.socket.clone();
+        runtime.panes.insert(
+            pane,
+            async_pane_runtime_with(
+                pane,
+                move || {
+                    gate.recv_timeout(Duration::from_secs(10))?;
+                    attach_log::LogConnection::open_on(&socket, "async-target")
+                },
+                None,
+                Some(42),
+                "/bin/sh",
+            ),
+        );
+        runtime.mark_attach_session(pane, "async-target".into(), "async-target".into());
+        assert_eq!(runtime.remote_pane_id(pane), Some(42));
+        assert_eq!(
+            runtime.pane_for_remote("async-target", Some(42)),
+            Some(pane)
+        );
+        assert_eq!(runtime.pane_for_remote("async-target", Some(43)), None);
+        assert_eq!(runtime.pane_for_remote("other", Some(42)), None);
+
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !runtime.is_log_backed(pane) {
+            let _ = runtime.drain_all();
+            assert!(Instant::now() < deadline, "connect never landed");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            runtime.remote_pane_id(pane),
+            runtime.panes[&pane].log.as_ref().map(|log| log.pane_id),
+            "a connected replica reports its own pane"
+        );
     }
 
     #[test]
@@ -7132,7 +7440,7 @@ mod tests {
             let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
             let pane = runtime.focused_id();
             assert!(runtime
-                .promote_to_log_replica(pane, "alerts", "alerts", &server.socket)
+                .promote_to_log_replica(pane, "alerts", "alerts", &server.socket, None)
                 .unwrap());
             let previous = if iteration == 0 {
                 "OLD_OUTPUT"

@@ -73,7 +73,16 @@ fn main() {
             present.prepare(size.width, size.height).unwrap();
             present.pixels_mut().fill(0x80402010);
             present.pixels_mut()[0] = 0xff11e795;
-            present.present(FrameDamage::Full, false).unwrap();
+            let full_present = present.present(FrameDamage::Full, false).unwrap();
+            assert_eq!(
+                full_present.dirty_tiles,
+                present_tiles::tiles(size.width as usize, size.height as usize).len()
+            );
+            assert_eq!(
+                full_present.write_bytes,
+                size.width as usize * size.height as usize * std::mem::size_of::<u32>()
+            );
+            assert_eq!(full_present.changed_tiles, None);
 
             let RawWindowHandle::AppKit(handle) = window.window_handle().unwrap().as_raw() else {
                 panic!("expected AppKit handle");
@@ -137,9 +146,11 @@ fn main() {
             // and every untouched tile must retain the same image object.
             assert!(present.prepare(size.width, size.height).unwrap());
             present.pixels_mut()[0] = 0xffabcdef;
-            present
+            let partial_present = present
                 .present(FrameDamage::Rects(vec![PixelRect::new(0, 0, 1, 1)]), false)
                 .unwrap();
+            assert_eq!(partial_present.dirty_tiles, 1);
+            assert_eq!(partial_present.changed_tiles, None);
             for (index, (tile, prior)) in tiles.iter().zip(&prior_contents).enumerate() {
                 let contents = unsafe { tile.contents() }.unwrap();
                 let same = std::ptr::eq(&*contents, &**prior);

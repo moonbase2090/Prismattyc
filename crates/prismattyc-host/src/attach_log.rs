@@ -30,8 +30,8 @@ use anyhow::{bail, Context, Result};
 use prismattyc_mux::{
     classify_control_request_id, default_socket_path, next_stale_skip, ControlError,
     ControlErrorCode, ControlIdMatch, ControlRequest, ControlResponse, ControlResponseBody,
-    ControlResponseData, PaneEvent, PaneFramePolicy, PaneLogFrame, PaneStyled, Snapshot,
-    MAX_PANE_STATE_BYTES, PROTOCOL_VERSION,
+    ControlResponseData, EventBatch, PaneEvent, PaneFramePolicy, PaneLogFrame, PaneStyled,
+    Snapshot, MAX_PANE_STATE_BYTES, PROTOCOL_VERSION,
 };
 
 use crate::rich::ChildWrite;
@@ -274,7 +274,7 @@ fn attach_session_key(args: &[String]) -> Option<String> {
 }
 
 /// Socket the host attaches: `PMUX_SOCKET` if set, else the default.
-fn mux_socket() -> Result<PathBuf> {
+pub(crate) fn mux_socket() -> Result<PathBuf> {
     if let Some(raw) = std::env::var_os("PMUX_SOCKET") {
         if !raw.is_empty() {
             return Ok(PathBuf::from(raw));
@@ -364,6 +364,13 @@ impl Client {
     fn connect(path: &Path, read_timeout: Duration) -> Result<Self> {
         let stream = prismattyc_mux::local_socket::UnixStream::connect(path)
             .with_context(|| format!("connect {}", path.display()))?;
+        Self::from_stream(stream, read_timeout)
+    }
+
+    fn from_stream(
+        stream: prismattyc_mux::local_socket::UnixStream,
+        read_timeout: Duration,
+    ) -> Result<Self> {
         stream.set_read_timeout(Some(read_timeout))?;
         stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
         let mut client = Self {
@@ -605,6 +612,47 @@ impl Client {
         let request = make(request_id);
         self.send(&request)?;
         self.read_frame(request_id)
+    }
+}
+
+/// One registered control connection for the long-lived snapshot cache.
+///
+/// `on_connected` runs after `connect` returns and before the register read,
+/// so a caller can count the socket while a stalled daemon is still blocking.
+pub(crate) struct SnapshotSocket {
+    client: Client,
+}
+
+impl SnapshotSocket {
+    pub(crate) fn open(path: &Path, on_connected: impl FnOnce()) -> Result<Self> {
+        let stream = prismattyc_mux::local_socket::UnixStream::connect(path)
+            .with_context(|| format!("connect {}", path.display()))?;
+        on_connected();
+        Ok(Self {
+            client: Client::from_stream(stream, REQUEST_TIMEOUT)?,
+        })
+    }
+
+    pub(crate) fn snapshot(&mut self) -> Result<Snapshot> {
+        match self.client.request(|request_id| ControlRequest::Snapshot {
+            version: PROTOCOL_VERSION,
+            request_id,
+        })? {
+            ControlResponseData::Snapshot { snapshot } => Ok(snapshot),
+            _ => bail!("server returned an unexpected snapshot response"),
+        }
+    }
+
+    pub(crate) fn events_after(&mut self, after_sequence: u64) -> Result<EventBatch> {
+        match self.client.request(|request_id| ControlRequest::Events {
+            version: PROTOCOL_VERSION,
+            request_id,
+            after_sequence,
+            limit: Some(1),
+        })? {
+            ControlResponseData::Events { batch } => Ok(batch),
+            _ => bail!("server returned an unexpected events response"),
+        }
     }
 }
 

@@ -52,6 +52,7 @@ mod render_diagnostics;
 mod restart;
 mod sidebar_resize;
 mod sidebar_width;
+mod snapshot_client;
 mod terminal_switcher;
 #[cfg(test)]
 mod test_support;
@@ -943,6 +944,8 @@ struct HostState {
     font_features: Vec<String>,
     render_timer: config::RenderTimer,
     render_timer_log_every_frame: bool,
+    /// Periodic pmuxd snapshot cache. `None` when `snapshot_client` is off.
+    snapshot_client: Option<Arc<snapshot_client::SnapshotClient>>,
     render_frame: RenderFrame,
     render_window: RenderWindow,
     render_osd: RenderWindowSummary,
@@ -2588,6 +2591,9 @@ struct App {
     _config_watcher: Option<config::ConfigWatch>,
     /// Coalesced wake from PTY reader threads and the config watcher.
     wake: mux::Wake,
+    /// Process-wide snapshot cache. `None` when `snapshot_client` is off.
+    /// Startup only: config reload does not start or stop it.
+    snapshot_client: Option<Arc<snapshot_client::SnapshotClient>>,
     /// `[[remote]]` destinations and their catalogs (issue #24).
     remote: Rc<RefCell<remote_rail::RemoteRail>>,
     wake_pending: Arc<AtomicBool>,
@@ -2640,6 +2646,10 @@ impl App {
                 (None, None)
             }
         };
+        let snapshot_client = snapshot_client::start_snapshot_client(
+            file_config.snapshot_client_enabled(),
+            wake.clone(),
+        );
         let keymap = Arc::new(file_config.loaded_keymap());
         // `config::load` already rejected invalid entries.
         let remote = Rc::new(RefCell::new(remote_rail::RemoteRail::new(
@@ -2657,6 +2667,7 @@ impl App {
             startup_config_error,
             _config_watcher: watcher,
             wake,
+            snapshot_client,
             remote,
             wake_pending,
             keymap,
@@ -3714,6 +3725,7 @@ impl App {
                 font_features: self.file_config.font_features(),
                 render_timer: self.file_config.render_timer(),
                 render_timer_log_every_frame: self.file_config.render_timer_log_every_frame(),
+                snapshot_client: self.snapshot_client.clone(),
                 render_frame: RenderFrame::default(),
                 render_window: RenderWindow::default(),
                 render_osd: RenderWindowSummary::default(),
@@ -7887,7 +7899,8 @@ fn spawned_attach_registration(
 }
 
 fn apply_attach_title_pin(host: &mut HostState, pane: PaneId, session_key: &str) {
-    let Some(snapshot) = attach_log::live_snapshot() else {
+    let Some(snapshot) = snapshot_client::snapshot_for_periodic(host.snapshot_client.as_deref())
+    else {
         return;
     };
     let Some((title, pinned)) = attach_log::session_title_pin(&snapshot, session_key) else {
@@ -8681,7 +8694,7 @@ fn refresh_space_views(host: &mut HostState) {
         return;
     }
     host.last_space_refresh = Some(now);
-    let snapshot = attach_log::live_snapshot();
+    let snapshot = snapshot_client::snapshot_for_periodic(host.snapshot_client.as_deref());
     if host.mux.refresh_git_info(snapshot.as_ref()) {
         host.dirty = true;
     }
@@ -8864,7 +8877,9 @@ fn poll_host_attach_tabs(host: &mut HostState) {
     if let Some(name) = file.space.as_deref() {
         let permitted = load_space(&spaces_dir(), name)
             .ok()
-            .zip(attach_log::live_snapshot())
+            .zip(snapshot_client::snapshot_for_periodic(
+                host.snapshot_client.as_deref(),
+            ))
             .is_some_and(|(space, snapshot)| space_view::permits_layout(&space, &snapshot, &file));
         if !permitted {
             host.attach_cache_stamp = now;
@@ -8899,7 +8914,9 @@ fn poll_host_attach_tabs(host: &mut HostState) {
             .space
             .as_deref()
             .and_then(|name| load_space(&spaces_dir(), name).ok())
-            .zip(attach_log::live_snapshot())
+            .zip(snapshot_client::snapshot_for_periodic(
+                host.snapshot_client.as_deref(),
+            ))
         {
             file = local_views::layout(
                 host,
@@ -8912,7 +8929,7 @@ fn poll_host_attach_tabs(host: &mut HostState) {
     }
     let focused = host.mux.focused_id();
     let mux_bin = find_mux_bin();
-    let names = attach_log::session_names();
+    let names = snapshot_client::periodic_session_names(host.snapshot_client.as_deref());
     let result = if preserve_view && file.tabs == current.tabs {
         Ok(false)
     } else {

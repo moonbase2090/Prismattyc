@@ -299,6 +299,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         value: ConfigValue::Bool(false),
     },
     ConfigKey {
+        name: "snapshot_client",
+        group: ConfigGroup::Layout,
+        doc: "Keep one pmuxd snapshot connection for periodic polls. Startup only",
+        range: "true | false",
+        value: ConfigValue::Bool(false),
+    },
+    ConfigKey {
         name: "space_autosave",
         group: ConfigGroup::Layout,
         doc: "Save changed Space arrangements after a short idle",
@@ -1098,6 +1105,7 @@ mod tests {
         "pane_padding_px",
         "space_rail",
         "space_reorder",
+        "snapshot_client",
         "space_autosave",
         "session_naming",
         "space_startup",
@@ -1202,6 +1210,8 @@ mod tests {
         assert_eq!(parsed.link_click(), crate::link_click::Mode::Plain);
         assert_eq!(parsed.chrome_style(), crate::config::ChromeStyle::Graphite);
         assert_eq!(parsed.space_reorder, Some(false));
+        assert_eq!(parsed.snapshot_client, Some(false));
+        assert!(!parsed.snapshot_client_enabled());
         assert!(
             template
                 .lines()

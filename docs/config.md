@@ -33,6 +33,8 @@ install; `PRISMATTYC_NO_AGENT_SKILLS=1` also opts out and wins over the config
 value. Automatic signed-release checks run on app launch and daily by default.
 Set the top-level `automatic_update_checks = false` or turn them off in the app
 menu to opt out. The app menu's manual check works regardless of this setting.
+`snapshot_client` stays off unless the file sets it to true. The host reads
+that key at startup only; a later edit does not start or stop the cache.
 The classic `prismattyc` binary does not
 read this file. `chrome_style` defaults to `graphite`. Leave that key
 commented, or omit it, to follow the app default. `chrome_style = "classic"`
@@ -127,6 +129,8 @@ pane_padding_px = 5
 space_rail = "bottom"
 # Enable drag and Shift+arrow reordering for saved spaces. true | false.
 space_reorder = false
+# Keep one pmuxd snapshot connection for periodic polls. Startup only. true | false.
+snapshot_client = false
 # Save changed Space arrangements after a short idle. true | false.
 space_autosave = true
 # Choose naming prompts, automatic sessions, or blank terminals. "ask" | "auto" | "blank".

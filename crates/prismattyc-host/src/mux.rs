@@ -5,7 +5,7 @@ pub(crate) use local::Recipe as LocalRecipe;
 
 use crate::space_rail::RailSide;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -31,6 +31,12 @@ const MAX_PTY_DRAIN_PER_PANE: usize = 8;
 /// Wakes the winit loop when a pane reader has bytes (or the child exits).
 /// Optional so mux unit tests can spawn without an event loop.
 pub(crate) type Wake = Arc<dyn Fn() + Send + Sync>;
+
+fn next_runtime_instance() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// How long after its last visible output a pane still counts as "active".
 pub(crate) const ACTIVE_WINDOW: Duration = Duration::from_millis(1500);
 /// Quiet gap before an unfocused pane's next output (or silence) badges.
@@ -820,18 +826,14 @@ impl PaneRuntime {
 
         let (to_child_tx, to_child_rx) = mpsc::sync_channel::<ChildWrite>(TO_CHILD_CAP);
         let (grant_tx, grant_rx) = mpsc::channel();
+        let writer = crate::paste_job::PtyWriter::new(to_child_rx);
+        let exit_writer = writer.clone();
         thread::Builder::new()
             .name(format!("prism-pane-{pane}-write"))
             .spawn(move || {
-                while let Ok(msg) = to_child_rx.recv() {
-                    if child_writer.write_all(&msg.bytes).is_err() {
-                        break;
-                    }
-                    let _ = child_writer.flush();
-                    if let Some(features) = msg.capability_grant {
-                        let _ = grant_tx.send(features);
-                    }
-                }
+                writer.run(&mut child_writer, |features| {
+                    let _ = grant_tx.send(features);
+                });
             })?;
 
         let (from_pty_tx, from_pty_rx) =
@@ -843,6 +845,9 @@ impl PaneRuntime {
             .name(format!("prism-pane-{pane}-wait"))
             .spawn(move || {
                 wait_for_child_exit(child_pid);
+                if child_pid.is_some() {
+                    exit_writer.child_exited();
+                }
                 let _ = exit_tx.send(Ok(Vec::new()));
                 if let Some(wake) = exit_wake {
                     wake();
@@ -1751,6 +1756,9 @@ pub(crate) fn tab_close_left_with_inset(
 
 /// Domain topology plus one live runtime per pane leaf.
 pub(crate) struct MuxRuntime {
+    /// Unique per runtime in this process. Pane ids restart at 1 in every
+    /// runtime (each Space view), so `(instance, pane)` names a pane.
+    instance: u64,
     pub(crate) space_id: Option<String>,
     git_info: crate::git_info::Cache,
     /// Previously focused pane per window, for `focus_last_pane` (PT-127).
@@ -1887,6 +1895,7 @@ impl MuxRuntime {
         let mut panes = HashMap::new();
         panes.insert(pane, runtime);
         Ok(Self {
+            instance: next_runtime_instance(),
             space_id: None,
             git_info: Default::default(),
             domain,
@@ -3041,6 +3050,11 @@ impl MuxRuntime {
         self.panes.get_mut(&id)
     }
 
+    /// Any live pane (any tab) by its stable numeric id.
+    pub(crate) fn pane_id_by_raw(&self, raw: u64) -> Option<PaneId> {
+        self.panes.keys().copied().find(|id| id.get() == raw)
+    }
+
     pub(crate) fn panes_and_rects(&self) -> impl Iterator<Item = (PaneId, &PaneRuntime, CellRect)> {
         self.rects
             .iter()
@@ -3215,6 +3229,16 @@ impl MuxRuntime {
     /// Attention messages emitted since the previous take.
     pub(crate) fn take_pending_attentions(&mut self) -> Vec<(PaneId, String)> {
         std::mem::take(&mut self.pending_attentions)
+    }
+
+    /// Process-unique id of this runtime; pane ids repeat across runtimes.
+    pub(crate) fn instance(&self) -> u64 {
+        self.instance
+    }
+
+    /// The host wake, for workers that report back to this window.
+    pub(crate) fn wake(&self) -> Option<Wake> {
+        self.wake.clone()
     }
 
     /// Writer-death toasts since the previous take.

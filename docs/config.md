@@ -35,6 +35,8 @@ Set the top-level `automatic_update_checks = false` or turn them off in the app
 menu to opt out. The app menu's manual check works regardless of this setting.
 `async_file_writes` enables the host's file-writer thread. It defaults to
 `false` and takes effect at startup, so restart the host after changing it.
+`snapshot_client` stays off unless the file sets it to true. The host reads
+that key at startup only; a later edit does not start or stop the cache.
 The classic `prismattyc` binary does not
 read this file. `chrome_style` defaults to `graphite`. Leave that key
 commented, or omit it, to follow the app default. `chrome_style = "classic"`
@@ -139,6 +141,8 @@ pane_padding_px = 5
 space_rail = "bottom"
 # Enable drag and Shift+arrow reordering for saved spaces. true | false.
 space_reorder = false
+# Keep one pmuxd snapshot connection for periodic polls. Startup only. true | false.
+snapshot_client = false
 # Restore and re-stroke only border rings that change. true | false.
 selective_border_rings = false
 # Save changed Space arrangements after a short idle. true | false.

@@ -6,7 +6,7 @@ use std::process::{Child, Command, Stdio};
 use winit::platform::x11::EventLoopBuilderExtX11;
 
 const CHILD_ENV: &str = "PRISMATTYC_RENDER_TEST_CHILD";
-const RESULT_ENV: &str = "PRISMATTYC_RENDER_TEST_RESULT";
+pub(super) const RESULT_ENV: &str = "PRISMATTYC_RENDER_TEST_RESULT";
 const TEST_NAME: &str = "render_window_tests::real_window_paint_reaches_the_backend";
 
 const RED_PNG: &[u8] = &[

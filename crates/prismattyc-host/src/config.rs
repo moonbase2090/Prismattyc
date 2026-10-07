@@ -252,6 +252,9 @@ pub struct ConfigFile {
     pub space_rail: Option<String>,
     /// Enable dragging and keyboard reordering of saved spaces. Default false.
     pub space_reorder: Option<bool>,
+    /// Keep one pmuxd snapshot connection for periodic polls.
+    /// Default false. Startup only: a reload does not start or stop the client.
+    pub snapshot_client: Option<bool>,
     /// Partial frames restore and re-stroke only border rings that change.
     /// Default false. Hot-reloaded.
     pub selective_border_rings: Option<bool>,
@@ -432,6 +435,11 @@ impl ConfigFile {
 
     pub fn render_timer(&self) -> RenderTimer {
         self.render_timer.unwrap_or_default()
+    }
+
+    /// Long-lived snapshot cache. Missing means off.
+    pub fn snapshot_client_enabled(&self) -> bool {
+        self.snapshot_client.unwrap_or(false)
     }
 
     pub fn render_timer_log_every_frame(&self) -> bool {
@@ -1112,6 +1120,7 @@ mod tests {
         assert!(ConfigFile::default().install_agent_skills.unwrap_or(true));
         assert!(!ConfigFile::default().space_reorder.unwrap_or(false));
         assert!(!ConfigFile::default().async_file_writes());
+        assert!(!ConfigFile::default().snapshot_client_enabled());
         assert!(!ConfigFile::default()
             .selective_border_rings
             .unwrap_or(false));
@@ -1121,6 +1130,10 @@ mod tests {
 
         std::fs::write(&path, "async_file_writes = true\n").unwrap();
         assert!(load(&path).unwrap().async_file_writes());
+        std::fs::write(&path, "snapshot_client = true\n").unwrap();
+        assert!(load(&path).unwrap().snapshot_client_enabled());
+        std::fs::write(&path, "snapshot_client = false\n").unwrap();
+        assert!(!load(&path).unwrap().snapshot_client_enabled());
         std::fs::write(&path, "selective_border_rings = true\n").unwrap();
         assert!(load(&path).unwrap().selective_border_rings.unwrap_or(false));
 

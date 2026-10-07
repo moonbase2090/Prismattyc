@@ -1436,6 +1436,7 @@ fn verify_selective_border_rings(host: &mut HostState) {
     let saved_flag = host.selective_border_rings;
     let saved_focus = host.window_focused;
     let saved_cycle = host.light_cycle;
+    let saved_pulse = host.last_pulse_step;
     host.selective_border_rings = true;
     host.window_focused = false;
     host.light_cycle = false;
@@ -1462,29 +1463,32 @@ fn verify_selective_border_rings(host: &mut HostState) {
     );
     assert_eq!(retained, full_frame_oracle(host));
 
-    let focused = host.mux.focused_id();
-    let other = host
-        .mux
-        .active_pane_ids()
-        .into_iter()
-        .find(|id| *id != focused)
-        .expect("split fixture");
-    assert!(host.mux.focus(other));
-    let moved = paint_retained(host, &mut retained);
-    assert_eq!(moved.full_repaint_reason, None);
+    // A focus move rewrites unbounded chrome state and is a full frame.
+    // The running-dot pulse stays partial and still crosses the top ring strip.
+    host.window_focused = true;
+    host.mux.focused_mut().last_output_at = Some(Instant::now());
+    host.last_pulse_step = 0;
+    let mut retained = frame(host);
+    host.last_pulse_step = 1;
+    let pulsed = paint_retained(host, &mut retained);
+    assert_eq!(
+        pulsed.full_repaint_reason, None,
+        "a pulse step stays partial with selective rings"
+    );
     assert!(
         host.border_underlay.last_restored_slots >= 1,
-        "a focus change restores the rings that moved"
+        "pulse damage under the ring restores that ring"
     );
     assert_eq!(
         retained,
         full_frame_oracle(host),
-        "focus rings must match a full repaint"
+        "a restored pulse ring must match a full repaint"
     );
 
     host.selective_border_rings = saved_flag;
     host.window_focused = saved_focus;
     host.light_cycle = saved_cycle;
+    host.last_pulse_step = saved_pulse;
     frame(host);
 }
 

@@ -183,23 +183,18 @@ impl BorderUnderlay {
                 refresh[index] = true;
             }
         }
-        loop {
-            let mut grew = false;
-            for index in 0..self.slots.len() {
-                if !refresh[index] {
+        let mut pending: Vec<usize> = refresh
+            .iter()
+            .enumerate()
+            .filter_map(|(index, on)| on.then_some(index))
+            .collect();
+        while let Some(index) = pending.pop() {
+            for (other, slot) in self.slots.iter().enumerate() {
+                if refresh[other] || !slots_share_pixels(&self.slots[index], slot) {
                     continue;
                 }
-                for other in 0..self.slots.len() {
-                    if refresh[other] || !slots_share_pixels(&self.slots[index], &self.slots[other])
-                    {
-                        continue;
-                    }
-                    refresh[other] = true;
-                    grew = true;
-                }
-            }
-            if !grew {
-                break;
+                refresh[other] = true;
+                pending.push(other);
             }
         }
         let mut kept = Vec::new();

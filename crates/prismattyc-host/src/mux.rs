@@ -3596,26 +3596,11 @@ impl MuxRuntime {
             .and_then(|runtime| runtime.attach_name.as_deref())
     }
 
-    pub(crate) fn reopen_placeholder(
-        &mut self,
-        pane: PaneId,
-        program: &str,
-        child_args: &[String],
-    ) -> Result<bool> {
-        let Some(runtime) = self.panes.get(&pane) else {
-            return Ok(false);
-        };
-        if runtime.placeholder.is_none() {
-            return Ok(false);
-        }
-        self.respawn_attach(pane, program, child_args)
-    }
-
     /// Replace this pane's process with a new attach command.
     ///
-    /// Placeholders use this from Enter. A daemon restart also uses it when
-    /// the pane still names a live session whose id was recycled: the old
-    /// child is subscribed to a pane that no longer exists.
+    /// Enter on a placeholder uses this, and so does Space refresh after
+    /// pmuxd restarts. The caller decides whether the pane is a dead binding.
+    /// The old child may still be subscribed to a pane that no longer exists.
     pub(crate) fn respawn_attach(
         &mut self,
         pane: PaneId,
@@ -5600,7 +5585,7 @@ mod tests {
         runtime.panes.get_mut(&pane).unwrap().child_alive = false;
         assert!(runtime.drain_all().0);
         assert!(runtime.is_placeholder(pane));
-        assert!(runtime.reopen_placeholder(pane, "/bin/sh", &[]).unwrap());
+        assert!(runtime.respawn_attach(pane, "/bin/sh", &[]).unwrap());
         assert!(!runtime.is_placeholder(pane));
         assert!(runtime.panes[&pane].child_alive);
         assert_eq!(runtime.attach_session_of(pane), Some("9"));

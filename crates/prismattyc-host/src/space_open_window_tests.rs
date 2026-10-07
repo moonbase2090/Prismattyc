@@ -1056,14 +1056,30 @@ impl ApplicationHandler<UserAction> for StaleDetachProof {
 }
 
 /// Space panes must still be attached after `pmux space open` recreates them
-/// on a fresh daemon. The old ids stay on the placeholders; reconciliation
-/// used to treat the new ids as user-closed tabs and write an empty cache.
+/// on a fresh daemon. Burner sessions force new ids. Reconciliation used to
+/// treat those ids as tabs the user closed and write an empty cache.
 #[test]
 fn space_reopen_after_daemon_restart_keeps_sessions() {
+    launch_reopen_child(
+        "space_open_window_tests::space_reopen_after_daemon_restart_keeps_sessions",
+        true,
+    );
+}
+
+/// The same reopen when the fresh daemon reissues the old session ids.
+/// A dead placeholder whose id matches the new session used to stay
+/// disconnected, because regroup already saw the name as present.
+#[test]
+fn space_reopen_after_daemon_restart_reused_ids_stay_connected() {
+    launch_reopen_child(
+        "space_open_window_tests::space_reopen_after_daemon_restart_reused_ids_stay_connected",
+        false,
+    );
+}
+
+fn launch_reopen_child(test_name: &str, recycle_ids: bool) {
     if std::env::var_os("PRISMATTYC_RENDER_TEST_CHILD").is_none() {
-        render_window_tests::run_in_private_display(
-            "space_open_window_tests::space_reopen_after_daemon_restart_keeps_sessions",
-        );
+        render_window_tests::run_in_private_display(test_name);
         return;
     }
     let binaries = std::env::current_exe()
@@ -1111,15 +1127,18 @@ fn space_reopen_after_daemon_restart_keeps_sessions() {
             .map(String::from),
     )
     .unwrap();
-    let mut config = config::ConfigFile::default();
-    config.space_startup = Some("fresh".into());
-    config.space_autosave = Some(false);
+    let config = config::ConfigFile {
+        space_startup: Some("fresh".into()),
+        space_autosave: Some(false),
+        ..config::ConfigFile::default()
+    };
     let app = App::new(cli, config, None, event_loop.create_proxy()).unwrap();
     let mut proof = RestartProof {
         app,
         daemon,
         pmuxd,
         socket,
+        recycle_ids,
         done: false,
     };
     event_loop.run_app(&mut proof).unwrap();
@@ -1131,6 +1150,7 @@ struct RestartProof {
     daemon: Daemon,
     pmuxd: PathBuf,
     socket: PathBuf,
+    recycle_ids: bool,
     done: bool,
 }
 
@@ -1146,6 +1166,7 @@ impl ApplicationHandler<UserAction> for RestartProof {
             &mut self.daemon,
             &self.pmuxd,
             &self.socket,
+            self.recycle_ids,
         );
         std::fs::write(
             std::env::var_os("PRISMATTYC_RENDER_TEST_RESULT").unwrap(),
@@ -1167,7 +1188,16 @@ fn pump_host(app: &mut App, window: WindowId) {
     refresh_space_views(host);
 }
 
-fn pump_command(app: &mut App, window: WindowId, args: &[&str]) {
+/// Ack `space open` without refreshing. Refresh rewrites a dead binding's
+/// id to its name while the new daemon has not recreated the session, and
+/// that rewrite hides the reused-id case behind the different-id path.
+fn pump_ack(app: &mut App, window: WindowId) {
+    let host = app.windows.get_mut(&window).unwrap();
+    let _ = host.mux.drain_all();
+    poll_host_attach_tabs(host);
+}
+
+fn pump_command_with(app: &mut App, window: WindowId, args: &[&str], pump: fn(&mut App, WindowId)) {
     let pmux = pmux_bin();
     let owned: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
     let handle = std::thread::spawn(move || {
@@ -1185,7 +1215,7 @@ fn pump_command(app: &mut App, window: WindowId, args: &[&str]) {
             started.elapsed() < Duration::from_secs(8),
             "pmux {args:?} did not finish"
         );
-        pump_host(app, window);
+        pump(app, window);
         std::thread::sleep(Duration::from_millis(20));
     }
     let result = handle.join().expect("pmux thread");
@@ -1195,6 +1225,46 @@ fn pump_command(app: &mut App, window: WindowId, args: &[&str]) {
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
     );
+}
+
+fn pump_command(app: &mut App, window: WindowId, args: &[&str]) {
+    pump_command_with(app, window, args, pump_host);
+}
+
+fn pump_command_ack(app: &mut App, window: WindowId, args: &[&str]) {
+    pump_command_with(app, window, args, pump_ack);
+}
+
+/// The fresh daemon has already reissued the old ids, and every pane is
+/// still the pre-restart placeholder bound to that same id.
+fn assert_reused_ids_still_dead(app: &App, window: WindowId) {
+    let host = app.windows.get(&window).unwrap();
+    let space = load_space(&spaces_dir(), "reopen-space").unwrap();
+    let snapshot = attach_log::live_snapshot().expect("daemon snapshot");
+    let mut checked = 0;
+    for (pane, bound) in &host.attach_pane_sessions {
+        let Some(name) = host.mux.attach_name_of(*pane) else {
+            continue;
+        };
+        let Some(live) = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.name == name && session.space_id == space.id)
+        else {
+            continue;
+        };
+        checked += 1;
+        assert_eq!(
+            bound,
+            &live.id.to_string(),
+            "{name} id changed before refresh; this no longer covers reused ids"
+        );
+        assert!(
+            host.mux.is_placeholder(*pane),
+            "{name} reconnected before refresh"
+        );
+    }
+    assert!(checked >= 2, "reused-id setup lost the placeholder panes");
 }
 
 fn replace_daemon(daemon: &mut Daemon, pmuxd: &Path, socket: &Path) {
@@ -1226,9 +1296,12 @@ fn reopen_space_after_restart(
     daemon: &mut Daemon,
     pmuxd: &Path,
     socket: &Path,
+    recycle_ids: bool,
 ) {
-    for name in ["burner-1", "burner-2", "burner-3"] {
-        pump_command(app, window, &["new", "--no-attach", name]);
+    if recycle_ids {
+        for name in ["burner-1", "burner-2", "burner-3"] {
+            pump_command(app, window, &["new", "--no-attach", name]);
+        }
     }
     pump_command(
         app,
@@ -1288,7 +1361,12 @@ fn reopen_space_after_restart(
         "pre-restart panes must be placeholders"
     );
     replace_daemon(daemon, pmuxd, socket);
-    pump_command(app, window, &["space", "open", "reopen-space"]);
+    if recycle_ids {
+        pump_command(app, window, &["space", "open", "reopen-space"]);
+    } else {
+        pump_command_ack(app, window, &["space", "open", "reopen-space"]);
+        assert_reused_ids_still_dead(app, window);
+    }
     pump_host(app, window);
 
     let space = load_space(&spaces_dir(), "reopen-space").unwrap();
@@ -1299,11 +1377,19 @@ fn reopen_space_after_restart(
         .filter(|session| session.space_id == space.id)
         .collect();
     assert_eq!(live.len(), 2, "space open did not restore both sessions");
-    assert!(
-        live.iter()
-            .any(|session| !stale_ids.contains(&session.id.to_string())),
-        "restart did not recycle session ids: stale={stale_ids:?} live={live:?}"
-    );
+    if recycle_ids {
+        assert!(
+            live.iter()
+                .any(|session| !stale_ids.contains(&session.id.to_string())),
+            "restart did not recycle session ids: stale={stale_ids:?} live={live:?}"
+        );
+    } else {
+        assert!(
+            live.iter()
+                .all(|session| stale_ids.contains(&session.id.to_string())),
+            "restart did not reuse session ids: stale={stale_ids:?} live={live:?}"
+        );
+    }
     let host = app.windows.get_mut(&window).unwrap();
     let path = host.attach_layout_path.clone().unwrap();
     let cache = attach_tabs::load(&path).expect("attach cache");
@@ -1319,25 +1405,33 @@ fn reopen_space_after_restart(
             "attach cache dropped {}: keys={keys:?}",
             session.name
         );
-        let pane = host
+        let matches: Vec<_> = host
             .attach_pane_sessions
             .iter()
-            .find(|(pane, bound)| {
+            .filter(|(pane, bound)| {
                 *bound == &id || host.mux.attach_name_of(**pane) == Some(session.name.as_str())
             })
-            .map(|(pane, _)| *pane)
-            .unwrap_or_else(|| panic!("no pane for {}", session.name));
-        assert!(
-            !host.mux.is_placeholder(pane),
-            "{} is still a placeholder after reopen",
-            session.name
-        );
-        assert!(
-            host.mux
-                .pane(pane)
-                .is_some_and(|runtime| runtime.child_alive),
-            "{} attach is not running",
-            session.name
-        );
+            .map(|(pane, bound)| (*pane, bound.clone()))
+            .collect();
+        assert!(!matches.is_empty(), "no pane for {}", session.name);
+        for (pane, bound) in matches {
+            assert_eq!(
+                bound, id,
+                "{} is bound to {bound}, not the live session",
+                session.name
+            );
+            assert!(
+                !host.mux.is_placeholder(pane),
+                "{} is still a placeholder after reopen",
+                session.name
+            );
+            assert!(
+                host.mux
+                    .pane(pane)
+                    .is_some_and(|runtime| runtime.child_alive),
+                "{} attach is not running",
+                session.name
+            );
+        }
     }
 }

@@ -89,7 +89,7 @@ mod walkthrough_audio;
 mod wayland_shm;
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
@@ -1227,6 +1227,14 @@ struct HostState {
     /// When this window bound the pane to that session. Absent means the
     /// binding predates the timestamp and a snapshot may judge it.
     attach_bound_at: HashMap<PaneId, SystemTime>,
+    /// `pmuxd` pid the same-id rebind has already run against.
+    /// A new pid is a new daemon. Dead placeholders are reconnected once
+    /// for that pid, including when the new sessions reused the old ids.
+    attach_daemon_pid: Option<u32>,
+    /// Panes already respawned for `attach_daemon_pid` while the id matched.
+    /// A working attach on that id is left alone. A child that exits again
+    /// stays a placeholder until the daemon pid changes or the user reopens it.
+    attach_rebound_same_id: HashSet<PaneId>,
     /// Panes whose local shell runs a nested `pmux-attach` (PT-210).
     adopted: attach_adopt::Adopted,
     /// Serialize helpers and fence cache writes until their layout applies.
@@ -3999,6 +4007,8 @@ impl App {
                 attach_layout_path,
                 attach_pane_sessions,
                 attach_bound_at,
+                attach_daemon_pid: None,
+                attach_rebound_same_id: HashSet::new(),
                 adopted: attach_adopt::Adopted::default(),
                 space_opens: space_open::Opens::default(),
                 space_open_observation: None,
@@ -8902,17 +8912,43 @@ fn resolve_host_space(host: &mut HostState) -> Option<prismattyc_mux::SavedSpace
     Some(space)
 }
 
-/// Reattach panes whose session was recreated with a new id after pmuxd restarted.
+/// Remember which `pmuxd` process this window has already reconciled.
 ///
-/// `pmux space open` writes the new ids into the attach cache. Regroup matches
-/// the still-open panes by name and leaves them on the old id. The next refresh
-/// then treats those new ids as tabs the user closed, and the cache collapses
-/// to the local shells. Spawn the live id instead.
+/// Session ids restart at 1 with each daemon. A placeholder can therefore
+/// show the same id as the session `space open` just created. That match
+/// is not a live attachment.
+fn note_attach_daemon(host: &mut HostState) {
+    let Some(socket) = host_mux_socket() else {
+        return;
+    };
+    let Some(pid) = prismattyc_mux::procinfo::find_server_pids(&socket)
+        .into_iter()
+        .min()
+    else {
+        return;
+    };
+    if host.attach_daemon_pid == Some(pid) {
+        return;
+    }
+    host.attach_daemon_pid = Some(pid);
+    host.attach_rebound_same_id.clear();
+}
+
+/// Reattach panes still named for a live Space session after pmuxd restarted.
+///
+/// `pmux space open` writes the current ids into the attach cache. Regroup
+/// matches panes by name and leaves a dead placeholder in place. When the
+/// id changed, the next refresh used to treat the new id as a tab the user
+/// closed and write an empty cache. When the id was reused, the placeholder
+/// stayed disconnected. Spawn the live id in both cases. A pane that is
+/// already running on that id is left alone, and a same-id placeholder is
+/// respawned only once for this daemon pid.
 fn rebind_restarted_attaches(host: &mut HostState, snapshot: &prismattyc_mux::Snapshot) {
+    note_attach_daemon(host);
     let Some(owner) = host.mux.space_id.clone() else {
         return;
     };
-    let targets: Vec<(PaneId, String, String)> = host
+    let targets: Vec<(PaneId, String, String, bool)> = host
         .attach_pane_sessions
         .iter()
         .filter_map(|(pane, id)| {
@@ -8924,10 +8960,25 @@ fn rebind_restarted_attaches(host: &mut HostState, snapshot: &prismattyc_mux::Sn
                 session.name == name && session.space_id.as_deref() == Some(owner.as_str())
             })?;
             let live_id = live.id.to_string();
-            (live_id != *id).then_some((*pane, live_id, name))
+            let same_id = live_id == *id;
+            let dead = host.mux.is_placeholder(*pane)
+                || host
+                    .mux
+                    .pane(*pane)
+                    .is_some_and(|runtime| !runtime.child_alive);
+            if same_id && !dead {
+                return None;
+            }
+            if same_id && host.attach_rebound_same_id.contains(pane) {
+                return None;
+            }
+            Some((*pane, live_id, name, same_id))
         })
         .collect();
-    for (pane, live_id, name) in targets {
+    for (pane, live_id, name, same_id) in targets {
+        if same_id {
+            host.attach_rebound_same_id.insert(pane);
+        }
         reopen_attach(host, pane, &live_id, &name);
     }
 }

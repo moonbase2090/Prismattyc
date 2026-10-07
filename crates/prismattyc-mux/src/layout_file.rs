@@ -694,7 +694,13 @@ pub fn spaces_dir_for_socket(socket: &Path) -> PathBuf {
 /// Stable marker path shared by the mux daemon and its clients.
 #[must_use]
 pub fn spaces_daemon_identity_path(socket: &Path) -> PathBuf {
-    stable_socket_identity(socket).with_extension("spaces-identity")
+    let stable = stable_socket_identity(socket);
+    let parent = stable.parent().unwrap_or_else(|| Path::new("."));
+    let name = stable
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    parent.join(format!("{name}.spaces-identity"))
 }
 
 /// Canonical socket identity used when a daemon has no marker yet.
@@ -1837,7 +1843,13 @@ mod tests {
         let base = Path::new("/xdg/prismattyc/spaces");
         let first = Path::new("/tmp/pmux-a.sock");
         let second = Path::new("/tmp/pmux-b.sock");
+        let same_basename_a = Path::new("/tmp/a/seat.sock");
+        let same_basename_b = Path::new("/tmp/b/seat.other");
 
+        assert_ne!(
+            spaces_daemon_identity_path(same_basename_a),
+            spaces_daemon_identity_path(same_basename_b)
+        );
         assert_eq!(spaces_dir_for_identity("default", base), base);
         let first_dir = spaces_dir_for_socket_with_base(first, base);
         let second_dir = spaces_dir_for_socket_with_base(second, base);

@@ -14,6 +14,7 @@ mod attach_tabs;
 mod border_underlay;
 mod config;
 mod config_template;
+mod file_writer;
 mod frame_damage;
 mod git_info;
 #[cfg(feature = "gpu")]
@@ -1208,6 +1209,10 @@ struct HostState {
     attach_cache_stamp: Option<(SystemTime, u64)>,
     /// Stamp of a cache write this host made; the poll ignores it.
     attach_own_stamp: Option<(SystemTime, u64)>,
+    file_writer: file_writer::Handle,
+    pending_attach_write: Option<u64>,
+    attach_write_retry_used: bool,
+    force_attach_write: bool,
     /// This window may persist its view file. Only the registered default
     /// window uses the global CLI target; other windows use private paths.
     cache_writer: bool,
@@ -2573,6 +2578,7 @@ impl PartialEq for UserAction {
 
 struct App {
     cli: Cli,
+    file_writer: file_writer::FileWriter,
     /// One entry per OS window, keyed by winit's `WindowId`. Empty means no
     /// windows remain and the process exits (see `pump`/`window_event`).
     windows: std::collections::HashMap<WindowId, HostState>,
@@ -2641,6 +2647,7 @@ impl App {
             }
         };
         let keymap = Arc::new(file_config.loaded_keymap());
+        let file_writer = file_writer::FileWriter::new(wake.clone())?;
         // `config::load` already rejected invalid entries.
         let remote = Rc::new(RefCell::new(remote_rail::RemoteRail::new(
             file_config.remote_destinations().unwrap_or_default(),
@@ -2650,6 +2657,7 @@ impl App {
         let automatic_update_checks = file_config.automatic_update_checks.unwrap_or(true);
         Ok(Self {
             cli,
+            file_writer,
             windows: std::collections::HashMap::new(),
             exit_code: 0,
             file_config,
@@ -3213,6 +3221,75 @@ impl App {
         }
     }
 
+    fn poll_file_writer(&mut self) {
+        for completion in self.file_writer.drain() {
+            match completion.kind {
+                file_writer::CompletionKind::AttachTabs { path } => {
+                    let host = self
+                        .windows
+                        .values_mut()
+                        .find(|host| host.attach_layout_path.as_deref() == Some(path.as_path()));
+                    let Some(host) = host else {
+                        if let Err(error) = completion.result {
+                            eprintln!("prismattyc-host: could not save attach tab layout: {error}");
+                        }
+                        continue;
+                    };
+                    if host
+                        .pending_attach_write
+                        .is_some_and(|id| id == completion.id)
+                    {
+                        host.pending_attach_write = None;
+                        match completion.result {
+                            Ok(()) => {
+                                host.attach_cache_stamp = completion.stamp;
+                                host.attach_own_stamp = completion.stamp;
+                                host.attach_write_retry_used = false;
+                                host.force_attach_write = false;
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "prismattyc-host: could not save attach tab layout: {error}"
+                                );
+                                if host.attach_write_retry_used {
+                                    host.attach_write_retry_used = false;
+                                    host.force_attach_write = true;
+                                } else if let Some(file) = host.attach_layout.clone() {
+                                    host.attach_write_retry_used = true;
+                                    match host.file_writer.attach_tabs(path.clone(), file) {
+                                        Ok(id) => {
+                                            host.pending_attach_write = Some(id);
+                                            host.force_attach_write = false;
+                                        }
+                                        Err(retry_error) => {
+                                            host.attach_write_retry_used = false;
+                                            host.force_attach_write = true;
+                                            eprintln!("prismattyc-host: could not queue attach tab retry: {retry_error}");
+                                        }
+                                    }
+                                } else {
+                                    host.force_attach_write = true;
+                                }
+                            }
+                        }
+                    } else if let Err(error) = completion.result {
+                        eprintln!("prismattyc-host: could not save attach tab layout: {error}");
+                    }
+                }
+                file_writer::CompletionKind::RenderStatus => {
+                    if let Err(error) = completion.result {
+                        eprintln!("prismattyc-host: could not publish render status: {error}");
+                    }
+                }
+                file_writer::CompletionKind::ComponentHeartbeat => {
+                    if let Err(error) = completion.result {
+                        eprintln!("prismattyc-host: could not write component heartbeat: {error}");
+                    }
+                }
+            }
+        }
+    }
+
     fn poll_attach_tabs(&mut self) {
         for host in self.windows.values_mut() {
             poll_host_attach_tabs(host);
@@ -3235,6 +3312,7 @@ impl App {
         // flag *before* drain still avoids dropping a child-EOF wake that
         // arrives while we are inside pump (live cascade).
         self.wake_pending.store(false, Ordering::Relaxed);
+        self.poll_file_writer();
         restart::poll(self);
         self.poll_config_reload();
         self.poll_attach_tabs();
@@ -3859,6 +3937,10 @@ impl App {
                 observed_space_sessions: Default::default(),
                 attach_cache_stamp: startup_cache_stamp,
                 attach_own_stamp: None,
+                file_writer: self.file_writer.handle(),
+                pending_attach_write: None,
+                attach_write_retry_used: false,
+                force_attach_write: false,
                 cache_writer: false,
                 background_png: load_background_png(self.file_config.background_image.as_deref()),
                 background_opacity: self.file_config.background_opacity(),
@@ -7930,18 +8012,33 @@ fn persist_attach_layout_from_live(host: &mut HostState) {
         return;
     }
     let new = attach_records_from_live(host);
-    match attach_tabs::persist_if_changed(&path, &mut host.attach_layout, new) {
-        Ok(true) => {
-            let stamp = cache_stamp(&path);
-            host.attach_own_stamp = stamp;
-            host.attach_cache_stamp = stamp;
-        }
-        Ok(false) => {}
+    match enqueue_attach_tabs(host, &path, new) {
+        Ok(()) => {}
         Err(error) => {
             eprintln!("prismattyc-host: could not save attach tab layout: {error}");
+            host.layout_dirty = true;
+            return;
         }
     }
     host.layout_dirty = false;
+}
+
+fn enqueue_attach_tabs(
+    host: &mut HostState,
+    path: &Path,
+    file: attach_tabs::AttachTabsFile,
+) -> std::io::Result<()> {
+    if host.attach_layout.as_ref() == Some(&file) && !host.force_attach_write {
+        return Ok(());
+    }
+    let id = host
+        .file_writer
+        .attach_tabs(path.to_path_buf(), file.clone())?;
+    host.attach_layout = Some(file.clone());
+    host.pending_attach_write = Some(id);
+    host.attach_write_retry_used = false;
+    host.force_attach_write = false;
+    Ok(())
 }
 
 /// Startup attach grouping is allowed to read the shared cache only for the
@@ -8019,7 +8116,7 @@ fn persist_attach_selection(host: &mut HostState) {
     if !may_write_shared_cache(host.cache_writer) {
         return;
     }
-    let Some(path) = host.attach_layout_path.as_ref() else {
+    let Some(path) = host.attach_layout_path.clone() else {
         return;
     };
     let Some(mut file) = host.attach_layout.clone() else {
@@ -8043,15 +8140,12 @@ fn persist_attach_selection(host: &mut HostState) {
             .get(&host.mux.focused_id())
             .cloned(),
     );
-    match attach_tabs::persist_if_changed(path, &mut host.attach_layout, file) {
-        Ok(true) => {
-            let stamp = cache_stamp(path);
-            host.attach_own_stamp = stamp;
-            host.attach_cache_stamp = stamp;
-        }
-        Ok(false) => {}
+    match enqueue_attach_tabs(host, &path, file) {
+        Ok(()) => {}
         Err(error) => {
             eprintln!("prismattyc-host: could not save attach tab layout: {error}");
+            host.layout_dirty = true;
+            return;
         }
     }
     host.layout_dirty = false;
@@ -8850,6 +8944,9 @@ fn poll_host_attach_tabs(host: &mut HostState) {
     let Some(path) = host.attach_layout_path.clone() else {
         return;
     };
+    if host.file_writer.attach_tabs_write_pending(&path) {
+        return;
+    }
     let now = cache_stamp(&path);
     if now == host.attach_cache_stamp {
         return;
@@ -8861,6 +8958,11 @@ fn poll_host_attach_tabs(host: &mut HostState) {
     let Some(mut file) = attach_tabs::load(&path) else {
         return;
     };
+    if host.attach_layout.as_ref() == Some(&file) {
+        host.attach_cache_stamp = now;
+        host.attach_own_stamp = now;
+        return;
+    }
     if let Some(name) = file.space.as_deref() {
         let permitted = load_space(&spaces_dir(), name)
             .ok()

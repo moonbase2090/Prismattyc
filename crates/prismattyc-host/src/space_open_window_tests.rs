@@ -216,6 +216,7 @@ fn verify_space_rename(app: &mut App, event_loop: &ActiveEventLoop, source: Wind
             .with_file_name("rename-view.json"),
     );
     persist_attach_layout_from_live(&mut follower);
+    test_support::wait_for_attach_write(&follower);
     app.windows = windows;
     std::env::remove_var("PMUX_SPACE");
     std::env::remove_var("PMUX_VIEW_PATH");
@@ -538,6 +539,7 @@ impl ApplicationHandler<UserAction> for Proof {
                 session_prompt::dispatch_key(a, &Key::Named(NamedKey::Enter), false);
                 assert!(a.session_prompt.is_none(), "tab naming failed");
                 persist_attach_layout_from_live(a);
+                test_support::wait_for_attach_write(a);
                 self.changed = Instant::now();
                 self.phase = 5;
             }
@@ -561,6 +563,7 @@ impl ApplicationHandler<UserAction> for Proof {
                 capture(a, "a-new-sessions");
                 a.mux.select_tab(0).unwrap();
                 persist_attach_selection(a);
+                test_support::wait_for_attach_write(a);
                 let selected = attach_tabs::load(a.attach_layout_path.as_ref().unwrap()).unwrap();
                 assert_eq!(
                     selected.focused_session,
@@ -631,6 +634,7 @@ impl ApplicationHandler<UserAction> for Proof {
                 let b = self.app.windows.get_mut(&self.windows[1]).unwrap();
                 assert_ne!(b.attach_layout_path, b_path);
                 assert_eq!(b.space_rail.current.as_deref(), Some("b"));
+                test_support::wait_for_attach_write(b);
                 let layout = attach_tabs::load(b.attach_layout_path.as_ref().unwrap()).unwrap();
                 assert_eq!(layout.space.as_deref(), Some("b"));
                 open_space_from_host(b, "a", SpaceOpenMode::Switch);

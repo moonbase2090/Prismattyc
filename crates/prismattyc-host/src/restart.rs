@@ -52,7 +52,13 @@ pub(super) fn poll(app: &mut App) {
     let Some(socket) = host_mux_socket() else {
         return;
     };
-    let _ = requests::register(&socket, "host");
+    if let Err(error) = app
+        .file_writer
+        .handle()
+        .component_heartbeat(socket.clone(), "host")
+    {
+        eprintln!("prismattyc-host: could not queue component heartbeat: {error}");
+    }
     let Some(request) = requests::take(&socket, "host") else {
         return;
     };
@@ -77,6 +83,9 @@ pub(super) fn poll(app: &mut App) {
 pub(super) fn schedule_after_update(app: &mut App, notice: String) -> Result<()> {
     app.update_restart_notice = Some(notice);
     let socket = host_mux_socket().context("mux socket path")?;
+    app.file_writer
+        .handle()
+        .wait_for_component_heartbeat(&socket, "host");
     requests::register(&socket, "host")?;
     requests::request(&socket, "host", std::process::id())?;
     Ok(())
@@ -121,6 +130,7 @@ fn perform(app: &mut App, request: &requests::Request) -> Result<()> {
             records.tabs.iter().any(|tab| !tab.sessions.is_empty()),
             "window has no mux sessions to restore"
         );
+        host.file_writer.wait_for_attach_tabs(&path);
         prismattyc_mux::attach_tabs::save(&path, &records)?;
         let size = host.window.inner_size();
         views.push(WindowState {

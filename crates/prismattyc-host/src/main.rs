@@ -3656,6 +3656,7 @@ impl App {
 
         let (cols, rows) = size_to_cells(window.inner_size(), &font, geom);
         let mut attach_pane_sessions: HashMap<PaneId, String> = HashMap::new();
+        let mut attach_bound_at: HashMap<PaneId, SystemTime> = HashMap::new();
         let mut mux = mux::MuxRuntime::spawn_with_geom(
             &boot_program,
             &boot_args,
@@ -3681,6 +3682,12 @@ impl App {
             let pane_sessions = open_attach_session_tabs(&mut mux, &grouped)?;
             seed_attach_focus(&mut mux, &grouped, &pane_sessions);
             attach_pane_sessions = pane_sessions.into_iter().collect();
+            // Stamp at creation. An empty map would let a process-wide cache
+            // from before this window treat the new attachment as already gone.
+            let bound_at = SystemTime::now();
+            for pane in attach_pane_sessions.keys() {
+                attach_bound_at.insert(*pane, bound_at);
+            }
         }
         if let Ok(raw) = std::env::var("PRISMATTYC_MAIL_ATTENTION") {
             if let Ok(depth) = raw.parse::<u32>() {
@@ -3866,7 +3873,7 @@ impl App {
                 attach_layout: None,
                 attach_layout_path,
                 attach_pane_sessions,
-                attach_bound_at: HashMap::new(),
+                attach_bound_at,
                 adopted: attach_adopt::Adopted::default(),
                 space_opens: space_open::Opens::default(),
                 space_open_observation: None,

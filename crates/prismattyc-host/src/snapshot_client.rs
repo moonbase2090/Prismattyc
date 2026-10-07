@@ -29,8 +29,10 @@ const BACKOFF_MAX: Duration = Duration::from_secs(2);
 
 struct Cache {
     snapshot: Option<Snapshot>,
-    /// When `snapshot` was read from pmuxd. Callers compare this with a
-    /// layout file's mtime so an older cache cannot reject that file.
+    /// When the snapshot request started, not when its bytes were published.
+    /// The server can release its state lock and accept a newer layout while
+    /// this response is still in flight, so a publish-time stamp would make
+    /// the stale body look newer than that file.
     fetched_at: Option<SystemTime>,
     /// Set until the client thread has a snapshot from the current connection
     /// attempt. [`SnapshotClient::fresh`] returns `None` while this is set,
@@ -108,8 +110,9 @@ impl SnapshotClient {
         }
     }
 
-    /// A cache with no background thread. Tests publish snapshots directly.
-    #[cfg(test)]
+    /// A cache with no background thread. The Linux window fixture publishes
+    /// snapshots directly. Other targets do not compile that fixture.
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn detached() -> Self {
         let inner = Arc::new(Inner {
             cache: Mutex::new(Cache {
@@ -130,8 +133,9 @@ impl SnapshotClient {
     }
 
     /// Install one snapshot without connecting. `fetched_at` is the time the
-    /// caller claims the snapshot was read.
-    #[cfg(test)]
+    /// caller claims the request started. Linux window tests use this to
+    /// place a cache before or after a layout file.
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn publish_for_test(&self, snapshot: Snapshot, fetched_at: SystemTime) {
         let mut cache = lock(&self.inner.cache);
         cache.snapshot = Some(snapshot);
@@ -267,10 +271,11 @@ fn open_and_snapshot(
         inner.connects.fetch_add(1, Ordering::Relaxed);
     })
     .ok()?;
+    let observed_at = SystemTime::now();
     match opened.snapshot() {
         Ok(snapshot) => {
             let sequence = snapshot.sequence;
-            publish(inner, snapshot);
+            publish(inner, snapshot, observed_at);
             Some((opened, sequence))
         }
         Err(_) => None,
@@ -278,10 +283,11 @@ fn open_and_snapshot(
 }
 
 fn resnapshot(connection: &mut SnapshotSocket, inner: &Inner, sequence: &mut u64) -> bool {
+    let observed_at = SystemTime::now();
     match connection.snapshot() {
         Ok(snapshot) => {
             *sequence = snapshot.sequence;
-            publish(inner, snapshot);
+            publish(inner, snapshot, observed_at);
             true
         }
         Err(_) => {
@@ -291,12 +297,12 @@ fn resnapshot(connection: &mut SnapshotSocket, inner: &Inner, sequence: &mut u64
     }
 }
 
-fn publish(inner: &Inner, snapshot: Snapshot) {
+fn publish(inner: &Inner, snapshot: Snapshot, observed_at: SystemTime) {
     let changed = {
         let mut cache = lock(&inner.cache);
         let changed = cache.snapshot.as_ref() != Some(&snapshot);
         cache.snapshot = Some(snapshot);
-        cache.fetched_at = Some(SystemTime::now());
+        cache.fetched_at = Some(observed_at);
         cache.stale = false;
         changed
     };
@@ -662,6 +668,257 @@ mod tests {
         assert!(
             missing_fingerprint.is_empty(),
             "a missing snapshot must not look like a layout change"
+        );
+    }
+
+    /// Holds the first snapshot response so the test can write a layout file
+    /// while that response is still in flight.
+    ///
+    /// The listen socket is nonblocking so the accept loop can notice
+    /// `release`. An accepted stream inherits that flag on macOS, which made
+    /// the first client read look like EOF and left this thread blocked in
+    /// `read_line`. Drop shuts the sockets down before joining.
+    struct HoldingProxy {
+        release: Arc<AtomicBool>,
+        held: Arc<AtomicBool>,
+        seen: Arc<Mutex<Vec<String>>>,
+        client_sock: Arc<Mutex<Option<UnixStream>>>,
+        server_sock: Arc<Mutex<Option<UnixStream>>>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    fn note_line(seen: &Mutex<Vec<String>>, prefix: &str, line: &str) {
+        let mut lines = seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lines.len() >= 6 {
+            return;
+        }
+        let trimmed = line.trim_end();
+        let end = trimmed.len().min(180);
+        lines.push(format!("{prefix}{}", &trimmed[..end]));
+    }
+
+    impl HoldingProxy {
+        fn bind(listen: &Path, upstream: &Path) -> Self {
+            let _ = std::fs::remove_file(listen);
+            let listener = UnixListener::bind(listen).expect("holding proxy listen");
+            listener.set_nonblocking(true).expect("holding proxy poll");
+            let upstream = upstream.to_path_buf();
+            let release = Arc::new(AtomicBool::new(false));
+            let held = Arc::new(AtomicBool::new(false));
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let client_sock = Arc::new(Mutex::new(None));
+            let server_sock = Arc::new(Mutex::new(None));
+            let release_flag = Arc::clone(&release);
+            let held_flag = Arc::clone(&held);
+            let seen_flag = Arc::clone(&seen);
+            let client_slot = Arc::clone(&client_sock);
+            let server_slot = Arc::clone(&server_sock);
+            let thread = thread::spawn(move || {
+                let client = loop {
+                    if release_flag.load(Ordering::Acquire) {
+                        return;
+                    }
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => {
+                            note_line(&seen_flag, "accept ", &error.to_string());
+                            return;
+                        }
+                    }
+                };
+                if let Err(error) = client.set_nonblocking(false) {
+                    note_line(&seen_flag, "blocking ", &error.to_string());
+                    return;
+                }
+                match client.try_clone() {
+                    Ok(stream) => {
+                        *client_slot
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(stream);
+                    }
+                    Err(error) => {
+                        note_line(&seen_flag, "clone ", &error.to_string());
+                        return;
+                    }
+                }
+                let server = match UnixStream::connect(&upstream) {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        note_line(&seen_flag, "upstream ", &error.to_string());
+                        return;
+                    }
+                };
+                match server.try_clone() {
+                    Ok(stream) => {
+                        *server_slot
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(stream);
+                    }
+                    Err(error) => {
+                        note_line(&seen_flag, "clone ", &error.to_string());
+                        return;
+                    }
+                }
+                let client_read = match client.try_clone() {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        note_line(&seen_flag, "clone ", &error.to_string());
+                        return;
+                    }
+                };
+                let server_write = match server.try_clone() {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        note_line(&seen_flag, "clone ", &error.to_string());
+                        return;
+                    }
+                };
+                let seen_forward = Arc::clone(&seen_flag);
+                let forward = thread::spawn(move || {
+                    use std::io::{BufRead, BufReader, Write};
+                    let mut reader = BufReader::new(client_read);
+                    let mut writer = server_write;
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        match reader.read_line(&mut line) {
+                            Ok(0) => break,
+                            Ok(_) => {}
+                            Err(error) => {
+                                note_line(&seen_forward, "client-read ", &error.to_string());
+                                break;
+                            }
+                        }
+                        note_line(&seen_forward, "c ", &line);
+                        if writer.write_all(line.as_bytes()).is_err() || writer.flush().is_err() {
+                            break;
+                        }
+                    }
+                });
+                use std::io::{BufRead, BufReader, Write};
+                let mut reader = BufReader::new(server);
+                let mut writer = client;
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(error) => {
+                            note_line(&seen_flag, "server-read ", &error.to_string());
+                            break;
+                        }
+                    }
+                    note_line(&seen_flag, "s ", &line);
+                    if line.contains("\"kind\":\"snapshot\"")
+                        && !release_flag.load(Ordering::Acquire)
+                    {
+                        held_flag.store(true, Ordering::Release);
+                        while !release_flag.load(Ordering::Acquire) {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                    if writer.write_all(line.as_bytes()).is_err() || writer.flush().is_err() {
+                        break;
+                    }
+                }
+                let _ = forward.join();
+            });
+            Self {
+                release,
+                held,
+                seen,
+                client_sock,
+                server_sock,
+                thread: Some(thread),
+            }
+        }
+
+        fn seen(&self) -> String {
+            self.seen
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .join(" | ")
+        }
+    }
+
+    impl Drop for HoldingProxy {
+        fn drop(&mut self) {
+            self.release.store(true, Ordering::Release);
+            for slot in [&self.client_sock, &self.server_sock] {
+                if let Some(stream) = slot
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .as_ref()
+                {
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                }
+            }
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    #[test]
+    fn delayed_snapshot_keeps_the_request_start_time() {
+        let upstream = socket_path();
+        let listen = socket_path();
+        let _server = boot_server(&upstream);
+        let proxy = HoldingProxy::bind(&listen, &upstream);
+        let client = SnapshotClient::spawn_at(listen, noop_wake());
+        assert!(
+            wait_until(Duration::from_secs(3), || {
+                proxy.held.load(Ordering::Acquire)
+            }),
+            "snapshot response was not held in flight; saw {}",
+            proxy.seen()
+        );
+        // The helper's layout write lands while the old snapshot is held.
+        let file_mtime = SystemTime::now();
+        thread::sleep(Duration::from_millis(40));
+        proxy.release.store(true, Ordering::Release);
+        assert!(
+            wait_until(Duration::from_secs(3), || client.fresh_observed().is_some()),
+            "delayed snapshot was not published"
+        );
+        let (fetched_at, snapshot) = client.fresh_observed().expect("published snapshot");
+        assert!(
+            fetched_at <= file_mtime,
+            "observation {fetched_at:?} must stay at the request start, not the publish time after {file_mtime:?}"
+        );
+        let space = prismattyc_mux::SavedSpace {
+            version: 2,
+            id: Some("a".into()),
+            created_at_unix_ms: None,
+            saved_at_unix: 0,
+            sessions: Vec::new(),
+            tabs: Vec::new(),
+            active_tab: 0,
+            focused_session: None,
+        };
+        let file = crate::attach_tabs::AttachTabsFile {
+            tabs: vec![crate::attach_tabs::AttachTabRecord {
+                title: "late".into(),
+                sessions: vec!["999".into()],
+                layout: None,
+            }],
+            space: Some("a".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::space_view::layout_ownership(
+                Some(&space),
+                Some(&(fetched_at, snapshot)),
+                &file,
+                Some(file_mtime),
+                true,
+            ),
+            crate::space_view::LayoutOwnership::Pending,
+            "a snapshot requested before the layout write must not deny it"
         );
     }
 }

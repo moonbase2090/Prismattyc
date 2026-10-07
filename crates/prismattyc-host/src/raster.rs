@@ -4641,7 +4641,11 @@ pub(crate) fn rasterize_render_timer(
     let reason = summary
         .dominant_full_repaint_reason
         .map_or("-", crate::FullRepaintReason::as_str);
-    let text = format!(
+    let pump_text = format!(
+        " pump={}us slowest={}:{}us ",
+        summary.pump.total_us, summary.pump.slowest_phase, summary.pump.slowest_us,
+    );
+    let raster_text = format!(
         " last/max raster={}/{}us frames={} cells_max={} blit_sum={} full={} ",
         summary.last_raster_us,
         summary.max_raster_us,
@@ -4651,9 +4655,11 @@ pub(crate) fn rasterize_render_timer(
         reason,
     );
     let max_cells = stride.saturating_sub(16) / font.cell_w.max(1);
-    let text: String = text.chars().take(max_cells.max(1)).collect();
-    let panel_w = (text.chars().count() * font.cell_w + 8).min(stride.saturating_sub(8));
-    let panel_h = font.cell_h.saturating_add(6).min(height as usize);
+    let pump_text: String = pump_text.chars().take(max_cells.max(1)).collect();
+    let raster_text: String = raster_text.chars().take(max_cells.max(1)).collect();
+    let text_cells = pump_text.chars().count().max(raster_text.chars().count());
+    let panel_w = (text_cells * font.cell_w + 8).min(stride.saturating_sub(8));
+    let panel_h = (font.cell_h.saturating_mul(2).saturating_add(10)).min(height as usize);
     let x = 4;
     let y = (height as usize).saturating_sub(panel_h + 4);
     fill_rect_argb(
@@ -4670,9 +4676,19 @@ pub(crate) fn rasterize_render_timer(
         buffer,
         stride,
         font,
-        &text,
+        &pump_text,
         x + 4,
         y + 3,
+        theme.chrome_fg,
+        x.saturating_add(panel_w).saturating_sub(2),
+    );
+    draw_theme_text(
+        buffer,
+        stride,
+        font,
+        &raster_text,
+        x + 4,
+        y + 3 + font.cell_h,
         theme.chrome_fg,
         x.saturating_add(panel_w).saturating_sub(2),
     );

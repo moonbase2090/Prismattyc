@@ -163,6 +163,19 @@ fn should_publish_render_status(
     toast_guard_stale || render_status_due(last, now)
 }
 
+fn present_timing_json(present: Option<crate::present_timing::PresentTiming>) -> serde_json::Value {
+    let Some(present) = present else {
+        return serde_json::Value::Null;
+    };
+    serde_json::json!({
+        "write_us": present.write_us,
+        "commit_us": present.commit_us,
+        "dirty_tiles": present.dirty_tiles,
+        "changed_tiles": present.changed_tiles,
+        "write_bytes": present.write_bytes,
+    })
+}
+
 impl App {
     pub(super) fn publish_render_status(&mut self) {
         let Some((pid_path, pid)) = self.registered_host.as_ref() else {
@@ -188,6 +201,7 @@ impl App {
         let mut attach_queue_bytes = 0usize;
         let mut attach_queue_high_water_bytes = 0usize;
         let mut attach_reader_blocked_ms = 0u64;
+        let pump = self.pump_timing.json();
         let windows: Vec<_> = self.windows.iter().map(|(id, host)| {
             let pane_ids = host
                 .mux
@@ -256,6 +270,23 @@ impl App {
                 }))
             }).collect();
             let frame = host.render_frame;
+            let last_raster = serde_json::json!({
+                "unix_ms": frame.raster_at_unix_ms,
+                "present_succeeded": frame.present_succeeded,
+                "raster_mode": if frame.full_repaint_reason.is_some() { "full" } else { "partial" },
+                "full_repaint_reason": frame.full_repaint_reason.map(super::FullRepaintReason::as_str),
+                "guard_mask": frame.guards.0,
+                "guards": frame.guards.names(),
+                "cells_painted": frame.cells_painted,
+                "rows_scrolled_as_blit": frame.rows_scrolled_as_blit,
+                "timing": {
+                    "parse_us": frame.timing.last_parse_us,
+                    "damage_us": frame.timing.damage_us,
+                    "raster_us": frame.timing.raster_us,
+                    "present_us": frame.timing.present_us,
+                },
+                "present": present_timing_json(frame.present),
+            });
             let mut status = serde_json::json!({
                 "window_id": format!("{id:?}"),
                 "focused": host.window_focused,
@@ -300,18 +331,10 @@ impl App {
                 "selected_tab": host.mux.selected_tab_index(),
                 "focused_session": host.attach_pane_sessions.get(&host.mux.focused_id()),
                 "current_panes": panes,
-                "last_raster": {
-                    "unix_ms": frame.raster_at_unix_ms,
-                    "present_succeeded": frame.present_succeeded,
-                    "raster_mode": if frame.full_repaint_reason.is_some() { "full" } else { "partial" },
-                    "full_repaint_reason": frame.full_repaint_reason.map(super::FullRepaintReason::as_str),
-                    "guard_mask": frame.guards.0,
-                    "guards": frame.guards.names(),
-                    "cells_painted": frame.cells_painted,
-                    "rows_scrolled_as_blit": frame.rows_scrolled_as_blit,
-                },
             });
             if let Some(status) = status.as_object_mut() {
+                status.insert("pump".into(), pump.clone());
+                status.insert("last_raster".into(), last_raster);
                 status.insert(
                     "sidebar_space_rows".into(),
                     serde_json::Value::Array(sidebar_spaces),
@@ -636,5 +659,22 @@ mod tests {
             now + Duration::from_secs(1),
             false
         ));
+    }
+
+    #[test]
+    fn present_status_schema_reports_write_commit_and_tile_counts() {
+        let status = present_timing_json(Some(crate::present_timing::PresentTiming {
+            write_us: 17,
+            commit_us: 23,
+            dirty_tiles: 11,
+            changed_tiles: Some(4),
+            write_bytes: 65_536,
+        }));
+        assert_eq!(status["write_us"], 17);
+        assert_eq!(status["commit_us"], 23);
+        assert_eq!(status["dirty_tiles"], 11);
+        assert_eq!(status["changed_tiles"], 4);
+        assert_eq!(status["write_bytes"], 65_536);
+        assert!(present_timing_json(None).is_null());
     }
 }

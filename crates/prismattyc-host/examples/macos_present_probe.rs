@@ -18,6 +18,8 @@ mod pixel_alpha;
 #[cfg(target_os = "macos")]
 #[path = "../src/present_tiles.rs"]
 mod present_tiles;
+#[path = "../src/present_timing.rs"]
+mod present_timing;
 
 #[cfg(target_os = "macos")]
 fn main() {
@@ -71,7 +73,7 @@ fn main() {
             present.prepare(size.width, size.height).unwrap();
             present.pixels_mut().fill(0x80402010);
             present.pixels_mut()[0] = 0xff11e795;
-            present.present(FrameDamage::Full).unwrap();
+            present.present(FrameDamage::Full, false).unwrap();
 
             let RawWindowHandle::AppKit(handle) = window.window_handle().unwrap().as_raw() else {
                 panic!("expected AppKit handle");
@@ -136,7 +138,7 @@ fn main() {
             assert!(present.prepare(size.width, size.height).unwrap());
             present.pixels_mut()[0] = 0xffabcdef;
             present
-                .present(FrameDamage::Rects(vec![PixelRect::new(0, 0, 1, 1)]))
+                .present(FrameDamage::Rects(vec![PixelRect::new(0, 0, 1, 1)]), false)
                 .unwrap();
             for (index, (tile, prior)) in tiles.iter().zip(&prior_contents).enumerate() {
                 let contents = unsafe { tile.contents() }.unwrap();

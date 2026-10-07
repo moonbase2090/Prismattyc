@@ -2675,7 +2675,8 @@ impl App {
             }
         };
         let keymap = Arc::new(file_config.loaded_keymap());
-        let file_writer = file_writer::FileWriter::new(wake.clone())?;
+        let file_writer =
+            file_writer::FileWriter::new(wake.clone(), file_config.async_file_writes())?;
         // `config::load` already rejected invalid entries.
         let remote = Rc::new(RefCell::new(remote_rail::RemoteRail::new(
             file_config.remote_destinations().unwrap_or_default(),
@@ -2752,7 +2753,11 @@ impl App {
                 }
             }
         }
-        let Some(newest) = newest else { return };
+        let Some(mut newest) = newest else { return };
+        if newest.async_file_writes() != self.file_config.async_file_writes() {
+            eprintln!("prismattyc-host: async_file_writes changes take effect after restart");
+            newest.async_file_writes = self.file_config.async_file_writes;
+        }
         if newest == self.file_config {
             return;
         }
@@ -8162,7 +8167,14 @@ fn enqueue_attach_tabs(
         .file_writer
         .attach_tabs(path.to_path_buf(), file.clone())?;
     host.attach_layout = Some(file.clone());
-    host.pending_attach_write = Some(id);
+    if host.file_writer.is_asynchronous() {
+        host.pending_attach_write = Some(id);
+    } else {
+        let stamp = cache_stamp(path);
+        host.attach_cache_stamp = stamp;
+        host.attach_own_stamp = stamp;
+        host.pending_attach_write = None;
+    }
     host.attach_write_retry_used = false;
     host.force_attach_write = false;
     Ok(())
@@ -9090,6 +9102,7 @@ fn poll_host_attach_tabs(host: &mut HostState) {
         host.attach_own_stamp = now;
         host.space_opens
             .cache_applied(now, file.space.as_deref(), file.mode, true);
+        touch_host_attach_ack();
         return;
     }
     if let Some(name) = file.space.as_deref() {
@@ -9185,12 +9198,7 @@ fn poll_host_attach_tabs(host: &mut HostState) {
             host.window
                 .set_title(&window_title(&host.mux, show_tab_strip(host)));
             host.window.focus_window();
-            if let Some(socket) = host_mux_socket() {
-                let ack = prismattyc_mux::host_ack_path_from_socket(&socket);
-                if let Err(error) = prismattyc_mux::touch_host_ack(&ack) {
-                    eprintln!("prismattyc-host: could not ack attach-tabs reload: {error}");
-                }
-            }
+            touch_host_attach_ack();
             App::refit_geom(host, host.window.inner_size(), Some("space regroup"));
         }
         Err(error) => {
@@ -9207,6 +9215,15 @@ fn poll_host_attach_tabs(host: &mut HostState) {
             }
             host.dirty = true;
             eprintln!("prismattyc-host: attach-tabs regroup failed: {error:#}");
+        }
+    }
+}
+
+fn touch_host_attach_ack() {
+    if let Some(socket) = host_mux_socket() {
+        let ack = prismattyc_mux::host_ack_path_from_socket(&socket);
+        if let Err(error) = prismattyc_mux::touch_host_ack(&ack) {
+            eprintln!("prismattyc-host: could not ack attach-tabs reload: {error}");
         }
     }
 }

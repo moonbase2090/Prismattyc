@@ -62,13 +62,11 @@ fn isolated_space_windows_create_move_and_render() {
         .build()
         .unwrap();
     let cli = Cli::parse(["--no-splash", "/bin/cat"].into_iter().map(String::from)).unwrap();
-    let app = App::new(
-        cli,
-        config::ConfigFile::default(),
-        None,
-        event_loop.create_proxy(),
-    )
-    .unwrap();
+    let file_config = config::ConfigFile {
+        async_file_writes: Some(true),
+        ..config::ConfigFile::default()
+    };
+    let app = App::new(cli, file_config, None, event_loop.create_proxy()).unwrap();
     let mut proof = Proof {
         app,
         windows: Vec::new(),
@@ -239,6 +237,7 @@ fn verify_space_rename(app: &mut App, event_loop: &ActiveEventLoop, source: Wind
     prismattyc_mux::save_space(&spaces_dir(), "a", &replacement).unwrap();
     follower.last_space_refresh = None;
     refresh_space_views(&mut follower);
+    test_support::wait_for_attach_write(&follower);
     assert_eq!(follower.space_rail.current.as_deref(), Some("renamed-a"));
     assert_eq!(follower.mux.space_id, owner);
     assert_eq!(follower.attach_pane_sessions, panes);
@@ -441,7 +440,15 @@ impl ApplicationHandler<UserAction> for Proof {
                 assert!(a.space_opens.blocks_persist());
                 prismattyc_mux::attach_tabs::save(&path, &original).unwrap();
                 set_cache_modified(&path, SystemTime::now() + Duration::from_secs(4));
+                let ack = prismattyc_mux::host_ack_path_from_socket(&host_mux_socket().unwrap());
+                std::fs::write(&ack, b"stale\n").unwrap();
+                set_cache_modified(&ack, SystemTime::now() - Duration::from_secs(10));
+                let since = SystemTime::now() - Duration::from_secs(2);
                 poll_host_attach_tabs(a);
+                assert!(
+                    prismattyc_mux::wait_host_ack(&ack, since, Duration::from_millis(100)),
+                    "matching external cache layout must refresh the host ACK"
+                );
                 assert!(!a.space_opens.blocks_persist());
                 // Multi-pane source: only the visible original pane moves.
                 split(&space_session("a"));

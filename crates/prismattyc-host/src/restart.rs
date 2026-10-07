@@ -57,7 +57,7 @@ pub(super) fn poll(app: &mut App) {
         .handle()
         .component_heartbeat(socket.clone(), "host")
     {
-        eprintln!("prismattyc-host: could not queue component heartbeat: {error}");
+        eprintln!("prismattyc-host: could not write component heartbeat: {error}");
     }
     let Some(request) = requests::take(&socket, "host") else {
         return;

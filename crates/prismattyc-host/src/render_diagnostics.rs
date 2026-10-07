@@ -371,7 +371,7 @@ impl App {
             .handle()
             .render_status(pid_path.clone(), *pid, status)
         {
-            eprintln!("prismattyc-host: could not queue render status: {error}");
+            eprintln!("prismattyc-host: could not publish render status: {error}");
         }
     }
 }

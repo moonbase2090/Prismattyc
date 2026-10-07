@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Latest-wins file writes that must not block the host event loop.
 
 use std::collections::{HashMap, HashSet};
@@ -79,6 +80,7 @@ struct Shared {
 #[derive(Clone)]
 pub(super) struct Handle {
     shared: Arc<Shared>,
+    asynchronous: bool,
 }
 
 pub(super) struct FileWriter {
@@ -102,24 +104,30 @@ pub(super) struct Completion {
 }
 
 impl FileWriter {
-    pub(super) fn new(wake: Arc<dyn Fn() + Send + Sync>) -> io::Result<Self> {
+    pub(super) fn new(wake: Arc<dyn Fn() + Send + Sync>, asynchronous: bool) -> io::Result<Self> {
         let shared = Arc::new(Shared {
             state: Mutex::new(QueueState::default()),
             changed: Condvar::new(),
             next_id: AtomicU64::new(1),
         });
+        let (complete, completed) = mpsc::channel();
         let handle = Handle {
             shared: shared.clone(),
+            asynchronous,
         };
-        let (complete, completed) = mpsc::channel();
-        let worker_wake = wake.clone();
-        let worker = thread::Builder::new()
-            .name("prismattyc-file-writer".into())
-            .spawn(move || writer_loop(shared, complete, worker_wake))?;
+        let worker = if asynchronous {
+            Some(
+                thread::Builder::new()
+                    .name("prismattyc-file-writer".into())
+                    .spawn(move || writer_loop(shared, complete, wake))?,
+            )
+        } else {
+            None
+        };
         Ok(Self {
             handle,
             completed,
-            worker: Some(worker),
+            worker,
         })
     }
 
@@ -165,6 +173,10 @@ impl Handle {
 
     pub(super) fn wait_for_attach_tabs(&self, path: &Path) {
         self.wait_for(WriteKey::AttachTabs(path.to_path_buf()));
+    }
+
+    pub(super) fn is_asynchronous(&self) -> bool {
+        self.asynchronous
     }
 
     #[cfg(all(test, target_os = "linux"))]
@@ -225,6 +237,23 @@ impl Handle {
 
     fn submit(&self, job: WriteJob) -> io::Result<u64> {
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
+        {
+            let state = self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.shutdown {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "file writer is shutting down",
+                ));
+            }
+        }
+        if !self.asynchronous {
+            let completion = write_one(PendingJob { id, job });
+            return completion.result.map(|()| id).map_err(io::Error::other);
+        }
         let key = job.key();
         let mut state = self
             .shared
@@ -409,7 +438,7 @@ mod tests {
             active_tab: 3,
             ..Default::default()
         };
-        let writer = FileWriter::new(Arc::new(|| {})).unwrap();
+        let writer = FileWriter::new(Arc::new(|| {}), true).unwrap();
         let handle = writer.handle();
         let render_id = handle
             .render_status(pid_path.clone(), pid, status.clone())
@@ -464,6 +493,37 @@ mod tests {
 
         drop(handle);
         drop(writer);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn disabled_writer_saves_before_return_without_starting_a_worker() {
+        let dir = test_dir("sync-writes");
+        let path = dir.join("pmux.attach-tabs.json");
+        let file = AttachTabsFile {
+            active_tab: 9,
+            ..Default::default()
+        };
+        let wakes = Arc::new(AtomicU64::new(0));
+        let worker_wakes = wakes.clone();
+        let writer = FileWriter::new(
+            Arc::new(move || {
+                worker_wakes.fetch_add(1, Ordering::Relaxed);
+            }),
+            false,
+        )
+        .unwrap();
+        assert!(writer.worker.is_none());
+
+        let id = writer
+            .handle()
+            .attach_tabs(path.clone(), file.clone())
+            .unwrap();
+
+        assert_eq!(prismattyc_mux::attach_tabs::load(&path), Some(file));
+        assert_eq!(wakes.load(Ordering::Relaxed), 0);
+        assert!(writer.drain().next().is_none());
+        assert_eq!(id, 1);
         fs::remove_dir_all(dir).unwrap();
     }
 }

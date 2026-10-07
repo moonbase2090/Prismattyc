@@ -136,8 +136,13 @@ fn node_shape(node: &prismattyc_mux::SavedNode) -> serde_json::Value {
     }
 }
 
-fn saved_shapes(space: &prismattyc_mux::SavedSpace) -> (bool, String) {
-    let Some(snapshot) = attach_log::live_snapshot() else {
+pub(crate) fn saved_shapes(
+    space: &prismattyc_mux::SavedSpace,
+    snapshot: Option<&prismattyc_mux::Snapshot>,
+) -> (bool, String) {
+    // No snapshot matches today's `live_snapshot() == None` result: skip the
+    // write. A stopped daemon must not look like a layout change.
+    let Some(snapshot) = snapshot else {
         return (true, String::new());
     };
     let mut fingerprint = String::new();
@@ -270,7 +275,8 @@ pub(super) fn poll(host: &mut HostState) {
     let step = match load_space(&spaces_dir(), &name) {
         Ok(space) if space.id == host.mux.space_id => {
             let live = live_snaps(host);
-            let (shapes_match, shapes) = saved_shapes(&space);
+            let snap = snapshot_client::snapshot_for_periodic(host.snapshot_client.as_deref());
+            let (shapes_match, shapes) = saved_shapes(&space, snap.as_ref());
             let fingerprint = format!("{name}:{live:?}:{shapes}");
             decide(
                 &mut host.space_polish,

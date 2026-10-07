@@ -1437,21 +1437,35 @@ fn verify_selective_border_rings(host: &mut HostState) {
     let saved_focus = host.window_focused;
     let saved_cycle = host.light_cycle;
     let saved_pulse = host.last_pulse_step;
+    let saved_output: Vec<_> = host
+        .mux
+        .active_pane_ids()
+        .into_iter()
+        .filter_map(|id| host.mux.pane(id).map(|pane| (id, pane.last_output_at)))
+        .collect();
+    // Activity expires after 1.5s. Restamp around each oracle so a slow
+    // full paint cannot change the spaces-bar working count between the
+    // retained frame and the comparison, and put the old stamps back so
+    // the strip-pulse check later in this window is not racing that clock.
+    let stamp_active = |host: &mut HostState| {
+        let now = Instant::now();
+        for id in host.mux.active_pane_ids() {
+            if let Some(pane) = host.mux.pane_mut(id) {
+                pane.last_output_at = Some(now);
+            }
+        }
+    };
     host.selective_border_rings = true;
     host.window_focused = false;
     host.light_cycle = false;
-    let now = Instant::now();
-    for id in host.mux.active_pane_ids() {
-        if let Some(pane) = host.mux.pane_mut(id) {
-            pane.last_output_at = Some(now);
-        }
-    }
+    stamp_active(host);
     let mut retained = frame(host);
     let _ = host
         .mux
         .focused_mut()
         .emulator
         .feed(b"\x1b[3;2Hsteady ring");
+    stamp_active(host);
     let partial = paint_retained(host, &mut retained);
     assert_eq!(
         partial.full_repaint_reason, None,
@@ -1461,14 +1475,16 @@ fn verify_selective_border_rings(host: &mut HostState) {
         host.border_underlay.last_restored_slots, 0,
         "a cell update must not restore settled rings"
     );
+    stamp_active(host);
     assert_eq!(retained, full_frame_oracle(host));
 
     // A focus move rewrites unbounded chrome state and is a full frame.
     // The running-dot pulse stays partial and still crosses the top ring strip.
     host.window_focused = true;
-    host.mux.focused_mut().last_output_at = Some(Instant::now());
+    stamp_active(host);
     host.last_pulse_step = 0;
     let mut retained = frame(host);
+    stamp_active(host);
     host.last_pulse_step = 1;
     let pulsed = paint_retained(host, &mut retained);
     assert_eq!(
@@ -1479,6 +1495,7 @@ fn verify_selective_border_rings(host: &mut HostState) {
         host.border_underlay.last_restored_slots >= 1,
         "pulse damage under the ring restores that ring"
     );
+    stamp_active(host);
     assert_eq!(
         retained,
         full_frame_oracle(host),
@@ -1489,6 +1506,11 @@ fn verify_selective_border_rings(host: &mut HostState) {
     host.window_focused = saved_focus;
     host.light_cycle = saved_cycle;
     host.last_pulse_step = saved_pulse;
+    for (id, at) in saved_output {
+        if let Some(pane) = host.mux.pane_mut(id) {
+            pane.last_output_at = at;
+        }
+    }
     frame(host);
 }
 

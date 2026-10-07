@@ -1451,6 +1451,8 @@ fn explicit_socket_spaces_are_stable_across_runtime_directories() {
     let mut daemon = Command::new(env!("CARGO_BIN_EXE_pmuxd"));
     let mut daemon = daemon
         .env("XDG_RUNTIME_DIR", &runtime_a)
+        .env("XDG_DATA_HOME", data.0.as_os_str())
+        .env("XDG_CONFIG_HOME", data.0.join("config"))
         .arg("--socket")
         .arg(&socket)
         .args(["--", "/bin/sh"])

@@ -429,6 +429,7 @@ impl ApplicationHandler<UserAction> for Proof {
                 let path = a.attach_layout_path.clone().unwrap();
                 let mut foreign = original.clone();
                 foreign.tabs[0].sessions = vec![self.original[1].0.to_string()];
+                foreign.tabs[0].title.push_str(" poisoned layout");
                 prismattyc_mux::attach_tabs::save(&path, &foreign).unwrap();
                 poll_host_attach_tabs(a);
                 assert_eq!(

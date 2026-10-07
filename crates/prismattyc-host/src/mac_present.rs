@@ -5,6 +5,7 @@
 //! Animation retains the other tile images without a full-frame conversion.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use objc2::{rc::Retained, MainThreadMarker};
@@ -21,6 +22,7 @@ use winit::window::Window;
 use crate::frame_damage::{FrameDamage, PixelRect};
 use crate::pixel_alpha::premultiply_in_place;
 use crate::present_tiles::{copy_tile, damaged_tiles, tiles};
+use crate::present_timing::PresentTiming;
 
 pub struct MacPresent {
     layer: Retained<CALayer>,
@@ -28,6 +30,7 @@ pub struct MacPresent {
     view: Retained<NSView>,
     color_space: CFRetained<CGColorSpace>,
     pixels: Vec<u32>,
+    previous_pixels: Option<Vec<u32>>,
     tile_rects: Vec<PixelRect>,
     tile_layers: Vec<Retained<CALayer>>,
     scratch: Vec<u32>,
@@ -73,6 +76,7 @@ impl MacPresent {
             view,
             color_space,
             pixels: Vec::new(),
+            previous_pixels: None,
             tile_rects: Vec::new(),
             tile_layers: Vec::new(),
             scratch: Vec::new(),
@@ -114,17 +118,47 @@ impl MacPresent {
         &mut self.pixels
     }
 
-    pub fn present(&mut self, damage: FrameDamage) -> Result<()> {
+    pub fn present(
+        &mut self,
+        damage: FrameDamage,
+        measure_changed_tiles: bool,
+    ) -> Result<PresentTiming> {
         let damage = if self.rebuild_layers {
             FrameDamage::Full
         } else {
             damage
         };
         let dirty = damaged_tiles(&self.tile_rects, &damage);
+        let dirty_tiles = dirty.len();
+        let write_bytes = dirty
+            .iter()
+            .map(|&index| {
+                let tile = self.tile_rects[index];
+                tile.width
+                    .saturating_mul(tile.height)
+                    .saturating_mul(std::mem::size_of::<u32>())
+            })
+            .fold(0usize, usize::saturating_add);
+        let write_started = Instant::now();
+        let changed_tiles = if measure_changed_tiles {
+            self.previous_pixels
+                .as_ref()
+                .filter(|previous| previous.len() == self.pixels.len())
+                .map(|previous| {
+                    dirty
+                        .iter()
+                        .filter(|&&index| {
+                            tile_differs(&self.pixels, previous, self.width, self.tile_rects[index])
+                        })
+                        .count()
+                })
+        } else {
+            None
+        };
         // Prepare every replacement before changing the layer tree. Images own
         // immutable data, so reuse of scratch never races the compositor.
         let mut images = Vec::with_capacity(dirty.len());
-        for index in dirty {
+        for index in dirty.iter().copied() {
             let tile = self.tile_rects[index];
             copy_tile(&self.pixels, self.width, tile, &mut self.scratch);
             premultiply_in_place(&mut self.scratch);
@@ -133,6 +167,8 @@ impl MacPresent {
                 alpha_image(&self.scratch, tile.width, tile.height, &self.color_space)?,
             ));
         }
+        let write_us = elapsed_us(write_started);
+        let commit_started = Instant::now();
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         self.layer.setFrame(self.root_layer.bounds());
@@ -176,10 +212,47 @@ impl MacPresent {
             unsafe { self.tile_layers[index].setContents(Some(image.as_ref())) };
         }
         CATransaction::commit();
+        let commit_us = elapsed_us(commit_started);
+        self.update_previous_pixels(&dirty, measure_changed_tiles);
         self.scale = scale;
         self.rebuild_layers = false;
         self.retained = true;
-        Ok(())
+        Ok(PresentTiming {
+            write_us,
+            commit_us,
+            dirty_tiles,
+            changed_tiles,
+            write_bytes,
+        })
+    }
+
+    fn update_previous_pixels(&mut self, dirty: &[usize], measure_changed_tiles: bool) {
+        if !measure_changed_tiles {
+            self.previous_pixels = None;
+            return;
+        }
+        if self
+            .previous_pixels
+            .as_ref()
+            .is_none_or(|previous| previous.len() != self.pixels.len())
+        {
+            self.previous_pixels = Some(self.pixels.clone());
+            return;
+        }
+        let width = self.width;
+        let pixels = &self.pixels;
+        let tile_rects = &self.tile_rects;
+        let previous = self
+            .previous_pixels
+            .as_mut()
+            .expect("the previous frame was checked above");
+        for &index in dirty {
+            let tile = tile_rects[index];
+            for y in tile.y..tile.y + tile.height {
+                let row = y * width + tile.x..y * width + tile.x + tile.width;
+                previous[row.clone()].copy_from_slice(&pixels[row]);
+            }
+        }
     }
 }
 
@@ -226,9 +299,41 @@ fn alpha_image(
     .context("create alpha-capable Core Graphics image")
 }
 
+fn tile_differs(current: &[u32], previous: &[u32], width: usize, tile: PixelRect) -> bool {
+    (tile.y..tile.y + tile.height).any(|y| {
+        let row = y * width + tile.x..y * width + tile.x + tile.width;
+        current[row.clone()] != previous[row]
+    })
+}
+
+fn elapsed_us(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changed_tile_scan_compares_only_pixels_inside_the_tile() {
+        let previous = [0, 1, 2, 3, 4, 5];
+        let tile = PixelRect {
+            x: 1,
+            y: 0,
+            width: 2,
+            height: 2,
+        };
+
+        assert!(!tile_differs(&previous, &previous, 3, tile));
+
+        let mut changed_inside = previous;
+        changed_inside[5] = 6;
+        assert!(tile_differs(&changed_inside, &previous, 3, tile));
+
+        let mut changed_outside = previous;
+        changed_outside[0] = 6;
+        assert!(!tile_differs(&changed_outside, &previous, 3, tile));
+    }
 
     #[test]
     fn image_preserves_alpha_and_owns_its_pixels() {

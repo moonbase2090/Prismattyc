@@ -339,6 +339,7 @@ pub(crate) fn live_snapshot() -> Option<Snapshot> {
 }
 
 fn live_snapshot_at(socket: &Path) -> Option<Snapshot> {
+    let _timing = crate::pump_timing::PumpIoTimer::socket_round_trip();
     let mut client = Client::connect(socket, REQUEST_TIMEOUT).ok()?;
     match client.request(|request_id| ControlRequest::Snapshot {
         version: PROTOCOL_VERSION,
@@ -836,6 +837,7 @@ impl LogConnection {
 
     /// Same as [`Self::open`] on an explicit socket (adopt / tests).
     pub(crate) fn open_on(socket: &Path, session_key: &str) -> Result<Self> {
+        let _timing = crate::pump_timing::PumpIoTimer::socket_round_trip();
         let mut client = Client::connect(socket, REQUEST_TIMEOUT)?;
         let snapshot = client.request(|request_id| ControlRequest::Snapshot {
             version: PROTOCOL_VERSION,

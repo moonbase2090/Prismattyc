@@ -1143,6 +1143,22 @@ outside the bounded damage boxes.
 The `osd` guard means that the render timer OSD is visible. OSD output forces
 full repaint for the frame.
 
+Each window's `pump` object reports the latest main-thread pump duration and
+the maximum observed in the current one-second window. `slowest_phase` names
+the most expensive phase in the latest pump. The `phases` map includes each
+phase's `last_us` and `max_1s_us`; socket round trips and synchronous
+subprocess waits include per-pump counts and time, plus one-second totals.
+The pump data is application-wide and is repeated under each window.
+
+`last_raster.timing.parse_us` accumulates PTY parsing across drains until the
+next completed paint. On macOS, `last_raster.present` reports the time spent
+writing tile images and committing them, dirty tile count, and bytes copied.
+`changed_tiles` is `null` unless `render_timer` is `osd`, `log`, or `both`; in
+those modes it counts dirty tiles whose pixels differ from the preceding
+frame. With timing off, the host does not allocate the comparison buffer.
+These fields describe the latest raster attempt, which can be older than the
+current pump snapshot when a window is idle.
+
 The `alt-screen` guard means a pane entered or left its alternate screen
 since the previous frame. A pane that stays on its alternate screen does
 not set this guard. The `scrollback` guard means the scroll offset changed,

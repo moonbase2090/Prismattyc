@@ -173,6 +173,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         value: ConfigValue::String("plain"),
     },
     ConfigKey {
+        name: "async_paste",
+        group: ConfigGroup::Input,
+        doc: "Hand pastes to the pane writer thread so large pastes never pause the window",
+        range: "true | false",
+        value: ConfigValue::Bool(false),
+    },
+    ConfigKey {
         name: "install_agent_skills",
         group: ConfigGroup::AgentSkills,
         doc: "Install the pmux Agent Skill for detected agents once per app version",
@@ -1071,6 +1078,7 @@ mod tests {
         "render_timer_log_every_frame",
         "tab_strip",
         "link_click",
+        "async_paste",
         "chrome_style",
         "bar_color",
         "layout",

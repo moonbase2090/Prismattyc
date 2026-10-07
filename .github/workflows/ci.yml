@@ -150,7 +150,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo tree -p prismattyc-host -i graphite-core | tee /tmp/graphite-core-tree.txt
-          grep -F 'rev=008d29cb93de4021f50dd246c4a43063ecaad1b6#008d29cb93de4021f50dd246c4a43063ecaad1b6' /tmp/graphite-core-tree.txt
+          grep -F 'rev=008d29cb93de4021f50dd246c4a43063ecaad1b6#008d29cb' /tmp/graphite-core-tree.txt
 
       - name: Check workspace
         run: |

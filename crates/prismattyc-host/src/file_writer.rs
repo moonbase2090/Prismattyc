@@ -167,6 +167,11 @@ impl Handle {
         self.wait_for(WriteKey::AttachTabs(path.to_path_buf()));
     }
 
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn wait_for_render_status(&self, pid_path: &Path) {
+        self.wait_for(WriteKey::RenderStatus(pid_path.to_path_buf()));
+    }
+
     #[cfg(target_os = "macos")]
     pub(super) fn wait_for_component_heartbeat(&self, socket: &Path, component: &str) {
         self.wait_for(WriteKey::ComponentHeartbeat {

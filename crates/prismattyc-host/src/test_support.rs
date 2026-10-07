@@ -21,6 +21,14 @@ pub(crate) fn wait_for_attach_write(host: &crate::HostState) {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn wait_for_render_status(app: &crate::App) {
+    let Some((pid_path, _)) = app.registered_host.as_ref() else {
+        return;
+    };
+    app.file_writer.handle().wait_for_render_status(pid_path);
+}
+
 pub(crate) fn mux_bin_dir() -> &'static PathBuf {
     static BIN_DIR: OnceLock<PathBuf> = OnceLock::new();
     BIN_DIR.get_or_init(|| {

@@ -412,6 +412,9 @@ impl ApplicationHandler<UserAction> for Proof {
                     .space_rail
                     .current = None;
                 self.app.pump(event_loop);
+                test_support::wait_for_attach_write(
+                    self.app.windows.get(&self.windows[0]).unwrap(),
+                );
                 assert_eq!(
                     self.app.windows[&self.windows[0]]
                         .space_rail
@@ -651,6 +654,7 @@ impl ApplicationHandler<UserAction> for Proof {
                 let _ = std::fs::remove_file(pid_path.with_extension("render.json"));
                 self.app.last_render_status = None;
                 self.app.publish_render_status();
+                test_support::wait_for_render_status(&self.app);
                 let status =
                     prismattyc_mux::host_render_status::read(&host_mux_socket().unwrap()).unwrap();
                 assert!(!status["windows"].as_array().unwrap().is_empty());

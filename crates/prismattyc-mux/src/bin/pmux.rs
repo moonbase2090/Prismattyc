@@ -514,6 +514,14 @@ fn main() -> Result<()> {
     // helpers, and any host/attach child they launch, use the same identity
     // without changing PMUX_SOCKET's caller-identity semantics.
     std::env::set_var("PRISMATTYC_SPACES_SOCKET", &paths.socket);
+    let current_default = default_socket_path("default")
+        .ok()
+        .is_some_and(|default| default == paths.socket);
+    if !paths.target_is_explicit || current_default {
+        std::env::set_var("PRISMATTYC_DAEMON_IDENTITY", "default");
+    } else {
+        std::env::remove_var("PRISMATTYC_DAEMON_IDENTITY");
+    }
     match verb {
         Verb::Up => {
             reject_session_flag(cli_session.as_deref(), "up")?;

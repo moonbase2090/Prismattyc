@@ -670,10 +670,8 @@ pub fn list_layouts(dir: &Path) -> Result<Vec<LayoutListEntry>> {
     Ok(out)
 }
 
-/// The default daemon retains this historical location when its socket uses
-/// the built-in `pmux.sock` identity. Other sockets get a stable, private
-/// subdirectory whose identity is canonicalized even when the socket is gone,
-/// so aliases of one daemon share one Space store.
+/// The default daemon retains its historical Space directory. Other daemons
+/// get a stable private subdirectory keyed by their recorded socket identity.
 #[must_use]
 pub fn spaces_dir() -> PathBuf {
     let base = spaces_dir_default();
@@ -690,7 +688,24 @@ pub fn spaces_dir() -> PathBuf {
 #[must_use]
 pub fn spaces_dir_for_socket(socket: &Path) -> PathBuf {
     let base = spaces_dir_default();
+    if let Some(identity) =
+        std::env::var_os("PRISMATTYC_DAEMON_IDENTITY").filter(|value| !value.is_empty())
+    {
+        return spaces_dir_for_identity(&identity.to_string_lossy(), &base);
+    }
     spaces_dir_for_socket_with_base(socket, &base)
+}
+
+/// Stable marker path shared by the mux daemon and its clients.
+#[must_use]
+pub fn spaces_daemon_identity_path(socket: &Path) -> PathBuf {
+    stable_socket_identity(socket).with_extension("spaces-identity")
+}
+
+/// Canonical socket identity used when a daemon has no marker yet.
+#[must_use]
+pub fn spaces_socket_identity(socket: &Path) -> String {
+    stable_socket_identity(socket).display().to_string()
 }
 
 fn spaces_dir_default() -> PathBuf {
@@ -698,11 +713,28 @@ fn spaces_dir_default() -> PathBuf {
 }
 
 fn spaces_dir_for_socket_with_base(socket: &Path, base: &Path) -> PathBuf {
-    if socket.file_name().and_then(|name| name.to_str()) == Some("pmux.sock") {
+    let marker = spaces_daemon_identity_path(socket);
+    if let Ok(identity) = fs::read_to_string(marker) {
+        let identity = identity.trim();
+        if !identity.is_empty() {
+            return spaces_dir_for_identity(identity, base);
+        }
+    }
+    let identity = spaces_socket_identity(socket);
+    if crate::default_socket_path("default")
+        .ok()
+        .is_some_and(|default| spaces_socket_identity(&default) == identity)
+    {
         return base.to_path_buf();
     }
-    let identity = stable_socket_identity(socket);
-    let digest = Sha256::digest(identity.to_string_lossy().as_bytes());
+    spaces_dir_for_identity(&identity, base)
+}
+
+fn spaces_dir_for_identity(identity: &str, base: &Path) -> PathBuf {
+    if identity == "default" {
+        return base.to_path_buf();
+    }
+    let digest = Sha256::digest(identity.as_bytes());
     base.join("instances").join(format!("sha256-{digest:x}"))
 }
 
@@ -1808,11 +1840,10 @@ mod tests {
     #[test]
     fn spaces_dir_scopes_explicit_sockets_but_preserves_default() {
         let base = Path::new("/xdg/prismattyc/spaces");
-        let default = Path::new("/run/user/1000/prismattyc/pmux.sock");
         let first = Path::new("/tmp/pmux-a.sock");
         let second = Path::new("/tmp/pmux-b.sock");
 
-        assert_eq!(spaces_dir_for_socket_with_base(default, base), base);
+        assert_eq!(spaces_dir_for_identity("default", base), base);
         let first_dir = spaces_dir_for_socket_with_base(first, base);
         let second_dir = spaces_dir_for_socket_with_base(second, base);
         assert_ne!(first_dir, second_dir);

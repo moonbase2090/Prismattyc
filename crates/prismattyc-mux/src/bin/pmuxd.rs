@@ -205,6 +205,18 @@ fn main() -> Result<()> {
     }
     let server = ControlServer::bind(&cli.socket, plane)
         .with_context(|| format!("bind {}", cli.socket.display()))?;
+    let identity = std::env::var("PRISMATTYC_DAEMON_IDENTITY").unwrap_or_else(|_| {
+        if default_socket_path("default").ok().as_ref() == Some(&cli.socket) {
+            "default".into()
+        } else {
+            prismattyc_mux::spaces_socket_identity(&cli.socket)
+        }
+    });
+    std::fs::write(
+        prismattyc_mux::spaces_daemon_identity_path(&cli.socket),
+        format!("{identity}\n"),
+    )
+    .context("write Spaces daemon identity")?;
     println!("{}", server.path().display());
 
     server.wait_shutdown();

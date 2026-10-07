@@ -1352,10 +1352,16 @@ fn space_save_open_ls_front_door_and_usage_exit() {
 
 #[test]
 fn spaces_are_scoped_to_explicit_sockets() {
-    let socket_a = socket_path();
-    let socket_b = socket_path();
-    let _guard_a = start_server(&socket_a);
-    let _guard_b = start_server(&socket_b);
+    let socket_root =
+        std::env::temp_dir().join(format!("prism-same-basename-{}", std::process::id()));
+    let socket_a_parent = socket_root.join("a");
+    let socket_b_parent = socket_root.join("b");
+    std::fs::create_dir_all(&socket_a_parent).expect("socket A directory");
+    std::fs::create_dir_all(&socket_b_parent).expect("socket B directory");
+    let socket_a = socket_a_parent.join("pmux.sock");
+    let socket_b = socket_b_parent.join("pmux.sock");
+    let guard_a = start_server(&socket_a);
+    let guard_b = start_server(&socket_b);
     let data = layout_data_dir();
     let xdg = &[("XDG_DATA_HOME", data.0.as_path())];
 
@@ -1421,6 +1427,9 @@ fn spaces_are_scoped_to_explicit_sockets() {
         instance_dirs, 2,
         "each explicit socket needs its own Spaces directory"
     );
+    drop(guard_a);
+    drop(guard_b);
+    let _ = std::fs::remove_dir_all(socket_root);
 }
 
 #[test]
@@ -1438,6 +1447,11 @@ fn explicit_socket_spaces_are_stable_across_runtime_directories() {
         .expect("private second runtime");
     let socket = socket_parent.join("pmux.sock");
     let guard = start_server(&socket);
+    std::fs::write(
+        prismattyc_mux::spaces_daemon_identity_path(&socket),
+        "default\n",
+    )
+    .expect("default daemon identity");
     let extra_a = [
         ("XDG_DATA_HOME", data.0.as_os_str().to_os_string()),
         ("XDG_RUNTIME_DIR", runtime_a.as_os_str().to_os_string()),
@@ -1491,6 +1505,15 @@ fn explicit_socket_spaces_are_stable_across_runtime_directories() {
         stdout(&through_env).contains("runtime-space"),
         "{}",
         stdout(&through_env)
+    );
+    let default_alias = data.0.join("default-socket-alias.sock");
+    std::os::unix::fs::symlink(&socket, &default_alias).expect("default socket alias");
+    let alias_route = umbrella_vars_cleared(&default_alias, &extra_b, &[], &["space", "ls"]);
+    assert!(alias_route.status.success(), "{}", stderr(&alias_route));
+    assert!(
+        stdout(&alias_route).contains("runtime-space"),
+        "default alias lost its Space: {}",
+        stdout(&alias_route)
     );
     let listed = umbrella_vars_cleared(&socket, &extra_b, &[], &["space", "ls"]);
     assert!(listed.status.success(), "{}", stderr(&listed));

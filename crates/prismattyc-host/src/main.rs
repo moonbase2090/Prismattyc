@@ -1134,6 +1134,8 @@ struct HostState {
     border_anim: Option<Instant>,
     /// Pixels beneath the current animated border; empty outside a sweep.
     border_underlay: border_underlay::BorderUnderlay,
+    /// Partial frames restore only rings that change. Off until a later flip.
+    selective_border_rings: bool,
     /// Last quantized sweep step painted (same repaint-throttle idea as the
     /// pulse dot).
     last_cycle_step: u8,
@@ -2797,6 +2799,11 @@ impl App {
         };
 
         for host in self.windows.values_mut() {
+            let selective_border_rings = self.file_config.selective_border_rings.unwrap_or(false);
+            if host.selective_border_rings != selective_border_rings {
+                host.selective_border_rings = selective_border_rings;
+                host.dirty = true;
+            }
             let space_reorder_enabled = self.file_config.space_reorder.unwrap_or(false);
             if host.space_reorder_enabled != space_reorder_enabled {
                 host.space_reorder_enabled = space_reorder_enabled;
@@ -3925,6 +3932,7 @@ impl App {
                 last_focused: initial_focus,
                 border_anim: None,
                 border_underlay: Default::default(),
+                selective_border_rings: self.file_config.selective_border_rings.unwrap_or(false),
                 last_cycle_step: 0,
                 visual_bell: self.file_config.visual_bell(),
                 pane_visual_bell: self.file_config.pane_visual_bell.unwrap_or(false),
@@ -5588,13 +5596,15 @@ struct GraphitePaneChrome {
     handle_hover: bool,
 }
 
-/// Capture every Graphite slot, then stroke every pane's chrome.
+/// Capture the Graphite slots this frame is re-stroking, then stroke them.
 ///
 /// The hairline and focus ring blend. A second stroke on the retained buffer
-/// darkens the edge, so partial frames restore the pre-chrome strips and paint
-/// the ring once. Slots are captured before any ring so a shared gap keeps the
-/// cell surface, not the previous pane's stroke. Panes the cell loop skipped
-/// still get their ring back, because the restore erased every captured slot.
+/// darkens the edge, so a partial frame restores the pre-chrome strips and
+/// paints the ring once. Slots are captured before any ring so a shared gap
+/// keeps the cell surface, not the previous pane's stroke. With
+/// `selective_border_rings` off, every ring is restored and stroked. With it
+/// on, only rings that changed (focus, pulse, sweep, or damage under the
+/// ring) are restored; the others stay as already painted.
 fn paint_retained_graphite_panes(
     host: &mut HostState,
     buffer: &mut [u32],
@@ -5604,6 +5614,7 @@ fn paint_retained_graphite_panes(
     cycle_progress: Option<f32>,
     focused: PaneId,
 ) {
+    let refresh = host.border_underlay.take_refresh();
     if !geom.chrome.graphite {
         return;
     }
@@ -5630,11 +5641,31 @@ fn paint_retained_graphite_panes(
     }
     let tok = graphite::bar_tokens(&host.theme, host.bar_color);
     let accent = graphite::accent(&tok, focus_border_rgb(host.focus_border));
-    for (index, pane) in panes.iter().enumerate() {
+    let mut refresh = refresh;
+    if let border_underlay::BorderRefresh::Slots(slots) = &mut refresh {
+        for pane in &panes {
+            if !slots.contains(&pane.slot) && !host.border_underlay.has_slot(pane.slot) {
+                slots.push(pane.slot);
+            }
+        }
+    }
+    let stroke_slot = |slot: PixelRect| match &refresh {
+        border_underlay::BorderRefresh::All => true,
+        border_underlay::BorderRefresh::Slots(slots) => slots.contains(&slot),
+    };
+    let mut reset = matches!(refresh, border_underlay::BorderRefresh::All);
+    for pane in &panes {
+        if !stroke_slot(pane.slot) {
+            continue;
+        }
         host.border_underlay
-            .capture_graphite(buffer, width, pane.slot, index == 0);
+            .capture_graphite(buffer, width, pane.slot, reset);
+        reset = false;
     }
     for pane in &panes {
+        if !stroke_slot(pane.slot) {
+            continue;
+        }
         graphite::paint_pane_chrome(
             buffer,
             width,
@@ -5858,8 +5889,13 @@ fn rasterize_frame(
     if empty_partial_skips_paint(full, &frame_damage, pane_damage_empty) {
         return frame_damage;
     }
-    host.border_underlay
-        .restore(buffer, width as usize, &mut frame_damage);
+    if host.selective_border_rings {
+        host.border_underlay
+            .restore_changed(buffer, width as usize, &mut frame_damage);
+    } else {
+        host.border_underlay
+            .restore(buffer, width as usize, &mut frame_damage);
+    }
     let overlay_surface = host_overlay_surface(host);
     if host.find.active && host.emulator.screen().alt_active() {
         close_find(&mut host.find);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PresentTiming {
     pub(crate) write_us: u64,

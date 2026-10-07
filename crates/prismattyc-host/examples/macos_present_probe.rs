@@ -18,6 +18,7 @@ mod pixel_alpha;
 #[cfg(target_os = "macos")]
 #[path = "../src/present_tiles.rs"]
 mod present_tiles;
+#[cfg(target_os = "macos")]
 #[path = "../src/present_timing.rs"]
 mod present_timing;
 

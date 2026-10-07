@@ -1397,6 +1397,19 @@ fn spaces_are_scoped_to_explicit_sockets() {
         !alias_listing.contains("only-b"),
         "socket alias leaked socket B: {alias_listing}"
     );
+    let stop_a = umbrella(&socket_a, &["stop"]);
+    assert!(stop_a.status.success(), "{}", stderr(&stop_a));
+    let stopped_alias_list = umbrella_env(&alias_a, xdg, &["space", "ls"]);
+    assert!(
+        stopped_alias_list.status.success(),
+        "{}",
+        stderr(&stopped_alias_list)
+    );
+    assert!(
+        stdout(&stopped_alias_list).contains("only-a"),
+        "stopped daemon alias lost its Space: {}",
+        stdout(&stopped_alias_list)
+    );
 
     let instance_root = data.0.join("prismattyc/spaces/instances");
     let instance_dirs = std::fs::read_dir(instance_root)
@@ -1418,6 +1431,11 @@ fn explicit_socket_spaces_are_stable_across_runtime_directories() {
     let socket_parent = runtime_a.join("prismattyc");
     std::fs::create_dir_all(&socket_parent).expect("runtime socket directory");
     std::fs::create_dir_all(&runtime_b).expect("second runtime directory");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&runtime_a, std::fs::Permissions::from_mode(0o700))
+        .expect("private first runtime");
+    std::fs::set_permissions(&runtime_b, std::fs::Permissions::from_mode(0o700))
+        .expect("private second runtime");
     let socket = socket_parent.join("pmux.sock");
     let guard = start_server(&socket);
     let extra_a = [
@@ -1443,6 +1461,37 @@ fn explicit_socket_spaces_are_stable_across_runtime_directories() {
         &["space", "save", "runtime-space", "runtime-seat"],
     );
     assert!(saved.status.success(), "{}", stderr(&saved));
+    let routed_ls = |runtime: &Path, socket_env: Option<&Path>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+        command
+            .env("PMUX_SERVER", env!("CARGO_BIN_EXE_pmuxd"))
+            .env("PMUX_ATTACH", env!("CARGO_BIN_EXE_pmux-attach"));
+        clear_command_env(&mut command);
+        command
+            .env("XDG_DATA_HOME", data.0.as_os_str())
+            .env("XDG_RUNTIME_DIR", runtime.as_os_str());
+        if let Some(socket) = socket_env {
+            command.env("PMUX_SOCKET", socket);
+        }
+        command
+            .args(["space", "ls"])
+            .output()
+            .expect("run pmux route")
+    };
+    let implicit = routed_ls(&runtime_a, None);
+    assert!(implicit.status.success(), "{}", stderr(&implicit));
+    assert!(
+        stdout(&implicit).contains("runtime-space"),
+        "{}",
+        stdout(&implicit)
+    );
+    let through_env = routed_ls(&runtime_b, Some(&socket));
+    assert!(through_env.status.success(), "{}", stderr(&through_env));
+    assert!(
+        stdout(&through_env).contains("runtime-space"),
+        "{}",
+        stdout(&through_env)
+    );
     let listed = umbrella_vars_cleared(&socket, &extra_b, &[], &["space", "ls"]);
     assert!(listed.status.success(), "{}", stderr(&listed));
     assert!(
@@ -2395,6 +2444,129 @@ fn space_open_no_run_and_none_skip_all_runs_unbound() {
         all_out.contains("ran sleep 30 in pt93-plain"),
         "all must run unbound: {all_out}"
     );
+}
+
+/// #206: reopening a saved session replays its saved command under the
+/// same policy as `space open`, instead of leaving a bare shell.
+#[test]
+fn session_reopen_replays_saved_command_under_space_open_policy() {
+    let socket = socket_path();
+    let _guard = start_server(&socket);
+    let data = layout_data_dir();
+    let cfg_dir = layout_data_dir();
+    let none_cfg = cfg_dir.0.join("none.toml");
+    std::fs::write(&none_cfg, "[mux]\nspace_open_runs_commands = \"none\"\n")
+        .expect("write none config");
+    let all_cfg = cfg_dir.0.join("all.toml");
+    std::fs::write(&all_cfg, "[mux]\nspace_open_runs_commands = \"all\"\n")
+        .expect("write all config");
+    let vars = |config: &Path| {
+        vec![
+            ("XDG_DATA_HOME", data.0.as_os_str().to_os_string()),
+            ("PRISMATTYC_CONFIG", config.as_os_str().to_os_string()),
+        ]
+    };
+    let reopen = |config: &Path, extra: &[&str]| {
+        let mut args = vec!["session", "reopen", "pt206", "--space", "seat206"];
+        args.extend_from_slice(extra);
+        let out = umbrella_vars(&socket, &vars(config), &args);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(
+            stdout(&out).contains("reopened pt206 in seat206"),
+            "{}",
+            stdout(&out)
+        );
+        stdout(&out)
+    };
+    let stop = || {
+        let stop = umbrella(&socket, &["stop", "pt206"]);
+        assert!(stop.status.success(), "{}", stderr(&stop));
+    };
+
+    let created = umbrella(
+        &socket,
+        &["new", "--no-attach", "--no-agent", "pt206", "--", "/bin/sh"],
+    );
+    assert!(created.status.success(), "{}", stderr(&created));
+    let save = umbrella_vars(
+        &socket,
+        &[
+            ("XDG_DATA_HOME", data.0.as_os_str().to_os_string()),
+            (procinfo::TEST_FOREGROUND_COMMAND_ENV, "sleep 30".into()),
+        ],
+        &["space", "save", "seat206"],
+    );
+    assert!(save.status.success(), "{}", stderr(&save));
+    let space_path = stdout(&save).trim().to_string();
+    let mut ctl = TestClient::connect(&socket);
+    let _ = register_client(&mut ctl);
+    let owner = ctl
+        .snapshot()
+        .sessions
+        .iter()
+        .find(|session| session.name == "pt206")
+        .and_then(|session| session.space_id.clone());
+    assert!(owner.is_some(), "space save claims the session");
+    stop();
+
+    let none_out = reopen(&none_cfg, &[]);
+    assert!(none_out.contains("skip run"), "none must skip: {none_out}");
+    assert!(
+        !none_out.contains("ran sleep"),
+        "none must not run: {none_out}"
+    );
+    stop();
+
+    let no_run_out = reopen(&all_cfg, &["--no-run"]);
+    assert!(
+        no_run_out.contains("skip run"),
+        "--no-run must skip: {no_run_out}"
+    );
+    assert!(
+        !no_run_out.contains("ran sleep"),
+        "--no-run must not run: {no_run_out}"
+    );
+    stop();
+
+    let all_out = reopen(&all_cfg, &[]);
+    assert!(
+        all_out.contains("ran sleep 30 in pt206"),
+        "all must run: {all_out}"
+    );
+    let mut found = None;
+    for _ in 0..50 {
+        let snapshot = ctl.snapshot();
+        if let Some(pid) = session_window(&snapshot, "pt206").panes[0].child_pid {
+            found = procinfo::foreground_command(pid);
+            if found.as_deref().is_some_and(|cmd| cmd.contains("sleep")) {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let foreground = found.expect("foreground after reopen");
+    assert!(
+        foreground.contains("sleep"),
+        "reopen left a bare shell: {foreground}"
+    );
+    stop();
+
+    // --no-claim: same replay, but the Space file and owner are untouched.
+    let before = std::fs::read(&space_path).expect("read space");
+    let unclaimed_out = reopen(&all_cfg, &["--no-claim"]);
+    assert!(
+        unclaimed_out.contains("ran sleep 30 in pt206"),
+        "{unclaimed_out}"
+    );
+    let unclaimed = ctl
+        .snapshot()
+        .sessions
+        .iter()
+        .find(|session| session.name == "pt206")
+        .map(|session| session.space_id.clone())
+        .expect("reopened session");
+    assert_eq!(unclaimed, None, "--no-claim must not claim the session");
+    assert_eq!(std::fs::read(&space_path).expect("read space"), before);
 }
 
 #[test]

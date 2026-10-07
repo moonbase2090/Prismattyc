@@ -670,21 +670,19 @@ pub fn list_layouts(dir: &Path) -> Result<Vec<LayoutListEntry>> {
     Ok(out)
 }
 
-/// The default daemon retains this historical location when `pmux` selects
-/// its built-in target. Explicit sockets get a stable, private subdirectory
-/// whose identity is canonicalized before hashing so aliases of one daemon
-/// share one Space store.
+/// The default daemon retains this historical location when its socket uses
+/// the built-in `pmux.sock` identity. Other sockets get a stable, private
+/// subdirectory whose identity is canonicalized even when the socket is gone,
+/// so aliases of one daemon share one Space store.
 #[must_use]
 pub fn spaces_dir() -> PathBuf {
     let base = spaces_dir_default();
-    let legacy_default =
-        std::env::var_os("PRISMATTYC_SPACES_LEGACY").is_some_and(|value| value == "1");
     let socket = std::env::var_os("PRISMATTYC_SPACES_SOCKET")
         .filter(|value| !value.is_empty())
         .or_else(|| std::env::var_os("PMUX_SOCKET").filter(|value| !value.is_empty()));
-    match (legacy_default, socket) {
-        (true, _) | (false, None) => base,
-        (false, Some(socket)) => spaces_dir_for_socket(Path::new(&socket)),
+    match socket {
+        None => base,
+        Some(socket) => spaces_dir_for_socket(Path::new(&socket)),
     }
 }
 
@@ -692,20 +690,48 @@ pub fn spaces_dir() -> PathBuf {
 #[must_use]
 pub fn spaces_dir_for_socket(socket: &Path) -> PathBuf {
     let base = spaces_dir_default();
-    spaces_dir_for_socket_with_default(socket, false, &base)
+    spaces_dir_for_socket_with_base(socket, &base)
 }
 
 fn spaces_dir_default() -> PathBuf {
     spaces_dir_from(crate::platform::data_home(), crate::platform::home_dir())
 }
 
-fn spaces_dir_for_socket_with_default(socket: &Path, legacy_default: bool, base: &Path) -> PathBuf {
-    if legacy_default {
+fn spaces_dir_for_socket_with_base(socket: &Path, base: &Path) -> PathBuf {
+    if socket.file_name().and_then(|name| name.to_str()) == Some("pmux.sock") {
         return base.to_path_buf();
     }
-    let identity = fs::canonicalize(socket).unwrap_or_else(|_| socket.to_path_buf());
+    let identity = stable_socket_identity(socket);
     let digest = Sha256::digest(identity.to_string_lossy().as_bytes());
     base.join("instances").join(format!("sha256-{digest:x}"))
+}
+
+fn stable_socket_identity(socket: &Path) -> PathBuf {
+    if let Ok(canonical) = fs::canonicalize(socket) {
+        return canonical;
+    }
+    let mut candidate = socket.to_path_buf();
+    if let Ok(link) = fs::read_link(&candidate) {
+        candidate = if link.is_absolute() {
+            link
+        } else {
+            candidate
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(link)
+        };
+    }
+    let parent = candidate
+        .parent()
+        .and_then(|parent| fs::canonicalize(parent).ok())
+        .unwrap_or_else(|| {
+            candidate
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf()
+        });
+    let file_name = candidate.file_name().map(PathBuf::from).unwrap_or_default();
+    parent.join(file_name)
 }
 
 fn spaces_dir_from(xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> PathBuf {
@@ -1786,12 +1812,9 @@ mod tests {
         let first = Path::new("/tmp/pmux-a.sock");
         let second = Path::new("/tmp/pmux-b.sock");
 
-        assert_eq!(
-            spaces_dir_for_socket_with_default(default, true, base),
-            base
-        );
-        let first_dir = spaces_dir_for_socket_with_default(first, false, base);
-        let second_dir = spaces_dir_for_socket_with_default(second, false, base);
+        assert_eq!(spaces_dir_for_socket_with_base(default, base), base);
+        let first_dir = spaces_dir_for_socket_with_base(first, base);
+        let second_dir = spaces_dir_for_socket_with_base(second, base);
         assert_ne!(first_dir, second_dir);
         assert!(first_dir.starts_with(base.join("instances")));
         assert!(second_dir.starts_with(base.join("instances")));

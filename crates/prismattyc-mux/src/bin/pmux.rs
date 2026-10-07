@@ -514,11 +514,6 @@ fn main() -> Result<()> {
     // helpers, and any host/attach child they launch, use the same identity
     // without changing PMUX_SOCKET's caller-identity semantics.
     std::env::set_var("PRISMATTYC_SPACES_SOCKET", &paths.socket);
-    if paths.target_is_explicit {
-        std::env::remove_var("PRISMATTYC_SPACES_LEGACY");
-    } else {
-        std::env::set_var("PRISMATTYC_SPACES_LEGACY", "1");
-    }
     match verb {
         Verb::Up => {
             reject_session_flag(cli_session.as_deref(), "up")?;
@@ -4949,8 +4944,11 @@ verbs:
   rename NAME [--session KEY]
     Set the session name and agent ID together. Default: this pane.
     Pending mail stays. Previous mailbox addresses forward to NAME.
-  reopen NAME --space SPACE
-    Reopen one saved session with its name, mailbox, and Space owner.
+  reopen NAME --space SPACE [--no-run] [--no-claim]
+    Reopen one saved session with its name, mailbox, and Space owner,
+    then run its saved commands as space open does
+    (space_open_runs_commands; --no-run skips them). --no-claim
+    leaves the Space file and the session's owner unchanged.
   suggest [--space NAME]
     Print an unused name such as work-1.
   clear [--all] [--keep NAME]

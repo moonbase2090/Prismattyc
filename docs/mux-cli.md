@@ -174,7 +174,10 @@ pmux session suggest --space work
 Omit `--session-name` or `--name` to use the suggested name automatically.
 After a restart, press Enter in an exited pane to reopen its saved session.
 Use `pmux session reopen NAME --space SPACE` to do the same from the CLI.
-The session keeps its saved name, mailbox, and Space owner.
+The session keeps its saved name, mailbox, and Space owner. Its saved
+commands run as they do for `pmux space open`: `space_open_runs_commands`
+decides which run, and `--no-run` skips them all. `--no-claim` reopens the
+session without changing the Space file or the session's owner.
 `pmux mail alias NAME` creates a shorthand. It does not bind a session.
 
 ## Work in isolated spaces

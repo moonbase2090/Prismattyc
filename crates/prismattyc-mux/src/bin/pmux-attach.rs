@@ -6042,10 +6042,8 @@ fn main() -> Result<()> {
     // Keep Space reads aligned with the socket selected by this attach client.
     if cli.socket_explicit {
         std::env::set_var("PRISMATTYC_SPACES_SOCKET", &cli.socket);
-        std::env::remove_var("PRISMATTYC_SPACES_LEGACY");
     } else {
         std::env::remove_var("PRISMATTYC_SPACES_SOCKET");
-        std::env::set_var("PRISMATTYC_SPACES_LEGACY", "1");
     }
     diagnose_socket(&cli.socket)?;
     let mut client = Client::connect(&cli.socket)?;

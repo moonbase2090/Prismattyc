@@ -85,6 +85,8 @@ hover_blend = 0.1
 # -- input --
 # Open links on plain clicks; Cmd/Ctrl-click always remains available. plain|modifier.
 link_click = "plain"
+# Hand pastes to the pane writer thread so large pastes never pause the window. true | false.
+async_paste = false
 
 # -- agent integration --
 # Install the pmux Agent Skill for detected agents once per app version. true|false.
@@ -135,6 +137,8 @@ space_rail = "bottom"
 space_reorder = false
 # Keep one pmuxd snapshot connection for periodic polls. Startup only. true | false.
 snapshot_client = false
+# Restore and re-stroke only border rings that change. true | false.
+selective_border_rings = false
 # Save changed Space arrangements after a short idle. true | false.
 space_autosave = true
 # Choose naming prompts, automatic sessions, or blank terminals. "ask" | "auto" | "blank".
@@ -1015,6 +1019,9 @@ the file applies changes on the next poll tick:
 - `focus_border` — recolors immediately; deleting the key reverts to default.
 - `theme` — swaps terminal defaults, ANSI 0–15, cursor/selection, and host
   chrome immediately; deleting the key restores Prismattyc Default.
+- `selective_border_rings` — off unless the file sets it true. Partial frames
+  then restore and re-stroke only rings that change (focus, pulse, sweep, or
+  damage under the ring). Deleting the key turns that off again.
 - `focus_border_animation` — takes effect on the next focus change; switching
   to `"none"` (or deleting the key) settles any in-progress sweep.
 - `focus_border_animation_ms` / `focus_border_animation_head` — apply from

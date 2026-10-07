@@ -166,6 +166,9 @@ pub struct ConfigFile {
     pub tab_strip: Option<TabStripMode>,
     /// Open links with a plain click (default) or require Cmd/Ctrl-click.
     pub link_click: Option<crate::link_click::Mode>,
+    /// Deliver pastes on the pane writer thread and encode image pastes off
+    /// the main thread (#195). Default false.
+    pub async_paste: Option<bool>,
     /// Multi-pane title row: `focused` (default) or `hover`. Sibling of
     /// `tab_strip` because TOML cannot nest a table under `tab_strip = "auto"`.
     pub pane_titles: Option<PaneTitlesMode>,
@@ -250,6 +253,9 @@ pub struct ConfigFile {
     /// Keep one pmuxd snapshot connection for periodic polls.
     /// Default false. Startup only: a reload does not start or stop the client.
     pub snapshot_client: Option<bool>,
+    /// Partial frames restore and re-stroke only border rings that change.
+    /// Default false. Hot-reloaded.
+    pub selective_border_rings: Option<bool>,
     /// Widest spaces-rail chip in cells (6–40); chips fit their labels up
     /// to it. `0` (default) means 28.
     pub space_rail_chip_cols: Option<usize>,
@@ -547,6 +553,10 @@ impl ConfigFile {
 
     pub fn link_click(&self) -> crate::link_click::Mode {
         self.link_click.unwrap_or_default()
+    }
+
+    pub fn async_paste(&self) -> bool {
+        self.async_paste.unwrap_or(false)
     }
 
     pub fn os_notify_bell(&self) -> bool {
@@ -1087,6 +1097,16 @@ mod tests {
     }
 
     #[test]
+    fn async_paste_is_off_unless_set() {
+        assert!(!ConfigFile::default().async_paste());
+        let dir = temp_dir("async-paste");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "async_paste = true\n").unwrap();
+        assert!(load(&path).unwrap().async_paste());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn missing_file_is_defaults_and_partial_files_parse() {
         let dir = temp_dir("parse");
         let path = dir.join("config.toml");
@@ -1094,6 +1114,9 @@ mod tests {
         assert!(ConfigFile::default().install_agent_skills.unwrap_or(true));
         assert!(!ConfigFile::default().space_reorder.unwrap_or(false));
         assert!(!ConfigFile::default().snapshot_client_enabled());
+        assert!(!ConfigFile::default()
+            .selective_border_rings
+            .unwrap_or(false));
 
         std::fs::write(&path, "space_reorder = true\n").unwrap();
         assert!(load(&path).unwrap().space_reorder.unwrap_or(false));
@@ -1102,6 +1125,8 @@ mod tests {
         assert!(load(&path).unwrap().snapshot_client_enabled());
         std::fs::write(&path, "snapshot_client = false\n").unwrap();
         assert!(!load(&path).unwrap().snapshot_client_enabled());
+        std::fs::write(&path, "selective_border_rings = true\n").unwrap();
+        assert!(load(&path).unwrap().selective_border_rings.unwrap_or(false));
 
         std::fs::write(&path, "install_agent_skills = false\n").unwrap();
         assert!(!load(&path).unwrap().install_agent_skills.unwrap_or(true));

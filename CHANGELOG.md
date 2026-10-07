@@ -1,5 +1,132 @@
 # Changelog
 
+## [0.3.3] - 2026-10-07
+
+### Since 0.3.0
+
+A plain click opens a link. This applies to OSC 8 links and detected
+HTTP(S) URLs. The link opens on release only when the press and release stay
+on the same link. Drags still select text, double- and triple-clicks still
+select a word or line, and programs using mouse reporting still receive
+unmodified clicks. `link_click = "modifier"` brings back Ctrl-click on Linux
+and Command-click on macOS. The setting is hot-reloaded and appears in
+Settings.
+
+Right-click a space, session, or pane row in the sidebar or a vertical space
+rail, or a space icon on the collapsed strip, to open a context menu. It
+offers the existing open, save, rename, stop, move, and delete actions.
+Destructive actions ask for confirmation. Close space… appears only for the
+current space. Menu or Shift+F10 opens the menu from a focused rail, and the
+unbound `space_rail_context_menu` action does the same. The sidebar and the
+collapsed strip no longer show a pane row for a session with one pane. The
+session row stands for that pane, and its menu adds Focus, Rename, Close
+pane…, Stop…, and Move to space….
+
+The Graphite sidebar marks the space, tab, and pane rows that need you. A
+space row shows how many panes are waiting. Clicking a marker focuses the
+next pane that needs attention, and opens its space first when that space is
+not current. `jump_needs_you` (default `Ctrl+Shift+U`) and a command-palette
+entry cycle through those panes. Attention clears when the pane prints more
+output without a new attention request, so a badge no longer sticks after an
+agent rings once and keeps working. Focusing the pane still clears it.
+
+Pressing Enter on the placeholder for a saved Space session replays that
+session's saved command instead of opening a bare login shell. The saved
+layout and per-pane working directories come back too.
+`pmux session reopen NAME --space SPACE` replays saved commands under the
+same `space_open_runs_commands` policy as `pmux space open`. A seat that is
+already live in an owned Space is not replayed. `--no-run` skips the
+commands, and `--no-claim` reopens the session without changing the Space
+file or the session's owner.
+
+pmux mail reaches Muse panes. Doorbells used to wait because pmux did not
+recognize the `muse-bin-<version>` foreground process. pmux now matches
+`muse` and `muse-*` and submits with one carriage return.
+
+Pixel alpha premultiplication is exact and faster. Each channel keeps
+floor(channel × alpha / 255) for every 8-bit value, and fully opaque runs are
+skipped. On a 3,528 × 1,764 frame on Apple silicon, the median opaque
+conversion dropped from 2.45 ms to 0.67 ms, and alpha 128 from 2.74 ms to
+2.27 ms. These times cover the conversion loop, not end-to-end presentation.
+
+`pmux render-status --json` reports the main-thread pump phases and the count
+and time of synchronous socket and subprocess waits. With `render_timer` on,
+the log and the on-screen display show the pump duration and its slowest
+phase, PTY parse time, and on macOS the presentation write and commit times,
+tile counts, and bytes. Changed-pixel comparison follows the existing
+`render_timer` modes, which default to off.
+
+The nightly mutants in-diff job runs as 16 shards instead of one, so it
+finishes inside the step timeout. Tests that could not fail now assert real
+behavior. CI installs Noto CJK fonts and checks GPU adapter enumeration on
+wgpu's Noop backend.
+
+## [0.3.3-rc.1] - 2026-10-07
+
+This build is a prerelease. A tag such as `v0.3.3-rc.1` is published with
+`--prerelease --latest=false`. `pmux update` and the app menu do not offer it.
+Install the assets from the release, or opt in with `pmux update --pre`.
+The binaries report the base version, `0.3.3`.
+
+### Since 0.3.0
+
+A plain click opens a link. This applies to OSC 8 links and detected
+HTTP(S) URLs. The link opens on release only when the press and release stay
+on the same link. Drags still select text, double- and triple-clicks still
+select a word or line, and programs using mouse reporting still receive
+unmodified clicks. `link_click = "modifier"` brings back Ctrl-click on Linux
+and Command-click on macOS. The setting is hot-reloaded and appears in
+Settings.
+
+Right-click a space, session, or pane row in the sidebar or a vertical space
+rail, or a space icon on the collapsed strip, to open a context menu. It
+offers the existing open, save, rename, stop, move, and delete actions.
+Destructive actions ask for confirmation. Close space… appears only for the
+current space. Menu or Shift+F10 opens the menu from a focused rail, and the
+unbound `space_rail_context_menu` action does the same. The sidebar and the
+collapsed strip no longer show a pane row for a session with one pane. The
+session row stands for that pane, and its menu adds Focus, Rename, Close
+pane…, Stop…, and Move to space….
+
+The Graphite sidebar marks the space, tab, and pane rows that need you. A
+space row shows how many panes are waiting. Clicking a marker focuses the
+next pane that needs attention, and opens its space first when that space is
+not current. `jump_needs_you` (default `Ctrl+Shift+U`) and a command-palette
+entry cycle through those panes. Attention clears when the pane prints more
+output without a new attention request, so a badge no longer sticks after an
+agent rings once and keeps working. Focusing the pane still clears it.
+
+Pressing Enter on the placeholder for a saved Space session replays that
+session's saved command instead of opening a bare login shell. The saved
+layout and per-pane working directories come back too.
+`pmux session reopen NAME --space SPACE` replays saved commands under the
+same `space_open_runs_commands` policy as `pmux space open`. A seat that is
+already live in an owned Space is not replayed. `--no-run` skips the
+commands, and `--no-claim` reopens the session without changing the Space
+file or the session's owner.
+
+pmux mail reaches Muse panes. Doorbells used to wait because pmux did not
+recognize the `muse-bin-<version>` foreground process. pmux now matches
+`muse` and `muse-*` and submits with one carriage return.
+
+Pixel alpha premultiplication is exact and faster. Each channel keeps
+floor(channel × alpha / 255) for every 8-bit value, and fully opaque runs are
+skipped. On a 3,528 × 1,764 frame on Apple silicon, the median opaque
+conversion dropped from 2.45 ms to 0.67 ms, and alpha 128 from 2.74 ms to
+2.27 ms. These times cover the conversion loop, not end-to-end presentation.
+
+`pmux render-status --json` reports the main-thread pump phases and the count
+and time of synchronous socket and subprocess waits. With `render_timer` on,
+the log and the on-screen display show the pump duration and its slowest
+phase, PTY parse time, and on macOS the presentation write and commit times,
+tile counts, and bytes. Changed-pixel comparison follows the existing
+`render_timer` modes, which default to off.
+
+The nightly mutants in-diff job runs as 16 shards instead of one, so it
+finishes inside the step timeout. Tests that could not fail now assert real
+behavior. CI installs Noto CJK fonts and checks GPU adapter enumeration on
+wgpu's Noop backend.
+
 ## [0.3.0] - 2026-10-05
 
 Graphite is the default chrome. To keep the previous look, add this line to

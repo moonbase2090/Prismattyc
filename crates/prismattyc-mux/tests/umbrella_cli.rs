@@ -1010,7 +1010,8 @@ fn layout_data_dir() -> DataDirGuard {
 }
 
 fn spaces_data_dir(data: &Path, socket: &Path) -> PathBuf {
-    let digest = Sha256::digest(socket.to_string_lossy().as_bytes());
+    let identity = std::fs::canonicalize(socket).unwrap_or_else(|_| socket.to_path_buf());
+    let digest = Sha256::digest(identity.to_string_lossy().as_bytes());
     data.join("prismattyc/spaces/instances")
         .join(format!("sha256-{digest:x}"))
 }
@@ -1386,6 +1387,17 @@ fn spaces_are_scoped_to_explicit_sockets() {
         "socket B leaked socket A: {listing_b}"
     );
 
+    let alias_a = data.0.join("socket-a-alias.sock");
+    std::os::unix::fs::symlink(&socket_a, &alias_a).expect("socket alias");
+    let alias_list = umbrella_env(&alias_a, xdg, &["space", "ls"]);
+    assert!(alias_list.status.success(), "{}", stderr(&alias_list));
+    let alias_listing = stdout(&alias_list);
+    assert!(alias_listing.contains("only-a"), "{alias_listing}");
+    assert!(
+        !alias_listing.contains("only-b"),
+        "socket alias leaked socket B: {alias_listing}"
+    );
+
     let instance_root = data.0.join("prismattyc/spaces/instances");
     let instance_dirs = std::fs::read_dir(instance_root)
         .expect("per-socket Spaces root")
@@ -1396,6 +1408,51 @@ fn spaces_are_scoped_to_explicit_sockets() {
         instance_dirs, 2,
         "each explicit socket needs its own Spaces directory"
     );
+}
+
+#[test]
+fn explicit_socket_spaces_are_stable_across_runtime_directories() {
+    let data = layout_data_dir();
+    let runtime_a = std::env::temp_dir().join(format!("pt205-runtime-a-{}", std::process::id()));
+    let runtime_b = std::env::temp_dir().join(format!("pt205-runtime-b-{}", std::process::id()));
+    let socket_parent = runtime_a.join("prismattyc");
+    std::fs::create_dir_all(&socket_parent).expect("runtime socket directory");
+    std::fs::create_dir_all(&runtime_b).expect("second runtime directory");
+    let socket = socket_parent.join("pmux.sock");
+    let guard = start_server(&socket);
+    let extra_a = [
+        ("XDG_DATA_HOME", data.0.as_os_str().to_os_string()),
+        ("XDG_RUNTIME_DIR", runtime_a.as_os_str().to_os_string()),
+    ];
+    let extra_b = [
+        ("XDG_DATA_HOME", data.0.as_os_str().to_os_string()),
+        ("XDG_RUNTIME_DIR", runtime_b.as_os_str().to_os_string()),
+    ];
+
+    let created = umbrella_vars_cleared(
+        &socket,
+        &extra_a,
+        &[],
+        &["new", "--no-attach", "runtime-seat", "--", "/bin/sh"],
+    );
+    assert!(created.status.success(), "{}", stderr(&created));
+    let saved = umbrella_vars_cleared(
+        &socket,
+        &extra_a,
+        &[],
+        &["space", "save", "runtime-space", "runtime-seat"],
+    );
+    assert!(saved.status.success(), "{}", stderr(&saved));
+    let listed = umbrella_vars_cleared(&socket, &extra_b, &[], &["space", "ls"]);
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    assert!(
+        stdout(&listed).contains("runtime-space"),
+        "{}",
+        stdout(&listed)
+    );
+    drop(guard);
+    let _ = std::fs::remove_dir_all(runtime_a);
+    let _ = std::fs::remove_dir_all(runtime_b);
 }
 
 #[test]

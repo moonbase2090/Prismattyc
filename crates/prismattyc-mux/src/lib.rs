@@ -96,10 +96,10 @@ pub use layout_file::{
     list_layouts, list_spaces, load_layout, load_space, new_space_id, plan, remove_layout,
     remove_space, rename_space, reorder_spaces, save_layout, save_space, space_active_session,
     space_add_session, space_bind_agent, space_remove_session, space_sessions_in_tab_order,
-    spaces_dir, stub_space_session, valid_space_id, validate_layout_name, CwdSource,
-    LayoutListEntry, NodeRef, SavedLayout, SavedNode, SavedSpace, SavedSpaceSession, SavedSpaceTab,
-    SavedWindow, SpaceListEntry, SplitOp, OWNED_SPACE_VERSION, SAVED_LAYOUT_VERSION,
-    SAVED_SPACE_VERSION,
+    spaces_daemon_identity_path, spaces_dir, spaces_socket_identity, stub_space_session,
+    valid_space_id, validate_layout_name, CwdSource, LayoutListEntry, NodeRef, SavedLayout,
+    SavedNode, SavedSpace, SavedSpaceSession, SavedSpaceTab, SavedWindow, SpaceListEntry, SplitOp,
+    OWNED_SPACE_VERSION, SAVED_LAYOUT_VERSION, SAVED_SPACE_VERSION,
 };
 pub use live::{PMUX_SOCKET, PRISMATTYC_PANE_ID};
 pub use pane_log::PaneFramePolicy;

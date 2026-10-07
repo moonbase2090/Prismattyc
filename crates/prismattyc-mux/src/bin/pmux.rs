@@ -4939,8 +4939,11 @@ verbs:
   rename NAME [--session KEY]
     Set the session name and agent ID together. Default: this pane.
     Pending mail stays. Previous mailbox addresses forward to NAME.
-  reopen NAME --space SPACE
-    Reopen one saved session with its name, mailbox, and Space owner.
+  reopen NAME --space SPACE [--no-run] [--no-claim]
+    Reopen one saved session with its name, mailbox, and Space owner,
+    then run its saved commands as space open does
+    (space_open_runs_commands; --no-run skips them). --no-claim
+    leaves the Space file and the session's owner unchanged.
   suggest [--space NAME]
     Print an unused name such as work-1.
   clear [--all] [--keep NAME]

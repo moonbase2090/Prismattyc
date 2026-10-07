@@ -83,6 +83,8 @@ hover_blend = 0.1
 # -- input --
 # Open links on plain clicks; Cmd/Ctrl-click always remains available. plain|modifier.
 link_click = "plain"
+# Hand pastes to the pane writer thread so large pastes never pause the window. true | false.
+async_paste = false
 
 # -- agent integration --
 # Install the pmux Agent Skill for detected agents once per app version. true|false.

@@ -166,6 +166,9 @@ pub struct ConfigFile {
     pub tab_strip: Option<TabStripMode>,
     /// Open links with a plain click (default) or require Cmd/Ctrl-click.
     pub link_click: Option<crate::link_click::Mode>,
+    /// Deliver pastes on the pane writer thread and encode image pastes off
+    /// the main thread (#195). Default false.
+    pub async_paste: Option<bool>,
     /// Multi-pane title row: `focused` (default) or `hover`. Sibling of
     /// `tab_strip` because TOML cannot nest a table under `tab_strip = "auto"`.
     pub pane_titles: Option<PaneTitlesMode>,
@@ -539,6 +542,10 @@ impl ConfigFile {
 
     pub fn link_click(&self) -> crate::link_click::Mode {
         self.link_click.unwrap_or_default()
+    }
+
+    pub fn async_paste(&self) -> bool {
+        self.async_paste.unwrap_or(false)
     }
 
     pub fn os_notify_bell(&self) -> bool {
@@ -1075,6 +1082,16 @@ mod tests {
             std::fs::write(&path, bad).unwrap();
             assert!(load(&path).is_err(), "{bad:?} must be rejected");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn async_paste_is_off_unless_set() {
+        assert!(!ConfigFile::default().async_paste());
+        let dir = temp_dir("async-paste");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "async_paste = true\n").unwrap();
+        assert!(load(&path).unwrap().async_paste());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

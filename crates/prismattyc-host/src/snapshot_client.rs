@@ -235,8 +235,13 @@ fn run(
         }
         let mut failed = false;
         if let Some(connection) = conn.as_mut() {
+            // Stamp before the RPC. A file written while this poll is in
+            // flight stays newer than the boundary, same as a snapshot RPC.
+            let observed_at = SystemTime::now();
             match connection.events_after(sequence) {
-                Ok(batch) if batch.current_sequence == sequence && batch.events.is_empty() => {}
+                Ok(batch) if batch.current_sequence == sequence && batch.events.is_empty() => {
+                    confirm_observed(&inner, observed_at);
+                }
                 Ok(_) => {
                     if !resnapshot(connection, &inner, &mut sequence) {
                         failed = true;
@@ -294,6 +299,20 @@ fn resnapshot(connection: &mut SnapshotSocket, inner: &Inner, sequence: &mut u64
             mark_stale(inner);
             false
         }
+    }
+}
+
+/// The cached snapshot was still current when `observed_at` was sampled,
+/// before an events poll that came back unchanged. Move the boundary only
+/// forward, and only while that snapshot is still the current one. A later
+/// quiet poll can then deny a layout the first snapshot was too old to judge.
+fn confirm_observed(inner: &Inner, observed_at: SystemTime) {
+    let mut cache = lock(&inner.cache);
+    if cache.stale || cache.snapshot.is_none() {
+        return;
+    }
+    if cache.fetched_at.is_none_or(|fetched| fetched < observed_at) {
+        cache.fetched_at = Some(observed_at);
     }
 }
 
@@ -919,6 +938,116 @@ mod tests {
             ),
             crate::space_view::LayoutOwnership::Pending,
             "a snapshot requested before the layout write must not deny it"
+        );
+    }
+
+    /// A quiet daemon never changes sequence, so the events poll used to leave
+    /// `fetched_at` at the first snapshot. A layout written after that stamp
+    /// stayed Pending forever. A later unchanged poll must move the boundary
+    /// forward and let that same cache Deny.
+    #[test]
+    fn quiet_daemon_observation_denies_a_layout_written_after_the_cache() {
+        let path = socket_path();
+        let _server = boot_server(&path);
+        let client = SnapshotClient::spawn_at(path.clone(), noop_wake());
+        assert!(
+            wait_until(Duration::from_secs(3), || first_connection_cached(&client)),
+            "connects={}",
+            client.connects()
+        );
+        let (first_at, first) = client.fresh_observed().expect("cached snapshot");
+        assert!(
+            first_at <= SystemTime::now(),
+            "the first observation must already have happened"
+        );
+        assert!(
+            first
+                .sessions
+                .iter()
+                .all(|session| session.id.to_string() != "999"),
+            "the bootstrap snapshot must not already contain session 999"
+        );
+        let sequence = first.sequence;
+        let space = prismattyc_mux::SavedSpace {
+            version: 2,
+            id: Some("a".into()),
+            created_at_unix_ms: None,
+            saved_at_unix: 0,
+            sessions: Vec::new(),
+            tabs: Vec::new(),
+            active_tab: 0,
+            focused_session: None,
+        };
+        let file = crate::attach_tabs::AttachTabsFile {
+            tabs: vec![crate::attach_tabs::AttachTabRecord {
+                title: "late".into(),
+                sessions: vec!["999".into()],
+                layout: None,
+            }],
+            space: Some("a".into()),
+            ..Default::default()
+        };
+        let started = Instant::now();
+        let file_mtime = loop {
+            if started.elapsed() > Duration::from_secs(3) {
+                panic!("could not sample a layout newer than the cached observation");
+            }
+            let now = SystemTime::now();
+            let Some((fetched_at, snapshot)) = client.fresh_observed() else {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            };
+            if fetched_at > now || snapshot.sequence != sequence || snapshot != first {
+                continue;
+            }
+            let verdict = crate::space_view::layout_ownership(
+                Some(&space),
+                Some(&(fetched_at, snapshot)),
+                &file,
+                Some(now),
+                true,
+            );
+            if verdict == crate::space_view::LayoutOwnership::Pending {
+                break now;
+            }
+            thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(
+            client.connects(),
+            1,
+            "sampling must not open another socket"
+        );
+        assert!(
+            wait_until(Duration::from_secs(3), || {
+                client
+                    .fresh_observed()
+                    .is_some_and(|(fetched_at, snapshot)| {
+                        fetched_at > file_mtime
+                            && snapshot.sequence == sequence
+                            && snapshot == first
+                    })
+            }),
+            "a quiet daemon never moved the observation past the layout file"
+        );
+        let (later_at, later) = client.fresh_observed().expect("later observation");
+        assert!(later_at > file_mtime);
+        assert_eq!(later.sequence, sequence);
+        assert_eq!(later, first);
+        assert_eq!(
+            client.connects(),
+            1,
+            "the quiet poll must stay on the first socket"
+        );
+        assert_eq!(
+            crate::space_view::layout_ownership(
+                Some(&space),
+                Some(&(later_at, later)),
+                &file,
+                Some(file_mtime),
+                true,
+            ),
+            crate::space_view::LayoutOwnership::Deny,
+            "an observation that started after the layout write must deny a missing session"
         );
     }
 }

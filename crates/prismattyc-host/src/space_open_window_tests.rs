@@ -784,7 +784,7 @@ impl ApplicationHandler<UserAction> for StaleCacheProof {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.app.pump(event_loop);
+        self.app.pump(event_loop, None);
         for host in self.app.windows.values_mut() {
             let _ = host.mux.drain_all();
         }
@@ -994,7 +994,7 @@ impl ApplicationHandler<UserAction> for StaleDetachProof {
         if self.done {
             return;
         }
-        self.app.pump(event_loop);
+        self.app.pump(event_loop, None);
         for host in self.app.windows.values_mut() {
             let _ = host.mux.drain_all();
         }

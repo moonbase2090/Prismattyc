@@ -3041,6 +3041,11 @@ impl MuxRuntime {
         self.panes.get_mut(&id)
     }
 
+    /// Any live pane (any tab) by its stable numeric id.
+    pub(crate) fn pane_id_by_raw(&self, raw: u64) -> Option<PaneId> {
+        self.panes.keys().copied().find(|id| id.get() == raw)
+    }
+
     pub(crate) fn panes_and_rects(&self) -> impl Iterator<Item = (PaneId, &PaneRuntime, CellRect)> {
         self.rects
             .iter()
@@ -3218,6 +3223,11 @@ impl MuxRuntime {
     }
 
     /// Writer-death toasts since the previous take.
+    /// The host wake, for workers that report back to this window.
+    pub(crate) fn wake(&self) -> Option<Wake> {
+        self.wake.clone()
+    }
+
     pub(crate) fn take_pending_toasts(&mut self) -> Vec<(PaneId, String)> {
         std::mem::take(&mut self.pending_toasts)
     }

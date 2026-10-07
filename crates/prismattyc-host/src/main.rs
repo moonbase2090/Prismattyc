@@ -120,10 +120,7 @@ use prismattyc_core::{
     encode_osc52_clipboard, Color, GridDamage, HistoryMatch, Screen, ScrollDamage, Selection, Style,
 };
 use prismattyc_emulator::{CursorShape, Emulator};
-use prismattyc_mux::{
-    layout_path, load_space, plan, space_bind_agent, spaces_dir, PaneId, SavedSpaceSession,
-    WindowId as MuxWindowId,
-};
+use prismattyc_mux::{layout_path, load_space, spaces_dir, PaneId, WindowId as MuxWindowId};
 use prismattyc_protocol::{InputModifiers, PointerPhase};
 use prismattyc_render::paint_display_row;
 use raster::{
@@ -17437,28 +17434,21 @@ fn plan_placeholder_reopen(
     }
 }
 
-struct SpaceRestore {
-    agent: Option<String>,
-    cwd: Option<PathBuf>,
-}
-
-fn restore_from_space_session(session: &SavedSpaceSession) -> SpaceRestore {
-    SpaceRestore {
-        agent: space_bind_agent(session.agent.as_deref(), &session.name),
-        cwd: session
-            .windows
-            .first()
-            .and_then(|window| plan(&window.root).0),
+/// `pmux session reopen` for a placeholder's saved session. The current
+/// Space claims it; with no current Space, `--no-claim` leaves the fallback
+/// Space file and the session's owner alone. pmux recreates the layout and
+/// replays saved commands under `space_open_runs_commands` (#206).
+fn session_reopen_args(name: &str, space: &str, claim: bool) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "session".into(),
+        "reopen".into(),
+        name.into(),
+        "--space".into(),
+        space.into(),
+    ];
+    if !claim {
+        args.push("--no-claim".into());
     }
-}
-
-fn pmux_new_args(name: &str, restore: &SpaceRestore) -> Vec<String> {
-    let mut args = vec!["new".into(), "--no-attach".into()];
-    if let Some(agent) = &restore.agent {
-        args.push("--agent".into());
-        args.push(agent.clone());
-    }
-    args.push(name.to_string());
     args
 }
 
@@ -17604,14 +17594,19 @@ fn live_cache_space(space: Option<String>, dir: &Path) -> Option<String> {
     space.filter(|name| space_json_exists_in(dir, name))
 }
 
-fn loaded_space(host: &HostState) -> Option<prismattyc_mux::SavedSpace> {
-    let name = host
-        .space_rail
+/// The Space whose saved sessions placeholders reopen from: the current
+/// one, else `$PMUX_SPACE`, else `default`.
+fn loaded_space_name(host: &HostState) -> String {
+    host.space_rail
         .current
         .clone()
         .or_else(|| std::env::var("PMUX_SPACE").ok())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "default".into());
+        .unwrap_or_else(|| "default".into())
+}
+
+fn loaded_space(host: &HostState) -> Option<prismattyc_mux::SavedSpace> {
+    let name = loaded_space_name(host);
     if !space_json_exists(&name) {
         return None;
     }
@@ -17619,40 +17614,12 @@ fn loaded_space(host: &HostState) -> Option<prismattyc_mux::SavedSpace> {
 }
 
 fn recreate_session(host: &HostState, name: &str) -> Result<()> {
-    if let Some(space) = &host.space_rail.current {
-        let output = std::process::Command::new(pmux_bin())
-            .args(["session", "reopen", name, "--space", space])
-            .stdin(std::process::Stdio::null())
-            .output()?;
-        if !output.status.success() {
-            bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
-        }
-        return Ok(());
-    }
-    let restore = loaded_space(host)
-        .and_then(|space| {
-            space
-                .sessions
-                .into_iter()
-                .find(|session| session.name == name)
-        })
-        .map(|session| restore_from_space_session(&session));
-    let mux_bin = find_mux_bin();
-    let args = match &restore {
-        Some(restore) => pmux_new_args(name, restore),
-        None => pmux_new_args(
-            name,
-            &SpaceRestore {
-                agent: space_bind_agent(None, name),
-                cwd: None,
-            },
-        ),
+    let args = match &host.space_rail.current {
+        Some(space) => session_reopen_args(name, space, true),
+        None => session_reopen_args(name, &loaded_space_name(host), false),
     };
-    let mut command = std::process::Command::new(&mux_bin);
+    let mut command = std::process::Command::new(pmux_bin());
     command.args(&args);
-    if let Some(cwd) = restore.as_ref().and_then(|restore| restore.cwd.as_ref()) {
-        command.current_dir(cwd);
-    }
     if let Some(socket) = host_mux_socket() {
         command.env("PMUX_SOCKET", socket);
     }
@@ -24000,31 +23967,22 @@ session mail (id 15)
     }
 
     #[test]
-    fn restore_from_space_session_uses_agent_and_leaf_cwd() {
-        let session = SavedSpaceSession {
-            name: "mail".into(),
-            agent: Some("kiro-pc".into()),
-            windows: vec![prismattyc_mux::SavedWindow {
-                title: "main".into(),
-                cols: 80,
-                rows: 24,
-                root: prismattyc_mux::SavedNode::Leaf {
-                    cwd: Some("/tmp/mail".into()),
-                    program: None,
-                    command: None,
-                    title: None,
-                },
-            }],
-        };
-        let restore = restore_from_space_session(&session);
-        assert_eq!(restore.agent.as_deref(), Some("kiro-pc"));
+    fn placeholder_reopen_goes_through_session_reopen_on_both_branches() {
+        // The current Space claims the seat; no current Space must not.
         assert_eq!(
-            restore.cwd.as_deref(),
-            Some(std::path::Path::new("/tmp/mail"))
+            session_reopen_args("mail", "work", true),
+            ["session", "reopen", "mail", "--space", "work"]
         );
         assert_eq!(
-            pmux_new_args("mail", &restore),
-            ["new", "--no-attach", "--agent", "kiro-pc", "mail"]
+            session_reopen_args("mail", "default", false),
+            [
+                "session",
+                "reopen",
+                "mail",
+                "--space",
+                "default",
+                "--no-claim"
+            ]
         );
     }
 

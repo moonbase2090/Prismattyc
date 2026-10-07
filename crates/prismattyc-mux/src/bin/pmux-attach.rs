@@ -92,6 +92,7 @@ const DEFAULT_TOAST_FOCUS_RGB: [u8; 3] = [0x62, 0xa8, 0xff];
 
 struct Cli {
     socket: PathBuf,
+    socket_explicit: bool,
     pane: Option<u64>,
     session: Option<String>,
     session_id: Option<u64>,
@@ -174,8 +175,10 @@ impl Cli {
         if read_only && write.is_some() {
             bail!("--read-only cannot be combined with --write");
         }
+        let socket_explicit = socket.is_some();
         Ok(Self {
             socket: socket.unwrap_or(default_socket_path("default")?),
+            socket_explicit,
             pane,
             session,
             session_id,
@@ -6036,6 +6039,12 @@ fn dump_styled_json(client: &mut Client, client_id: u64, pane_id: u64, watch: bo
 fn main() -> Result<()> {
     prismattyc_mux::release_update::forward_installed("pmux-attach")?;
     let cli = Cli::parse(std::env::args().skip(1))?;
+    // Keep Space reads aligned with the socket selected by this attach client.
+    if cli.socket_explicit {
+        std::env::set_var("PRISMATTYC_SPACES_SOCKET", &cli.socket);
+    } else {
+        std::env::remove_var("PRISMATTYC_SPACES_SOCKET");
+    }
     diagnose_socket(&cli.socket)?;
     let mut client = Client::connect(&cli.socket)?;
     let registered = client.request(|request_id| ControlRequest::RegisterClient {

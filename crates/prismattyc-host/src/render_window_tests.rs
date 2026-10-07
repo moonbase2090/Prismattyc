@@ -382,7 +382,7 @@ fn paint_in_real_window(restore_only: bool) {
                 assert!(guards.iter().any(|value| value == guard), "missing {guard}");
             }
             assert!(!guards.iter().any(|value| value == "backend-no-partial"));
-            verify_sidebar_chrome_click_with_zero_rows(host);
+            verify_sidebar_chrome_click_with_zero_rows(self.app.windows.get_mut(&id).unwrap());
             verify_config_reload(&mut self.app, id);
             chrome_contract_tests::verify(self.app.windows.get_mut(&id).unwrap());
             self.painted = true;

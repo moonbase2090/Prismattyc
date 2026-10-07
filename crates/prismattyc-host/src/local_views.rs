@@ -93,15 +93,23 @@ pub(super) fn switch(host: &mut HostState, owner: Option<String>) -> Result<bool
 }
 
 /// Hidden shells continue consuming output without repainting the active Space.
-pub(super) fn drain(host: &mut HostState) -> (bool, Vec<(Option<String>, PaneId, String, String)>) {
+pub(super) struct ExitedAttach {
+    pub(super) session_id: String,
+    pub(super) session: String,
+}
+
+pub(super) fn drain(host: &mut HostState) -> (bool, Vec<ExitedAttach>) {
     let mut more = false;
     let mut exited = Vec::new();
-    host.local_views.parked.retain(|owner, view| {
+    host.local_views.parked.retain(|_, view| {
         more |= view.mux.drain_all().1;
         for (pane, session_id, session) in view.mux.take_exited_attach_sessions() {
             view.mux.clear_attach_session(pane);
             view.observed.remove(&session_id);
-            exited.push((owner.clone(), pane, session_id, session));
+            exited.push(ExitedAttach {
+                session_id,
+                session,
+            });
         }
         view.mux.take_pending_bells();
         view.mux.take_pending_attentions();

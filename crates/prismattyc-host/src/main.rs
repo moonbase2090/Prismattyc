@@ -7553,10 +7553,12 @@ impl App {
         let parse_started = Instant::now();
         let (parked_more, parked_exited) = local_views::drain(host);
         let mut retry_cleanups = Vec::new();
-        for (_owner, _pane, session_id, session) in parked_exited {
-            host.observed_space_sessions.remove(&session_id);
-            if let Err(error) = remove_exited_session_from_space(host, &session, &session_id) {
-                retry_cleanups.push((session, session_id));
+        for event in parked_exited {
+            host.observed_space_sessions.remove(&event.session_id);
+            if let Err(error) =
+                remove_exited_session_from_space(host, &event.session, &event.session_id)
+            {
+                retry_cleanups.push((event.session, event.session_id));
                 rail_toast(
                     host,
                     &format!(" clean exit cleanup failed; retrying: {error} "),
@@ -13891,6 +13893,15 @@ fn remove_exited_session_from_space(
         });
     }
 
+    if attach_log::live_snapshot().is_some_and(|snapshot| {
+        !snapshot
+            .sessions
+            .iter()
+            .any(|live| live.id.to_string() == session_id || live.name == session)
+    }) {
+        // Another host may have completed the same cleanup already.
+        return Ok(());
+    }
     let args = vec!["stop".into(), session_id.to_string()];
     run_pmux_space(&args)
         .map_err(|error| format!("could not stop direct session {session_id}: {error}"))

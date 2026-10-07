@@ -42,6 +42,21 @@ PRISMATTYC_BINS="$PWD/target/debug" tests/native/docker/run.sh rail-transparency
 
 This check inspects alpha in the host framebuffer. It does not verify compositor blur.
 
+### Pixel-alpha performance acceptance
+
+Run the conversion benchmark on a native host:
+
+```bash
+tests/native/pixel-alpha-acceptance.sh
+```
+
+The step compares the production conversion path with the pre-optimization
+reference for opaque and 50% alpha frames. Both optimized p50 measurements
+must be at most 90% of the reference p50. The bound catches a reverted
+conversion path. This measures the conversion loop, not end-to-end presentation
+latency. The [macOS alpha fixture](#run-macos-tests) also checks captured
+pixels through the Core Animation path.
+
 ### Focus-border raster measurements
 
 The private Xvfb window fixture can measure release-mode raster cost with the

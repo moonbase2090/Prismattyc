@@ -2282,6 +2282,129 @@ fn space_open_no_run_and_none_skip_all_runs_unbound() {
     );
 }
 
+/// #206: reopening a saved session replays its saved command under the
+/// same policy as `space open`, instead of leaving a bare shell.
+#[test]
+fn session_reopen_replays_saved_command_under_space_open_policy() {
+    let socket = socket_path();
+    let _guard = start_server(&socket);
+    let data = layout_data_dir();
+    let cfg_dir = layout_data_dir();
+    let none_cfg = cfg_dir.0.join("none.toml");
+    std::fs::write(&none_cfg, "[mux]\nspace_open_runs_commands = \"none\"\n")
+        .expect("write none config");
+    let all_cfg = cfg_dir.0.join("all.toml");
+    std::fs::write(&all_cfg, "[mux]\nspace_open_runs_commands = \"all\"\n")
+        .expect("write all config");
+    let vars = |config: &Path| {
+        vec![
+            ("XDG_DATA_HOME", data.0.as_os_str().to_os_string()),
+            ("PRISMATTYC_CONFIG", config.as_os_str().to_os_string()),
+        ]
+    };
+    let reopen = |config: &Path, extra: &[&str]| {
+        let mut args = vec!["session", "reopen", "pt206", "--space", "seat206"];
+        args.extend_from_slice(extra);
+        let out = umbrella_vars(&socket, &vars(config), &args);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(
+            stdout(&out).contains("reopened pt206 in seat206"),
+            "{}",
+            stdout(&out)
+        );
+        stdout(&out)
+    };
+    let stop = || {
+        let stop = umbrella(&socket, &["stop", "pt206"]);
+        assert!(stop.status.success(), "{}", stderr(&stop));
+    };
+
+    let created = umbrella(
+        &socket,
+        &["new", "--no-attach", "--no-agent", "pt206", "--", "/bin/sh"],
+    );
+    assert!(created.status.success(), "{}", stderr(&created));
+    let save = umbrella_vars(
+        &socket,
+        &[
+            ("XDG_DATA_HOME", data.0.as_os_str().to_os_string()),
+            (procinfo::TEST_FOREGROUND_COMMAND_ENV, "sleep 30".into()),
+        ],
+        &["space", "save", "seat206"],
+    );
+    assert!(save.status.success(), "{}", stderr(&save));
+    let space_path = stdout(&save).trim().to_string();
+    let mut ctl = TestClient::connect(&socket);
+    let _ = register_client(&mut ctl);
+    let owner = ctl
+        .snapshot()
+        .sessions
+        .iter()
+        .find(|session| session.name == "pt206")
+        .and_then(|session| session.space_id.clone());
+    assert!(owner.is_some(), "space save claims the session");
+    stop();
+
+    let none_out = reopen(&none_cfg, &[]);
+    assert!(none_out.contains("skip run"), "none must skip: {none_out}");
+    assert!(
+        !none_out.contains("ran sleep"),
+        "none must not run: {none_out}"
+    );
+    stop();
+
+    let no_run_out = reopen(&all_cfg, &["--no-run"]);
+    assert!(
+        no_run_out.contains("skip run"),
+        "--no-run must skip: {no_run_out}"
+    );
+    assert!(
+        !no_run_out.contains("ran sleep"),
+        "--no-run must not run: {no_run_out}"
+    );
+    stop();
+
+    let all_out = reopen(&all_cfg, &[]);
+    assert!(
+        all_out.contains("ran sleep 30 in pt206"),
+        "all must run: {all_out}"
+    );
+    let mut found = None;
+    for _ in 0..50 {
+        let snapshot = ctl.snapshot();
+        if let Some(pid) = session_window(&snapshot, "pt206").panes[0].child_pid {
+            found = procinfo::foreground_command(pid);
+            if found.as_deref().is_some_and(|cmd| cmd.contains("sleep")) {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let foreground = found.expect("foreground after reopen");
+    assert!(
+        foreground.contains("sleep"),
+        "reopen left a bare shell: {foreground}"
+    );
+    stop();
+
+    // --no-claim: same replay, but the Space file and owner are untouched.
+    let before = std::fs::read(&space_path).expect("read space");
+    let unclaimed_out = reopen(&all_cfg, &["--no-claim"]);
+    assert!(
+        unclaimed_out.contains("ran sleep 30 in pt206"),
+        "{unclaimed_out}"
+    );
+    let unclaimed = ctl
+        .snapshot()
+        .sessions
+        .iter()
+        .find(|session| session.name == "pt206")
+        .map(|session| session.space_id.clone())
+        .expect("reopened session");
+    assert_eq!(unclaimed, None, "--no-claim must not claim the session");
+    assert_eq!(std::fs::read(&space_path).expect("read space"), before);
+}
+
 #[test]
 fn arrange_main_vertical_retile_keeps_pane_count() {
     let socket = socket_path();

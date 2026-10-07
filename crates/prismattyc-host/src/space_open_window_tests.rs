@@ -431,6 +431,7 @@ impl ApplicationHandler<UserAction> for Proof {
                 foreign.tabs[0].sessions = vec![self.original[1].0.to_string()];
                 foreign.tabs[0].title.push_str(" poisoned layout");
                 prismattyc_mux::attach_tabs::save(&path, &foreign).unwrap();
+                set_cache_modified(&path, SystemTime::now() + Duration::from_secs(2));
                 poll_host_attach_tabs(a);
                 assert_eq!(
                     a.mux.remote_pane_id(a.mux.focused_id()),
@@ -439,6 +440,7 @@ impl ApplicationHandler<UserAction> for Proof {
                 );
                 assert!(a.space_opens.blocks_persist());
                 prismattyc_mux::attach_tabs::save(&path, &original).unwrap();
+                set_cache_modified(&path, SystemTime::now() + Duration::from_secs(4));
                 poll_host_attach_tabs(a);
                 assert!(!a.space_opens.blocks_persist());
                 // Multi-pane source: only the visible original pane moves.
@@ -670,6 +672,13 @@ impl ApplicationHandler<UserAction> for Proof {
         ));
     }
     fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+}
+
+fn set_cache_modified(path: &Path, modified: SystemTime) {
+    std::fs::File::open(path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
 }
 
 fn verify_polish_ui(host: &mut HostState) {

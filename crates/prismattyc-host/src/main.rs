@@ -8961,6 +8961,8 @@ fn poll_host_attach_tabs(host: &mut HostState) {
     if host.attach_layout.as_ref() == Some(&file) {
         host.attach_cache_stamp = now;
         host.attach_own_stamp = now;
+        host.space_opens
+            .cache_applied(now, file.space.as_deref(), file.mode, true);
         return;
     }
     if let Some(name) = file.space.as_deref() {

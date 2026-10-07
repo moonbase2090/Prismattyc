@@ -62,6 +62,21 @@ text and a reference to an image file that exists. The same run with
 change is reverted. `PASTE_E2E_TEXT_GAP_MS` and `PASTE_E2E_IMAGE_GAP_MS`
 override the bounds. Results are stored in `build/paste-e2e/`.
 
+### Pixel-alpha performance acceptance
+
+Run the conversion benchmark on a native host:
+
+```bash
+tests/native/pixel-alpha-acceptance.sh
+```
+
+The step compares the production conversion path with the pre-optimization
+reference for opaque and 50% alpha frames. Both optimized p50 measurements
+must be at most 90% of the reference p50. The bound catches a reverted
+conversion path. This measures the conversion loop, not end-to-end presentation
+latency. The [macOS alpha fixture](#run-macos-tests) also checks captured
+pixels through the Core Animation path.
+
 ### Focus-border raster measurements
 
 The private Xvfb window fixture can measure release-mode raster cost with the

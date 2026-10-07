@@ -688,11 +688,6 @@ pub fn spaces_dir() -> PathBuf {
 #[must_use]
 pub fn spaces_dir_for_socket(socket: &Path) -> PathBuf {
     let base = spaces_dir_default();
-    if let Some(identity) =
-        std::env::var_os("PRISMATTYC_DAEMON_IDENTITY").filter(|value| !value.is_empty())
-    {
-        return spaces_dir_for_identity(&identity.to_string_lossy(), &base);
-    }
     spaces_dir_for_socket_with_base(socket, &base)
 }
 

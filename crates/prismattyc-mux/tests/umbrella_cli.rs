@@ -1438,6 +1438,8 @@ fn explicit_socket_spaces_are_stable_across_runtime_directories() {
     let runtime_a = std::env::temp_dir().join(format!("pt205-runtime-a-{}", std::process::id()));
     let runtime_b = std::env::temp_dir().join(format!("pt205-runtime-b-{}", std::process::id()));
     let socket_parent = runtime_a.join("prismattyc");
+    let _ = std::fs::remove_dir_all(&runtime_a);
+    let _ = std::fs::remove_dir_all(&runtime_b);
     std::fs::create_dir_all(&socket_parent).expect("runtime socket directory");
     std::fs::create_dir_all(&runtime_b).expect("second runtime directory");
     use std::os::unix::fs::PermissionsExt;
@@ -1446,12 +1448,25 @@ fn explicit_socket_spaces_are_stable_across_runtime_directories() {
     std::fs::set_permissions(&runtime_b, std::fs::Permissions::from_mode(0o700))
         .expect("private second runtime");
     let socket = socket_parent.join("pmux.sock");
-    let guard = start_server(&socket);
-    std::fs::write(
-        prismattyc_mux::spaces_daemon_identity_path(&socket),
-        "default\n",
-    )
-    .expect("default daemon identity");
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_pmuxd"));
+    let mut daemon = daemon
+        .env("XDG_RUNTIME_DIR", &runtime_a)
+        .arg("--socket")
+        .arg(&socket)
+        .args(["--", "/bin/sh"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn default daemon");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while UnixStream::connect(&socket).is_err() {
+        if daemon.try_wait().expect("poll default daemon").is_some() {
+            panic!("default daemon exited before binding {socket:?}");
+        }
+        assert!(Instant::now() < deadline, "default daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let extra_a = [
         ("XDG_DATA_HOME", data.0.as_os_str().to_os_string()),
         ("XDG_RUNTIME_DIR", runtime_a.as_os_str().to_os_string()),
@@ -1483,7 +1498,8 @@ fn explicit_socket_spaces_are_stable_across_runtime_directories() {
         clear_command_env(&mut command);
         command
             .env("XDG_DATA_HOME", data.0.as_os_str())
-            .env("XDG_RUNTIME_DIR", runtime.as_os_str());
+            .env("XDG_RUNTIME_DIR", runtime.as_os_str())
+            .env("PRISMATTYC_CONFIG", data.0.join("config.toml"));
         if let Some(socket) = socket_env {
             command.env("PMUX_SOCKET", socket);
         }
@@ -1522,7 +1538,8 @@ fn explicit_socket_spaces_are_stable_across_runtime_directories() {
         "{}",
         stdout(&listed)
     );
-    drop(guard);
+    let _ = daemon.kill();
+    let _ = daemon.wait();
     let _ = std::fs::remove_dir_all(runtime_a);
     let _ = std::fs::remove_dir_all(runtime_b);
 }

@@ -43,6 +43,8 @@ mod paste_job;
 mod pixel_alpha;
 #[cfg(any(target_os = "macos", test))]
 mod present_tiles;
+mod present_timing;
+mod pump_timing;
 mod rail_context_menu;
 mod rail_resize;
 mod raster;
@@ -259,9 +261,25 @@ fn ime_cursor_area(
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct RenderTiming {
     parse_us: u64,
+    last_parse_us: u64,
     damage_us: u64,
     raster_us: u64,
     present_us: u64,
+}
+
+impl RenderTiming {
+    fn add_parse(&mut self, elapsed: Duration) {
+        self.parse_us = self
+            .parse_us
+            .saturating_add(u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX));
+    }
+
+    fn finish_frame_parse(&mut self) -> u64 {
+        let parse_us = self.parse_us;
+        self.last_parse_us = parse_us;
+        self.parse_us = 0;
+        parse_us
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,6 +322,8 @@ impl FullRepaintReason {
 #[derive(Debug, Clone, Copy, Default)]
 struct RenderFrame {
     timing: RenderTiming,
+    pump: pump_timing::PumpSummary,
+    present: Option<present_timing::PresentTiming>,
     cells_painted: u64,
     rows_scrolled_as_blit: u64,
     full_repaint_reason: Option<FullRepaintReason>,
@@ -320,6 +340,7 @@ struct RenderWindowSummary {
     max_cells_painted: u64,
     blit_sum: u64,
     dominant_full_repaint_reason: Option<FullRepaintReason>,
+    pump: pump_timing::PumpSummary,
 }
 
 #[derive(Debug, Default)]
@@ -372,6 +393,7 @@ impl RenderWindow {
             max_cells_painted: self.max_cells_painted,
             blit_sum: self.blit_sum,
             dominant_full_repaint_reason: dominant,
+            pump: frame.pump,
         };
         *self = Self {
             started_at: Some(now),
@@ -1982,6 +2004,7 @@ impl PresentBackend {
     }
 
     fn paint(&mut self, host: &mut HostState, width: u32, height: u32) -> Result<()> {
+        host.render_frame.present = None;
         // The OSD rewrites a moving host-drawn rectangle after terminal
         // rasterization. Keep it on the conservative full-frame path until
         // its exact rectangle is part of FrameDamage.
@@ -2033,7 +2056,11 @@ impl PresentBackend {
                     host.render_frame.full_repaint_reason,
                 );
                 let present_started = Instant::now();
-                mac.present(damage)?;
+                let present_timing = mac.present(
+                    damage,
+                    host.render_timer.logs() || host.render_timer.shows_osd(),
+                )?;
+                host.render_frame.present = Some(present_timing);
                 host.render_frame.timing.present_us = present_started.elapsed().as_micros() as u64;
             }
             #[cfg(all(test, target_os = "linux"))]
@@ -2607,6 +2634,7 @@ struct App {
     last_register_try: Option<Instant>,
     last_render_status: Option<Instant>,
     render_status_seq: u64,
+    pump_timing: pump_timing::PumpTiming,
     last_component_poll: Option<Instant>,
     restart_view: Option<PathBuf>,
     #[cfg(target_os = "macos")]
@@ -2669,6 +2697,7 @@ impl App {
             last_register_try: None,
             last_render_status: None,
             render_status_seq: 0,
+            pump_timing: pump_timing::PumpTiming::default(),
             last_component_poll: None,
             restart_view: None,
             #[cfg(target_os = "macos")]
@@ -3219,16 +3248,50 @@ impl App {
     }
 
     fn poll_attach_tabs(&mut self) {
+        let timing = &mut self.pump_timing;
         for host in self.windows.values_mut() {
+            let started = Instant::now();
             poll_host_attach_tabs(host);
+            timing.record_phase(pump_timing::Phase::PollHostAttachTabs, started.elapsed());
+            let started = Instant::now();
             advance_space_opens(host);
+            timing.record_phase(pump_timing::Phase::AdvanceSpaceOpens, started.elapsed());
+            let started = Instant::now();
             refresh_space_views(host);
+            timing.record_phase(pump_timing::Phase::RefreshSpaceViews, started.elapsed());
+            let started = Instant::now();
             local_views::persist_and_restore(host, false);
+            timing.record_phase(pump_timing::Phase::PersistAndRestore, started.elapsed());
+            let started = Instant::now();
             apply_pending_session_focus(host);
+            timing.record_phase(
+                pump_timing::Phase::ApplyPendingSessionFocus,
+                started.elapsed(),
+            );
         }
     }
 
-    fn pump(&mut self, event_loop: &ActiveEventLoop) {
+    fn finish_pump_timing(
+        &mut self,
+        started: Instant,
+        external_us: u64,
+        io_scope: pump_timing::PumpIoScope,
+    ) {
+        let total_us = external_us
+            .saturating_add(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+        self.pump_timing
+            .finish_pump(total_us, io_scope.finish(), Instant::now());
+        let summary = self.pump_timing.summary();
+        for host in self.windows.values_mut() {
+            host.render_frame.pump = summary;
+        }
+    }
+
+    fn pump(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        existing_io_scope: Option<pump_timing::PumpIoScope>,
+    ) {
         // ONE drain pass per event-loop cycle, then yield. Looping on `more`
         // pinned the main (UI) thread: under sustained PTY output, drain_pty
         // always reports leftover work, so the old continue never returned.
@@ -3239,9 +3302,18 @@ impl App {
         // wake; the resulting user_event re-enters pump next cycle. Clearing the
         // flag *before* drain still avoids dropping a child-EOF wake that
         // arrives while we are inside pump (live cascade).
+        let pump_started = Instant::now();
+        let external_us = self.pump_timing.begin_pump(pump_started);
+        let pump_io = existing_io_scope.unwrap_or_else(pump_timing::PumpIoScope::begin);
         self.wake_pending.store(false, Ordering::Relaxed);
+        let phase_started = Instant::now();
         restart::poll(self);
+        self.pump_timing
+            .record_phase(pump_timing::Phase::RestartPoll, phase_started.elapsed());
+        let phase_started = Instant::now();
         self.poll_config_reload();
+        self.pump_timing
+            .record_phase(pump_timing::Phase::ConfigReload, phase_started.elapsed());
         self.poll_attach_tabs();
         let mut more = false;
         let mut closed: Vec<WindowId> = Vec::new();
@@ -3263,15 +3335,34 @@ impl App {
                 next_deadline = Some(deadline);
             }
         }
+        let phase_started = Instant::now();
         self.retry_register_host_pid();
+        self.pump_timing.record_phase(
+            pump_timing::Phase::RetryRegisterHostPid,
+            phase_started.elapsed(),
+        );
         let rail_now = Instant::now();
+        let phase_started = Instant::now();
         let remote_changed = self.remote.borrow_mut().poll();
+        self.pump_timing
+            .record_phase(pump_timing::Phase::RemoteRailPoll, phase_started.elapsed());
+        let timing = &mut self.pump_timing;
         for (id, host) in self.windows.iter_mut() {
+            let phase_started = Instant::now();
             if host.space_rail.poll(&spaces_dir(), rail_now) {
                 rail_changed(host);
             }
+            timing.record_phase(pump_timing::Phase::SpaceRailPoll, phase_started.elapsed());
+            let phase_started = Instant::now();
             sync_remote_rail(host, remote_changed);
+            timing.record_phase(pump_timing::Phase::SyncRemoteRail, phase_started.elapsed());
+            let phase_started = Instant::now();
             adopt_nested_attaches(host, rail_now);
+            timing.record_phase(
+                pump_timing::Phase::AdoptNestedAttaches,
+                phase_started.elapsed(),
+            );
+            let phase_started = Instant::now();
             if !host.space_opens.blocks_persist()
                 && host.space_rail.current_index().is_none()
                 && !host.space_rail.names.is_empty()
@@ -3283,9 +3374,16 @@ impl App {
                     set_current_space(host, inferred);
                 }
             }
+            timing.record_phase(
+                pump_timing::Phase::InferCurrentSpace,
+                phase_started.elapsed(),
+            );
+            let phase_started = Instant::now();
             if Self::drain_pty(host) {
                 more = true;
             }
+            timing.record_phase(pump_timing::Phase::DrainPty, phase_started.elapsed());
+            let phase_started = Instant::now();
             maybe_e2e_dismiss_splash(host);
             let due_link_opens = host.link_click_gesture.take_due(Instant::now());
             for url in due_link_opens {
@@ -3302,6 +3400,10 @@ impl App {
             }
             if host.mux.all_children_exited() {
                 closed.push(*id);
+                timing.record_phase(
+                    pump_timing::Phase::WindowBookkeeping,
+                    phase_started.elapsed(),
+                );
                 continue;
             }
             let now = Instant::now();
@@ -3367,6 +3469,10 @@ impl App {
                     None => when,
                 });
             }
+            timing.record_phase(
+                pump_timing::Phase::WindowBookkeeping,
+                phase_started.elapsed(),
+            );
         }
         for id in closed {
             self.windows.remove(&id);
@@ -3374,9 +3480,15 @@ impl App {
         if self.windows.is_empty() {
             self.unregister_host_pid();
             event_loop.exit();
+            self.finish_pump_timing(pump_started, external_us, pump_io);
             return;
         }
+        let phase_started = Instant::now();
         self.publish_render_status();
+        self.pump_timing.record_phase(
+            pump_timing::Phase::PublishRenderStatus,
+            phase_started.elapsed(),
+        );
         event_loop.set_control_flow(match next_deadline {
             Some(when) => ControlFlow::WaitUntil(when),
             None => ControlFlow::Wait,
@@ -3384,6 +3496,7 @@ impl App {
         if more || self.wake_pending.load(Ordering::Relaxed) {
             (self.wake)();
         }
+        self.finish_pump_timing(pump_started, external_us, pump_io);
     }
 
     fn open_window(
@@ -3949,6 +4062,7 @@ impl App {
 
     fn finish_paint(host: &mut HostState) {
         host.render_frame.present_succeeded = true;
+        let parse_us = host.render_frame.timing.finish_frame_parse();
         if let Some(summary) = host.render_window.record(host.render_frame, Instant::now()) {
             host.render_osd = summary;
         }
@@ -3958,12 +4072,25 @@ impl App {
                 || should_log_render_frame(&mut host.last_render_log, now))
         {
             let frame = host.render_frame;
+            let present = frame.present.unwrap_or_default();
+            let changed_tiles = frame
+                .present
+                .and_then(|present| present.changed_tiles)
+                .map_or_else(|| "-".to_string(), |count| count.to_string());
             eprintln!(
-                "prismattyc-host: render parse={}us damage={}us raster={}us present={}us cells_painted={} rows_scrolled_as_blit={} full_repaint_reason={} full_repaint_guards={}",
-                frame.timing.parse_us,
+                "prismattyc-host: render parse={}us damage={}us raster={}us present={}us pump={}us slowest={}:{}us present_write={}us present_commit={}us dirty_tiles={} changed_tiles={} write_bytes={} cells_painted={} rows_scrolled_as_blit={} full_repaint_reason={} full_repaint_guards={}",
+                parse_us,
                 frame.timing.damage_us,
                 frame.timing.raster_us,
                 frame.timing.present_us,
+                frame.pump.total_us,
+                frame.pump.slowest_phase,
+                frame.pump.slowest_us,
+                present.write_us,
+                present.commit_us,
+                present.dirty_tiles,
+                changed_tiles,
+                present.write_bytes,
                 frame.cells_painted,
                 frame.rows_scrolled_as_blit,
                 frame.full_repaint_reason.map_or("-", FullRepaintReason::as_str),
@@ -7380,7 +7507,7 @@ impl App {
             host.hyperlink_hover = None;
         }
         let more = more || parked_more;
-        host.render_frame.timing.parse_us = parse_started.elapsed().as_micros() as u64;
+        host.render_frame.timing.add_parse(parse_started.elapsed());
         let damage_started = Instant::now();
         host.dirty |= pty_dirty;
         let bells = host.mux.take_pending_bells();
@@ -9013,24 +9140,25 @@ fn save_space_from_host_with(host: &mut HostState, name: &str, toast: bool) -> b
         return false;
     }
     persist_attach_layout_from_live(host);
-    match std::process::Command::new(pmux_bin())
-        .args(["space", "save", name])
-        .args(
-            host.attach_layout_path
-                .as_ref()
-                .into_iter()
-                .flat_map(|path| {
-                    [
-                        std::ffi::OsString::from("--view-path"),
-                        path.as_os_str().to_owned(),
-                    ]
-                }),
-        )
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-    {
+    match pump_timing::measure_subprocess_wait(|| {
+        std::process::Command::new(pmux_bin())
+            .args(["space", "save", name])
+            .args(
+                host.attach_layout_path
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|path| {
+                        [
+                            std::ffi::OsString::from("--view-path"),
+                            path.as_os_str().to_owned(),
+                        ]
+                    }),
+            )
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+    }) {
         Ok(status) if status.success() => {
             refresh_rail(host);
             set_current_space(host, Some(name.to_string()));
@@ -17422,11 +17550,13 @@ fn live_sessions() -> Vec<(String, String)> {
     let Some(socket) = host_mux_socket() else {
         return Vec::new();
     };
-    let output = std::process::Command::new(find_mux_bin())
-        .arg("--socket")
-        .arg(&socket)
-        .arg("ls")
-        .output();
+    let output = pump_timing::measure_subprocess_wait(|| {
+        std::process::Command::new(find_mux_bin())
+            .arg("--socket")
+            .arg(&socket)
+            .arg("ls")
+            .output()
+    });
     let Ok(output) = output else {
         return Vec::new();
     };
@@ -18448,7 +18578,7 @@ impl ApplicationHandler<UserAction> for App {
         if matches!(event, WindowEvent::RedrawRequested) {
             // Drain on the paint path so a child-EOF wake that only
             // produced a redraw still runs the exit cascade.
-            self.pump(event_loop);
+            self.pump(event_loop, None);
             if let Some(host) = self.windows.get_mut(&id) {
                 // Output and scrollback can change the link under a stationary pointer.
                 sync_chrome_hover(host);
@@ -19683,7 +19813,7 @@ impl ApplicationHandler<UserAction> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserAction) {
         match event {
-            UserAction::Wake => self.pump(event_loop),
+            UserAction::Wake => self.pump(event_loop, None),
             UserAction::NewWindow => {
                 if let Err(e) = self.open_window(event_loop, false) {
                     eprintln!("prismattyc-host: new window failed: {e:#}");
@@ -19787,12 +19917,22 @@ impl ApplicationHandler<UserAction> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let pump_io = pump_timing::PumpIoScope::begin();
+        let mut persist_time = Duration::ZERO;
         for host in self.windows.values_mut() {
             if host.layout_dirty {
+                let started = Instant::now();
                 persist_attach_layout_from_live(host);
+                persist_time = persist_time.saturating_add(started.elapsed());
             }
         }
-        self.pump(event_loop);
+        if !persist_time.is_zero() {
+            self.pump_timing.record_external(
+                pump_timing::Phase::PersistAttachLayoutFromLive,
+                persist_time,
+            );
+        }
+        self.pump(event_loop, Some(pump_io));
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
@@ -26107,11 +26247,24 @@ session mail (id 15)
                 max_cells_painted: 300,
                 blit_sum: 5,
                 dominant_full_repaint_reason: Some(FullRepaintReason::Resize),
+                pump: pump_timing::PumpSummary::default(),
             })
         );
         assert!(window
             .record(RenderFrame::default(), start + Duration::from_millis(1500))
             .is_none());
+    }
+
+    #[test]
+    fn parse_timing_accumulates_drains_until_a_frame_completes() {
+        let mut timing = RenderTiming::default();
+        timing.add_parse(Duration::from_micros(11));
+        timing.add_parse(Duration::from_micros(29));
+        assert_eq!(timing.parse_us, 40);
+
+        assert_eq!(timing.finish_frame_parse(), 40);
+        assert_eq!(timing.parse_us, 0);
+        assert_eq!(timing.last_parse_us, 40);
     }
 
     #[test]

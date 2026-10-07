@@ -18,7 +18,7 @@ use crate::keybind::{self, Action};
 
 /// Default cell size in px before display scaling (`FONT_PX` in main).
 pub const DEFAULT_FONT_PX: f32 = 15.0;
-const DEFAULT_THEME: &str = "prismattyc-default";
+const DEFAULT_THEME: &str = "prismattyc";
 const DEFAULT_FOCUS_BORDER: &str = "blue";
 const DEFAULT_FOCUS_ANIMATION: &str = "none";
 const DEFAULT_FOCUS_ANIMATION_MS: u64 = 280;
@@ -32,6 +32,7 @@ pub enum ConfigGroup {
     Updates,
     FocusBorder,
     Font,
+    Input,
     Layout,
     BellsAttention,
     Background,
@@ -48,6 +49,8 @@ pub enum ConfigValue {
     U64(u64),
     F32(f32),
     String(&'static str),
+    /// Shown in the template, but commented so a fresh install does not pin it.
+    CommentedString(&'static str),
     StringArray(&'static [&'static str]),
     CommentedPath(&'static str),
 }
@@ -67,9 +70,9 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         name: "theme",
         group: ConfigGroup::Appearance,
         doc:
-            "Named theme: built-in slug, display name, sibling themes/ file, or absolute TOML path",
+            "Named theme: built-in slug, display name, sibling themes/ file, or absolute TOML path. Omit this key to follow the app default (prismattyc)",
         range: "theme slug or absolute path",
-        value: ConfigValue::String(DEFAULT_THEME),
+        value: ConfigValue::CommentedString(DEFAULT_THEME),
     },
     ConfigKey {
         name: "render_timer",
@@ -116,9 +119,37 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey {
         name: "chrome_style",
         group: ConfigGroup::Appearance,
-        doc: "Host chrome look: classic, or the opt-in Graphite redesign",
+        doc: "Host chrome look. Omit this key to follow the app default (graphite)",
         range: "classic|graphite",
-        value: ConfigValue::String("classic"),
+        value: ConfigValue::CommentedString("graphite"),
+    },
+    ConfigKey {
+        name: "bar_color",
+        group: ConfigGroup::Appearance,
+        doc: "Graphite bar background: omit to follow the theme, or graphite, harbor, moss, or plum (Sand on light themes)",
+        range: "graphite|harbor|moss|plum",
+        value: ConfigValue::CommentedString("graphite"),
+    },
+    ConfigKey {
+        name: "layout",
+        group: ConfigGroup::Appearance,
+        doc: "Chrome arrangement: bars, or the sidebar tree. Classic honors sidebar too",
+        range: "bars|sidebar",
+        value: ConfigValue::CommentedString("bars"),
+    },
+    ConfigKey {
+        name: "sidebar_width_px",
+        group: ConfigGroup::Appearance,
+        doc: "Expanded Spaces sidebar width in pixels. Names ellipsize; the width does not follow them",
+        range: "200-2000",
+        value: ConfigValue::U32(256),
+    },
+    ConfigKey {
+        name: "sidebar_collapsed",
+        group: ConfigGroup::Appearance,
+        doc: "Collapse the Spaces sidebar to the icon strip",
+        range: "true|false",
+        value: ConfigValue::Bool(false),
     },
     ConfigKey {
         name: "pane_titles",
@@ -133,6 +164,20 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         doc: "Immediate hover blend for interactive strip, rail, and scrollbar chrome",
         range: "0.0-0.3",
         value: ConfigValue::F32(crate::config::DEFAULT_HOVER_BLEND),
+    },
+    ConfigKey {
+        name: "link_click",
+        group: ConfigGroup::Input,
+        doc: "Open links on plain clicks; Cmd/Ctrl-click always remains available",
+        range: "plain|modifier",
+        value: ConfigValue::String("plain"),
+    },
+    ConfigKey {
+        name: "async_paste",
+        group: ConfigGroup::Input,
+        doc: "Hand pastes to the pane writer thread so large pastes never pause the window",
+        range: "true | false",
+        value: ConfigValue::Bool(false),
     },
     ConfigKey {
         name: "install_agent_skills",
@@ -254,11 +299,25 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         value: ConfigValue::String(DEFAULT_SPACE_RAIL),
     },
     ConfigKey {
-        name: "space_autosave",
+        name: "space_reorder",
         group: ConfigGroup::Layout,
-        doc: "Save changed Space layouts after two idle seconds",
+        doc: "Enable drag and Shift+arrow reordering for saved spaces",
         range: "true | false",
         value: ConfigValue::Bool(false),
+    },
+    ConfigKey {
+        name: "selective_border_rings",
+        group: ConfigGroup::Layout,
+        doc: "Restore and re-stroke only border rings that change",
+        range: "true | false",
+        value: ConfigValue::Bool(false),
+    },
+    ConfigKey {
+        name: "space_autosave",
+        group: ConfigGroup::Layout,
+        doc: "Save changed Space arrangements after a short idle",
+        range: "true | false",
+        value: ConfigValue::Bool(true),
     },
     ConfigKey {
         name: "session_naming",
@@ -337,6 +396,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         doc: "Show 'Moving tab NAME → target' while a tab or pane is dragged",
         range: "true|false",
         value: ConfigValue::Bool(true),
+    },
+    ConfigKey {
+        name: "toasts",
+        group: ConfigGroup::BellsAttention,
+        doc: "Status toasts: all, errors only, or off; hidden ones stay in Recent messages",
+        range: "all|errors|off",
+        value: ConfigValue::String("all"),
     },
     ConfigKey {
         name: "os_notify_bell",
@@ -452,6 +518,7 @@ fn group_header(group: ConfigGroup) -> &'static str {
         ConfigGroup::Updates => "updates",
         ConfigGroup::FocusBorder => "focus border",
         ConfigGroup::Font => "font",
+        ConfigGroup::Input => "input",
         ConfigGroup::Layout => "layout",
         ConfigGroup::BellsAttention => "bells and attention",
         ConfigGroup::Background => "background",
@@ -474,7 +541,7 @@ fn format_value(value: ConfigValue) -> String {
                 format!("{v}")
             }
         }
-        ConfigValue::String(v) => format!("\"{v}\""),
+        ConfigValue::String(v) | ConfigValue::CommentedString(v) => format!("\"{v}\""),
         ConfigValue::StringArray(items) => {
             let inner = items
                 .iter()
@@ -494,7 +561,7 @@ fn emit_key(out: &mut String, key: &ConfigKey) {
         ConfigValue::CommentedPath(_) if key.name == "font_fallback" => {
             out.push_str(&format!("# {} = [{rendered}]\n", key.name));
         }
-        ConfigValue::CommentedPath(_) => {
+        ConfigValue::CommentedPath(_) | ConfigValue::CommentedString(_) => {
             out.push_str(&format!("# {} = {rendered}\n", key.name));
         }
         _ => out.push_str(&format!("{} = {rendered}\n", key.name)),
@@ -516,6 +583,24 @@ fn emit_keys_table(out: &mut String) {
             // Unbound by default: shown commented so the name is discoverable
             // without an explicit `[]` line (PT-207).
             out.push_str(&format!("# {name} = []\n"));
+            continue;
+        }
+        // These two defaults differ by OS. A live line would pin the portable
+        // chord on macOS, so Option+Left/Right would stay pane focus and the
+        // word-jump bytes would never be sent for anyone with a generated
+        // config. Leave them commented; the loader fills in the platform
+        // default. Uncommenting is an explicit pin.
+        if matches!(action, Action::FocusLeft | Action::FocusRight) {
+            let macos = match action {
+                Action::FocusLeft => "ctrl+alt+left",
+                Action::FocusRight => "ctrl+alt+right",
+                _ => unreachable!(),
+            };
+            out.push_str(&format!(
+                "# Commented so this file does not pin a chord. Linux uses {}; macOS uses {macos}. Uncomment to pin.\n",
+                chords[0]
+            ));
+            out.push_str(&format!("# {name} = \"{}\"\n", chords[0]));
             continue;
         }
         if chords.len() == 1 {
@@ -556,7 +641,17 @@ pub fn render_template() -> String {
     out.push('\n');
     out.push_str(&render_a11y_section());
     out.push('\n');
+    out.push_str(&render_spaces_section());
+    out.push('\n');
     out.push_str(REMOTE_SECTION);
+    out
+}
+
+fn render_spaces_section() -> String {
+    let mut out = String::from("# -- spaces --\n");
+    out.push_str("[spaces]\n");
+    out.push_str("# Save the arrangement whenever it changes, after a short idle. true|false.\n");
+    out.push_str("autosave = true\n");
     out
 }
 
@@ -596,8 +691,8 @@ const THEME_OVERRIDES_HEADER: &str = "# -- theme overrides --\n\
 
 /// Every `[theme_overrides]` key with the prismattyc-default value.
 pub fn theme_override_keys() -> Vec<ThemeOverrideKey> {
-    use crate::theme::{default_theme, hex};
-    let theme = default_theme();
+    use crate::theme::{hex, shipped_default};
+    let theme = &shipped_default();
     let quoted = |rgb: [u8; 3]| toml_edit::Value::from(hex(rgb)).to_string();
     let pair = |value: Option<[u8; 3]>, fallback: [u8; 3]| quoted(value.unwrap_or(fallback));
     let mut ansi = toml_edit::Array::new();
@@ -747,6 +842,9 @@ fn insert_toml_value(document: &mut toml_edit::DocumentMut, key: &ConfigKey) {
         }
         ConfigValue::F32(v) => document[key.name] = toml_edit::value(f64::from(v)),
         ConfigValue::String(v) => document[key.name] = toml_edit::value(v),
+        ConfigValue::CommentedString(value) => {
+            insert_commented_root_key(document, key.name, value, false);
+        }
         ConfigValue::StringArray(items) => {
             let mut array = toml_edit::Array::new();
             for item in items {
@@ -848,6 +946,10 @@ pub fn merge_template(existing: &str) -> Result<String> {
     let mut document = existing
         .parse::<toml_edit::DocumentMut>()
         .context("parse existing config for merge")?;
+    // A file that already chose `space_autosave` keeps that choice. Inserting
+    // `[spaces] autosave = true` would override a legacy `false`.
+    let insert_spaces =
+        !document.contains_key("space_autosave") && !document.contains_key("spaces");
     for key in CONFIG_KEYS {
         insert_toml_value(&mut document, key);
     }
@@ -855,7 +957,21 @@ pub fn merge_template(existing: &str) -> Result<String> {
     merge_mux_section(&mut document);
     merge_keys_table(&mut document);
     merge_a11y_section(&mut document);
+    if insert_spaces {
+        merge_spaces_section(&mut document);
+    }
     Ok(document.to_string())
+}
+
+fn merge_spaces_section(document: &mut toml_edit::DocumentMut) {
+    if document.contains_key("spaces") {
+        return;
+    }
+    let mut table = toml_edit::Table::new();
+    table.set_implicit(false);
+    table.decor_mut().set_prefix("\n");
+    table.insert("autosave", toml_edit::value(true));
+    document["spaces"] = toml_edit::Item::Table(table);
 }
 
 fn merge_a11y_section(document: &mut toml_edit::DocumentMut) {
@@ -944,6 +1060,11 @@ pub fn help_lines() -> Vec<String> {
         "    a11y.announce                Speak mail, attention, pane-title notices, and cursor-line changes (true|false)"
             .to_string(),
     );
+    lines.push("    [spaces]".to_string());
+    lines.push(
+        "    spaces.autosave              Save the arrangement after a short idle (true|false)"
+            .to_string(),
+    );
     lines
 }
 
@@ -963,7 +1084,13 @@ mod tests {
         "render_timer",
         "render_timer_log_every_frame",
         "tab_strip",
+        "link_click",
+        "async_paste",
         "chrome_style",
+        "bar_color",
+        "layout",
+        "sidebar_width_px",
+        "sidebar_collapsed",
         "pane_titles",
         "focus_border",
         "focus_border_animation",
@@ -985,6 +1112,8 @@ mod tests {
         "pane_gap_px",
         "pane_padding_px",
         "space_rail",
+        "space_reorder",
+        "selective_border_rings",
         "space_autosave",
         "session_naming",
         "space_startup",
@@ -998,6 +1127,7 @@ mod tests {
         "bell_toaster",
         "bell_toaster_ms",
         "drag_toaster",
+        "toasts",
         "os_notify_bell",
         "attention_sound",
         "attention_badge",
@@ -1017,6 +1147,7 @@ mod tests {
         "mux",
         "keys",
         "a11y",
+        "spaces",
         "theme_overrides",
         "remote",
     ];
@@ -1031,7 +1162,7 @@ mod tests {
             assert!(present, "template missing {field}");
             if !matches!(
                 *field,
-                "mux" | "keys" | "a11y" | "theme_overrides" | "remote"
+                "mux" | "keys" | "a11y" | "spaces" | "theme_overrides" | "remote"
             ) {
                 assert!(
                     CONFIG_KEYS.iter().any(|key| key.name == *field),
@@ -1066,12 +1197,49 @@ mod tests {
     fn generated_template_parses_to_builtin_defaults() {
         let template = render_template();
         let parsed = load_from_str(&template);
-        assert_eq!(parsed.theme.as_deref(), Some(DEFAULT_THEME));
+        assert!(
+            parsed.theme.is_none(),
+            "a fresh install follows the code default instead of pinning a theme name"
+        );
+        assert!(
+            template
+                .lines()
+                .any(|line| line == "# theme = \"prismattyc\""),
+            "fresh installs show the default without pinning it"
+        );
+        assert!(
+            !template.lines().any(|line| line.starts_with("theme =")),
+            "a live theme line would pin a name 0.2.30 cannot load"
+        );
         assert_eq!(parsed.render_timer(), crate::config::RenderTimer::Off);
         assert!(!parsed.render_timer_log_every_frame());
         assert_eq!(parsed.install_agent_skills, Some(true));
         assert_eq!(parsed.tab_strip(), crate::config::TabStripMode::Auto);
-        assert_eq!(parsed.chrome_style(), crate::config::ChromeStyle::Classic);
+        assert_eq!(parsed.link_click(), crate::link_click::Mode::Plain);
+        assert_eq!(parsed.chrome_style(), crate::config::ChromeStyle::Graphite);
+        assert_eq!(parsed.space_reorder, Some(false));
+        assert_eq!(parsed.selective_border_rings, Some(false));
+        assert!(
+            template
+                .lines()
+                .any(|line| line == "# chrome_style = \"graphite\""),
+            "fresh installs show the default without pinning it"
+        );
+        assert!(
+            !template
+                .lines()
+                .any(|line| line.starts_with("chrome_style =")),
+            "a live chrome_style line would pin the default"
+        );
+        assert!(template
+            .lines()
+            .any(|line| line == "# bar_color = \"graphite\""));
+        assert!(!template.lines().any(|line| line.starts_with("bar_color =")));
+        assert!(template.lines().any(|line| line == "# layout = \"bars\""));
+        assert!(!template.lines().any(|line| line.starts_with("layout =")));
+        let classic = load_from_str("chrome_style = \"classic\"\n");
+        assert_eq!(classic.chrome_style(), crate::config::ChromeStyle::Classic);
+        assert_eq!(parsed.bar_color, None, "bars follow the theme");
         assert_eq!(parsed.pane_titles(), crate::config::PaneTitlesMode::Focused);
         assert!(parsed.splash());
         assert_eq!(parsed.splash, Some(true));
@@ -1090,17 +1258,41 @@ mod tests {
         assert!(!parsed.window_blur());
         assert!(parsed.font.is_none());
         assert!(parsed.background_image.is_none());
-        assert_eq!(parsed.loaded_keymap(), KeyMap::default());
+        assert_eq!(
+            parsed.loaded_keymap(),
+            KeyMap::from_config_with_platform(None, false, cfg!(target_os = "macos")).unwrap()
+        );
+        assert!(
+            template
+                .lines()
+                .any(|line| line == "# focus_left = \"alt+left\""),
+            "focus_left stays commented at the portable chord"
+        );
+        assert!(
+            template
+                .lines()
+                .any(|line| line == "# focus_right = \"alt+right\""),
+            "focus_right stays commented at the portable chord"
+        );
+        assert!(
+            !template
+                .lines()
+                .any(|line| line.starts_with("focus_left =") || line.starts_with("focus_right =")),
+            "a live focus_left/right line would pin Option on macOS"
+        );
         for action in Action::all() {
             let listed = parsed
                 .keys
                 .as_ref()
                 .is_some_and(|keys| keys.contains_key(&action.name()));
+            // focus_left/right are bound, but the template leaves them
+            // commented so macOS can apply ctrl+alt+left/right.
+            let platform_commented = matches!(action, Action::FocusLeft | Action::FocusRight);
             let bound = !keybind::default_chords(action).is_empty();
             assert_eq!(
                 listed,
-                bound,
-                "{}: bound actions are live keys; unbound ones stay commented",
+                bound && !platform_commented,
+                "{}: bound actions are live keys; unbound ones stay commented; focus_left/right stay commented",
                 action.name()
             );
             if !bound {
@@ -1116,7 +1308,7 @@ mod tests {
             Some(crate::theme::ThemeOverrides::default()),
             "the commented [theme_overrides] table parses empty"
         );
-        assert_eq!(parsed.loaded_theme(), *crate::theme::default_theme());
+        assert_eq!(parsed.loaded_theme(), crate::theme::shipped_default());
         for key in theme_override_keys() {
             assert!(
                 template.contains(&format!("# {} = {}", key.name, key.literal)),
@@ -1127,14 +1319,14 @@ mod tests {
     }
 
     /// PT-207: uncommenting an override recolours the named theme; the
-    /// example values are exactly the prismattyc-default palette.
+    /// example values are exactly the shipped Prismattyc palette.
     #[test]
     fn uncommented_theme_overrides_recolour_the_named_theme() {
         let template = render_template();
         let live = template.replace("# attention_badge = \"", "attention_badge = \"");
         assert_ne!(live, template);
         let parsed = load_from_str(&live);
-        assert_eq!(parsed.loaded_theme(), *crate::theme::default_theme());
+        assert_eq!(parsed.loaded_theme(), crate::theme::shipped_default());
 
         let all_live = theme_override_keys()
             .iter()
@@ -1142,23 +1334,23 @@ mod tests {
                 acc.replace(&format!("# {} = ", key.name), &format!("{} = ", key.name))
             });
         let parsed = load_from_str(&all_live);
-        let mut expected = crate::theme::default_theme().clone();
+        let mut expected = crate::theme::shipped_default();
         // Explicit keys: the chip stops following the focus colour and the
         // selection example (inverse video spelled out) becomes explicit.
         expected.tab_active_bg_explicit = true;
-        expected.selection_fg = Some(expected.default_bg);
-        expected.selection_bg = Some(expected.default_fg);
+        expected.selection_fg = Some(expected.selection_fg.unwrap_or(expected.default_bg));
+        expected.selection_bg = Some(expected.selection_bg.unwrap_or(expected.default_fg));
         assert_eq!(
             parsed.loaded_theme(),
             expected,
-            "every example value equals the prismattyc-default palette"
+            "every example value equals the shipped Prismattyc palette"
         );
 
         let recoloured = live.replace(
             &format!(
                 "attention_badge = {}",
                 toml_edit::Value::from(crate::theme::hex(
-                    crate::theme::default_theme().attention_badge
+                    crate::theme::shipped_default().attention_badge
                 ))
             ),
             "attention_badge = \"#123456\"",
@@ -1167,7 +1359,7 @@ mod tests {
         assert_eq!(parsed.loaded_theme().attention_badge, [0x12, 0x34, 0x56]);
         assert_eq!(
             parsed.loaded_theme().mail_letter,
-            crate::theme::default_theme().mail_letter,
+            crate::theme::shipped_default().mail_letter,
             "other keys keep the named theme"
         );
     }
@@ -1229,6 +1421,8 @@ mod tests {
             "mux.instance",
             "[a11y]",
             "a11y.os_tree",
+            "[spaces]",
+            "spaces.autosave",
         ] {
             assert!(
                 lines.iter().any(|line| line.contains(expected)),
@@ -1317,6 +1511,23 @@ mod tests {
         );
         let parsed = load_from_str(&merged);
         assert_eq!(parsed.theme.as_deref(), Some("dracula"));
+        let omitted = merge_template("panes = 3\n").unwrap();
+        assert!(
+            omitted
+                .lines()
+                .any(|line| line == "# theme = \"prismattyc\""),
+            "merge must comment a missing theme: {omitted}"
+        );
+        assert!(
+            !omitted.lines().any(|line| line.starts_with("theme =")),
+            "merge must not live-write the default theme: {omitted}"
+        );
+        let omitted_parsed = load_from_str(&omitted);
+        assert!(omitted_parsed.theme.is_none());
+        assert_eq!(
+            omitted_parsed.loaded_theme(),
+            crate::theme::shipped_default()
+        );
         assert_eq!(parsed.panes, Some(3));
         assert_eq!(parsed.font_px, Some(DEFAULT_FONT_PX));
         assert!(parsed.font.is_none());
@@ -1331,6 +1542,21 @@ mod tests {
         let end = body.find("```").expect("closing fence");
         let example = &body[..end];
         assert_eq!(example, render_template());
+    }
+
+    #[test]
+    fn merge_keeps_a_legacy_autosave_opt_out() {
+        let opted_out = merge_template("space_autosave = false\n").unwrap();
+        assert!(
+            !opted_out.contains("[spaces]"),
+            "merge must not override a legacy opt-out: {opted_out}"
+        );
+        assert!(!load_from_str(&opted_out).space_autosave_enabled());
+        let fresh = merge_template("panes = 1\n").unwrap();
+        assert!(fresh.contains("[spaces]"), "{fresh}");
+        assert!(fresh.contains("autosave = true"), "{fresh}");
+        assert!(load_from_str(&fresh).space_autosave_enabled());
+        assert!(load_from_str(&render_template()).space_autosave_enabled());
     }
 
     fn load_from_str(raw: &str) -> ConfigFile {

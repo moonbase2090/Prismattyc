@@ -680,7 +680,11 @@ fn attach_all_passes_session_id_not_ambiguous_name() {
             ids.push(pair[1].to_string());
         }
     }
-    assert!(ids.len() >= 2, "expected generated ids: {text}");
+    assert_eq!(
+        ids.len(),
+        2,
+        "expected exactly the two created session ids: {text}"
+    );
 
     let ambiguous = umbrella(&socket, &["attach", "1", "--json"]);
     assert!(!ambiguous.status.success(), "{}", stderr(&ambiguous));
@@ -867,6 +871,7 @@ fn update_help_and_unknown_flag() {
     assert!(text.contains("moonbase2090/Prismattyc"), "{text}");
     assert!(text.contains("--source"), "{text}");
     assert!(text.contains("--rollback"), "{text}");
+    assert!(text.contains("--pre"), "{text}");
     assert!(
         text.contains("prismattyc update"),
         "pmux update and prismattyc update share the release updater: {text}"
@@ -2277,6 +2282,129 @@ fn space_open_no_run_and_none_skip_all_runs_unbound() {
     );
 }
 
+/// #206: reopening a saved session replays its saved command under the
+/// same policy as `space open`, instead of leaving a bare shell.
+#[test]
+fn session_reopen_replays_saved_command_under_space_open_policy() {
+    let socket = socket_path();
+    let _guard = start_server(&socket);
+    let data = layout_data_dir();
+    let cfg_dir = layout_data_dir();
+    let none_cfg = cfg_dir.0.join("none.toml");
+    std::fs::write(&none_cfg, "[mux]\nspace_open_runs_commands = \"none\"\n")
+        .expect("write none config");
+    let all_cfg = cfg_dir.0.join("all.toml");
+    std::fs::write(&all_cfg, "[mux]\nspace_open_runs_commands = \"all\"\n")
+        .expect("write all config");
+    let vars = |config: &Path| {
+        vec![
+            ("XDG_DATA_HOME", data.0.as_os_str().to_os_string()),
+            ("PRISMATTYC_CONFIG", config.as_os_str().to_os_string()),
+        ]
+    };
+    let reopen = |config: &Path, extra: &[&str]| {
+        let mut args = vec!["session", "reopen", "pt206", "--space", "seat206"];
+        args.extend_from_slice(extra);
+        let out = umbrella_vars(&socket, &vars(config), &args);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(
+            stdout(&out).contains("reopened pt206 in seat206"),
+            "{}",
+            stdout(&out)
+        );
+        stdout(&out)
+    };
+    let stop = || {
+        let stop = umbrella(&socket, &["stop", "pt206"]);
+        assert!(stop.status.success(), "{}", stderr(&stop));
+    };
+
+    let created = umbrella(
+        &socket,
+        &["new", "--no-attach", "--no-agent", "pt206", "--", "/bin/sh"],
+    );
+    assert!(created.status.success(), "{}", stderr(&created));
+    let save = umbrella_vars(
+        &socket,
+        &[
+            ("XDG_DATA_HOME", data.0.as_os_str().to_os_string()),
+            (procinfo::TEST_FOREGROUND_COMMAND_ENV, "sleep 30".into()),
+        ],
+        &["space", "save", "seat206"],
+    );
+    assert!(save.status.success(), "{}", stderr(&save));
+    let space_path = stdout(&save).trim().to_string();
+    let mut ctl = TestClient::connect(&socket);
+    let _ = register_client(&mut ctl);
+    let owner = ctl
+        .snapshot()
+        .sessions
+        .iter()
+        .find(|session| session.name == "pt206")
+        .and_then(|session| session.space_id.clone());
+    assert!(owner.is_some(), "space save claims the session");
+    stop();
+
+    let none_out = reopen(&none_cfg, &[]);
+    assert!(none_out.contains("skip run"), "none must skip: {none_out}");
+    assert!(
+        !none_out.contains("ran sleep"),
+        "none must not run: {none_out}"
+    );
+    stop();
+
+    let no_run_out = reopen(&all_cfg, &["--no-run"]);
+    assert!(
+        no_run_out.contains("skip run"),
+        "--no-run must skip: {no_run_out}"
+    );
+    assert!(
+        !no_run_out.contains("ran sleep"),
+        "--no-run must not run: {no_run_out}"
+    );
+    stop();
+
+    let all_out = reopen(&all_cfg, &[]);
+    assert!(
+        all_out.contains("ran sleep 30 in pt206"),
+        "all must run: {all_out}"
+    );
+    let mut found = None;
+    for _ in 0..50 {
+        let snapshot = ctl.snapshot();
+        if let Some(pid) = session_window(&snapshot, "pt206").panes[0].child_pid {
+            found = procinfo::foreground_command(pid);
+            if found.as_deref().is_some_and(|cmd| cmd.contains("sleep")) {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let foreground = found.expect("foreground after reopen");
+    assert!(
+        foreground.contains("sleep"),
+        "reopen left a bare shell: {foreground}"
+    );
+    stop();
+
+    // --no-claim: same replay, but the Space file and owner are untouched.
+    let before = std::fs::read(&space_path).expect("read space");
+    let unclaimed_out = reopen(&all_cfg, &["--no-claim"]);
+    assert!(
+        unclaimed_out.contains("ran sleep 30 in pt206"),
+        "{unclaimed_out}"
+    );
+    let unclaimed = ctl
+        .snapshot()
+        .sessions
+        .iter()
+        .find(|session| session.name == "pt206")
+        .map(|session| session.space_id.clone())
+        .expect("reopened session");
+    assert_eq!(unclaimed, None, "--no-claim must not claim the session");
+    assert_eq!(std::fs::read(&space_path).expect("read space"), before);
+}
+
 #[test]
 fn arrange_main_vertical_retile_keeps_pane_count() {
     let socket = socket_path();
@@ -3424,6 +3552,7 @@ fn space_open_switch_rejects_shared_save_and_cross_space_add() {
             tabs: vec![attach_tabs::AttachTabRecord {
                 title: "alpha".into(),
                 sessions: vec![id_a.clone()],
+                layout: None,
             }],
             space: Some("alpha".into()),
             ..Default::default()
@@ -3584,10 +3713,12 @@ fn space_save_copies_fake_attach_tabs_cache() {
                 attach_tabs::AttachTabRecord {
                     title: "seats".into(),
                     sessions: vec![id_a.clone(), id_b.clone()],
+                    layout: None,
                 },
                 attach_tabs::AttachTabRecord {
                     title: "solo".into(),
                     sessions: vec![id_b.clone()],
+                    layout: None,
                 },
             ],
             active_tab: 1,
@@ -3623,6 +3754,125 @@ fn space_save_copies_fake_attach_tabs_cache() {
 }
 
 #[test]
+fn space_save_and_open_round_trip_the_tab_split_tree() {
+    use prismattyc_mux::attach_tabs::TabLayoutNode;
+
+    let socket = socket_path();
+    let _guard = start_server(&socket);
+    let data = layout_data_dir();
+    let xdg = &[("XDG_DATA_HOME", data.0.as_path())];
+    for name in ["pt147-a", "pt147-b", "pt147-c", "pt147-d"] {
+        let created = umbrella(&socket, &["new", "--no-attach", name, "--", "/bin/sh"]);
+        assert!(created.status.success(), "{}", stderr(&created));
+    }
+
+    let mut ctl = TestClient::connect(&socket);
+    let _ = ctl.request(|request_id| ControlRequest::RegisterClient {
+        version: PROTOCOL_VERSION,
+        request_id,
+    });
+    let snapshot = ctl.snapshot();
+    let mut ids = Vec::new();
+    for name in ["pt147-a", "pt147-b", "pt147-c", "pt147-d"] {
+        ids.push(
+            snapshot
+                .sessions
+                .iter()
+                .find(|session| session.name == name)
+                .map(|session| session.id.to_string())
+                .unwrap_or_else(|| panic!("missing {name}")),
+        );
+    }
+    let leaf = |session: &str| {
+        Box::new(TabLayoutNode::Leaf {
+            session: session.to_string(),
+        })
+    };
+    let row = |left: &str, right: &str| {
+        Box::new(TabLayoutNode::Split {
+            axis: AxisWire::Horizontal,
+            ratio: 0.5,
+            first: leaf(left),
+            second: leaf(right),
+        })
+    };
+    let layout = TabLayoutNode::Split {
+        axis: AxisWire::Vertical,
+        ratio: 0.5,
+        first: row(&ids[0], &ids[1]),
+        second: row(&ids[2], &ids[3]),
+    };
+    let cache = attach_tabs::layout_path_from_socket(&socket);
+    attach_tabs::save(
+        &cache,
+        &attach_tabs::AttachTabsFile {
+            tabs: vec![attach_tabs::AttachTabRecord {
+                title: "grid".into(),
+                sessions: ids.clone(),
+                layout: Some(layout),
+            }],
+            ..Default::default()
+        },
+    )
+    .expect("write attach-tabs cache");
+
+    let save = umbrella_env(&socket, xdg, &["space", "save", "pt147"]);
+    assert!(save.status.success(), "{}", stderr(&save));
+    let save_out = stdout(&save);
+    let save_path = save_out
+        .lines()
+        .find(|line| line.contains("spaces/pt147.json"))
+        .unwrap_or(save_out.trim())
+        .to_string();
+    let raw = std::fs::read_to_string(&save_path).expect("read space file");
+    assert!(
+        raw.contains("\"vertical\""),
+        "space file dropped the grid axis: {raw}"
+    );
+    for name in ["pt147-a", "pt147-b", "pt147-c", "pt147-d"] {
+        assert!(raw.contains(name), "{raw}");
+    }
+
+    std::fs::remove_file(&cache).expect("clear host cache");
+    let open = umbrella_env(&socket, xdg, &["space", "open", "pt147", "--no-attach"]);
+    assert!(open.status.success(), "{}", stderr(&open));
+    let restored = attach_tabs::load(&cache).expect("space open writes the cache");
+    assert_eq!(restored.tabs.len(), 1, "{restored:?}");
+    assert_eq!(restored.tabs[0].sessions, ids);
+    match restored.tabs[0].layout.as_ref() {
+        Some(TabLayoutNode::Split {
+            axis: AxisWire::Vertical,
+            first,
+            second,
+            ..
+        }) => {
+            assert!(
+                matches!(
+                    first.as_ref(),
+                    TabLayoutNode::Split {
+                        axis: AxisWire::Horizontal,
+                        ..
+                    }
+                ),
+                "top row: {first:?}"
+            );
+            assert!(
+                matches!(
+                    second.as_ref(),
+                    TabLayoutNode::Split {
+                        axis: AxisWire::Horizontal,
+                        ..
+                    }
+                ),
+                "bottom row: {second:?}"
+            );
+            assert_eq!(restored.tabs[0].layout.as_ref().unwrap().sessions(), ids);
+        }
+        other => panic!("open did not restore the 2x2 tree: {other:?}"),
+    }
+}
+
+#[test]
 fn space_save_tabs_a_live_session_the_cache_omits() {
     let socket = socket_path();
     let _guard = start_server(&socket);
@@ -3654,6 +3904,7 @@ fn space_save_tabs_a_live_session_the_cache_omits() {
             tabs: vec![attach_tabs::AttachTabRecord {
                 title: "one".into(),
                 sessions: vec![id_a],
+                layout: None,
             }],
             active_tab: 0,
             focused_session: None,
@@ -3748,10 +3999,12 @@ fn space_open_restores_two_tabs_three_plus_two() {
                 attach_tabs::AttachTabRecord {
                     title: "PRISMATTYC".into(),
                     sessions: vec![ids[0].clone(), ids[1].clone(), ids[2].clone()],
+                    layout: None,
                 },
                 attach_tabs::AttachTabRecord {
                     title: "WEBSITE".into(),
                     sessions: vec![ids[3].clone(), ids[4].clone()],
+                    layout: None,
                 },
             ],
             active_tab: 1,
@@ -3804,6 +4057,7 @@ fn space_open_tabless_space_replaces_stale_cache_with_one_tab_per_session() {
             tabs: vec![attach_tabs::AttachTabRecord {
                 title: "stale".into(),
                 sessions: vec!["99".into()],
+                layout: None,
             }],
             active_tab: 1,
             focused_session: Some("99".into()),
@@ -3837,6 +4091,7 @@ fn space_open_tabless_space_replaces_stale_cache_with_one_tab_per_session() {
         vec![attach_tabs::AttachTabRecord {
             title: "pt66-empty-a".into(),
             sessions: vec![live_id],
+            layout: None,
         }],
         "{loaded:?}"
     );
@@ -3880,6 +4135,7 @@ fn space_open_tty_prints_attach_recipe_in_tab_order() {
             tabs: vec![attach_tabs::AttachTabRecord {
                 title: "seats".into(),
                 sessions: vec![id_b.clone(), id_a.clone()],
+                layout: None,
             }],
             active_tab: 0,
             focused_session: Some(id_a),

@@ -411,6 +411,91 @@ impl RailLayout {
         }
     }
 
+    /// Insertion slot under a pointer for a Space reorder. The returned
+    /// index is between `0..=n`; destination chips and footer/header areas
+    /// are never reorder targets.
+    pub fn insertion_index_at(&self, px: usize, py: usize, n: usize) -> Option<usize> {
+        match self.hit(px, py, n)? {
+            RailHit::Plus => return Some(n),
+            RailHit::Chip { index, .. } => {
+                let (x, y, w, h) = self.chip_bounds(index, n)?;
+                let (pointer, center) = if self.side.horizontal() {
+                    (px, x + w / 2)
+                } else {
+                    (py, y + h / 2)
+                };
+                return Some(index + usize::from(pointer >= center));
+            }
+            RailHit::Empty => {}
+            RailHit::Overflow | RailHit::Destination(_) | RailHit::Thumb => return None,
+        }
+        if self.visible_rows.is_some() && !self.in_side_list(py) {
+            return None;
+        }
+        let pointer = if self.side.horizontal() { px } else { py };
+        let mut after_last_visible = None;
+        for index in 0..n {
+            let Some((x, y, w, h)) = self.chip_bounds(index, n) else {
+                continue;
+            };
+            let (start, extent) = if self.side.horizontal() {
+                (x, w)
+            } else {
+                (y, h)
+            };
+            if pointer < start + extent / 2 {
+                return Some(index);
+            }
+            after_last_visible = Some(index + 1);
+        }
+        after_last_visible
+    }
+
+    /// Two-pixel marker for an insertion slot, if that slot is visible.
+    pub fn insertion_marker(
+        &self,
+        insertion: usize,
+        n: usize,
+    ) -> Option<(usize, usize, usize, usize)> {
+        if insertion > n {
+            return None;
+        }
+        let previous = insertion
+            .checked_sub(1)
+            .and_then(|index| self.chip_bounds(index, n));
+        let next = (insertion < n)
+            .then(|| self.chip_bounds(insertion, n))
+            .flatten();
+        if self.side.horizontal() {
+            let x = if let Some((x, _, _, _)) = next {
+                x.saturating_sub(self.gap / 2 + 1)
+            } else {
+                let (_, _, w, _) = previous?;
+                previous?.0.saturating_add(w).saturating_add(self.gap / 2)
+            };
+            Some((
+                x,
+                self.y.saturating_add(2),
+                2,
+                self.h.saturating_sub(4).max(1),
+            ))
+        } else {
+            let y = if let Some((_, y, _, _)) = next {
+                if previous.is_some() {
+                    y.saturating_sub(self.gap / 2 + 1)
+                } else {
+                    y.saturating_sub(1)
+                }
+            } else {
+                let (_, y, _, h) = previous?;
+                y.saturating_add(h).saturating_add(self.gap / 2)
+            };
+            let x = self.row_x.max(self.x).saturating_add(2);
+            let w = self.row_w.max(self.w).saturating_sub(4);
+            Some((x, y, w, 2))
+        }
+    }
+
     /// Pixel box of destination chip `index`, or `None` when it would not
     /// fit. Destinations follow the `+` after [`DESTINATION_SEPARATOR_PX`];
     /// with overflow they sit just before the `+`, anchored to the end.
@@ -565,6 +650,35 @@ pub fn scroll_by(scroll: usize, delta: i32, max_scroll: usize) -> usize {
     (scroll as i32 + delta).clamp(0, max_scroll as i32) as usize
 }
 
+/// Move one saved Space to a final list index. A missing source or an empty
+/// list returns `None`; an unchanged move returns the same names.
+pub fn move_space_to_index(names: &[String], from: usize, to: usize) -> Option<Vec<String>> {
+    if names.is_empty() || from >= names.len() || to >= names.len() {
+        return None;
+    }
+    let mut moved = names.to_vec();
+    let name = moved.remove(from);
+    moved.insert(to, name);
+    Some(moved)
+}
+
+/// Move one saved Space to the slot before `insertion` in the original list.
+pub fn move_space_to_insertion(
+    names: &[String],
+    from: usize,
+    insertion: usize,
+) -> Option<Vec<String>> {
+    if insertion > names.len() {
+        return None;
+    }
+    let to = if insertion > from {
+        insertion.saturating_sub(1)
+    } else {
+        insertion
+    };
+    move_space_to_index(names, from, to.min(names.len().saturating_sub(1)))
+}
+
 /// Scroll that puts `row` inside a window of `visible` rows.
 pub fn revealed_scroll(scroll: usize, row: usize, visible: usize, max_scroll: usize) -> usize {
     if visible == 0 {
@@ -611,6 +725,8 @@ pub enum RailKey {
     Last,
     Prev,
     Next,
+    MovePrev,
+    MoveNext,
     Enter,
     Escape,
     Delete,
@@ -629,6 +745,10 @@ pub enum RailVerdict {
     Rename {
         old: String,
         new: String,
+    },
+    Reorder {
+        name: String,
+        to: usize,
     },
     Delete(String),
     Create(String),
@@ -673,6 +793,9 @@ pub struct SpaceRail {
     pub keyboard: bool,
     /// First visible row of a Graphite side list. Classic rails ignore it.
     side_scroll: usize,
+    /// Sidebar-collapsed spaces, by name (issue #113). Per window, session
+    /// memory only; the default bars layout ignores it.
+    collapsed_spaces: std::collections::HashSet<String>,
     last_poll: Option<Instant>,
     dir_stamp: Option<SystemTime>,
     /// Inputs of the last [`Self::infer_current`] scan: directory stamp and
@@ -696,6 +819,7 @@ impl SpaceRail {
             notice: None,
             keyboard: false,
             side_scroll: 0,
+            collapsed_spaces: std::collections::HashSet::new(),
             last_poll: None,
             dir_stamp: None,
             infer_tried: None,
@@ -888,6 +1012,20 @@ impl SpaceRail {
 
     pub fn set_side_scroll(&mut self, scroll: usize, max_scroll: usize) {
         self.side_scroll = scroll.min(max_scroll);
+    }
+
+    /// Sidebar collapse state for one space (issue #113).
+    pub fn is_collapsed(&self, name: &str) -> bool {
+        self.collapsed_spaces.contains(name)
+    }
+
+    /// Collapse (`true`) or expand (`false`) one space in the sidebar tree.
+    pub fn set_collapsed(&mut self, name: &str, collapsed: bool) {
+        if collapsed {
+            self.collapsed_spaces.insert(name.to_string());
+        } else {
+            self.collapsed_spaces.remove(name);
+        }
     }
 
     /// Reload the chip list from `dir`. Returns whether anything changed.
@@ -1147,6 +1285,24 @@ impl SpaceRail {
             return RailVerdict::Consumed;
         };
         match key {
+            RailKey::MovePrev | RailKey::MoveNext => {
+                if focus >= self.names.len() {
+                    return RailVerdict::Consumed;
+                }
+                let to = match key {
+                    RailKey::MovePrev => focus.saturating_sub(1),
+                    RailKey::MoveNext => (focus + 1).min(self.names.len() - 1),
+                    _ => unreachable!(),
+                };
+                if to == focus {
+                    RailVerdict::Consumed
+                } else {
+                    RailVerdict::Reorder {
+                        name: self.names[focus].clone(),
+                        to,
+                    }
+                }
+            }
             RailKey::Prev => {
                 self.step(-1);
                 RailVerdict::Consumed
@@ -1694,6 +1850,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn drag_reorder_uses_horizontal_and_vertical_chip_positions() {
+        let list = names(&["alpha", "beta", "gamma"]);
+        let horizontal = RailLayout::for_window(geom(RailSide::Bottom), 400, 300, &list).unwrap();
+        let (x, y, w, h) = horizontal.chip_bounds(2, list.len()).unwrap();
+        let insertion = horizontal
+            .insertion_index_at(x + w / 2, y + h / 2, list.len())
+            .unwrap();
+        assert_eq!(
+            move_space_to_insertion(&list, 0, insertion).unwrap(),
+            names(&["beta", "gamma", "alpha"]),
+            "horizontal drag moves alpha after gamma"
+        );
+
+        let vertical = RailLayout::for_window(geom(RailSide::Left), 400, 300, &list).unwrap();
+        let (x, y, w, _) = vertical.chip_bounds(0, list.len()).unwrap();
+        let insertion = vertical
+            .insertion_index_at(x + w / 2, y + 1, list.len())
+            .unwrap();
+        assert_eq!(
+            move_space_to_insertion(&list, 2, insertion).unwrap(),
+            names(&["gamma", "alpha", "beta"]),
+            "vertical drag moves gamma before alpha"
+        );
+
+        let top = RailLayout::for_window(geom(RailSide::Top), 400, 300, &list).unwrap();
+        let (x, y, w, h) = top.chip_bounds(1, list.len()).unwrap();
+        assert_eq!(
+            top.insertion_index_at(x + w - 1, y + h / 2, list.len()),
+            Some(2),
+            "top rail uses horizontal insertion points"
+        );
+
+        let right = RailLayout::for_window(geom(RailSide::Right), 400, 300, &list).unwrap();
+        let (_, y, _, h) = right.chip_bounds(1, list.len()).unwrap();
+        assert_eq!(
+            right.insertion_index_at(399, y + h - 1, list.len()),
+            Some(2),
+            "right rail uses vertical insertion points"
+        );
+    }
+
     fn rail(names: &[&str], current: Option<&str>) -> SpaceRail {
         let mut rail = SpaceRail::new(current.map(str::to_string));
         rail.names = names.iter().map(|name| (*name).to_string()).collect();
@@ -1718,6 +1916,30 @@ mod tests {
         );
         assert_eq!(rail.key(RailKey::Escape), RailVerdict::Leave);
         assert!(!rail.is_active());
+    }
+
+    #[test]
+    fn keyboard_reorder_keeps_focus_on_the_same_space() {
+        let mut selected = rail(&["alpha", "beta", "gamma"], Some("beta"));
+        selected.focus_rail();
+        assert_eq!(
+            selected.key(RailKey::MovePrev),
+            RailVerdict::Reorder {
+                name: "beta".into(),
+                to: 0,
+            }
+        );
+        assert_eq!(selected.focus, Some(1));
+        assert_eq!(
+            selected.key(RailKey::MoveNext),
+            RailVerdict::Reorder {
+                name: "beta".into(),
+                to: 2,
+            }
+        );
+        let mut first = rail(&["alpha", "beta"], Some("alpha"));
+        first.focus_rail();
+        assert_eq!(first.key(RailKey::MovePrev), RailVerdict::Consumed);
     }
 
     #[test]
@@ -1928,6 +2150,7 @@ mod tests {
                 .map(|(title, members)| prismattyc_mux::SavedSpaceTab {
                     title: (*title).into(),
                     sessions: members.iter().map(|m| (*m).to_string()).collect(),
+                    layout: None,
                 })
                 .collect(),
             active_tab: 0,
@@ -2141,6 +2364,18 @@ mod tests {
         assert!(layout.visible_rows.is_none());
         assert_eq!(layout.h, 30);
         assert!(layout.chip_px.contains(&0));
+    }
+
+    #[test]
+    fn collapsed_spaces_remember_per_window_session_state() {
+        let mut rail = SpaceRail::new(None);
+        assert!(!rail.is_collapsed("lab"));
+        rail.set_collapsed("lab", true);
+        assert!(rail.is_collapsed("lab"));
+        rail.set_collapsed("lab", false);
+        assert!(!rail.is_collapsed("lab"));
+        // Unknown names are simply not collapsed.
+        assert!(!rail.is_collapsed("mail"));
     }
 
     #[test]

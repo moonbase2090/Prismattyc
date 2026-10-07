@@ -31,6 +31,9 @@ See [test requirements](docs/testing-policy.md),
 [native UI testing](docs/testing-ux.md), and
 [acceptance tests](docs/acceptance-pipeline.md) for the remaining checks.
 
+Every test must fail when the behavior it covers breaks. AGENTS.md lists
+the tautological tests that review rejects.
+
 ## Run CI locally
 
 The workflows can run through Local Actions. On a machine with limited
@@ -40,6 +43,8 @@ run heavy coverage, mutation, and native-window jobs concurrently.
 A completed job must report a successful status and exit code. Record the
 revision you tested and distinguish passing checks from skipped or pending
 checks. Keep generated reports in ignored build directories or CI artifacts.
+
+The Jev PR triage workflow is advisory only: it can add `triage:*` labels and one comment, and it never blocks a merge.
 
 ## Version a change
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for nightly rotation planning and partial-result handling."""
+"""Unit tests for nightly rotation planning, partial results, and argv."""
 
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -154,6 +156,124 @@ class NightlyPlanTests(unittest.TestCase):
             self.assertEqual(state["next_shard"], 1)
             self.assertEqual(state["metrics"]["prismattyc-core"]["build_seconds"], 4.0)
             self.assertEqual(state["metrics"]["prismattyc-core"]["test_seconds"], 2.0)
+
+
+class NightlyArgvTests(unittest.TestCase):
+    def dry_run(self, updates: dict[str, str], unset: tuple[str, ...] = ()) -> list[str]:
+        env = os.environ.copy()
+        for key in unset:
+            env.pop(key, None)
+        env.update(updates)
+        env["MUTANTS_DRY_RUN"] = "1"
+        script = Path(__file__).with_name("mutants-nightly.sh")
+        completed = subprocess.run(
+            ["bash", str(script)],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(completed.stderr, "")
+        return completed.stdout.splitlines()
+
+    def test_in_diff_supplies_shard_required_by_sharding(self) -> None:
+        args = self.dry_run(
+            {"MUTANTS_IN_DIFF_FILE": "build/mutants/nightly-in-diff.patch"},
+            unset=("MUTANTS_SHARD",),
+        )
+        self.assertEqual(args[0], "cargo")
+        self.assertEqual(args[args.index("--sharding") + 1], "round-robin")
+        self.assertEqual(
+            args[args.index("--in-diff") + 1],
+            "build/mutants/nightly-in-diff.patch",
+        )
+        self.assertEqual(args[args.index("--shard") + 1], "0/1")
+        self.assertEqual(args[args.index("--output") + 1], "build/mutants/in-diff")
+
+    def test_in_diff_uses_requested_shard(self) -> None:
+        args = self.dry_run(
+            {
+                "MUTANTS_IN_DIFF_FILE": "build/mutants/nightly-in-diff.patch",
+                "MUTANTS_SHARD": "7/16",
+            }
+        )
+        self.assertEqual(args.count("--shard"), 1)
+        self.assertEqual(args[args.index("--shard") + 1], "7/16")
+
+    def test_shard_path_keeps_its_shard_and_omits_in_diff(self) -> None:
+        args = self.dry_run({"MUTANTS_SHARD": "16/154"}, unset=("MUTANTS_IN_DIFF_FILE",))
+        self.assertNotIn("--in-diff", args)
+        self.assertEqual(args[args.index("--sharding") + 1], "round-robin")
+        self.assertEqual(args[args.index("--shard") + 1], "16/154")
+        self.assertEqual(args[args.index("--output") + 1], "build/mutants/shard-16")
+
+    def test_in_diff_shards_partition_the_mutants(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mutants-in-diff-shards-") as temp:
+            root = Path(temp)
+            (root / "src").mkdir()
+            manifest = (
+                '[package]\nname="mutants-shard-fixture"\nversion="0.1.0"\n'
+                'edition="2021"\n[lib]\npath="src/lib.rs"\n'
+            )
+            (root / "Cargo.toml").write_text(manifest, encoding="utf-8")
+            source = root / "src/lib.rs"
+            terms = " + ".join(f"(x + {value})" for value in range(1, 25))
+            baseline = f"pub fn calculate(x: i32) -> i32 {{ {terms} }}\n"
+            changed_terms = " + ".join(f"(x + {value + 50})" for value in range(1, 25))
+            source.write_text(baseline, encoding="utf-8")
+
+            def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    argv,
+                    cwd=root,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+
+            run(["git", "init", "-q"])
+            run(["git", "config", "user.name", "Mutants fixture"])
+            run(["git", "config", "user.email", "mutants-fixture@example.invalid"])
+            run(["git", "add", "."])
+            run(["git", "commit", "-qm", "baseline"])
+            source.write_text(
+                f"pub fn calculate(x: i32) -> i32 {{ {changed_terms} }}\n",
+                encoding="utf-8",
+            )
+            patch = root / "in-diff.patch"
+            patch.write_text(
+                run(["git", "diff", "--binary", "HEAD", "--", "*.rs"]).stdout,
+                encoding="utf-8",
+            )
+
+            def shard_mutants(shard: str) -> set[str]:
+                result = run(
+                    [
+                        "cargo",
+                        "mutants",
+                        "--list",
+                        "--json",
+                        "--workspace",
+                        "--sharding",
+                        "round-robin",
+                        "--in-diff",
+                        str(patch),
+                        "--shard",
+                        shard,
+                    ]
+                )
+                rows = json.loads(result.stdout)
+                self.assertIsInstance(rows, list)
+                return {json.dumps(row, sort_keys=True) for row in rows}
+
+            complete = shard_mutants("0/1")
+            seen: set[str] = set()
+            for index in range(16):
+                shard = shard_mutants(f"{index}/16")
+                self.assertFalse(seen.intersection(shard), f"shard {index}/16 overlaps earlier work")
+                seen.update(shard)
+            self.assertEqual(seen, complete)
+            self.assertGreater(len(complete), 16)
 
 
 if __name__ == "__main__":

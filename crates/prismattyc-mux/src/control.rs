@@ -74,6 +74,15 @@ impl From<AxisWire> for Axis {
     }
 }
 
+impl From<Axis> for AxisWire {
+    fn from(axis: Axis) -> Self {
+        match axis {
+            Axis::Horizontal => Self::Horizontal,
+            Axis::Vertical => Self::Vertical,
+        }
+    }
+}
+
 /// Wire-safe named arrangement (PT-132).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArrangementWire {
@@ -3480,14 +3489,8 @@ impl ControlPlane {
         outcome: MailInjectOutcome,
         nbytes: usize,
     ) -> ControlResponseData {
-        let agent = match self.foreground_agent_for(pane_raw) {
-            crate::InjectAgent::Claude => "claude",
-            crate::InjectAgent::Grok => "grok",
-            crate::InjectAgent::Cursor => "cursor",
-            crate::InjectAgent::Codex => "codex",
-            crate::InjectAgent::Kiro => "kiro",
-            crate::InjectAgent::Unknown => "unknown",
-        };
+        let agent =
+            crate::inject_agent_slug(self.foreground_agent_for(pane_raw)).unwrap_or("unknown");
         let at_ms = now_unix_ms();
         eprintln!(
             "INFO pmux_mail_inject agent={agent} pane={pane_raw} queue_rev={queue_rev} outcome={outcome:?} nbytes={nbytes}"
@@ -15213,6 +15216,74 @@ mod tests {
         let (outcome, nbytes) = mail_inject(inject_mail(&mut plane, client, pane, 4));
         assert_eq!(outcome, MailInjectOutcome::Wrote);
         assert_eq!(nbytes, PMUX_MAIL_NOTIFICATION.len() + 1);
+    }
+
+    #[test]
+    fn doorbell_writes_when_foreground_is_muse() {
+        // The shipped Muse binary is `muse-bin-<version>`. A symlink with
+        // that file name is the foreground; classification must not stay
+        // Unknown, or the doorbell defers and the verification nudge never
+        // arms.
+        let dir = std::env::temp_dir().join(format!("pt183-muse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let muse = dir.join("muse-bin-1.4.3-R5018.1");
+        let _ = std::fs::remove_file(&muse);
+        std::os::unix::fs::symlink("/bin/sleep", &muse).unwrap();
+        let run = dir.join("run.sh");
+        std::fs::write(
+            &run,
+            format!(
+                "printf 'READY\\n'\nA={} sh -c '\"$A\" 999'\nexit 0\n",
+                muse.display()
+            ),
+        )
+        .unwrap();
+        let script = format!(". {}", run.display());
+        let (mut plane, pane) = live_inject_fixture(&script);
+        let client = registered_client(plane.handle(ControlRequest::RegisterClient {
+            version: PROTOCOL_VERSION,
+            request_id: 1,
+        }));
+        wait_spawn_then_quiet(&mut plane, pane, "READY");
+        let set = plane.handle(ControlRequest::MailAttentionSet {
+            version: PROTOCOL_VERSION,
+            request_id: 2,
+            client_id: client,
+            pane_id: pane,
+            cell: MAIL_ATTENTION_CELL.into(),
+            gen: 1,
+            queue_rev: 1,
+            depth: 1,
+            wake: Some(MailWake::Armed),
+            bound_pid: None,
+        });
+        assert!(matches!(set.body, ControlResponseBody::Ok { .. }));
+        quiet_unattended(&mut plane, pane);
+
+        plane.set_inject_agent_override(None);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while plane.foreground_agent_for(pane) != crate::InjectAgent::Muse {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "foreground muse never appeared under the pane child"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (outcome, nbytes) = mail_inject(inject_mail(&mut plane, client, pane, 3));
+        assert_eq!(outcome, MailInjectOutcome::Wrote);
+        assert_eq!(nbytes, PMUX_MAIL_NOTIFICATION.len() + 1);
+        assert_eq!(
+            plane
+                .mail_inject_last
+                .get(&pane)
+                .map(|diagnostic| diagnostic.agent.as_str()),
+            Some("muse")
+        );
+        assert!(plane
+            .mail_nudges
+            .get(&pane)
+            .is_some_and(|nudge| nudge.verification));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

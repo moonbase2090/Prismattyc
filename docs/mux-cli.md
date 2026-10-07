@@ -174,7 +174,10 @@ pmux session suggest --space work
 Omit `--session-name` or `--name` to use the suggested name automatically.
 After a restart, press Enter in an exited pane to reopen its saved session.
 Use `pmux session reopen NAME --space SPACE` to do the same from the CLI.
-The session keeps its saved name, mailbox, and Space owner.
+The session keeps its saved name, mailbox, and Space owner. Its saved
+commands run as they do for `pmux space open`: `space_open_runs_commands`
+decides which run, and `--no-run` skips them all. `--no-claim` reopens the
+session without changing the Space file or the session's owner.
 `pmux mail alias NAME` creates a shorthand. It does not bind a session.
 
 ## Work in isolated spaces
@@ -560,10 +563,12 @@ does not exist. It adds the saved windows when `TARGET` exists. `TARGET`
 defaults to `NAME`. It does not bind an agent unless you pass `--agent`
 (the target session name).
 
-`space save` also copies the host cache's active tab index and focused
-session name into the space file. `space open` writes them back so the
-opened host selects that tab and pane and unzooms. Missing or unknown
-values fall back to the first tab and its first pane.
+`space save` also copies the host cache's active tab index, focused
+session name, and each tab's split tree into the space file. `space open`
+writes them back so the opened host selects that tab and pane, restores
+the saved axes and ratios, and unzooms. A tab with no saved tree (a single
+pane, or a file from an older build) still opens as a left-to-right row.
+Missing or unknown focus falls back to the first tab and its first pane.
 
 With no `SESSION` list and a non-empty attach-tabs cache, `space save`
 saves the sessions the live window shows (cache tab order). Detached but
@@ -1141,6 +1146,22 @@ outside the bounded damage boxes.
 The `osd` guard means that the render timer OSD is visible. OSD output forces
 full repaint for the frame.
 
+Each window's `pump` object reports the latest main-thread pump duration and
+the maximum observed in the current one-second window. `slowest_phase` names
+the most expensive phase in the latest pump. The `phases` map includes each
+phase's `last_us` and `max_1s_us`; socket round trips and synchronous
+subprocess waits include per-pump counts and time, plus one-second totals.
+The pump data is application-wide and is repeated under each window.
+
+`last_raster.timing.parse_us` accumulates PTY parsing across drains until the
+next completed paint. On macOS, `last_raster.present` reports the time spent
+writing tile images and committing them, dirty tile count, and bytes copied.
+`changed_tiles` is `null` unless `render_timer` is `osd`, `log`, or `both`; in
+those modes it counts dirty tiles whose pixels differ from the preceding
+frame. With timing off, the host does not allocate the comparison buffer.
+These fields describe the latest raster attempt, which can be older than the
+current pump snapshot when a window is idle.
+
 The `alt-screen` guard means a pane entered or left its alternate screen
 since the previous frame. A pane that stays on its alternate screen does
 not set this guard. The `scrollback` guard means the scroll offset changed,
@@ -1227,17 +1248,24 @@ Right-click an empty part of the rail to open the same settings.
 
 - Select **Rail: bottom**, **Rail: left**, **Rail: top**, or **Rail: right**.
   The rail moves immediately. The preference applies to all windows.
-- Select **Autosave** to turn it on or off. It is off by default.
-  When enabled, changed tab arrangements and session layouts save after
-  two idle seconds. Saving does not run saved commands.
+- Select **Autosave** to turn it on or off. It is on by default.
+  Adding or closing a tab, terminal, or agent session, changing a split
+  or its ratio, using Arrange, dragging tabs or panes, or moving a session
+  between spaces saves the arrangement after a short idle, about one second.
+  The rail shows **Saving…**, then **Saved**. Saving does not run saved
+  commands. `[spaces] autosave = false` opts out. When that key is absent,
+  `space_autosave` applies. When both are absent, autosave stays on.
 - Select **Startup: ask**, **Startup: restore**, or **Startup: fresh**.
   The default is **ask**. Restore reconnects running sessions.
   Stopped sessions stay stopped until you explicitly reopen them.
 
-The current Space chip shows its save state. **Unsaved** means the current
-arrangement differs from its saved definition. **Save failed** requires a
-retry with **Save current space**. Autosave stops retrying after a failure.
-Normal terminal output and focus changes do not trigger layout saves.
+The current Space chip shows its save state. **Saving…** means a change is
+waiting out the short idle. **Saved** means the file matches the live
+arrangement. **Unsaved** means autosave is off and the arrangement differs
+from the file. **Save failed** requires a retry with **Save current space**.
+Autosave stops retrying after a failure. **Save current space** still writes
+immediately. Normal terminal output and focus changes do not trigger layout
+saves. Autosave waits while a space is opening or being restored.
 
 Crowded chips show a shortened session list and a **+N more** count.
 Use **Team details** to inspect the full session list. Select **…** on a

@@ -2,6 +2,7 @@
 # Run one round-robin shard, or a current-head --in-diff pass, for CI.
 # Usage: MUTANTS_SHARD=0/159 ./scripts/mutants-nightly.sh
 #        MUTANTS_IN_DIFF_FILE=build/in-diff.patch ./scripts/mutants-nightly.sh
+#        MUTANTS_DRY_RUN=1 prints the cargo argv and exits before any lock or run.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,22 +20,53 @@ fi
 export PATH="${HOME}/.cargo/bin:${PATH}"
 
 in_diff_file="${MUTANTS_IN_DIFF_FILE:-}"
+shard="${MUTANTS_SHARD:-0/1}"
+if [[ ! "$shard" =~ ^([0-9]+)/([1-9][0-9]*)$ ]]; then
+  echo "error: MUTANTS_SHARD must have the form k/N, got '$shard'" >&2
+  exit 2
+fi
+shard_index="${BASH_REMATCH[1]}"
+shard_count="${BASH_REMATCH[2]}"
+if (( shard_index >= shard_count )); then
+  echo "error: shard index $shard_index must be less than $shard_count" >&2
+  exit 2
+fi
+
 if [ -n "$in_diff_file" ]; then
-  shard="in-diff"
+  shard_label="in-diff (${shard})"
   out="build/mutants/in-diff"
 else
-  shard="${MUTANTS_SHARD:-0/1}"
-  if [[ ! "$shard" =~ ^([0-9]+)/([1-9][0-9]*)$ ]]; then
-    echo "error: MUTANTS_SHARD must have the form k/N, got '$shard'" >&2
-    exit 2
-  fi
-  shard_index="${BASH_REMATCH[1]}"
-  shard_count="${BASH_REMATCH[2]}"
-  if (( shard_index >= shard_count )); then
-    echo "error: shard index $shard_index must be less than $shard_count" >&2
-    exit 2
-  fi
+  shard_label="$shard"
   out="build/mutants/shard-${shard_index}"
+fi
+
+timeout_seconds="${MUTANTS_TIMEOUT_SECONDS:-300}"
+nextest_profile="${MUTANTS_NEXTTEST_PROFILE:-mutants}"
+if [[ ! "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
+  echo "error: MUTANTS_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 2
+fi
+case "$nextest_profile" in
+  mutants|mutants-slow) ;;
+  *) echo "error: unsupported MUTANTS_NEXTTEST_PROFILE '$nextest_profile'" >&2; exit 2 ;;
+esac
+
+mutant_args=(
+  mutants --in-place --baseline=skip --sharding round-robin
+  --timeout "$timeout_seconds" --profile mutants --test-tool nextest
+  --test-workspace=false --workspace -vV --annotations=none
+)
+if [ -n "$in_diff_file" ]; then
+  # Keep the required worktree shard in this slice of the in-diff pass.
+  mutant_args+=(--in-diff "$in_diff_file" --shard "$shard")
+else
+  mutant_args+=(--shard "$shard")
+fi
+mutant_args+=(--output "$out" -- --profile "$nextest_profile")
+
+if [ "${MUTANTS_DRY_RUN:-}" = 1 ]; then
+  printf '%s\n' cargo "${mutant_args[@]}"
+  exit 0
 fi
 
 # Keep test tempfiles and cargo-mutants scratch on runner disk, not tmpfs.
@@ -64,33 +96,12 @@ python3 "$ROOT/scripts/mutants-nightly-process-cleanup.py" --phase before
 
 rm -rf "$out"
 mkdir -p "$(dirname "$out")"
-timeout_seconds="${MUTANTS_TIMEOUT_SECONDS:-300}"
-nextest_profile="${MUTANTS_NEXTTEST_PROFILE:-mutants}"
-if [[ ! "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
-  echo "error: MUTANTS_TIMEOUT_SECONDS must be a positive integer" >&2
-  exit 2
-fi
-case "$nextest_profile" in
-  mutants|mutants-slow) ;;
-  *) echo "error: unsupported MUTANTS_NEXTTEST_PROFILE '$nextest_profile'" >&2; exit 2 ;;
-esac
 oom_events="${MUTANTS_OOM_EVENTS:-/sys/fs/cgroup/memory.events}"
 oom_before="$(python3 "$ROOT/scripts/mutants-gate.py" --read-oom-kill --oom-events "$oom_events")"
 
-echo "== mutants nightly: ${shard} =="
+echo "== mutants nightly: ${shard_label} =="
 echo "== nextest ${nextest_profile} profile; package-local tests; timeout ${timeout_seconds}s =="
 set +e
-mutant_args=(
-  mutants --in-place --baseline=skip --sharding round-robin
-  --timeout "$timeout_seconds" --profile mutants --test-tool nextest
-  --test-workspace=false --workspace -vV --annotations=none
-)
-if [ -n "$in_diff_file" ]; then
-  mutant_args+=(--in-diff "$in_diff_file")
-else
-  mutant_args+=(--shard "$shard")
-fi
-mutant_args+=(--output "$out" -- --profile "$nextest_profile")
 cargo "${mutant_args[@]}"
 mutants_status=$?
 set -e

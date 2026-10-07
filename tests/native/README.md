@@ -42,6 +42,44 @@ PRISMATTYC_BINS="$PWD/target/debug" tests/native/docker/run.sh rail-transparency
 
 This check inspects alpha in the host framebuffer. It does not verify compositor blur.
 
+### Paste responsiveness
+
+Check that a clipboard paste does not stall the window (#195). Use release
+binaries; the frame-gap bounds assume release encode and decode times.
+
+```bash
+cargo build --release --workspace --bins --locked
+PRISMATTYC_BINS="$PWD/target/release" tests/native/docker/run.sh paste-e2e
+```
+
+`paste-e2e.py` runs the host with a slow-reading child, pastes 5 MiB of text
+and then a 4096-by-4000 PNG with `xclip` and Ctrl+Shift+V, and timestamps
+every rendered frame from the `render_timer` log. The gap measure includes
+the interval that crosses the key and the one that crosses the end of the
+window; `paste-e2e_test.py` checks those boundary cases and runs first. With
+`async_paste = true`, the largest frame gap in the 2 s after the key must stay
+within 120 ms for text and 60 ms for the image. The child must receive the
+whole 1 MiB capped text and a reference to an image file that exists. The
+same run with `async_paste = false` must exceed both bounds, so the check
+fails if the change is reverted. `PASTE_E2E_TEXT_GAP_MS` and
+`PASTE_E2E_IMAGE_GAP_MS` override the bounds. Results are stored in
+`build/paste-e2e/`.
+
+### Pixel-alpha performance acceptance
+
+Run the conversion benchmark on a native host:
+
+```bash
+tests/native/pixel-alpha-acceptance.sh
+```
+
+The step compares the production conversion path with the pre-optimization
+reference for opaque and 50% alpha frames. Both optimized p50 measurements
+must be at most 90% of the reference p50. The bound catches a reverted
+conversion path. This measures the conversion loop, not end-to-end presentation
+latency. The [macOS alpha fixture](#run-macos-tests) also checks captured
+pixels through the Core Animation path.
+
 ### Focus-border raster measurements
 
 The private Xvfb window fixture can measure release-mode raster cost with the

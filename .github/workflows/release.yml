@@ -280,6 +280,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+
       - name: Download all release assets
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
@@ -298,14 +303,28 @@ jobs:
           cd dist
           sha256sum * > SHA256SUMS
 
+      - name: Build release notes from the changelog
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release/changelog_notes.py CHANGELOG.md "$RELEASE_VERSION" > release-notes.md
+          test -s release-notes.md
+
       - name: Publish verified tag
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: |
           set -euo pipefail
-          args=(release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$RELEASE_TAG")
+          args=(
+            release create "$RELEASE_TAG"
+            --repo "$GITHUB_REPOSITORY"
+            --verify-tag
+            --title "$RELEASE_TAG"
+            --notes-file release-notes.md
+          )
           if [[ "$RELEASE_TAG" == *-* ]]; then
-            args+=(--prerelease)
+            args+=(--prerelease --latest=false)
           fi
           gh "${args[@]}" dist/*

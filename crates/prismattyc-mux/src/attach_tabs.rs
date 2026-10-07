@@ -8,11 +8,174 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// One host tab: title plus mux session ids in pane order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+use crate::control::AxisWire;
+use crate::layout::{Axis, PaneLayout, Split};
+use crate::PaneId;
+
+/// Host-tab split tree. Leaves use the same ids as [`AttachTabRecord::sessions`]:
+/// a session id in the attach-tabs cache, a session name in a space file.
+/// A single pane omits the tree. An older file omits it too; restore then
+/// keeps the historical left-to-right row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TabLayoutNode {
+    Leaf {
+        session: String,
+    },
+    Split {
+        axis: AxisWire,
+        ratio: f64,
+        first: Box<TabLayoutNode>,
+        second: Box<TabLayoutNode>,
+    },
+}
+
+impl TabLayoutNode {
+    /// Depth-first session ids, the same order as `sessions` on the tab.
+    #[must_use]
+    pub fn sessions(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_sessions(&mut out);
+        out
+    }
+
+    fn collect_sessions(&self, out: &mut Vec<String>) {
+        match self {
+            Self::Leaf { session } => out.push(session.clone()),
+            Self::Split { first, second, .. } => {
+                first.collect_sessions(out);
+                second.collect_sessions(out);
+            }
+        }
+    }
+}
+
+fn clamp_layout_ratio(ratio: f64) -> f64 {
+    if ratio.is_finite() {
+        ratio.clamp(0.01, 0.99)
+    } else {
+        0.5
+    }
+}
+
+/// Keep `node` only when it is a real split whose leaves equal `sessions`.
+#[must_use]
+pub fn layout_for_sessions(
+    node: Option<TabLayoutNode>,
+    sessions: &[String],
+) -> Option<TabLayoutNode> {
+    let node = node?;
+    if !matches!(node, TabLayoutNode::Split { .. }) {
+        return None;
+    }
+    (node.sessions() == sessions).then_some(node)
+}
+
+/// Rewrite leaf ids. A leaf `map` rejects is dropped and its parent
+/// collapses to the sibling, so a removed session does not keep a hole.
+#[must_use]
+pub fn remap_layout(
+    node: &TabLayoutNode,
+    mut map: impl FnMut(&str) -> Option<String>,
+) -> Option<TabLayoutNode> {
+    fn walk(
+        node: &TabLayoutNode,
+        map: &mut impl FnMut(&str) -> Option<String>,
+    ) -> Option<TabLayoutNode> {
+        match node {
+            TabLayoutNode::Leaf { session } => {
+                map(session).map(|session| TabLayoutNode::Leaf { session })
+            }
+            TabLayoutNode::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => match (walk(first, map), walk(second, map)) {
+                (Some(first), Some(second)) => Some(TabLayoutNode::Split {
+                    axis: *axis,
+                    ratio: *ratio,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                }),
+                (Some(only), None) | (None, Some(only)) => Some(only),
+                (None, None) => None,
+            },
+        }
+    }
+    walk(node, &mut map)
+}
+
+/// Capture a host pane tree. Local panes (no session) collapse out.
+/// A single remaining session returns `None`.
+#[must_use]
+pub fn tab_layout_from_panes(
+    layout: &PaneLayout,
+    session_of: impl Fn(PaneId) -> Option<String>,
+) -> Option<TabLayoutNode> {
+    fn walk(
+        layout: &PaneLayout,
+        session_of: &impl Fn(PaneId) -> Option<String>,
+    ) -> Option<TabLayoutNode> {
+        match layout {
+            PaneLayout::Leaf(pane) => {
+                let session = session_of(*pane)?;
+                Some(TabLayoutNode::Leaf { session })
+            }
+            PaneLayout::Split(split) => {
+                match (
+                    walk(&split.first, session_of),
+                    walk(&split.second, session_of),
+                ) {
+                    (Some(first), Some(second)) => Some(TabLayoutNode::Split {
+                        axis: AxisWire::from(split.axis),
+                        ratio: clamp_layout_ratio(split.ratio),
+                        first: Box::new(first),
+                        second: Box::new(second),
+                    }),
+                    (Some(only), None) | (None, Some(only)) => Some(only),
+                    (None, None) => None,
+                }
+            }
+        }
+    }
+    match walk(layout, &session_of) {
+        Some(node @ TabLayoutNode::Split { .. }) => Some(node),
+        _ => None,
+    }
+}
+
+/// Rebuild a pane tree. Any unknown leaf fails the whole tree so restore
+/// does not invent a different arrangement.
+#[must_use]
+pub fn pane_layout_from_tab(
+    node: &TabLayoutNode,
+    pane_of: &impl Fn(&str) -> Option<PaneId>,
+) -> Option<PaneLayout> {
+    match node {
+        TabLayoutNode::Leaf { session } => Some(PaneLayout::leaf(pane_of(session)?)),
+        TabLayoutNode::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } => Some(PaneLayout::Split(Split {
+            axis: Axis::from(*axis),
+            ratio: *ratio,
+            first: Box::new(pane_layout_from_tab(first, pane_of)?),
+            second: Box::new(pane_layout_from_tab(second, pane_of)?),
+        })),
+    }
+}
+
+/// One host tab: title, session ids in pane order, and the optional split tree.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttachTabRecord {
     pub title: String,
     pub sessions: Vec<String>,
+    /// Split tree for `sessions`. Absent for one pane or an older file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<TabLayoutNode>,
 }
 
 /// Serde skip for default tab index 0.
@@ -42,7 +205,7 @@ fn mode_is_add(mode: &AttachTabsMode) -> bool {
     mode.is_add()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AttachTabsFile {
     pub tabs: Vec<AttachTabRecord>,
     /// Index into `tabs`. Missing or 0 means the first tab.
@@ -112,20 +275,33 @@ fn tmp_path(path: &Path) -> PathBuf {
     PathBuf::from(tmp)
 }
 
+/// One tab kept by [`remap_tabs`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemappedTab<S> {
+    pub title: String,
+    pub sessions: Vec<S>,
+    pub layout: Option<TabLayoutNode>,
+}
+
 /// Keep non-empty mapped tabs. Remap `selected` (input index) onto the
 /// kept list. If that tab was dropped, use the last kept tab before it,
 /// else 0.
 pub fn remap_tabs<T, S>(
     tabs: impl IntoIterator<Item = T>,
     selected: usize,
-    mut map: impl FnMut(T) -> Option<(String, Vec<S>)>,
-) -> (Vec<(String, Vec<S>)>, usize) {
+    mut map: impl FnMut(T) -> Option<RemappedTab<S>>,
+) -> (Vec<RemappedTab<S>>, usize) {
     let mut out = Vec::new();
     let mut active = 0;
     let mut last_before = 0;
     let mut saw = false;
     for (i, tab) in tabs.into_iter().enumerate() {
-        let Some((title, sessions)) = map(tab) else {
+        let Some(RemappedTab {
+            title,
+            sessions,
+            layout,
+        }) = map(tab)
+        else {
             continue;
         };
         if sessions.is_empty() {
@@ -139,7 +315,11 @@ pub fn remap_tabs<T, S>(
             active = kept;
             saw = true;
         }
-        out.push((title, sessions));
+        out.push(RemappedTab {
+            title,
+            sessions,
+            layout,
+        });
     }
     if !saw {
         active = if out.is_empty() {
@@ -314,9 +494,16 @@ pub fn merge_add_cache(
             .cloned()
             .collect();
         if !sessions.is_empty() {
+            let layout = tab.layout.as_ref().and_then(|node| {
+                remap_layout(node, |id| {
+                    sessions.iter().find(|kept| kept.as_str() == id).cloned()
+                })
+            });
+            let layout = layout_for_sessions(layout, &sessions);
             tabs.push(AttachTabRecord {
                 title: tab.title.clone(),
                 sessions,
+                layout,
             });
         }
     }
@@ -386,11 +573,15 @@ pub fn plan_host_seat_cache(
         file.tabs.push(AttachTabRecord {
             title: title.to_string(),
             sessions: vec![session_id.to_string()],
+            layout: None,
         });
         file.active_tab = 0;
     } else {
         let index = file.active_tab.min(file.tabs.len().saturating_sub(1));
         file.tabs[index].sessions.push(session_id.to_string());
+        // The saved tree does not include this seat. Drop it so a later
+        // open does not restore a picture that omits the new pane.
+        file.tabs[index].layout = None;
         if file.tabs[index].title.trim().is_empty() {
             file.tabs[index].title = title.to_string();
         }
@@ -415,6 +606,7 @@ pub fn keep_caller_session(file: &mut AttachTabsFile, caller_id: &str, caller_na
     file.tabs.push(AttachTabRecord {
         title: caller_name.to_string(),
         sessions: vec![caller_id.to_string()],
+        layout: None,
     });
     true
 }
@@ -456,6 +648,7 @@ mod tests {
             tabs: vec![AttachTabRecord {
                 title: "seats".into(),
                 sessions: vec!["2".into(), "3".into()],
+                layout: None,
             }],
             ..Default::default()
         };
@@ -475,18 +668,19 @@ mod tests {
             if title == "A" {
                 None
             } else {
-                Some((
-                    title.to_string(),
-                    sessions.into_iter().map(str::to_string).collect(),
-                ))
+                Some(RemappedTab {
+                    title: title.to_string(),
+                    sessions: sessions.into_iter().map(str::to_string).collect(),
+                    layout: None,
+                })
             }
         });
         assert_eq!(
             active, 1,
             "C was file index 2, kept index 1 after dropping A"
         );
-        assert_eq!(kept[0].0, "B");
-        assert_eq!(kept[1].0, "C");
+        assert_eq!(kept[0].title, "B");
+        assert_eq!(kept[1].title, "C");
         let input = [
             ("A", vec!["1"]),
             ("shell", Vec::<&str>::new()),
@@ -494,7 +688,11 @@ mod tests {
         ];
         let (kept, active) = remap_tabs(input, 1, |(title, sessions)| {
             let sessions: Vec<String> = sessions.into_iter().map(str::to_string).collect();
-            (!sessions.is_empty()).then_some((title.to_string(), sessions))
+            (!sessions.is_empty()).then_some(RemappedTab {
+                title: title.to_string(),
+                sessions,
+                layout: None,
+            })
         });
         assert_eq!(kept.len(), 2);
         assert_eq!(active, 0, "shell tab drops; nearest kept before it is A");
@@ -511,10 +709,12 @@ mod tests {
                 AttachTabRecord {
                     title: "work".into(),
                     sessions: vec!["1".into(), "3".into()],
+                    layout: None,
                 },
                 AttachTabRecord {
                     title: "mail".into(),
                     sessions: vec!["2".into()],
+                    layout: None,
                 },
             ],
             ..Default::default()
@@ -565,6 +765,7 @@ mod tests {
             tabs: vec![AttachTabRecord {
                 title: "a".into(),
                 sessions: vec!["2".into()],
+                layout: None,
             }],
             ..Default::default()
         };
@@ -572,6 +773,7 @@ mod tests {
             tabs: vec![AttachTabRecord {
                 title: "b".into(),
                 sessions: vec!["3".into()],
+                layout: None,
             }],
             active_tab: 0,
             focused_session: Some("3".into()),
@@ -680,6 +882,7 @@ mod tests {
             tabs: vec![AttachTabRecord {
                 title: "web".into(),
                 sessions: vec!["7".into()],
+                layout: None,
             }],
             mode: AttachTabsMode::Switch,
             ..Default::default()
@@ -699,6 +902,7 @@ mod tests {
             tabs: vec![AttachTabRecord {
                 title: "beta".into(),
                 sessions: vec!["c".into(), "gone".into()],
+                layout: None,
             }],
             space: Some("beta".into()),
             mode: AttachTabsMode::Switch,
@@ -709,10 +913,12 @@ mod tests {
                 AttachTabRecord {
                     title: "a".into(),
                     sessions: vec!["a".into()],
+                    layout: None,
                 },
                 AttachTabRecord {
                     title: "b".into(),
                     sessions: vec!["b".into()],
+                    layout: None,
                 },
             ],
             active_tab: 1,
@@ -732,6 +938,7 @@ mod tests {
             tabs: vec![AttachTabRecord {
                 title: "mixed".into(),
                 sessions: vec!["a".into(), "c".into()],
+                layout: None,
             }],
             ..Default::default()
         };
@@ -739,6 +946,7 @@ mod tests {
             tabs: vec![AttachTabRecord {
                 title: "a".into(),
                 sessions: vec!["a".into()],
+                layout: None,
             }],
             ..Default::default()
         };
@@ -754,10 +962,12 @@ mod tests {
                 AttachTabRecord {
                     title: "seats".into(),
                     sessions: vec!["3".into(), "2".into()],
+                    layout: None,
                 },
                 AttachTabRecord {
                     title: "solo".into(),
                     sessions: vec!["2".into(), "9".into()],
+                    layout: None,
                 },
             ],
             ..Default::default()
@@ -770,5 +980,96 @@ mod tests {
             cache_sessions_in_tab_order(&file, &names),
             ["fable-pc", "grok-pc"]
         );
+    }
+
+    #[test]
+    fn grid_and_free_form_trees_round_trip_and_old_tabs_have_no_layout() {
+        let panes = [
+            PaneId::from_raw(1),
+            PaneId::from_raw(2),
+            PaneId::from_raw(3),
+            PaneId::from_raw(4),
+        ];
+        let names = ["a", "b", "c", "d"];
+        let grid = crate::even_two_row_grid(&panes).unwrap();
+        let captured = tab_layout_from_panes(&grid, |pane| {
+            let index = panes.iter().position(|id| *id == pane).unwrap();
+            Some(names[index].to_string())
+        })
+        .expect("grid");
+        assert!(matches!(
+            captured,
+            TabLayoutNode::Split {
+                axis: AxisWire::Vertical,
+                ..
+            }
+        ));
+        let sessions: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
+        let tab = crate::SavedSpaceTab {
+            title: "seats".into(),
+            sessions: sessions.clone(),
+            layout: layout_for_sessions(Some(captured), &sessions),
+        };
+        let raw = serde_json::to_string(&tab).unwrap();
+        assert!(
+            raw.contains("\"vertical\""),
+            "space tab must store the grid axis: {raw}"
+        );
+        let back: crate::SavedSpaceTab = serde_json::from_str(&raw).unwrap();
+        let ids = ["1", "2", "3", "4"];
+        let id_sessions: Vec<String> = ids.iter().map(|id| (*id).to_string()).collect();
+        let as_ids = remap_layout(back.layout.as_ref().unwrap(), |name| {
+            let index = names.iter().position(|got| *got == name).unwrap();
+            Some(ids[index].to_string())
+        })
+        .unwrap();
+        let as_ids = layout_for_sessions(Some(as_ids), &id_sessions).unwrap();
+        let restored = pane_layout_from_tab(&as_ids, &|session| {
+            let index = ids.iter().position(|id| *id == session).unwrap();
+            Some(panes[index])
+        })
+        .unwrap();
+        assert_eq!(restored, grid);
+
+        let old: crate::SavedSpaceTab =
+            serde_json::from_str(r#"{"title":"t","sessions":["a","b","c","d"]}"#).unwrap();
+        assert!(old.layout.is_none());
+
+        let custom = PaneLayout::Split(Split {
+            axis: Axis::Vertical,
+            ratio: 0.3,
+            first: Box::new(PaneLayout::leaf(panes[0])),
+            second: Box::new(PaneLayout::Split(Split {
+                axis: Axis::Horizontal,
+                ratio: 0.7,
+                first: Box::new(PaneLayout::leaf(panes[1])),
+                second: Box::new(PaneLayout::leaf(panes[2])),
+            })),
+        });
+        let node = tab_layout_from_panes(&custom, |pane| {
+            let index = panes.iter().position(|id| *id == pane).unwrap();
+            Some(names[index].to_string())
+        })
+        .unwrap();
+        match node {
+            TabLayoutNode::Split {
+                axis,
+                ratio,
+                second,
+                ..
+            } => {
+                assert_eq!(axis, AxisWire::Vertical);
+                assert!((ratio - 0.3).abs() < 1e-12);
+                match *second {
+                    TabLayoutNode::Split { axis, ratio, .. } => {
+                        assert_eq!(axis, AxisWire::Horizontal);
+                        assert!((ratio - 0.7).abs() < 1e-12);
+                    }
+                    other => panic!("expected inner split, got {other:?}"),
+                }
+            }
+            other => panic!("expected split, got {other:?}"),
+        }
+        assert!(tab_layout_from_panes(&custom, |_| None).is_none());
     }
 }

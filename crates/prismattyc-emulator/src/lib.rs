@@ -220,6 +220,9 @@ pub struct EmulatorStateV1 {
     /// xterm modifyOtherKeys mode (0 through 3). Older snapshots omit it.
     #[serde(default)]
     pub modify_other_keys: u8,
+    /// DECCKM application cursor keys (`CSI ? 1 h`). Older snapshots omit it.
+    #[serde(default)]
+    pub cursor_keys_app: bool,
     pub cwd: Option<PathBuf>,
     pub cell_width_px: u32,
     pub cell_height_px: u32,
@@ -384,6 +387,9 @@ pub struct Emulator {
     keyboard_alt: KeyboardModeStack,
     /// xterm modifyOtherKeys mode, shared by both screens.
     modify_other_keys: u8,
+    /// DECCKM (`CSI ? 1 h` / `CSI ? 1 l`), shared by both screens.
+    /// Unmodified Home, End, and arrows use SS3 while this is set.
+    cursor_keys_app: bool,
     /// Bytes the host must write to the child PTY (DSR/CPR, DA1, …).
     /// Drained via [`Self::take_pending_replies`] after each [`Self::feed`].
     pending_replies: Vec<Vec<u8>>,
@@ -422,6 +428,7 @@ impl Emulator {
             keyboard_main: KeyboardModeStack::default(),
             keyboard_alt: KeyboardModeStack::default(),
             modify_other_keys: 0,
+            cursor_keys_app: false,
             pending_replies: Vec::new(),
             cwd: None,
             pending_bell: false,
@@ -449,6 +456,7 @@ impl Emulator {
             keyboard_main: KeyboardModeStack::default(),
             keyboard_alt: KeyboardModeStack::default(),
             modify_other_keys: 0,
+            cursor_keys_app: false,
             pending_replies: Vec::new(),
             cwd: None,
             pending_bell: false,
@@ -503,6 +511,7 @@ impl Emulator {
                 stack: self.keyboard_alt.stack.clone(),
             },
             modify_other_keys: self.modify_other_keys,
+            cursor_keys_app: self.cursor_keys_app,
             cwd: self.cwd.clone(),
             cell_width_px: self.cell_width_px,
             cell_height_px: self.cell_height_px,
@@ -554,6 +563,7 @@ impl Emulator {
                 stack: state.keyboard_alt.stack,
             },
             modify_other_keys: state.modify_other_keys,
+            cursor_keys_app: state.cursor_keys_app,
             pending_replies: Vec::new(),
             cwd: state.cwd,
             pending_bell: false,
@@ -649,6 +659,11 @@ impl Emulator {
     /// Active xterm modifyOtherKeys mode (`CSI > 4 ; Ps m`).
     pub const fn modify_other_keys(&self) -> u8 {
         self.modify_other_keys
+    }
+
+    /// DECCKM application cursor keys (`CSI ? 1 h`).
+    pub const fn cursor_keys_app(&self) -> bool {
+        self.cursor_keys_app
     }
 
     /// Clear the active screen and primary scrollback (xterm ED 3 behavior).
@@ -760,6 +775,7 @@ impl Emulator {
             keyboard_main,
             keyboard_alt,
             modify_other_keys,
+            cursor_keys_app,
             pending_replies,
             cwd,
             pending_bell,
@@ -780,6 +796,7 @@ impl Emulator {
                 keyboard_main,
                 keyboard_alt,
                 modify_other_keys,
+                cursor_keys_app,
                 pending_replies,
                 cwd,
                 pending_bell,
@@ -824,6 +841,7 @@ struct ScreenPerformer<'a> {
     keyboard_main: &'a mut KeyboardModeStack,
     keyboard_alt: &'a mut KeyboardModeStack,
     modify_other_keys: &'a mut u8,
+    cursor_keys_app: &'a mut bool,
     pending_replies: &'a mut Vec<Vec<u8>>,
     cwd: &'a mut Option<PathBuf>,
     pending_bell: &'a mut bool,
@@ -973,19 +991,25 @@ impl Perform for ScreenPerformer<'_> {
             match action {
                 'h' => apply_private_mode(
                     self.screen,
-                    self.bracketed_paste,
-                    self.cursor_visible,
-                    self.mouse,
-                    self.focus_report,
+                    &mut PrivateModes {
+                        bracketed_paste: self.bracketed_paste,
+                        cursor_visible: self.cursor_visible,
+                        mouse: self.mouse,
+                        focus_report: self.focus_report,
+                        cursor_keys_app: self.cursor_keys_app,
+                    },
                     params,
                     true,
                 ),
                 'l' => apply_private_mode(
                     self.screen,
-                    self.bracketed_paste,
-                    self.cursor_visible,
-                    self.mouse,
-                    self.focus_report,
+                    &mut PrivateModes {
+                        bracketed_paste: self.bracketed_paste,
+                        cursor_visible: self.cursor_visible,
+                        mouse: self.mouse,
+                        focus_report: self.focus_report,
+                        cursor_keys_app: self.cursor_keys_app,
+                    },
                     params,
                     false,
                 ),
@@ -1018,11 +1042,12 @@ impl Perform for ScreenPerformer<'_> {
         if intermediates == b"!" {
             if action == 'p' {
                 self.screen.soft_reset();
-                // Claimed-mode polish: unstick DECTCEM + focus report. Keep app
-                // mouse (editors soft-reset mid-session) and bracketed paste.
+                // Claimed-mode polish: unstick DECTCEM + focus report + DECCKM.
+                // Keep app mouse (editors soft-reset mid-session) and bracketed paste.
                 *self.cursor_visible = true;
                 *self.cursor_shape = CursorShape::Block;
                 *self.focus_report = false;
+                *self.cursor_keys_app = false;
             }
             return;
         }
@@ -1217,6 +1242,7 @@ impl Perform for ScreenPerformer<'_> {
                 self.keyboard_main.clear();
                 self.keyboard_alt.clear();
                 *self.modify_other_keys = 0;
+                *self.cursor_keys_app = false;
             }
             b'D' => self.screen.line_feed(), // IND — Index
             b'E' => {
@@ -1282,20 +1308,27 @@ fn first_param(params: &Params, default: usize) -> usize {
         .map_or(default, usize::from)
 }
 
+struct PrivateModes<'a> {
+    bracketed_paste: &'a mut bool,
+    cursor_visible: &'a mut bool,
+    mouse: &'a mut MouseModeFlags,
+    focus_report: &'a mut bool,
+    cursor_keys_app: &'a mut bool,
+}
+
 fn apply_private_mode(
     screen: &mut Screen,
-    bracketed_paste: &mut bool,
-    cursor_visible: &mut bool,
-    mouse: &mut MouseModeFlags,
-    focus_report: &mut bool,
+    modes: &mut PrivateModes<'_>,
     params: &Params,
     enable: bool,
 ) {
     use prismattyc_core::AltScreenMode;
     for value in params_vec(params) {
         match value {
+            // DECCKM: application cursor keys (SS3 Home/End/arrows).
+            1 => *modes.cursor_keys_app = enable,
             // DECTCEM: text cursor enable mode.
-            25 => *cursor_visible = enable,
+            25 => *modes.cursor_visible = enable,
             47 => {
                 let mode = AltScreenMode::Mode47;
                 if enable {
@@ -1320,22 +1353,22 @@ fn apply_private_mode(
                     screen.leave_alt_screen(mode);
                 }
             }
-            2004 => *bracketed_paste = enable,
+            2004 => *modes.bracketed_paste = enable,
             // DECOM — origin mode: CUP relative to DECSTBM margins.
             6 => screen.set_origin_mode(enable),
             // DECAWM — auto-wrap (default on).
             7 => screen.set_autowrap(enable),
             // Focus in/out reporting: host sends CSI I / CSI O when enabled.
-            1004 => *focus_report = enable,
+            1004 => *modes.focus_report = enable,
             // Application mouse tracking (mouse input hybrid). Flags are independent;
             // host routes via highest enabled level. 1005/1015/1016 encodings are
             // accepted but not implemented — SGR (1006) or legacy X10 is used.
-            1000 => mouse.m1000 = enable,
-            1002 => mouse.m1002 = enable,
-            1003 => mouse.m1003 = enable,
-            1006 => mouse.sgr = enable,
+            1000 => modes.mouse.m1000 = enable,
+            1002 => modes.mouse.m1002 = enable,
+            1003 => modes.mouse.m1003 = enable,
+            1006 => modes.mouse.sgr = enable,
             // Private: wheel reports without claiming buttons.
-            7700 => mouse.wheel_only = enable,
+            7700 => modes.mouse.wheel_only = enable,
             1005 | 1015 | 1016 => {}
             _ => {}
         }
@@ -2653,6 +2686,38 @@ mod tests {
     }
 
     #[test]
+    fn cursor_keys_app_tracks_decckm_and_resets() {
+        let mut emulator = Emulator::new(4, 2, 0);
+        assert!(!emulator.cursor_keys_app());
+        let _ = emulator.feed(b"\x1b[?1h");
+        assert!(emulator.cursor_keys_app(), "CSI ? 1 h sets DECCKM");
+        let _ = emulator.feed(b"\x1b[?1l");
+        assert!(!emulator.cursor_keys_app(), "CSI ? 1 l clears DECCKM");
+        // Combined with another private mode in one CSI.
+        let _ = emulator.feed(b"\x1b[?1;25h");
+        assert!(emulator.cursor_keys_app());
+        assert!(emulator.cursor_visible());
+
+        let snapshot = emulator.export_state().expect("parser boundary");
+        assert!(snapshot.cursor_keys_app);
+        let restored = Emulator::import_state(snapshot).expect("valid state");
+        assert!(restored.cursor_keys_app());
+
+        let mut value = serde_json::to_value(emulator.export_state().unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("cursor_keys_app");
+        let omitted: EmulatorStateV1 = serde_json::from_value(value).unwrap();
+        assert!(
+            !omitted.cursor_keys_app,
+            "snapshots from before DECCKM load with the mode off"
+        );
+
+        let _ = emulator.feed(b"\x1b[!p");
+        assert!(!emulator.cursor_keys_app(), "DECSTR clears DECCKM");
+        let _ = emulator.feed(b"\x1b[?1h\x1bc");
+        assert!(!emulator.cursor_keys_app(), "RIS clears DECCKM");
+    }
+
+    #[test]
     fn decom_private_mode_tracks_and_affects_cup_cpr() {
         let mut emulator = Emulator::new(10, 6, 0);
         assert!(!emulator.screen().origin_mode());
@@ -2689,17 +2754,19 @@ mod tests {
     fn soft_reset_restores_claimed_modes_keeps_mouse() {
         let mut emulator = Emulator::new(10, 6, 0);
         let _ = emulator.feed(
-            b"\x1b[2;4r\x1b[?6h\x1b[?7l\x1b[?25l\x1b[?1004h\x1b[?1000h\x1b[?1006h\x1b[?2004h",
+            b"\x1b[2;4r\x1b[?6h\x1b[?7l\x1b[?25l\x1b[?1h\x1b[?1004h\x1b[?1000h\x1b[?1006h\x1b[?2004h",
         );
         assert!(emulator.screen().origin_mode());
         assert!(!emulator.screen().autowrap());
         assert!(!emulator.cursor_visible());
+        assert!(emulator.cursor_keys_app());
         assert!(emulator.focus_report());
         assert!(emulator.bracketed_paste());
         let _ = emulator.feed(b"\x1b[!p");
         assert!(!emulator.screen().origin_mode(), "DECSTR clears DECOM");
         assert!(emulator.screen().autowrap(), "DECSTR restores DECAWM");
         assert!(emulator.cursor_visible(), "DECSTR restores DECTCEM");
+        assert!(!emulator.cursor_keys_app(), "DECSTR clears DECCKM");
         assert!(!emulator.focus_report(), "DECSTR clears focus report");
         assert_eq!(emulator.mouse_tracking(), MouseTracking::Click);
         assert!(
@@ -2717,11 +2784,12 @@ mod tests {
     fn ris_clears_claimed_private_modes() {
         let mut emulator = Emulator::new(10, 6, 20);
         let _ = emulator.feed(
-            b"\x1b[2;4r\x1b[?6h\x1b[?7l\x1b[?25l\x1b[?1004h\x1b[?1000h\x1b[?1006h\x1b[?2004hMAIN\r\n",
+            b"\x1b[2;4r\x1b[?6h\x1b[?7l\x1b[?25l\x1b[?1h\x1b[?1004h\x1b[?1000h\x1b[?1006h\x1b[?2004hMAIN\r\n",
         );
         assert!(emulator.screen().origin_mode());
         assert!(!emulator.screen().autowrap());
         assert!(!emulator.cursor_visible());
+        assert!(emulator.cursor_keys_app());
         assert!(emulator.focus_report());
         assert!(emulator.bracketed_paste());
         assert_eq!(emulator.mouse_tracking(), MouseTracking::Click);
@@ -2729,6 +2797,7 @@ mod tests {
         assert!(!emulator.screen().origin_mode());
         assert!(emulator.screen().autowrap());
         assert!(emulator.cursor_visible());
+        assert!(!emulator.cursor_keys_app());
         assert!(!emulator.focus_report());
         assert!(!emulator.bracketed_paste());
         assert_eq!(emulator.mouse_tracking(), MouseTracking::Off);

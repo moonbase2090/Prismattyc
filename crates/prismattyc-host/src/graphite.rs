@@ -11,9 +11,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use fontdue::{Font, FontSettings};
 
+use crate::config::BarColor;
 use crate::mux::{ChromeGeom, StripHit};
-use crate::raster::{alpha_of, contrast_ratio, mix_rgb, pack_argb, raise_alpha, unpack_rgb};
-use crate::theme::ThemeVariant;
+use crate::raster::{
+    alpha_of, contrast_ratio, mix_rgb, pack_argb, raise_alpha, relative_luminance, unpack_rgb,
+};
+use crate::theme::{Theme, ThemeVariant};
 
 pub(crate) type Rgb = [u8; 3];
 
@@ -29,6 +32,8 @@ impl Design {
 
 /// Tabs bar height.
 pub(crate) const TABS_BAR_H: Design = Design(44.0);
+/// Combined sidebar tree width (issue #113).
+pub(crate) const SIDEBAR_W: Design = Design(256.0);
 /// Pane title row height, inside the pane slot.
 pub(crate) const PANE_HEADER_H: f32 = 28.0;
 /// Bottom (or top) spaces bar height.
@@ -86,9 +91,9 @@ const PILL_TEXT: f32 = 11.0;
 const PILL_PAD_X: f32 = 6.0;
 const PILL_H: f32 = 16.0;
 const CMD_TEXT: f32 = 12.5;
-const KEY_TEXT: f32 = 11.0;
-const KEY_PAD_X: f32 = 6.0;
-const KEY_H: f32 = 18.0;
+pub(crate) const KEY_TEXT: f32 = 11.0;
+pub(crate) const KEY_PAD_X: f32 = 6.0;
+pub(crate) const KEY_H: f32 = 18.0;
 
 const fn rgb(hex: u32) -> Rgb {
     [(hex >> 16) as u8, (hex >> 8) as u8, hex as u8]
@@ -142,6 +147,10 @@ pub(crate) struct Tokens {
     pub unseen_text: Rgb,
     /// Light-cycle vehicle head at the sweep's leading edge.
     pub cycle_head: Rgb,
+    /// Dialog and overlay card fill; also the pane fill in previews.
+    pub panel: Rgb,
+    /// Which brief column the tokens follow (light bars, outlines, opacity).
+    pub variant: ThemeVariant,
 }
 
 pub(crate) const DARK: Tokens = Tokens {
@@ -179,6 +188,8 @@ pub(crate) const DARK: Tokens = Tokens {
     hover_outline: rgb(0x3d5f8f),
     unseen_text: rgb(0xf2b84b),
     cycle_head: rgb(0xd6e8ff),
+    panel: rgb(0x181b21),
+    variant: ThemeVariant::Dark,
 };
 
 pub(crate) const LIGHT: Tokens = Tokens {
@@ -187,7 +198,9 @@ pub(crate) const LIGHT: Tokens = Tokens {
     bar_line: rgb(0xd5d9df),
     divider: rgb(0xd5d9df),
     tab_active: rgb(0xffffff),
-    tab_active_line: Some(rgb(0xd5d9df)),
+    // #145: #d5d9df read too faint on the light bar; a stronger rule keeps
+    // the white active chip legible at a glance. Dark stays unoutlined.
+    tab_active_line: Some(rgb(0xaab2bd)),
     tab_hover: rgb(0xe2e6eb),
     text: rgb(0x1f2329),
     text_strong: rgb(0x1f2329),
@@ -216,8 +229,12 @@ pub(crate) const LIGHT: Tokens = Tokens {
     hover_outline: rgb(0x9dbbe8),
     unseen_text: rgb(0x9a6200),
     cycle_head: rgb(0x163f80),
+    panel: rgb(0xffffff),
+    variant: ThemeVariant::Light,
 };
 
+/// The brief's token table for `variant`. Painters take [`theme_tokens`] or
+/// [`bar_tokens`] so the chrome follows the selected theme.
 pub(crate) fn tokens(variant: ThemeVariant) -> &'static Tokens {
     match variant {
         ThemeVariant::Dark => &DARK,
@@ -225,15 +242,235 @@ pub(crate) fn tokens(variant: ThemeVariant) -> &'static Tokens {
     }
 }
 
+/// Themes whose palette is the brief's token table (#145).
+const BRIEF_THEMES: [&str; 3] = ["prismattyc", "prismattyc-dark", "prismattyc-light"];
+
+/// The Prismattyc themes paint the brief tokens exactly, unless
+/// `[theme_overrides]` moved their chrome pair (#160).
+pub(crate) fn uses_brief(theme: &Theme) -> bool {
+    let brief = tokens(theme.variant);
+    BRIEF_THEMES.contains(&theme.id.as_str())
+        && theme.chrome_bg == brief.bar
+        && theme.chrome_fg == brief.text
+}
+
+/// Graphite tokens for the selected theme (#160). The Prismattyc themes keep
+/// the brief; every other theme derives its tokens from its own palette.
+pub(crate) fn theme_tokens(theme: &Theme) -> Tokens {
+    if uses_brief(theme) {
+        *tokens(theme.variant)
+    } else {
+        derive_tokens(theme)
+    }
+}
+
+/// `percent` of the way from `from` to `to`.
+fn toward(from: Rgb, to: Rgb, percent: u16) -> Rgb {
+    mix_rgb(from, to, percent.min(100) * 256 / 100)
+}
+
+const BLACK: Rgb = [0, 0, 0];
+const WHITE: Rgb = [0xff, 0xff, 0xff];
+
+/// Move `ink` toward whichever of black or white stands out more on the
+/// first ground until it reaches `target` on every ground (#160). Inks that
+/// already read are returned unchanged.
+fn readable(ink: Rgb, grounds: &[Rgb], target: f32) -> Rgb {
+    let Some(&first) = grounds.first() else {
+        return ink;
+    };
+    let pole = if contrast_ratio(WHITE, first) >= contrast_ratio(BLACK, first) {
+        WHITE
+    } else {
+        BLACK
+    };
+    let worst = |color: Rgb| {
+        grounds
+            .iter()
+            .map(|ground| contrast_ratio(color, *ground))
+            .fold(f32::INFINITY, f32::min)
+    };
+    let mut color = ink;
+    for _ in 0..24 {
+        if worst(color) >= target {
+            break;
+        }
+        color = mix_rgb(color, pole, 24);
+    }
+    color
+}
+
+/// Text on a status fill: the brief's dark ink, or white when that reads
+/// better.
+fn ink_on(fill: Rgb) -> Rgb {
+    let dark = DARK.on_attention;
+    if contrast_ratio(WHITE, fill) >= contrast_ratio(dark, fill) {
+        WHITE
+    } else {
+        dark
+    }
+}
+
+/// Tokens from a theme that is not one of the Prismattyc themes (#160).
+/// Bars come from `chrome_bg`, text from `chrome_fg`, the active chip from
+/// `tab_active_bg`, panes and title rows from `default_bg`, and the status
+/// dots from the theme's badges. The light-cycle head stays brand chrome.
+fn derive_tokens(theme: &Theme) -> Tokens {
+    let variant = theme.variant;
+    let light = variant == ThemeVariant::Light;
+    let (bar, fg) = (theme.chrome_bg, theme.chrome_fg);
+    let (pane, ink) = (theme.default_bg, theme.default_fg);
+    let blue = theme.ansi[4];
+    let status_bar = if light {
+        toward(bar, fg, 5)
+    } else {
+        toward(bar, BLACK, 38)
+    };
+    let tab_hover = crate::theme::hover_rgb(variant, bar, fg, 0.10);
+    let mut tok = Tokens {
+        ground: theme.pane_backdrop,
+        bar,
+        bar_line: toward(bar, fg, if light { 12 } else { 7 }),
+        divider: toward(bar, fg, 12),
+        tab_active: theme.tab_active_bg,
+        tab_active_line: light.then(|| toward(bar, fg, 30)),
+        tab_hover,
+        text: fg,
+        text_strong: if light { fg } else { toward(fg, WHITE, 30) },
+        muted: toward(fg, bar, 30),
+        tab_text: toward(fg, bar, 25),
+        working: theme.active_badge,
+        unseen: theme.unseen_badge,
+        attention: theme.attention_badge,
+        on_attention: ink_on(theme.attention_badge),
+        idle: toward(fg, bar, 50),
+        field: pane,
+        field_line: toward(bar, fg, 16),
+        key: tab_hover,
+        key_line: toward(bar, fg, 18),
+        key_text: toward(fg, bar, 12),
+        status_bar,
+        status_line: toward(status_bar, fg, 7),
+        chip_active: crate::theme::derived_tab_active_bg(variant, status_bar, fg),
+        separator: toward(bar, fg, 25),
+        hairline: theme.pane_border,
+        title_line: toward(pane, ink, 8),
+        title_focus: toward(pane, blue, 10),
+        title_focus_line: toward(pane, blue, 22),
+        muted_focus: toward(ink, pane, 22),
+        title_hover: crate::theme::hover_rgb(variant, pane, ink, 0.10),
+        hover_outline: toward(pane, blue, 40),
+        unseen_text: theme.unseen_badge,
+        cycle_head: tokens(variant).cycle_head,
+        panel: pane,
+        variant,
+    };
+    keep_text_readable(&mut tok);
+    tok
+}
+
+/// WCAG AA for body text.
+const AA: f32 = 4.5;
+
+/// Nudge derived text toward readability on the fills it sits on (#160
+/// item 6). AA is the aim; a theme whose pair cannot reach it still gets the
+/// closest ink 24 steps allow. Body text never ends up weaker than the muted
+/// text beside it.
+fn keep_text_readable(tok: &mut Tokens) {
+    let bars = [tok.bar, tok.status_bar, tok.tab_active, tok.chip_active];
+    tok.muted = readable(tok.muted, &[tok.bar, tok.tab_active, tok.field], AA);
+    tok.tab_text = readable(tok.tab_text, &bars, AA);
+    let floor = AA
+        .max(contrast_ratio(tok.muted, tok.bar))
+        .max(contrast_ratio(tok.tab_text, tok.bar));
+    tok.text = readable(tok.text, &bars, floor);
+    tok.text_strong = readable(tok.text_strong, &bars, floor);
+    tok.key_text = readable(tok.key_text, &[tok.key], AA);
+    tok.muted_focus = readable(tok.muted_focus, &[tok.title_focus], AA);
+    tok.unseen_text = readable(tok.unseen_text, &[tok.bar, tok.status_bar], AA);
+    tok.on_attention = readable(tok.on_attention, &[tok.attention], AA);
+}
+
+/// Tabs bar / spaces bar fills per preset (design brief, item 5). `Plum`
+/// renders Sand on light themes.
+fn bar_fills(bar: BarColor, variant: ThemeVariant) -> (Rgb, Rgb) {
+    use ThemeVariant::{Dark, Light};
+    match (bar, variant) {
+        (BarColor::Graphite, Dark) => (rgb(0x15181d), rgb(0x0d0f12)),
+        (BarColor::Graphite, Light) => (rgb(0xeef0f3), rgb(0xe4e7ec)),
+        (BarColor::Harbor, Dark) => (rgb(0x152131), rgb(0x0e1722)),
+        (BarColor::Harbor, Light) => (rgb(0xe3edf8), rgb(0xd6e3f2)),
+        (BarColor::Moss, Dark) => (rgb(0x17221b), rgb(0x0f1712)),
+        (BarColor::Moss, Light) => (rgb(0xe4f0e7), rgb(0xd7e7db)),
+        (BarColor::Plum, Dark) => (rgb(0x211a27), rgb(0x17121c)),
+        (BarColor::Plum, Light) => (rgb(0xf4ece0), rgb(0xebe0cf)),
+    }
+}
+
+/// Theme tokens with an explicit `bar_color` preset applied to both bars.
+/// `None` (no `bar_color` in the config) keeps the theme's own bars (#160);
+/// on the Prismattyc themes that is the Graphite preset.
+pub(crate) fn bar_tokens(theme: &Theme, bar: Option<BarColor>) -> Tokens {
+    let mut tok = theme_tokens(theme);
+    if let Some(bar) = bar {
+        let (tabs, status) = bar_fills(bar, theme.variant);
+        tok.bar = tabs;
+        tok.status_bar = status;
+        if !uses_brief(theme) {
+            keep_text_readable(&mut tok);
+        }
+    }
+    tok
+}
+
+/// Display name for the bar preset cycle. `None` follows the theme.
+pub(crate) fn bar_color_name(bar: Option<BarColor>) -> &'static str {
+    match bar {
+        None => "Theme",
+        Some(BarColor::Graphite) => "Graphite",
+        Some(BarColor::Harbor) => "Harbor",
+        Some(BarColor::Moss) => "Moss",
+        Some(BarColor::Plum) => "Plum",
+    }
+}
+
+/// Next preset in the Ctrl+Shift+B cycle (wraps). `forward = false` steps
+/// back. `theme_bars` adds the theme's own bars to the cycle; the Prismattyc
+/// themes leave it out because their bars are the Graphite preset.
+pub(crate) fn step_bar_color(
+    bar: Option<BarColor>,
+    forward: bool,
+    theme_bars: bool,
+) -> Option<BarColor> {
+    use BarColor::{Graphite, Harbor, Moss, Plum};
+    const ORDER: [Option<BarColor>; 5] =
+        [None, Some(Graphite), Some(Harbor), Some(Moss), Some(Plum)];
+    let order = if theme_bars { &ORDER[..] } else { &ORDER[1..] };
+    let current = bar.or(if theme_bars { None } else { Some(Graphite) });
+    let index = order
+        .iter()
+        .position(|preset| *preset == current)
+        .unwrap_or(0);
+    let next = if forward {
+        index.saturating_add(1) % order.len()
+    } else {
+        index.saturating_add(order.len().saturating_sub(1)) % order.len()
+    };
+    order[next]
+}
+
 /// The accent is the focus colour, darkened on light bars until it keeps the
-/// 3:1 a non-text indicator needs against the bar.
+/// 3:1 a non-text indicator needs against the bar. The direction follows the
+/// bar's luminance relative to its text (not token identity), so `bar_color`
+/// presets darken and lighten the same way the base tokens do.
 pub(crate) fn accent(tok: &Tokens, focus: Rgb) -> Rgb {
     let mut color = focus;
+    let light_bar = relative_luminance(tok.bar) > relative_luminance(tok.text);
     for _ in 0..24 {
         if contrast_ratio(color, tok.bar) >= 3.0 {
             break;
         }
-        color = if tok.bar == LIGHT.bar {
+        color = if light_bar {
             mix_rgb(color, [0, 0, 0], 24)
         } else {
             mix_rgb(color, [255, 255, 255], 24)
@@ -558,7 +795,7 @@ pub(crate) fn fill_round_rect(
 }
 
 /// A round rectangle with a 1-pixel `line` border around `fill`.
-fn outlined_round_rect(
+pub(crate) fn outlined_round_rect(
     buffer: &mut [u32],
     stride: usize,
     rect: Rect,
@@ -1485,7 +1722,7 @@ fn round_rect_sd(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> 
 /// Anti-aliased `width`-pixel band just inside a rounded rectangle's edge.
 /// Only the edge strips are visited, so cost scales with the perimeter.
 #[allow(clippy::too_many_arguments)]
-fn stroke_round_rect(
+pub(crate) fn stroke_round_rect(
     buffer: &mut [u32],
     stride: usize,
     x0: f32,
@@ -2132,6 +2369,33 @@ pub(crate) fn paint_pane_chrome(
     }
 }
 
+/// Header regions that change when a pane starts or stops running.
+///
+/// Both rects stay inside the title row. They are not chrome boxes: a stable
+/// box would be republished on every pulse, and a box that appears only while
+/// the pane is running would expand to the whole slot when it disappears.
+pub(crate) fn activity_header_rects(chrome: ChromeGeom, slot: Rect) -> Vec<Rect> {
+    let head_h = chrome.px(PANE_HEADER_H).min(slot.h);
+    if slot.w < chrome.px(40.0) || head_h == 0 {
+        return Vec::new();
+    }
+    let pad = chrome.px(HEADER_PAD_X);
+    let dot = chrome.px(HEADER_DOT).max(1);
+    let cx = slot.x.saturating_add(pad).saturating_add(dot / 2);
+    let dot_left = cx.saturating_sub(dot / 2 + 2).max(slot.x);
+    let dot_right = cx.saturating_add(dot / 2 + 3).min(slot.right());
+    let dot_rect = Rect::new(dot_left, slot.y, dot_right.saturating_sub(dot_left), head_h);
+    // Wider than "needs you" / "new output" plus the right pad, at 1x and up.
+    let status_w = chrome.px(168.0).min(slot.w);
+    let status = Rect::new(
+        slot.right().saturating_sub(status_w),
+        slot.y,
+        status_w,
+        head_h,
+    );
+    vec![dot_rect, status]
+}
+
 fn status_width(chrome: ChromeGeom, status: PaneStatus) -> f32 {
     let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
     let px = s(HEADER_TEXT);
@@ -2302,7 +2566,10 @@ pub(crate) fn paint_rail_chip(
         };
         outlined_round_rect(buffer, stride, rect, s(5.0), accent, fill);
     } else if chip.current {
-        fill_round_rect(buffer, stride, rect, s(5.0), tok.chip_active, 0xff);
+        match tok.tab_active_line {
+            Some(line) => outlined_round_rect(buffer, stride, rect, s(5.0), line, tok.chip_active),
+            None => fill_round_rect(buffer, stride, rect, s(5.0), tok.chip_active, 0xff),
+        }
     } else if chip.hovered {
         fill_round_rect(buffer, stride, rect, s(5.0), tok.tab_hover, 0xff);
     }
@@ -2610,7 +2877,10 @@ fn paint_side_chip(
         };
         outlined_round_rect(buffer, stride, rect, s(6.0), paint.accent, fill);
     } else if chip.current {
-        fill_round_rect(buffer, stride, rect, s(6.0), tok.chip_active, 0xff);
+        match tok.tab_active_line {
+            Some(line) => outlined_round_rect(buffer, stride, rect, s(6.0), line, tok.chip_active),
+            None => fill_round_rect(buffer, stride, rect, s(6.0), tok.chip_active, 0xff),
+        }
     } else if chip.hovered {
         fill_round_rect(buffer, stride, rect, s(6.0), tok.tab_hover, 0xff);
     }
@@ -2779,9 +3049,2040 @@ fn paint_side_footer(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Combined sidebar (issue #113, issue #174).
+//
+// `layout = "sidebar"` swaps the tabs bar and the spaces bar for one tree
+// column (Spaces → tabs → panes) plus a 44 px header over the panes with
+// the breadcrumb and the arrangement buttons. Graphite and classic both
+// paint it. The column width is the user's, and a collapse draws the icon
+// strip instead of the tree.
+
+/// Tree row height.
+const SIDEBAR_ROW_H: f32 = 24.0;
+/// Tree and footer text size.
+const SIDEBAR_TEXT: f32 = 12.0;
+/// Indent per tree depth.
+const SIDEBAR_INDENT: f32 = 14.0;
+/// Status dot diameter.
+const SIDEBAR_DOT: f32 = 6.0;
+/// Footer action row height.
+const SIDEBAR_ACTION_H: f32 = 30.0;
+/// Footer top padding.
+const SIDEBAR_FOOT_PAD: f32 = 8.0;
+/// Scrollbar thumb width and minimum height.
+const SIDEBAR_THUMB_W: f32 = 6.0;
+const SIDEBAR_THUMB_MIN: f32 = 24.0;
+/// Arrangement buttons in the header over the panes, in button order. The
+/// buttons paint icons (#162); these names are the tooltips and the
+/// accessible names.
+pub(crate) const SIDEBAR_ARRANGE: [&str; 3] = ["Single", "Split", "Grid"];
+/// Arrange control: a fixed track of three equal icon segments, so the
+/// control never resizes when the selection changes.
+const ARRANGE_SEG_W: f32 = 32.0;
+const ARRANGE_H: f32 = 28.0;
+const ARRANGE_INSET: f32 = 2.0;
+/// Icon box inside a segment, and its interior tint.
+const ARRANGE_ICON_W: f32 = 16.0;
+const ARRANGE_ICON_H: f32 = 12.0;
+const ARRANGE_TINT: f32 = 0.3;
+/// Tooltip chip under a hovered arrangement button.
+const TOOLTIP_H: f32 = 22.0;
+const TOOLTIP_PAD_X: f32 = 8.0;
+const TOOLTIP_GAP: f32 = 6.0;
+/// Footer actions at the bottom of the tree column.
+pub(crate) const SIDEBAR_ACTIONS: [&str; 3] = ["+ New tab", "+ New space", "Commands"];
+
+/// One tree row to paint: content from the [`crate::sidebar`] model, `slot`
+/// from [`sidebar_layout`].
+pub(crate) struct SidebarRow<'a> {
+    pub slot: Rect,
+    pub depth: usize,
+    /// Space rows show a collapse chevron; `Some(true)` is collapsed.
+    pub chevron: Option<bool>,
+    /// Tab status dot; space and pane rows pass `None`.
+    pub dot: Option<Dot>,
+    pub label: &'a str,
+    /// Mail badge count; 0 hides the envelope.
+    pub mail: u32,
+    /// Needs-you badge count on space rows; 0 hides it.
+    pub needs_you: usize,
+    /// The active tab row: active fill plus the 2 px accent marker.
+    pub selected: bool,
+    /// Pointer is over the row (PR3 hit-testing fills this in).
+    pub hovered: bool,
+}
+
+/// Fixed panel geometry for the tree column: a 44 px title band, a scroll
+/// viewport for rows, and three footer actions. The tree scrolls inside;
+/// the panel itself never resizes.
+pub(crate) struct SidebarLayout {
+    pub column: Rect,
+    pub head: Rect,
+    pub list: Rect,
+    pub rows: Vec<Rect>,
+    pub thumb: Option<Rect>,
+    pub foot: Rect,
+    pub actions: [Rect; 3],
+    /// First visible row after clamping `scroll`.
+    pub first_row: usize,
+}
+
+pub(crate) fn sidebar_layout(
+    chrome: ChromeGeom,
+    column: Rect,
+    row_count: usize,
+    scroll: usize,
+) -> SidebarLayout {
+    let head_h = TABS_BAR_H.px(chrome);
+    let action_h = chrome.px(SIDEBAR_ACTION_H);
+    let foot_h = action_h
+        .saturating_mul(SIDEBAR_ACTIONS.len())
+        .saturating_add(chrome.px(SIDEBAR_FOOT_PAD));
+    let head = Rect::new(column.x, column.y, column.w, head_h.min(column.h));
+    let foot_h = foot_h.min(column.h.saturating_sub(head.h));
+    let foot = Rect::new(
+        column.x,
+        column.y.saturating_add(column.h).saturating_sub(foot_h),
+        column.w,
+        foot_h,
+    );
+    let list = Rect::new(
+        column.x,
+        head.y.saturating_add(head.h),
+        column.w,
+        foot.y.saturating_sub(head.y.saturating_add(head.h)),
+    );
+    let row_h = chrome.px(SIDEBAR_ROW_H).max(1);
+    let visible = list.h / row_h;
+    let max_scroll = row_count.saturating_sub(visible.max(1));
+    let first_row = scroll.min(max_scroll).min(row_count);
+    let mut rows = Vec::new();
+    for index in 0..row_count.saturating_sub(first_row) {
+        let y = list.y.saturating_add(index.saturating_mul(row_h));
+        if y.saturating_add(row_h) > list.y.saturating_add(list.h) {
+            break;
+        }
+        rows.push(Rect::new(list.x, y, list.w, row_h));
+    }
+    let total_h = row_count.saturating_mul(row_h);
+    let thumb = if total_h > list.h && list.h > 0 {
+        let thumb_h = ((list.h as f32 * list.h as f32) / total_h as f32)
+            .ceil()
+            .max(chrome.px(SIDEBAR_THUMB_MIN) as f32) as usize;
+        let thumb_h = thumb_h.min(list.h);
+        let travel = list.h.saturating_sub(thumb_h);
+        let thumb_y = if max_scroll == 0 {
+            list.y
+        } else {
+            list.y.saturating_add(
+                travel
+                    .saturating_mul(first_row)
+                    .checked_div(max_scroll)
+                    .unwrap_or(0),
+            )
+        };
+        let thumb_w = chrome.px(SIDEBAR_THUMB_W).min(list.w);
+        Some(Rect::new(
+            list.x.saturating_add(list.w).saturating_sub(thumb_w),
+            thumb_y,
+            thumb_w,
+            thumb_h,
+        ))
+    } else {
+        None
+    };
+    let mut actions = [Rect::new(0, 0, 0, 0); 3];
+    for (index, slot) in actions.iter_mut().enumerate() {
+        *slot = Rect::new(
+            foot.x,
+            foot.y
+                .saturating_add(chrome.px(SIDEBAR_FOOT_PAD))
+                .saturating_add(index.saturating_mul(action_h)),
+            foot.w,
+            action_h.min(foot.h.saturating_sub(chrome.px(SIDEBAR_FOOT_PAD))),
+        );
+    }
+    SidebarLayout {
+        column,
+        head,
+        list,
+        rows,
+        thumb,
+        foot,
+        actions,
+        first_row,
+    }
+}
+
+/// Pair each painted sidebar slot with the corresponding absolute row index.
+/// `sidebar_layout` starts its slots at `first_row` when the list is scrolled.
+pub(crate) fn sidebar_rows_in_view<'a, T>(
+    rows: &'a [T],
+    layout: &SidebarLayout,
+) -> Vec<(usize, &'a T, Rect)> {
+    rows.iter()
+        .enumerate()
+        .skip(layout.first_row)
+        .take(layout.rows.len())
+        .zip(layout.rows.iter().copied())
+        .map(|((index, row), slot)| (index, row, slot))
+        .collect()
+}
+
+/// Header over the panes: breadcrumb plus the three arrangement buttons.
+pub(crate) struct SidebarHeaderLayout {
+    pub span: Rect,
+    pub crumb: Rect,
+    /// The Arrange control's track; `buttons` are its segments.
+    pub track: Rect,
+    pub buttons: [Rect; 3],
+}
+
+pub(crate) fn sidebar_header_layout(chrome: ChromeGeom, span: Rect) -> SidebarHeaderLayout {
+    let inset = chrome.px(ARRANGE_INSET);
+    let seg_w = chrome.px(ARRANGE_SEG_W);
+    let track_h = chrome.px(ARRANGE_H);
+    let track_w = seg_w
+        .saturating_mul(SIDEBAR_ARRANGE.len())
+        .saturating_add(inset.saturating_mul(2));
+    let track = Rect::new(
+        span.right()
+            .saturating_sub(chrome.px(12.0))
+            .saturating_sub(track_w),
+        span.y.saturating_add(span.h.saturating_sub(track_h) / 2),
+        track_w,
+        track_h,
+    );
+    let mut buttons = [Rect::new(0, 0, 0, 0); 3];
+    for (index, slot) in buttons.iter_mut().enumerate() {
+        *slot = Rect::new(
+            track
+                .x
+                .saturating_add(inset)
+                .saturating_add(index.saturating_mul(seg_w)),
+            track.y.saturating_add(inset),
+            seg_w,
+            track_h.saturating_sub(inset.saturating_mul(2)),
+        );
+    }
+    let crumb_x = span.x.saturating_add(chrome.px(12.0));
+    let crumb = Rect::new(
+        crumb_x,
+        span.y,
+        track
+            .x
+            .saturating_sub(chrome.px(8.0))
+            .saturating_sub(crumb_x),
+        span.h,
+    );
+    SidebarHeaderLayout {
+        span,
+        crumb,
+        track,
+        buttons,
+    }
+}
+
+/// The tree column: title band, rows, footer actions, scrollbar thumb.
+pub(crate) struct SidebarPaint<'a> {
+    pub chrome: ChromeGeom,
+    pub tok: &'a Tokens,
+    pub accent: Rgb,
+    pub layout: &'a SidebarLayout,
+    pub title: &'a str,
+    pub rows: &'a [SidebarRow<'a>],
+    pub actions: [&'a str; 3],
+    /// Chord hint after Commands (`Ctrl Shift P`); empty hides it.
+    pub commands_hint: &'a str,
+    pub action_hovered: Option<usize>,
+    pub alpha: u8,
+    /// Grip along the inner edge, drawn in the accent while hot.
+    pub grip_hot: bool,
+    /// Sidebar docked on the right: the grip is the column's left edge.
+    pub dock_right: bool,
+    /// Header control that collapses or expands the column.
+    pub toggle: Rect,
+    pub toggle_hovered: bool,
+}
+
+pub(crate) fn paint_sidebar(buffer: &mut [u32], stride: usize, paint: &SidebarPaint<'_>) {
+    let tok = paint.tok;
+    let column = paint.layout.column;
+    let ground = pack_argb(paint.alpha, tok.status_bar);
+    for y in column.y..column.y.saturating_add(column.h) {
+        for x in column.x..column.right() {
+            set(buffer, stride, x, y, ground);
+        }
+    }
+    let line = pack_argb(0xff, tok.status_line);
+    let s = |d: f32| d * paint.chrome.scale_milli as f32 / 1000.0;
+    let pad = paint.chrome.px(12.0);
+    let title_right = if paint.dock_right {
+        column.right()
+    } else {
+        paint.toggle.x.min(column.right())
+    };
+    let title_left = if paint.dock_right {
+        paint.toggle.right().max(column.x)
+    } else {
+        column.x
+    };
+    draw_text(
+        buffer,
+        stride,
+        title_left as f32 + pad as f32,
+        paint.layout.head.y as f32 + paint.layout.head.h as f32 / 2.0,
+        Face::SemiBold,
+        s(TAB_TEXT),
+        paint.title,
+        tok.text,
+        title_left,
+        title_right,
+    );
+    paint_sidebar_toggle(
+        buffer,
+        stride,
+        paint.chrome,
+        paint.toggle,
+        true,
+        paint.dock_right,
+        paint.toggle_hovered,
+        tok,
+    );
+    for x in column.x..column.right() {
+        set(
+            buffer,
+            stride,
+            x,
+            paint
+                .layout
+                .head
+                .y
+                .saturating_add(paint.layout.head.h)
+                .saturating_sub(1),
+            line,
+        );
+    }
+    for row in paint.rows {
+        paint_sidebar_row(buffer, stride, paint, row);
+    }
+    if let Some(thumb) = paint.layout.thumb {
+        fill_round_rect(buffer, stride, thumb, s(3.0), tok.separator, 0xff);
+    }
+    let foot_top = paint.layout.foot.y;
+    for x in column.x..column.right() {
+        set(buffer, stride, x, foot_top, line);
+    }
+    for (index, slot) in paint.layout.actions.iter().enumerate() {
+        let hovered = paint.action_hovered == Some(index);
+        if hovered {
+            fill_round_rect(buffer, stride, *slot, s(5.0), tok.tab_hover, 0xff);
+        }
+        let end = draw_text(
+            buffer,
+            stride,
+            slot.x as f32 + pad as f32,
+            slot.center_y(),
+            Face::Regular,
+            s(SIDEBAR_TEXT),
+            paint.actions[index],
+            tok.muted,
+            slot.x,
+            slot.right(),
+        );
+        if index == 2 && !paint.commands_hint.is_empty() {
+            let hint = ellipsize(
+                Face::Regular,
+                s(SIDEBAR_TEXT),
+                paint.commands_hint,
+                (slot.right().saturating_sub(pad) as f32 - end - s(8.0)).max(0.0),
+            );
+            let hint_w = text_width(Face::Regular, s(SIDEBAR_TEXT), &hint);
+            draw_text(
+                buffer,
+                stride,
+                slot.right().saturating_sub(pad) as f32 - hint_w,
+                slot.center_y(),
+                Face::Regular,
+                s(SIDEBAR_TEXT),
+                &hint,
+                tok.muted,
+                slot.x,
+                slot.right(),
+            );
+        }
+    }
+    // The grip stays on top of rows and the footer rule.
+    paint_sidebar_grip(
+        buffer,
+        stride,
+        column,
+        paint.chrome,
+        paint.dock_right,
+        paint.grip_hot,
+        paint.accent,
+        tok.status_line,
+    );
+}
+
+fn paint_sidebar_row(
+    buffer: &mut [u32],
+    stride: usize,
+    paint: &SidebarPaint<'_>,
+    row: &SidebarRow<'_>,
+) {
+    let tok = paint.tok;
+    let s = |d: f32| d * paint.chrome.scale_milli as f32 / 1000.0;
+    let slot = row.slot;
+    if row.selected {
+        match tok.tab_active_line {
+            Some(line) => outlined_round_rect(buffer, stride, slot, s(6.0), line, tok.tab_active),
+            None => fill_round_rect(buffer, stride, slot, s(6.0), tok.tab_active, 0xff),
+        }
+    } else if row.hovered {
+        fill_round_rect(buffer, stride, slot, s(6.0), tok.tab_hover, 0xff);
+    }
+    let cy = slot.center_y();
+    let mut x = slot.x as f32 + s(12.0) + row.depth as f32 * s(SIDEBAR_INDENT);
+    if let Some(collapsed) = row.chevron {
+        if collapsed {
+            chevron_right(buffer, stride, x, cy, s(10.0), s(1.5), tok.muted);
+        } else {
+            chevron_down(buffer, stride, x, cy, s(10.0), s(1.5), tok.muted);
+        }
+        x += s(10.0) + s(6.0);
+    }
+    if let Some(dot) = row.dot {
+        let dot_r = s(SIDEBAR_DOT) / 2.0;
+        match dot {
+            Dot::Idle => stroke_circle(
+                buffer,
+                stride,
+                x + dot_r,
+                cy,
+                dot_r - s(0.75),
+                s(1.5),
+                tok.idle,
+            ),
+            Dot::Working => fill_circle(buffer, stride, x + dot_r, cy, dot_r, tok.working),
+            Dot::Unseen => fill_circle(buffer, stride, x + dot_r, cy, dot_r, tok.unseen),
+            Dot::Attention => fill_circle(buffer, stride, x + dot_r, cy, dot_r, tok.attention),
+        }
+        x += s(SIDEBAR_DOT) + s(7.0);
+    }
+    let mut right = slot.right().saturating_sub(paint.chrome.px(12.0)) as f32;
+    if row.mail > 0 {
+        let count = row.mail.to_string();
+        let badge_w = s(14.0) + s(6.0) + text_width(Face::Regular, s(SIDEBAR_TEXT), &count);
+        envelope(
+            buffer,
+            stride,
+            right - badge_w,
+            cy,
+            s(14.0),
+            s(1.3),
+            tok.unseen,
+        );
+        draw_text(
+            buffer,
+            stride,
+            right - badge_w + s(14.0) + s(6.0),
+            cy,
+            Face::Regular,
+            s(SIDEBAR_TEXT),
+            &count,
+            tok.unseen_text,
+            slot.x,
+            slot.right(),
+        );
+        right -= badge_w + s(8.0);
+    }
+    if let Some(badge) = sidebar_needs_you_label(row.depth, row.needs_you) {
+        let badge_w = text_width(Face::SemiBold, s(SIDEBAR_TEXT), &badge);
+        draw_text(
+            buffer,
+            stride,
+            right - badge_w,
+            cy,
+            Face::SemiBold,
+            s(SIDEBAR_TEXT),
+            &badge,
+            tok.attention,
+            slot.x,
+            slot.right(),
+        );
+        right -= badge_w + s(8.0);
+    }
+    let (face, ink) = match row.depth {
+        0 => (Face::SemiBold, tok.text),
+        1 if row.selected => (Face::Regular, tok.text_strong),
+        1 => (Face::Regular, tok.text),
+        _ => (Face::Regular, tok.muted),
+    };
+    let label = ellipsize(face, s(SIDEBAR_TEXT), row.label, (right - x).max(0.0));
+    draw_text(
+        buffer,
+        stride,
+        x,
+        cy,
+        face,
+        s(SIDEBAR_TEXT),
+        &label,
+        ink,
+        slot.x,
+        slot.right(),
+    );
+    if row.selected {
+        let marker = Rect::new(
+            slot.x.saturating_add(paint.chrome.px(2.0)),
+            slot.y.saturating_add(paint.chrome.px(4.0)),
+            paint.chrome.px(2.0).max(1),
+            slot.h.saturating_sub(paint.chrome.px(8.0)),
+        );
+        fill_round_rect(buffer, stride, marker, s(1.0), paint.accent, 0xff);
+    }
+}
+
+/// Collapse chevron pointing right (the expanded twin is `chevron_down`).
+fn chevron_right(
+    buffer: &mut [u32],
+    stride: usize,
+    x: f32,
+    cy: f32,
+    size: f32,
+    width: f32,
+    ink: Rgb,
+) {
+    let (a, b) = (size * 0.2, size * 0.5);
+    let mid = cy - size * 0.1;
+    stroke_line(
+        buffer,
+        stride,
+        x + a,
+        mid - size * 0.3,
+        x + b,
+        mid,
+        width,
+        ink,
+    );
+    stroke_line(
+        buffer,
+        stride,
+        x + b,
+        mid,
+        x + a,
+        mid + size * 0.3,
+        width,
+        ink,
+    );
+}
+
+fn chevron_left(
+    buffer: &mut [u32],
+    stride: usize,
+    x: f32,
+    cy: f32,
+    size: f32,
+    width: f32,
+    ink: Rgb,
+) {
+    let (a, b) = (size * 0.8, size * 0.5);
+    let mid = cy - size * 0.1;
+    stroke_line(
+        buffer,
+        stride,
+        x + a,
+        mid - size * 0.3,
+        x + b,
+        mid,
+        width,
+        ink,
+    );
+    stroke_line(
+        buffer,
+        stride,
+        x + b,
+        mid,
+        x + a,
+        mid + size * 0.3,
+        width,
+        ink,
+    );
+}
+
+#[allow(clippy::too_many_arguments)] // buffer, column, dock, and the two colours
+fn paint_sidebar_grip(
+    buffer: &mut [u32],
+    stride: usize,
+    column: Rect,
+    chrome: ChromeGeom,
+    dock_right: bool,
+    hot: bool,
+    accent: Rgb,
+    resting: Rgb,
+) {
+    let thickness = if hot { chrome.px(3.0).max(2) } else { 1 };
+    let x0 = if dock_right {
+        column.x
+    } else {
+        column.right().saturating_sub(thickness)
+    };
+    let color = pack_argb(0xff, if hot { accent } else { resting });
+    for y in column.y..column.y.saturating_add(column.h) {
+        for x in x0..x0.saturating_add(thickness).min(column.right()) {
+            set(buffer, stride, x, y, color);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // buffer, slot, direction, and hover
+fn paint_sidebar_toggle(
+    buffer: &mut [u32],
+    stride: usize,
+    chrome: ChromeGeom,
+    slot: Rect,
+    expanded: bool,
+    dock_right: bool,
+    hovered: bool,
+    tok: &Tokens,
+) {
+    if slot.w == 0 || slot.h == 0 {
+        return;
+    }
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    if hovered {
+        fill_round_rect(buffer, stride, slot, s(4.0), tok.tab_hover, 0xff);
+    }
+    let point_left = expanded ^ dock_right;
+    let ink = tok.text;
+    if point_left {
+        chevron_left(
+            buffer,
+            stride,
+            slot.x as f32 + s(4.0),
+            slot.center_y(),
+            s(10.0),
+            s(1.5),
+            ink,
+        );
+    } else {
+        chevron_right(
+            buffer,
+            stride,
+            slot.x as f32 + s(4.0),
+            slot.center_y(),
+            s(10.0),
+            s(1.5),
+            ink,
+        );
+    }
+}
+
+/// One collapsed-strip icon. The label is the tooltip, not a letter.
+pub(crate) struct IconMark {
+    pub slot: Rect,
+    pub seat: crate::sidebar_width::Seat,
+    pub dot: Option<Dot>,
+    pub selected: bool,
+    pub hovered: bool,
+}
+
+pub(crate) struct IconStripPaint<'a> {
+    pub chrome: ChromeGeom,
+    pub tok: &'a Tokens,
+    pub accent: Rgb,
+    pub column: Rect,
+    pub toggle: Rect,
+    pub icons: &'a [IconMark],
+    pub actions: &'a [Rect; 3],
+    pub action_hovered: Option<usize>,
+    pub toggle_hovered: bool,
+    pub grip_hot: bool,
+    pub dock_right: bool,
+    pub alpha: u8,
+}
+
+pub(crate) fn paint_icon_strip(buffer: &mut [u32], stride: usize, paint: &IconStripPaint<'_>) {
+    let tok = paint.tok;
+    let column = paint.column;
+    let ground = pack_argb(paint.alpha, tok.status_bar);
+    for y in column.y..column.y.saturating_add(column.h) {
+        for x in column.x..column.right() {
+            set(buffer, stride, x, y, ground);
+        }
+    }
+    paint_sidebar_toggle(
+        buffer,
+        stride,
+        paint.chrome,
+        paint.toggle,
+        false,
+        paint.dock_right,
+        paint.toggle_hovered,
+        tok,
+    );
+    for icon in paint.icons {
+        paint_seat_icon(buffer, stride, paint, icon);
+    }
+    for (index, slot) in paint.actions.iter().enumerate() {
+        if paint.action_hovered == Some(index) {
+            let s = |d: f32| d * paint.chrome.scale_milli as f32 / 1000.0;
+            fill_round_rect(buffer, stride, *slot, s(5.0), tok.tab_hover, 0xff);
+        }
+        paint_action_icon(buffer, stride, paint.chrome, index, *slot, tok.text);
+    }
+    paint_sidebar_grip(
+        buffer,
+        stride,
+        column,
+        paint.chrome,
+        paint.dock_right,
+        paint.grip_hot,
+        paint.accent,
+        tok.status_line,
+    );
+}
+
+fn paint_seat_icon(buffer: &mut [u32], stride: usize, paint: &IconStripPaint<'_>, icon: &IconMark) {
+    let tok = paint.tok;
+    let slot = icon.slot;
+    let s = |d: f32| d * paint.chrome.scale_milli as f32 / 1000.0;
+    if icon.selected {
+        fill_round_rect(buffer, stride, slot, s(6.0), tok.tab_active, 0xff);
+        stroke_round_rect(
+            buffer,
+            stride,
+            slot.x as f32,
+            slot.y as f32,
+            slot.right() as f32,
+            (slot.y + slot.h) as f32,
+            s(6.0),
+            s(1.5),
+            paint.accent,
+        );
+    } else if icon.hovered {
+        fill_round_rect(buffer, stride, slot, s(6.0), tok.tab_hover, 0xff);
+    }
+    let ink = if icon.selected {
+        tok.text_strong
+    } else {
+        tok.text
+    };
+    seat_mark(
+        buffer,
+        stride,
+        paint.chrome,
+        icon.seat,
+        slot,
+        ink,
+        tok.muted,
+    );
+    if let Some(dot) = icon.dot {
+        let r = s(3.0).max(2.0);
+        let (cx, cy) = (
+            slot.right() as f32 - r - s(1.0),
+            (slot.y + slot.h) as f32 - r - s(1.0),
+        );
+        let color = match dot {
+            Dot::Idle => tok.idle,
+            Dot::Working => tok.working,
+            Dot::Unseen => tok.unseen,
+            Dot::Attention => tok.attention,
+        };
+        fill_circle(buffer, stride, cx, cy, r, color);
+    }
+}
+
+fn seat_mark(
+    buffer: &mut [u32],
+    stride: usize,
+    chrome: ChromeGeom,
+    seat: crate::sidebar_width::Seat,
+    slot: Rect,
+    ink: Rgb,
+    muted: Rgb,
+) {
+    use crate::sidebar_width::Seat;
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    let cx = slot.x as f32 + slot.w as f32 / 2.0;
+    let cy = slot.y as f32 + slot.h as f32 / 2.0;
+    let w = s(1.5).max(1.0);
+    match seat {
+        Seat::Space => {
+            let back = Rect::new(
+                (cx - s(7.0)) as usize,
+                (cy - s(8.0)) as usize,
+                s(12.0) as usize,
+                s(10.0) as usize,
+            );
+            let front = Rect::new(
+                (cx - s(4.0)) as usize,
+                (cy - s(4.0)) as usize,
+                s(12.0) as usize,
+                s(10.0) as usize,
+            );
+            fill_round_rect(buffer, stride, back, s(2.0), muted, 0xff);
+            outlined_round_rect(buffer, stride, front, s(2.0), ink, muted);
+        }
+        Seat::Shell => {
+            chevron_right(buffer, stride, cx - s(4.0), cy, s(10.0), w, ink);
+            stroke_line(
+                buffer,
+                stride,
+                cx + s(1.0),
+                cy + s(3.0),
+                cx + s(6.0),
+                cy + s(3.0),
+                w,
+                ink,
+            );
+        }
+        Seat::Claude => {
+            for index in 0..4 {
+                let angle = index as f32 * std::f32::consts::FRAC_PI_4;
+                let (dx, dy) = (angle.cos() * s(6.0), angle.sin() * s(6.0));
+                stroke_line(buffer, stride, cx - dx, cy - dy, cx + dx, cy + dy, w, ink);
+            }
+        }
+        Seat::Codex => {
+            let outer = Rect::new(
+                (cx - s(6.0)) as usize,
+                (cy - s(6.0)) as usize,
+                s(12.0) as usize,
+                s(12.0) as usize,
+            );
+            let inner = Rect::new(
+                (cx - s(2.5)) as usize,
+                (cy - s(2.5)) as usize,
+                s(5.0) as usize,
+                s(5.0) as usize,
+            );
+            outlined_round_rect(buffer, stride, outer, s(2.0), ink, muted);
+            fill_round_rect(buffer, stride, inner, s(1.0), ink, 0xff);
+        }
+        Seat::Grok => {
+            stroke_circle(buffer, stride, cx, cy, s(6.0), w, ink);
+            fill_circle(buffer, stride, cx + s(2.0), cy - s(2.0), s(2.2), ink);
+        }
+        Seat::Muse => {
+            fill_circle(buffer, stride, cx, cy, s(3.0), ink);
+            for index in 0..6 {
+                let angle = index as f32 * std::f32::consts::FRAC_PI_3;
+                stroke_line(
+                    buffer,
+                    stride,
+                    cx + angle.cos() * s(4.5),
+                    cy + angle.sin() * s(4.5),
+                    cx + angle.cos() * s(7.0),
+                    cy + angle.sin() * s(7.0),
+                    w,
+                    ink,
+                );
+            }
+        }
+        Seat::Composer => {
+            for row in 0..3 {
+                let y = cy - s(4.0) + row as f32 * s(4.0);
+                stroke_line(buffer, stride, cx - s(6.0), y, cx + s(4.0), y, w, ink);
+            }
+            stroke_line(
+                buffer,
+                stride,
+                cx + s(2.0),
+                cy - s(7.0),
+                cx + s(7.0),
+                cy + s(6.0),
+                w,
+                ink,
+            );
+        }
+    }
+}
+
+fn paint_action_icon(
+    buffer: &mut [u32],
+    stride: usize,
+    chrome: ChromeGeom,
+    kind: usize,
+    slot: Rect,
+    ink: Rgb,
+) {
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    let cx = slot.x as f32 + slot.w as f32 / 2.0;
+    let cy = slot.center_y();
+    let w = s(1.5).max(1.0);
+    match kind {
+        0 => {
+            stroke_line(buffer, stride, cx - s(5.0), cy, cx + s(5.0), cy, w, ink);
+            stroke_line(buffer, stride, cx, cy - s(5.0), cx, cy + s(5.0), w, ink);
+        }
+        1 => {
+            stroke_round_rect(
+                buffer,
+                stride,
+                cx - s(6.0),
+                cy - s(6.0),
+                cx + s(6.0),
+                cy + s(6.0),
+                s(2.0),
+                w,
+                ink,
+            );
+            stroke_line(buffer, stride, cx - s(3.0), cy, cx + s(3.0), cy, w, ink);
+            stroke_line(buffer, stride, cx, cy - s(3.0), cx, cy + s(3.0), w, ink);
+        }
+        _ => {
+            for row in 0..3 {
+                let y = cy - s(4.0) + row as f32 * s(4.0);
+                fill_circle(buffer, stride, cx, y, s(1.3), ink);
+            }
+        }
+    }
+}
+
+/// What the pointer hits in the sidebar: a tree row, a footer action, an
+/// arrangement button, the collapse toggle, or the list thumb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarHit {
+    Row(usize),
+    /// The trailing "needs you" badge on a tree row (issue #184).
+    NeedsYou(usize),
+    Action(usize),
+    Arrange(usize),
+    Toggle,
+    Thumb,
+}
+
+/// Collapse control in the sidebar head, inset from the grip.
+pub(crate) fn sidebar_toggle_rect(
+    chrome: ChromeGeom,
+    column: Rect,
+    head: Rect,
+    dock_right: bool,
+) -> Rect {
+    let size = chrome.px(18.0).clamp(12, column.w.max(12));
+    let inset = chrome.px(10.0);
+    let y = head.y + head.h.saturating_sub(size) / 2;
+    let x = if dock_right {
+        column.x.saturating_add(inset)
+    } else {
+        column.right().saturating_sub(inset.saturating_add(size))
+    };
+    Rect::new(x, y, size.min(column.w), size.min(head.h.max(1)))
+}
+
+/// Hit-test the painted sidebar: thumb first (it overlaps the list edge),
+/// then rows, footer actions, and header buttons.
+pub(crate) fn sidebar_needs_you_label(depth: usize, count: usize) -> Option<String> {
+    if count == 0 {
+        None
+    } else if depth == 0 && count > 1 {
+        Some(format!("{count} needs you"))
+    } else {
+        Some("needs you".into())
+    }
+}
+
+/// Hit box of the trailing needs-you badge, when one is painted.
+pub(crate) fn sidebar_needs_you_hit_rect(chrome: ChromeGeom, row: &SidebarRow<'_>) -> Option<Rect> {
+    let label = sidebar_needs_you_label(row.depth, row.needs_you)?;
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    let slot = row.slot;
+    let mut right = slot.right().saturating_sub(chrome.px(12.0)) as f32;
+    if row.mail > 0 {
+        let count = row.mail.to_string();
+        let badge_w = s(14.0) + s(6.0) + text_width(Face::Regular, s(SIDEBAR_TEXT), &count);
+        right -= badge_w + s(8.0);
+    }
+    let badge_w = text_width(Face::SemiBold, s(SIDEBAR_TEXT), &label);
+    let left = (right - badge_w).max(slot.x as f32) as usize;
+    let width = badge_w.ceil() as usize;
+    Some(Rect::new(left, slot.y, width.min(slot.w), slot.h))
+}
+
+/// Hit-test inputs for [`sidebar_hit`].
+pub(crate) struct SidebarHitTargets<'a> {
+    pub rows: &'a [Rect],
+    pub needs_you: &'a [(usize, Rect)],
+    pub actions: &'a [Rect; 3],
+    pub arrange: &'a [Rect; 3],
+    pub thumb: Option<Rect>,
+    pub toggle: Rect,
+}
+
+pub(crate) fn sidebar_hit(
+    targets: &SidebarHitTargets<'_>,
+    px: usize,
+    py: usize,
+) -> Option<SidebarHit> {
+    if targets.thumb.is_some_and(|thumb| thumb.contains(px, py)) {
+        return Some(SidebarHit::Thumb);
+    }
+    if targets.toggle.w > 0 && targets.toggle.h > 0 && targets.toggle.contains(px, py) {
+        return Some(SidebarHit::Toggle);
+    }
+    if let Some((row, _)) = targets
+        .needs_you
+        .iter()
+        .find(|(_, rect)| rect.contains(px, py))
+    {
+        return Some(SidebarHit::NeedsYou(*row));
+    }
+    if let Some(row) = targets.rows.iter().position(|row| row.contains(px, py)) {
+        return Some(SidebarHit::Row(row));
+    }
+    if let Some(action) = targets
+        .actions
+        .iter()
+        .position(|slot| slot.contains(px, py))
+    {
+        return Some(SidebarHit::Action(action));
+    }
+    if let Some(button) = targets
+        .arrange
+        .iter()
+        .position(|slot| slot.contains(px, py))
+    {
+        return Some(SidebarHit::Arrange(button));
+    }
+    None
+}
+
+/// Largest first-row offset for `row_count` rows in a column `column_h`
+/// tall: the clamped offset a huge scroll settles on.
+pub(crate) fn sidebar_max_scroll(chrome: ChromeGeom, column_h: usize, row_count: usize) -> usize {
+    sidebar_layout(
+        chrome,
+        Rect::new(0, 0, SIDEBAR_W.px(chrome), column_h),
+        row_count,
+        usize::MAX,
+    )
+    .first_row
+}
+
+/// The 44 px header over the panes: breadcrumb plus arrangement buttons.
+pub(crate) struct SidebarHeaderPaint<'a> {
+    pub chrome: ChromeGeom,
+    pub tok: &'a Tokens,
+    pub layout: &'a SidebarHeaderLayout,
+    pub crumb: &'a str,
+    /// Outline of the selected arrangement segment.
+    pub accent: Rgb,
+    /// Button for the active tab's current arrangement; `None` when the
+    /// panes match none of the three.
+    pub arrange_selected: Option<usize>,
+    pub arrange_hovered: Option<usize>,
+    pub alpha: u8,
+}
+
+pub(crate) fn paint_sidebar_header(
+    buffer: &mut [u32],
+    stride: usize,
+    paint: &SidebarHeaderPaint<'_>,
+) {
+    let tok = paint.tok;
+    let span = paint.layout.span;
+    if span.w == 0 || span.h == 0 {
+        return;
+    }
+    let ground = pack_argb(paint.alpha, tok.bar);
+    for y in span.y..span.y + span.h.saturating_sub(1) {
+        for x in span.x..span.right().min(stride) {
+            set(buffer, stride, x, y, ground);
+        }
+    }
+    let line = pack_argb(paint.alpha.max(0xff / 2), tok.bar_line);
+    for x in span.x..span.right().min(stride) {
+        set(buffer, stride, x, span.y + span.h - 1, line);
+    }
+    let s = |d: f32| d * paint.chrome.scale_milli as f32 / 1000.0;
+    draw_text(
+        buffer,
+        stride,
+        paint.layout.crumb.x as f32,
+        span.center_y(),
+        Face::SemiBold,
+        s(TAB_TEXT),
+        &ellipsize(
+            Face::SemiBold,
+            s(TAB_TEXT),
+            paint.crumb,
+            paint.layout.crumb.w as f32,
+        ),
+        tok.text,
+        span.x,
+        paint.layout.crumb.right(),
+    );
+    // Opaque track and segments keep the icons readable over translucent
+    // chrome.
+    outlined_round_rect(
+        buffer,
+        stride,
+        paint.layout.track,
+        s(7.0),
+        tok.field_line,
+        tok.field,
+    );
+    for (index, slot) in paint.layout.buttons.iter().enumerate() {
+        if paint.arrange_selected == Some(index) {
+            // A 1 design-px accent ring (2 px on a 2x window) so the
+            // selection reads even where the active fill matches the track.
+            fill_round_rect(buffer, stride, *slot, s(5.0), tok.tab_active, 0xff);
+            stroke_round_rect(
+                buffer,
+                stride,
+                slot.x as f32,
+                slot.y as f32,
+                slot.right() as f32,
+                (slot.y + slot.h) as f32,
+                s(5.0),
+                paint.chrome.px(1.0).max(1) as f32,
+                paint.accent,
+            );
+        } else if paint.arrange_hovered == Some(index) {
+            fill_round_rect(buffer, stride, *slot, s(5.0), tok.tab_hover, 0xff);
+        }
+        arrange_icon(buffer, stride, paint.chrome, index, *slot, tok.text);
+    }
+}
+
+/// Arrange icon (#162), centred in `slot`: a rounded outline in `ink` with
+/// a light tint inside. Single is the bare box, Split adds a vertical
+/// divider, and Grid adds both dividers.
+fn arrange_icon(
+    buffer: &mut [u32],
+    stride: usize,
+    chrome: ChromeGeom,
+    kind: usize,
+    slot: Rect,
+    ink: Rgb,
+) {
+    let line = chrome.px(1.0).max(1);
+    // Sizes share the line's parity, so each divider covers whole pixels.
+    let fit = |d: f32| {
+        let v = chrome.px(d);
+        (v + (v + line) % 2) as f32
+    };
+    let (w, h) = (fit(ARRANGE_ICON_W), fit(ARRANGE_ICON_H));
+    let x0 = (slot.x + slot.w / 2) as f32 - (w / 2.0).floor();
+    let y0 = (slot.y + slot.h / 2) as f32 - (h / 2.0).floor();
+    let (x1, y1) = (x0 + w, y0 + h);
+    let line = line as f32;
+    let radius = line * 2.0;
+    shade(buffer, stride, x0, y0, x1, y1, ink, |x, y| {
+        (0.5 - round_rect_sd(x, y, x0, y0, x1, y1, radius)).clamp(0.0, 1.0) * ARRANGE_TINT
+    });
+    stroke_round_rect(buffer, stride, x0, y0, x1, y1, radius, line, ink);
+    let (mid_x, mid_y) = (x0 + w / 2.0, y0 + h / 2.0);
+    // Square-ended bars between the outline's inner edges.
+    let bar = |buffer: &mut [u32], bx0: f32, by0: f32, bx1: f32, by1: f32| {
+        let overlap = |c: f32, lo: f32, hi: f32| ((c + 0.5).min(hi) - (c - 0.5).max(lo)).max(0.0);
+        shade(buffer, stride, bx0, by0, bx1, by1, ink, |x, y| {
+            overlap(x, bx0, bx1) * overlap(y, by0, by1)
+        });
+    };
+    if kind >= 1 {
+        bar(
+            buffer,
+            mid_x - line / 2.0,
+            y0 + line,
+            mid_x + line / 2.0,
+            y1 - line,
+        );
+    }
+    if kind >= 2 {
+        bar(
+            buffer,
+            x0 + line,
+            mid_y - line / 2.0,
+            x1 - line,
+            mid_y + line / 2.0,
+        );
+    }
+}
+
+/// Tooltip chip with `text`, centred under `anchor` (a gap below its
+/// bottom edge) and kept inside the buffer. Returns the painted rect.
+pub(crate) fn paint_tooltip(
+    buffer: &mut [u32],
+    stride: usize,
+    chrome: ChromeGeom,
+    tok: &Tokens,
+    anchor: Rect,
+    text: &str,
+) -> Rect {
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    let height = buffer.len() / stride.max(1);
+    let w =
+        (text_width(Face::Regular, s(SIDEBAR_TEXT), text) + s(TOOLTIP_PAD_X) * 2.0).ceil() as usize;
+    let h = chrome.px(TOOLTIP_H);
+    let x = (anchor.x + anchor.w / 2)
+        .saturating_sub(w / 2)
+        .min(stride.saturating_sub(w));
+    let y = (anchor.y + anchor.h + chrome.px(TOOLTIP_GAP)).min(height.saturating_sub(h));
+    let chip = Rect::new(x, y, w.min(stride), h.min(height));
+    if chip.w == 0 || chip.h == 0 {
+        return chip;
+    }
+    outlined_round_rect(
+        buffer,
+        stride,
+        chip,
+        s(5.0),
+        tok.tab_active_line.unwrap_or(tok.field_line),
+        tok.tab_active,
+    );
+    draw_text(
+        buffer,
+        stride,
+        chip.x as f32 + s(TOOLTIP_PAD_X),
+        chip.center_y(),
+        Face::Regular,
+        s(SIDEBAR_TEXT),
+        text,
+        tok.text_strong,
+        chip.x,
+        chip.right(),
+    );
+    chip
+}
+
+/// PNG writer for the job-only still tests (`mod tests` and the sidebar
+/// stills below share it).
+#[cfg(test)]
+fn write_still_png(path: &std::path::Path, pixels: &[u32], width: usize, height: usize) {
+    let file = std::fs::File::create(path).expect("still file");
+    let mut encoder = png::Encoder::new(file, width as u32, height as u32);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().expect("png header");
+    let mut rgba = vec![0u8; width * height * 4];
+    for (i, px) in pixels.iter().enumerate() {
+        rgba[i * 4] = ((px >> 16) & 0xff) as u8;
+        rgba[i * 4 + 1] = ((px >> 8) & 0xff) as u8;
+        rgba[i * 4 + 2] = (px & 0xff) as u8;
+        rgba[i * 4 + 3] = ((px >> 24) & 0xff) as u8;
+    }
+    writer.write_image_data(&rgba).expect("png data");
+}
+
+#[cfg(test)]
+mod sidebar_render_tests {
+    use super::*;
+
+    fn chrome() -> ChromeGeom {
+        ChromeGeom {
+            graphite: true,
+            scale_milli: 1000,
+        }
+    }
+
+    fn column(height: usize) -> Rect {
+        Rect::new(0, 0, SIDEBAR_W.px(chrome()), height)
+    }
+
+    #[test]
+    fn sidebar_panel_splits_title_list_and_three_actions() {
+        let layout = sidebar_layout(chrome(), column(600), 4, 0);
+        assert_eq!((layout.column.w, layout.head.h), (256, 44));
+        assert_eq!(layout.actions.len(), 3);
+        assert_eq!(layout.rows.len(), 4, "short list shows every row");
+        assert!(layout.thumb.is_none(), "no overflow, no thumb");
+        assert_eq!(layout.first_row, 0);
+        // Rows tile the viewport between the title band and the footer.
+        assert_eq!(layout.rows[0].y, layout.list.y);
+        assert!(layout.rows[3].y + layout.rows[3].h <= layout.foot.y);
+        // Footer actions tile the footer top to bottom.
+        assert_eq!(layout.actions[0].y, layout.foot.y + chrome().px(8.0));
+        for window in layout.actions.windows(2) {
+            assert_eq!(window[1].y, window[0].y + window[0].h);
+        }
+        let last = layout.actions[2];
+        assert!(last.y + last.h <= layout.foot.y + layout.foot.h);
+    }
+
+    #[test]
+    fn sidebar_scroll_clamps_and_thumbs_overflow() {
+        let tall = sidebar_layout(chrome(), column(600), 60, 0);
+        let thumb = tall.thumb.expect("overflow shows a thumb");
+        assert!(thumb.h < tall.list.h);
+        assert_eq!(thumb.y, tall.list.y, "top offset parks at the top");
+        let scrolled = sidebar_layout(chrome(), column(600), 60, 1000);
+        assert!(
+            scrolled.first_row > 0,
+            "a huge offset clamps to the last page, not past it"
+        );
+        assert_eq!(
+            scrolled.rows.len(),
+            tall.rows.len(),
+            "last page fills the viewport"
+        );
+        let thumb = scrolled.thumb.expect("still overflowing");
+        assert!(thumb.y > tall.list.y, "thumb follows the offset down");
+        assert!(thumb.y + thumb.h <= tall.list.y + tall.list.h);
+    }
+
+    #[test]
+    fn sidebar_rows_in_view_follow_scrolled_layout_slots() {
+        let items: Vec<_> = (0..60).collect();
+        let layout = sidebar_layout(chrome(), column(600), items.len(), 1000);
+        let rows = sidebar_rows_in_view(&items, &layout);
+        assert_eq!(rows.len(), layout.rows.len());
+        assert_eq!(
+            rows.first().map(|(index, item, _)| (*index, **item)),
+            Some((layout.first_row, layout.first_row))
+        );
+        assert_eq!(
+            rows.last().map(|(index, item, _)| (*index, **item)),
+            Some((
+                layout.first_row + rows.len() - 1,
+                layout.first_row + rows.len() - 1
+            ))
+        );
+        assert!(rows
+            .iter()
+            .zip(layout.rows.iter())
+            .all(|((_, _, slot), expected)| slot == expected));
+    }
+
+    #[test]
+    fn sidebar_header_puts_buttons_right_of_crumb() {
+        let span = Rect::new(256, 0, 1024, 44);
+        let header = sidebar_header_layout(chrome(), span);
+        assert_eq!(header.buttons.len(), 3);
+        for (index, button) in header.buttons.iter().enumerate() {
+            assert!(button.h > 0 && button.w > 0, "button {index} has size");
+            assert!(button.y + button.h <= span.y + span.h);
+        }
+        for window in header.buttons.windows(2) {
+            assert!(window[1].x >= window[0].x + window[0].w);
+        }
+        let last = header.buttons[2];
+        assert!(last.x + last.w <= span.x + span.w);
+        assert!(
+            header.crumb.x + header.crumb.w <= header.buttons[0].x,
+            "crumb never runs under the buttons"
+        );
+    }
+
+    #[test]
+    fn arrange_control_is_a_fixed_track_of_equal_segments() {
+        for milli in [1000, 1500, 2000] {
+            let chrome = ChromeGeom {
+                graphite: true,
+                scale_milli: milli,
+            };
+            let span = Rect::new(256, 0, 1024, chrome.px(44.0));
+            let header = sidebar_header_layout(chrome, span);
+            let track = header.track;
+            assert_eq!(track.w, chrome.px(32.0) * 3 + chrome.px(2.0) * 2);
+            assert_eq!(track.h, chrome.px(28.0));
+            assert_eq!(track.right(), span.right() - chrome.px(12.0));
+            for (index, button) in header.buttons.iter().enumerate() {
+                assert_eq!(button.w, chrome.px(32.0), "segment {index} width");
+                assert!(track.contains(button.x, button.y));
+                assert!(
+                    button.right() <= track.right() && button.y + button.h <= track.y + track.h
+                );
+            }
+            for pair in header.buttons.windows(2) {
+                assert_eq!(pair[1].x, pair[0].right(), "segments abut, no dead gap");
+            }
+        }
+    }
+
+    fn header_pixels(
+        selected: Option<usize>,
+        hovered: Option<usize>,
+    ) -> (Vec<u32>, usize, SidebarHeaderLayout) {
+        let chrome = chrome();
+        let (w, h) = (768usize, 44usize);
+        let header = sidebar_header_layout(chrome, Rect::new(0, 0, w, h));
+        let mut buffer = vec![pack_argb(0xff, DARK.ground); w * h];
+        paint_sidebar_header(
+            &mut buffer,
+            w,
+            &SidebarHeaderPaint {
+                chrome,
+                tok: &DARK,
+                layout: &header,
+                crumb: "lab / notes",
+                accent: rgb(0x5aa2ff),
+                arrange_selected: selected,
+                arrange_hovered: hovered,
+                alpha: 0xff,
+            },
+        );
+        (buffer, w, header)
+    }
+
+    #[test]
+    fn arrange_icons_draw_in_text_ink_with_dividers() {
+        let (buffer, w, header) = header_pixels(None, None);
+        let ink = pack_argb(0xff, DARK.text);
+        let at = |x: usize, y: usize| buffer[y * w + x];
+        for (index, slot) in header.buttons.iter().enumerate() {
+            let (cx, cy) = (slot.x + slot.w / 2, slot.y + slot.h / 2);
+            let inked = (slot.y..slot.y + slot.h)
+                .flat_map(|y| (slot.x..slot.right()).map(move |x| (x, y)))
+                .filter(|&(x, y)| at(x, y) == ink)
+                .count();
+            assert!(
+                inked > 20,
+                "button {index} draws an outline in the text color"
+            );
+            // The centre pixel sits on Split's divider and Grid's cross;
+            // Single's centre is the tinted interior.
+            if index == 0 {
+                assert_ne!(at(cx, cy), ink, "Single has no divider");
+                assert_ne!(at(cx, cy), pack_argb(0xff, DARK.field), "Single is tinted");
+            } else {
+                assert_eq!(at(cx, cy), ink, "button {index} divides down the middle");
+            }
+            if index == 2 {
+                assert_eq!(at(cx - 4, cy), ink, "Grid divides across");
+            } else {
+                assert_ne!(at(cx - 4, cy), ink, "button {index} has no cross bar");
+            }
+        }
+    }
+
+    #[test]
+    fn arrange_selected_segment_is_outlined_and_filled() {
+        let (plain, w, header) = header_pixels(None, None);
+        let (picked, _, _) = header_pixels(Some(1), None);
+        let slot = header.buttons[1];
+        let accent = pack_argb(0xff, rgb(0x5aa2ff));
+        assert_eq!(
+            picked[(slot.y + slot.h / 2) * w + slot.x],
+            accent,
+            "accent outline"
+        );
+        assert_eq!(
+            picked[(slot.y + 2) * w + slot.x + 3],
+            pack_argb(0xff, DARK.tab_active),
+            "active fill"
+        );
+        assert_eq!(
+            plain[(slot.y + 2) * w + slot.x + 3],
+            pack_argb(0xff, DARK.field)
+        );
+        // Selection never moves the control.
+        let (_, _, again) = header_pixels(Some(2), Some(0));
+        assert_eq!(again.track, header.track);
+        assert_eq!(again.buttons, header.buttons);
+        let (hovered, _, _) = header_pixels(None, Some(0));
+        let first = header.buttons[0];
+        assert_eq!(
+            hovered[(first.y + 2) * w + first.x + 3],
+            pack_argb(0xff, DARK.tab_hover)
+        );
+    }
+
+    #[test]
+    fn tooltip_names_the_button_under_it_and_stays_on_screen() {
+        let chrome = chrome();
+        let (w, h) = (400usize, 200usize);
+        let mut buffer = vec![pack_argb(0xff, DARK.ground); w * h];
+        let anchor = Rect::new(w - 34, 8, 32, 24);
+        let chip = paint_tooltip(&mut buffer, w, chrome, &DARK, anchor, "Grid");
+        assert!(chip.right() <= w, "clamped to the right edge");
+        assert_eq!(chip.y, anchor.y + anchor.h + 6);
+        assert!(chip.w as f32 >= text_width(Face::Regular, SIDEBAR_TEXT, "Grid"));
+        assert!(
+            (chip.y..chip.y + chip.h)
+                .flat_map(|y| (chip.x..chip.right()).map(move |x| (x, y)))
+                .any(
+                    |(x, y)| buffer[y * w + x] != pack_argb(0xff, DARK.tab_active)
+                        && buffer[y * w + x] != pack_argb(0xff, DARK.ground)
+                ),
+            "the name is drawn on the chip"
+        );
+    }
+
+    fn demo_labels() -> Vec<String> {
+        vec![
+            "lab".to_string(),
+            "notes".to_string(),
+            "shell".to_string(),
+            "mail".to_string(),
+            "inbox".to_string(),
+        ]
+    }
+
+    fn demo_rows<'a>(slots: &[Rect], labels: &'a [String]) -> Vec<SidebarRow<'a>> {
+        let content = [
+            (0, Some(false), None, 0, 2, false, false),
+            (1, None, Some(Dot::Working), 3, 0, true, false),
+            (2, None, None, 0, 0, false, true),
+            (0, Some(true), None, 0, 0, false, false),
+            (1, None, Some(Dot::Idle), 0, 0, false, false),
+        ];
+        content
+            .iter()
+            .zip(slots.iter())
+            .zip(labels.iter())
+            .map(
+                |(((depth, chevron, dot, mail, needs_you, selected, hovered), slot), label)| {
+                    SidebarRow {
+                        slot: *slot,
+                        depth: *depth,
+                        chevron: *chevron,
+                        dot: *dot,
+                        label: label.as_str(),
+                        mail: *mail,
+                        needs_you: *needs_you,
+                        selected: *selected,
+                        hovered: *hovered,
+                    }
+                },
+            )
+            .collect()
+    }
+
+    #[test]
+    fn sidebar_needs_you_label_counts_only_space_rows() {
+        assert_eq!(
+            sidebar_needs_you_label(0, 2).as_deref(),
+            Some("2 needs you")
+        );
+        assert_eq!(sidebar_needs_you_label(1, 1).as_deref(), Some("needs you"));
+        assert_eq!(sidebar_needs_you_label(2, 1).as_deref(), Some("needs you"));
+        assert!(sidebar_needs_you_label(0, 0).is_none());
+    }
+
+    #[test]
+    fn sidebar_needs_you_hit_beats_the_row_behind_it() {
+        let chrome = chrome();
+        let slot = Rect::new(0, 40, 240, 28);
+        let row = SidebarRow {
+            slot,
+            depth: 0,
+            chevron: None,
+            dot: None,
+            label: "lab",
+            mail: 0,
+            needs_you: 2,
+            selected: false,
+            hovered: false,
+        };
+        let badge = sidebar_needs_you_hit_rect(chrome, &row).expect("badge rect");
+        let hit = sidebar_hit(
+            &SidebarHitTargets {
+                rows: &[slot],
+                needs_you: &[(0, badge)],
+                actions: &[Rect::new(0, 0, 0, 0); 3],
+                arrange: &[Rect::new(0, 0, 0, 0); 3],
+                thumb: None,
+                toggle: Rect::new(0, 0, 0, 0),
+            },
+            badge.x + 2,
+            badge.y + badge.h / 2,
+        );
+        assert_eq!(hit, Some(SidebarHit::NeedsYou(0)));
+    }
+
+    #[test]
+    fn sidebar_hit_prefers_thumb_then_rows_then_buttons() {
+        let chrome = chrome();
+        let layout = sidebar_layout(chrome, column(600), 60, 0);
+        let header = sidebar_header_layout(chrome, Rect::new(256, 0, 768, 44));
+        let toggle = sidebar_toggle_rect(chrome, layout.column, layout.head, false);
+        let hit = |x: usize, y: usize| {
+            sidebar_hit(
+                &SidebarHitTargets {
+                    rows: &layout.rows,
+                    needs_you: &[],
+                    actions: &layout.actions,
+                    arrange: &header.buttons,
+                    thumb: layout.thumb,
+                    toggle,
+                },
+                x,
+                y,
+            )
+        };
+        let thumb = layout.thumb.expect("overflow thumbs for hit priority");
+        assert_eq!(hit(thumb.x + 1, thumb.y + 2), Some(SidebarHit::Thumb));
+        let row = layout.rows[3];
+        // A row away from the thumb edge hits the row, not the thumb.
+        assert_eq!(hit(row.x + 4, row.y + row.h / 2), Some(SidebarHit::Row(3)));
+        assert_eq!(
+            hit(layout.actions[1].x + 4, layout.actions[1].y + 4),
+            Some(SidebarHit::Action(1))
+        );
+        assert_eq!(
+            hit(header.buttons[0].x + 4, header.buttons[0].y + 4),
+            Some(SidebarHit::Arrange(0))
+        );
+        assert_eq!(hit(900, 500), None, "pane area is no sidebar hit");
+        assert_eq!(hit(layout.column.x, layout.column.y), None);
+        assert_eq!(
+            hit(toggle.x + 2, toggle.y + toggle.h / 2),
+            Some(SidebarHit::Toggle)
+        );
+    }
+
+    #[test]
+    fn sidebar_max_scroll_is_the_last_page_offset() {
+        let chrome = chrome();
+        assert_eq!(sidebar_max_scroll(chrome, 600, 4), 0);
+        let max = sidebar_max_scroll(chrome, 600, 60);
+        assert!(max > 0);
+        assert_eq!(
+            sidebar_layout(chrome, column(600), 60, max).first_row,
+            max,
+            "the max offset shows a full last page"
+        );
+        assert_eq!(
+            sidebar_layout(chrome, column(600), 60, max + 10).first_row,
+            max,
+            "larger offsets clamp back to it"
+        );
+    }
+
+    #[test]
+    fn sidebar_paint_marks_the_selected_row() {
+        let chrome = chrome();
+        let layout = sidebar_layout(chrome, column(600), 5, 0);
+        let labels = demo_labels();
+        let rows = demo_rows(&layout.rows, &labels);
+        let accent = rgb(0x5aa2ff);
+        let (w, h) = (256usize, 600usize);
+        let mut buffer = vec![pack_argb(0xff, DARK.ground); w * h];
+        paint_sidebar(
+            &mut buffer,
+            w,
+            &SidebarPaint {
+                chrome,
+                tok: &DARK,
+                accent,
+                layout: &layout,
+                title: "Spaces",
+                rows: &rows,
+                actions: ["+ New tab", "+ New space", "Commands"],
+                commands_hint: "Ctrl Shift P",
+                action_hovered: None,
+                alpha: 0xff,
+                grip_hot: false,
+                dock_right: false,
+                toggle: Rect::new(0, 0, 0, 0),
+                toggle_hovered: false,
+            },
+        );
+        assert!(
+            buffer
+                .iter()
+                .any(|pixel| *pixel != pack_argb(0xff, DARK.ground)),
+            "the panel paints over the ground"
+        );
+        // 2 px accent marker down the selected tab row.
+        let marker = layout.rows[1];
+        let spot = buffer[(marker.y + marker.h / 2) * w + marker.x + 3];
+        assert_eq!(spot, pack_argb(0xff, accent), "selected marker in accent");
+    }
+
+    /// The focused session row carries the same accent marker as its tab.
+    /// Set `PRISMATTYC_SIDEBAR_FOCUS_SHOTS` to write the still. A normal
+    /// test run only checks pixels.
+    #[test]
+    fn focused_session_row_shares_the_tab_accent() {
+        let chrome = chrome();
+        let layout = sidebar_layout(chrome, column(640), 5, 0);
+        let labels = [
+            "lab".to_string(),
+            "prismattyc-3".to_string(),
+            "prismattyc-1".to_string(),
+            "prismattyc-3".to_string(),
+            "composer-2".to_string(),
+        ];
+        let specs = [
+            (0usize, Some(false), false, false),
+            (1, None, true, false),
+            (2, None, false, false),
+            (2, None, true, false),
+            (2, None, false, true),
+        ];
+        let rows: Vec<SidebarRow<'_>> = specs
+            .iter()
+            .zip(layout.rows.iter())
+            .zip(labels.iter())
+            .map(
+                |((&(depth, chevron, selected, hovered), slot), label)| SidebarRow {
+                    slot: *slot,
+                    depth,
+                    chevron,
+                    dot: (depth == 2).then_some(Dot::Idle),
+                    label: label.as_str(),
+                    mail: 0,
+                    needs_you: 0,
+                    selected,
+                    hovered,
+                },
+            )
+            .collect();
+        let accent = rgb(0x5aa2ff);
+        let (w, h) = (1024usize, 640usize);
+        let mut buffer = vec![pack_argb(0xff, DARK.ground); w * h];
+        paint_sidebar(
+            &mut buffer,
+            w,
+            &SidebarPaint {
+                chrome,
+                tok: &DARK,
+                accent,
+                layout: &layout,
+                title: "Spaces",
+                rows: &rows,
+                actions: ["+ New tab", "+ New space", "Commands"],
+                commands_hint: "Ctrl Shift P",
+                action_hovered: None,
+                alpha: 0xff,
+                grip_hot: false,
+                dock_right: false,
+                toggle: Rect::new(0, 0, 0, 0),
+                toggle_hovered: false,
+            },
+        );
+        let focused = layout.rows[3];
+        let idle = layout.rows[2];
+        let spot = buffer[(focused.y + focused.h / 2) * w + focused.x + 3];
+        assert_eq!(spot, pack_argb(0xff, accent), "focused session marker");
+        let other = buffer[(idle.y + idle.h / 2) * w + idle.x + 3];
+        assert_ne!(other, spot, "an unfocused session has no accent marker");
+        if let Some(dir) = std::env::var_os("PRISMATTYC_SIDEBAR_FOCUS_SHOTS") {
+            let dir = std::path::PathBuf::from(dir);
+            std::fs::create_dir_all(&dir).expect("stills dir");
+            write_still_png(&dir.join("focused-session.png"), &buffer, w, h);
+        }
+    }
+
+    /// Job-only stills for design review (issue #113): set
+    /// `PRISMATTYC_DUMP_SIDEBAR` to a directory to paint the tree column
+    /// and the header over the panes, dark and light, top and scrolled. A
+    /// plain `cargo test` run never writes.
+    #[test]
+    fn dump_sidebar_stills_for_review() {
+        let Some(dir) = std::env::var_os("PRISMATTYC_DUMP_SIDEBAR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).expect("stills dir");
+        let chrome = chrome();
+        let accent = rgb(0x5aa2ff);
+        for (name, tok) in [("dark", &DARK), ("light", &LIGHT)] {
+            for (still, scroll) in [("top", 0usize), ("scrolled", 12usize)] {
+                let (w, h) = (1024usize, 640usize);
+                let mut buffer = vec![pack_argb(0xff, tok.ground); w * h];
+                let column_rect = Rect::new(0, 0, SIDEBAR_W.px(chrome), h);
+                // Thirty rows overflow the ~20-row viewport, so the
+                // scrolled still exercises the thumb.
+                let layout = sidebar_layout(chrome, column_rect, 30, scroll);
+                let mut owned: Vec<String> = Vec::new();
+                for index in 0..30 {
+                    owned.push(match index % 7 {
+                        0 => "lab".to_string(),
+                        1 => "notes".to_string(),
+                        2 => "shell".to_string(),
+                        3 => "editor".to_string(),
+                        4 => "mail".to_string(),
+                        5 => "inbox".to_string(),
+                        _ => "drafts".to_string(),
+                    });
+                }
+                let paint_rows: Vec<SidebarRow> = layout
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .map(|(visible, slot)| {
+                        let absolute = layout.first_row + visible;
+                        let depth = match absolute % 7 {
+                            0 | 4 => 0,
+                            1 | 2 | 5 => 1,
+                            _ => 2,
+                        };
+                        SidebarRow {
+                            slot: *slot,
+                            depth,
+                            chevron: if depth == 0 {
+                                Some(absolute == 4)
+                            } else {
+                                None
+                            },
+                            dot: if depth == 1 {
+                                Some(if absolute == 1 {
+                                    Dot::Working
+                                } else {
+                                    Dot::Idle
+                                })
+                            } else {
+                                None
+                            },
+                            label: owned[absolute].as_str(),
+                            mail: if absolute == 1 { 3 } else { 0 },
+                            needs_you: if absolute == 0 { 2 } else { 0 },
+                            selected: absolute == 1,
+                            hovered: absolute == 2,
+                        }
+                    })
+                    .collect();
+                paint_sidebar(
+                    &mut buffer,
+                    w,
+                    &SidebarPaint {
+                        chrome,
+                        tok,
+                        accent,
+                        layout: &layout,
+                        title: "Spaces",
+                        rows: &paint_rows,
+                        actions: ["+ New tab", "+ New space", "Commands"],
+                        commands_hint: "Ctrl Shift P",
+                        action_hovered: None,
+                        alpha: 0xff,
+                        grip_hot: false,
+                        dock_right: false,
+                        toggle: sidebar_toggle_rect(chrome, column_rect, layout.head, false),
+                        toggle_hovered: false,
+                    },
+                );
+                let span = Rect::new(column_rect.w, 0, w - column_rect.w, 44);
+                let header = sidebar_header_layout(chrome, span);
+                paint_sidebar_header(
+                    &mut buffer,
+                    w,
+                    &SidebarHeaderPaint {
+                        chrome,
+                        tok,
+                        layout: &header,
+                        crumb: "lab / notes",
+                        accent,
+                        arrange_selected: Some(1),
+                        arrange_hovered: Some(2),
+                        alpha: 0xff,
+                    },
+                );
+                paint_tooltip(
+                    &mut buffer,
+                    w,
+                    chrome,
+                    tok,
+                    Rect::new(header.buttons[2].x, 0, header.buttons[2].w, span.h),
+                    SIDEBAR_ARRANGE[2],
+                );
+                write_still_png(
+                    &dir.join(format!("sidebar-{name}-{still}.png")),
+                    &buffer,
+                    w,
+                    h,
+                );
+            }
+        }
+    }
+
+    fn pixel(buffer: &[u32], stride: usize, x: usize, y: usize) -> u32 {
+        buffer[y * stride + x]
+    }
+
+    fn paint_width_frame(
+        tok: &Tokens,
+        column_w: usize,
+        collapsed: bool,
+        grip_hot: bool,
+        alpha: u8,
+    ) -> (Vec<u32>, usize, usize) {
+        let chrome = chrome();
+        let accent = accent(tok, rgb(0x3d8bfd));
+        let margin = 48;
+        let (w, h) = (column_w + margin, 420usize);
+        let mut buffer = vec![pack_argb(0xff, tok.ground); w * h];
+        let column = Rect::new(0, 0, column_w, h);
+        if collapsed {
+            let head = chrome.px(44.0);
+            let row = chrome.px(36.0);
+            let action = chrome.px(32.0);
+            let strip = crate::sidebar_width::icon_strip(
+                0,
+                column_w as i32,
+                h as i32,
+                head as i32,
+                row as i32,
+                action as i32,
+                6,
+                0,
+            );
+            let seats = [
+                crate::sidebar_width::Seat::Space,
+                crate::sidebar_width::Seat::Shell,
+                crate::sidebar_width::Seat::Claude,
+                crate::sidebar_width::Seat::Codex,
+                crate::sidebar_width::Seat::Grok,
+                crate::sidebar_width::Seat::Muse,
+            ];
+            let icons: Vec<IconMark> = strip
+                .icons
+                .iter()
+                .enumerate()
+                .map(|(index, (_, slot))| IconMark {
+                    slot: Rect::new(
+                        slot.x as usize,
+                        slot.y as usize,
+                        slot.w as usize,
+                        slot.h as usize,
+                    ),
+                    seat: seats[index],
+                    dot: Some(if index == 2 { Dot::Working } else { Dot::Idle }),
+                    selected: index == 0 || index == 2,
+                    hovered: index == 1,
+                })
+                .collect();
+            let actions = strip.actions.map(|slot| {
+                Rect::new(
+                    slot.x as usize,
+                    slot.y as usize,
+                    slot.w as usize,
+                    slot.h as usize,
+                )
+            });
+            let toggle = Rect::new(
+                strip.toggle.x as usize,
+                strip.toggle.y as usize,
+                strip.toggle.w as usize,
+                strip.toggle.h as usize,
+            );
+            paint_icon_strip(
+                &mut buffer,
+                w,
+                &IconStripPaint {
+                    chrome,
+                    tok,
+                    accent,
+                    column,
+                    toggle,
+                    icons: &icons,
+                    actions: &actions,
+                    action_hovered: Some(0),
+                    toggle_hovered: false,
+                    grip_hot,
+                    dock_right: false,
+                    alpha,
+                },
+            );
+        } else {
+            let layout = sidebar_layout(chrome, column, 4, 0);
+            let labels = ["lab", "shell", "claude", "notes"];
+            let rows: Vec<SidebarRow> = layout
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(index, slot)| SidebarRow {
+                    slot: *slot,
+                    depth: usize::from(index > 0),
+                    chevron: (index == 0).then_some(false),
+                    dot: (index == 1).then_some(Dot::Working),
+                    label: labels[index],
+                    mail: 0,
+                    needs_you: 0,
+                    selected: index == 1,
+                    hovered: false,
+                })
+                .collect();
+            let toggle = sidebar_toggle_rect(chrome, column, layout.head, false);
+            paint_sidebar(
+                &mut buffer,
+                w,
+                &SidebarPaint {
+                    chrome,
+                    tok,
+                    accent,
+                    layout: &layout,
+                    title: "Spaces",
+                    rows: &rows,
+                    actions: ["+ New tab", "+ New space", "Commands"],
+                    commands_hint: "",
+                    action_hovered: None,
+                    alpha,
+                    grip_hot,
+                    dock_right: false,
+                    toggle,
+                    toggle_hovered: false,
+                },
+            );
+        }
+        (buffer, w, h)
+    }
+
+    #[test]
+    fn grip_highlight_follows_the_accent_and_stays_opaque() {
+        for tok in [&DARK, &LIGHT] {
+            let accent = accent(tok, rgb(0x3d8bfd));
+            let (rest, stride, _) = paint_width_frame(tok, 256, false, false, 0xff);
+            let (hot, _, _) = paint_width_frame(tok, 256, false, true, 0xff);
+            let y = 80;
+            let resting = pixel(&rest, stride, 255, y);
+            let highlighted = pixel(&hot, stride, 254, y);
+            assert_eq!(resting, pack_argb(0xff, tok.status_line));
+            assert_ne!(highlighted, resting);
+            assert_eq!(highlighted, pack_argb(0xff, accent));
+            let other = super::accent(tok, rgb(0xe06c75));
+            assert_ne!(accent, other, "two themes of focus colour stay distinct");
+        }
+        let (frame, stride, _) = paint_width_frame(&DARK, 52, true, true, 140);
+        let ground = pixel(&frame, stride, 2, 80);
+        assert_eq!(
+            (ground >> 24) as u8,
+            140,
+            "translucent strip ground keeps the bar alpha"
+        );
+        let grip = pixel(&frame, stride, 50, 80);
+        assert_eq!((grip >> 24) as u8, 0xff, "the grip stays opaque");
+        let shell = paint_width_frame(&DARK, 52, true, false, 0xff).0;
+        let claude = {
+            let (frame, _, _) = paint_width_frame(&LIGHT, 52, true, false, 0xff);
+            frame
+        };
+        assert_ne!(
+            shell[200 * stride + 26],
+            claude[200 * stride + 26],
+            "seat marks are shapes, and light chrome differs from dark"
+        );
+        if let Some(dir) = std::env::var_os("PRISMATTYC_SIDEBAR_WIDTH_SHOTS") {
+            let dir = std::path::PathBuf::from(dir);
+            std::fs::create_dir_all(&dir).expect("stills dir");
+            for (name, tok, width, collapsed, hot, alpha) in [
+                ("expanded-default", &DARK, 256usize, false, false, 0xffu8),
+                ("expanded-wide", &DARK, 420, false, false, 0xff),
+                ("grip-hover-dark", &DARK, 256, false, true, 0xff),
+                ("grip-hover-light", &LIGHT, 256, false, true, 0xff),
+                ("collapsed-icons", &DARK, 52, true, false, 0xff),
+                ("collapsed-translucent", &DARK, 52, true, true, 140),
+                ("expanded-light", &LIGHT, 256, false, false, 0xff),
+            ] {
+                let (buffer, w, h) = paint_width_frame(tok, width, collapsed, hot, alpha);
+                write_still_png(&dir.join(format!("{name}.png")), &buffer, w, h);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn builtin(id: &str) -> &'static Theme {
+        crate::theme::builtins()
+            .iter()
+            .find(|theme| theme.id == id)
+            .unwrap_or_else(|| panic!("built-in {id}"))
+    }
+
+    fn brief_theme(variant: ThemeVariant) -> &'static Theme {
+        builtin(match variant {
+            ThemeVariant::Dark => "prismattyc-dark",
+            ThemeVariant::Light => "prismattyc-light",
+        })
+    }
 
     fn scale(milli: u32) -> ChromeGeom {
         ChromeGeom {
@@ -2798,6 +5099,36 @@ mod tests {
             attention: false,
             selected,
         }
+    }
+
+    #[test]
+    fn activity_header_rects_cover_the_dot_and_the_status_label() {
+        let chrome = scale(1000);
+        let slot = Rect::new(10, 20, 400, 200);
+        let rects = activity_header_rects(chrome, slot);
+        assert_eq!(rects.len(), 2);
+        let head = chrome.px(PANE_HEADER_H);
+        for rect in &rects {
+            assert!(rect.y >= slot.y && rect.y + rect.h <= slot.y + head);
+            assert!(rect.x >= slot.x && rect.right() <= slot.right());
+        }
+        let dot = rects[0];
+        let cx = slot.x + chrome.px(HEADER_PAD_X) + chrome.px(HEADER_DOT) / 2;
+        let cy = slot.y + head.saturating_sub(1) / 2;
+        assert!(dot.contains(cx, cy));
+        let widest = [
+            PaneStatus::Attention,
+            PaneStatus::Mail(999),
+            PaneStatus::Unseen,
+            PaneStatus::Running,
+            PaneStatus::Focused,
+        ]
+        .into_iter()
+        .map(|status| status_width(chrome, status).ceil() as usize)
+        .max()
+        .unwrap();
+        assert!(rects[1].w >= widest + chrome.px(HEADER_PAD_X));
+        assert!(activity_header_rects(chrome, Rect::new(0, 0, 20, 10)).is_empty());
     }
 
     #[test]
@@ -2825,6 +5156,35 @@ mod tests {
         }
     }
 
+    /// #145: every Light surface a chip, pill, or bar sits on stays light,
+    /// and the active outline is visible against both light bars.
+    #[test]
+    fn light_chips_and_bars_stay_light_with_a_visible_active_outline() {
+        use crate::raster::relative_luminance;
+        for fill in [
+            LIGHT.bar,
+            LIGHT.status_bar,
+            LIGHT.ground,
+            LIGHT.tab_active,
+            LIGHT.chip_active,
+            LIGHT.field,
+            LIGHT.key,
+            LIGHT.tab_hover,
+            LIGHT.title_focus,
+        ] {
+            assert!(
+                relative_luminance(fill) > 0.75,
+                "{fill:?} reads dark on Light"
+            );
+        }
+        let line = LIGHT
+            .tab_active_line
+            .expect("Light outlines the active chip");
+        assert!(contrast_ratio(line, LIGHT.bar) >= 1.7);
+        assert!(contrast_ratio(line, LIGHT.status_bar) >= 1.5);
+        assert!(DARK.tab_active_line.is_none(), "Dark is unchanged");
+    }
+
     #[test]
     fn accent_keeps_three_to_one_on_both_bars() {
         for focus in [rgb(0x62a8ff), rgb(0xffd866), rgb(0x4cd18b), rgb(0xff6b6b)] {
@@ -2833,6 +5193,119 @@ mod tests {
             }
         }
         assert_eq!(accent(&DARK, rgb(0x62a8ff)), rgb(0x62a8ff));
+    }
+
+    #[test]
+    fn bar_color_graphite_is_identity_and_cycle_wraps() {
+        use crate::config::BarColor;
+        use crate::theme::ThemeVariant::{Dark, Light};
+        for variant in [Dark, Light] {
+            let theme = brief_theme(variant);
+            assert_eq!(
+                bar_tokens(theme, Some(BarColor::Graphite)),
+                *tokens(variant)
+            );
+            assert_eq!(bar_tokens(theme, None), *tokens(variant));
+        }
+        let order = [
+            Some(BarColor::Graphite),
+            Some(BarColor::Harbor),
+            Some(BarColor::Moss),
+            Some(BarColor::Plum),
+        ];
+        for (index, preset) in order.iter().enumerate() {
+            assert_eq!(step_bar_color(*preset, true, false), order[(index + 1) % 4]);
+            assert_eq!(
+                step_bar_color(*preset, false, false),
+                order[(index + 3) % 4]
+            );
+        }
+        // Unset bars sit on Graphite in the Prismattyc cycle.
+        assert_eq!(step_bar_color(None, true, false), order[1]);
+        // #160: other themes add their own bars to the cycle.
+        let with_theme = [None, order[0], order[1], order[2], order[3]];
+        for (index, preset) in with_theme.iter().enumerate() {
+            assert_eq!(
+                step_bar_color(*preset, true, true),
+                with_theme[(index + 1) % 5]
+            );
+            assert_eq!(
+                step_bar_color(*preset, false, true),
+                with_theme[(index + 4) % 5]
+            );
+        }
+        assert_eq!(bar_color_name(Some(BarColor::Plum)), "Plum");
+        assert_eq!(bar_color_name(None), "Theme");
+    }
+
+    #[test]
+    fn bar_color_presets_meet_brief_contrast() {
+        use crate::config::BarColor;
+        use crate::theme::ThemeVariant::{Dark, Light};
+        // Brief item 5: tab text ≥6.7:1 on the tabs bar, spaces-bar text
+        // ≥4.6:1, and the default-blue accent underline ≥4.1:1.
+        let blue = rgb(0x62a8ff);
+        for variant in [Dark, Light] {
+            for bar in [
+                BarColor::Graphite,
+                BarColor::Harbor,
+                BarColor::Moss,
+                BarColor::Plum,
+            ] {
+                let tok = bar_tokens(brief_theme(variant), Some(bar));
+                // The brief states one-decimal ratios; Harbor/Light measures
+                // 6.67, which rounds to the claimed 6.7.
+                let tab_ratio = contrast_ratio(tok.tab_text, tok.bar);
+                assert!(
+                    (tab_ratio * 10.0).round() >= 67.0,
+                    "{bar:?}/{variant:?}: tab text on tabs bar is {tab_ratio:.2}"
+                );
+                assert!(
+                    contrast_ratio(tok.text, tok.status_bar) >= 4.6,
+                    "{bar:?}/{variant:?}: spaces-bar text"
+                );
+                // The accent algorithm floors at 3:1 (see
+                // `accent_keeps_three_to_one_on_both_bars`), so the brief's
+                // 4.1 underline claim does not hold even for the default
+                // preset; presets must keep the established floor.
+                assert!(
+                    contrast_ratio(accent(&tok, blue), tok.bar) >= 3.0,
+                    "{bar:?}/{variant:?}: accent underline"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bar_color_preset_paints_both_bar_grounds() {
+        use crate::config::BarColor;
+        use crate::theme::ThemeVariant::Dark;
+        // The preset fills reach the painted tabs-bar ground.
+        let tabs = vec![tab("grid", true)];
+        let layout = bar_layout(scale(1000), 1440, 0, "lab", &tabs, "Ctrl Shift P");
+        for bar in [BarColor::Harbor, BarColor::Moss, BarColor::Plum] {
+            let tok = bar_tokens(brief_theme(Dark), Some(bar));
+            let accent = accent(&tok, rgb(0x62a8ff));
+            let mut buffer = vec![0u32; 1440 * layout.bar.h as usize];
+            paint_tabs_bar(
+                &mut buffer,
+                1440,
+                &BarPaint {
+                    layout: &layout,
+                    tok: &tok,
+                    accent,
+                    hover: None,
+                    drop_target: None,
+                    bar_alpha: 0xff,
+                    editing: None,
+                },
+            );
+            let ground = pack_argb(0xff, tok.bar);
+            assert!(
+                buffer.contains(&ground),
+                "{bar:?} tabs-bar ground paints its preset fill"
+            );
+        }
     }
 
     #[test]
@@ -3087,22 +5560,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    fn write_still_png(path: &std::path::Path, pixels: &[u32], width: usize, height: usize) {
-        let file = std::fs::File::create(path).expect("still file");
-        let mut encoder = png::Encoder::new(file, width as u32, height as u32);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("png header");
-        let mut rgba = vec![0u8; width * height * 4];
-        for (i, px) in pixels.iter().enumerate() {
-            rgba[i * 4] = ((px >> 16) & 0xff) as u8;
-            rgba[i * 4 + 1] = ((px >> 8) & 0xff) as u8;
-            rgba[i * 4 + 2] = (px & 0xff) as u8;
-            rgba[i * 4 + 3] = ((px >> 24) & 0xff) as u8;
-        }
-        writer.write_image_data(&rgba).expect("png data");
     }
 
     #[test]
@@ -3494,7 +5951,7 @@ mod tests {
                 },
                 true,
                 None,
-                false,
+                true,
             );
         }
     }
@@ -3664,6 +6121,147 @@ mod tests {
             },
         );
     }
+    /// #160: the Prismattyc themes resolve to the brief's tokens exactly,
+    /// follow-OS included, and the Graphite preset is their identity.
+    #[test]
+    fn prismattyc_themes_keep_the_brief_tokens() {
+        use crate::theme::resolve_follow_os;
+        let follow = builtin("prismattyc");
+        for (theme, brief) in [
+            (builtin("prismattyc-dark").clone(), &DARK),
+            (builtin("prismattyc-light").clone(), &LIGHT),
+            (follow.clone(), &DARK),
+            (resolve_follow_os(follow, false, None), &DARK),
+            (resolve_follow_os(follow, true, None), &LIGHT),
+        ] {
+            assert!(uses_brief(&theme), "{}", theme.id);
+            assert_eq!(theme_tokens(&theme), *brief, "{}", theme.id);
+            assert_eq!(bar_tokens(&theme, None), *brief, "{}", theme.id);
+        }
+    }
+
+    /// #160: a third-party theme paints from its own palette. Pins the
+    /// derivation for Japanesque (dark) and Hive Muted Professional Light.
+    #[test]
+    fn other_themes_derive_graphite_tokens_from_the_theme() {
+        let japanesque = builtin("japanesque");
+        assert!(!uses_brief(japanesque));
+        let tok = theme_tokens(japanesque);
+        assert_eq!(tok.bar, japanesque.chrome_bg);
+        assert_eq!(tok.text, japanesque.chrome_fg);
+        assert_eq!(tok.tab_active, japanesque.tab_active_bg);
+        assert_eq!(tok.ground, japanesque.pane_backdrop);
+        assert_eq!(tok.panel, japanesque.default_bg);
+        assert_eq!(tok.field, japanesque.default_bg);
+        assert_eq!(tok.hairline, japanesque.pane_border);
+        assert_eq!(tok.working, japanesque.active_badge);
+        assert_eq!(tok.unseen, japanesque.unseen_badge);
+        assert_eq!(tok.attention, japanesque.attention_badge);
+        assert_eq!(tok.variant, ThemeVariant::Dark);
+        assert_eq!(tok.tab_active_line, None);
+        assert_eq!(tok.cycle_head, DARK.cycle_head, "light cycle stays brand");
+        assert_eq!(tok.bar, rgb(0x181818));
+        assert_eq!(tok.status_bar, rgb(0x0e0e0e));
+        assert_eq!(tok.tab_active, rgb(0x2a2a29));
+        assert_eq!(tok.ground, rgb(0x161616));
+        assert_eq!(tok.title_focus, rgb(0x222a2f));
+        assert_ne!(tok, DARK, "no longer Graphite gray");
+
+        let light = builtin("hive-muted-professional-light");
+        let tok = theme_tokens(light);
+        assert_eq!(tok.variant, ThemeVariant::Light);
+        assert_eq!(tok.bar, light.chrome_bg);
+        assert_eq!(tok.panel, light.default_bg);
+        assert!(tok.tab_active_line.is_some(), "light chips keep an outline");
+        // The theme's own chrome pair is 3.1:1; the derived text is nudged
+        // darker until it reads on every bar fill.
+        assert!(contrast_ratio(light.chrome_fg, light.chrome_bg) < AA);
+        assert_ne!(tok.text, light.chrome_fg);
+        for ground in [tok.bar, tok.status_bar, tok.tab_active, tok.chip_active] {
+            assert!(contrast_ratio(tok.text, ground) >= AA);
+        }
+    }
+
+    /// #160: an explicit `bar_color` still repaints both bars on any theme;
+    /// unset, the bars follow the theme.
+    #[test]
+    fn explicit_bar_color_overrides_theme_bars() {
+        use crate::config::BarColor;
+        let japanesque = builtin("japanesque");
+        let own = bar_tokens(japanesque, None);
+        assert_eq!(own.bar, japanesque.chrome_bg);
+        let harbor = bar_tokens(japanesque, Some(BarColor::Harbor));
+        assert_eq!(
+            (harbor.bar, harbor.status_bar),
+            bar_fills(BarColor::Harbor, ThemeVariant::Dark)
+        );
+        let graphite = bar_tokens(japanesque, Some(BarColor::Graphite));
+        assert_eq!(
+            (graphite.bar, graphite.status_bar),
+            (DARK.bar, DARK.status_bar)
+        );
+        assert_eq!(graphite.tab_active, own.tab_active, "only the bars move");
+    }
+
+    /// #160: `[theme_overrides]` chrome keys reach Graphite, on a Prismattyc
+    /// theme too.
+    #[test]
+    fn chrome_overrides_reach_graphite() {
+        use crate::theme::{apply_overrides, ThemeOverrides};
+        for id in ["prismattyc-dark", "japanesque"] {
+            let mut theme = builtin(id).clone();
+            apply_overrides(
+                &mut theme,
+                &ThemeOverrides {
+                    chrome_bg: Some("#203040".into()),
+                    chrome_fg: Some("#f0e0d0".into()),
+                    ..ThemeOverrides::default()
+                },
+            )
+            .unwrap();
+            assert!(!uses_brief(&theme), "{id}");
+            let tok = theme_tokens(&theme);
+            assert_eq!(tok.bar, rgb(0x203040), "{id}");
+            assert_eq!(tok.text, rgb(0xf0e0d0), "{id}");
+        }
+    }
+
+    /// #160 item 6: text on derived fills reaches AA on every built-in, and a
+    /// theme whose pair is unreadable is nudged until it reads.
+    #[test]
+    fn derived_text_stays_readable() {
+        for theme in crate::theme::builtins() {
+            let tok = theme_tokens(theme);
+            for (fg, bg) in [
+                (tok.text, tok.bar),
+                (tok.text, tok.status_bar),
+                (tok.tab_text, tok.bar),
+                (tok.muted, tok.bar),
+                (tok.text_strong, tok.tab_active),
+                (tok.text, tok.chip_active),
+                (tok.on_attention, tok.attention),
+                (tok.key_text, tok.key),
+            ] {
+                assert!(
+                    contrast_ratio(fg, bg) >= AA,
+                    "{}: {fg:?} on {bg:?}",
+                    theme.id
+                );
+            }
+            assert!(
+                contrast_ratio(tok.text, tok.bar) + 0.01 >= contrast_ratio(tok.muted, tok.bar),
+                "{}: body text reads at least as strong as muted",
+                theme.id
+            );
+        }
+        let mut murky = builtin("japanesque").clone();
+        murky.chrome_bg = rgb(0x404040);
+        murky.chrome_fg = rgb(0x505050);
+        let tok = theme_tokens(&murky);
+        assert!(contrast_ratio(tok.text, tok.bar) >= AA);
+        assert!(contrast_ratio(tok.muted, tok.bar) >= AA);
+    }
+
     #[test]
     fn handle_tokens_match_the_brief() {
         assert_eq!(DARK.title_hover, rgb(0x252a33));

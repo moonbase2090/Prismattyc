@@ -55,6 +55,9 @@ pub const TIPS: &[&str] = &[
     #[cfg(not(target_os = "macos"))]
     "Ctrl+Shift+F4 splits into 2×2 quadrants.",
     "Ctrl+Shift+\\ horizontal split; Ctrl+Shift+- vertical split.",
+    #[cfg(target_os = "macos")]
+    "Ctrl+Option+Arrow moves focus. Option+Left/Right jumps by word.",
+    #[cfg(not(target_os = "macos"))]
     "Alt+Arrow moves focus between panes.",
     "Ctrl+Shift+W closes the focused pane.",
     "Ctrl+Shift+T new tab; Ctrl+Shift+1…9 select tabs.",

@@ -33,6 +33,10 @@ pub enum Action {
     FocusDown,
     FocusBorderNext,
     FocusBorderPrev,
+    /// Cycle the Graphite bar background preset (#108). Gated on
+    /// `chrome_style = "graphite"`; the default chord is Ctrl+Shift+B.
+    BarColorNext,
+    BarColorPrev,
     /// Exchange the focused pane with the previous one in layout order (PT-125).
     SwapPanePrev,
     /// Exchange the focused pane with the next one in layout order (PT-125).
@@ -52,7 +56,12 @@ pub enum Action {
     SessionSplitDown,
     TerminalSwitcher,
     AgentMessages,
+    /// Focus the next pane that needs attention (issue #184).
+    JumpNeedsYou,
     UpdateRestart,
+    /// Recent status messages, including toasts hidden by `toasts` (#171).
+    /// Unbound by default.
+    RecentMessages,
 
     CloseTab,
     RenameTab,
@@ -121,6 +130,8 @@ pub enum Action {
     MovePaneToSpace,
     /// Move keyboard focus onto the spaces rail (PT-91). Unbound by default.
     SpaceRailFocus,
+    /// Open the rail context menu for the focused chip or sidebar row (#181).
+    SpaceRailContextMenu,
     SpaceSettings,
     UndoSpaceChange,
     /// Open the space after the current one in the rail (PT-91). Unbound.
@@ -144,6 +155,14 @@ pub enum Action {
     SelectAll,
     ScrollLineUp,
     ScrollLineDown,
+    /// Open the transparency dialog. Unbound. The palette lists it only when
+    /// `chrome_style` is graphite (#112).
+    Transparency,
+    /// Open the Layout settings (Bars or Sidebar). Unbound. The palette lists
+    /// it only when `chrome_style` is graphite (#150).
+    ChromeLayout,
+    /// Collapse or expand the Spaces sidebar (issue #174).
+    SidebarCollapse,
     RichFocus,
 }
 
@@ -161,6 +180,8 @@ impl Action {
             Action::FocusDown,
             Action::FocusBorderNext,
             Action::FocusBorderPrev,
+            Action::BarColorNext,
+            Action::BarColorPrev,
             Action::SwapPanePrev,
             Action::SwapPaneNext,
             Action::RotatePanes,
@@ -175,7 +196,9 @@ impl Action {
             Action::SessionSplitDown,
             Action::TerminalSwitcher,
             Action::AgentMessages,
+            Action::JumpNeedsYou,
             Action::UpdateRestart,
+            Action::RecentMessages,
             Action::CloseTab,
             Action::RenameTab,
             Action::RenamePane,
@@ -215,6 +238,7 @@ impl Action {
             Action::DeleteSpace,
             Action::MovePaneToSpace,
             Action::SpaceRailFocus,
+            Action::SpaceRailContextMenu,
             Action::SpaceSettings,
             Action::UndoSpaceChange,
             Action::SpaceRailNext,
@@ -232,6 +256,9 @@ impl Action {
             Action::SelectAll,
             Action::ScrollLineUp,
             Action::ScrollLineDown,
+            Action::Transparency,
+            Action::ChromeLayout,
+            Action::SidebarCollapse,
             Action::RichFocus,
         ]);
         all
@@ -250,6 +277,8 @@ impl Action {
             Action::FocusDown => "focus_down".into(),
             Action::FocusBorderNext => "focus_border_next".into(),
             Action::FocusBorderPrev => "focus_border_prev".into(),
+            Action::BarColorNext => "bar_color_next".into(),
+            Action::BarColorPrev => "bar_color_prev".into(),
             Action::SwapPanePrev => "swap_pane_prev".into(),
             Action::SwapPaneNext => "swap_pane_next".into(),
             Action::RotatePanes => "rotate_panes".into(),
@@ -265,7 +294,9 @@ impl Action {
             Action::SessionSplitDown => "session_split_down".into(),
             Action::TerminalSwitcher => "terminal_switcher".into(),
             Action::AgentMessages => "agent_messages".into(),
+            Action::JumpNeedsYou => "jump_needs_you".into(),
             Action::UpdateRestart => "update_restart".into(),
+            Action::RecentMessages => "recent_messages".into(),
 
             Action::CloseTab => "close_tab".into(),
             Action::RenameTab => "rename_tab".into(),
@@ -301,6 +332,7 @@ impl Action {
             Action::DeleteSpace => "delete_space".into(),
             Action::MovePaneToSpace => "move_pane_to_space".into(),
             Action::SpaceRailFocus => "space_rail_focus".into(),
+            Action::SpaceRailContextMenu => "space_rail_context_menu".into(),
             Action::SpaceSettings => "space_settings".into(),
             Action::UndoSpaceChange => "undo_space_change".into(),
             Action::SpaceRailNext => "space_rail_next".into(),
@@ -318,6 +350,9 @@ impl Action {
             Action::SelectAll => "select_all".into(),
             Action::ScrollLineUp => "scroll_line_up".into(),
             Action::ScrollLineDown => "scroll_line_down".into(),
+            Action::Transparency => "transparency".into(),
+            Action::ChromeLayout => "chrome_layout".into(),
+            Action::SidebarCollapse => "sidebar_collapse".into(),
             Action::RichFocus => "rich_focus".into(),
         }
     }
@@ -340,6 +375,8 @@ impl Action {
             Action::FocusDown => "focus the pane below".into(),
             Action::FocusBorderNext => "cycle the focus border color forward".into(),
             Action::FocusBorderPrev => "cycle the focus border color back".into(),
+            Action::BarColorNext => "cycle the Graphite bar color forward".into(),
+            Action::BarColorPrev => "cycle the Graphite bar color back".into(),
             Action::SwapPanePrev => "swap the focused pane with the previous pane".into(),
             Action::SwapPaneNext => "swap the focused pane with the next pane".into(),
             Action::RotatePanes => "rotate every pane one slot forward".into(),
@@ -355,7 +392,9 @@ impl Action {
             Action::SessionSplitDown => "split down with an automatically named session".into(),
             Action::TerminalSwitcher => "find a terminal across Spaces".into(),
             Action::AgentMessages => "view pending mail and pane input queue receipts".into(),
+            Action::JumpNeedsYou => "focus the next pane that needs your attention".into(),
             Action::UpdateRestart => "update, restart components, and inspect versions".into(),
+            Action::RecentMessages => "show recent status messages, including hidden toasts".into(),
 
             Action::CloseTab => "close the active tab".into(),
             Action::RenameTab => "rename the active tab".into(),
@@ -408,7 +447,10 @@ impl Action {
             Action::OpenSpace => "open a saved space".into(),
             Action::DeleteSpace => "delete a saved space".into(),
             Action::MovePaneToSpace => "move the focused pane to another saved space".into(),
-            Action::SpaceRailFocus => "focus the spaces rail".into(),
+            Action::SpaceRailFocus => "focus and reorder saved spaces".into(),
+            Action::SpaceRailContextMenu => {
+                "open the sidebar or vertical-rail context menu for the focused row".into()
+            }
             Action::SpaceSettings => "choose rail position, autosave, and startup behavior".into(),
             Action::UndoSpaceChange => "undo the last session removal or move".into(),
             Action::SpaceRailNext => "open the next saved space".into(),
@@ -426,6 +468,11 @@ impl Action {
             Action::SelectAll => "select the visible viewport".into(),
             Action::ScrollLineUp => "scroll history up one line".into(),
             Action::ScrollLineDown => "scroll history down one line".into(),
+            Action::Transparency => "open transparency settings (graphite chrome only)".into(),
+            Action::ChromeLayout => {
+                "choose the Bars or Sidebar layout (graphite chrome only)".into()
+            }
+            Action::SidebarCollapse => "collapse or expand the spaces sidebar".into(),
             Action::RichFocus => "toggle rich focus (--experimental-rich)".into(),
         }
     }
@@ -478,6 +525,8 @@ impl Action {
             | Action::FocusDown
             | Action::FocusBorderNext
             | Action::FocusBorderPrev
+            | Action::BarColorNext
+            | Action::BarColorPrev
             | Action::SwapPanePrev
             | Action::SwapPaneNext
             | Action::RotatePanes
@@ -515,17 +564,20 @@ impl Action {
             | Action::ArrangeSplit
             | Action::ArrangeGrid => ActionGroup::Layout,
             Action::AgentMessages
+            | Action::JumpNeedsYou
             | Action::TerminalSwitcher
             | Action::OpenSpace
             | Action::DeleteSpace
             | Action::MovePaneToSpace
             | Action::SpaceRailFocus
+            | Action::SpaceRailContextMenu
             | Action::SpaceSettings
             | Action::UndoSpaceChange
             | Action::SpaceRailNext
             | Action::SpaceRailPrev
             | Action::SaveSpace => ActionGroup::Spaces,
             Action::UpdateRestart
+            | Action::RecentMessages
             | Action::NewWindow
             | Action::Quit
             | Action::OpenConfig
@@ -545,6 +597,9 @@ impl Action {
             | Action::SelectAll
             | Action::ScrollLineUp
             | Action::ScrollLineDown
+            | Action::Transparency
+            | Action::ChromeLayout
+            | Action::SidebarCollapse
             | Action::RichFocus => ActionGroup::ViewEdit,
         }
     }
@@ -565,7 +620,9 @@ impl Action {
             Action::SelectTab(_) => Some("Enter, then press the tab digit."),
             Action::Layout(_) => Some("Enter, then press the column count. Spawns panes up to N."),
             Action::AgentMessages => Some("Read agent messages and inspect pending deliveries."),
+            Action::JumpNeedsYou => Some("Clears attention on the pane you focus."),
             Action::UpdateRestart => Some("Check installed versions, update, or restart components."),
+            Action::RecentMessages => Some("Settings choose which toasts show: all, errors, or off."),
             Action::PresetSingle
             | Action::PresetSplitH
             | Action::PresetSplitV
@@ -585,7 +642,10 @@ impl Action {
                 Some("Move the focused pane to another saved Space. Blank terminals keep their local shell.")
             }
             Action::SpaceRailFocus => {
-                Some("Arrows move, Enter opens, F2 renames, Delete asks, Esc returns to the pane.")
+                Some("Arrows move; when space_reorder is enabled, Shift+arrows reorder. Enter opens, F2 renames, Delete asks, Esc returns to the pane.")
+            }
+            Action::SpaceRailContextMenu => {
+                Some("Same menu as right-click on a space, session, or pane row in the sidebar or vertical rail. Menu or Shift+F10 while the rail is focused.")
             }
             Action::SpaceRailNext | Action::SpaceRailPrev => {
                 Some("Wraps around the rail; the chip becomes current.")
@@ -597,6 +657,15 @@ impl Action {
                 Some("Deletes walkthrough.json. The caption restarts at the first step.")
             }
             Action::RichFocus => Some("Needs --experimental-rich."),
+            Action::Transparency => Some(
+                "Writes the existing opacity keys. Listed in the palette only when chrome_style is graphite.",
+            ),
+            Action::ChromeLayout => Some(
+                "Writes the layout key and applies it at once. Listed in the palette only when chrome_style is graphite.",
+            ),
+            Action::SidebarCollapse => Some(
+                "Saves the collapsed state with the sidebar width. Applies when layout is sidebar.",
+            ),
             _ => None,
         }
     }
@@ -1088,6 +1157,20 @@ fn macos_chord(action: Action) -> Option<&'static str> {
     })
 }
 
+/// Runtime defaults. macOS moves pane focus off Option+Left/Right unless
+/// `[keys]` sets those actions. [`default_chords`] itself stays portable
+/// because the config template is generated from it.
+fn platform_default_chords(action: Action, mac_platform: bool) -> Vec<&'static str> {
+    if mac_platform {
+        match action {
+            Action::FocusLeft => return vec!["ctrl+alt+left"],
+            Action::FocusRight => return vec!["ctrl+alt+right"],
+            _ => {}
+        }
+    }
+    default_chords(action)
+}
+
 /// Default chords per action (keybindings D-K1). Reproduces the chords shipped
 /// before user keybindings, including the macOS layout alternates.
 pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
@@ -1102,6 +1185,8 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         Action::FocusDown => vec!["alt+down"],
         Action::FocusBorderNext => vec!["ctrl+shift+]"],
         Action::FocusBorderPrev => vec!["ctrl+shift+["],
+        Action::BarColorNext => vec!["ctrl+shift+b"],
+        Action::BarColorPrev => vec![],
         Action::NewTab => vec!["ctrl+shift+t"],
         Action::NewBlankTab => vec!["ctrl+alt+shift+t"],
         Action::NewSessionTab => vec!["ctrl+alt+shift+n"],
@@ -1110,7 +1195,8 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         Action::SessionSplitRight => vec!["ctrl+alt+shift+r"],
         Action::SessionSplitDown => vec!["ctrl+alt+shift+b"],
         Action::TerminalSwitcher => vec!["ctrl+shift+o"],
-        Action::AgentMessages | Action::UpdateRestart => vec![],
+        Action::AgentMessages | Action::UpdateRestart | Action::RecentMessages => vec![],
+        Action::JumpNeedsYou => vec!["ctrl+shift+u"],
 
         Action::CloseTab => vec!["ctrl+shift+q"],
         Action::RenameTab => vec!["ctrl+shift+r"],
@@ -1214,7 +1300,10 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         Action::RotatePanesBack => vec![],
         Action::FocusLastPane => vec![],
         Action::LastTab => vec![],
-        Action::SpaceRailFocus | Action::SpaceSettings | Action::UndoSpaceChange => vec![],
+        Action::SpaceRailFocus
+        | Action::SpaceRailContextMenu
+        | Action::SpaceSettings
+        | Action::UndoSpaceChange => vec![],
         Action::SpaceRailNext => vec![],
         Action::SpaceRailPrev => vec![],
         Action::SaveSpace => vec![],
@@ -1226,6 +1315,9 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         Action::SelectAll => vec!["ctrl+shift+a"],
         Action::ScrollLineUp => vec!["ctrl+shift+up"],
         Action::ScrollLineDown => vec!["ctrl+shift+down"],
+        Action::Transparency => vec![],
+        Action::ChromeLayout => vec![],
+        Action::SidebarCollapse => vec!["ctrl+alt+shift+s"],
         Action::RichFocus => vec!["ctrl+shift+g"],
     }
 }
@@ -1253,9 +1345,25 @@ impl KeyMap {
 
     /// Build defaults with optional macOS Command shortcuts, then apply
     /// per-action config overrides. Config entries replace all defaults.
+    /// The portable map keeps `alt+left` / `alt+right`. The live host passes
+    /// [`Self::from_config_with_platform`] so macOS can move focus off Option.
     pub fn from_config_with_macos(
         keys: Option<&BTreeMap<String, KeysValue>>,
         macos_shortcuts: bool,
+    ) -> Result<KeyMap, String> {
+        Self::from_config_with_platform(keys, macos_shortcuts, false)
+    }
+
+    /// Same as [`Self::from_config_with_macos`], plus the macOS runtime
+    /// overlay. When `mac_platform` is set and `[keys]` omits
+    /// `focus_left` / `focus_right`, those defaults become
+    /// `ctrl+alt+left` / `ctrl+alt+right` so Option+Left/Right can reach
+    /// the shell as word jumps. The generated template leaves those two
+    /// keys commented; a live `focus_left = "alt+left"` still pins Option.
+    pub fn from_config_with_platform(
+        keys: Option<&BTreeMap<String, KeysValue>>,
+        macos_shortcuts: bool,
+        mac_platform: bool,
     ) -> Result<KeyMap, String> {
         let mut bindings: Vec<(Action, Chord)> = Vec::new();
         let mut user_chords: Vec<(Action, Chord)> = Vec::new();
@@ -1273,7 +1381,7 @@ impl KeyMap {
                     }
                 }
                 None => {
-                    for text in default_chords(action) {
+                    for text in platform_default_chords(action, mac_platform) {
                         let chord = Chord::parse(text).expect("default chord parses");
                         bindings.push((action, chord));
                     }
@@ -1485,6 +1593,7 @@ mod tests {
             action,
             Action::AgentMessages
                 | Action::UpdateRestart
+                | Action::RecentMessages
                 | Action::PresetSingle
                 | Action::PresetSplitH
                 | Action::PresetSplitV
@@ -1509,6 +1618,7 @@ mod tests {
                 | Action::FocusLastPane
                 | Action::LastTab
                 | Action::SpaceRailFocus
+                | Action::SpaceRailContextMenu
                 | Action::SpaceSettings
                 | Action::UndoSpaceChange
                 | Action::SpaceRailNext
@@ -1523,6 +1633,9 @@ mod tests {
                 | Action::IncreaseFontSize
                 | Action::DecreaseFontSize
                 | Action::ResetFontSize
+                | Action::BarColorPrev
+                | Action::Transparency
+                | Action::ChromeLayout
         )
     }
 
@@ -1621,6 +1734,17 @@ mod tests {
             vec!["ctrl+alt+g".to_string()]
         );
         assert!(bound.chords(Action::ArrangeSingle).is_empty());
+    }
+
+    #[test]
+    fn recent_messages_action_is_listed_and_unbound() {
+        let map = KeyMap::default();
+        let action = Action::RecentMessages;
+        assert_eq!(action.name(), "recent_messages");
+        assert_eq!(Action::from_name("recent_messages"), Some(action));
+        assert!(map.chords(action).is_empty());
+        assert_eq!(action.group(), ActionGroup::ViewEdit);
+        assert!(action.describe().contains("hidden"));
     }
 
     #[test]
@@ -1999,6 +2123,11 @@ mod tests {
         );
         assert_eq!(mac.spellings(Action::Quit), vec!["super+q"]);
         assert_eq!(
+            mac.spellings(Action::FocusLeft),
+            vec!["alt+left"],
+            "the portable macOS-shortcuts map does not move focus"
+        );
+        assert_eq!(
             mac.spellings(Action::IncreaseFontSize),
             vec!["shift+super+="]
         );
@@ -2018,6 +2147,72 @@ mod tests {
         assert!(custom.chords(Action::Copy).is_empty());
         assert!(custom.chords(Action::Quit).is_empty());
         assert_eq!(custom.spellings(Action::NewWindow), vec!["ctrl+alt+n"]);
+    }
+
+    #[test]
+    fn macos_platform_moves_horizontal_focus_off_option_unless_overridden() {
+        let mac = KeyMap::from_config_with_platform(None, false, true).unwrap();
+        assert_eq!(mac.spellings(Action::FocusLeft), vec!["ctrl+alt+left"]);
+        assert_eq!(mac.spellings(Action::FocusRight), vec!["ctrl+alt+right"]);
+        assert_eq!(mac.spellings(Action::FocusUp), vec!["alt+up"]);
+        assert_eq!(mac.spellings(Action::FocusDown), vec!["alt+down"]);
+        assert_eq!(mac.label(Action::FocusLeft), "C-A-Left");
+        let alt = mods(false, false, true, false);
+        let ctrl_alt = mods(true, false, true, false);
+        assert_eq!(
+            mac.action(
+                &Key::Named(NamedKey::ArrowLeft),
+                PhysicalKey::Code(KeyCode::ArrowLeft),
+                alt
+            ),
+            None,
+            "Option+Left is free for the shell word jump"
+        );
+        assert_eq!(
+            mac.action(
+                &Key::Named(NamedKey::ArrowLeft),
+                PhysicalKey::Code(KeyCode::ArrowLeft),
+                ctrl_alt
+            ),
+            Some(Action::FocusLeft)
+        );
+        assert_eq!(
+            mac.action(
+                &Key::Named(NamedKey::ArrowUp),
+                PhysicalKey::Code(KeyCode::ArrowUp),
+                alt
+            ),
+            Some(Action::FocusUp)
+        );
+
+        let linux = KeyMap::from_config_with_platform(None, false, false).unwrap();
+        assert_eq!(linux, KeyMap::default());
+        assert_eq!(linux.spellings(Action::FocusLeft), vec!["alt+left"]);
+
+        let keep =
+            KeyMap::from_config_with_platform(Some(&one("focus_left", "alt+left")), false, true)
+                .unwrap();
+        assert_eq!(keep.spellings(Action::FocusLeft), vec!["alt+left"]);
+        assert_eq!(keep.spellings(Action::FocusRight), vec!["ctrl+alt+right"]);
+        assert_eq!(
+            keep.action(
+                &Key::Named(NamedKey::ArrowLeft),
+                PhysicalKey::Code(KeyCode::ArrowLeft),
+                alt
+            ),
+            Some(Action::FocusLeft),
+            "an explicit [keys] entry still consumes Option+Left"
+        );
+
+        let conflict = BTreeMap::from([(
+            "split_right".to_string(),
+            KeysValue::One("ctrl+alt+left".into()),
+        )]);
+        let err = KeyMap::from_config_with_platform(Some(&conflict), false, true).unwrap_err();
+        assert!(
+            err.contains("focus_left") && err.contains("split_right"),
+            "{err}"
+        );
     }
 
     #[test]

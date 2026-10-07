@@ -5,7 +5,7 @@ pub(crate) use local::Recipe as LocalRecipe;
 
 use crate::space_rail::RailSide;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -31,6 +31,12 @@ const MAX_PTY_DRAIN_PER_PANE: usize = 8;
 /// Wakes the winit loop when a pane reader has bytes (or the child exits).
 /// Optional so mux unit tests can spawn without an event loop.
 pub(crate) type Wake = Arc<dyn Fn() + Send + Sync>;
+
+fn next_runtime_instance() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// How long after its last visible output a pane still counts as "active".
 pub(crate) const ACTIVE_WINDOW: Duration = Duration::from_millis(1500);
 /// Quiet gap before an unfocused pane's next output (or silence) badges.
@@ -105,6 +111,10 @@ pub(crate) struct HostGeom {
     /// Reserved thickness of the spaces rail: a row height on the bottom or
     /// top edge, `rail_chip_cols` cells on the left or right edge.
     pub rail_px: usize,
+    /// Reserved width of a left-docked sidebar (issue #113). Graphite and
+    /// classic both honor `layout = "sidebar"`. A right dock stores the
+    /// width in `rail_px` instead, and the rail it replaces is 0.
+    pub sidebar_px: usize,
     /// Fixed chip width of the spaces rail in cells.
     pub rail_chip_cols: usize,
     /// Graphite chrome sizing (#104). [`ChromeGeom::CLASSIC`] adds nothing.
@@ -190,6 +200,15 @@ pub(crate) enum ArrangeTarget {
 }
 
 impl ArrangeTarget {
+    /// Position in the sidebar's Arrange control (`graphite::SIDEBAR_ARRANGE`).
+    pub(crate) fn button(self) -> usize {
+        match self {
+            ArrangeTarget::Single => 0,
+            ArrangeTarget::Split => 1,
+            ArrangeTarget::Grid => 2,
+        }
+    }
+
     /// Pane slots the target holds.
     pub(crate) fn capacity(self) -> usize {
         match self {
@@ -400,6 +419,7 @@ impl HostGeom {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            sidebar_px: 0,
             chrome: ChromeGeom::CLASSIC,
         }
     }
@@ -432,13 +452,14 @@ impl HostGeom {
         }
     }
 
-    /// Chrome reserved left of the pane area (a left rail).
+    /// Chrome reserved left of the pane area (a left rail, or the sidebar).
     pub(crate) fn chrome_left(self) -> usize {
         if self.rail_side == RailSide::Left {
             self.rail_px
         } else {
             0
         }
+        .saturating_add(self.sidebar_px)
     }
 
     /// Chrome reserved right of the pane area (a right rail).
@@ -805,18 +826,14 @@ impl PaneRuntime {
 
         let (to_child_tx, to_child_rx) = mpsc::sync_channel::<ChildWrite>(TO_CHILD_CAP);
         let (grant_tx, grant_rx) = mpsc::channel();
+        let writer = crate::paste_job::PtyWriter::new(to_child_rx);
+        let exit_writer = writer.clone();
         thread::Builder::new()
             .name(format!("prism-pane-{pane}-write"))
             .spawn(move || {
-                while let Ok(msg) = to_child_rx.recv() {
-                    if child_writer.write_all(&msg.bytes).is_err() {
-                        break;
-                    }
-                    let _ = child_writer.flush();
-                    if let Some(features) = msg.capability_grant {
-                        let _ = grant_tx.send(features);
-                    }
-                }
+                writer.run(&mut child_writer, |features| {
+                    let _ = grant_tx.send(features);
+                });
             })?;
 
         let (from_pty_tx, from_pty_rx) =
@@ -828,6 +845,9 @@ impl PaneRuntime {
             .name(format!("prism-pane-{pane}-wait"))
             .spawn(move || {
                 wait_for_child_exit(child_pid);
+                if child_pid.is_some() {
+                    exit_writer.child_exited();
+                }
                 let _ = exit_tx.send(Ok(Vec::new()));
                 if let Some(wake) = exit_wake {
                     wake();
@@ -1211,6 +1231,15 @@ impl PaneRuntime {
                     {
                         self.selection.clear();
                         self.keyboard_select_mode = false;
+                    }
+                    if self.attention.is_some() {
+                        if let Some(message) = self.emulator.take_pending_attention() {
+                            self.attention = Some(message);
+                        } else {
+                            // Later PTY output without a new attention OSC means the
+                            // agent moved on (issue #184).
+                            self.attention = None;
+                        }
                     }
                     dirty = true;
                     if i + 1 == MAX_PTY_DRAIN_PER_PANE {
@@ -1727,6 +1756,9 @@ pub(crate) fn tab_close_left_with_inset(
 
 /// Domain topology plus one live runtime per pane leaf.
 pub(crate) struct MuxRuntime {
+    /// Unique per runtime in this process. Pane ids restart at 1 in every
+    /// runtime (each Space view), so `(instance, pane)` names a pane.
+    instance: u64,
     pub(crate) space_id: Option<String>,
     git_info: crate::git_info::Cache,
     /// Previously focused pane per window, for `focus_last_pane` (PT-127).
@@ -1865,6 +1897,7 @@ impl MuxRuntime {
         let mut panes = HashMap::new();
         panes.insert(pane, runtime);
         Ok(Self {
+            instance: next_runtime_instance(),
             space_id: None,
             git_info: Default::default(),
             domain,
@@ -1930,6 +1963,59 @@ impl MuxRuntime {
         self.domain
             .window(window)
             .map(|win| win.layout.pane_count())
+    }
+
+    pub(crate) fn window_layout(&self, window: WindowId) -> Option<PaneLayout> {
+        self.domain.window(window).map(|win| win.layout.clone())
+    }
+
+    /// Replace `window`'s split tree when it names exactly the panes already
+    /// in that window. `Ok(false)` leaves the tree alone (unknown pane, extra
+    /// pane, or the ratios do not fit). The active window is refit; a
+    /// background window is applied the next time it is selected.
+    pub(crate) fn install_window_layout(
+        &mut self,
+        window: WindowId,
+        layout: PaneLayout,
+    ) -> Result<bool> {
+        let Some(current) = self.domain.window(window).map(|win| win.layout.clone()) else {
+            return Ok(false);
+        };
+        let have = current.panes();
+        let want = layout.panes();
+        if have.len() != want.len()
+            || want.iter().any(|pane| !have.contains(pane))
+            || have.iter().any(|pane| !want.contains(pane))
+        {
+            return Ok(false);
+        }
+        let bounds = CellRect {
+            col: 0,
+            row: 0,
+            cols: self.cols,
+            rows: self.rows,
+        };
+        if layout_to_rects(&layout, bounds, self.geom.min_cols(), self.geom.min_rows()).is_err() {
+            return Ok(false);
+        }
+        self.domain
+            .set_layout(window, layout)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        if self.view.window == Some(window) {
+            match self.window_rects(window) {
+                Ok(rects) => {
+                    if let Err(error) = self.apply_rects(rects, self.geom) {
+                        let _ = self.domain.set_layout(window, current);
+                        return Err(error);
+                    }
+                }
+                Err(_) => {
+                    let _ = self.domain.set_layout(window, current);
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
     }
 
     pub(crate) fn tab_layouts(&self) -> Vec<(String, String)> {
@@ -2096,6 +2182,85 @@ impl MuxRuntime {
             .domain
             .rename_window(target.active_window(), "Terminal")?;
         Ok(destination)
+    }
+
+    /// Per-tab pane mail depths in [`Self::tab_infos`] order (issue #113):
+    /// one entry per layout pane, so the sidebar tree can badge panes.
+    pub(crate) fn tab_pane_mail(&self) -> Vec<Vec<u32>> {
+        self.window_ids()
+            .into_iter()
+            .map(|window| {
+                self.domain
+                    .window(window)
+                    .map(|win| win.layout.panes())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|pane| {
+                        self.panes
+                            .get(pane)
+                            .map(|runtime| runtime.mail_depth)
+                            .unwrap_or(0)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Per-pane agent-attention flags, aligned with [`Self::tab_pane_mail`].
+    pub(crate) fn tab_pane_attention(&self) -> Vec<Vec<bool>> {
+        self.window_ids()
+            .into_iter()
+            .map(|window| {
+                self.domain
+                    .window(window)
+                    .map(|win| win.layout.panes())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|pane| {
+                        self.panes
+                            .get(pane)
+                            .is_some_and(|runtime| runtime.attention.is_some())
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Panes with agent attention in tab order, then layout pane order.
+    pub(crate) fn attention_panes_in_order(&self) -> Vec<PaneId> {
+        let mut out = Vec::new();
+        for window in self.window_ids() {
+            let panes = self
+                .domain
+                .window(window)
+                .map(|win| win.layout.panes())
+                .unwrap_or_default();
+            for pane in panes {
+                if self
+                    .panes
+                    .get(&pane)
+                    .is_some_and(|runtime| runtime.attention.is_some())
+                {
+                    out.push(pane);
+                }
+            }
+        }
+        out
+    }
+
+    /// Focus the next pane that needs attention, wrapping after the current
+    /// focus. Returns false when none need attention.
+    pub(crate) fn focus_next_attention_pane(&mut self) -> bool {
+        let order = self.attention_panes_in_order();
+        let Some(next) = order
+            .iter()
+            .position(|pane| *pane == self.focused_id())
+            .and_then(|index| order.get(index + 1).or(order.first()))
+            .or(order.first())
+        else {
+            return false;
+        };
+        self.focus(*next)
     }
 
     pub(crate) fn tab_infos(&self) -> Vec<TabInfo> {
@@ -2513,6 +2678,15 @@ impl MuxRuntime {
         self.zoomed_here().is_some()
     }
 
+    /// The Arrange target the active tab shows now, for the sidebar's
+    /// selected button (issue #162). A zoom counts as Single.
+    pub(crate) fn current_arrange(&self) -> Option<ArrangeTarget> {
+        if self.zoomed_here().is_some() {
+            return Some(ArrangeTarget::Single);
+        }
+        arrange_shape(&self.domain.window(self.active_window())?.layout)
+    }
+
     /// The zoomed pane when it lives in the active tab. Zoom on another
     /// tab is left alone by edits made here.
     fn zoomed_here(&self) -> Option<PaneId> {
@@ -2734,6 +2908,29 @@ impl MuxRuntime {
         }
     }
 
+    /// Sidebar session row (issue #175): select `tab`, then focus the pane
+    /// at `pane_index` in that tab's layout order. A pane hidden by zoom
+    /// comes back into view. The layout ratios are left alone, and nothing
+    /// is written to the pane. An unknown tab or pane does nothing.
+    pub(crate) fn focus_session_row(&mut self, tab: usize, pane_index: usize) -> bool {
+        let ids = self.window_ids();
+        let Some(&window) = ids.get(tab) else {
+            return false;
+        };
+        if self.view.window != Some(window) && self.select_tab(tab).ok() != Some(true) {
+            return false;
+        }
+        let panes = self
+            .domain
+            .window(window)
+            .map(|win| win.layout.panes())
+            .unwrap_or_default();
+        let Some(&pane) = panes.get(pane_index) else {
+            return false;
+        };
+        self.focus(pane)
+    }
+
     pub(crate) fn focus_neighbor(&mut self, direction: FocusDirection) -> bool {
         // Neighbors are hidden while zoomed; leave zoom, then navigate.
         if self.zoomed_here().is_some() && self.set_zoom(None).is_err() {
@@ -2854,6 +3051,11 @@ impl MuxRuntime {
 
     pub(crate) fn pane_mut(&mut self, id: PaneId) -> Option<&mut PaneRuntime> {
         self.panes.get_mut(&id)
+    }
+
+    /// Any live pane (any tab) by its stable numeric id.
+    pub(crate) fn pane_id_by_raw(&self, raw: u64) -> Option<PaneId> {
+        self.panes.keys().copied().find(|id| id.get() == raw)
     }
 
     pub(crate) fn panes_and_rects(&self) -> impl Iterator<Item = (PaneId, &PaneRuntime, CellRect)> {
@@ -3030,6 +3232,16 @@ impl MuxRuntime {
     /// Attention messages emitted since the previous take.
     pub(crate) fn take_pending_attentions(&mut self) -> Vec<(PaneId, String)> {
         std::mem::take(&mut self.pending_attentions)
+    }
+
+    /// Process-unique id of this runtime; pane ids repeat across runtimes.
+    pub(crate) fn instance(&self) -> u64 {
+        self.instance
+    }
+
+    /// The host wake, for workers that report back to this window.
+    pub(crate) fn wake(&self) -> Option<Wake> {
+        self.wake.clone()
     }
 
     /// Writer-death toasts since the previous take.
@@ -3638,6 +3850,10 @@ impl MuxRuntime {
         self.graphite_bar = bar;
     }
 
+    pub(crate) fn graphite_bar(&self) -> Option<&crate::graphite::BarLayout> {
+        self.graphite_bar.as_ref()
+    }
+
     /// Presentation index for a pixel in the top tab strip, if any.
     /// Slots sit in the window-padded content box so they stay aligned
     /// with `rasterize_tab_strip`. `close` is the right-edge close target.
@@ -4160,6 +4376,28 @@ fn write_placeholder_screen(runtime: &mut PaneRuntime, name: &str, reason: &str,
 
 fn ranges_overlap(a_start: usize, a_end: usize, b_start: usize, b_end: usize) -> bool {
     a_start < b_end && b_start < a_end
+}
+
+/// Which Arrange target a layout's shape matches: one leaf is Single, two
+/// side-by-side leaves are Split, two rows of two are Grid. Ratios are
+/// ignored so a dragged divider keeps the match; any other shape is `None`.
+fn arrange_shape(layout: &PaneLayout) -> Option<ArrangeTarget> {
+    let pair = |node: &PaneLayout| {
+        matches!(node, PaneLayout::Split(split)
+            if split.axis == Axis::Horizontal
+                && matches!(*split.first, PaneLayout::Leaf(_))
+                && matches!(*split.second, PaneLayout::Leaf(_)))
+    };
+    match layout {
+        PaneLayout::Leaf(_) => Some(ArrangeTarget::Single),
+        _ if pair(layout) => Some(ArrangeTarget::Split),
+        PaneLayout::Split(split)
+            if split.axis == Axis::Vertical && pair(&split.first) && pair(&split.second) =>
+        {
+            Some(ArrangeTarget::Grid)
+        }
+        PaneLayout::Split(_) => None,
+    }
 }
 
 /// Visible rects for `window`. A `zoomed` pane that lives in `window`
@@ -4826,6 +5064,38 @@ mod tests {
         assert!(!runtime.panes[&second].unseen_output);
     }
 
+    #[test]
+    fn attention_clears_when_unfocused_pane_outputs_again() {
+        let mut runtime = MuxRuntime::spawn("/bin/cat", &[], 80, 24).unwrap();
+        let first = runtime.focused_id();
+        let second = runtime
+            .split_focused("/bin/cat", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        runtime.focus(first);
+        let _ = runtime
+            .panes
+            .get_mut(&second)
+            .unwrap()
+            .emulator
+            .feed(b"\x1b]9;permission needed\x07");
+        let _ = runtime.drain_all();
+        assert!(runtime.panes[&second].attention.is_some());
+        runtime
+            .panes
+            .get(&second)
+            .unwrap()
+            .send_bytes(b"printf 'resumed\\n'\n".to_vec())
+            .unwrap();
+        for _ in 0..8 {
+            let _ = runtime.drain_all();
+            if runtime.panes[&second].attention.is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(runtime.panes[&second].attention.is_none());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn proc_stat_detects_zombie_state() {
@@ -4850,6 +5120,7 @@ mod tests {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            sidebar_px: 0,
             chrome: ChromeGeom::CLASSIC,
         };
         let rect = CellRect {
@@ -4875,6 +5146,51 @@ mod tests {
         };
         let (_, y, _, _) = with_strip.pane_slot_px(rect);
         assert_eq!(y, 43);
+    }
+
+    #[test]
+    fn graphite_header_insets_the_grid_below_the_slot() {
+        // Linux paint CI (cell 10×19, header 28): slot (8, 52, 410, 494)
+        // and content (8, 85, 410, 456). 466px remain under the title row,
+        // 24 rows use 456, and the 10px surplus is split 5 above the grid.
+        let geom = HostGeom {
+            cell_w: 10,
+            cell_h: 19,
+            window_pad: 8,
+            slack_x: 0,
+            slack_y: 44,
+            pane_gap: 0,
+            rail_gap: 0,
+            inner_pad: 0,
+            top_chrome_px: 0,
+            scrollbar_gutter_px: 0,
+            rail_side: RailSide::Off,
+            rail_px: 0,
+            rail_chip_cols: 0,
+            sidebar_px: 0,
+            chrome: ChromeGeom {
+                graphite: true,
+                scale_milli: 1000,
+            },
+        };
+        let rect = CellRect {
+            col: 0,
+            row: 0,
+            cols: 41,
+            rows: 26,
+        };
+        assert_eq!(geom.chrome.pane_header(), 28);
+        assert_eq!(geom.pane_slot_px(rect), (8, 52, 410, 494));
+        assert_eq!(geom.pane_content_px(rect), (8, 85, 410, 456));
+        let (sx, sy, sw, sh) = geom.pane_slot_px(rect);
+        let header = geom.chrome.pane_header();
+        let avail_h = sh - header;
+        let used_h = (avail_h / geom.cell_h) * geom.cell_h;
+        let extra_h = avail_h - used_h;
+        assert_eq!(
+            geom.pane_content_px(rect),
+            (sx, sy + header + extra_h / 2, sw, used_h)
+        );
     }
 
     #[test]
@@ -4907,6 +5223,7 @@ mod tests {
                     rail_side: RailSide::Off,
                     rail_px: 0,
                     rail_chip_cols: 0,
+                    sidebar_px: 0,
                     chrome: ChromeGeom::CLASSIC,
                 };
                 let rect = CellRect {
@@ -4966,6 +5283,7 @@ mod tests {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            sidebar_px: 0,
             chrome: ChromeGeom::CLASSIC,
         };
         runtime.set_geom(base).unwrap();
@@ -5035,6 +5353,7 @@ mod tests {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            sidebar_px: 0,
             chrome: ChromeGeom::CLASSIC,
         };
         runtime.set_geom(chrome).unwrap();
@@ -5082,6 +5401,7 @@ mod tests {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            sidebar_px: 0,
             chrome: ChromeGeom::CLASSIC,
         };
 
@@ -5538,6 +5858,109 @@ mod tests {
     }
 
     #[test]
+    fn tab_pane_mail_aligns_with_tab_infos() {
+        let runtime = spawn_n_panes(2, 80, 24);
+        let infos = runtime.tab_infos();
+        let mail = runtime.tab_pane_mail();
+        assert_eq!(mail.len(), infos.len());
+        for (info, panes) in infos.iter().zip(mail.iter()) {
+            let n = if info.handles == 0 { 1 } else { info.handles };
+            assert_eq!(panes.len(), n);
+            assert!(panes.iter().all(|&depth| depth == 0));
+        }
+    }
+
+    #[test]
+    fn tab_pane_attention_aligns_with_tab_infos() {
+        let runtime = spawn_n_panes(2, 80, 24);
+        let infos = runtime.tab_infos();
+        let attention = runtime.tab_pane_attention();
+        assert_eq!(attention.len(), infos.len());
+        for (info, panes) in infos.iter().zip(attention.iter()) {
+            let n = if info.handles == 0 { 1 } else { info.handles };
+            assert_eq!(panes.len(), n);
+            assert!(panes.iter().all(|flag| !*flag));
+        }
+    }
+
+    #[test]
+    fn focus_next_attention_pane_cycles_layout_order() {
+        let mut runtime = MuxRuntime::spawn("/bin/cat", &[], 80, 24).unwrap();
+        let first = runtime.focused_id();
+        let second = runtime
+            .split_focused("/bin/cat", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        runtime.focus(first);
+        for pane in [second, first] {
+            runtime.panes.get_mut(&pane).unwrap().attention = Some("needs input".to_string());
+        }
+        assert!(runtime.focus_next_attention_pane());
+        assert_eq!(runtime.focused_id(), second);
+        assert!(runtime.panes[&second].attention.is_none());
+        assert!(runtime.focus_next_attention_pane());
+        assert_eq!(runtime.focused_id(), first);
+        assert!(runtime.panes[&first].attention.is_none());
+        assert!(!runtime.focus_next_attention_pane());
+    }
+
+    #[test]
+    fn current_arrange_follows_the_active_tab_shape() {
+        let mut runtime = spawn_n_panes(1, 80, 24);
+        assert_eq!(runtime.current_arrange(), Some(ArrangeTarget::Single));
+        runtime
+            .arrange(ArrangeTarget::Split, "/bin/sh", &[])
+            .unwrap();
+        assert_eq!(runtime.current_arrange(), Some(ArrangeTarget::Split));
+        runtime
+            .arrange(ArrangeTarget::Grid, "/bin/sh", &[])
+            .unwrap();
+        assert_eq!(runtime.current_arrange(), Some(ArrangeTarget::Grid));
+        runtime
+            .arrange(ArrangeTarget::Single, "/bin/sh", &[])
+            .unwrap();
+        assert_eq!(
+            runtime.current_arrange(),
+            Some(ArrangeTarget::Single),
+            "a zoomed grid shows one pane"
+        );
+        // Three side-by-side panes match no button.
+        let runtime = spawn_n_panes(3, 120, 24);
+        assert_eq!(runtime.current_arrange(), None);
+    }
+
+    #[test]
+    fn arrange_shape_ignores_ratios_and_rejects_other_trees() {
+        let ids = spawn_n_panes(4, 160, 24).active_pane_ids();
+        let leaf = |index: usize| PaneLayout::leaf(ids[index]);
+        let split = |axis, ratio, first, second| {
+            PaneLayout::Split(prismattyc_mux::Split {
+                axis,
+                ratio,
+                first: Box::new(first),
+                second: Box::new(second),
+            })
+        };
+        let dragged = split(Axis::Horizontal, 0.3, leaf(0), leaf(1));
+        assert_eq!(arrange_shape(&dragged), Some(ArrangeTarget::Split));
+        let stacked = split(Axis::Vertical, 0.5, leaf(0), leaf(1));
+        assert_eq!(arrange_shape(&stacked), None, "top/bottom is not Split");
+        let grid = split(
+            Axis::Vertical,
+            0.6,
+            split(Axis::Horizontal, 0.5, leaf(0), leaf(1)),
+            split(Axis::Horizontal, 0.4, leaf(2), leaf(3)),
+        );
+        assert_eq!(arrange_shape(&grid), Some(ArrangeTarget::Grid));
+        let ragged = split(
+            Axis::Vertical,
+            0.5,
+            split(Axis::Horizontal, 0.5, leaf(0), leaf(1)),
+            leaf(2),
+        );
+        assert_eq!(arrange_shape(&ragged), None);
+    }
+
+    #[test]
     fn arrange_shrink_zooms_without_closing() {
         let mut runtime = spawn_n_panes(1, 80, 24);
         runtime
@@ -5796,6 +6219,43 @@ mod tests {
         assert!(runtime.focus(right));
         assert_eq!(runtime.zoomed_pane(), None);
         assert_eq!(runtime.rects().count(), 2);
+    }
+
+    #[test]
+    fn focus_session_row_switches_tabs_and_unzooms_without_retiling() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let first = runtime.focused_id();
+        let second = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        assert_eq!(runtime.active_pane_ids(), vec![first, second]);
+        let layout = runtime.active_layout();
+        assert!(runtime.toggle_zoom().unwrap());
+        assert_eq!(runtime.zoomed_pane(), Some(second));
+        assert!(runtime.focus_session_row(0, 1));
+        assert_eq!(runtime.focused_id(), second);
+        assert_eq!(
+            runtime.zoomed_pane(),
+            Some(second),
+            "the pane already on screen stays zoomed"
+        );
+        assert!(runtime.focus_session_row(0, 0));
+        assert_eq!(runtime.focused_id(), first);
+        assert_eq!(runtime.zoomed_pane(), None, "a hidden pane comes back");
+        assert_eq!(runtime.active_layout(), layout, "focus does not retile");
+
+        runtime.new_tab("/bin/sh", &[]).unwrap();
+        let third = runtime.focused_id();
+        assert!(runtime.focus_session_row(0, 0));
+        assert_eq!(runtime.selected_tab_index(), 0);
+        assert_eq!(runtime.focused_id(), first);
+        assert!(runtime.focus_session_row(1, 0));
+        assert_eq!(runtime.selected_tab_index(), 1);
+        assert_eq!(runtime.focused_id(), third);
+        assert!(!runtime.focus_session_row(9, 0));
+        assert_eq!(runtime.focused_id(), third, "an unknown tab is left alone");
+        assert!(!runtime.focus_session_row(1, 4));
+        assert_eq!(runtime.focused_id(), third, "an unknown pane is left alone");
     }
 
     #[test]
@@ -6417,6 +6877,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                sidebar_px: 0,
                 chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
@@ -6533,6 +6994,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                sidebar_px: 0,
                 chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
@@ -6608,6 +7070,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                sidebar_px: 0,
                 chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
@@ -6717,6 +7180,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                sidebar_px: 0,
                 chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
@@ -6873,6 +7337,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                sidebar_px: 0,
                 chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
@@ -6912,6 +7377,7 @@ mod tests {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            sidebar_px: 0,
             chrome: ChromeGeom::CLASSIC,
         };
         runtime.set_geom(split).unwrap();
@@ -6981,6 +7447,7 @@ mod tests {
             rail_side: RailSide::Off,
             rail_px: 0,
             rail_chip_cols: 0,
+            sidebar_px: 0,
             chrome: ChromeGeom::CLASSIC,
         };
         runtime.set_geom(geom).unwrap();
@@ -7039,6 +7506,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                sidebar_px: 0,
                 chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();
@@ -7211,6 +7679,7 @@ mod tests {
                 rail_side: RailSide::Off,
                 rail_px: 0,
                 rail_chip_cols: 0,
+                sidebar_px: 0,
                 chrome: ChromeGeom::CLASSIC,
             })
             .unwrap();

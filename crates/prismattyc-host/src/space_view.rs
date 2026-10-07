@@ -1,6 +1,8 @@
 //! Project daemon ownership into a window and the live pane-name rail.
 
-use crate::attach_tabs::{AttachTabRecord, AttachTabsFile, AttachTabsMode};
+use crate::attach_tabs::{
+    layout_for_sessions, remap_layout, AttachTabRecord, AttachTabsFile, AttachTabsMode,
+};
 use prismattyc_mux::{SavedSpace, Snapshot};
 use std::collections::{HashMap, HashSet};
 
@@ -65,6 +67,7 @@ pub fn restore_layout(
                 .map(|session| AttachTabRecord {
                     title: session.name.clone(),
                     sessions: vec![session.name.clone()],
+                    layout: None,
                 })
                 .collect()
         } else {
@@ -74,6 +77,7 @@ pub fn restore_layout(
                 .map(|tab| AttachTabRecord {
                     title: tab.title.clone(),
                     sessions: tab.sessions.clone(),
+                    layout: tab.layout.clone(),
                 })
                 .collect()
         };
@@ -120,7 +124,31 @@ pub fn restore_layout(
     file.session_names = names;
     file.space_id = owner.map(str::to_string);
     file.mode = AttachTabsMode::Switch;
+    retarget_tab_layouts(&mut file);
     Ok((file, stopped))
+}
+
+/// Layout leaves may still be the names `tab.sessions` just left behind.
+/// Keep the tree only when every leaf is one of this tab's live ids.
+fn retarget_tab_layouts(file: &mut AttachTabsFile) {
+    let id_of_name: std::collections::HashMap<&str, &str> = file
+        .session_names
+        .iter()
+        .map(|(id, name)| (name.as_str(), id.as_str()))
+        .collect();
+    for tab in &mut file.tabs {
+        let sessions = tab.sessions.clone();
+        tab.layout = tab.layout.take().and_then(|node| {
+            let mapped = remap_layout(&node, |leaf| {
+                if sessions.iter().any(|id| id == leaf) {
+                    Some(leaf.to_string())
+                } else {
+                    id_of_name.get(leaf).map(|id| (*id).to_string())
+                }
+            });
+            layout_for_sessions(mapped, &sessions)
+        });
+    }
 }
 
 /// Names can change or be reused. An open window keeps its stable owner.
@@ -261,9 +289,14 @@ pub fn owned_layout_with_local_tabs(
                 return None;
             }
             retained_indices.push(index);
+            let layout = tab.layout.as_ref().and_then(|node| {
+                let mapped = remap_layout(node, &resolve);
+                layout_for_sessions(mapped, &sessions)
+            });
             Some(AttachTabRecord {
                 title: tab.title.clone(),
                 sessions,
+                layout,
             })
         })
         .collect();
@@ -273,6 +306,7 @@ pub fn owned_layout_with_local_tabs(
             tabs.push(AttachTabRecord {
                 title: session_title(space, session),
                 sessions: vec![id],
+                layout: None,
             });
         }
     }
@@ -336,6 +370,7 @@ mod tests {
                 .map(|id| AttachTabRecord {
                     title: format!("tab-{id}"),
                     sessions: vec![(*id).into()],
+                    layout: None,
                 })
                 .collect(),
             active_tab: 1,

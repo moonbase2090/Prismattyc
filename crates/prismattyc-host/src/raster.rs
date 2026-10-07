@@ -2982,6 +2982,8 @@ pub struct PaletteFrame<'a> {
     pub layout_mode: PaletteLayoutMode,
     /// Optional query row. Context menus omit it so the section header is first.
     pub query: Option<&'a str>,
+    /// The search field owns the caret. A click on that field sets this.
+    pub query_focused: bool,
     /// Chip labels and the selected chip; `None` hides the chip row.
     pub chips: Option<(&'a [&'a str], usize)>,
     pub sections: &'a [PaletteSection<'a>],
@@ -3064,6 +3066,8 @@ pub struct PaletteLayout {
     pub rows: Vec<PaletteLaidRow>,
     pub filter_chips: Vec<PaletteLaidChip>,
     pub list_viewport: PaletteListViewport,
+    /// Search field bounds. `None` when the frame has no query row.
+    pub query_bounds: Option<PaletteListViewport>,
     /// Fixed detail panel top. `None` for content-fit overlays.
     pub detail_y: Option<usize>,
 }
@@ -3144,6 +3148,33 @@ pub fn palette_pointer_hit(
         .or_else(|| palette_hit(layout, pointer_x, pointer_y).map(PalettePointerTarget::Row))
 }
 
+/// Hit target for the Spaces dropdown. Rows, the search field, the panel
+/// chrome, and the area outside the panel are distinct so a click can open,
+/// focus, or dismiss.
+pub fn space_menu_target(
+    layout: &PaletteLayout,
+    pointer_x: usize,
+    pointer_y: usize,
+) -> crate::palette::SpaceMenuTarget {
+    let in_panel = pointer_x >= layout.panel_x
+        && pointer_x < layout.panel_x.saturating_add(layout.panel_w)
+        && pointer_y >= layout.panel_y
+        && pointer_y < layout.panel_y.saturating_add(layout.panel_h);
+    if !in_panel {
+        return crate::palette::SpaceMenuTarget::Outside;
+    }
+    if layout
+        .query_bounds
+        .is_some_and(|bounds| bounds.contains(pointer_x, pointer_y))
+    {
+        return crate::palette::SpaceMenuTarget::Query;
+    }
+    if let Some(row) = palette_hit(layout, pointer_x, pointer_y) {
+        return crate::palette::SpaceMenuTarget::Row(row);
+    }
+    crate::palette::SpaceMenuTarget::Inside
+}
+
 fn palette_chrome_px(
     geom: PaletteGeom,
     cell_h: usize,
@@ -3179,7 +3210,7 @@ fn palette_chrome_px(
         .saturating_add(cell_h)
 }
 
-fn palette_collect_lines(frame: &PaletteFrame<'_>) -> (Vec<PaletteLine>, usize) {
+pub(crate) fn palette_collect_lines(frame: &PaletteFrame<'_>) -> (Vec<PaletteLine>, usize) {
     let mut lines = Vec::new();
     let mut global = 0;
     let mut selected_line = 0;
@@ -3260,7 +3291,8 @@ fn wrap_lines(text: &str, max_cells: usize, lines: usize) -> Vec<String> {
     out
 }
 
-enum PaletteLine {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaletteLine {
     Header(usize),
     Row(usize, usize),
 }
@@ -3342,10 +3374,16 @@ pub fn palette_layout(
     let y = buffer_height_px.saturating_sub(height) / 2;
     let blank = if geom.compact { 0 } else { font.cell_h };
     let mut row_y = y.saturating_add(font.cell_h / 2);
-    if has_query {
-        row_y = row_y.saturating_add(geom.query_h_px);
-        row_y = row_y.saturating_add(blank);
-    }
+    let query_bounds = has_query.then(|| {
+        let bounds = PaletteListViewport {
+            x,
+            y: row_y,
+            width,
+            height: geom.query_h_px,
+        };
+        row_y = row_y.saturating_add(geom.query_h_px).saturating_add(blank);
+        bounds
+    });
     let filter_chips = palette_filter_chips(font, frame, geom, x, width, row_y);
     if frame.chips.is_some() {
         row_y = row_y.saturating_add(font.cell_h).saturating_add(blank);
@@ -3385,6 +3423,7 @@ pub fn palette_layout(
             width,
             height: list_px,
         },
+        query_bounds,
         detail_y: None,
     })
 }
@@ -3454,9 +3493,16 @@ fn palette_fixed_layout(
     let bottom = y.saturating_add(height);
     let blank = if geom.compact { 0 } else { font.cell_h };
     let mut list_y = y.saturating_add(font.cell_h / 2);
-    if frame.query.is_some() {
+    let query_bounds = frame.query.is_some().then(|| {
+        let bounds = PaletteListViewport {
+            x,
+            y: list_y,
+            width,
+            height: geom.query_h_px,
+        };
         list_y = list_y.saturating_add(geom.query_h_px).saturating_add(blank);
-    }
+        bounds
+    });
     let filter_chips = palette_filter_chips(font, frame, geom, x, width, list_y);
     if frame.chips.is_some() {
         list_y = list_y.saturating_add(font.cell_h).saturating_add(blank);
@@ -3522,6 +3568,7 @@ fn palette_fixed_layout(
             width,
             height: list_bottom.saturating_sub(list_y),
         },
+        query_bounds,
         detail_y: Some(detail_y),
     })
 }
@@ -3617,7 +3664,11 @@ pub fn rasterize_palette_with_hover(
     let blank = if geom.compact { 0 } else { font.cell_h };
     let mut row_y = y.saturating_add(font.cell_h / 2);
     if let Some(query) = frame.query {
-        let query_line = format!("> {}█", query);
+        let query_line = if frame.query_focused {
+            format!("> {query}█")
+        } else {
+            format!("> {query}")
+        };
         let query_text_y = row_y.saturating_add(geom.query_h_px.saturating_sub(font.cell_h) / 2);
         draw_theme_text(
             buffer,
@@ -3629,6 +3680,20 @@ pub fn rasterize_palette_with_hover(
             theme.chrome_fg,
             text_right,
         );
+        if frame.query_focused {
+            if let Some(bounds) = layout.query_bounds {
+                let rule_y = bounds.y.saturating_add(bounds.height).saturating_sub(1);
+                fill_rect(
+                    buffer,
+                    stride_px,
+                    bounds.x.saturating_add(1),
+                    rule_y,
+                    bounds.width.saturating_sub(2),
+                    1,
+                    focus_rgb,
+                );
+            }
+        }
         row_y = row_y.saturating_add(geom.query_h_px).saturating_add(blank);
     }
 
@@ -4249,6 +4314,51 @@ pub fn rasterize_splash(
         return;
     }
     fill_rect(buffer, stride_px, 0, 0, stride_px, buffer_height_px, bg);
+    rasterize_splash_lines(
+        font,
+        lines,
+        buffer,
+        stride_px,
+        buffer_height_px,
+        animation_ms,
+        false,
+    );
+}
+
+/// Paint only the splash word art and its pixel animation over the existing
+/// surface. Graphite uses this to keep the established art while changing the
+/// surrounding copy's face and colours.
+pub(crate) fn rasterize_splash_art(
+    font: &FontMetrics,
+    lines: &[Vec<(String, [u8; 3])>],
+    buffer: &mut [u32],
+    stride_px: usize,
+    buffer_height_px: usize,
+    animation_ms: Option<u64>,
+) {
+    rasterize_splash_lines(
+        font,
+        lines,
+        buffer,
+        stride_px,
+        buffer_height_px,
+        animation_ms,
+        true,
+    );
+}
+
+fn rasterize_splash_lines(
+    font: &FontMetrics,
+    lines: &[Vec<(String, [u8; 3])>],
+    buffer: &mut [u32],
+    stride_px: usize,
+    buffer_height_px: usize,
+    animation_ms: Option<u64>,
+    art_only: bool,
+) {
+    if stride_px == 0 || buffer_height_px == 0 {
+        return;
+    }
     let line_cols = |line: &[(String, [u8; 3])]| {
         line.iter()
             .map(|(text, _)| text.chars().count())
@@ -4277,7 +4387,10 @@ pub fn rasterize_splash(
     let art_bottom = row_y + ART.len() * font.cell_h;
     let art_left = col_x0 + ART_MARGIN_LEFT * font.cell_w;
     let art_right = col_x0 + (art_frame_width() - ART_MARGIN) * font.cell_w;
-    for line in lines {
+    for (line_index, line) in lines.iter().enumerate() {
+        if art_only && line_index >= ART.len() {
+            break;
+        }
         if row_y.saturating_add(font.cell_h) > buffer_height_px {
             break;
         }
@@ -4528,7 +4641,11 @@ pub(crate) fn rasterize_render_timer(
     let reason = summary
         .dominant_full_repaint_reason
         .map_or("-", crate::FullRepaintReason::as_str);
-    let text = format!(
+    let pump_text = format!(
+        " pump={}us slowest={}:{}us ",
+        summary.pump.total_us, summary.pump.slowest_phase, summary.pump.slowest_us,
+    );
+    let raster_text = format!(
         " last/max raster={}/{}us frames={} cells_max={} blit_sum={} full={} ",
         summary.last_raster_us,
         summary.max_raster_us,
@@ -4538,9 +4655,11 @@ pub(crate) fn rasterize_render_timer(
         reason,
     );
     let max_cells = stride.saturating_sub(16) / font.cell_w.max(1);
-    let text: String = text.chars().take(max_cells.max(1)).collect();
-    let panel_w = (text.chars().count() * font.cell_w + 8).min(stride.saturating_sub(8));
-    let panel_h = font.cell_h.saturating_add(6).min(height as usize);
+    let pump_text: String = pump_text.chars().take(max_cells.max(1)).collect();
+    let raster_text: String = raster_text.chars().take(max_cells.max(1)).collect();
+    let text_cells = pump_text.chars().count().max(raster_text.chars().count());
+    let panel_w = (text_cells * font.cell_w + 8).min(stride.saturating_sub(8));
+    let panel_h = (font.cell_h.saturating_mul(2).saturating_add(10)).min(height as usize);
     let x = 4;
     let y = (height as usize).saturating_sub(panel_h + 4);
     fill_rect_argb(
@@ -4557,9 +4676,19 @@ pub(crate) fn rasterize_render_timer(
         buffer,
         stride,
         font,
-        &text,
+        &pump_text,
         x + 4,
         y + 3,
+        theme.chrome_fg,
+        x.saturating_add(panel_w).saturating_sub(2),
+    );
+    draw_theme_text(
+        buffer,
+        stride,
+        font,
+        &raster_text,
+        x + 4,
+        y + 3 + font.cell_h,
         theme.chrome_fg,
         x.saturating_add(panel_w).saturating_sub(2),
     );
@@ -5053,6 +5182,57 @@ fn rasterize_rail_names(
                 *pixel = scratch[row * source_w + col];
             }
         }
+    }
+}
+
+/// Lifted classic-rail label during a Space reorder. The caller supplies the
+/// original slot so the chip keeps its size for the entire drag.
+pub fn rasterize_space_reorder_chip(
+    theme: &Theme,
+    font: &FontMetrics,
+    label: &str,
+    buffer: &mut [u32],
+    stride_px: usize,
+    rect: (usize, usize, usize, usize),
+    accent: [u8; 3],
+) {
+    let (x, y, w, h) = rect;
+    if stride_px == 0 || w < 8 || h < 8 {
+        return;
+    }
+    let height = buffer.len() / stride_px;
+    let x = x.min(stride_px.saturating_sub(w));
+    let y = y.min(height.saturating_sub(h));
+    let fill = theme.tab_active_bg;
+    fill_rect(buffer, stride_px, x, y, w, h, fill);
+    fill_rect(buffer, stride_px, x, y, w, 1, accent);
+    fill_rect(buffer, stride_px, x, y + h - 1, w, 1, accent);
+    fill_rect(buffer, stride_px, x, y, 1, h, accent);
+    fill_rect(buffer, stride_px, x + w - 1, y, 1, h, accent);
+
+    let cell_w = font.cell_w.max(1);
+    let cell_h = font.cell_h.max(1).min(h.saturating_sub(2));
+    let clip_start = x.saturating_add(4);
+    let clip_end = x.saturating_add(w).saturating_sub(4);
+    let max_width = clip_end.saturating_sub(clip_start);
+    let baseline_y = y.saturating_add(h.saturating_sub(cell_h) / 2);
+    let ink = contrast_ink(fill);
+    let mut used = 0usize;
+    let mut shown: Vec<char> = Vec::new();
+    for ch in label.chars() {
+        let width = prismattyc_core::char_display_width(ch).max(1) * cell_w;
+        if used.saturating_add(width) > max_width {
+            break;
+        }
+        shown.push(ch);
+        used += width;
+    }
+    let mut text_x = clip_start;
+    for ch in shown {
+        blit_glyph_in(
+            buffer, stride_px, font, ch, text_x, baseline_y, ink, clip_start, clip_end, false,
+        );
+        text_x = text_x.saturating_add(prismattyc_core::char_display_width(ch).max(1) * cell_w);
     }
 }
 
@@ -7350,10 +7530,42 @@ fn paint_overlay_surface(
     rgb: [u8; 3],
     surface: OverlaySurface,
 ) {
+    paint_overlay_surface_with_radius(buffer, stride, x0, y0, w, h, 0.0, rgb, surface);
+}
+
+/// Blend an overlay surface through a rounded clip, preserving the pixels
+/// outside the corner radius. Graphite dialogs use this on translucent windows.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_overlay_surface_rounded(
+    buffer: &mut [u32],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    w: usize,
+    h: usize,
+    radius: f32,
+    rgb: [u8; 3],
+    surface: OverlaySurface,
+) {
+    paint_overlay_surface_with_radius(buffer, stride, x0, y0, w, h, radius, rgb, surface);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_overlay_surface_with_radius(
+    buffer: &mut [u32],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    w: usize,
+    h: usize,
+    radius: f32,
+    rgb: [u8; 3],
+    surface: OverlaySurface,
+) {
     if w == 0 || h == 0 {
         return;
     }
-    if surface.is_opaque() {
+    if surface.is_opaque() && radius <= 0.0 {
         fill_rect(buffer, stride, x0, y0, w, h, rgb);
         return;
     }
@@ -7380,6 +7592,10 @@ fn paint_overlay_surface(
     };
     for y in 0..h {
         for x in 0..w {
+            let coverage = round_rect_coverage(x, y, w, h, radius);
+            if coverage <= 0.0 {
+                continue;
+            }
             let idx = (y0.saturating_add(y))
                 .saturating_mul(stride)
                 .saturating_add(x0.saturating_add(x));
@@ -7396,8 +7612,39 @@ fn paint_overlay_surface(
                 })
                 .unwrap_or(dest_rgb);
             let backdrop_px = pack_argb(alpha_of(dest), backdrop_rgb);
-            buffer[idx] = blend_pixel(backdrop_px, rgb, OPAQUE_ALPHA, fg_weight);
+            let weight = (f32::from(fg_weight) * coverage).round() as u16;
+            buffer[idx] = blend_pixel(backdrop_px, rgb, OPAQUE_ALPHA, weight);
         }
+    }
+}
+
+fn round_rect_coverage(x: usize, y: usize, width: usize, height: usize, radius: f32) -> f32 {
+    let radius = radius.min(width as f32 / 2.0).min(height as f32 / 2.0);
+    if radius <= 0.0 {
+        return 1.0;
+    }
+    let px = x as f32 + 0.5;
+    let py = y as f32 + 0.5;
+    let cx = if px < radius {
+        Some(radius)
+    } else if px > width as f32 - radius {
+        Some(width as f32 - radius)
+    } else {
+        None
+    };
+    let cy = if py < radius {
+        Some(radius)
+    } else if py > height as f32 - radius {
+        Some(height as f32 - radius)
+    } else {
+        None
+    };
+    match (cx, cy) {
+        (Some(cx), Some(cy)) => {
+            let distance = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
+            (radius - distance + 0.5).clamp(0.0, 1.0)
+        }
+        _ => 1.0,
     }
 }
 
@@ -11214,6 +11461,7 @@ mod tests {
         let frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::FixedHeight,
             query: Some("split"),
+            query_focused: true,
             chips: Some((&chips, 1)),
             sections: &sections,
             selected: 0,
@@ -11465,6 +11713,7 @@ mod tests {
         let palette_frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::ContentFit,
             query: Some("split"),
+            query_focused: true,
             chips: None,
             sections: &palette_sections,
             selected: 0,
@@ -11486,6 +11735,7 @@ mod tests {
         let picker_frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::ContentFit,
             query: None,
+            query_focused: false,
             chips: None,
             sections: &picker_sections,
             selected: 1,
@@ -11516,6 +11766,7 @@ mod tests {
         let space_menu_frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::ContentFit,
             query: None,
+            query_focused: false,
             chips: None,
             sections: &space_menu_sections,
             selected: 2,
@@ -11538,6 +11789,7 @@ mod tests {
         let pane_menu_frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::ContentFit,
             query: None,
+            query_focused: false,
             chips: None,
             sections: &pane_menu_sections,
             selected: 1,
@@ -11571,6 +11823,7 @@ mod tests {
             let frame = PaletteFrame {
                 layout_mode: PaletteLayoutMode::ContentFit,
                 query: Some(query),
+                query_focused: true,
                 chips: None,
                 sections: &sections,
                 selected: 0,
@@ -11812,6 +12065,7 @@ mod tests {
         let frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::ContentFit,
             query: Some(""),
+            query_focused: true,
             chips: None,
             sections: &sections,
             selected: 0,
@@ -11864,6 +12118,7 @@ mod tests {
             let frame = PaletteFrame {
                 layout_mode: PaletteLayoutMode::FixedHeight,
                 query: None,
+                query_focused: false,
                 chips: None,
                 sections: &sections,
                 selected: 0,
@@ -11977,6 +12232,7 @@ mod tests {
         let frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::ContentFit,
             query: Some(""),
+            query_focused: true,
             chips: None,
             sections: &sections,
             selected: 0,
@@ -12018,6 +12274,228 @@ mod tests {
         assert_eq!(hit, Some(0));
         let miss = palette_hit(&layout, sample_x, selected.y + layout.geom.row_pitch_px);
         assert_ne!(miss, Some(0));
+    }
+
+    fn space_menu_name(index: usize) -> String {
+        match index {
+            0 => "cairn".to_string(),
+            1 => "scorecard".to_string(),
+            2 => "rookrunner".to_string(),
+            3 => "Prismattyc".to_string(),
+            4 => "Codemap".to_string(),
+            5 => "Dogfood".to_string(),
+            other => format!("space-{other}"),
+        }
+    }
+
+    fn space_menu_rows(count: usize) -> Vec<crate::palette::PaletteRow> {
+        (0..count)
+            .map(|index| {
+                crate::palette::PaletteRow::plain(
+                    space_menu_name(index),
+                    "2 sessions".into(),
+                    String::new(),
+                )
+            })
+            .collect()
+    }
+
+    fn space_menu_spaces(count: usize) -> Vec<crate::palette::SpacePickerRow> {
+        (0..count)
+            .map(|index| crate::palette::SpacePickerRow {
+                name: space_menu_name(index),
+                sessions: 2,
+                saved_at_unix: index as u64,
+            })
+            .collect()
+    }
+
+    fn space_menu_frame<'a>(
+        sections: &'a [PaletteSection<'a>],
+        selected: usize,
+        scroll: usize,
+        focused: bool,
+    ) -> PaletteFrame<'a> {
+        PaletteFrame {
+            layout_mode: PaletteLayoutMode::FixedHeight,
+            query: Some(""),
+            query_focused: focused,
+            chips: None,
+            sections,
+            selected,
+            scroll,
+            detail: None,
+            footer: "Click or Enter open · Esc close · ↑↓/wheel move",
+        }
+    }
+
+    #[test]
+    fn space_menu_hits_rows_opens_on_click_and_outside_click_closes() {
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let theme = default_theme();
+        let width = 140 * font.cell_w;
+        let height = 42 * font.cell_h;
+        let short_rows = space_menu_rows(2);
+        let long_rows = space_menu_rows(40);
+        let short_sections = [PaletteSection {
+            header: "OPEN SPACE",
+            subtitle: "",
+            rows: &short_rows,
+        }];
+        let long_sections = [PaletteSection {
+            header: "OPEN SPACE",
+            subtitle: "",
+            rows: &long_rows,
+        }];
+        let short_frame = space_menu_frame(&short_sections, 0, 0, true);
+        let mut long_frame = space_menu_frame(&long_sections, 0, 0, true);
+        let short = palette_layout(&font, &short_frame, width, height).expect("short menu");
+        let long = palette_layout(&font, &long_frame, width, height).expect("long menu");
+        assert_eq!(
+            (short.panel_x, short.panel_y, short.panel_w, short.panel_h),
+            (long.panel_x, long.panel_y, long.panel_w, long.panel_h),
+            "the menu keeps one size when the list overflows"
+        );
+        assert!(
+            long.rows.len() < 40,
+            "the long list scrolls inside the panel"
+        );
+        let query = long.query_bounds.expect("search field");
+        let query_x = query.x + query.width / 2;
+        let query_y = query.y + query.height / 2;
+        assert_eq!(
+            space_menu_target(&long, query_x, query_y),
+            crate::palette::SpaceMenuTarget::Query
+        );
+        assert_eq!(
+            space_menu_target(&long, 0, 0),
+            crate::palette::SpaceMenuTarget::Outside
+        );
+        assert_eq!(
+            space_menu_target(&long, long.panel_x.saturating_sub(1), long.panel_y + 4),
+            crate::palette::SpaceMenuTarget::Outside
+        );
+        let header_y = long.list_viewport.y + long.geom.row_pitch_px / 2;
+        assert_eq!(
+            space_menu_target(&long, long.panel_x + 8, header_y),
+            crate::palette::SpaceMenuTarget::Inside,
+            "the section header is not a space row"
+        );
+
+        let spaces = space_menu_spaces(40);
+        let mut picker = crate::palette::SpacePicker::new(crate::palette::SpacePickerKind::Open);
+        picker.query_focused = false;
+        assert_eq!(
+            picker.pointer(space_menu_target(&long, query_x, query_y), &spaces),
+            crate::palette::SpacePickerVerdict::Consumed
+        );
+        assert!(picker.query_focused);
+        assert_eq!(
+            picker.pointer(
+                space_menu_target(&long, long.panel_x + 8, header_y),
+                &spaces
+            ),
+            crate::palette::SpacePickerVerdict::Consumed
+        );
+        let row = long.rows.iter().find(|row| row.global == 1).expect("row 1");
+        let row_x = long.panel_x + 8;
+        let row_y = row.y + long.geom.row_pitch_px / 2;
+        assert_eq!(
+            space_menu_target(&long, row_x, row_y),
+            crate::palette::SpaceMenuTarget::Row(1)
+        );
+        assert_eq!(
+            picker.pointer(crate::palette::SpaceMenuTarget::Row(1), &spaces),
+            crate::palette::SpacePickerVerdict::Open("scorecard".into())
+        );
+        let mut picker = crate::palette::SpacePicker::new(crate::palette::SpacePickerKind::Open);
+        assert_eq!(
+            picker.pointer(space_menu_target(&long, 0, 0), &spaces),
+            crate::palette::SpacePickerVerdict::Close
+        );
+
+        let mut plain = vec![pack_rgb(theme.default_bg); width * height];
+        let mut marked = plain.clone();
+        rasterize_palette(
+            &font,
+            &long_frame,
+            theme,
+            OverlaySurface::default(),
+            &mut plain,
+            width,
+            height,
+            FOCUS_BORDER_PALETTE[0].1,
+        );
+        long_frame.selected = 1;
+        rasterize_palette(
+            &font,
+            &long_frame,
+            theme,
+            OverlaySurface::default(),
+            &mut marked,
+            width,
+            height,
+            FOCUS_BORDER_PALETTE[0].1,
+        );
+        long_frame.selected = 0;
+        let selected_bg = pack_rgb(theme.selection_bg.unwrap_or(theme.default_fg));
+        let sample = row_y * width + row_x;
+        assert_ne!(plain[sample], selected_bg);
+        assert_eq!(
+            marked[sample], selected_bg,
+            "hover uses the keyboard selection highlight"
+        );
+
+        let mut frosted = gradient_backdrop(width, height);
+        long_frame.selected = 1;
+        rasterize_palette(
+            &font,
+            &long_frame,
+            theme,
+            OverlaySurface::from_window(0.72, 8, true),
+            &mut frosted,
+            width,
+            height,
+            FOCUS_BORDER_PALETTE[0].1,
+        );
+        long_frame.selected = 0;
+        assert_eq!(
+            frosted[sample], selected_bg,
+            "translucency keeps the row highlight opaque"
+        );
+
+        assert!(picker.scroll_by_wheel(
+            -((long.geom.row_pitch_px as i64) * 4 * 1_000),
+            long.geom.row_pitch_px,
+            long.shown,
+            spaces.len(),
+        ));
+        let mut scrolled = long_frame;
+        scrolled.scroll = picker.scroll;
+        scrolled.selected = picker.selected;
+        let scrolled_layout =
+            palette_layout(&font, &scrolled, width, height).expect("scrolled menu");
+        assert_eq!(scrolled_layout.panel_h, long.panel_h);
+        assert_eq!(scrolled_layout.start, picker.scroll);
+        let visible = scrolled_layout.rows[0];
+        assert!(visible.global > 0, "wheel reveals a later space");
+        assert_eq!(
+            space_menu_target(
+                &scrolled_layout,
+                scrolled_layout.panel_x + 8,
+                visible.y + scrolled_layout.geom.row_pitch_px / 2,
+            ),
+            crate::palette::SpaceMenuTarget::Row(visible.global)
+        );
+        assert_eq!(
+            picker.pointer(
+                crate::palette::SpaceMenuTarget::Row(visible.global),
+                &spaces
+            ),
+            crate::palette::SpacePickerVerdict::Open(space_menu_name(visible.global))
+        );
     }
 
     #[test]

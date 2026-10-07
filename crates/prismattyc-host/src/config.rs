@@ -74,15 +74,29 @@ pub enum TabStripMode {
     Multi,
 }
 
-/// Host chrome look (#104). `classic` (default) keeps the original chrome;
-/// `graphite` opts into the Graphite tabs bar, pane title rows, and spaces
-/// bar while the redesign lands behind this setting.
+/// Host chrome look (#104, #114). `graphite` (default) is the tabs bar, pane
+/// title rows, and spaces bar. `classic` keeps the original chrome and stays
+/// selectable.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChromeStyle {
-    #[default]
     Classic,
+    #[default]
     Graphite,
+}
+
+/// Graphite bar background preset (#108). `graphite` (default) is the
+/// shipped look; `harbor` and `moss` recolor both bars, and `plum` renders
+/// Plum on dark themes and Sand on light ones. Only read when
+/// `chrome_style = "graphite"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BarColor {
+    #[default]
+    Graphite,
+    Harbor,
+    Moss,
+    Plum,
 }
 
 /// Multi-pane title row (PT-190). `focused` shows the focused pane's OSC
@@ -95,16 +109,85 @@ pub enum PaneTitlesMode {
     Hover,
 }
 
+/// Chrome arrangement (issue #113). `bars` (default) keeps the tabs rail
+/// plus spaces bar; `sidebar` replaces both with one collapsible tree.
+/// Only read when `chrome_style = "graphite"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LayoutMode {
+    #[default]
+    Bars,
+    Sidebar,
+}
+
+impl LayoutMode {
+    /// The `layout` value as written in the config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LayoutMode::Bars => "bars",
+            LayoutMode::Sidebar => "sidebar",
+        }
+    }
+}
+
+/// Which status toasts show (#171). `all` (default) shows every status
+/// message; `errors` shows only failures; `off` shows none. Hidden messages
+/// stay in Recent messages. Bell, paste, and drag chips have their own keys.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToastLevel {
+    #[default]
+    All,
+    Errors,
+    Off,
+}
+
+impl ToastLevel {
+    pub fn parse(raw: &str) -> Option<Self> {
+        [ToastLevel::All, ToastLevel::Errors, ToastLevel::Off]
+            .into_iter()
+            .find(|level| level.as_str() == raw)
+    }
+
+    /// The `toasts` value as written in the config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToastLevel::All => "all",
+            ToastLevel::Errors => "errors",
+            ToastLevel::Off => "off",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigFile {
     /// Tab strip visibility: `auto`, `always`, or `multi` (default `auto`).
     pub tab_strip: Option<TabStripMode>,
+    /// Open links with a plain click (default) or require Cmd/Ctrl-click.
+    pub link_click: Option<crate::link_click::Mode>,
+    /// Deliver pastes on the pane writer thread and encode image pastes off
+    /// the main thread (#195). Default false.
+    pub async_paste: Option<bool>,
     /// Multi-pane title row: `focused` (default) or `hover`. Sibling of
     /// `tab_strip` because TOML cannot nest a table under `tab_strip = "auto"`.
     pub pane_titles: Option<PaneTitlesMode>,
-    /// Host chrome look: `classic` (default) or `graphite`. Hot-reloaded.
+    /// Host chrome look: `graphite` (default) or `classic`. Hot-reloaded.
+    /// A missing key follows this default, so a later flip reaches installs
+    /// that did not pin the key.
     pub chrome_style: Option<ChromeStyle>,
+    /// Graphite bar background: `graphite`, `harbor`, `moss`, or `plum` (Sand
+    /// on light themes). Unset follows the theme's chrome (#160). Only read
+    /// for `graphite` chrome.
+    pub bar_color: Option<BarColor>,
+    /// Chrome arrangement: `bars` (default) or `sidebar` (issue #113).
+    /// Graphite and classic both honor `sidebar`.
+    pub layout: Option<LayoutMode>,
+    /// Expanded Spaces sidebar width in design pixels (issue #174). Default 256.
+    /// The collapsed strip uses a fixed width and does not write this key.
+    pub sidebar_width_px: Option<u32>,
+    /// Spaces sidebar collapsed to the icon strip (issue #174). Default false.
+    pub sidebar_collapsed: Option<bool>,
     /// Render timing output. Default `off`; hot-reloaded.
     pub render_timer: Option<RenderTimer>,
     /// Log every rendered frame when `render_timer` includes `log`. Default false.
@@ -165,6 +248,11 @@ pub struct ConfigFile {
     pub pane_padding_px: Option<usize>,
     /// Spaces rail edge: `bottom` (default), `left`, `top`, `right`, `off`.
     pub space_rail: Option<String>,
+    /// Enable dragging and keyboard reordering of saved spaces. Default false.
+    pub space_reorder: Option<bool>,
+    /// Partial frames restore and re-stroke only border rings that change.
+    /// Default false. Hot-reloaded.
+    pub selective_border_rings: Option<bool>,
     /// Widest spaces-rail chip in cells (6–40); chips fit their labels up
     /// to it. `0` (default) means 28.
     pub space_rail_chip_cols: Option<usize>,
@@ -178,7 +266,8 @@ pub struct ConfigFile {
     pub alt_screen_scrollback: Option<bool>,
     /// Show live pane names below each Space name. Default true.
     pub space_rail_pane_names: Option<bool>,
-    /// Save changed Space layouts after a short idle period. Default false.
+    /// Legacy flat opt-out. `[spaces].autosave` wins when it is set.
+    /// Missing both means on.
     pub space_autosave: Option<bool>,
     /// Ask for session names or assign suggested names automatically.
     pub session_naming: Option<String>,
@@ -200,6 +289,8 @@ pub struct ConfigFile {
     /// Show "Moving tab NAME → …" while a tab chip or pane handle is being
     /// dragged (PT-79). Default true.
     pub drag_toaster: Option<bool>,
+    /// Status toasts: `all` (default), `errors`, or `off` (#171). Hot-reloaded.
+    pub toasts: Option<ToastLevel>,
     /// Raise an OS notification on BEL while the window is unfocused.
     /// Default false. Linux: `notify-send`; macOS: `osascript`.
     pub os_notify_bell: Option<bool>,
@@ -256,6 +347,9 @@ pub struct ConfigFile {
     /// `[a11y]` (accessibility). Defaults on when the table is absent.
     #[serde(default)]
     pub a11y: Option<A11ySection>,
+    /// `[spaces]` arrangement autosave. See [`ConfigFile::space_autosave_enabled`].
+    #[serde(default)]
+    pub spaces: SpacesSection,
     /// `[theme_overrides]` (PT-207). Recolours keys of the named theme;
     /// applied by [`load`] so hot reload and the picker both keep them.
     #[serde(default)]
@@ -274,6 +368,14 @@ pub struct A11ySection {
     pub announce: Option<bool>,
 }
 
+/// Space arrangement autosave (issue #161).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpacesSection {
+    /// Save after a structural change. `None` follows [`ConfigFile::space_autosave`], then on.
+    pub autosave: Option<bool>,
+}
+
 impl ConfigFile {
     /// The effective key table. Falls back to the defaults if the table
     /// somehow fails validation (it cannot after [`load`], but never panic).
@@ -285,9 +387,13 @@ impl ConfigFile {
     }
 
     pub fn loaded_keymap(&self) -> crate::keybind::KeyMap {
-        crate::keybind::KeyMap::from_config_with_macos(
+        // macOS moves focus_left/right to Ctrl+Option+arrows unless [keys]
+        // sets them. The generated template leaves those two keys commented
+        // so this overlay applies to a fresh config on every OS.
+        crate::keybind::KeyMap::from_config_with_platform(
             self.keys.as_ref(),
             self.macos_shortcuts.unwrap_or(false),
+            cfg!(target_os = "macos"),
         )
         .unwrap_or_else(|_| crate::keybind::KeyMap::default())
     }
@@ -319,7 +425,7 @@ impl ConfigFile {
     pub fn loaded_theme(&self) -> crate::theme::Theme {
         self.resolved_theme
             .clone()
-            .unwrap_or_else(|| crate::theme::default_theme().clone())
+            .unwrap_or_else(crate::theme::shipped_default)
     }
 
     pub fn render_timer(&self) -> RenderTimer {
@@ -340,6 +446,10 @@ impl ConfigFile {
 
     pub fn chrome_style(&self) -> ChromeStyle {
         self.chrome_style.unwrap_or_default()
+    }
+
+    pub fn layout(&self) -> LayoutMode {
+        self.layout.unwrap_or_default()
     }
 
     /// Show the launch splash on a bare first window. Default true.
@@ -386,6 +496,16 @@ impl ConfigFile {
         self.pane_padding_px.unwrap_or(DEFAULT_PANE_PADDING_PX)
     }
 
+    /// `[spaces] autosave` when set, otherwise the legacy `space_autosave`
+    /// key, otherwise on.
+    pub fn space_autosave_enabled(&self) -> bool {
+        match (self.spaces.autosave, self.space_autosave) {
+            (Some(value), _) => value,
+            (None, Some(value)) => value,
+            (None, None) => true,
+        }
+    }
+
     /// Validated by [`load`]; an unknown spelling never reaches here.
     pub fn space_rail(&self) -> crate::space_rail::RailSide {
         self.space_rail
@@ -417,6 +537,18 @@ impl ConfigFile {
 
     pub fn drag_toaster(&self) -> bool {
         self.drag_toaster.unwrap_or(true)
+    }
+
+    pub fn toasts(&self) -> ToastLevel {
+        self.toasts.unwrap_or_default()
+    }
+
+    pub fn link_click(&self) -> crate::link_click::Mode {
+        self.link_click.unwrap_or_default()
+    }
+
+    pub fn async_paste(&self) -> bool {
+        self.async_paste.unwrap_or(false)
     }
 
     pub fn os_notify_bell(&self) -> bool {
@@ -561,6 +693,37 @@ pub fn save_theme(path: &Path, theme_id: &str) -> Result<()> {
 
 /// Save one preference atomically and preserve unrelated settings and comments.
 pub fn save_preference(path: &Path, key: &str, value: toml_edit::Item) -> Result<()> {
+    mutate_preference(path, |document| {
+        document[key] = value;
+    })
+}
+
+/// Write `[spaces] autosave` without rewriting the rest of the file.
+pub fn save_spaces_autosave(path: &Path, enabled: bool) -> Result<()> {
+    mutate_preference(path, |document| {
+        if document
+            .get("spaces")
+            .and_then(|item| item.as_table())
+            .is_none()
+        {
+            let mut table = toml_edit::Table::new();
+            table.set_implicit(false);
+            document["spaces"] = toml_edit::Item::Table(table);
+        }
+        if let Some(table) = document["spaces"].as_table_mut() {
+            table["autosave"] = toml_edit::value(enabled);
+        }
+    })
+}
+
+/// Remove one top-level key and preserve the rest of the file.
+pub fn clear_preference(path: &Path, key: &str) -> Result<()> {
+    mutate_preference(path, |document| {
+        document.remove(key);
+    })
+}
+
+fn mutate_preference(path: &Path, mutate: impl FnOnce(&mut toml_edit::DocumentMut)) -> Result<()> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -568,8 +731,8 @@ pub fn save_preference(path: &Path, key: &str, value: toml_edit::Item) -> Result
     };
     let mut document = raw
         .parse::<toml_edit::DocumentMut>()
-        .with_context(|| format!("parse {} before saving theme", path.display()))?;
-    document[key] = value;
+        .with_context(|| format!("parse {} before saving a preference", path.display()))?;
+    mutate(&mut document);
     parse(&document.to_string(), path)?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)
@@ -665,13 +828,12 @@ fn parse(raw: &str, path: &Path) -> Result<ConfigFile> {
             "panes {panes} outside 1..={MAX_INITIAL_PANES}"
         );
     }
-    if let Some(keys) = config.keys.as_ref() {
-        crate::keybind::KeyMap::from_config_with_macos(Some(keys), config.macos_shortcuts())
-            .map_err(|e| anyhow::anyhow!(e))?;
-    } else if config.macos_shortcuts() {
-        crate::keybind::KeyMap::from_config_with_macos(None, true)
-            .map_err(|e| anyhow::anyhow!(e))?;
-    }
+    crate::keybind::KeyMap::from_config_with_platform(
+        config.keys.as_ref(),
+        config.macos_shortcuts(),
+        cfg!(target_os = "macos"),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     for (name, value) in [
         ("window_padding_px", config.window_padding_px),
         ("pane_gap_px", config.pane_gap_px),
@@ -707,6 +869,12 @@ fn parse(raw: &str, path: &Path) -> Result<ConfigFile> {
         anyhow::ensure!(
             (8..=60).contains(&cols),
             "space_rail_width_cols must be between 8 and 60"
+        );
+    }
+    if let Some(px) = config.sidebar_width_px {
+        anyhow::ensure!(
+            crate::sidebar_width::stored_width_ok(px),
+            "sidebar_width_px must be between 200 and 2000"
         );
     }
     if let Some(cols) = config.space_rail_chip_cols {
@@ -871,6 +1039,24 @@ mod tests {
     }
 
     #[test]
+    fn link_click_defaults_to_plain_and_accepts_modifier_mode() {
+        assert_eq!(
+            ConfigFile::default().link_click(),
+            crate::link_click::Mode::Plain
+        );
+        let dir = temp_dir("link-click");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "link_click = \"modifier\"\n").unwrap();
+        assert_eq!(
+            load(&path).unwrap().link_click(),
+            crate::link_click::Mode::Modifier
+        );
+        std::fs::write(&path, "link_click = \"unsupported\"\n").unwrap();
+        assert!(load(&path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn remote_destinations_load_and_invalid_entries_are_rejected() {
         let dir = temp_dir("remote");
         let path = dir.join("config.toml");
@@ -903,11 +1089,31 @@ mod tests {
     }
 
     #[test]
+    fn async_paste_is_off_unless_set() {
+        assert!(!ConfigFile::default().async_paste());
+        let dir = temp_dir("async-paste");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "async_paste = true\n").unwrap();
+        assert!(load(&path).unwrap().async_paste());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn missing_file_is_defaults_and_partial_files_parse() {
         let dir = temp_dir("parse");
         let path = dir.join("config.toml");
         assert_eq!(load(&path).unwrap(), ConfigFile::default());
         assert!(ConfigFile::default().install_agent_skills.unwrap_or(true));
+        assert!(!ConfigFile::default().space_reorder.unwrap_or(false));
+        assert!(!ConfigFile::default()
+            .selective_border_rings
+            .unwrap_or(false));
+
+        std::fs::write(&path, "space_reorder = true\n").unwrap();
+        assert!(load(&path).unwrap().space_reorder.unwrap_or(false));
+
+        std::fs::write(&path, "selective_border_rings = true\n").unwrap();
+        assert!(load(&path).unwrap().selective_border_rings.unwrap_or(false));
 
         std::fs::write(&path, "install_agent_skills = false\n").unwrap();
         assert!(!load(&path).unwrap().install_agent_skills.unwrap_or(true));
@@ -967,7 +1173,12 @@ mod tests {
         );
         assert_eq!(
             ConfigFile::default().loaded_keymap(),
-            crate::keybind::KeyMap::default()
+            crate::keybind::KeyMap::from_config_with_platform(
+                None,
+                false,
+                cfg!(target_os = "macos")
+            )
+            .unwrap()
         );
         for bad in [
             "[keys]\nsplit_rite = \"ctrl+alt+enter\"\n",
@@ -1072,16 +1283,24 @@ mod tests {
         );
         assert!(!ConfigFile::default().window_blur());
         assert_eq!(ConfigFile::default().hover_blend(), DEFAULT_HOVER_BLEND);
-        assert_eq!(ConfigFile::default().chrome_style(), ChromeStyle::Classic);
+        assert_eq!(ConfigFile::default().chrome_style(), ChromeStyle::Graphite);
         assert_eq!(ConfigFile::default().pane_titles(), PaneTitlesMode::Focused);
         std::fs::write(&path, "pane_titles = \"hover\"\n").unwrap();
         assert_eq!(load(&path).unwrap().pane_titles(), PaneTitlesMode::Hover);
+        std::fs::write(&path, "chrome_style = \"classic\"\n").unwrap();
+        assert_eq!(load(&path).unwrap().chrome_style(), ChromeStyle::Classic);
         std::fs::write(&path, "chrome_style = \"graphite\"\n").unwrap();
         assert_eq!(load(&path).unwrap().chrome_style(), ChromeStyle::Graphite);
+        assert_eq!(ConfigFile::default().layout(), LayoutMode::Bars);
+        std::fs::write(&path, "layout = \"sidebar\"\n").unwrap();
+        assert_eq!(load(&path).unwrap().layout(), LayoutMode::Sidebar);
         assert_eq!(ConfigFile::default().reduced_motion, None);
         assert!(!load(&path).unwrap().reduced_motion.unwrap_or(false));
         std::fs::write(&path, "reduced_motion = true\n").unwrap();
         assert!(load(&path).unwrap().reduced_motion.unwrap_or(false));
+        assert_eq!(ConfigFile::default().bar_color, None);
+        std::fs::write(&path, "bar_color = \"harbor\"\n").unwrap();
+        assert_eq!(load(&path).unwrap().bar_color, Some(BarColor::Harbor));
         // chrome_opacity follows window_opacity unless set explicitly.
         let follows = ConfigFile {
             window_opacity: Some(0.8),
@@ -1179,6 +1398,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `toasts` (#171): default all; each mode loads; a Settings save
+    /// survives a restart (a fresh load of the same file).
+    #[test]
+    fn toasts_level_defaults_to_all_and_round_trips_through_save() {
+        assert_eq!(ConfigFile::default().toasts(), ToastLevel::All);
+        let dir = temp_dir("toasts");
+        let path = dir.join("config.toml");
+        for (raw, level) in [
+            ("all", ToastLevel::All),
+            ("errors", ToastLevel::Errors),
+            ("off", ToastLevel::Off),
+        ] {
+            std::fs::write(&path, format!("toasts = \"{raw}\"\n")).unwrap();
+            assert_eq!(load(&path).unwrap().toasts(), level);
+            assert_eq!(level.as_str(), raw);
+        }
+        std::fs::write(&path, "# mine\nbell_toaster = false\n").unwrap();
+        save_preference(&path, "toasts", toml_edit::value(ToastLevel::Off.as_str())).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("# mine") && raw.contains("toasts = \"off\""),
+            "{raw}"
+        );
+        let restarted = load(&path).unwrap();
+        assert_eq!(restarted.toasts(), ToastLevel::Off);
+        assert!(!restarted.bell_toaster());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn invalid_values_and_unknown_keys_are_rejected() {
         let dir = temp_dir("invalid");
@@ -1228,6 +1476,9 @@ mod tests {
             "[a11y]\nnot_a_setting = true",
             "pane_titles = \"always\"",
             "chrome_style = \"glass\"",
+            "bar_color = \"teal\"",
+            "toasts = \"some\"",
+            "toasts = false",
         ] {
             std::fs::write(&path, bad).unwrap();
             assert!(load(&path).is_err(), "should reject: {bad}");
@@ -1263,7 +1514,7 @@ mod tests {
         std::fs::write(&path, "[theme_overrides]\n").unwrap();
         assert_eq!(
             load(&path).unwrap().loaded_theme(),
-            *crate::theme::default_theme(),
+            crate::theme::shipped_default(),
             "an empty table changes nothing"
         );
 
@@ -1277,7 +1528,9 @@ mod tests {
                 "must list 16 colours",
             ),
             (
-                "[theme_overrides]\nselection_fg = \"#000000\"\n",
+                // prismattyc-default ships no selection pair, so half of one
+                // is still rejected.
+                "theme = \"prismattyc-default\"\n[theme_overrides]\nselection_fg = \"#000000\"\n",
                 "selection_fg and selection_bg",
             ),
             (
@@ -1358,6 +1611,26 @@ mod tests {
     }
 
     #[test]
+    fn clear_preference_removes_one_key_and_keeps_the_rest() {
+        let dir = temp_dir("clear-preference");
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "# keep\nwindow_opacity = 0.82\nchrome_opacity = 0.5\n",
+        )
+        .unwrap();
+        clear_preference(&path, "chrome_opacity").unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# keep"), "{raw}");
+        assert!(raw.contains("window_opacity = 0.82"), "{raw}");
+        assert!(!raw.contains("chrome_opacity"), "{raw}");
+        let loaded = load(&path).unwrap();
+        assert!(loaded.chrome_opacity.is_none());
+        assert!((loaded.chrome_opacity() - 0.82).abs() < 0.001);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn space_preferences_preserve_config_and_reject_invalid_values() {
         let dir = temp_dir("space-preferences");
         let path = dir.join("config.toml");
@@ -1374,6 +1647,7 @@ mod tests {
         assert_eq!(config.session_naming.as_deref(), Some("auto"));
         assert_eq!(config.space_rail(), crate::space_rail::RailSide::Right);
         assert_eq!(config.space_autosave, Some(true));
+        assert!(config.space_autosave_enabled());
         let before = std::fs::read_to_string(&path).unwrap();
         assert!(before.contains("# keep"));
         assert!(before.contains("font_px = 17.0"));
@@ -1381,6 +1655,40 @@ mod tests {
         assert!(save_preference(&path, "session_naming", toml_edit::value("invalid")).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn space_autosave_defaults_on_and_the_spaces_table_wins() {
+        assert!(ConfigFile::default().space_autosave_enabled());
+        let dir = temp_dir("space-autosave-precedence");
+        let path = dir.join("config.toml");
+        let load_text = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            load(&path).unwrap()
+        };
+        assert!(
+            !load_text("space_autosave = false\n").space_autosave_enabled(),
+            "a legacy flat opt-out stays off when [spaces] is absent"
+        );
+        assert!(load_text("space_autosave = true\n").space_autosave_enabled());
+        assert!(
+            !load_text("space_autosave = true\n\n[spaces]\nautosave = false\n")
+                .space_autosave_enabled(),
+            "[spaces] autosave wins over the flat key"
+        );
+        assert!(
+            load_text("space_autosave = false\n\n[spaces]\nautosave = true\n")
+                .space_autosave_enabled()
+        );
+        assert!(!load_text("[spaces]\nautosave = false\n").space_autosave_enabled());
+        std::fs::write(&path, "# keep\nfont_px = 17.0\nspace_autosave = false\n").unwrap();
+        save_spaces_autosave(&path, true).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# keep"), "{raw}");
+        assert!(raw.contains("font_px = 17.0"), "{raw}");
+        assert!(raw.contains("autosave = true"), "{raw}");
+        assert!(load(&path).unwrap().space_autosave_enabled());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -17,6 +17,8 @@ pub(crate) const DOCUMENT_ID: u64 = 6;
 pub(crate) const TEXT_RUN_ID: u64 = 7;
 pub(crate) const LIVE_ID: u64 = 8;
 pub(crate) const CAPTION_ID: u64 = 9;
+/// Graphite sidebar header's Arrange control (issue #162).
+pub(crate) const ARRANGE_ID: u64 = 10;
 
 /// Minimum gap between cursor-line announces (accessibility D-A5 coalesce).
 pub(crate) const GRID_ANNOUNCE_GAP_MS: u64 = 400;
@@ -28,12 +30,15 @@ pub(crate) const OVERLAY_ROW_BASE: u64 = 400;
 pub(crate) const RAIL_CHIP_BASE: u64 = 700;
 /// SSH destination chips in the rail (issue #24).
 pub(crate) const RAIL_DEST_BASE: u64 = 800;
+/// Arrange buttons (Single, Split, Grid) in the sidebar header.
+pub(crate) const ARRANGE_BASE: u64 = 900;
 
 const MAX_TABS: u64 = 64;
 const MAX_PANES: u64 = 64;
 const MAX_OVERLAY_ROWS: u64 = 64;
 const MAX_RAIL_CHIPS: u64 = 64;
 const MAX_RAIL_DESTS: u64 = 32;
+const MAX_ARRANGE: u64 = 8;
 
 /// One tab chip and the panes it owns.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +149,10 @@ pub(crate) struct ChromeSnapshot {
     pub document: Option<DocumentSnap>,
     pub live: Option<LiveSnap>,
     pub caption: Option<String>,
+    /// Arrange button names while the sidebar header shows them; empty
+    /// otherwise. The buttons paint icons, so these are their only names.
+    pub arrange: Vec<String>,
+    pub arrange_current: Option<usize>,
 }
 
 /// One live-region utterance (accessibility D-A5).
@@ -370,6 +379,7 @@ pub(crate) enum ChromeAction {
     OverlayActivate(usize),
     OpenSpace(usize),
     OpenRemote(usize),
+    Arrange(usize),
 }
 
 /// Join badge words for a tab description.
@@ -466,6 +476,25 @@ pub(crate) fn build_chrome_tree(snap: &ChromeSnapshot) -> (u64, Vec<TreeNode>) {
                 "Button",
                 label.clone(),
                 false,
+                Vec::new(),
+            ));
+        }
+    }
+
+    if !snap.arrange.is_empty() {
+        window_children.push(ARRANGE_ID);
+        let buttons: Vec<u64> = (0..snap.arrange.len())
+            .map(|i| ARRANGE_BASE + i as u64)
+            .collect();
+        nodes.push(chrome_node(
+            ARRANGE_ID, "Toolbar", "arrange", false, buttons,
+        ));
+        for (i, name) in snap.arrange.iter().enumerate() {
+            nodes.push(chrome_node(
+                ARRANGE_BASE + i as u64,
+                "Button",
+                name.clone(),
+                snap.arrange_current == Some(i),
                 Vec::new(),
             ));
         }
@@ -611,6 +640,12 @@ pub(crate) fn action_for(id: u64, snap: &ChromeSnapshot) -> Option<ChromeAction>
             return Some(ChromeAction::OpenRemote(index));
         }
     }
+    if (ARRANGE_BASE..ARRANGE_BASE + MAX_ARRANGE).contains(&id) {
+        let index = (id - ARRANGE_BASE) as usize;
+        if index < snap.arrange.len() {
+            return Some(ChromeAction::Arrange(index));
+        }
+    }
     None
 }
 
@@ -635,6 +670,7 @@ fn to_accesskit(node: TreeNode) -> (NodeId, Node) {
         "Pane" => Role::Pane,
         "ScrollBar" => Role::ScrollBar,
         "Complementary" => Role::Complementary,
+        "Toolbar" => Role::Toolbar,
         "Dialog" => Role::Dialog,
         "Button" => Role::Button,
         "Document" => Role::Document,
@@ -727,6 +763,8 @@ mod tests {
             document: None,
             live: None,
             caption: None,
+            arrange: Vec::new(),
+            arrange_current: None,
         };
         let (focus, nodes) = build_chrome_tree(&snap);
         assert_eq!(focus, TAB_BASE);
@@ -783,6 +821,8 @@ mod tests {
             document: None,
             live: None,
             caption: None,
+            arrange: Vec::new(),
+            arrange_current: None,
         };
         let (focus, nodes) = build_chrome_tree(&snap);
         assert_eq!(focus, pane_id(0, 1));
@@ -810,6 +850,8 @@ mod tests {
             document: None,
             live: None,
             caption: None,
+            arrange: Vec::new(),
+            arrange_current: None,
         };
         let (focus, nodes) = build_chrome_tree(&snap);
         assert_eq!(focus, OVERLAY_ROW_BASE + 1);
@@ -844,6 +886,63 @@ mod tests {
     }
 
     #[test]
+    fn arrange_icons_are_named_buttons_that_click_through() {
+        let mut snap = ChromeSnapshot {
+            window_title: "Prismattyc".into(),
+            tabs: vec![tab("main", true, "", vec![])],
+            overlay: OverlayKind::None,
+            scroll: None,
+            rail: Vec::new(),
+            rail_current: None,
+            remote: Vec::new(),
+            document: None,
+            live: None,
+            caption: None,
+            arrange: vec!["Single".into(), "Split".into(), "Grid".into()],
+            arrange_current: Some(2),
+        };
+        let (_, nodes) = build_chrome_tree(&snap);
+        let window = nodes.iter().find(|n| n.id == WINDOW_ID).unwrap();
+        assert!(window.children.contains(&ARRANGE_ID));
+        let toolbar = nodes.iter().find(|n| n.id == ARRANGE_ID).unwrap();
+        assert_eq!(
+            (toolbar.role, toolbar.name.as_str()),
+            ("Toolbar", "arrange")
+        );
+        assert_eq!(
+            toolbar.children,
+            vec![ARRANGE_BASE, ARRANGE_BASE + 1, ARRANGE_BASE + 2]
+        );
+        let buttons: Vec<_> = names(&nodes)
+            .into_iter()
+            .filter(|(id, ..)| toolbar.children.contains(id))
+            .collect();
+        assert_eq!(
+            buttons,
+            vec![
+                (ARRANGE_BASE, "Button", "Single".into(), false),
+                (ARRANGE_BASE + 1, "Button", "Split".into(), false),
+                (ARRANGE_BASE + 2, "Button", "Grid".into(), true),
+            ]
+        );
+        assert_eq!(
+            action_for(ARRANGE_BASE + 1, &snap),
+            Some(ChromeAction::Arrange(1))
+        );
+        assert_eq!(action_for(ARRANGE_BASE + 3, &snap), None);
+        let (_, button) = to_accesskit(nodes.into_iter().find(|n| n.id == ARRANGE_BASE).unwrap());
+        assert_eq!(button.role(), Role::Button);
+        assert_eq!(button.label(), Some("Single"));
+
+        // Bars layout: no header, no toolbar, no stray clicks.
+        snap.arrange.clear();
+        snap.arrange_current = None;
+        let (_, nodes) = build_chrome_tree(&snap);
+        assert!(nodes.iter().all(|n| n.id != ARRANGE_ID));
+        assert_eq!(action_for(ARRANGE_BASE, &snap), None);
+    }
+
+    #[test]
     fn find_dialog_carries_the_query_in_description() {
         let snap = ChromeSnapshot {
             window_title: "Prismattyc".into(),
@@ -858,6 +957,8 @@ mod tests {
             document: None,
             live: None,
             caption: None,
+            arrange: Vec::new(),
+            arrange_current: None,
         };
         let (_, nodes) = build_chrome_tree(&snap);
         let find = nodes.iter().find(|n| n.role == "Dialog").unwrap();
@@ -892,6 +993,8 @@ mod tests {
             document: None,
             live: None,
             caption: None,
+            arrange: Vec::new(),
+            arrange_current: None,
         };
         let (_, nodes) = build_chrome_tree(&snap);
         let rail = nodes.iter().find(|node| node.id == RAIL_ID).unwrap();
@@ -937,6 +1040,8 @@ mod tests {
             document: None,
             live: None,
             caption: None,
+            arrange: Vec::new(),
+            arrange_current: None,
         };
         assert_eq!(action_for(WINDOW_ID, &snap), None);
         assert_eq!(action_for(TAB_BASE + 9, &snap), None);
@@ -955,6 +1060,8 @@ mod tests {
             document: None,
             live: None,
             caption: None,
+            arrange: Vec::new(),
+            arrange_current: None,
         };
         let palette = ChromeSnapshot {
             overlay: OverlayKind::Palette {
@@ -983,6 +1090,8 @@ mod tests {
             document: None,
             live: None,
             caption: None,
+            arrange: Vec::new(),
+            arrange_current: None,
         };
         let update = tree_update(&snap);
         assert_eq!(update.focus, NodeId(TAB_BASE));
@@ -1057,6 +1166,8 @@ mod tests {
             document: Some(viewport_document(&["$ ls".into()], Some((0, 4)), None)),
             live: None,
             caption: None,
+            arrange: Vec::new(),
+            arrange_current: None,
         };
         let (focus, nodes) = build_chrome_tree(&snap);
         assert_eq!(focus, DOCUMENT_ID);
@@ -1087,6 +1198,8 @@ mod tests {
             document: Some(viewport_document(&["x".into()], Some((0, 0)), None)),
             live: None,
             caption: None,
+            arrange: Vec::new(),
+            arrange_current: None,
         };
         let (focus, nodes) = build_chrome_tree(&snap);
         assert_eq!(focus, OVERLAY_ROW_BASE);
@@ -1199,6 +1312,8 @@ mod tests {
                 assertive: true,
             }),
             caption: None,
+            arrange: Vec::new(),
+            arrange_current: None,
         };
         let (focus, nodes) = build_chrome_tree(&snap);
         assert_eq!(focus, TAB_BASE);
@@ -1237,6 +1352,8 @@ mod tests {
             document: None,
             live: None,
             caption: None,
+            arrange: Vec::new(),
+            arrange_current: None,
         };
         let (focus, nodes) = build_chrome_tree(&snap);
         assert_ne!(focus, LIVE_ID);
@@ -1259,6 +1376,8 @@ mod tests {
             document: None,
             live: None,
             caption: Some("Split the pane to the right. Ctrl+Shift+\\".into()),
+            arrange: Vec::new(),
+            arrange_current: None,
         };
         let (focus, nodes) = build_chrome_tree(&snap);
         assert_eq!(focus, TAB_BASE);

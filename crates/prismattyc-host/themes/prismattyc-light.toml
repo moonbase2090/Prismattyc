@@ -1,0 +1,27 @@
+# Prismattyc Light: Graphite Light tokens for the terminal and the chrome.
+id = "prismattyc-light"
+name = "Prismattyc Light"
+variant = "light"
+source = "https://github.com/Moonbase2090/Prismattyc"
+license = "Project-local palette; Graphite Light tokens (docs/design/graphite-ui-brief.md), ANSI from hive-muted-professional-light"
+default_fg = "#1f2329"
+default_bg = "#ffffff"
+chrome_fg = "#1f2329"
+chrome_bg = "#eef0f3"
+pane_backdrop = "#e9ecf0"
+pane_border = "#d5d9df"
+overlay_bg = "#ffffff"
+unseen_badge = "#b87a0a"
+mail_letter = "#b87a0a"
+active_badge = "#1f8a55"
+attention_badge = "#c2392b"
+cursor_fg = "#ffffff"
+cursor_bg = "#1f2329"
+selection_fg = "#1f2329"
+selection_bg = "#dbe7fb"
+ansi = [
+  "#43484e", "#a4432f", "#4e7a35", "#96702f",
+  "#2f6f8c", "#7d5386", "#56718a", "#d3d5d7",
+  "#a9afb6", "#863727", "#40642b", "#7b5c27",
+  "#275b73", "#67446e", "#475d71", "#191c20",
+]

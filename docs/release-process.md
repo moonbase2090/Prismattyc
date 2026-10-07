@@ -6,9 +6,10 @@ and a signed universal macOS app distributed as a DMG and a zip.
 
 ## Prepare a release
 
-1. Set the workspace package version in `Cargo.toml`. The tag version must
-   match the binaries. For a prerelease tag such as `v0.2.21-rc.1`, binaries
-   may report the base version `0.2.21`.
+1. Set the workspace package version in `Cargo.toml` and add a matching
+   `## [version]` section to `CHANGELOG.md`. The tag version must match the
+   binaries. For a prerelease tag such as `v0.2.21-rc.1`, binaries may report
+   the base version `0.2.21`.
 2. Merge the release source into `main` and complete the release gates in
    [the testing policy](testing-policy.md).
 3. Confirm that the repository has the Apple secrets listed below.
@@ -17,8 +18,13 @@ and a signed universal macOS app distributed as a DMG and a zip.
    every platform package succeeds and the Apple job reports `signed=true`.
 
 The publish job downloads each platform's assets, writes a combined
-`SHA256SUMS`, and creates the GitHub release. A tag containing a hyphen creates
-a prerelease. The release includes the Linux per-binary updater assets,
+`SHA256SUMS`, and creates the GitHub release. It copies the matching
+`CHANGELOG.md` section into the release body and fails if that section is
+missing. A tag containing a hyphen is published with `--prerelease --latest=false`,
+so it does not become the Latest release. `pmux update` and the app menu ignore
+it unless the user passes `--pre`. The prismattyc.com download picker lives in
+`moonbase2090/prismattyc-website`; it skips drafts, prereleases, and any tag
+that is not `vX.Y.Z`. The release includes the Linux per-binary updater assets,
 manifests, installation archives, the Windows package and manifest, both
 macOS files, `SHA256SUMS-macos`, and `manifest-macos-universal.json`.
 The Windows package includes the shared license notices.

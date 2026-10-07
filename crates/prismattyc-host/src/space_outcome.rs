@@ -178,6 +178,12 @@ pub struct Report {
 }
 
 impl Report {
+    /// A failed open toasts as an error (#171); unavailable sessions in an
+    /// applied view are routine.
+    pub fn is_error(&self) -> bool {
+        self.error.is_some()
+    }
+
     pub fn label(&self) -> String {
         if let Some(error) = &self.error {
             let view = match self.view {
@@ -236,6 +242,26 @@ mod tests {
                 windows: 1,
             },
         )])
+    }
+
+    /// #171: a routine open is info; only a failed open is an error toast.
+    #[test]
+    fn only_a_failed_open_is_an_error() {
+        let observation = || Observation {
+            saved: vec![("worker".into(), 1)],
+            before: Some(live(7, 1, 1)),
+        };
+        let fine = observation().finish("team".into(), View::Applied, None, Some(live(7, 1, 1)));
+        assert!(!fine.is_error(), "{}", fine.label());
+        let unavailable = observation().finish("team".into(), View::Applied, None, None);
+        assert!(!unavailable.is_error(), "{}", unavailable.label());
+        let failed = observation().finish(
+            "team".into(),
+            View::NotApplied,
+            Some("socket closed".into()),
+            None,
+        );
+        assert!(failed.is_error(), "{}", failed.label());
     }
 
     #[test]

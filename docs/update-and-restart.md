@@ -26,6 +26,11 @@ Before the first release exists, the check reports that no usable release
 is available. It leaves your installation unchanged.
 
 Update accepts stable, immutable releases from the configured repository.
+A release tag without a hyphen, such as `v0.3.0`, is offered by `pmux update`
+and the app menu. Prereleases such as `v0.3.0-rc.1`, `v0.3.0-rc.2`, and
+`v0.3.0-rc.3` are not offered. Opt in with
+`pmux update --pre`, which selects the newest immutable release, including
+prereleases. The app menu stays on the stable channel.
 On Linux and Windows it downloads the six binaries for your platform.
 On macOS it downloads the universal app zip. It verifies asset names,
 origins, sizes, and SHA-256 digests. Linux and Windows also check the

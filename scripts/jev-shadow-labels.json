@@ -1,4 +1,105 @@
 {
   "schema_version": 1,
-  "labels": {}
+  "source_run_id": "37302196952",
+  "source_cycle_sha": "d8deecf6d551b45a46c407e1a982c7678c8abeb6",
+  "sample_method": "First 25 missed mutants sorted by package and name; deterministic but not representative of miss prevalence.",
+  "labels": {
+    "876ffc0e920c278839be": "real-test-gap",
+    "9bc703b5c9df56f2a089": "real-test-gap",
+    "59e7747f39c2dd54a6ab": "real-test-gap",
+    "6dd084d9bfbbe3280f8b": "real-test-gap",
+    "3cf78212e3085863cac7": "real-test-gap",
+    "c63f84df670187121219": "real-test-gap",
+    "e01515a357b8ae30da5c": "real-test-gap",
+    "56a294bb1beb0053aab1": "real-test-gap",
+    "b26d878619c51739fc16": "real-test-gap",
+    "100be9c40e0e578dc947": "real-test-gap",
+    "f6ecc5797d767700bd27": "real-test-gap",
+    "5fef52f1a8c042ea0dd9": "real-test-gap",
+    "e324a76c331e3d0315f6": "real-test-gap",
+    "58d128c424a3a18806da": "real-test-gap",
+    "1b3645b6af24b4ec5e26": "real-test-gap",
+    "ba741b7ace3c19b7efd7": "real-test-gap",
+    "2e1f7ae5d1f8122f6843": "real-test-gap",
+    "2e9f422468b5ed8929db": "real-test-gap",
+    "1a7c215257d452b43a16": "real-test-gap",
+    "a0f1ebaecf30cb0e2ea2": "real-test-gap",
+    "87cfa4dfc22055ca882b": "real-test-gap",
+    "b819e365decec7632ca7": "real-test-gap",
+    "644dca5de5d68cbcb8f7": "real-test-gap",
+    "1a4cf6b20be06c40480e": "real-test-gap",
+    "ab98f655b2b8960143b9": "real-test-gap"
+  },
+  "label_notes": {
+    "876ffc0e920c278839be": "Dropping text content makes the tutorial omit the mailbox response.",
+    "9bc703b5c9df56f2a089": "The send tool would return success-shaped empty content without sending the letter.",
+    "59e7747f39c2dd54a6ab": "The claim tool would return empty content without claiming open letters.",
+    "6dd084d9bfbbe3280f8b": "The commit tool would acknowledge nothing and leave held letters unchanged.",
+    "3cf78212e3085863cac7": "The release tool would return success-shaped empty content without releasing letters.",
+    "c63f84df670187121219": "The inbox tool would omit the mailbox depth it promises to report.",
+    "e01515a357b8ae30da5c": "The alias tool would not bind the requested alias.",
+    "56a294bb1beb0053aab1": "The who tool would omit the live agent presence list.",
+    "b26d878619c51739fc16": "The broadcast tool would send no letters to bound agents.",
+    "100be9c40e0e578dc947": "Replacing the tutorial with an unrelated word removes the documented workflow.",
+    "f6ecc5797d767700bd27": "Returning an empty tutorial removes the documented workflow.",
+    "5fef52f1a8c042ea0dd9": "Default server info omits the configured tool capability and agent instructions.",
+    "e324a76c331e3d0315f6": "Inverting the environment check ignores valid non-empty PMUX_AGENT identities.",
+    "58d128c424a3a18806da": "The altered slice removes the wrong bytes when a paste delimiter closes.",
+    "1b3645b6af24b4ec5e26": "The altered truncate length can panic on a recognized paste delimiter.",
+    "ba741b7ace3c19b7efd7": "The altered truncate length removes the wrong suffix after a paste delimiter.",
+    "2e1f7ae5d1f8122f6843": "Modified Enter would use the wrong legacy terminal encoding.",
+    "2e9f422468b5ed8929db": "Modified Backspace would use the wrong legacy terminal encoding.",
+    "1a7c215257d452b43a16": "Unmodified Tab would take the modified-key encoding path.",
+    "a0f1ebaecf30cb0e2ea2": "The flag union makes Kitty disambiguation appear enabled for unrelated flag sets.",
+    "87cfa4dfc22055ca882b": "Escape would fail to exit keyboard select mode or clear an existing selection in either single-state case.",
+    "b819e365decec7632ca7": "Typing while scrolled would fail to jump the viewport back to live output.",
+    "644dca5de5d68cbcb8f7": "The widened condition exits selection mode for keys that should continue extending it.",
+    "1a4cf6b20be06c40480e": "Deleting the negation leaves selection mode on typing keys and exits it on motion keys.",
+    "ab98f655b2b8960143b9": "The widened condition finishes selections for ordinary keys even when selection mode is off."
+  },
+  "examples": [
+    {
+      "crate": "pmux-mcp",
+      "mutant_kind": "FnValue",
+      "mutation_pattern": "mail operation replaced by an empty success result",
+      "label": "real-test-gap",
+      "rationale": "The public tool no longer performs the requested mailbox operation."
+    },
+    {
+      "crate": "pmux-mcp",
+      "mutant_kind": "UnaryOperator",
+      "mutation_pattern": "negation removed from the non-empty identity check",
+      "label": "real-test-gap",
+      "rationale": "Valid environment identities are ignored and configuration behavior changes."
+    },
+    {
+      "crate": "prismattyc",
+      "mutant_kind": "BinaryOperator",
+      "mutation_pattern": "paste delimiter suffix arithmetic changed",
+      "label": "real-test-gap",
+      "rationale": "The changed arithmetic removes the wrong bytes or panics on ordinary delimiter input."
+    },
+    {
+      "crate": "prismattyc",
+      "mutant_kind": "BinaryOperator",
+      "mutation_pattern": "terminal key modifier encoding condition inverted",
+      "label": "real-test-gap",
+      "rationale": "Valid key events produce bytes that do not match the terminal protocol."
+    },
+    {
+      "crate": "prismattyc",
+      "mutant_kind": "BinaryOperator",
+      "mutation_pattern": "selection and viewport state condition widened or inverted",
+      "label": "real-test-gap",
+      "rationale": "Common input sequences no longer preserve selection or jump back to live output."
+    }
+  ],
+  "historical_metrics": {
+    "source_run_id": "37302196952",
+    "sampled": 25,
+    "labeled": 25,
+    "predicted_real_gaps_labeled": 25,
+    "true_positive_real_gaps": 25,
+    "precision": 1.0
+  }
 }

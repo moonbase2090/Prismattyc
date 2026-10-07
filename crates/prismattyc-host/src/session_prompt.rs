@@ -110,7 +110,7 @@ fn begin_creation(host: &mut HostState, target: Target, name: String) {
         finish_choice(host, true, mode == "blank");
         if let Some(prompt) = host.session_prompt.take() {
             if let Some(error) = prompt.error {
-                rail_toast(host, &format!("Could not create terminal: {error}"));
+                rail_error_toast(host, &format!("Could not create terminal: {error}"));
             }
         }
     }
@@ -533,6 +533,7 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
     let frame = PaletteFrame {
         layout_mode: PaletteLayoutMode::FixedHeight,
         query: Some(&prompt.buffer),
+        query_focused: true,
         chips: None,
         sections: &sections,
         selected: prompt.button,
@@ -543,6 +544,7 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
     host.palette_layout = paint_palette_overlay(
         &host.font,
         &host.theme,
+        host.mux.geom().chrome,
         focus_border_rgb(host.focus_border),
         &frame,
         host_overlay_surface(host),

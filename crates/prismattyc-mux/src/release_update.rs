@@ -56,6 +56,8 @@ struct Options {
     check: bool,
     json: bool,
     rollback: bool,
+    /// Include immutable prereleases. The app menu never sets this.
+    pre: bool,
     bin_dir: Option<PathBuf>,
 }
 
@@ -104,6 +106,7 @@ fn set_update_flag(options: &mut Options, arg: &str) -> bool {
         "--check" => options.check = true,
         "--json" => options.json = true,
         "--rollback" => options.rollback = true,
+        "--pre" => options.pre = true,
         "--all" => {}
         _ => return false,
     }
@@ -319,7 +322,9 @@ fn asset_match_error(release: &Release, target: &str, expected: &str, found: usi
     )
 }
 
-fn release_version(release: &Release) -> Result<Version> {
+/// Stable updates reject prereleases. `--pre` still rejects drafts and
+/// releases that are not immutable.
+fn accepted_version(release: &Release, include_prerelease: bool) -> Result<Version> {
     let raw = release
         .tag_name
         .strip_prefix('v')
@@ -329,15 +334,45 @@ fn release_version(release: &Release) -> Result<Version> {
         version >= Version::new(0, 2, 0),
         "the release channel starts at 0.2.0"
     );
-    ensure!(
-        version.pre.is_empty() && version.build.is_empty() && !release.draft && !release.prerelease,
-        "only stable published releases are accepted"
-    );
+    if include_prerelease {
+        ensure!(!release.draft, "draft releases are not installed");
+    } else {
+        ensure!(
+            version.pre.is_empty()
+                && version.build.is_empty()
+                && !release.draft
+                && !release.prerelease,
+            "only stable published releases are accepted"
+        );
+    }
     ensure!(
         release.immutable,
         "release must be immutable before Update can install it"
     );
     Ok(version)
+}
+
+fn best_release_index(releases: &[Release], include_prerelease: bool) -> Result<usize> {
+    let mut best: Option<(usize, Version)> = None;
+    for (index, release) in releases.iter().enumerate() {
+        let Ok(version) = accepted_version(release, include_prerelease) else {
+            continue;
+        };
+        match &best {
+            Some((_, current)) if version <= *current => {}
+            _ => best = Some((index, version)),
+        }
+    }
+    best.map(|(index, _)| index).with_context(|| {
+        format!(
+            "no usable release from {REPOSITORY}; releases start at 0.2.0. Nothing was installed"
+        )
+    })
+}
+
+fn take_best_release(mut releases: Vec<Release>, include_prerelease: bool) -> Result<Release> {
+    let index = best_release_index(&releases, include_prerelease)?;
+    Ok(releases.swap_remove(index))
 }
 
 #[derive(Debug)]
@@ -567,6 +602,20 @@ fn curl() -> Command {
 }
 
 fn latest_release() -> Result<Release> {
+    let bytes = fetch_release_json(&format!(
+        "https://api.github.com/repos/{REPOSITORY}/releases/latest"
+    ))?;
+    serde_json::from_slice(&bytes).context("parse release metadata")
+}
+
+fn listed_releases() -> Result<Vec<Release>> {
+    let bytes = fetch_release_json(&format!(
+        "https://api.github.com/repos/{REPOSITORY}/releases?per_page=30"
+    ))?;
+    serde_json::from_slice(&bytes).context("parse release list")
+}
+
+fn fetch_release_json(url: &str) -> Result<Vec<u8>> {
     let mut child = curl()
         .args([
             "--header",
@@ -574,14 +623,11 @@ fn latest_release() -> Result<Release> {
             "--max-filesize",
             "4194304",
         ])
-        .arg(format!(
-            "https://api.github.com/repos/{REPOSITORY}/releases/latest"
-        ))
+        .arg(url)
         .stdout(Stdio::piped())
         .spawn()
         .context("start HTTPS download (curl is required)")?;
-    let bytes = read_capped_child_stdout(&mut child, 4_194_304)?;
-    serde_json::from_slice(&bytes).context("parse release metadata")
+    read_capped_child_stdout(&mut child, 4_194_304)
 }
 
 /// Read up to `cap` bytes from a spawned child's stdout, killing it on
@@ -928,13 +974,17 @@ fn is_help_flag(arg: &String) -> bool {
 }
 
 fn print_update_help() {
-    println!("pmux update [--check] [--json] [--bin-dir PATH]\nprismattyc update [--check] [--json] [--bin-dir PATH]\npmux update --rollback\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together. --rollback restores that previous installation.\nOn macOS, verify SHA256SUMS-macos, Developer ID Team ID S24C53PD3Y, and Gatekeeper notarization. Keep the previous verified app for --rollback.\nprismattyc update is the same command as pmux update.\nUpdating does not stop sessions. The app menu restarts the host and safely restarts the daemon when it has no active sessions.\n--source is an explicit development-only source build.");
+    println!("pmux update [--check] [--json] [--pre] [--bin-dir PATH]\nprismattyc update [--check] [--json] [--pre] [--bin-dir PATH]\npmux update --rollback\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\n--pre includes immutable prereleases such as v0.3.0-rc.3. The default channel and the app menu stay on stable releases such as v0.3.0.\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together. --rollback restores that previous installation.\nOn macOS, verify SHA256SUMS-macos, Developer ID Team ID S24C53PD3Y, and Gatekeeper notarization. Keep the previous verified app for --rollback.\nprismattyc update is the same command as pmux update.\nUpdating does not stop sessions. The app menu restarts the host and safely restarts the daemon when it has no active sessions.\n--source is an explicit development-only source build.");
 }
 
 /// Fetch the latest release, compare versions, and either report or install.
 /// Split out of [`run`] so each function stays within the CRAP budget.
 fn run_update_flow(root: &Path, options: &Options) -> Result<()> {
-    let release = latest_release()?;
+    let release = if options.pre {
+        take_best_release(listed_releases()?, true)?
+    } else {
+        latest_release()?
+    };
     let target = target()?;
     let plan = select_plan(&release, target)?;
     finish_update_flow(root, options, &release, target, plan)
@@ -949,7 +999,7 @@ fn finish_update_flow(
     target: &'static str,
     plan: UpdatePlan,
 ) -> Result<()> {
-    let resolved = resolve_versions(root, release, &plan)?;
+    let resolved = resolve_versions(root, release, &plan, options.pre)?;
     if should_only_report(options, &resolved.available, &resolved.current) {
         report_check(
             &resolved.installed,
@@ -980,8 +1030,14 @@ struct ResolvedVersions {
 
 /// Resolve the available release version and the installed version. Split out
 /// of [`run_update_flow`] to keep each function within the CRAP budget.
-fn resolve_versions(root: &Path, release: &Release, plan: &UpdatePlan) -> Result<ResolvedVersions> {
-    let available = release_version(release)?;
+/// `include_prerelease` is set only for `pmux update --pre`.
+fn resolve_versions(
+    root: &Path,
+    release: &Release,
+    plan: &UpdatePlan,
+    include_prerelease: bool,
+) -> Result<ResolvedVersions> {
+    let available = accepted_version(release, include_prerelease)?;
     let installed = installed_label(root, matches!(plan, UpdatePlan::MacosBundle { .. }))?;
     let current = Version::parse(&installed)?;
     Ok(ResolvedVersions {
@@ -1001,7 +1057,7 @@ fn should_only_report(options: &Options, available: &Version, current: &Version)
 fn run_rollback(root: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        return run_macos_rollback(root);
+        run_macos_rollback(root)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -2453,6 +2509,56 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    fn bare_release(tag: &str, prerelease: bool, draft: bool, immutable: bool) -> Release {
+        Release {
+            tag_name: tag.into(),
+            draft,
+            prerelease,
+            body: None,
+            immutable,
+            assets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn stable_channel_skips_prereleases_and_pre_picks_the_newest() {
+        let releases = vec![
+            bare_release("v0.3.0-rc.3", true, false, true),
+            bare_release("v0.3.0-rc.3", false, false, true),
+            bare_release("v0.3.0", false, false, true),
+            bare_release("v0.2.30", false, false, true),
+            bare_release("v0.2.29", false, false, true),
+        ];
+        let stable = best_release_index(&releases, false).unwrap();
+        assert_eq!(releases[stable].tag_name, "v0.3.0");
+        let pre = best_release_index(&releases, true).unwrap();
+        assert_eq!(releases[pre].tag_name, "v0.3.0");
+        let rc = &releases[0];
+        assert!(accepted_version(rc, false).is_err());
+        assert_eq!(
+            accepted_version(rc, true).unwrap().to_string(),
+            "0.3.0-rc.3"
+        );
+        assert_eq!(
+            accepted_version(&releases[stable], false)
+                .unwrap()
+                .to_string(),
+            "0.3.0"
+        );
+    }
+
+    #[test]
+    fn pre_channel_still_skips_drafts_and_mutable_releases() {
+        let releases = vec![
+            bare_release("v0.3.0-rc.3", true, true, true),
+            bare_release("v0.3.0-rc.1", true, false, false),
+            bare_release("v0.3.0", false, false, true),
+            bare_release("v0.2.30", false, false, true),
+        ];
+        let pre = best_release_index(&releases, true).unwrap();
+        assert_eq!(releases[pre].tag_name, "v0.3.0");
+    }
+
     fn fixture() -> Release {
         Release {
             tag_name: "v0.2.0".into(),
@@ -2534,16 +2640,19 @@ mod tests {
     #[test]
     fn release_channel_rejects_unpublished_mutable_and_old_releases() {
         let mut release = fixture();
-        assert_eq!(release_version(&release).unwrap(), Version::new(0, 2, 0));
+        assert_eq!(
+            accepted_version(&release, false).unwrap(),
+            Version::new(0, 2, 0)
+        );
         release.immutable = false;
-        assert!(release_version(&release).is_err());
+        assert!(accepted_version(&release, false).is_err());
         release.immutable = true;
         release.draft = true;
-        assert!(release_version(&release).is_err());
+        assert!(accepted_version(&release, false).is_err());
         release.draft = false;
         for version in ["v0.1.999", "v0.2.0-beta.1", "v0.2.0+untrusted", "../../bad"] {
             release.tag_name = version.into();
-            assert!(release_version(&release).is_err());
+            assert!(accepted_version(&release, false).is_err());
         }
     }
     #[test]
@@ -3187,7 +3296,9 @@ mod tests {
     #[test]
     fn options_parse_flags_and_reject_unknown() {
         let o = options(&["--check".into(), "--json".into()]).unwrap();
-        assert!(o.check && o.json && !o.rollback);
+        assert!(o.check && o.json && !o.rollback && !o.pre);
+        let o = options(&["--pre".into()]).unwrap();
+        assert!(o.pre && !o.check);
         let o = options(&["--all".into()]).unwrap();
         assert!(!o.check && !o.json && !o.rollback, "--all is a no-op");
         let o = options(&["--bin-dir".into(), "/tmp/x".into()]).unwrap();
@@ -3203,9 +3314,10 @@ mod tests {
         assert!(set_update_flag(&mut o, "--check"));
         assert!(set_update_flag(&mut o, "--json"));
         assert!(set_update_flag(&mut o, "--rollback"));
+        assert!(set_update_flag(&mut o, "--pre"));
         assert!(set_update_flag(&mut o, "--all"));
         assert!(!set_update_flag(&mut o, "--bin-dir"));
-        assert!(o.check && o.json && o.rollback);
+        assert!(o.check && o.json && o.rollback && o.pre);
     }
 
     #[test]

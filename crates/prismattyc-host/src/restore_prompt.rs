@@ -161,7 +161,7 @@ pub(super) fn finish(host: &mut HostState, accept: bool) {
             }
             Err(error) => {
                 eprintln!("prismattyc-host: could not restore last space: {error:#}");
-                rail_toast(host, &format!(" could not restore last space: {error:#} "));
+                rail_error_toast(host, &format!(" could not restore last space: {error:#} "));
             }
         }
     } else {
@@ -204,6 +204,7 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
     let frame = PaletteFrame {
         layout_mode: PaletteLayoutMode::FixedHeight,
         query: None,
+        query_focused: false,
         chips: None,
         sections: &sections,
         selected: prompt.selected,
@@ -214,6 +215,7 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
     host.palette_layout = paint_palette_overlay(
         &host.font,
         &host.theme,
+        host.mux.geom().chrome,
         focus_border_rgb(host.focus_border),
         &frame,
         host_overlay_surface(host),
@@ -238,6 +240,7 @@ mod tests {
             tabs: vec![attach_tabs::AttachTabRecord {
                 title: "saved".into(),
                 sessions: vec!["gone".into()],
+                layout: None,
             }],
             ..Default::default()
         })
@@ -250,7 +253,8 @@ mod tests {
         assert!(RestorePrompt::new(attach_tabs::AttachTabsFile {
             tabs: vec![attach_tabs::AttachTabRecord {
                 title: "empty".into(),
-                sessions: vec![]
+                sessions: vec![],
+                layout: None,
             }],
             ..Default::default()
         })

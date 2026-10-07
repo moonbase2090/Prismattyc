@@ -114,7 +114,7 @@ jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Check out repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -134,6 +134,17 @@ jobs:
           fi
           rustup toolchain install 1.90.0 --profile minimal
           rustup default 1.90.0
+
+      - name: Install pinned cargo-mutants for nightly argv tests
+        run: |
+          set -euo pipefail
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          if [ -f "$cargo_env" ]; then . "$cargo_env"; fi
+          cargo install cargo-mutants --locked --version 27.1.0
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+
+      - name: Check nightly mutants argv and sharding
+        run: python3 scripts/mutants-nightly_test.py
 
       - name: Check workspace
         run: |
@@ -193,12 +204,21 @@ jobs:
       - name: Install real-window test display
         run: ./scripts/install-render-test-deps.sh
 
+      - name: Install CJK test font
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-noto-cjk
+          fc-cache -f
+
       - name: Test workspace
         run: |
           cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
           [ -f "$cargo_env" ] && . "$cargo_env"
           [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
           cargo test --workspace --locked
+
+      - name: Test GPU adapter enumeration without hardware
+        run: cargo test -p prismattyc-host --features gpu,wgpu/noop --bin prismattyc-host instance_enumerates_adapters_without_a_window
 
   # Frozen rich harness pin. Not a light-stage / PRD §5.6 / A-6 gate.
   # Hand / Local Actions: --event pull_request --job phase3-rich
@@ -544,7 +564,7 @@ jobs:
           host_root="/tmp/prismattyc-spaces-e2e-$$"
           trap "dkr run --rm -v /tmp:/tmp alpine:latest rm -rf '$host_root'" EXIT
           dkr run --rm -v "$host_root:$host_root" alpine:latest \
-            mkdir -p "$host_root/bins" "$host_root/tests/native/docker"
+            mkdir -p "$host_root/bins" "$host_root/tests/native/docker" "$host_root/build/space-reorder-e2e"
           tar -C "$PWD/target/debug" -cf - pmux pmuxd pmux-attach prismattyc-host \
             | dkr run --rm -i -v "$host_root:$host_root" alpine:latest \
               tar -C "$host_root/bins" -xf -
@@ -555,6 +575,7 @@ jobs:
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$host_root:$host_root" \
             -v "$PWD/build/host-ux-e2e:$host_root/build/host-ux-e2e" \
+            -v "$PWD/build/space-reorder-e2e:$host_root/build/space-reorder-e2e" \
             -e PRISMATTYC_BINS="$host_root/bins" \
             -e WIGGLE="${WIGGLE:-0}" \
             -w "$host_root" \
@@ -564,6 +585,14 @@ jobs:
           # The nested artifact mount writes to the host checkout. It survives
           # removal of both job containers and the temporary staging path.
           echo "Host UX artifacts: $PWD/build/host-ux-e2e"
+
+      - name: Upload Space reorder screenshots
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0, Node 24
+        with:
+          name: space-reorder-screenshots
+          path: build/space-reorder-e2e/
+          if-no-files-found: warn
 
       - name: Release heavy-job lock
         if: always()
@@ -1129,8 +1158,10 @@ jobs:
       - name: Mutants gate unit tests
         run: |
           python3 scripts/jev-shadow_test.py
+          python3 scripts/jev-pr-triage_test.py
           python3 scripts/mutants-gate_test.py
           python3 scripts/mutants-route_test.py
+          python3 scripts/mutants-nightly_test.py
           python3 scripts/la-heavy-serial_test.py
           python3 scripts/la-staged_test.py
 

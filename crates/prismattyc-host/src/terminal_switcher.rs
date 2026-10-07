@@ -183,7 +183,7 @@ pub(super) fn activate(host: &mut HostState, label: &str) -> bool {
         return true;
     };
     if let Err(error) = navigate(host, &entry) {
-        rail_toast(host, &format!("Terminal unavailable: {error}"));
+        rail_error_toast(host, &format!("Terminal unavailable: {error}"));
     }
     true
 }

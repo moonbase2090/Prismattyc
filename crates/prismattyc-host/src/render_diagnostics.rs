@@ -37,6 +37,7 @@ pub(super) enum Guard {
     HoverTarget,
     RestorePrompt,
     SaveSpace,
+    Transparency,
 }
 
 const GUARDS: &[(Guard, &str)] = &[
@@ -73,6 +74,7 @@ const GUARDS: &[(Guard, &str)] = &[
     (Guard::HoverTarget, "hover-target"),
     (Guard::RestorePrompt, "restore-prompt"),
     (Guard::SaveSpace, "save-space"),
+    (Guard::Transparency, "transparency"),
 ];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -141,6 +143,7 @@ pub(super) fn record_overlay_guards(mask: &mut GuardMask, state: TransientOverla
     mask.set(Guard::TitleNotice, state.title_notice);
     mask.set(Guard::HoverTarget, state.hover_target);
     mask.set(Guard::SaveSpace, state.save_space);
+    mask.set(Guard::Transparency, state.transparency);
 }
 
 /// Published `bell-toasts` follows the live chip list, not only the last raster.
@@ -158,6 +161,19 @@ fn should_publish_render_status(
     toast_guard_stale: bool,
 ) -> bool {
     toast_guard_stale || render_status_due(last, now)
+}
+
+fn present_timing_json(present: Option<crate::present_timing::PresentTiming>) -> serde_json::Value {
+    let Some(present) = present else {
+        return serde_json::Value::Null;
+    };
+    serde_json::json!({
+        "write_us": present.write_us,
+        "commit_us": present.commit_us,
+        "dirty_tiles": present.dirty_tiles,
+        "changed_tiles": present.changed_tiles,
+        "write_bytes": present.write_bytes,
+    })
 }
 
 impl App {
@@ -185,6 +201,7 @@ impl App {
         let mut attach_queue_bytes = 0usize;
         let mut attach_queue_high_water_bytes = 0usize;
         let mut attach_reader_blocked_ms = 0u64;
+        let pump = self.pump_timing.json();
         let windows: Vec<_> = self.windows.iter().map(|(id, host)| {
             let pane_ids = host
                 .mux
@@ -242,8 +259,35 @@ impl App {
                         "name": host.space_rail.names.get(index), "x":x,"y":y,"width":w,"height":h
                     }))
                 })).collect();
+            let sidebar_spaces: Vec<_> = host.sidebar_rows.iter().filter_map(|(slot, row)| {
+                if row.kind != crate::sidebar::RowKind::Space {
+                    return None;
+                }
+                let name = &host.sidebar_tree.spaces.get(row.space)?.name;
+                Some(serde_json::json!({
+                    "name": name, "x": slot.x, "y": slot.y,
+                    "width": slot.w, "height": slot.h
+                }))
+            }).collect();
             let frame = host.render_frame;
-            serde_json::json!({
+            let last_raster = serde_json::json!({
+                "unix_ms": frame.raster_at_unix_ms,
+                "present_succeeded": frame.present_succeeded,
+                "raster_mode": if frame.full_repaint_reason.is_some() { "full" } else { "partial" },
+                "full_repaint_reason": frame.full_repaint_reason.map(super::FullRepaintReason::as_str),
+                "guard_mask": frame.guards.0,
+                "guards": frame.guards.names(),
+                "cells_painted": frame.cells_painted,
+                "rows_scrolled_as_blit": frame.rows_scrolled_as_blit,
+                "timing": {
+                    "parse_us": frame.timing.last_parse_us,
+                    "damage_us": frame.timing.damage_us,
+                    "raster_us": frame.timing.raster_us,
+                    "present_us": frame.timing.present_us,
+                },
+                "present": present_timing_json(frame.present),
+            });
+            let mut status = serde_json::json!({
                 "window_id": format!("{id:?}"),
                 "focused": host.window_focused,
                 "occluded": host.window_occluded,
@@ -276,6 +320,10 @@ impl App {
                     "target": host.context_menu_target.map(|target| match target {
                         super::ContextMenuTarget::SpaceChip(_) => "space",
                         super::ContextMenuTarget::Pane(_) => "pane",
+                        super::ContextMenuTarget::RailSpace(_) => "rail-space",
+                        super::ContextMenuTarget::RailSession(_) => "rail-session",
+                        super::ContextMenuTarget::RailSessionSolo(_) => "rail-session-solo",
+                        super::ContextMenuTarget::RailPane(_) => "rail-pane",
                     }),
                 })),
                 "space_session_names": host.space_rail.live_pane_names,
@@ -283,17 +331,24 @@ impl App {
                 "selected_tab": host.mux.selected_tab_index(),
                 "focused_session": host.attach_pane_sessions.get(&host.mux.focused_id()),
                 "current_panes": panes,
-                "last_raster": {
-                    "unix_ms": frame.raster_at_unix_ms,
-                    "present_succeeded": frame.present_succeeded,
-                    "raster_mode": if frame.full_repaint_reason.is_some() { "full" } else { "partial" },
-                    "full_repaint_reason": frame.full_repaint_reason.map(super::FullRepaintReason::as_str),
-                    "guard_mask": frame.guards.0,
-                    "guards": frame.guards.names(),
-                    "cells_painted": frame.cells_painted,
-                    "rows_scrolled_as_blit": frame.rows_scrolled_as_blit,
-                },
-            })
+            });
+            if let Some(status) = status.as_object_mut() {
+                status.insert("pump".into(), pump.clone());
+                status.insert("last_raster".into(), last_raster);
+                status.insert(
+                    "sidebar_space_rows".into(),
+                    serde_json::Value::Array(sidebar_spaces),
+                );
+                status.insert(
+                    "space_reorder_drag_active".into(),
+                    serde_json::Value::Bool(
+                        host.space_reorder_drag
+                            .as_ref()
+                            .is_some_and(|drag| drag.active),
+                    ),
+                );
+            }
+            status
         }).collect();
         let status = serde_json::json!({
             "schema_version": 1,
@@ -408,6 +463,7 @@ mod tests {
             Guard::HoverTarget,
             Guard::RestorePrompt,
             Guard::SaveSpace,
+            Guard::Transparency,
         ];
         assert_eq!(GUARDS.len(), ALL.len());
         for guard in ALL {
@@ -552,6 +608,13 @@ mod tests {
                 },
                 "save-space",
             ),
+            (
+                TransientOverlayState {
+                    transparency: true,
+                    ..TransientOverlayState::default()
+                },
+                "transparency",
+            ),
         ];
         for (state, name) in cases {
             let mut mask = GuardMask::default();
@@ -596,5 +659,22 @@ mod tests {
             now + Duration::from_secs(1),
             false
         ));
+    }
+
+    #[test]
+    fn present_status_schema_reports_write_commit_and_tile_counts() {
+        let status = present_timing_json(Some(crate::present_timing::PresentTiming {
+            write_us: 17,
+            commit_us: 23,
+            dirty_tiles: 11,
+            changed_tiles: Some(4),
+            write_bytes: 65_536,
+        }));
+        assert_eq!(status["write_us"], 17);
+        assert_eq!(status["commit_us"], 23);
+        assert_eq!(status["dirty_tiles"], 11);
+        assert_eq!(status["changed_tiles"], 4);
+        assert_eq!(status["write_bytes"], 65_536);
+        assert!(present_timing_json(None).is_null());
     }
 }

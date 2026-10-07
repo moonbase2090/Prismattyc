@@ -5595,10 +5595,29 @@ mod tests {
         let mut out = Vec::<u8>::new();
         enter_host_modes(&mut out).expect("enter");
         leave_host_modes_best_effort(&mut out);
-        let s = String::from_utf8_lossy(&out);
-        // LeaveAlternateScreen / Show / DisableMouseCapture are CSI sequences.
-        assert!(s.contains("\u{1b}["), "expected CSI in host modes: {s:?}");
-        assert!(out.len() > 10);
+        let expected = concat!(
+            "\x1b[?1049h",
+            "\x1b[?25l",
+            "\x1b[?1000h",
+            "\x1b[?1002h",
+            "\x1b[?1003h",
+            "\x1b[?1015h",
+            "\x1b[?1006h",
+            "\x1b[?2004h",
+            "\x1b[?1004h",
+            "\x1b[>3u",
+            "\x1b[<1u",
+            "\x1b[?1004l",
+            "\x1b[?2004l",
+            "\x1b[?1006l",
+            "\x1b[?1015l",
+            "\x1b[?1003l",
+            "\x1b[?1002l",
+            "\x1b[?1000l",
+            "\x1b[?25h",
+            "\x1b[?1049l",
+        );
+        assert_eq!(out, expected.as_bytes());
     }
 
     /// F2: writer EIO on first byte still best-effort leave (no panic).

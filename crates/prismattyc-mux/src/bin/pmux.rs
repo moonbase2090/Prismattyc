@@ -43,7 +43,7 @@
 //! pmux stop                     ShutdownServer, then TERM/KILL fallback
 //! pmux --session NAME stop      destroy one session; server stays up
 //! pmux restart [--host|--daemon|--mcp|--all]  cooperative component restart
-//! pmux update [--check|--rollback]  install verified release artifacts
+//! pmux update [--check|--rollback|--pre]  install verified release artifacts
 //! pmux completions <shell>      emit bash/zsh/fish completions
 //! ```
 //!
@@ -179,7 +179,7 @@ session
     skills install [--agent codex|claude|cursor|muse|kiro|detected|all]
         [--check] [--force]         install the pmux agent skill
     config init [--merge]         write [mux] keys into config.toml
-    update [--check|--rollback]  install verified GitHub release artifacts
+    update [--check|--rollback|--pre]  install verified GitHub release artifacts
     completions <bash|zsh|fish>   print shell completion script
 
 tab
@@ -764,7 +764,7 @@ _prismattyc_mux() {
     arrange) COMPREPLY=( $(compgen -W "main-vertical main-horizontal even-h even-v grid" -- "$cur") ); return ;;
     stop|kick|doctor) COMPREPLY=( $(compgen -W "--session" -- "$cur") ); return ;;
     restart) COMPREPLY=( $(compgen -W "--all --host --daemon --mcp --plan --stop-sessions --json --help" -- "$cur") ); return ;;
-    update) COMPREPLY=( $(compgen -W "--check --rollback --bin-dir --json --source --host --mux --all --help" -- "$cur") ); return ;;
+    update) COMPREPLY=( $(compgen -W "--check --rollback --pre --bin-dir --json --source --host --mux --all --help" -- "$cur") ); return ;;
   esac
   if [[ "$cur" == -* ]]; then
     COMPREPLY=( $(compgen -W "--instance --socket --session --help" -- "$cur") )
@@ -832,7 +832,7 @@ case $state in
       join-pane) _arguments '--to[Window id]:id:' '-h' '-v' '1:pane:' ;;
       arrange) _arguments '1:session:' '2:kind:(main-vertical main-horizontal even-h even-v grid)' ;;
       restart) _arguments '--all' '--host' '--daemon' '--mcp' '--plan' '--stop-sessions' '--json' '--help' ;;
-      update) _arguments '--check' '--rollback' '--bin-dir[Install directory]:directory:_files -/' '--json' '--source' '--host' '--mux' '--all' '--help' ;;
+      update) _arguments '--check' '--rollback' '--pre' '--bin-dir[Install directory]:directory:_files -/' '--json' '--source' '--host' '--mux' '--all' '--help' ;;
     esac
     ;;
 esac
@@ -1698,6 +1698,7 @@ fn play_boss_verdict(client: &mut Client, socket: &Path) -> Result<BossVerdict> 
             .map(|tab| SavedSpaceTab {
                 title: tab.title,
                 sessions: tab.sessions,
+                layout: tab.layout,
             })
             .collect::<Vec<_>>()
     });
@@ -4938,8 +4939,11 @@ verbs:
   rename NAME [--session KEY]
     Set the session name and agent ID together. Default: this pane.
     Pending mail stays. Previous mailbox addresses forward to NAME.
-  reopen NAME --space SPACE
-    Reopen one saved session with its name, mailbox, and Space owner.
+  reopen NAME --space SPACE [--no-run] [--no-claim]
+    Reopen one saved session with its name, mailbox, and Space owner,
+    then run its saved commands as space open does
+    (space_open_runs_commands; --no-run skips them). --no-claim
+    leaves the Space file and the session's owner unchanged.
   suggest [--space NAME]
     Print an unused name such as work-1.
   clear [--all] [--keep NAME]
@@ -5360,6 +5364,7 @@ fn tab_untabbed_sessions(space: &mut SavedSpace, saved_names: &[String]) {
         space.tabs.push(SavedSpaceTab {
             title: name.clone(),
             sessions: vec![name],
+            layout: None,
         });
     }
 }
@@ -5383,11 +5388,33 @@ fn apply_attach_records_to_space(
             })
             .filter(|name| saved_names.contains(name))
             .collect();
-        (!sessions.is_empty()).then_some((tab.title.clone(), sessions))
+        if sessions.is_empty() {
+            return None;
+        }
+        let layout = tab.layout.as_ref().and_then(|node| {
+            attach_tabs::remap_layout(node, |id| {
+                snapshot
+                    .sessions
+                    .iter()
+                    .find(|session| session.id.to_string() == id)
+                    .map(|session| session.name.clone())
+                    .filter(|name| saved_names.iter().any(|saved| saved == name))
+            })
+        });
+        let layout = attach_tabs::layout_for_sessions(layout, &sessions);
+        Some(attach_tabs::RemappedTab {
+            title: tab.title.clone(),
+            sessions,
+            layout,
+        })
     });
     space.tabs = kept
         .into_iter()
-        .map(|(title, sessions)| SavedSpaceTab { title, sessions })
+        .map(|tab| SavedSpaceTab {
+            title: tab.title,
+            sessions: tab.sessions,
+            layout: tab.layout,
+        })
         .collect();
     space.active_tab = active_tab;
     space.focused_session = file.focused_session.as_ref().and_then(|id| {
@@ -5414,6 +5441,7 @@ fn attach_file_from_space(space: &SavedSpace, snapshot: &Snapshot) -> attach_tab
             .map(|session| SavedSpaceTab {
                 title: session.name.clone(),
                 sessions: vec![session.name.clone()],
+                layout: None,
             })
             .collect();
         &one_per_session
@@ -5432,11 +5460,32 @@ fn attach_file_from_space(space: &SavedSpace, snapshot: &Snapshot) -> attach_tab
                     .map(|session| session.id.to_string())
             })
             .collect();
-        (!sessions.is_empty()).then_some((tab.title.clone(), sessions))
+        if sessions.is_empty() {
+            return None;
+        }
+        let layout = tab.layout.as_ref().and_then(|node| {
+            attach_tabs::remap_layout(node, |name| {
+                snapshot
+                    .sessions
+                    .iter()
+                    .find(|session| session.name == name)
+                    .map(|session| session.id.to_string())
+            })
+        });
+        let layout = attach_tabs::layout_for_sessions(layout, &sessions);
+        Some(attach_tabs::RemappedTab {
+            title: tab.title.clone(),
+            sessions,
+            layout,
+        })
     });
     let tabs: Vec<attach_tabs::AttachTabRecord> = kept
         .into_iter()
-        .map(|(title, sessions)| attach_tabs::AttachTabRecord { title, sessions })
+        .map(|tab| attach_tabs::AttachTabRecord {
+            title: tab.title,
+            sessions: tab.sessions,
+            layout: tab.layout,
+        })
         .collect();
     let focused_session = space.focused_session.as_ref().and_then(|name| {
         snapshot
@@ -8529,31 +8578,29 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn detach_fixture_process() {
-        let Some(ready) = std::env::var_os("PMUX_DETACH_FIXTURE_READY") else {
-            return;
-        };
-        std::fs::write(ready, b"ready").unwrap();
-        std::thread::sleep(Duration::from_secs(30));
-    }
-
     fn spawn_fake_attach(dir: &Path, sock: &Path) -> ReapChild {
         use prismattyc_mux::platform::Exec;
         let ready = dir.join("attach-ready");
-        // A native test process retains argv0 on macOS. Python framework
-        // launchers replace it during startup, making the scan race exec.
+        let fixture_source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/detach-process.rs");
+        let fixture_bin = dir.join("pmux-attach-fixture");
+        let compiled = Command::new("rustc")
+            .arg("--edition=2021")
+            .arg(&fixture_source)
+            .arg("-o")
+            .arg(&fixture_bin)
+            .output()
+            .expect("compile detach process fixture");
+        assert!(
+            compiled.status.success(),
+            "detach fixture compilation failed: {}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
         let mut child = ReapChild::new(
-            Command::new(std::env::current_exe().unwrap())
+            Command::new(&fixture_bin)
                 .arg0("pmux-attach")
-                .args([
-                    "--exact",
-                    "tests::detach_fixture_process",
-                    "--nocapture",
-                    "--",
-                    "--socket",
-                    sock.to_str().unwrap(),
-                ])
+                .arg("--socket")
+                .arg(sock)
                 .env("PMUX_DETACH_FIXTURE_READY", &ready)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -9261,6 +9308,7 @@ mod tests {
             tabs: vec![SavedSpaceTab {
                 title: "seats".into(),
                 sessions: vec!["beta".into(), "alpha".into()],
+                layout: None,
             }],
             active_tab: 0,
             focused_session: Some("alpha".into()),
@@ -9553,10 +9601,12 @@ mod tests {
                 attach_tabs::AttachTabRecord {
                     title: "seats".into(),
                     sessions: vec!["3".into(), "2".into(), "4".into()],
+                    layout: None,
                 },
                 attach_tabs::AttachTabRecord {
                     title: "other".into(),
                     sessions: vec!["9".into(), "77".into()],
+                    layout: None,
                 },
             ],
             active_tab: 0,
@@ -9586,6 +9636,7 @@ mod tests {
             vec![SavedSpaceTab {
                 title: "seats".into(),
                 sessions: vec!["fable-pc".into(), "grok-pc".into(), "kiro-pc".into()],
+                layout: None,
             }],
             "tabs outside the space and unknown ids are dropped"
         );
@@ -9599,6 +9650,7 @@ mod tests {
             vec![attach_tabs::AttachTabRecord {
                 title: "seats".into(),
                 sessions: vec!["12".into(), "14".into(), "13".into()],
+                layout: None,
             }]
         );
         assert_eq!(restored.focused_session.as_deref(), Some("14"));
@@ -9644,10 +9696,12 @@ mod tests {
                 attach_tabs::AttachTabRecord {
                     title: "beta".into(),
                     sessions: vec!["8".into()],
+                    layout: None,
                 },
                 attach_tabs::AttachTabRecord {
                     title: "alpha".into(),
                     sessions: vec!["7".into()],
+                    layout: None,
                 },
             ],
             "one tab per live space session; sessions outside the space are not pulled in"

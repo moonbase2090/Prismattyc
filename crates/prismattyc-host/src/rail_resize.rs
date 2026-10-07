@@ -1,6 +1,9 @@
 //! A fixed side rail width. Pointer dragging changes geometry immediately.
 use super::*;
 pub(super) fn at_edge(host: &HostState) -> bool {
+    if host.spacing.layout == config::LayoutMode::Sidebar {
+        return false;
+    }
     if host.restore_prompt.is_some()
         || host.context_menu.is_some()
         || host.palette.is_some()
@@ -27,7 +30,7 @@ pub(super) fn at_edge(host: &HostState) -> bool {
     y >= top && (x - edge).abs() <= 5.0
 }
 pub(super) fn motion(host: &mut HostState, x: f64, y: f64) -> bool {
-    if !host.rail_resizing {
+    if host.spacing.layout == config::LayoutMode::Sidebar || !host.rail_resizing {
         return false;
     }
     host.pointer_px = Some((x, y));
@@ -63,7 +66,7 @@ pub(super) fn motion(host: &mut HostState, x: f64, y: f64) -> bool {
     true
 }
 pub(super) fn button(host: &mut HostState, state: ElementState, button: MouseButton) -> bool {
-    if button != MouseButton::Left {
+    if host.spacing.layout == config::LayoutMode::Sidebar || button != MouseButton::Left {
         return false;
     }
     if state == ElementState::Pressed && at_edge(host) {
@@ -78,7 +81,7 @@ pub(super) fn button(host: &mut HostState, state: ElementState, button: MouseBut
             "space_rail_width_cols",
             toml_edit::value(host.spacing.space_rail_width_cols as i64),
         ) {
-            rail_toast(host, &format!("Could not save rail width: {error}"));
+            rail_error_toast(host, &format!("Could not save rail width: {error}"));
         }
         sync_chrome_hover(host);
         return true;

@@ -31,9 +31,13 @@ and their regression tests.
 ## Open hyperlinks
 
 Move the pointer over an HTTP or HTTPS link to show the hand cursor.
-The host recognizes URLs in terminal text and named OSC 8 hyperlinks.
-Hold Ctrl and click to open a link on Linux. On macOS, hold Command and click.
-Plain clicks keep their normal selection or application behavior.
+The host recognizes URLs in terminal text and named OSC 8 hyperlinks. By
+default, click a link to open it. Set `link_click = "modifier"` in
+`config.toml` to require Ctrl-click on Linux or Command-click on macOS. Either
+way, a click only opens when press and release stay on the same link and move
+less than half a cell. A drag selects text, and double- or triple-click selects
+a word or line. When an application uses mouse reporting, unmodified clicks
+still go to the application; the platform's Ctrl/Command-click opens the link.
 
 ## Route mouse input
 

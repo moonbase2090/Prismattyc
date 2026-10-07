@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: MPL-2.0
+name: Jev smoke
+
+# Manual smoke test: one Jev request through Cloudflare AI Gateway with the same
+# secrets and client code as the nightly jev-shadow job. Costs well under one cent
+# per run (about 300 input tokens for the default question at USD 0.042 per 1M).
+#   gh workflow run jev-smoke.yml -R moonbase2090/Prismattyc
+
+on:
+  workflow_dispatch:
+    inputs:
+      nightly_questions:
+        description: Ask the nightly's prediction and triage questions about a synthetic mutant
+        type: boolean
+        default: false
+      probe:
+        description: Also run read-only token/gateway checks and header variants on 403
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jev-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Jev smoke request
+    if: ${{ github.repository == 'moonbase2090/Prismattyc' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0, Node 24
+        with:
+          persist-credentials: false
+
+      - name: Send one Jev request
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_AI_GATEWAY_TOKEN: ${{ secrets.CLOUDFLARE_AI_GATEWAY_TOKEN }}
+          CLOUDFLARE_AI_GATEWAY_ID: ${{ secrets.CLOUDFLARE_AI_GATEWAY_ID }}
+          PROBE: ${{ inputs.probe }}
+          NIGHTLY_QUESTIONS: ${{ github.event_name == 'push' || inputs.nightly_questions }}
+        run: |
+          set -euo pipefail
+          if [[ "$NIGHTLY_QUESTIONS" == "true" ]]; then
+            python3 scripts/jev-smoke.py --nightly-questions
+          else
+            python3 scripts/jev-smoke.py
+          fi
+          if [[ "$PROBE" == "true" ]]; then
+            python3 scripts/jev-smoke.py --probe
+          fi

@@ -1,0 +1,29 @@
+# Prismattyc theme that follows the OS appearance: the host paints Prismattyc
+# Dark or Prismattyc Light from the system setting. These colors are the dark
+# fallback when the system does not report an appearance.
+id = "prismattyc"
+name = "Prismattyc (match system)"
+variant = "dark"
+source = "https://github.com/Moonbase2090/Prismattyc"
+license = "Project-local palette; Graphite Dark tokens (docs/design/graphite-ui-brief.md), ANSI from prismattyc-default"
+default_fg = "#d9dde4"
+default_bg = "#181b21"
+chrome_fg = "#e6e9ee"
+chrome_bg = "#15181d"
+pane_backdrop = "#101216"
+pane_border = "#262a32"
+overlay_bg = "#1a1d23"
+unseen_badge = "#f2b84b"
+mail_letter = "#f2b84b"
+active_badge = "#4cc98a"
+attention_badge = "#ff7a6b"
+cursor_fg = "#181b21"
+cursor_bg = "#e6e9ee"
+selection_fg = "#f2f4f7"
+selection_bg = "#2a3a55"
+ansi = [
+  "#000000", "#cd0000", "#00cd00", "#cdcd00",
+  "#0000ee", "#cd00cd", "#00cdcd", "#e5e5e5",
+  "#7f7f7f", "#ff0000", "#00ff00", "#ffff00",
+  "#5c5cff", "#ff00ff", "#00ffff", "#ffffff",
+]

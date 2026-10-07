@@ -582,15 +582,17 @@ def main():
                 passed('polish-four-rail-positions-live-config-and-hit-targets')
                 choose('Startup: restore')
                 assert 'space_startup = "restore"' in cfg.read_text()
-                choose('Autosave: off')
-                assert 'space_autosave = true' in cfg.read_text()
+                # Autosave is on when neither key opts out.
+                text = cfg.read_text()
+                assert 'space_autosave = false' not in text
+                assert 'autosave = false' not in text
                 host.capture('spaces-settings')
                 host.key('Escape')
                 cli('space', 'add', 'polish', '--name', 'polish-2')
                 wait(lambda: host.status()['space_session_names']['polish'] == ['polish-1', 'polish-2'], 'second polish session')
                 wait(lambda: host.status()['space_save_status'] == 'Saved', 'saved arrangement')
                 host.key('ctrl+shift+w')
-                wait(lambda: host.status()['space_save_status'] == 'Unsaved changes', 'unsaved arrangement')
+                wait(lambda: host.status()['space_save_status'] in ('Saving…', 'Saved'), 'autosave started')
                 host.capture('unsaved-layout')
                 wait(lambda: len(details('polish')['sessions']) == 1 and host.status()['space_save_status'] == 'Saved', 'autosave reduced view')
                 host.capture('autosaved-layout')
@@ -598,6 +600,7 @@ def main():
                 host.key('ctrl+alt+p')
                 wait(lambda: panel_ready(), 'autosave settings')
                 choose('Autosave: on')
+                assert 'autosave = false' in cfg.read_text()
                 host.key('Escape')
                 cli('space','add','polish','--name','save-failure-seat')
                 wait(lambda: len(host.status()['space_session_names']['polish']) == 2, 'save failure setup')

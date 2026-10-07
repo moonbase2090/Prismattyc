@@ -34,17 +34,25 @@ value. Automatic signed-release checks run on app launch and daily by default.
 Set the top-level `automatic_update_checks = false` or turn them off in the app
 menu to opt out. The app menu's manual check works regardless of this setting.
 The classic `prismattyc` binary does not
-read this file.
+read this file. `chrome_style` defaults to `graphite`. Leave that key
+commented, or omit it, to follow the app default. `chrome_style = "classic"`
+keeps the previous chrome and applies live. `theme` defaults to `prismattyc`
+(follow the system appearance). Leave that key commented, or omit it, to
+follow the app default.
 
 ## Keys
+
+When `render_timer` is `osd`, `log`, or `both`, the macOS host compares dirty
+tiles with the previous frame and reports how many changed. With the timer off,
+it does not allocate the comparison buffer.
 
 ```toml
 # Prismattyc host config. Every key is at its default.
 # Edit in place. CLI flags and PRISMATTYC_* env vars still win.
 
 # -- appearance / theme --
-# Named theme: built-in slug, display name, sibling themes/ file, or absolute TOML path. theme slug or absolute path.
-theme = "prismattyc-default"
+# Named theme: built-in slug, display name, sibling themes/ file, or absolute TOML path. Omit this key to follow the app default (prismattyc). theme slug or absolute path.
+# theme = "prismattyc"
 # Render timings and counters. off|osd|log|both.
 render_timer = "off"
 # Log every render frame when render_timer includes log; use for benches only. true|false.
@@ -57,12 +65,26 @@ splash_animation = true
 reduced_motion = false
 # Tab strip visibility: auto and always show one tab; multi needs two tabs. auto|always|multi.
 tab_strip = "auto"
-# Host chrome look: classic, or the opt-in Graphite redesign. classic|graphite.
-chrome_style = "classic"
+# Host chrome look. Omit this key to follow the app default (graphite). classic|graphite.
+# chrome_style = "graphite"
+# Graphite bar background: omit to follow the theme, or graphite, harbor, moss, or plum (Sand on light themes). graphite|harbor|moss|plum.
+# bar_color = "graphite"
+# Chrome arrangement: bars, or the sidebar tree. Classic honors sidebar too. bars|sidebar.
+# layout = "bars"
+# Expanded Spaces sidebar width in pixels. Names ellipsize; the width does not follow them. 200-2000.
+sidebar_width_px = 256
+# Collapse the Spaces sidebar to the icon strip. true|false.
+sidebar_collapsed = false
 # Multi-pane title row: focused pane OSC title, or handle hover only. focused|hover.
 pane_titles = "focused"
 # Immediate hover blend for interactive strip, rail, and scrollbar chrome. 0.0-0.3.
 hover_blend = 0.1
+
+# -- input --
+# Open links on plain clicks; Cmd/Ctrl-click always remains available. plain|modifier.
+link_click = "plain"
+# Hand pastes to the pane writer thread so large pastes never pause the window. true | false.
+async_paste = false
 
 # -- agent integration --
 # Install the pmux Agent Skill for detected agents once per app version. true|false.
@@ -109,8 +131,12 @@ pane_gap_px = 3
 pane_padding_px = 5
 # Edge that shows the saved-spaces rail; off hides it. "bottom" | "left" | "top" | "right" | "off".
 space_rail = "bottom"
-# Save changed Space layouts after two idle seconds. true | false.
-space_autosave = false
+# Enable drag and Shift+arrow reordering for saved spaces. true | false.
+space_reorder = false
+# Restore and re-stroke only border rings that change. true | false.
+selective_border_rings = false
+# Save changed Space arrangements after a short idle. true | false.
+space_autosave = true
 # Choose naming prompts, automatic sessions, or blank terminals. "ask" | "auto" | "blank".
 session_naming = "ask"
 # Startup choice; restore reconnects live sessions without launching stopped ones. "ask" | "restore" | "fresh".
@@ -137,6 +163,8 @@ bell_toaster = true
 bell_toaster_ms = 10000
 # Show 'Moving tab NAME → target' while a tab or pane is dragged. true|false.
 drag_toaster = true
+# Status toasts: all, errors only, or off; hidden ones stay in Recent messages. all|errors|off.
+toasts = "all"
 # OS notification on BEL while the window is unfocused. true|false.
 os_notify_bell = false
 # Play the attention cue on OSC 9 / 777 / 99. true|false.
@@ -176,37 +204,37 @@ window_blur = false
 # values. Hot-reloaded with the rest of this file; the theme picker keeps them.
 [theme_overrides]
 # Terminal text. #RRGGBB.
-# default_fg = "#d0d0d0"
+# default_fg = "#d9dde4"
 # Terminal ground. #RRGGBB.
-# default_bg = "#121214"
+# default_bg = "#181b21"
 # Chrome text: tabs, rails, footer. #RRGGBB.
-# chrome_fg = "#e5e9f0"
+# chrome_fg = "#e6e9ee"
 # Chrome ground. #RRGGBB.
-# chrome_bg = "#1b1e26"
+# chrome_bg = "#15181d"
 # Active tab chip fill; follows the focus colour when unset. #RRGGBB.
-# tab_active_bg = "#2b2e36"
+# tab_active_bg = "#26292e"
 # Frame ground behind panes; pane opacity blends toward it. #RRGGBB.
-# pane_backdrop = "#0a0a0c"
+# pane_backdrop = "#101216"
 # Unfocused pane border. #RRGGBB.
-# pane_border = "#454a57"
+# pane_border = "#262a32"
 # Toast and overlay ground. #RRGGBB.
-# overlay_bg = "#2a364a"
+# overlay_bg = "#1a1d23"
 # Unseen-output tab badge. #RRGGBB.
-# unseen_badge = "#ffb454"
+# unseen_badge = "#f2b84b"
 # Mail envelope ink. #RRGGBB.
-# mail_letter = "#ffb454"
+# mail_letter = "#f2b84b"
 # Working tab badge and breathing handle chip. #RRGGBB.
-# active_badge = "#4cd18b"
+# active_badge = "#4cc98a"
 # Agent attention tab badge. #RRGGBB.
-# attention_badge = "#ff6b6b"
+# attention_badge = "#ff7a6b"
 # Cursor text; set together with cursor_bg. #RRGGBB.
-# cursor_fg = "#121214"
+# cursor_fg = "#181b21"
 # Cursor block; set together with cursor_fg. #RRGGBB.
-# cursor_bg = "#d0d0d0"
+# cursor_bg = "#e6e9ee"
 # Selection text; set together with selection_bg (unset: inverse video). #RRGGBB.
-# selection_fg = "#121214"
+# selection_fg = "#f2f4f7"
 # Selection ground; set together with selection_fg (unset: inverse video). #RRGGBB.
-# selection_bg = "#d0d0d0"
+# selection_bg = "#2a3a55"
 # ANSI colours 0-15. #RRGGBB.
 # ansi = ["#000000", "#cd0000", "#00cd00", "#cdcd00", "#0000ee", "#cd00cd", "#00cdcd", "#e5e5e5", "#7f7f7f", "#ff0000", "#00ff00", "#ffff00", "#5c5cff", "#ff00ff", "#00ffff", "#ffffff"]
 
@@ -235,9 +263,11 @@ close_pane = "ctrl+shift+w"
 # detach this session view (last tab exits).
 detach = "ctrl+shift+x"
 # focus the pane to the left.
-focus_left = "alt+left"
+# Commented so this file does not pin a chord. Linux uses alt+left; macOS uses ctrl+alt+left. Uncomment to pin.
+# focus_left = "alt+left"
 # focus the pane to the right.
-focus_right = "alt+right"
+# Commented so this file does not pin a chord. Linux uses alt+right; macOS uses ctrl+alt+right. Uncomment to pin.
+# focus_right = "alt+right"
 # focus the pane above.
 focus_up = "alt+up"
 # focus the pane below.
@@ -246,6 +276,10 @@ focus_down = "alt+down"
 focus_border_next = "ctrl+shift+]"
 # cycle the focus border color back.
 focus_border_prev = "ctrl+shift+["
+# cycle the Graphite bar color forward.
+bar_color_next = "ctrl+shift+b"
+# cycle the Graphite bar color back.
+# bar_color_prev = []
 # swap the focused pane with the previous pane.
 # swap_pane_prev = []
 # swap the focused pane with the next pane.
@@ -274,8 +308,12 @@ session_split_down = "ctrl+alt+shift+b"
 terminal_switcher = "ctrl+shift+o"
 # view pending mail and pane input queue receipts.
 # agent_messages = []
+# focus the next pane that needs your attention.
+jump_needs_you = "ctrl+shift+u"
 # update, restart components, and inspect versions.
 # update_restart = []
+# show recent status messages, including hidden toasts.
+# recent_messages = []
 # close the active tab.
 close_tab = "ctrl+shift+q"
 # rename the active tab.
@@ -374,8 +412,10 @@ theme_picker = "ctrl+shift+,"
 # delete_space = []
 # move the focused pane to another saved space.
 # move_pane_to_space = []
-# focus the spaces rail.
+# focus and reorder saved spaces.
 # space_rail_focus = []
+# open the sidebar or vertical-rail context menu for the focused row.
+# space_rail_context_menu = []
 # choose rail position, autosave, and startup behavior.
 # space_settings = []
 # undo the last session removal or move.
@@ -410,6 +450,12 @@ select_all = "ctrl+shift+a"
 scroll_line_up = "ctrl+shift+up"
 # scroll history down one line.
 scroll_line_down = "ctrl+shift+down"
+# open transparency settings (graphite chrome only).
+# transparency = []
+# choose the Bars or Sidebar layout (graphite chrome only).
+# chrome_layout = []
+# collapse or expand the spaces sidebar.
+sidebar_collapse = "ctrl+alt+shift+s"
 # toggle rich focus (--experimental-rich).
 rich_focus = "ctrl+shift+g"
 
@@ -419,6 +465,11 @@ rich_focus = "ctrl+shift+g"
 os_tree = true
 # Speak mail, attention, pane-title notices, and cursor-line changes (PT-175). true|false.
 announce = true
+
+# -- spaces --
+[spaces]
+# Save the arrangement whenever it changes, after a short idle. true|false.
+autosave = true
 
 # -- remote spaces --
 # SSH destinations whose running Spaces the host can list (issue #24).
@@ -516,7 +567,15 @@ focused one: its surface is painted at
 
 `chrome_opacity` sets the tab strip and the footer rail; it defaults to
 `window_opacity`. The bars themselves become translucent; their text and
-badges do not.
+badges do not. Omit the key and the bars follow `window_opacity`.
+
+When `chrome_style = "graphite"`, the command palette action `transparency`
+opens a fixed 760×460 dialog that writes these keys. The list scrolls inside
+the dialog. The right side is a live preview of the ground, the bars, and the
+panes. Classic chrome does not list or open that dialog. Text, the cursor,
+status dots, badges, the active tab chip, the command field, and the focus
+ring stay opaque. X11 without a compositor and `--gpu` stay opaque. Lowering
+`window_opacity` from `1.0` on X11 or Wayland needs a restart.
 
 When several windows attach to the same session, a pane is sized to the
 smallest attached window. A larger window shows that pane at the top left
@@ -583,11 +642,14 @@ chosen by contrast.
 
 ### Themes
 
-Prismattyc ships 29 built-in themes:
+Prismattyc ships 32 built-in themes:
 
 | Config slug | Display name |
 | --- | --- |
 | `prismattyc-default` | Prismattyc Default |
+| `prismattyc` | Prismattyc (match system) |
+| `prismattyc-dark` | Prismattyc Dark |
+| `prismattyc-light` | Prismattyc Light |
 | `catppuccin-mocha` | Catppuccin Mocha |
 | `tokyo-night` | Tokyo Night |
 | `rose-pine-moon` | Rosé Pine Moon |
@@ -616,6 +678,28 @@ Prismattyc ships 29 built-in themes:
 | `hive-monochromatic-light` | Hive Monochromatic Light |
 | `hive-tri-tone-light` | Hive Tri-Tone Light |
 | `hive-muted-professional-light` | Hive Muted Professional Light |
+
+`prismattyc` is the default for new installs and for a config without `theme`.
+It follows the OS appearance (macOS, Windows, and desktops that report one) and
+paints Prismattyc Dark or Prismattyc Light, so the Graphite chrome, the
+terminal ground, text, cursor, and selection, and the macOS title band all use
+one palette; it falls back to Dark when the system reports nothing.
+`prismattyc-dark` and `prismattyc-light` pin one side. `prismattyc-default` is
+the earlier palette and stays available by name. Any other theme, a theme file,
+or `[theme_overrides]` keeps its own colors; overrides are re-applied after an
+appearance switch.
+
+The Graphite chrome follows the selected theme too. The three Prismattyc
+themes paint the design brief's tokens exactly. Every other theme, and a
+Prismattyc theme whose `chrome_bg` or `chrome_fg` is overridden, derives them:
+the tabs bar, spaces bar, side rail, and sidebar from `chrome_bg` (the spaces
+bar a shade off it), text from `chrome_fg`, the active chip from
+`tab_active_bg`, panes, title rows, and dialogs from `default_bg`, and the
+status dots from the theme's badge colors. Derived text is nudged toward
+readable contrast when a theme's pair is too close. An explicit `bar_color`
+still recolors both bars; without one, the bars follow the theme, and
+`Ctrl+Shift+B` cycles Theme, Graphite, Harbor, Moss, and Plum. The focus-ring
+spectrum and the light-cycle head stay brand chrome.
 
 The Omarchy themes use palettes from the official Omarchy repository, with
 window-control colors mapped to Prismattyc. Their [MIT notice](../crates/prismattyc-host/themes/OMARCHY-LICENSE.txt)
@@ -707,6 +791,32 @@ overrides. An explicit `[keys]` entry that drops its Command chord keeps only
 the listed chords; the host prints a warning naming the suppressed shortcut
 so it can be added back as an alias. `[]` unbinds without warning.
 
+On macOS, with `macos_shortcuts = true`, Cmd+Left and Cmd+Right send `^A` and
+`^E` (line start and end) and Cmd+Backspace sends `^U`. The flag stays off by
+default. Those three are bytes for the shell, not host actions, so they do
+not appear in `[keys]`.
+
+Home, End, and the arrow keys follow DECCKM. When the child turns application
+cursor mode on (`CSI ? 1 h`, which `smkx` sends), unmodified keys use SS3
+(`ESC O H`, `ESC O F`, `ESC O A` through `ESC O D`). Otherwise they use CSI
+(`ESC [ H`, `ESC [ F`, `ESC [ A` through `ESC [ D`). A modifier keeps the
+xterm CSI form `ESC [ 1 ; mod letter` whether or not DECCKM is on. Kitty
+keyboard disambiguate also keeps the CSI form. Page Up, Page Down, Delete,
+Insert, and the function keys are unchanged.
+
+On macOS the runtime default for `focus_left` and `focus_right` is
+`ctrl+alt+left` and `ctrl+alt+right` (Ctrl+Option+Left / Ctrl+Option+Right)
+when `[keys]` does not set those actions. The generated template leaves
+both keys commented, so a fresh config follows that default and
+Option+Left / Option+Right reach the shell as word jumps (`ESC b` and
+`ESC f`), matching Terminal.app and iTerm2. Linux uses `alt+left` and
+`alt+right` when those keys are absent. Focus up and down stay
+Option+Up and Option+Down, and those lines stay live in the template.
+Uncommenting a line pins it on every OS: `focus_left = "alt+left"` focuses
+the pane and does not send `ESC b`. A config written by an older build has
+those two lines live at the portable chords; comment them out to follow
+the platform default.
+
 Any action can be rebound by its name in `[keys]`; a string binds one chord,
 an array binds aliases, and `[]` disables it. The list command shows actions
 with no active chord as `(unbound)`.
@@ -732,6 +842,40 @@ Growing spawns empty shells to fill the target with focus unchanged;
 shrinking never closes panes, it zooms the focused pane and shows a
 "still running" toast (Ctrl+Shift+Z restores the split).
 
+## Layout
+
+`layout` picks the arrangement. `bars` (the default) shows the tabs bar and
+the spaces bar. `sidebar` replaces both with one tree of Spaces and their
+tabs. Graphite and classic both honor `sidebar`.
+
+Open the command palette and run `chrome_layout`, or open
+**Spaces settings…**. Both show **Layout: Bars** and **Layout: Sidebar**, only
+with Graphite chrome. Classic sets `layout` in this file. A choice applies to
+the window at once, with no restart. It is saved to `layout`, so other open
+windows follow it.
+
+With `layout = "sidebar"`, drag the inner edge to resize the tree. The pointer
+uses the column-resize cursor in Graphite and the left-right resize cursor in
+classic, and the edge highlights while the pointer is on it. The width is
+saved as `sidebar_width_px` (200–2000, default 256). A long name does not
+change the width: names ellipsize, and the list scrolls. Double-click the
+edge to return to 256. Dragging narrower than 200 snaps the sidebar closed.
+Panes reflow on a short interval during the drag, and once more when the
+button is released.
+
+The sidebar can collapse to a 52 px icon strip. Use the chevron in the
+sidebar header, `sidebar_collapse` (`Ctrl+Alt+Shift+S`, also in the command
+palette), or drag the edge below 200. The strip shows an icon for each space
+and each session, with the status dot and a tooltip for the full name. Click
+a space icon to open that space. Click a session icon to focus that pane.
+`+ New tab`, `+ New space`, and Commands sit at the bottom as icons. The strip
+scrolls inside its fixed width. Expanding restores the last dragged width.
+The collapsed state is saved as `sidebar_collapsed`.
+
+`space_rail = "right"` docks that sidebar on the right, with the grip on its
+left edge. Other `space_rail` values keep the sidebar on the left. The spaces
+rail itself is not drawn while the sidebar is showing.
+
 ## Spaces rail
 
 The rail shows the saved spaces (`spaces/*.json`, see `pmux space ls`) as
@@ -744,10 +888,25 @@ configuration and apply to the running windows.
 
 ```toml
 space_rail = "bottom"        # bottom (default) | left | top | right | off
+space_reorder = false         # enable mouse and Shift+arrow reordering
 space_rail_chip_cols = 0     # horizontal chip limit, 6-40; 0 = 28
 space_rail_width_cols = 18   # side rail width in cells, 8-60
 space_rail_pane_names = true # show live session names in a second row
 ```
+
+`[spaces] autosave` defaults to true. Adding or closing a tab, terminal, or
+agent session, changing a split or its ratio, using Arrange, dragging tabs
+or panes, or moving a session between spaces saves the arrangement after a
+short idle, about one second. The rail shows Saving…, then Saved. Manual
+Save writes the same file immediately. `[spaces] autosave = false` opts out.
+When that key is absent, the legacy `space_autosave` value applies. When
+both are absent, autosave stays on. Autosave does not run while a space is
+opening or being restored.
+
+Set `space_reorder = true` to drag saved Space chips in any rail or Graphite
+sidebar, or focus the rail and use `Shift+Left` / `Shift+Right` (horizontal)
+or `Shift+Up` / `Shift+Down` (vertical). The shared order is stored separately
+from each Space layout and is also used by `pmux space ls`.
 
 - `bottom` / `top`: one row of chips under the panes (above the Ctrl+Shift
   chord strip) or above the tab strip. Chips start at the left edge; each
@@ -800,6 +959,7 @@ Keyboard (palette actions, unbound by default; bind them under `[keys]`):
 | Action | Effect |
 |---|---|
 | `space_rail_focus` | move focus to the rail: ←/→ (↑/↓ on a side rail) or Tab step over the chips and `+`, Enter opens (or creates a fresh Space on `+`), F2 renames, Delete asks, Esc returns to the pane |
+| `space_rail_context_menu` | open the same menu as right-click on a space, session (tab), or pane row in the sidebar or vertical rail; Menu or Shift+F10 while the rail is focused also works |
 | `space_rail_next` / `space_rail_prev` | open the neighbour of the current space, wrapping |
 | `save_space` | save the current Space arrangement |
 | `open_space` / `delete_space` | the filtered pickers over the same files |
@@ -855,6 +1015,9 @@ the file applies changes on the next poll tick:
 - `focus_border` — recolors immediately; deleting the key reverts to default.
 - `theme` — swaps terminal defaults, ANSI 0–15, cursor/selection, and host
   chrome immediately; deleting the key restores Prismattyc Default.
+- `selective_border_rings` — off unless the file sets it true. Partial frames
+  then restore and re-stroke only rings that change (focus, pulse, sweep, or
+  damage under the ring). Deleting the key turns that off again.
 - `focus_border_animation` — takes effect on the next focus change; switching
   to `"none"` (or deleting the key) settles any in-progress sweep.
 - `focus_border_animation_ms` / `focus_border_animation_head` — apply from
@@ -906,8 +1069,22 @@ the file applies changes on the next poll tick:
   the PT-148 handle-hover preview only. An unfocused pane whose title
   changes still lingers in the title row for `bell_toaster_ms` and tints
   its handle. Deleting the key restores `focused`.
+- `link_click` — hot-reloaded, default `plain`. This applies to OSC 8 links
+  and detected HTTP(S) URLs. A click opens after release only when press and
+  release stay on the same link within half a cell; drags select text and
+  double/triple-clicks select a word/line. `modifier` requires Ctrl-click on
+  Linux or Command-click on macOS. Unmodified clicks still go to programs
+  using mouse reporting.
 - `drag_toaster` — applies to the next drag; deleting the key restores
   `true`.
+- `toasts` — hot-reloaded, default `all`. Status toasts are the chips that
+  answer Space, move, save, and restore actions ("cairn: view applied; 3
+  reused sessions…"). `errors` shows only failures and refused requests;
+  `off` shows none. A stricter level clears a live status chip it now
+  hides. Every status message, shown or hidden, stays in Recent messages:
+  Settings → Recent messages…, or the `recent_messages` palette action.
+  Bell, pasted-image, write-fail, and drag chips keep their own keys.
+  Settings → Toasts writes this key; deleting it restores `all`.
 - `visual_bell` / `audible_bell` / `bell_toaster` / `bell_toaster_ms` /
   `os_notify_bell` — apply to the next BEL; deleting a key restores its
   default (flash, sound, and toaster on, 10s linger; OS notification off).

@@ -8,6 +8,10 @@
 //! - Codex: first CR inserts; a second CR submits.
 //! - Claude: assumed one CR (not probed this session).
 //! - Kiro: assumed one CR (not probed).
+//! - Muse: one CR submits. muse-bin 1.4.3 binds composer submit to Enter
+//!   and newline to Shift+Enter, Ctrl+J, Ctrl+M, and Alt+Enter (keymap
+//!   strings, 2026-10-06). A raw CR is Enter in the TUI parser, same as
+//!   Grok. The verification nudge sends that same chord.
 
 #[cfg(not(windows))]
 use std::collections::{HashSet, VecDeque};
@@ -24,7 +28,58 @@ pub enum InjectAgent {
     Cursor,
     Codex,
     Kiro,
+    Muse,
     Unknown,
+}
+
+/// Lowercase id for logs and attention copy. `None` for a plain shell.
+#[must_use]
+pub fn inject_agent_slug(agent: InjectAgent) -> Option<&'static str> {
+    match agent {
+        InjectAgent::Claude => Some("claude"),
+        InjectAgent::Grok => Some("grok"),
+        InjectAgent::Cursor => Some("cursor"),
+        InjectAgent::Codex => Some("codex"),
+        InjectAgent::Kiro => Some("kiro"),
+        InjectAgent::Muse => Some("muse"),
+        InjectAgent::Unknown => None,
+    }
+}
+
+/// Shared file-name matcher for unix cmdlines and Windows argv.
+///
+/// `name` is a single path basename. Matching is case-insensitive.
+/// `muse` and `muse-*` (including `muse-bin*`) are Muse. `museum` is not.
+fn classify_agent_file_name(name: &str) -> Option<InjectAgent> {
+    let name = name.to_ascii_lowercase();
+    if name == "cursor-agent" || name.starts_with("cursor-agent-") || name.contains("cursor-agent")
+    {
+        return Some(InjectAgent::Cursor);
+    }
+    if agent_stem(&name, "codex") {
+        return Some(InjectAgent::Codex);
+    }
+    if agent_stem(&name, "claude") {
+        return Some(InjectAgent::Claude);
+    }
+    if agent_stem(&name, "grok") {
+        return Some(InjectAgent::Grok);
+    }
+    if agent_stem(&name, "kiro") {
+        return Some(InjectAgent::Kiro);
+    }
+    if agent_stem(&name, "muse") {
+        return Some(InjectAgent::Muse);
+    }
+    None
+}
+
+/// Exact `stem`, or `stem-*` (`muse-bin-1.4.3` is `muse-*`).
+fn agent_stem(name: &str, stem: &str) -> bool {
+    name == stem
+        || name
+            .strip_prefix(stem)
+            .is_some_and(|rest| rest.starts_with('-'))
 }
 
 /// Kitty keyboard protocol: Ctrl+Enter.
@@ -38,41 +93,29 @@ pub fn classify_cmdline(cmd: &str) -> Option<InjectAgent> {
     let tokens: Vec<&str> = normalized.split_whitespace().collect();
     let names: Vec<String> = tokens
         .iter()
-        .map(|t| {
-            Path::new(t)
+        .map(|token| {
+            Path::new(token)
                 .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(t)
+                .and_then(|name| name.to_str())
+                .unwrap_or(token)
                 .to_ascii_lowercase()
         })
         .collect();
-    let joined = names.join(" ");
-    if names
-        .iter()
-        .any(|n| n == "cursor-agent" || n.contains("cursor-agent"))
-        || joined.contains("cursor-agent")
-    {
-        return Some(InjectAgent::Cursor);
-    }
-    if names
-        .iter()
-        .any(|n| n == "codex" || n.starts_with("codex-"))
-    {
-        return Some(InjectAgent::Codex);
-    }
-    if names
-        .iter()
-        .any(|n| n == "claude" || n.starts_with("claude-"))
-    {
-        return Some(InjectAgent::Claude);
-    }
-    if names.iter().any(|n| n == "grok" || n.starts_with("grok-")) {
-        return Some(InjectAgent::Grok);
-    }
-    if names.iter().any(|n| n == "kiro" || n.starts_with("kiro-")) {
-        return Some(InjectAgent::Kiro);
-    }
-    None
+    // Family order matches the previous classifiers: cursor wins over a
+    // later token that names another agent.
+    const ORDER: [InjectAgent; 6] = [
+        InjectAgent::Cursor,
+        InjectAgent::Codex,
+        InjectAgent::Claude,
+        InjectAgent::Grok,
+        InjectAgent::Kiro,
+        InjectAgent::Muse,
+    ];
+    ORDER.into_iter().find(|&kind| {
+        names
+            .iter()
+            .any(|name| classify_agent_file_name(name) == Some(kind))
+    })
 }
 
 #[cfg(windows)]
@@ -140,19 +183,7 @@ pub(crate) fn classify_windows_argv(args: &[String]) -> Option<InjectAgent> {
         .strip_suffix(".cmd")
         .or_else(|| name.strip_suffix(".bat"))
         .unwrap_or(&name);
-    if name == "cursor-agent" || name.starts_with("cursor-agent-") {
-        Some(InjectAgent::Cursor)
-    } else if name == "codex" || name.starts_with("codex-") {
-        Some(InjectAgent::Codex)
-    } else if name == "claude" || name.starts_with("claude-") {
-        Some(InjectAgent::Claude)
-    } else if name == "grok" || name.starts_with("grok-") {
-        Some(InjectAgent::Grok)
-    } else if name == "kiro" || name.starts_with("kiro-") {
-        Some(InjectAgent::Kiro)
-    } else {
-        None
-    }
+    classify_agent_file_name(name)
 }
 
 /// Writes to send, in order. Codex needs two writes (text+CR, then CR).
@@ -167,7 +198,11 @@ pub fn inject_writes(agent: InjectAgent) -> Vec<Vec<u8>> {
             first.push(b'\r');
             vec![first, vec![b'\r']]
         }
-        InjectAgent::Claude | InjectAgent::Grok | InjectAgent::Kiro | InjectAgent::Unknown => {
+        InjectAgent::Claude
+        | InjectAgent::Grok
+        | InjectAgent::Kiro
+        | InjectAgent::Muse
+        | InjectAgent::Unknown => {
             let mut one = text.to_vec();
             one.push(b'\r');
             vec![one]
@@ -299,6 +334,25 @@ mod tests {
     }
 
     #[test]
+    fn classify_muse_binary_and_not_museum() {
+        assert_eq!(classify_cmdline("muse"), Some(InjectAgent::Muse));
+        assert_eq!(classify_cmdline("MUSE"), Some(InjectAgent::Muse));
+        assert_eq!(
+            classify_cmdline("/Users/x/.local/bin/muse-bin-1.4.3-R5018.1 --yolo"),
+            Some(InjectAgent::Muse)
+        );
+        assert_eq!(
+            classify_cmdline("/Users/x/.local/bin/muse-bin-1.4.3-R5018.1\0--model\0spark\0--yolo"),
+            Some(InjectAgent::Muse)
+        );
+        assert_eq!(classify_cmdline("muse-bin"), Some(InjectAgent::Muse));
+        assert_eq!(classify_cmdline("museum"), None);
+        assert_eq!(classify_cmdline("musebin"), None);
+        assert_eq!(classify_cmdline("/opt/museum/bin/bash --yolo"), None);
+        assert_eq!(inject_agent_slug(InjectAgent::Muse), Some("muse"));
+    }
+
+    #[test]
     fn cursor_writes_text_then_ctrl_enter() {
         let w = inject_writes(InjectAgent::Cursor);
         assert_eq!(w.len(), 2);
@@ -316,11 +370,12 @@ mod tests {
     }
 
     #[test]
-    fn claude_grok_kiro_unknown_are_one_cr() {
+    fn claude_grok_kiro_muse_unknown_are_one_cr() {
         for agent in [
             InjectAgent::Claude,
             InjectAgent::Grok,
             InjectAgent::Kiro,
+            InjectAgent::Muse,
             InjectAgent::Unknown,
         ] {
             let w = inject_writes(agent);

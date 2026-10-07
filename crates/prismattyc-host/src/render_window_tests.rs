@@ -448,10 +448,12 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
             attach_tabs::AttachTabRecord {
                 title: "one".into(),
                 sessions: vec!["missing-one".into()],
+                layout: None,
             },
             attach_tabs::AttachTabRecord {
                 title: "two".into(),
                 sessions: vec!["missing-two".into()],
+                layout: None,
             },
         ],
         active_tab: 1,
@@ -470,13 +472,15 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
         assert!(host.attach_pane_sessions.is_empty());
         let pixels = frame(host);
         let size = host.window.inner_size();
-        let rail = space_rail::RailLayout::for_window(
-            host.mux.geom(),
-            size.width as usize,
-            size.height as usize,
-            &host.space_rail.names,
-        )
-        .unwrap();
+        let rail = host
+            .space_rail
+            .layout(
+                host.mux.geom(),
+                size.width as usize,
+                size.height as usize,
+                host.spacing.space_rail_pane_names,
+            )
+            .unwrap();
         let (x, y, _, _) = rail
             .chip_bounds(host.space_rail.names.len(), host.space_rail.names.len())
             .unwrap();
@@ -629,6 +633,7 @@ fn verify_config_reload(app: &mut App, id: WindowId) {
 
     let mut reloaded = app.file_config.clone();
     reloaded.render_timer = Some(config::RenderTimer::Log);
+    reloaded.toasts = Some(config::ToastLevel::Errors);
     {
         let host = app.windows.get_mut(&id).unwrap();
         host.render_timer = config::RenderTimer::Off;
@@ -642,6 +647,7 @@ fn verify_config_reload(app: &mut App, id: WindowId) {
     assert_eq!(app.file_config, reloaded);
     let host = app.windows.get(&id).unwrap();
     assert_eq!(host.render_timer, config::RenderTimer::Log);
+    assert_eq!(host.toasts, config::ToastLevel::Errors);
     assert!(host.dirty);
     assert_eq!(host.pending_full_repaint, Some(FullRepaintReason::Fallback));
 }
@@ -804,6 +810,7 @@ fn verify_pixels_and_overlays(host: &mut HostState) {
         selected: Some(0),
         family: None,
         scroll: 0,
+        wheel_remainder_milli_px: 0,
     });
     assert_ne!(
         frame(host),
@@ -817,6 +824,7 @@ fn verify_pixels_and_overlays(host: &mut HostState) {
         pane: host.mux.focused_id(),
         until: Instant::now() + Duration::from_secs(10),
         label: " test bell ".into(),
+        status: None,
     });
     assert_ne!(
         frame(host),
@@ -824,6 +832,32 @@ fn verify_pixels_and_overlays(host: &mut HostState) {
         "pane bell toast must reach the framebuffer"
     );
     host.bell_toasts.clear();
+    assert_eq!(frame(host), plain);
+
+    // #171: each `toasts` level gates status chips; history keeps them all.
+    let recorded = host.status_history.newest_first().count();
+    let hidden = host.status_history.hidden();
+    host.toasts = config::ToastLevel::Off;
+    rail_toast(host, " cairn: view applied ");
+    rail_error_toast(host, " move failed: gone ");
+    assert!(host.bell_toasts.is_empty(), "off hides every status toast");
+    assert_eq!(frame(host), plain, "a hidden toast paints nothing");
+    host.toasts = config::ToastLevel::Errors;
+    rail_toast(host, " Saved ");
+    assert!(host.bell_toasts.is_empty(), "errors hides info toasts");
+    rail_error_toast(host, " Save failed ");
+    assert_ne!(frame(host), plain, "errors still shows an error toast");
+    host.toasts = config::ToastLevel::All;
+    rail_toast(host, " opening space cairn ");
+    assert_eq!(host.bell_toasts[0].label, " opening space cairn ");
+    assert_eq!(
+        host.status_history.newest_first().count(),
+        recorded + 5,
+        "every message reaches Recent messages"
+    );
+    assert_eq!(host.status_history.hidden(), hidden + 3);
+    host.bell_toasts.clear();
+    host.toasts = config::ToastLevel::default();
     assert_eq!(frame(host), plain);
 }
 
@@ -873,6 +907,7 @@ fn verify_pane_damage_and_chrome(host: &mut HostState) {
     let first = host.mux.focused_id();
     verify_split_panes(host, first);
     verify_steady_four_pane_partial(host);
+    verify_selective_border_rings(host);
     verify_pane_local_bell(host);
     verify_cursor_only_partial_frames(host);
     verify_same_layout_tab_switch(host);
@@ -1049,9 +1084,25 @@ fn verify_mail_scroll_during_sweep(host: &mut HostState) {
         .unwrap();
     let focused = host.mux.focused_id();
     let rect = host.mux.rects().find(|(id, _)| *id == focused).unwrap().1;
+    // Pad, gap, and gutter are zero, so the grid shares the slot's x and
+    // width. Graphite keeps the title row above that grid and centres the
+    // leftover pixels that are not a whole cell row.
+    let geom = host.mux.geom();
+    let (sx, sy, sw, sh) = geom.pane_slot_px(rect);
+    let header = geom.chrome.pane_header();
+    assert!(header > 0, "graphite pane header sits above the grid");
+    let avail_h = sh.saturating_sub(header);
+    let cell_h = geom.cell_h.max(1);
+    let used_h = (avail_h / cell_h).saturating_mul(cell_h);
+    let extra_h = avail_h.saturating_sub(used_h);
     assert_eq!(
-        host.mux.geom().pane_slot_px(rect),
-        host.mux.geom().pane_content_px(rect)
+        geom.pane_content_px(rect),
+        (
+            sx,
+            sy.saturating_add(header).saturating_add(extra_h / 2),
+            sw,
+            used_h,
+        )
     );
     let pane = host.mux.focused_mut();
     pane.mail_depth = 1;
@@ -1068,7 +1119,30 @@ fn verify_mail_scroll_during_sweep(host: &mut HostState) {
     let _ = host.mux.focused_mut().emulator.feed(b"\x1b[T");
     let scrolled = paint_retained(host, &mut retained);
     assert_eq!(scrolled.full_repaint_reason, None);
-    assert_eq!(scrolled.rows_scrolled_as_blit, 0);
+    // Multi-pane mail is a 20px chip at the slot corner. The Graphite title
+    // row is taller than that chip, so the chip sits above the grid and a
+    // cell scroll may blit. A chip that still covers the grid must not.
+    let (cx, cy, cw, ch) = geom.pane_content_px(rect);
+    let mail = super::frame_damage::mail_chrome_box(
+        super::frame_damage::PixelRect::new(sx, sy, sw, sh),
+        super::frame_damage::PixelRect::new(cx, cy, cw, ch),
+        host.mux.pane_count() > 1,
+    );
+    let mail_on_grid = mail.x < cx.saturating_add(cw)
+        && cx < mail.x.saturating_add(mail.width)
+        && mail.y < cy.saturating_add(ch)
+        && cy < mail.y.saturating_add(mail.height);
+    if mail_on_grid {
+        assert_eq!(
+            scrolled.rows_scrolled_as_blit, 0,
+            "mail on the grid must not be copied by a scroll blit"
+        );
+    } else {
+        assert!(
+            scrolled.rows_scrolled_as_blit > 0,
+            "mail above the grid leaves the cell scroll free to blit"
+        );
+    }
     assert!(scrolled.cells_painted > 0);
     assert!(scrolled.cells_painted < render_cells_painted(host));
     assert_eq!(
@@ -1355,6 +1429,89 @@ fn verify_steady_four_pane_partial(host: &mut HostState) {
     assert!(partial.cells_painted > 0);
     assert!(partial.cells_painted < render_cells_painted(host));
     assert_eq!(retained, full_frame_oracle(host));
+}
+
+/// Flag-on partial frames leave settled rings alone and still match a full paint.
+fn verify_selective_border_rings(host: &mut HostState) {
+    let saved_flag = host.selective_border_rings;
+    let saved_focus = host.window_focused;
+    let saved_cycle = host.light_cycle;
+    let saved_pulse = host.last_pulse_step;
+    let saved_output: Vec<_> = host
+        .mux
+        .active_pane_ids()
+        .into_iter()
+        .filter_map(|id| host.mux.pane(id).map(|pane| (id, pane.last_output_at)))
+        .collect();
+    // Activity expires after 1.5s. Restamp around each oracle so a slow
+    // full paint cannot change the spaces-bar working count between the
+    // retained frame and the comparison, and put the old stamps back so
+    // the strip-pulse check later in this window is not racing that clock.
+    let stamp_active = |host: &mut HostState| {
+        let now = Instant::now();
+        for id in host.mux.active_pane_ids() {
+            if let Some(pane) = host.mux.pane_mut(id) {
+                pane.last_output_at = Some(now);
+            }
+        }
+    };
+    host.selective_border_rings = true;
+    host.window_focused = false;
+    host.light_cycle = false;
+    stamp_active(host);
+    let mut retained = frame(host);
+    let _ = host
+        .mux
+        .focused_mut()
+        .emulator
+        .feed(b"\x1b[3;2Hsteady ring");
+    stamp_active(host);
+    let partial = paint_retained(host, &mut retained);
+    assert_eq!(
+        partial.full_repaint_reason, None,
+        "steady output stays partial with selective rings"
+    );
+    assert_eq!(
+        host.border_underlay.last_restored_slots, 0,
+        "a cell update must not restore settled rings"
+    );
+    stamp_active(host);
+    assert_eq!(retained, full_frame_oracle(host));
+
+    // A focus move rewrites unbounded chrome state and is a full frame.
+    // The running-dot pulse stays partial and still crosses the top ring strip.
+    host.window_focused = true;
+    stamp_active(host);
+    host.last_pulse_step = 0;
+    let mut retained = frame(host);
+    stamp_active(host);
+    host.last_pulse_step = 1;
+    let pulsed = paint_retained(host, &mut retained);
+    assert_eq!(
+        pulsed.full_repaint_reason, None,
+        "a pulse step stays partial with selective rings"
+    );
+    assert!(
+        host.border_underlay.last_restored_slots >= 1,
+        "pulse damage under the ring restores that ring"
+    );
+    stamp_active(host);
+    assert_eq!(
+        retained,
+        full_frame_oracle(host),
+        "a restored pulse ring must match a full repaint"
+    );
+
+    host.selective_border_rings = saved_flag;
+    host.window_focused = saved_focus;
+    host.light_cycle = saved_cycle;
+    host.last_pulse_step = saved_pulse;
+    for (id, at) in saved_output {
+        if let Some(pane) = host.mux.pane_mut(id) {
+            pane.last_output_at = at;
+        }
+    }
+    frame(host);
 }
 
 fn verify_same_layout_tab_switch(host: &mut HostState) {
@@ -1711,19 +1868,32 @@ fn verify_decision_handlers(host: &mut HostState) {
 
     host.tab_strip_mode = config::TabStripMode::Always;
     App::refit_geom(host, host.window.inner_size(), Some("decision test"));
+    // Graphite hit-testing uses the bar stored by the last paint. Classic
+    // derives the close from the cell grid and does not need that cache.
+    // The paint must not replace the raster the status snapshot publishes:
+    // that raster still carries the preedit and OSD guards.
+    let saved_frame = host.render_frame;
+    frame(host);
+    host.render_frame = saved_frame;
     let stride = host.window.inner_size().width as usize;
-    let close_x = (0..stride).find(|x| {
-        matches!(
-            host.mux.tab_strip_hit(*x, 0, stride, false),
-            Some(mux::StripHit::Tab { close: true, .. })
-        )
+    let geom = host.mux.geom();
+    let strip_top = geom.tab_strip_y();
+    let strip_h = geom.top_chrome_px;
+    let close = (strip_top..strip_top.saturating_add(strip_h)).find_map(|y| {
+        (0..stride).find_map(|x| {
+            matches!(
+                host.mux.tab_strip_hit(x, y, stride, false),
+                Some(mux::StripHit::Tab { close: true, .. })
+            )
+            .then_some((x, y))
+        })
     });
-    let Some(close_x) = close_x else {
-        panic!("real tab strip must expose a close hit for the decision test");
+    let Some((close_x, close_y)) = close else {
+        panic!("real tab strip must expose a close hit (y={strip_top} h={strip_h})");
     };
 
     host.tab_rename = None;
-    host.pointer_px = Some((close_x as f64, 0.0));
+    host.pointer_px = Some((close_x as f64, close_y as f64));
     assert_eq!(
         handle_strip_click(host, MouseButton::Right),
         StripClickResult::Handled
@@ -1734,14 +1904,23 @@ fn verify_decision_handlers(host: &mut HostState) {
     );
     cancel_tab_rename(host);
 
-    host.pointer_px = Some((close_x as f64, host.font.cell_h as f64));
-    assert_eq!(
-        handle_strip_click(host, MouseButton::Right),
-        StripClickResult::Handled
-    );
+    // Classic keeps a handle row under the title. Graphite's whole bar is
+    // the title row, so the first pixel under the bar is outside the strip.
+    let below_y = if geom.chrome.graphite {
+        strip_top.saturating_add(strip_h)
+    } else {
+        host.font.cell_h
+    };
+    host.pointer_px = Some((close_x as f64, below_y as f64));
+    let below = handle_strip_click(host, MouseButton::Right);
+    if geom.chrome.graphite {
+        assert_eq!(below, StripClickResult::NotHandled);
+    } else {
+        assert_eq!(below, StripClickResult::Handled);
+    }
     assert!(
         host.tab_rename.is_none(),
-        "the first row after the title must not rename the tab"
+        "a click off the title row must not rename the tab"
     );
 
     verify_mux_apply_wrappers(host, &args);
@@ -1989,6 +2168,145 @@ pub(super) fn session_naming_in_private_window() {
     };
     let app = App::new(cli, config, None, event_loop.create_proxy()).unwrap();
     let mut proof = NamingProof {
+        app,
+        completed: false,
+    };
+    event_loop.run_app(&mut proof).unwrap();
+    assert!(proof.completed);
+    std::fs::write(std::env::var_os(RESULT_ENV).unwrap(), b"complete").unwrap();
+}
+
+/// Issue #139: a press on the Graphite Space dropdown opens the picker, and
+/// the `+` and command field reach their actions the same way.
+#[test]
+fn graphite_tabs_bar_clicks_open_their_actions() {
+    if std::env::var_os(CHILD_ENV).is_none() {
+        run_in_private_display("render_window_tests::graphite_tabs_bar_clicks_open_their_actions");
+        return;
+    }
+
+    struct ClickProof {
+        app: App,
+        completed: bool,
+    }
+    impl ApplicationHandler<UserAction> for ClickProof {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            let id = self.app.open_window(event_loop, false).unwrap();
+            let host = self.app.windows.get_mut(&id).unwrap();
+            assert!(
+                host.mux.geom().chrome.graphite,
+                "default chrome is Graphite"
+            );
+            assert_ne!(host.spacing.layout, config::LayoutMode::Sidebar);
+            frame(host);
+            let stride = host.window.inner_size().width as usize;
+            let find = |host: &HostState, want: mux::StripHit| -> (usize, usize) {
+                let geom = host.mux.geom();
+                let top = geom.tab_strip_y();
+                let bottom = top.saturating_add(geom.top_chrome_px);
+                for y in top..bottom {
+                    for x in 0..stride {
+                        if host
+                            .mux
+                            .tab_strip_hit(x, y, stride, reserve_strip_end(host))
+                            == Some(want)
+                        {
+                            return (x, y);
+                        }
+                    }
+                }
+                panic!("tabs bar missing {want:?}");
+            };
+            let press = |host: &mut HostState, at: (usize, usize), action: keybind::Action| {
+                host.pointer_px = Some((at.0 as f64 + 0.5, at.1 as f64 + 0.5));
+                host.tab_rename = None;
+                assert_eq!(
+                    handle_strip_click(host, MouseButton::Left),
+                    StripClickResult::Action(action),
+                    "{action:?}"
+                );
+                assert_eq!(
+                    dispatch_strip_action(host, action, "/bin/cat", &[]),
+                    Dispatch::Handled,
+                    "{action:?}"
+                );
+            };
+
+            let space = find(host, mux::StripHit::SpaceMenu);
+            press(host, space, keybind::Action::OpenSpace);
+            assert!(
+                host.space_picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.kind == palette::SpacePickerKind::Open),
+                "Space dropdown must open the space picker"
+            );
+            assert!(host.palette.is_none());
+            frame(host);
+            let (panel_x, panel_y, panel_w, panel_h) = {
+                let layout = host
+                    .palette_layout
+                    .as_ref()
+                    .expect("open picker paints a palette");
+                (
+                    layout.panel_x,
+                    layout.panel_y,
+                    layout.panel_w,
+                    layout.panel_h,
+                )
+            };
+            let (width, height) = (
+                host.window.inner_size().width as usize,
+                host.window.inner_size().height as usize,
+            );
+            let (left, top) = space_picker_anchor(host).expect("bars layout anchors the picker");
+            assert_eq!(panel_x, left.min(width.saturating_sub(panel_w)));
+            assert_eq!(panel_y, top.min(height.saturating_sub(panel_h)));
+            host.space_picker = None;
+            host.palette_layout = None;
+
+            let command = find(host, mux::StripHit::Command);
+            press(host, command, keybind::Action::CommandPalette);
+            assert!(
+                host.palette.is_some(),
+                "command field must open the palette"
+            );
+            assert!(host.space_picker.is_none());
+            host.palette = None;
+            host.palette_layout = None;
+
+            let tabs = host.mux.tab_count();
+            let plus = find(host, mux::StripHit::NewTab);
+            press(host, plus, keybind::Action::NewTab);
+            assert!(
+                host.session_prompt.is_some() || host.mux.tab_count() > tabs,
+                "+ must start a new tab"
+            );
+            assert!(host.space_picker.is_none());
+            assert!(host.palette.is_none());
+
+            self.completed = true;
+            self.app.windows.clear();
+            event_loop.exit();
+        }
+
+        fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+    }
+
+    let event_loop = EventLoop::<UserAction>::with_user_event()
+        .with_x11()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
+    let cli = Cli::parse(["--no-splash", "/bin/cat"].into_iter().map(String::from)).unwrap();
+    let config = config::ConfigFile {
+        a11y: Some(config::A11ySection {
+            os_tree: Some(false),
+            announce: Some(false),
+        }),
+        ..config::ConfigFile::default()
+    };
+    let app = App::new(cli, config, None, event_loop.create_proxy()).unwrap();
+    let mut proof = ClickProof {
         app,
         completed: false,
     };

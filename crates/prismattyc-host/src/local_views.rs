@@ -116,13 +116,27 @@ pub(super) fn records(host: &HostState) -> attach_tabs::AttachTabsFile {
             .into_iter()
             .map(|(title, panes)| {
                 let mut seen = HashSet::new();
-                let sessions = panes
+                let sessions: Vec<String> = panes
                     .iter()
                     .filter_map(|pane| host.mux.attach_session_of(*pane))
                     .filter(|id| seen.insert(id.to_string()))
                     .map(str::to_string)
                     .collect();
-                attach_tabs::AttachTabRecord { title, sessions }
+                let layout = panes
+                    .first()
+                    .and_then(|pane| host.mux.pane_window(*pane))
+                    .and_then(|window| {
+                        let tree = host.mux.window_layout(window)?;
+                        let captured = attach_tabs::tab_layout_from_panes(&tree, |pane| {
+                            host.mux.attach_session_of(pane).map(str::to_string)
+                        });
+                        attach_tabs::layout_for_sessions(captured, &sessions)
+                    });
+                attach_tabs::AttachTabRecord {
+                    title,
+                    sessions,
+                    layout,
+                }
             })
             .collect();
         file.active_tab = host.mux.selected_tab_index();
@@ -214,6 +228,7 @@ fn live_layout(owner: &Option<String>) -> Result<attach_tabs::AttachTabsFile> {
         .map(|s| attach_tabs::AttachTabRecord {
             title: s.name.clone(),
             sessions: vec![s.id.to_string()],
+            layout: None,
         })
         .collect();
     Ok(attach_tabs::AttachTabsFile {
@@ -354,7 +369,7 @@ pub(super) fn persist_and_restore(host: &mut HostState, closing: bool) {
                 }
                 Err(error) => {
                     host.local_views.pending.insert(owner, recipe);
-                    rail_toast(host, &format!("Could not restore blank terminals: {error}"));
+                    rail_error_toast(host, &format!("Could not restore blank terminals: {error}"));
                     return;
                 }
             }
@@ -392,7 +407,7 @@ pub(super) fn persist_and_restore(host: &mut HostState, closing: bool) {
         Ok(())
     };
     if let Err(error) = write() {
-        rail_toast(
+        rail_error_toast(
             host,
             &format!("Could not save blank terminal layout: {error}"),
         );

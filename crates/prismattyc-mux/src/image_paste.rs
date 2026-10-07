@@ -279,8 +279,14 @@ mod tests {
         let path = write_paste_png_in(&dir, 1, 1, &[0, 255, 0, 255]).unwrap();
         assert!(path.starts_with(&dir));
         assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("png"));
-        let bytes = fs::read(&path).unwrap();
-        assert!(bytes.len() > 8);
+        let decoder = png::Decoder::new(fs::File::open(&path).unwrap());
+        let mut reader = decoder.read_info().unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut pixels).unwrap();
+        assert_eq!((info.width, info.height), (1, 1));
+        assert_eq!(info.color_type, png::ColorType::Rgba);
+        assert_eq!(info.bit_depth, png::BitDepth::Eight);
+        assert_eq!(&pixels[..4], &[0, 255, 0, 255]);
         let _ = fs::remove_dir_all(dir);
     }
 

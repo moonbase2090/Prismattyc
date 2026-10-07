@@ -12,6 +12,10 @@ enum Choice {
     None,
     Settings,
     Preference(String, String),
+    Layout(config::LayoutMode),
+    Messages,
+    /// One Recent messages row; nothing to do on Enter.
+    Message,
     Back,
     Session(String),
     View(String),
@@ -42,11 +46,14 @@ enum Choice {
 enum Page {
     Maintenance,
     Settings,
+    Layout,
     Team,
     Session(String),
     Templates,
     Preview(String, String),
     Text(String),
+    /// Recent messages (#171): (message, age and state) rows, newest first.
+    Messages(Vec<(String, String)>),
 }
 
 #[derive(Clone)]
@@ -81,6 +88,9 @@ pub(super) struct Panel {
     pending: Option<Receiver<Result<Payload, String>>>,
     pub scroll: usize,
     columns: usize,
+    /// Live `layout` while Graphite chrome is on, else None. The Layout rows
+    /// are shown only when this is set (#150).
+    chrome_layout: Option<config::LayoutMode>,
 }
 
 impl Panel {
@@ -120,6 +130,85 @@ impl Panel {
                 choice,
             });
         }
+    }
+
+    /// Bars or Sidebar, with the live choice marked. Only for Graphite chrome.
+    fn layout_rows(&mut self) {
+        let Some(current) = self.chrome_layout else {
+            return;
+        };
+        for (mode, label, detail) in [
+            (
+                config::LayoutMode::Bars,
+                "Layout: Bars",
+                "Tabs bar and spaces bar",
+            ),
+            (
+                config::LayoutMode::Sidebar,
+                "Layout: Sidebar",
+                "One tree of Spaces and their tabs",
+            ),
+        ] {
+            self.row(
+                label,
+                if current == mode { "Selected" } else { detail },
+                Choice::Layout(mode),
+            );
+        }
+    }
+
+    /// Toasts: all, errors, or off, with the saved level marked, then the
+    /// way into Recent messages (#171).
+    fn toast_rows(&mut self, current: config::ToastLevel) {
+        for (level, detail) in [
+            (config::ToastLevel::All, "Show every status message"),
+            (
+                config::ToastLevel::Errors,
+                "Show failures only; keep the rest in Recent messages",
+            ),
+            (
+                config::ToastLevel::Off,
+                "Hide status messages; keep them in Recent messages",
+            ),
+        ] {
+            self.row(
+                format!("Toasts: {}", level.as_str()),
+                if current == level { "Selected" } else { detail },
+                Choice::Preference("toasts".into(), level.as_str().into()),
+            );
+        }
+        self.row(
+            "Recent messages…",
+            "Status messages, including hidden ones",
+            Choice::Messages,
+        );
+    }
+
+    fn link_click_rows(&mut self, current: crate::link_click::Mode) {
+        for (mode, value, detail) in [
+            (
+                crate::link_click::Mode::Plain,
+                "plain",
+                "Open links with a plain click",
+            ),
+            (
+                crate::link_click::Mode::Modifier,
+                "modifier",
+                "Require Cmd/Ctrl-click to open links",
+            ),
+        ] {
+            self.row(
+                format!("Link clicks: {value}"),
+                if current == mode { "Selected" } else { detail },
+                Choice::Preference("link_click".into(), value.into()),
+            );
+        }
+    }
+
+    /// Settings pages keep one panel size and scroll inside it.
+    pub(super) fn fixed_size(&self) -> bool {
+        self.input.is_none()
+            && matches!(self.page, Page::Settings | Page::Layout | Page::Messages(_))
     }
 
     fn rebuild(&mut self) {
@@ -187,7 +276,16 @@ impl Panel {
                     );
                 }
             }
+            Page::Layout => {
+                self.layout_rows();
+                self.row(
+                    "More settings…",
+                    "Rail, autosave, and startup",
+                    Choice::Settings,
+                );
+            }
             Page::Settings => {
+                self.layout_rows();
                 let config = config::load(&config::config_path()).unwrap_or_default();
                 for side in ["bottom", "left", "top", "right"] {
                     self.row(
@@ -206,11 +304,11 @@ impl Panel {
                     "Recreate fresh shells, working directories, and split layouts on restore",
                     Choice::Preference("restore_blank_terminals".into(), (!restore).to_string()),
                 );
-                let enabled = config.space_autosave.unwrap_or(false);
+                let enabled = config.space_autosave_enabled();
                 self.row(
                     format!("Autosave: {}", if enabled { "on" } else { "off" }),
-                    "Save changed layouts after two idle seconds",
-                    Choice::Preference("space_autosave".into(), (!enabled).to_string()),
+                    "Save the arrangement after a short idle",
+                    Choice::Preference("spaces.autosave".into(), (!enabled).to_string()),
                 );
                 for (value, label, detail) in [
                     (
@@ -258,6 +356,23 @@ impl Panel {
                         Choice::Preference("space_startup".into(), value.into()),
                     );
                 }
+                self.link_click_rows(config.link_click());
+                self.toast_rows(config.toasts());
+            }
+            Page::Messages(rows) => {
+                if rows.is_empty() {
+                    self.row("No status messages yet", "", Choice::None);
+                }
+                // Age and state in the name column; the message gets the wide
+                // column so Graphite does not clip it to the name width.
+                for (message, detail) in rows {
+                    self.rows.push(Row {
+                        label: detail,
+                        detail: message,
+                        choice: Choice::Message,
+                    });
+                }
+                self.row("Back to settings", "", Choice::Settings);
             }
             Page::Team => {
                 if let Some(details) = self.details.clone() {
@@ -461,12 +576,65 @@ pub(super) fn maintenance(host: &mut HostState) {
     }
 }
 
+/// Open the Layout page (#150). Graphite chrome only; classic has one layout.
+pub(super) fn layout(host: &mut HostState) {
+    if host.spacing.chrome_style != config::ChromeStyle::Graphite {
+        return;
+    }
+    settings(host);
+    let panel = host.space_panel.as_mut().unwrap();
+    panel.page = Page::Layout;
+    panel.rebuild();
+    let current = panel
+        .rows
+        .iter()
+        .position(|r| matches!(r.choice, Choice::Layout(mode) if Some(mode) == panel.chrome_layout))
+        .unwrap_or(0);
+    if let Some(menu) = host.context_menu.as_mut() {
+        menu.selected = current;
+    }
+}
+
+/// Write `layout` the same way the other settings rows save their keys.
+/// Comments and other keys in the file are kept.
+fn save_layout(path: &std::path::Path, mode: config::LayoutMode) -> anyhow::Result<()> {
+    config::save_preference(path, "layout", toml_edit::value(mode.as_str()))
+}
+
+/// Open Recent messages: every status message, shown or hidden (#171).
+pub(super) fn messages(host: &mut HostState) {
+    settings(host);
+    show_messages(host);
+}
+
+fn show_messages(host: &mut HostState) {
+    let rows = status_toasts::rows(&host.status_history, Instant::now());
+    let Some(panel) = host.space_panel.as_mut() else {
+        return;
+    };
+    panel.page = Page::Messages(rows);
+    panel.scroll = 0;
+    panel.rebuild();
+}
+
 pub(super) fn settings(host: &mut HostState) {
     open(host, host.space_rail.current.clone().unwrap_or_default());
     let panel = host.space_panel.as_mut().unwrap();
     panel.pending = None;
     panel.page = Page::Settings;
     panel.rebuild();
+}
+
+pub(super) fn refresh_settings_link_click(host: &mut HostState) {
+    let refresh = host
+        .space_panel
+        .as_mut()
+        .filter(|panel| matches!(panel.page, Page::Settings))
+        .map(|panel| panel.rebuild())
+        .is_some();
+    if refresh {
+        host.dirty = true;
+    }
 }
 
 fn command(host: &mut HostState, args: Vec<String>, kind: &'static str) {
@@ -534,6 +702,8 @@ pub(super) fn open(host: &mut HostState, name: String) {
         scroll: 0,
         columns: (host.window.inner_size().width as usize / host.font.cell_w.max(1))
             .saturating_sub(10),
+        chrome_layout: (host.spacing.chrome_style == config::ChromeStyle::Graphite)
+            .then_some(host.spacing.layout),
     });
     command(
         host,
@@ -551,6 +721,8 @@ pub(super) fn rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
             Page::Maintenance => "UPDATE AND RESTART".into(),
             Page::Text(_) if panel.maintenance => "UPDATE AND RESTART RESULT".into(),
             Page::Settings => "SPACES SETTINGS".into(),
+            Page::Layout => "LAYOUT".into(),
+            Page::Messages(_) => "RECENT MESSAGES".into(),
             Page::Session(name) => format!("{} — {name}", panel.space),
             Page::Templates => "TEAM TEMPLATES".into(),
             Page::Preview(_, name) => format!("PREVIEW {name}"),
@@ -734,23 +906,52 @@ pub(super) fn activate(host: &mut HostState, index: usize) {
         Choice::Command(args) => {
             command(host, args, "maintenance");
         }
-        Choice::None => return,
+        Choice::None | Choice::Message => return,
         Choice::Settings => {
             panel.page = Page::Settings;
             panel.rebuild();
         }
+        Choice::Messages => show_messages(host),
         Choice::Preference(key, value) => {
-            let item = if key == "space_autosave" || key == "restore_blank_terminals" {
-                toml_edit::value(value == "true")
+            let saved = if key == "spaces.autosave" {
+                config::save_spaces_autosave(&config::config_path(), value == "true")
             } else {
-                toml_edit::value(value)
+                let item = if key == "space_autosave" || key == "restore_blank_terminals" {
+                    toml_edit::value(value == "true")
+                } else {
+                    toml_edit::value(value.as_str())
+                };
+                config::save_preference(&config::config_path(), &key, item)
             };
-            match config::save_preference(&config::config_path(), &key, item) {
+            match saved {
+                Ok(()) if key == "toasts" => {
+                    panel.rebuild();
+                    // Apply now; the config watcher confirms it shortly.
+                    apply_toast_level(host, &value);
+                }
+                Ok(()) if key == "link_click" => {
+                    panel.rebuild();
+                    host.link_click_mode = if value == "modifier" {
+                        crate::link_click::Mode::Modifier
+                    } else {
+                        crate::link_click::Mode::Plain
+                    };
+                }
                 Ok(()) => panel.rebuild(),
                 Err(error) => {
                     panel.page = Page::Text(format!("Could not save preference: {error}"));
                     panel.rebuild();
                 }
+            }
+        }
+        Choice::Layout(mode) => {
+            if let Err(error) = save_layout(&config::config_path(), mode) {
+                panel.page = Page::Text(format!("Could not save preference: {error}"));
+                panel.rebuild();
+            } else {
+                panel.chrome_layout = Some(mode);
+                panel.rebuild();
+                apply_chrome_layout(host, mode);
             }
         }
         Choice::Back => {
@@ -1091,7 +1292,7 @@ fn focus_pending(host: &mut HostState) {
     };
     if started.elapsed() > Duration::from_secs(15) {
         host.space_team_focus = None;
-        rail_toast(host, " Session unavailable; refresh its team details ");
+        rail_error_toast(host, " Session unavailable; refresh its team details ");
         return;
     }
     if host.space_opens.busy() || host.mux.space_id.as_ref() != Some(&owner) {
@@ -1106,7 +1307,7 @@ fn focus_pending(host: &mut HostState) {
         .any(|s| s.id == session && s.space_id.as_ref() == Some(&owner))
     {
         host.space_team_focus = None;
-        rail_toast(host, " Session moved or stopped; refresh its team details ");
+        rail_error_toast(host, " Session moved or stopped; refresh its team details ");
         return;
     }
     let target = host
@@ -1201,5 +1402,469 @@ mod maintenance_tests {
             maintenance_result(r#"{"status":"updated","version":"0.2.1"}"#),
             "updated: 0.2.1"
         );
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use crate::config::LayoutMode;
+
+    fn panel(page: Page, chrome_layout: Option<LayoutMode>) -> Panel {
+        let mut panel = Panel {
+            space: "demo".into(),
+            maintenance: false,
+            owner: None,
+            details: None,
+            page,
+            rows: vec![],
+            input: None,
+            submitted: None,
+            pending: None,
+            scroll: 0,
+            columns: 100,
+            chrome_layout,
+        };
+        panel.rebuild();
+        panel
+    }
+
+    fn labels(panel: &Panel) -> Vec<(String, String)> {
+        panel
+            .rows
+            .iter()
+            .map(|r| (r.label.clone(), r.detail.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn layout_page_offers_bars_and_sidebar_and_marks_the_live_choice() {
+        let bars = panel(Page::Layout, Some(LayoutMode::Bars));
+        assert_eq!(
+            labels(&bars),
+            [
+                ("Layout: Bars".into(), "Selected".into()),
+                (
+                    "Layout: Sidebar".into(),
+                    "One tree of Spaces and their tabs".into()
+                ),
+                (
+                    "More settings…".into(),
+                    "Rail, autosave, and startup".into()
+                ),
+            ]
+        );
+        assert!(matches!(
+            bars.rows[1].choice,
+            Choice::Layout(LayoutMode::Sidebar)
+        ));
+        let sidebar = panel(Page::Layout, Some(LayoutMode::Sidebar));
+        assert_eq!(sidebar.rows[0].detail, "Tabs bar and spaces bar");
+        assert_eq!(sidebar.rows[1].detail, "Selected");
+    }
+
+    #[test]
+    fn settings_menu_lists_layout_first_only_for_graphite() {
+        let graphite = panel(Page::Settings, Some(LayoutMode::Sidebar));
+        assert_eq!(graphite.rows[0].label, "Layout: Bars");
+        assert_eq!(graphite.rows[1].label, "Layout: Sidebar");
+        assert_eq!(graphite.rows[1].detail, "Selected");
+        assert!(graphite.rows[2].label.starts_with("Rail: "));
+        let classic = panel(Page::Settings, None);
+        assert!(classic.rows[0].label.starts_with("Rail: "));
+        assert!(!classic
+            .rows
+            .iter()
+            .any(|r| matches!(r.choice, Choice::Layout(_))));
+    }
+
+    #[test]
+    fn settings_offer_plain_and_modifier_link_click_modes() {
+        let mut settings = panel(Page::Settings, None);
+        settings.rows.clear();
+        settings.link_click_rows(crate::link_click::Mode::Plain);
+        assert_eq!(
+            labels(&settings),
+            [
+                ("Link clicks: plain".into(), "Selected".into()),
+                (
+                    "Link clicks: modifier".into(),
+                    "Require Cmd/Ctrl-click to open links".into()
+                ),
+            ]
+        );
+        assert!(matches!(
+            &settings.rows[1].choice,
+            Choice::Preference(key, value) if key == "link_click" && value == "modifier"
+        ));
+    }
+
+    /// #171: three Toasts rows mark the saved level, and Recent messages
+    /// opens the history page.
+    #[test]
+    fn settings_offer_toast_levels_and_recent_messages() {
+        let mut settings = panel(Page::Settings, None);
+        settings.rows.clear();
+        settings.toast_rows(config::ToastLevel::Errors);
+        assert_eq!(
+            labels(&settings),
+            [
+                ("Toasts: all".into(), "Show every status message".into()),
+                ("Toasts: errors".into(), "Selected".into()),
+                (
+                    "Toasts: off".into(),
+                    "Hide status messages; keep them in Recent messages".into()
+                ),
+                (
+                    "Recent messages…".into(),
+                    "Status messages, including hidden ones".into()
+                ),
+            ]
+        );
+        for (row, value) in settings.rows.iter().zip(["all", "errors", "off"]) {
+            assert!(
+                matches!(&row.choice, Choice::Preference(key, v) if key == "toasts" && v == value),
+                "{}",
+                row.label
+            );
+        }
+        assert!(matches!(settings.rows[3].choice, Choice::Messages));
+        let full = panel(Page::Settings, None);
+        assert!(full.rows.iter().any(|r| r.label == "Toasts: off"));
+        assert!(full
+            .rows
+            .iter()
+            .any(|r| matches!(r.choice, Choice::Messages)));
+    }
+
+    #[test]
+    fn recent_messages_page_lists_history_newest_first_with_a_way_back() {
+        let page = panel(
+            Page::Messages(vec![
+                ("Save failed".into(), "2m ago · error · hidden".into()),
+                ("cairn: view applied".into(), "3m ago · hidden".into()),
+            ]),
+            None,
+        );
+        assert_eq!(
+            labels(&page),
+            [
+                ("2m ago · error · hidden".into(), "Save failed".into()),
+                ("3m ago · hidden".into(), "cairn: view applied".into()),
+                ("Back to settings".into(), String::new()),
+            ]
+        );
+        assert!(matches!(page.rows[0].choice, Choice::Message));
+        assert!(matches!(page.rows[2].choice, Choice::Settings));
+        assert!(page.fixed_size());
+        let empty = panel(Page::Messages(vec![]), None);
+        assert_eq!(empty.rows[0].label, "No status messages yet");
+    }
+
+    /// #171 proof: the Toasts rows, Recent messages, and the error toast
+    /// that `errors` still shows, through the app painters for Graphite and
+    /// classic chrome. Set `PRISMATTYC_DUMP_TOASTS_SETTING=<dir>` for PNGs.
+    #[test]
+    fn toast_settings_and_recent_messages_paint_in_both_chromes() {
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let theme = theme::shipped_default();
+        let mut settings = panel(Page::Settings, None);
+        let first = settings
+            .rows
+            .iter()
+            .position(|r| r.label.starts_with("Toasts: "))
+            .expect("Settings lists the Toasts rows");
+        settings.rows.truncate(first);
+        settings.toast_rows(config::ToastLevel::Errors);
+        let start = Instant::now();
+        let mut history = status_toasts::History::default();
+        for (secs, level, kind, text) in [
+            (0, config::ToastLevel::All, ToastKind::Info, " opening space cairn "),
+            (
+                2,
+                config::ToastLevel::All,
+                ToastKind::Info,
+                " cairn: view applied; 3 reused sessions (live layouts retained), 1 unavailable session ",
+            ),
+            (95, config::ToastLevel::Errors, ToastKind::Info, " Saved "),
+            (
+                140,
+                config::ToastLevel::Errors,
+                ToastKind::Error,
+                " Save failed — use Save current space to retry ",
+            ),
+            (
+                150,
+                config::ToastLevel::Errors,
+                ToastKind::Info,
+                " moved to review · Undo: Spaces menu ",
+            ),
+        ] {
+            history.record(level, kind, text, start + Duration::from_secs(secs));
+        }
+        let messages = panel(
+            Page::Messages(status_toasts::rows(
+                &history,
+                start + Duration::from_secs(170),
+            )),
+            None,
+        );
+        let (width, height) = (1200, 800);
+        let paint = |panel: &Panel, header: &str, selected: usize, graphite: bool| {
+            let rows: Vec<PaletteRow> = panel
+                .rows
+                .iter()
+                .map(|r| {
+                    let mut row =
+                        PaletteRow::plain(r.label.clone(), r.detail.clone(), String::new());
+                    row.full_width = matches!(r.choice, Choice::None);
+                    row
+                })
+                .collect();
+            let sections = [PaletteSection {
+                header,
+                subtitle: "",
+                rows: &rows,
+            }];
+            let frame = PaletteFrame {
+                layout_mode: PaletteLayoutMode::FixedHeight,
+                query: None,
+                query_focused: false,
+                chips: None,
+                sections: &sections,
+                selected,
+                scroll: 0,
+                detail: None,
+                footer: "Enter select · Esc close · ↑↓ move",
+            };
+            let mut buffer = vec![crate::raster::pack_argb(255, theme.default_bg); width * height];
+            let layout = paint_palette_overlay(
+                &font,
+                &theme,
+                mux::ChromeGeom {
+                    graphite,
+                    scale_milli: 1_000,
+                },
+                [0x5b, 0x9b, 0xff],
+                &frame,
+                OverlaySurface::default(),
+                &mut buffer,
+                width,
+                height,
+            )
+            .expect("panel paints");
+            (layout, buffer)
+        };
+        // Select the last row so every Toasts row is on screen.
+        let errors_row = settings.rows.len() - 1;
+        for graphite in [true, false] {
+            let (layout, _) = paint(&settings, "SPACES SETTINGS", errors_row, graphite);
+            assert!(
+                layout.rows.iter().any(|laid| laid.global == errors_row),
+                "the Toasts rows scroll into view"
+            );
+            let (layout, _) = paint(&messages, "RECENT MESSAGES", 0, graphite);
+            assert!(layout.rows.iter().any(|laid| laid.global == 0));
+        }
+        let Some(dir) = std::env::var_os("PRISMATTYC_DUMP_TOASTS_SETTING") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (graphite, chrome) in [(true, "graphite"), (false, "classic")] {
+            let (_, buffer) = paint(&settings, "SPACES SETTINGS", errors_row, graphite);
+            write_present_png(
+                &dir.join(format!("{chrome}-settings-toasts.png")),
+                &buffer,
+                width as u32,
+                height as u32,
+            )
+            .unwrap();
+            let (_, buffer) = paint(&messages, "RECENT MESSAGES", 0, graphite);
+            write_present_png(
+                &dir.join(format!("{chrome}-recent-messages.png")),
+                &buffer,
+                width as u32,
+                height as u32,
+            )
+            .unwrap();
+            let (w, h) = (900, 120);
+            let mut pane = vec![crate::raster::pack_argb(255, theme.default_bg); w * h];
+            let fill = [0x5b, 0x9b, 0xff];
+            paint_bell_toast_for_style(
+                &font,
+                mux::ChromeGeom {
+                    graphite,
+                    scale_milli: 1_000,
+                },
+                &theme,
+                " Save failed — use Save current space to retry ",
+                &mut pane,
+                w,
+                0,
+                0,
+                w,
+                h,
+                fill,
+                contrast_ink(fill),
+            );
+            write_present_png(
+                &dir.join(format!("{chrome}-error-toast.png")),
+                &pane,
+                w as u32,
+                h as u32,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn settings_pages_are_fixed_size_and_other_pages_fit_content() {
+        assert!(panel(Page::Layout, Some(LayoutMode::Bars)).fixed_size());
+        assert!(panel(Page::Settings, None).fixed_size());
+        assert!(!panel(Page::Team, None).fixed_size());
+        assert!(!panel(Page::Maintenance, None).fixed_size());
+        let mut editing = panel(Page::Settings, None);
+        editing.input = Some(Input {
+            label: "Role".into(),
+            value: String::new(),
+            select_all: false,
+            choice: Choice::None,
+        });
+        assert!(!editing.fixed_size(), "a text field keeps its own prompt");
+    }
+
+    #[test]
+    fn choosing_a_layout_writes_the_layout_key_and_keeps_the_file() {
+        let dir = std::env::temp_dir().join(format!("prism-layout-setting-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "# my settings\nchrome_style = \"graphite\"\nbar_color = \"moss\"\n",
+        )
+        .unwrap();
+        save_layout(&path, LayoutMode::Sidebar).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# my settings"), "{raw}");
+        assert!(raw.contains("layout = \"sidebar\""), "{raw}");
+        let loaded = config::load(&path).unwrap();
+        assert_eq!(loaded.layout(), LayoutMode::Sidebar);
+        assert_eq!(loaded.bar_color, Some(config::BarColor::Moss));
+        save_layout(&path, LayoutMode::Bars).unwrap();
+        assert_eq!(config::load(&path).unwrap().layout(), LayoutMode::Bars);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The panel goes through the same Graphite palette painter as the app.
+    /// Its size does not depend on the page or the row count, and every
+    /// option row is a pointer target (the hand cursor).
+    #[test]
+    fn layout_panel_paints_at_the_settings_size_with_pointer_rows() {
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let chrome = mux::ChromeGeom {
+            graphite: true,
+            scale_milli: 1_000,
+        };
+        let (width, height) = (1200, 800);
+        let paint = |panel: &Panel, variant: theme::ThemeVariant| {
+            let rows: Vec<PaletteRow> = panel
+                .rows
+                .iter()
+                .map(|r| PaletteRow::plain(r.label.clone(), r.detail.clone(), String::new()))
+                .collect();
+            let header = match panel.page {
+                Page::Layout => "LAYOUT",
+                _ => "SPACES SETTINGS",
+            };
+            let sections = [PaletteSection {
+                header,
+                subtitle: "",
+                rows: &rows,
+            }];
+            let frame = PaletteFrame {
+                layout_mode: PaletteLayoutMode::FixedHeight,
+                query: None,
+                query_focused: false,
+                chips: None,
+                sections: &sections,
+                selected: 1,
+                scroll: 0,
+                detail: None,
+                footer: "Enter select · Esc close · ↑↓ move",
+            };
+            let mut buffer = vec![crate::raster::pack_argb(255, [32, 36, 44]); width * height];
+            let layout = graphite_overlays::palette(
+                &font,
+                crate::graphite::tokens(variant),
+                chrome,
+                [0x5b, 0x9b, 0xff],
+                &frame,
+                OverlaySurface::default(),
+                &mut buffer,
+                width,
+                height,
+                None,
+                None,
+            )
+            .expect("layout panel paints");
+            (layout, buffer)
+        };
+        let layout_page = panel(Page::Layout, Some(LayoutMode::Bars));
+        let settings_page = panel(Page::Settings, Some(LayoutMode::Bars));
+        let (small, _) = paint(&layout_page, theme::ThemeVariant::Dark);
+        let (large, _) = paint(&settings_page, theme::ThemeVariant::Dark);
+        assert_eq!(
+            (small.panel_x, small.panel_y, small.panel_w, small.panel_h),
+            (large.panel_x, large.panel_y, large.panel_w, large.panel_h),
+            "fixed size: three rows and the full settings list share one panel"
+        );
+        // Pointing at each option hits that row, and a context-menu row
+        // shows the pointing hand.
+        for row in 0..2 {
+            let laid = small
+                .rows
+                .iter()
+                .find(|laid| laid.global == row)
+                .expect("option row is laid out");
+            let x = small.panel_x + small.panel_w / 2;
+            let hit = crate::raster::palette_hit(&small, x, laid.y + 1);
+            assert_eq!(hit, Some(row));
+            let hover = hit.map(HoverTarget::ContextMenuRow);
+            assert_eq!(
+                cursor_for_hover(hover, false, false, false, None, false),
+                CursorIcon::Pointer
+            );
+        }
+        let Some(dir) = std::env::var_os("PRISMATTYC_DUMP_LAYOUT_SETTING") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (panel, variant, name) in [
+            (
+                &layout_page,
+                theme::ThemeVariant::Dark,
+                "graphite-layout-dark.png",
+            ),
+            (
+                &layout_page,
+                theme::ThemeVariant::Light,
+                "graphite-layout-light.png",
+            ),
+            (
+                &settings_page,
+                theme::ThemeVariant::Dark,
+                "graphite-settings-layout-dark.png",
+            ),
+        ] {
+            let (_, buffer) = paint(panel, variant);
+            write_present_png(&dir.join(name), &buffer, width as u32, height as u32).unwrap();
+        }
     }
 }

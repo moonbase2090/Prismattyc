@@ -245,9 +245,9 @@ pub fn confirm_rollback() -> bool {
     };
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&NSString::from_str("Roll Back Prismattyc?"));
-    alert.setInformativeText(&NSString::from_str(&format!(
-        "Restore the previous verified release. The app will restart."
-    )));
+    alert.setInformativeText(&NSString::from_str(
+        "Restore the previous verified release. The app will restart.",
+    ));
     alert.addButtonWithTitle(&NSString::from_str("Roll Back"));
     alert.addButtonWithTitle(&NSString::from_str("Cancel"));
     alert.runModal() == NSAlertFirstButtonReturn

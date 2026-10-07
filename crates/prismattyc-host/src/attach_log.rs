@@ -1485,13 +1485,15 @@ fn writer_loop(
     let mut last_host_size: Option<PendingResize> = None;
     let mut refit_after_input = false;
     let mut pending: Vec<u8> = Vec::new();
+    // `async_paste` tickets whose bytes are in `pending`; settled below.
+    let mut pastes = PendingPastes::default();
     'outer: loop {
         match to_child_rx.recv_timeout(WRITER_TICK) {
             Ok(msg) => {
-                pending.extend_from_slice(&msg.bytes);
+                pastes.absorb(&mut pending, msg);
                 // Coalesce a paste burst before touching the lease.
                 while let Ok(more) = to_child_rx.try_recv() {
-                    pending.extend_from_slice(&more.bytes);
+                    pastes.absorb(&mut pending, more);
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1515,6 +1517,7 @@ fn writer_loop(
                         controller = acquire_lease(&mut client, client_id, pane_id);
                         if !controller {
                             pending.clear();
+                            pastes.incomplete("input lease lost");
                             break;
                         }
                         result = write_pane(&mut client, client_id, pane_id, chunk);
@@ -1527,9 +1530,11 @@ fn writer_loop(
                         // (same as pmux-attach write_as_controller).
                         controller = false;
                         pending.clear();
+                        pastes.incomplete("pane input is dirty");
                         break;
                     }
                     if let Err(error) = result {
+                        pastes.incomplete(&error.to_string());
                         let _ = events_tx.send(LogMessage::WriteFailed {
                             reason: error.to_string(),
                         });
@@ -1539,11 +1544,15 @@ fn writer_loop(
                         break 'outer;
                     }
                 }
+                if pending.is_empty() {
+                    pastes.delivered();
+                }
                 last_typed = Some(Instant::now());
                 refit_after_input = true;
             } else {
                 // No lease: drop the keys rather than queue them forever.
                 pending.clear();
+                pastes.incomplete("no input lease for the pane");
             }
         }
         apply_writer_resize(
@@ -1567,6 +1576,34 @@ fn writer_loop(
     }
     if controller {
         let _ = send_release_lease(&mut client, client_id, pane_id, session);
+    }
+}
+
+/// `async_paste` tickets whose bytes the log writer has buffered.
+#[derive(Default)]
+struct PendingPastes(Vec<(crate::paste_job::PasteTicket, usize)>);
+
+impl PendingPastes {
+    /// Append `msg`'s bytes (waiting for a deferred image paste) and keep
+    /// its ticket until the buffer is written or dropped.
+    fn absorb(&mut self, pending: &mut Vec<u8>, msg: ChildWrite) {
+        let (bytes, ticket) = crate::paste_job::writer_payload(msg);
+        pending.extend_from_slice(&bytes);
+        if let Some(ticket) = ticket {
+            self.0.push((ticket, bytes.len()));
+        }
+    }
+
+    fn delivered(&mut self) {
+        for (ticket, len) in self.0.drain(..) {
+            ticket.delivered(len);
+        }
+    }
+
+    fn incomplete(&mut self, reason: &str) {
+        for (ticket, len) in self.0.drain(..) {
+            ticket.incomplete(0, Some(len), reason);
+        }
     }
 }
 

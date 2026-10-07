@@ -5,7 +5,7 @@ pub(crate) use local::Recipe as LocalRecipe;
 
 use crate::space_rail::RailSide;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -31,6 +31,37 @@ const MAX_PTY_DRAIN_PER_PANE: usize = 8;
 /// Wakes the winit loop when a pane reader has bytes (or the child exits).
 /// Optional so mux unit tests can spawn without an event loop.
 pub(crate) type Wake = Arc<dyn Fn() + Send + Sync>;
+
+fn next_runtime_instance() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// PTY writer thread: one message at a time, in order. A paste reports its
+/// outcome; a failed write stops the thread, and messages still queued
+/// report incomplete when the channel drops.
+fn pty_writer_loop(
+    to_child_rx: &mpsc::Receiver<ChildWrite>,
+    child_writer: &mut dyn std::io::Write,
+    grant_tx: &mpsc::Sender<crate::rich::CapabilityGrant>,
+) {
+    while let Ok(msg) = to_child_rx.recv() {
+        let grant = msg.capability_grant.clone();
+        let (bytes, ticket) = crate::paste_job::writer_payload(msg);
+        if let Err((written, reason)) = crate::paste_job::write_counted(child_writer, &bytes) {
+            if let Some(ticket) = ticket {
+                ticket.incomplete(written, Some(bytes.len()), reason);
+            }
+            break;
+        }
+        if let Some(ticket) = ticket {
+            ticket.delivered(bytes.len());
+        }
+        if let Some(features) = grant {
+            let _ = grant_tx.send(features);
+        }
+    }
+}
 /// How long after its last visible output a pane still counts as "active".
 pub(crate) const ACTIVE_WINDOW: Duration = Duration::from_millis(1500);
 /// Quiet gap before an unfocused pane's next output (or silence) badges.
@@ -822,17 +853,7 @@ impl PaneRuntime {
         let (grant_tx, grant_rx) = mpsc::channel();
         thread::Builder::new()
             .name(format!("prism-pane-{pane}-write"))
-            .spawn(move || {
-                while let Ok(msg) = to_child_rx.recv() {
-                    if child_writer.write_all(&msg.bytes).is_err() {
-                        break;
-                    }
-                    let _ = child_writer.flush();
-                    if let Some(features) = msg.capability_grant {
-                        let _ = grant_tx.send(features);
-                    }
-                }
-            })?;
+            .spawn(move || pty_writer_loop(&to_child_rx, &mut child_writer, &grant_tx))?;
 
         let (from_pty_tx, from_pty_rx) =
             mpsc::sync_channel::<std::io::Result<Vec<u8>>>(FROM_PTY_CAP);
@@ -1751,6 +1772,9 @@ pub(crate) fn tab_close_left_with_inset(
 
 /// Domain topology plus one live runtime per pane leaf.
 pub(crate) struct MuxRuntime {
+    /// Unique per runtime in this process. Pane ids restart at 1 in every
+    /// runtime (each Space view), so `(instance, pane)` names a pane.
+    instance: u64,
     pub(crate) space_id: Option<String>,
     git_info: crate::git_info::Cache,
     /// Previously focused pane per window, for `focus_last_pane` (PT-127).
@@ -1887,6 +1911,7 @@ impl MuxRuntime {
         let mut panes = HashMap::new();
         panes.insert(pane, runtime);
         Ok(Self {
+            instance: next_runtime_instance(),
             space_id: None,
             git_info: Default::default(),
             domain,
@@ -3222,12 +3247,17 @@ impl MuxRuntime {
         std::mem::take(&mut self.pending_attentions)
     }
 
-    /// Writer-death toasts since the previous take.
+    /// Process-unique id of this runtime; pane ids repeat across runtimes.
+    pub(crate) fn instance(&self) -> u64 {
+        self.instance
+    }
+
     /// The host wake, for workers that report back to this window.
     pub(crate) fn wake(&self) -> Option<Wake> {
         self.wake.clone()
     }
 
+    /// Writer-death toasts since the previous take.
     pub(crate) fn take_pending_toasts(&mut self) -> Vec<(PaneId, String)> {
         std::mem::take(&mut self.pending_toasts)
     }

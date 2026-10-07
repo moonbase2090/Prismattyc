@@ -1,25 +1,210 @@
 // SPDX-License-Identifier: MPL-2.0
 //! Clipboard paste delivery that never waits on the main thread (#195).
 //!
-//! With `async_paste = true`, a paste is one [`ChildWrite`] on the pane's
-//! writer channel. The writer thread owns the back-pressure wait: the PTY
-//! writer blocks in `write_all`, and the log writer chunks it into pmuxd
-//! input. One message keeps `CSI 200 ~` and `CSI 201 ~` together and keeps
-//! later keys behind the whole paste. Image-only clipboards are encoded to PNG
-//! and written to disk on a worker thread; the host pastes the file reference
-//! when the worker reports back.
+//! With `async_paste = true`, every paste is one [`ChildWrite`] that carries a
+//! [`PasteTicket`]. The message takes its place on the pane's own writer
+//! channel when the paste starts, so later keys stay behind it and the paste
+//! can only reach the pane it started in. The writer thread owns the
+//! back-pressure wait (the PTY writer blocks in `write`; the log writer chunks
+//! into pmuxd input), which keeps `CSI 200 ~` and `CSI 201 ~` together.
+//!
+//! An image-only clipboard gets a ticket whose bytes are filled later: a
+//! worker encodes the PNG, writes the file, and fills in the reference. The
+//! writer waits for it in order, so two image pastes and any keys after them
+//! keep their order.
+//!
+//! Each ticket reports exactly once through [`PasteJobs::take_outcomes`]:
+//! delivered, or incomplete with the bytes written. A ticket dropped without a
+//! report (writer stopped, pane closed) reports incomplete from `Drop`.
 
+use std::io::Write;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 
 use crate::mux::Wake;
 use crate::rich::ChildWrite;
 
-/// Outcome of offering a paste to a pane writer. Never blocks.
+/// Where a paste started: the mux runtime instance and the pane in it.
+/// Pane ids restart at 1 in each runtime, so the pane alone is ambiguous.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PasteOrigin {
+    pub mux: u64,
+    pub pane: u64,
+}
+
+/// How a paste ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PasteResult {
+    Delivered {
+        bytes: usize,
+    },
+    Incomplete {
+        written: usize,
+        total: Option<usize>,
+        reason: String,
+    },
+}
+
+/// One finished paste, reported by the writer (or by `Drop`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PasteOutcome {
+    pub origin: PasteOrigin,
+    /// The file an image paste referenced, for the "pasted image" toast.
+    pub image: Option<PathBuf>,
+    pub result: PasteResult,
+}
+
+enum Slot {
+    Pending,
+    Ready(Vec<u8>),
+    Failed(String),
+    Taken,
+}
+
+struct Ticket {
+    origin: PasteOrigin,
+    slot: Mutex<Slot>,
+    filled: Condvar,
+    image: Mutex<Option<PathBuf>>,
+    reported: AtomicBool,
+    outcomes: mpsc::Sender<PasteOutcome>,
+    wake: Option<Wake>,
+}
+
+impl Ticket {
+    fn report(&self, result: PasteResult) {
+        if self.reported.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let image = self.image.lock().unwrap().clone();
+        let _ = self.outcomes.send(PasteOutcome {
+            origin: self.origin,
+            image,
+            result,
+        });
+        if let Some(wake) = &self.wake {
+            wake();
+        }
+    }
+}
+
+impl Drop for Ticket {
+    fn drop(&mut self) {
+        self.report(PasteResult::Incomplete {
+            written: 0,
+            total: None,
+            reason: "the pane writer stopped before the paste".into(),
+        });
+    }
+}
+
+/// Writer-side handle for one paste. Clones share one ticket.
+#[derive(Clone)]
+pub(crate) struct PasteTicket(Arc<Ticket>);
+
+impl std::fmt::Debug for PasteTicket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("PasteTicket").field(&self.0.origin).finish()
+    }
+}
+
+impl PartialEq for PasteTicket {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for PasteTicket {}
+
+impl PasteTicket {
+    fn fill(&self, bytes: Result<Vec<u8>, String>) {
+        let mut slot = self.0.slot.lock().unwrap();
+        if matches!(*slot, Slot::Pending) {
+            *slot = match bytes {
+                Ok(bytes) => Slot::Ready(bytes),
+                Err(reason) => Slot::Failed(reason),
+            };
+            self.0.filled.notify_all();
+        }
+    }
+
+    /// Wait (writer thread only) until the bytes exist, then take them.
+    fn take_bytes(&self) -> Result<Vec<u8>, String> {
+        let mut slot = self.0.slot.lock().unwrap();
+        while matches!(*slot, Slot::Pending) {
+            slot = self.0.filled.wait(slot).unwrap();
+        }
+        match std::mem::replace(&mut *slot, Slot::Taken) {
+            Slot::Ready(bytes) => Ok(bytes),
+            Slot::Failed(reason) => Err(reason),
+            Slot::Taken | Slot::Pending => Err("paste bytes already taken".into()),
+        }
+    }
+
+    pub(crate) fn delivered(&self, bytes: usize) {
+        self.0.report(PasteResult::Delivered { bytes });
+    }
+
+    pub(crate) fn incomplete(
+        &self,
+        written: usize,
+        total: Option<usize>,
+        reason: impl Into<String>,
+    ) {
+        self.0.report(PasteResult::Incomplete {
+            written,
+            total,
+            reason: reason.into(),
+        });
+    }
+}
+
+/// Fails a still-pending ticket if the encode worker ends without filling it,
+/// so the writer never waits forever.
+struct FillGuard(PasteTicket);
+
+impl Drop for FillGuard {
+    fn drop(&mut self) {
+        self.0.fill(Err("image encode stopped".into()));
+    }
+}
+
+/// The bytes a writer sends for `msg`, and its paste ticket if any. Blocks
+/// until a deferred image paste has its bytes. A failed image encode reports
+/// the ticket incomplete and yields no bytes.
+pub(crate) fn writer_payload(msg: ChildWrite) -> (Vec<u8>, Option<PasteTicket>) {
+    let Some(ticket) = msg.paste else {
+        return (msg.bytes, None);
+    };
+    match ticket.take_bytes() {
+        Ok(bytes) => (bytes, Some(ticket)),
+        Err(reason) => {
+            ticket.incomplete(0, None, reason);
+            (Vec::new(), None)
+        }
+    }
+}
+
+/// Write `bytes` in bounded chunks so a failure can say how much went out.
+pub(crate) fn write_counted(writer: &mut dyn Write, bytes: &[u8]) -> Result<(), (usize, String)> {
+    const CHUNK: usize = 64 * 1024;
+    let mut written = 0;
+    for chunk in bytes.chunks(CHUNK) {
+        if let Err(error) = writer.write_all(chunk) {
+            return Err((written, error.to_string()));
+        }
+        written += chunk.len();
+    }
+    let _ = writer.flush();
+    Ok(())
+}
+
+/// Result of offering a paste to a pane writer. Never blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PasteSend {
-    /// The writer accepted the whole paste.
+    /// The writer accepted the paste; its outcome arrives later.
     Queued,
     /// The writer channel is full: the child has stopped reading and earlier
     /// input is still queued. Nothing was sent, so no bracket is left open.
@@ -28,21 +213,26 @@ pub(crate) enum PasteSend {
     Closed,
 }
 
-/// Offer `bytes` to the writer as one message, without waiting.
-pub(crate) fn send_paste(to_child: &mpsc::SyncSender<ChildWrite>, bytes: Vec<u8>) -> PasteSend {
-    match to_child.try_send(ChildWrite::bytes(bytes)) {
+/// Offer one paste message to the writer, without waiting. A refused paste
+/// reports its ticket incomplete.
+pub(crate) fn send_paste(to_child: &mpsc::SyncSender<ChildWrite>, msg: ChildWrite) -> PasteSend {
+    match to_child.try_send(msg) {
         Ok(()) => PasteSend::Queued,
-        Err(mpsc::TrySendError::Full(_)) => PasteSend::Busy,
-        Err(mpsc::TrySendError::Disconnected(_)) => PasteSend::Closed,
+        Err(mpsc::TrySendError::Full(msg)) => {
+            refuse(msg, "the pane's input queue is full");
+            PasteSend::Busy
+        }
+        Err(mpsc::TrySendError::Disconnected(msg)) => {
+            refuse(msg, "the pane writer is gone");
+            PasteSend::Closed
+        }
     }
 }
 
-/// A finished image encode for the pane that was focused at paste time.
-#[derive(Debug)]
-pub(crate) struct EncodedImage {
-    /// `PaneId::get()` of the pane focused at paste time.
-    pub pane: u64,
-    pub result: anyhow::Result<PathBuf>,
+fn refuse(msg: ChildWrite, reason: &str) {
+    if let Some(ticket) = msg.paste {
+        ticket.incomplete(0, None, reason);
+    }
 }
 
 /// Clipboard RGBA pixels copied off the clipboard on the main thread.
@@ -52,50 +242,89 @@ pub(crate) struct ClipboardImage {
     pub rgba: Vec<u8>,
 }
 
-type Encode = fn(u32, u32, &[u8]) -> anyhow::Result<PathBuf>;
+type Encode = Arc<dyn Fn(u32, u32, &[u8]) -> anyhow::Result<PathBuf> + Send + Sync>;
 
-/// Image pastes in flight for one window.
-pub(crate) struct ImagePastes {
-    tx: mpsc::Sender<EncodedImage>,
-    rx: mpsc::Receiver<EncodedImage>,
+/// Paste tickets and their outcomes for one window.
+pub(crate) struct PasteJobs {
+    tx: mpsc::Sender<PasteOutcome>,
+    rx: mpsc::Receiver<PasteOutcome>,
     encode: Encode,
 }
 
-impl Default for ImagePastes {
+impl Default for PasteJobs {
     fn default() -> Self {
-        Self::with_encoder(prismattyc_mux::write_paste_png)
+        Self::with_encoder(Arc::new(prismattyc_mux::write_paste_png))
     }
 }
 
-impl ImagePastes {
+impl PasteJobs {
     fn with_encoder(encode: Encode) -> Self {
         let (tx, rx) = mpsc::channel();
         Self { tx, rx, encode }
     }
 
-    /// Encode and write `image` on a worker; `wake` runs when it is done.
-    pub(crate) fn start(&self, pane: u64, image: ClipboardImage, wake: Option<Wake>) {
-        let tx = self.tx.clone();
-        let encode = self.encode;
+    fn ticket(&self, origin: PasteOrigin, wake: Option<Wake>) -> PasteTicket {
+        PasteTicket(Arc::new(Ticket {
+            origin,
+            slot: Mutex::new(Slot::Pending),
+            filled: Condvar::new(),
+            image: Mutex::new(None),
+            reported: AtomicBool::new(false),
+            outcomes: self.tx.clone(),
+            wake,
+        }))
+    }
+
+    /// A paste whose bytes are known now. `image` names a referenced image
+    /// file (a copied file or URI) for the delivered toast.
+    pub(crate) fn text(
+        &self,
+        origin: PasteOrigin,
+        bytes: Vec<u8>,
+        image: Option<PathBuf>,
+        wake: Option<Wake>,
+    ) -> ChildWrite {
+        let ticket = self.ticket(origin, wake);
+        *ticket.0.image.lock().unwrap() = image;
+        ticket.fill(Ok(bytes));
+        ChildWrite::paste(ticket)
+    }
+
+    /// An image paste. A worker encodes and writes the PNG, then `payload`
+    /// turns the file path into the bytes to send. The returned message
+    /// holds the pane writer's place until then.
+    pub(crate) fn image(
+        &self,
+        origin: PasteOrigin,
+        image: ClipboardImage,
+        payload: impl FnOnce(&std::path::Path) -> Vec<u8> + Send + 'static,
+        wake: Option<Wake>,
+    ) -> ChildWrite {
+        let ticket = self.ticket(origin, wake);
+        let guard = FillGuard(ticket.clone());
+        let encode = self.encode.clone();
         let spawned = thread::Builder::new()
             .name("prism-image-paste".into())
             .spawn(move || {
-                let result = encode(image.width, image.height, &image.rgba);
-                let _ = tx.send(EncodedImage { pane, result });
-                if let Some(wake) = wake {
-                    wake();
-                }
+                let guard = guard;
+                let filled = match encode(image.width, image.height, &image.rgba) {
+                    Ok(path) => {
+                        let bytes = payload(&path);
+                        *guard.0 .0.image.lock().unwrap() = Some(path);
+                        Ok(bytes)
+                    }
+                    Err(error) => Err(format!("image paste failed: {error:#}")),
+                };
+                guard.0.fill(filled);
             });
         if let Err(error) = spawned {
-            let _ = self.tx.send(EncodedImage {
-                pane,
-                result: Err(anyhow::anyhow!("spawn image paste worker: {error}")),
-            });
+            ticket.fill(Err(format!("spawn image paste worker: {error}")));
         }
+        ChildWrite::paste(ticket)
     }
 
-    /// Encodes finished since the last call.
-    pub(crate) fn take_done(&self) -> Vec<EncodedImage> {
+    /// Outcomes reported since the last call.
+    pub(crate) fn take_outcomes(&self) -> Vec<PasteOutcome> {
         self.rx.try_iter().collect()
     }
 }
@@ -103,29 +332,74 @@ impl ImagePastes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
+    const ORIGIN: PasteOrigin = PasteOrigin { mux: 1, pane: 1 };
+
+    /// The PTY writer loop's per-message step, over any `Write`.
+    fn write_message(writer: &mut dyn Write, msg: ChildWrite) -> bool {
+        let (bytes, ticket) = writer_payload(msg);
+        match write_counted(writer, &bytes) {
+            Ok(()) => {
+                if let Some(ticket) = ticket {
+                    ticket.delivered(bytes.len());
+                }
+                true
+            }
+            Err((written, reason)) => {
+                if let Some(ticket) = ticket {
+                    ticket.incomplete(written, Some(bytes.len()), reason);
+                }
+                false
+            }
+        }
+    }
+
+    fn wait_outcomes(jobs: &PasteJobs, count: usize) -> Vec<PasteOutcome> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut all = Vec::new();
+        while all.len() < count && Instant::now() < deadline {
+            all.extend(jobs.take_outcomes());
+            thread::sleep(Duration::from_millis(2));
+        }
+        all
+    }
+
     #[test]
-    fn whole_bracketed_paste_is_one_writer_message() {
+    fn whole_bracketed_paste_is_one_writer_message_ahead_of_later_keys() {
+        let jobs = PasteJobs::default();
         let (tx, rx) = mpsc::sync_channel::<ChildWrite>(4);
         let mut payload = b"\x1b[200~".to_vec();
         payload.extend(std::iter::repeat_n(b'x', 64 * 1024));
         payload.extend_from_slice(b"\x1b[201~");
-        assert_eq!(send_paste(&tx, payload.clone()), PasteSend::Queued);
-        // A key typed after the paste must land after the closing bracket.
+        let msg = jobs.text(ORIGIN, payload.clone(), None, None);
+        assert_eq!(send_paste(&tx, msg), PasteSend::Queued);
         tx.try_send(ChildWrite::bytes(b"k".to_vec())).unwrap();
-        assert_eq!(rx.try_recv().unwrap().bytes, payload);
-        assert_eq!(rx.try_recv().unwrap().bytes, b"k");
+        let mut out = Vec::new();
+        assert!(write_message(&mut out, rx.try_recv().unwrap()));
+        assert_eq!(out, payload, "the paste must arrive whole, as one write");
+        assert!(write_message(&mut out, rx.try_recv().unwrap()));
+        assert!(
+            out.ends_with(b"\x1b[201~k"),
+            "the key lands after the closing bracket"
+        );
         assert!(rx.try_recv().is_err());
+        assert_eq!(
+            jobs.take_outcomes()[0].result,
+            PasteResult::Delivered {
+                bytes: payload.len()
+            }
+        );
     }
 
     #[test]
-    fn full_writer_is_busy_without_waiting_or_sending() {
+    fn full_writer_is_busy_without_waiting_and_reports_incomplete() {
+        let jobs = PasteJobs::default();
         let (tx, rx) = mpsc::sync_channel::<ChildWrite>(1);
         tx.try_send(ChildWrite::bytes(b"earlier".to_vec())).unwrap();
         let started = Instant::now();
-        assert_eq!(send_paste(&tx, b"paste".to_vec()), PasteSend::Busy);
+        let msg = jobs.text(ORIGIN, b"paste".to_vec(), None, None);
+        assert_eq!(send_paste(&tx, msg), PasteSend::Busy);
         // The old path polled in 2 ms sleeps for up to 250 ms here.
         assert!(
             started.elapsed() < Duration::from_millis(50),
@@ -134,13 +408,203 @@ mod tests {
         );
         assert_eq!(rx.try_recv().unwrap().bytes, b"earlier");
         assert!(rx.try_recv().is_err(), "nothing of the paste may be sent");
+        let outcomes = jobs.take_outcomes();
+        assert!(
+            matches!(
+                &outcomes[..],
+                [PasteOutcome {
+                    result: PasteResult::Incomplete { written: 0, .. },
+                    ..
+                }]
+            ),
+            "{outcomes:?}"
+        );
     }
 
     #[test]
     fn closed_writer_is_reported() {
+        let jobs = PasteJobs::default();
         let (tx, rx) = mpsc::sync_channel::<ChildWrite>(1);
         drop(rx);
-        assert_eq!(send_paste(&tx, b"paste".to_vec()), PasteSend::Closed);
+        let msg = jobs.text(ORIGIN, b"paste".to_vec(), None, None);
+        assert_eq!(send_paste(&tx, msg), PasteSend::Closed);
+        assert!(matches!(
+            jobs.take_outcomes()[..],
+            [PasteOutcome {
+                result: PasteResult::Incomplete { .. },
+                ..
+            }]
+        ));
+    }
+
+    /// A writer that accepts `limit` bytes, then fails like a PTY whose
+    /// child exited.
+    struct FailsAfter {
+        limit: usize,
+        taken: Vec<u8>,
+    }
+
+    impl Write for FailsAfter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let room = self.limit - self.taken.len();
+            if room == 0 {
+                return Err(std::io::Error::other("child exited"));
+            }
+            let n = room.min(buf.len());
+            self.taken.extend_from_slice(&buf[..n]);
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn writer_failure_after_accepting_a_prefix_reports_incomplete() {
+        let jobs = PasteJobs::default();
+        let total = 300 * 1024;
+        let msg = jobs.text(ORIGIN, vec![b'y'; total], None, None);
+        let mut child = FailsAfter {
+            limit: 100 * 1024,
+            taken: Vec::new(),
+        };
+        assert!(!write_message(&mut child, msg));
+        let outcomes = jobs.take_outcomes();
+        let [PasteOutcome {
+            result:
+                PasteResult::Incomplete {
+                    written,
+                    total: Some(reported),
+                    ..
+                },
+            ..
+        }] = &outcomes[..]
+        else {
+            panic!("expected one incomplete outcome: {outcomes:?}");
+        };
+        assert_eq!(*reported, total);
+        assert!(*written < total, "written {written} of {total}");
+    }
+
+    #[test]
+    fn a_dropped_paste_reports_incomplete() {
+        let jobs = PasteJobs::default();
+        drop(jobs.text(ORIGIN, b"lost".to_vec(), None, None));
+        assert!(matches!(
+            jobs.take_outcomes()[..],
+            [PasteOutcome {
+                result: PasteResult::Incomplete { .. },
+                ..
+            }]
+        ));
+    }
+
+    /// An encoder that waits for a gate, then returns a path naming its
+    /// thread, so tests control finish order and see where it ran.
+    fn gated_encoder(gate: mpsc::Receiver<()>) -> Encode {
+        let gate = Mutex::new(gate);
+        Arc::new(move |width, height, _rgba| {
+            gate.lock().unwrap().recv_timeout(Duration::from_secs(5))?;
+            Ok(PathBuf::from(format!(
+                "{width}x{height}-{:?}.png",
+                thread::current().id()
+            )))
+        })
+    }
+
+    fn image(width: u32) -> ClipboardImage {
+        ClipboardImage {
+            width,
+            height: 1,
+            rgba: vec![0; width as usize * 4],
+        }
+    }
+
+    fn reference(path: &std::path::Path) -> Vec<u8> {
+        format!("[{}]", path.display()).into_bytes()
+    }
+
+    #[test]
+    fn image_pastes_and_later_keys_keep_their_order() {
+        // The first encode is held back; the second finishes first.
+        let (first_gate, first) = mpsc::channel();
+        let (second_gate, second) = mpsc::channel();
+        let first_jobs = PasteJobs::with_encoder(gated_encoder(first));
+        let second_jobs = PasteJobs::with_encoder(gated_encoder(second));
+        let (tx, rx) = mpsc::sync_channel::<ChildWrite>(8);
+        assert_eq!(
+            send_paste(&tx, first_jobs.image(ORIGIN, image(1), reference, None)),
+            PasteSend::Queued
+        );
+        assert_eq!(
+            send_paste(&tx, second_jobs.image(ORIGIN, image(2), reference, None)),
+            PasteSend::Queued
+        );
+        tx.try_send(ChildWrite::bytes(b"\r".to_vec())).unwrap();
+        drop(tx);
+        second_gate.send(()).unwrap();
+        let writer = thread::spawn(move || {
+            let mut out = Vec::new();
+            for msg in rx {
+                write_message(&mut out, msg);
+            }
+            out
+        });
+        thread::sleep(Duration::from_millis(50));
+        first_gate.send(()).unwrap();
+        let out = String::from_utf8(writer.join().unwrap()).unwrap();
+        let one = out.find("[1x1-").expect(&out);
+        let two = out.find("[2x1-").expect(&out);
+        let enter = out.find('\r').expect(&out);
+        assert!(one < two && two < enter, "order: {out:?}");
+        assert!(
+            !out.contains(&format!("{:?}", thread::current().id())),
+            "encode ran on the caller: {out:?}"
+        );
+    }
+
+    #[test]
+    fn an_image_paste_goes_to_its_own_pane_writer_and_names_its_origin() {
+        // Two runtimes whose focused panes share id 1 (Space A and Space B).
+        let (gate, held) = mpsc::channel();
+        let jobs = PasteJobs::with_encoder(gated_encoder(held));
+        let (space_a, a_rx) = mpsc::sync_channel::<ChildWrite>(4);
+        let (_space_b, b_rx) = mpsc::sync_channel::<ChildWrite>(4);
+        let origin = PasteOrigin { mux: 10, pane: 1 };
+        assert_eq!(
+            send_paste(&space_a, jobs.image(origin, image(3), reference, None)),
+            PasteSend::Queued
+        );
+        // The host switches to Space B while the encode is still running.
+        gate.send(()).unwrap();
+        let mut out = Vec::new();
+        write_message(&mut out, a_rx.try_recv().unwrap());
+        assert!(String::from_utf8(out).unwrap().starts_with("[3x1-"));
+        assert!(
+            b_rx.try_recv().is_err(),
+            "Space B's pane 1 must get nothing"
+        );
+        let outcomes = wait_outcomes(&jobs, 1);
+        assert_eq!(outcomes[0].origin, origin);
+        assert!(outcomes[0].image.is_some());
+    }
+
+    #[test]
+    fn a_failed_encode_unblocks_the_writer_and_reports() {
+        let jobs = PasteJobs::with_encoder(Arc::new(|_, _, _| anyhow::bail!("disk full")));
+        let (tx, rx) = mpsc::sync_channel::<ChildWrite>(4);
+        send_paste(&tx, jobs.image(ORIGIN, image(1), reference, None));
+        tx.try_send(ChildWrite::bytes(b"k".to_vec())).unwrap();
+        let mut out = Vec::new();
+        write_message(&mut out, rx.try_recv().unwrap());
+        write_message(&mut out, rx.try_recv().unwrap());
+        assert_eq!(out, b"k");
+        let outcomes = wait_outcomes(&jobs, 1);
+        assert!(
+            matches!(&outcomes[0].result, PasteResult::Incomplete { reason, .. } if reason.contains("disk full")),
+            "{outcomes:?}"
+        );
     }
 
     /// Writes into a scratch directory, never the real `prism-paste` one,
@@ -162,85 +626,35 @@ mod tests {
         let started = Instant::now();
         scratch_encoder(width, height, &rgba).unwrap();
         let inline = started.elapsed();
-        let pastes = ImagePastes::with_encoder(scratch_encoder);
+        let jobs = PasteJobs::with_encoder(Arc::new(scratch_encoder));
+        let (tx, rx) = mpsc::sync_channel::<ChildWrite>(1);
         let started = Instant::now();
-        pastes.start(
-            1,
+        let msg = jobs.image(
+            ORIGIN,
             ClipboardImage {
                 width,
                 height,
                 rgba,
             },
+            reference,
             None,
         );
+        send_paste(&tx, msg);
         let call = started.elapsed();
-        let done = loop {
-            let done = pastes.take_done();
-            if !done.is_empty() {
-                break done;
-            }
-            thread::sleep(Duration::from_millis(5));
-        };
+        let mut out = Vec::new();
+        write_message(&mut out, rx.recv().unwrap());
         let total = started.elapsed();
         let _ = std::fs::remove_dir_all(
             std::env::temp_dir().join(format!("paste-195-img-{}", std::process::id())),
         );
         println!(
             "image {width}x{height}: inline encode+write on main={inline:?}; \
-             async start() on main={call:?}, worker done after {total:?}"
+             async image()+send on main={call:?}, writer had the reference after {total:?}"
         );
-        assert!(done[0].result.is_ok());
-        assert!(call < Duration::from_millis(5), "start() took {call:?}");
-    }
-
-    static ENCODER_THREAD: OnceLock<Mutex<Option<thread::ThreadId>>> = OnceLock::new();
-
-    fn recording_encoder(width: u32, height: u32, rgba: &[u8]) -> anyhow::Result<PathBuf> {
-        *ENCODER_THREAD.get_or_init(Default::default).lock().unwrap() =
-            Some(thread::current().id());
-        Ok(PathBuf::from(format!(
-            "{width}x{height}-{}.png",
-            rgba.len()
-        )))
-    }
-
-    #[test]
-    fn image_encode_runs_off_the_calling_thread_and_reports_back() {
-        let pastes = ImagePastes::with_encoder(recording_encoder);
-        let pane = 7;
-        let woke = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = woke.clone();
-        let wake: Wake = std::sync::Arc::new(move || {
-            flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        });
-        pastes.start(
-            pane,
-            ClipboardImage {
-                width: 2,
-                height: 1,
-                rgba: vec![0; 8],
-            },
-            Some(wake),
-        );
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let done = loop {
-            let done = pastes.take_done();
-            if !done.is_empty() || Instant::now() > deadline {
-                break done;
-            }
-            thread::sleep(Duration::from_millis(5));
-        };
-        assert_eq!(done.len(), 1);
-        assert_eq!(done[0].pane, pane);
-        assert_eq!(
-            done[0].result.as_ref().unwrap(),
-            &PathBuf::from("2x1-8.png")
-        );
-        let encoder = ENCODER_THREAD.get().unwrap().lock().unwrap().unwrap();
-        assert_ne!(encoder, thread::current().id(), "encode ran on the caller");
+        assert!(!out.is_empty());
         assert!(
-            woke.load(std::sync::atomic::Ordering::SeqCst),
-            "worker must wake the host"
+            call < Duration::from_millis(5),
+            "image()+send took {call:?}"
         );
     }
 }

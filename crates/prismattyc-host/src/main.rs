@@ -1143,7 +1143,7 @@ struct HostState {
     link_click_mode: link_click::Mode,
     /// `async_paste`: paste through the writer thread (#195).
     async_paste: bool,
-    image_pastes: paste_job::ImagePastes,
+    paste_jobs: paste_job::PasteJobs,
     /// Every status message, shown or hidden, for Recent messages (#171).
     status_history: status_toasts::History,
     /// Config `os_notify_bell` (default false): OS notification on BEL while
@@ -3829,7 +3829,7 @@ impl App {
                 toasts: self.file_config.toasts(),
                 link_click_mode: self.file_config.link_click(),
                 async_paste: self.file_config.async_paste(),
-                image_pastes: Default::default(),
+                paste_jobs: Default::default(),
                 status_history: Default::default(),
                 os_notify_bell: self.file_config.os_notify_bell(),
                 attention_sound: self.file_config.attention_sound(),
@@ -7372,7 +7372,7 @@ impl App {
         let prior_panes = host.mux.pane_count();
         let prior_tabs = host.mux.tab_count();
         let prior_active = host.mux.active_count();
-        finish_image_pastes(host);
+        finish_pastes(host);
         let parse_started = Instant::now();
         let parked_more = local_views::drain(host);
         let (pty_dirty, more) = host.mux.drain_all();
@@ -16229,12 +16229,21 @@ fn paste_clipboard_native(host: &mut HostState) -> bool {
         None => {
             if host.async_paste {
                 if let Some(image) = host.clipboard.as_mut().and_then(clipboard_image) {
-                    // Encode and write on a worker; the reference is pasted
-                    // when it reports back (`finish_image_pastes`).
-                    let pane = host.mux.focused_id().get();
-                    let wake = host.mux.wake();
-                    host.image_pastes.start(pane, image, wake);
-                    return true;
+                    // The message takes its place on this pane's writer now;
+                    // a worker encodes the PNG and fills in the reference.
+                    let agent = prismattyc_mux::detect_inject_agent(host.child_pid(), None);
+                    let bracketed = host.emulator.bracketed_paste();
+                    let msg = host.paste_jobs.image(
+                        paste_origin(host),
+                        image,
+                        move |path| {
+                            paste_payload(&prismattyc_mux::paste_reference(path, agent), bracketed)
+                        },
+                        host.mux.wake(),
+                    );
+                    host.dirty |= reset_pane_for_paste(host.mux.focused_mut());
+                    return paste_job::send_paste(&host.to_child_tx, msg)
+                        == paste_job::PasteSend::Queued;
                 }
             }
             let Some(path) = host.clipboard.as_mut().and_then(|clipboard| {
@@ -16257,12 +16266,14 @@ fn paste_clipboard_native(host: &mut HostState) -> bool {
         return false;
     }
 
-    if !deliver_paste_bytes(
-        &host.to_child_tx,
-        bytes,
-        child_wants_bracketed,
-        host.async_paste,
-    ) {
+    if host.async_paste {
+        // The toast waits for the writer's delivered outcome (`finish_pastes`).
+        let msg = host
+            .paste_jobs
+            .text(paste_origin(host), bytes, image_path, host.mux.wake());
+        return paste_job::send_paste(&host.to_child_tx, msg) == paste_job::PasteSend::Queued;
+    }
+    if !deliver_paste_bytes(&host.to_child_tx, bytes, child_wants_bracketed) {
         return false;
     }
     if let Some(path) = image_path {
@@ -16271,24 +16282,21 @@ fn paste_clipboard_native(host: &mut HostState) -> bool {
     true
 }
 
-/// Send a paste payload to a pane writer. With `async_paste` the writer
-/// thread owns the back-pressure wait and this returns at once; otherwise the
-/// main thread polls a full channel for up to `PASTE_SEND_BUDGET` and closes a
-/// partial bracketed paste. Returns whether the whole paste was handed off.
+fn paste_origin(host: &HostState) -> paste_job::PasteOrigin {
+    paste_job::PasteOrigin {
+        mux: host.mux.instance(),
+        pane: host.mux.focused_id().get(),
+    }
+}
+
+/// Default (`async_paste = false`) delivery: the main thread polls a full
+/// channel for up to `PASTE_SEND_BUDGET` and closes a partial bracketed
+/// paste. Returns whether the whole paste was handed off.
 fn deliver_paste_bytes(
     to_child: &mpsc::SyncSender<rich::ChildWrite>,
     bytes: Vec<u8>,
     bracketed: bool,
-    async_paste: bool,
 ) -> bool {
-    if async_paste {
-        let sent = paste_job::send_paste(to_child, bytes);
-        if sent != paste_job::PasteSend::Queued {
-            eprintln!("prismattyc-host: paste to child not sent ({sent:?})");
-            return false;
-        }
-        return true;
-    }
     let result = enqueue_paste_chunks(to_child, &bytes, PASTE_SEND_BUDGET);
     if bracketed && matches!(result, PasteEnqueueResult::Partial) {
         let close_deadline = Instant::now() + PASTE_BRACKET_CLOSE_TIMEOUT;
@@ -16330,36 +16338,35 @@ fn reset_pane_for_paste(pane: &mut mux::PaneRuntime) -> bool {
     changed
 }
 
-/// Paste the file references of image encodes that finished since the last
-/// pump, into the pane that was focused when each paste started.
-fn finish_image_pastes(host: &mut HostState) {
-    for done in host.image_pastes.take_done() {
-        let path = match done.result {
-            Ok(path) => path,
-            Err(error) => {
-                eprintln!("prismattyc-host: image paste failed: {error:#}");
-                continue;
+/// Report `async_paste` outcomes. A delivered image reference shows the
+/// toast on its pane only while that pane's runtime is the current one;
+/// pane ids repeat across Space views.
+fn finish_pastes(host: &mut HostState) {
+    for outcome in host.paste_jobs.take_outcomes() {
+        match outcome.result {
+            paste_job::PasteResult::Delivered { .. } => {
+                let Some(path) = outcome.image else { continue };
+                if let Some(pane) = paste_toast_pane(&host.mux, outcome.origin) {
+                    show_paste_toast_on(host, pane, &path);
+                }
             }
-        };
-        let Some(id) = host.mux.pane_id_by_raw(done.pane) else {
-            eprintln!("prismattyc-host: image paste target pane closed");
-            continue;
-        };
-        let Some(pane) = host.mux.pane_mut(id) else {
-            continue;
-        };
-        let agent = prismattyc_mux::detect_inject_agent(pane.child_pid(), None);
-        let text = prismattyc_mux::paste_reference(&path, agent);
-        let bytes = paste_payload(&text, pane.emulator.bracketed_paste());
-        let changed = reset_pane_for_paste(pane);
-        let sent = paste_job::send_paste(&pane.to_child_tx, bytes);
-        host.dirty |= changed;
-        if sent == paste_job::PasteSend::Queued {
-            show_paste_toast_on(host, id, &path);
-        } else {
-            eprintln!("prismattyc-host: image paste not sent ({sent:?})");
+            paste_job::PasteResult::Incomplete {
+                written,
+                total,
+                reason,
+            } => {
+                let total = total.map_or_else(|| "?".to_string(), |total| total.to_string());
+                eprintln!("prismattyc-host: paste to child incomplete ({written}/{total} bytes): {reason}");
+            }
         }
     }
+}
+
+/// The pane a paste started in, if its runtime is the one shown now.
+fn paste_toast_pane(mux: &mux::MuxRuntime, origin: paste_job::PasteOrigin) -> Option<PaneId> {
+    (mux.instance() == origin.mux)
+        .then(|| mux.pane_id_by_raw(origin.pane))
+        .flatten()
 }
 
 /// Build the bytes sent to the child for a normalized paste payload.
@@ -23522,6 +23529,7 @@ open(sys.argv[1], 'w').write(str(n))
         frames: usize,
         received: usize,
         delivered_in: Duration,
+        outcome: Option<paste_job::PasteResult>,
     }
 
     fn paste_into_slow_reader(async_paste: bool, clipboard_bytes: usize) -> SlowPaste {
@@ -23554,7 +23562,16 @@ open(sys.argv[1], 'w').write(str(n))
         let payload = bytes.len();
         let started = Instant::now();
         let to_child = mux.focused().to_child_tx.clone();
-        deliver_paste_bytes(&to_child, bytes, false, async_paste);
+        let jobs = paste_job::PasteJobs::default();
+        if async_paste {
+            let origin = paste_job::PasteOrigin {
+                mux: mux.instance(),
+                pane: mux.focused_id().get(),
+            };
+            paste_job::send_paste(&to_child, jobs.text(origin, bytes, None, None));
+        } else {
+            deliver_paste_bytes(&to_child, bytes, false);
+        }
         let call = started.elapsed();
         // Frames: drain the mux every 16 ms until the child reports.
         let mut max_gap = call;
@@ -23583,7 +23600,79 @@ open(sys.argv[1], 'w').write(str(n))
             frames,
             received,
             delivered_in,
+            outcome: jobs.take_outcomes().pop().map(|outcome| outcome.result),
         }
+    }
+
+    #[test]
+    fn pty_child_exiting_mid_paste_reports_incomplete() {
+        // Raw mode, take a 64 KiB prefix, then exit with the rest unread.
+        let dir = std::env::temp_dir().join(format!("paste-195-exit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ready = dir.join("ready");
+        let script = format!(
+            "stty raw -echo; : > {}; dd bs=1024 count=64 of=/dev/null 2>/dev/null",
+            ready.display()
+        );
+        let mut mux =
+            mux::MuxRuntime::spawn("/bin/sh", &["-c".to_string(), script], 80, 24).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() {
+            assert!(Instant::now() < deadline, "child did not start");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let jobs = paste_job::PasteJobs::default();
+        let origin = paste_job::PasteOrigin {
+            mux: mux.instance(),
+            pane: mux.focused_id().get(),
+        };
+        let total = 1024 * 1024;
+        let msg = jobs.text(origin, vec![b'y'; total], None, None);
+        assert_eq!(
+            paste_job::send_paste(&mux.focused().to_child_tx, msg),
+            paste_job::PasteSend::Queued
+        );
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let outcome = loop {
+            let _ = mux.drain_all();
+            if let Some(outcome) = jobs.take_outcomes().pop() {
+                break outcome;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no paste outcome after the child exited"
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        match outcome.result {
+            paste_job::PasteResult::Incomplete {
+                written,
+                total: Some(reported),
+                ..
+            } => {
+                assert_eq!(reported, total);
+                assert!(written < total, "written {written} of {total}");
+            }
+            other => panic!("expected an incomplete paste, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paste_toast_never_resolves_a_pane_in_another_runtime() {
+        // Each Space view bootstraps its own Domain, so pane ids collide.
+        let space_a = mux::MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let space_b = mux::MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        assert_eq!(space_a.focused_id().get(), space_b.focused_id().get());
+        let origin = paste_job::PasteOrigin {
+            mux: space_a.instance(),
+            pane: space_a.focused_id().get(),
+        };
+        assert_eq!(
+            paste_toast_pane(&space_a, origin),
+            Some(space_a.focused_id())
+        );
+        assert_eq!(paste_toast_pane(&space_b, origin), None);
     }
 
     /// Proof harness for #195 parts 1-2 (needs /usr/bin/python3):
@@ -23612,6 +23701,10 @@ open(sys.argv[1], 'w').write(str(n))
                 assert_eq!(
                     run.received, run.payload,
                     "the writer must deliver all of it"
+                );
+                assert_eq!(
+                    run.outcome,
+                    Some(paste_job::PasteResult::Delivered { bytes: run.payload })
                 );
             }
         }

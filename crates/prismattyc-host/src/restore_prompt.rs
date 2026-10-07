@@ -143,14 +143,17 @@ pub(super) fn finish(host: &mut HostState, accept: bool) {
                 .map(|s| (s.id.to_string(), s.name.clone()))
                 .collect();
             host.mux.space_id = file.space_id.clone();
-            regroup::apply_with_placeholders(
+            let before_bindings = host.attach_pane_sessions.clone();
+            let applied = regroup::apply_with_placeholders(
                 &mut host.mux,
                 &mut host.attach_pane_sessions,
                 &file,
                 &find_mux_bin().to_string_lossy(),
                 &names,
                 &stopped,
-            )?;
+            );
+            crate::note_attach_bindings(host, &before_bindings);
+            applied?;
             Ok(file)
         })();
         match result {

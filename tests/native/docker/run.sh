@@ -255,6 +255,7 @@ paste_e2e() {
   esac
   docker cp "$NATIVE/paste-e2e.py" "$cid:/home/tester/paste-e2e.py"
   docker cp "$NATIVE/paste-slow-reader.py" "$cid:/home/tester/paste-slow-reader.py"
+  docker cp "$NATIVE/paste-e2e_test.py" "$cid:/home/tester/paste-e2e_test.py"
   docker start "$cid" >/dev/null
   # Images built before xclip was added to the Dockerfile.
   if ! docker exec -u tester "$cid" command -v xclip >/dev/null 2>&1; then
@@ -264,6 +265,8 @@ paste_e2e() {
       return 1
     }
   fi
+  # The frame-gap measurement's boundary cases come first.
+  docker exec -u tester "$cid" python3 /home/tester/paste-e2e_test.py || return 1
   if docker exec -u tester -e DISPLAY=:99 "$cid" \
     python3 /home/tester/paste-e2e.py --out /tmp/paste-e2e; then
     status=0

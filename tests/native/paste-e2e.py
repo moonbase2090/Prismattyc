@@ -5,8 +5,9 @@
 Runs a real host window on the current X display with a slow-reading child
 (paste-slow-reader.py), puts a payload on the clipboard with xclip, presses
 Ctrl+Shift+V with xdotool, and timestamps every rendered frame from the
-`render_timer` log. The measure is the largest gap between frames in the
-2 s after the key.
+`render_timer` log. The measure is the largest interval between frames that
+overlaps the 2 s after the key, including the frame before the key and the
+first frame after the window (see `window_gaps`).
 
 `async_paste = true` must keep that gap within the bound and deliver the
 whole payload: the 1 MiB `MAX_PASTE_BYTES` cap of a 5 MiB text clipboard, and
@@ -104,9 +105,25 @@ class Frames:
             elif "paste" in line:
                 self.notes.append((now, line))
 
-    def gaps(self, start, end):
-        points = [t for t in self.times if start <= t <= end]
-        return points, [b - a for a, b in zip(points, points[1:])]
+
+
+def window_gaps(times, start, end):
+    """Intervals between consecutive frames that overlap `[start, end]`.
+
+    The window is bounded by the last frame at or before `start` and the
+    first frame at or after `end`, so a stall before the first frame inside
+    the window, or one that runs past its end, is measured. Fails when no
+    frame bounds either side, since the window would be unobserved there.
+    """
+    times = sorted(times)
+    opening = [t for t in times if t <= start]
+    closing = [t for t in times if t >= end]
+    if not opening or not closing:
+        raise AssertionError(
+            f"frames do not span [{start:.3f}, {end:.3f}]: "
+            f"{len(opening)} at or before it, {len(closing)} at or after it")
+    points = [opening[-1], *(t for t in times if start < t < end), closing[0]]
+    return [b - a for a, b in zip(points, points[1:])]
 
 
 def measure(case, async_paste, out):
@@ -141,17 +158,18 @@ def measure(case, async_paste, out):
             host.terminate()
             host.wait(timeout=10)
             frames.thread.join(timeout=5)
-    before, before_gaps = frames.gaps(key_at - 1.0, key_at)
-    _, after_gaps = frames.gaps(key_at, key_at + 2.0)
+    before_gaps = window_gaps(frames.times, key_at - 1.0, key_at)
+    after_gaps = window_gaps(frames.times, key_at, key_at + 2.0)
     received = result.read_bytes()
     record = {
         "case": case,
         "async_paste": async_paste,
         "clipboard_bytes": clipboard_bytes,
         "received_bytes": len(received),
-        "frames_1s_before": len(before),
+        "frames_1s_before": sum(1 for t in frames.times if key_at - 1.0 <= t <= key_at),
         "max_gap_ms_before": round(max(before_gaps) * 1000, 1),
         "max_gap_ms_after_key": round(max(after_gaps) * 1000, 1),
+        "first_frame_after_key_ms": round((min(t for t in frames.times if t > key_at) - key_at) * 1000, 1),
         "bound_ms": BOUNDS_MS[case],
         "host_notes": [f"{t - key_at:+.3f}s {line}" for t, line in frames.notes],
     }

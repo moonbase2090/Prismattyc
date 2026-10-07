@@ -16,6 +16,7 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::control::{AxisWire, LayoutSnapshot, PaneSnapshot, SessionSnapshot};
 
@@ -669,10 +670,101 @@ pub fn list_layouts(dir: &Path) -> Result<Vec<LayoutListEntry>> {
     Ok(out)
 }
 
-/// `$XDG_DATA_HOME/prismattyc/spaces`, else `$HOME/.local/share/prismattyc/spaces`.
+/// The default daemon retains its historical Space directory. Other daemons
+/// get a stable private subdirectory keyed by their recorded socket identity.
 #[must_use]
 pub fn spaces_dir() -> PathBuf {
+    let base = spaces_dir_default();
+    let socket = std::env::var_os("PRISMATTYC_SPACES_SOCKET")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("PMUX_SOCKET").filter(|value| !value.is_empty()));
+    match socket {
+        None => base,
+        Some(socket) => spaces_dir_for_socket(Path::new(&socket)),
+    }
+}
+
+/// Return the explicitly socket-scoped Spaces directory.
+#[must_use]
+pub fn spaces_dir_for_socket(socket: &Path) -> PathBuf {
+    let base = spaces_dir_default();
+    spaces_dir_for_socket_with_base(socket, &base)
+}
+
+/// Stable marker path shared by the mux daemon and its clients.
+#[must_use]
+pub fn spaces_daemon_identity_path(socket: &Path) -> PathBuf {
+    let stable = stable_socket_identity(socket);
+    let parent = stable.parent().unwrap_or_else(|| Path::new("."));
+    let name = stable
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    parent.join(format!("{name}.spaces-identity"))
+}
+
+/// Canonical socket identity used when a daemon has no marker yet.
+#[must_use]
+pub fn spaces_socket_identity(socket: &Path) -> String {
+    stable_socket_identity(socket).display().to_string()
+}
+
+fn spaces_dir_default() -> PathBuf {
     spaces_dir_from(crate::platform::data_home(), crate::platform::home_dir())
+}
+
+fn spaces_dir_for_socket_with_base(socket: &Path, base: &Path) -> PathBuf {
+    let marker = spaces_daemon_identity_path(socket);
+    if let Ok(identity) = fs::read_to_string(marker) {
+        let identity = identity.trim();
+        if !identity.is_empty() {
+            return spaces_dir_for_identity(identity, base);
+        }
+    }
+    let identity = spaces_socket_identity(socket);
+    if crate::default_socket_path("default")
+        .ok()
+        .is_some_and(|default| spaces_socket_identity(&default) == identity)
+    {
+        return base.to_path_buf();
+    }
+    spaces_dir_for_identity(&identity, base)
+}
+
+fn spaces_dir_for_identity(identity: &str, base: &Path) -> PathBuf {
+    if identity == "default" {
+        return base.to_path_buf();
+    }
+    let digest = Sha256::digest(identity.as_bytes());
+    base.join("instances").join(format!("sha256-{digest:x}"))
+}
+
+fn stable_socket_identity(socket: &Path) -> PathBuf {
+    if let Ok(canonical) = fs::canonicalize(socket) {
+        return canonical;
+    }
+    let mut candidate = socket.to_path_buf();
+    if let Ok(link) = fs::read_link(&candidate) {
+        candidate = if link.is_absolute() {
+            link
+        } else {
+            candidate
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(link)
+        };
+    }
+    let parent = candidate
+        .parent()
+        .and_then(|parent| fs::canonicalize(parent).ok())
+        .unwrap_or_else(|| {
+            candidate
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf()
+        });
+    let file_name = candidate.file_name().map(PathBuf::from).unwrap_or_default();
+    parent.join(file_name)
 }
 
 fn spaces_dir_from(xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> PathBuf {
@@ -1744,6 +1836,26 @@ mod tests {
             home,
             PathBuf::from("/home/me/.local/share/prismattyc/spaces")
         );
+    }
+
+    #[test]
+    fn spaces_dir_scopes_explicit_sockets_but_preserves_default() {
+        let base = Path::new("/xdg/prismattyc/spaces");
+        let first = Path::new("/tmp/pmux-a.sock");
+        let second = Path::new("/tmp/pmux-b.sock");
+        let same_basename_a = Path::new("/tmp/seat.sock");
+        let same_basename_b = Path::new("/tmp/seat.other");
+
+        assert_ne!(
+            spaces_daemon_identity_path(same_basename_a),
+            spaces_daemon_identity_path(same_basename_b)
+        );
+        assert_eq!(spaces_dir_for_identity("default", base), base);
+        let first_dir = spaces_dir_for_socket_with_base(first, base);
+        let second_dir = spaces_dir_for_socket_with_base(second, base);
+        assert_ne!(first_dir, second_dir);
+        assert!(first_dir.starts_with(base.join("instances")));
+        assert!(second_dir.starts_with(base.join("instances")));
     }
 
     #[test]

@@ -226,6 +226,58 @@ render_bench() {
   return "$st"
 }
 
+# #195: clipboard paste must not stall the window. Needs release binaries;
+# the frame-gap bounds assume release encode and decode times.
+paste_e2e() {
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || {
+    echo "ERROR: image $IMAGE is missing. Run: $0 build" >&2
+    return 1
+  }
+  local name="pt195-paste-$$" cid src bin status
+  local run_id="${PASTE_E2E_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-$$}"
+  case "$run_id" in
+    *[!a-zA-Z0-9._-]*|"") echo "ERROR: invalid PASTE_E2E_RUN_ID" >&2; return 1 ;;
+  esac
+  local destination="$REPO/build/paste-e2e/$run_id"
+  [[ ! -e "$destination" ]] || { echo "ERROR: use a new PASTE_E2E_RUN_ID: $destination" >&2; return 1; }
+  cid="$(docker create --init --name "$name" --hostname prismattyc --shm-size 1g \
+    -e DISPLAY=:99 -e WINIT_UNIX_BACKEND=x11 -e COLORTERM=truecolor \
+    "$IMAGE" sleep infinity)"
+  trap "docker rm -f '$name' >/dev/null 2>&1 || true" EXIT
+  for bin in pmux pmuxd pmux-attach prismattyc-host; do
+    src="$(resolve_e2e_bin "$bin")"
+    echo "  e2e bin $bin <- $src"
+    docker cp "$src" "$cid:/usr/local/bin/$bin"
+  done
+  case "$(resolve_e2e_bin prismattyc-host)" in
+    */release/*) ;;
+    *) echo "WARNING: not a release build; the frame-gap bounds assume release" >&2 ;;
+  esac
+  docker cp "$NATIVE/paste-e2e.py" "$cid:/home/tester/paste-e2e.py"
+  docker cp "$NATIVE/paste-slow-reader.py" "$cid:/home/tester/paste-slow-reader.py"
+  docker start "$cid" >/dev/null
+  # Images built before xclip was added to the Dockerfile.
+  if ! docker exec -u tester "$cid" command -v xclip >/dev/null 2>&1; then
+    docker exec -u 0 "$cid" pacman --disable-sandbox -Sy --noconfirm --needed xclip >/tmp/pt195-pacman.log 2>&1 || {
+      echo "ERROR: pacman could not install xclip" >&2
+      cat /tmp/pt195-pacman.log >&2 || true
+      return 1
+    }
+  fi
+  if docker exec -u tester -e DISPLAY=:99 "$cid" \
+    python3 /home/tester/paste-e2e.py --out /tmp/paste-e2e; then
+    status=0
+  else
+    status=$?
+  fi
+  mkdir -p "$destination"
+  docker cp "$cid:/tmp/paste-e2e/." "$destination/" || return 1
+  echo "Paste evidence: $destination"
+  [[ "$status" -eq 0 ]] || return "$status"
+  python3 -c 'import json, sys; assert json.load(open(sys.argv[1]))["status"] == "PASS"' \
+    "$destination/result.json"
+}
+
 # Prefer the branch under test: PRISMATTYC_BINS, else repo target/debug,
 # else PATH (with a warning).
 resolve_e2e_bin() {
@@ -262,5 +314,6 @@ case "${1:-}" in
   spaces-e2e-wayland) spaces_e2e_wayland ;;
   walkthrough-caption-e2e) walkthrough_caption_e2e ;;
   render-bench) render_bench ;;
-  *) echo "Usage: $0 build|spaces-e2e|host-ux-e2e|rail-transparency-e2e|spaces-e2e-wayland|walkthrough-caption-e2e|render-bench" >&2; exit 2 ;;
+  paste-e2e) paste_e2e ;;
+  *) echo "Usage: $0 build|spaces-e2e|host-ux-e2e|rail-transparency-e2e|spaces-e2e-wayland|walkthrough-caption-e2e|render-bench|paste-e2e" >&2; exit 2 ;;
 esac

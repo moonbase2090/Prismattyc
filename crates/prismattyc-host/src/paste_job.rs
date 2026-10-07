@@ -19,7 +19,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 
@@ -187,18 +187,130 @@ pub(crate) fn writer_payload(msg: ChildWrite) -> (Vec<u8>, Option<PasteTicket>) 
     }
 }
 
-/// Write `bytes` in bounded chunks so a failure can say how much went out.
-pub(crate) fn write_counted(writer: &mut dyn Write, bytes: &[u8]) -> Result<(), (usize, String)> {
-    const CHUNK: usize = 64 * 1024;
+/// Write `bytes` in bounded chunks, publishing progress in `progress`, so a
+/// failure (or a watcher) can say how much went out.
+pub(crate) fn write_counted(
+    writer: &mut dyn Write,
+    bytes: &[u8],
+    progress: &AtomicUsize,
+) -> Result<(), (usize, String)> {
+    const CHUNK: usize = 4 * 1024;
     let mut written = 0;
+    progress.store(0, Ordering::SeqCst);
     for chunk in bytes.chunks(CHUNK) {
         if let Err(error) = writer.write_all(chunk) {
             return Err((written, error.to_string()));
         }
         written += chunk.len();
+        progress.store(written, Ordering::SeqCst);
     }
     let _ = writer.flush();
     Ok(())
+}
+
+const CHILD_EXITED: &str = "the pane's program exited";
+
+/// A PTY pane's writer, shared by its writer thread and its child-exit
+/// watcher.
+///
+/// Once the child exits and the slave side closes, a Linux PTY master
+/// `write` blocks for good; macOS fails it with EIO. So the watcher reports
+/// the paste the writer is stuck in and drops the queue: every paste still
+/// gets an outcome, and later sends see `Closed`.
+pub(crate) struct PtyWriter {
+    rx: Mutex<Option<mpsc::Receiver<ChildWrite>>>,
+    state: Mutex<WriterState>,
+    written: AtomicUsize,
+}
+
+#[derive(Default)]
+struct WriterState {
+    exited: bool,
+    /// The paste being written and its length.
+    in_flight: Option<(PasteTicket, usize)>,
+}
+
+impl PtyWriter {
+    pub(crate) fn new(rx: mpsc::Receiver<ChildWrite>) -> Arc<Self> {
+        Arc::new(Self {
+            rx: Mutex::new(Some(rx)),
+            state: Mutex::default(),
+            written: AtomicUsize::new(0),
+        })
+    }
+
+    /// Writer thread: one message at a time, in order. A failed write stops
+    /// it; `granted` runs for a capability grant after its bytes are written.
+    pub(crate) fn run(
+        &self,
+        child: &mut dyn Write,
+        mut granted: impl FnMut(crate::rich::CapabilityGrant),
+    ) {
+        loop {
+            let msg = {
+                let rx = self.rx.lock().unwrap();
+                let Some(Ok(msg)) = rx.as_ref().map(mpsc::Receiver::recv) else {
+                    return;
+                };
+                msg
+            };
+            let grant = msg.capability_grant.clone();
+            let (bytes, ticket) = writer_payload(msg);
+            {
+                let mut state = self.state.lock().unwrap();
+                if state.exited {
+                    drop(state);
+                    if let Some(ticket) = ticket {
+                        ticket.incomplete(0, Some(bytes.len()), CHILD_EXITED);
+                    }
+                    self.close();
+                    return;
+                }
+                state.in_flight = ticket.map(|ticket| (ticket, bytes.len()));
+            }
+            let result = write_counted(child, &bytes, &self.written);
+            let in_flight = self.state.lock().unwrap().in_flight.take();
+            match result {
+                Ok(()) => {
+                    if let Some((ticket, total)) = in_flight {
+                        ticket.delivered(total);
+                    }
+                    if let Some(grant) = grant {
+                        granted(grant);
+                    }
+                }
+                Err((written, reason)) => {
+                    if let Some((ticket, total)) = in_flight {
+                        ticket.incomplete(written, Some(total), reason);
+                    }
+                    self.close();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// The child exited: report the paste being written and drop the queue.
+    pub(crate) fn child_exited(&self) {
+        let in_flight = {
+            let mut state = self.state.lock().unwrap();
+            state.exited = true;
+            state.in_flight.take()
+        };
+        if let Some((ticket, total)) = in_flight {
+            let written = self.written.load(Ordering::SeqCst);
+            ticket.incomplete(written, Some(total), CHILD_EXITED);
+        }
+        self.close();
+    }
+
+    /// Drop the receiver and what is queued in it. A writer waiting in
+    /// `recv` holds the lock; it sees `exited` on its next message instead.
+    fn close(&self) {
+        if let Ok(mut rx) = self.rx.try_lock() {
+            rx.take();
+        }
+    }
 }
 
 /// Result of offering a paste to a pane writer. Never blocks.
@@ -339,7 +451,7 @@ mod tests {
     /// The PTY writer loop's per-message step, over any `Write`.
     fn write_message(writer: &mut dyn Write, msg: ChildWrite) -> bool {
         let (bytes, ticket) = writer_payload(msg);
-        match write_counted(writer, &bytes) {
+        match write_counted(writer, &bytes, &AtomicUsize::new(0)) {
             Ok(()) => {
                 if let Some(ticket) = ticket {
                     ticket.delivered(bytes.len());
@@ -485,6 +597,116 @@ mod tests {
         };
         assert_eq!(*reported, total);
         assert!(*written < total, "written {written} of {total}");
+    }
+
+    /// A Linux PTY master after the child exits: accepts `limit` bytes,
+    /// then blocks until released (never, in production).
+    struct BlocksAfter {
+        limit: usize,
+        taken: usize,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl Write for BlocksAfter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.taken == self.limit {
+                let _ = self.release.recv();
+                return Err(std::io::Error::other("released"));
+            }
+            let n = (self.limit - self.taken).min(buf.len());
+            self.taken += n;
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn child_exit_reports_a_paste_stuck_in_a_blocked_write_and_closes_the_queue() {
+        let jobs = PasteJobs::default();
+        let (tx, rx) = mpsc::sync_channel::<ChildWrite>(4);
+        let writer = PtyWriter::new(rx);
+        let (release, held) = mpsc::channel();
+        let limit = 64 * 1024;
+        let mut child = BlocksAfter {
+            limit,
+            taken: 0,
+            release: held,
+        };
+        let thread = {
+            let writer = writer.clone();
+            thread::spawn(move || writer.run(&mut child, |_| {}))
+        };
+        let total = 300 * 1024;
+        let stuck = jobs.text(ORIGIN, vec![b'y'; total], None, None);
+        assert_eq!(send_paste(&tx, stuck), PasteSend::Queued);
+        let queued = jobs.text(ORIGIN, b"behind".to_vec(), None, None);
+        assert_eq!(send_paste(&tx, queued), PasteSend::Queued);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while writer.written.load(Ordering::SeqCst) < limit {
+            assert!(Instant::now() < deadline, "writer never reached the limit");
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            jobs.take_outcomes().is_empty(),
+            "the write is still blocked"
+        );
+
+        writer.child_exited();
+        let outcomes = jobs.take_outcomes();
+        assert_eq!(
+            outcomes.iter().map(|o| &o.result).collect::<Vec<_>>(),
+            [
+                &PasteResult::Incomplete {
+                    written: limit,
+                    total: Some(total),
+                    reason: CHILD_EXITED.into(),
+                },
+                &PasteResult::Incomplete {
+                    written: 0,
+                    total: None,
+                    reason: "the pane writer stopped before the paste".into(),
+                },
+            ]
+        );
+        let later = jobs.text(ORIGIN, b"later".to_vec(), None, None);
+        assert_eq!(send_paste(&tx, later), PasteSend::Closed);
+        assert_eq!(jobs.take_outcomes().len(), 1);
+
+        // If the write ever returns, nothing reports twice.
+        release.send(()).unwrap();
+        thread.join().unwrap();
+        assert!(jobs.take_outcomes().is_empty());
+    }
+
+    #[test]
+    fn child_exit_while_idle_fails_the_next_paste_and_closes_the_queue() {
+        let jobs = PasteJobs::default();
+        let (tx, rx) = mpsc::sync_channel::<ChildWrite>(4);
+        let writer = PtyWriter::new(rx);
+        let thread = {
+            let writer = writer.clone();
+            thread::spawn(move || writer.run(&mut Vec::new(), |_| {}))
+        };
+        // The writer holds the receiver lock only while waiting in `recv`.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while writer.rx.try_lock().is_ok() {
+            assert!(Instant::now() < deadline, "writer never waited");
+            thread::sleep(Duration::from_millis(1));
+        }
+        writer.child_exited();
+        let msg = jobs.text(ORIGIN, b"after exit".to_vec(), None, None);
+        assert_eq!(send_paste(&tx, msg), PasteSend::Queued);
+        thread.join().unwrap();
+        assert!(matches!(
+            &jobs.take_outcomes()[..],
+            [PasteOutcome { result: PasteResult::Incomplete { written: 0, reason, .. }, .. }]
+                if reason == CHILD_EXITED
+        ));
+        let later = jobs.text(ORIGIN, b"later".to_vec(), None, None);
+        assert_eq!(send_paste(&tx, later), PasteSend::Closed);
     }
 
     #[test]

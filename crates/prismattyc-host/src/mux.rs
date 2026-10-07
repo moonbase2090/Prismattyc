@@ -37,31 +37,6 @@ fn next_runtime_instance() -> u64 {
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// PTY writer thread: one message at a time, in order. A paste reports its
-/// outcome; a failed write stops the thread, and messages still queued
-/// report incomplete when the channel drops.
-fn pty_writer_loop(
-    to_child_rx: &mpsc::Receiver<ChildWrite>,
-    child_writer: &mut dyn std::io::Write,
-    grant_tx: &mpsc::Sender<crate::rich::CapabilityGrant>,
-) {
-    while let Ok(msg) = to_child_rx.recv() {
-        let grant = msg.capability_grant.clone();
-        let (bytes, ticket) = crate::paste_job::writer_payload(msg);
-        if let Err((written, reason)) = crate::paste_job::write_counted(child_writer, &bytes) {
-            if let Some(ticket) = ticket {
-                ticket.incomplete(written, Some(bytes.len()), reason);
-            }
-            break;
-        }
-        if let Some(ticket) = ticket {
-            ticket.delivered(bytes.len());
-        }
-        if let Some(features) = grant {
-            let _ = grant_tx.send(features);
-        }
-    }
-}
 /// How long after its last visible output a pane still counts as "active".
 pub(crate) const ACTIVE_WINDOW: Duration = Duration::from_millis(1500);
 /// Quiet gap before an unfocused pane's next output (or silence) badges.
@@ -851,9 +826,15 @@ impl PaneRuntime {
 
         let (to_child_tx, to_child_rx) = mpsc::sync_channel::<ChildWrite>(TO_CHILD_CAP);
         let (grant_tx, grant_rx) = mpsc::channel();
+        let writer = crate::paste_job::PtyWriter::new(to_child_rx);
+        let exit_writer = writer.clone();
         thread::Builder::new()
             .name(format!("prism-pane-{pane}-write"))
-            .spawn(move || pty_writer_loop(&to_child_rx, &mut child_writer, &grant_tx))?;
+            .spawn(move || {
+                writer.run(&mut child_writer, |features| {
+                    let _ = grant_tx.send(features);
+                });
+            })?;
 
         let (from_pty_tx, from_pty_rx) =
             mpsc::sync_channel::<std::io::Result<Vec<u8>>>(FROM_PTY_CAP);
@@ -864,6 +845,9 @@ impl PaneRuntime {
             .name(format!("prism-pane-{pane}-wait"))
             .spawn(move || {
                 wait_for_child_exit(child_pid);
+                if child_pid.is_some() {
+                    exit_writer.child_exited();
+                }
                 let _ = exit_tx.send(Ok(Vec::new()));
                 if let Some(wake) = exit_wake {
                     wake();

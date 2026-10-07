@@ -27,11 +27,17 @@ struct CapturedSlot {
     slot: PixelRect,
     rects: Vec<PixelRect>,
     pixels: Vec<u32>,
+    /// Times `pixels` grew. Reuse keeps this small across frames.
+    #[cfg(test)]
+    pixel_grows: usize,
 }
 
 #[derive(Default)]
 pub(crate) struct BorderUnderlay {
     slots: Vec<CapturedSlot>,
+    /// Live prefix of `slots`. Entries at and after this index are spare
+    /// shells whose buffers stay allocated for the next frame.
+    active: usize,
     stride: usize,
     len: usize,
     /// Set by the last restore. `paint_retained_graphite_panes` takes it.
@@ -63,13 +69,24 @@ impl BorderUnderlay {
         if reset || stride != self.stride || buffer.len() != self.len {
             self.reset(stride, buffer.len());
         } else {
-            self.slots.retain(|captured| captured.slot != slot);
+            // Pull a matching live shell out of the prefix and keep its buffers.
+            while let Some(index) = self.slots[..self.active]
+                .iter()
+                .position(|captured| captured.slot == slot)
+            {
+                self.active -= 1;
+                self.slots.swap(index, self.active);
+                self.slots[self.active].rects.clear();
+                self.slots[self.active].pixels.clear();
+            }
         }
         self.store_slot(buffer, stride, slot, GRAPHITE_RING_OUTSET);
     }
 
     pub(crate) fn has_slot(&self, slot: PixelRect) -> bool {
-        self.slots.iter().any(|captured| captured.slot == slot)
+        self.slots[..self.active]
+            .iter()
+            .any(|captured| captured.slot == slot)
     }
 
     /// Rings the last restore asked the painter to stroke. Missing a take
@@ -79,29 +96,47 @@ impl BorderUnderlay {
     }
 
     fn reset(&mut self, stride: usize, len: usize) {
-        self.slots.clear();
+        self.discard_slots();
         self.stride = stride;
         self.len = len;
+    }
+
+    /// Drop pixel contents and mark every shell spare. `clear` keeps the
+    /// allocation, so the next capture does not allocate again.
+    fn discard_slots(&mut self) {
+        for slot in &mut self.slots {
+            slot.rects.clear();
+            slot.pixels.clear();
+        }
+        self.active = 0;
     }
 
     fn store_slot(&mut self, buffer: &[u32], stride: usize, slot: PixelRect, outset: usize) {
         if stride == 0 {
             return;
         }
-        let mut captured = CapturedSlot {
-            slot,
-            rects: Vec::new(),
-            pixels: Vec::new(),
-        };
+        if self.active == self.slots.len() {
+            self.slots.push(CapturedSlot {
+                slot,
+                rects: Vec::new(),
+                pixels: Vec::new(),
+                #[cfg(test)]
+                pixel_grows: 0,
+            });
+        }
+        let captured = &mut self.slots[self.active];
+        captured.slot = slot;
+        captured.rects.clear();
+        captured.pixels.clear();
         for rect in border_strips(slot) {
-            store_rect(buffer, stride, rect, &mut captured);
+            store_rect(buffer, stride, rect, captured);
         }
         if outset > 0 {
             for rect in outer_frame(slot, outset) {
-                store_rect(buffer, stride, rect, &mut captured);
+                store_rect(buffer, stride, rect, captured);
             }
         }
-        self.slots.push(captured);
+        self.active += 1;
     }
 
     fn note_restored(&mut self, count: usize) {
@@ -142,15 +177,16 @@ impl BorderUnderlay {
             && stride == self.stride
             && buffer.len() == self.len;
         if writable {
-            let slots = std::mem::take(&mut self.slots);
-            self.note_restored(slots.len());
-            for slot in &slots {
+            let count = self.active;
+            self.note_restored(count);
+            for slot in &self.slots[..count] {
                 Self::write_slot(buffer, stride, slot, damage);
             }
         } else {
-            self.slots.clear();
             self.note_restored(0);
         }
+        // Full damage and a stride change discard the pixels. The shells stay.
+        self.discard_slots();
         self.pending = BorderRefresh::All;
     }
 
@@ -168,14 +204,15 @@ impl BorderUnderlay {
             && stride == self.stride
             && buffer.len() == self.len;
         if !writable {
-            self.slots.clear();
+            self.discard_slots();
             self.note_restored(0);
             self.pending = BorderRefresh::All;
             return;
         }
-        let mut refresh = vec![false; self.slots.len()];
-        for (index, slot) in self.slots.iter().enumerate() {
-            if slot
+        let live = self.active;
+        let mut refresh = vec![false; live];
+        for index in 0..live {
+            if self.slots[index]
                 .rects
                 .iter()
                 .any(|rect| frame_damage_intersects(damage, *rect))
@@ -189,28 +226,71 @@ impl BorderUnderlay {
             .filter_map(|(index, on)| on.then_some(index))
             .collect();
         while let Some(index) = pending.pop() {
-            for (other, slot) in self.slots.iter().enumerate() {
-                if refresh[other] || !slots_share_pixels(&self.slots[index], slot) {
+            for other in 0..live {
+                if refresh[other] || !live_slots_share(&self.slots, index, other) {
                     continue;
                 }
                 refresh[other] = true;
                 pending.push(other);
             }
         }
-        let mut kept = Vec::new();
+        let mut ordered = Vec::with_capacity(self.slots.len());
         let mut restored = Vec::new();
-        for (slot, refresh) in self.slots.drain(..).zip(refresh) {
-            if refresh {
-                Self::write_slot(buffer, stride, &slot, damage);
-                restored.push(slot.slot);
-            } else {
-                kept.push(slot);
+        for index in 0..live {
+            if refresh[index] {
+                continue;
             }
+            ordered.push(std::mem::replace(&mut self.slots[index], empty_slot()));
         }
+        let kept = ordered.len();
+        for index in 0..live {
+            if !refresh[index] {
+                continue;
+            }
+            let slot = std::mem::replace(&mut self.slots[index], empty_slot());
+            Self::write_slot(buffer, stride, &slot, damage);
+            restored.push(slot.slot);
+            ordered.push(cleared_slot(slot));
+        }
+        for index in live..self.slots.len() {
+            ordered.push(std::mem::replace(&mut self.slots[index], empty_slot()));
+        }
+        self.slots.clear();
         self.note_restored(restored.len());
-        self.slots = kept;
+        self.active = kept;
+        self.slots = ordered;
         self.pending = BorderRefresh::Slots(restored);
     }
+}
+
+fn empty_slot() -> CapturedSlot {
+    CapturedSlot {
+        slot: PixelRect::new(0, 0, 0, 0),
+        rects: Vec::new(),
+        pixels: Vec::new(),
+        #[cfg(test)]
+        pixel_grows: 0,
+    }
+}
+
+fn cleared_slot(mut slot: CapturedSlot) -> CapturedSlot {
+    slot.rects.clear();
+    slot.pixels.clear();
+    slot
+}
+
+fn live_slots_share(slots: &[CapturedSlot], index: usize, other: usize) -> bool {
+    if index == other {
+        return false;
+    }
+    let (left, right) = if index < other {
+        let (head, tail) = slots.split_at(other);
+        (&head[index], &tail[0])
+    } else {
+        let (head, tail) = slots.split_at(index);
+        (&tail[0], &head[other])
+    };
+    slots_share_pixels(left, right)
 }
 
 fn store_rect(buffer: &[u32], stride: usize, rect: PixelRect, captured: &mut CapturedSlot) {
@@ -220,9 +300,14 @@ fn store_rect(buffer: &[u32], stride: usize, rect: PixelRect, captured: &mut Cap
     captured.rects.push(rect);
     for y in rect.y..rect.y + rect.height {
         let start = y * stride + rect.x;
-        captured
-            .pixels
-            .extend_from_slice(&buffer[start..start + rect.width]);
+        let row = &buffer[start..start + rect.width];
+        #[cfg(test)]
+        let before = captured.pixels.capacity();
+        captured.pixels.extend_from_slice(row);
+        #[cfg(test)]
+        if captured.pixels.capacity() > before {
+            captured.pixel_grows += 1;
+        }
     }
 }
 
@@ -474,6 +559,46 @@ mod tests {
         assert!(buffer.iter().all(|pixel| *pixel == 0xabcdef01));
         cache.restore(&mut buffer, 100, &mut FrameDamage::rects());
         assert!(buffer.iter().all(|pixel| *pixel == 0xabcdef01));
+    }
+
+    /// The flag-off path calls `restore` then `capture` every partial frame.
+    /// Reused shells must not allocate a new pixel buffer per frame. The
+    /// unfixed `mem::take` / `slots.clear` path grows once per capture.
+    #[test]
+    fn default_off_restore_reuses_pixel_buffers() {
+        let mut grows = 0usize;
+        for (width, height) in [(1, 1), (9, 13), (101, 63), (1025, 769)] {
+            let stride = width + 12;
+            let slot = PixelRect::new(5, 4, width, height);
+            let mut surface: Vec<u32> = (0..stride * (height + 10))
+                .map(|i| 0x80000000 | ((i as u32).wrapping_mul(7919) & 0xffffff))
+                .collect();
+            let mut retained = surface.clone();
+            let mut underlay = BorderUnderlay::default();
+            for _head in [true, false] {
+                for step in 0..=20 {
+                    let mut damage = FrameDamage::rects();
+                    underlay.restore(&mut retained, stride, &mut damage);
+                    let index = slot.y * stride + slot.x;
+                    surface[index] ^= 0x000055aa;
+                    retained[index] = surface[index];
+                    if step < 20 {
+                        underlay.capture(&retained, stride, slot);
+                    }
+                }
+                retained.clone_from(&surface);
+            }
+            grows += underlay
+                .slots
+                .iter()
+                .map(|slot| slot.pixel_grows)
+                .sum::<usize>();
+        }
+        eprintln!("border.pixel_grows.default_off={grows}");
+        assert!(
+            grows <= 24,
+            "pixel buffers grew {grows} times across the sweep; reuse measured 18 and a fresh Vec per frame measured 720"
+        );
     }
 
     fn damaged_tile_count(width: usize, height: usize, damage: &FrameDamage) -> usize {

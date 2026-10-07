@@ -102,7 +102,7 @@ mod tests {
                         1 => 0x80,
                         _ => 0,
                     };
-                    alpha << 24 | (index as u32 * 0x0102_03) & 0x00ff_ffff
+                    alpha << 24 | (index as u32 * 0x0001_0203) & 0x00ff_ffff
                 })
                 .collect();
             let mut expected = input.clone();

@@ -146,6 +146,9 @@ jobs:
       - name: Check nightly mutants argv and sharding
         run: python3 scripts/mutants-nightly_test.py
 
+      - name: Check graphite-core dependency pin
+        run: cargo tree -p prismattyc-host -i graphite-core
+
       - name: Check workspace
         run: |
           cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"

@@ -62,13 +62,11 @@ fn isolated_space_windows_create_move_and_render() {
         .build()
         .unwrap();
     let cli = Cli::parse(["--no-splash", "/bin/cat"].into_iter().map(String::from)).unwrap();
-    let app = App::new(
-        cli,
-        config::ConfigFile::default(),
-        None,
-        event_loop.create_proxy(),
-    )
-    .unwrap();
+    let file_config = config::ConfigFile {
+        async_file_writes: Some(true),
+        ..config::ConfigFile::default()
+    };
+    let app = App::new(cli, file_config, None, event_loop.create_proxy()).unwrap();
     let mut proof = Proof {
         app,
         windows: Vec::new(),
@@ -216,6 +214,7 @@ fn verify_space_rename(app: &mut App, event_loop: &ActiveEventLoop, source: Wind
             .with_file_name("rename-view.json"),
     );
     persist_attach_layout_from_live(&mut follower);
+    test_support::wait_for_attach_write(&follower);
     app.windows = windows;
     std::env::remove_var("PMUX_SPACE");
     std::env::remove_var("PMUX_VIEW_PATH");
@@ -238,6 +237,7 @@ fn verify_space_rename(app: &mut App, event_loop: &ActiveEventLoop, source: Wind
     prismattyc_mux::save_space(&spaces_dir(), "a", &replacement).unwrap();
     follower.last_space_refresh = None;
     refresh_space_views(&mut follower);
+    test_support::wait_for_attach_write(&follower);
     assert_eq!(follower.space_rail.current.as_deref(), Some("renamed-a"));
     assert_eq!(follower.mux.space_id, owner);
     assert_eq!(follower.attach_pane_sessions, panes);
@@ -411,6 +411,9 @@ impl ApplicationHandler<UserAction> for Proof {
                     .space_rail
                     .current = None;
                 self.app.pump(event_loop, None);
+                test_support::wait_for_attach_write(
+                    self.app.windows.get(&self.windows[0]).unwrap(),
+                );
                 assert_eq!(
                     self.app.windows[&self.windows[0]]
                         .space_rail
@@ -425,7 +428,9 @@ impl ApplicationHandler<UserAction> for Proof {
                 let path = a.attach_layout_path.clone().unwrap();
                 let mut foreign = original.clone();
                 foreign.tabs[0].sessions = vec![self.original[1].0.to_string()];
+                foreign.tabs[0].title.push_str(" poisoned layout");
                 prismattyc_mux::attach_tabs::save(&path, &foreign).unwrap();
+                set_cache_modified(&path, SystemTime::now() + Duration::from_secs(2));
                 poll_host_attach_tabs(a);
                 assert_eq!(
                     a.mux.remote_pane_id(a.mux.focused_id()),
@@ -434,7 +439,16 @@ impl ApplicationHandler<UserAction> for Proof {
                 );
                 assert!(a.space_opens.blocks_persist());
                 prismattyc_mux::attach_tabs::save(&path, &original).unwrap();
+                set_cache_modified(&path, SystemTime::now() + Duration::from_secs(4));
+                let ack = prismattyc_mux::host_ack_path_from_socket(&host_mux_socket().unwrap());
+                std::fs::write(&ack, b"stale\n").unwrap();
+                set_cache_modified(&ack, SystemTime::now() - Duration::from_secs(10));
+                let since = SystemTime::now() - Duration::from_secs(2);
                 poll_host_attach_tabs(a);
+                assert!(
+                    prismattyc_mux::wait_host_ack(&ack, since, Duration::from_millis(100)),
+                    "matching external cache layout must refresh the host ACK"
+                );
                 assert!(!a.space_opens.blocks_persist());
                 // Multi-pane source: only the visible original pane moves.
                 split(&space_session("a"));
@@ -538,6 +552,7 @@ impl ApplicationHandler<UserAction> for Proof {
                 session_prompt::dispatch_key(a, &Key::Named(NamedKey::Enter), false);
                 assert!(a.session_prompt.is_none(), "tab naming failed");
                 persist_attach_layout_from_live(a);
+                test_support::wait_for_attach_write(a);
                 self.changed = Instant::now();
                 self.phase = 5;
             }
@@ -561,6 +576,7 @@ impl ApplicationHandler<UserAction> for Proof {
                 capture(a, "a-new-sessions");
                 a.mux.select_tab(0).unwrap();
                 persist_attach_selection(a);
+                test_support::wait_for_attach_write(a);
                 let selected = attach_tabs::load(a.attach_layout_path.as_ref().unwrap()).unwrap();
                 assert_eq!(
                     selected.focused_session,
@@ -631,6 +647,7 @@ impl ApplicationHandler<UserAction> for Proof {
                 let b = self.app.windows.get_mut(&self.windows[1]).unwrap();
                 assert_ne!(b.attach_layout_path, b_path);
                 assert_eq!(b.space_rail.current.as_deref(), Some("b"));
+                test_support::wait_for_attach_write(b);
                 let layout = attach_tabs::load(b.attach_layout_path.as_ref().unwrap()).unwrap();
                 assert_eq!(layout.space.as_deref(), Some("b"));
                 open_space_from_host(b, "a", SpaceOpenMode::Switch);
@@ -647,6 +664,7 @@ impl ApplicationHandler<UserAction> for Proof {
                 let _ = std::fs::remove_file(pid_path.with_extension("render.json"));
                 self.app.last_render_status = None;
                 self.app.publish_render_status();
+                test_support::wait_for_render_status(&self.app);
                 let status =
                     prismattyc_mux::host_render_status::read(&host_mux_socket().unwrap()).unwrap();
                 assert!(!status["windows"].as_array().unwrap().is_empty());
@@ -661,6 +679,13 @@ impl ApplicationHandler<UserAction> for Proof {
         ));
     }
     fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+}
+
+fn set_cache_modified(path: &Path, modified: SystemTime) {
+    std::fs::File::open(path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
 }
 
 fn verify_polish_ui(host: &mut HostState) {

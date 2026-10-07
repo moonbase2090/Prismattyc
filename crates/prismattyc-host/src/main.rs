@@ -171,6 +171,7 @@ const PASTE_SEND_BUDGET: Duration = Duration::from_millis(250);
 /// Extra wait to close a partially-delivered bracketed paste (`CSI 201 ~`).
 const PASTE_BRACKET_CLOSE_TIMEOUT: Duration = Duration::from_millis(50);
 const PASTE_POLL_INTERVAL: Duration = Duration::from_millis(2);
+const EXIT_CLEANUP_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PaneSpacing {
@@ -3407,7 +3408,18 @@ impl App {
                 host.window.request_redraw();
             }
             if host.mux.all_children_exited() {
-                closed.push(*id);
+                if host.pending_exited_cleanups.is_empty() {
+                    closed.push(*id);
+                } else {
+                    // Keep the final window alive while a failed Space cleanup
+                    // retries. Without this owner, the pending queue would be
+                    // dropped together with the HostState.
+                    let retry = Instant::now() + EXIT_CLEANUP_RETRY_INTERVAL;
+                    next_deadline = Some(match next_deadline {
+                        Some(existing) => existing.min(retry),
+                        None => retry,
+                    });
+                }
                 timing.record_phase(
                     pump_timing::Phase::WindowBookkeeping,
                     phase_started.elapsed(),
@@ -7539,8 +7551,18 @@ impl App {
         let prior_active = host.mux.active_count();
         finish_pastes(host);
         let parse_started = Instant::now();
-        let parked_more = local_views::drain(host);
+        let (parked_more, parked_exited) = local_views::drain(host);
         let mut retry_cleanups = Vec::new();
+        for (_owner, _pane, session_id, session) in parked_exited {
+            host.observed_space_sessions.remove(&session_id);
+            if let Err(error) = remove_exited_session_from_space(host, &session, &session_id) {
+                retry_cleanups.push((session, session_id));
+                rail_toast(
+                    host,
+                    &format!(" clean exit cleanup failed; retrying: {error} "),
+                );
+            }
+        }
         for (session, session_id) in std::mem::take(&mut host.pending_exited_cleanups) {
             if remove_exited_session_from_space(host, &session, &session_id).is_err() {
                 retry_cleanups.push((session, session_id));

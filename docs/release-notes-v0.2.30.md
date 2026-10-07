@@ -1,12 +1,5 @@
 # Prismattyc 0.2.30 release notes
 
-## Cleanly close exited Space sessions
-
-When an attached session exits successfully, Prismattyc now closes its pane,
-removes the session from its saved Space, and tears down the live session. A
-failed attached client still remains available as a placeholder so it can be
-reopened.
-
 ## In-app updates
 
 On macOS, the Prismattyc menu checks for a signed release, shows its version
@@ -45,7 +38,7 @@ resize reflow, and narrow-cell writes do less work.
 Jev shadow requests send AI Gateway authentication and accept a double-wrapped
 gateway response (`result.result.answers`). A manual smoke workflow can make
 one live call. Pull-request triage is advisory: it may add `triage:*` labels
-and one comment, it stays off until `JEV_PR_TRIAGE_ENABLED` is set, and it does
-not block a merge.
+and one comment, it stays off until `JEV_PR_TRIAGE_ENABLED` is set, and it
+does not block a merge.
 
 The GitHub release body is this version's section in [CHANGELOG.md](../CHANGELOG.md).

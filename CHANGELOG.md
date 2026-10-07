@@ -4,6 +4,12 @@
 
 ### Since 0.3.0
 
+When an attached session exits successfully, Prismattyc closes its pane,
+removes the session from its saved Space, and tears down the live session.
+Direct attachments without a saved Space are stopped by stable session ID, and
+failed cleanup is retried. Failed attached clients remain available as
+reopenable placeholders.
+
 A plain click opens a link. This applies to OSC 8 links and detected
 HTTP(S) URLs. The link opens on release only when the press and release stay
 on the same link. Drags still select text, double- and triple-clicks still

@@ -711,6 +711,10 @@ pub(crate) struct PaneRuntime {
     pub(crate) scroll_new_output: bool,
     pub(crate) last_content_epoch: u64,
     pub(crate) child_alive: bool,
+    /// Exit status captured when the PTY is first reaped. Keeping it here
+    /// lets attached-pane cleanup distinguish a successful exit from a
+    /// failed one after `try_wait` has consumed the status.
+    exit_status: Option<portable_pty::ExitStatus>,
     /// Pane title from the child's OSC 0/2 (PT-148): a `pmux rename-pane`
     /// title or guest status relayed by pmux-attach, or a local shell's own
     /// title. Shown on the strip handle hover.
@@ -1009,6 +1013,7 @@ impl PaneRuntime {
             scroll_new_output: false,
             last_content_epoch,
             child_alive: true,
+            exit_status: None,
             title: None,
             title_pinned: false,
             attach_session: None,
@@ -1177,6 +1182,16 @@ impl PaneRuntime {
         result
     }
 
+    fn mark_child_exited(&mut self) {
+        self.child_alive = false;
+        if self.exit_status.is_none() {
+            self.exit_status = self
+                .session
+                .as_mut()
+                .and_then(|session| session.try_wait().ok().flatten());
+        }
+    }
+
     fn drain_pty(
         &mut self,
         from_pty_rx: &mpsc::Receiver<std::io::Result<Vec<u8>>>,
@@ -1187,7 +1202,7 @@ impl PaneRuntime {
         for i in 0..MAX_PTY_DRAIN_PER_PANE {
             match from_pty_rx.try_recv() {
                 Ok(Ok(bytes)) if bytes.is_empty() => {
-                    self.child_alive = false;
+                    self.mark_child_exited();
                     return (true, content_changed, false);
                 }
                 Ok(Ok(bytes)) => {
@@ -1247,7 +1262,7 @@ impl PaneRuntime {
                     }
                 }
                 Ok(Err(_)) | Err(mpsc::TryRecvError::Disconnected) => {
-                    self.child_alive = false;
+                    self.mark_child_exited();
                     return (true, content_changed, false);
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -1255,15 +1270,16 @@ impl PaneRuntime {
         }
         // PTY read can stay blocked after the child dies; reap so the
         // cascade still runs on the next pump (live wiring).
-        if self.child_alive
-            && self
+        if self.child_alive {
+            if let Some(status) = self
                 .session
                 .as_mut()
                 .and_then(|session| session.try_wait().ok().flatten())
-                .is_some()
-        {
-            self.child_alive = false;
-            dirty = true;
+            {
+                self.exit_status = Some(status);
+                self.child_alive = false;
+                dirty = true;
+            }
         }
         (dirty, content_changed, more)
     }
@@ -3393,10 +3409,15 @@ impl MuxRuntime {
         if runtime.log_exit_reason.as_deref() == Some("exited 0") {
             return true;
         }
+        if runtime.exit_status.is_none() {
+            runtime.exit_status = runtime
+                .session
+                .as_mut()
+                .and_then(|session| session.try_wait().ok().flatten());
+        }
         runtime
-            .session
-            .as_mut()
-            .and_then(|session| session.try_wait().ok().flatten())
+            .exit_status
+            .as_ref()
             .is_some_and(|status| status.success())
     }
 
@@ -5578,6 +5599,28 @@ mod tests {
         assert!(text.contains("seat"), "{text:?}");
         assert!(text.contains("Enter to reopen"), "{text:?}");
         assert!(runtime.panes.contains_key(&first));
+    }
+
+    #[test]
+    fn clean_attach_pty_exit_preserves_success_status() {
+        let mut runtime =
+            MuxRuntime::spawn_with_wake("/bin/sh", &[], 80, 24, Arc::new(|| {})).unwrap();
+        let pane = runtime.focused_id();
+        runtime.mark_attach_session(pane, "2".into(), "seat".into());
+        runtime.focused().send_bytes(b"exit 0\n".to_vec()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut events = Vec::new();
+        while Instant::now() < deadline {
+            let _ = runtime.drain_all();
+            events = runtime.take_exited_attach_sessions();
+            if !events.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(events, vec![(pane, "2".to_string(), "seat".to_string())]);
+        assert!(runtime.all_children_exited());
     }
 
     #[test]

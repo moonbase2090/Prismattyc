@@ -1542,6 +1542,40 @@ fn explicit_socket_spaces_are_stable_across_runtime_directories() {
     );
     let _ = daemon.kill();
     let _ = daemon.wait();
+    let mut restarted = Command::new(env!("CARGO_BIN_EXE_pmuxd"));
+    let mut restarted = restarted
+        .env("XDG_RUNTIME_DIR", &runtime_b)
+        .env("XDG_DATA_HOME", data.0.as_os_str())
+        .env("XDG_CONFIG_HOME", data.0.join("config"))
+        .arg("--socket")
+        .arg(&socket)
+        .args(["--", "/bin/sh"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("restart default daemon");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while UnixStream::connect(&socket).is_err() {
+        if restarted
+            .try_wait()
+            .expect("poll restarted daemon")
+            .is_some()
+        {
+            panic!("restarted daemon exited before binding {socket:?}");
+        }
+        assert!(Instant::now() < deadline, "restarted daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let after_restart = routed_ls(&runtime_b, Some(&socket));
+    assert!(after_restart.status.success(), "{}", stderr(&after_restart));
+    assert!(
+        stdout(&after_restart).contains("runtime-space"),
+        "restart lost its Space: {}",
+        stdout(&after_restart)
+    );
+    let _ = restarted.kill();
+    let _ = restarted.wait();
     let _ = std::fs::remove_dir_all(runtime_a);
     let _ = std::fs::remove_dir_all(runtime_b);
 }

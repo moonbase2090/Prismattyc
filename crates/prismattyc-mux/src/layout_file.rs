@@ -1843,8 +1843,8 @@ mod tests {
         let base = Path::new("/xdg/prismattyc/spaces");
         let first = Path::new("/tmp/pmux-a.sock");
         let second = Path::new("/tmp/pmux-b.sock");
-        let same_basename_a = Path::new("/tmp/a/seat.sock");
-        let same_basename_b = Path::new("/tmp/b/seat.other");
+        let same_basename_a = Path::new("/tmp/seat.sock");
+        let same_basename_b = Path::new("/tmp/seat.other");
 
         assert_ne!(
             spaces_daemon_identity_path(same_basename_a),

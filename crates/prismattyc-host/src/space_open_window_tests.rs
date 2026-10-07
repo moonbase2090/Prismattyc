@@ -700,3 +700,168 @@ fn verify_polish_ui(host: &mut HostState) {
     host.space_panel = None;
     host.context_menu = None;
 }
+
+/// A layout written before the snapshot cache knows its session stays pending.
+/// The next snapshot, taken after that write, applies and acks the same file.
+#[test]
+fn stale_snapshot_keeps_a_newer_layout_pending() {
+    if std::env::var_os("PRISMATTYC_RENDER_TEST_CHILD").is_none() {
+        render_window_tests::run_in_private_display(
+            "space_open_window_tests::stale_snapshot_keeps_a_newer_layout_pending",
+        );
+        return;
+    }
+    let binaries = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let pmux = binaries.join("pmux");
+    let pmuxd = binaries.join("pmuxd");
+    assert!(pmux.is_file() && pmuxd.is_file());
+    std::env::set_var("PMUX", &pmux);
+    let socket = host_mux_socket().unwrap();
+    let _daemon = Daemon(
+        Command::new(pmuxd)
+            .arg("--socket")
+            .arg(&socket)
+            .args(["--", "/bin/sh"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let start = Instant::now();
+    while attach_log::live_snapshot().is_none() {
+        assert!(start.elapsed() < Duration::from_secs(4));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let event_loop = EventLoop::<UserAction>::with_user_event()
+        .with_x11()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
+    let cli = Cli::parse(["--no-splash", "/bin/cat"].into_iter().map(String::from)).unwrap();
+    let app = App::new(
+        cli,
+        config::ConfigFile::default(),
+        None,
+        event_loop.create_proxy(),
+    )
+    .unwrap();
+    let mut proof = StaleCacheProof {
+        app,
+        window: None,
+        started: Instant::now(),
+        done: false,
+    };
+    event_loop.run_app(&mut proof).unwrap();
+    assert!(proof.done);
+}
+
+struct StaleCacheProof {
+    app: App,
+    window: Option<WindowId>,
+    started: Instant,
+    done: bool,
+}
+
+impl ApplicationHandler<UserAction> for StaleCacheProof {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let id = self.app.open_window(event_loop, false).unwrap();
+        self.window = Some(id);
+        let host = self.app.windows.get_mut(&id).unwrap();
+        apply_rail_verdict(host, space_rail::RailVerdict::Create("a".into()));
+        session_prompt::dispatch_key(host, &Key::Named(NamedKey::Enter), false);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.app.pump(event_loop);
+        for host in self.app.windows.values_mut() {
+            let _ = host.mux.drain_all();
+        }
+        assert!(
+            self.started.elapsed() < Duration::from_secs(20),
+            "stale-cache proof timed out"
+        );
+        let id = self.window.expect("window");
+        if self.app.windows[&id].space_opens.busy() {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(30),
+            ));
+            return;
+        }
+        let host = self.app.windows.get_mut(&id).unwrap();
+        assert_eq!(host.space_rail.current.as_deref(), Some("a"));
+        assert!(host.cache_writer);
+        let _ = space_session("a");
+        let path = host.attach_layout_path.clone().unwrap();
+        let ack = prismattyc_mux::host_ack_path_from_socket(&host_mux_socket().unwrap());
+        let ack_mtime = std::fs::metadata(&ack)
+            .and_then(|meta| meta.modified())
+            .ok();
+        host.snapshot_client = Some(Arc::new(snapshot_client::SnapshotClient::detached()));
+        let client = Arc::clone(host.snapshot_client.as_ref().unwrap());
+        client.publish_for_test(
+            prismattyc_mux::Snapshot {
+                sequence: 0,
+                sessions: Vec::new(),
+            },
+            SystemTime::UNIX_EPOCH,
+        );
+        let mut layout = attach_tabs::load(&path).unwrap();
+        assert!(!layout.tabs.is_empty());
+        layout.tabs[0].title = "stale-cache-pending-title".into();
+        std::thread::sleep(Duration::from_millis(20));
+        prismattyc_mux::attach_tabs::save(&path, &layout).unwrap();
+        let stamp_before = host.attach_cache_stamp;
+        let pane_before = host.mux.remote_pane_id(host.mux.focused_id());
+        poll_host_attach_tabs(host);
+        assert_eq!(
+            host.attach_cache_stamp, stamp_before,
+            "an older cache must not consume the layout stamp"
+        );
+        assert!(
+            !host.space_opens.blocks_persist(),
+            "pending ownership must not fence later polls"
+        );
+        assert_eq!(
+            std::fs::metadata(&ack)
+                .and_then(|meta| meta.modified())
+                .ok(),
+            ack_mtime,
+            "a pending layout is not acknowledged"
+        );
+        assert_eq!(host.mux.remote_pane_id(host.mux.focused_id()), pane_before);
+        let file_mtime = cache_stamp(&path).unwrap().0;
+        client.publish_for_test(
+            attach_log::live_snapshot().unwrap(),
+            file_mtime + Duration::from_secs(2),
+        );
+        poll_host_attach_tabs(host);
+        assert_eq!(host.attach_cache_stamp, cache_stamp(&path));
+        assert!(!host.space_opens.blocks_persist());
+        assert_eq!(
+            host.attach_layout
+                .as_ref()
+                .and_then(|file| file.tabs.first())
+                .map(|tab| tab.title.as_str()),
+            Some("stale-cache-pending-title"),
+            "the same file is applied once a later snapshot allows it"
+        );
+        assert_ne!(
+            std::fs::metadata(&ack)
+                .and_then(|meta| meta.modified())
+                .ok(),
+            ack_mtime,
+            "the same file is acknowledged once a later snapshot allows it"
+        );
+        self.done = true;
+        event_loop.exit();
+    }
+
+    fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+}

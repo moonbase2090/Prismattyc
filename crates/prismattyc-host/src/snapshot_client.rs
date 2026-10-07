@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Long-lived pmuxd snapshot cache for periodic host polls.
 //!
 //! One background thread owns the socket. It snapshots once, then pulls
@@ -12,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use prismattyc_mux::{ControlError, ControlErrorCode, Snapshot};
 
@@ -28,6 +29,9 @@ const BACKOFF_MAX: Duration = Duration::from_secs(2);
 
 struct Cache {
     snapshot: Option<Snapshot>,
+    /// When `snapshot` was read from pmuxd. Callers compare this with a
+    /// layout file's mtime so an older cache cannot reject that file.
+    fetched_at: Option<SystemTime>,
     /// Set until the client thread has a snapshot from the current connection
     /// attempt. [`SnapshotClient::fresh`] returns `None` while this is set,
     /// matching a failed `live_snapshot` for periodic callers.
@@ -64,6 +68,7 @@ impl SnapshotClient {
         let inner = Arc::new(Inner {
             cache: Mutex::new(Cache {
                 snapshot: None,
+                fetched_at: None,
                 stale: true,
             }),
             connects: AtomicU64::new(0),
@@ -88,12 +93,50 @@ impl SnapshotClient {
     /// Latest snapshot, or `None` when the cache is missing or stale.
     /// Does not open a socket.
     pub(crate) fn fresh(&self) -> Option<Snapshot> {
+        self.fresh_observed().map(|(_, snapshot)| snapshot)
+    }
+
+    /// Latest snapshot and the time it was read from pmuxd.
+    pub(crate) fn fresh_observed(&self) -> Option<(SystemTime, Snapshot)> {
         let cache = lock(&self.inner.cache);
         if cache.stale {
-            None
-        } else {
-            cache.snapshot.clone()
+            return None;
         }
+        match (&cache.snapshot, cache.fetched_at) {
+            (Some(snapshot), Some(fetched_at)) => Some((fetched_at, snapshot.clone())),
+            _ => None,
+        }
+    }
+
+    /// A cache with no background thread. Tests publish snapshots directly.
+    #[cfg(test)]
+    pub(crate) fn detached() -> Self {
+        let inner = Arc::new(Inner {
+            cache: Mutex::new(Cache {
+                snapshot: None,
+                fetched_at: None,
+                stale: true,
+            }),
+            connects: AtomicU64::new(0),
+            wake: Arc::new(|| {}),
+        });
+        let (refresh_tx, _refresh_rx) = mpsc::channel();
+        Self {
+            inner,
+            stop: Arc::new(AtomicBool::new(false)),
+            refresh_tx,
+            thread: None,
+        }
+    }
+
+    /// Install one snapshot without connecting. `fetched_at` is the time the
+    /// caller claims the snapshot was read.
+    #[cfg(test)]
+    pub(crate) fn publish_for_test(&self, snapshot: Snapshot, fetched_at: SystemTime) {
+        let mut cache = lock(&self.inner.cache);
+        cache.snapshot = Some(snapshot);
+        cache.fetched_at = Some(fetched_at);
+        cache.stale = false;
     }
 
     /// Ask the client thread to pull events now. The caller does not wait.
@@ -121,9 +164,15 @@ impl Drop for SnapshotClient {
 
 /// `None` keeps today's blocking snapshot. `Some` reads the cache only.
 pub(crate) fn snapshot_for_periodic(client: Option<&SnapshotClient>) -> Option<Snapshot> {
+    snapshot_observed(client).map(|(_, snapshot)| snapshot)
+}
+
+/// Snapshot plus the time it was obtained. A live read is stamped now,
+/// which is after the caller has already seen the layout file.
+pub(crate) fn snapshot_observed(client: Option<&SnapshotClient>) -> Option<(SystemTime, Snapshot)> {
     match client {
-        Some(client) => client.fresh(),
-        None => attach_log::live_snapshot(),
+        Some(client) => client.fresh_observed(),
+        None => attach_log::live_snapshot().map(|snapshot| (SystemTime::now(), snapshot)),
     }
 }
 
@@ -247,6 +296,7 @@ fn publish(inner: &Inner, snapshot: Snapshot) {
         let mut cache = lock(&inner.cache);
         let changed = cache.snapshot.as_ref() != Some(&snapshot);
         cache.snapshot = Some(snapshot);
+        cache.fetched_at = Some(SystemTime::now());
         cache.stale = false;
         changed
     };

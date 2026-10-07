@@ -208,7 +208,7 @@ fn spawn_standalone(
         host.mux.focused_id()
     };
     host.mux.mark_attach_session(pane, id.clone(), name.into());
-    host.attach_pane_sessions.insert(pane, id);
+    crate::bind_attach_pane(host, pane, id);
     if axis.is_none() {
         host.mux.rename_window(host.mux.active_window(), name)?;
     }

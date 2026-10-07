@@ -1199,6 +1199,9 @@ struct HostState {
     /// Attach pane → mux session id, so tab membership can be re-derived
     /// from the live tabs after a pane moves (PT-60).
     attach_pane_sessions: HashMap<PaneId, String>,
+    /// When this window bound the pane to that session. Absent means the
+    /// binding predates the timestamp and a snapshot may judge it.
+    attach_bound_at: HashMap<PaneId, SystemTime>,
     /// Panes whose local shell runs a nested `pmux-attach` (PT-210).
     adopted: attach_adopt::Adopted,
     /// Serialize helpers and fence cache writes until their layout applies.
@@ -3863,6 +3866,7 @@ impl App {
                 attach_layout: None,
                 attach_layout_path,
                 attach_pane_sessions,
+                attach_bound_at: HashMap::new(),
                 adopted: attach_adopt::Adopted::default(),
                 space_opens: space_open::Opens::default(),
                 space_open_observation: None,
@@ -7780,6 +7784,7 @@ fn observe_boss_walkthrough(host: &mut HostState) {
 }
 
 fn sync_attach_pane_sessions(host: &mut HostState) {
+    let before = host.attach_pane_sessions.clone();
     host.attach_pane_sessions = host
         .mux
         .tab_panes()
@@ -7791,6 +7796,46 @@ fn sync_attach_pane_sessions(host: &mut HostState) {
                 .map(|id| (pane, id.to_string()))
         })
         .collect();
+    note_attach_bindings(host, &before);
+}
+
+/// Stamp bindings that appeared or changed since `before`. An unchanged
+/// pair keeps its old time, including pairs that were never stamped.
+pub(crate) fn note_attach_bindings(host: &mut HostState, before: &HashMap<PaneId, String>) {
+    let now = SystemTime::now();
+    let sessions = &host.attach_pane_sessions;
+    host.attach_bound_at
+        .retain(|pane, _| sessions.get(pane) == before.get(pane));
+    let changed: Vec<PaneId> = sessions
+        .iter()
+        .filter(|(pane, id)| before.get(pane) != Some(*id))
+        .map(|(pane, _)| *pane)
+        .collect();
+    for pane in changed {
+        host.attach_bound_at.insert(pane, now);
+    }
+}
+
+pub(crate) fn bind_attach_pane(host: &mut HostState, pane: PaneId, id: String) {
+    if host.attach_pane_sessions.get(&pane) != Some(&id) {
+        host.attach_bound_at.insert(pane, SystemTime::now());
+    }
+    host.attach_pane_sessions.insert(pane, id);
+}
+
+pub(crate) fn unbind_attach_pane(host: &mut HostState, pane: PaneId) -> Option<String> {
+    host.attach_bound_at.remove(&pane);
+    host.attach_pane_sessions.remove(&pane)
+}
+
+/// A snapshot read before a binding was created is not evidence that the
+/// pane has disappeared.
+fn snapshot_covers_attachments<'a>(
+    bound_at: &HashMap<PaneId, SystemTime>,
+    mut panes: impl Iterator<Item = &'a PaneId>,
+    snapshot_at: SystemTime,
+) -> bool {
+    panes.all(|pane| bound_at.get(pane).is_none_or(|bound| *bound <= snapshot_at))
 }
 
 /// Once a second: mark panes whose shell runs a nested `pmux-attach` on
@@ -7812,7 +7857,7 @@ fn adopt_nested_attaches(host: &mut HostState, now: Instant) {
     let gone = attach_adopt::clear_gone(&mut host.mux, &mut host.adopted, &live_panes);
     if !gone.is_empty() {
         for pane in gone {
-            host.attach_pane_sessions.remove(&pane);
+            unbind_attach_pane(host, pane);
         }
         changed = true;
     }
@@ -7850,7 +7895,7 @@ fn adopt_nested_attaches(host: &mut HostState, now: Instant) {
             );
             for (pane, _pid, id, _name) in assignments {
                 apply_attach_title_pin(host, pane, &id);
-                host.attach_pane_sessions.insert(pane, id);
+                bind_attach_pane(host, pane, id);
                 changed = true;
             }
         }
@@ -7871,7 +7916,7 @@ fn register_spawned_attach(host: &mut HostState, pane: PaneId, program: &str, ar
         return;
     };
     host.mux.mark_attach_session(pane, id.clone(), name);
-    host.attach_pane_sessions.insert(pane, id.clone());
+    bind_attach_pane(host, pane, id.clone());
     apply_attach_title_pin(host, pane, &id);
 }
 
@@ -8694,11 +8739,14 @@ fn refresh_space_views(host: &mut HostState) {
         return;
     }
     host.last_space_refresh = Some(now);
-    let snapshot = snapshot_client::snapshot_for_periodic(host.snapshot_client.as_deref());
-    if host.mux.refresh_git_info(snapshot.as_ref()) {
+    let observed = snapshot_client::snapshot_observed(host.snapshot_client.as_deref());
+    if host
+        .mux
+        .refresh_git_info(observed.as_ref().map(|(_, snapshot)| snapshot))
+    {
         host.dirty = true;
     }
-    let Some(snapshot) = snapshot else {
+    let Some((snapshot_at, snapshot)) = observed else {
         if !host.space_rail.attention_counts.is_empty() {
             host.space_rail.attention_counts.clear();
             host.dirty = true;
@@ -8759,6 +8807,13 @@ fn refresh_space_views(host: &mut HostState) {
         return;
     };
     host.mux.space_id = Some(owner.to_string());
+    if !snapshot_covers_attachments(
+        &host.attach_bound_at,
+        host.attach_pane_sessions.keys(),
+        snapshot_at,
+    ) {
+        return;
+    }
     let exited: Vec<_> = host
         .attach_pane_sessions
         .iter()
@@ -8808,7 +8863,7 @@ fn refresh_space_views(host: &mut HostState) {
             eprintln!("prismattyc-host: detach moved pane: {error}");
             return;
         }
-        host.attach_pane_sessions.remove(&pane);
+        unbind_attach_pane(host, pane);
         host.dirty = true;
     }
     sync_attach_pane_sessions(host);
@@ -8837,6 +8892,7 @@ fn refresh_space_views(host: &mut HostState) {
         .collect();
     host.mux.space_id = Some(owner.to_string());
     let focused = host.mux.focused_id();
+    let before_bindings = host.attach_pane_sessions.clone();
     match regroup::apply(
         &mut host.mux,
         &mut host.attach_pane_sessions,
@@ -8845,13 +8901,17 @@ fn refresh_space_views(host: &mut HostState) {
         &names,
     ) {
         Ok(_) => {
+            note_attach_bindings(host, &before_bindings);
             local_views::restore_local_focus(host, focused);
             host.attach_layout = Some(desired);
             persist_attach_layout_from_live(host);
             App::refit_geom(host, host.window.inner_size(), Some("space ownership"));
             host.dirty = true;
         }
-        Err(error) => rail_error_toast(host, &format!(" space view update failed: {error} ")),
+        Err(error) => {
+            note_attach_bindings(host, &before_bindings);
+            rail_error_toast(host, &format!(" space view update failed: {error} "));
+        }
     }
 }
 
@@ -8874,19 +8934,30 @@ fn poll_host_attach_tabs(host: &mut HostState) {
     let Some(mut file) = attach_tabs::load(&path) else {
         return;
     };
-    if let Some(name) = file.space.as_deref() {
-        let permitted = load_space(&spaces_dir(), name)
-            .ok()
-            .zip(snapshot_client::snapshot_for_periodic(
-                host.snapshot_client.as_deref(),
-            ))
-            .is_some_and(|(space, snapshot)| space_view::permits_layout(&space, &snapshot, &file));
-        if !permitted {
-            host.attach_cache_stamp = now;
-            host.space_opens
-                .cache_applied(now, file.space.as_deref(), file.mode, false);
-            rail_error_toast(host, " space ownership could not be verified ");
-            return;
+    if file.space.is_some() {
+        let space = file
+            .space
+            .as_deref()
+            .and_then(|name| load_space(&spaces_dir(), name).ok());
+        let observed = snapshot_client::snapshot_observed(host.snapshot_client.as_deref());
+        match space_view::layout_ownership(
+            space.as_ref(),
+            observed.as_ref(),
+            &file,
+            now.map(|(mtime, _)| mtime),
+            host.snapshot_client.is_some(),
+        ) {
+            // An older or missing cache cannot prove this file is foreign.
+            // Leave the stamp pending so the next fresh snapshot can retry it.
+            space_view::LayoutOwnership::Pending => return,
+            space_view::LayoutOwnership::Deny => {
+                host.attach_cache_stamp = now;
+                host.space_opens
+                    .cache_applied(now, file.space.as_deref(), file.mode, false);
+                rail_error_toast(host, " space ownership could not be verified ");
+                return;
+            }
+            space_view::LayoutOwnership::Allow => {}
         }
     }
     let prior_owner = host.mux.space_id.clone();
@@ -8930,6 +9001,7 @@ fn poll_host_attach_tabs(host: &mut HostState) {
     let focused = host.mux.focused_id();
     let mux_bin = find_mux_bin();
     let names = snapshot_client::periodic_session_names(host.snapshot_client.as_deref());
+    let before_bindings = host.attach_pane_sessions.clone();
     let result = if preserve_view && file.tabs == current.tabs {
         Ok(false)
     } else {
@@ -8941,6 +9013,7 @@ fn poll_host_attach_tabs(host: &mut HostState) {
             &names,
         )
     };
+    note_attach_bindings(host, &before_bindings);
     host.attach_cache_stamp = now;
     host.space_opens
         .cache_applied(now, file.space.as_deref(), file.mode, result.is_ok());
@@ -13723,7 +13796,7 @@ fn remove_session_from_space(host: &mut HostState, pane: PaneId, kill: bool) {
             );
             return;
         }
-        if let Some(id) = host.attach_pane_sessions.remove(&pane) {
+        if let Some(id) = unbind_attach_pane(host, pane) {
             host.observed_space_sessions.remove(&id);
         }
     }
@@ -13802,7 +13875,7 @@ fn move_to_space_from_host(host: &mut HostState, target: &str, whole_session: bo
                     rail_error_toast(host, &format!(" moved; view refresh failed: {error} "));
                     return;
                 }
-                host.attach_pane_sessions.remove(&pane);
+                unbind_attach_pane(host, pane);
             }
             persist_attach_layout_from_live(host);
             host.last_space_refresh = None;
@@ -15490,7 +15563,7 @@ fn spawn_owned_space_pane(
         let title = space_view::session_title(&space, session);
         host.mux.rename_window(host.mux.active_window(), &title)?;
     }
-    host.attach_pane_sessions.insert(pane, id);
+    bind_attach_pane(host, pane, id);
     if empty {
         host.mux.focus(old);
         host.mux.close_focused()?;
@@ -17304,7 +17377,7 @@ fn reopen_attach(host: &mut HostState, pane: PaneId, id: &str, name: &str) {
     }
     host.mux
         .mark_attach_session(pane, id.to_string(), name.to_string());
-    host.attach_pane_sessions.insert(pane, id.to_string());
+    bind_attach_pane(host, pane, id.to_string());
     mark_layout_dirty(host);
     observe_walkthrough(
         host,

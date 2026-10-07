@@ -42,6 +42,10 @@ follow the app default.
 
 ## Keys
 
+When `render_timer` is `osd`, `log`, or `both`, the macOS host compares dirty
+tiles with the previous frame and reports how many changed. With the timer off,
+it does not allocate the comparison buffer.
+
 ```toml
 # Prismattyc host config. Every key is at its default.
 # Edit in place. CLI flags and PRISMATTYC_* env vars still win.

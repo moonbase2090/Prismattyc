@@ -5414,6 +5414,7 @@ mod tests {
             .send(ChildWrite {
                 bytes: b"TYPED_WHILE_CONNECTING\n".to_vec(),
                 capability_grant: None,
+                paste: None,
             })
             .unwrap();
         release.send(()).unwrap();

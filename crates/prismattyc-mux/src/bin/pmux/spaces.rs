@@ -967,16 +967,23 @@ fn fresh_record(
     Ok(record)
 }
 
-fn instantiate(
+/// Create a saved session's layout, binding its agent as `space open` does.
+/// A session that is already live is left alone (`ApplyResult::Skipped`).
+fn recreate(
     client: &mut Client,
     space: &SavedSpace,
     record: &prismattyc_mux::SavedSpaceSession,
-) -> Result<()> {
+) -> Result<ApplyResult> {
     let layout = SavedLayout {
         version: 1,
         saved_at_unix: space.saved_at_unix,
         session: record.name.clone(),
         windows: record.windows.clone(),
+    };
+    let agent = if space.version == prismattyc_mux::OWNED_SPACE_VERSION {
+        record.agent.clone()
+    } else {
+        space_bind_agent(record.agent.as_deref(), &record.name)
     };
     let snapshot = take_snapshot(client)?;
     apply_saved_layout(
@@ -984,32 +991,79 @@ fn instantiate(
         &snapshot,
         &layout,
         &record.name,
-        record.agent.clone(),
+        agent,
         ApplyExisting::Skip,
-    )?;
+    )
+}
+
+fn instantiate(
+    client: &mut Client,
+    space: &SavedSpace,
+    record: &prismattyc_mux::SavedSpaceSession,
+) -> Result<()> {
+    recreate(client, space, record)?;
     claim_saved_session(client, space, &record.name)
 }
 
-/// Recreate one saved seat without opening its other sessions or changing views.
+const REOPEN_USAGE: &str = "usage: pmux session reopen NAME --space SPACE [--no-run] [--no-claim]";
+
+/// Recreate one saved seat without opening its other sessions or changing
+/// views, then replay its saved commands as `space open` does
+/// (`space_open_runs_commands`, `--no-run`). `--no-claim` leaves the Space
+/// file and the session's owner as they are.
 pub(super) fn reopen(paths: &Paths, args: Vec<String>) -> Result<()> {
-    let [name, flag, space_name] = args.as_slice() else {
-        bail!("usage: pmux session reopen NAME --space SPACE");
-    };
-    if flag != "--space" {
-        bail!("usage: pmux session reopen NAME --space SPACE");
+    let mut args = args.into_iter();
+    let name = args.next().context(REOPEN_USAGE)?;
+    let (mut space_name, mut no_run, mut no_claim) = (None, false, false);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--space" if space_name.is_none() => {
+                space_name = Some(args.next().context(REOPEN_USAGE)?);
+            }
+            "--no-run" => no_run = true,
+            "--no-claim" => no_claim = true,
+            _ => bail!("{REOPEN_USAGE}"),
+        }
     }
+    let space_name = space_name.context(REOPEN_USAGE)?;
     ensure_live_server(paths)?;
-    let mut client = connect(paths)?;
+    let (mut client, client_id) = connect_registered(paths)?;
     let store = Store::lock(&mut client)?;
-    let space = prepare_open(&store, &mut client, space_name)?;
+    let space = if no_claim {
+        load_space(&spaces_dir(), &space_name)?
+    } else {
+        prepare_open(&store, &mut client, &space_name)?
+    };
     let record = space
         .sessions
         .iter()
-        .find(|record| record.name == *name)
-        .context("session is not saved in this Space")?;
-    instantiate(&mut client, &space, record)?;
+        .find(|record| record.name == name)
+        .context("session is not saved in this Space")?
+        .clone();
+    let result = recreate(&mut client, &space, &record)?;
+    if !no_claim {
+        claim_saved_session(&mut client, &space, &name)?;
+    }
+    drop(store);
     println!("reopened {name} in {space_name}");
-    Ok(())
+    let mux_file = load_mux_section(&prism_config_path()).unwrap_or_else(|error| {
+        eprintln!("pmux: ignoring config: {error:#}");
+        prismattyc_mux::MuxSection::default()
+    });
+    let policy = resolve_space_open_runs_commands(no_run, &mux_file)?;
+    let snapshot = take_snapshot(&mut client)?;
+    let seat = SavedSpace {
+        sessions: vec![record],
+        ..space
+    };
+    run_space_open_commands(
+        &mut client,
+        client_id,
+        &snapshot,
+        &seat,
+        &[(name, result, 0)],
+        policy,
+    )
 }
 
 pub(super) fn create(paths: &Paths, args: Vec<String>) -> Result<()> {

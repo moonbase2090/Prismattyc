@@ -133,6 +133,8 @@ pane_padding_px = 5
 space_rail = "bottom"
 # Enable drag and Shift+arrow reordering for saved spaces. true | false.
 space_reorder = false
+# Restore and re-stroke only border rings that change. true | false.
+selective_border_rings = false
 # Save changed Space arrangements after a short idle. true | false.
 space_autosave = true
 # Choose naming prompts, automatic sessions, or blank terminals. "ask" | "auto" | "blank".
@@ -1013,6 +1015,9 @@ the file applies changes on the next poll tick:
 - `focus_border` — recolors immediately; deleting the key reverts to default.
 - `theme` — swaps terminal defaults, ANSI 0–15, cursor/selection, and host
   chrome immediately; deleting the key restores Prismattyc Default.
+- `selective_border_rings` — off unless the file sets it true. Partial frames
+  then restore and re-stroke only rings that change (focus, pulse, sweep, or
+  damage under the ring). Deleting the key turns that off again.
 - `focus_border_animation` — takes effect on the next focus change; switching
   to `"none"` (or deleting the key) settles any in-progress sweep.
 - `focus_border_animation_ms` / `focus_border_animation_head` — apply from

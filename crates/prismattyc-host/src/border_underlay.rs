@@ -1,18 +1,51 @@
 // SPDX-License-Identifier: MPL-2.0
 //! Retain only pixels covered by a transient border, including its head.
-use crate::frame_damage::{border_strips, FrameDamage, PixelRect};
+use crate::frame_damage::{border_strips, frame_damage_intersects, FrameDamage, PixelRect};
 
 /// Pixels outside a Graphite slot covered by the focus ring and sweep head.
 /// The settled ring starts one pixel outside the slot and shades one pixel
 /// past that; the head stamp reaches about two pixels past its sample.
 const GRAPHITE_RING_OUTSET: usize = 3;
 
-#[derive(Default)]
-pub(crate) struct BorderUnderlay {
+/// Which rings the next Graphite stroke should paint.
+///
+/// `All` is a full frame or the flag-off path. `Slots` is the rings whose
+/// captured strips were restored on this partial frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum BorderRefresh {
+    All,
+    Slots(Vec<PixelRect>),
+}
+
+impl Default for BorderRefresh {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
+struct CapturedSlot {
+    slot: PixelRect,
     rects: Vec<PixelRect>,
     pixels: Vec<u32>,
+}
+
+#[derive(Default)]
+pub(crate) struct BorderUnderlay {
+    slots: Vec<CapturedSlot>,
+    /// Live prefix of `slots`. Entries at and after this index are spare
+    /// shells whose buffers stay allocated for the next frame.
+    active: usize,
     stride: usize,
     len: usize,
+    /// Set by the last restore. `paint_retained_graphite_panes` takes it.
+    pending: BorderRefresh,
+    /// Slots whose strips were written back. Full frames record 0.
+    #[cfg(test)]
+    pub(crate) last_restored_slots: usize,
+    /// Times a pixel buffer grew. The count stays here so dropping the slot
+    /// shells cannot hide a fresh allocation on the next capture.
+    #[cfg(test)]
+    pub(crate) pixel_grows: usize,
 }
 
 impl BorderUnderlay {
@@ -36,63 +69,278 @@ impl BorderUnderlay {
     ) {
         if reset || stride != self.stride || buffer.len() != self.len {
             self.reset(stride, buffer.len());
+        } else {
+            // Pull a matching live shell out of the prefix and keep its buffers.
+            while let Some(index) = self.slots[..self.active]
+                .iter()
+                .position(|captured| captured.slot == slot)
+            {
+                self.active -= 1;
+                self.slots.swap(index, self.active);
+                self.slots[self.active].rects.clear();
+                self.slots[self.active].pixels.clear();
+            }
         }
         self.store_slot(buffer, stride, slot, GRAPHITE_RING_OUTSET);
     }
 
+    pub(crate) fn has_slot(&self, slot: PixelRect) -> bool {
+        self.slots[..self.active]
+            .iter()
+            .any(|captured| captured.slot == slot)
+    }
+
+    /// Rings the last restore asked the painter to stroke. Missing a take
+    /// leaves `All`, which is the flag-off stroke.
+    pub(crate) fn take_refresh(&mut self) -> BorderRefresh {
+        std::mem::replace(&mut self.pending, BorderRefresh::All)
+    }
+
     fn reset(&mut self, stride: usize, len: usize) {
-        self.rects.clear();
-        self.pixels.clear();
+        self.discard_slots();
         self.stride = stride;
         self.len = len;
+    }
+
+    /// Drop pixel contents and mark every shell spare. `clear` keeps the
+    /// allocation, so the next capture does not allocate again.
+    fn discard_slots(&mut self) {
+        for slot in &mut self.slots {
+            slot.rects.clear();
+            slot.pixels.clear();
+        }
+        self.active = 0;
     }
 
     fn store_slot(&mut self, buffer: &[u32], stride: usize, slot: PixelRect, outset: usize) {
         if stride == 0 {
             return;
         }
-        for rect in border_strips(slot) {
-            self.store_rect(buffer, stride, rect);
+        if self.active == self.slots.len() {
+            self.slots.push(CapturedSlot {
+                slot,
+                rects: Vec::new(),
+                pixels: Vec::new(),
+            });
         }
-        if outset > 0 {
-            for rect in outer_frame(slot, outset) {
-                self.store_rect(buffer, stride, rect);
+        let added = {
+            let captured = &mut self.slots[self.active];
+            captured.slot = slot;
+            captured.rects.clear();
+            captured.pixels.clear();
+            let mut added = 0usize;
+            for rect in border_strips(slot) {
+                added += store_rect(buffer, stride, rect, captured);
             }
-        }
-    }
-
-    fn store_rect(&mut self, buffer: &[u32], stride: usize, rect: PixelRect) {
-        let Some(rect) = rect.clipped(stride, buffer.len() / stride) else {
-            return;
-        };
-        self.rects.push(rect);
-        for y in rect.y..rect.y + rect.height {
-            let start = y * stride + rect.x;
-            self.pixels
-                .extend_from_slice(&buffer[start..start + rect.width]);
-        }
-    }
-
-    /// Erase the previous border before content updates, and publish the erased
-    /// strips even when the sweep has already ended. Full paints replace the
-    /// entire surface, so stale layout/theme/size pixels must be discarded.
-    pub(crate) fn restore(&mut self, buffer: &mut [u32], stride: usize, damage: &mut FrameDamage) {
-        if !matches!(damage, FrameDamage::Full) && stride == self.stride && buffer.len() == self.len
-        {
-            let mut offset = 0;
-            for rect in &self.rects {
-                for y in rect.y..rect.y + rect.height {
-                    let start = y * stride + rect.x;
-                    buffer[start..start + rect.width]
-                        .copy_from_slice(&self.pixels[offset..offset + rect.width]);
-                    offset += rect.width;
+            if outset > 0 {
+                for rect in outer_frame(slot, outset) {
+                    added += store_rect(buffer, stride, rect, captured);
                 }
-                damage.push_rect(*rect);
+            }
+            added
+        };
+        #[cfg(test)]
+        {
+            self.pixel_grows += added;
+        }
+        #[cfg(not(test))]
+        {
+            let _ = added;
+        }
+        self.active += 1;
+    }
+
+    fn note_restored(&mut self, count: usize) {
+        #[cfg(test)]
+        {
+            self.last_restored_slots = count;
+        }
+        #[cfg(not(test))]
+        {
+            let _ = count;
+        }
+    }
+
+    fn write_slot(
+        buffer: &mut [u32],
+        stride: usize,
+        slot: &CapturedSlot,
+        damage: &mut FrameDamage,
+    ) {
+        let mut offset = 0;
+        for rect in &slot.rects {
+            for y in rect.y..rect.y + rect.height {
+                let start = y * stride + rect.x;
+                buffer[start..start + rect.width]
+                    .copy_from_slice(&slot.pixels[offset..offset + rect.width]);
+                offset += rect.width;
+            }
+            damage.push_rect(*rect);
+        }
+    }
+
+    /// Erase every previous border before content updates, and publish the
+    /// erased strips even when the sweep has already ended. Full paints
+    /// replace the entire surface, so stale layout/theme/size pixels must be
+    /// discarded.
+    pub(crate) fn restore(&mut self, buffer: &mut [u32], stride: usize, damage: &mut FrameDamage) {
+        let writable = !matches!(damage, FrameDamage::Full)
+            && stride == self.stride
+            && buffer.len() == self.len;
+        if writable {
+            let count = self.active;
+            self.note_restored(count);
+            for slot in &self.slots[..count] {
+                Self::write_slot(buffer, stride, slot, damage);
+            }
+        } else {
+            self.note_restored(0);
+        }
+        // Full damage and a stride change discard the pixels. The shells stay.
+        self.discard_slots();
+        self.pending = BorderRefresh::All;
+    }
+
+    /// Restore only rings that intersect `damage` (focus, pulse, sweep, or
+    /// damage under the ring). A ring that shares pixels with one of those
+    /// is restored too, so erasing a shared gap does not drop the neighbor.
+    /// Unchanged rings stay on the surface and out of the damage.
+    pub(crate) fn restore_changed(
+        &mut self,
+        buffer: &mut [u32],
+        stride: usize,
+        damage: &mut FrameDamage,
+    ) {
+        let writable = !matches!(damage, FrameDamage::Full)
+            && stride == self.stride
+            && buffer.len() == self.len;
+        if !writable {
+            self.discard_slots();
+            self.note_restored(0);
+            self.pending = BorderRefresh::All;
+            return;
+        }
+        let live = self.active;
+        let mut refresh = vec![false; live];
+        for (slot, on) in self.slots[..live].iter().zip(&mut refresh) {
+            if slot
+                .rects
+                .iter()
+                .any(|rect| frame_damage_intersects(damage, *rect))
+            {
+                *on = true;
             }
         }
-        self.rects.clear();
-        self.pixels.clear();
+        let mut pending: Vec<usize> = refresh
+            .iter()
+            .enumerate()
+            .filter_map(|(index, on)| on.then_some(index))
+            .collect();
+        while let Some(index) = pending.pop() {
+            for (other, on) in refresh.iter_mut().enumerate() {
+                if *on || !live_slots_share(&self.slots, index, other) {
+                    continue;
+                }
+                *on = true;
+                pending.push(other);
+            }
+        }
+        let mut ordered = Vec::with_capacity(self.slots.len());
+        let mut restored = Vec::new();
+        for (index, on) in refresh.iter().enumerate() {
+            if *on {
+                continue;
+            }
+            ordered.push(std::mem::replace(&mut self.slots[index], empty_slot()));
+        }
+        let kept = ordered.len();
+        for (index, on) in refresh.iter().enumerate() {
+            if !*on {
+                continue;
+            }
+            let slot = std::mem::replace(&mut self.slots[index], empty_slot());
+            Self::write_slot(buffer, stride, &slot, damage);
+            restored.push(slot.slot);
+            ordered.push(cleared_slot(slot));
+        }
+        for slot in &mut self.slots[live..] {
+            ordered.push(std::mem::replace(slot, empty_slot()));
+        }
+        self.slots.clear();
+        self.note_restored(restored.len());
+        self.active = kept;
+        self.slots = ordered;
+        self.pending = BorderRefresh::Slots(restored);
     }
+}
+
+fn empty_slot() -> CapturedSlot {
+    CapturedSlot {
+        slot: PixelRect::new(0, 0, 0, 0),
+        rects: Vec::new(),
+        pixels: Vec::new(),
+    }
+}
+
+fn cleared_slot(mut slot: CapturedSlot) -> CapturedSlot {
+    slot.rects.clear();
+    slot.pixels.clear();
+    slot
+}
+
+fn live_slots_share(slots: &[CapturedSlot], index: usize, other: usize) -> bool {
+    if index == other {
+        return false;
+    }
+    let (left, right) = if index < other {
+        let (head, tail) = slots.split_at(other);
+        (&head[index], &tail[0])
+    } else {
+        let (head, tail) = slots.split_at(index);
+        (&tail[0], &head[other])
+    };
+    slots_share_pixels(left, right)
+}
+
+fn store_rect(
+    buffer: &[u32],
+    stride: usize,
+    rect: PixelRect,
+    captured: &mut CapturedSlot,
+) -> usize {
+    let Some(rect) = rect.clipped(stride, buffer.len() / stride) else {
+        return 0;
+    };
+    captured.rects.push(rect);
+    #[cfg(test)]
+    let mut grows = 0usize;
+    #[cfg(not(test))]
+    let grows = 0usize;
+    for y in rect.y..rect.y + rect.height {
+        let start = y * stride + rect.x;
+        let row = &buffer[start..start + rect.width];
+        #[cfg(test)]
+        let before = captured.pixels.capacity();
+        captured.pixels.extend_from_slice(row);
+        #[cfg(test)]
+        if captured.pixels.capacity() > before {
+            grows += 1;
+        }
+    }
+    grows
+}
+
+fn rects_overlap(left: PixelRect, right: PixelRect) -> bool {
+    left.x < right.x.saturating_add(right.width)
+        && right.x < left.x.saturating_add(left.width)
+        && left.y < right.y.saturating_add(right.height)
+        && right.y < left.y.saturating_add(left.height)
+}
+
+fn slots_share_pixels(left: &CapturedSlot, right: &CapturedSlot) -> bool {
+    left.rects
+        .iter()
+        .any(|rect| right.rects.iter().any(|other| rects_overlap(*rect, *other)))
 }
 
 /// The ring's outside band: above and below the slot, including the corners,
@@ -271,8 +519,9 @@ mod tests {
             underlay.capture_graphite(&surface, stride, right, false);
             assert!(
                 underlay
-                    .rects
+                    .slots
                     .iter()
+                    .flat_map(|slot| slot.rects.iter())
                     .any(|rect| rect.x < left.x || rect.y < left.y),
                 "graphite capture must keep the ring outside the slot"
             );
@@ -304,12 +553,17 @@ mod tests {
         let mut buffer = vec![0x11u32; stride * 20];
         let mut underlay = BorderUnderlay::default();
         underlay.capture(&buffer, stride, PixelRect::new(0, 0, 12, 12));
-        let first = underlay.pixels.len();
+        let first: usize = underlay.slots.iter().map(|slot| slot.pixels.len()).sum();
         assert!(first > 0);
         buffer.fill(0x22);
         underlay.capture(&buffer, stride, PixelRect::new(0, 0, 12, 12));
-        assert_eq!(underlay.pixels.len(), first);
-        assert!(underlay.pixels.iter().all(|pixel| *pixel == 0x22));
+        let pixels: Vec<u32> = underlay
+            .slots
+            .iter()
+            .flat_map(|slot| slot.pixels.iter().copied())
+            .collect();
+        assert_eq!(pixels.len(), first);
+        assert!(pixels.iter().all(|pixel| *pixel == 0x22));
     }
 
     #[test]
@@ -317,12 +571,280 @@ mod tests {
         let mut cache = BorderUnderlay::default();
         let mut buffer = vec![0x12345678; 100 * 80];
         cache.restore(&mut buffer, 100, &mut FrameDamage::rects());
-        assert_eq!(cache.pixels.capacity(), 0);
+        assert_eq!(cache.slots.capacity(), 0);
         cache.capture(&buffer, 100, PixelRect::new(0, 0, 100, 80));
         buffer.fill(0xabcdef01);
         cache.restore(&mut buffer, 100, &mut FrameDamage::Full);
         assert!(buffer.iter().all(|pixel| *pixel == 0xabcdef01));
         cache.restore(&mut buffer, 100, &mut FrameDamage::rects());
         assert!(buffer.iter().all(|pixel| *pixel == 0xabcdef01));
+    }
+
+    /// The flag-off path calls `restore` then `capture` every partial frame.
+    /// Reused shells must not allocate a new pixel buffer per frame. The count
+    /// lives on the underlay, so the sweep can end on `restore` (no slots left)
+    /// and a `discard_slots` that drops those shells still fails the bound.
+    #[test]
+    fn default_off_restore_reuses_pixel_buffers() {
+        let mut grows = 0usize;
+        for (width, height) in [(1, 1), (9, 13), (101, 63), (1025, 769)] {
+            let stride = width + 12;
+            let slot = PixelRect::new(5, 4, width, height);
+            let mut surface: Vec<u32> = (0..stride * (height + 10))
+                .map(|i| 0x80000000 | ((i as u32).wrapping_mul(7919) & 0xffffff))
+                .collect();
+            let mut retained = surface.clone();
+            let mut underlay = BorderUnderlay::default();
+            for _head in [true, false] {
+                for step in 0..=20 {
+                    let mut damage = FrameDamage::rects();
+                    underlay.restore(&mut retained, stride, &mut damage);
+                    let index = slot.y * stride + slot.x;
+                    surface[index] ^= 0x000055aa;
+                    retained[index] = surface[index];
+                    if step < 20 {
+                        underlay.capture(&retained, stride, slot);
+                    }
+                }
+                retained.clone_from(&surface);
+            }
+            grows += underlay.pixel_grows;
+        }
+        eprintln!("border.pixel_grows.default_off={grows}");
+        assert!(
+            grows <= 24,
+            "pixel buffers grew {grows} times across the sweep; reuse measured 18 and dropping the shells each frame allocates again"
+        );
+    }
+
+    fn damaged_tile_count(width: usize, height: usize, damage: &FrameDamage) -> usize {
+        let grid = crate::present_tiles::tiles(width, height);
+        crate::present_tiles::damaged_tiles(&grid, damage).len()
+    }
+
+    fn percentile_50(samples: &[usize]) -> usize {
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        sorted[sorted.len() / 2]
+    }
+
+    /// Present-cost scenario (c) frame: 3642×1716, eight even columns, four of
+    /// them writing an inset band. Restoring every ring adds 68 tiles at the
+    /// median. Restoring only rings that intersect the damage adds none.
+    fn scenario_column_slots() -> Vec<PixelRect> {
+        const WIDTH: usize = 3642;
+        const HEIGHT: usize = 1716;
+        const LEFT: usize = 8;
+        const TOP: usize = 132;
+        const BOTTOM: usize = 56;
+        const GAP: usize = 8;
+        const COLS: usize = 8;
+        let slot_w = (WIDTH - LEFT * 2 - (COLS - 1) * GAP) / COLS;
+        let slot_h = HEIGHT - TOP - BOTTOM;
+        (0..COLS)
+            .map(|index| PixelRect::new(LEFT + index * (slot_w + GAP), TOP, slot_w, slot_h))
+            .collect()
+    }
+
+    fn scenario_chatter(slots: &[PixelRect]) -> FrameDamage {
+        let mut damage = FrameDamage::rects();
+        for slot in slots.iter().step_by(2) {
+            damage.push_rect(PixelRect::new(
+                slot.x + 12,
+                slot.y + 28 + 12,
+                slot.width - 24,
+                20 * 18,
+            ));
+        }
+        damage
+    }
+
+    #[test]
+    fn scenario_underlay_tiles_move_from_68_toward_0() {
+        const WIDTH: usize = 3642;
+        const HEIGHT: usize = 1716;
+        const FRAMES: usize = 31;
+        let slots = scenario_column_slots();
+        let buffer = vec![0xff1c1e20u32; WIDTH * HEIGHT];
+        let chatter = scenario_chatter(&slots);
+        let chatter_tiles = damaged_tile_count(WIDTH, HEIGHT, &chatter);
+        let mut scratch = buffer.clone();
+        let mut baseline = Vec::with_capacity(FRAMES);
+        let mut selective = Vec::with_capacity(FRAMES);
+        for _ in 0..FRAMES {
+            let mut all = BorderUnderlay::default();
+            for (index, slot) in slots.iter().enumerate() {
+                all.capture_graphite(&buffer, WIDTH, *slot, index == 0);
+            }
+            scratch.copy_from_slice(&buffer);
+            let mut damage = chatter.clone();
+            let before = damaged_tile_count(WIDTH, HEIGHT, &damage);
+            all.restore(&mut scratch, WIDTH, &mut damage);
+            baseline.push(damaged_tile_count(WIDTH, HEIGHT, &damage) - before);
+
+            let mut some = BorderUnderlay::default();
+            for (index, slot) in slots.iter().enumerate() {
+                some.capture_graphite(&buffer, WIDTH, *slot, index == 0);
+            }
+            scratch.copy_from_slice(&buffer);
+            let mut damage = chatter.clone();
+            let before = damaged_tile_count(WIDTH, HEIGHT, &damage);
+            some.restore_changed(&mut scratch, WIDTH, &mut damage);
+            assert_eq!(some.last_restored_slots, 0);
+            selective.push(damaged_tile_count(WIDTH, HEIGHT, &damage) - before);
+        }
+        let baseline_p50 = percentile_50(&baseline);
+        let selective_p50 = percentile_50(&selective);
+        eprintln!(
+            "damage.added_tiles.underlay frames={FRAMES} compose_tiles={chatter_tiles} baseline_p50={baseline_p50} selective_p50={selective_p50}"
+        );
+        assert_eq!(baseline_p50, 68, "full-ring restore is the measured 68");
+        assert_eq!(
+            selective_p50, 0,
+            "unchanged rings must not add underlay tiles"
+        );
+
+        let mut focus = chatter.clone();
+        focus.push_rect(slots[0]);
+        focus.push_rect(slots[1]);
+        let mut moved = BorderUnderlay::default();
+        for (index, slot) in slots.iter().enumerate() {
+            moved.capture_graphite(&buffer, WIDTH, *slot, index == 0);
+        }
+        let before = damaged_tile_count(WIDTH, HEIGHT, &focus);
+        scratch.copy_from_slice(&buffer);
+        moved.restore_changed(&mut scratch, WIDTH, &mut focus);
+        let added = damaged_tile_count(WIDTH, HEIGHT, &focus) - before;
+        eprintln!(
+            "damage.added_tiles.underlay focus_slots={} added={added}",
+            moved.last_restored_slots
+        );
+        assert!(
+            moved.last_restored_slots >= 2,
+            "focus damage restores the old and new rings"
+        );
+        assert!(
+            added < baseline_p50,
+            "focus slots already cover the ring tiles, so underlay adds {added}"
+        );
+    }
+
+    #[test]
+    fn unchanged_interior_matches_full_restroke_and_ring_damage_is_not_missed() {
+        use crate::frame_damage::frame_damage_intersects;
+        use crate::graphite::{self, PaneHeader, PaneStatus};
+        use crate::mux::ChromeGeom;
+        let chrome = ChromeGeom {
+            graphite: true,
+            scale_milli: 1000,
+        };
+        let tok = graphite::DARK;
+        let stride = 180;
+        let height = 80;
+        let left = PixelRect::new(8, 8, 70, 52);
+        let right = PixelRect::new(86, 8, 70, 52);
+        let surface = vec![0xff1c1e20u32; stride * height];
+        let paint = |buffer: &mut [u32], slot: PixelRect, focused: bool| {
+            graphite::paint_pane_chrome(
+                buffer,
+                stride,
+                chrome,
+                &tok,
+                [90, 140, 180],
+                graphite::Rect::new(slot.x, slot.y, slot.width, slot.height),
+                [28, 30, 32],
+                &PaneHeader {
+                    name: "shell",
+                    meta: None,
+                    dot: graphite::Dot::Idle,
+                    status: if focused {
+                        PaneStatus::Focused
+                    } else {
+                        PaneStatus::Quiet
+                    },
+                    focused,
+                    handle_hover: false,
+                },
+                true,
+                None,
+                false,
+            );
+        };
+        let capture_both = |underlay: &mut BorderUnderlay, buffer: &[u32]| {
+            underlay.capture_graphite(buffer, stride, left, true);
+            underlay.capture_graphite(buffer, stride, right, false);
+        };
+        let mut retained = surface.clone();
+        let mut underlay = BorderUnderlay::default();
+        capture_both(&mut underlay, &retained);
+        paint(&mut retained, left, true);
+        paint(&mut retained, right, false);
+        let stroked = retained.clone();
+
+        // Below the 28px title row and inside the 7px edge strips.
+        let interior = PixelRect::new(left.x + 20, left.y + 36, 6, 4);
+        let mut selective = retained.clone();
+        let mut oracle = retained.clone();
+        let index = (interior.y + 1) * stride + interior.x + 1;
+        selective[index] ^= 0x0000_44aa;
+        oracle[index] ^= 0x0000_44aa;
+        let mut sel_under = BorderUnderlay::default();
+        let mut ora_under = BorderUnderlay::default();
+        capture_both(&mut sel_under, &surface);
+        capture_both(&mut ora_under, &surface);
+        let mut sel_damage = FrameDamage::rects();
+        sel_damage.push_rect(interior);
+        sel_under.restore_changed(&mut selective, stride, &mut sel_damage);
+        assert_eq!(sel_under.last_restored_slots, 0);
+        let mut ora_damage = FrameDamage::rects();
+        ora_damage.push_rect(interior);
+        ora_under.restore(&mut oracle, stride, &mut ora_damage);
+        capture_both(&mut ora_under, &oracle);
+        paint(&mut oracle, left, true);
+        paint(&mut oracle, right, false);
+        assert_eq!(
+            selective, oracle,
+            "an interior cell must not restroke rings"
+        );
+        assert_eq!(sel_under.take_refresh(), BorderRefresh::Slots(Vec::new()));
+
+        let top = border_strips(left)[0];
+        let mut selective = stroked.clone();
+        let mut oracle = stroked.clone();
+        let mut sel_under = BorderUnderlay::default();
+        let mut ora_under = BorderUnderlay::default();
+        capture_both(&mut sel_under, &surface);
+        capture_both(&mut ora_under, &surface);
+        let mut sel_damage = FrameDamage::rects();
+        sel_damage.push_rect(top);
+        sel_under.restore_changed(&mut selective, stride, &mut sel_damage);
+        assert_eq!(sel_under.last_restored_slots, 1);
+        let mut ora_damage = FrameDamage::rects();
+        ora_damage.push_rect(top);
+        ora_under.restore(&mut oracle, stride, &mut ora_damage);
+        let content = top.y * stride + top.x + 4;
+        selective[content] = 0xff20_c060;
+        oracle[content] = 0xff20_c060;
+        sel_under.capture_graphite(&selective, stride, left, false);
+        paint(&mut selective, left, true);
+        capture_both(&mut ora_under, &oracle);
+        paint(&mut oracle, left, true);
+        paint(&mut oracle, right, false);
+        assert_eq!(
+            selective, oracle,
+            "damage under one ring restrokes that ring only"
+        );
+        for (index, (before, after)) in stroked.iter().zip(&selective).enumerate() {
+            if before == after {
+                continue;
+            }
+            let pixel = PixelRect::new(index % stride, index / stride, 1, 1);
+            assert!(
+                frame_damage_intersects(&sel_damage, pixel),
+                "missed damage at {},{}",
+                pixel.x,
+                pixel.y
+            );
+        }
     }
 }

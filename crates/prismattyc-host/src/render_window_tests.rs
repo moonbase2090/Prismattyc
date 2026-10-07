@@ -371,7 +371,6 @@ fn paint_in_real_window(restore_only: bool) {
             verify_render_guards(host);
             verify_caption_click(host);
             verify_decision_handlers(host);
-            verify_sidebar_chrome_click_with_zero_rows(host);
             self.app.register_host_pid();
             self.app.publish_render_status();
             let snapshot =
@@ -383,6 +382,7 @@ fn paint_in_real_window(restore_only: bool) {
                 assert!(guards.iter().any(|value| value == guard), "missing {guard}");
             }
             assert!(!guards.iter().any(|value| value == "backend-no-partial"));
+            verify_sidebar_chrome_click_with_zero_rows(host);
             verify_config_reload(&mut self.app, id);
             chrome_contract_tests::verify(self.app.windows.get_mut(&id).unwrap());
             self.painted = true;

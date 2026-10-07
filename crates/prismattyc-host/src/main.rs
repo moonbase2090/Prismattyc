@@ -8837,6 +8837,36 @@ fn resolve_host_space(host: &mut HostState) -> Option<prismattyc_mux::SavedSpace
     Some(space)
 }
 
+/// Reattach panes whose session was recreated with a new id after pmuxd restarted.
+///
+/// `pmux space open` writes the new ids into the attach cache. Regroup matches
+/// the still-open panes by name and leaves them on the old id. The next refresh
+/// then treats those new ids as tabs the user closed, and the cache collapses
+/// to the local shells. Spawn the live id instead.
+fn rebind_restarted_attaches(host: &mut HostState, snapshot: &prismattyc_mux::Snapshot) {
+    let Some(owner) = host.mux.space_id.clone() else {
+        return;
+    };
+    let targets: Vec<(PaneId, String, String)> = host
+        .attach_pane_sessions
+        .iter()
+        .filter_map(|(pane, id)| {
+            if host.mux.is_retained_local_terminal(*pane) {
+                return None;
+            }
+            let name = host.mux.attach_name_of(*pane)?.to_string();
+            let live = snapshot.sessions.iter().find(|session| {
+                session.name == name && session.space_id.as_deref() == Some(owner.as_str())
+            })?;
+            let live_id = live.id.to_string();
+            (live_id != *id).then_some((*pane, live_id, name))
+        })
+        .collect();
+    for (pane, live_id, name) in targets {
+        reopen_attach(host, pane, &live_id, &name);
+    }
+}
+
 /// Refresh all chips and reconcile transfers without reopening launch recipes.
 fn refresh_space_views(host: &mut HostState) {
     space_panel::poll(host);
@@ -8865,7 +8895,18 @@ fn refresh_space_views(host: &mut HostState) {
         .iter()
         .filter_map(|(pane, id)| {
             let session = snapshot.sessions.iter().find(|s| s.id.to_string() == *id)?;
-            (host.mux.attach_name_of(*pane) != Some(session.name.as_str()))
+            let recorded = host.mux.attach_name_of(*pane);
+            // A restarted daemon recycles numeric ids. The pane's recorded
+            // name is the session; do not adopt whoever now sits at the old id.
+            if recorded.is_some_and(|name| {
+                snapshot
+                    .sessions
+                    .iter()
+                    .any(|live| live.name == name && live.id.to_string() != *id)
+            }) {
+                return None;
+            }
+            (recorded != Some(session.name.as_str()))
                 .then(|| (*pane, id.clone(), session.name.clone()))
         })
         .collect();
@@ -8914,6 +8955,9 @@ fn refresh_space_views(host: &mut HostState) {
         return;
     };
     host.mux.space_id = Some(owner.to_string());
+    // Do this before the dismissal filter. A placeholder still named for a
+    // live session is that session under a new id, not a tab the user closed.
+    rebind_restarted_attaches(host, &snapshot);
     let exited: Vec<_> = host
         .attach_pane_sessions
         .iter()
@@ -8974,11 +9018,24 @@ fn refresh_space_views(host: &mut HostState) {
         .filter(|session| session.space_id.as_deref() == Some(owner))
         .map(|session| session.id.to_string())
         .collect();
+    let shown_names: std::collections::HashSet<String> = host
+        .attach_pane_sessions
+        .keys()
+        .filter_map(|pane| host.mux.attach_name_of(*pane).map(str::to_string))
+        .collect();
     let mut visible = snapshot.clone();
     visible.sessions.retain(|session| {
         let id = session.id.to_string();
+        let in_tabs = current.tabs.iter().any(|tab| {
+            tab.sessions
+                .iter()
+                .any(|key| key == &id || key == &session.name)
+        });
+        // A pane that still shows this session's name has not been closed.
+        // Hiding the new id here is what wiped a reopened Space after restart.
         !host.observed_space_sessions.contains(&id)
-            || current.tabs.iter().any(|tab| tab.sessions.contains(&id))
+            || in_tabs
+            || shown_names.contains(&session.name)
     });
     host.observed_space_sessions = observed;
     let desired = local_views::layout(host, &name, &space, &visible, &current);
@@ -17541,7 +17598,7 @@ fn reopen_attach(host: &mut HostState, pane: PaneId, id: &str, name: &str) {
     });
     if let Err(error) = host
         .mux
-        .reopen_placeholder(pane, &mux_bin.to_string_lossy(), &args)
+        .respawn_attach(pane, &mux_bin.to_string_lossy(), &args)
     {
         eprintln!("prismattyc-host: reopen attach failed: {error:#}");
         rail_error_toast(host, &format!(" could not reopen {name}: {error:#} "));

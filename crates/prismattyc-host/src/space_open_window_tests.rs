@@ -700,3 +700,290 @@ fn verify_polish_ui(host: &mut HostState) {
     host.space_panel = None;
     host.context_menu = None;
 }
+
+/// Space panes must still be attached after `pmux space open` recreates them
+/// on a fresh daemon. The old ids stay on the placeholders; reconciliation
+/// used to treat the new ids as user-closed tabs and write an empty cache.
+#[test]
+fn space_reopen_after_daemon_restart_keeps_sessions() {
+    if std::env::var_os("PRISMATTYC_RENDER_TEST_CHILD").is_none() {
+        render_window_tests::run_in_private_display(
+            "space_open_window_tests::space_reopen_after_daemon_restart_keeps_sessions",
+        );
+        return;
+    }
+    let binaries = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let pmux = binaries.join("pmux");
+    let pmuxd = binaries.join("pmuxd");
+    assert!(
+        pmux.is_file() && pmuxd.is_file(),
+        "build pmux and pmuxd first"
+    );
+    std::env::set_var("PMUX", &pmux);
+    let socket = host_mux_socket().unwrap();
+    let daemon = Daemon(
+        Command::new(&pmuxd)
+            .arg("--socket")
+            .arg(&socket)
+            .args(["--", "/bin/sh"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let started = Instant::now();
+    while attach_log::live_snapshot().is_none() {
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "private daemon did not start"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let event_loop = EventLoop::<UserAction>::with_user_event()
+        .with_x11()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
+    let cli = Cli::parse(
+        ["--no-splash", "--panes", "2", "/bin/cat"]
+            .into_iter()
+            .map(String::from),
+    )
+    .unwrap();
+    let mut config = config::ConfigFile::default();
+    config.space_startup = Some("fresh".into());
+    config.space_autosave = Some(false);
+    let app = App::new(cli, config, None, event_loop.create_proxy()).unwrap();
+    let mut proof = RestartProof {
+        app,
+        daemon,
+        pmuxd,
+        socket,
+        done: false,
+    };
+    event_loop.run_app(&mut proof).unwrap();
+    assert!(proof.done, "restart fixture did not run");
+}
+
+struct RestartProof {
+    app: App,
+    daemon: Daemon,
+    pmuxd: PathBuf,
+    socket: PathBuf,
+    done: bool,
+}
+
+impl ApplicationHandler<UserAction> for RestartProof {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.done {
+            return;
+        }
+        let window = self.app.open_window(event_loop, false).unwrap();
+        reopen_space_after_restart(
+            &mut self.app,
+            window,
+            &mut self.daemon,
+            &self.pmuxd,
+            &self.socket,
+        );
+        std::fs::write(
+            std::env::var_os("PRISMATTYC_RENDER_TEST_RESULT").unwrap(),
+            "complete",
+        )
+        .unwrap();
+        self.done = true;
+        event_loop.exit();
+    }
+
+    fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+}
+
+fn pump_host(app: &mut App, window: WindowId) {
+    let host = app.windows.get_mut(&window).unwrap();
+    let _ = host.mux.drain_all();
+    poll_host_attach_tabs(host);
+    host.last_space_refresh = None;
+    refresh_space_views(host);
+}
+
+fn pump_command(app: &mut App, window: WindowId, args: &[&str]) {
+    let pmux = pmux_bin();
+    let owned: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+    let handle = std::thread::spawn(move || {
+        Command::new(pmux)
+            .args(&owned)
+            .output()
+            .expect("spawn pmux")
+    });
+    let started = Instant::now();
+    loop {
+        if handle.is_finished() {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "pmux {args:?} did not finish"
+        );
+        pump_host(app, window);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let result = handle.join().expect("pmux thread");
+    assert!(
+        result.status.success(),
+        "pmux {args:?}\n{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+fn replace_daemon(daemon: &mut Daemon, pmuxd: &Path, socket: &Path) {
+    let _ = daemon.0.kill();
+    let _ = daemon.0.wait();
+    let _ = std::fs::remove_file(socket);
+    daemon.0 = Command::new(pmuxd)
+        .arg("--socket")
+        .arg(socket)
+        .args(["--", "/bin/sh"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    while attach_log::live_snapshot().is_none() {
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "replacement daemon did not start"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn reopen_space_after_restart(
+    app: &mut App,
+    window: WindowId,
+    daemon: &mut Daemon,
+    pmuxd: &Path,
+    socket: &Path,
+) {
+    for name in ["burner-1", "burner-2", "burner-3"] {
+        pump_command(app, window, &["new", "--no-attach", name]);
+    }
+    pump_command(
+        app,
+        window,
+        &["space", "create", "reopen-space", "--no-attach"],
+    );
+    pump_command(
+        app,
+        window,
+        &["space", "add", "reopen-space", "--name", "reopen-extra"],
+    );
+    pump_host(app, window);
+    {
+        let host = app.windows.get_mut(&window).unwrap();
+        assert_eq!(host.space_rail.current.as_deref(), Some("reopen-space"));
+        assert!(
+            !host.attach_pane_sessions.is_empty(),
+            "host never attached the space"
+        );
+    }
+    let _ = daemon.0.kill();
+    let _ = daemon.0.wait();
+    // Each log reader blocks in subscribe, then retries the dead socket.
+    // Every attached pane has to be a placeholder before the new daemon
+    // starts; one survivor reconnects and hides the reopen race.
+    let started = Instant::now();
+    loop {
+        let host = app.windows.get_mut(&window).unwrap();
+        let _ = host.mux.drain_all();
+        let pending = host.attach_pane_sessions.keys().any(|pane| {
+            !host.mux.is_placeholder(*pane)
+                && host
+                    .mux
+                    .pane(*pane)
+                    .is_some_and(|runtime| runtime.child_alive)
+        });
+        if !host.attach_pane_sessions.is_empty() && !pending {
+            let _ = host.mux.drain_all();
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "attach panes never all became placeholders after pmuxd died"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let stale_ids: Vec<String> = app.windows[&window]
+        .attach_pane_sessions
+        .values()
+        .cloned()
+        .collect();
+    assert!(
+        app.windows[&window]
+            .attach_pane_sessions
+            .keys()
+            .all(|pane| app.windows[&window].mux.is_placeholder(*pane)),
+        "pre-restart panes must be placeholders"
+    );
+    replace_daemon(daemon, pmuxd, socket);
+    pump_command(app, window, &["space", "open", "reopen-space"]);
+    pump_host(app, window);
+
+    let space = load_space(&spaces_dir(), "reopen-space").unwrap();
+    let snapshot = attach_log::live_snapshot().expect("daemon snapshot");
+    let live: Vec<_> = snapshot
+        .sessions
+        .iter()
+        .filter(|session| session.space_id == space.id)
+        .collect();
+    assert_eq!(live.len(), 2, "space open did not restore both sessions");
+    assert!(
+        live.iter()
+            .any(|session| !stale_ids.contains(&session.id.to_string())),
+        "restart did not recycle session ids: stale={stale_ids:?} live={live:?}"
+    );
+    let host = app.windows.get_mut(&window).unwrap();
+    let path = host.attach_layout_path.clone().unwrap();
+    let cache = attach_tabs::load(&path).expect("attach cache");
+    let keys: Vec<String> = cache
+        .tabs
+        .iter()
+        .flat_map(|tab| tab.sessions.iter().cloned())
+        .collect();
+    for session in &live {
+        let id = session.id.to_string();
+        assert!(
+            keys.iter().any(|key| key == &id || key == &session.name),
+            "attach cache dropped {}: keys={keys:?}",
+            session.name
+        );
+        let pane = host
+            .attach_pane_sessions
+            .iter()
+            .find(|(pane, bound)| {
+                *bound == &id || host.mux.attach_name_of(**pane) == Some(session.name.as_str())
+            })
+            .map(|(pane, _)| *pane)
+            .unwrap_or_else(|| panic!("no pane for {}", session.name));
+        assert!(
+            !host.mux.is_placeholder(pane),
+            "{} is still a placeholder after reopen",
+            session.name
+        );
+        assert!(
+            host.mux
+                .pane(pane)
+                .is_some_and(|runtime| runtime.child_alive),
+            "{} attach is not running",
+            session.name
+        );
+    }
+}

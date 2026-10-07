@@ -3608,6 +3608,23 @@ impl MuxRuntime {
         if runtime.placeholder.is_none() {
             return Ok(false);
         }
+        self.respawn_attach(pane, program, child_args)
+    }
+
+    /// Replace this pane's process with a new attach command.
+    ///
+    /// Placeholders use this from Enter. A daemon restart also uses it when
+    /// the pane still names a live session whose id was recycled: the old
+    /// child is subscribed to a pane that no longer exists.
+    pub(crate) fn respawn_attach(
+        &mut self,
+        pane: PaneId,
+        program: &str,
+        child_args: &[String],
+    ) -> Result<bool> {
+        let Some(runtime) = self.panes.get(&pane) else {
+            return Ok(false);
+        };
         let cols = runtime.cols;
         let rows = runtime.outer_rows;
         let cell_w = runtime.cell_w;

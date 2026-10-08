@@ -3446,14 +3446,7 @@ pub(crate) fn sidebar_hit(
     px: usize,
     py: usize,
 ) -> Option<SidebarHit> {
-    if let Some((row, _)) = targets
-        .needs_you
-        .iter()
-        .find(|(_, rect)| rect.contains(px, py))
-    {
-        return Some(SidebarHit::NeedsYou(*row));
-    }
-    graphite_core::sidebar_hit(
+    let core_hit = graphite_core::sidebar_hit(
         targets.rows,
         targets.actions,
         targets.arrange,
@@ -3468,7 +3461,15 @@ pub(crate) fn sidebar_hit(
         graphite_core::SidebarHit::Arrange(button) => SidebarHit::Arrange(button),
         graphite_core::SidebarHit::Toggle => SidebarHit::Toggle,
         graphite_core::SidebarHit::Thumb => SidebarHit::Thumb,
-    })
+    });
+    if core_hit.is_some() {
+        return core_hit;
+    }
+    targets
+        .needs_you
+        .iter()
+        .find(|(_, rect)| rect.contains(px, py))
+        .map(|(row, _)| SidebarHit::NeedsYou(*row))
 }
 
 /// Largest first-row offset for `row_count` rows in a column `column_h`

@@ -1383,7 +1383,7 @@ dependencies = [
 [[package]]
 name = "graphite-core"
 version = "0.1.0"
-source = "git+https://github.com/moonbase2090/graphite?rev=b47c446cbcd4586a0650e0572ee1af94612e91b2#b47c446cbcd4586a0650e0572ee1af94612e91b2"
+source = "git+https://github.com/moonbase2090/graphite?rev=ba0f5910af17ce3e2510034d3eff7cb8d5342ab8#ba0f5910af17ce3e2510034d3eff7cb8d5342ab8"
 
 [[package]]
 name = "half"

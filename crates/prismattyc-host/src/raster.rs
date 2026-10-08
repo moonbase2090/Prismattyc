@@ -5684,6 +5684,7 @@ pub fn active_chip_bg(theme: &Theme, _focus_rgb: [u8; 3]) -> [u8; 3] {
 const ACTIVE_CHIP_LIFT: u16 = 26;
 
 /// WCAG relative luminance of an sRGB colour.
+#[allow(dead_code)]
 pub fn relative_luminance(rgb: [u8; 3]) -> f32 {
     graphite_core::relative_luminance(rgb)
 }

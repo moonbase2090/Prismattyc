@@ -97,6 +97,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         value: ConfigValue::Bool(false),
     },
     ConfigKey {
+        name: "pty_drain_budget_ms",
+        group: ConfigGroup::Appearance,
+        doc: "Maximum PTY parsing time per event-loop pump; hot-reloaded",
+        range: "1-1000 ms",
+        value: ConfigValue::U64(crate::config::DEFAULT_PTY_DRAIN_BUDGET_MS),
+    },
+    ConfigKey {
         name: "splash",
         group: ConfigGroup::Appearance,
         doc: "Show the launch splash on bare launches",
@@ -1107,6 +1114,7 @@ mod tests {
         "render_timer",
         "macos_present",
         "render_timer_log_every_frame",
+        "pty_drain_budget_ms",
         "async_file_writes",
         "tab_strip",
         "link_click",

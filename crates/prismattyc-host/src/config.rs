@@ -24,6 +24,8 @@ pub const DEFAULT_PANE_GAP_PX: usize = 3;
 pub const DEFAULT_PANE_PADDING_PX: usize = 5;
 pub const DEFAULT_BELL_TOASTER_MS: u64 = 10_000;
 pub const BELL_TOASTER_MS_RANGE: std::ops::RangeInclusive<u64> = 500..=60_000;
+pub const PTY_DRAIN_BUDGET_MS_RANGE: std::ops::RangeInclusive<u64> = 1..=1_000;
+pub const DEFAULT_PTY_DRAIN_BUDGET_MS: u64 = 8;
 pub const DEFAULT_BACKGROUND_OPACITY: f32 = 0.35;
 pub const BACKGROUND_OPACITY_RANGE: std::ops::RangeInclusive<f32> = 0.0..=1.0;
 pub const DEFAULT_BACKGROUND_BLUR_PX: u32 = 0;
@@ -211,6 +213,8 @@ pub struct ConfigFile {
     pub render_timer: Option<RenderTimer>,
     /// macOS present path: `tiles` (default) or `iosurface`. Startup only.
     pub macos_present: Option<String>,
+    /// Maximum PTY parsing time per event-loop pump in milliseconds. Default 8; hot-reloaded.
+    pub pty_drain_budget_ms: Option<u64>,
     /// Log every rendered frame when `render_timer` includes `log`. Default false.
     pub render_timer_log_every_frame: Option<bool>,
     /// Write host files on a worker thread. Startup only; default false.
@@ -456,6 +460,11 @@ impl ConfigFile {
 
     pub fn render_timer(&self) -> RenderTimer {
         self.render_timer.unwrap_or_default()
+    }
+
+    pub fn pty_drain_budget_ms(&self) -> u64 {
+        self.pty_drain_budget_ms
+            .unwrap_or(DEFAULT_PTY_DRAIN_BUDGET_MS)
     }
 
     /// Long-lived snapshot cache. Missing means off.
@@ -842,6 +851,13 @@ fn parse(raw: &str, path: &Path) -> Result<ConfigFile> {
             BELL_TOASTER_MS_RANGE
         );
     }
+    if let Some(ms) = config.pty_drain_budget_ms {
+        anyhow::ensure!(
+            PTY_DRAIN_BUDGET_MS_RANGE.contains(&ms),
+            "pty_drain_budget_ms {ms} outside {:?}",
+            PTY_DRAIN_BUDGET_MS_RANGE
+        );
+    }
     if let Some(px) = config.font_px {
         anyhow::ensure!(
             FONT_PX_RANGE.contains(&px),
@@ -1154,6 +1170,18 @@ mod tests {
             load(&path).unwrap().macos_present.as_deref(),
             Some("iosurface")
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pty_drain_budget_defaults_to_eight_and_loads_override() {
+        let dir = temp_dir("pty-drain-budget");
+        let path = dir.join("config.toml");
+        assert_eq!(ConfigFile::default().pty_drain_budget_ms(), 8);
+        std::fs::write(&path, "pty_drain_budget_ms = 16\n").unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.pty_drain_budget_ms, Some(16));
+        assert_eq!(loaded.pty_drain_budget_ms(), 16);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1519,6 +1547,8 @@ mod tests {
             "bell_toaster = 0",
             "bell_toaster_ms = 100",
             "bell_toaster_ms = 300000",
+            "pty_drain_budget_ms = 0",
+            "pty_drain_budget_ms = 1001",
             "os_notify_bell = 1",
             "font_features = [\"ligatures\"]",
             "font_features = [\"ca!t\"]",

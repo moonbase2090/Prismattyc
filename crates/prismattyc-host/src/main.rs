@@ -358,6 +358,8 @@ struct RenderFrame {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct RenderWindowSummary {
+    sample_seq: u64,
+    interval_us: u64,
     last_raster_us: u64,
     max_raster_us: u64,
     frame_count: u64,
@@ -370,6 +372,7 @@ struct RenderWindowSummary {
 #[derive(Debug, Default)]
 struct RenderWindow {
     started_at: Option<Instant>,
+    sample_seq: u64,
     last_raster_us: u64,
     max_raster_us: u64,
     frame_count: u64,
@@ -411,6 +414,12 @@ impl RenderWindow {
             }
         }
         let summary = RenderWindowSummary {
+            sample_seq: self.sample_seq.saturating_add(1),
+            interval_us: now
+                .duration_since(started_at)
+                .as_micros()
+                .try_into()
+                .unwrap_or(u64::MAX),
             last_raster_us: self.last_raster_us,
             max_raster_us: self.max_raster_us,
             frame_count: self.frame_count,
@@ -421,6 +430,7 @@ impl RenderWindow {
         };
         *self = Self {
             started_at: Some(now),
+            sample_seq: summary.sample_seq,
             ..Self::default()
         };
         Some(summary)
@@ -2677,6 +2687,8 @@ struct App {
     /// One entry per OS window, keyed by winit's `WindowId`. Empty means no
     /// windows remain and the process exits (see `pump`/`window_event`).
     windows: std::collections::HashMap<WindowId, HostState>,
+    /// Window index at which the next budgeted PTY drain starts.
+    drain_window_cursor: usize,
     exit_code: i32,
     /// Currently applied config-file state (defaults when no file exists).
     file_config: config::ConfigFile,
@@ -2777,6 +2789,7 @@ impl App {
             cli,
             file_writer,
             windows: std::collections::HashMap::new(),
+            drain_window_cursor: 0,
             exit_code: 0,
             file_config,
             config_rx: rx,
@@ -3478,10 +3491,11 @@ impl App {
         // RedrawRequested calls pump() *before* paint(), so no frame presented
         // and the OS run loop starved (#183). Multi-window: drain every window,
         // fold WaitUntil to the earliest deadline, apply once. If a pane still
-        // has buffered output or a wake raced in mid-drain, re-arm one coalesced
-        // wake; the resulting user_event re-enters pump next cycle. Clearing the
-        // flag *before* drain still avoids dropping a child-EOF wake that
-        // arrives while we are inside pump (live cascade).
+        // has buffered output or a wake raced in mid-drain, use Poll so the
+        // next about_to_wait pumps again. Wake user events are no-ops; keeping
+        // wake_pending set until this pump prevents readers from re-sending
+        // inside Winit's macOS user-event drain. Clearing it *before* drain
+        // still avoids dropping a child-EOF wake that arrives mid-pump.
         let pump_started = Instant::now();
         let external_us = self.pump_timing.begin_pump(pump_started);
         let pump_io = existing_io_scope.unwrap_or_else(pump_timing::PumpIoScope::begin);
@@ -3527,8 +3541,19 @@ impl App {
         let remote_changed = self.remote.borrow_mut().poll();
         self.pump_timing
             .record_phase(pump_timing::Phase::RemoteRailPoll, phase_started.elapsed());
+        let pty_drain_deadline =
+            Instant::now() + Duration::from_millis(self.file_config.pty_drain_budget_ms());
+        let mut window_ids: Vec<_> = self.windows.keys().copied().collect();
+        if !window_ids.is_empty() {
+            let start = self.drain_window_cursor % window_ids.len();
+            window_ids.rotate_left(start);
+            self.drain_window_cursor = (start + 1) % window_ids.len();
+        }
         let timing = &mut self.pump_timing;
-        for (id, host) in self.windows.iter_mut() {
+        for id in window_ids {
+            let Some(host) = self.windows.get_mut(&id) else {
+                continue;
+            };
             let phase_started = Instant::now();
             if host.space_rail.poll(&spaces_dir(), rail_now) {
                 rail_changed(host);
@@ -3560,7 +3585,7 @@ impl App {
                 phase_started.elapsed(),
             );
             let phase_started = Instant::now();
-            if Self::drain_pty(host) {
+            if Self::drain_pty(host, pty_drain_deadline) {
                 more = true;
             }
             timing.record_phase(pump_timing::Phase::DrainPty, phase_started.elapsed());
@@ -3583,7 +3608,7 @@ impl App {
                 host.mux.all_children_exited(),
                 !host.pending_exited_cleanups.is_empty(),
             ) {
-                closed.push(*id);
+                closed.push(id);
                 timing.record_phase(
                     pump_timing::Phase::WindowBookkeeping,
                     phase_started.elapsed(),
@@ -3685,13 +3710,14 @@ impl App {
             pump_timing::Phase::PublishRenderStatus,
             phase_started.elapsed(),
         );
-        event_loop.set_control_flow(match next_deadline {
-            Some(when) => ControlFlow::WaitUntil(when),
-            None => ControlFlow::Wait,
+        event_loop.set_control_flow(if more || self.wake_pending.load(Ordering::Relaxed) {
+            ControlFlow::Poll
+        } else {
+            match next_deadline {
+                Some(when) => ControlFlow::WaitUntil(when),
+                None => ControlFlow::Wait,
+            }
         });
-        if more || self.wake_pending.load(Ordering::Relaxed) {
-            (self.wake)();
-        }
         self.finish_pump_timing(pump_started, external_us, pump_io);
     }
 
@@ -3925,7 +3951,7 @@ impl App {
         let (init_cols, init_rows) = if show_splash {
             splash::window_cells(80, 24)
         } else {
-            (80, 24)
+            e2e_initial_window_cells().unwrap_or((80, 24))
         };
         let _ = window.request_inner_size(initial_window_size(&font, geom, init_cols, init_rows));
         #[cfg(target_os = "macos")]
@@ -7746,14 +7772,19 @@ impl App {
         sync_chrome_hover(host);
     }
 
-    fn drain_pty(host: &mut HostState) -> bool {
+    fn drain_pty(host: &mut HostState, deadline: Instant) -> bool {
         let prior_unseen = host.mux.unseen_count();
         let prior_panes = host.mux.pane_count();
         let prior_tabs = host.mux.tab_count();
         let prior_active = host.mux.active_count();
         finish_pastes(host);
         let parse_started = Instant::now();
-        let (parked_more, parked_exited) = local_views::drain(host);
+        // Reserve half the remaining budget for the selected view even when
+        // parked Spaces are continuously busy. The parked-space and pane
+        // cursors rotate across turns, so inactive views keep making progress.
+        let before_parked = Instant::now();
+        let parked_deadline = before_parked + deadline.saturating_duration_since(before_parked) / 2;
+        let (parked_more, parked_exited) = local_views::drain(host, parked_deadline);
         let mut retry_cleanups = Vec::new();
         for event in parked_exited {
             host.observed_space_sessions.remove(&event.session_id);
@@ -7771,7 +7802,7 @@ impl App {
             std::mem::take(&mut host.pending_exited_cleanups),
             |session, session_id| remove_exited_session_from_space(host, session, session_id),
         ));
-        let (pty_dirty, more) = host.mux.drain_all();
+        let (pty_dirty, more) = host.mux.drain_all_until(deadline);
         let exited_attaches = host.mux.take_exited_attach_sessions();
         for (pane, session_id, session) in &exited_attaches {
             host.mux.clear_attach_session(*pane);
@@ -15755,6 +15786,16 @@ fn initial_window_size(
     )
 }
 
+/// Set a larger initial grid in native event-loop regressions without changing
+/// the normal 80×24 launch size.
+fn e2e_initial_window_cells() -> Option<(usize, usize)> {
+    let raw = std::env::var("PRISMATTYC_E2E_WINDOW_CELLS").ok()?;
+    let (cols, rows) = raw.split_once('x')?;
+    let cols = cols.parse::<usize>().ok()?;
+    let rows = rows.parse::<usize>().ok()?;
+    (cols > 0 && cols <= 400 && rows > 0 && rows <= 120).then_some((cols, rows))
+}
+
 fn cell_at_position(
     position: PhysicalPosition<f64>,
     font: &FontMetrics,
@@ -20354,7 +20395,10 @@ impl ApplicationHandler<UserAction> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserAction) {
         match event {
-            UserAction::Wake => self.pump(event_loop, None),
+            // Keep wake_pending latched until about_to_wait or RedrawRequested
+            // pumps. Pumping here can re-send Wake from the same callback;
+            // Winit's macOS user-event drain then never reaches redraw.
+            UserAction::Wake => {}
             UserAction::NewWindow => {
                 if let Err(e) = self.open_window(event_loop, false) {
                     eprintln!("prismattyc-host: new window failed: {e:#}");
@@ -26866,6 +26910,8 @@ session mail (id 15)
         assert_eq!(
             window.record(second, start + Duration::from_secs(1)),
             Some(RenderWindowSummary {
+                sample_seq: 1,
+                interval_us: 1_000_000,
                 last_raster_us: 20,
                 max_raster_us: 20,
                 frame_count: 2,
@@ -26878,6 +26924,20 @@ session mail (id 15)
         assert!(window
             .record(RenderFrame::default(), start + Duration::from_millis(1500))
             .is_none());
+        assert_eq!(
+            window.record(RenderFrame::default(), start + Duration::from_secs(2)),
+            Some(RenderWindowSummary {
+                sample_seq: 2,
+                interval_us: 1_000_000,
+                last_raster_us: 0,
+                max_raster_us: 0,
+                frame_count: 2,
+                max_cells_painted: 0,
+                blit_sum: 0,
+                dominant_full_repaint_reason: None,
+                pump: pump_timing::PumpSummary::default(),
+            })
+        );
     }
 
     #[test]

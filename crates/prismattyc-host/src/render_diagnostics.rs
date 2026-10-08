@@ -338,6 +338,14 @@ impl App {
                 status.insert("pump".into(), pump.clone());
                 status.insert("last_raster".into(), last_raster);
                 status.insert(
+                    "render_sample".into(),
+                    serde_json::json!({
+                        "seq": host.render_osd.sample_seq,
+                        "frames": host.render_osd.frame_count,
+                        "interval_us": host.render_osd.interval_us,
+                    }),
+                );
+                status.insert(
                     "sidebar_space_rows".into(),
                     serde_json::Value::Array(sidebar_spaces),
                 );

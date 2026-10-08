@@ -1761,7 +1761,7 @@ fn reopen_two_views_after_restart(
     loop {
         let host = app.windows.get_mut(&window).unwrap();
         let _ = host.mux.drain_all();
-        let _ = local_views::drain(host);
+        let _ = local_views::drain(host, Instant::now() + Duration::from_secs(1));
         let active_pending = attach_still_running(&host.mux);
         let parked_pending = host
             .local_views
@@ -1774,7 +1774,7 @@ fn reopen_two_views_after_restart(
             && !parked_pending
         {
             let _ = host.mux.drain_all();
-            let _ = local_views::drain(host);
+            let _ = local_views::drain(host, Instant::now() + Duration::from_secs(1));
             break;
         }
         assert!(

@@ -1945,27 +1945,17 @@ pub(crate) fn side_cols_for_px(px: f64, scale_milli: u32, max_cols: usize) -> us
     graphite_core::side_cols_for_px(px, scale_milli, max_cols)
 }
 
-/// Chip width for a Space name. The right `RAIL_CLOSE_W` is the close
-/// target, drawn only on hover.
+/// Chip width for a Space name. The right close target is drawn only on hover.
 pub(crate) fn rail_chip_width(chrome: ChromeGeom, label: &str, current: bool) -> usize {
-    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
-    let dot = if current { s(RAIL_DOT) + s(7.0) } else { 0.0 };
-    (s(RAIL_CHIP_PAD_X)
-        + dot
-        + text_width(Face::Regular, s(RAIL_TEXT), label)
-        + s(6.0)
-        + s(RAIL_CLOSE_W))
-    .ceil() as usize
+    graphite_core::rail_chip_width(&ChromeMetrics, chrome.scale_milli, label, current)
 }
 
 pub(crate) fn rail_close_width(chrome: ChromeGeom) -> usize {
-    chrome.px(RAIL_CLOSE_W)
+    graphite_core::rail_close_width(chrome.scale_milli)
 }
 
 pub(crate) fn rail_plus_width(chrome: ChromeGeom) -> usize {
-    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
-    (2.0 * s(RAIL_CHIP_PAD_X) + text_width(Face::Regular, s(RAIL_TEXT), RAIL_PLUS_LABEL)).ceil()
-        as usize
+    graphite_core::rail_plus_width(&ChromeMetrics, chrome.scale_milli)
 }
 
 /// One chip on the spaces bar.

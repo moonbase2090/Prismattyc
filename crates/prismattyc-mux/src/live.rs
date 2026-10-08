@@ -824,6 +824,13 @@ impl LiveRuntime {
             .and_then(|pane| pane.child_pid)
     }
 
+    /// Active Kitty keyboard flags reported by the guest in this pane.
+    pub(crate) fn keyboard_flags(&self, pane_id: u64) -> Option<u16> {
+        self.panes
+            .get(&pane_id)
+            .map(|pane| pane.emulator.keyboard_flags())
+    }
+
     #[cfg(test)]
     pub(crate) fn force_write_backpressure_for_test(&mut self, pane_id: u64) {
         let Some(runtime) = self.panes.get_mut(&pane_id) else {

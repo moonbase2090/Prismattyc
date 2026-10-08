@@ -53,7 +53,12 @@ impl ControlPlane {
                 "pane is typing or streaming output; retry when idle",
             ));
         }
-        let chunks = pane_write_chunks(&data, submit, self.foreground_agent_for(pane_raw))?;
+        let chunks = pane_write_chunks(
+            &data,
+            submit,
+            self.foreground_agent_for(pane_raw),
+            self.guest_keyboard_flags_for(pane_raw),
+        )?;
         let total_bytes = chunks.iter().map(Vec::len).sum();
         let (nbytes, error) = queue_chunks(&chunks, |chunk| {
             self.live
@@ -99,6 +104,7 @@ fn pane_write_chunks(
     data: &str,
     submit: PaneWriteSubmit,
     agent: crate::InjectAgent,
+    kitty_flags: u16,
 ) -> Result<Vec<Vec<u8>>, ControlError> {
     if data.is_empty()
         || data.len() > MAX_SPAWN_BYTES - 32
@@ -115,25 +121,16 @@ fn pane_write_chunks(
         PaneWriteSubmit::None => Ok(vec![data.as_bytes().to_vec()]),
         PaneWriteSubmit::Enter => Ok(vec![format!("{data}\r").into_bytes()]),
         PaneWriteSubmit::Auto => {
-            // Paste the body as text, then submit using the existing guest
-            // adapter. Mail's fixed-token injection remains unchanged.
+            // Paste the body as text, then use the same agent and keyboard
+            // mode adapter as the mail doorbell.
             let body = format!("\x1b[200~{data}\x1b[201~").into_bytes();
-            let submit = match agent {
-                crate::InjectAgent::Unknown => {
-                    return Err(ControlError::new(
-                        ControlErrorCode::InvalidRequest,
-                        "no supported foreground agent; select submit enter or none explicitly",
-                    ));
-                }
-                crate::InjectAgent::Cursor => {
-                    vec![crate::inject_submit::CURSOR_SUBMIT.to_vec()]
-                }
-                crate::InjectAgent::Codex => vec![vec![b'\r'], vec![b'\r']],
-                crate::InjectAgent::Claude
-                | crate::InjectAgent::Grok
-                | crate::InjectAgent::Kiro
-                | crate::InjectAgent::Muse => vec![vec![b'\r']],
-            };
+            if agent == crate::InjectAgent::Unknown {
+                return Err(ControlError::new(
+                    ControlErrorCode::InvalidRequest,
+                    "no supported foreground agent; select submit enter or none explicitly",
+                ));
+            }
+            let submit = crate::inject_submit::submit_writes(agent, kitty_flags);
             Ok(std::iter::once(body).chain(submit).collect())
         }
     }
@@ -206,11 +203,11 @@ mod tests {
             (Codex, vec![b"\r".to_vec(), b"\r".to_vec()]),
             (Cursor, vec![crate::inject_submit::CURSOR_SUBMIT.to_vec()]),
         ] {
-            let chunks = pane_write_chunks("one\ntwo\tλ", PaneWriteSubmit::Auto, agent).unwrap();
+            let chunks = pane_write_chunks("one\ntwo\tλ", PaneWriteSubmit::Auto, agent, 0).unwrap();
             assert_eq!(chunks[0], "\x1b[200~one\ntwo\tλ\x1b[201~".as_bytes());
             assert_eq!(chunks[1..], terminators);
         }
-        assert!(pane_write_chunks("hello", PaneWriteSubmit::Auto, Unknown).is_err());
+        assert!(pane_write_chunks("hello", PaneWriteSubmit::Auto, Unknown, 0).is_err());
         for bad in [
             "",
             "escape\x1b[201~",
@@ -218,15 +215,39 @@ mod tests {
             "nul\0",
             &"x".repeat(65505),
         ] {
-            assert!(pane_write_chunks(bad, PaneWriteSubmit::Enter, Grok).is_err());
+            assert!(pane_write_chunks(bad, PaneWriteSubmit::Enter, Grok, 0).is_err());
         }
         assert_eq!(
-            pane_write_chunks("literal\\n", PaneWriteSubmit::None, Unknown).unwrap(),
+            pane_write_chunks("literal\\n", PaneWriteSubmit::None, Unknown, 0).unwrap(),
             vec![b"literal\\n".to_vec()]
         );
         assert_eq!(
-            pane_write_chunks("λ", PaneWriteSubmit::Enter, Unknown).unwrap(),
+            pane_write_chunks("λ", PaneWriteSubmit::Enter, Unknown, 0).unwrap(),
             vec!["λ\r".as_bytes()]
         );
+    }
+
+    #[test]
+    fn pane_write_muse_auto_submit_uses_live_kitty_keyboard_mode() {
+        let flags =
+            prismattyc_emulator::KITTY_DISAMBIGUATE | prismattyc_emulator::KITTY_EVENT_TYPES;
+        let chunks = pane_write_chunks(
+            "PMUX_MAIL",
+            PaneWriteSubmit::Auto,
+            crate::InjectAgent::Muse,
+            flags,
+        )
+        .unwrap();
+        assert_eq!(chunks[0], b"\x1b[200~PMUX_MAIL\x1b[201~");
+        assert_eq!(chunks[1..], [b"\x1b[13;1u".to_vec()]);
+
+        let legacy = pane_write_chunks(
+            "PMUX_MAIL",
+            PaneWriteSubmit::Auto,
+            crate::InjectAgent::Muse,
+            0,
+        )
+        .unwrap();
+        assert_eq!(legacy[1..], [b"\r".to_vec()]);
     }
 }

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.10] - 2026-10-08
+
+### Since 0.3.9
+
+Attached-session cleanup remains owned by the final host window until
+transient removal failures succeed, while already-destroyed sessions are
+recognized as completed cleanup.
+
 ## [0.3.9] - 2026-10-07
 
 ### Since 0.3.8

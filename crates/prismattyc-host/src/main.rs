@@ -173,6 +173,25 @@ const PASTE_SEND_BUDGET: Duration = Duration::from_millis(250);
 /// Extra wait to close a partially-delivered bracketed paste (`CSI 201 ~`).
 const PASTE_BRACKET_CLOSE_TIMEOUT: Duration = Duration::from_millis(50);
 const PASTE_POLL_INTERVAL: Duration = Duration::from_millis(2);
+const EXIT_CLEANUP_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+fn retry_exited_cleanups(
+    pending: Vec<(String, String)>,
+    mut cleanup: impl FnMut(&str, &str) -> Result<(), String>,
+) -> Vec<(String, String)> {
+    pending
+        .into_iter()
+        .filter_map(|(session, session_id)| {
+            cleanup(&session, &session_id)
+                .err()
+                .map(|_| (session, session_id))
+        })
+        .collect()
+}
+
+fn should_close_exited_host(all_children_exited: bool, pending_cleanups: bool) -> bool {
+    all_children_exited && !pending_cleanups
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PaneSpacing {
@@ -3503,8 +3522,23 @@ impl App {
             if host.dirty {
                 host.window.request_redraw();
             }
-            if host.mux.all_children_exited() {
+            if should_close_exited_host(
+                host.mux.all_children_exited(),
+                !host.pending_exited_cleanups.is_empty(),
+            ) {
                 closed.push(*id);
+                timing.record_phase(
+                    pump_timing::Phase::WindowBookkeeping,
+                    phase_started.elapsed(),
+                );
+                continue;
+            }
+            if host.mux.all_children_exited() {
+                let retry = Instant::now() + EXIT_CLEANUP_RETRY_INTERVAL;
+                next_deadline = Some(match next_deadline {
+                    Some(existing) => existing.min(retry),
+                    None => retry,
+                });
                 timing.record_phase(
                     pump_timing::Phase::WindowBookkeeping,
                     phase_started.elapsed(),
@@ -7663,11 +7697,10 @@ impl App {
                 );
             }
         }
-        for (session, session_id) in std::mem::take(&mut host.pending_exited_cleanups) {
-            if remove_exited_session_from_space(host, &session, &session_id).is_err() {
-                retry_cleanups.push((session, session_id));
-            }
-        }
+        retry_cleanups.extend(retry_exited_cleanups(
+            std::mem::take(&mut host.pending_exited_cleanups),
+            |session, session_id| remove_exited_session_from_space(host, session, session_id),
+        ));
         let (pty_dirty, more) = host.mux.drain_all();
         let exited_attaches = host.mux.take_exited_attach_sessions();
         for (pane, session_id, session) in &exited_attaches {
@@ -20373,6 +20406,36 @@ mod modifier_tests;
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn final_host_stays_open_until_exited_cleanup_succeeds() {
+        assert!(!should_close_exited_host(true, true));
+        assert!(should_close_exited_host(true, false));
+        assert!(!should_close_exited_host(false, false));
+    }
+
+    #[test]
+    fn exited_cleanup_retries_failure_then_closes_final_host() {
+        let mut attempts = 0;
+        let pending = vec![("seat".to_string(), "7".to_string())];
+        let pending = retry_exited_cleanups(pending, |_, _| {
+            attempts += 1;
+            if attempts == 1 {
+                Err("transient failure".to_string())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(attempts, 1);
+        assert_eq!(pending.len(), 1);
+        let pending = retry_exited_cleanups(pending, |_, _| {
+            attempts += 1;
+            Ok(())
+        });
+        assert_eq!(attempts, 2);
+        assert!(pending.is_empty());
+        assert!(should_close_exited_host(true, pending.is_empty()));
+    }
 
     #[test]
     fn muse_attention_title_comes_from_the_shared_slug() {

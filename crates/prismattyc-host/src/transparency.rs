@@ -10,6 +10,7 @@ use crate::config::{self, ConfigFile};
 use crate::graphite::{self, Face, Rect};
 use crate::mux::ChromeGeom;
 use crate::raster::{alpha_of, opacity_to_alpha, pack_argb, unpack_rgb};
+#[cfg(test)]
 use crate::theme::ThemeVariant;
 
 /// Design size of the dialog. It does not grow or shrink with its contents.
@@ -919,7 +920,7 @@ pub(crate) fn paint(
     graphite::fill_round_rect(buffer, stride, layout.dialog, RADIUS, card, 255);
     let accent = graphite::accent(
         tok,
-        if tok.variant == ThemeVariant::Light {
+        if tok.variant == graphite_core::ThemeVariant::Light {
             [0x2f, 0x6f, 0xd0]
         } else {
             [0x5a, 0xa2, 0xff]

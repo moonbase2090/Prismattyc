@@ -20434,7 +20434,7 @@ mod tests {
         });
         assert_eq!(attempts, 2);
         assert!(pending.is_empty());
-        assert!(should_close_exited_host(true, pending.is_empty()));
+        assert!(should_close_exited_host(true, false));
     }
 
     #[test]

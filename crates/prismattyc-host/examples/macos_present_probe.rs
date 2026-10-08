@@ -1,5 +1,6 @@
 //! Run the native presenter lifecycle check in a logged-in macOS desktop.
 //! `cargo run -p prismattyc-host --example macos_present_probe --locked`
+//! Add `iosurface` to run the three-buffer readback and scale checks.
 
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
@@ -16,11 +17,17 @@ mod macos_window;
 #[path = "../src/pixel_alpha.rs"]
 mod pixel_alpha;
 #[cfg(target_os = "macos")]
+#[path = "../src/present_surface.rs"]
+mod present_surface;
+#[cfg(target_os = "macos")]
 #[path = "../src/present_tiles.rs"]
 mod present_tiles;
 #[cfg(target_os = "macos")]
 #[path = "../src/present_timing.rs"]
 mod present_timing;
+#[cfg(target_os = "macos")]
+#[path = "../src/surface_damage.rs"]
+mod surface_damage;
 
 #[cfg(target_os = "macos")]
 fn main() {
@@ -45,6 +52,8 @@ fn main() {
         window: Option<Arc<Window>>,
         present: Option<mac_present::MacPresent>,
         resized: bool,
+        iosurface: bool,
+        iosurface_stage: usize,
     }
 
     impl ApplicationHandler for Probe {
@@ -59,7 +68,8 @@ fn main() {
                     )
                     .unwrap(),
             );
-            self.present = Some(mac_present::MacPresent::new(window.clone()).unwrap());
+            self.present =
+                Some(mac_present::MacPresent::new(window.clone(), self.iosurface).unwrap());
             window.request_redraw();
             self.window = Some(window);
         }
@@ -71,6 +81,195 @@ fn main() {
             let window = self.window.as_ref().unwrap();
             let size = window.inner_size();
             let present = self.present.as_mut().unwrap();
+            if self.iosurface {
+                match self.iosurface_stage {
+                    0 => {
+                        let width = size.width as usize;
+                        let height = size.height as usize;
+                        assert_eq!(present.backend(), "iosurface");
+                        assert!(!present.prepare(size.width, size.height).unwrap());
+                        let mut expected = vec![0x80402010; width * height];
+                        expected[0] = 0xff11e795;
+                        let mut expected_premultiplied = vec![0x80201008; width * height];
+                        expected_premultiplied[0] = 0xff11e795;
+                        present.pixels_mut().copy_from_slice(&expected);
+                        let timing = present
+                            .present_at_scale(FrameDamage::Full, false, 1.0)
+                            .unwrap();
+                        assert_eq!(timing.backend, "iosurface");
+                        assert_eq!(timing.write_us, 0, "timing is disabled");
+                        assert_eq!(timing.commit_us, 0, "timing is disabled");
+                        assert_eq!(timing.write_bytes, 0, "timing is disabled");
+                        assert_eq!(timing.busy_surface_stalls, 0);
+                        let readback = present.readback().unwrap();
+                        assert_readback(&readback, &expected_premultiplied);
+                        if let Some(path) = std::env::var_os("PRISMATTYC_DUMP_PRESENT") {
+                            write_present_png(
+                                std::path::Path::new(&path),
+                                &expected_premultiplied,
+                                size.width,
+                                size.height,
+                            )
+                            .unwrap();
+                            write_present_png(
+                                &std::path::PathBuf::from(path).with_extension("readback.png"),
+                                &readback,
+                                size.width,
+                                size.height,
+                            )
+                            .unwrap();
+                            println!("PASS IOSurface dump and readback PNGs written for SHA-256 comparison");
+                        }
+                        let mut slots = vec![present.current_surface_slot().unwrap()];
+
+                        for (rect, color, premultiplied_color) in [
+                            (PixelRect::new(1, 1, 7, 3), 0x80123456, 0x80091a2b),
+                            (PixelRect::new(13, 9, 2, 4), 0x407f31dd, 0x401f0c37),
+                            (PixelRect::new(0, 0, 1, 1), 0xffabcdef, 0xffabcdef),
+                            (
+                                PixelRect::new(width - 2, height - 2, 2, 2),
+                                0x00aabbcc,
+                                0x00000000,
+                            ),
+                        ] {
+                            assert!(present.prepare(size.width, size.height).unwrap());
+                            for y in rect.y..rect.y + rect.height {
+                                expected[y * width + rect.x..y * width + rect.x + rect.width]
+                                    .fill(color);
+                                expected_premultiplied
+                                    [y * width + rect.x..y * width + rect.x + rect.width]
+                                    .fill(premultiplied_color);
+                            }
+                            present.pixels_mut().copy_from_slice(&expected);
+                            let timing = present
+                                .present_at_scale(FrameDamage::Rects(vec![rect]), false, 1.0)
+                                .unwrap();
+                            assert_eq!(timing.write_us, 0, "timing is disabled");
+                            assert_eq!(timing.commit_us, 0, "timing is disabled");
+                            assert_eq!(timing.write_bytes, 0, "timing is disabled");
+                            assert_readback(present.readback().unwrap(), &expected_premultiplied);
+                            slots.push(present.current_surface_slot().unwrap());
+                        }
+                        assert!(
+                            [0, 1, 2].iter().all(|slot| slots.contains(slot)),
+                            "all three IOSurface buffers must be used: {slots:?}"
+                        );
+
+                        let RawWindowHandle::AppKit(handle) =
+                            window.window_handle().unwrap().as_raw()
+                        else {
+                            panic!("expected AppKit handle");
+                        };
+                        // SAFETY: the retained winit window owns this main-thread NSView.
+                        let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+                        let root = view.layer().unwrap();
+                        // SAFETY: the main-thread root layer owns its sublayers.
+                        let layers = unsafe { root.sublayers() }.unwrap();
+                        let layer = layers
+                            .iter()
+                            .find(|layer| layer.zPosition() == 1.0)
+                            .unwrap();
+                        assert_eq!(layer.frame(), root.bounds());
+                        assert_eq!(layer.contentsScale(), 1.0);
+                        // SAFETY: the presenter has assigned a live IOSurface contents object.
+                        assert!(unsafe { layer.contents() }.is_some());
+                        // SAFETY: the main-thread presenter layer owns its sublayers, if any.
+                        assert!(unsafe { layer.sublayers() }.is_none());
+
+                        let mut generation = present.surface_generation().unwrap();
+                        for scale in [2.0, 1.0] {
+                            assert!(present.prepare(size.width, size.height).unwrap());
+                            present.pixels_mut().copy_from_slice(&expected);
+                            let timing = present
+                                .present_at_scale(
+                                    FrameDamage::Rects(vec![PixelRect::new(0, 0, 1, 1)]),
+                                    true,
+                                    scale,
+                                )
+                                .unwrap();
+                            generation += 1;
+                            assert_eq!(present.surface_generation(), Some(generation));
+                            assert_eq!(timing.write_bytes, width * height * 4);
+                            assert_readback(present.readback().unwrap(), &expected_premultiplied);
+                            assert_eq!(layer.contentsScale(), scale);
+                        }
+
+                        self.iosurface_stage = 1;
+                        let _ = window.request_inner_size(PhysicalSize::new(900, 600));
+                        window.request_redraw();
+                        println!(
+                            "PASS IOSurface partial frames, three buffers, readback, timing-off, and 1x/2x/1x reallocation"
+                        );
+                        return;
+                    }
+                    1 | 2 => {
+                        let target = if self.iosurface_stage == 1 {
+                            PhysicalSize::new(900, 600)
+                        } else {
+                            PhysicalSize::new(1800, 1200)
+                        };
+                        if size != target {
+                            window.request_redraw();
+                            return;
+                        }
+                        let width = size.width as usize;
+                        let height = size.height as usize;
+                        let prior_generation = present.surface_generation().unwrap();
+                        assert!(!present.prepare(size.width, size.height).unwrap());
+                        let expected = vec![0xff23579b; width * height];
+                        present.pixels_mut().copy_from_slice(&expected);
+                        let timing = present
+                            .present_at_scale(FrameDamage::Full, true, 1.0)
+                            .unwrap();
+                        assert_eq!(present.surface_generation(), Some(prior_generation + 1));
+                        assert_eq!(timing.write_bytes, width * height * 4);
+                        assert_readback(present.readback().unwrap(), &expected);
+                        if self.iosurface_stage == 1 {
+                            self.iosurface_stage = 2;
+                            let _ = window.request_inner_size(PhysicalSize::new(1800, 1200));
+                            window.request_redraw();
+                            println!("PASS IOSurface shrink reallocated and copied the full frame");
+                            return;
+                        }
+
+                        let RawWindowHandle::AppKit(handle) =
+                            window.window_handle().unwrap().as_raw()
+                        else {
+                            panic!("expected AppKit handle");
+                        };
+                        // SAFETY: the retained winit window owns this main-thread NSView.
+                        let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+                        let root = view.layer().unwrap();
+                        // SAFETY: the main-thread root layer owns its sublayers.
+                        let layers = unsafe { root.sublayers() }.unwrap();
+                        let layer = layers
+                            .iter()
+                            .find(|layer| layer.zPosition() == 1.0)
+                            .unwrap();
+                        drop(self.present.take());
+                        assert!(
+                            layer.superlayer().is_none(),
+                            "drop removes the content layer"
+                        );
+                        let replacement =
+                            mac_present::MacPresent::new(window.clone(), true).unwrap();
+                        self.present = Some(replacement);
+                        let replacement = self.present.as_mut().unwrap();
+                        assert!(!replacement.prepare(size.width, size.height).unwrap());
+                        replacement.pixels_mut().copy_from_slice(&expected);
+                        replacement
+                            .present_at_scale(FrameDamage::Full, false, 1.0)
+                            .unwrap();
+                        assert_readback(replacement.readback().unwrap(), &expected);
+                        println!("PASS IOSurface grow, teardown, and presenter recreation");
+                        self.iosurface_stage = 3;
+                        event_loop.exit();
+                        return;
+                    }
+                    3 => return,
+                    _ => unreachable!(),
+                }
+            }
             present.prepare(size.width, size.height).unwrap();
             present.pixels_mut().fill(0x80402010);
             present.pixels_mut()[0] = 0xff11e795;
@@ -85,13 +284,13 @@ fn main() {
             );
             assert_eq!(full_present.changed_tiles, None);
             let mut expected_readback =
-                vec![0x8020_1008; size.width as usize * size.height as usize];
-            expected_readback[0] = 0xff11_e795;
+                vec![0x80201008; size.width as usize * size.height as usize];
+            expected_readback[0] = 0xff11e795;
             let readback = present.readback().unwrap();
             assert_pixels_equal(
                 &readback,
                 &expected_readback,
-                "tile image readback must match the premultiplied framebuffer",
+                "tile readback must match the premultiplied framebuffer",
             );
             if let Some(path) = std::env::var_os("PRISMATTYC_DUMP_PRESENT") {
                 let path = std::path::PathBuf::from(path);
@@ -158,7 +357,7 @@ fn main() {
                 }
                 assert_eq!(tile.contentsScale(), scale);
                 assert!(!tile.isOpaque());
-                // SAFETY: the presenter assigns a live CGImage contents object.
+                // SAFETY: the presenter has assigned a live CGImage contents object.
                 let contents = unsafe { tile.contents() }.unwrap();
                 // SAFETY: the presenter assigns a CGImage to each tile.
                 let image: &CGImage = unsafe { &*((&*contents as *const AnyObject).cast()) };
@@ -179,12 +378,12 @@ fn main() {
                 .unwrap();
             assert_eq!(partial_present.dirty_tiles, 1);
             assert_eq!(partial_present.changed_tiles, None);
-            expected_readback[0] = 0xffab_cdef;
+            expected_readback[0] = 0xffabcdef;
             let readback = present.readback().unwrap();
             assert_pixels_equal(
                 &readback,
                 &expected_readback,
-                "partial tile presentation must preserve untouched premultiplied pixels",
+                "partial tile present must retain the other premultiplied pixels",
             );
             for (index, (tile, prior)) in tiles.iter().zip(&prior_contents).enumerate() {
                 // SAFETY: each tile retains the CGImage assigned by the presenter.
@@ -226,7 +425,7 @@ fn main() {
                 "drop removes the content layer"
             );
             // Recreate on the same view to check backdrop bookkeeping cleanup.
-            let replacement = mac_present::MacPresent::new(window.clone()).unwrap();
+            let replacement = mac_present::MacPresent::new(window.clone(), false).unwrap();
             assert!(macos_window::set_window_blur(window, true));
             assert_eq!(view.subviews().len(), children + 1);
             drop(replacement);
@@ -236,10 +435,23 @@ fn main() {
         }
     }
 
+    let iosurface = std::env::args().any(|arg| arg == "iosurface");
     EventLoop::new()
         .unwrap()
-        .run_app(&mut Probe::default())
+        .run_app(&mut Probe {
+            iosurface,
+            ..Probe::default()
+        })
         .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+fn assert_readback(readback: impl AsRef<[u32]>, expected_premultiplied: &[u32]) {
+    assert_pixels_equal(
+        readback.as_ref(),
+        expected_premultiplied,
+        "present readback must match the premultiplied framebuffer",
+    );
 }
 
 #[cfg(target_os = "macos")]

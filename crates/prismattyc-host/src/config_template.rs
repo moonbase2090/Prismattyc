@@ -85,7 +85,7 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey {
         name: "macos_present",
         group: ConfigGroup::Appearance,
-        doc: "macOS present backend; startup only; ignored on other platforms",
+        doc: "macOS present backend; startup only, ignored on other platforms, unknown values warn and use tiles",
         range: "tiles|iosurface",
         value: ConfigValue::String("tiles"),
     },

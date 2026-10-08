@@ -12832,6 +12832,7 @@ fn paint_graphite_tabs_bar(
         stride,
         &graphite::BarPaint {
             layout: &layout,
+            chrome: geom.chrome,
             tok: &tok,
             accent: graphite::accent(&tok, focus_border_rgb(host.focus_border)),
             hover,
@@ -13319,11 +13320,8 @@ fn sidebar_hit_at(host: &HostState, px: usize, py: usize) -> Option<graphite::Si
             });
         }
     }
-    if host.sidebar_row_count == 0 && !host.spacing.sidebar_collapsed {
-        return None;
-    }
     let rows: Vec<graphite::Rect> = host.sidebar_rows.iter().map(|(slot, _)| *slot).collect();
-    graphite::sidebar_hit(
+    sidebar_hit_stored(
         &graphite::SidebarHitTargets {
             rows: &rows,
             needs_you: &host.sidebar_needs_you_hits,
@@ -13335,6 +13333,17 @@ fn sidebar_hit_at(host: &HostState, px: usize, py: usize) -> Option<graphite::Si
         px,
         py,
     )
+}
+
+/// Hit-test the stored sidebar paint. Empty rows simply miss, so the footer
+/// actions, header arrange buttons, list thumb and collapse toggle still
+/// resolve when zero Spaces leave no rows to hit.
+fn sidebar_hit_stored(
+    targets: &graphite::SidebarHitTargets<'_>,
+    px: usize,
+    py: usize,
+) -> Option<graphite::SidebarHit> {
+    graphite::sidebar_hit(targets, px, py)
 }
 
 /// `Ctrl Shift P` for the first chord bound to `action`; empty when unbound.
@@ -26417,6 +26426,69 @@ session mail (id 15)
             session_title_of(&tree, clicked).as_deref(),
             Some("composer-2")
         );
+    }
+
+    #[test]
+    fn sidebar_chrome_still_hits_with_zero_rows() {
+        use graphite::SidebarHit;
+        let chrome = mux::ChromeGeom {
+            graphite: true,
+            scale_milli: 1000,
+        };
+        let column = graphite::Rect::new(0, 0, 256, 640);
+        let layout = graphite::sidebar_layout(chrome, column, 0, 0);
+        assert!(layout.rows.is_empty(), "zero Spaces paint no rows");
+        let span = graphite::Rect::new(0, 0, column.w, 64);
+        let header = graphite::sidebar_header_layout(chrome, span);
+        let toggle = graphite::sidebar_toggle_rect(chrome, column, layout.head, false);
+        let targets = graphite::SidebarHitTargets {
+            rows: &[],
+            needs_you: &[],
+            actions: &layout.actions,
+            arrange: &header.buttons,
+            thumb: layout.thumb,
+            toggle,
+        };
+        let hit = |rect: graphite::Rect| {
+            sidebar_hit_stored(&targets, rect.x + rect.w / 2, rect.y + rect.h / 2)
+        };
+        assert_eq!(hit(layout.actions[0]), Some(SidebarHit::Action(0)));
+        assert_eq!(hit(layout.actions[1]), Some(SidebarHit::Action(1)));
+        assert_eq!(hit(header.buttons[0]), Some(SidebarHit::Arrange(0)));
+        assert_eq!(hit(toggle), Some(SidebarHit::Toggle));
+        assert_eq!(
+            sidebar_hit_stored(&targets, layout.list.x + 4, layout.list.y + 4),
+            None,
+            "an empty list hits nothing"
+        );
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::Action(0), None, false, None),
+            SidebarClick::Run(keybind::Action::NewTab),
+            "the new-tab action runs with zero Spaces"
+        );
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::Action(1), None, false, None),
+            SidebarClick::BeginNewSpace,
+            "the new-Space action runs with zero Spaces"
+        );
+    }
+
+    #[test]
+    fn collapsed_strip_actions_hit_with_zero_rows() {
+        let strip = sidebar_width::icon_strip(0, 52, 640, 32, 36, 32, 0, 0);
+        assert!(strip.icons.is_empty(), "zero Spaces paint no icons");
+        let hit = |slot: sidebar_width::PxBox| {
+            sidebar_width::icon_hit(&strip, slot.x + slot.w / 2, slot.y + slot.h / 2)
+        };
+        assert_eq!(
+            hit(strip.actions[0]),
+            Some(sidebar_width::IconTarget::Action(0))
+        );
+        assert_eq!(
+            hit(strip.actions[1]),
+            Some(sidebar_width::IconTarget::Action(1))
+        );
+        assert_eq!(hit(strip.toggle), Some(sidebar_width::IconTarget::Toggle));
     }
 
     #[test]

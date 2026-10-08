@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use objc2::{rc::Retained, MainThreadMarker};
+use objc2::{rc::Retained, runtime::AnyObject, MainThreadMarker};
 use objc2_app_kit::NSView;
 use objc2_core_foundation::{CFData, CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
@@ -21,6 +21,7 @@ use winit::window::Window;
 
 use crate::frame_damage::{FrameDamage, PixelRect};
 use crate::pixel_alpha::premultiply_in_place;
+use crate::present_surface::SurfaceRing;
 use crate::present_tiles::{copy_tile, damaged_tiles, tiles};
 use crate::present_timing::PresentTiming;
 
@@ -34,6 +35,9 @@ pub struct MacPresent {
     tile_rects: Vec<PixelRect>,
     tile_layers: Vec<Retained<CALayer>>,
     scratch: Vec<u32>,
+    surface_ring: Option<SurfaceRing>,
+    iosurface_requested: bool,
+    allocation_warning_logged: bool,
     retained: bool,
     rebuild_layers: bool,
     scale: f64,
@@ -46,7 +50,7 @@ pub struct MacPresent {
 }
 
 impl MacPresent {
-    pub fn new(window: Arc<Window>) -> Result<Self> {
+    pub fn new(window: Arc<Window>, iosurface: bool) -> Result<Self> {
         let main_thread =
             MainThreadMarker::new().context("Mac presenter requires the main thread")?;
         let handle = window.window_handle()?;
@@ -67,6 +71,7 @@ impl MacPresent {
         layer.setGeometryFlipped(true);
         // Keep terminal content above backdrop subviews added by hot reload.
         layer.setZPosition(1.0);
+        // SAFETY: this framework constant is valid for the process lifetime.
         layer.setContentsGravity(unsafe { kCAGravityTopLeft });
         root_layer.addSublayer(&layer);
         CATransaction::commit();
@@ -80,6 +85,9 @@ impl MacPresent {
             tile_rects: Vec::new(),
             tile_layers: Vec::new(),
             scratch: Vec::new(),
+            surface_ring: None,
+            iosurface_requested: iosurface,
+            allocation_warning_logged: false,
             retained: false,
             rebuild_layers: true,
             scale: 0.0,
@@ -118,7 +126,196 @@ impl MacPresent {
         &mut self.pixels
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn pixels(&self) -> &[u32] {
+        &self.pixels
+    }
+
+    pub fn backend(&self) -> &'static str {
+        if self.iosurface_requested || self.surface_ring.is_some() {
+            "iosurface"
+        } else {
+            "tiles"
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn uses_iosurface(&self) -> bool {
+        self.surface_ring.is_some()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn iosurface_requested(&self) -> bool {
+        self.iosurface_requested
+    }
+
+    pub(crate) fn wait_presented(&self) -> Result<()> {
+        // IOSurfaceIsInUse stays true while Core Animation owns the shown
+        // surface, so presentation completion is the committed transaction;
+        // ring reuse separately waits until a target surface is no longer in use.
+        CATransaction::flush();
+        Ok(())
+    }
+
+    pub(crate) fn readback(&self) -> Result<Vec<u32>> {
+        self.wait_presented()?;
+        if let Some(ring) = &self.surface_ring {
+            return ring.readback();
+        }
+        if !self.retained || self.tile_layers.len() != self.tile_rects.len() {
+            bail!("presenter has no complete committed frame to read back");
+        }
+        let pixel_count = self
+            .width
+            .checked_mul(self.height)
+            .context("Mac readback size overflow")?;
+        let mut pixels = vec![0; pixel_count];
+        for (index, (layer, rect)) in self.tile_layers.iter().zip(&self.tile_rects).enumerate() {
+            // SAFETY: the presenter assigns a retained CGImage to every tile layer.
+            let contents = unsafe { layer.contents() }
+                .with_context(|| format!("tile layer {index} has no image contents"))?;
+            // SAFETY: `contents` is the CGImage installed by `alpha_image` above.
+            let image: &CGImage = unsafe { &*((&*contents as *const AnyObject).cast()) };
+            let provider = CGImage::data_provider(Some(image))
+                .with_context(|| format!("tile layer {index} has no data provider"))?;
+            let data = CGDataProvider::data(Some(&provider))
+                .with_context(|| format!("tile layer {index} has no provider data"))?;
+            let row_bytes = rect
+                .width
+                .checked_mul(std::mem::size_of::<u32>())
+                .context("Mac readback row overflow")?;
+            if CGImage::bytes_per_row(Some(image)) != row_bytes {
+                bail!("tile layer {index} has an unexpected row stride");
+            }
+            let expected_bytes = row_bytes
+                .checked_mul(rect.height)
+                .context("Mac readback tile size overflow")?;
+            if data.len() != expected_bytes {
+                bail!(
+                    "tile layer {index} data length {} does not match expected {expected_bytes}",
+                    data.len()
+                );
+            }
+            let bytes = data.to_vec();
+            for tile_y in 0..rect.height {
+                for tile_x in 0..rect.width {
+                    let source = tile_y * row_bytes + tile_x * 4;
+                    let pixel = u32::from_le_bytes(bytes[source..source + 4].try_into().unwrap());
+                    let destination = (rect.y + tile_y) * self.width + rect.x + tile_x;
+                    pixels[destination] = pixel;
+                }
+            }
+        }
+        Ok(pixels)
+    }
+
+    /// Probe hook for checking ring rotation.
+    #[allow(dead_code)]
+    pub(crate) fn current_surface_slot(&self) -> Option<usize> {
+        self.surface_ring
+            .as_ref()
+            .and_then(SurfaceRing::current_slot)
+    }
+
+    /// Probe hook for checking full reallocation after geometry changes.
+    #[allow(dead_code)]
+    pub(crate) fn surface_generation(&self) -> Option<u64> {
+        self.surface_ring.as_ref().map(SurfaceRing::generation)
+    }
+
     pub fn present(
+        &mut self,
+        damage: FrameDamage,
+        measure_changed_tiles: bool,
+    ) -> Result<PresentTiming> {
+        let scale = self.window.scale_factor();
+        self.present_at_scale(damage, measure_changed_tiles, scale)
+    }
+
+    pub(crate) fn present_at_scale(
+        &mut self,
+        damage: FrameDamage,
+        measure: bool,
+        scale: f64,
+    ) -> Result<PresentTiming> {
+        if self.iosurface_requested {
+            return self.present_iosurface(damage, measure, scale);
+        }
+        self.present_tiles(damage, measure)
+    }
+
+    fn present_iosurface(
+        &mut self,
+        damage: FrameDamage,
+        measure: bool,
+        scale: f64,
+    ) -> Result<PresentTiming> {
+        let mut reallocated = false;
+        if self.surface_ring.is_none() {
+            match SurfaceRing::new(self.width, self.height, scale) {
+                Ok(ring) => {
+                    self.surface_ring = Some(ring);
+                    reallocated = true;
+                }
+                Err(error) => {
+                    self.fallback_to_tiles(&error);
+                    return self.present_tiles(FrameDamage::Full, measure);
+                }
+            }
+        } else if let Err(error) = self
+            .surface_ring
+            .as_mut()
+            .expect("ring exists after initialization")
+            .resize_if_needed(self.width, self.height, scale)
+            .map(|changed| reallocated = changed)
+        {
+            self.fallback_to_tiles(&error);
+            return self.present_tiles(FrameDamage::Full, measure);
+        }
+
+        let damage = if reallocated || self.rebuild_layers {
+            FrameDamage::Full
+        } else {
+            damage
+        };
+        let timing = self
+            .surface_ring
+            .as_mut()
+            .expect("ring was initialized above")
+            .present(
+                &self.layer,
+                self.root_layer.bounds(),
+                scale,
+                &self.pixels,
+                damage,
+                measure,
+            )?;
+        self.previous_pixels = None;
+        self.scale = scale;
+        self.rebuild_layers = false;
+        self.retained = true;
+        Ok(timing)
+    }
+
+    fn fallback_to_tiles(&mut self, error: &anyhow::Error) {
+        if !self.allocation_warning_logged {
+            eprintln!(
+                "prismattyc-host: IOSurface allocation failed ({error:#}); falling back to tiles for this window"
+            );
+            self.allocation_warning_logged = true;
+        }
+        self.iosurface_requested = false;
+        self.surface_ring = None;
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        // SAFETY: clearing contents removes the previously retained image or
+        // IOSurface before the tile sublayers are rebuilt beneath this layer.
+        unsafe { self.layer.setContents(None) };
+        CATransaction::commit();
+        self.rebuild_layers = true;
+    }
+
+    fn present_tiles(
         &mut self,
         damage: FrameDamage,
         measure_changed_tiles: bool,
@@ -182,6 +379,7 @@ impl MacPresent {
                 layer.setOpaque(false);
                 layer.setAnchorPoint(CGPoint::new(0.0, 0.0));
                 layer.setGeometryFlipped(true);
+                // SAFETY: this framework constant is valid for the process lifetime.
                 layer.setContentsGravity(unsafe { kCAGravityTopLeft });
                 self.layer.addSublayer(&layer);
                 self.tile_layers.push(layer);
@@ -218,11 +416,13 @@ impl MacPresent {
         self.rebuild_layers = false;
         self.retained = true;
         Ok(PresentTiming {
+            backend: "tiles",
             write_us,
             commit_us,
             dirty_tiles,
             changed_tiles,
             write_bytes,
+            busy_surface_stalls: 0,
         })
     }
 

@@ -37,6 +37,9 @@ menu to opt out. The app menu's manual check works regardless of this setting.
 `false` and takes effect at startup, so restart the host after changing it.
 `snapshot_client` stays off unless the file sets it to true. The host reads
 that key at startup only; a later edit does not start or stop the cache.
+`macos_present` selects the macOS window presenter at startup. It defaults to
+`"tiles"`; `"iosurface"` enables the three-buffer IOSurface path. Unknown
+values warn and use `"tiles"`. Other platforms ignore this key.
 The classic `prismattyc` binary does not
 read this file. `chrome_style` defaults to `graphite`. Leave that key
 commented, or omit it, to follow the app default. `chrome_style = "classic"`
@@ -62,6 +65,8 @@ event-loop turn.
 # theme = "prismattyc"
 # Render timings and counters. off|osd|log|both.
 render_timer = "off"
+# macOS present backend; startup only, ignored on other platforms, unknown values warn and use tiles. tiles|iosurface.
+macos_present = "tiles"
 # Log every render frame when render_timer includes log; use for benches only. true|false.
 render_timer_log_every_frame = false
 # Maximum PTY parsing time per event-loop pump; hot-reloaded. 1-1000 ms.

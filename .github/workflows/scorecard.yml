@@ -20,7 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+          # `&& 0 || 1` is wrong in GHA expressions (0 is falsy); PR --diff needs full history.
+          fetch-depth: 0
       - name: Install sc v0.1.5
         run: |
           set -eu

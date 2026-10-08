@@ -1,5 +1,64 @@
 # Changelog
 
+## [0.3.29] - 2026-10-08
+
+### Since 0.3.3-rc.1
+
+Graphite is now the default host chrome. The P1–P6 work moved Graphite’s
+colors, token derivation, tabs, rail geometry, and sidebar layout into the
+shared rendering path, pinned the graphite-core revisions used by each row,
+and added the corresponding hit-testing, drag, resize, theme, transparency,
+and light-cycle behavior. The sidebar supports live tabs, saved Spaces,
+attention markers, collapsed mode, scrolling, arrangement controls, and
+clickable chrome even when there are zero Spaces.
+
+The dark Hive themes are lighter while preserving their contrast goals and ANSI
+behavior. Theme, sidebar, and window screenshots cover the shipped palettes.
+
+Space reopening after a pmuxd restart now reconnects existing sessions without
+replaying commands into the wrong session, preserving panes, tabs, and saved
+layout state. Cleanly exited attached sessions close their panes, remove stale
+Space membership, and stop their daemon session; failed cleanup retries and
+failed exits remain reopenable placeholders. The native regression covers the
+failure-and-recovery lifecycle with a real host and daemon.
+
+CI now installs Scorecard outside the checkout before the type and test gates,
+keeps the intended diff base, and runs the release checks against the pinned
+revision. The changelog’s former Unreleased sidebar-click note is included
+above with the Graphite sidebar changes.
+
+## [0.3.29-rc.1] - 2026-10-08
+
+This build is a prerelease. A tag such as `v0.3.29-rc.1` is published with
+`--prerelease --latest=false`. `pmux update` and the app menu do not offer it.
+Install the assets from the release, or opt in with `pmux update --pre`.
+The binaries report the base version, `0.3.29`.
+
+### Since 0.3.3-rc.1
+
+Graphite is now the default host chrome. The P1–P6 work moved Graphite’s
+colors, token derivation, tabs, rail geometry, and sidebar layout into the
+shared rendering path, pinned the graphite-core revisions used by each row,
+and added the corresponding hit-testing, drag, resize, theme, transparency,
+and light-cycle behavior. The sidebar supports live tabs, saved Spaces,
+attention markers, collapsed mode, scrolling, arrangement controls, and
+clickable chrome even when there are zero Spaces.
+
+The dark Hive themes are lighter while preserving their contrast goals and ANSI
+behavior. Theme, sidebar, and window screenshots cover the shipped palettes.
+
+Space reopening after a pmuxd restart now reconnects existing sessions without
+replaying commands into the wrong session, preserving panes, tabs, and saved
+layout state. Cleanly exited attached sessions close their panes, remove stale
+Space membership, and stop their daemon session; failed cleanup retries and
+failed exits remain reopenable placeholders. The native regression covers the
+failure-and-recovery lifecycle with a real host and daemon.
+
+CI now installs Scorecard outside the checkout before the type and test gates,
+keeps the intended diff base, and runs the release checks against the pinned
+revision. The changelog’s former Unreleased sidebar-click note is included
+above with the Graphite sidebar changes.
+
 ## [0.3.25] - 2026-10-08
 
 ### Since 0.3.9
@@ -17,12 +76,6 @@ removes the session from its saved Space, and tears down the live session.
 Direct attachments without a saved Space are stopped by stable session ID, and
 failed cleanup is retried. Failed attached clients remain available as
 reopenable placeholders.
-
-## [Unreleased]
-
-With zero Spaces, clicks on the sidebar chrome work again. The new-tab,
-new-Space, and command-palette actions, the arrange buttons, and the collapse
-toggle resolve even when the sidebar paints no rows.
 
 ## [0.3.16] - 2026-10-07
 

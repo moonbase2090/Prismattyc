@@ -3,6 +3,31 @@
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
+
+#[cfg(target_os = "linux")]
+pub(crate) fn wait_for_attach_write(host: &crate::HostState) {
+    let Some(path) = host.attach_layout_path.as_deref() else {
+        return;
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while host.file_writer.attach_tabs_write_pending(path) {
+        assert!(
+            Instant::now() < deadline,
+            "attach-tabs write did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn wait_for_render_status(app: &crate::App) {
+    let Some((pid_path, _)) = app.registered_host.as_ref() else {
+        return;
+    };
+    app.file_writer.handle().wait_for_render_status(pid_path);
+}
 
 pub(crate) fn mux_bin_dir() -> &'static PathBuf {
     static BIN_DIR: OnceLock<PathBuf> = OnceLock::new();

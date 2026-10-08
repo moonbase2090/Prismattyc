@@ -30,8 +30,8 @@ use anyhow::{bail, Context, Result};
 use prismattyc_mux::{
     classify_control_request_id, default_socket_path, next_stale_skip, ControlError,
     ControlErrorCode, ControlIdMatch, ControlRequest, ControlResponse, ControlResponseBody,
-    ControlResponseData, PaneEvent, PaneFramePolicy, PaneLogFrame, PaneStyled, Snapshot,
-    MAX_PANE_STATE_BYTES, PROTOCOL_VERSION,
+    ControlResponseData, EventBatch, PaneEvent, PaneFramePolicy, PaneLogFrame, PaneStyled,
+    Snapshot, MAX_PANE_STATE_BYTES, PROTOCOL_VERSION,
 };
 
 use crate::rich::ChildWrite;
@@ -205,6 +205,15 @@ pub(crate) fn pty_fallback_requested() -> bool {
     )
 }
 
+/// `PRISMATTYC_ASYNC_PANE_CONNECT=1` connects and promotes pmuxd panes on
+/// worker threads instead of blocking the main thread. Off by default.
+pub(crate) fn async_connect_requested() -> bool {
+    matches!(
+        std::env::var("PRISMATTYC_ASYNC_PANE_CONNECT").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
 /// Session key of a host attach spawn (PT-111 / PT-306).
 ///
 /// Matches `pmux attach --session-id ID`, `pmux attach --session NAME`,
@@ -274,7 +283,7 @@ fn attach_session_key(args: &[String]) -> Option<String> {
 }
 
 /// Socket the host attaches: `PMUX_SOCKET` if set, else the default.
-fn mux_socket() -> Result<PathBuf> {
+pub(crate) fn mux_socket() -> Result<PathBuf> {
     if let Some(raw) = std::env::var_os("PMUX_SOCKET") {
         if !raw.is_empty() {
             return Ok(PathBuf::from(raw));
@@ -365,6 +374,13 @@ impl Client {
     fn connect(path: &Path, read_timeout: Duration) -> Result<Self> {
         let stream = prismattyc_mux::local_socket::UnixStream::connect(path)
             .with_context(|| format!("connect {}", path.display()))?;
+        Self::from_stream(stream, read_timeout)
+    }
+
+    fn from_stream(
+        stream: prismattyc_mux::local_socket::UnixStream,
+        read_timeout: Duration,
+    ) -> Result<Self> {
         stream.set_read_timeout(Some(read_timeout))?;
         stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
         let mut client = Self {
@@ -606,6 +622,47 @@ impl Client {
         let request = make(request_id);
         self.send(&request)?;
         self.read_frame(request_id)
+    }
+}
+
+/// One registered control connection for the long-lived snapshot cache.
+///
+/// `on_connected` runs after `connect` returns and before the register read,
+/// so a caller can count the socket while a stalled daemon is still blocking.
+pub(crate) struct SnapshotSocket {
+    client: Client,
+}
+
+impl SnapshotSocket {
+    pub(crate) fn open(path: &Path, on_connected: impl FnOnce()) -> Result<Self> {
+        let stream = prismattyc_mux::local_socket::UnixStream::connect(path)
+            .with_context(|| format!("connect {}", path.display()))?;
+        on_connected();
+        Ok(Self {
+            client: Client::from_stream(stream, REQUEST_TIMEOUT)?,
+        })
+    }
+
+    pub(crate) fn snapshot(&mut self) -> Result<Snapshot> {
+        match self.client.request(|request_id| ControlRequest::Snapshot {
+            version: PROTOCOL_VERSION,
+            request_id,
+        })? {
+            ControlResponseData::Snapshot { snapshot } => Ok(snapshot),
+            _ => bail!("server returned an unexpected snapshot response"),
+        }
+    }
+
+    pub(crate) fn events_after(&mut self, after_sequence: u64) -> Result<EventBatch> {
+        match self.client.request(|request_id| ControlRequest::Events {
+            version: PROTOCOL_VERSION,
+            request_id,
+            after_sequence,
+            limit: Some(1),
+        })? {
+            ControlResponseData::Events { batch } => Ok(batch),
+            _ => bail!("server returned an unexpected events response"),
+        }
     }
 }
 
@@ -1487,13 +1544,15 @@ fn writer_loop(
     let mut last_host_size: Option<PendingResize> = None;
     let mut refit_after_input = false;
     let mut pending: Vec<u8> = Vec::new();
+    // `async_paste` tickets whose bytes are in `pending`; settled below.
+    let mut pastes = PendingPastes::default();
     'outer: loop {
         match to_child_rx.recv_timeout(WRITER_TICK) {
             Ok(msg) => {
-                pending.extend_from_slice(&msg.bytes);
+                pastes.absorb(&mut pending, msg);
                 // Coalesce a paste burst before touching the lease.
                 while let Ok(more) = to_child_rx.try_recv() {
-                    pending.extend_from_slice(&more.bytes);
+                    pastes.absorb(&mut pending, more);
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1517,6 +1576,7 @@ fn writer_loop(
                         controller = acquire_lease(&mut client, client_id, pane_id);
                         if !controller {
                             pending.clear();
+                            pastes.incomplete("input lease lost");
                             break;
                         }
                         result = write_pane(&mut client, client_id, pane_id, chunk);
@@ -1529,9 +1589,11 @@ fn writer_loop(
                         // (same as pmux-attach write_as_controller).
                         controller = false;
                         pending.clear();
+                        pastes.incomplete("pane input is dirty");
                         break;
                     }
                     if let Err(error) = result {
+                        pastes.incomplete(&error.to_string());
                         let _ = events_tx.send(LogMessage::WriteFailed {
                             reason: error.to_string(),
                         });
@@ -1541,11 +1603,15 @@ fn writer_loop(
                         break 'outer;
                     }
                 }
+                if pending.is_empty() {
+                    pastes.delivered();
+                }
                 last_typed = Some(Instant::now());
                 refit_after_input = true;
             } else {
                 // No lease: drop the keys rather than queue them forever.
                 pending.clear();
+                pastes.incomplete("no input lease for the pane");
             }
         }
         apply_writer_resize(
@@ -1569,6 +1635,34 @@ fn writer_loop(
     }
     if controller {
         let _ = send_release_lease(&mut client, client_id, pane_id, session);
+    }
+}
+
+/// `async_paste` tickets whose bytes the log writer has buffered.
+#[derive(Default)]
+struct PendingPastes(Vec<(crate::paste_job::PasteTicket, usize)>);
+
+impl PendingPastes {
+    /// Append `msg`'s bytes (waiting for a deferred image paste) and keep
+    /// its ticket until the buffer is written or dropped.
+    fn absorb(&mut self, pending: &mut Vec<u8>, msg: ChildWrite) {
+        let (bytes, ticket) = crate::paste_job::writer_payload(msg);
+        pending.extend_from_slice(&bytes);
+        if let Some(ticket) = ticket {
+            self.0.push((ticket, bytes.len()));
+        }
+    }
+
+    fn delivered(&mut self) {
+        for (ticket, len) in self.0.drain(..) {
+            ticket.delivered(len);
+        }
+    }
+
+    fn incomplete(&mut self, reason: &str) {
+        for (ticket, len) in self.0.drain(..) {
+            ticket.incomplete(0, Some(len), reason);
+        }
     }
 }
 

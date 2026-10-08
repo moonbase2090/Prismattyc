@@ -31,6 +31,7 @@ RUN pacman --disable-sandbox -Syu --noconfirm \
         which \
         wtype \
         xdotool \
+        xclip \
         xorg-server-xvfb \
         xorg-xdpyinfo \
         xorg-xsetroot \

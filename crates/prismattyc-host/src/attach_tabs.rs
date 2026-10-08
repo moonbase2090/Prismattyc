@@ -11,9 +11,11 @@ pub fn window_layout_path(socket: &std::path::Path, pid: u32, window: u64) -> st
     path.into()
 }
 
+#[cfg(test)]
+pub use prismattyc_mux::attach_tabs::persist_if_changed;
 pub use prismattyc_mux::attach_tabs::{
-    layout_for_sessions, layout_path_from_socket, load, pane_layout_from_tab, persist_if_changed,
-    regroup_diff, remap_layout, remap_tabs, tab_layout_from_panes, AttachTabRecord, AttachTabsFile,
+    layout_for_sessions, layout_path_from_socket, load, pane_layout_from_tab, regroup_diff,
+    remap_layout, remap_tabs, tab_layout_from_panes, AttachTabRecord, AttachTabsFile,
     AttachTabsMode, RemappedTab, TabLayoutNode,
 };
 

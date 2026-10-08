@@ -366,7 +366,11 @@ impl App {
             },
             "windows": windows,
         });
-        if let Err(error) = prismattyc_mux::host_render_status::publish(pid_path, *pid, &status) {
+        if let Err(error) = self
+            .file_writer
+            .handle()
+            .render_status(pid_path.clone(), *pid, status)
+        {
             eprintln!("prismattyc-host: could not publish render status: {error}");
         }
     }

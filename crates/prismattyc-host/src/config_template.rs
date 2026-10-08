@@ -28,6 +28,7 @@ const DEFAULT_PANES: usize = 1;
 #[allow(dead_code)]
 pub enum ConfigGroup {
     Appearance,
+    FileWrites,
     AgentSkills,
     Updates,
     FocusBorder,
@@ -166,11 +167,25 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         value: ConfigValue::F32(crate::config::DEFAULT_HOVER_BLEND),
     },
     ConfigKey {
+        name: "async_file_writes",
+        group: ConfigGroup::FileWrites,
+        doc: "Write render status, attach cache, and heartbeat files on a worker thread; startup only",
+        range: "true|false",
+        value: ConfigValue::Bool(false),
+    },
+    ConfigKey {
         name: "link_click",
         group: ConfigGroup::Input,
         doc: "Open links on plain clicks; Cmd/Ctrl-click always remains available",
         range: "plain|modifier",
         value: ConfigValue::String("plain"),
+    },
+    ConfigKey {
+        name: "async_paste",
+        group: ConfigGroup::Input,
+        doc: "Hand pastes to the pane writer thread so large pastes never pause the window",
+        range: "true | false",
+        value: ConfigValue::Bool(false),
     },
     ConfigKey {
         name: "install_agent_skills",
@@ -295,6 +310,20 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         name: "space_reorder",
         group: ConfigGroup::Layout,
         doc: "Enable drag and Shift+arrow reordering for saved spaces",
+        range: "true | false",
+        value: ConfigValue::Bool(false),
+    },
+    ConfigKey {
+        name: "snapshot_client",
+        group: ConfigGroup::Layout,
+        doc: "Keep one pmuxd snapshot connection for periodic polls. Startup only",
+        range: "true | false",
+        value: ConfigValue::Bool(false),
+    },
+    ConfigKey {
+        name: "selective_border_rings",
+        group: ConfigGroup::Layout,
+        doc: "Restore and re-stroke only border rings that change",
         range: "true | false",
         value: ConfigValue::Bool(false),
     },
@@ -500,6 +529,7 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
 fn group_header(group: ConfigGroup) -> &'static str {
     match group {
         ConfigGroup::Appearance => "appearance / theme",
+        ConfigGroup::FileWrites => "file writes",
         ConfigGroup::AgentSkills => "agent integration",
         ConfigGroup::Updates => "updates",
         ConfigGroup::FocusBorder => "focus border",
@@ -1069,8 +1099,10 @@ mod tests {
         "theme",
         "render_timer",
         "render_timer_log_every_frame",
+        "async_file_writes",
         "tab_strip",
         "link_click",
+        "async_paste",
         "chrome_style",
         "bar_color",
         "layout",
@@ -1098,6 +1130,8 @@ mod tests {
         "pane_padding_px",
         "space_rail",
         "space_reorder",
+        "snapshot_client",
+        "selective_border_rings",
         "space_autosave",
         "session_naming",
         "space_startup",
@@ -1197,11 +1231,15 @@ mod tests {
         );
         assert_eq!(parsed.render_timer(), crate::config::RenderTimer::Off);
         assert!(!parsed.render_timer_log_every_frame());
+        assert!(!parsed.async_file_writes());
         assert_eq!(parsed.install_agent_skills, Some(true));
         assert_eq!(parsed.tab_strip(), crate::config::TabStripMode::Auto);
         assert_eq!(parsed.link_click(), crate::link_click::Mode::Plain);
         assert_eq!(parsed.chrome_style(), crate::config::ChromeStyle::Graphite);
         assert_eq!(parsed.space_reorder, Some(false));
+        assert_eq!(parsed.snapshot_client, Some(false));
+        assert!(!parsed.snapshot_client_enabled());
+        assert_eq!(parsed.selective_border_rings, Some(false));
         assert!(
             template
                 .lines()

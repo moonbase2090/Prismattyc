@@ -21,6 +21,7 @@ anyhow.workspace = true
 mutants = "0.0.3"
 getrandom = "0.3"
 fontdue = "0.9"
+graphite-core = { git = "https://github.com/moonbase2090/graphite", rev = "b47c446cbcd4586a0650e0572ee1af94612e91b2" }
 portable-pty.workspace = true
 prismattyc-core = { path = "../prismattyc-core" }
 prismattyc-emulator = { path = "../prismattyc-emulator" }

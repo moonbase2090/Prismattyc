@@ -184,7 +184,7 @@ pub(crate) fn adopt_candidates(
     };
     for (pane, pid, id, name) in &assignments {
         mux.mark_attach_session(*pane, id.clone(), name.clone());
-        let promoted = match mux.promote_to_log_replica(*pane, id, name, socket) {
+        let promoted = match mux.promote_to_log_replica(*pane, id, name, socket, Some(*pid)) {
             Ok(ok) => ok,
             Err(error) => {
                 eprintln!("prismattyc-host: promote session {id} failed: {error:#}");
@@ -217,9 +217,15 @@ pub(crate) fn clear_gone(
         .collect();
     for pane in &gone {
         adopted.by_pane.remove(pane);
-        mux.clear_attach_session(*pane);
+        // An async promote replaces the nested attach after the mark was
+        // taken; its exit is the replacement, not the user leaving the session.
+        if !mux.is_log_backed(*pane) {
+            mux.clear_attach_session(*pane);
+        }
     }
-    gone
+    gone.into_iter()
+        .filter(|pane| !mux.is_log_backed(*pane))
+        .collect()
 }
 
 #[cfg(test)]

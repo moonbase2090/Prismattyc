@@ -6,7 +6,7 @@ use std::process::{Child, Command, Stdio};
 use winit::platform::x11::EventLoopBuilderExtX11;
 
 const CHILD_ENV: &str = "PRISMATTYC_RENDER_TEST_CHILD";
-const RESULT_ENV: &str = "PRISMATTYC_RENDER_TEST_RESULT";
+pub(super) const RESULT_ENV: &str = "PRISMATTYC_RENDER_TEST_RESULT";
 const TEST_NAME: &str = "render_window_tests::real_window_paint_reaches_the_backend";
 
 const RED_PNG: &[u8] = &[
@@ -373,6 +373,7 @@ fn paint_in_real_window(restore_only: bool) {
             verify_decision_handlers(host);
             self.app.register_host_pid();
             self.app.publish_render_status();
+            test_support::wait_for_render_status(&self.app);
             let snapshot =
                 prismattyc_mux::host_render_status::read(&host_mux_socket().unwrap()).unwrap();
             let guards = snapshot["windows"][0]["last_raster"]["guards"]
@@ -577,6 +578,7 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
         .rename_window(host.mux.active_window(), "Locally renamed")
         .unwrap();
     persist_attach_layout_from_live(host);
+    test_support::wait_for_attach_write(host);
     let written = attach_tabs::load(&path).unwrap();
     assert_eq!(written.tabs[written.active_tab].title, "Locally renamed");
     assert_ne!(written, updated);
@@ -907,6 +909,7 @@ fn verify_pane_damage_and_chrome(host: &mut HostState) {
     let first = host.mux.focused_id();
     verify_split_panes(host, first);
     verify_steady_four_pane_partial(host);
+    verify_selective_border_rings(host);
     verify_pane_local_bell(host);
     verify_cursor_only_partial_frames(host);
     verify_same_layout_tab_switch(host);
@@ -1428,6 +1431,89 @@ fn verify_steady_four_pane_partial(host: &mut HostState) {
     assert!(partial.cells_painted > 0);
     assert!(partial.cells_painted < render_cells_painted(host));
     assert_eq!(retained, full_frame_oracle(host));
+}
+
+/// Flag-on partial frames leave settled rings alone and still match a full paint.
+fn verify_selective_border_rings(host: &mut HostState) {
+    let saved_flag = host.selective_border_rings;
+    let saved_focus = host.window_focused;
+    let saved_cycle = host.light_cycle;
+    let saved_pulse = host.last_pulse_step;
+    let saved_output: Vec<_> = host
+        .mux
+        .active_pane_ids()
+        .into_iter()
+        .filter_map(|id| host.mux.pane(id).map(|pane| (id, pane.last_output_at)))
+        .collect();
+    // Activity expires after 1.5s. Restamp around each oracle so a slow
+    // full paint cannot change the spaces-bar working count between the
+    // retained frame and the comparison, and put the old stamps back so
+    // the strip-pulse check later in this window is not racing that clock.
+    let stamp_active = |host: &mut HostState| {
+        let now = Instant::now();
+        for id in host.mux.active_pane_ids() {
+            if let Some(pane) = host.mux.pane_mut(id) {
+                pane.last_output_at = Some(now);
+            }
+        }
+    };
+    host.selective_border_rings = true;
+    host.window_focused = false;
+    host.light_cycle = false;
+    stamp_active(host);
+    let mut retained = frame(host);
+    let _ = host
+        .mux
+        .focused_mut()
+        .emulator
+        .feed(b"\x1b[3;2Hsteady ring");
+    stamp_active(host);
+    let partial = paint_retained(host, &mut retained);
+    assert_eq!(
+        partial.full_repaint_reason, None,
+        "steady output stays partial with selective rings"
+    );
+    assert_eq!(
+        host.border_underlay.last_restored_slots, 0,
+        "a cell update must not restore settled rings"
+    );
+    stamp_active(host);
+    assert_eq!(retained, full_frame_oracle(host));
+
+    // A focus move rewrites unbounded chrome state and is a full frame.
+    // The running-dot pulse stays partial and still crosses the top ring strip.
+    host.window_focused = true;
+    stamp_active(host);
+    host.last_pulse_step = 0;
+    let mut retained = frame(host);
+    stamp_active(host);
+    host.last_pulse_step = 1;
+    let pulsed = paint_retained(host, &mut retained);
+    assert_eq!(
+        pulsed.full_repaint_reason, None,
+        "a pulse step stays partial with selective rings"
+    );
+    assert!(
+        host.border_underlay.last_restored_slots >= 1,
+        "pulse damage under the ring restores that ring"
+    );
+    stamp_active(host);
+    assert_eq!(
+        retained,
+        full_frame_oracle(host),
+        "a restored pulse ring must match a full repaint"
+    );
+
+    host.selective_border_rings = saved_flag;
+    host.window_focused = saved_focus;
+    host.light_cycle = saved_cycle;
+    host.last_pulse_step = saved_pulse;
+    for (id, at) in saved_output {
+        if let Some(pane) = host.mux.pane_mut(id) {
+            pane.last_output_at = at;
+        }
+    }
+    frame(host);
 }
 
 fn verify_same_layout_tab_switch(host: &mut HostState) {

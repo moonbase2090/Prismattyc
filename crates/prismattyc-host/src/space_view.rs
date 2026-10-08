@@ -5,6 +5,7 @@ use crate::attach_tabs::{
 };
 use prismattyc_mux::{SavedSpace, Snapshot};
 use std::collections::{HashMap, HashSet};
+use std::time::SystemTime;
 
 /// Resolve a restart cache before opening any subscriptions. Old numeric-only
 /// Space caches fall back to the saved layout when their IDs no longer resolve.
@@ -343,6 +344,48 @@ pub fn permits_layout(space: &SavedSpace, snapshot: &Snapshot, layout: &AttachTa
     })
 }
 
+/// Whether a layout file may be applied from the snapshot on hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutOwnership {
+    /// The file has no Space, or this snapshot shows every session's owner.
+    Allow,
+    /// The snapshot is new enough to show that ownership does not match.
+    Deny,
+    /// The cache is missing, or it was read before the layout file was written.
+    Pending,
+}
+
+/// `cached` is true when the snapshot comes from the background client.
+/// A synchronous read is already newer than the file the caller just loaded.
+pub fn layout_ownership(
+    space: Option<&SavedSpace>,
+    observed: Option<&(SystemTime, Snapshot)>,
+    layout: &AttachTabsFile,
+    file_mtime: Option<SystemTime>,
+    cached: bool,
+) -> LayoutOwnership {
+    if layout.space.is_none() {
+        return LayoutOwnership::Allow;
+    }
+    let Some(space) = space else {
+        return LayoutOwnership::Deny;
+    };
+    let Some((fetched_at, snapshot)) = observed else {
+        return if cached {
+            LayoutOwnership::Pending
+        } else {
+            LayoutOwnership::Deny
+        };
+    };
+    if permits_layout(space, snapshot, layout) {
+        return LayoutOwnership::Allow;
+    }
+    if cached && file_mtime.is_none_or(|mtime| *fetched_at <= mtime) {
+        return LayoutOwnership::Pending;
+    }
+    LayoutOwnership::Deny
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,6 +567,45 @@ mod tests {
         }
         space.id = None;
         assert!(!permits_layout(&space, &snapshot(), &layout(&["1"])));
+    }
+
+    #[test]
+    fn older_cache_cannot_reject_a_layout_written_after_it() {
+        let space = saved_space();
+        let file = layout(&["1", "3"]);
+        let live = snapshot();
+        let mut missing = live.clone();
+        missing.sessions.clear();
+        let written = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(50);
+        let older = (written - std::time::Duration::from_secs(5), missing.clone());
+        let newer = (written + std::time::Duration::from_secs(5), missing);
+        assert_eq!(
+            layout_ownership(Some(&space), None, &file, Some(written), true),
+            LayoutOwnership::Pending
+        );
+        assert_eq!(
+            layout_ownership(Some(&space), None, &file, Some(written), false),
+            LayoutOwnership::Deny
+        );
+        assert_eq!(
+            layout_ownership(Some(&space), Some(&older), &file, Some(written), true),
+            LayoutOwnership::Pending
+        );
+        assert_eq!(
+            layout_ownership(Some(&space), Some(&newer), &file, Some(written), true),
+            LayoutOwnership::Deny
+        );
+        let proved = (written - std::time::Duration::from_secs(5), live);
+        assert_eq!(
+            layout_ownership(Some(&space), Some(&proved), &file, Some(written), true),
+            LayoutOwnership::Allow
+        );
+        let mut unscoped = file.clone();
+        unscoped.space = None;
+        assert_eq!(
+            layout_ownership(None, None, &unscoped, Some(written), true),
+            LayoutOwnership::Allow
+        );
     }
     #[test]
     fn transfers_project_once_without_foreign_members_and_keep_focus() {

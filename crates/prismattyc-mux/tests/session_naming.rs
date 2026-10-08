@@ -5,6 +5,7 @@ use prismattyc_mux::{
     ControlRequest, ControlResponse, ControlResponseBody, ControlResponseData, Snapshot,
     PROTOCOL_VERSION,
 };
+use sha2::{Digest, Sha256};
 use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
@@ -104,11 +105,16 @@ impl Fixture {
             other => panic!("snapshot: {other:?}"),
         }
     }
+    fn spaces_dir(&self) -> PathBuf {
+        let identity = std::fs::canonicalize(&self.socket).unwrap_or_else(|_| self.socket.clone());
+        let digest = Sha256::digest(identity.to_string_lossy().as_bytes());
+        self.dir
+            .join("prismattyc/spaces/instances")
+            .join(format!("sha256-{digest:x}"))
+    }
     fn saved(&self) -> serde_json::Value {
-        serde_json::from_slice(
-            &std::fs::read(self.dir.join("prismattyc/spaces/work.json")).unwrap(),
-        )
-        .unwrap()
+        serde_json::from_slice(&std::fs::read(self.spaces_dir().join("work.json")).unwrap())
+            .unwrap()
     }
 }
 fn ok(out: Output) -> String {
@@ -292,10 +298,7 @@ fn bind_existing_unassigned_session_and_reject_name_conflicts_without_changes() 
             .unwrap();
         assert_eq!(same.name, "astra-spaces");
         assert_eq!(same.windows[0].panes[0].id, pane);
-        assert!(!f
-            .dir
-            .join("prismattyc/spaces/.session-name-transaction")
-            .exists());
+        assert!(!f.spaces_dir().join(".session-name-transaction").exists());
     }
 }
 
@@ -379,7 +382,7 @@ fn interrupted_rename_reconciles_saved_references_before_the_next_space_operatio
     BufReader::new(stream).read_line(&mut line).unwrap();
     let response: ControlResponse = serde_json::from_str(&line).unwrap();
     assert!(matches!(response.body, ControlResponseBody::Ok { .. }));
-    let path = f.dir.join("prismattyc/spaces/.session-name-transaction");
+    let path = f.spaces_dir().join(".session-name-transaction");
     std::fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
     assert_eq!(
         f.ok(&["session", "suggest", "--space", "work"]).trim(),

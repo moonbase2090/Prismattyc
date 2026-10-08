@@ -33,6 +33,10 @@ install; `PRISMATTYC_NO_AGENT_SKILLS=1` also opts out and wins over the config
 value. Automatic signed-release checks run on app launch and daily by default.
 Set the top-level `automatic_update_checks = false` or turn them off in the app
 menu to opt out. The app menu's manual check works regardless of this setting.
+`async_file_writes` enables the host's file-writer thread. It defaults to
+`false` and takes effect at startup, so restart the host after changing it.
+`snapshot_client` stays off unless the file sets it to true. The host reads
+that key at startup only; a later edit does not start or stop the cache.
 The classic `prismattyc` binary does not
 read this file. `chrome_style` defaults to `graphite`. Leave that key
 commented, or omit it, to follow the app default. `chrome_style = "classic"`
@@ -80,9 +84,15 @@ pane_titles = "focused"
 # Immediate hover blend for interactive strip, rail, and scrollbar chrome. 0.0-0.3.
 hover_blend = 0.1
 
+# -- file writes --
+# Write render status, attach cache, and heartbeat files on a worker thread; startup only. true|false.
+async_file_writes = false
+
 # -- input --
 # Open links on plain clicks; Cmd/Ctrl-click always remains available. plain|modifier.
 link_click = "plain"
+# Hand pastes to the pane writer thread so large pastes never pause the window. true | false.
+async_paste = false
 
 # -- agent integration --
 # Install the pmux Agent Skill for detected agents once per app version. true|false.
@@ -131,6 +141,10 @@ pane_padding_px = 5
 space_rail = "bottom"
 # Enable drag and Shift+arrow reordering for saved spaces. true | false.
 space_reorder = false
+# Keep one pmuxd snapshot connection for periodic polls. Startup only. true | false.
+snapshot_client = false
+# Restore and re-stroke only border rings that change. true | false.
+selective_border_rings = false
 # Save changed Space arrangements after a short idle. true | false.
 space_autosave = true
 # Choose naming prompts, automatic sessions, or blank terminals. "ask" | "auto" | "blank".
@@ -1011,6 +1025,9 @@ the file applies changes on the next poll tick:
 - `focus_border` — recolors immediately; deleting the key reverts to default.
 - `theme` — swaps terminal defaults, ANSI 0–15, cursor/selection, and host
   chrome immediately; deleting the key restores Prismattyc Default.
+- `selective_border_rings` — off unless the file sets it true. Partial frames
+  then restore and re-stroke only rings that change (focus, pulse, sweep, or
+  damage under the ring). Deleting the key turns that off again.
 - `focus_border_animation` — takes effect on the next focus change; switching
   to `"none"` (or deleting the key) settles any in-progress sweep.
 - `focus_border_animation_ms` / `focus_border_animation_head` — apply from

@@ -24,6 +24,7 @@ use prismattyc_mux::{
     ControlResponseData, Event, LayoutSnapshot, Snapshot, SpawnSpec, WindowSnapshot,
     PROTOCOL_VERSION,
 };
+use sha2::{Digest, Sha256};
 
 mod support;
 use support::clear_command_env;
@@ -1008,6 +1009,13 @@ fn layout_data_dir() -> DataDirGuard {
     DataDirGuard(dir)
 }
 
+fn spaces_data_dir(data: &Path, socket: &Path) -> PathBuf {
+    let identity = std::fs::canonicalize(socket).unwrap_or_else(|_| socket.to_path_buf());
+    let digest = Sha256::digest(identity.to_string_lossy().as_bytes());
+    data.join("prismattyc/spaces/instances")
+        .join(format!("sha256-{digest:x}"))
+}
+
 #[test]
 fn layout_save_apply_ls_and_reject_bad_name() {
     let socket = socket_path();
@@ -1138,7 +1146,7 @@ fn layout_space_save_apply_skips_default_and_binds_agent() {
     assert!(save.status.success(), "{}", stderr(&save));
     let save_path = stdout(&save).trim().to_string();
     assert!(
-        save_path.ends_with("spaces/today.json"),
+        save_path.ends_with("today.json"),
         "space save prints the file path: {save_path}"
     );
     let raw = std::fs::read_to_string(&save_path).expect("read space file");
@@ -1251,7 +1259,7 @@ fn space_save_open_ls_front_door_and_usage_exit() {
     assert!(save.status.success(), "{}", stderr(&save));
     let save_path = stdout(&save).trim().to_string();
     assert!(
-        save_path.contains("spaces/today.json"),
+        save_path.contains("today.json"),
         "space save prints the file path: {save_path}"
     );
 
@@ -1343,6 +1351,236 @@ fn space_save_open_ls_front_door_and_usage_exit() {
 }
 
 #[test]
+fn spaces_are_scoped_to_explicit_sockets() {
+    let socket_root =
+        std::env::temp_dir().join(format!("prism-same-basename-{}", std::process::id()));
+    let socket_a_parent = socket_root.join("a");
+    let socket_b_parent = socket_root.join("b");
+    std::fs::create_dir_all(&socket_a_parent).expect("socket A directory");
+    std::fs::create_dir_all(&socket_b_parent).expect("socket B directory");
+    let socket_a = socket_a_parent.join("pmux.sock");
+    let socket_b = socket_b_parent.join("pmux.sock");
+    let guard_a = start_server(&socket_a);
+    let guard_b = start_server(&socket_b);
+    let data = layout_data_dir();
+    let xdg = &[("XDG_DATA_HOME", data.0.as_path())];
+
+    let new_a = umbrella(&socket_a, &["new", "space-a", "--", "/bin/sh"]);
+    assert!(new_a.status.success(), "{}", stderr(&new_a));
+    let new_b = umbrella(&socket_b, &["new", "space-b", "--", "/bin/sh"]);
+    assert!(new_b.status.success(), "{}", stderr(&new_b));
+
+    let add_a = umbrella_env(&socket_a, xdg, &["space", "save", "only-a"]);
+    assert!(add_a.status.success(), "{}", stderr(&add_a));
+    let add_b = umbrella_env(&socket_b, xdg, &["space", "save", "only-b"]);
+    assert!(add_b.status.success(), "{}", stderr(&add_b));
+
+    let list_a = umbrella_env(&socket_a, xdg, &["space", "ls"]);
+    assert!(list_a.status.success(), "{}", stderr(&list_a));
+    let listing_a = stdout(&list_a);
+    assert!(listing_a.contains("only-a"), "{listing_a}");
+    assert!(
+        !listing_a.contains("only-b"),
+        "socket A leaked socket B: {listing_a}"
+    );
+
+    let list_b = umbrella_env(&socket_b, xdg, &["space", "ls"]);
+    assert!(list_b.status.success(), "{}", stderr(&list_b));
+    let listing_b = stdout(&list_b);
+    assert!(listing_b.contains("only-b"), "{listing_b}");
+    assert!(
+        !listing_b.contains("only-a"),
+        "socket B leaked socket A: {listing_b}"
+    );
+
+    let alias_a = data.0.join("socket-a-alias.sock");
+    std::os::unix::fs::symlink(&socket_a, &alias_a).expect("socket alias");
+    let alias_list = umbrella_env(&alias_a, xdg, &["space", "ls"]);
+    assert!(alias_list.status.success(), "{}", stderr(&alias_list));
+    let alias_listing = stdout(&alias_list);
+    assert!(alias_listing.contains("only-a"), "{alias_listing}");
+    assert!(
+        !alias_listing.contains("only-b"),
+        "socket alias leaked socket B: {alias_listing}"
+    );
+    let stop_a = umbrella(&socket_a, &["stop"]);
+    assert!(stop_a.status.success(), "{}", stderr(&stop_a));
+    let stopped_alias_list = umbrella_env(&alias_a, xdg, &["space", "ls"]);
+    assert!(
+        stopped_alias_list.status.success(),
+        "{}",
+        stderr(&stopped_alias_list)
+    );
+    assert!(
+        stdout(&stopped_alias_list).contains("only-a"),
+        "stopped daemon alias lost its Space: {}",
+        stdout(&stopped_alias_list)
+    );
+
+    let instance_root = data.0.join("prismattyc/spaces/instances");
+    let instance_dirs = std::fs::read_dir(instance_root)
+        .expect("per-socket Spaces root")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .count();
+    assert_eq!(
+        instance_dirs, 2,
+        "each explicit socket needs its own Spaces directory"
+    );
+    drop(guard_a);
+    drop(guard_b);
+    let _ = std::fs::remove_dir_all(socket_root);
+}
+
+#[test]
+fn explicit_socket_spaces_are_stable_across_runtime_directories() {
+    let data = layout_data_dir();
+    let runtime_a = std::env::temp_dir().join(format!("pt205-runtime-a-{}", std::process::id()));
+    let runtime_b = std::env::temp_dir().join(format!("pt205-runtime-b-{}", std::process::id()));
+    let socket_parent = runtime_a.join("prismattyc");
+    let _ = std::fs::remove_dir_all(&runtime_a);
+    let _ = std::fs::remove_dir_all(&runtime_b);
+    std::fs::create_dir_all(&socket_parent).expect("runtime socket directory");
+    std::fs::create_dir_all(&runtime_b).expect("second runtime directory");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&runtime_a, std::fs::Permissions::from_mode(0o700))
+        .expect("private first runtime");
+    std::fs::set_permissions(&runtime_b, std::fs::Permissions::from_mode(0o700))
+        .expect("private second runtime");
+    let socket = socket_parent.join("pmux.sock");
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_pmuxd"));
+    let mut daemon = daemon
+        .env("XDG_RUNTIME_DIR", &runtime_a)
+        .env("XDG_DATA_HOME", data.0.as_os_str())
+        .env("XDG_CONFIG_HOME", data.0.join("config"))
+        .arg("--socket")
+        .arg(&socket)
+        .args(["--", "/bin/sh"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn default daemon");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while UnixStream::connect(&socket).is_err() {
+        if daemon.try_wait().expect("poll default daemon").is_some() {
+            panic!("default daemon exited before binding {socket:?}");
+        }
+        assert!(Instant::now() < deadline, "default daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let extra_a = [
+        ("XDG_DATA_HOME", data.0.as_os_str().to_os_string()),
+        ("XDG_RUNTIME_DIR", runtime_a.as_os_str().to_os_string()),
+    ];
+    let extra_b = [
+        ("XDG_DATA_HOME", data.0.as_os_str().to_os_string()),
+        ("XDG_RUNTIME_DIR", runtime_b.as_os_str().to_os_string()),
+    ];
+
+    let created = umbrella_vars_cleared(
+        &socket,
+        &extra_a,
+        &[],
+        &["new", "--no-attach", "runtime-seat", "--", "/bin/sh"],
+    );
+    assert!(created.status.success(), "{}", stderr(&created));
+    let saved = umbrella_vars_cleared(
+        &socket,
+        &extra_a,
+        &[],
+        &["space", "save", "runtime-space", "runtime-seat"],
+    );
+    assert!(saved.status.success(), "{}", stderr(&saved));
+    let routed_ls = |runtime: &Path, socket_env: Option<&Path>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+        command
+            .env("PMUX_SERVER", env!("CARGO_BIN_EXE_pmuxd"))
+            .env("PMUX_ATTACH", env!("CARGO_BIN_EXE_pmux-attach"));
+        clear_command_env(&mut command);
+        command
+            .env("XDG_DATA_HOME", data.0.as_os_str())
+            .env("XDG_RUNTIME_DIR", runtime.as_os_str())
+            .env("PRISMATTYC_CONFIG", data.0.join("config.toml"));
+        if let Some(socket) = socket_env {
+            command.env("PMUX_SOCKET", socket);
+        }
+        command
+            .args(["space", "ls"])
+            .output()
+            .expect("run pmux route")
+    };
+    let implicit = routed_ls(&runtime_a, None);
+    assert!(implicit.status.success(), "{}", stderr(&implicit));
+    assert!(
+        stdout(&implicit).contains("runtime-space"),
+        "{}",
+        stdout(&implicit)
+    );
+    let through_env = routed_ls(&runtime_b, Some(&socket));
+    assert!(through_env.status.success(), "{}", stderr(&through_env));
+    assert!(
+        stdout(&through_env).contains("runtime-space"),
+        "{}",
+        stdout(&through_env)
+    );
+    let default_alias = data.0.join("default-socket-alias.sock");
+    std::os::unix::fs::symlink(&socket, &default_alias).expect("default socket alias");
+    let alias_route = umbrella_vars_cleared(&default_alias, &extra_b, &[], &["space", "ls"]);
+    assert!(alias_route.status.success(), "{}", stderr(&alias_route));
+    assert!(
+        stdout(&alias_route).contains("runtime-space"),
+        "default alias lost its Space: {}",
+        stdout(&alias_route)
+    );
+    let listed = umbrella_vars_cleared(&socket, &extra_b, &[], &["space", "ls"]);
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    assert!(
+        stdout(&listed).contains("runtime-space"),
+        "{}",
+        stdout(&listed)
+    );
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    let mut restarted = Command::new(env!("CARGO_BIN_EXE_pmuxd"));
+    let mut restarted = restarted
+        .env("XDG_RUNTIME_DIR", &runtime_b)
+        .env("XDG_DATA_HOME", data.0.as_os_str())
+        .env("XDG_CONFIG_HOME", data.0.join("config"))
+        .arg("--socket")
+        .arg(&socket)
+        .args(["--", "/bin/sh"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("restart default daemon");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while UnixStream::connect(&socket).is_err() {
+        if restarted
+            .try_wait()
+            .expect("poll restarted daemon")
+            .is_some()
+        {
+            panic!("restarted daemon exited before binding {socket:?}");
+        }
+        assert!(Instant::now() < deadline, "restarted daemon did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let after_restart = routed_ls(&runtime_b, Some(&socket));
+    assert!(after_restart.status.success(), "{}", stderr(&after_restart));
+    assert!(
+        stdout(&after_restart).contains("runtime-space"),
+        "restart lost its Space: {}",
+        stdout(&after_restart)
+    );
+    let _ = restarted.kill();
+    let _ = restarted.wait();
+    let _ = std::fs::remove_dir_all(runtime_a);
+    let _ = std::fs::remove_dir_all(runtime_b);
+}
+
+#[test]
 fn space_remove_and_kill_refuses_wrong_space_and_destroys_only_target() {
     let socket = socket_path();
     let _guard = start_server(&socket);
@@ -1402,7 +1640,7 @@ fn space_remove_and_kill_refuses_wrong_space_and_destroys_only_target() {
         prior.windows[0].panes[0].child_pid
     );
     let saved: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(data.0.join("prismattyc/spaces/kill-target.json")).unwrap(),
+        &std::fs::read(spaces_data_dir(&data.0, &socket).join("kill-target.json")).unwrap(),
     )
     .unwrap();
     assert!(saved["sessions"].as_array().unwrap().is_empty());
@@ -1462,7 +1700,7 @@ fn saving_reduced_space_releases_omitted_sessions_without_stopping_them() {
         .is_none());
 
     // Replay a save interrupted before its release, and after it completed.
-    let dir = data.0.join("prismattyc/spaces");
+    let dir = spaces_data_dir(&data.0, &socket);
     let mut definition: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("desk.json")).unwrap()).unwrap();
     definition["sessions"]
@@ -1539,7 +1777,8 @@ fn space_add_and_remove_transfer_exclusive_ownership() {
     );
     assert!(add.status.success(), "{}", stderr(&add));
     assert!(stdout(&add).contains("pt182-extra"), "{}", stdout(&add));
-    let body = std::fs::read_to_string(data.0.join("prismattyc/spaces/desk.json")).unwrap();
+    let body =
+        std::fs::read_to_string(spaces_data_dir(&data.0, &socket).join("desk.json")).unwrap();
     assert!(body.contains("pt182-extra"), "{body}");
     assert!(body.contains("Extra"), "{body}");
 
@@ -1556,7 +1795,8 @@ fn space_add_and_remove_transfer_exclusive_ownership() {
         &["space", "remove", "desk", "--session", "pt182-extra"],
     );
     assert!(remove.status.success(), "{}", stderr(&remove));
-    let body = std::fs::read_to_string(data.0.join("prismattyc/spaces/desk.json")).unwrap();
+    let body =
+        std::fs::read_to_string(spaces_data_dir(&data.0, &socket).join("desk.json")).unwrap();
     assert!(!body.contains("pt182-extra"), "{body}");
 
     let last = umbrella_env(
@@ -1571,7 +1811,7 @@ fn space_add_and_remove_transfer_exclusive_ownership() {
         &["space", "remove", "desk", "--session", "pt182-b"],
     );
     assert!(refuse.status.success(), "{}", stderr(&refuse));
-    let raw = std::fs::read_to_string(data.0.join("prismattyc/spaces/desk.json")).unwrap();
+    let raw = std::fs::read_to_string(spaces_data_dir(&data.0, &socket).join("desk.json")).unwrap();
     let saved: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert!(saved["sessions"].as_array().unwrap().is_empty());
     let mut ctl = TestClient::connect(&socket);
@@ -1611,8 +1851,8 @@ fn space_move_updates_both_owners_and_failed_add_is_noop() {
     );
     assert!(moved.status.success(), "{}", stderr(&moved));
 
-    let desk_path = data.0.join("prismattyc/spaces/desk.json");
-    let lab_path = data.0.join("prismattyc/spaces/lab.json");
+    let desk_path = spaces_data_dir(&data.0, &socket).join("desk.json");
+    let lab_path = spaces_data_dir(&data.0, &socket).join("lab.json");
     let desk_body = std::fs::read_to_string(&desk_path).unwrap();
     let lab_body = std::fs::read_to_string(&lab_path).unwrap();
     assert!(!desk_body.contains("pt182-src-a"), "{desk_body}");
@@ -2827,9 +3067,8 @@ fn rename_pane_shows_in_ls_and_round_trips_through_a_space() {
 
     let save = umbrella_env(&socket, xdg, &["space", "save", "titled"]);
     assert!(save.status.success(), "{}", stderr(&save));
-    let file =
-        std::fs::read_to_string(data.0.join("prismattyc").join("spaces").join("titled.json"))
-            .expect("space file");
+    let file = std::fs::read_to_string(spaces_data_dir(&data.0, &socket).join("titled.json"))
+        .expect("space file");
     assert!(file.contains("\"title\": \"build server\""), "{file}");
 
     let cleared = umbrella(&socket, &["rename-pane", &pane_id.to_string()]);
@@ -3589,7 +3828,9 @@ fn space_open_switch_rejects_shared_save_and_cross_space_add() {
         !probe.status.success(),
         "Save As must not alias owned sessions"
     );
-    assert!(!data.0.join("prismattyc/spaces/probe.json").exists());
+    assert!(!spaces_data_dir(&data.0, &socket)
+        .join("probe.json")
+        .exists());
     let added = umbrella_env(
         &socket,
         xdg,
@@ -3735,7 +3976,7 @@ fn space_save_copies_fake_attach_tabs_cache() {
     let save_out = stdout(&save);
     let save_path = save_out
         .lines()
-        .find(|line| line.contains("spaces/today.json"))
+        .find(|line| line.contains("today.json"))
         .unwrap_or(save_out.trim())
         .to_string();
     let raw = std::fs::read_to_string(&save_path).expect("read space file");
@@ -3821,7 +4062,7 @@ fn space_save_and_open_round_trip_the_tab_split_tree() {
     let save_out = stdout(&save);
     let save_path = save_out
         .lines()
-        .find(|line| line.contains("spaces/pt147.json"))
+        .find(|line| line.contains("pt147.json"))
         .unwrap_or(save_out.trim())
         .to_string();
     let raw = std::fs::read_to_string(&save_path).expect("read space file");
@@ -3931,7 +4172,7 @@ fn space_save_tabs_a_live_session_the_cache_omits() {
     );
     let save_path = save_out
         .lines()
-        .find(|line| line.contains("spaces/partial.json"))
+        .find(|line| line.contains("partial.json"))
         .unwrap_or(save_out.trim())
         .to_string();
     let raw = std::fs::read_to_string(&save_path).expect("read space file");
@@ -4288,7 +4529,7 @@ fn space_cli_termwright_save_ls_open_no_attach() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(out.status.success(), "termwright failed: {text}");
-    assert!(text.contains("spaces/today.json"), "{text}");
+    assert!(text.contains("today.json"), "{text}");
     assert!(text.contains("today"), "{text}");
     assert!(
         text.contains("skip pt64-tw-a (already exists)"),
@@ -4672,7 +4913,7 @@ fn exclusive_spaces_create_add_move_and_reject_stale_writer() {
             stderr(&result)
         );
     }
-    let dir = data.0.join("prismattyc/spaces");
+    let dir = spaces_data_dir(&data.0, &socket);
     let alpha = prismattyc_mux::load_space(&dir, "alpha").unwrap();
     let beta = prismattyc_mux::load_space(&dir, "beta").unwrap();
     assert_ne!(alpha.id, beta.id);
@@ -4879,7 +5120,7 @@ fn exclusive_spaces_empty_save_delete_and_legacy_conflict() {
         );
         assert!(result.status.success(), "{}", stderr(&result));
     }
-    let dir = data.0.join("prismattyc/spaces");
+    let dir = spaces_data_dir(&data.0, &socket);
     let alpha = prismattyc_mux::load_space(&dir, "alpha").unwrap();
     let name = &alpha.sessions[0].name;
     let result = umbrella_env(&socket, xdg, &["space", "move", "beta", "--session", name]);
@@ -4978,7 +5219,7 @@ fn exclusive_spaces_rejected_pane_move_does_not_block_later_work() {
         );
         assert!(result.status.success(), "{}", stderr(&result));
     }
-    let dir = data.0.join("prismattyc/spaces");
+    let dir = spaces_data_dir(&data.0, &socket);
     let alpha = prismattyc_mux::load_space(&dir, "alpha").unwrap();
     let beta = prismattyc_mux::load_space(&dir, "beta").unwrap();
     let mut ctl = TestClient::connect(&socket);
@@ -5054,7 +5295,7 @@ fn exclusive_spaces_rename_preserves_owner_and_rejects_collision() {
         let created = umbrella_env(&socket, xdg, &["space", "create", name, "--no-attach"]);
         assert!(created.status.success(), "{}", stderr(&created));
     }
-    let dir = data.0.join("prismattyc/spaces");
+    let dir = spaces_data_dir(&data.0, &socket);
     let before = std::fs::read(dir.join("alpha.json")).unwrap();
     let mut ctl = TestClient::connect(&socket);
     let snapshot = ctl.snapshot();

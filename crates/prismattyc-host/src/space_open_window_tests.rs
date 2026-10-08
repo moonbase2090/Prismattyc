@@ -62,13 +62,11 @@ fn isolated_space_windows_create_move_and_render() {
         .build()
         .unwrap();
     let cli = Cli::parse(["--no-splash", "/bin/cat"].into_iter().map(String::from)).unwrap();
-    let app = App::new(
-        cli,
-        config::ConfigFile::default(),
-        None,
-        event_loop.create_proxy(),
-    )
-    .unwrap();
+    let file_config = config::ConfigFile {
+        async_file_writes: Some(true),
+        ..config::ConfigFile::default()
+    };
+    let app = App::new(cli, file_config, None, event_loop.create_proxy()).unwrap();
     let mut proof = Proof {
         app,
         windows: Vec::new(),
@@ -216,6 +214,7 @@ fn verify_space_rename(app: &mut App, event_loop: &ActiveEventLoop, source: Wind
             .with_file_name("rename-view.json"),
     );
     persist_attach_layout_from_live(&mut follower);
+    test_support::wait_for_attach_write(&follower);
     app.windows = windows;
     std::env::remove_var("PMUX_SPACE");
     std::env::remove_var("PMUX_VIEW_PATH");
@@ -238,6 +237,7 @@ fn verify_space_rename(app: &mut App, event_loop: &ActiveEventLoop, source: Wind
     prismattyc_mux::save_space(&spaces_dir(), "a", &replacement).unwrap();
     follower.last_space_refresh = None;
     refresh_space_views(&mut follower);
+    test_support::wait_for_attach_write(&follower);
     assert_eq!(follower.space_rail.current.as_deref(), Some("renamed-a"));
     assert_eq!(follower.mux.space_id, owner);
     assert_eq!(follower.attach_pane_sessions, panes);
@@ -411,6 +411,9 @@ impl ApplicationHandler<UserAction> for Proof {
                     .space_rail
                     .current = None;
                 self.app.pump(event_loop, None);
+                test_support::wait_for_attach_write(
+                    self.app.windows.get(&self.windows[0]).unwrap(),
+                );
                 assert_eq!(
                     self.app.windows[&self.windows[0]]
                         .space_rail
@@ -425,7 +428,9 @@ impl ApplicationHandler<UserAction> for Proof {
                 let path = a.attach_layout_path.clone().unwrap();
                 let mut foreign = original.clone();
                 foreign.tabs[0].sessions = vec![self.original[1].0.to_string()];
+                foreign.tabs[0].title.push_str(" poisoned layout");
                 prismattyc_mux::attach_tabs::save(&path, &foreign).unwrap();
+                set_cache_modified(&path, SystemTime::now() + Duration::from_secs(2));
                 poll_host_attach_tabs(a);
                 assert_eq!(
                     a.mux.remote_pane_id(a.mux.focused_id()),
@@ -434,7 +439,16 @@ impl ApplicationHandler<UserAction> for Proof {
                 );
                 assert!(a.space_opens.blocks_persist());
                 prismattyc_mux::attach_tabs::save(&path, &original).unwrap();
+                set_cache_modified(&path, SystemTime::now() + Duration::from_secs(4));
+                let ack = prismattyc_mux::host_ack_path_from_socket(&host_mux_socket().unwrap());
+                std::fs::write(&ack, b"stale\n").unwrap();
+                set_cache_modified(&ack, SystemTime::now() - Duration::from_secs(10));
+                let since = SystemTime::now() - Duration::from_secs(2);
                 poll_host_attach_tabs(a);
+                assert!(
+                    prismattyc_mux::wait_host_ack(&ack, since, Duration::from_millis(100)),
+                    "matching external cache layout must refresh the host ACK"
+                );
                 assert!(!a.space_opens.blocks_persist());
                 // Multi-pane source: only the visible original pane moves.
                 split(&space_session("a"));
@@ -538,6 +552,7 @@ impl ApplicationHandler<UserAction> for Proof {
                 session_prompt::dispatch_key(a, &Key::Named(NamedKey::Enter), false);
                 assert!(a.session_prompt.is_none(), "tab naming failed");
                 persist_attach_layout_from_live(a);
+                test_support::wait_for_attach_write(a);
                 self.changed = Instant::now();
                 self.phase = 5;
             }
@@ -561,6 +576,7 @@ impl ApplicationHandler<UserAction> for Proof {
                 capture(a, "a-new-sessions");
                 a.mux.select_tab(0).unwrap();
                 persist_attach_selection(a);
+                test_support::wait_for_attach_write(a);
                 let selected = attach_tabs::load(a.attach_layout_path.as_ref().unwrap()).unwrap();
                 assert_eq!(
                     selected.focused_session,
@@ -631,6 +647,7 @@ impl ApplicationHandler<UserAction> for Proof {
                 let b = self.app.windows.get_mut(&self.windows[1]).unwrap();
                 assert_ne!(b.attach_layout_path, b_path);
                 assert_eq!(b.space_rail.current.as_deref(), Some("b"));
+                test_support::wait_for_attach_write(b);
                 let layout = attach_tabs::load(b.attach_layout_path.as_ref().unwrap()).unwrap();
                 assert_eq!(layout.space.as_deref(), Some("b"));
                 open_space_from_host(b, "a", SpaceOpenMode::Switch);
@@ -647,6 +664,7 @@ impl ApplicationHandler<UserAction> for Proof {
                 let _ = std::fs::remove_file(pid_path.with_extension("render.json"));
                 self.app.last_render_status = None;
                 self.app.publish_render_status();
+                test_support::wait_for_render_status(&self.app);
                 let status =
                     prismattyc_mux::host_render_status::read(&host_mux_socket().unwrap()).unwrap();
                 assert!(!status["windows"].as_array().unwrap().is_empty());
@@ -661,6 +679,13 @@ impl ApplicationHandler<UserAction> for Proof {
         ));
     }
     fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+}
+
+fn set_cache_modified(path: &Path, modified: SystemTime) {
+    std::fs::File::open(path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
 }
 
 fn verify_polish_ui(host: &mut HostState) {
@@ -699,4 +724,358 @@ fn verify_polish_ui(host: &mut HostState) {
     capture(host, "update-restart");
     host.space_panel = None;
     host.context_menu = None;
+}
+
+/// A layout written before the snapshot cache knows its session stays pending.
+/// The next snapshot, taken after that write, applies and acks the same file.
+#[test]
+fn stale_snapshot_keeps_a_newer_layout_pending() {
+    if std::env::var_os("PRISMATTYC_RENDER_TEST_CHILD").is_none() {
+        render_window_tests::run_in_private_display(
+            "space_open_window_tests::stale_snapshot_keeps_a_newer_layout_pending",
+        );
+        return;
+    }
+    let binaries = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let pmux = binaries.join("pmux");
+    let pmuxd = binaries.join("pmuxd");
+    assert!(pmux.is_file() && pmuxd.is_file());
+    std::env::set_var("PMUX", &pmux);
+    let socket = host_mux_socket().unwrap();
+    let _daemon = Daemon(
+        Command::new(pmuxd)
+            .arg("--socket")
+            .arg(&socket)
+            .args(["--", "/bin/sh"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let start = Instant::now();
+    while attach_log::live_snapshot().is_none() {
+        assert!(start.elapsed() < Duration::from_secs(4));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let event_loop = EventLoop::<UserAction>::with_user_event()
+        .with_x11()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
+    let cli = Cli::parse(["--no-splash", "/bin/cat"].into_iter().map(String::from)).unwrap();
+    let app = App::new(
+        cli,
+        config::ConfigFile::default(),
+        None,
+        event_loop.create_proxy(),
+    )
+    .unwrap();
+    let mut proof = StaleCacheProof {
+        app,
+        window: None,
+        started: Instant::now(),
+        done: false,
+    };
+    event_loop.run_app(&mut proof).unwrap();
+    assert!(proof.done);
+    std::fs::write(
+        std::env::var_os(render_window_tests::RESULT_ENV).unwrap(),
+        b"complete",
+    )
+    .unwrap();
+}
+
+struct StaleCacheProof {
+    app: App,
+    window: Option<WindowId>,
+    started: Instant,
+    done: bool,
+}
+
+impl ApplicationHandler<UserAction> for StaleCacheProof {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let id = self.app.open_window(event_loop, false).unwrap();
+        self.window = Some(id);
+        let host = self.app.windows.get_mut(&id).unwrap();
+        apply_rail_verdict(host, space_rail::RailVerdict::Create("a".into()));
+        session_prompt::dispatch_key(host, &Key::Named(NamedKey::Enter), false);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.app.pump(event_loop, None);
+        for host in self.app.windows.values_mut() {
+            let _ = host.mux.drain_all();
+        }
+        assert!(
+            self.started.elapsed() < Duration::from_secs(20),
+            "stale-cache proof timed out"
+        );
+        let id = self.window.expect("window");
+        if self.app.windows[&id].space_opens.busy() {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(30),
+            ));
+            return;
+        }
+        let host = self.app.windows.get_mut(&id).unwrap();
+        assert_eq!(host.space_rail.current.as_deref(), Some("a"));
+        assert!(host.cache_writer);
+        let _ = space_session("a");
+        let path = host.attach_layout_path.clone().unwrap();
+        let ack = prismattyc_mux::host_ack_path_from_socket(&host_mux_socket().unwrap());
+        let ack_mtime = std::fs::metadata(&ack)
+            .and_then(|meta| meta.modified())
+            .ok();
+        host.snapshot_client = Some(Arc::new(snapshot_client::SnapshotClient::detached()));
+        let client = Arc::clone(host.snapshot_client.as_ref().unwrap());
+        client.publish_for_test(
+            prismattyc_mux::Snapshot {
+                sequence: 0,
+                sessions: Vec::new(),
+            },
+            SystemTime::UNIX_EPOCH,
+        );
+        let mut layout = attach_tabs::load(&path).unwrap();
+        assert!(!layout.tabs.is_empty());
+        layout.tabs[0].title = "stale-cache-pending-title".into();
+        std::thread::sleep(Duration::from_millis(20));
+        prismattyc_mux::attach_tabs::save(&path, &layout).unwrap();
+        let stamp_before = host.attach_cache_stamp;
+        let pane_before = host.mux.remote_pane_id(host.mux.focused_id());
+        poll_host_attach_tabs(host);
+        assert_eq!(
+            host.attach_cache_stamp, stamp_before,
+            "an older cache must not consume the layout stamp"
+        );
+        assert!(
+            !host.space_opens.blocks_persist(),
+            "pending ownership must not fence later polls"
+        );
+        assert_eq!(
+            std::fs::metadata(&ack)
+                .and_then(|meta| meta.modified())
+                .ok(),
+            ack_mtime,
+            "a pending layout is not acknowledged"
+        );
+        assert_eq!(host.mux.remote_pane_id(host.mux.focused_id()), pane_before);
+        let file_mtime = cache_stamp(&path).unwrap().0;
+        client.publish_for_test(
+            attach_log::live_snapshot().unwrap(),
+            file_mtime + Duration::from_secs(2),
+        );
+        poll_host_attach_tabs(host);
+        assert_eq!(host.attach_cache_stamp, cache_stamp(&path));
+        assert!(!host.space_opens.blocks_persist());
+        assert_eq!(
+            host.attach_layout
+                .as_ref()
+                .and_then(|file| file.tabs.first())
+                .map(|tab| tab.title.as_str()),
+            Some("stale-cache-pending-title"),
+            "the same file is applied once a later snapshot allows it"
+        );
+        assert_ne!(
+            std::fs::metadata(&ack)
+                .and_then(|meta| meta.modified())
+                .ok(),
+            ack_mtime,
+            "the same file is acknowledged once a later snapshot allows it"
+        );
+        self.done = true;
+        event_loop.exit();
+    }
+
+    fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+}
+
+/// Startup attach copies live sessions into the window without going through
+/// `bind_attach_pane`. A process-wide cache from before that copy must not
+/// detach them. A snapshot taken after the copy may.
+#[test]
+fn stale_cache_does_not_detach_a_newer_attachment() {
+    if std::env::var_os("PRISMATTYC_RENDER_TEST_CHILD").is_none() {
+        render_window_tests::run_in_private_display(
+            "space_open_window_tests::stale_cache_does_not_detach_a_newer_attachment",
+        );
+        return;
+    }
+    let binaries = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let pmux = binaries.join("pmux");
+    let pmuxd = binaries.join("pmuxd");
+    assert!(pmux.is_file() && pmuxd.is_file());
+    std::env::set_var("PMUX", &pmux);
+    let socket = host_mux_socket().unwrap();
+    let _daemon = Daemon(
+        Command::new(pmuxd)
+            .arg("--socket")
+            .arg(&socket)
+            .args(["--", "/bin/sh"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let start = Instant::now();
+    while attach_log::live_snapshot().is_none() {
+        assert!(start.elapsed() < Duration::from_secs(4));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    command(&["space", "create", "a"]);
+    let session = loop {
+        let found = load_space(&spaces_dir(), "a").ok().and_then(|space| {
+            attach_log::live_snapshot().and_then(|snapshot| {
+                snapshot
+                    .sessions
+                    .into_iter()
+                    .find(|live| live.space_id == space.id)
+            })
+        });
+        if let Some(found) = found {
+            break found;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "space create did not publish a session"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    std::env::set_var("PMUX_SPACE", "a");
+    let event_loop = EventLoop::<UserAction>::with_user_event()
+        .with_x11()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
+    let cli = Cli::parse(
+        [
+            "--no-splash",
+            "--attach-session",
+            &session.id.to_string(),
+            "--attach-title",
+            session.name.as_str(),
+        ]
+        .into_iter()
+        .map(String::from),
+    )
+    .unwrap();
+    let mut app = App::new(
+        cli,
+        config::ConfigFile::default(),
+        None,
+        event_loop.create_proxy(),
+    )
+    .unwrap();
+    app.snapshot_client = Some(Arc::new(snapshot_client::SnapshotClient::detached()));
+    app.snapshot_client.as_ref().unwrap().publish_for_test(
+        prismattyc_mux::Snapshot {
+            sequence: 0,
+            sessions: Vec::new(),
+        },
+        SystemTime::UNIX_EPOCH,
+    );
+    let mut proof = StaleDetachProof {
+        app,
+        window: None,
+        started: Instant::now(),
+        done: false,
+    };
+    event_loop.run_app(&mut proof).unwrap();
+    assert!(proof.done);
+    std::fs::write(
+        std::env::var_os(render_window_tests::RESULT_ENV).unwrap(),
+        b"complete",
+    )
+    .unwrap();
+}
+
+struct StaleDetachProof {
+    app: App,
+    window: Option<WindowId>,
+    started: Instant,
+    done: bool,
+}
+
+impl ApplicationHandler<UserAction> for StaleDetachProof {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let id = self.app.open_window(event_loop, false).unwrap();
+        self.window = Some(id);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.done {
+            return;
+        }
+        self.app.pump(event_loop, None);
+        for host in self.app.windows.values_mut() {
+            let _ = host.mux.drain_all();
+        }
+        assert!(
+            self.started.elapsed() < Duration::from_secs(20),
+            "stale-detach proof timed out"
+        );
+        let id = self.window.expect("window");
+        let host = self.app.windows.get_mut(&id).unwrap();
+        assert_eq!(host.space_rail.current.as_deref(), Some("a"));
+        let sessions = host.attach_pane_sessions.clone();
+        assert!(
+            !sessions.is_empty(),
+            "startup must attach the new Space session"
+        );
+        assert!(
+            sessions
+                .keys()
+                .all(|pane| host.attach_bound_at.contains_key(pane)),
+            "window initialization must stamp every attachment"
+        );
+        let pane_before = host.mux.remote_pane_id(host.mux.focused_id());
+        host.snapshot_client = Some(Arc::new(snapshot_client::SnapshotClient::detached()));
+        let client = Arc::clone(host.snapshot_client.as_ref().unwrap());
+        client.publish_for_test(
+            prismattyc_mux::Snapshot {
+                sequence: 0,
+                sessions: Vec::new(),
+            },
+            SystemTime::UNIX_EPOCH,
+        );
+        host.last_space_refresh = None;
+        refresh_space_views(host);
+        assert_eq!(
+            host.attach_pane_sessions, sessions,
+            "a cache from before the attachment must not detach it"
+        );
+        assert_eq!(host.mux.remote_pane_id(host.mux.focused_id()), pane_before);
+        client.publish_for_test(
+            prismattyc_mux::Snapshot {
+                sequence: 1,
+                sessions: Vec::new(),
+            },
+            SystemTime::now() + Duration::from_secs(5),
+        );
+        host.last_space_refresh = None;
+        refresh_space_views(host);
+        assert!(
+            sessions
+                .keys()
+                .all(|pane| !host.attach_pane_sessions.contains_key(pane)),
+            "a snapshot taken after the attachment may detach a session it lacks"
+        );
+        self.done = true;
+        event_loop.exit();
+    }
+
+    fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
 }

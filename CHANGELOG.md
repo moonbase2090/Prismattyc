@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.3.25] - 2026-10-08
+
+### Since 0.3.9
+
+Attached-session cleanup remains owned by the final host window until
+transient removal failures succeed, while already-destroyed sessions are
+recognized as completed cleanup.
+
+## [0.3.9] - 2026-10-07
+
+### Since 0.3.8
+
+When an attached session exits successfully, Prismattyc closes its pane,
+removes the session from its saved Space, and tears down the live session.
+Direct attachments without a saved Space are stopped by stable session ID, and
+failed cleanup is retried. Failed attached clients remain available as
+reopenable placeholders.
+
 ## [Unreleased]
 
 With zero Spaces, clicks on the sidebar chrome work again. The new-tab,

@@ -93,16 +93,30 @@ pub(super) fn switch(host: &mut HostState, owner: Option<String>) -> Result<bool
 }
 
 /// Hidden shells continue consuming output without repainting the active Space.
-pub(super) fn drain(host: &mut HostState) -> bool {
+pub(super) struct ExitedAttach {
+    pub(super) session_id: String,
+    pub(super) session: String,
+}
+
+pub(super) fn drain(host: &mut HostState) -> (bool, Vec<ExitedAttach>) {
     let mut more = false;
+    let mut exited = Vec::new();
     host.local_views.parked.retain(|_, view| {
         more |= view.mux.drain_all().1;
+        for (pane, session_id, session) in view.mux.take_exited_attach_sessions() {
+            view.mux.clear_attach_session(pane);
+            view.observed.remove(&session_id);
+            exited.push(ExitedAttach {
+                session_id,
+                session,
+            });
+        }
         view.mux.take_pending_bells();
         view.mux.take_pending_attentions();
         view.mux.take_pending_toasts();
         has_local(&view.mux) && !view.mux.all_children_exited()
     });
-    more
+    (more, exited)
 }
 
 /// Reconciliation needs physical tab indices, including local-only tabs.

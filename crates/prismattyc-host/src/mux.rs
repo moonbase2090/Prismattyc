@@ -831,6 +831,10 @@ pub(crate) struct PaneRuntime {
     pub(crate) scroll_new_output: bool,
     pub(crate) last_content_epoch: u64,
     pub(crate) child_alive: bool,
+    /// Exit status captured when the PTY is first reaped. Keeping it here
+    /// lets attached-pane cleanup distinguish a successful exit from a
+    /// failed one after `try_wait` has consumed the status.
+    exit_status: Option<portable_pty::ExitStatus>,
     /// Pane title from the child's OSC 0/2 (PT-148): a `pmux rename-pane`
     /// title or guest status relayed by pmux-attach, or a local shell's own
     /// title. Shown on the strip handle hover.
@@ -1481,6 +1485,7 @@ impl PaneRuntime {
             scroll_new_output: false,
             last_content_epoch,
             child_alive: true,
+            exit_status: None,
             title: None,
             title_pinned: false,
             attach_session: None,
@@ -1664,6 +1669,16 @@ impl PaneRuntime {
         result
     }
 
+    fn mark_child_exited(&mut self) {
+        self.child_alive = false;
+        if self.exit_status.is_none() {
+            self.exit_status = self
+                .session
+                .as_mut()
+                .and_then(|session| session.try_wait().ok().flatten());
+        }
+    }
+
     fn drain_pty(
         &mut self,
         from_pty_rx: &mpsc::Receiver<std::io::Result<Vec<u8>>>,
@@ -1674,7 +1689,7 @@ impl PaneRuntime {
         for i in 0..MAX_PTY_DRAIN_PER_PANE {
             match from_pty_rx.try_recv() {
                 Ok(Ok(bytes)) if bytes.is_empty() => {
-                    self.child_alive = false;
+                    self.mark_child_exited();
                     return (true, content_changed, false);
                 }
                 Ok(Ok(bytes)) => {
@@ -1734,7 +1749,7 @@ impl PaneRuntime {
                     }
                 }
                 Ok(Err(_)) | Err(mpsc::TryRecvError::Disconnected) => {
-                    self.child_alive = false;
+                    self.mark_child_exited();
                     return (true, content_changed, false);
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -1742,15 +1757,16 @@ impl PaneRuntime {
         }
         // PTY read can stay blocked after the child dies; reap so the
         // cascade still runs on the next pump (live wiring).
-        if self.child_alive
-            && self
+        if self.child_alive {
+            if let Some(status) = self
                 .session
                 .as_mut()
                 .and_then(|session| session.try_wait().ok().flatten())
-                .is_some()
-        {
-            self.child_alive = false;
-            dirty = true;
+            {
+                self.exit_status = Some(status);
+                self.child_alive = false;
+                dirty = true;
+            }
         }
         (dirty, content_changed, more)
     }
@@ -2274,6 +2290,8 @@ pub(crate) struct MuxRuntime {
     pending_attentions: Vec<(PaneId, String)>,
     /// Log-backed writer-death toasts since the last [`Self::take_pending_toasts`].
     pending_toasts: Vec<(PaneId, String)>,
+    /// Cleanly exited attached sessions whose panes were closed during drain.
+    exited_attach_sessions: Vec<(PaneId, String, String)>,
     /// Client-local zoom (mux architecture: a view projection, never a topology
     /// mutation). While set, the pane takes the whole window of the tab that
     /// owns it and its siblings keep their PTY sizes untouched in the tree.
@@ -2404,6 +2422,7 @@ impl MuxRuntime {
             pending_bells: Vec::new(),
             pending_attentions: Vec::new(),
             pending_toasts: Vec::new(),
+            exited_attach_sessions: Vec::new(),
             last_pane: HashMap::new(),
             graphite_bar: None,
             last_window: None,
@@ -3854,13 +3873,49 @@ impl MuxRuntime {
     /// selects the neighbor (same rule as C-S-Q); last pane of the last
     /// tab is left in place so `all_children_exited` can tear down the host.
     fn close_exited_pane(&mut self, pane: PaneId) -> Result<bool> {
-        if self
-            .panes
-            .get(&pane)
-            .is_some_and(|runtime| runtime.attach_session.is_some())
-        {
-            return self.enter_placeholder(pane);
+        let attached = self.panes.get(&pane).and_then(|runtime| {
+            runtime.attach_session.as_ref().map(|session_id| {
+                (
+                    session_id.clone(),
+                    runtime
+                        .attach_name
+                        .clone()
+                        .unwrap_or_else(|| session_id.clone()),
+                )
+            })
+        });
+        if let Some((session_id, session)) = attached {
+            if !self.attach_exit_succeeded(pane) {
+                return self.enter_placeholder(pane);
+            }
+            let changed = self.close_exited_layout_pane(pane)?;
+            self.exited_attach_sessions
+                .push((pane, session_id, session));
+            return Ok(changed);
         }
+        self.close_exited_layout_pane(pane)
+    }
+
+    fn attach_exit_succeeded(&mut self, pane: PaneId) -> bool {
+        let Some(runtime) = self.panes.get_mut(&pane) else {
+            return false;
+        };
+        if runtime.log_exit_reason.as_deref() == Some("exited 0") {
+            return true;
+        }
+        if runtime.exit_status.is_none() {
+            runtime.exit_status = runtime
+                .session
+                .as_mut()
+                .and_then(|session| session.try_wait().ok().flatten());
+        }
+        runtime
+            .exit_status
+            .as_ref()
+            .is_some_and(|status| status.success())
+    }
+
+    fn close_exited_layout_pane(&mut self, pane: PaneId) -> Result<bool> {
         let Some(window) = self.domain.pane_owner(pane) else {
             self.panes.remove(&pane);
             return Ok(true);
@@ -3882,6 +3937,10 @@ impl MuxRuntime {
             return self.close_tab_at(index);
         }
         Ok(false)
+    }
+
+    pub(crate) fn take_exited_attach_sessions(&mut self) -> Vec<(PaneId, String, String)> {
+        std::mem::take(&mut self.exited_attach_sessions)
     }
 
     fn enter_placeholder(&mut self, pane: PaneId) -> Result<bool> {
@@ -6558,7 +6617,7 @@ mod tests {
     }
 
     #[test]
-    fn attach_exit_becomes_placeholder_and_does_not_collapse() {
+    fn attach_exit_with_failure_becomes_placeholder_and_does_not_collapse() {
         let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
         let first = runtime.focused_id();
         let second = runtime
@@ -6566,6 +6625,7 @@ mod tests {
             .unwrap();
         runtime.mark_attach_session(second, "2".into(), "seat".into());
         assert!(runtime.toggle_zoom().unwrap());
+        runtime.panes.get_mut(&second).unwrap().log_exit_reason = Some("exited 1".into());
         runtime.panes.get_mut(&second).unwrap().child_alive = false;
         assert!(runtime.drain_all().0);
         assert!(runtime.is_placeholder(second));
@@ -6577,6 +6637,65 @@ mod tests {
         assert!(text.contains("seat"), "{text:?}");
         assert!(text.contains("Enter to reopen"), "{text:?}");
         assert!(runtime.panes.contains_key(&first));
+    }
+
+    #[test]
+    fn clean_attach_pty_exit_preserves_success_status() {
+        let mut runtime =
+            MuxRuntime::spawn_with_wake("/bin/sh", &[], 80, 24, Arc::new(|| {})).unwrap();
+        let pane = runtime.focused_id();
+        runtime.mark_attach_session(pane, "2".into(), "seat".into());
+        runtime.focused().send_bytes(b"exit 0\n".to_vec()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut events = Vec::new();
+        while Instant::now() < deadline {
+            let _ = runtime.drain_all();
+            events = runtime.take_exited_attach_sessions();
+            if !events.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(events, vec![(pane, "2".to_string(), "seat".to_string())]);
+        assert!(runtime.all_children_exited());
+    }
+
+    #[test]
+    fn clean_attach_exit_closes_pane_and_reports_session() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let first = runtime.focused_id();
+        let second = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        runtime.mark_attach_session(second, "2".into(), "seat".into());
+        runtime.panes.get_mut(&second).unwrap().log_exit_reason = Some("exited 0".into());
+        runtime.panes.get_mut(&second).unwrap().child_alive = false;
+
+        assert!(runtime.drain_all().0);
+        assert!(!runtime.panes.contains_key(&second));
+        assert!(runtime.panes.contains_key(&first));
+        assert!(!runtime.is_placeholder(first));
+        assert_eq!(
+            runtime.take_exited_attach_sessions(),
+            vec![(second, "2".to_string(), "seat".to_string())]
+        );
+    }
+
+    #[test]
+    fn clean_attach_exit_on_last_pane_signals_host_teardown() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let pane = runtime.focused_id();
+        runtime.mark_attach_session(pane, "2".into(), "seat".into());
+        runtime.panes.get_mut(&pane).unwrap().log_exit_reason = Some("exited 0".into());
+        runtime.panes.get_mut(&pane).unwrap().child_alive = false;
+
+        let _ = runtime.drain_all();
+        assert!(runtime.all_children_exited());
+        assert_eq!(
+            runtime.take_exited_attach_sessions(),
+            vec![(pane, "2".to_string(), "seat".to_string())]
+        );
     }
 
     #[test]

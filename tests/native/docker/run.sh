@@ -67,6 +67,45 @@ assert 'SPACE_OPEN_RACE_COMPLETE:' in (root / 'space-open-race.log').read_text()
 PY_CHECK
 }
 
+clean_attached_exit_e2e() {
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || {
+    echo "ERROR: image $IMAGE is missing. Run: $0 build" >&2
+    return 1
+  }
+  local name="pt-clean-exit-$$" cid src bin status
+  local fixture_bins="${PRISMATTYC_BINS:-$REPO/target/debug}"
+  local run_id="${CLEAN_EXIT_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-$$}"
+  case "$run_id" in
+    *[!a-zA-Z0-9._-]*|"") echo "ERROR: invalid CLEAN_EXIT_RUN_ID" >&2; return 1 ;;
+  esac
+  local destination="$REPO/build/clean-attached-exit-e2e/$run_id"
+  [[ ! -e "$destination" ]] || { echo "ERROR: use a new CLEAN_EXIT_RUN_ID: $destination" >&2; return 1; }
+  mkdir -p "$destination"
+  cid="$(docker create --init --name "$name" --hostname prismattyc --shm-size 1g \
+    -e WINIT_UNIX_BACKEND=x11 -e COLORTERM=truecolor "$IMAGE" sleep infinity)"
+  trap "docker rm -f '$name' >/dev/null 2>&1 || true" EXIT
+  for bin in pmux pmuxd pmux-attach prismattyc-host; do
+    src="$fixture_bins/$bin"
+    [[ -x "$src" ]] || { echo "ERROR: missing tested binary $src" >&2; return 1; }
+    docker cp "$src" "$cid:/usr/local/bin/$bin"
+  done
+  docker cp "$NATIVE/clean-attached-exit-e2e.py" "$cid:/home/tester/clean-attached-exit-e2e.py"
+  docker start "$cid" >/dev/null
+  if docker exec -u tester "$cid" python3 /home/tester/clean-attached-exit-e2e.py \
+    --bins /usr/local/bin --out /tmp/clean-attached-exit; then
+    status=0
+  else
+    status=$?
+  fi
+  docker cp "$cid:/tmp/clean-attached-exit/." "$destination/" || return 1
+  echo "Clean attached-exit evidence: $destination"
+  [[ "$status" -eq 0 ]] || return "$status"
+  python3 - "$destination/result.json" <<'PY_CHECK'
+import json, sys
+assert json.load(open(sys.argv[1]))['status'] == 'PASS'
+PY_CHECK
+}
+
 spaces_e2e() {
   if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     echo "ERROR: image $IMAGE is missing. Run: $0 build" >&2
@@ -318,5 +357,6 @@ case "${1:-}" in
   walkthrough-caption-e2e) walkthrough_caption_e2e ;;
   render-bench) render_bench ;;
   paste-e2e) paste_e2e ;;
-  *) echo "Usage: $0 build|spaces-e2e|host-ux-e2e|rail-transparency-e2e|spaces-e2e-wayland|walkthrough-caption-e2e|render-bench|paste-e2e" >&2; exit 2 ;;
+  clean-attached-exit-e2e) clean_attached_exit_e2e ;;
+  *) echo "Usage: $0 build|spaces-e2e|host-ux-e2e|rail-transparency-e2e|spaces-e2e-wayland|walkthrough-caption-e2e|render-bench|paste-e2e|clean-attached-exit-e2e" >&2; exit 2 ;;
 esac

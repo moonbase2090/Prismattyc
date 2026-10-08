@@ -122,7 +122,9 @@ use prismattyc_core::{
     encode_osc52_clipboard, Color, GridDamage, HistoryMatch, Screen, ScrollDamage, Selection, Style,
 };
 use prismattyc_emulator::{CursorShape, Emulator};
-use prismattyc_mux::{layout_path, load_space, spaces_dir, PaneId, WindowId as MuxWindowId};
+use prismattyc_mux::{
+    layout_path, list_spaces, load_space, spaces_dir, PaneId, WindowId as MuxWindowId,
+};
 use prismattyc_protocol::{InputModifiers, PointerPhase};
 use prismattyc_render::paint_display_row;
 use raster::{
@@ -171,6 +173,25 @@ const PASTE_SEND_BUDGET: Duration = Duration::from_millis(250);
 /// Extra wait to close a partially-delivered bracketed paste (`CSI 201 ~`).
 const PASTE_BRACKET_CLOSE_TIMEOUT: Duration = Duration::from_millis(50);
 const PASTE_POLL_INTERVAL: Duration = Duration::from_millis(2);
+const EXIT_CLEANUP_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+fn retry_exited_cleanups(
+    pending: Vec<(String, String)>,
+    mut cleanup: impl FnMut(&str, &str) -> Result<(), String>,
+) -> Vec<(String, String)> {
+    pending
+        .into_iter()
+        .filter_map(|(session, session_id)| {
+            cleanup(&session, &session_id)
+                .err()
+                .map(|_| (session, session_id))
+        })
+        .collect()
+}
+
+fn should_close_exited_host(all_children_exited: bool, pending_cleanups: bool) -> bool {
+    all_children_exited && !pending_cleanups
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PaneSpacing {
@@ -1225,6 +1246,8 @@ struct HostState {
     /// Attach pane → mux session id, so tab membership can be re-derived
     /// from the live tabs after a pane moves (PT-60).
     attach_pane_sessions: HashMap<PaneId, String>,
+    /// Clean-exit Space cleanup commands that should be retried on the next pump.
+    pending_exited_cleanups: Vec<(String, String)>,
     /// When this window bound the pane to that session. Absent means the
     /// binding predates the timestamp and a snapshot may judge it.
     attach_bound_at: HashMap<PaneId, SystemTime>,
@@ -3509,8 +3532,23 @@ impl App {
             if host.dirty {
                 host.window.request_redraw();
             }
-            if host.mux.all_children_exited() {
+            if should_close_exited_host(
+                host.mux.all_children_exited(),
+                !host.pending_exited_cleanups.is_empty(),
+            ) {
                 closed.push(*id);
+                timing.record_phase(
+                    pump_timing::Phase::WindowBookkeeping,
+                    phase_started.elapsed(),
+                );
+                continue;
+            }
+            if host.mux.all_children_exited() {
+                let retry = Instant::now() + EXIT_CLEANUP_RETRY_INTERVAL;
+                next_deadline = Some(match next_deadline {
+                    Some(existing) => existing.min(retry),
+                    None => retry,
+                });
                 timing.record_phase(
                     pump_timing::Phase::WindowBookkeeping,
                     phase_started.elapsed(),
@@ -4091,6 +4129,7 @@ impl App {
                 attach_layout: None,
                 attach_layout_path,
                 attach_pane_sessions,
+                pending_exited_cleanups: Vec::new(),
                 attach_bound_at,
                 attach_daemon_pid: None,
                 attach_rebound_same_id: HashSet::new(),
@@ -7656,8 +7695,49 @@ impl App {
         let prior_active = host.mux.active_count();
         finish_pastes(host);
         let parse_started = Instant::now();
-        let parked_more = local_views::drain(host);
+        let (parked_more, parked_exited) = local_views::drain(host);
+        let mut retry_cleanups = Vec::new();
+        for event in parked_exited {
+            host.observed_space_sessions.remove(&event.session_id);
+            if let Err(error) =
+                remove_exited_session_from_space(host, &event.session, &event.session_id)
+            {
+                retry_cleanups.push((event.session, event.session_id));
+                rail_toast(
+                    host,
+                    &format!(" clean exit cleanup failed; retrying: {error} "),
+                );
+            }
+        }
+        retry_cleanups.extend(retry_exited_cleanups(
+            std::mem::take(&mut host.pending_exited_cleanups),
+            |session, session_id| remove_exited_session_from_space(host, session, session_id),
+        ));
         let (pty_dirty, more) = host.mux.drain_all();
+        let exited_attaches = host.mux.take_exited_attach_sessions();
+        for (pane, session_id, session) in &exited_attaches {
+            host.mux.clear_attach_session(*pane);
+            host.attach_pane_sessions.remove(pane);
+            host.observed_space_sessions.remove(session_id);
+            if let Err(error) = remove_exited_session_from_space(host, session, session_id) {
+                retry_cleanups.push((session.clone(), session_id.clone()));
+                rail_toast(
+                    host,
+                    &format!(" clean exit cleanup failed; retrying: {error} "),
+                );
+            }
+        }
+        host.pending_exited_cleanups.extend(retry_cleanups);
+        if !exited_attaches.is_empty() {
+            persist_attach_layout_from_live(host);
+            host.last_space_refresh = None;
+            refresh_rail(host);
+            App::refit_geom(
+                host,
+                host.window.inner_size(),
+                Some("clean attached session exit"),
+            );
+        }
         if pty_dirty {
             host.hyperlink_hover = None;
         }
@@ -14128,6 +14208,66 @@ fn run_pmux_space(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// Release saved membership after an attached client exits cleanly.
+///
+/// The attach pane has already been closed by `MuxRuntime`; this helper updates
+/// the durable Space record and destroys a still-live daemon session. Failed
+/// cleanup is returned so the host can retry it on a later pump.
+fn remove_exited_session_from_space(
+    host: &mut HostState,
+    session: &str,
+    session_id: &str,
+) -> Result<(), String> {
+    let space_name = host
+        .space_rail
+        .current
+        .clone()
+        .filter(|name| {
+            load_space(&spaces_dir(), name)
+                .ok()
+                .is_some_and(|space| space.sessions.iter().any(|saved| saved.name == session))
+        })
+        .or_else(|| {
+            list_spaces(&spaces_dir())
+                .ok()?
+                .into_iter()
+                .find_map(|entry| {
+                    let space = load_space(&spaces_dir(), &entry.name).ok()?;
+                    space
+                        .sessions
+                        .iter()
+                        .any(|saved| saved.name == session)
+                        .then_some(entry.name)
+                })
+        });
+    if let Some(space_name) = space_name {
+        let args = vec![
+            "space".into(),
+            "remove".into(),
+            space_name.clone(),
+            "--session".into(),
+            session.to_string(),
+            "--kill".into(),
+        ];
+        return run_pmux_space(&args).map_err(|error| {
+            format!("could not remove {session} from Space {space_name}: {error}")
+        });
+    }
+
+    if attach_log::live_snapshot().is_some_and(|snapshot| {
+        !snapshot
+            .sessions
+            .iter()
+            .any(|live| live.id.to_string() == session_id || live.name == session)
+    }) {
+        // Another host may have completed the same cleanup already.
+        return Ok(());
+    }
+    let args = vec!["stop".into(), session_id.to_string()];
+    run_pmux_space(&args)
+        .map_err(|error| format!("could not stop direct session {session_id}: {error}"))
+}
+
 /// Release saved membership, then detach every local view of that session.
 fn remove_session_from_space(host: &mut HostState, pane: PaneId, kill: bool) {
     let Some(session) = host
@@ -20388,6 +20528,36 @@ mod modifier_tests;
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn final_host_stays_open_until_exited_cleanup_succeeds() {
+        assert!(!should_close_exited_host(true, true));
+        assert!(should_close_exited_host(true, false));
+        assert!(!should_close_exited_host(false, false));
+    }
+
+    #[test]
+    fn exited_cleanup_retries_failure_then_closes_final_host() {
+        let mut attempts = 0;
+        let pending = vec![("seat".to_string(), "7".to_string())];
+        let pending = retry_exited_cleanups(pending, |_, _| {
+            attempts += 1;
+            if attempts == 1 {
+                Err("transient failure".to_string())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(attempts, 1);
+        assert_eq!(pending.len(), 1);
+        let pending = retry_exited_cleanups(pending, |_, _| {
+            attempts += 1;
+            Ok(())
+        });
+        assert_eq!(attempts, 2);
+        assert!(pending.is_empty());
+        assert!(should_close_exited_host(true, false));
+    }
 
     #[test]
     fn muse_attention_title_comes_from_the_shared_slug() {

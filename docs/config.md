@@ -50,6 +50,10 @@ When `render_timer` is `osd`, `log`, or `both`, the macOS host compares dirty
 tiles with the previous frame and reports how many changed. With the timer off,
 it does not allocate the comparison buffer.
 
+`macos_present` is read at startup and defaults to `tiles`. Non-macOS builds
+ignore it. If you select `iosurface` before the backend is present, the host
+warns and uses `tiles`.
+
 ```toml
 # Prismattyc host config. Every key is at its default.
 # Edit in place. CLI flags and PRISMATTYC_* env vars still win.
@@ -59,6 +63,8 @@ it does not allocate the comparison buffer.
 # theme = "prismattyc"
 # Render timings and counters. off|osd|log|both.
 render_timer = "off"
+# macOS present backend; startup only; ignored on other platforms. tiles|iosurface.
+macos_present = "tiles"
 # Log every render frame when render_timer includes log; use for benches only. true|false.
 render_timer_log_every_frame = false
 # Show the launch splash on bare launches. true|false.

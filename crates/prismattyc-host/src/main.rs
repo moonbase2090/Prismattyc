@@ -2090,14 +2090,6 @@ impl PresentBackend {
                     );
                 }
                 host.render_frame.timing.raster_us = raster_started.elapsed().as_micros() as u64;
-                maybe_dump_present(
-                    host.dump_present.as_deref(),
-                    &mut host.dump_present_seq,
-                    mac.pixels_mut(),
-                    width,
-                    height,
-                    host.render_frame.full_repaint_reason,
-                );
                 let present_started = Instant::now();
                 let present_timing = mac.present(
                     damage,
@@ -2105,6 +2097,34 @@ impl PresentBackend {
                 )?;
                 host.render_frame.present = Some(present_timing);
                 host.render_frame.timing.present_us = present_started.elapsed().as_micros() as u64;
+                if let Some(path) = host.dump_present.as_deref() {
+                    let mut expected = mac.pixels().to_vec();
+                    pixel_alpha::premultiply_in_place(&mut expected);
+                    maybe_dump_present(
+                        Some(path),
+                        &mut host.dump_present_seq,
+                        &expected,
+                        width,
+                        height,
+                        host.render_frame.full_repaint_reason,
+                    );
+                    match mac.readback() {
+                        Ok(readback) => {
+                            if readback != expected {
+                                eprintln!("prismattyc-host: present readback differs from the premultiplied framebuffer");
+                            }
+                            let readback_path = path.with_extension("readback.png");
+                            if let Err(error) =
+                                write_present_png(&readback_path, &readback, width, height)
+                            {
+                                eprintln!("prismattyc-host: present readback png failed: {error}");
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("prismattyc-host: present readback failed: {error:#}");
+                        }
+                    }
+                }
             }
             #[cfg(all(test, target_os = "linux"))]
             Self::Probe => unreachable!("probe backend cannot paint"),
@@ -2719,6 +2739,16 @@ impl App {
                 (None, None)
             }
         };
+        #[cfg(target_os = "macos")]
+        match config::MacosPresent::parse(file_config.macos_present.as_deref()) {
+            Ok(config::MacosPresent::Tiles) => {}
+            Ok(config::MacosPresent::Iosurface) => eprintln!(
+                "prismattyc-host: macos_present = iosurface is not available in this change; using tiles"
+            ),
+            Err(value) => eprintln!(
+                "prismattyc-host: warning: unknown macos_present value {value:?}; using tiles"
+            ),
+        }
         let snapshot_client = snapshot_client::start_snapshot_client(
             file_config.snapshot_client_enabled(),
             wake.clone(),
@@ -2807,6 +2837,11 @@ impl App {
         if newest.async_file_writes() != self.file_config.async_file_writes() {
             eprintln!("prismattyc-host: async_file_writes changes take effect after restart");
             newest.async_file_writes = self.file_config.async_file_writes;
+        }
+        #[cfg(target_os = "macos")]
+        if newest.macos_present != self.file_config.macos_present {
+            eprintln!("prismattyc-host: macos_present changes take effect after restart");
+            newest.macos_present = self.file_config.macos_present.clone();
         }
         if newest == self.file_config {
             return;

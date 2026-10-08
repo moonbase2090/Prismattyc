@@ -65,6 +65,23 @@ impl RenderTimer {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MacosPresent {
+    #[default]
+    Tiles,
+    Iosurface,
+}
+
+impl MacosPresent {
+    pub fn parse(raw: Option<&str>) -> std::result::Result<Self, &str> {
+        match raw {
+            None | Some("tiles") => Ok(Self::Tiles),
+            Some("iosurface") => Ok(Self::Iosurface),
+            Some(other) => Err(other),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TabStripMode {
@@ -190,6 +207,8 @@ pub struct ConfigFile {
     pub sidebar_collapsed: Option<bool>,
     /// Render timing output. Default `off`; hot-reloaded.
     pub render_timer: Option<RenderTimer>,
+    /// macOS present path: `tiles` (default) or `iosurface`. Startup only.
+    pub macos_present: Option<String>,
     /// Log every rendered frame when `render_timer` includes `log`. Default false.
     pub render_timer_log_every_frame: Option<bool>,
     /// Write host files on a worker thread. Startup only; default false.
@@ -1109,6 +1128,30 @@ mod tests {
         let path = dir.join("config.toml");
         std::fs::write(&path, "async_paste = true\n").unwrap();
         assert!(load(&path).unwrap().async_paste());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn macos_present_defaults_to_tiles_and_parses_iosurface() {
+        assert_eq!(MacosPresent::parse(None), Ok(MacosPresent::Tiles));
+        assert_eq!(
+            MacosPresent::parse(ConfigFile::default().macos_present.as_deref()),
+            Ok(MacosPresent::Tiles)
+        );
+        assert_eq!(MacosPresent::parse(Some("tiles")), Ok(MacosPresent::Tiles));
+        assert_eq!(
+            MacosPresent::parse(Some("iosurface")),
+            Ok(MacosPresent::Iosurface)
+        );
+        assert_eq!(MacosPresent::parse(Some("metal")), Err("metal"));
+
+        let dir = temp_dir("macos-present");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "macos_present = \"iosurface\"\n").unwrap();
+        assert_eq!(
+            load(&path).unwrap().macos_present.as_deref(),
+            Some("iosurface")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

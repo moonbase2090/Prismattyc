@@ -49,6 +49,9 @@ pub(super) fn switch(host: &mut HostState, owner: Option<String>) -> Result<bool
         }
     };
     let old_owner = host.mux.space_id.clone();
+    if old_owner != owner {
+        host.space_epoch = host.space_epoch.wrapping_add(1);
+    }
     let old = Parked {
         mux: std::mem::replace(&mut host.mux, incoming.mux),
         adopted: std::mem::replace(&mut host.adopted, incoming.adopted),
@@ -355,10 +358,7 @@ pub(super) fn persist_and_restore(host: &mut HostState, closing: bool) {
     let Some(path) = recipe_path(host) else {
         return;
     };
-    let Ok(config) = config::load(&config::config_path()) else {
-        return;
-    };
-    let enabled = config.restore_blank_terminals.unwrap_or(false);
+    let enabled = host.restore_blank_terminals;
     if !enabled {
         host.local_views.pending.clear();
         host.local_views.loaded = false;

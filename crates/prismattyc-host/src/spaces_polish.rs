@@ -8,7 +8,76 @@ pub(super) struct State {
     pub changed: Option<(String, Instant)>,
     /// The rail has shown "Saving…" for this fingerprint. The next poll writes.
     pub(super) armed: bool,
+    /// Autosave command is on the worker. A second write waits.
+    pub(super) save_in_flight: bool,
+    /// Identifies the in-flight save. A late report from an older claim is ignored.
+    save_generation: u64,
+    /// Space name captured when the save was claimed.
+    save_space: Option<String>,
     pub undo: Option<PathBuf>,
+}
+
+/// What a finished autosave may change on the polish state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SaveCompletion {
+    /// The report is not the save this state is waiting on.
+    Ignore,
+    /// The save ended, but the window has moved on. Drop the in-flight bit only.
+    ReleaseOnly,
+    /// The window is still the visit that started the save.
+    Apply,
+}
+
+/// True once, when a decided write may start. A later call stays false
+/// until the matching report is classified.
+pub(super) fn claim_save(state: &mut State, name: &str) -> Option<u64> {
+    if state.save_in_flight {
+        return None;
+    }
+    state.save_in_flight = true;
+    state.save_generation = state.save_generation.wrapping_add(1);
+    state.save_space = Some(name.to_string());
+    Some(state.save_generation)
+}
+
+/// `still_this_space` is false after a switch. The new Space keeps its own
+/// dirty bit, armed poll, and failure flag.
+pub(super) fn finish_save(state: &mut State, ok: bool, still_this_space: bool) {
+    state.save_in_flight = false;
+    state.save_space = None;
+    if !still_this_space {
+        return;
+    }
+    state.armed = false;
+    if ok {
+        state.failed = false;
+        state.changed = None;
+    } else {
+        state.failed = true;
+    }
+}
+
+/// `epoch` is the visit captured with the save. A later visit of the same
+/// name (leave and come back) must not take this result.
+pub(super) fn classify_save_completion(
+    state: &State,
+    report_space: &str,
+    report_generation: u64,
+    report_epoch: u64,
+    current_space: Option<&str>,
+    live_epoch: u64,
+) -> SaveCompletion {
+    if !state.save_in_flight
+        || state.save_generation != report_generation
+        || state.save_space.as_deref() != Some(report_space)
+    {
+        return SaveCompletion::Ignore;
+    }
+    if current_space == Some(report_space) && report_epoch == live_epoch {
+        SaveCompletion::Apply
+    } else {
+        SaveCompletion::ReleaseOnly
+    }
 }
 
 /// Minimum gap between arrangement checks.
@@ -259,6 +328,26 @@ fn decide(
     }
 }
 
+/// True when a live member of this Space is neither attached nor a session
+/// this window has already applied. Autosave must not release that member.
+fn view_omits_unobserved_member(host: &HostState) -> bool {
+    let Some(owner) = host.mux.space_id.as_deref() else {
+        return false;
+    };
+    let Some(snapshot) = snapshot_client::snapshot_for_periodic(host.snapshot_client.as_deref())
+    else {
+        return false;
+    };
+    snapshot.sessions.iter().any(|session| {
+        if session.space_id.as_deref() != Some(owner) {
+            return false;
+        }
+        let id = session.id.to_string();
+        let attached = host.attach_pane_sessions.values().any(|live| live == &id);
+        !attached && !host.observed_space_sessions.contains(&id)
+    })
+}
+
 pub(super) fn poll(host: &mut HostState) {
     let now = Instant::now();
     let blocked = host.restore_prompt.is_some() || host.space_opens.blocks_persist();
@@ -268,12 +357,18 @@ pub(super) fn poll(host: &mut HostState) {
     let Some(name) = host.space_rail.current.clone() else {
         return;
     };
-    let autosave = config::load(&config::config_path())
-        .map(|config| config.space_autosave_enabled())
-        .unwrap_or(false);
+    let autosave = host.space_autosave_enabled;
     let paused = host.context_menu.is_some() || host.session_prompt.is_some();
-    let step = match load_space(&spaces_dir(), &name) {
-        Ok(space) if space.id == host.mux.space_id => {
+    let loaded = host
+        .space_poll_loaded
+        .take()
+        .filter(|(loaded_name, _)| loaded_name == &name);
+    let Some((_, space)) = loaded else {
+        let _ = host.space_client.submit_poll(spaces_dir(), name);
+        return;
+    };
+    let step = match space {
+        Some(space) if space.id == host.mux.space_id => {
             let live = live_snaps(host);
             let snap = snapshot_client::snapshot_for_periodic(host.snapshot_client.as_deref());
             let (shapes_match, shapes) = saved_shapes(&space, snap.as_ref());
@@ -293,15 +388,32 @@ pub(super) fn poll(host: &mut HostState) {
         },
     };
     let mut status = step.status;
-    if step.write {
-        let wrote = save_space_from_host_quiet(host, &name);
-        status = if host.space_polish.failed {
-            "Save failed"
-        } else if wrote {
-            "Saved"
-        } else {
-            "Saving…"
-        };
+    // A pane move assigns the session to this Space before the window
+    // attaches it. The daemon id is not in `observed_space_sessions` yet.
+    // Saving the current view would release that session.
+    if step.write && !view_omits_unobserved_member(host) {
+        if let Some(generation) = claim_save(&mut host.space_polish, &name) {
+            persist_attach_layout_from_live(host);
+            // `attach_layout` is the file just handed to the writer, including
+            // a write that has not reached the shared path. The worker saves
+            // this copy. A switch that rewrites the shared path cannot erase
+            // the Space this claim belongs to.
+            let view = host.attach_layout.clone();
+            let epoch = host.space_epoch;
+            let queued = host.space_client.submit_save(space_client::SaveJob {
+                pmux: pmux_bin(),
+                name: name.clone(),
+                view,
+                view_dir: None,
+                generation,
+                epoch,
+            });
+            if !queued {
+                host.space_polish.save_in_flight = false;
+                host.space_polish.save_space = None;
+            }
+            status = "Saving…";
+        }
     }
     if host.space_rail.save_status != status {
         host.space_rail.save_status = status.to_string();
@@ -313,6 +425,78 @@ pub(super) fn poll(host: &mut HostState) {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn a_second_autosave_is_not_claimed_while_one_is_in_flight() {
+        let mut state = State {
+            changed: Some(("layout".into(), Instant::now())),
+            ..State::default()
+        };
+        let generation = claim_save(&mut state, "review-a").unwrap();
+        assert!(claim_save(&mut state, "review-a").is_none());
+        assert_eq!(
+            classify_save_completion(&state, "review-a", generation, 1, Some("review-a"), 1),
+            SaveCompletion::Apply
+        );
+        finish_save(&mut state, false, true);
+        assert!(state.failed);
+        assert!(!state.save_in_flight);
+        assert!(state.changed.is_some());
+        assert!(claim_save(&mut state, "review-a").is_some());
+        finish_save(&mut state, true, true);
+        assert!(!state.failed);
+        assert!(!state.save_in_flight);
+        assert!(state.changed.is_none());
+    }
+
+    #[test]
+    fn a_finished_save_does_not_clear_the_space_switched_to() {
+        let mut state = State {
+            changed: Some(("review-a".into(), Instant::now())),
+            ..State::default()
+        };
+        let generation = claim_save(&mut state, "review-a").unwrap();
+        state.changed = Some(("review-b".into(), Instant::now()));
+        state.armed = true;
+        assert_eq!(
+            classify_save_completion(&state, "review-a", generation, 1, Some("review-b"), 2),
+            SaveCompletion::ReleaseOnly
+        );
+        finish_save(&mut state, true, false);
+        assert!(!state.save_in_flight);
+        assert_eq!(
+            state.changed.as_ref().map(|(mark, _)| mark.as_str()),
+            Some("review-b")
+        );
+        assert!(state.armed);
+        assert!(!state.failed);
+    }
+
+    #[test]
+    fn returning_to_a_space_does_not_apply_the_save_from_the_previous_visit() {
+        let mut state = State::default();
+        let generation = claim_save(&mut state, "review-a").unwrap();
+        state.changed = Some(("review-a-again".into(), Instant::now()));
+        state.armed = true;
+        assert_eq!(
+            classify_save_completion(&state, "review-a", generation, 1, Some("review-a"), 3),
+            SaveCompletion::ReleaseOnly
+        );
+        assert_eq!(
+            classify_save_completion(
+                &state,
+                "review-a",
+                generation.wrapping_add(1),
+                1,
+                Some("review-a"),
+                1
+            ),
+            SaveCompletion::Ignore
+        );
+        finish_save(&mut state, true, false);
+        assert!(state.changed.is_some());
+        assert!(state.armed);
+    }
 
     use prismattyc_mux::{PaneId, SavedSpace, SavedSpaceTab, SAVED_SPACE_VERSION};
 

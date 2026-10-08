@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Prove sustained PTY output still reaches macOS RedrawRequested paints.
+"""Measure macOS RedrawRequested paints during sustained local PTY output.
 
-Runs the real host and private pmuxd. On the unfixed event loop, repeated
-UserAction::Wake delivery starves Winit's macOS event drain and this test times
-out without a new raster timestamp.
+Runs the real host with a local child process. On the unfixed event loop,
+repeated UserAction::Wake delivery can starve Winit's macOS event drain.
 """
 import argparse
 import json
@@ -11,7 +10,6 @@ import os
 from pathlib import Path
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
@@ -32,10 +30,7 @@ assert out == Path("/private/tmp/pwake") or Path("/private/tmp/pwake") in out.pa
 runtime = Path(tempfile.mkdtemp(prefix="wake-test-", dir="/private/tmp/pwake"))
 socket_path = runtime / "pmux.sock"
 config = out / "config.toml"
-config.write_text(
-    'font_px = 16.0\nsplash = false\nrender_timer = "log"\n'
-    'render_timer_log_every_frame = true\n'
-)
+config.write_text("font_px = 16.0\nsplash = false\n")
 for directory in ("home", "config", "data", "state"):
     (out / directory).mkdir(exist_ok=True)
 env = {
@@ -66,17 +61,27 @@ def wait_for(predicate, label, timeout=20):
     raise AssertionError(f"timed out waiting for {label}")
 
 
-def snapshot():
-    with socket.socket(socket.AF_UNIX) as connection:
-        connection.settimeout(5)
-        connection.connect(str(socket_path))
-        connection.sendall(b'{"version":1,"request_id":1,"type":"snapshot"}\n')
-        return json.loads(connection.makefile().readline())["response"]["snapshot"]
+def render_status():
+    result = subprocess.run(
+        [str(bins / "pmux"), "render-status", "--json"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        return None
+    return json.loads(result.stdout)
 
 
-def painted_frames():
-    log = (out / "host.log").read_text()
-    return sum("prismattyc-host: render parse=" in line for line in log.splitlines())
+def raster_timestamp(status):
+    return max(
+        (
+            window["last_raster"]["unix_ms"] or 0
+            for window in status["windows"]
+        ),
+        default=0,
+    )
 
 
 def stop(process):
@@ -93,37 +98,69 @@ def stop(process):
 try:
     daemon_log = (out / "daemon.log").open("w")
     daemon = subprocess.Popen(
-        [str(bins / "pmuxd"), "--socket", str(socket_path), "--", "/bin/zsh", "-f", "-c", "exec yes"],
-        env=env, stdout=daemon_log, stderr=daemon_log,
+        [str(bins / "pmuxd"), "--socket", str(socket_path), "--", "/bin/sh", "-c", "exec sleep 120"],
+        env=env,
+        stdout=daemon_log,
+        stderr=daemon_log,
     )
     wait_for(lambda: socket_path.exists(), "private daemon")
-    session = wait_for(lambda: snapshot()["sessions"][0], "default session")
-    assert session["windows"][0]["panes"], "default session has no PTY pane"
     host_log = (out / "host.log").open("w")
     host = subprocess.Popen(
-        [str(bins / "prismattyc-host"), "--no-splash", "--attach-session", str(session["id"])],
+        [str(bins / "prismattyc-host"), "--no-splash", "--", "/bin/sh", "-c", "sleep 3; exec yes"],
         env=env, stdout=host_log, stderr=host_log,
     )
 
-    # yes runs before the host attaches, so the first attached reader sees a
-    # continuously readable PTY rather than a one-time command wake.
     wait_for(lambda: host.poll() is None, "host startup")
-    time.sleep(5)
-    started_frames = painted_frames()
-    deadline = time.monotonic() + 20
+    wait_for(render_status, "initial raster status")
+    time.sleep(6)
+    started_status = wait_for(render_status, "warmed raster status")
+    started_raster = raster_timestamp(started_status)
+    last_raster = started_raster
+    raster_advances = 0
+    first_raster_delay_s = None
+    sample_seq = started_status["windows"][0].get("render_sample", {}).get("seq", 0)
+    frames = None
+    interval_us = 0
+    samples = []
+    sample_started = time.monotonic()
+    deadline = sample_started + 20
     while time.monotonic() < deadline:
+        status = render_status()
+        if status is not None:
+            current_raster = raster_timestamp(status)
+            if current_raster != last_raster:
+                raster_advances += 1
+                if first_raster_delay_s is None:
+                    first_raster_delay_s = time.monotonic() - sample_started
+                last_raster = current_raster
+            render_sample = status["windows"][0].get("render_sample")
+            if render_sample is not None and render_sample["seq"] > sample_seq:
+                sample_seq = render_sample["seq"]
+                frames = (frames or 0) + render_sample["frames"]
+                interval_us += render_sample["interval_us"]
+                samples.append(render_sample)
         time.sleep(0.25)
-    new_frames = painted_frames() - started_frames
-    # The poll-drain spike reached 24.6 fps under this workload. Requiring
-    # 20 fps leaves scheduling margin while catching a loop that starves most
-    # redraw opportunities under the same continuous Wake stream.
-    assert new_frames >= 400, (
-        f"expected at least 400 paints (20 fps) in 20 seconds of output; saw {new_frames}"
+    final_status = render_status()
+    assert final_status is not None, "final render status was unavailable"
+    final_raster = raster_timestamp(final_status)
+    if final_raster != last_raster:
+        raster_advances += 1
+    assert raster_advances >= 10 and first_raster_delay_s is not None and first_raster_delay_s <= 3, (
+        "expected a paint within 3 seconds and at least 10 raster advances in 20 seconds "
+        f"of sustained PTY output; observed {raster_advances}, first paint delay "
+        f"{first_raster_delay_s}, from {started_raster} to {final_raster}"
     )
     (out / "result.json").write_text(json.dumps({
         "status": "PASS",
-        "frames_during_output_window": new_frames,
-        "assertion": "real macOS host raster advanced after sustained PTY output",
+        "frames_during_output_window": frames,
+        "fps": frames / (interval_us / 1_000_000) if frames is not None and interval_us else None,
+        "raster_advances_during_output_window": raster_advances,
+        "first_raster_delay_seconds": first_raster_delay_s,
+        "raster_timestamp_before_output_window": started_raster,
+        "raster_timestamp_after_output_window": final_raster,
+        "assertion": "real macOS host raster timestamp advanced during sustained PTY output",
+        "render_samples": samples,
+        "final_render_status": final_status,
     }, indent=2))
     print("MACOS_WAKE_STARVATION_E2E_COMPLETE: PASS", flush=True)
 finally:

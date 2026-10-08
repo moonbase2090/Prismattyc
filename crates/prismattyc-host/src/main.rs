@@ -354,6 +354,8 @@ struct RenderFrame {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct RenderWindowSummary {
+    sample_seq: u64,
+    interval_us: u64,
     last_raster_us: u64,
     max_raster_us: u64,
     frame_count: u64,
@@ -366,6 +368,7 @@ struct RenderWindowSummary {
 #[derive(Debug, Default)]
 struct RenderWindow {
     started_at: Option<Instant>,
+    sample_seq: u64,
     last_raster_us: u64,
     max_raster_us: u64,
     frame_count: u64,
@@ -407,6 +410,12 @@ impl RenderWindow {
             }
         }
         let summary = RenderWindowSummary {
+            sample_seq: self.sample_seq.saturating_add(1),
+            interval_us: now
+                .duration_since(started_at)
+                .as_micros()
+                .try_into()
+                .unwrap_or(u64::MAX),
             last_raster_us: self.last_raster_us,
             max_raster_us: self.max_raster_us,
             frame_count: self.frame_count,
@@ -417,6 +426,7 @@ impl RenderWindow {
         };
         *self = Self {
             started_at: Some(now),
+            sample_seq: summary.sample_seq,
             ..Self::default()
         };
         Some(summary)
@@ -26818,6 +26828,8 @@ session mail (id 15)
         assert_eq!(
             window.record(second, start + Duration::from_secs(1)),
             Some(RenderWindowSummary {
+                sample_seq: 1,
+                interval_us: 1_000_000,
                 last_raster_us: 20,
                 max_raster_us: 20,
                 frame_count: 2,
@@ -26830,6 +26842,20 @@ session mail (id 15)
         assert!(window
             .record(RenderFrame::default(), start + Duration::from_millis(1500))
             .is_none());
+        assert_eq!(
+            window.record(RenderFrame::default(), start + Duration::from_secs(2)),
+            Some(RenderWindowSummary {
+                sample_seq: 2,
+                interval_us: 1_000_000,
+                last_raster_us: 0,
+                max_raster_us: 0,
+                frame_count: 2,
+                max_cells_painted: 0,
+                blit_sum: 0,
+                dominant_full_repaint_reason: None,
+                pump: pump_timing::PumpSummary::default(),
+            })
+        );
     }
 
     #[test]

@@ -301,8 +301,7 @@ fn write_private_view(
 
 fn random_view_dir_name() -> std::io::Result<String> {
     let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes)
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    getrandom::fill(&mut bytes).map_err(|error| std::io::Error::other(error.to_string()))?;
     let mut name = String::with_capacity("pmux-save-view-".len() + bytes.len() * 2);
     name.push_str("pmux-save-view-");
     const HEX: &[u8; 16] = b"0123456789abcdef";

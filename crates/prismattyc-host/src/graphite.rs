@@ -5851,3 +5851,25 @@ mod tests {
         assert_ne!(plain, on_end, "drop past + draws the dashed slot");
     }
 }
+
+#[cfg(test)]
+mod p6_sidebar_overlap_tests {
+    use super::{sidebar_hit, Rect, SidebarHit, SidebarHitTargets};
+
+    #[test]
+    fn sidebar_hit_thumb_wins_over_an_overlapping_needs_you_badge() {
+        let rows = [];
+        let needs_you = [(0usize, Rect::new(250, 44, 6, 24))];
+        let actions = [Rect::new(0, 0, 0, 0); 3];
+        let arrange = [Rect::new(0, 0, 0, 0); 3];
+        let targets = SidebarHitTargets {
+            rows: &rows,
+            needs_you: &needs_you,
+            actions: &actions,
+            arrange: &arrange,
+            thumb: Some(Rect::new(250, 44, 6, 146)),
+            toggle: Rect::new(0, 0, 0, 0),
+        };
+        assert_eq!(sidebar_hit(&targets, 251, 46), Some(SidebarHit::Thumb));
+    }
+}

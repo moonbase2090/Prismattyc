@@ -15282,7 +15282,7 @@ mod tests {
         assert_eq!(plane.guest_keyboard_flags_for(pane), 3);
         let (outcome, nbytes) = mail_inject(inject_mail(&mut plane, client, pane, 3));
         assert_eq!(outcome, MailInjectOutcome::Wrote);
-        assert_eq!(nbytes, PMUX_MAIL_NOTIFICATION.len() + b"\x1b[13;1u".len());
+        assert_eq!(nbytes, 28);
         assert_eq!(
             plane
                 .mail_inject_last

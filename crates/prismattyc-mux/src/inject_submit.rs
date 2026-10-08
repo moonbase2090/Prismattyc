@@ -11,7 +11,8 @@
 //! - Muse: use Kitty Enter when the pane has Kitty keyboard flags, else CR.
 //!   A Muse 1.4.3 probe (2026-10-08) found flags `3`, modifyOtherKeys `0`;
 //!   raw CR and bare `CSI 13u` left `PMUX_MAIL` in the composer, while a
-//!   separate write of event-typed Enter (`CSI 13;1u`) submitted it.
+//!   plain-text write followed by event-typed Enter (`CSI 13;1u`) could still
+//!   leave it in the composer. Bracketed paste followed by that Enter submits.
 
 #[cfg(not(windows))]
 use std::collections::{HashSet, VecDeque};
@@ -222,7 +223,15 @@ pub(crate) fn inject_writes_for_mode(agent: InjectAgent, kitty_flags: u16) -> Ve
             first.extend_from_slice(&submit[0]);
             vec![first, submit[1].clone()]
         }
-        InjectAgent::Muse if kitty_flags != 0 => vec![text.to_vec(), submit[0].clone()],
+        InjectAgent::Muse if kitty_flags != 0 => {
+            // Muse submits this token reliably when the paste terminator
+            // establishes an input boundary before the Kitty Enter event.
+            let mut pasted = Vec::with_capacity(text.len() + 12);
+            pasted.extend_from_slice(b"\x1b[200~");
+            pasted.extend_from_slice(text);
+            pasted.extend_from_slice(b"\x1b[201~");
+            vec![pasted, submit[0].clone()]
+        }
         InjectAgent::Claude
         | InjectAgent::Grok
         | InjectAgent::Kiro
@@ -420,7 +429,10 @@ mod tests {
         );
         assert_eq!(
             inject_writes_for_mode(InjectAgent::Muse, flags),
-            vec![b"PMUX_MAIL".to_vec(), b"\x1b[13;1u".to_vec()]
+            vec![
+                b"\x1b[200~PMUX_MAIL\x1b[201~".to_vec(),
+                b"\x1b[13;1u".to_vec()
+            ]
         );
         assert_eq!(
             submit_writes(InjectAgent::Grok, flags),

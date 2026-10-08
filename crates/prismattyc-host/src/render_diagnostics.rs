@@ -168,11 +168,13 @@ fn present_timing_json(present: Option<crate::present_timing::PresentTiming>) ->
         return serde_json::Value::Null;
     };
     serde_json::json!({
+        "backend": present.backend,
         "write_us": present.write_us,
         "commit_us": present.commit_us,
         "dirty_tiles": present.dirty_tiles,
         "changed_tiles": present.changed_tiles,
         "write_bytes": present.write_bytes,
+        "busy_surface_stalls": present.busy_surface_stalls,
     })
 }
 
@@ -676,17 +678,21 @@ mod tests {
     #[test]
     fn present_status_schema_reports_write_commit_and_tile_counts() {
         let status = present_timing_json(Some(crate::present_timing::PresentTiming {
+            backend: "tiles",
             write_us: 17,
             commit_us: 23,
             dirty_tiles: 11,
             changed_tiles: Some(4),
             write_bytes: 65_536,
+            busy_surface_stalls: 0,
         }));
+        assert_eq!(status["backend"], "tiles");
         assert_eq!(status["write_us"], 17);
         assert_eq!(status["commit_us"], 23);
         assert_eq!(status["dirty_tiles"], 11);
         assert_eq!(status["changed_tiles"], 4);
         assert_eq!(status["write_bytes"], 65_536);
+        assert_eq!(status["busy_surface_stalls"], 0);
         assert!(present_timing_json(None).is_null());
     }
 }

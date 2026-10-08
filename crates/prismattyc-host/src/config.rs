@@ -1150,7 +1150,7 @@ mod tests {
     }
 
     #[test]
-    fn macos_present_defaults_to_tiles_and_parses_iosurface() {
+    fn macos_present_defaults_to_tiles_and_accepts_iosurface() {
         assert_eq!(MacosPresent::parse(None), Ok(MacosPresent::Tiles));
         assert_eq!(
             MacosPresent::parse(ConfigFile::default().macos_present.as_deref()),

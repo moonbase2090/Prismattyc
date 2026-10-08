@@ -42,6 +42,8 @@ mod palette;
 mod pane_bell;
 mod paste_job;
 mod pixel_alpha;
+#[cfg(target_os = "macos")]
+mod present_surface;
 #[cfg(any(target_os = "macos", test))]
 mod present_tiles;
 mod present_timing;
@@ -57,6 +59,8 @@ mod restart;
 mod sidebar_resize;
 mod sidebar_width;
 mod snapshot_client;
+#[cfg(any(target_os = "macos", test))]
+mod surface_damage;
 mod terminal_switcher;
 #[cfg(test)]
 mod test_support;
@@ -2121,7 +2125,9 @@ impl PresentBackend {
                     match mac.readback() {
                         Ok(readback) => {
                             if readback != expected {
-                                eprintln!("prismattyc-host: present readback differs from the premultiplied framebuffer");
+                                eprintln!(
+                                    "prismattyc-host: present readback differs from the premultiplied framebuffer"
+                                );
                             }
                             let readback_path = path.with_extension("readback.png");
                             if let Err(error) =
@@ -2718,6 +2724,9 @@ struct App {
     restart_view: Option<PathBuf>,
     #[cfg(target_os = "macos")]
     automatic_update_checks: bool,
+    /// Captured once at startup; changing the config requires a restart.
+    #[cfg(target_os = "macos")]
+    macos_present: config::MacosPresent,
     #[cfg(target_os = "macos")]
     next_automatic_update_check: Option<Instant>,
     #[cfg(target_os = "macos")]
@@ -2751,16 +2760,6 @@ impl App {
                 (None, None)
             }
         };
-        #[cfg(target_os = "macos")]
-        match config::MacosPresent::parse(file_config.macos_present.as_deref()) {
-            Ok(config::MacosPresent::Tiles) => {}
-            Ok(config::MacosPresent::Iosurface) => eprintln!(
-                "prismattyc-host: macos_present = iosurface is not available in this change; using tiles"
-            ),
-            Err(value) => eprintln!(
-                "prismattyc-host: warning: unknown macos_present value {value:?}; using tiles"
-            ),
-        }
         let snapshot_client = snapshot_client::start_snapshot_client(
             file_config.snapshot_client_enabled(),
             wake.clone(),
@@ -2775,6 +2774,17 @@ impl App {
         )));
         #[cfg(target_os = "macos")]
         let automatic_update_checks = file_config.automatic_update_checks.unwrap_or(true);
+        #[cfg(target_os = "macos")]
+        let macos_present = match config::MacosPresent::parse(file_config.macos_present.as_deref())
+        {
+            Ok(mode) => mode,
+            Err(value) => {
+                eprintln!(
+                    "prismattyc-host: warning: unknown macos_present value {value:?}; using tiles"
+                );
+                config::MacosPresent::Tiles
+            }
+        };
         Ok(Self {
             cli,
             file_writer,
@@ -2800,6 +2810,8 @@ impl App {
             restart_view: None,
             #[cfg(target_os = "macos")]
             automatic_update_checks,
+            #[cfg(target_os = "macos")]
+            macos_present,
             #[cfg(target_os = "macos")]
             next_automatic_update_check: automatic_update_checks.then(Instant::now),
             #[cfg(target_os = "macos")]
@@ -3942,11 +3954,16 @@ impl App {
             e2e_initial_window_cells().unwrap_or((80, 24))
         };
         let _ = window.request_inner_size(initial_window_size(&font, geom, init_cols, init_rows));
+        #[cfg(target_os = "macos")]
+        let use_iosurface = self.macos_present == config::MacosPresent::Iosurface;
+        #[cfg(not(target_os = "macos"))]
+        let use_iosurface = false;
         let present = open_present_backend(
             window.clone(),
             self.cli.gpu,
             want_alpha,
             self.file_config.window_blur(),
+            use_iosurface,
         )?;
         let alpha_visual = want_alpha && present.carries_alpha(&window);
         if wants_alpha_visual(&self.file_config) && !alpha_visual {
@@ -4305,7 +4322,7 @@ impl App {
                 .and_then(|present| present.changed_tiles)
                 .map_or_else(|| "-".to_string(), |count| count.to_string());
             eprintln!(
-                "prismattyc-host: render parse={}us damage={}us raster={}us present={}us pump={}us slowest={}:{}us present_write={}us present_commit={}us dirty_tiles={} changed_tiles={} write_bytes={} cells_painted={} rows_scrolled_as_blit={} full_repaint_reason={} full_repaint_guards={}",
+                "prismattyc-host: render parse={}us damage={}us raster={}us present={}us pump={}us slowest={}:{}us present_backend={} present_write={}us present_commit={}us dirty_tiles={} changed_tiles={} write_bytes={} busy_surface_stalls={} cells_painted={} rows_scrolled_as_blit={} full_repaint_reason={} full_repaint_guards={}",
                 parse_us,
                 frame.timing.damage_us,
                 frame.timing.raster_us,
@@ -4313,11 +4330,13 @@ impl App {
                 frame.pump.total_us,
                 frame.pump.slowest_phase,
                 frame.pump.slowest_us,
+                present.backend,
                 present.write_us,
                 present.commit_us,
                 present.dirty_tiles,
                 changed_tiles,
                 present.write_bytes,
+                present.busy_surface_stalls,
                 frame.cells_painted,
                 frame.rows_scrolled_as_blit,
                 frame.full_repaint_reason.map_or("-", FullRepaintReason::as_str),
@@ -4879,6 +4898,7 @@ fn open_present_backend(
     want_gpu: bool,
     want_alpha: bool,
     want_blur: bool,
+    use_iosurface: bool,
 ) -> Result<PresentBackend> {
     #[cfg(target_os = "linux")]
     let wayland = wayland_shm::is_wayland(&window);
@@ -4919,11 +4939,14 @@ fn open_present_backend(
             }
         }
     }
-    let _ = (want_alpha, want_blur);
+    let _ = (want_alpha, want_blur, use_iosurface);
     #[cfg(target_os = "macos")]
     {
-        let mac = mac_present::MacPresent::new(window)?;
-        eprintln!("prismattyc-host: Core Animation present (premultiplied ARGB)");
+        let mac = mac_present::MacPresent::new(window, use_iosurface)?;
+        eprintln!(
+            "prismattyc-host: Core Animation present ({})",
+            mac.backend()
+        );
         Ok(PresentBackend::Mac(Box::new(mac)))
     }
     #[cfg(not(target_os = "macos"))]

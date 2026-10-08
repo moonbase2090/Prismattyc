@@ -13,14 +13,68 @@ use fontdue::{Font, FontSettings};
 
 use crate::config::BarColor;
 use crate::mux::{ChromeGeom, StripHit};
-use crate::raster::{
-    alpha_of, contrast_ratio, mix_rgb, pack_argb, raise_alpha, relative_luminance, unpack_rgb,
-};
+#[cfg(test)]
+use crate::raster::contrast_ratio;
+use crate::raster::{alpha_of, mix_rgb, pack_argb, raise_alpha, unpack_rgb};
+#[cfg(test)]
+const AA: f32 = 4.5;
 use crate::theme::{Theme, ThemeVariant};
 
-pub(crate) type Rgb = [u8; 3];
+pub(crate) type Rgb = graphite_core::Rgb;
+pub(crate) type Tokens = graphite_core::Tokens;
+#[allow(dead_code)]
+pub(crate) const DARK: Tokens = graphite_core::DARK;
+#[allow(dead_code)]
+pub(crate) const LIGHT: Tokens = graphite_core::LIGHT;
 
-/// A Graphite design size in pixels at window scale 1.
+fn core_variant(variant: ThemeVariant) -> graphite_core::ThemeVariant {
+    match variant {
+        ThemeVariant::Dark => graphite_core::ThemeVariant::Dark,
+        ThemeVariant::Light => graphite_core::ThemeVariant::Light,
+    }
+}
+
+fn theme_source(theme: &Theme) -> graphite_core::ThemeSource {
+    graphite_core::ThemeSource {
+        id: theme.id.clone(),
+        variant: core_variant(theme.variant),
+        chrome_bg: theme.chrome_bg,
+        chrome_fg: theme.chrome_fg,
+        default_bg: theme.default_bg,
+        default_fg: theme.default_fg,
+        tab_active_bg: theme.tab_active_bg,
+        pane_backdrop: theme.pane_backdrop,
+        pane_border: theme.pane_border,
+        active_badge: theme.active_badge,
+        unseen_badge: theme.unseen_badge,
+        attention_badge: theme.attention_badge,
+        ansi: theme.ansi,
+    }
+}
+
+fn core_bar(bar: BarColor) -> graphite_core::BarColor {
+    match bar {
+        BarColor::Graphite => graphite_core::BarColor::Graphite,
+        BarColor::Harbor => graphite_core::BarColor::Harbor,
+        BarColor::Moss => graphite_core::BarColor::Moss,
+        BarColor::Plum => graphite_core::BarColor::Plum,
+    }
+}
+
+fn host_bar(bar: graphite_core::BarColor) -> BarColor {
+    match bar {
+        graphite_core::BarColor::Graphite => BarColor::Graphite,
+        graphite_core::BarColor::Harbor => BarColor::Harbor,
+        graphite_core::BarColor::Moss => BarColor::Moss,
+        graphite_core::BarColor::Plum => BarColor::Plum,
+    }
+}
+
+/// Return the core token set for a host theme variant.
+#[allow(dead_code)]
+pub(crate) fn tokens(variant: ThemeVariant) -> &'static Tokens {
+    graphite_core::tokens(core_variant(variant))
+}
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Design(pub f32);
 
@@ -95,388 +149,47 @@ pub(crate) const KEY_TEXT: f32 = 11.0;
 pub(crate) const KEY_PAD_X: f32 = 6.0;
 pub(crate) const KEY_H: f32 = 18.0;
 
+#[allow(dead_code)]
 const fn rgb(hex: u32) -> Rgb {
     [(hex >> 16) as u8, (hex >> 8) as u8, hex as u8]
 }
 
-/// Graphite colours for one theme variant (design brief, "Tokens").
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Tokens {
-    /// Window ground behind the bars and panes.
-    pub ground: Rgb,
-    /// Tabs bar fill and its bottom hairline.
-    pub bar: Rgb,
-    pub bar_line: Rgb,
-    /// The short rule between the Space dropdown and the first tab.
-    pub divider: Rgb,
-    pub tab_active: Rgb,
-    /// Light themes outline the active chip so it reads on a light bar.
-    pub tab_active_line: Option<Rgb>,
-    pub tab_hover: Rgb,
-    pub text: Rgb,
-    pub text_strong: Rgb,
-    pub muted: Rgb,
-    pub tab_text: Rgb,
-    pub working: Rgb,
-    pub unseen: Rgb,
-    pub attention: Rgb,
-    pub on_attention: Rgb,
-    pub idle: Rgb,
-    pub field: Rgb,
-    pub field_line: Rgb,
-    pub key: Rgb,
-    pub key_line: Rgb,
-    pub key_text: Rgb,
-    /// Bottom spaces bar fill, its hairline, and the current-Space chip.
-    pub status_bar: Rgb,
-    pub status_line: Rgb,
-    pub chip_active: Rgb,
-    /// The `·` between status counts.
-    pub separator: Rgb,
-    /// Pane outline, title-row rule, and the focused pane's title row.
-    pub hairline: Rgb,
-    pub title_line: Rgb,
-    pub title_focus: Rgb,
-    pub title_focus_line: Rgb,
-    pub muted_focus: Rgb,
-    /// Handle hover fill behind the header dot and name (issue #109).
-    pub title_hover: Rgb,
-    /// Hover outline around the pane whose handle is hovered.
-    pub hover_outline: Rgb,
-    /// Unseen/mail status as text (the dot colour fails AA on light).
-    pub unseen_text: Rgb,
-    /// Light-cycle vehicle head at the sweep's leading edge.
-    pub cycle_head: Rgb,
-    /// Dialog and overlay card fill; also the pane fill in previews.
-    pub panel: Rgb,
-    /// Which brief column the tokens follow (light bars, outlines, opacity).
-    pub variant: ThemeVariant,
-}
-
-pub(crate) const DARK: Tokens = Tokens {
-    ground: rgb(0x101216),
-    bar: rgb(0x15181d),
-    bar_line: rgb(0x23272e),
-    divider: rgb(0x2b3038),
-    tab_active: rgb(0x252a33),
-    tab_active_line: None,
-    tab_hover: rgb(0x1f232a),
-    text: rgb(0xe6e9ee),
-    text_strong: rgb(0xf2f4f7),
-    muted: rgb(0xa3abb8),
-    tab_text: rgb(0xaeb5c1),
-    working: rgb(0x4cc98a),
-    unseen: rgb(0xf2b84b),
-    attention: rgb(0xff7a6b),
-    on_attention: rgb(0x1a0d0b),
-    idle: rgb(0x6b7380),
-    field: rgb(0x111317),
-    field_line: rgb(0x2b3038),
-    key: rgb(0x1f232a),
-    key_line: rgb(0x2f343d),
-    key_text: rgb(0xc6ccd6),
-    status_bar: rgb(0x0d0f12),
-    status_line: rgb(0x1e2228),
-    chip_active: rgb(0x1f232a),
-    separator: rgb(0x3a404a),
-    hairline: rgb(0x262a32),
-    title_line: rgb(0x22262d),
-    title_focus: rgb(0x1c2330),
-    title_focus_line: rgb(0x2a3140),
-    muted_focus: rgb(0xb4bcc9),
-    title_hover: rgb(0x252a33),
-    hover_outline: rgb(0x3d5f8f),
-    unseen_text: rgb(0xf2b84b),
-    cycle_head: rgb(0xd6e8ff),
-    panel: rgb(0x181b21),
-    variant: ThemeVariant::Dark,
-};
-
-pub(crate) const LIGHT: Tokens = Tokens {
-    ground: rgb(0xe9ecf0),
-    bar: rgb(0xeef0f3),
-    bar_line: rgb(0xd5d9df),
-    divider: rgb(0xd5d9df),
-    tab_active: rgb(0xffffff),
-    // #145: #d5d9df read too faint on the light bar; a stronger rule keeps
-    // the white active chip legible at a glance. Dark stays unoutlined.
-    tab_active_line: Some(rgb(0xaab2bd)),
-    tab_hover: rgb(0xe2e6eb),
-    text: rgb(0x1f2329),
-    text_strong: rgb(0x1f2329),
-    muted: rgb(0x5b6472),
-    tab_text: rgb(0x4a525e),
-    working: rgb(0x1f8a55),
-    unseen: rgb(0xb87a0a),
-    attention: rgb(0xc2392b),
-    on_attention: rgb(0xffffff),
-    idle: rgb(0x8a929e),
-    field: rgb(0xffffff),
-    field_line: rgb(0xc9ced6),
-    key: rgb(0xf4f6f8),
-    key_line: rgb(0xc9ced6),
-    key_text: rgb(0x1f2329),
-    status_bar: rgb(0xe4e7ec),
-    status_line: rgb(0xd5d9df),
-    chip_active: rgb(0xffffff),
-    separator: rgb(0xa9b0ba),
-    hairline: rgb(0xd5d9df),
-    title_line: rgb(0xe3e6ea),
-    title_focus: rgb(0xeaf1fc),
-    title_focus_line: rgb(0xcddcf3),
-    muted_focus: rgb(0x4a525e),
-    title_hover: rgb(0xe2e6eb),
-    hover_outline: rgb(0x9dbbe8),
-    unseen_text: rgb(0x9a6200),
-    cycle_head: rgb(0x163f80),
-    panel: rgb(0xffffff),
-    variant: ThemeVariant::Light,
-};
-
-/// The brief's token table for `variant`. Painters take [`theme_tokens`] or
-/// [`bar_tokens`] so the chrome follows the selected theme.
-pub(crate) fn tokens(variant: ThemeVariant) -> &'static Tokens {
-    match variant {
-        ThemeVariant::Dark => &DARK,
-        ThemeVariant::Light => &LIGHT,
-    }
-}
-
-/// Themes whose palette is the brief's token table (#145).
-const BRIEF_THEMES: [&str; 3] = ["prismattyc", "prismattyc-dark", "prismattyc-light"];
-
-/// The Prismattyc themes paint the brief tokens exactly, unless
-/// `[theme_overrides]` moved their chrome pair (#160).
 pub(crate) fn uses_brief(theme: &Theme) -> bool {
-    let brief = tokens(theme.variant);
-    BRIEF_THEMES.contains(&theme.id.as_str())
-        && theme.chrome_bg == brief.bar
-        && theme.chrome_fg == brief.text
+    graphite_core::uses_brief(&theme_source(theme))
 }
 
-/// Graphite tokens for the selected theme (#160). The Prismattyc themes keep
-/// the brief; every other theme derives its tokens from its own palette.
+/// Graphite tokens for the selected host theme.
 pub(crate) fn theme_tokens(theme: &Theme) -> Tokens {
-    if uses_brief(theme) {
-        *tokens(theme.variant)
-    } else {
-        derive_tokens(theme)
-    }
+    graphite_core::theme_tokens(&theme_source(theme))
 }
 
-/// `percent` of the way from `from` to `to`.
-fn toward(from: Rgb, to: Rgb, percent: u16) -> Rgb {
-    mix_rgb(from, to, percent.min(100) * 256 / 100)
+#[allow(dead_code)]
+pub(crate) fn bar_fills(bar: BarColor, variant: ThemeVariant) -> (Rgb, Rgb) {
+    graphite_core::bar_fills(core_bar(bar), core_variant(variant))
 }
 
-const BLACK: Rgb = [0, 0, 0];
-const WHITE: Rgb = [0xff, 0xff, 0xff];
-
-/// Move `ink` toward whichever of black or white stands out more on the
-/// first ground until it reaches `target` on every ground (#160). Inks that
-/// already read are returned unchanged.
-fn readable(ink: Rgb, grounds: &[Rgb], target: f32) -> Rgb {
-    let Some(&first) = grounds.first() else {
-        return ink;
-    };
-    let pole = if contrast_ratio(WHITE, first) >= contrast_ratio(BLACK, first) {
-        WHITE
-    } else {
-        BLACK
-    };
-    let worst = |color: Rgb| {
-        grounds
-            .iter()
-            .map(|ground| contrast_ratio(color, *ground))
-            .fold(f32::INFINITY, f32::min)
-    };
-    let mut color = ink;
-    for _ in 0..24 {
-        if worst(color) >= target {
-            break;
-        }
-        color = mix_rgb(color, pole, 24);
-    }
-    color
-}
-
-/// Text on a status fill: the brief's dark ink, or white when that reads
-/// better.
-fn ink_on(fill: Rgb) -> Rgb {
-    let dark = DARK.on_attention;
-    if contrast_ratio(WHITE, fill) >= contrast_ratio(dark, fill) {
-        WHITE
-    } else {
-        dark
-    }
-}
-
-/// Tokens from a theme that is not one of the Prismattyc themes (#160).
-/// Bars come from `chrome_bg`, text from `chrome_fg`, the active chip from
-/// `tab_active_bg`, panes and title rows from `default_bg`, and the status
-/// dots from the theme's badges. The light-cycle head stays brand chrome.
-fn derive_tokens(theme: &Theme) -> Tokens {
-    let variant = theme.variant;
-    let light = variant == ThemeVariant::Light;
-    let (bar, fg) = (theme.chrome_bg, theme.chrome_fg);
-    let (pane, ink) = (theme.default_bg, theme.default_fg);
-    let blue = theme.ansi[4];
-    let status_bar = if light {
-        toward(bar, fg, 5)
-    } else {
-        toward(bar, BLACK, 38)
-    };
-    let tab_hover = crate::theme::hover_rgb(variant, bar, fg, 0.10);
-    let mut tok = Tokens {
-        ground: theme.pane_backdrop,
-        bar,
-        bar_line: toward(bar, fg, if light { 12 } else { 7 }),
-        divider: toward(bar, fg, 12),
-        tab_active: theme.tab_active_bg,
-        tab_active_line: light.then(|| toward(bar, fg, 30)),
-        tab_hover,
-        text: fg,
-        text_strong: if light { fg } else { toward(fg, WHITE, 30) },
-        muted: toward(fg, bar, 30),
-        tab_text: toward(fg, bar, 25),
-        working: theme.active_badge,
-        unseen: theme.unseen_badge,
-        attention: theme.attention_badge,
-        on_attention: ink_on(theme.attention_badge),
-        idle: toward(fg, bar, 50),
-        field: pane,
-        field_line: toward(bar, fg, 16),
-        key: tab_hover,
-        key_line: toward(bar, fg, 18),
-        key_text: toward(fg, bar, 12),
-        status_bar,
-        status_line: toward(status_bar, fg, 7),
-        chip_active: crate::theme::derived_tab_active_bg(variant, status_bar, fg),
-        separator: toward(bar, fg, 25),
-        hairline: theme.pane_border,
-        title_line: toward(pane, ink, 8),
-        title_focus: toward(pane, blue, 10),
-        title_focus_line: toward(pane, blue, 22),
-        muted_focus: toward(ink, pane, 22),
-        title_hover: crate::theme::hover_rgb(variant, pane, ink, 0.10),
-        hover_outline: toward(pane, blue, 40),
-        unseen_text: theme.unseen_badge,
-        cycle_head: tokens(variant).cycle_head,
-        panel: pane,
-        variant,
-    };
-    keep_text_readable(&mut tok);
-    tok
-}
-
-/// WCAG AA for body text.
-const AA: f32 = 4.5;
-
-/// Nudge derived text toward readability on the fills it sits on (#160
-/// item 6). AA is the aim; a theme whose pair cannot reach it still gets the
-/// closest ink 24 steps allow. Body text never ends up weaker than the muted
-/// text beside it.
-fn keep_text_readable(tok: &mut Tokens) {
-    let bars = [tok.bar, tok.status_bar, tok.tab_active, tok.chip_active];
-    tok.muted = readable(tok.muted, &[tok.bar, tok.tab_active, tok.field], AA);
-    tok.tab_text = readable(tok.tab_text, &bars, AA);
-    let floor = AA
-        .max(contrast_ratio(tok.muted, tok.bar))
-        .max(contrast_ratio(tok.tab_text, tok.bar));
-    tok.text = readable(tok.text, &bars, floor);
-    tok.text_strong = readable(tok.text_strong, &bars, floor);
-    tok.key_text = readable(tok.key_text, &[tok.key], AA);
-    tok.muted_focus = readable(tok.muted_focus, &[tok.title_focus], AA);
-    tok.unseen_text = readable(tok.unseen_text, &[tok.bar, tok.status_bar], AA);
-    tok.on_attention = readable(tok.on_attention, &[tok.attention], AA);
-}
-
-/// Tabs bar / spaces bar fills per preset (design brief, item 5). `Plum`
-/// renders Sand on light themes.
-fn bar_fills(bar: BarColor, variant: ThemeVariant) -> (Rgb, Rgb) {
-    use ThemeVariant::{Dark, Light};
-    match (bar, variant) {
-        (BarColor::Graphite, Dark) => (rgb(0x15181d), rgb(0x0d0f12)),
-        (BarColor::Graphite, Light) => (rgb(0xeef0f3), rgb(0xe4e7ec)),
-        (BarColor::Harbor, Dark) => (rgb(0x152131), rgb(0x0e1722)),
-        (BarColor::Harbor, Light) => (rgb(0xe3edf8), rgb(0xd6e3f2)),
-        (BarColor::Moss, Dark) => (rgb(0x17221b), rgb(0x0f1712)),
-        (BarColor::Moss, Light) => (rgb(0xe4f0e7), rgb(0xd7e7db)),
-        (BarColor::Plum, Dark) => (rgb(0x211a27), rgb(0x17121c)),
-        (BarColor::Plum, Light) => (rgb(0xf4ece0), rgb(0xebe0cf)),
-    }
-}
-
-/// Theme tokens with an explicit `bar_color` preset applied to both bars.
-/// `None` (no `bar_color` in the config) keeps the theme's own bars (#160);
-/// on the Prismattyc themes that is the Graphite preset.
+/// Theme tokens with an explicit bar preset applied to both bars.
 pub(crate) fn bar_tokens(theme: &Theme, bar: Option<BarColor>) -> Tokens {
-    let mut tok = theme_tokens(theme);
-    if let Some(bar) = bar {
-        let (tabs, status) = bar_fills(bar, theme.variant);
-        tok.bar = tabs;
-        tok.status_bar = status;
-        if !uses_brief(theme) {
-            keep_text_readable(&mut tok);
-        }
-    }
-    tok
+    graphite_core::bar_tokens(&theme_source(theme), bar.map(core_bar))
 }
 
-/// Display name for the bar preset cycle. `None` follows the theme.
+/// Display name for the bar preset cycle.
 pub(crate) fn bar_color_name(bar: Option<BarColor>) -> &'static str {
-    match bar {
-        None => "Theme",
-        Some(BarColor::Graphite) => "Graphite",
-        Some(BarColor::Harbor) => "Harbor",
-        Some(BarColor::Moss) => "Moss",
-        Some(BarColor::Plum) => "Plum",
-    }
+    graphite_core::bar_color_name(bar.map(core_bar))
 }
 
-/// Next preset in the Ctrl+Shift+B cycle (wraps). `forward = false` steps
-/// back. `theme_bars` adds the theme's own bars to the cycle; the Prismattyc
-/// themes leave it out because their bars are the Graphite preset.
+/// Step through the host bar-color cycle while delegating behavior to core.
 pub(crate) fn step_bar_color(
     bar: Option<BarColor>,
     forward: bool,
     theme_bars: bool,
 ) -> Option<BarColor> {
-    use BarColor::{Graphite, Harbor, Moss, Plum};
-    const ORDER: [Option<BarColor>; 5] =
-        [None, Some(Graphite), Some(Harbor), Some(Moss), Some(Plum)];
-    let order = if theme_bars { &ORDER[..] } else { &ORDER[1..] };
-    let current = bar.or(if theme_bars { None } else { Some(Graphite) });
-    let index = order
-        .iter()
-        .position(|preset| *preset == current)
-        .unwrap_or(0);
-    let next = if forward {
-        index.saturating_add(1) % order.len()
-    } else {
-        index.saturating_add(order.len().saturating_sub(1)) % order.len()
-    };
-    order[next]
+    graphite_core::step_bar_color(bar.map(core_bar), forward, theme_bars).map(host_bar)
 }
 
-/// The accent is the focus colour, darkened on light bars until it keeps the
-/// 3:1 a non-text indicator needs against the bar. The direction follows the
-/// bar's luminance relative to its text (not token identity), so `bar_color`
-/// presets darken and lighten the same way the base tokens do.
+/// Keep the host accent entry point while using the core implementation.
 pub(crate) fn accent(tok: &Tokens, focus: Rgb) -> Rgb {
-    let mut color = focus;
-    let light_bar = relative_luminance(tok.bar) > relative_luminance(tok.text);
-    for _ in 0..24 {
-        if contrast_ratio(color, tok.bar) >= 3.0 {
-            break;
-        }
-        color = if light_bar {
-            mix_rgb(color, [0, 0, 0], 24)
-        } else {
-            mix_rgb(color, [255, 255, 255], 24)
-        };
-    }
-    color
+    graphite_core::accent(tok, focus)
 }
 
 // ---------------------------------------------------------------------------
@@ -6157,7 +5870,7 @@ mod tests {
         assert_eq!(tok.working, japanesque.active_badge);
         assert_eq!(tok.unseen, japanesque.unseen_badge);
         assert_eq!(tok.attention, japanesque.attention_badge);
-        assert_eq!(tok.variant, ThemeVariant::Dark);
+        assert_eq!(tok.variant, graphite_core::ThemeVariant::Dark);
         assert_eq!(tok.tab_active_line, None);
         assert_eq!(tok.cycle_head, DARK.cycle_head, "light cycle stays brand");
         assert_eq!(tok.bar, rgb(0x181818));
@@ -6169,7 +5882,7 @@ mod tests {
 
         let light = builtin("hive-muted-professional-light");
         let tok = theme_tokens(light);
-        assert_eq!(tok.variant, ThemeVariant::Light);
+        assert_eq!(tok.variant, graphite_core::ThemeVariant::Light);
         assert_eq!(tok.bar, light.chrome_bg);
         assert_eq!(tok.panel, light.default_bg);
         assert!(tok.tab_active_line.is_some(), "light chips keep an outline");

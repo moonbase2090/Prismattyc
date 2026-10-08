@@ -221,16 +221,7 @@ fn navigate(host: &mut HostState, entry: &Entry) -> Result<()> {
     }
     local_views::activate_owner(host, entry.owner.clone())?;
     if let Some(session) = &entry.session {
-        if !host
-            .mux
-            .tab_panes()
-            .iter()
-            .flat_map(|(_, panes)| panes)
-            .any(|pane| {
-                host.mux.attach_session_of(*pane) == Some(session)
-                    && host.mux.remote_pane_id(*pane) == entry.remote
-            })
-        {
+        if host.mux.pane_for_remote(session, entry.remote).is_none() {
             let names = attach_log::session_names();
             let name = names.get(session).context("session disappeared")?.clone();
             let program = find_mux_bin().to_string_lossy().into_owned();
@@ -255,14 +246,8 @@ fn navigate(host: &mut HostState, entry: &Entry) -> Result<()> {
         .local
         .map(|(pane, _)| pane)
         .or_else(|| {
-            host.mux
-                .tab_panes()
-                .into_iter()
-                .flat_map(|(_, panes)| panes)
-                .find(|pane| {
-                    host.mux.attach_session_of(*pane) == entry.session.as_deref()
-                        && host.mux.remote_pane_id(*pane) == entry.remote
-                })
+            let session = entry.session.as_deref()?;
+            host.mux.pane_for_remote(session, entry.remote)
         })
         .context("terminal is no longer in this view")?;
     let window = host.mux.pane_window(pane).context("tab closed")?;

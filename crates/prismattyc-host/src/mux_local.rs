@@ -171,6 +171,7 @@ impl MuxRuntime {
                                 self.mux.geom.cell_w,
                                 self.mux.geom.cell_h,
                                 self.mux.space_id.as_deref(),
+                                self.mux.async_connect,
                             )?;
                             runtime.keep_local = true;
                             runtime.title = title.clone();

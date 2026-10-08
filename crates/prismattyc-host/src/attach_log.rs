@@ -205,6 +205,15 @@ pub(crate) fn pty_fallback_requested() -> bool {
     )
 }
 
+/// `PRISMATTYC_ASYNC_PANE_CONNECT=1` connects and promotes pmuxd panes on
+/// worker threads instead of blocking the main thread. Off by default.
+pub(crate) fn async_connect_requested() -> bool {
+    matches!(
+        std::env::var("PRISMATTYC_ASYNC_PANE_CONNECT").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
 /// Session key of a host attach spawn (PT-111 / PT-306).
 ///
 /// Matches `pmux attach --session-id ID`, `pmux attach --session NAME`,

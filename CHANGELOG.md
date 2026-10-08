@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.3.15] - 2026-10-08
+## [0.3.21] - 2026-10-08
 
 ### Since 0.3.9
 
@@ -17,6 +17,21 @@ removes the session from its saved Space, and tears down the live session.
 Direct attachments without a saved Space are stopped by stable session ID, and
 failed cleanup is retried. Failed attached clients remain available as
 reopenable placeholders.
+
+## [0.3.16] - 2026-10-07
+
+### Since 0.3.3
+
+The ten dark Hive themes are a little lighter. The terminal ground, chrome,
+overlays, pane borders, and selection each move up 6 points of OKLCH
+lightness with hue and chroma held, so the steps between surfaces stay the
+same. High-Contrast Dual moves 3 points. Muted Professional moves 4.5 points,
+which keeps the shared ANSI red at 4.5:1 on its ground. ANSI black follows
+the ground, and bright black keeps its earlier contrast. Chrome text moves up
+in the five themes where it would otherwise fall below 4.5:1. Body text,
+chrome text, selection text, the cursor, and every ANSI color other than
+black and bright black stay at 4.5:1 or more. High-Contrast Dual's body text
+stays near 16:1. The three light Hive themes do not change.
 
 ## [0.3.3] - 2026-10-07
 

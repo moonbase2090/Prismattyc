@@ -2512,30 +2512,12 @@ fn paint_side_footer(
 // paint it. The column width is the user's, and a collapse draws the icon
 // strip instead of the tree.
 
-/// Tree row height.
-const SIDEBAR_ROW_H: f32 = 24.0;
 /// Tree and footer text size.
 const SIDEBAR_TEXT: f32 = 12.0;
 /// Indent per tree depth.
 const SIDEBAR_INDENT: f32 = 14.0;
 /// Status dot diameter.
 const SIDEBAR_DOT: f32 = 6.0;
-/// Footer action row height.
-const SIDEBAR_ACTION_H: f32 = 30.0;
-/// Footer top padding.
-const SIDEBAR_FOOT_PAD: f32 = 8.0;
-/// Scrollbar thumb width and minimum height.
-const SIDEBAR_THUMB_W: f32 = 6.0;
-const SIDEBAR_THUMB_MIN: f32 = 24.0;
-/// Arrangement buttons in the header over the panes, in button order. The
-/// buttons paint icons (#162); these names are the tooltips and the
-/// accessible names.
-pub(crate) const SIDEBAR_ARRANGE: [&str; 3] = ["Single", "Split", "Grid"];
-/// Arrange control: a fixed track of three equal icon segments, so the
-/// control never resizes when the selection changes.
-const ARRANGE_SEG_W: f32 = 32.0;
-const ARRANGE_H: f32 = 28.0;
-const ARRANGE_INSET: f32 = 2.0;
 /// Icon box inside a segment, and its interior tint.
 const ARRANGE_ICON_W: f32 = 16.0;
 const ARRANGE_ICON_H: f32 = 12.0;
@@ -2544,9 +2526,6 @@ const ARRANGE_TINT: f32 = 0.3;
 const TOOLTIP_H: f32 = 22.0;
 const TOOLTIP_PAD_X: f32 = 8.0;
 const TOOLTIP_GAP: f32 = 6.0;
-/// Footer actions at the bottom of the tree column.
-pub(crate) const SIDEBAR_ACTIONS: [&str; 3] = ["+ New tab", "+ New space", "Commands"];
-
 pub(crate) type SidebarRow<'a> = graphite_core::SidebarRow<'a>;
 
 pub(crate) type SidebarLayout = graphite_core::SidebarLayout;
@@ -2559,94 +2538,6 @@ pub(crate) fn sidebar_layout(
     graphite_core::sidebar_layout(chrome.scale_milli, column, row_count, scroll)
 }
 
-#[allow(dead_code)]
-fn host_sidebar_layout(
-    chrome: ChromeGeom,
-    column: Rect,
-    row_count: usize,
-    scroll: usize,
-) -> SidebarLayout {
-    let head_h = TABS_BAR_H.px(chrome);
-    let action_h = chrome.px(SIDEBAR_ACTION_H);
-    let foot_h = action_h
-        .saturating_mul(SIDEBAR_ACTIONS.len())
-        .saturating_add(chrome.px(SIDEBAR_FOOT_PAD));
-    let head = Rect::new(column.x, column.y, column.w, head_h.min(column.h));
-    let foot_h = foot_h.min(column.h.saturating_sub(head.h));
-    let foot = Rect::new(
-        column.x,
-        column.y.saturating_add(column.h).saturating_sub(foot_h),
-        column.w,
-        foot_h,
-    );
-    let list = Rect::new(
-        column.x,
-        head.y.saturating_add(head.h),
-        column.w,
-        foot.y.saturating_sub(head.y.saturating_add(head.h)),
-    );
-    let row_h = chrome.px(SIDEBAR_ROW_H).max(1);
-    let visible = list.h / row_h;
-    let max_scroll = row_count.saturating_sub(visible.max(1));
-    let first_row = scroll.min(max_scroll).min(row_count);
-    let mut rows = Vec::new();
-    for index in 0..row_count.saturating_sub(first_row) {
-        let y = list.y.saturating_add(index.saturating_mul(row_h));
-        if y.saturating_add(row_h) > list.y.saturating_add(list.h) {
-            break;
-        }
-        rows.push(Rect::new(list.x, y, list.w, row_h));
-    }
-    let total_h = row_count.saturating_mul(row_h);
-    let thumb = if total_h > list.h && list.h > 0 {
-        let thumb_h = ((list.h as f32 * list.h as f32) / total_h as f32)
-            .ceil()
-            .max(chrome.px(SIDEBAR_THUMB_MIN) as f32) as usize;
-        let thumb_h = thumb_h.min(list.h);
-        let travel = list.h.saturating_sub(thumb_h);
-        let thumb_y = if max_scroll == 0 {
-            list.y
-        } else {
-            list.y.saturating_add(
-                travel
-                    .saturating_mul(first_row)
-                    .checked_div(max_scroll)
-                    .unwrap_or(0),
-            )
-        };
-        let thumb_w = chrome.px(SIDEBAR_THUMB_W).min(list.w);
-        Some(Rect::new(
-            list.x.saturating_add(list.w).saturating_sub(thumb_w),
-            thumb_y,
-            thumb_w,
-            thumb_h,
-        ))
-    } else {
-        None
-    };
-    let mut actions = [Rect::new(0, 0, 0, 0); 3];
-    for (index, slot) in actions.iter_mut().enumerate() {
-        *slot = Rect::new(
-            foot.x,
-            foot.y
-                .saturating_add(chrome.px(SIDEBAR_FOOT_PAD))
-                .saturating_add(index.saturating_mul(action_h)),
-            foot.w,
-            action_h.min(foot.h.saturating_sub(chrome.px(SIDEBAR_FOOT_PAD))),
-        );
-    }
-    SidebarLayout {
-        column,
-        head,
-        list,
-        rows,
-        thumb,
-        foot,
-        actions,
-        first_row,
-    }
-}
-
 /// Pair each painted sidebar slot with the corresponding absolute row index.
 /// `sidebar_layout` starts its slots at `first_row` when the list is scrolled.
 pub(crate) fn sidebar_rows_in_view<'a, T>(
@@ -2656,70 +2547,10 @@ pub(crate) fn sidebar_rows_in_view<'a, T>(
     graphite_core::sidebar_rows_in_view(rows, layout)
 }
 
-#[allow(dead_code)]
-fn host_sidebar_rows_in_view<'a, T>(
-    rows: &'a [T],
-    layout: &SidebarLayout,
-) -> Vec<(usize, &'a T, Rect)> {
-    rows.iter()
-        .enumerate()
-        .skip(layout.first_row)
-        .take(layout.rows.len())
-        .zip(layout.rows.iter().copied())
-        .map(|((index, row), slot)| (index, row, slot))
-        .collect()
-}
-
 pub(crate) type SidebarHeaderLayout = graphite_core::SidebarHeaderLayout;
 
 pub(crate) fn sidebar_header_layout(chrome: ChromeGeom, span: Rect) -> SidebarHeaderLayout {
     graphite_core::sidebar_header_layout(chrome.scale_milli, span)
-}
-
-#[allow(dead_code)]
-fn host_sidebar_header_layout(chrome: ChromeGeom, span: Rect) -> SidebarHeaderLayout {
-    let inset = chrome.px(ARRANGE_INSET);
-    let seg_w = chrome.px(ARRANGE_SEG_W);
-    let track_h = chrome.px(ARRANGE_H);
-    let track_w = seg_w
-        .saturating_mul(SIDEBAR_ARRANGE.len())
-        .saturating_add(inset.saturating_mul(2));
-    let track = Rect::new(
-        span.right()
-            .saturating_sub(chrome.px(12.0))
-            .saturating_sub(track_w),
-        span.y.saturating_add(span.h.saturating_sub(track_h) / 2),
-        track_w,
-        track_h,
-    );
-    let mut buttons = [Rect::new(0, 0, 0, 0); 3];
-    for (index, slot) in buttons.iter_mut().enumerate() {
-        *slot = Rect::new(
-            track
-                .x
-                .saturating_add(inset)
-                .saturating_add(index.saturating_mul(seg_w)),
-            track.y.saturating_add(inset),
-            seg_w,
-            track_h.saturating_sub(inset.saturating_mul(2)),
-        );
-    }
-    let crumb_x = span.x.saturating_add(chrome.px(12.0));
-    let crumb = Rect::new(
-        crumb_x,
-        span.y,
-        track
-            .x
-            .saturating_sub(chrome.px(8.0))
-            .saturating_sub(crumb_x),
-        span.h,
-    );
-    SidebarHeaderLayout {
-        span,
-        crumb,
-        track,
-        buttons,
-    }
 }
 
 /// The tree column: title band, rows, footer actions, scrollbar thumb.
@@ -3446,30 +3277,56 @@ pub(crate) fn sidebar_hit(
     px: usize,
     py: usize,
 ) -> Option<SidebarHit> {
-    let core_hit = graphite_core::sidebar_hit(
-        targets.rows,
-        targets.actions,
-        targets.arrange,
+    let empty_actions = [Rect::new(0, 0, 0, 0); 3];
+    let empty_arrange = [Rect::new(0, 0, 0, 0); 3];
+    let chrome_hit = graphite_core::sidebar_hit(
+        &[],
+        &empty_actions,
+        &empty_arrange,
         targets.thumb,
         targets.toggle,
         px,
         py,
-    )
-    .map(|hit| match hit {
-        graphite_core::SidebarHit::Row(row) => SidebarHit::Row(row),
-        graphite_core::SidebarHit::Action(action) => SidebarHit::Action(action),
-        graphite_core::SidebarHit::Arrange(button) => SidebarHit::Arrange(button),
-        graphite_core::SidebarHit::Toggle => SidebarHit::Toggle,
-        graphite_core::SidebarHit::Thumb => SidebarHit::Thumb,
-    });
-    if core_hit.is_some() {
-        return core_hit;
+    );
+    if let Some(hit) = chrome_hit {
+        return Some(match hit {
+            graphite_core::SidebarHit::Toggle => SidebarHit::Toggle,
+            graphite_core::SidebarHit::Thumb => SidebarHit::Thumb,
+            _ => unreachable!(),
+        });
     }
-    targets
+    if let Some((row, _)) = targets
         .needs_you
         .iter()
         .find(|(_, rect)| rect.contains(px, py))
-        .map(|(row, _)| SidebarHit::NeedsYou(*row))
+    {
+        return Some(SidebarHit::NeedsYou(*row));
+    }
+    if let Some(graphite_core::SidebarHit::Row(row)) = graphite_core::sidebar_hit(
+        targets.rows,
+        &empty_actions,
+        &empty_arrange,
+        None,
+        Rect::new(0, 0, 0, 0),
+        px,
+        py,
+    ) {
+        return Some(SidebarHit::Row(row));
+    }
+    graphite_core::sidebar_hit(
+        &[],
+        targets.actions,
+        targets.arrange,
+        None,
+        Rect::new(0, 0, 0, 0),
+        px,
+        py,
+    )
+    .map(|hit| match hit {
+        graphite_core::SidebarHit::Action(action) => SidebarHit::Action(action),
+        graphite_core::SidebarHit::Arrange(button) => SidebarHit::Arrange(button),
+        _ => unreachable!(),
+    })
 }
 
 /// Largest first-row offset for `row_count` rows in a column `column_h`
@@ -4286,7 +4143,7 @@ mod sidebar_render_tests {
                     chrome,
                     tok,
                     Rect::new(header.buttons[2].x, 0, header.buttons[2].w, span.h),
-                    SIDEBAR_ARRANGE[2],
+                    graphite_core::SIDEBAR_ARRANGE[2],
                 );
                 write_still_png(
                     &dir.join(format!("sidebar-{name}-{still}.png")),

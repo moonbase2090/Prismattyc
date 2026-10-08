@@ -428,7 +428,7 @@ pub fn inventory(dirs: &Dirs) -> Vec<Item> {
 
     // --- Windows preview install tree + Start Menu shortcut. ---
     if let Some(data) = &dirs.data_home {
-        // %LOCALAPPDATA%\Programs\Prismattyc holds versioned preview installs.
+        // %LOCALAPPDATA%\Programs\Prismattyc holds the per-user MSI and versioned preview installs.
         push(
             data.join("Programs").join("Prismattyc"),
             Category::Binaries,

@@ -92,19 +92,6 @@ pub(crate) const SIDEBAR_W: Design = Design(256.0);
 pub(crate) const PANE_HEADER_H: f32 = 28.0;
 /// Bottom (or top) spaces bar height.
 pub(crate) const RAIL_H: Design = Design(30.0);
-/// Left/right column width at the default `space_rail_width_cols` (18).
-/// Other widths scale by `cols / 18` so the resize grip still saves that key.
-pub(crate) const SIDE_RAIL_W: Design = Design(220.0);
-/// `space_rail_width_cols` value that maps to [`SIDE_RAIL_W`].
-pub(crate) const SIDE_RAIL_DEFAULT_COLS: f32 = 18.0;
-const SIDE_HEADER_H: f32 = 44.0;
-const SIDE_FOOTER_H: f32 = 56.0;
-const SIDE_CHIP_H: f32 = 44.0;
-const SIDE_CHIP_H_COMPACT: f32 = 28.0;
-const SIDE_GAP: f32 = 4.0;
-const SIDE_PAD: f32 = 8.0;
-const SIDE_THUMB_W: f32 = 8.0;
-const SIDE_THUMB_MIN_H: f32 = 18.0;
 /// Window edge, pane gap, and pane padding defaults when the user has not
 /// set `window_padding_px`, `pane_gap_px`, or `pane_padding_px`.
 pub(crate) const WINDOW_PAD: Design = Design(8.0);
@@ -1922,53 +1909,40 @@ fn envelope(buffer: &mut [u32], stride: usize, x: f32, cy: f32, w: f32, width: f
 
 /// Pixel width of a Graphite left/right column for `space_rail_width_cols`.
 pub(crate) fn side_rail_px(chrome: ChromeGeom, cols: usize) -> usize {
-    let cols = (cols as f32).clamp(8.0, 60.0);
-    chrome.px(SIDE_RAIL_W.0 * cols / SIDE_RAIL_DEFAULT_COLS)
+    graphite_core::side_rail_px(chrome.scale_milli, cols)
 }
 
 pub(crate) fn side_header_px(chrome: ChromeGeom) -> usize {
-    chrome.px(SIDE_HEADER_H)
+    graphite_core::side_header_px(chrome.scale_milli)
 }
 
 pub(crate) fn side_footer_px(chrome: ChromeGeom) -> usize {
-    chrome.px(SIDE_FOOTER_H)
+    graphite_core::side_footer_px(chrome.scale_milli)
 }
 
 pub(crate) fn side_chip_px(chrome: ChromeGeom, pane_names: bool) -> usize {
-    chrome.px(if pane_names {
-        SIDE_CHIP_H
-    } else {
-        SIDE_CHIP_H_COMPACT
-    })
+    graphite_core::side_chip_px(chrome.scale_milli, pane_names)
 }
 
 pub(crate) fn side_gap_px(chrome: ChromeGeom) -> usize {
-    chrome.px(SIDE_GAP)
+    graphite_core::side_gap_px(chrome.scale_milli)
 }
 
 pub(crate) fn side_pad_px(chrome: ChromeGeom) -> usize {
-    chrome.px(SIDE_PAD)
+    graphite_core::side_pad_px(chrome.scale_milli)
 }
 
 pub(crate) fn side_thumb_px(chrome: ChromeGeom) -> usize {
-    chrome.px(SIDE_THUMB_W).max(1)
+    graphite_core::side_thumb_px(chrome.scale_milli)
 }
 
 pub(crate) fn side_thumb_min_px(chrome: ChromeGeom) -> usize {
-    chrome.px(SIDE_THUMB_MIN_H).max(1)
+    graphite_core::side_thumb_min_px(chrome.scale_milli)
 }
 
 /// Columns saved by a drag to `px`, so 220 design px lands on 18 columns.
 pub(crate) fn side_cols_for_px(px: f64, scale_milli: u32, max_cols: usize) -> usize {
-    let scale = f64::from(scale_milli.max(1)) / 1000.0;
-    let per = f64::from(SIDE_RAIL_W.0) / f64::from(SIDE_RAIL_DEFAULT_COLS) * scale;
-    let cols = if per <= f64::EPSILON {
-        SIDE_RAIL_DEFAULT_COLS as usize
-    } else {
-        (px / per).round() as usize
-    };
-    let max_cols = max_cols.clamp(8, 60);
-    cols.clamp(8, max_cols)
+    graphite_core::side_cols_for_px(px, scale_milli, max_cols)
 }
 
 /// Chip width for a Space name. The right `RAIL_CLOSE_W` is the close
@@ -2312,7 +2286,7 @@ pub(crate) fn paint_side_rail(buffer: &mut [u32], stride: usize, paint: &SideRai
         }
     }
     let s = |d: f32| d * paint.chrome.scale_milli as f32 / 1000.0;
-    let pad = paint.chrome.px(SIDE_PAD);
+    let pad = side_pad_px(paint.chrome);
     let title_right = paint
         .plus
         .map(|plus| plus.x.saturating_sub(pad))
@@ -2485,12 +2459,12 @@ fn paint_side_footer(
     let s = |d: f32| d * paint.chrome.scale_milli as f32 / 1000.0;
     let tok = paint.tok;
     let px = s(RAIL_TEXT);
-    let pad = paint.chrome.px(SIDE_PAD) as f32;
+    let pad = side_pad_px(paint.chrome) as f32;
     let left = paint.column.x as f32 + pad;
     let right = paint
         .column
         .right()
-        .saturating_sub(paint.chrome.px(SIDE_PAD));
+        .saturating_sub(side_pad_px(paint.chrome));
     let footer_h = paint.column.y + paint.column.h - footer_top;
     let mut rows: Vec<(Option<Rgb>, String)> = Vec::new();
     if paint.working > 0 {

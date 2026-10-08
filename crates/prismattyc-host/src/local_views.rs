@@ -15,6 +15,7 @@ pub(super) struct Parked {
 #[derive(Default)]
 pub(super) struct Views {
     pub(super) parked: HashMap<Option<String>, Parked>,
+    drain_cursor: usize,
     last_poll: Option<Instant>,
     loaded: bool,
     pending: HashMap<Option<String>, mux::LocalRecipe>,
@@ -98,11 +99,26 @@ pub(super) struct ExitedAttach {
     pub(super) session: String,
 }
 
-pub(super) fn drain(host: &mut HostState) -> (bool, Vec<ExitedAttach>) {
+pub(super) fn drain(host: &mut HostState, deadline: Instant) -> (bool, Vec<ExitedAttach>) {
     let mut more = false;
     let mut exited = Vec::new();
-    host.local_views.parked.retain(|_, view| {
-        more |= view.mux.drain_all().1;
+    let mut owners: Vec<_> = host.local_views.parked.keys().cloned().collect();
+    owners.sort();
+    if !owners.is_empty() {
+        let start = host.local_views.drain_cursor % owners.len();
+        owners.rotate_left(start);
+        host.local_views.drain_cursor = (start + 1) % owners.len();
+    }
+    let mut keep = HashSet::new();
+    for owner in owners {
+        let Some(view) = host.local_views.parked.get_mut(&owner) else {
+            continue;
+        };
+        if Instant::now() < deadline {
+            more |= view.mux.drain_all_until(deadline).1;
+        } else {
+            more = true;
+        }
         for (pane, session_id, session) in view.mux.take_exited_attach_sessions() {
             view.mux.clear_attach_session(pane);
             view.observed.remove(&session_id);
@@ -114,8 +130,13 @@ pub(super) fn drain(host: &mut HostState) -> (bool, Vec<ExitedAttach>) {
         view.mux.take_pending_bells();
         view.mux.take_pending_attentions();
         view.mux.take_pending_toasts();
-        has_local(&view.mux) && !view.mux.all_children_exited()
-    });
+        if has_local(&view.mux) && !view.mux.all_children_exited() {
+            keep.insert(owner);
+        }
+    }
+    host.local_views
+        .parked
+        .retain(|owner, _| keep.contains(owner));
     (more, exited)
 }
 

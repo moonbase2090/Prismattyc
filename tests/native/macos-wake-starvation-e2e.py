@@ -54,13 +54,6 @@ env = {
 daemon = host = None
 
 
-def run_cli(*words, check=True):
-    return subprocess.run(
-        [str(bins / "pmux"), *map(str, words)], env=env, check=check,
-        capture_output=True, text=True, timeout=10,
-    )
-
-
 def wait_for(predicate, label, timeout=20):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -79,23 +72,6 @@ def snapshot():
         connection.connect(str(socket_path))
         connection.sendall(b'{"version":1,"request_id":1,"type":"snapshot"}\n')
         return json.loads(connection.makefile().readline())["response"]["snapshot"]
-
-
-def render_status():
-    result = run_cli("render-status", "--json", check=False)
-    if result.returncode:
-        return None
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return None
-
-
-def raster_time(status):
-    try:
-        return status["windows"][0]["last_raster"]["unix_ms"]
-    except (KeyError, IndexError, TypeError):
-        return None
 
 
 def painted_frames():
@@ -117,33 +93,33 @@ def stop(process):
 try:
     daemon_log = (out / "daemon.log").open("w")
     daemon = subprocess.Popen(
-        [str(bins / "pmuxd"), "--socket", str(socket_path), "--", "/bin/zsh", "-f"],
+        [str(bins / "pmuxd"), "--socket", str(socket_path), "--", "/bin/zsh", "-f", "-c", "exec yes"],
         env=env, stdout=daemon_log, stderr=daemon_log,
     )
     wait_for(lambda: socket_path.exists(), "private daemon")
     session = wait_for(lambda: snapshot()["sessions"][0], "default session")
-    pane = session["windows"][0]["panes"][0]["id"]
+    assert session["windows"][0]["panes"], "default session has no PTY pane"
     host_log = (out / "host.log").open("w")
     host = subprocess.Popen(
         [str(bins / "prismattyc-host"), "--no-splash", "--attach-session", str(session["id"])],
         env=env, stdout=host_log, stderr=host_log,
     )
 
-    def ready():
-        status = render_status()
-        if status and status.get("host_pid") == host.pid and raster_time(status) is not None:
-            return status
-        return None
-
-    wait_for(ready, "host first paint")
-    time.sleep(3)
-    run_cli("pane-write", str(pane), "--text", "yes", "--submit", "enter", "--json")
+    # yes runs before the host attaches, so the first attached reader sees a
+    # continuously readable PTY rather than a one-time command wake.
+    wait_for(lambda: host.poll() is None, "host startup")
+    time.sleep(5)
     started_frames = painted_frames()
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         time.sleep(0.25)
     new_frames = painted_frames() - started_frames
-    assert new_frames > 0, "no RedrawRequested paint during 20 seconds of sustained PTY output"
+    # The poll-drain spike reached 24.6 fps under this workload. Requiring
+    # 20 fps leaves scheduling margin while catching a loop that starves most
+    # redraw opportunities under the same continuous Wake stream.
+    assert new_frames >= 400, (
+        f"expected at least 400 paints (20 fps) in 20 seconds of output; saw {new_frames}"
+    )
     (out / "result.json").write_text(json.dumps({
         "status": "PASS",
         "frames_during_output_window": new_frames,

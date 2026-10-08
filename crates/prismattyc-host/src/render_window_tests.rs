@@ -2190,7 +2190,7 @@ pub(super) fn session_naming_in_private_window() {
             assert!(!local_views::switch(host, Some("owner-two".into())).unwrap());
             assert!(!local_views::has_local(&host.mux));
             assert_eq!(host.mux.pane_count(), 1);
-            local_views::drain(host);
+            local_views::drain(host, Instant::now() + Duration::from_secs(1));
             assert!(local_views::switch(host, Some("owner-one".into())).unwrap());
             assert_eq!(host.mux.tab_layouts(), layout);
             assert_eq!(host.mux.focused_id(), focused);

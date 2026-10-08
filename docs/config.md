@@ -53,6 +53,10 @@ it does not allocate the comparison buffer.
 8 ms, accepts 1–1000 ms, and hot-reloads; remaining output is drained on a later
 event-loop turn.
 
+`macos_present` is read at startup and defaults to `tiles`. Non-macOS builds
+ignore it. If you select `iosurface` before the backend is present, the host
+warns and uses `tiles`.
+
 ```toml
 # Prismattyc host config. Every key is at its default.
 # Edit in place. CLI flags and PRISMATTYC_* env vars still win.
@@ -62,6 +66,8 @@ event-loop turn.
 # theme = "prismattyc"
 # Render timings and counters. off|osd|log|both.
 render_timer = "off"
+# macOS present backend; startup only; ignored on other platforms. tiles|iosurface.
+macos_present = "tiles"
 # Log every render frame when render_timer includes log; use for benches only. true|false.
 render_timer_log_every_frame = false
 # Maximum PTY parsing time per event-loop pump; hot-reloaded. 1-1000 ms.

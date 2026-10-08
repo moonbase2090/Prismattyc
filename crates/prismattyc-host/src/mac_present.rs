@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use objc2::{rc::Retained, MainThreadMarker};
+use objc2::{rc::Retained, runtime::AnyObject, MainThreadMarker};
 use objc2_app_kit::NSView;
 use objc2_core_foundation::{CFData, CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
@@ -67,6 +67,7 @@ impl MacPresent {
         layer.setGeometryFlipped(true);
         // Keep terminal content above backdrop subviews added by hot reload.
         layer.setZPosition(1.0);
+        // SAFETY: this framework constant is valid for the process lifetime.
         layer.setContentsGravity(unsafe { kCAGravityTopLeft });
         root_layer.addSublayer(&layer);
         CATransaction::commit();
@@ -116,6 +117,67 @@ impl MacPresent {
 
     pub fn pixels_mut(&mut self) -> &mut [u32] {
         &mut self.pixels
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn pixels(&self) -> &[u32] {
+        &self.pixels
+    }
+
+    /// Flush the Core Animation transaction before inspecting assigned images.
+    pub(crate) fn wait_presented(&self) -> Result<()> {
+        CATransaction::flush();
+        Ok(())
+    }
+
+    /// Reconstruct the visible premultiplied framebuffer from the tile images.
+    pub(crate) fn readback(&self) -> Result<Vec<u32>> {
+        self.wait_presented()?;
+        if !self.retained || self.tile_layers.len() != self.tile_rects.len() {
+            bail!("presenter has no complete committed frame to read back");
+        }
+        let pixel_count = self
+            .width
+            .checked_mul(self.height)
+            .context("Mac readback size overflow")?;
+        let mut pixels = vec![0; pixel_count];
+        for (index, (layer, rect)) in self.tile_layers.iter().zip(&self.tile_rects).enumerate() {
+            // SAFETY: the presenter assigns a retained CGImage to every tile layer.
+            let contents = unsafe { layer.contents() }
+                .with_context(|| format!("tile layer {index} has no image contents"))?;
+            // SAFETY: `contents` is the CGImage installed by `alpha_image` above.
+            let image: &CGImage = unsafe { &*((&*contents as *const AnyObject).cast()) };
+            let provider = CGImage::data_provider(Some(image))
+                .with_context(|| format!("tile layer {index} has no data provider"))?;
+            let data = CGDataProvider::data(Some(&provider))
+                .with_context(|| format!("tile layer {index} has no provider data"))?;
+            let row_bytes = rect
+                .width
+                .checked_mul(std::mem::size_of::<u32>())
+                .context("Mac readback row overflow")?;
+            if CGImage::bytes_per_row(Some(image)) != row_bytes {
+                bail!("tile layer {index} has an unexpected row stride");
+            }
+            let expected_bytes = row_bytes
+                .checked_mul(rect.height)
+                .context("Mac readback tile size overflow")?;
+            if data.len() != expected_bytes {
+                bail!(
+                    "tile layer {index} data length {} does not match expected {expected_bytes}",
+                    data.len()
+                );
+            }
+            let bytes = data.to_vec();
+            for tile_y in 0..rect.height {
+                for tile_x in 0..rect.width {
+                    let source = tile_y * row_bytes + tile_x * 4;
+                    let pixel = u32::from_le_bytes(bytes[source..source + 4].try_into().unwrap());
+                    let destination = (rect.y + tile_y) * self.width + rect.x + tile_x;
+                    pixels[destination] = pixel;
+                }
+            }
+        }
+        Ok(pixels)
     }
 
     pub fn present(
@@ -182,6 +244,7 @@ impl MacPresent {
                 layer.setOpaque(false);
                 layer.setAnchorPoint(CGPoint::new(0.0, 0.0));
                 layer.setGeometryFlipped(true);
+                // SAFETY: this framework constant is valid for the process lifetime.
                 layer.setContentsGravity(unsafe { kCAGravityTopLeft });
                 self.layer.addSublayer(&layer);
                 self.tile_layers.push(layer);

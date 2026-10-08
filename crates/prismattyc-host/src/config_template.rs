@@ -83,6 +83,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         value: ConfigValue::String("off"),
     },
     ConfigKey {
+        name: "macos_present",
+        group: ConfigGroup::Appearance,
+        doc: "macOS present backend; startup only; ignored on other platforms",
+        range: "tiles|iosurface",
+        value: ConfigValue::String("tiles"),
+    },
+    ConfigKey {
         name: "render_timer_log_every_frame",
         group: ConfigGroup::Appearance,
         doc: "Log every render frame when render_timer includes log; use for benches only",
@@ -1105,6 +1112,7 @@ mod tests {
     const CONFIG_FILE_FIELDS: &[&str] = &[
         "theme",
         "render_timer",
+        "macos_present",
         "render_timer_log_every_frame",
         "pty_drain_budget_ms",
         "async_file_writes",

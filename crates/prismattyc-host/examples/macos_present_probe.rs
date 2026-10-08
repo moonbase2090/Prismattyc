@@ -84,18 +84,43 @@ fn main() {
                 size.width as usize * size.height as usize * std::mem::size_of::<u32>()
             );
             assert_eq!(full_present.changed_tiles, None);
+            let mut expected_readback =
+                vec![0x8020_1008; size.width as usize * size.height as usize];
+            expected_readback[0] = 0xff11_e795;
+            let readback = present.readback().unwrap();
+            assert_pixels_equal(
+                &readback,
+                &expected_readback,
+                "tile image readback must match the premultiplied framebuffer",
+            );
+            if let Some(path) = std::env::var_os("PRISMATTYC_DUMP_PRESENT") {
+                let path = std::path::PathBuf::from(path);
+                write_present_png(&path, &expected_readback, size.width, size.height).unwrap();
+                write_present_png(
+                    &path.with_extension("readback.png"),
+                    &readback,
+                    size.width,
+                    size.height,
+                )
+                .unwrap();
+                println!("PASS tile dump and readback PNGs written for SHA-256 comparison");
+            }
 
             let RawWindowHandle::AppKit(handle) = window.window_handle().unwrap().as_raw() else {
                 panic!("expected AppKit handle");
             };
             // SAFETY: the retained winit window owns these main-thread objects.
             let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+            // SAFETY: the view is live on the main thread and responds to `window`.
             let native: *mut AnyObject = unsafe { msg_send![view, window] };
+            // SAFETY: the native window is the live NSWindow returned above.
             let opaque: bool = unsafe { msg_send![native, isOpaque] };
+            // SAFETY: the native window is the live NSWindow returned above.
             let alpha: f64 = unsafe { msg_send![native, alphaValue] };
             assert!(!opaque);
             assert_eq!(alpha, 1.0, "text must not use whole-window opacity");
             let root = view.layer().unwrap();
+            // SAFETY: the main-thread root layer owns its sublayers.
             let layers = unsafe { root.sublayers() }.unwrap();
             let layer = layers
                 .iter()
@@ -103,6 +128,7 @@ fn main() {
                 .unwrap();
             assert!(!layer.isOpaque());
             assert_eq!(layer.frame(), root.bounds());
+            // SAFETY: the presenter layer owns its tile sublayers.
             let tiles = unsafe { layer.sublayers() }.unwrap();
             let rects = present_tiles::tiles(size.width as usize, size.height as usize);
             assert_eq!(tiles.len(), rects.len());
@@ -132,6 +158,7 @@ fn main() {
                 }
                 assert_eq!(tile.contentsScale(), scale);
                 assert!(!tile.isOpaque());
+                // SAFETY: the presenter assigns a live CGImage contents object.
                 let contents = unsafe { tile.contents() }.unwrap();
                 // SAFETY: the presenter assigns a CGImage to each tile.
                 let image: &CGImage = unsafe { &*((&*contents as *const AnyObject).cast()) };
@@ -152,11 +179,20 @@ fn main() {
                 .unwrap();
             assert_eq!(partial_present.dirty_tiles, 1);
             assert_eq!(partial_present.changed_tiles, None);
+            expected_readback[0] = 0xffab_cdef;
+            let readback = present.readback().unwrap();
+            assert_pixels_equal(
+                &readback,
+                &expected_readback,
+                "partial tile presentation must preserve untouched premultiplied pixels",
+            );
             for (index, (tile, prior)) in tiles.iter().zip(&prior_contents).enumerate() {
+                // SAFETY: each tile retains the CGImage assigned by the presenter.
                 let contents = unsafe { tile.contents() }.unwrap();
                 let same = std::ptr::eq(&*contents, &**prior);
                 assert_eq!(same, index != 0, "only the damaged tile replaces its image");
             }
+            // SAFETY: the retained contents originated from the presenter's CGImage.
             let prior: &CGImage = unsafe { &*((&*prior_contents[0] as *const AnyObject).cast()) };
             let provider = CGImage::data_provider(Some(prior)).unwrap();
             let bytes = CGDataProvider::data(Some(&provider)).unwrap().to_vec();
@@ -204,6 +240,54 @@ fn main() {
         .unwrap()
         .run_app(&mut Probe::default())
         .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+fn assert_pixels_equal(actual: &[u32], expected: &[u32], message: &str) {
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{message}: pixel count differs"
+    );
+    if let Some((index, (actual, expected))) = actual
+        .iter()
+        .zip(expected)
+        .enumerate()
+        .find(|(_, (actual, expected))| actual != expected)
+    {
+        panic!("{message}: pixel {index} was {actual:#010x}, expected {expected:#010x}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn write_present_png(
+    path: &std::path::Path,
+    pixels: &[u32],
+    width: u32,
+    height: u32,
+) -> anyhow::Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::File::create(path)?;
+    let mut encoder = png::Encoder::new(file, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    let mut rgba = Vec::with_capacity(pixels.len() * 4);
+    for pixel in pixels {
+        rgba.extend_from_slice(&[
+            (pixel >> 16) as u8,
+            (pixel >> 8) as u8,
+            *pixel as u8,
+            (pixel >> 24) as u8,
+        ]);
+    }
+    writer.write_image_data(&rgba)?;
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]

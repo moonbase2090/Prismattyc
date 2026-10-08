@@ -95,7 +95,7 @@ def sessions():
     return snapshot()["sessions"]
 
 
-def host_ready(host_pid, session_name):
+def host_ready(host_pid, session_id):
     result = run_cli("render-status", "--json", check=False)
     if result.returncode:
         return False
@@ -104,7 +104,7 @@ def host_ready(host_pid, session_name):
         window = status["windows"][0]
     except (ValueError, KeyError, IndexError):
         return False
-    return status.get("host_pid") == host_pid and window.get("focused_session") == session_name
+    return status.get("host_pid") == host_pid and window.get("focused_session") == str(session_id)
 
 
 def stop_process(process):
@@ -152,7 +152,7 @@ try:
         stderr=host_log,
     )
     wait_for(lambda: host.poll() is None, "attached host startup")
-    wait_for(lambda: host_ready(host.pid, session["name"]), "real attach readiness")
+    wait_for(lambda: host_ready(host.pid, session["id"]), "real attach readiness")
 
     command_link.unlink()
     run_cli("send", str(pane), "exit 0", "--enter", "--force")

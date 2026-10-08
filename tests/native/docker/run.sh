@@ -356,6 +356,7 @@ case "${1:-}" in
   spaces-e2e-wayland) spaces_e2e_wayland ;;
   walkthrough-caption-e2e) walkthrough_caption_e2e ;;
   render-bench) render_bench ;;
+  paste-e2e) paste_e2e ;;
   clean-attached-exit-e2e) clean_attached_exit_e2e ;;
   *) echo "Usage: $0 build|spaces-e2e|host-ux-e2e|rail-transparency-e2e|spaces-e2e-wayland|walkthrough-caption-e2e|render-bench|paste-e2e|clean-attached-exit-e2e" >&2; exit 2 ;;
 esac

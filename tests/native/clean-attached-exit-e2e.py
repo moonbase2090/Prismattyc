@@ -28,9 +28,11 @@ out.mkdir(parents=True, exist_ok=False)
 
 runtime = Path(tempfile.mkdtemp(prefix="clean-attached-exit-", dir="/tmp"))
 socket_path = runtime / "pmux.sock"
+command_dir = runtime / "bin"
+command_dir.mkdir()
 config = out / "config.toml"
 config.write_text("font_px = 14.0\nwindow_opacity = 1.0\n")
-command_link = runtime / "pmux-switch"
+command_link = command_dir / "pmux"
 
 base_env = {
     key: value
@@ -93,6 +95,18 @@ def sessions():
     return snapshot()["sessions"]
 
 
+def host_ready(host_pid, session_name):
+    result = run_cli("render-status", "--json", check=False)
+    if result.returncode:
+        return False
+    try:
+        status = json.loads(result.stdout)
+        window = status["windows"][0]
+    except (ValueError, KeyError, IndexError):
+        return False
+    return status.get("host_pid") == host_pid and window.get("focused_session") == session_name
+
+
 def stop_process(process):
     if process is None or process.poll() is not None:
         return
@@ -138,7 +152,7 @@ try:
         stderr=host_log,
     )
     wait_for(lambda: host.poll() is None, "attached host startup")
-    time.sleep(1)
+    wait_for(lambda: host_ready(host.pid, session["name"]), "real attach readiness")
 
     command_link.unlink()
     run_cli("send", str(pane), "exit 0", "--enter", "--force")

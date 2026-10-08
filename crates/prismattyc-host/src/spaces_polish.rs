@@ -282,6 +282,26 @@ fn decide(
     }
 }
 
+/// True when a live member of this Space is neither attached nor a session
+/// this window has already applied. Autosave must not release that member.
+fn view_omits_unobserved_member(host: &HostState) -> bool {
+    let Some(owner) = host.mux.space_id.as_deref() else {
+        return false;
+    };
+    let Some(snapshot) = snapshot_client::snapshot_for_periodic(host.snapshot_client.as_deref())
+    else {
+        return false;
+    };
+    snapshot.sessions.iter().any(|session| {
+        if session.space_id.as_deref() != Some(owner) {
+            return false;
+        }
+        let id = session.id.to_string();
+        let attached = host.attach_pane_sessions.values().any(|live| live == &id);
+        !attached && !host.observed_space_sessions.contains(&id)
+    })
+}
+
 pub(super) fn poll(host: &mut HostState) {
     let now = Instant::now();
     let blocked = host.restore_prompt.is_some() || host.space_opens.blocks_persist();
@@ -322,7 +342,10 @@ pub(super) fn poll(host: &mut HostState) {
         },
     };
     let mut status = step.status;
-    if step.write && claim_save(&mut host.space_polish) {
+    // A pane move assigns the session to this Space before the window
+    // attaches it. The daemon id is not in `observed_space_sessions` yet.
+    // Saving the current view would release that session.
+    if step.write && !view_omits_unobserved_member(host) && claim_save(&mut host.space_polish) {
         persist_attach_layout_from_live(host);
         let view_path = host.attach_layout_path.clone();
         let queued = host.space_client.submit_save(space_client::SaveJob {

@@ -9257,9 +9257,9 @@ fn refresh_space_views(host: &mut HostState) {
     drain_space_client(host);
     let now = Instant::now();
     let refresh_busy = host.space_client.refresh_busy();
-    let refresh_due = !host
+    let refresh_due = host
         .last_space_refresh
-        .is_some_and(|last| now.duration_since(last) < CACHE_POLL_HEARTBEAT);
+        .is_none_or(|last| now.duration_since(last) >= CACHE_POLL_HEARTBEAT);
     // A save on this pump persists the pre-regroup view. `pmux space save`
     // then releases a pane that already belongs to the other Space. The
     // clock is read once so a slow poll cannot also queue that refresh.

@@ -185,6 +185,36 @@ class VersionCheckTests(unittest.TestCase):
         finally:
             shutil.rmtree(repo, ignore_errors=True)
 
+    def test_malformed_release_name_with_version_bump_fails(self) -> None:
+        repo = fresh_repo()
+        try:
+            git(repo, "checkout", "-qb", "release/feature-v0.3.30")
+            write_repo(repo, version=NEW_VERSION)
+            commit_all(repo, "bump")
+            code, output = run_check(
+                repo, branch="release/feature-v0.3.30"
+            )
+            self.assertNotEqual(
+                code, 0, f"malformed release name bump must fail\n{output}"
+            )
+            self.assertIn(NEW_VERSION, output)
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+
+    def test_bare_v_release_name_bump_fails(self) -> None:
+        repo = fresh_repo()
+        try:
+            git(repo, "checkout", "-qb", "release/v0.3.30")
+            write_repo(repo, version=NEW_VERSION)
+            commit_all(repo, "bump")
+            code, output = run_check(repo, branch="release/v0.3.30")
+            self.assertNotEqual(
+                code, 0, f"undocumented release name bump must fail\n{output}"
+            )
+            self.assertIn(NEW_VERSION, output)
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+
     def test_unversioned_release_branch_without_bump_passes(self) -> None:
         repo = fresh_repo()
         try:

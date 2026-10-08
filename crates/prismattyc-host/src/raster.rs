@@ -2653,12 +2653,7 @@ pub fn rasterize_scrollbar(
 }
 
 pub(crate) fn mix_rgb(bg: [u8; 3], fg: [u8; 3], fg_weight: u16) -> [u8; 3] {
-    let bg_weight = 256u16.saturating_sub(fg_weight);
-    [
-        ((u16::from(bg[0]) * bg_weight + u16::from(fg[0]) * fg_weight) / 256) as u8,
-        ((u16::from(bg[1]) * bg_weight + u16::from(fg[1]) * fg_weight) / 256) as u8,
-        ((u16::from(bg[2]) * bg_weight + u16::from(fg[2]) * fg_weight) / 256) as u8,
-    ]
+    graphite_core::mix_rgb(bg, fg, fg_weight)
 }
 
 /// Bottom-right inverse ` N/M ` chip while a pane is in history view (
@@ -5690,22 +5685,12 @@ const ACTIVE_CHIP_LIFT: u16 = 26;
 
 /// WCAG relative luminance of an sRGB colour.
 pub fn relative_luminance(rgb: [u8; 3]) -> f32 {
-    let lin = |c: u8| {
-        let c = f32::from(c) / 255.0;
-        if c <= 0.039_28 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2])
+    graphite_core::relative_luminance(rgb)
 }
 
 /// WCAG contrast ratio between two colours (1.0..=21.0).
 pub fn contrast_ratio(a: [u8; 3], b: [u8; 3]) -> f32 {
-    let (la, lb) = (relative_luminance(a), relative_luminance(b));
-    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
-    (hi + 0.05) / (lo + 0.05)
+    graphite_core::contrast_ratio(a, b)
 }
 
 fn tab_marker_rgb_with_theme(theme: &Theme, focus_rgb: [u8; 3]) -> [u8; 3] {

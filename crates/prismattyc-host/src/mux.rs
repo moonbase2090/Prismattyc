@@ -5301,17 +5301,22 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn budgeted_round_robin_delivers_hidden_pane_bell_and_unseen_badge() {
-        let args = vec!["-c".to_string(), "printf '\\007'; exec sleep 2".to_string()];
+        let args = vec![
+            "-c".to_string(),
+            "exec /usr/bin/python3 -c 'import os, time; os.write(1, b\"x\" * 65536); time.sleep(2)'".to_string(),
+        ];
         let mut runtime = MuxRuntime::spawn("/bin/sh", &args, 80, 24).unwrap();
-        let bell_pane = runtime.focused_id();
-        runtime
-            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+        let busy_pane = runtime.focused_id();
+        let bell_args = vec!["-c".to_string(), "printf '\\007'; exec sleep 2".to_string()];
+        let bell_pane = runtime
+            .split_focused("/bin/sh", &bell_args, Axis::Horizontal, 0.5)
             .unwrap();
+        assert!(runtime.focus(busy_pane));
         assert_ne!(runtime.focused_id(), bell_pane);
 
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
-            let _ = runtime.drain_all_until(Instant::now() + Duration::from_millis(1));
+            let _ = runtime.drain_all_until(Instant::now() + Duration::from_millis(8));
             let bells = runtime.take_pending_bells();
             if bells.contains(&bell_pane) {
                 assert!(runtime.panes[&bell_pane].unseen_output);

@@ -1,8 +1,13 @@
 """Tests for the per-user MSI version map, authoring, and checksum refresh."""
 import hashlib
+import importlib.util
+import io
 import json
+import sys
 import tempfile
 import unittest
+import unittest.mock
+from contextlib import redirect_stderr
 from pathlib import Path
 
 from windows_msi import (
@@ -57,6 +62,8 @@ class WindowsMsiTests(unittest.TestCase):
         for name in ("MPL-2.0.txt", "NOTICE.txt", "OMARCHY-LICENSE.txt"):
             self.assertIn(name, source)
         self.assertIn("reset-windows-update-pointer.ps1", source)
+        self.assertIn("[SystemFolder]WindowsPowerShell\\v1.0\\powershell.exe", source)
+        self.assertNotIn('ExeCommand="powershell.exe', source)
         self.assertIn("windows-current.json", reset)
         for forbidden in ("Stop-Process", "taskkill", "kill"):
             self.assertNotIn(forbidden, reset)
@@ -68,6 +75,33 @@ class WindowsMsiTests(unittest.TestCase):
                 with self.subTest(workflow=relative, name=name):
                     self.assertIn(name, text)
             self.assertIn("Windows code signing skipped: Azure Artifact Signing settings are absent.", text)
+
+    def test_package_script_refuses_non_windows_before_building(self):
+        if sys.platform == "win32":
+            self.skipTest("native Windows continues into the real package")
+        spec = importlib.util.spec_from_file_location(
+            "package_windows_under_test",
+            ROOT / "scripts/release/package-windows.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        argv = [
+            "package-windows.py",
+            "--version",
+            "0.3.29",
+            "--target",
+            "x86_64-pc-windows-msvc",
+            "--bin-dir",
+            str(ROOT),
+            "--out",
+            str(ROOT / "build" / "windows-msi-test-should-not-exist"),
+        ]
+        stderr = io.StringIO()
+        with unittest.mock.patch.object(sys, "argv", argv), redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as caught:
+                module.main()
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("native Windows", stderr.getvalue())
 
     def test_icon_is_a_windows_icon(self):
         header = (ROOT / "scripts/release/prismattyc.ico").read_bytes()[:6]

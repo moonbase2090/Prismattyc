@@ -104,7 +104,6 @@ def main():
         with zipfile.ZipFile(args.out / f'prismattyc-v{args.version}-{args.target}.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(p for p in root.rglob('*') if p.is_file()):
                 archive.write(path, path.relative_to(root.parent).as_posix())
-        import sys
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from windows_msi import build_msi, msi_product_version
         msi_name = f'prismattyc-v{args.version}-{args.target}.msi'

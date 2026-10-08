@@ -3834,6 +3834,24 @@ impl MuxRuntime {
     }
 
     fn drain_all_with_deadline(&mut self, deadline: Option<Instant>) -> (bool, bool) {
+        let Some(deadline) = deadline else {
+            return self.drain_all_pass(None);
+        };
+
+        let mut dirty = false;
+        loop {
+            if Instant::now() >= deadline {
+                return (dirty, true);
+            }
+            let (pass_dirty, more) = self.drain_all_pass(Some(deadline));
+            dirty |= pass_dirty;
+            if !more {
+                return (dirty, false);
+            }
+        }
+    }
+
+    fn drain_all_pass(&mut self, deadline: Option<Instant>) -> (bool, bool) {
         let mut pane_ids: Vec<_> = self.panes.keys().copied().collect();
         if deadline.is_some() {
             pane_ids.sort_by_key(|pane| pane.get());

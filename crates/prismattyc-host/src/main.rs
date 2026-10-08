@@ -3878,7 +3878,7 @@ impl App {
         let (init_cols, init_rows) = if show_splash {
             splash::window_cells(80, 24)
         } else {
-            (80, 24)
+            e2e_initial_window_cells().unwrap_or((80, 24))
         };
         let _ = window.request_inner_size(initial_window_size(&font, geom, init_cols, init_rows));
         let present = open_present_backend(
@@ -15695,6 +15695,16 @@ fn initial_window_size(
             .saturating_add(geom.chrome_top())
             .saturating_add(geom.chrome_bottom())) as u32,
     )
+}
+
+/// Set a larger initial grid in native event-loop regressions without changing
+/// the normal 80×24 launch size.
+fn e2e_initial_window_cells() -> Option<(usize, usize)> {
+    let raw = std::env::var("PRISMATTYC_E2E_WINDOW_CELLS").ok()?;
+    let (cols, rows) = raw.split_once('x')?;
+    let cols = cols.parse::<usize>().ok()?;
+    let rows = rows.parse::<usize>().ok()?;
+    (cols > 0 && cols <= 400 && rows > 0 && rows <= 120).then_some((cols, rows))
 }
 
 fn cell_at_position(

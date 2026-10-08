@@ -32,7 +32,10 @@ assert out == Path("/private/tmp/pwake") or Path("/private/tmp/pwake") in out.pa
 runtime = Path(tempfile.mkdtemp(prefix="wake-test-", dir="/private/tmp/pwake"))
 socket_path = runtime / "pmux.sock"
 config = out / "config.toml"
-config.write_text('font_px = 16.0\nsplash = false\nrender_timer = "log"\n')
+config.write_text(
+    'font_px = 16.0\nsplash = false\nrender_timer = "log"\n'
+    'render_timer_log_every_frame = true\n'
+)
 for directory in ("home", "config", "data", "state"):
     (out / directory).mkdir(exist_ok=True)
 env = {
@@ -46,6 +49,7 @@ env = {
     "XDG_STATE_HOME": str(out / "state"),
     "PRISMATTYC_CONFIG": str(config),
     "PRISMATTYC_NO_AGENT_SKILLS": "1",
+    "PRISMATTYC_E2E_WINDOW_CELLS": "200x60",
 }
 daemon = host = None
 
@@ -94,6 +98,11 @@ def raster_time(status):
         return None
 
 
+def painted_frames():
+    log = (out / "host.log").read_text()
+    return sum("prismattyc-host: render parse=" in line for line in log.splitlines())
+
+
 def stop(process):
     if process is None or process.poll() is not None:
         return
@@ -126,21 +135,18 @@ try:
             return status
         return None
 
-    before = wait_for(ready, "host first paint")
-    initial_raster_ms = raster_time(before)
+    wait_for(ready, "host first paint")
+    time.sleep(3)
     run_cli("pane-write", str(pane), "--text", "yes", "--submit", "enter", "--json")
-
-    def painted_after_output():
-        status = render_status()
-        updated = raster_time(status) if status else None
-        return status if updated is not None and updated > initial_raster_ms else None
-
-    after = wait_for(painted_after_output, "RedrawRequested during sustained PTY output", timeout=20)
-    assert raster_time(after) > initial_raster_ms
+    started_frames = painted_frames()
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        time.sleep(0.25)
+    new_frames = painted_frames() - started_frames
+    assert new_frames > 0, "no RedrawRequested paint during 20 seconds of sustained PTY output"
     (out / "result.json").write_text(json.dumps({
         "status": "PASS",
-        "initial_raster_unix_ms": initial_raster_ms,
-        "raster_unix_ms_after_output": raster_time(after),
+        "frames_during_output_window": new_frames,
         "assertion": "real macOS host raster advanced after sustained PTY output",
     }, indent=2))
     print("MACOS_WAKE_STARVATION_E2E_COMPLETE: PASS", flush=True)

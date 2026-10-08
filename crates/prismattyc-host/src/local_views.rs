@@ -355,10 +355,7 @@ pub(super) fn persist_and_restore(host: &mut HostState, closing: bool) {
     let Some(path) = recipe_path(host) else {
         return;
     };
-    let Ok(config) = config::load(&config::config_path()) else {
-        return;
-    };
-    let enabled = config.restore_blank_terminals.unwrap_or(false);
+    let enabled = host.restore_blank_terminals;
     if !enabled {
         host.local_views.pending.clear();
         host.local_views.loaded = false;

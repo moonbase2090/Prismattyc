@@ -236,7 +236,7 @@ fn verify_space_rename(app: &mut App, event_loop: &ActiveEventLoop, source: Wind
     replacement.tabs.clear();
     prismattyc_mux::save_space(&spaces_dir(), "a", &replacement).unwrap();
     follower.last_space_refresh = None;
-    refresh_space_views(&mut follower);
+    refresh_space_views_settled(&mut follower);
     test_support::wait_for_attach_write(&follower);
     assert_eq!(follower.space_rail.current.as_deref(), Some("renamed-a"));
     assert_eq!(follower.mux.space_id, owner);
@@ -250,7 +250,7 @@ fn verify_space_rename(app: &mut App, event_loop: &ActiveEventLoop, source: Wind
         std::thread::sleep(Duration::from_millis(10));
     }
     follower.last_space_refresh = None;
-    refresh_space_views(&mut follower);
+    refresh_space_views_settled(&mut follower);
     assert_eq!(
         follower.space_rail.live_pane_names["renamed-a"],
         vec!["a-1"]
@@ -260,7 +260,7 @@ fn verify_space_rename(app: &mut App, event_loop: &ActiveEventLoop, source: Wind
     command(&["space", "rename", "renamed-a", "a"]);
     for host in [app.windows.get_mut(&source).unwrap(), &mut follower] {
         host.last_space_refresh = None;
-        refresh_space_views(host);
+        refresh_space_views_settled(host);
         assert_eq!(host.space_rail.current.as_deref(), Some("a"));
         assert_eq!(host.mux.space_id, owner);
     }
@@ -391,7 +391,7 @@ impl ApplicationHandler<UserAction> for Proof {
                     let host = self.app.windows.get_mut(id).unwrap();
                     refresh_rail(host);
                     host.last_space_refresh = None;
-                    refresh_space_views(host);
+                    refresh_space_views_settled(host);
                     assert_eq!(host.space_rail.live_pane_names["a"], vec!["a-1"]);
                     assert_eq!(host.space_rail.live_pane_names["b"], vec!["b-1"]);
                     capture(
@@ -619,7 +619,7 @@ impl ApplicationHandler<UserAction> for Proof {
                     &session,
                 ]);
                 a.last_space_refresh = None;
-                refresh_space_views(a);
+                refresh_space_views_settled(a);
                 assert!(
                     a.space_rail.live_pane_names["a"].contains(&"short-lived-worker".to_string())
                 );
@@ -630,7 +630,7 @@ impl ApplicationHandler<UserAction> for Proof {
             7 if self.changed.elapsed() >= Duration::from_millis(1300) => {
                 for host in self.app.windows.values_mut() {
                     host.last_space_refresh = None;
-                    refresh_space_views(host);
+                    refresh_space_views_settled(host);
                     assert!(!host.space_rail.live_pane_names["a"]
                         .contains(&"short-lived-worker".to_string()));
                 }
@@ -1052,7 +1052,7 @@ impl ApplicationHandler<UserAction> for StaleDetachProof {
             SystemTime::UNIX_EPOCH,
         );
         host.last_space_refresh = None;
-        refresh_space_views(host);
+        refresh_space_views_settled(host);
         assert_eq!(
             host.attach_pane_sessions, sessions,
             "a cache from before the attachment must not detach it"
@@ -1066,7 +1066,7 @@ impl ApplicationHandler<UserAction> for StaleDetachProof {
             SystemTime::now() + Duration::from_secs(5),
         );
         host.last_space_refresh = None;
-        refresh_space_views(host);
+        refresh_space_views_settled(host);
         assert!(
             sessions
                 .keys()
@@ -1210,7 +1210,7 @@ fn pump_host(app: &mut App, window: WindowId) {
     let _ = host.mux.drain_all();
     poll_host_attach_tabs(host);
     host.last_space_refresh = None;
-    refresh_space_views(host);
+    refresh_space_views_settled(host);
 }
 
 /// Ack `space open` without refreshing. Refresh rewrites a dead binding's

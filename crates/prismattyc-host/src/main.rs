@@ -70,6 +70,7 @@ mod restore_prompt;
 mod rich;
 mod session_prompt;
 mod sidebar;
+mod space_client;
 mod space_open;
 #[cfg(test)]
 #[cfg(target_os = "linux")]
@@ -1246,6 +1247,15 @@ struct HostState {
     space_reorder_drag: Option<SpaceReorderDrag>,
     /// Opt-in gate for saved-space reordering (#140; trunk ships disabled).
     space_reorder_enabled: bool,
+    /// `[spaces] autosave`, copied from `file_config` so timers do not
+    /// call `config::load`.
+    space_autosave_enabled: bool,
+    /// `restore_blank_terminals`, copied from `file_config`.
+    restore_blank_terminals: bool,
+    /// Blocking Space file and autosave work.
+    space_client: space_client::Client,
+    /// Space file the worker just loaded for the polish poll.
+    space_poll_loaded: Option<(String, Option<prismattyc_mux::SavedSpace>)>,
     /// Divider drag (PT-133): the split whose ratio follows the pointer.
     divider_drag: Option<mux::Divider>,
     /// A resize cursor is showing (over a divider or while dragging one).
@@ -2885,6 +2895,15 @@ impl App {
                 }
                 host.dirty = true;
             }
+            let space_autosave_enabled = self.file_config.space_autosave_enabled();
+            let restore_blank_terminals = self.file_config.restore_blank_terminals.unwrap_or(false);
+            if host.space_autosave_enabled != space_autosave_enabled
+                || host.restore_blank_terminals != restore_blank_terminals
+            {
+                host.space_autosave_enabled = space_autosave_enabled;
+                host.restore_blank_terminals = restore_blank_terminals;
+                host.dirty = true;
+            }
             let render_timer = self.file_config.render_timer();
             let render_timer_log_every_frame = self.file_config.render_timer_log_every_frame();
             if render_timer != prior.render_timer()
@@ -4150,6 +4169,10 @@ impl App {
                 strip_drag: None,
                 space_reorder_drag: None,
                 space_reorder_enabled: self.file_config.space_reorder.unwrap_or(false),
+                space_autosave_enabled: self.file_config.space_autosave_enabled(),
+                restore_blank_terminals: self.file_config.restore_blank_terminals.unwrap_or(false),
+                space_client: space_client::Client::spawn(self.wake.clone()),
+                space_poll_loaded: None,
                 divider_drag: None,
                 divider_cursor: false,
                 attach_layout: None,
@@ -9206,8 +9229,32 @@ fn rebind_restarted_attaches(host: &mut HostState, snapshot: &prismattyc_mux::Sn
 }
 
 /// Refresh all chips and reconcile transfers without reopening launch recipes.
+/// Linux window tests wait until the worker's report is applied.
+/// The cap stops a bug that requeues forever. The inflight count drops
+/// on the worker after it sends, so this loop can observe it.
+#[cfg(all(test, target_os = "linux"))]
+fn refresh_space_views_settled(host: &mut HostState) {
+    // The worker sends the report, then clears `busy`. A call can return
+    // after that send and before this check, so an idle pass drains once
+    // more and only then returns.
+    for _ in 0..8 {
+        refresh_space_views(host);
+        let start = Instant::now();
+        while host.space_client.busy() && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !host.space_client.busy() {
+            refresh_space_views(host);
+            if !host.space_client.busy() {
+                return;
+            }
+        }
+    }
+}
+
 fn refresh_space_views(host: &mut HostState) {
     space_panel::poll(host);
+    drain_space_client(host);
     spaces_polish::poll(host);
     let now = Instant::now();
     if host
@@ -9216,7 +9263,9 @@ fn refresh_space_views(host: &mut HostState) {
     {
         return;
     }
-    host.last_space_refresh = Some(now);
+    if host.space_client.refresh_busy() {
+        return;
+    }
     let observed = snapshot_client::snapshot_observed(host.snapshot_client.as_deref());
     if host
         .mux
@@ -9224,7 +9273,8 @@ fn refresh_space_views(host: &mut HostState) {
     {
         host.dirty = true;
     }
-    let Some((snapshot_at, snapshot)) = observed else {
+    let Some((_, snapshot)) = observed else {
+        host.last_space_refresh = Some(now);
         if !host.space_rail.attention_counts.is_empty() {
             host.space_rail.attention_counts.clear();
             host.dirty = true;
@@ -9256,25 +9306,61 @@ fn refresh_space_views(host: &mut HostState) {
         mark_layout_dirty(host);
         host.dirty = true;
     }
-    let mut pane_names = HashMap::new();
+    host.last_space_refresh = Some(now);
     let requests = space_panel::attention_requests(host);
-    let mut attention_counts = HashMap::new();
-    for name in &host.space_rail.names {
-        if let Ok(space) = load_space(&spaces_dir(), name) {
-            pane_names.insert(name.clone(), space_view::pane_names(&space, &snapshot));
-            let details = prismattyc_mux::space_team::describe(
-                name,
-                &space,
-                Default::default(),
-                Some(&snapshot),
-                &requests,
-                prismattyc_mux::host_render_status::unix_ms(),
-            );
-            if details.sessions_needing_input > 0 {
-                attention_counts.insert(name.clone(), details.sessions_needing_input);
+    let names = host.space_rail.names.clone();
+    let current = host.space_rail.current.clone();
+    let owner = host.mux.space_id.clone();
+    let _ = host.space_client.submit_refresh(space_client::RefreshJob {
+        dir: spaces_dir(),
+        names,
+        snapshot,
+        requests,
+        now_ms: prismattyc_mux::host_render_status::unix_ms(),
+        current,
+        owner,
+    });
+}
+
+fn drain_space_client(host: &mut HostState) {
+    for report in host.space_client.drain() {
+        match report {
+            space_client::Report::Poll { name, space, .. } => {
+                if host.restore_prompt.is_some() || host.space_opens.blocks_persist() {
+                    host.space_poll_loaded = None;
+                } else {
+                    host.space_poll_loaded = Some((name, space));
+                }
             }
+            space_client::Report::Save { ok, .. } => {
+                spaces_polish::note_save_finished(&mut host.space_polish, ok);
+                if ok {
+                    refresh_rail(host);
+                    if let Some(name) = host.space_rail.current.clone() {
+                        set_current_space(host, Some(name));
+                    }
+                    host.space_rail.save_status = "Saved".into();
+                } else {
+                    host.space_rail.save_status = "Save failed".into();
+                }
+                host.dirty = true;
+            }
+            space_client::Report::Refresh {
+                pane_names,
+                attention,
+                resolved,
+                ..
+            } => apply_space_refresh(host, pane_names, attention, resolved),
         }
     }
+}
+
+fn apply_space_refresh(
+    host: &mut HostState,
+    pane_names: HashMap<String, Vec<String>>,
+    attention_counts: HashMap<String, usize>,
+    resolved: Option<(String, prismattyc_mux::SavedSpace)>,
+) {
     if host.space_rail.attention_counts != attention_counts {
         host.space_rail.attention_counts = attention_counts;
         host.dirty = true;
@@ -9286,13 +9372,20 @@ fn refresh_space_views(host: &mut HostState) {
     if host.space_opens.blocks_persist() || host.restore_prompt.is_some() {
         return;
     }
-    let Some(space) = resolve_host_space(host) else {
+    let Some((name, space)) = resolved else {
         return;
     };
-    let Some(name) = host.space_rail.current.clone() else {
-        return;
-    };
+    if host.space_rail.current.as_deref() != Some(name.as_str()) {
+        set_current_space(host, Some(name.clone()));
+        refresh_rail(host);
+        persist_attach_layout_from_live(host);
+    }
     let Some(owner) = space.id.as_deref() else {
+        return;
+    };
+    let Some((snapshot_at, snapshot)) =
+        snapshot_client::snapshot_observed(host.snapshot_client.as_deref())
+    else {
         return;
     };
     host.mux.space_id = Some(owner.to_string());
@@ -9593,12 +9686,6 @@ fn touch_host_attach_ack() {
 /// Save the current Space from this window's live arrangement.
 fn save_space_from_host(host: &mut HostState, name: &str) {
     let _ = save_space_from_host_with(host, name, true);
-}
-
-/// Autosave uses the same write as manual Save and skips the toast.
-/// The rail shows the result. Returns whether the file was replaced.
-fn save_space_from_host_quiet(host: &mut HostState, name: &str) -> bool {
-    save_space_from_host_with(host, name, false)
 }
 
 fn save_space_from_host_with(host: &mut HostState, name: &str, toast: bool) -> bool {

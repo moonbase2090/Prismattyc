@@ -8,7 +8,30 @@ pub(super) struct State {
     pub changed: Option<(String, Instant)>,
     /// The rail has shown "Saving…" for this fingerprint. The next poll writes.
     pub(super) armed: bool,
+    /// Autosave command is on the worker. A second write waits.
+    pub(super) save_in_flight: bool,
     pub undo: Option<PathBuf>,
+}
+
+/// True once, when a decided write may start. A later call stays false
+/// until [`note_save_finished`].
+pub(super) fn claim_save(state: &mut State) -> bool {
+    if state.save_in_flight {
+        return false;
+    }
+    state.save_in_flight = true;
+    true
+}
+
+pub(super) fn note_save_finished(state: &mut State, ok: bool) {
+    state.save_in_flight = false;
+    state.armed = false;
+    if ok {
+        state.failed = false;
+        state.changed = None;
+    } else {
+        state.failed = true;
+    }
 }
 
 /// Minimum gap between arrangement checks.
@@ -268,12 +291,18 @@ pub(super) fn poll(host: &mut HostState) {
     let Some(name) = host.space_rail.current.clone() else {
         return;
     };
-    let autosave = config::load(&config::config_path())
-        .map(|config| config.space_autosave_enabled())
-        .unwrap_or(false);
+    let autosave = host.space_autosave_enabled;
     let paused = host.context_menu.is_some() || host.session_prompt.is_some();
-    let step = match load_space(&spaces_dir(), &name) {
-        Ok(space) if space.id == host.mux.space_id => {
+    let loaded = host
+        .space_poll_loaded
+        .take()
+        .filter(|(loaded_name, _)| loaded_name == &name);
+    let Some((_, space)) = loaded else {
+        let _ = host.space_client.submit_poll(spaces_dir(), name);
+        return;
+    };
+    let step = match space {
+        Some(space) if space.id == host.mux.space_id => {
             let live = live_snaps(host);
             let snap = snapshot_client::snapshot_for_periodic(host.snapshot_client.as_deref());
             let (shapes_match, shapes) = saved_shapes(&space, snap.as_ref());
@@ -293,15 +322,18 @@ pub(super) fn poll(host: &mut HostState) {
         },
     };
     let mut status = step.status;
-    if step.write {
-        let wrote = save_space_from_host_quiet(host, &name);
-        status = if host.space_polish.failed {
-            "Save failed"
-        } else if wrote {
-            "Saved"
-        } else {
-            "Saving…"
-        };
+    if step.write && claim_save(&mut host.space_polish) {
+        persist_attach_layout_from_live(host);
+        let view_path = host.attach_layout_path.clone();
+        let queued = host.space_client.submit_save(space_client::SaveJob {
+            pmux: pmux_bin(),
+            name: name.clone(),
+            view_path,
+        });
+        if !queued {
+            host.space_polish.save_in_flight = false;
+        }
+        status = "Saving…";
     }
     if host.space_rail.save_status != status {
         host.space_rail.save_status = status.to_string();
@@ -313,6 +345,25 @@ pub(super) fn poll(host: &mut HostState) {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn a_second_autosave_is_not_claimed_while_one_is_in_flight() {
+        let mut state = State {
+            changed: Some(("layout".into(), Instant::now())),
+            ..State::default()
+        };
+        assert!(claim_save(&mut state));
+        assert!(!claim_save(&mut state));
+        note_save_finished(&mut state, false);
+        assert!(state.failed);
+        assert!(!state.save_in_flight);
+        assert!(state.changed.is_some());
+        assert!(claim_save(&mut state));
+        note_save_finished(&mut state, true);
+        assert!(!state.failed);
+        assert!(!state.save_in_flight);
+        assert!(state.changed.is_none());
+    }
 
     use prismattyc_mux::{PaneId, SavedSpace, SavedSpaceTab, SAVED_SPACE_VERSION};
 

@@ -9,22 +9,22 @@ variant = "dark"
 source = "Hive TUI Variants — design package"
 license = "Unspecified"
 default_fg = "#e4d2ab"
-default_bg = "#0e0c09"
+default_bg = "#1b1916"
 chrome_fg = "#9a8458"
-chrome_bg = "#0a0906"
-pane_border = "#3b2b13"
-overlay_bg = "#211e18"
+chrome_bg = "#171612"
+pane_border = "#4b3a22"
+overlay_bg = "#302c26"
 unseen_badge = "#f0a63c"
 mail_letter = "#f0a63c"
 active_badge = "#f0a63c"
 attention_badge = "#ff6b6b"
-cursor_fg = "#0e0c09"
+cursor_fg = "#1b1916"
 cursor_bg = "#f0a63c"
 selection_fg = "#f7e3b4"
-selection_bg = "#563d19"
+selection_bg = "#674d2a"
 ansi = [
-  "#0c0a08", "#c9705f", "#8fb573", "#f0a63c",
+  "#191715", "#c9705f", "#8fb573", "#f0a63c",
   "#7fafc4", "#b48ead", "#85b1a4", "#e4d2ab",
-  "#635230", "#d38972", "#a6bf81", "#f2b860",
+  "#6a5937", "#d38972", "#a6bf81", "#f2b860",
   "#99bac0", "#c3a1af", "#9ebca8", "#f7e3b4",
 ]

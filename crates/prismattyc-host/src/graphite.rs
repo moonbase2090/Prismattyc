@@ -121,20 +121,10 @@ const RAIL_DOT: f32 = 6.0;
 const RAIL_CLOSE_W: f32 = 18.0;
 const RAIL_PLUS_LABEL: &str = "+ New space";
 
-const BAR_PAD_X: f32 = 10.0;
-const CHIP_H: f32 = 30.0;
 const CHIP_RADIUS: f32 = 6.0;
 const CHIP_PAD_X: f32 = 12.0;
-const CHIP_GAP: f32 = 4.0;
 const DOT: f32 = 7.0;
 const INNER_GAP: f32 = 8.0;
-const CLOSE_W: f32 = 16.0;
-const CLOSE_END: f32 = 4.0;
-const DROPDOWN_LABEL_MAX: f32 = 180.0;
-const TAB_LABEL_MAX: f32 = 220.0;
-const TAB_LABEL_MIN: f32 = 36.0;
-const PLUS_W: f32 = 30.0;
-const CMD_W: f32 = 260.0;
 const UNDERLINE_H: f32 = 2.0;
 const UNDERLINE_INSET: f32 = 10.0;
 const ICON: f32 = 14.0;
@@ -375,28 +365,14 @@ pub(crate) fn draw_text(
 // ---------------------------------------------------------------------------
 // Shapes
 
-/// A pixel rectangle in window coordinates.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Rect {
-    pub x: usize,
-    pub y: usize,
-    pub w: usize,
-    pub h: usize,
+pub(crate) type Rect = graphite_core::Rect;
+
+trait RectPaintExt {
+    fn center_y(self) -> f32;
+    fn inset(self, by: usize) -> Self;
 }
 
-impl Rect {
-    pub(crate) const fn new(x: usize, y: usize, w: usize, h: usize) -> Self {
-        Self { x, y, w, h }
-    }
-
-    pub(crate) fn contains(self, px: usize, py: usize) -> bool {
-        px >= self.x && py >= self.y && px < self.x + self.w && py < self.y + self.h
-    }
-
-    pub(crate) fn right(self) -> usize {
-        self.x + self.w
-    }
-
+impl RectPaintExt for Rect {
     fn center_y(self) -> f32 {
         self.y as f32 + self.h as f32 / 2.0
     }
@@ -629,88 +605,27 @@ fn shade(
 // ---------------------------------------------------------------------------
 // Tabs bar
 
-/// Status dot on a tab: what a glance at the bar should tell you.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Dot {
-    Attention,
-    Working,
-    Unseen,
-    Idle,
-}
+pub(crate) type Dot = graphite_core::Dot;
+pub(crate) type TabText = graphite_core::TabText;
+pub(crate) type TabSlot = graphite_core::TabSlot;
+pub(crate) type BarLayout = graphite_core::BarLayout;
+pub(crate) type DropTarget = graphite_core::DropTarget;
 
-impl Dot {
-    /// Attention first, then live output, then unseen output.
-    pub(crate) fn for_tab(attention: bool, active: bool, unseen: bool) -> Self {
-        if attention {
-            Self::Attention
-        } else if active {
-            Self::Working
-        } else if unseen {
-            Self::Unseen
-        } else {
-            Self::Idle
-        }
+/// Text metrics backed by the host's cached fontdue faces.
+struct ChromeMetrics;
+
+impl graphite_core::TextMetrics for ChromeMetrics {
+    fn width(&self, face: graphite_core::Face, px: f32, text: &str) -> f32 {
+        let face = match face {
+            graphite_core::Face::Regular => Face::Regular,
+            graphite_core::Face::SemiBold => Face::SemiBold,
+            graphite_core::Face::Mono => Face::Mono,
+        };
+        text_width(face, px, text)
     }
 }
 
-/// What one tab chip shows, decided by the caller from `TabInfo`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TabText {
-    pub label: String,
-    /// Muted text after the label: `4 panes`, `4 panes · zoomed`.
-    pub meta: Option<String>,
-    pub dot: Dot,
-    /// Shows the `needs you` pill.
-    pub attention: bool,
-    pub selected: bool,
-}
-
-/// One laid-out tab chip.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TabSlot {
-    pub chip: Rect,
-    pub close: Rect,
-    pub label: String,
-    pub meta: Option<String>,
-    pub dot: Dot,
-    pub attention: bool,
-    pub selected: bool,
-}
-
-/// The whole tabs bar, in window pixels. Paint and hit-testing read this.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BarLayout {
-    pub bar: Rect,
-    pub dropdown: Rect,
-    pub space_label: String,
-    pub divider_x: usize,
-    /// Tabs that fit, in order. Index `i` is tab `i`.
-    pub tabs: Vec<TabSlot>,
-    pub plus: Rect,
-    /// The `Run a command` field; dropped first when the bar is narrow.
-    pub command: Option<Rect>,
-    pub chord: String,
-    pub chrome: ChromeGeom,
-}
-
-fn chip_width(chrome: ChromeGeom, tab: &TabText, label_w: f32) -> f32 {
-    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
-    let mut w = s(CHIP_PAD_X) + s(DOT) + s(INNER_GAP) + label_w;
-    if let Some(meta) = &tab.meta {
-        w += s(INNER_GAP) + text_width(Face::Regular, s(META_TEXT), meta);
-    }
-    if tab.attention {
-        w += s(INNER_GAP) + pill_width(chrome);
-    }
-    w + s(INNER_GAP) + s(CLOSE_W) + s(CLOSE_END)
-}
-
-fn pill_width(chrome: ChromeGeom) -> f32 {
-    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
-    text_width(Face::SemiBold, s(PILL_TEXT), "needs you") + 2.0 * s(PILL_PAD_X)
-}
-
-/// Lay out the tabs bar across `width` pixels starting at window row `y`.
+/// Lay out the tabs bar using the renderer-independent core model.
 pub(crate) fn bar_layout(
     chrome: ChromeGeom,
     width: usize,
@@ -719,184 +634,46 @@ pub(crate) fn bar_layout(
     tabs: &[TabText],
     chord: &str,
 ) -> BarLayout {
-    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
-    let p = |d: f32| chrome.px(d);
-    let bar = Rect::new(0, y, width, TABS_BAR_H.px(chrome));
-    let chip_h = p(CHIP_H).min(bar.h);
-    let chip_y = y + (bar.h - chip_h) / 2;
-    let mut x = p(BAR_PAD_X);
-
-    let space_label = ellipsize(
-        Face::SemiBold,
-        s(TAB_TEXT),
+    let metrics = ChromeMetrics;
+    graphite_core::bar_layout(
+        &metrics,
+        chrome.scale_milli,
+        width,
+        y,
         space_label,
-        s(DROPDOWN_LABEL_MAX),
-    );
-    let dropdown_w = (s(10.0)
-        + s(ICON)
-        + s(INNER_GAP)
-        + text_width(Face::SemiBold, s(TAB_TEXT), &space_label)
-        + s(INNER_GAP)
-        + s(10.0)
-        + s(10.0))
-    .ceil() as usize;
-    let dropdown = Rect::new(x, chip_y, dropdown_w, chip_h);
-    x += dropdown_w + p(6.0);
-    let divider_x = x;
-    x += 1 + p(6.0);
-
-    let right_edge = width.saturating_sub(p(BAR_PAD_X));
-    let cmd_w = p(CMD_W);
-    let plus_w = p(PLUS_W);
-    let gap = p(CHIP_GAP);
-    let fits = |label_cap: f32, command: bool| -> bool {
-        let tabs_w: f32 = tabs
-            .iter()
-            .map(|tab| {
-                let label_w = text_width(Face::Regular, s(TAB_TEXT), &tab.label).min(label_cap);
-                chip_width(chrome, tab, label_w).ceil() + gap as f32
-            })
-            .sum();
-        let end = x as f32 + tabs_w + plus_w as f32;
-        let limit = if command {
-            right_edge.saturating_sub(cmd_w + p(INNER_GAP)) as f32
-        } else {
-            right_edge as f32
-        };
-        end <= limit
-    };
-    let mut command = cmd_w + p(INNER_GAP) + x + plus_w <= right_edge;
-    if command && !fits(s(TAB_LABEL_MAX), true) {
-        command = fits(s(TAB_LABEL_MIN), true);
-    }
-    // Largest label cap that fits, by halving the search interval.
-    let mut cap = s(TAB_LABEL_MAX);
-    if !fits(cap, command) {
-        let (mut lo, mut hi) = (s(TAB_LABEL_MIN), cap);
-        for _ in 0..12 {
-            let mid = (lo + hi) / 2.0;
-            if fits(mid, command) {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        cap = lo;
-    }
-    let tab_limit = if command {
-        right_edge.saturating_sub(cmd_w + p(INNER_GAP))
-    } else {
-        right_edge
-    }
-    .saturating_sub(plus_w);
-    let mut slots = Vec::with_capacity(tabs.len());
-    for tab in tabs {
-        let label = ellipsize(Face::Regular, s(TAB_TEXT), &tab.label, cap);
-        let label_w = text_width(Face::Regular, s(TAB_TEXT), &label);
-        let w = chip_width(chrome, tab, label_w).ceil() as usize;
-        if x + w > tab_limit {
-            break;
-        }
-        let chip = Rect::new(x, chip_y, w, chip_h);
-        let close_w = p(CLOSE_W);
-        let close = Rect::new(
-            chip.right().saturating_sub(p(CLOSE_END) + close_w),
-            chip_y,
-            close_w,
-            chip_h,
-        );
-        slots.push(TabSlot {
-            chip,
-            close,
-            label,
-            meta: tab.meta.clone(),
-            dot: tab.dot,
-            attention: tab.attention,
-            selected: tab.selected,
-        });
-        x += w + gap;
-    }
-    let plus = Rect::new(x, chip_y, plus_w, chip_h);
-    let command =
-        command.then(|| Rect::new(right_edge.saturating_sub(cmd_w), chip_y, cmd_w, chip_h));
-    BarLayout {
-        bar,
-        dropdown,
-        space_label,
-        divider_x,
-        tabs: slots,
-        plus,
-        command,
-        chord: chord.to_string(),
-        chrome,
-    }
+        tabs,
+        chord,
+    )
 }
 
-/// Move a bar laid out at x = 0 so it sits beside a left spaces column.
-pub(crate) fn shift_bar(mut layout: BarLayout, dx: usize) -> BarLayout {
-    if dx == 0 {
-        return layout;
-    }
-    let shift = |rect: &mut Rect| {
-        rect.x = rect.x.saturating_add(dx);
-    };
-    shift(&mut layout.bar);
-    shift(&mut layout.dropdown);
-    layout.divider_x = layout.divider_x.saturating_add(dx);
-    for tab in &mut layout.tabs {
-        shift(&mut tab.chip);
-        shift(&mut tab.close);
-    }
-    shift(&mut layout.plus);
-    if let Some(command) = layout.command.as_mut() {
-        shift(command);
-    }
-    layout
+pub(crate) fn shift_bar(layout: BarLayout, dx: usize) -> BarLayout {
+    graphite_core::shift_bar(layout, dx)
 }
 
-/// What sits under a window pixel in the tabs bar.
 pub(crate) fn bar_hit(
     layout: &BarLayout,
     px: usize,
     py: usize,
     reserve_end: bool,
 ) -> Option<StripHit> {
-    if !layout.bar.contains(px, py) {
-        return None;
-    }
-    if layout.dropdown.contains(px, py) {
-        return Some(StripHit::SpaceMenu);
-    }
-    for (index, tab) in layout.tabs.iter().enumerate() {
-        if tab.chip.contains(px, py) {
-            return Some(StripHit::Tab {
-                index,
-                close: tab.close.contains(px, py),
-            });
-        }
-    }
-    if layout.plus.contains(px, py) {
-        return Some(StripHit::NewTab);
-    }
-    if layout.command.is_some_and(|rect| rect.contains(px, py)) {
-        return Some(StripHit::Command);
-    }
-    let after_tabs = px >= layout.plus.x;
-    (reserve_end && after_tabs).then_some(StripHit::EmptyEnd)
+    graphite_core::bar_hit(layout, px, py, reserve_end).map(|hit| match hit {
+        graphite_core::BarHit::SpaceMenu => StripHit::SpaceMenu,
+        graphite_core::BarHit::Tab { index, close } => StripHit::Tab { index, close },
+        graphite_core::BarHit::NewTab => StripHit::NewTab,
+        graphite_core::BarHit::Command => StripHit::Command,
+        graphite_core::BarHit::EmptyEnd => StripHit::EmptyEnd,
+    })
 }
 
-/// Drop highlight during a pane-header drag (issue #109). `Tab` outlines
-/// the tab chip that would receive the pane; `NewTab` draws the dashed
-/// slot past `+`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DropTarget {
-    Tab(usize),
-    NewTab,
+/// Resolve a core drop target to its host-independent highlight rectangle.
+pub(crate) fn drop_target_rect(layout: &BarLayout, target: DropTarget) -> Option<Rect> {
+    graphite_core::drop_target_rect(layout, target)
 }
 
 /// Inputs for one tabs-bar paint.
 pub(crate) struct BarPaint<'a> {
     pub layout: &'a BarLayout,
+    pub chrome: ChromeGeom,
     pub tok: &'a Tokens,
     pub accent: Rgb,
     pub hover: Option<StripHit>,
@@ -910,7 +687,7 @@ pub(crate) struct BarPaint<'a> {
 pub(crate) fn paint_tabs_bar(buffer: &mut [u32], stride: usize, paint: &BarPaint<'_>) {
     let layout = paint.layout;
     let tok = paint.tok;
-    let chrome = layout.chrome;
+    let chrome = paint.chrome;
     let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
     let p = |d: f32| chrome.px(d);
     let bar = layout.bar;
@@ -1073,51 +850,44 @@ pub(crate) fn paint_tabs_bar(buffer: &mut [u32], stride: usize, paint: &BarPaint
     // Drop highlight for a pane-header drag (issue #109): a dashed
     // "New tab" slot past `+`, where the bar_hit EmptyEnd region starts.
     if paint.drop_target == Some(DropTarget::NewTab) {
-        let chip_h = p(CHIP_H).min(bar.h);
-        let target = Rect::new(
-            layout.plus.x,
-            bar.y + bar.h.saturating_sub(chip_h) / 2,
-            bar.right()
-                .saturating_sub(layout.plus.x)
-                .saturating_sub(p(BAR_PAD_X)),
-            chip_h,
-        );
-        if target.w >= p(24.0) && target.h >= p(12.0) {
-            paint_dashed_round_rect(
-                buffer,
-                stride,
-                target,
-                s(CHIP_RADIUS),
-                s(6.0),
-                s(4.0),
-                s(1.5),
-                paint.accent,
-            );
-            let label = ellipsize(
-                Face::Regular,
-                s(TAB_TEXT),
-                "New tab",
-                target.w as f32 - 2.0 * s(CHIP_PAD_X),
-            );
-            draw_text(
-                buffer,
-                stride,
-                target.x as f32 + s(CHIP_PAD_X),
-                target.center_y(),
-                Face::Regular,
-                s(TAB_TEXT),
-                &label,
-                tok.tab_text,
-                target.x,
-                target.right(),
-            );
+        if let Some(target) = drop_target_rect(layout, DropTarget::NewTab) {
+            if target.w >= p(24.0) && target.h >= p(12.0) {
+                paint_dashed_round_rect(
+                    buffer,
+                    stride,
+                    target,
+                    s(CHIP_RADIUS),
+                    s(6.0),
+                    s(4.0),
+                    s(1.5),
+                    paint.accent,
+                );
+                let label = ellipsize(
+                    Face::Regular,
+                    s(TAB_TEXT),
+                    "New tab",
+                    target.w as f32 - 2.0 * s(CHIP_PAD_X),
+                );
+                draw_text(
+                    buffer,
+                    stride,
+                    target.x as f32 + s(CHIP_PAD_X),
+                    target.center_y(),
+                    Face::Regular,
+                    s(TAB_TEXT),
+                    &label,
+                    tok.tab_text,
+                    target.x,
+                    target.right(),
+                );
+            }
         }
     }
 }
 
 fn paint_tab(buffer: &mut [u32], stride: usize, paint: &BarPaint<'_>, index: usize, tab: &TabSlot) {
     let tok = paint.tok;
-    let chrome = paint.layout.chrome;
+    let chrome = paint.chrome;
     let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
     let p = |d: f32| chrome.px(d);
     let chip = tab.chip;
@@ -1233,7 +1003,13 @@ fn paint_tab(buffer: &mut [u32], stride: usize, paint: &BarPaint<'_>, index: usi
         );
     }
     if tab.attention {
-        let pill_w = pill_width(paint.layout.chrome).ceil() as usize;
+        let pill_w = (graphite_core::TextMetrics::width(
+            &ChromeMetrics,
+            graphite_core::Face::SemiBold,
+            s(PILL_TEXT),
+            "needs you",
+        ) + 2.0 * s(PILL_PAD_X))
+        .ceil() as usize;
         let pill_h = p(PILL_H);
         let pill = Rect::new(
             (x + s(INNER_GAP)).round() as usize,
@@ -4995,7 +4771,8 @@ mod tests {
         use crate::theme::ThemeVariant::Dark;
         // The preset fills reach the painted tabs-bar ground.
         let tabs = vec![tab("grid", true)];
-        let layout = bar_layout(scale(1000), 1440, 0, "lab", &tabs, "Ctrl Shift P");
+        let chrome = scale(1000);
+        let layout = bar_layout(chrome, 1440, 0, "lab", &tabs, "Ctrl Shift P");
         for bar in [BarColor::Harbor, BarColor::Moss, BarColor::Plum] {
             let tok = bar_tokens(brief_theme(Dark), Some(bar));
             let accent = accent(&tok, rgb(0x62a8ff));
@@ -5005,6 +4782,7 @@ mod tests {
                 1440,
                 &BarPaint {
                     layout: &layout,
+                    chrome,
                     tok: &tok,
                     accent,
                     hover: None,
@@ -5353,6 +5131,7 @@ mod tests {
             800,
             &BarPaint {
                 layout: &layout,
+                chrome: scale(1000),
                 tok: &DARK,
                 accent,
                 hover: None,
@@ -5722,6 +5501,7 @@ mod tests {
             w,
             &BarPaint {
                 layout: &layout,
+                chrome,
                 tok,
                 accent: accent_color,
                 hover: None,
@@ -6119,6 +5899,7 @@ mod tests {
                 1440,
                 &BarPaint {
                     layout: &layout,
+                    chrome: scale(1000),
                     tok: &DARK,
                     accent: rgb(0x5aa2ff),
                     hover: None,

@@ -12865,6 +12865,7 @@ fn paint_graphite_tabs_bar(
         stride,
         &graphite::BarPaint {
             layout: &layout,
+            chrome: geom.chrome,
             tok: &tok,
             accent: graphite::accent(&tok, focus_border_rgb(host.focus_border)),
             hover,

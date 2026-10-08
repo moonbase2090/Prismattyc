@@ -192,6 +192,8 @@ pub struct ConfigFile {
     pub render_timer: Option<RenderTimer>,
     /// Log every rendered frame when `render_timer` includes `log`. Default false.
     pub render_timer_log_every_frame: Option<bool>,
+    /// Write host files on a worker thread. Startup only; default false.
+    pub async_file_writes: Option<bool>,
     /// Named built-in theme, display name, config-local theme name, or an
     /// absolute path to a Prismattyc theme TOML file.
     pub theme: Option<String>,
@@ -442,6 +444,10 @@ impl ConfigFile {
 
     pub fn render_timer_log_every_frame(&self) -> bool {
         self.render_timer_log_every_frame.unwrap_or(false)
+    }
+
+    pub fn async_file_writes(&self) -> bool {
+        self.async_file_writes.unwrap_or(false)
     }
 
     pub fn tab_strip(&self) -> TabStripMode {
@@ -1113,6 +1119,7 @@ mod tests {
         assert_eq!(load(&path).unwrap(), ConfigFile::default());
         assert!(ConfigFile::default().install_agent_skills.unwrap_or(true));
         assert!(!ConfigFile::default().space_reorder.unwrap_or(false));
+        assert!(!ConfigFile::default().async_file_writes());
         assert!(!ConfigFile::default().snapshot_client_enabled());
         assert!(!ConfigFile::default()
             .selective_border_rings
@@ -1121,6 +1128,8 @@ mod tests {
         std::fs::write(&path, "space_reorder = true\n").unwrap();
         assert!(load(&path).unwrap().space_reorder.unwrap_or(false));
 
+        std::fs::write(&path, "async_file_writes = true\n").unwrap();
+        assert!(load(&path).unwrap().async_file_writes());
         std::fs::write(&path, "snapshot_client = true\n").unwrap();
         assert!(load(&path).unwrap().snapshot_client_enabled());
         std::fs::write(&path, "snapshot_client = false\n").unwrap();

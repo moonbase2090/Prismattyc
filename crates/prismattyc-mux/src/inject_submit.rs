@@ -8,10 +8,10 @@
 //! - Codex: first CR inserts; a second CR submits.
 //! - Claude: assumed one CR (not probed this session).
 //! - Kiro: assumed one CR (not probed).
-//! - Muse: one CR submits. muse-bin 1.4.3 binds composer submit to Enter
-//!   and newline to Shift+Enter, Ctrl+J, Ctrl+M, and Alt+Enter (keymap
-//!   strings, 2026-10-06). A raw CR is Enter in the TUI parser, same as
-//!   Grok. The verification nudge sends that same chord.
+//! - Muse: use Kitty Enter when the pane has Kitty keyboard flags, else CR.
+//!   A Muse 1.4.3 probe (2026-10-08) found flags `3`, modifyOtherKeys `0`;
+//!   raw CR and bare `CSI 13u` left `PMUX_MAIL` in the composer, while a
+//!   separate write of event-typed Enter (`CSI 13;1u`) submitted it.
 
 #[cfg(not(windows))]
 use std::collections::{HashSet, VecDeque};
@@ -84,6 +84,25 @@ fn agent_stem(name: &str, stem: &str) -> bool {
 
 /// Kitty keyboard protocol: Ctrl+Enter.
 pub const CURSOR_SUBMIT: &[u8] = b"\x1b[13;5u";
+
+/// Unmodified Enter in the Kitty keyboard protocol, with its modifier field explicit.
+pub(crate) const KITTY_ENTER_SUBMIT: &[u8] = b"\x1b[13;1u";
+
+/// Submit bytes for one detected guest. Muse depends on the live Kitty mode;
+/// other agents keep their established submit sequences.
+#[must_use]
+pub(crate) fn submit_writes(agent: InjectAgent, kitty_flags: u16) -> Vec<Vec<u8>> {
+    match agent {
+        InjectAgent::Cursor => vec![CURSOR_SUBMIT.to_vec()],
+        InjectAgent::Codex => vec![vec![b'\r'], vec![b'\r']],
+        InjectAgent::Muse if kitty_flags != 0 => vec![KITTY_ENTER_SUBMIT.to_vec()],
+        InjectAgent::Claude
+        | InjectAgent::Grok
+        | InjectAgent::Kiro
+        | InjectAgent::Muse
+        | InjectAgent::Unknown => vec![vec![b'\r']],
+    }
+}
 
 /// Classify a `/proc` cmdline (NUL or space separated).
 #[must_use]
@@ -190,21 +209,27 @@ pub(crate) fn classify_windows_argv(args: &[String]) -> Option<InjectAgent> {
 /// The text is always [`PMUX_MAIL_NOTIFICATION`] — never free text.
 #[must_use]
 pub fn inject_writes(agent: InjectAgent) -> Vec<Vec<u8>> {
+    inject_writes_for_mode(agent, 0)
+}
+
+pub(crate) fn inject_writes_for_mode(agent: InjectAgent, kitty_flags: u16) -> Vec<Vec<u8>> {
     let text = PMUX_MAIL_NOTIFICATION.as_bytes();
+    let submit = submit_writes(agent, kitty_flags);
     match agent {
-        InjectAgent::Cursor => vec![text.to_vec(), CURSOR_SUBMIT.to_vec()],
+        InjectAgent::Cursor => vec![text.to_vec(), submit[0].clone()],
         InjectAgent::Codex => {
             let mut first = text.to_vec();
-            first.push(b'\r');
-            vec![first, vec![b'\r']]
+            first.extend_from_slice(&submit[0]);
+            vec![first, submit[1].clone()]
         }
+        InjectAgent::Muse if kitty_flags != 0 => vec![text.to_vec(), submit[0].clone()],
         InjectAgent::Claude
         | InjectAgent::Grok
         | InjectAgent::Kiro
         | InjectAgent::Muse
         | InjectAgent::Unknown => {
             let mut one = text.to_vec();
-            one.push(b'\r');
+            one.extend_from_slice(&submit[0]);
             vec![one]
         }
     }
@@ -370,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_grok_kiro_muse_unknown_are_one_cr() {
+    fn legacy_agents_and_muse_without_kitty_mode_use_one_cr() {
         for agent in [
             InjectAgent::Claude,
             InjectAgent::Grok,
@@ -381,5 +406,26 @@ mod tests {
             let w = inject_writes(agent);
             assert_eq!(w, vec![b"PMUX_MAIL\r".to_vec()], "{agent:?}");
         }
+    }
+
+    #[test]
+    fn muse_submit_uses_live_kitty_keyboard_mode() {
+        use prismattyc_emulator::{KITTY_DISAMBIGUATE, KITTY_EVENT_TYPES};
+
+        assert_eq!(submit_writes(InjectAgent::Muse, 0), vec![b"\r".to_vec()]);
+        let flags = KITTY_DISAMBIGUATE | KITTY_EVENT_TYPES;
+        assert_eq!(
+            submit_writes(InjectAgent::Muse, flags),
+            vec![b"\x1b[13;1u".to_vec()]
+        );
+        assert_eq!(
+            inject_writes_for_mode(InjectAgent::Muse, flags),
+            vec![b"PMUX_MAIL".to_vec(), b"\x1b[13;1u".to_vec()]
+        );
+        assert_eq!(
+            submit_writes(InjectAgent::Grok, flags),
+            vec![b"\r".to_vec()],
+            "guest keyboard mode must only change Muse submit"
+        );
     }
 }

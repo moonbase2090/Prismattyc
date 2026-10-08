@@ -3665,7 +3665,10 @@ impl ControlPlane {
 
         let before = self.pane_revision(pane_raw);
         // The same foreground agent picks the submit chord (PT-94).
-        let chunks = crate::inject_writes(agent);
+        let chunks = crate::inject_submit::inject_writes_for_mode(
+            agent,
+            self.guest_keyboard_flags_for(pane_raw),
+        );
         let nbytes = match self.write_inject_chunks(pane_raw, &chunks) {
             Ok(n) => n,
             Err(LiveWriteError::Backpressure) => {
@@ -3771,6 +3774,13 @@ impl ControlPlane {
             return crate::InjectAgent::Unknown;
         };
         crate::procinfo::foreground_agent(root)
+    }
+
+    fn guest_keyboard_flags_for(&self, pane_raw: u64) -> u16 {
+        self.live
+            .as_ref()
+            .and_then(|live| live.keyboard_flags(pane_raw))
+            .unwrap_or_default()
     }
 
     fn write_inject_chunks(
@@ -15233,7 +15243,7 @@ mod tests {
         std::fs::write(
             &run,
             format!(
-                "printf 'READY\\n'\nA={} sh -c '\"$A\" 999'\nexit 0\n",
+                "printf '\\033[=3;1u\\nREADY\\n'\nA={} sh -c '\"$A\" 999'\nexit 0\n",
                 muse.display()
             ),
         )
@@ -15269,9 +15279,10 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+        assert_eq!(plane.guest_keyboard_flags_for(pane), 3);
         let (outcome, nbytes) = mail_inject(inject_mail(&mut plane, client, pane, 3));
         assert_eq!(outcome, MailInjectOutcome::Wrote);
-        assert_eq!(nbytes, PMUX_MAIL_NOTIFICATION.len() + 1);
+        assert_eq!(nbytes, PMUX_MAIL_NOTIFICATION.len() + b"\x1b[13;1u".len());
         assert_eq!(
             plane
                 .mail_inject_last
@@ -15284,6 +15295,74 @@ mod tests {
             .get(&pane)
             .is_some_and(|nudge| nudge.verification));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pane_write_auto_uses_muse_live_kitty_mode() {
+        let body = b"\x1b[200~PMUX_MAIL\x1b[201~";
+        let kitty_enter = b"\x1b[13;1u";
+        let expected_bytes = body.len() + kitty_enter.len();
+        let script = format!(
+            "stty raw -echo 2>/dev/null; printf '\\033[=3;1u\\nREADY\\n'; dd bs=1 count={expected_bytes} 2>/dev/null | od -An -tx1; printf 'WOKE\\n'; exec sleep 999"
+        );
+        let (mut plane, pane) = live_inject_fixture(&script);
+        let client = registered_client(plane.handle(ControlRequest::RegisterClient {
+            version: PROTOCOL_VERSION,
+            request_id: 1,
+        }));
+        wait_spawn_then_quiet(&mut plane, pane, "READY");
+        plane.set_inject_agent_override(Some(crate::InjectAgent::Muse));
+        assert_eq!(plane.guest_keyboard_flags_for(pane), 3);
+        let child_pid = plane.live.as_ref().unwrap().child_pid(pane).unwrap();
+
+        let result = plane
+            .intentional_pane_write(
+                client,
+                pane,
+                child_pid,
+                "PMUX_MAIL".into(),
+                PaneWriteSubmit::Auto,
+            )
+            .unwrap();
+        let ControlResponseData::PaneWriteResult {
+            nbytes,
+            total_bytes,
+            complete,
+            ..
+        } = result
+        else {
+            panic!("expected pane-write receipt, got {result:?}");
+        };
+        assert!(complete);
+        assert_eq!(nbytes, expected_bytes);
+        assert_eq!(total_bytes, expected_bytes);
+
+        let expected_hex = body
+            .iter()
+            .copied()
+            .chain(kitty_enter.iter().copied())
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut observed = None;
+        while Instant::now() < deadline {
+            plane.drain_for_test();
+            if let Some(content) = plane.live.as_ref().and_then(|live| live.content(pane)) {
+                let text = content.lines.join("\n");
+                if text.contains("WOKE") {
+                    observed = Some(text);
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let observed = observed.expect("the child should consume the complete pane-write");
+        let observed_tokens = observed.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            observed_tokens.contains(&expected_hex),
+            "received bytes: {observed}"
+        );
     }
 
     #[test]

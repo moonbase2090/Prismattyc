@@ -147,7 +147,10 @@ jobs:
         run: python3 scripts/mutants-nightly_test.py
 
       - name: Check graphite-core dependency pin
-        run: cargo tree -p prismattyc-host -i graphite-core
+        run: |
+          set -euo pipefail
+          cargo tree -p prismattyc-host -i graphite-core | tee /tmp/graphite-core-tree.txt
+          grep -F 'rev=008d29cb93de4021f50dd246c4a43063ecaad1b6#008d29cb' /tmp/graphite-core-tree.txt
 
       - name: Check workspace
         run: |

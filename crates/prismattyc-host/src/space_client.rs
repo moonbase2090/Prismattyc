@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{self, ThreadId};
@@ -35,7 +35,8 @@ pub(crate) struct SaveJob {
     pub pmux: PathBuf,
     pub name: String,
     pub view: Option<prismattyc_mux::attach_tabs::AttachTabsFile>,
-    /// Where the private view file is written. `None` uses the process temp dir.
+    /// Parent of the owner-only directory that holds the private view.
+    /// `None` uses the process temp dir. The view file is not written here.
     pub view_dir: Option<PathBuf>,
     pub generation: u64,
     /// Space visit that claimed this save. Compared when the report arrives.
@@ -250,7 +251,18 @@ fn run_save(job: SaveJob) -> Report {
         .status()
         .is_ok_and(|status| status.success());
     if let Some(path) = private {
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(&path);
+        // Only the directory this save created. A file that sits directly in
+        // `view_dir` must not take the process temp directory with it.
+        if let Some(parent) = path.parent() {
+            if parent
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("pmux-save-view-"))
+            {
+                let _ = std::fs::remove_dir(parent);
+            }
+        }
     }
     Report::Save {
         ok,
@@ -261,16 +273,81 @@ fn run_save(job: SaveJob) -> Report {
     }
 }
 
-/// A private absolute view file. Callers delete it after `pmux space save`.
+/// Write `view` as `view.json` inside a new owner-only directory under `dir`.
+/// The directory name is random. Exclusive create does not follow a symlink
+/// that already occupies the file path. Callers delete the file and that
+/// directory after `pmux space save`.
 fn write_private_view(
     dir: &std::path::Path,
     view: &prismattyc_mux::attach_tabs::AttachTabsFile,
 ) -> std::io::Result<PathBuf> {
-    static SEQ: AtomicU64 = AtomicU64::new(1);
-    let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    let path = dir.join(format!("pmux-save-view-{}-{n}.json", std::process::id()));
-    prismattyc_mux::attach_tabs::save(&path, view)?;
-    path.canonicalize()
+    let private_dir = dir.join(random_view_dir_name()?);
+    create_private_dir(&private_dir)?;
+    let path = private_dir.join("view.json");
+    if let Err(error) = write_view_exclusive(&path, view) {
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&private_dir);
+        return Err(error);
+    }
+    match path.canonicalize() {
+        Ok(absolute) => Ok(absolute),
+        Err(error) => {
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_dir(&private_dir);
+            Err(error)
+        }
+    }
+}
+
+fn random_view_dir_name() -> std::io::Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let mut name = String::with_capacity("pmux-save-view-".len() + bytes.len() * 2);
+    name.push_str("pmux-save-view-");
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes {
+        name.push(char::from(HEX[(byte >> 4) as usize]));
+        name.push(char::from(HEX[(byte & 0x0f) as usize]));
+    }
+    Ok(name)
+}
+
+fn create_private_dir(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        // `mkdir` applies the umask, which can only clear bits. 0o700 stays
+        // owner-only.
+        builder.mode(0o700);
+        // Fails when the name exists, including as a symlink.
+        builder.create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(path)
+    }
+}
+
+/// Create `path` and write `view`. A path that already exists, including a
+/// symlink, is an error and is not followed.
+fn write_view_exclusive(
+    path: &std::path::Path,
+    view: &prismattyc_mux::attach_tabs::AttachTabsFile,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let bytes = serde_json::to_vec_pretty(view)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+        let _ = std::fs::remove_file(path);
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn run_refresh(job: RefreshJob) -> Report {
@@ -457,6 +534,18 @@ mod tests {
             !used_path.exists(),
             "private view is removed after the save"
         );
+        let private_dir = used_path.parent().expect("private view directory");
+        assert!(
+            private_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("pmux-save-view-")),
+            "view is not written directly in the shared temp directory"
+        );
+        assert!(
+            !private_dir.exists(),
+            "private view directory is removed after the save"
+        );
         let shared_now = prismattyc_mux::attach_tabs::load(&shared).unwrap();
         assert!(shared_now.tabs.is_empty());
         assert_eq!(shared_now.space.as_deref(), Some("review-b"));
@@ -523,6 +612,79 @@ mod tests {
         assert_eq!(generation, 9);
         assert_eq!(epoch, 2);
         assert!(!marker.exists(), "pmux space save must not run");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    fn captured_view() -> prismattyc_mux::attach_tabs::AttachTabsFile {
+        prismattyc_mux::attach_tabs::AttachTabsFile {
+            tabs: vec![prismattyc_mux::attach_tabs::AttachTabRecord {
+                title: "review-a".into(),
+                sessions: vec!["review-a-1".into()],
+                layout: None,
+            }],
+            space: Some("review-a".into()),
+            ..Default::default()
+        }
+    }
+
+    #[cfg(unix)]
+    fn scratch_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exclusive_view_write_does_not_follow_a_symlink() {
+        let dir = scratch_dir("pmux-save-symlink");
+        let victim = dir.join("victim");
+        std::fs::write(&victim, b"keep-me").unwrap();
+        let link = dir.join("view.json");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        let error = write_view_exclusive(&link, &captured_view())
+            .expect_err("a pre-created symlink must not be followed");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep-me");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_view_is_an_owner_only_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("pmux-save-private");
+        let victim = dir.join("victim");
+        std::fs::write(&victim, b"untouched").unwrap();
+        let planted = dir.join("view.json");
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+        let path = write_private_view(&dir, &captured_view()).unwrap();
+        let parent = path.parent().expect("private directory");
+        assert_eq!(path.file_name().unwrap(), "view.json");
+        assert_ne!(parent, dir.canonicalize().unwrap());
+        let meta = std::fs::symlink_metadata(parent).unwrap();
+        assert!(meta.file_type().is_dir());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        let saved = prismattyc_mux::attach_tabs::load(&path).expect("written view");
+        assert_eq!(saved.space.as_deref(), Some("review-a"));
+        assert_eq!(saved.tabs[0].sessions, ["review-a-1"]);
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
+        assert!(planted.symlink_metadata().unwrap().file_type().is_symlink());
+        let mut tmp = path.as_os_str().to_os_string();
+        tmp.push(".tmp");
+        assert!(!PathBuf::from(tmp).exists());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(parent).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

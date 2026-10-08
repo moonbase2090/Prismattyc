@@ -19,9 +19,13 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # `&& 0 || 1` is wrong in GHA expressions (0 is falsy); PR --diff needs full history.
+          fetch-depth: 0
       - name: Install sc v0.1.5
         run: |
           set -eu
+          cd "$RUNNER_TEMP"
           asset=sc-v0.1.5-x86_64-unknown-linux-gnu.tar.gz
           base=https://github.com/moonbase2090/Scorecard/releases/download/v0.1.5
           curl -fsSL -O "$base/$asset"
@@ -41,7 +45,19 @@ jobs:
           cargo install cargo-llvm-cov --version 0.9.1 --locked
           cargo llvm-cov --version
       - name: Analyze
-        run: sc analyze . --format all --out scorecard.html --fail-on "" --budget-seconds 900
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="origin/${{ github.base_ref }}"
+            if [ -z "${{ github.base_ref }}" ]; then
+              base="origin/main"
+            fi
+            sc analyze . --diff "$base" --fail-on secrets,tests,lint,types \
+              --format all --out scorecard.html --budget-seconds 900
+          else
+            sc analyze . --format all --out scorecard.html --fail-on "" \
+              --budget-seconds 900
+          fi
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

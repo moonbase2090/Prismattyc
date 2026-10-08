@@ -4495,7 +4495,7 @@ fn chrome_snapshot(host: &HostState, live: Option<a11y::LiveSnap>) -> a11y::Chro
             }
         }),
         arrange: if sidebar_header_shown(host) {
-            graphite::SIDEBAR_ARRANGE
+            graphite_core::SIDEBAR_ARRANGE
                 .iter()
                 .map(|name| name.to_string())
                 .collect()
@@ -11146,7 +11146,7 @@ fn sidebar_icon_tooltip(host: &HostState) -> Option<(graphite::Rect, String)> {
         {
             Some((
                 *host.sidebar_actions.get(index)?,
-                (*graphite::SIDEBAR_ACTIONS.get(index)?).to_string(),
+                (*graphite_core::SIDEBAR_ACTIONS.get(index)?).to_string(),
             ))
         }
         _ => None,
@@ -11158,7 +11158,7 @@ fn arrange_tooltip(host: &HostState) -> Option<(graphite::Rect, &'static str)> {
     match host.hover_target {
         Some(HoverTarget::Sidebar(graphite::SidebarHit::Arrange(button))) => Some((
             *host.sidebar_arrange.get(button)?,
-            *graphite::SIDEBAR_ARRANGE.get(button)?,
+            *graphite_core::SIDEBAR_ARRANGE.get(button)?,
         )),
         _ => None,
     }
@@ -13269,9 +13269,9 @@ fn paint_graphite_sidebar(
                 title: "Spaces",
                 rows: &rows,
                 actions: [
-                    graphite::SIDEBAR_ACTIONS[0],
-                    graphite::SIDEBAR_ACTIONS[1],
-                    graphite::SIDEBAR_ACTIONS[2],
+                    graphite_core::SIDEBAR_ACTIONS[0],
+                    graphite_core::SIDEBAR_ACTIONS[1],
+                    graphite_core::SIDEBAR_ACTIONS[2],
                 ],
                 commands_hint: &graphite_chord_label(&host.keymap, keybind::Action::CommandPalette),
                 action_hovered: hover_action,

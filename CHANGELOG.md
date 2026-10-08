@@ -27,6 +27,33 @@ keeps the intended diff base, and runs the release checks against the pinned
 revision. The changelog’s former Unreleased sidebar-click note is included
 above with the Graphite sidebar changes.
 
+## [0.3.29-rc.2] - 2026-10-08
+
+This build is a prerelease. A tag such as `v0.3.29-rc.2` is published with
+`--prerelease --latest=false`. `pmux update` and the app menu do not offer it.
+Install the assets from the release, or opt in with `pmux update --pre`.
+The binaries report the base version, `0.3.29`.
+
+### Since rc.1
+
+macOS Wake starvation is fixed: `Wake` is notification-only and the loop
+pumps from `about_to_wait` and `RedrawRequested`, so sustained PTY output
+advances the raster (0 frames before, 400 frames with 20 raster advances
+after in the 20-second native harness window). Each pump drains bounded
+PTY batches under `pty_drain_budget_ms` (default 8 ms, 1–1000 ms,
+hot-reloads).
+
+macOS gains an IOSurface present backend behind startup-only
+`macos_present = "iosurface"`, with readback, allocation fallback, and
+scale/resize reallocation. `tiles` remains the default; the backend
+switches after the dogfood period. Scenario (b) present p50 falls from
+21.985 ms (tiles) to 1.222 ms (IOSurface); scenario (c) shows the same
+shape with the render-thread row-2 work included.
+
+Space polling and autosave moved off the main thread; a Space save now
+fails loudly when its owner-only private view cannot be written, and a
+delayed save stays on the visit that started it.
+
 ## [0.3.29-rc.1] - 2026-10-08
 
 This build is a prerelease. A tag such as `v0.3.29-rc.1` is published with

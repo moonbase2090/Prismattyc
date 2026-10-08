@@ -1643,11 +1643,16 @@ impl PaneRuntime {
         None
     }
 
+    #[cfg(test)]
     fn drain(&mut self) -> (bool, bool, bool) {
+        self.drain_until(None)
+    }
+
+    fn drain_until(&mut self, deadline: Option<Instant>) -> (bool, bool, bool) {
         // Observe the backing first (EOF, child exit) so a finished connect
         // is judged against what the pane is doing now. A swap asks for
         // another pass to read the new replica's first frames.
-        let (dirty, content_changed, more) = self.drain_backing();
+        let (dirty, content_changed, more) = self.drain_backing(deadline);
         let swapped = self.poll_connect();
         (
             dirty || swapped,
@@ -1656,15 +1661,15 @@ impl PaneRuntime {
         )
     }
 
-    fn drain_backing(&mut self) -> (bool, bool, bool) {
+    fn drain_backing(&mut self, deadline: Option<Instant>) -> (bool, bool, bool) {
         if self.log.is_some() {
-            return self.drain_log();
+            return self.drain_log(deadline);
         }
         // Lend the receiver out for the loop; `drain_pty` needs `&mut self`.
         let Some(from_pty_rx) = self.from_pty_rx.take() else {
             return (false, false, false);
         };
-        let result = self.drain_pty(&from_pty_rx);
+        let result = self.drain_pty(&from_pty_rx, deadline);
         self.from_pty_rx = Some(from_pty_rx);
         result
     }
@@ -1682,11 +1687,16 @@ impl PaneRuntime {
     fn drain_pty(
         &mut self,
         from_pty_rx: &mpsc::Receiver<std::io::Result<Vec<u8>>>,
+        deadline: Option<Instant>,
     ) -> (bool, bool, bool) {
         let mut dirty = false;
         let mut content_changed = false;
         let mut more = false;
         for i in 0..MAX_PTY_DRAIN_PER_PANE {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                more = true;
+                break;
+            }
             match from_pty_rx.try_recv() {
                 Ok(Ok(bytes)) if bytes.is_empty() => {
                     self.mark_child_exited();
@@ -1773,11 +1783,15 @@ impl PaneRuntime {
 
     /// Apply pane-log frames to the replica emulator (PT-111). Same
     /// bookkeeping as [`Self::drain_pty`], different source.
-    fn drain_log(&mut self) -> (bool, bool, bool) {
+    fn drain_log(&mut self, deadline: Option<Instant>) -> (bool, bool, bool) {
         let mut dirty = false;
         let mut content_changed = false;
         let mut more = false;
         for i in 0..MAX_PTY_DRAIN_PER_PANE {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                more = true;
+                break;
+            }
             let Some(log) = self.log.as_ref() else {
                 break;
             };
@@ -2286,6 +2300,8 @@ pub(crate) struct MuxRuntime {
     async_connect: bool,
     /// Panes that rang BEL since the last [`Self::take_pending_bells`].
     pending_bells: Vec<PaneId>,
+    /// Last pane visited by a budgeted drain; each turn starts after it.
+    drain_cursor: Option<u64>,
     /// Panes that emitted attention since the last [`Self::take_pending_attentions`].
     pending_attentions: Vec<(PaneId, String)>,
     /// Log-backed writer-death toasts since the last [`Self::take_pending_toasts`].
@@ -2420,6 +2436,7 @@ impl MuxRuntime {
             wake,
             async_connect,
             pending_bells: Vec::new(),
+            drain_cursor: None,
             pending_attentions: Vec::new(),
             pending_toasts: Vec::new(),
             exited_attach_sessions: Vec::new(),
@@ -3807,8 +3824,25 @@ impl MuxRuntime {
             .count()
     }
 
+    #[cfg(test)]
     pub(crate) fn drain_all(&mut self) -> (bool, bool) {
-        let pane_ids: Vec<_> = self.panes.keys().copied().collect();
+        self.drain_all_with_deadline(None)
+    }
+
+    pub(crate) fn drain_all_until(&mut self, deadline: Instant) -> (bool, bool) {
+        self.drain_all_with_deadline(Some(deadline))
+    }
+
+    fn drain_all_with_deadline(&mut self, deadline: Option<Instant>) -> (bool, bool) {
+        let mut pane_ids: Vec<_> = self.panes.keys().copied().collect();
+        if deadline.is_some() {
+            pane_ids.sort_by_key(|pane| pane.get());
+            let start = self
+                .drain_cursor
+                .and_then(|cursor| pane_ids.iter().position(|pane| pane.get() > cursor))
+                .unwrap_or(0);
+            pane_ids.rotate_left(start);
+        }
         let focused = self.focused_id();
         let now = Instant::now();
         let mut dirty = false;
@@ -3817,9 +3851,16 @@ impl MuxRuntime {
         let mut attentions = Vec::new();
         let mut toasts = Vec::new();
         for pane in pane_ids {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                more = true;
+                break;
+            }
             if let Some(runtime) = self.panes.get_mut(&pane) {
                 // Inactive tabs keep draining so unseen badges accumulate.
-                let (pane_dirty, content_changed, pane_more) = runtime.drain();
+                let (pane_dirty, content_changed, pane_more) = runtime.drain_until(deadline);
+                if deadline.is_some() {
+                    self.drain_cursor = Some(pane.get());
+                }
                 let bell = runtime.emulator.take_pending_bell();
                 if bell {
                     bells.push(pane);
@@ -5186,6 +5227,54 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         panic!("timed out waiting for {needle:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn expired_pty_drain_deadline_yields_and_next_turn_delivers_output() {
+        let args = vec![
+            "-c".to_string(),
+            "printf 'DRAIN_BUDGET_MARKER\\n'; exec sleep 2".to_string(),
+        ];
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &args, 80, 24).unwrap();
+        let (dirty, more) = runtime.drain_all_until(Instant::now() - Duration::from_millis(1));
+        assert!(!dirty, "an expired deadline must not parse pane output");
+        assert!(more, "unvisited PTY work must be carried to a later turn");
+
+        let pane = runtime.focused_id();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            let _ = runtime.drain_all_until(Instant::now() + Duration::from_millis(2));
+            if visible_text(&runtime.panes[&pane]).contains("DRAIN_BUDGET_MARKER") {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("output deferred by the expired deadline was not delivered on a later turn");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn budgeted_round_robin_delivers_hidden_pane_bell_and_unseen_badge() {
+        let args = vec!["-c".to_string(), "printf '\\007'; exec sleep 2".to_string()];
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &args, 80, 24).unwrap();
+        let bell_pane = runtime.focused_id();
+        runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        assert_ne!(runtime.focused_id(), bell_pane);
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            let _ = runtime.drain_all_until(Instant::now() + Duration::from_millis(1));
+            let bells = runtime.take_pending_bells();
+            if bells.contains(&bell_pane) {
+                assert!(runtime.panes[&bell_pane].unseen_output);
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("budgeted drains did not deliver the hidden pane bell and unseen badge");
     }
 
     /// Drain until one specific pane shows `needle`.

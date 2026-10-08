@@ -49,6 +49,9 @@ follow the app default.
 When `render_timer` is `osd`, `log`, or `both`, the macOS host compares dirty
 tiles with the previous frame and reports how many changed. With the timer off,
 it does not allocate the comparison buffer.
+`pty_drain_budget_ms` caps PTY parsing in each event-loop pump. It defaults to
+8 ms, accepts 1–1000 ms, and hot-reloads; remaining output is drained on a later
+event-loop turn.
 
 ```toml
 # Prismattyc host config. Every key is at its default.
@@ -61,6 +64,8 @@ it does not allocate the comparison buffer.
 render_timer = "off"
 # Log every render frame when render_timer includes log; use for benches only. true|false.
 render_timer_log_every_frame = false
+# Maximum PTY parsing time per event-loop pump; hot-reloaded. 1-1000 ms.
+pty_drain_budget_ms = 8
 # Show the launch splash on bare launches. true|false.
 splash = true
 # Animate the launch splash word art. true|false.

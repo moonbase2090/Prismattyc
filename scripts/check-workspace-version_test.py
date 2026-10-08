@@ -158,14 +158,79 @@ class VersionCheckTests(unittest.TestCase):
     def test_release_branch_lowering_version_fails(self) -> None:
         repo = fresh_repo()
         try:
-            git(repo, "checkout", "-qb", "release/v0.3.30-rc.1-changelog")
+            # Branch name matches the lowered version, so only the
+            # no-downgrade guard can fail.
+            git(repo, "checkout", "-qb", "release/v0.3.28-rc.1-changelog")
             write_repo(repo, version="0.3.28")
             commit_all(repo, "lower")
             code, output = run_check(
-                repo, branch="release/v0.3.30-rc.1-changelog"
+                repo, branch="release/v0.3.28-rc.1-changelog"
             )
             self.assertNotEqual(code, 0, f"lowered version must fail\n{output}")
             self.assertIn("0.3.28", output)
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+
+    def test_unversioned_release_branch_bump_fails_drift(self) -> None:
+        repo = fresh_repo()
+        try:
+            git(repo, "checkout", "-qb", "release/feature")
+            write_repo(repo, version=NEW_VERSION)
+            commit_all(repo, "bump")
+            code, output = run_check(repo, branch="release/feature")
+            self.assertNotEqual(
+                code, 0, f"unversioned release bump must fail\n{output}"
+            )
+            self.assertIn(NEW_VERSION, output)
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+
+    def test_unversioned_release_branch_without_bump_passes(self) -> None:
+        repo = fresh_repo()
+        try:
+            git(repo, "checkout", "-qb", "release/feature")
+            (repo / "notes.txt").write_text("hello\n")
+            commit_all(repo, "notes")
+            code, output = run_check(repo, branch="release/feature")
+            self.assertEqual(
+                code, 0, f"unversioned release without bump must pass\n{output}"
+            )
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+
+    def test_release_stable_to_rc_fails(self) -> None:
+        repo = fresh_repo()
+        try:
+            git(repo, "checkout", "-qb", "release/v0.3.29-rc.1-changelog")
+            write_repo(repo, version="0.3.29-rc.1")
+            commit_all(repo, "rc")
+            code, output = run_check(
+                repo, branch="release/v0.3.29-rc.1-changelog"
+            )
+            self.assertNotEqual(
+                code, 0, f"stable-to-RC workspace version must fail\n{output}"
+            )
+            self.assertIn("0.3.29-rc.1", output)
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+
+    def test_release_rc_decrease_fails(self) -> None:
+        repo = Path(tempfile.mkdtemp(prefix="scv-"))
+        git(repo, "init", "-b", "main", ".")
+        write_repo(repo, version="0.3.30-rc.2")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "base")
+        try:
+            git(repo, "checkout", "-qb", "release/v0.3.30-rc.1-changelog")
+            write_repo(repo, version="0.3.30-rc.1")
+            commit_all(repo, "rc decrease")
+            code, output = run_check(
+                repo, branch="release/v0.3.30-rc.1-changelog"
+            )
+            self.assertNotEqual(
+                code, 0, f"RC decrease must fail\n{output}"
+            )
+            self.assertIn("0.3.30-rc.1", output)
         finally:
             shutil.rmtree(repo, ignore_errors=True)
 

@@ -35,6 +35,8 @@ pub(crate) struct SaveJob {
     pub pmux: PathBuf,
     pub name: String,
     pub view: Option<prismattyc_mux::attach_tabs::AttachTabsFile>,
+    /// Where the private view file is written. `None` uses the process temp dir.
+    pub view_dir: Option<PathBuf>,
     pub generation: u64,
     /// Space visit that claimed this save. Compared when the report arrives.
     pub epoch: u64,
@@ -218,12 +220,26 @@ fn run_poll(dir: PathBuf, name: String) -> Report {
 }
 
 fn run_save(job: SaveJob) -> Report {
+    let failed = Report::Save {
+        ok: false,
+        name: job.name.clone(),
+        generation: job.generation,
+        epoch: job.epoch,
+        thread: thread::current().id(),
+    };
+    let private = if let Some(view) = job.view.as_ref() {
+        let dir = job.view_dir.clone().unwrap_or_else(std::env::temp_dir);
+        // A captured view is required. Falling through without `--view-path`
+        // would make `pmux space save` read the shared cache again.
+        match write_private_view(&dir, view) {
+            Ok(path) => Some(path),
+            Err(_) => return failed,
+        }
+    } else {
+        None
+    };
     let mut command = Command::new(&job.pmux);
     command.arg("space").arg("save").arg(&job.name);
-    let private = job
-        .view
-        .as_ref()
-        .and_then(|view| write_private_view(view).ok());
     if let Some(path) = &private {
         command.arg("--view-path").arg(path);
     }
@@ -247,11 +263,12 @@ fn run_save(job: SaveJob) -> Report {
 
 /// A private absolute view file. Callers delete it after `pmux space save`.
 fn write_private_view(
+    dir: &std::path::Path,
     view: &prismattyc_mux::attach_tabs::AttachTabsFile,
 ) -> std::io::Result<PathBuf> {
     static SEQ: AtomicU64 = AtomicU64::new(1);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("pmux-save-view-{}-{n}.json", std::process::id()));
+    let path = dir.join(format!("pmux-save-view-{}-{n}.json", std::process::id()));
     prismattyc_mux::attach_tabs::save(&path, view)?;
     path.canonicalize()
 }
@@ -324,6 +341,7 @@ mod tests {
             pmux: script,
             name: "demo".into(),
             view: None,
+            view_dir: None,
             generation: 1,
             epoch: 1,
         }));
@@ -336,6 +354,7 @@ mod tests {
             pmux: PathBuf::from("true"),
             name: "demo".into(),
             view: None,
+            view_dir: None,
             generation: 2,
             epoch: 1,
         }));
@@ -410,6 +429,7 @@ mod tests {
             pmux: script,
             name: "review-a".into(),
             view: Some(view_a),
+            view_dir: None,
             generation: 4,
             epoch: 1,
         });
@@ -440,6 +460,69 @@ mod tests {
         let shared_now = prismattyc_mux::attach_tabs::load(&shared).unwrap();
         assert!(shared_now.tabs.is_empty());
         assert_eq!(shared_now.space.as_deref(), Some("review-b"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn private_view_write_failure_does_not_save_the_shared_cache() {
+        let dir = std::env::temp_dir().join(format!(
+            "pmux-save-fail-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("launched");
+        let script = dir.join("pmux-capture");
+        let not_a_dir = dir.join("not-a-dir");
+        std::fs::write(&not_a_dir, b"x").unwrap();
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script, perms).unwrap();
+        }
+        let view = prismattyc_mux::attach_tabs::AttachTabsFile {
+            tabs: vec![prismattyc_mux::attach_tabs::AttachTabRecord {
+                title: "review-a".into(),
+                sessions: vec!["review-a-1".into()],
+                layout: None,
+            }],
+            space: Some("review-a".into()),
+            ..Default::default()
+        };
+        let report = run_save(SaveJob {
+            pmux: script,
+            name: "review-a".into(),
+            view: Some(view),
+            view_dir: Some(not_a_dir),
+            generation: 9,
+            epoch: 2,
+        });
+        let Report::Save {
+            ok,
+            name,
+            generation,
+            epoch,
+            ..
+        } = report
+        else {
+            panic!("save report");
+        };
+        assert!(!ok);
+        assert_eq!(name, "review-a");
+        assert_eq!(generation, 9);
+        assert_eq!(epoch, 2);
+        assert!(!marker.exists(), "pmux space save must not run");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

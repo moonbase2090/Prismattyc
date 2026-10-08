@@ -404,6 +404,7 @@ pub(super) fn poll(host: &mut HostState) {
                 pmux: pmux_bin(),
                 name: name.clone(),
                 view,
+                view_dir: None,
                 generation,
                 epoch,
             });

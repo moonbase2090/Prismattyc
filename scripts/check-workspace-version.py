@@ -13,10 +13,13 @@ Two checks, stdlib only:
    fidelity-matrix sentence must all name the same version.
 
 Branch from VERSION_BRANCH, else GITHUB_HEAD_REF, else the git branch
-(detached HEAD counts as non-release). On release/* the version may
-change but must not go down, and must match the version in the branch
-name when there is one. Exit 0 only when every check passes, 1 on a
-check failure, 2 when the repo or base ref is unusable.
+(detached HEAD counts as non-release). Only a release branch whose name
+carries a version (release/vX.Y.Z-rc.N-changelog, or the older
+release/X.Y.Z style) may change the version. There the workspace
+version must be a base X.Y.Z with no prerelease suffix, must not go
+down, and must match the branch version or its base. Exit 0 only when
+every check passes, 1 on a check failure, 2 when the repo or base ref
+is unusable.
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ LOCK_ENTRY_RE = re.compile(
     r"(\nsource = \"[^\"]+\")?",
 )
 BRANCH_VERSION_RE = re.compile(r"v?(\d+\.\d+\.\d+(?:-rc\.\d+)?)")
+BASE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
 def run_git(root: Path, *args: str) -> tuple[int, str]:
@@ -155,9 +159,24 @@ def main() -> int:
         return FAIL
     print(f"drift: HEAD {head_version} vs merge-base({base}) {base_version}")
 
+    branch_match = BRANCH_VERSION_RE.search(branch) if is_release else None
+    if is_release and branch_match is None:
+        print(
+            "release: branch carries no version, so the release exemption "
+            "does not apply"
+        )
+        is_release = False
     if is_release:
         print("drift: skipped on a release branch")
-        if semver_key(head_version) < semver_key(base_version):
+        assert branch_match is not None
+        if not BASE_VERSION_RE.match(head_version):
+            failures.append(
+                f"workspace version {head_version} is not a base version "
+                f"(X.Y.Z with no prerelease suffix; prerelease binaries "
+                f"report the base version)"
+            )
+            print("release: FAIL (workspace version must be base X.Y.Z)")
+        elif semver_key(head_version) < semver_key(base_version):
             failures.append(
                 f"release branch lowers the version "
                 f"({base_version} -> {head_version})"
@@ -165,8 +184,7 @@ def main() -> int:
             print(f"release: FAIL (version goes down)")
         else:
             print(f"release: version does not go down ({head_version})")
-        branch_match = BRANCH_VERSION_RE.search(branch)
-        if branch_match:
+        if BASE_VERSION_RE.match(head_version):
             branch_version = branch_match.group(1)
             branch_base = branch_version.split("-rc.")[0]
             if head_version not in (branch_version, branch_base):

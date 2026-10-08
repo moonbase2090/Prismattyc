@@ -59,7 +59,8 @@ If a branch picked up a version bump, restore those four files to the base's
 version. Run `scripts/check-workspace-version.sh` before merging. Only the
 release PR (`release/vX.Y.Z-rc.N-changelog`, which adds the `## [X.Y.Z]` and
 `## [X.Y.Z-rc.N]` CHANGELOG sections before the signed tag) moves the
-version, and it updates all four files together. A package version change
+version, and it updates all four files together. The workspace version is
+always a plain `X.Y.Z` with no prerelease suffix. A package version change
 does not publish a release or expand terminal compatibility. See
 [release packaging](docs/release-process.md) for published builds.
 

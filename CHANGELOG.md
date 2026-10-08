@@ -50,9 +50,15 @@ switches after the dogfood period. Scenario (b) present p50 falls from
 21.985 ms (tiles) to 1.222 ms (IOSurface); scenario (c) shows the same
 shape with the render-thread row-2 work included.
 
-Space polling and autosave moved off the main thread; a Space save now
-fails loudly when its owner-only private view cannot be written, and a
-delayed save stays on the visit that started it.
+Muse mail submission works in Kitty keyboard mode: doorbells go out as
+bracketed paste and `pane write --submit auto` follows the pane's live
+Kitty mode instead of sending a bare CR.
+
+Space file reads, team describe, and autosave `pmux space save` run on a
+worker thread per window while the main thread queues the job and applies
+the report on a later pump. A Space save now fails loudly when its
+owner-only private view cannot be written, and a delayed save stays on
+the visit that started it.
 
 ## [0.3.29-rc.1] - 2026-10-08
 

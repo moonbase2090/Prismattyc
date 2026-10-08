@@ -5255,6 +5255,33 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn budgeted_drain_uses_remaining_time_for_more_than_one_chunk_batch() {
+        let args = vec![
+            "-c".to_string(),
+            "exec /usr/bin/python3 -c 'import sys, time; sys.stdout.write(\"x\" * 70000 + \"\\nDRAIN_BATCH_FINAL_MARKER\\n\"); sys.stdout.flush(); time.sleep(2)'".to_string(),
+        ];
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &args, 80, 24).unwrap();
+        let pane = runtime.focused_id();
+        thread::sleep(Duration::from_millis(100));
+
+        let (dirty, more) = runtime.drain_all_until(Instant::now() + Duration::from_secs(2));
+
+        assert!(
+            dirty,
+            "PTY data buffered before the deadline must be parsed"
+        );
+        assert!(
+            visible_text(&runtime.panes[&pane]).contains("DRAIN_BATCH_FINAL_MARKER"),
+            "one deadline must allow more than the first eight-chunk batch"
+        );
+        assert!(
+            !more,
+            "the buffered PTY output must drain before the deadline"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn budgeted_round_robin_delivers_hidden_pane_bell_and_unseen_badge() {
         let args = vec!["-c".to_string(), "printf '\\007'; exec sleep 2".to_string()];
         let mut runtime = MuxRuntime::spawn("/bin/sh", &args, 80, 24).unwrap();

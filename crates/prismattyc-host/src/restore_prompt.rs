@@ -142,7 +142,7 @@ pub(super) fn finish(host: &mut HostState, accept: bool) {
                 })
                 .map(|s| (s.id.to_string(), s.name.clone()))
                 .collect();
-            host.mux.space_id = file.space_id.clone();
+            adopt_space_owner(host, file.space_id.clone());
             let before_bindings = host.attach_pane_sessions.clone();
             let applied = regroup::apply_with_placeholders(
                 &mut host.mux,

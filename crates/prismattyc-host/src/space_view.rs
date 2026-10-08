@@ -173,6 +173,34 @@ pub fn resolve_space(
         })
 }
 
+/// Whether a finished refresh may still change the window's current Space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshResolution {
+    /// This visit is still current. A different resolved name is a rename.
+    Current,
+    /// The window changed Space, or this result is from an older visit.
+    Stale,
+}
+
+/// `generation` is the visit counter captured when the refresh was submitted.
+/// A rename keeps the owner and the generation. Leaving and later returning
+/// to that owner bumps the generation, so the old result stays stale.
+pub fn refresh_resolution(
+    requested_generation: u64,
+    live_generation: u64,
+    requested_owner: Option<&str>,
+    live_owner: Option<&str>,
+    resolved_owner: Option<&str>,
+) -> RefreshResolution {
+    if requested_generation != live_generation || requested_owner != live_owner {
+        return RefreshResolution::Stale;
+    }
+    if resolved_owner != live_owner {
+        return RefreshResolution::Stale;
+    }
+    RefreshResolution::Current
+}
+
 /// Show the session identity even when its panes have no optional title.
 /// One session appears once, including when its mux layout has several panes.
 pub fn pane_names(space: &SavedSpace, snapshot: &Snapshot) -> Vec<String> {
@@ -629,5 +657,35 @@ mod tests {
         let empty = owned_layout("a", &space, &live, &added);
         assert!(empty.tabs.is_empty());
         assert!(empty.focused_session.is_none());
+    }
+
+    #[test]
+    fn completed_switch_rejects_an_old_refresh() {
+        assert_eq!(
+            refresh_resolution(1, 2, Some("owner-a"), Some("owner-b"), Some("owner-a")),
+            RefreshResolution::Stale
+        );
+    }
+
+    #[test]
+    fn returning_to_the_same_owner_rejects_the_previous_visit() {
+        assert_eq!(
+            refresh_resolution(1, 3, Some("owner-a"), Some("owner-a"), Some("owner-a")),
+            RefreshResolution::Stale
+        );
+    }
+
+    #[test]
+    fn rename_of_the_same_owner_keeps_the_refresh() {
+        // The caller applies a different resolved name only for `Current`.
+        // That is the rename. A different owner is not.
+        assert_eq!(
+            refresh_resolution(4, 4, Some("owner-a"), Some("owner-a"), Some("owner-a")),
+            RefreshResolution::Current
+        );
+        assert_eq!(
+            refresh_resolution(4, 4, Some("owner-a"), Some("owner-a"), Some("owner-b")),
+            RefreshResolution::Stale
+        );
     }
 }

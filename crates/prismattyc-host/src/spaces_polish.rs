@@ -10,27 +10,73 @@ pub(super) struct State {
     pub(super) armed: bool,
     /// Autosave command is on the worker. A second write waits.
     pub(super) save_in_flight: bool,
+    /// Identifies the in-flight save. A late report from an older claim is ignored.
+    save_generation: u64,
+    /// Space name captured when the save was claimed.
+    save_space: Option<String>,
     pub undo: Option<PathBuf>,
 }
 
-/// True once, when a decided write may start. A later call stays false
-/// until [`note_save_finished`].
-pub(super) fn claim_save(state: &mut State) -> bool {
-    if state.save_in_flight {
-        return false;
-    }
-    state.save_in_flight = true;
-    true
+/// What a finished autosave may change on the polish state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SaveCompletion {
+    /// The report is not the save this state is waiting on.
+    Ignore,
+    /// The save ended, but the window has moved on. Drop the in-flight bit only.
+    ReleaseOnly,
+    /// The window is still the visit that started the save.
+    Apply,
 }
 
-pub(super) fn note_save_finished(state: &mut State, ok: bool) {
+/// True once, when a decided write may start. A later call stays false
+/// until the matching report is classified.
+pub(super) fn claim_save(state: &mut State, name: &str) -> Option<u64> {
+    if state.save_in_flight {
+        return None;
+    }
+    state.save_in_flight = true;
+    state.save_generation = state.save_generation.wrapping_add(1);
+    state.save_space = Some(name.to_string());
+    Some(state.save_generation)
+}
+
+/// `still_this_space` is false after a switch. The new Space keeps its own
+/// dirty bit, armed poll, and failure flag.
+pub(super) fn finish_save(state: &mut State, ok: bool, still_this_space: bool) {
     state.save_in_flight = false;
+    state.save_space = None;
+    if !still_this_space {
+        return;
+    }
     state.armed = false;
     if ok {
         state.failed = false;
         state.changed = None;
     } else {
         state.failed = true;
+    }
+}
+
+/// `epoch` is the visit captured with the save. A later visit of the same
+/// name (leave and come back) must not take this result.
+pub(super) fn classify_save_completion(
+    state: &State,
+    report_space: &str,
+    report_generation: u64,
+    report_epoch: u64,
+    current_space: Option<&str>,
+    live_epoch: u64,
+) -> SaveCompletion {
+    if !state.save_in_flight
+        || state.save_generation != report_generation
+        || state.save_space.as_deref() != Some(report_space)
+    {
+        return SaveCompletion::Ignore;
+    }
+    if current_space == Some(report_space) && report_epoch == live_epoch {
+        SaveCompletion::Apply
+    } else {
+        SaveCompletion::ReleaseOnly
     }
 }
 
@@ -345,18 +391,28 @@ pub(super) fn poll(host: &mut HostState) {
     // A pane move assigns the session to this Space before the window
     // attaches it. The daemon id is not in `observed_space_sessions` yet.
     // Saving the current view would release that session.
-    if step.write && !view_omits_unobserved_member(host) && claim_save(&mut host.space_polish) {
-        persist_attach_layout_from_live(host);
-        let view_path = host.attach_layout_path.clone();
-        let queued = host.space_client.submit_save(space_client::SaveJob {
-            pmux: pmux_bin(),
-            name: name.clone(),
-            view_path,
-        });
-        if !queued {
-            host.space_polish.save_in_flight = false;
+    if step.write && !view_omits_unobserved_member(host) {
+        if let Some(generation) = claim_save(&mut host.space_polish, &name) {
+            persist_attach_layout_from_live(host);
+            // `attach_layout` is the file just handed to the writer, including
+            // a write that has not reached the shared path. The worker saves
+            // this copy. A switch that rewrites the shared path cannot erase
+            // the Space this claim belongs to.
+            let view = host.attach_layout.clone();
+            let epoch = host.space_epoch;
+            let queued = host.space_client.submit_save(space_client::SaveJob {
+                pmux: pmux_bin(),
+                name: name.clone(),
+                view,
+                generation,
+                epoch,
+            });
+            if !queued {
+                host.space_polish.save_in_flight = false;
+                host.space_polish.save_space = None;
+            }
+            status = "Saving…";
         }
-        status = "Saving…";
     }
     if host.space_rail.save_status != status {
         host.space_rail.save_status = status.to_string();
@@ -375,17 +431,70 @@ mod tests {
             changed: Some(("layout".into(), Instant::now())),
             ..State::default()
         };
-        assert!(claim_save(&mut state));
-        assert!(!claim_save(&mut state));
-        note_save_finished(&mut state, false);
+        let generation = claim_save(&mut state, "review-a").unwrap();
+        assert!(claim_save(&mut state, "review-a").is_none());
+        assert_eq!(
+            classify_save_completion(&state, "review-a", generation, 1, Some("review-a"), 1),
+            SaveCompletion::Apply
+        );
+        finish_save(&mut state, false, true);
         assert!(state.failed);
         assert!(!state.save_in_flight);
         assert!(state.changed.is_some());
-        assert!(claim_save(&mut state));
-        note_save_finished(&mut state, true);
+        assert!(claim_save(&mut state, "review-a").is_some());
+        finish_save(&mut state, true, true);
         assert!(!state.failed);
         assert!(!state.save_in_flight);
         assert!(state.changed.is_none());
+    }
+
+    #[test]
+    fn a_finished_save_does_not_clear_the_space_switched_to() {
+        let mut state = State {
+            changed: Some(("review-a".into(), Instant::now())),
+            ..State::default()
+        };
+        let generation = claim_save(&mut state, "review-a").unwrap();
+        state.changed = Some(("review-b".into(), Instant::now()));
+        state.armed = true;
+        assert_eq!(
+            classify_save_completion(&state, "review-a", generation, 1, Some("review-b"), 2),
+            SaveCompletion::ReleaseOnly
+        );
+        finish_save(&mut state, true, false);
+        assert!(!state.save_in_flight);
+        assert_eq!(
+            state.changed.as_ref().map(|(mark, _)| mark.as_str()),
+            Some("review-b")
+        );
+        assert!(state.armed);
+        assert!(!state.failed);
+    }
+
+    #[test]
+    fn returning_to_a_space_does_not_apply_the_save_from_the_previous_visit() {
+        let mut state = State::default();
+        let generation = claim_save(&mut state, "review-a").unwrap();
+        state.changed = Some(("review-a-again".into(), Instant::now()));
+        state.armed = true;
+        assert_eq!(
+            classify_save_completion(&state, "review-a", generation, 1, Some("review-a"), 3),
+            SaveCompletion::ReleaseOnly
+        );
+        assert_eq!(
+            classify_save_completion(
+                &state,
+                "review-a",
+                generation.wrapping_add(1),
+                1,
+                Some("review-a"),
+                1
+            ),
+            SaveCompletion::Ignore
+        );
+        finish_save(&mut state, true, false);
+        assert!(state.changed.is_some());
+        assert!(state.armed);
     }
 
     use prismattyc_mux::{PaneId, SavedSpace, SavedSpaceTab, SAVED_SPACE_VERSION};

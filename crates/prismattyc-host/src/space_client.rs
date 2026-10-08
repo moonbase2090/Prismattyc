@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{self, ThreadId};
@@ -29,12 +29,15 @@ enum Kind {
     Refresh,
 }
 
-/// `pmux space save` arguments captured on the main thread after the
-/// attach layout is already on disk.
+/// `pmux space save` arguments captured on the main thread.
+/// `view` is the arrangement at claim time, not the shared attach path.
 pub(crate) struct SaveJob {
     pub pmux: PathBuf,
     pub name: String,
-    pub view_path: Option<PathBuf>,
+    pub view: Option<prismattyc_mux::attach_tabs::AttachTabsFile>,
+    pub generation: u64,
+    /// Space visit that claimed this save. Compared when the report arrives.
+    pub epoch: u64,
 }
 
 /// One heartbeat of Space chip facts. Paths and the snapshot are copied
@@ -47,6 +50,8 @@ pub(crate) struct RefreshJob {
     pub now_ms: u64,
     pub current: Option<String>,
     pub owner: Option<String>,
+    /// Space visit (`space_epoch`) when this refresh was submitted.
+    pub generation: u64,
 }
 
 pub(crate) enum Report {
@@ -58,6 +63,9 @@ pub(crate) enum Report {
     },
     Save {
         ok: bool,
+        name: String,
+        generation: u64,
+        epoch: u64,
         #[cfg_attr(not(test), allow(dead_code))]
         thread: ThreadId,
     },
@@ -65,6 +73,8 @@ pub(crate) enum Report {
         pane_names: HashMap<String, Vec<String>>,
         attention: HashMap<String, usize>,
         resolved: Option<(String, SavedSpace)>,
+        generation: u64,
+        owner: Option<String>,
         #[allow(dead_code)]
         thread: ThreadId,
     },
@@ -210,7 +220,11 @@ fn run_poll(dir: PathBuf, name: String) -> Report {
 fn run_save(job: SaveJob) -> Report {
     let mut command = Command::new(&job.pmux);
     command.arg("space").arg("save").arg(&job.name);
-    if let Some(path) = &job.view_path {
+    let private = job
+        .view
+        .as_ref()
+        .and_then(|view| write_private_view(view).ok());
+    if let Some(path) = &private {
         command.arg("--view-path").arg(path);
     }
     let ok = command
@@ -219,10 +233,27 @@ fn run_save(job: SaveJob) -> Report {
         .stderr(std::process::Stdio::inherit())
         .status()
         .is_ok_and(|status| status.success());
+    if let Some(path) = private {
+        let _ = std::fs::remove_file(path);
+    }
     Report::Save {
         ok,
+        name: job.name,
+        generation: job.generation,
+        epoch: job.epoch,
         thread: thread::current().id(),
     }
+}
+
+/// A private absolute view file. Callers delete it after `pmux space save`.
+fn write_private_view(
+    view: &prismattyc_mux::attach_tabs::AttachTabsFile,
+) -> std::io::Result<PathBuf> {
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("pmux-save-view-{}-{n}.json", std::process::id()));
+    prismattyc_mux::attach_tabs::save(&path, view)?;
+    path.canonicalize()
 }
 
 fn run_refresh(job: RefreshJob) -> Report {
@@ -256,6 +287,8 @@ fn run_refresh(job: RefreshJob) -> Report {
         pane_names,
         attention,
         resolved,
+        generation: job.generation,
+        owner: job.owner,
         thread: thread::current().id(),
     }
 }
@@ -290,7 +323,9 @@ mod tests {
         assert!(client.submit_save(SaveJob {
             pmux: script,
             name: "demo".into(),
-            view_path: None,
+            view: None,
+            generation: 1,
+            epoch: 1,
         }));
         assert!(
             started.elapsed() < Duration::from_millis(200),
@@ -300,14 +335,16 @@ mod tests {
         assert!(!client.submit_save(SaveJob {
             pmux: PathBuf::from("true"),
             name: "demo".into(),
-            view_path: None,
+            view: None,
+            generation: 2,
+            epoch: 1,
         }));
         let caller = thread::current().id();
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut found = None;
         while Instant::now() < deadline {
             for report in client.drain() {
-                if let Report::Save { ok, thread } = report {
+                if let Report::Save { ok, thread, .. } = report {
                     found = Some((ok, thread));
                 }
             }
@@ -319,6 +356,90 @@ mod tests {
         let (ok, thread) = found.expect("save report");
         assert!(ok);
         assert_ne!(thread, caller);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delayed_save_keeps_the_captured_view_after_the_shared_file_changes() {
+        let dir = std::env::temp_dir().join(format!(
+            "pmux-save-capture-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let shared = dir.join("shared.json");
+        let capture = dir.join("captured.json");
+        let used = dir.join("used-path");
+        let script = dir.join("pmux-capture");
+        let view_a = prismattyc_mux::attach_tabs::AttachTabsFile {
+            tabs: vec![prismattyc_mux::attach_tabs::AttachTabRecord {
+                title: "review-a".into(),
+                sessions: vec!["review-a-1".into()],
+                layout: None,
+            }],
+            space: Some("review-a".into()),
+            ..Default::default()
+        };
+        let empty_b = prismattyc_mux::attach_tabs::AttachTabsFile {
+            tabs: Vec::new(),
+            space: Some("review-b".into()),
+            ..Default::default()
+        };
+        prismattyc_mux::attach_tabs::save(&shared, &empty_b).unwrap();
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nset -eu\npath=\nprev=\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"--view-path\" ]; then\n    path=$arg\n  fi\n  prev=$arg\ndone\nprintf '%s' \"$path\" > '{}'\ncp \"$path\" '{}'\n",
+                used.display(),
+                capture.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script, perms).unwrap();
+        }
+        let report = run_save(SaveJob {
+            pmux: script,
+            name: "review-a".into(),
+            view: Some(view_a),
+            generation: 4,
+            epoch: 1,
+        });
+        let Report::Save {
+            ok,
+            name,
+            generation,
+            epoch,
+            ..
+        } = report
+        else {
+            panic!("save report");
+        };
+        assert!(ok);
+        assert_eq!(name, "review-a");
+        assert_eq!(generation, 4);
+        assert_eq!(epoch, 1);
+        let saved = prismattyc_mux::attach_tabs::load(&capture).expect("captured view");
+        assert_eq!(saved.space.as_deref(), Some("review-a"));
+        assert_eq!(saved.tabs[0].sessions, ["review-a-1"]);
+        let used_path = PathBuf::from(std::fs::read_to_string(&used).unwrap());
+        assert_ne!(used_path, shared);
+        assert!(used_path.is_absolute());
+        assert!(
+            !used_path.exists(),
+            "private view is removed after the save"
+        );
+        let shared_now = prismattyc_mux::attach_tabs::load(&shared).unwrap();
+        assert!(shared_now.tabs.is_empty());
+        assert_eq!(shared_now.space.as_deref(), Some("review-b"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

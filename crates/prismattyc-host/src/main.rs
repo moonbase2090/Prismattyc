@@ -1288,6 +1288,9 @@ struct HostState {
     space_open_observation: Option<space_outcome::Observation>,
     last_space_open: Option<space_outcome::Report>,
     last_space_refresh: Option<Instant>,
+    /// Bumped when this window adopts a different Space owner.
+    /// Refresh and autosave reports carry the value from submit time.
+    space_epoch: u64,
     observed_space_sessions: std::collections::HashSet<String>,
     /// Last attach-tabs stamp we already handled (mtime, len).
     attach_cache_stamp: Option<(SystemTime, u64)>,
@@ -4187,6 +4190,7 @@ impl App {
                 space_open_observation: None,
                 last_space_open: None,
                 last_space_refresh: None,
+                space_epoch: 0,
                 observed_space_sessions: Default::default(),
                 attach_cache_stamp: startup_cache_stamp,
                 attach_own_stamp: None,
@@ -8672,6 +8676,15 @@ fn handle_rename_key(host: &mut HostState, event: &winit::event::KeyEvent) -> bo
     true
 }
 
+/// Record a new Space owner. The same owner, including a rename, does not
+/// bump [`HostState::space_epoch`].
+fn adopt_space_owner(host: &mut HostState, owner: Option<String>) {
+    if host.mux.space_id != owner {
+        host.space_epoch = host.space_epoch.wrapping_add(1);
+        host.mux.space_id = owner;
+    }
+}
+
 /// The current space changed (opened from the rail, the picker, or by
 /// `pmux space open` through the attach-tabs cache). `PMUX_SPACE` follows so
 /// [`loaded_space`] (placeholder recreate) reads the same file.
@@ -9314,6 +9327,7 @@ fn refresh_space_views(host: &mut HostState) {
     let names = host.space_rail.names.clone();
     let current = host.space_rail.current.clone();
     let owner = host.mux.space_id.clone();
+    let generation = host.space_epoch;
     let _ = host.space_client.submit_refresh(space_client::RefreshJob {
         dir: spaces_dir(),
         names,
@@ -9322,6 +9336,7 @@ fn refresh_space_views(host: &mut HostState) {
         now_ms: prismattyc_mux::host_render_status::unix_ms(),
         current,
         owner,
+        generation,
     });
 }
 
@@ -9335,25 +9350,46 @@ fn drain_space_client(host: &mut HostState) {
                     host.space_poll_loaded = Some((name, space));
                 }
             }
-            space_client::Report::Save { ok, .. } => {
-                spaces_polish::note_save_finished(&mut host.space_polish, ok);
-                if ok {
-                    refresh_rail(host);
-                    if let Some(name) = host.space_rail.current.clone() {
-                        set_current_space(host, Some(name));
+            space_client::Report::Save {
+                ok,
+                name,
+                generation,
+                epoch,
+                ..
+            } => {
+                match spaces_polish::classify_save_completion(
+                    &host.space_polish,
+                    &name,
+                    generation,
+                    epoch,
+                    host.space_rail.current.as_deref(),
+                    host.space_epoch,
+                ) {
+                    spaces_polish::SaveCompletion::Ignore => {}
+                    spaces_polish::SaveCompletion::ReleaseOnly => {
+                        spaces_polish::finish_save(&mut host.space_polish, ok, false);
                     }
-                    host.space_rail.save_status = "Saved".into();
-                } else {
-                    host.space_rail.save_status = "Save failed".into();
+                    spaces_polish::SaveCompletion::Apply => {
+                        spaces_polish::finish_save(&mut host.space_polish, ok, true);
+                        if ok {
+                            refresh_rail(host);
+                            set_current_space(host, Some(name));
+                            host.space_rail.save_status = "Saved".into();
+                        } else {
+                            host.space_rail.save_status = "Save failed".into();
+                        }
+                        host.dirty = true;
+                    }
                 }
-                host.dirty = true;
             }
             space_client::Report::Refresh {
                 pane_names,
                 attention,
                 resolved,
+                generation,
+                owner,
                 ..
-            } => apply_space_refresh(host, pane_names, attention, resolved),
+            } => apply_space_refresh(host, pane_names, attention, resolved, generation, owner),
         }
     }
 }
@@ -9363,6 +9399,8 @@ fn apply_space_refresh(
     pane_names: HashMap<String, Vec<String>>,
     attention_counts: HashMap<String, usize>,
     resolved: Option<(String, prismattyc_mux::SavedSpace)>,
+    generation: u64,
+    requested_owner: Option<String>,
 ) {
     if host.space_rail.attention_counts != attention_counts {
         host.space_rail.attention_counts = attention_counts;
@@ -9378,6 +9416,19 @@ fn apply_space_refresh(
     let Some((name, space)) = resolved else {
         return;
     };
+    // Chip counts above stay. The resolved Space does not: an open that
+    // finished while this refresh was queued must not switch the window back.
+    // A rename of the same owner still applies, because the generation matches.
+    if space_view::refresh_resolution(
+        generation,
+        host.space_epoch,
+        requested_owner.as_deref(),
+        host.mux.space_id.as_deref(),
+        space.id.as_deref(),
+    ) == space_view::RefreshResolution::Stale
+    {
+        return;
+    }
     if host.space_rail.current.as_deref() != Some(name.as_str()) {
         set_current_space(host, Some(name.clone()));
         refresh_rail(host);
@@ -9589,7 +9640,7 @@ fn poll_host_attach_tabs(host: &mut HostState) {
             return;
         }
     };
-    host.mux.space_id = owner;
+    adopt_space_owner(host, owner);
     let current = local_views::records(host);
     let preserve_view = restored || local_views::has_local(&host.mux);
     if preserve_view {
@@ -16234,7 +16285,7 @@ fn spawn_owned_space_pane(
             session.name == session_name && session.space_id.as_deref() == Some(owner.as_str())
         })
         .context("new session owner could not be verified")?;
-    host.mux.space_id = Some(owner);
+    adopt_space_owner(host, Some(owner));
     let id = session.id.to_string();
     let args = vec!["attach".into(), "--session-id".into(), id.clone()];
     let program = find_mux_bin().to_string_lossy().into_owned();

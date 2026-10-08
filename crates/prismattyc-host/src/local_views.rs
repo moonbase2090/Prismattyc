@@ -49,6 +49,9 @@ pub(super) fn switch(host: &mut HostState, owner: Option<String>) -> Result<bool
         }
     };
     let old_owner = host.mux.space_id.clone();
+    if old_owner != owner {
+        host.space_epoch = host.space_epoch.wrapping_add(1);
+    }
     let old = Parked {
         mux: std::mem::replace(&mut host.mux, incoming.mux),
         adopted: std::mem::replace(&mut host.adopted, incoming.adopted),

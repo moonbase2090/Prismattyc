@@ -15271,7 +15271,10 @@ mod tests {
         }
         let (outcome, nbytes) = mail_inject(inject_mail(&mut plane, client, pane, 3));
         assert_eq!(outcome, MailInjectOutcome::Wrote);
-        assert_eq!(nbytes, PMUX_MAIL_NOTIFICATION.len() + 1);
+        assert_eq!(
+            nbytes,
+            PMUX_MAIL_NOTIFICATION.len() + crate::inject_submit::MUSE_SUBMIT.len()
+        );
         assert_eq!(
             plane
                 .mail_inject_last

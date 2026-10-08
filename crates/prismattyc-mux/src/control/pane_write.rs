@@ -129,10 +129,10 @@ fn pane_write_chunks(
                     vec![crate::inject_submit::CURSOR_SUBMIT.to_vec()]
                 }
                 crate::InjectAgent::Codex => vec![vec![b'\r'], vec![b'\r']],
+                crate::InjectAgent::Muse => vec![crate::inject_submit::MUSE_SUBMIT.to_vec()],
                 crate::InjectAgent::Claude
                 | crate::InjectAgent::Grok
-                | crate::InjectAgent::Kiro
-                | crate::InjectAgent::Muse => vec![vec![b'\r']],
+                | crate::InjectAgent::Kiro => vec![vec![b'\r']],
             };
             Ok(std::iter::once(body).chain(submit).collect())
         }
@@ -202,7 +202,6 @@ mod tests {
             (Grok, vec![b"\r".to_vec()]),
             (Claude, vec![b"\r".to_vec()]),
             (Kiro, vec![b"\r".to_vec()]),
-            (Muse, vec![b"\r".to_vec()]),
             (Codex, vec![b"\r".to_vec(), b"\r".to_vec()]),
             (Cursor, vec![crate::inject_submit::CURSOR_SUBMIT.to_vec()]),
         ] {
@@ -210,6 +209,8 @@ mod tests {
             assert_eq!(chunks[0], "\x1b[200~one\ntwo\tλ\x1b[201~".as_bytes());
             assert_eq!(chunks[1..], terminators);
         }
+        let muse = pane_write_chunks("one", PaneWriteSubmit::Auto, Muse).unwrap();
+        assert_eq!(muse[1], crate::inject_submit::MUSE_SUBMIT);
         assert!(pane_write_chunks("hello", PaneWriteSubmit::Auto, Unknown).is_err());
         for bad in [
             "",

@@ -8,10 +8,9 @@
 //! - Codex: first CR inserts; a second CR submits.
 //! - Claude: assumed one CR (not probed this session).
 //! - Kiro: assumed one CR (not probed).
-//! - Muse: one CR submits. muse-bin 1.4.3 binds composer submit to Enter
-//!   and newline to Shift+Enter, Ctrl+J, Ctrl+M, and Alt+Enter (keymap
-//!   strings, 2026-10-06). A raw CR is Enter in the TUI parser, same as
-//!   Grok. The verification nudge sends that same chord.
+//! - Muse: kitty Enter (`CSI 13u`) submits. Muse binds Ctrl+M to newline
+//!   when enhanced keyboard handling is active, so a raw CR is ambiguous.
+//!   Using the explicit Enter sequence works in the default and kitty modes.
 
 #[cfg(not(windows))]
 use std::collections::{HashSet, VecDeque};
@@ -81,6 +80,9 @@ fn agent_stem(name: &str, stem: &str) -> bool {
             .strip_prefix(stem)
             .is_some_and(|rest| rest.starts_with('-'))
 }
+
+/// Kitty `Enter` (unmodified).
+pub const MUSE_SUBMIT: &[u8] = b"\x1b[13u";
 
 /// Kitty keyboard protocol: Ctrl+Enter.
 pub const CURSOR_SUBMIT: &[u8] = b"\x1b[13;5u";
@@ -198,11 +200,8 @@ pub fn inject_writes(agent: InjectAgent) -> Vec<Vec<u8>> {
             first.push(b'\r');
             vec![first, vec![b'\r']]
         }
-        InjectAgent::Claude
-        | InjectAgent::Grok
-        | InjectAgent::Kiro
-        | InjectAgent::Muse
-        | InjectAgent::Unknown => {
+        InjectAgent::Muse => vec![text.to_vec(), MUSE_SUBMIT.to_vec()],
+        InjectAgent::Claude | InjectAgent::Grok | InjectAgent::Kiro | InjectAgent::Unknown => {
             let mut one = text.to_vec();
             one.push(b'\r');
             vec![one]
@@ -370,16 +369,22 @@ mod tests {
     }
 
     #[test]
-    fn claude_grok_kiro_muse_unknown_are_one_cr() {
+    fn claude_grok_kiro_unknown_are_one_cr_and_muse_uses_kitty_enter() {
         for agent in [
             InjectAgent::Claude,
             InjectAgent::Grok,
             InjectAgent::Kiro,
-            InjectAgent::Muse,
             InjectAgent::Unknown,
         ] {
             let w = inject_writes(agent);
             assert_eq!(w, vec![b"PMUX_MAIL\r".to_vec()], "{agent:?}");
         }
+        assert_eq!(
+            inject_writes(InjectAgent::Muse),
+            vec![
+                PMUX_MAIL_NOTIFICATION.as_bytes().to_vec(),
+                MUSE_SUBMIT.to_vec()
+            ]
+        );
     }
 }

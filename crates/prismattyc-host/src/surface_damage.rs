@@ -57,10 +57,22 @@ impl SurfaceDamageHistory {
         self.stale[index].clear();
         for (other, stale) in self.stale.iter_mut().enumerate() {
             if other != index {
-                stale.extend_from_slice(&current);
+                append_bounded(stale, &current, self.bounds);
             }
         }
         self.current = Some(index);
+    }
+}
+
+fn append_bounded(stale: &mut Vec<PixelRect>, damage: &[PixelRect], bounds: PixelRect) {
+    if stale.contains(&bounds)
+        || damage.contains(&bounds)
+        || stale.len().saturating_add(damage.len()) > MAX_REPLAY_RECTS
+    {
+        stale.clear();
+        stale.push(bounds);
+    } else {
+        stale.extend_from_slice(damage);
     }
 }
 

@@ -87,6 +87,7 @@ impl Design {
 /// Tabs bar height.
 pub(crate) const TABS_BAR_H: Design = Design(44.0);
 /// Combined sidebar tree width (issue #113).
+#[allow(dead_code)]
 pub(crate) const SIDEBAR_W: Design = Design(256.0);
 /// Pane title row height, inside the pane slot.
 pub(crate) const PANE_HEADER_H: f32 = 28.0;
@@ -2546,42 +2547,20 @@ const TOOLTIP_GAP: f32 = 6.0;
 /// Footer actions at the bottom of the tree column.
 pub(crate) const SIDEBAR_ACTIONS: [&str; 3] = ["+ New tab", "+ New space", "Commands"];
 
-/// One tree row to paint: content from the [`crate::sidebar`] model, `slot`
-/// from [`sidebar_layout`].
-pub(crate) struct SidebarRow<'a> {
-    pub slot: Rect,
-    pub depth: usize,
-    /// Space rows show a collapse chevron; `Some(true)` is collapsed.
-    pub chevron: Option<bool>,
-    /// Tab status dot; space and pane rows pass `None`.
-    pub dot: Option<Dot>,
-    pub label: &'a str,
-    /// Mail badge count; 0 hides the envelope.
-    pub mail: u32,
-    /// Needs-you badge count on space rows; 0 hides it.
-    pub needs_you: usize,
-    /// The active tab row: active fill plus the 2 px accent marker.
-    pub selected: bool,
-    /// Pointer is over the row (PR3 hit-testing fills this in).
-    pub hovered: bool,
-}
+pub(crate) type SidebarRow<'a> = graphite_core::SidebarRow<'a>;
 
-/// Fixed panel geometry for the tree column: a 44 px title band, a scroll
-/// viewport for rows, and three footer actions. The tree scrolls inside;
-/// the panel itself never resizes.
-pub(crate) struct SidebarLayout {
-    pub column: Rect,
-    pub head: Rect,
-    pub list: Rect,
-    pub rows: Vec<Rect>,
-    pub thumb: Option<Rect>,
-    pub foot: Rect,
-    pub actions: [Rect; 3],
-    /// First visible row after clamping `scroll`.
-    pub first_row: usize,
-}
-
+pub(crate) type SidebarLayout = graphite_core::SidebarLayout;
 pub(crate) fn sidebar_layout(
+    chrome: ChromeGeom,
+    column: Rect,
+    row_count: usize,
+    scroll: usize,
+) -> SidebarLayout {
+    graphite_core::sidebar_layout(chrome.scale_milli, column, row_count, scroll)
+}
+
+#[allow(dead_code)]
+fn host_sidebar_layout(
     chrome: ChromeGeom,
     column: Rect,
     row_count: usize,
@@ -2674,6 +2653,14 @@ pub(crate) fn sidebar_rows_in_view<'a, T>(
     rows: &'a [T],
     layout: &SidebarLayout,
 ) -> Vec<(usize, &'a T, Rect)> {
+    graphite_core::sidebar_rows_in_view(rows, layout)
+}
+
+#[allow(dead_code)]
+fn host_sidebar_rows_in_view<'a, T>(
+    rows: &'a [T],
+    layout: &SidebarLayout,
+) -> Vec<(usize, &'a T, Rect)> {
     rows.iter()
         .enumerate()
         .skip(layout.first_row)
@@ -2683,16 +2670,14 @@ pub(crate) fn sidebar_rows_in_view<'a, T>(
         .collect()
 }
 
-/// Header over the panes: breadcrumb plus the three arrangement buttons.
-pub(crate) struct SidebarHeaderLayout {
-    pub span: Rect,
-    pub crumb: Rect,
-    /// The Arrange control's track; `buttons` are its segments.
-    pub track: Rect,
-    pub buttons: [Rect; 3],
-}
+pub(crate) type SidebarHeaderLayout = graphite_core::SidebarHeaderLayout;
 
 pub(crate) fn sidebar_header_layout(chrome: ChromeGeom, span: Rect) -> SidebarHeaderLayout {
+    graphite_core::sidebar_header_layout(chrome.scale_milli, span)
+}
+
+#[allow(dead_code)]
+fn host_sidebar_header_layout(chrome: ChromeGeom, span: Rect) -> SidebarHeaderLayout {
     let inset = chrome.px(ARRANGE_INSET);
     let seg_w = chrome.px(ARRANGE_SEG_W);
     let track_h = chrome.px(ARRANGE_H);
@@ -3414,15 +3399,7 @@ pub(crate) fn sidebar_toggle_rect(
     head: Rect,
     dock_right: bool,
 ) -> Rect {
-    let size = chrome.px(18.0).clamp(12, column.w.max(12));
-    let inset = chrome.px(10.0);
-    let y = head.y + head.h.saturating_sub(size) / 2;
-    let x = if dock_right {
-        column.x.saturating_add(inset)
-    } else {
-        column.right().saturating_sub(inset.saturating_add(size))
-    };
-    Rect::new(x, y, size.min(column.w), size.min(head.h.max(1)))
+    graphite_core::sidebar_toggle_rect(chrome.scale_milli, column, head, dock_right)
 }
 
 /// Hit-test the painted sidebar: thumb first (it overlaps the list edge),
@@ -3469,12 +3446,6 @@ pub(crate) fn sidebar_hit(
     px: usize,
     py: usize,
 ) -> Option<SidebarHit> {
-    if targets.thumb.is_some_and(|thumb| thumb.contains(px, py)) {
-        return Some(SidebarHit::Thumb);
-    }
-    if targets.toggle.w > 0 && targets.toggle.h > 0 && targets.toggle.contains(px, py) {
-        return Some(SidebarHit::Toggle);
-    }
     if let Some((row, _)) = targets
         .needs_you
         .iter()
@@ -3482,36 +3453,28 @@ pub(crate) fn sidebar_hit(
     {
         return Some(SidebarHit::NeedsYou(*row));
     }
-    if let Some(row) = targets.rows.iter().position(|row| row.contains(px, py)) {
-        return Some(SidebarHit::Row(row));
-    }
-    if let Some(action) = targets
-        .actions
-        .iter()
-        .position(|slot| slot.contains(px, py))
-    {
-        return Some(SidebarHit::Action(action));
-    }
-    if let Some(button) = targets
-        .arrange
-        .iter()
-        .position(|slot| slot.contains(px, py))
-    {
-        return Some(SidebarHit::Arrange(button));
-    }
-    None
+    graphite_core::sidebar_hit(
+        targets.rows,
+        targets.actions,
+        targets.arrange,
+        targets.thumb,
+        targets.toggle,
+        px,
+        py,
+    )
+    .map(|hit| match hit {
+        graphite_core::SidebarHit::Row(row) => SidebarHit::Row(row),
+        graphite_core::SidebarHit::Action(action) => SidebarHit::Action(action),
+        graphite_core::SidebarHit::Arrange(button) => SidebarHit::Arrange(button),
+        graphite_core::SidebarHit::Toggle => SidebarHit::Toggle,
+        graphite_core::SidebarHit::Thumb => SidebarHit::Thumb,
+    })
 }
 
 /// Largest first-row offset for `row_count` rows in a column `column_h`
 /// tall: the clamped offset a huge scroll settles on.
 pub(crate) fn sidebar_max_scroll(chrome: ChromeGeom, column_h: usize, row_count: usize) -> usize {
-    sidebar_layout(
-        chrome,
-        Rect::new(0, 0, SIDEBAR_W.px(chrome), column_h),
-        row_count,
-        usize::MAX,
-    )
-    .first_row
+    graphite_core::sidebar_max_scroll(chrome.scale_milli, column_h, row_count)
 }
 
 /// The 44 px header over the panes: breadcrumb plus arrangement buttons.

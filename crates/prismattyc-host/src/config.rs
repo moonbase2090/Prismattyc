@@ -65,6 +65,7 @@ impl RenderTimer {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MacosPresent {
     #[default]
@@ -72,6 +73,7 @@ pub enum MacosPresent {
     Iosurface,
 }
 
+#[cfg(any(target_os = "macos", test))]
 impl MacosPresent {
     pub fn parse(raw: Option<&str>) -> std::result::Result<Self, &str> {
         match raw {

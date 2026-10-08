@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+With zero Spaces, clicks on the sidebar chrome work again. The new-tab,
+new-Space, and command-palette actions, the arrange buttons, and the collapse
+toggle resolve even when the sidebar paints no rows.
+
 ## [0.3.16] - 2026-10-07
 
 ### Since 0.3.3

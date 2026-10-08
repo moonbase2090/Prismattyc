@@ -383,6 +383,7 @@ fn paint_in_real_window(restore_only: bool) {
                 assert!(guards.iter().any(|value| value == guard), "missing {guard}");
             }
             assert!(!guards.iter().any(|value| value == "backend-no-partial"));
+            verify_sidebar_chrome_click_with_zero_rows(self.app.windows.get_mut(&id).unwrap());
             verify_config_reload(&mut self.app, id);
             chrome_contract_tests::verify(self.app.windows.get_mut(&id).unwrap());
             self.painted = true;
@@ -1625,6 +1626,53 @@ fn verify_render_guards(host: &mut HostState) {
     frame(host);
     assert!(host.render_frame.guards.contains(Guard::Osd));
     assert!(!host.render_frame.guards.contains(Guard::Backend));
+}
+
+/// Sidebar chrome stays clickable with zero Spaces: a real left press on the
+/// new-Space action resolves through the stored paint and opens the new-space
+/// editor instead of falling through to the panes.
+fn verify_sidebar_chrome_click_with_zero_rows(host: &mut HostState) {
+    let layout = host.spacing.layout;
+    let collapsed = host.spacing.sidebar_collapsed;
+    let pointer = host.pointer_px;
+    host.spacing.layout = config::LayoutMode::Sidebar;
+    host.spacing.sidebar_collapsed = false;
+    frame(host);
+    // A zero-Spaces paint stores no rows but keeps the chrome targets.
+    host.sidebar_rows.clear();
+    host.sidebar_needs_you_hits.clear();
+    host.sidebar_row_count = 0;
+    let action = host.sidebar_actions[1];
+    assert!(
+        action.w > 0 && action.h > 0,
+        "the sidebar paint must record the footer actions"
+    );
+    let px = action.x + action.w / 2;
+    let py = action.y + action.h / 2;
+    assert_eq!(
+        sidebar_hit_at(host, px, py),
+        Some(graphite::SidebarHit::Action(1)),
+        "the new-Space action still hits with zero rows"
+    );
+    host.pointer_px = Some((px as f64 + 0.5, py as f64 + 0.5));
+    assert!(
+        matches!(
+            handle_sidebar_click(host, winit::event::MouseButton::Left),
+            StripClickResult::Handled
+        ),
+        "the new-Space click must not fall through to the panes"
+    );
+    assert!(
+        host.space_rail
+            .edit
+            .as_ref()
+            .is_some_and(|edit| edit.target.is_none()),
+        "the click must open the new-space editor"
+    );
+    host.space_rail.edit = None;
+    host.spacing.layout = layout;
+    host.spacing.sidebar_collapsed = collapsed;
+    host.pointer_px = pointer;
 }
 
 fn verify_caption_click(host: &mut HostState) {

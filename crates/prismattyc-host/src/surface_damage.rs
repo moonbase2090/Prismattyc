@@ -167,19 +167,51 @@ mod tests {
     }
 
     #[test]
+    fn stale_damage_history_stays_bounded_while_a_surface_is_busy() {
+        let mut history = SurfaceDamageHistory::new(32, 32);
+        let bounds = history.bounds;
+        for stale in &mut history.stale {
+            stale.clear();
+        }
+        history.current = Some(0);
+
+        for frame in 0..=MAX_REPLAY_RECTS {
+            let index = history.next_free(|slot| slot == 0).unwrap();
+            let damage = FrameDamage::Rects(vec![PixelRect::new(frame % 32, 0, 1, 1)]);
+            history.committed(index, &damage);
+        }
+        assert_eq!(history.stale[0].len(), 1);
+        assert_eq!(history.stale[0][0], bounds);
+
+        for frame in MAX_REPLAY_RECTS + 1..10_000 {
+            let index = history.next_free(|slot| slot == 0).unwrap();
+            let damage = FrameDamage::Rects(vec![PixelRect::new(frame % 32, 1, 1, 1)]);
+            history.committed(index, &damage);
+        }
+
+        assert_eq!(history.stale[0].len(), 1);
+        assert_eq!(history.stale[0][0], bounds);
+        assert!(history
+            .stale
+            .iter()
+            .all(|rects| rects.len() <= MAX_REPLAY_RECTS));
+        assert_eq!(history.plan(0, &FrameDamage::rects()), [bounds]);
+    }
+
+    #[test]
     fn rectangles_are_clipped_without_overflow() {
-        let history = SurfaceDamageHistory::new(4, 3);
-        assert_eq!(
-            history.plan(
-                0,
-                &FrameDamage::Rects(vec![
-                    PixelRect::new(3, 2, usize::MAX, usize::MAX),
-                    PixelRect::new(4, 0, 1, 1),
-                    PixelRect::new(0, 0, 0, 1),
-                ])
-            ),
-            [PixelRect::new(0, 0, 4, 3)]
+        let mut history = SurfaceDamageHistory::new(4, 3);
+        history.stale[0].clear();
+        let clipped = PixelRect::new(3, 2, 1, 1);
+        let plan = history.plan(
+            0,
+            &FrameDamage::Rects(vec![
+                PixelRect::new(3, 2, usize::MAX, usize::MAX),
+                PixelRect::new(4, 0, 1, 1),
+                PixelRect::new(0, 0, 0, 1),
+            ]),
         );
+        assert_eq!(plan, [clipped]);
     }
 
     fn publish(

@@ -1460,3 +1460,384 @@ fn reopen_space_after_restart(
         }
     }
 }
+
+/// Two retained Space views reuse pane ids. Rebinding one view must not
+/// consume the other view's dead pane after a daemon restart reissues the
+/// same session ids.
+#[test]
+fn space_reopen_after_daemon_restart_reused_ids_reconnect_each_view() {
+    if std::env::var_os("PRISMATTYC_RENDER_TEST_CHILD").is_none() {
+        render_window_tests::run_in_private_display(
+            "space_open_window_tests::space_reopen_after_daemon_restart_reused_ids_reconnect_each_view",
+        );
+        return;
+    }
+    let binaries = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let pmux = binaries.join("pmux");
+    let pmuxd = binaries.join("pmuxd");
+    assert!(
+        pmux.is_file() && pmuxd.is_file(),
+        "build pmux and pmuxd first"
+    );
+    std::env::set_var("PMUX", &pmux);
+    let socket = host_mux_socket().unwrap();
+    let daemon = Daemon(
+        Command::new(&pmuxd)
+            .arg("--socket")
+            .arg(&socket)
+            .args(["--", "/bin/sh"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let started = Instant::now();
+    while attach_log::live_snapshot().is_none() {
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "private daemon did not start"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let event_loop = EventLoop::<UserAction>::with_user_event()
+        .with_x11()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
+    let cli = Cli::parse(
+        ["--no-splash", "--panes", "1", "/bin/cat"]
+            .into_iter()
+            .map(String::from),
+    )
+    .unwrap();
+    let config = config::ConfigFile {
+        space_startup: Some("fresh".into()),
+        space_autosave: Some(false),
+        ..config::ConfigFile::default()
+    };
+    let app = App::new(cli, config, None, event_loop.create_proxy()).unwrap();
+    let mut proof = TwoViewProof {
+        app,
+        daemon,
+        pmuxd,
+        socket,
+        done: false,
+    };
+    event_loop.run_app(&mut proof).unwrap();
+    assert!(proof.done, "two-view restart fixture did not run");
+}
+
+struct TwoViewProof {
+    app: App,
+    daemon: Daemon,
+    pmuxd: PathBuf,
+    socket: PathBuf,
+    done: bool,
+}
+
+impl ApplicationHandler<UserAction> for TwoViewProof {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.done {
+            return;
+        }
+        let window = self.app.open_window(event_loop, false).unwrap();
+        reopen_two_views_after_restart(
+            &mut self.app,
+            window,
+            &mut self.daemon,
+            &self.pmuxd,
+            &self.socket,
+        );
+        std::fs::write(
+            std::env::var_os("PRISMATTYC_RENDER_TEST_RESULT").unwrap(),
+            "complete",
+        )
+        .unwrap();
+        self.done = true;
+        event_loop.exit();
+    }
+
+    fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+}
+
+fn attach_panes(mux: &mux::MuxRuntime) -> Vec<prismattyc_mux::PaneId> {
+    mux.tab_panes()
+        .into_iter()
+        .flat_map(|(_, panes)| panes)
+        .filter(|pane| mux.attach_session_of(*pane).is_some())
+        .collect()
+}
+
+fn bound_ids(mux: &mux::MuxRuntime) -> Vec<String> {
+    attach_panes(mux)
+        .into_iter()
+        .filter_map(|pane| mux.attach_session_of(pane).map(str::to_string))
+        .collect()
+}
+
+fn attach_still_running(mux: &mux::MuxRuntime) -> bool {
+    attach_panes(mux).into_iter().any(|pane| {
+        !mux.is_placeholder(pane) && mux.pane(pane).is_some_and(|runtime| runtime.child_alive)
+    })
+}
+
+fn retain_blank(app: &mut App, window: WindowId) {
+    let host = app.windows.get_mut(&window).unwrap();
+    let pane = host
+        .mux
+        .split_focused("/bin/cat", &[], prismattyc_mux::Axis::Horizontal, 0.5)
+        .expect("retain a local terminal");
+    host.mux.retain_local_terminal(pane);
+    assert!(host.mux.is_retained_local_terminal(pane));
+    assert!(
+        host.mux.attach_session_of(pane).is_none(),
+        "the retained terminal must not be an attach pane"
+    );
+}
+
+fn assert_view_still_dead(app: &App, window: WindowId, space_name: &str, stale_ids: &[String]) {
+    let host = app.windows.get(&window).unwrap();
+    let space = load_space(&spaces_dir(), space_name).unwrap();
+    assert_eq!(host.mux.space_id, space.id, "{space_name} is not showing");
+    let snapshot = attach_log::live_snapshot().expect("daemon snapshot");
+    let mut checked = 0;
+    for (pane, bound) in &host.attach_pane_sessions {
+        let Some(name) = host.mux.attach_name_of(*pane) else {
+            continue;
+        };
+        let Some(live) = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.name == name && session.space_id == space.id)
+        else {
+            continue;
+        };
+        checked += 1;
+        assert_eq!(
+            bound,
+            &live.id.to_string(),
+            "{name} id changed before refresh; this no longer covers reused ids"
+        );
+        assert!(
+            stale_ids.contains(bound),
+            "{space_name} {name} was not reused: stale={stale_ids:?} live={}",
+            live.id
+        );
+        assert!(
+            host.mux.is_placeholder(*pane),
+            "{name} reconnected before refresh"
+        );
+    }
+    assert!(
+        checked >= 1,
+        "{space_name} lost its placeholder panes before refresh"
+    );
+}
+
+fn assert_space_reattached(app: &App, window: WindowId, space_name: &str, stale_ids: &[String]) {
+    let space = load_space(&spaces_dir(), space_name).unwrap();
+    let snapshot = attach_log::live_snapshot().expect("daemon snapshot");
+    let live: Vec<_> = snapshot
+        .sessions
+        .iter()
+        .filter(|session| session.space_id == space.id)
+        .collect();
+    assert!(!live.is_empty(), "{space_name} has no live sessions");
+    assert!(
+        live.iter()
+            .all(|session| stale_ids.contains(&session.id.to_string())),
+        "{space_name} did not reuse session ids: stale={stale_ids:?} live={live:?}"
+    );
+    let host = app.windows.get(&window).unwrap();
+    assert_eq!(
+        host.mux.space_id, space.id,
+        "{space_name} is not the restored view"
+    );
+    for session in &live {
+        let id = session.id.to_string();
+        let matches: Vec<_> = host
+            .attach_pane_sessions
+            .iter()
+            .filter(|(pane, bound)| {
+                *bound == &id || host.mux.attach_name_of(**pane) == Some(session.name.as_str())
+            })
+            .map(|(pane, bound)| (*pane, bound.clone()))
+            .collect();
+        assert!(!matches.is_empty(), "no pane for {}", session.name);
+        for (pane, bound) in matches {
+            assert_eq!(
+                bound, id,
+                "{} is bound to {bound}, not the live session",
+                session.name
+            );
+            assert!(
+                !host.mux.is_placeholder(pane),
+                "{} is still a placeholder after reopen",
+                session.name
+            );
+            assert!(
+                host.mux
+                    .pane(pane)
+                    .is_some_and(|runtime| runtime.child_alive),
+                "{} attach is not running",
+                session.name
+            );
+        }
+    }
+}
+
+fn reopen_two_views_after_restart(
+    app: &mut App,
+    window: WindowId,
+    daemon: &mut Daemon,
+    pmuxd: &Path,
+    socket: &Path,
+) {
+    pump_command(app, window, &["space", "create", "reopen-a", "--no-attach"]);
+    pump_host(app, window);
+    {
+        let host = app.windows.get(&window).unwrap();
+        assert_eq!(host.space_rail.current.as_deref(), Some("reopen-a"));
+        assert!(
+            !attach_panes(&host.mux).is_empty(),
+            "reopen-a never attached"
+        );
+    }
+    retain_blank(app, window);
+    pump_command(app, window, &["space", "create", "reopen-b", "--no-attach"]);
+    pump_host(app, window);
+    {
+        let host = app.windows.get(&window).unwrap();
+        assert_eq!(host.space_rail.current.as_deref(), Some("reopen-b"));
+        assert!(
+            !attach_panes(&host.mux).is_empty(),
+            "reopen-b never attached"
+        );
+    }
+    retain_blank(app, window);
+
+    let (overlap, stale_a, stale_b) = {
+        let host = app.windows.get(&window).unwrap();
+        let space_a = load_space(&spaces_dir(), "reopen-a").unwrap();
+        let space_b = load_space(&spaces_dir(), "reopen-b").unwrap();
+        assert_eq!(host.mux.space_id, space_b.id);
+        assert_eq!(host.local_views.parked.len(), 1, "reopen-a was not parked");
+        let parked = host.local_views.parked.values().next().unwrap();
+        assert_eq!(parked.mux.space_id, space_a.id);
+        assert_ne!(
+            host.mux.instance(),
+            parked.mux.instance(),
+            "the two Spaces share one runtime, so pane ids cannot overlap"
+        );
+        assert!(local_views::has_local(&host.mux));
+        assert!(local_views::has_local(&parked.mux));
+        let active = attach_panes(&host.mux);
+        let parked_panes = attach_panes(&parked.mux);
+        let overlap: Vec<_> = active
+            .iter()
+            .copied()
+            .filter(|pane| parked_panes.contains(pane))
+            .collect();
+        assert!(
+            !overlap.is_empty(),
+            "fixture panes do not overlap; a bare PaneId guard would not be exercised: active={active:?} parked={parked_panes:?}"
+        );
+        let stale_b = bound_ids(&host.mux);
+        let stale_a = bound_ids(&parked.mux);
+        assert!(!stale_a.is_empty() && !stale_b.is_empty());
+        (overlap, stale_a, stale_b)
+    };
+
+    let _ = daemon.0.kill();
+    let _ = daemon.0.wait();
+    let started = Instant::now();
+    loop {
+        let host = app.windows.get_mut(&window).unwrap();
+        let _ = host.mux.drain_all();
+        let _ = local_views::drain(host);
+        let active_pending = attach_still_running(&host.mux);
+        let parked_pending = host
+            .local_views
+            .parked
+            .values()
+            .any(|view| attach_still_running(&view.mux));
+        if host.local_views.parked.len() == 1
+            && !attach_panes(&host.mux).is_empty()
+            && !active_pending
+            && !parked_pending
+        {
+            let _ = host.mux.drain_all();
+            let _ = local_views::drain(host);
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "active and parked attach panes never all became placeholders"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    {
+        let host = app.windows.get(&window).unwrap();
+        assert!(
+            attach_panes(&host.mux)
+                .iter()
+                .all(|pane| host.mux.is_placeholder(*pane)),
+            "reopen-b panes must be placeholders"
+        );
+        let parked = &host.local_views.parked.values().next().unwrap().mux;
+        assert!(
+            attach_panes(parked)
+                .iter()
+                .all(|pane| parked.is_placeholder(*pane)),
+            "reopen-a panes must be placeholders"
+        );
+    }
+
+    replace_daemon(daemon, pmuxd, socket);
+    // Open A first so the fresh daemon reissues ids in the original order.
+    // Refresh only after each open has created that Space's sessions.
+    pump_command_ack(app, window, &["space", "open", "reopen-a"]);
+    assert_view_still_dead(app, window, "reopen-a", &stale_a);
+    pump_host(app, window);
+    assert_space_reattached(app, window, "reopen-a", &stale_a);
+    {
+        let host = app.windows.get(&window).unwrap();
+        assert!(
+            overlap
+                .iter()
+                .any(|pane| host.attach_pane_sessions.contains_key(pane)
+                    && !host.mux.is_placeholder(*pane)),
+            "reopen-a did not reconnect an overlapping pane {overlap:?}"
+        );
+    }
+
+    pump_command_ack(app, window, &["space", "open", "reopen-b"]);
+    assert_view_still_dead(app, window, "reopen-b", &stale_b);
+    pump_host(app, window);
+    assert_space_reattached(app, window, "reopen-b", &stale_b);
+    {
+        let host = app.windows.get(&window).unwrap();
+        assert!(
+            overlap
+                .iter()
+                .any(|pane| host.attach_pane_sessions.contains_key(pane)
+                    && !host.mux.is_placeholder(*pane)
+                    && host
+                        .mux
+                        .pane(*pane)
+                        .is_some_and(|runtime| runtime.child_alive)),
+            "reopen-b left an overlapping pane disconnected {overlap:?}"
+        );
+    }
+
+    pump_command_ack(app, window, &["space", "open", "reopen-a"]);
+    pump_host(app, window);
+    assert_space_reattached(app, window, "reopen-a", &stale_a);
+}

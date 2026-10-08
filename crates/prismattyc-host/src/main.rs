@@ -1233,9 +1233,11 @@ struct HostState {
     /// for that pid, including when the new sessions reused the old ids.
     attach_daemon_pid: Option<u32>,
     /// Panes already respawned for `attach_daemon_pid` while the id matched.
+    /// Keyed by runtime instance and pane. Pane ids restart at 1 in every
+    /// Space view, so a bare pane id would skip another view's pane.
     /// A working attach on that id is left alone. A child that exits again
     /// stays a placeholder until the daemon pid changes or the user reopens it.
-    attach_rebound_same_id: HashSet<PaneId>,
+    attach_rebound_same_id: HashSet<(u64, PaneId)>,
     /// Panes whose local shell runs a nested `pmux-attach` (PT-210).
     adopted: attach_adopt::Adopted,
     /// Serialize helpers and fence cache writes until their layout applies.
@@ -9037,6 +9039,8 @@ fn note_attach_daemon(host: &mut HostState) {
         return;
     }
     host.attach_daemon_pid = Some(pid);
+    // Parked views keep their panes in this same set. A new pid retries
+    // every runtime, not only the one currently on screen.
     host.attach_rebound_same_id.clear();
 }
 
@@ -9048,12 +9052,13 @@ fn note_attach_daemon(host: &mut HostState) {
 /// closed and write an empty cache. When the id was reused, the placeholder
 /// stayed disconnected. Spawn the live id in both cases. A pane that is
 /// already running on that id is left alone, and a same-id placeholder is
-/// respawned only once for this daemon pid.
+/// respawned only once for this daemon pid and this runtime.
 fn rebind_restarted_attaches(host: &mut HostState, snapshot: &prismattyc_mux::Snapshot) {
     note_attach_daemon(host);
     let Some(owner) = host.mux.space_id.clone() else {
         return;
     };
+    let instance = host.mux.instance();
     let targets: Vec<(PaneId, String, String, bool)> = host
         .attach_pane_sessions
         .iter()
@@ -9075,7 +9080,7 @@ fn rebind_restarted_attaches(host: &mut HostState, snapshot: &prismattyc_mux::Sn
             if same_id && !dead {
                 return None;
             }
-            if same_id && host.attach_rebound_same_id.contains(pane) {
+            if same_id && host.attach_rebound_same_id.contains(&(instance, *pane)) {
                 return None;
             }
             Some((*pane, live_id, name, same_id))
@@ -9083,7 +9088,7 @@ fn rebind_restarted_attaches(host: &mut HostState, snapshot: &prismattyc_mux::Sn
         .collect();
     for (pane, live_id, name, same_id) in targets {
         if same_id {
-            host.attach_rebound_same_id.insert(pane);
+            host.attach_rebound_same_id.insert((instance, pane));
         }
         reopen_attach(host, pane, &live_id, &name);
     }

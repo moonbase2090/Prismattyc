@@ -13,13 +13,12 @@ Two checks, stdlib only:
    fidelity-matrix sentence must all name the same version.
 
 Branch from VERSION_BRANCH, else GITHUB_HEAD_REF, else the git branch
-(detached HEAD counts as non-release). Only a release branch whose name
-carries a version (release/vX.Y.Z-rc.N-changelog, or the older
+(detached HEAD counts as non-release). Only an exactly documented
+release branch name (release/vX.Y.Z-rc.N-changelog, or the older
 release/X.Y.Z style) may change the version. There the workspace
 version must be a base X.Y.Z with no prerelease suffix, must not go
-down, and must match the branch version or its base. Exit 0 only when
-every check passes, 1 on a check failure, 2 when the repo or base ref
-is unusable.
+down, and must equal the branch version. Exit 0 only when every check
+passes, 1 on a check failure, 2 when the repo or base ref is unusable.
 """
 
 from __future__ import annotations
@@ -51,8 +50,17 @@ LOCK_ENTRY_RE = re.compile(
     r"\[\[package\]\]\nname = \"([^\"]+)\"\nversion = \"([^\"]+)\""
     r"(\nsource = \"[^\"]+\")?",
 )
-BRANCH_VERSION_RE = re.compile(r"v?(\d+\.\d+\.\d+(?:-rc\.\d+)?)")
+RELEASE_BRANCH_RE = re.compile(r"^release/v(\d+\.\d+\.\d+)-rc\.\d+-changelog$")
+LEGACY_RELEASE_BRANCH_RE = re.compile(r"^release/(\d+\.\d+\.\d+)$")
 BASE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+
+
+def release_branch_version(branch: str) -> str | None:
+    """Base X.Y.Z a release branch name authorizes, else None."""
+    match = RELEASE_BRANCH_RE.match(branch) or LEGACY_RELEASE_BRANCH_RE.match(
+        branch
+    )
+    return match.group(1) if match else None
 
 
 def run_git(root: Path, *args: str) -> tuple[int, str]:
@@ -159,16 +167,17 @@ def main() -> int:
         return FAIL
     print(f"drift: HEAD {head_version} vs merge-base({base}) {base_version}")
 
-    branch_match = BRANCH_VERSION_RE.search(branch) if is_release else None
-    if is_release and branch_match is None:
+    branch_version = release_branch_version(branch) if is_release else None
+    if is_release and branch_version is None:
         print(
-            "release: branch carries no version, so the release exemption "
-            "does not apply"
+            "release: branch name is not a documented release branch "
+            "(release/vX.Y.Z-rc.N-changelog or release/X.Y.Z), so the "
+            "release exemption does not apply"
         )
         is_release = False
     if is_release:
         print("drift: skipped on a release branch")
-        assert branch_match is not None
+        assert branch_version is not None
         if not BASE_VERSION_RE.match(head_version):
             failures.append(
                 f"workspace version {head_version} is not a base version "
@@ -185,12 +194,10 @@ def main() -> int:
         else:
             print(f"release: version does not go down ({head_version})")
         if BASE_VERSION_RE.match(head_version):
-            branch_version = branch_match.group(1)
-            branch_base = branch_version.split("-rc.")[0]
-            if head_version not in (branch_version, branch_base):
+            if head_version != branch_version:
                 failures.append(
-                    f"release version {head_version} matches neither "
-                    f"branch version {branch_version} nor {branch_base}"
+                    f"release version {head_version} does not match "
+                    f"branch version {branch_version}"
                 )
                 print("release: FAIL (branch-name mismatch)")
             else:

@@ -310,6 +310,19 @@ impl Panel {
                     "Save the arrangement after a short idle",
                     Choice::Preference("spaces.autosave".into(), (!enabled).to_string()),
                 );
+                let login = config.start_at_login.unwrap_or_else(|| {
+                    host_mux_socket().is_some_and(|socket| {
+                        prismattyc_mux::login::enabled(&socket).unwrap_or(false)
+                    })
+                });
+                self.row(
+                    format!(
+                        "Start at login and restore workspace: {}",
+                        if login { "on" } else { "off" }
+                    ),
+                    "Keep sessions running after login and restore the previous workspace",
+                    Choice::Preference("start_at_login".into(), (!login).to_string()),
+                );
                 for (value, label, detail) in [
                     (
                         "blank",
@@ -916,7 +929,10 @@ pub(super) fn activate(host: &mut HostState, index: usize) {
             let saved = if key == "spaces.autosave" {
                 config::save_spaces_autosave(&config::config_path(), value == "true")
             } else {
-                let item = if key == "space_autosave" || key == "restore_blank_terminals" {
+                let item = if key == "space_autosave"
+                    || key == "restore_blank_terminals"
+                    || key == "start_at_login"
+                {
                     toml_edit::value(value == "true")
                 } else {
                     toml_edit::value(value.as_str())

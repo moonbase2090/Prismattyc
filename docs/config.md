@@ -73,6 +73,8 @@ render_timer_log_every_frame = false
 pty_drain_budget_ms = 8
 # Show the launch splash on bare launches. true|false.
 splash = true
+# Start at login and restore workspace; existing saved workspaces default on, new installs off. true|false.
+# start_at_login = false
 # Animate the launch splash word art. true|false.
 splash_animation = true
 # Skip focus-change animation; the focus ring appears instantly. true|false.
@@ -1220,6 +1222,12 @@ already-open panes keep the value from spawn. See
 `docs/scrollback-triage.md`.
 
 ### Restore blank terminals after restart
+
+Managed sessions can start automatically at login with **Start at login and
+restore workspace**, or `start_at_login = true`. New installations default
+off; existing saved workspaces default on after upgrade. See
+[Login and workspace restore](login-restore.md) for commands, platform
+services, and restore limits.
 
 Enable **Spaces settings → Restore blanks**, or set
 `restore_blank_terminals = true`. The default is `false`.

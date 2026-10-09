@@ -5,6 +5,8 @@ use super::*;
 pub(super) struct RestorePrompt {
     layout: attach_tabs::AttachTabsFile,
     pub(super) selected: usize,
+    automatic_at: Option<Instant>,
+    startup: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
 }
 
 impl RestorePrompt {
@@ -16,10 +18,44 @@ impl RestorePrompt {
             .then_some(Self {
                 layout,
                 selected: 0,
+                automatic_at: None,
+                startup: None,
             })
     }
 
+    pub(super) fn arm(&mut self, socket: PathBuf, pmux: PathBuf, wake: mux::Wake) {
+        self.automatic_at = Some(Instant::now() + Duration::from_secs(3));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.startup = Some(receiver);
+        std::thread::spawn(move || {
+            let result = std::process::Command::new(pmux)
+                .arg("--socket")
+                .arg(socket)
+                .arg("up")
+                .output()
+                .map_err(|error| error.to_string())
+                .and_then(|output| {
+                    if output.status.success() {
+                        Ok(())
+                    } else {
+                        Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+                    }
+                });
+            let _ = sender.send(result);
+            wake();
+        });
+    }
+
+    pub(super) fn deadline(&self) -> Option<Instant> {
+        self.startup
+            .is_none()
+            .then_some(self.automatic_at)
+            .flatten()
+    }
+
     fn key(&mut self, key: &Key) -> Option<bool> {
+        // Any deliberate navigation cancels the countdown.
+        self.automatic_at = None;
         match key {
             Key::Named(NamedKey::Enter) => Some(self.selected == 0),
             Key::Named(NamedKey::Escape) => Some(false),
@@ -108,6 +144,12 @@ pub(super) fn hover_button(host: &HostState) -> Option<usize> {
 }
 
 pub(super) fn finish(host: &mut HostState, accept: bool) {
+    if accept {
+        if let Some(prompt) = host.restore_prompt.as_mut().filter(|p| p.startup.is_some()) {
+            prompt.automatic_at = Some(Instant::now());
+            return;
+        }
+    }
     let Some(prompt) = host.restore_prompt.take() else {
         return;
     };
@@ -182,15 +224,64 @@ pub(super) fn finish(host: &mut HostState, accept: bool) {
     host.window.request_redraw();
 }
 
+pub(super) fn poll(host: &mut HostState) {
+    let Some(prompt) = host.restore_prompt.as_mut() else {
+        return;
+    };
+    let result = prompt.startup.as_ref().and_then(|rx| match rx.try_recv() {
+        Ok(result) => Some(result),
+        Err(std::sync::mpsc::TryRecvError::Empty) => None,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Some(Err("workspace startup worker stopped".into()))
+        }
+    });
+    if let Some(result) = result {
+        prompt.startup = None;
+        if let Err(error) = result {
+            prompt.automatic_at = None;
+            rail_error_toast(host, &format!(" Could not start workspace: {error} "));
+            return;
+        }
+    }
+    if prompt.deadline().is_some_and(|at| Instant::now() >= at) {
+        finish(host, true);
+    }
+}
+
+pub(super) fn sync_login_registration() {
+    let Some(socket) = host_mux_socket() else {
+        return;
+    };
+    let pmux = find_mux_bin();
+    std::thread::spawn(move || {
+        match std::process::Command::new(pmux)
+            .arg("--socket")
+            .arg(socket)
+            .args(["login", "sync"])
+            .output()
+        {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => eprintln!(
+                "prismattyc-host: login registration failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Err(error) => eprintln!("prismattyc-host: login registration failed: {error}"),
+        }
+    });
+}
+
 pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, height: usize) {
     let Some(prompt) = host.restore_prompt.as_ref() else {
         return;
     };
     let rows = [
         PaletteRow::plain(
-            "Restore".into(),
-            "Reconnect running sessions. Stopped sessions stay stopped until you reopen them."
-                .into(),
+            "Restore workspace".into(),
+            if prompt.automatic_at.is_some() {
+                "Restoring automatically. Esc starts fresh.".into()
+            } else {
+                "Reconnect saved sessions, tabs, panes, and Spaces.".into()
+            },
             "R".into(),
         ),
         PaletteRow::plain(
@@ -200,7 +291,7 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
         ),
     ];
     let sections = [PaletteSection {
-        header: "Restore last space?",
+        header: "Restore workspace",
         subtitle: prompt.layout.space.as_deref().unwrap_or("Previous window"),
         rows: &rows,
     }];

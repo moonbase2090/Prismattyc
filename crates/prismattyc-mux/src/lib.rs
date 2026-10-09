@@ -13,7 +13,9 @@ mod attention;
 pub mod component_restart;
 pub mod config;
 mod control;
+pub mod daemon_lock;
 mod domain;
+pub mod executable;
 mod geometry;
 pub mod host_register;
 pub mod host_render_status;
@@ -23,6 +25,7 @@ mod inject_submit;
 mod layout;
 mod layout_file;
 mod live;
+pub mod login;
 pub mod mailbox;
 mod pane_log;
 mod pane_log_persist;
@@ -39,6 +42,7 @@ pub mod team_attention;
 pub mod uninstall;
 pub mod update;
 pub mod walkthrough;
+pub mod workspace;
 
 pub use attach_scan::{
     attach_targets_session, classify_attach, parse_attach_client, scan_attach_clients,

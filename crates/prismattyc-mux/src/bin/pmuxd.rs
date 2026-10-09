@@ -33,6 +33,7 @@ struct Cli {
     cols: u32,
     rows: u32,
     experimental_rich: bool,
+    restore_workspace: bool,
     program: String,
     argv: Vec<String>,
 }
@@ -51,6 +52,7 @@ impl Cli {
             "1" | "true" | "on" | "yes"
         );
         let mut program = None;
+        let mut restore_workspace = false;
         let mut argv = Vec::new();
         while let Some(arg) = args.next() {
             if arg == "--" {
@@ -83,6 +85,7 @@ impl Cli {
                 "--experimental-rich" if program.is_none() => {
                     experimental_rich = true;
                 }
+                "--restore-workspace" if program.is_none() => restore_workspace = true,
                 _ if program.is_none() => program = Some(arg),
                 _ => argv.push(arg),
             }
@@ -96,6 +99,7 @@ impl Cli {
             cols,
             rows,
             experimental_rich,
+            restore_workspace,
             program: program.unwrap_or_else(prismattyc_mux::platform::default_shell),
             argv,
         })
@@ -117,7 +121,7 @@ fn print_help() {
 pmuxd — long-lived local Prismattyc mux server
 
 USAGE:
-    pmuxd [--socket PATH] [--cols N] [--rows N] [--experimental-rich] [PROGRAM [ARGS...]]
+    pmuxd [--socket PATH] [--cols N] [--rows N] [--experimental-rich] [--restore-workspace] [PROGRAM [ARGS...]]
     pmuxd --socket /absolute/path.sock -- /bin/bash -l
 
 The server owns PTYs, emulators, topology, leases, and authoritative geometry.
@@ -152,6 +156,76 @@ fn main() -> Result<()> {
     if cli.experimental_rich {
         std::env::set_var("PRISMATTYC_EXPERIMENTAL_RICH", "1");
     }
+    let instance = prismattyc_mux::daemon_lock::DaemonLock::acquire(&cli.socket)
+        .context("acquire pmuxd instance lock")?;
+    let stopped_path = cli.socket.with_extension("stopped");
+    if stopped_path.exists() {
+        std::fs::remove_file(&stopped_path)?;
+    }
+    let login_enabled = prismattyc_mux::login::initialize_default(&cli.socket)?;
+    let restore = cli.restore_workspace || login_enabled;
+    let saved = if restore {
+        match prismattyc_mux::workspace::load(&cli.socket)? {
+            Some(saved) => Some(saved),
+            None => prismattyc_mux::workspace::Workspace::migrate_saved_spaces(&cli.socket)?,
+        }
+    } else {
+        None
+    };
+    let mut plane = match saved.as_ref() {
+        Some(saved) => saved.restore(&cli.socket)?,
+        None => bootstrap_plane(&cli)?,
+    };
+    if let Some(saved) = &saved {
+        saved.checkpoint(&cli.socket)?;
+    }
+    if let Some(view) = saved.as_ref().and_then(|saved| saved.view.as_ref()) {
+        let path = prismattyc_mux::attach_tabs::layout_path_from_socket(&cli.socket);
+        if !path.exists() {
+            prismattyc_mux::attach_tabs::save(&path, view)?;
+        }
+    }
+    let remote_size = load_mux_section(&prism_config_path())
+        .ok()
+        .and_then(|file| resolve_remote_size(None, &file).ok())
+        .unwrap_or_default();
+    plane.set_remote_size(remote_size);
+    // The mailbox already persists independently of the daemon workspace.
+    let mail_db = prismattyc_mux::mailbox::default_mail_db_path();
+    let store = prismattyc_mux::mailbox::Store::open(&mail_db)
+        .with_context(|| format!("open mailbox {}", mail_db.display()))?;
+    plane.set_mail_store(store);
+    if let Some(path) = prismattyc_mux::resolve_pane_log_path(&cli.socket) {
+        plane
+            .set_pane_log_path(path)
+            .context("start pane-log checkpoint worker")?;
+    }
+    let server = ControlServer::bind(&cli.socket, plane)
+        .with_context(|| format!("bind {}", cli.socket.display()))?;
+    instance.publish_pid(&cli.socket)?;
+    let identity_path = prismattyc_mux::spaces_daemon_identity_path(&cli.socket);
+    if !identity_path.exists() {
+        let identity = std::env::var("PRISMATTYC_DAEMON_IDENTITY").unwrap_or_else(|_| {
+            if default_socket_path("default").ok().as_ref() == Some(&cli.socket) {
+                "default".into()
+            } else {
+                prismattyc_mux::spaces_socket_identity(&cli.socket)
+            }
+        });
+        std::fs::write(identity_path, format!("{identity}\n"))
+            .context("write Spaces daemon identity")?;
+    }
+    let checkpoint =
+        prismattyc_mux::workspace::Checkpointer::start(server.plane(), cli.socket.clone())?;
+    println!("{}", server.path().display());
+    server.wait_shutdown();
+    std::fs::write(&stopped_path, b"intentional shutdown\n")?;
+    drop(checkpoint);
+    drop(server);
+    Ok(())
+}
+
+fn bootstrap_plane(cli: &Cli) -> Result<ControlPlane> {
     let domain = Domain::bootstrap("default")?;
     let session = domain
         .sessions()
@@ -174,12 +248,12 @@ fn main() -> Result<()> {
     // HIVE_SOCKET arms the supervisor sink only and is never injected into the child
     // (ADR-0017 req 4; stripped in PtySession::spawn_config).
     let spawn = SpawnSpec {
-        program: cli.program,
-        argv: cli.argv,
+        program: cli.program.clone(),
+        argv: cli.argv.clone(),
         cwd: Some(std::env::current_dir().context("current directory")?),
         env: fold_hive_seat_env(),
     };
-    let mut plane = ControlPlane::new_live(
+    let plane = ControlPlane::new_live(
         domain,
         [bounds],
         None,
@@ -187,39 +261,5 @@ fn main() -> Result<()> {
         Some(cli.socket.clone()),
     )
     .map_err(anyhow::Error::new)?;
-    let remote_size = load_mux_section(&prism_config_path())
-        .ok()
-        .and_then(|file| resolve_remote_size(None, &file).ok())
-        .unwrap_or_default();
-    plane.set_remote_size(remote_size);
-    // Durable mailbox. Failure to open is fatal: silently serving mail from
-    // an in-memory default would lose letters on exit.
-    let mail_db = prismattyc_mux::mailbox::default_mail_db_path();
-    let store = prismattyc_mux::mailbox::Store::open(&mail_db)
-        .with_context(|| format!("open mailbox {}", mail_db.display()))?;
-    plane.set_mail_store(store);
-    if let Some(path) = prismattyc_mux::resolve_pane_log_path(&cli.socket) {
-        plane
-            .set_pane_log_path(path)
-            .context("start pane-log checkpoint worker")?;
-    }
-    let server = ControlServer::bind(&cli.socket, plane)
-        .with_context(|| format!("bind {}", cli.socket.display()))?;
-    let identity_path = prismattyc_mux::spaces_daemon_identity_path(&cli.socket);
-    if !identity_path.exists() {
-        let identity = std::env::var("PRISMATTYC_DAEMON_IDENTITY").unwrap_or_else(|_| {
-            if default_socket_path("default").ok().as_ref() == Some(&cli.socket) {
-                "default".into()
-            } else {
-                prismattyc_mux::spaces_socket_identity(&cli.socket)
-            }
-        });
-        std::fs::write(identity_path, format!("{identity}\n"))
-            .context("write Spaces daemon identity")?;
-    }
-    println!("{}", server.path().display());
-
-    server.wait_shutdown();
-    drop(server);
-    Ok(())
+    Ok(plane)
 }

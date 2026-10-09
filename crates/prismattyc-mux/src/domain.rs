@@ -216,6 +216,140 @@ fn validate_agent_id(agent_id: &str) -> Result<String, DomainError> {
 }
 
 impl Domain {
+    pub(crate) fn next_ids(&self) -> crate::workspace::NextIds {
+        crate::workspace::NextIds {
+            session: self.next_session,
+            window: self.next_window,
+            pane: self.next_pane,
+        }
+    }
+
+    /// Parse durable topology before any children start. Restore stable IDs,
+    /// but never restore controller leases belonging to dead clients.
+    pub(crate) fn from_workspace(saved: &crate::workspace::Workspace) -> anyhow::Result<Self> {
+        use anyhow::ensure;
+        use std::collections::HashSet;
+
+        fn check_id(id: u64, next: u64) -> anyhow::Result<()> {
+            ensure!(
+                id != 0 && (next == 0 || id < next),
+                "invalid saved ID or counter"
+            );
+            Ok(())
+        }
+
+        fn tree(saved: &crate::LayoutSnapshot) -> anyhow::Result<PaneLayout> {
+            Ok(match saved {
+                crate::LayoutSnapshot::Leaf { pane_id } => {
+                    PaneLayout::Leaf(PaneId::from_raw(*pane_id))
+                }
+                crate::LayoutSnapshot::Split {
+                    axis,
+                    ratio,
+                    first,
+                    second,
+                } => {
+                    ensure!(
+                        ratio.is_finite() && (0.01..=0.99).contains(ratio),
+                        "invalid saved split ratio"
+                    );
+                    PaneLayout::Split(crate::Split {
+                        axis: match axis {
+                            crate::AxisWire::Horizontal => crate::Axis::Horizontal,
+                            crate::AxisWire::Vertical => crate::Axis::Vertical,
+                        },
+                        ratio: *ratio,
+                        first: Box::new(tree(first)?),
+                        second: Box::new(tree(second)?),
+                    })
+                }
+            })
+        }
+
+        let mut domain = Self::new();
+        domain.next_session = saved.next_ids.session;
+        domain.next_window = saved.next_ids.window;
+        domain.next_pane = saved.next_ids.pane;
+        for session in &saved.sessions {
+            check_id(session.id, domain.next_session)?;
+            ensure!(
+                !session.name.trim().is_empty() && !session.name.contains('\0'),
+                "invalid saved session name"
+            );
+            let sid = SessionId::from_raw(session.id);
+            let inserted = domain.sessions.insert(
+                sid,
+                Session {
+                    id: sid,
+                    name: session.name.clone(),
+                    windows: Vec::new(),
+                    agent_id: None,
+                    space_id: None,
+                },
+            );
+            ensure!(inserted.is_none(), "duplicate saved session ID");
+            domain.session_order.push(sid);
+            domain.set_agent_id(sid, session.agent_id.clone())?;
+            domain.transfer_space_sessions(&[sid], None, session.space_id.as_deref())?;
+            for window in &session.windows {
+                check_id(window.id, domain.next_window)?;
+                validated_window_title(&window.title)?;
+                ensure!(
+                    window.bounds.window_id == window.id,
+                    "saved bounds name another window"
+                );
+                ensure!(
+                    window.bounds.cols > 0 && window.bounds.rows > 0,
+                    "empty saved window bounds"
+                );
+                let wid = WindowId::from_raw(window.id);
+                let layout = tree(&window.layout)?;
+                let leaves = layout.panes();
+                let leaf_set: HashSet<_> = leaves.iter().copied().collect();
+                ensure!(
+                    leaves.len() == leaf_set.len() && leaves.len() == window.panes.len(),
+                    "duplicate or missing saved pane"
+                );
+                for pane in &window.panes {
+                    check_id(pane.id, domain.next_pane)?;
+                    let pid = PaneId::from_raw(pane.id);
+                    ensure!(
+                        leaf_set.contains(&pid),
+                        "saved pane is absent from its layout"
+                    );
+                    let inserted = domain.panes.insert(
+                        pid,
+                        Pane {
+                            id: pid,
+                            title: pane.title.clone(),
+                            title_pinned: pane.title_pinned,
+                            controller: None,
+                        },
+                    );
+                    ensure!(inserted.is_none(), "duplicate saved pane ID");
+                    domain.pane_owner.insert(pid, wid);
+                }
+                let inserted = domain.windows.insert(
+                    wid,
+                    Window {
+                        id: wid,
+                        title: window.title.clone(),
+                        layout,
+                        sync_input: window.sync_input,
+                    },
+                );
+                ensure!(inserted.is_none(), "duplicate saved window ID");
+                domain
+                    .sessions
+                    .get_mut(&sid)
+                    .expect("inserted session")
+                    .windows
+                    .push(wid);
+            }
+        }
+        Ok(domain)
+    }
+
     /// Empty domain (no sessions). Prefer [`Self::bootstrap`] for a ready workspace.
     pub fn new() -> Self {
         Self {

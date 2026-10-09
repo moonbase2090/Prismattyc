@@ -242,6 +242,9 @@ pub struct ConfigFile {
     /// Show the launch splash on a bare first window. Default true.
     /// Startup only. `--no-splash` and `PRISMATTYC_NO_SPLASH` still hide it.
     pub splash: Option<bool>,
+    /// Start the daemon at login and restore the saved workspace. An absent
+    /// choice migrates existing saved workspaces on, and new installs off.
+    pub start_at_login: Option<bool>,
     /// Animate the launch splash's word art (beam sweep, reflection passes,
     /// lens flares). Default true; `false` shows the art static.
     pub splash_animation: Option<bool>,

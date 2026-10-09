@@ -697,11 +697,8 @@ fn find_mux_bin() -> std::path::PathBuf {
         }
     }
     if let Ok(me) = std::env::current_exe() {
-        if let Some(dir) = me.parent() {
-            let sibling = dir.join(prismattyc_mux::platform::executable_name("pmux"));
-            if sibling.is_file() {
-                return sibling;
-            }
+        if let Some(sibling) = prismattyc_mux::executable::sibling(&me, &["pmux"]) {
+            return sibling;
         }
     }
     #[cfg(target_os = "macos")]

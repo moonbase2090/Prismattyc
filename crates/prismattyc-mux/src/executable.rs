@@ -3,11 +3,36 @@
 use std::path::{Path, PathBuf};
 
 pub fn sibling(executable: &Path, names: &[&str]) -> Option<PathBuf> {
+    let resolved = executable.canonicalize().ok();
+    let executable = resolved.as_deref().unwrap_or(executable);
     let directory = executable.parent()?;
     names
         .iter()
         .map(|name| directory.join(crate::platform::executable_name(name)))
         .find(|path| path.is_file())
+}
+
+/// Finder launches have a minimal PATH. A standalone CLI can still use the
+/// helpers installed in the user's app bundle, then the system app bundle.
+pub fn app_companion(names: &[&str]) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut bundles = Vec::new();
+        if let Some(home) = crate::platform::home_dir() {
+            bundles.push(PathBuf::from(home).join("Applications/Prismattyc.app"));
+        }
+        bundles.push(PathBuf::from("/Applications/Prismattyc.app"));
+        for bundle in bundles {
+            for name in names {
+                let path = bundle.join("Contents/MacOS").join(name);
+                if path.is_file() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    let _ = names;
+    None
 }
 
 #[cfg(all(test, unix))]

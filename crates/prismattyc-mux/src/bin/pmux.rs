@@ -962,7 +962,7 @@ fn find_bin(keys: &[&str], names: &[&str]) -> PathBuf {
             return sibling;
         }
     }
-    PathBuf::from(names[0])
+    prismattyc_mux::executable::app_companion(names).unwrap_or_else(|| PathBuf::from(names[0]))
 }
 
 fn cmd_up(paths: &Paths, program: Vec<String>) -> Result<()> {

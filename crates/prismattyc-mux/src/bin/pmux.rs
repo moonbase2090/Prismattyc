@@ -958,13 +958,8 @@ fn find_bin(keys: &[&str], names: &[&str]) -> PathBuf {
         }
     }
     if let Ok(me) = std::env::current_exe() {
-        if let Some(dir) = me.parent() {
-            for name in names {
-                let sibling = dir.join(prismattyc_mux::platform::executable_name(name));
-                if sibling.is_file() {
-                    return sibling;
-                }
-            }
+        if let Some(sibling) = prismattyc_mux::executable::sibling(&me, names) {
+            return sibling;
         }
     }
     PathBuf::from(names[0])

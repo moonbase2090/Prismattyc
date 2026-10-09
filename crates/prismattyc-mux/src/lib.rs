@@ -14,6 +14,7 @@ pub mod component_restart;
 pub mod config;
 mod control;
 mod domain;
+pub mod executable;
 mod geometry;
 pub mod host_register;
 pub mod host_render_status;

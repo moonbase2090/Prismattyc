@@ -16,7 +16,7 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of Prismattyc is already installed." Schedule="afterInstallInitialize" />
     <MediaTemplate EmbedCab="yes" />
 
-    <!-- Do not ask Restart Manager to close Prismattyc. A locked executable fails the copy. -->
+    <!-- Do not ask Restart Manager to close Prismattyc. -->
     <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />
     <Property Id="ARPPRODUCTICON" Value="PrismattycIcon" />
     <Property Id="ARPNOMODIFY" Value="1" />

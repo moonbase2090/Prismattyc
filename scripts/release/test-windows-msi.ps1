@@ -1,6 +1,7 @@
 # Install, upgrade, and uninstall the per-user Prismattyc MSI.
 # Run on Windows with nothing in %LOCALAPPDATA%\Programs\Prismattyc\bin executing.
-# The MSI refuses to replace a locked executable and does not stop pmuxd.
+# The MSI does not stop pmuxd. This test locks one installed executable and
+# records the msiexec exit code instead of treating Restart Manager as proof.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
@@ -8,18 +9,76 @@ param(
     [string]$UpgradeFrom = '',
     [string]$ExpectedVersion = '',
     [string]$ExpectedProductVersion = '',
-    [switch]$AddToPath
+    [switch]$AddToPath,
+    [switch]$FormatArguments
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+function Format-ProcessArgument {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    # Start-Process joins an argument array with spaces and drops the quoting.
+    # msiexec receives one command line, so each argument is quoted here.
+    return '"' + $Value.Replace('"', '""') + '"'
+}
+
+function New-MsiCommandLine {
+    param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
+    return (($ArgumentList | ForEach-Object { Format-ProcessArgument $_ }) -join ' ')
+}
+
+function Get-MsiProofPhases {
+    $phases = @('install')
+    if ($UpgradeFrom) { $phases += 'upgrade' }
+    if ($ExpectedVersion -or $ExpectedProductVersion) { $phases += 'version' }
+    $phases += @('locked-file', 'uninstall')
+    return $phases
+}
+
+function Get-MsiTail {
+    $tail = @('/qn', '/norestart')
+    if ($AddToPath) { $tail += 'ADDTOPATH=1' } else { $tail += 'ADDTOPATH=0' }
+    # Keep the runner from rebooting. This does not claim the copy failed.
+    $tail += 'REBOOT=ReallySuppress'
+    return $tail
+}
+
+if ($FormatArguments) {
+    $tail = Get-MsiTail
+    if ($UpgradeFrom) {
+        Write-Output ('upgrade=' + (New-MsiCommandLine (@('/i', $UpgradeFrom) + $tail)))
+    }
+    Write-Output ('install=' + (New-MsiCommandLine (@('/i', $Msi) + $tail)))
+    Write-Output ('phases=' + ((Get-MsiProofPhases) -join ','))
+    exit 0
+}
+
 if ($env:OS -ne 'Windows_NT') { throw 'Run this test on Windows.' }
+
+function Start-Msi {
+    param(
+        [Parameter(Mandatory = $true)][string]$CommandLine,
+        [int]$TimeoutMilliseconds = 300000
+    )
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = Join-Path $env:SystemRoot 'System32\msiexec.exe'
+    $info.Arguments = $CommandLine
+    $info.UseShellExecute = $false
+    $started = New-Object System.Diagnostics.Process
+    $started.StartInfo = $info
+    if (-not $started.Start()) { throw "msiexec did not start: $CommandLine" }
+    if (-not $started.WaitForExit($TimeoutMilliseconds)) {
+        try { $started.Kill() } catch { }
+        throw "msiexec timed out: $CommandLine"
+    }
+    return $started.ExitCode
+}
 
 function Invoke-Msi {
     param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
-    $process = Start-Process -FilePath msiexec.exe -ArgumentList $ArgumentList -Wait -PassThru -NoNewWindow
-    if ($process.ExitCode -ne 0) {
-        throw "msiexec $($ArgumentList -join ' ') exited $($process.ExitCode)"
-    }
+    $commandLine = New-MsiCommandLine $ArgumentList
+    $code = Start-Msi -CommandLine $commandLine
+    if ($code -ne 0) { throw "msiexec $commandLine exited $code" }
 }
 
 function Get-PrismattycInstall {
@@ -103,6 +162,51 @@ function Assert-Removed {
     }
 }
 
+function Get-Sha256Hex {
+    param([byte[]]$Bytes)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+    }
+}
+
+function Read-AllBytes {
+    param([Parameter(Mandatory = $true)][System.IO.FileStream]$Stream)
+    $Stream.Position = 0
+    $buffer = New-Object byte[] $Stream.Length
+    $read = 0
+    while ($read -lt $buffer.Length) {
+        $count = $Stream.Read($buffer, $read, $buffer.Length - $read)
+        if ($count -le 0) { throw 'short read of locked executable' }
+        $read += $count
+    }
+    return $buffer
+}
+
+function Assert-LockedExecutableSurvivesReinstall {
+    param([Parameter(Mandatory = $true)][string]$CommandLine)
+    $install = Get-PrismattycInstall
+    $target = Join-Path $install.Bin 'pmux.exe'
+    $stream = [System.IO.File]::Open(
+        $target,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::None)
+    try {
+        $before = Get-Sha256Hex (Read-AllBytes $stream)
+        $code = Start-Msi -CommandLine $CommandLine
+        $after = Get-Sha256Hex (Read-AllBytes $stream)
+        if ($after -ne $before) { throw 'locked executable bytes changed during msiexec' }
+        if (-not $stream.CanRead) { throw 'lock did not survive msiexec' }
+        Write-Output "locked-file msiexec exit: $code"
+        Write-Output 'locked-file bytes unchanged'
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 $msiPath = (Resolve-Path -LiteralPath $Msi).Path
 $install = Get-PrismattycInstall
 $preserved = @(
@@ -113,17 +217,17 @@ New-Item -ItemType Directory -Path (Split-Path -Parent $preserved[1]) -Force | O
 Set-Content -LiteralPath $preserved[0] -Value 'keep' -Encoding ascii
 Set-Content -LiteralPath $preserved[1] -Value 'keep' -Encoding ascii
 
-$installArgs = @('/i', $msiPath, '/qn', '/norestart')
-if ($AddToPath) { $installArgs += 'ADDTOPATH=1' } else { $installArgs += 'ADDTOPATH=0' }
-
+$tail = Get-MsiTail
+$installArgs = @('/i', $msiPath) + $tail
 if ($UpgradeFrom) {
     $older = (Resolve-Path -LiteralPath $UpgradeFrom).Path
-    Invoke-Msi -ArgumentList @('/i', $older, '/qn', '/norestart', 'ADDTOPATH=0')
+    Invoke-Msi -ArgumentList (@('/i', $older) + $tail)
 }
 Invoke-Msi -ArgumentList $installArgs
 Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected ([bool]$AddToPath)
+Assert-LockedExecutableSurvivesReinstall -CommandLine (New-MsiCommandLine $installArgs)
 
 $installed = Get-PrismattycUninstallKey
-Invoke-Msi -ArgumentList @('/x', $installed.ProductCode, '/qn', '/norestart')
+Invoke-Msi -ArgumentList (@('/x', $installed.ProductCode, '/qn', '/norestart', 'REBOOT=ReallySuppress'))
 Assert-Removed -Survivors $preserved
-Write-Host "MSI install, upgrade, and uninstall checks passed."
+Write-Output ("MSI {0} checks passed." -f ((Get-MsiProofPhases) -join ', '))

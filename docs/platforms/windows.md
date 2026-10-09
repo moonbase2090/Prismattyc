@@ -36,15 +36,16 @@ shows the publisher Moonbase2090 and the numeric MSI product version described
 below. `pmux --version` still reports the semver.
 
 ```powershell
-msiexec /i prismattyc-v0.3.29-rc.2-x86_64-pc-windows-msvc.msi /qn /norestart
-msiexec /i prismattyc-v0.3.29-rc.2-x86_64-pc-windows-msvc.msi /qn /norestart ADDTOPATH=1
+msiexec /i prismattyc-v0.3.29-x86_64-pc-windows-msvc.msi /qn /norestart
+msiexec /i prismattyc-v0.3.29-x86_64-pc-windows-msvc.msi /qn /norestart ADDTOPATH=1
 ```
 
 `ADDTOPATH=1` prepends the install `bin` directory to the user PATH. The
 default is off, matching `install-windows-preview.ps1 -AddToPath`. Uninstall
 removes that PATH entry, the files, and the shortcut. It leaves `%APPDATA%`
-configuration and `%LOCALAPPDATA%\Prismattyc` data in place, including the
-update store under `%LOCALAPPDATA%\prismattyc\updates`.
+configuration and `%LOCALAPPDATA%\Prismattyc` data in place. The update store
+is `$XDG_DATA_HOME/prismattyc/updates` when `XDG_DATA_HOME` is nonempty, and
+otherwise `%LOCALAPPDATA%\prismattyc\updates`.
 
 MSI `ProductVersion` has three numbers of at most 65535 and cannot store a
 prerelease tag. Patch numbers through 64 map to `patch * 1000 + slot`. A
@@ -55,19 +56,25 @@ stable `X.Y.Z` uses slot 999. `X.Y.Z-rc.N` uses slot N, from 1 through 998.
 older one. Other prerelease spellings are rejected.
 
 The installer does not stop a running daemon or host. Restart Manager is
-disabled. If an executable in the install directory is still running, Windows
-cannot replace that file and `msiexec` fails the copy; the process keeps
-running. Close Prismattyc before installing. `pmux update` stores new builds
-under `%LOCALAPPDATA%\prismattyc\updates` and the installed executables forward
-to the selected version on their next launch. An MSI install runs
-`reset-windows-update-pointer.ps1`, which deletes `windows-current.json` when
-it exists, so the next launch runs the MSI binaries instead of an older staged
-update. The script does not kill or restart any process.
+disabled. That alone does not decide whether Windows replaces an in-use file
+or schedules the replacement until reboot. Close Prismattyc before installing
+when the new files must be the ones running in this session. `pmux update`
+stores new builds in the update store above, and the installed executables
+forward to the selected version on their next launch. An MSI install runs
+`reset-windows-update-pointer.ps1`, which deletes `windows-current.json` in
+that same store and leaves the staged payloads in place. The script uses the
+installer process environment, so a nonempty `XDG_DATA_HOME` selects the same
+directory `platform::data_home` uses. It does not stop or restart any process.
 
-`scripts/release/test-windows-msi.ps1` installs with `msiexec /qn`, checks the
-files, shortcut, Apps & features entry, and `--version`, upgrades from an
-older MSI when one is passed, uninstalls, and checks that the install is gone
-while the preserved data files remain.
+`scripts/release/test-windows-msi.ps1` quotes every msiexec argument, so an
+MSI path that contains spaces stays one argument. It installs with
+`msiexec /qn`, checks the files, shortcut, Apps & features entry, and
+`--version` when expected versions are passed, and upgrades from an older MSI
+when `-UpgradeFrom` is set. It then locks one installed executable, runs
+msiexec again with `REBOOT=ReallySuppress`, and fails if that lock does not
+survive or the file bytes change. It prints the msiexec exit code. It
+uninstalls and checks that the install is gone while the preserved data files
+remain. The final line names only the phases that ran.
 
 Extract the ZIP into a directory you own when you are not using the MSI.
 Launch `bin\prismattyc-host.exe`, or add its `bin` directory to your user PATH.
@@ -103,16 +110,40 @@ Create the account, complete identity validation, and create a certificate
 profile in the Azure portal. Microsoft currently offers Artifact Signing to
 organizations in the United States and Canada with at least three years of
 verifiable history. Assign the app registration the Artifact Signing
-Certificate Profile Signer role on that profile. Add a federated credential
-whose issuer is `https://token.actions.githubusercontent.com`, whose subject
-is `repo:moonbase2090/Prismattyc:ref:refs/tags/v*`, and whose audience is
-`api://AzureADTokenExchange`. Workflow-dispatch builds of a tag need a second
-credential only if the subject does not match the tag ref. Do not commit the
-values.
+Certificate Profile Signer role on that profile.
 
-The manual `Windows package` workflow runs the same script and uploads its
-output as a build artifact. It does not publish a GitHub release or install
-anything on a user's machine.
+A standard federated credential matches issuer, subject, and audience exactly.
+A `*` in that subject is a literal character, not a pattern. Issuer:
+`https://token.actions.githubusercontent.com`. Audience:
+`api://AzureADTokenExchange`.
+
+An exact subject matches one ref. The subject for a tag push of `v0.3.29` is
+`repo:moonbase2090/Prismattyc:ref:refs/tags/v0.3.29`. The subject for a
+workflow dispatch from `main` is
+`repo:moonbase2090/Prismattyc:ref:refs/heads/main`. `release.yml` runs on a
+pushed tag and on workflow dispatch. The dispatch subject is the selected
+workflow ref, not the `tag` input. `windows-package.yml` is dispatch-only, so
+its subject is `repo:moonbase2090/Prismattyc:ref:refs/heads/<branch>` or
+`repo:moonbase2090/Prismattyc:ref:refs/tags/<tag>` for the ref selected in
+the dispatch.
+
+A flexible credential leaves subject empty and sets `claimsMatchingExpression`
+with `languageVersion` 1. GitHub expressions match `sub` and `repository_id`.
+This repository's id is `1369174898`. Two credentials cover tag pushes and
+branch dispatches:
+
+`claims['sub'] matches 'repo:moonbase2090/Prismattyc:ref:refs/tags/*' and claims['repository_id'] eq '1369174898'`
+
+`claims['sub'] matches 'repo:moonbase2090/Prismattyc:ref:refs/heads/*' and claims['repository_id'] eq '1369174898'`
+
+These expressions match the name-based subject. If this repository enables
+immutable subject claims, replace them with the `sub` value from a workflow
+token. Do not commit tenant, client, or signing values.
+
+The manual `Windows package` workflow runs the same script, runs the per-user
+install proof on the runner, and uploads the package and proof as build
+artifacts. It does not publish a GitHub release or install anything on a
+user's machine.
 
 ## Unsigned cross-compiled preview
 

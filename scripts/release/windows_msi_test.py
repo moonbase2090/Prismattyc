@@ -3,6 +3,9 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -20,6 +23,13 @@ from windows_msi import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def powershell():
+    found = shutil.which("pwsh") or shutil.which("powershell")
+    if found is None:
+        raise AssertionError("pwsh or powershell is required to run the MSI scripts")
+    return found
 
 
 class WindowsMsiTests(unittest.TestCase):
@@ -75,6 +85,68 @@ class WindowsMsiTests(unittest.TestCase):
                 with self.subTest(workflow=relative, name=name):
                     self.assertIn(name, text)
             self.assertIn("Windows code signing skipped: Azure Artifact Signing settings are absent.", text)
+
+    def test_signing_docs_use_exact_or_flexible_subjects(self):
+        text = (ROOT / "docs/platforms/windows.md").read_text(encoding="utf-8")
+        self.assertNotIn("refs/tags/v*", text)
+        self.assertIn("claimsMatchingExpression", text)
+        self.assertIn("claims['repository_id'] eq '1369174898'", text)
+        self.assertIn("repo:moonbase2090/Prismattyc:ref:refs/tags/v0.3.29", text)
+        self.assertIn("repo:moonbase2090/Prismattyc:ref:refs/heads/main", text)
+        self.assertIn("refs/tags/*", text)
+        self.assertIn("refs/heads/*", text)
+
+    def test_reset_clears_redirected_pointer_and_keeps_payloads(self):
+        script = ROOT / "scripts/release/reset-windows-update-pointer.ps1"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "xdg"
+            updates = root / "prismattyc" / "updates"
+            payload = updates / "0.3.28" / "payload.bin"
+            payload.parent.mkdir(parents=True)
+            payload.write_bytes(b"keep")
+            pointer = updates / "windows-current.json"
+            pointer.write_text('{"bin_dir":"kept-aside"}', encoding="utf-8")
+            (updates / "windows-current.json.bak").write_text("keep", encoding="utf-8")
+            env = os.environ.copy()
+            env["XDG_DATA_HOME"] = str(root)
+            result = subprocess.run(
+                [powershell(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(pointer.exists())
+            self.assertEqual(payload.read_bytes(), b"keep")
+            self.assertEqual((updates / "windows-current.json.bak").read_text(encoding="utf-8"), "keep")
+
+    def test_format_arguments_quotes_paths_with_spaces_and_names_real_phases(self):
+        script = ROOT / "scripts/release/test-windows-msi.ps1"
+
+        def formatted(extra):
+            result = subprocess.run(
+                [powershell(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script), "-FormatArguments", *extra],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout
+
+        quoted = formatted([
+            "-Msi", r"C:\MSI Proof\new.msi",
+            "-UpgradeFrom", r"C:\MSI Proof\older.msi",
+            "-ExpectedVersion", "0.3.29",
+            "-ExpectedProductVersion", "0.3.29999",
+        ])
+        self.assertIn(r'"C:\MSI Proof\new.msi"', quoted)
+        self.assertIn(r'"C:\MSI Proof\older.msi"', quoted)
+        self.assertIn("phases=install,upgrade,version,locked-file,uninstall", quoted)
+        plain = formatted(["-Msi", r"C:\plain\new.msi"])
+        self.assertNotIn("upgrade", plain)
+        self.assertIn("phases=install,locked-file,uninstall", plain)
+        self.assertIn(r'"C:\plain\new.msi"', plain)
 
     def test_package_script_refuses_non_windows_before_building(self):
         if sys.platform == "win32":

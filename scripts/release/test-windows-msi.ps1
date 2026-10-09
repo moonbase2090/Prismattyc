@@ -17,9 +17,12 @@ Set-StrictMode -Version Latest
 
 function Format-ProcessArgument {
     param([Parameter(Mandatory = $true)][string]$Value)
-    # Start-Process joins an argument array with spaces and drops the quoting.
-    # msiexec receives one command line, so each argument is quoted here.
-    return '"' + $Value.Replace('"', '""') + '"'
+    # msiexec parses one command line. Quote values that contain spaces.
+    # A quoted switch such as "/qn" is not recognized, and the UI then waits.
+    if ($Value -match '[\s"]') {
+        return '"' + $Value.Replace('"', '""') + '"'
+    }
+    return $Value
 }
 
 function New-MsiCommandLine {
@@ -58,7 +61,7 @@ if ($env:OS -ne 'Windows_NT') { throw 'Run this test on Windows.' }
 function Start-Msi {
     param(
         [Parameter(Mandatory = $true)][string]$CommandLine,
-        [int]$TimeoutMilliseconds = 300000
+        [int]$TimeoutMilliseconds = 180000
     )
     $info = New-Object System.Diagnostics.ProcessStartInfo
     $info.FileName = Join-Path $env:SystemRoot 'System32\msiexec.exe'

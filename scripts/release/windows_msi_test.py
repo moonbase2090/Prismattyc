@@ -142,11 +142,14 @@ class WindowsMsiTests(unittest.TestCase):
         ])
         self.assertIn(r'"C:\MSI Proof\new.msi"', quoted)
         self.assertIn(r'"C:\MSI Proof\older.msi"', quoted)
+        self.assertNotIn('"/qn"', quoted)
+        self.assertIn("/qn /norestart ADDTOPATH=0 REBOOT=ReallySuppress", quoted)
         self.assertIn("phases=install,upgrade,version,locked-file,uninstall", quoted)
         plain = formatted(["-Msi", r"C:\plain\new.msi"])
         self.assertNotIn("upgrade", plain)
+        self.assertNotIn(r'"C:\plain\new.msi"', plain)
+        self.assertIn(r"C:\plain\new.msi", plain)
         self.assertIn("phases=install,locked-file,uninstall", plain)
-        self.assertIn(r'"C:\plain\new.msi"', plain)
 
     def test_package_script_refuses_non_windows_before_building(self):
         if sys.platform == "win32":

@@ -1,5 +1,85 @@
 # harness-icons proof (tester@repro)
+#
+# Run from repo root. Pass `--` before test-name filters on prismattyc-host.
+# UI still: docs/proof/harness-icons/collapsed-icons.png (Docker rust:latest,
+# PRISMATTYC_SIDEBAR_WIDTH_SHOTS=/work/docs/proof/harness-icons).
 
-cargo test -p prismattyc-mux --lib classify_argv0_basename
-cargo test -p prismattyc-host harness_seat row_seats
-cargo test -p prismattyc-host seat_marks
+=== classify_argv0_basename (prismattyc-mux) ===
+# cargo test -p prismattyc-mux --lib classify_argv0_basename
+   Compiling prismattyc-core v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-core)
+   Compiling prismattyc-emulator v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-emulator)
+   Compiling prismattyc-render v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-render)
+   Compiling prismattyc-mux v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-mux)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.24s
+     Running unittests src/lib.rs (target/debug/deps/prismattyc_mux-708e74f145464651)
+
+running 1 test
+test inject_submit::tests::classify_argv0_basename ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 506 filtered out; finished in 0.00s
+
+
+=== harness_seats_follow_argv0_basenames ===
+# cargo test -p prismattyc-host -- harness_seats_follow_argv0_basenames
+   Compiling prismattyc-core v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-core)
+   Compiling prismattyc-emulator v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-emulator)
+   Compiling prismattyc-render v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-render)
+   Compiling prismattyc-mux v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-mux)
+   Compiling prismattyc-host v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-host)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.30s
+     Running unittests src/main.rs (target/debug/deps/prismattyc_host-652b874acb990e28)
+
+running 1 test
+test sidebar_width::tests::harness_seats_follow_argv0_basenames ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1080 filtered out; finished in 0.00s
+
+     Running tests/version.rs (target/debug/deps/version-a3e89fe38852ab0e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+
+=== row_seats_keep_space_tab_and_pane_distinct ===
+# cargo test -p prismattyc-host -- row_seats_keep_space_tab_and_pane_distinct
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running unittests src/main.rs (target/debug/deps/prismattyc_host-652b874acb990e28)
+
+running 1 test
+test sidebar_width::tests::row_seats_keep_space_tab_and_pane_distinct ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1080 filtered out; finished in 0.00s
+
+     Running tests/version.rs (target/debug/deps/version-a3e89fe38852ab0e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+
+=== grip_highlight_follows_the_accent_and_stays_opaque (seat marks) ===
+# cargo test -p prismattyc-host -- grip_highlight_follows_the_accent_and_stays_opaque
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/main.rs (target/debug/deps/prismattyc_host-652b874acb990e28)
+
+running 1 test
+test graphite::sidebar_render_tests::grip_highlight_follows_the_accent_and_stays_opaque ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1080 filtered out; finished in 0.27s
+
+     Running tests/version.rs (target/debug/deps/version-a3e89fe38852ab0e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+=== Docker repro still (rust:latest, headless) ===
+# docker run --rm -v "$PWD":/work -w /work \
+#   -e PRISMATTYC_SIDEBAR_WIDTH_SHOTS=/work/docs/proof/harness-icons \
+#   -e HOME=/tmp/repro-home \
+#   -e PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+#   rust:latest bash -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libfontconfig1-dev libxkbcommon-dev libwayland-dev libx11-dev pkg-config >/dev/null && cargo test -p prismattyc-host -- grip_highlight_follows_the_accent_and_stays_opaque'
+# test graphite::sidebar_render_tests::grip_highlight_follows_the_accent_and_stays_opaque ... ok
+# wrote docs/proof/harness-icons/collapsed-icons.png (52px icon strip seat marks)
+

@@ -1,14 +1,12 @@
-# Set DisplayIcon once the uninstall key exists.
+# Set the per-user DisplayIcon once the uninstall key exists.
 # Windows Installer creates that key after the install sequence returns, so the
 # sequence action starts a hidden helper and returns. The helper does not create a key.
-# -Root HKCU runs as the installing user. -Root HKLM runs as the system account.
-# The helper scans only that hive.
+# This script runs as the installing user and writes only HKCU.
 [CmdletBinding()]
 param(
     [switch]$Apply,
     [Parameter(Mandatory = $true)][string]$ProductCode,
-    [Parameter(Mandatory = $true)][string]$Icon,
-    [Parameter(Mandatory = $true)][ValidateSet('HKCU', 'HKLM')][string]$Root
+    [Parameter(Mandatory = $true)][string]$Icon
 )
 $ErrorActionPreference = 'Continue'
 $trace = Join-Path ([System.IO.Path]::GetTempPath()) 'prismattyc-displayicon.txt'
@@ -24,15 +22,15 @@ if (-not $Apply) {
     # system directory. Sysnative exists only for a 32-bit caller and is not a path
     # WMI can start.
     $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $command = "$exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Apply -ProductCode `"$ProductCode`" -Icon `"$Icon`" -Root $Root"
+    $command = "$exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Apply -ProductCode `"$ProductCode`" -Icon `"$Icon`""
     $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $command }
-    Write-Trace "spawned=$($created.ReturnValue) root=$Root"
+    Write-Trace "spawned=$($created.ReturnValue) root=HKCU"
     exit 0
 }
 
-Write-Trace "waiting root=$Root"
+Write-Trace 'waiting root=HKCU'
 $deadline = (Get-Date).AddSeconds(20)
-$base = "${Root}:\Software\Microsoft\Windows\CurrentVersion\Uninstall"
+$base = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
 do {
     $wrote = $false
     if (Test-Path -LiteralPath $base) {
@@ -42,6 +40,7 @@ do {
             $match = ($item.PSChildName -eq $ProductCode) -or ($name -eq 'Prismattyc' -and $publisher -eq 'Moonbase2090')
             if (-not $match) { continue }
             $target = "$base\$($item.PSChildName)"
+            if (-not (Test-Path -LiteralPath $target)) { continue }
             try {
                 Set-ItemProperty -LiteralPath $target -Name DisplayIcon -Value $Icon -ErrorAction Stop
                 Write-Trace "wrote=$target"
@@ -54,5 +53,5 @@ do {
     if ($wrote) { exit 0 }
     Start-Sleep -Milliseconds 200
 } while ((Get-Date) -lt $deadline)
-Write-Trace "gave-up root=$Root"
+Write-Trace 'gave-up root=HKCU'
 exit 0

@@ -158,6 +158,9 @@ fn adopt_clears_nested_mark(promoted: bool, log_backed: bool) -> bool {
 ///
 /// Keep process-tree walking and mark mutation together so seam tests can
 /// drive the same operation as the host instead of setting state themselves.
+/// The Windows idle scan calls `discover_windows` instead, so this function
+/// is compiled for the unix pump and for tests.
+#[cfg(any(not(windows), test))]
 pub(crate) fn adopt_candidates(
     mux: &mut crate::mux::MuxRuntime,
     adopted: &mut Adopted,
@@ -222,14 +225,19 @@ pub(crate) struct WindowsDiscovery {
 }
 
 /// Collect a scan the UI thread can apply. Does not touch a `MuxRuntime`.
+///
+/// `cwd_pids` is the background cwd lookup. It includes daemon children of
+/// attached panes and is not an agent or adoption root. An empty `agent_roots`
+/// still returns those cwds.
 #[cfg(windows)]
 pub(crate) fn discover_windows(
     agent_roots: &[u32],
     candidates: &[(PaneId, u32)],
+    cwd_pids: &[u32],
     socket: &Path,
     directory: &[SessionEntry],
 ) -> WindowsDiscovery {
-    let (server_pids, cwds) = prismattyc_mux::procinfo::server_pids_and_cwds(socket, agent_roots);
+    let (server_pids, cwds) = prismattyc_mux::procinfo::server_pids_and_cwds(socket, cwd_pids);
     let server_pid = server_pids.into_iter().min();
     if agent_roots.is_empty() {
         return WindowsDiscovery {

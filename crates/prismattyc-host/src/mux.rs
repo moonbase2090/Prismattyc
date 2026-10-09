@@ -2592,6 +2592,20 @@ impl MuxRuntime {
         }
     }
 
+    /// Directory for an attached pane's git label. The daemon child's cached
+    /// cwd wins. A cache that does not contain that pid does not call `cwd_of`.
+    fn attached_git_cwd(
+        child_pid: Option<u32>,
+        cached_cwd: Option<&HashMap<u32, PathBuf>>,
+        emulator_cwd: Option<&Path>,
+        spawn_cwd: Option<&Path>,
+    ) -> Option<PathBuf> {
+        child_pid
+            .and_then(|pid| Self::lookup_cwd(pid, cached_cwd))
+            .or_else(|| emulator_cwd.map(Path::to_path_buf))
+            .or_else(|| spawn_cwd.map(Path::to_path_buf))
+    }
+
     pub(crate) fn refresh_git_info(
         &mut self,
         snapshot: Option<&prismattyc_mux::Snapshot>,
@@ -2601,18 +2615,19 @@ impl MuxRuntime {
             .panes
             .iter()
             .filter_map(|(id, pane)| {
-                let cwd = if let Some(remote) = self.remote_pane_id(*id) {
+                let cwd = if let Some(remote_id) = self.remote_pane_id(*id) {
                     let remote = snapshot?
                         .sessions
                         .iter()
                         .flat_map(|s| &s.windows)
                         .flat_map(|w| &w.panes)
-                        .find(|p| p.id == remote)?;
-                    remote
-                        .child_pid
-                        .and_then(|pid| Self::lookup_cwd(pid, cached_cwd))
-                        .or_else(|| pane.emulator.cwd().map(Path::to_path_buf))
-                        .or_else(|| remote.spawn.as_ref().and_then(|s| s.cwd.clone()))
+                        .find(|p| p.id == remote_id)?;
+                    Self::attached_git_cwd(
+                        remote.child_pid,
+                        cached_cwd,
+                        pane.emulator.cwd(),
+                        remote.spawn.as_ref().and_then(|spawn| spawn.cwd.as_deref()),
+                    )
                 } else if let Some(path) = pane.emulator.cwd().filter(|path| path.is_absolute()) {
                     Some(path.to_path_buf())
                 } else {
@@ -5167,6 +5182,53 @@ mod tests {
     use std::process::{Child, Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn attached_pane_uses_the_daemon_child_cwd_instead_of_spawn_cwd() {
+        let live = PathBuf::from("/live/repo");
+        let spawn = PathBuf::from("/spawn/repo");
+        let osc = PathBuf::from("/osc/repo");
+        let mut cache = HashMap::new();
+        cache.insert(99, live.clone());
+        assert_eq!(
+            MuxRuntime::attached_git_cwd(Some(99), Some(&cache), None, Some(spawn.as_path()))
+                .as_deref(),
+            Some(live.as_path())
+        );
+        assert_eq!(
+            MuxRuntime::attached_git_cwd(
+                Some(99),
+                Some(&cache),
+                Some(osc.as_path()),
+                Some(spawn.as_path())
+            )
+            .as_deref(),
+            Some(live.as_path())
+        );
+        let mut other = HashMap::new();
+        other.insert(100, PathBuf::from("/other/repo"));
+        assert_eq!(
+            MuxRuntime::attached_git_cwd(Some(99), Some(&other), None, Some(spawn.as_path()))
+                .as_deref(),
+            Some(spawn.as_path())
+        );
+        let empty = HashMap::new();
+        assert_eq!(
+            MuxRuntime::attached_git_cwd(Some(99), Some(&empty), None, Some(spawn.as_path()))
+                .as_deref(),
+            Some(spawn.as_path())
+        );
+        assert_eq!(
+            MuxRuntime::attached_git_cwd(
+                Some(99),
+                Some(&empty),
+                Some(osc.as_path()),
+                Some(spawn.as_path())
+            )
+            .as_deref(),
+            Some(osc.as_path())
+        );
+    }
 
     #[test]
     fn pty_size_reports_window_pixels_not_per_cell() {

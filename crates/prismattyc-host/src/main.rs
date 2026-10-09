@@ -8384,7 +8384,8 @@ fn snapshot_covers_attachments<'a>(
 /// Reap the Windows process scan and start the next one when a second has passed.
 ///
 /// The job is the only `CreateToolhelp32Snapshot` / `Process32NextW` walk for
-/// the idle pump. Reap does not wait.
+/// the idle pump. Reap does not wait. The snapshot is read only when a scan
+/// is due, and the adoption directory comes from that same snapshot.
 #[cfg(windows)]
 fn service_windows_process_scan(host: &mut HostState, now: Instant) {
     if let Some(report) = host.windows_scan.reap() {
@@ -8401,22 +8402,43 @@ fn service_windows_process_scan(host: &mut HostState, now: Instant) {
     let Some(socket) = host_mux_socket() else {
         return;
     };
-    let mut agent_roots = Vec::new();
-    let mut candidates = Vec::new();
-    for (_, panes) in host.mux.tab_panes() {
-        for pane in panes {
-            let Some(pid) = host.mux.pane(pane).and_then(|runtime| runtime.child_pid()) else {
-                continue;
-            };
-            agent_roots.push(pid);
-            if host.mux.attach_session_of(pane).is_none() {
-                candidates.push((pane, pid));
-            }
-        }
-    }
-    let directory = attach_log::session_directory();
+    let snapshot = snapshot_client::snapshot_for_periodic(host.snapshot_client.as_deref());
+    let remote_children: Vec<windows_scan::RemoteChild> = snapshot
+        .as_ref()
+        .into_iter()
+        .flat_map(|snap| &snap.sessions)
+        .flat_map(|session| &session.windows)
+        .flat_map(|window| &window.panes)
+        .map(|pane| windows_scan::RemoteChild {
+            pane: pane.id,
+            child_pid: pane.child_pid,
+        })
+        .collect();
+    let views: Vec<windows_scan::PaneScanView<PaneId>> = host
+        .mux
+        .tab_panes()
+        .into_iter()
+        .flat_map(|(_, panes)| panes)
+        .map(|pane| windows_scan::PaneScanView {
+            pane,
+            local_child: host.mux.pane(pane).and_then(|runtime| runtime.child_pid()),
+            unmarked: host.mux.attach_session_of(pane).is_none(),
+            remote_pane: host.mux.remote_pane_id(pane),
+        })
+        .collect();
+    let request = windows_scan::windows_scan_request(&views, &remote_children);
+    let directory = snapshot
+        .as_ref()
+        .map(attach_log::session_directory_from_snapshot)
+        .unwrap_or_else(attach_log::session_directory);
     host.windows_scan.start(now, move || {
-        attach_adopt::discover_windows(&agent_roots, &candidates, &socket, &directory)
+        attach_adopt::discover_windows(
+            &request.agent_roots,
+            &request.candidates,
+            &request.cwd_pids,
+            &socket,
+            &directory,
+        )
     });
 }
 

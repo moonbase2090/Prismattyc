@@ -159,7 +159,16 @@ function Assert-Installed {
     }
     $expectedIcon = "$(Join-Path $install.Bin 'prismattyc-host.exe'),0"
     if ($entries[0].DisplayIcon -ne $expectedIcon) {
-        throw "ARP DisplayIcon '$($entries[0].DisplayIcon)' in $($entries[0].Hive) is not $expectedIcon"
+        $traces = @()
+        foreach ($root in @('HKCU', 'HKLM')) {
+            $trace = Join-Path ([System.IO.Path]::GetTempPath()) "prismattyc-displayicon-$root.txt"
+            if (Test-Path -LiteralPath $trace) {
+                $traces += (Get-Content -LiteralPath $trace -Raw).Trim()
+            }
+        }
+        $extra = ''
+        if ($traces.Count -gt 0) { $extra = "`n" + ($traces -join "`n") }
+        throw "ARP DisplayIcon '$($entries[0].DisplayIcon)' in $($entries[0].Hive) is not $expectedIcon$extra"
     }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $parts = @($userPath -split ';' | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') })

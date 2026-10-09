@@ -49,12 +49,9 @@ runs `pmux login run` through `wscript` with a hidden window. The installer's
 update-pointer script starts PowerShell hidden. Apps & features
 shows the publisher Moonbase2090 and the numeric MSI product version described
 below. Its icon is `DisplayIcon` on the uninstall key Windows Installer
-created, set to `prismattyc-host.exe,0`. That key appears after the installer
-returns. A hidden helper, started outside the installer process, then sets
-the icon and does not create a key. An elevated install records the key under
-HKLM. That helper is embedded in the installer, runs as the system account, and
-does not load the script installed under the user profile. A standard per-user
-install records the key under HKCU, and that helper runs as the installing user.
+created, set to `prismattyc-host.exe,0`. The installer writes that value
+into the machine uninstall key while it writes the registry. It does not
+start a helper for that value.
 `pmux --version`
 still reports the semver.
 

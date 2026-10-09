@@ -13,12 +13,9 @@ rejects it prints a plain page, and start and quit stay free of escape
 sequences. Color follows stdout. A second bare launch of the GUI focuses the
 existing window. A local daemon connect from the GUI gives up after two
 seconds. The Apps & features entry points its icon at `prismattyc-host.exe`,
-on the uninstall key the installer created. A hidden helper sets that icon
-once the key exists, which is after the installer returns. The machine-scope
-key is set by a helper embedded in the installer and running as the system
-account. That helper does not run the script installed under the user profile. A failed
-write is logged and the helper exits non-zero.
-The per-user key is set by a helper running as the installing user.
+on the uninstall key the installer created. The installer writes that icon
+into the machine uninstall key while it writes the registry, and does not
+start a helper to do it.
 
 ## [0.3.29] - 2026-10-08
 

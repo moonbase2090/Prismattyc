@@ -195,15 +195,20 @@ class GateTests(unittest.TestCase):
             args = ["--baseline", str(root / "base.json"),
                     "--current", str(root / "cur.json"), "--repo", str(root), "--release",
                     "--threshold", "30"]
-            for count, expected in [(3, 1), (2, 0)]:
+            for count, warns in [(3, True), (2, False)]:
                 (root / "cur.json").write_text(json.dumps(report(
                     *(entry("a.rs", f"f{i}", 40) for i in range(count)))))
                 out, err = io.StringIO(), io.StringIO()
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                     code = gate.main(args)
-                self.assertEqual(code, expected)
+                self.assertEqual(code, 0)
                 self.assertIn(f"current {count}, last refreshed baseline 0.1.246 count 12, "
                               f"delta {count - 12:+d}, target 2 (-10), floor 0", out.getvalue())
+                if warns:
+                    self.assertIn("::warning::", out.getvalue())
+                    self.assertIn("release count 3 exceeds target 2", out.getvalue())
+                else:
+                    self.assertNotIn("::warning::", out.getvalue())
 
     def test_cli_release_at_c_floor_prints_done(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

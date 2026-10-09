@@ -297,13 +297,17 @@ Run this check from the release candidate checkout before you cut a tag:
 local-actions run --event workflow_dispatch --job crap-release
 ```
 
-The Local Actions daemon must use that checkout as its root. Require
-`status: succeeded` and `exit_code: 0` for the returned run ID before you
-publish the tag. A feature or fix merge does not run this check.
+The Local Actions daemon must use that checkout as its root. The gate is
+advisory on Prismattyc because of known legacy debt: it reports the count
+against the threshold as a `::warning` annotation plus a job summary, names
+any new functions above CRAP 40, and always exits 0, so it never fails the
+job. Review the warning before you publish the tag, and keep a regular
+whittle-down task against the baseline. A feature or fix merge does not
+run this check.
 
 [The release workflow](../.github/workflows/crap-release.yml) captures
 coverage in the runner and invokes `scripts/crap-gate.py --release`.
-It requires at least 10 fewer functions above CRAP 40 than the last
+It compares against at least 10 fewer functions above CRAP 40 than the last
 refreshed baseline. The target stops at zero. One report line prints the
 current count, last refreshed baseline count, actual delta, and target.
 The regular `crap` job continues to enforce the file-scoped merge checks.
@@ -320,7 +324,9 @@ Keep [the refresh script](../scripts/crap-refresh.sh) as the deliberate
 update path. After an intentional cleanup, run
 `local-actions run --job crap-refresh` and review the resulting baseline
 before you commit it. A host coverage capture is not comparable. Do not
-refresh merely to move the release target past a failing candidate.
+refresh merely to move the release target past a warning candidate, and
+never refresh to hide new debt: the baseline still must not absorb
+functions the gate just called out.
 
 ## Read a high CRAP score before you split
 

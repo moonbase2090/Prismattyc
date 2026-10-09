@@ -39,32 +39,49 @@ try {
         Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'bin\pmux.exe') } |
         Select-Object -First 1
     if (-not $payload) { throw 'packaged zip has no bin\pmux.exe' }
+    $wxs = Join-Path $repo 'scripts\release\prismattyc.wxs'
     $olderBuilt = Join-Path $stage 'older.msi'
-    & $wix build (Join-Path $repo 'scripts\release\prismattyc.wxs') -arch x64 `
+    $sameBuilt = Join-Path $stage 'same.msi'
+    & $wix build $wxs -arch x64 `
         -d "ProductVersion=$olderProduct" `
         -d "SourceVersion=$($manifest.version)" `
         -d "Payload=$($payload.FullName)" `
         -d "Repo=$repo" `
         -o $olderBuilt
     if ($LASTEXITCODE -ne 0) { throw "older MSI build exited $LASTEXITCODE" }
+    # A second build of the same ProductVersion gets a new ProductCode.
+    & $wix build $wxs -arch x64 `
+        -d "ProductVersion=$($manifest.msi_product_version)" `
+        -d "SourceVersion=$($manifest.version)" `
+        -d "Payload=$($payload.FullName)" `
+        -d "Repo=$repo" `
+        -o $sameBuilt
+    if ($LASTEXITCODE -ne 0) { throw "same-version MSI build exited $LASTEXITCODE" }
 
     $proofDir = Join-Path ([System.IO.Path]::GetTempPath()) 'MSI Proof'
     if ($proofDir -notmatch ' ') { throw 'proof directory must contain a space' }
     New-Item -ItemType Directory -Path $proofDir -Force | Out-Null
     $olderCopy = Join-Path $proofDir 'older.msi'
+    $sameCopy = Join-Path $proofDir 'same.msi'
     $newCopy = Join-Path $proofDir 'new.msi'
     Copy-Item -LiteralPath $olderBuilt -Destination $olderCopy -Force
+    Copy-Item -LiteralPath $sameBuilt -Destination $sameCopy -Force
     Copy-Item -LiteralPath $shipped.FullName -Destination $newCopy -Force
 
     $script = Join-Path $repo 'scripts\release\test-windows-msi.ps1'
-    $output = & $script -Msi $newCopy -UpgradeFrom $olderCopy -ExpectedVersion $manifest.version -ExpectedProductVersion $manifest.msi_product_version 2>&1
+    $higher = & $script -Msi $newCopy -UpgradeFrom $olderCopy -ExpectedVersion $manifest.version -ExpectedProductVersion $manifest.msi_product_version 2>&1
+    $same = & $script -Msi $newCopy -UpgradeFrom $sameCopy -ExpectedVersion $manifest.version -ExpectedProductVersion $manifest.msi_product_version 2>&1
     $text = @(
         "version=$($manifest.version)"
         "product_version=$($manifest.msi_product_version)"
         "older_product_version=$olderProduct"
+        "same_product_version=$($manifest.msi_product_version)"
         "msi_name=$($shipped.Name)"
         'path_has_space=true'
-        ($output | Out-String).TrimEnd()
+        'higher_version:'
+        ($higher | Out-String).TrimEnd()
+        'same_version:'
+        ($same | Out-String).TrimEnd()
     ) -join "`n"
     Write-Host $text
     if ($ProofPath) {

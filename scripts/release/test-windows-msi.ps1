@@ -92,7 +92,7 @@ function Get-PrismattycInstall {
     }
 }
 
-function Get-PrismattycUninstallKey {
+function Get-PrismattycUninstallKeys {
     $roots = @(
         'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
         'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
@@ -101,14 +101,14 @@ function Get-PrismattycUninstallKey {
         if (-not (Test-Path -LiteralPath $root)) { continue }
         foreach ($item in Get-ChildItem -LiteralPath $root) {
             if ($item.GetValue('DisplayName') -eq 'Prismattyc' -and $item.GetValue('Publisher') -eq 'Moonbase2090') {
-                return [pscustomobject]@{
+                Write-Output ([pscustomobject]@{
                     ProductCode    = $item.PSChildName
                     DisplayVersion = [string]$item.GetValue('DisplayVersion')
-                }
+                    Hive           = $root
+                })
             }
         }
     }
-    return $null
 }
 
 function Assert-Installed {
@@ -138,10 +138,13 @@ function Assert-Installed {
     if ($link.TargetPath -ne $expectedTarget) {
         throw "Shortcut target $($link.TargetPath) is not $expectedTarget"
     }
-    $arp = Get-PrismattycUninstallKey
-    if (-not $arp) { throw 'Prismattyc is missing from Apps & features.' }
-    if ($ProductVersion -and $arp.DisplayVersion -ne $ProductVersion) {
-        throw "ARP version $($arp.DisplayVersion) is not $ProductVersion"
+    $entries = @(Get-PrismattycUninstallKeys)
+    if ($entries.Count -ne 1) {
+        $listed = ($entries | ForEach-Object { "$($_.Hive) $($_.ProductCode) $($_.DisplayVersion)" }) -join '; '
+        throw "ARP has $($entries.Count) Prismattyc entries: $listed"
+    }
+    if ($ProductVersion -and $entries[0].DisplayVersion -ne $ProductVersion) {
+        throw "ARP version $($entries[0].DisplayVersion) is not $ProductVersion"
     }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $parts = @($userPath -split ';' | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') })
@@ -157,7 +160,8 @@ function Assert-Removed {
     if (Test-Path -LiteralPath $install.Bin) { throw "Bin directory remains: $($install.Bin)" }
     $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Prismattyc.lnk'
     if (Test-Path -LiteralPath $shortcut) { throw "Start menu shortcut remains: $shortcut" }
-    if (Get-PrismattycUninstallKey) { throw 'ARP entry remains after uninstall.' }
+    $entries = @(Get-PrismattycUninstallKeys)
+    if ($entries.Count -ne 0) { throw "ARP has $($entries.Count) Prismattyc entries after uninstall." }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if (@($userPath -split ';' | ForEach-Object { $_.TrimEnd('\') }) -contains $install.Bin) { throw 'User PATH still contains the install bin.' }
     foreach ($path in $Survivors) {
@@ -230,7 +234,8 @@ Invoke-Msi -ArgumentList $installArgs
 Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected ([bool]$AddToPath)
 Assert-LockedExecutableSurvivesReinstall -CommandLine (New-MsiCommandLine $installArgs)
 
-$installed = Get-PrismattycUninstallKey
-Invoke-Msi -ArgumentList (@('/x', $installed.ProductCode, '/qn', '/norestart', 'REBOOT=ReallySuppress'))
+$installed = @(Get-PrismattycUninstallKeys)
+if ($installed.Count -ne 1) { throw "ARP has $($installed.Count) Prismattyc entries before uninstall." }
+Invoke-Msi -ArgumentList (@('/x', $installed[0].ProductCode, '/qn', '/norestart', 'REBOOT=ReallySuppress'))
 Assert-Removed -Survivors $preserved
 Write-Output ("MSI {0} checks passed." -f ((Get-MsiProofPhases) -join ', '))

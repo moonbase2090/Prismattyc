@@ -13,7 +13,8 @@
       Compressed="yes"
       InstallerVersion="500"
       Language="1033">
-    <MajorUpgrade DowngradeErrorMessage="A newer version of Prismattyc is already installed." Schedule="afterInstallInitialize" />
+    <!-- Same ProductVersion replaces the previous build. Schedule after InstallInitialize so removal does not delete the product this install just registered. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of Prismattyc is already installed." Schedule="afterInstallInitialize" />
     <MediaTemplate EmbedCab="yes" />
 
     <!-- Do not ask Restart Manager to close Prismattyc. -->

@@ -53,7 +53,9 @@ stable `X.Y.Z` uses slot 999. `X.Y.Z-rc.N` uses slot N, from 1 through 998.
 `0.3.29-rc.2` is product version `0.3.29002`, `0.3.29` is `0.3.29999`, and
 `0.3.30-rc.1` is `0.3.30001`. The UpgradeCode
 `681faa33-88f2-5c22-aeba-86ab1fffd4da` stays fixed so a newer MSI replaces the
-older one. Other prerelease spellings are rejected.
+older one. A rebuild of the same product version also replaces the installed
+product and leaves one Apps & features entry. Other prerelease spellings are
+rejected.
 
 The installer does not stop a running daemon or host. Restart Manager is
 disabled. That alone does not decide whether Windows replaces an in-use file

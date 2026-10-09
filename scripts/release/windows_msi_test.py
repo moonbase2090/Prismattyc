@@ -62,6 +62,8 @@ class WindowsMsiTests(unittest.TestCase):
         reset = (ROOT / "scripts/release/reset-windows-update-pointer.ps1").read_text(encoding="utf-8")
         self.assertIn(f'UpgradeCode="{UPGRADE_CODE}"', source)
         self.assertIn('Scope="perUser"', source)
+        self.assertIn('AllowSameVersionUpgrades="yes"', source)
+        self.assertIn('Schedule="afterInstallInitialize"', source)
         self.assertIn('MSIRESTARTMANAGERCONTROL" Value="Disable"', source)
         self.assertIn('Id="ADDTOPATH" Secure="yes" Value="0"', source)
         self.assertNotIn("ProgramFiles", source)

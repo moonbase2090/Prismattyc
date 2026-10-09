@@ -394,6 +394,90 @@ pub fn detach_command(command: &mut std::process::Command) {
         command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
 }
+
+/// Detach `command` and spawn it without inheriting the caller's stdio pipes.
+///
+/// On Windows, `Command` sets `bInheritHandles`, so a detached `pmuxd` keeps
+/// every inheritable handle, including a captured stdout pipe. The parent
+/// then waits forever. The log handles assigned as the child's own stdio stay
+/// inheritable. The parent's standard handles are marked non-inheritable only
+/// for this spawn, then restored.
+pub fn spawn_detached(command: &mut std::process::Command) -> io::Result<std::process::Child> {
+    detach_command(command);
+    #[cfg(windows)]
+    {
+        spawn_without_parent_stdio(command)
+    }
+    #[cfg(not(windows))]
+    {
+        command.spawn()
+    }
+}
+
+#[cfg(windows)]
+fn spawn_without_parent_stdio(
+    command: &mut std::process::Command,
+) -> io::Result<std::process::Child> {
+    use std::sync::Mutex;
+    use windows_sys::Win32::Foundation::{
+        SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+
+    // Overlapping spawns would restore the inherit bit before the other spawn.
+    static SPAWN_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    unsafe fn standard_handle(id: u32) -> HANDLE {
+        let handle = GetStdHandle(id);
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            std::ptr::null_mut()
+        } else {
+            handle
+        }
+    }
+
+    struct RestoreInherit {
+        handles: [HANDLE; 3],
+        restore: [bool; 3],
+    }
+    impl Drop for RestoreInherit {
+        fn drop(&mut self) {
+            for (index, handle) in self.handles.iter().copied().enumerate() {
+                if self.restore[index] {
+                    unsafe {
+                        SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+                    }
+                }
+            }
+        }
+    }
+
+    unsafe {
+        let handles = [
+            standard_handle(STD_INPUT_HANDLE),
+            standard_handle(STD_OUTPUT_HANDLE),
+            standard_handle(STD_ERROR_HANDLE),
+        ];
+        let mut restore = RestoreInherit {
+            handles,
+            restore: [false; 3],
+        };
+        for (index, handle) in handles.iter().copied().enumerate() {
+            if !handle.is_null() && SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) != 0 {
+                restore.restore[index] = true;
+            }
+        }
+        let child = command.spawn();
+        drop(restore);
+        child
+    }
+}
+
 pub fn socket_identity(path: &Path) -> io::Result<String> {
     #[cfg(unix)]
     {
@@ -621,5 +705,90 @@ pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use std::io::Read;
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Command;
+    use std::time::Duration;
+    use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+    use windows_sys::Win32::System::Console::{GetStdHandle, SetStdHandle, STD_OUTPUT_HANDLE};
+
+    struct RestoreStdout(HANDLE);
+    impl Drop for RestoreStdout {
+        fn drop(&mut self) {
+            unsafe {
+                SetStdHandle(STD_OUTPUT_HANDLE, self.0);
+            }
+        }
+    }
+
+    struct KillChild(std::process::Child);
+    impl Drop for KillChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn detached_spawn_closes_the_caller_stdout_pipe() {
+        let (mut reader, writer) = std::io::pipe().expect("pipe");
+        let write_handle = writer.as_raw_handle() as HANDLE;
+        let mut flags = 0u32;
+        assert_ne!(
+            unsafe { GetHandleInformation(write_handle, &mut flags) },
+            0,
+            "pipe handle flags"
+        );
+        assert_ne!(
+            flags & HANDLE_FLAG_INHERIT,
+            0,
+            "the test pipe must start inheritable"
+        );
+        let previous = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+        assert_ne!(
+            unsafe { SetStdHandle(STD_OUTPUT_HANDLE, write_handle) },
+            0,
+            "install test stdout"
+        );
+        let child = {
+            let _restore_stdout = RestoreStdout(previous);
+            let mut command = Command::new(format!(
+                r"{}\System32\ping.exe",
+                std::env::var("SystemRoot").expect("SystemRoot")
+            ));
+            command
+                .args(["-n", "30", "127.0.0.1"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            KillChild(super::spawn_detached(&mut command).expect("spawn ping"))
+        };
+        let mut flags_after = 0u32;
+        assert_ne!(
+            unsafe { GetHandleInformation(write_handle, &mut flags_after) },
+            0
+        );
+        assert_ne!(
+            flags_after & HANDLE_FLAG_INHERIT,
+            0,
+            "parent stdout inherit bit was not restored"
+        );
+        drop(writer);
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 1];
+            let _ = sent.send(reader.read(&mut buffer));
+        });
+        match received.recv_timeout(Duration::from_secs(2)) {
+            Ok(Ok(0)) => {}
+            Ok(other) => panic!("caller stdout pipe returned {other:?}, expected EOF"),
+            Err(_) => panic!("detached child kept the caller stdout pipe open"),
+        }
+        drop(child);
     }
 }

@@ -1008,10 +1008,8 @@ fn cmd_up(paths: &Paths, program: Vec<String>) -> Result<()> {
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
     // Detach into its own session so closing this terminal never HUPs the
-    // server.
-    prismattyc_mux::platform::detach_command(&mut command);
-    let mut child = command
-        .spawn()
+    // server. Do not let pmuxd inherit a captured stdout pipe.
+    let mut child = prismattyc_mux::platform::spawn_detached(&mut command)
         .with_context(|| format!("spawn {}", server.display()))?;
     let pid = child.id();
 
@@ -5752,9 +5750,7 @@ fn open_applied_space(paths: &Paths, space: Option<&str>) -> Result<()> {
             log.try_clone().context("clone host log handle")?,
         ))
         .stderr(Stdio::from(log));
-    prismattyc_mux::platform::detach_command(&mut command);
-    let child = command
-        .spawn()
+    let child = prismattyc_mux::platform::spawn_detached(&mut command)
         .with_context(|| format!("spawn {}", host.display()))?;
     println!(
         "opened host pid {} with {} session(s): {}\nlog: {}",

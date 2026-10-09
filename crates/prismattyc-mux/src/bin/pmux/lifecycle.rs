@@ -114,8 +114,7 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
             .stdin(Stdio::null())
             .stdout(output.try_clone()?)
             .stderr(output);
-        prismattyc_mux::platform::detach_command(&mut child);
-        let process = child.spawn()?;
+        let process = prismattyc_mux::platform::spawn_detached(&mut child)?;
         println!(
             "{}",
             json!({"status":"scheduled","pid":process.id(),"log":log,"sessions_to_stop":sessions})

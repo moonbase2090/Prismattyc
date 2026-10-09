@@ -126,6 +126,85 @@ class WindowsMsiTests(unittest.TestCase):
         for forbidden in ("Stop-Process", "taskkill", "kill"):
             self.assertNotIn(forbidden, reset)
 
+    def test_path_uses_cmd_shims_and_preview_folders_are_swept(self):
+        source = (ROOT / "scripts/release/prismattyc.wxs").read_text(encoding="utf-8")
+        user_path = source.split('Id="UserPath"', 1)[1].split("</Component>", 1)[0]
+        self.assertIn('Directory="CMDFOLDER"', user_path)
+        self.assertIn('Value="[CMDFOLDER]"', user_path)
+        self.assertNotIn("BINFOLDER", user_path)
+        self.assertNotIn("prismattyc.exe", user_path)
+        self.assertIn('<Directory Id="CMDFOLDER" Name="cmd" />', source)
+        self.assertNotIn("prismattyc-host.cmd", source)
+        self.assertNotIn(r"\cmd\prismattyc.exe", source)
+        self.assertNotIn("/cmd/prismattyc.exe", source)
+        names = ("prismattyc", "pmux", "pmuxd", "pmux-attach", "pmux-mcp")
+        for name in names:
+            shim = ROOT / "scripts/release/cmd" / f"{name}.cmd"
+            self.assertEqual(
+                shim.read_text(encoding="utf-8"),
+                f'@echo off\n"%~dp0..\\bin\\{name}.exe" %*\n',
+            )
+            self.assertIn(f"cmd\\{name}.cmd", source)
+        self.assertFalse((ROOT / "scripts/release/cmd/prismattyc-host.cmd").exists())
+        for action_id, schedule in (
+            (
+                "SweepPreviewInstalls",
+                'Custom Action="SweepPreviewInstalls" After="InstallFiles" '
+                'Condition="NOT REMOVE~=&quot;ALL&quot;"',
+            ),
+            (
+                "SweepPreviewInstallsOnRemove",
+                'Custom Action="SweepPreviewInstallsOnRemove" Before="RemoveFiles" '
+                'Condition="REMOVE~=&quot;ALL&quot;"',
+            ),
+        ):
+            action = source.split(f'Id="{action_id}"', 1)[1].split("/>", 1)[0]
+            self.assertIn('Execute="deferred"', action)
+            self.assertIn('Impersonate="yes"', action)
+            self.assertIn('Return="ignore"', action)
+            self.assertNotIn('Execute="commit"', action)
+            self.assertIn("remove-windows-preview-installs.ps1", action)
+            self.assertIn("[System64Folder]WindowsPowerShell\\v1.0\\powershell.exe", action)
+            self.assertIn(schedule, source)
+        self.assertIn('RemoveFolder Id="RemoveCmd" Directory="CMDFOLDER"', source)
+        sweep = (ROOT / "scripts/release/remove-windows-preview-installs.ps1").read_text(encoding="utf-8")
+        self.assertIn("windows-preview-*", sweep)
+        self.assertIn("ReparsePoint", sweep)
+        self.assertIn("Prismattyc Windows Preview *.lnk", sweep)
+        self.assertIn(r"Programs\Prismattyc", sweep)
+        self.assertNotIn(r"Join-Path $local 'Prismattyc'", sweep)
+        for forbidden in ("Stop-Process", "taskkill", "kill"):
+            self.assertNotIn(forbidden, sweep)
+        packager = (ROOT / "scripts/release/package-windows.py").read_text(encoding="utf-8")
+        self.assertIn("remove-windows-preview-installs.ps1", packager)
+        self.assertIn("scripts/release/cmd", packager)
+        self.assertNotIn("add bin to your user PATH", packager)
+        self.assertIn("Do not add bin to PATH.", packager)
+        preview = (ROOT / "scripts/release/install-windows-preview.ps1").read_text(encoding="utf-8")
+        self.assertNotIn("@($binDir)", preview)
+        self.assertIn("$cmdDir", preview)
+        self.assertNotIn("prismattyc-host.cmd", preview)
+        preview_packager = (ROOT / "scripts/release/package-windows-preview.py").read_text(encoding="utf-8")
+        self.assertNotIn("adds this build's bin directory", preview_packager)
+        self.assertIn("cmd directory", preview_packager)
+        proof = (ROOT / "scripts/release/test-windows-msi.ps1").read_text(encoding="utf-8")
+        self.assertIn("windows-preview-deadbeef", proof)
+        self.assertIn("not-a-preview", proof)
+        self.assertIn("prismattyc-msi-path-keep", proof)
+        self.assertIn("sweep followed the preview junction", proof)
+        self.assertIn("User PATH still contains the install bin.", proof)
+        self.assertIn("$install.Cmd", proof)
+        prove = (ROOT / "scripts/release/prove-windows-msi.ps1").read_text(encoding="utf-8")
+        self.assertIn("-AddToPath", prove)
+        docs = (ROOT / "docs/platforms/windows.md").read_text(encoding="utf-8")
+        self.assertNotIn("Start search does not offer it as a separate app", docs)
+        self.assertNotIn("prepends the install `bin` directory", docs)
+        self.assertIn("windows-preview-*", docs)
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        unreleased = changelog.split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
+        self.assertIn("windows-preview-*", unreleased)
+        self.assertIn("`cmd`", unreleased)
+
     def test_workflows_name_every_signing_setting(self):
         for relative in (".github/workflows/release.yml", ".github/workflows/windows-package.yml"):
             text = (ROOT / relative).read_text(encoding="utf-8")

@@ -231,6 +231,53 @@ class GateTests(unittest.TestCase):
             self.assertIn("at C>30 floor 5; release target met", out.getvalue())
             self.assertEqual(err.getvalue(), "")
 
+    def test_cli_release_over_target_warns_but_exits_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline = report(*(entry("a.rs", f"f{i}", 40) for i in range(12)))
+            baseline.update(release="0.1.246", previous_release="0.1.245",
+                            previous_above_count=100, target_delta=-10)
+            (root / "base.json").write_text(json.dumps(baseline))
+            (root / "cur.json").write_text(json.dumps(report(
+                *(entry("a.rs", f"f{i}", 40) for i in range(3)),
+                entry("a.rs", "brand_new", 50))))
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = gate.main([
+                    "--baseline", str(root / "base.json"),
+                    "--current", str(root / "cur.json"),
+                    "--repo", str(root),
+                    "--release",
+                    "--threshold", "30",
+                ])
+            self.assertEqual(code, 0)
+            self.assertIn("::warning::", out.getvalue())
+            self.assertIn("release count 4 exceeds target 2", out.getvalue())
+            self.assertIn("brand_new", out.getvalue())
+            self.assertEqual(err.getvalue(), "")
+
+    def test_cli_release_pass_has_no_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline = report(*(entry("a.rs", f"f{i}", 40) for i in range(12)))
+            baseline.update(release="0.1.246", previous_release="0.1.245",
+                            previous_above_count=100, target_delta=-10)
+            (root / "base.json").write_text(json.dumps(baseline))
+            (root / "cur.json").write_text(json.dumps(report(
+                *(entry("a.rs", f"f{i}", 40) for i in range(2)))))
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = gate.main([
+                    "--baseline", str(root / "base.json"),
+                    "--current", str(root / "cur.json"),
+                    "--repo", str(root),
+                    "--release",
+                    "--threshold", "30",
+                ])
+            self.assertEqual(code, 0)
+            self.assertNotIn("::warning::", out.getvalue())
+            self.assertEqual(err.getvalue(), "")
+
     def test_top_per_crate_takes_highest_scores(self) -> None:
         current = {
             ("crates/mux/src/a.rs", "a"): entry(

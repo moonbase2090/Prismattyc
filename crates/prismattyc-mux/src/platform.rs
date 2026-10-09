@@ -400,8 +400,9 @@ pub fn detach_command(command: &mut std::process::Command) {
 /// On Windows, `Command` sets `bInheritHandles`, so a detached `pmuxd` keeps
 /// every inheritable handle, including a captured stdout pipe. The parent
 /// then waits forever. The log handles assigned as the child's own stdio stay
-/// inheritable. The parent's standard handles are marked non-inheritable only
-/// for this spawn, then restored.
+/// inheritable. A standard handle that is already inheritable is marked
+/// non-inheritable for this spawn, then put back. A handle that was already
+/// non-inheritable is left unchanged.
 pub fn spawn_detached(command: &mut std::process::Command) -> io::Result<std::process::Child> {
     detach_command(command);
     #[cfg(windows)]
@@ -420,7 +421,8 @@ fn spawn_without_parent_stdio(
 ) -> io::Result<std::process::Child> {
     use std::sync::Mutex;
     use windows_sys::Win32::Foundation::{
-        SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+        GetHandleInformation, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
+        INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::System::Console::{
         GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -443,6 +445,7 @@ fn spawn_without_parent_stdio(
 
     struct RestoreInherit {
         handles: [HANDLE; 3],
+        original: [u32; 3],
         restore: [bool; 3],
     }
     impl Drop for RestoreInherit {
@@ -450,7 +453,7 @@ fn spawn_without_parent_stdio(
             for (index, handle) in self.handles.iter().copied().enumerate() {
                 if self.restore[index] {
                     unsafe {
-                        SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+                        SetHandleInformation(handle, HANDLE_FLAG_INHERIT, self.original[index]);
                     }
                 }
             }
@@ -465,10 +468,24 @@ fn spawn_without_parent_stdio(
         ];
         let mut restore = RestoreInherit {
             handles,
+            original: [0; 3],
             restore: [false; 3],
         };
         for (index, handle) in handles.iter().copied().enumerate() {
-            if !handle.is_null() && SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) != 0 {
+            if handle.is_null() {
+                continue;
+            }
+            let mut flags = 0u32;
+            if GetHandleInformation(handle, &mut flags) == 0 {
+                continue;
+            }
+            let inherit = flags & HANDLE_FLAG_INHERIT;
+            restore.original[index] = inherit;
+            // Already private. Setting the bit on the way out would publish it.
+            if inherit == 0 {
+                continue;
+            }
+            if SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) != 0 {
                 restore.restore[index] = true;
             }
         }
@@ -714,7 +731,9 @@ mod tests {
     use std::os::windows::io::AsRawHandle;
     use std::process::Command;
     use std::time::Duration;
-    use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+    use windows_sys::Win32::Foundation::{
+        GetHandleInformation, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
+    };
     use windows_sys::Win32::System::Console::{GetStdHandle, SetStdHandle, STD_OUTPUT_HANDLE};
 
     struct RestoreStdout(HANDLE);
@@ -777,6 +796,69 @@ mod tests {
             flags_after & HANDLE_FLAG_INHERIT,
             0,
             "parent stdout inherit bit was not restored"
+        );
+        drop(writer);
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 1];
+            let _ = sent.send(reader.read(&mut buffer));
+        });
+        match received.recv_timeout(Duration::from_secs(2)) {
+            Ok(Ok(0)) => {}
+            Ok(other) => panic!("caller stdout pipe returned {other:?}, expected EOF"),
+            Err(_) => panic!("detached child kept the caller stdout pipe open"),
+        }
+        drop(child);
+    }
+
+    #[test]
+    fn detached_spawn_keeps_a_non_inheritable_stdout_private() {
+        let (mut reader, writer) = std::io::pipe().expect("pipe");
+        let write_handle = writer.as_raw_handle() as HANDLE;
+        assert_ne!(
+            unsafe { SetHandleInformation(write_handle, HANDLE_FLAG_INHERIT, 0) },
+            0,
+            "clear inherit"
+        );
+        let mut flags = 0u32;
+        assert_ne!(
+            unsafe { GetHandleInformation(write_handle, &mut flags) },
+            0,
+            "pipe handle flags"
+        );
+        assert_eq!(
+            flags & HANDLE_FLAG_INHERIT,
+            0,
+            "the test pipe must start non-inheritable"
+        );
+        let previous = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+        assert_ne!(
+            unsafe { SetStdHandle(STD_OUTPUT_HANDLE, write_handle) },
+            0,
+            "install test stdout"
+        );
+        let child = {
+            let _restore_stdout = RestoreStdout(previous);
+            let mut command = Command::new(format!(
+                r"{}\System32\ping.exe",
+                std::env::var("SystemRoot").expect("SystemRoot")
+            ));
+            command
+                .args(["-n", "30", "127.0.0.1"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            KillChild(super::spawn_detached(&mut command).expect("spawn ping"))
+        };
+        let mut flags_after = 0u32;
+        assert_ne!(
+            unsafe { GetHandleInformation(write_handle, &mut flags_after) },
+            0
+        );
+        assert_eq!(
+            flags_after & HANDLE_FLAG_INHERIT,
+            0,
+            "spawn made a private stdout handle inheritable"
         );
         drop(writer);
         let (sent, received) = std::sync::mpsc::channel();

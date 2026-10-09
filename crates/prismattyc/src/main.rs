@@ -3221,6 +3221,145 @@ mod tests {
         assert_eq!(encode_key_to_pty(a, flags), Some(b"a".to_vec()));
     }
 
+    /// Every `encode_key_legacy` arm, including the three-way Tab split and
+    /// the keys the match does not claim.
+    #[test]
+    fn encode_key_legacy_table_covers_every_arm() {
+        let enc = |code: KeyCode, mods: KeyModifiers| encode_key_legacy(KeyEvent::new(code, mods));
+        let none = KeyModifiers::NONE;
+        let rows: &[(KeyCode, KeyModifiers, Option<&[u8]>)] = &[
+            (KeyCode::BackTab, KeyModifiers::SHIFT, Some(b"\x1b[Z")),
+            (KeyCode::Char('x'), none, Some(b"x")),
+            (KeyCode::Char(' '), KeyModifiers::CONTROL, Some(b"\0")),
+            (KeyCode::Enter, none, Some(b"\r")),
+            (
+                KeyCode::Enter,
+                KeyModifiers::CONTROL,
+                Some(b"\x1b[27;5;13~"),
+            ),
+            (KeyCode::Backspace, none, Some(b"\x7f")),
+            (
+                KeyCode::Backspace,
+                KeyModifiers::ALT,
+                Some(b"\x1b[27;3;127~"),
+            ),
+            (KeyCode::Tab, none, Some(b"\t")),
+            (KeyCode::Tab, KeyModifiers::SHIFT, Some(b"\x1b[Z")),
+            (KeyCode::Tab, KeyModifiers::CONTROL, Some(b"\x1b[27;5;9~")),
+            (KeyCode::Tab, KeyModifiers::ALT, Some(b"\x1b[27;3;9~")),
+            (KeyCode::Esc, none, Some(b"\x1b")),
+            (KeyCode::Up, none, Some(b"\x1b[A")),
+            (KeyCode::Down, none, Some(b"\x1b[B")),
+            (KeyCode::Right, none, Some(b"\x1b[C")),
+            (KeyCode::Left, none, Some(b"\x1b[D")),
+            (KeyCode::Home, none, Some(b"\x1b[H")),
+            (KeyCode::End, none, Some(b"\x1b[F")),
+            (KeyCode::PageUp, none, Some(b"\x1b[5~")),
+            (KeyCode::PageDown, none, Some(b"\x1b[6~")),
+            (KeyCode::PageDown, KeyModifiers::SHIFT, Some(b"\x1b[6;2~")),
+            (KeyCode::Delete, none, Some(b"\x1b[3~")),
+            (KeyCode::Insert, none, Some(b"\x1b[2~")),
+            (KeyCode::Insert, KeyModifiers::ALT, Some(b"\x1b[2;3~")),
+            (KeyCode::F(2), none, Some(b"\x1bOQ")),
+            (KeyCode::F(6), none, Some(b"\x1b[17~")),
+            (KeyCode::F(13), none, None),
+            (KeyCode::Null, none, None),
+        ];
+        for (code, mods, want) in rows {
+            assert_eq!(
+                enc(*code, *mods).as_deref(),
+                *want,
+                "{code:?} {mods:?}"
+            );
+        }
+    }
+
+    /// Every `encode_key_kitty_disambiguate` arm. A letter release is not a
+    /// functional key, so disambiguate-only reports nothing. An arrow release
+    /// still uses the functional form, and event types add the `:3` subfield.
+    #[test]
+    fn encode_key_kitty_disambiguate_table_covers_every_arm() {
+        let enc = |code: KeyCode, mods: KeyModifiers, kind: KeyEventKind| {
+            let mut key = KeyEvent::new(code, mods);
+            key.kind = kind;
+            encode_key_kitty_disambiguate(key, 1, false, false)
+        };
+        let press = KeyEventKind::Press;
+        let release = KeyEventKind::Release;
+        let none = KeyModifiers::NONE;
+        let rows: &[(KeyCode, KeyModifiers, KeyEventKind, Option<&[u8]>)] = &[
+            (KeyCode::Esc, none, press, Some(b"\x1b[27u")),
+            (KeyCode::Enter, none, press, Some(b"\r")),
+            (KeyCode::Tab, none, press, Some(b"\t")),
+            (KeyCode::Tab, KeyModifiers::SHIFT, press, Some(b"\x1b[9;2u")),
+            (
+                KeyCode::Tab,
+                KeyModifiers::CONTROL,
+                press,
+                Some(b"\x1b[9;5u"),
+            ),
+            (KeyCode::Tab, KeyModifiers::ALT, press, Some(b"\x1b[9;3u")),
+            (KeyCode::Tab, KeyModifiers::SUPER, press, Some(b"\x1b[9;9u")),
+            (KeyCode::BackTab, none, press, Some(b"\x1b[9;2u")),
+            (
+                KeyCode::BackTab,
+                KeyModifiers::CONTROL,
+                press,
+                Some(b"\x1b[9;6u"),
+            ),
+            (KeyCode::Backspace, none, press, Some(b"\x7f")),
+            (
+                KeyCode::Backspace,
+                KeyModifiers::CONTROL,
+                press,
+                Some(b"\x1b[127;5u"),
+            ),
+            (KeyCode::Char('A'), KeyModifiers::SHIFT, press, Some(b"A")),
+            (
+                KeyCode::Char('b'),
+                KeyModifiers::ALT,
+                press,
+                Some(b"\x1b[98;3u"),
+            ),
+            (
+                KeyCode::Char('c'),
+                KeyModifiers::SUPER,
+                press,
+                Some(b"\x1b[99;9u"),
+            ),
+            (KeyCode::Up, none, press, Some(b"\x1b[A")),
+            (KeyCode::Char('a'), none, release, None),
+            (KeyCode::Up, none, release, Some(b"\x1b[A")),
+            (KeyCode::Null, none, press, None),
+        ];
+        for (code, mods, kind, want) in rows {
+            assert_eq!(
+                enc(*code, *mods, *kind).as_deref(),
+                *want,
+                "{code:?} {mods:?} {kind:?}"
+            );
+        }
+
+        let mut repeat_esc = KeyEvent::new(KeyCode::Esc, none);
+        repeat_esc.kind = KeyEventKind::Repeat;
+        assert_eq!(
+            encode_key_kitty_disambiguate(repeat_esc, 2, true, false),
+            Some(b"\x1b[27;1:2u".to_vec())
+        );
+        let mut release_up = KeyEvent::new(KeyCode::Up, none);
+        release_up.kind = KeyEventKind::Release;
+        assert_eq!(
+            encode_key_kitty_disambiguate(release_up, 3, true, false),
+            Some(b"\x1b[1;1:3A".to_vec())
+        );
+        let shifted_alt =
+            KeyEvent::new(KeyCode::Char('A'), KeyModifiers::ALT | KeyModifiers::SHIFT);
+        assert_eq!(
+            encode_key_kitty_disambiguate(shifted_alt, 1, false, true),
+            Some(b"\x1b[97:65;4u".to_vec())
+        );
+    }
+
     #[test]
     fn kitty_report_all_encodes_plain_keys_as_csi_u() {
         use prismattyc_emulator::{KITTY_DISAMBIGUATE, KITTY_REPORT_ALL, KITTY_REPORT_TEXT};

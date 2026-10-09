@@ -256,18 +256,63 @@ pub fn sync(socket: &Path, executable: &Path) -> Result<()> {
     }
     #[cfg(windows)]
     {
+        let system_root = std::env::var_os("SystemRoot").context("SystemRoot")?;
+        let script_path = login_script_path(&path);
+        let launch =
+            windows_login_launch(Path::new(&system_root), executable, socket, &script_path)?;
         std::fs::create_dir_all(path.parent().context("Startup directory")?)?;
+        crate::config::write_config_atomic(&script_path, &launch.script)?;
         let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
-        let script = format!("$s=(New-Object -ComObject WScript.Shell).CreateShortcut({});$s.TargetPath={};$s.Arguments={};$s.WindowStyle=7;$s.Save()",
-            quote(&path.to_string_lossy()), quote(&executable.to_string_lossy()), quote(&format!("--socket \"{}\" login run", socket.display())));
-        checked(Command::new("powershell.exe").args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &script,
-        ]))?;
+        let script = format!(
+            "$s=(New-Object -ComObject WScript.Shell).CreateShortcut({});$s.TargetPath={};$s.Arguments={};$s.Save()",
+            quote(&path.to_string_lossy()),
+            quote(&launch.target.to_string_lossy()),
+            quote(&launch.arguments),
+        );
+        let mut command = crate::platform::hidden_command("powershell.exe");
+        command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+        checked(&mut command)?;
     }
     Ok(())
+}
+
+/// VBScript beside the Startup shortcut. `wscript //B` runs it with no window,
+/// and the script starts `pmux login run` hidden.
+pub fn login_script_path(shortcut: &Path) -> PathBuf {
+    shortcut.with_extension("vbs")
+}
+
+pub struct WindowsLoginLaunch {
+    pub target: PathBuf,
+    pub arguments: String,
+    pub script: String,
+}
+
+/// Hidden logon launcher. Paths that contain a quote or a newline are rejected
+/// so they cannot break out of the VBScript string.
+pub fn windows_login_launch(
+    system_root: &Path,
+    executable: &Path,
+    socket: &Path,
+    script_path: &Path,
+) -> Result<WindowsLoginLaunch> {
+    for path in [system_root, executable, socket, script_path] {
+        let text = path.to_string_lossy();
+        ensure!(
+            !text.contains(['"', '\n', '\r']),
+            "login paths must not contain quotes or newlines"
+        );
+    }
+    let script = format!(
+        "CreateObject(\"WScript.Shell\").Run \"\"\"{exe}\"\" --socket \"\"{socket}\"\" login run\", 0, False\n",
+        exe = executable.display(),
+        socket = socket.display(),
+    );
+    Ok(WindowsLoginLaunch {
+        target: system_root.join("System32").join("wscript.exe"),
+        arguments: format!("//B //Nologo \"{}\"", script_path.display()),
+        script,
+    })
 }
 
 pub fn remove(socket: &Path) -> Result<()> {
@@ -287,6 +332,10 @@ pub fn remove_registration(path: &Path) -> Result<()> {
     let label = registration_label(path).context("unrecognized login registration")?;
     #[cfg(not(target_os = "macos"))]
     let _ = label;
+    let script = login_script_path(path);
+    if script.is_file() {
+        std::fs::remove_file(script)?;
+    }
     if !path.exists() {
         return Ok(());
     }
@@ -394,5 +443,67 @@ mod tests {
         );
         assert!(unit.contains("Restart=on-failure\nRestartSec=10\nKillMode=process\n"));
         assert!(render_systemd_unit(Path::new("/run/a\nb.sock"), Path::new("/bin/pmux")).is_err());
+    }
+
+    #[test]
+    fn windows_login_launch_hides_the_console() {
+        let script = Path::new(r"C:\Startup\dev.prismattyc.pmuxd.0123456789abcdef.vbs");
+        let launch = windows_login_launch(
+            Path::new(r"C:\Windows"),
+            Path::new(r"C:\Program Files\Prismattyc\bin\pmux.exe"),
+            Path::new(r"C:\prismattyc\default.sock"),
+            script,
+        )
+        .unwrap();
+        assert!(launch.target.ends_with("wscript.exe"));
+        assert!(launch.arguments.contains("//B"));
+        assert!(launch.arguments.contains("//Nologo"));
+        assert!(launch.arguments.contains(script.to_str().unwrap()));
+        assert!(launch.script.contains(", 0, False"));
+        assert!(launch
+            .script
+            .contains(r"C:\Program Files\Prismattyc\bin\pmux.exe"));
+        assert!(launch.script.contains(r"--socket"));
+        assert_eq!(
+            login_script_path(Path::new(
+                r"C:\Startup\dev.prismattyc.pmuxd.0123456789abcdef.lnk"
+            )),
+            script
+        );
+        assert!(windows_login_launch(
+            Path::new(r"C:\Windows"),
+            Path::new("C:\\bad\"pmux.exe"),
+            Path::new(r"C:\sock"),
+            script,
+        )
+        .is_err());
+        assert!(windows_login_launch(
+            Path::new(r"C:\Windows"),
+            Path::new("C:\\bad\npmux.exe"),
+            Path::new(r"C:\sock"),
+            script,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn remove_registration_deletes_the_hidden_login_script() {
+        let dir = std::env::temp_dir().join(format!(
+            "prismattyc-login-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("dev.prismattyc.pmuxd.0123456789abcdef.lnk");
+        let script = login_script_path(&link);
+        std::fs::write(&script, "CreateObject").unwrap();
+        let removed = remove_registration(&link);
+        let gone = !script.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        removed.unwrap();
+        assert!(gone);
     }
 }

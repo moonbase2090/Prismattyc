@@ -79,9 +79,19 @@ function Start-Msi {
 
 function Invoke-Msi {
     param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
-    $commandLine = New-MsiCommandLine $ArgumentList
+    $log = Join-Path ([System.IO.Path]::GetTempPath()) ('prismattyc-msi-{0}.log' -f [guid]::NewGuid().ToString('n'))
+    $commandLine = New-MsiCommandLine ($ArgumentList + @('/l*v', $log))
     $code = Start-Msi -CommandLine $commandLine
-    if ($code -ne 0) { throw "msiexec $commandLine exited $code" }
+    if ($code -ne 0) {
+        $detail = ''
+        if (Test-Path -LiteralPath $log) {
+            $matched = Select-String -LiteralPath $log -Pattern 'Error [0-9]|Custom action|Return value|SetArpDisplayIcon' | Select-Object -Last 30
+            if ($matched) { $detail = ($matched | ForEach-Object { $_.Line }) -join "`n" }
+        }
+        Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
+        throw "msiexec $commandLine exited $code`n$detail"
+    }
+    Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
 }
 
 function Get-PrismattycInstall {
@@ -104,9 +114,23 @@ function Get-PrismattycUninstallKeys {
                 Write-Output ([pscustomobject]@{
                     ProductCode    = $item.PSChildName
                     DisplayVersion = [string]$item.GetValue('DisplayVersion')
+                    DisplayIcon    = [string]$item.GetValue('DisplayIcon')
                     Hive           = $root
                 })
             }
+        }
+    }
+}
+
+function Get-HklmPrismattycIcons {
+    $root = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+    if (-not (Test-Path -LiteralPath $root)) { return }
+    foreach ($item in Get-ChildItem -LiteralPath $root) {
+        if ($item.GetValue('DisplayName') -eq 'Prismattyc' -and $item.GetValue('Publisher') -eq 'Moonbase2090') {
+            Write-Output ([pscustomobject]@{
+                ProductCode = $item.PSChildName
+                DisplayIcon = [string]$item.GetValue('DisplayIcon')
+            })
         }
     }
 }
@@ -145,6 +169,35 @@ function Assert-Installed {
     }
     if ($ProductVersion -and $entries[0].DisplayVersion -ne $ProductVersion) {
         throw "ARP version $($entries[0].DisplayVersion) is not $ProductVersion"
+    }
+    $expectedIcon = "$(Join-Path $install.Bin 'prismattyc-host.exe'),0"
+    # The helpers set DisplayIcon after msiexec creates the key and returns.
+    # A per-user key must not hide an empty machine-scope key.
+    $deadline = (Get-Date).AddSeconds(10)
+    $machine = @(Get-HklmPrismattycIcons)
+    do {
+        $badMachine = @($machine | Where-Object { $_.DisplayIcon -ne $expectedIcon })
+        $entryOk = ($entries.Count -eq 1 -and $entries[0].DisplayIcon -eq $expectedIcon)
+        if ($entryOk -and $badMachine.Count -eq 0) { break }
+        if ((Get-Date) -ge $deadline) { break }
+        Start-Sleep -Milliseconds 200
+        $entries = @(Get-PrismattycUninstallKeys)
+        $machine = @(Get-HklmPrismattycIcons)
+    } while ($true)
+    $trace = Join-Path ([System.IO.Path]::GetTempPath()) 'prismattyc-displayicon.txt'
+    $extra = ''
+    if (Test-Path -LiteralPath $trace) {
+        $extra = "`n" + ((Get-Content -LiteralPath $trace -Raw).Trim())
+    }
+    $badMachine = @($machine | Where-Object { $_.DisplayIcon -ne $expectedIcon })
+    if ($badMachine.Count -ne 0) {
+        $shown = "$($badMachine[0].ProductCode) '$($badMachine[0].DisplayIcon)'"
+        throw "HKLM DisplayIcon is not $expectedIcon ($shown)$extra"
+    }
+    if ($entries.Count -ne 1 -or $entries[0].DisplayIcon -ne $expectedIcon) {
+        $shown = ''
+        if ($entries.Count -eq 1) { $shown = "$($entries[0].Hive)\$($entries[0].ProductCode) '$($entries[0].DisplayIcon)'" }
+        throw "ARP DisplayIcon is not $expectedIcon ($shown)$extra"
     }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $parts = @($userPath -split ';' | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') })

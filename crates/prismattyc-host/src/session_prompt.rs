@@ -23,7 +23,7 @@ pub(super) struct Prompt {
 }
 
 fn suggested(space: &str) -> String {
-    let output = std::process::Command::new(pmux_bin())
+    let output = pmux_command()
         .args(["session", "suggest", "--space", space])
         .stdin(std::process::Stdio::null())
         .output();
@@ -175,7 +175,7 @@ pub(super) fn rename(host: &mut HostState, pane: PaneId, action: keybind::Action
 }
 
 fn run(args: &[&str]) -> Result<String> {
-    let output = std::process::Command::new(pmux_bin())
+    let output = pmux_command()
         .args(args)
         .stdin(std::process::Stdio::null())
         .output()?;

@@ -23,6 +23,7 @@ mod graphite;
 mod graphite_overlays;
 mod hyperlink;
 mod icon;
+mod instance;
 mod keybind;
 mod keys;
 mod link_click;
@@ -2667,6 +2668,9 @@ enum UserAction {
         rollback: bool,
         result: Result<macos_update::InstallResult, String>,
     },
+    /// A second bare launch asked this process to come forward.
+    #[cfg(windows)]
+    FocusExisting,
     AccessKit(accesskit_winit::Event),
 }
 
@@ -2689,6 +2693,8 @@ impl PartialEq for UserAction {
             | (Self::UpdateCheckFinished { .. }, Self::UpdateCheckFinished { .. })
             | (Self::UpdateInstallFinished { .. }, Self::UpdateInstallFinished { .. }) => true,
             (Self::AccessKit(left), Self::AccessKit(right)) => left.window_id == right.window_id,
+            #[cfg(windows)]
+            (Self::FocusExisting, Self::FocusExisting) => true,
             _ => false,
         }
     }
@@ -2748,6 +2754,9 @@ struct App {
     update_restart_notice: Option<String>,
     #[cfg(windows)]
     restart_resume: Option<restart::Resume>,
+    /// Set when a second launch arrives before the first window exists.
+    #[cfg(windows)]
+    pending_focus: bool,
 }
 
 impl App {
@@ -2833,6 +2842,8 @@ impl App {
             update_restart_notice: None,
             #[cfg(windows)]
             restart_resume: None,
+            #[cfg(windows)]
+            pending_focus: false,
         })
     }
 
@@ -3798,6 +3809,7 @@ impl App {
             );
         }
         let window = Arc::new(event_loop.create_window(attrs)?);
+        window.set_window_icon(icon::load_window_icon());
         #[cfg(target_os = "macos")]
         macos_window::install_titlebar_background(
             &window,
@@ -4335,6 +4347,11 @@ impl App {
             }
             if config_editor {
                 host.window.focus_window();
+            }
+            #[cfg(windows)]
+            if self.pending_focus {
+                self.pending_focus = false;
+                instance::foreground(&host.window);
             }
         }
         Ok(id)
@@ -8658,7 +8675,7 @@ fn commit_tab_rename(host: &mut HostState) {
             if !title.is_empty() {
                 args.push(title);
             }
-            let status = std::process::Command::new(pmux_bin())
+            let status = pmux_command()
                 .args(&args)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
@@ -9025,6 +9042,11 @@ fn pmux_bin() -> PathBuf {
     find_mux_bin()
 }
 
+/// `pmux` with no console window when this host is the Windows GUI.
+fn pmux_command() -> std::process::Command {
+    prismattyc_mux::platform::hidden_command(pmux_bin())
+}
+
 /// The mux socket this host belongs to: `PMUX_SOCKET` when set and
 /// non-empty, else the default instance — the same instance a bare `pmux`
 /// picks. A bare launch (Dock, Finder, a recorder, `prismattyc-host` from a
@@ -9135,7 +9157,7 @@ fn advance_space_opens(host: &mut HostState) {
     };
     let before = host.attach_layout_path.as_deref().and_then(cache_stamp);
     host.space_open_observation = Some(space_outcome::Observation::capture(&request.name));
-    match std::process::Command::new(pmux_bin())
+    match pmux_command()
         .args({
             let mut args = targeted_space_args(
                 &request.name,
@@ -9847,7 +9869,7 @@ fn save_space_from_host_with(host: &mut HostState, name: &str, toast: bool) -> b
     }
     persist_attach_layout_from_live(host);
     match pump_timing::measure_subprocess_wait(|| {
-        std::process::Command::new(pmux_bin())
+        pmux_command()
             .args(["space", "save", name])
             .args(
                 host.attach_layout_path
@@ -14495,7 +14517,7 @@ fn space_picker_rows(kind: SpacePickerKind, current: Option<&str>) -> Vec<SpaceP
 /// Whether the focused pane can move into `target`.
 fn run_pmux_space(args: &[String]) -> Result<(), String> {
     let args_ref = args.iter().map(String::as_str).collect::<Vec<_>>();
-    match std::process::Command::new(pmux_bin())
+    match pmux_command()
         .args(&args_ref)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -16387,7 +16409,7 @@ fn spawn_owned_space_pane(
         .as_deref()
         .context("no current Space")?;
     let owner = space.id.clone().context("Space ownership is unresolved")?;
-    let output = std::process::Command::new(pmux_bin())
+    let output = pmux_command()
         .args(["space", "add", name])
         .args(requested.into_iter().flat_map(|name| ["--name", name]))
         .stdin(std::process::Stdio::null())
@@ -18367,7 +18389,7 @@ fn live_sessions() -> Vec<(String, String)> {
         return Vec::new();
     };
     let output = pump_timing::measure_subprocess_wait(|| {
-        std::process::Command::new(find_mux_bin())
+        pmux_command()
             .arg("--socket")
             .arg(&socket)
             .arg("ls")
@@ -18444,7 +18466,7 @@ fn recreate_session(host: &HostState, name: &str) -> Result<()> {
         Some(space) => session_reopen_args(name, space, true),
         None => session_reopen_args(name, &loaded_space_name(host), false),
     };
-    let mut command = std::process::Command::new(pmux_bin());
+    let mut command = pmux_command();
     command.args(&args);
     if let Some(socket) = host_mux_socket() {
         command.env("PMUX_SOCKET", socket);
@@ -20708,6 +20730,8 @@ impl ApplicationHandler<UserAction> for App {
                     &error,
                 ),
             },
+            #[cfg(windows)]
+            UserAction::FocusExisting => self.focus_existing_window(),
             UserAction::AccessKit(event) => self.handle_accesskit(event_loop, event),
         }
     }
@@ -20741,6 +20765,25 @@ impl ApplicationHandler<UserAction> for App {
     }
 }
 
+#[cfg(windows)]
+impl App {
+    fn focus_existing_window(&mut self) {
+        if self.windows.is_empty() {
+            self.pending_focus = true;
+            return;
+        }
+        let id = self
+            .windows
+            .iter()
+            .find(|(_, host)| host.window_focused)
+            .map(|(id, _)| *id)
+            .or_else(|| self.windows.keys().next().copied());
+        if let Some(host) = id.and_then(|id| self.windows.get(&id)) {
+            instance::foreground(&host.window);
+        }
+    }
+}
+
 fn main() -> Result<()> {
     #[cfg(windows)]
     let restart_resume = restart::receive()?;
@@ -20759,6 +20802,16 @@ fn main() -> Result<()> {
         for warning in file_config.macos_override_warnings() {
             eprintln!("prismattyc-host: warning: {warning}");
         }
+        return Ok(());
+    }
+    #[cfg(windows)]
+    let wait_for_owner = restart_resume.is_some();
+    #[cfg(not(windows))]
+    let wait_for_owner = false;
+    if instance::claim_or_focus(
+        instance::claims_single_instance(cli.explicit_program, cli.attach_sessions.len()),
+        wait_for_owner,
+    ) {
         return Ok(());
     }
     #[cfg(target_os = "macos")]
@@ -20823,6 +20876,15 @@ fn main() -> Result<()> {
     #[cfg(windows)]
     {
         app.restart_resume = restart_resume;
+    }
+    if instance::owns_instance() {
+        #[cfg(windows)]
+        {
+            let proxy = app.event_proxy.clone();
+            instance::watch(move || {
+                let _ = proxy.send_event(UserAction::FocusExisting);
+            });
+        }
     }
     event_loop.run_app(&mut app).context("run_app")?;
     if app.exit_code != 0 {

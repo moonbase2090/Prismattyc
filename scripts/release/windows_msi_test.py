@@ -74,7 +74,53 @@ class WindowsMsiTests(unittest.TestCase):
         for name in ("MPL-2.0.txt", "NOTICE.txt", "OMARCHY-LICENSE.txt"):
             self.assertIn(name, source)
         self.assertIn("reset-windows-update-pointer.ps1", source)
-        self.assertIn("[SystemFolder]WindowsPowerShell\\v1.0\\powershell.exe", source)
+        self.assertIn("[System64Folder]WindowsPowerShell\\v1.0\\powershell.exe", source)
+        self.assertNotIn("[SystemFolder]", source)
+        self.assertIn("-WindowStyle Hidden", source)
+        self.assertIn(
+            'Root="HKLM" Key="Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\[ProductCode]" '
+            'Name="DisplayIcon" Type="string" Value="[BINFOLDER]prismattyc-host.exe,0"',
+            source,
+        )
+        shortcut = source.split('Id="StartMenuShortcut"', 1)[1].split("</Component>", 1)[0]
+        self.assertIn('Bitness="always64"', shortcut)
+        self.assertNotIn('Root="HKLM"', shortcut)
+        machine = source.split('Id="ArpDisplayIconMachine"', 1)[1].split("</Component>", 1)[0]
+        self.assertIn('Condition="Privileged"', machine)
+        self.assertIn(
+            'Root="HKLM" Key="Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\[ProductCode]" '
+            'Name="DisplayIcon" Type="string" Value="[BINFOLDER]prismattyc-host.exe,0"',
+            machine,
+        )
+        hklm_value = machine.split('Root="HKLM"', 1)[1].split("/>", 1)[0]
+        self.assertNotIn('KeyPath="yes"', hklm_value)
+        hkcu_value = machine.split('Root="HKCU"', 1)[1].split("/>", 1)[0]
+        self.assertIn('KeyPath="yes"', hkcu_value)
+        self.assertNotIn("Win64", source)
+        builder = (ROOT / "scripts/release/windows_msi.py").read_text(encoding="utf-8")
+        self.assertIn('"-arch",\n        "x64"', builder)
+        self.assertNotIn("Win32_Process", source)
+        self.assertNotIn('Impersonate="no"', source)
+        self.assertNotIn("set-arp-display-icon", source)
+        self.assertNotIn("EncodedCommand", source)
+        reset_action = source.split('Id="ResetUpdatePointer"', 1)[1].split("/>", 1)[0]
+        self.assertIn('Directory="System64Folder"', reset_action)
+        self.assertIn('Impersonate="yes"', reset_action)
+        self.assertNotIn("set-arp-display-icon", reset_action)
+        packager = (ROOT / "scripts/release/package-windows.py").read_text(encoding="utf-8")
+        self.assertNotIn("set-arp-display-icon", packager)
+        proof = (ROOT / "scripts/release/test-windows-msi.ps1").read_text(encoding="utf-8")
+        self.assertIn("'/l*v'", proof)
+        self.assertIn("prismattyc-displayicon.txt", proof)
+        self.assertIn("AddSeconds(10)", proof)
+        self.assertIn("ARP DisplayIcon", proof)
+        self.assertIn("HKLM DisplayIcon is not", proof)
+        self.assertIn("function Get-HklmPrismattycIcons", proof)
+        hklm_check = proof.split("function Get-HklmPrismattycIcons", 1)[1].split("function ", 1)[0]
+        self.assertIn(r"HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall", hklm_check)
+        self.assertIn("DisplayIcon", hklm_check)
+        self.assertIn("Moonbase2090", hklm_check)
+        self.assertIn("prismattyc-host.exe'),0", proof)
         self.assertNotIn('ExeCommand="powershell.exe', source)
         self.assertIn("windows-current.json", reset)
         for forbidden in ("Stop-Process", "taskkill", "kill"):
@@ -181,9 +227,20 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn("native Windows", stderr.getvalue())
 
     def test_icon_is_a_windows_icon(self):
-        header = (ROOT / "scripts/release/prismattyc.ico").read_bytes()[:6]
-        self.assertEqual(header[:4], b"\x00\x00\x01\x00")
-        self.assertGreater(int.from_bytes(header[4:6], "little"), 0)
+        from pe_icon import contains_utf16, ico_sizes, icon_widths, synthetic_pe
+
+        data = (ROOT / "scripts/release/prismattyc.ico").read_bytes()
+        self.assertEqual(set(ico_sizes(data)), {16, 24, 32, 48, 256})
+        shortcut = (ROOT / "scripts/release/prismattyc.wxs").read_text(encoding="utf-8")
+        self.assertIn('Icon="PrismattycIcon"', shortcut)
+        self.assertIn('Name="Prismattyc"', shortcut)
+        self.assertEqual(icon_widths(synthetic_pe([32])), [32])
+        self.assertEqual(icon_widths(synthetic_pe([16, 24, 32, 48, 256])), [16, 24, 32, 48, 256])
+        self.assertEqual(icon_widths(synthetic_pe([32], icon_id=2)), [])
+        self.assertEqual(icon_widths(synthetic_pe([])), [])
+        marked = synthetic_pe([16]) + "Prismattyc".encode("utf-16le")
+        self.assertTrue(contains_utf16(marked, "Prismattyc"))
+        self.assertFalse(contains_utf16(synthetic_pe([16]), "Moonbase 2090 LLC"))
 
     def test_refresh_replaces_a_stale_msi_hash(self):
         with tempfile.TemporaryDirectory() as tmp:

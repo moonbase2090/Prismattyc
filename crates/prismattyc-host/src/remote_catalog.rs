@@ -40,7 +40,7 @@ pub type Wake = Arc<dyn Fn() + Send + Sync>;
 /// System SSH config, agent and host-key checking apply unchanged. The alias
 /// is its own argument after `--` and is validated not to start with `-`.
 pub fn ssh_command(destination: &SshDestination) -> Command {
-    let mut command = Command::new("ssh");
+    let mut command = prismattyc_mux::platform::hidden_command("ssh");
     command
         .arg("-T")
         .args(["-o", "BatchMode=yes"])

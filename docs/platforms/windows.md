@@ -31,9 +31,29 @@ The release asset is `prismattyc-vVERSION-x86_64-pc-windows-msvc.msi`. It is a
 per-user package: it does not request administrator rights. It installs the six
 executables, licenses, and `NOTICE` under
 `%LOCALAPPDATA%\Programs\Prismattyc`, with the executables in `bin`. A Start
-menu shortcut named Prismattyc launches `prismattyc-host.exe`. Apps & features
+menu shortcut named Prismattyc launches `prismattyc-host.exe`. That is the
+only Start menu entry. It opens the GUI, which carries the Prismattyc icon
+and does not allocate a console. `prismattyc.exe` is the CLI. Its file
+description is Prismattyc CLI, and it is not a shortcut target, so Start
+search does not offer it as a separate app. The other executables stay in
+`bin` and are added to PATH only when the install is given `ADDTOPATH=1`.
+
+A second bare launch of the GUI focuses the existing window. `pmux attach --all`
+and `pmux space open --new-window` still open another window. A connect from
+the GUI to the local daemon gives up after two seconds, so a stuck socket
+cannot stop the window from pumping. Login restore and login sync already run
+on a worker thread. Programs the GUI
+starts for itself, including `git` and `pmux`, are created with
+`CREATE_NO_WINDOW`, so they do not flash a console. The login Startup shortcut
+runs `pmux login run` through `wscript` with a hidden window. The installer's
+update-pointer script starts PowerShell hidden. Apps & features
 shows the publisher Moonbase2090 and the numeric MSI product version described
-below. `pmux --version` still reports the semver.
+below. Its icon is `DisplayIcon` on the uninstall key Windows Installer
+created, set to `prismattyc-host.exe,0`. An elevated install writes that value into the machine uninstall key while
+it writes the registry. A non-elevated install skips that write, so a denied
+machine-key update cannot roll the install back. It does not start a helper.
+`pmux --version`
+still reports the semver.
 
 ```powershell
 msiexec /i prismattyc-v0.3.29-x86_64-pc-windows-msvc.msi /qn /norestart

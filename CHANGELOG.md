@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased]
+
+Windows builds embed the Prismattyc icon and version information in the packaged
+executables, and the Start menu shortcut uses that icon. The GUI stays
+`prismattyc-host.exe`. `prismattyc.exe` remains the CLI, with the file
+description Prismattyc CLI, and is not a Start shortcut. Helpers the GUI starts
+no longer open a console window. The login daemon starts detached, and the
+installer's update-pointer script starts PowerShell hidden. The CLI tools
+enable virtual-terminal processing. A pipe, `NO_COLOR`, or a console that
+rejects it prints a plain page, and start and quit stay free of escape
+sequences. Color follows stdout. A second bare launch of the GUI focuses the
+existing window. A local daemon connect from the GUI gives up after two
+seconds. The Apps & features entry points its icon at `prismattyc-host.exe`,
+on the uninstall key the installer created. An elevated install writes that icon into the machine uninstall key while
+it writes the registry. A non-elevated install skips that write, so a denied
+machine-key update cannot roll the install back. It does not start a helper.
+
 ## [0.3.30] - 2026-10-09
 
 ### Workspace recovery

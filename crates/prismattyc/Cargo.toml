@@ -22,6 +22,9 @@ prismattyc-mux = { path = "../prismattyc-mux" }
 prismattyc-protocol = { path = "../prismattyc-protocol" }
 prismattyc-render = { path = "../prismattyc-render" }
 
+[build-dependencies]
+prismattyc-winres = { path = "../prismattyc-winres" }
+
 [target.'cfg(unix)'.dependencies]
 # Already pulled by crossterm; direct dep for host terminate-signal restore.
 signal-hook = "0.3"

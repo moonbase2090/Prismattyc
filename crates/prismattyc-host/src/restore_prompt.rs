@@ -28,7 +28,7 @@ impl RestorePrompt {
         let (sender, receiver) = std::sync::mpsc::channel();
         self.startup = Some(receiver);
         std::thread::spawn(move || {
-            let result = std::process::Command::new(pmux)
+            let result = prismattyc_mux::platform::hidden_command(pmux)
                 .arg("--socket")
                 .arg(socket)
                 .arg("up")
@@ -254,7 +254,7 @@ pub(super) fn sync_login_registration() {
     };
     let pmux = find_mux_bin();
     std::thread::spawn(move || {
-        match std::process::Command::new(pmux)
+        match prismattyc_mux::platform::hidden_command(pmux)
             .arg("--socket")
             .arg(socket)
             .args(["login", "sync"])

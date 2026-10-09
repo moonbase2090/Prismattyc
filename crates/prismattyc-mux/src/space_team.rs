@@ -277,9 +277,10 @@ pub struct TeamClient {
 
 impl TeamClient {
     pub fn connect(socket: &Path) -> Result<Self> {
-        let stream = UnixStream::connect(socket)?;
-        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+        let timeout = Duration::from_secs(2);
+        let stream = crate::local_socket::connect_timeout(socket, timeout)?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
         let mut client = Self {
             stream: BufReader::new(stream),
             next_id: 0,

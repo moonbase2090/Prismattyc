@@ -441,6 +441,7 @@ fn parse_argv(args: impl IntoIterator<Item = String>) -> Result<Cli> {
 }
 
 fn main() -> Result<()> {
+    let _vt = prismattyc_mux::platform::enable_console_vt();
     prismattyc_mux::release_update::forward_installed("pmux")?;
     // Execute stays in `main` rather than a new `run`. Extracting `run`
     // scores C=75 as a new function and PT-277 blocks it; leaving the
@@ -3605,9 +3606,12 @@ fn run_login_supervisor(paths: &Paths) -> Result<()> {
             .stdin(Stdio::null())
             .stdout(Stdio::from(log.try_clone()?))
             .stderr(Stdio::from(log));
-        prismattyc_mux::platform::detach_command(&mut command);
         let started = Instant::now();
-        let mut child = command.spawn().context("start login daemon")?;
+        // spawn_detached keeps the caller's console handles private. detach
+        // plus spawn still inherits them, and a new pmuxd on each retry looks
+        // like a restart loop.
+        let mut child =
+            prismattyc_mux::platform::spawn_detached(&mut command).context("start login daemon")?;
         loop {
             if let Some(status) = child.try_wait()? {
                 if status.success() {

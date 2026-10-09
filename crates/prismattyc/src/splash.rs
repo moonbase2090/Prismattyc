@@ -248,10 +248,40 @@ pub fn render_topic(topic: Topic, version: &str, color: bool) -> String {
 #[must_use]
 pub fn should_show(explicit_program: bool, no_splash_flag: bool) -> bool {
     use std::io::IsTerminal;
-    if explicit_program || no_splash_flag || env_flag_enabled("PRISMATTYC_NO_SPLASH") {
+    if explicit_program || splash_suppressed(no_splash_flag) {
         return false;
     }
     io::stdin().is_terminal() && io::stdout().is_terminal()
+}
+
+/// `--no-splash` or `PRISMATTYC_NO_SPLASH`.
+#[must_use]
+pub fn splash_suppressed(no_splash_flag: bool) -> bool {
+    no_splash_flag || env_flag_enabled("PRISMATTYC_NO_SPLASH")
+}
+
+/// Color only when the user asked for it, stdout is a terminal, and that
+/// terminal accepted virtual-terminal processing.
+#[must_use]
+pub fn color_enabled(no_color: bool, terminal: bool, vt_ready: bool) -> bool {
+    !no_color && terminal && vt_ready
+}
+
+/// A bare launch whose stdout is not a console prints one plain page and
+/// returns. An explicit program, `--no-splash`, or a real terminal does not.
+#[must_use]
+pub fn should_print_plain(
+    explicit_program: bool,
+    no_splash: bool,
+    stdout_is_terminal: bool,
+) -> bool {
+    !explicit_program && !no_splash && !stdout_is_terminal
+}
+
+/// One colorless splash page for a pipe or a console without VT.
+#[must_use]
+pub fn plain_page(version: &str) -> String {
+    render_main(version, tip_index(day_of_year()), false, 0)
 }
 
 fn env_flag_enabled(name: &str) -> bool {
@@ -299,22 +329,49 @@ fn write_page(stdout: &mut impl Write, page: &str) -> Result<()> {
     Ok(())
 }
 
+/// Keys for the interactive splash. The real console polls; tests supply
+/// the next key immediately.
+trait SplashKeys {
+    fn next_key(&mut self, wait: Duration) -> Result<Option<KeyEvent>>;
+}
+
+struct ConsoleKeys;
+
+impl SplashKeys for ConsoleKeys {
+    fn next_key(&mut self, wait: Duration) -> Result<Option<KeyEvent>> {
+        if !event::poll(wait)? {
+            return Ok(None);
+        }
+        read_key()
+    }
+}
+
 /// Run the interactive splash. Caller has already checked [`should_show`].
 ///
 /// With color on, the art animates (beam sweep, then the reflection loop)
 /// between keypresses: the loop polls for input one frame at a time and
 /// repaints the art rows in place. Any mapped key acts immediately.
-pub fn run(version: &str) -> Result<Outcome> {
-    let color = env::var_os("NO_COLOR").is_none();
-    let tip = tip_index(day_of_year());
+pub fn run(version: &str, color: bool) -> Result<Outcome> {
     let mut stdout = io::stdout();
     let _raw = RawModeGuard::enter()?;
+    drive(&mut stdout, version, color, &mut ConsoleKeys)
+}
+
+/// Drive one splash. `color` false is the NO_COLOR and failed-VT path: the
+/// page and the Launch and Quit actions stay free of CSI.
+fn drive(
+    stdout: &mut impl Write,
+    version: &str,
+    color: bool,
+    keys: &mut impl SplashKeys,
+) -> Result<Outcome> {
+    let tip = tip_index(day_of_year());
     let started = Instant::now();
     let elapsed_ms = || started.elapsed().as_millis() as u64;
     let result = (|| -> Result<Outcome> {
         let page = render_main(version, tip, color, elapsed_ms());
         let lines = page_lines(&page);
-        write_page(&mut stdout, &page)?;
+        write_page(stdout, &page)?;
         let animate = color && page_fits_terminal(lines);
         loop {
             let now = elapsed_ms();
@@ -323,44 +380,43 @@ pub fn run(version: &str) -> Result<Outcome> {
             } else {
                 Duration::from_secs(60)
             };
-            if !event::poll(wait)? {
+            let Some(key) = keys.next_key(wait)? else {
                 if animate {
                     write!(stdout, "{}", art_repaint(lines, elapsed_ms()))?;
                     stdout.flush()?;
                 }
                 continue;
-            }
-            let Some(key) = read_key()? else {
-                continue;
             };
             match key_action(key) {
                 Some(Action::Launch) => {
-                    // Remove the splash from the primary screen before the
-                    // child redraws it. Otherwise full-screen TUIs that use
-                    // partial repainting can expose these old cells.
-                    write!(stdout, "\x1b[2J\x1b[H\x1b[0m")?;
-                    stdout.flush()?;
+                    // A VT console clears the splash before the child redraws.
+                    // A console that rejected VT, or NO_COLOR, must not see
+                    // those sequences as raw text.
+                    if color {
+                        write!(stdout, "\x1b[2J\x1b[H\x1b[0m")?;
+                        stdout.flush()?;
+                    }
                     return Ok(Outcome::Launch);
                 }
                 Some(Action::Quit) => {
-                    write!(stdout, "\x1b[2K\r")?;
+                    if color {
+                        write!(stdout, "\x1b[2K\r")?;
+                    }
                     return Ok(Outcome::Quit);
                 }
                 Some(Action::Show(topic)) => {
-                    write_page(&mut stdout, &render_topic(topic, version, color))?;
+                    write_page(stdout, &render_topic(topic, version, color))?;
                     // Sub-page: any key returns to the main page; Quit exits.
                     loop {
-                        match read_key()? {
-                            None => {}
-                            Some(key) => {
-                                if key_action(key) == Some(Action::Quit) {
-                                    return Ok(Outcome::Quit);
-                                }
-                                break;
-                            }
+                        let Some(key) = keys.next_key(Duration::from_secs(60))? else {
+                            continue;
+                        };
+                        if key_action(key) == Some(Action::Quit) {
+                            return Ok(Outcome::Quit);
                         }
+                        break;
                     }
-                    write_page(&mut stdout, &render_main(version, tip, color, elapsed_ms()))?;
+                    write_page(stdout, &render_main(version, tip, color, elapsed_ms()))?;
                 }
                 None => {}
             }
@@ -429,12 +485,84 @@ mod tests {
         assert!(page.contains("Quit"));
     }
 
+    struct ScriptedKeys {
+        keys: Vec<KeyEvent>,
+        index: usize,
+    }
+
+    impl SplashKeys for ScriptedKeys {
+        fn next_key(&mut self, _wait: Duration) -> Result<Option<KeyEvent>> {
+            let key = self.keys.get(self.index).copied();
+            if key.is_some() {
+                self.index += 1;
+            }
+            Ok(key)
+        }
+    }
+
+    fn captured(color: bool, code: KeyCode) -> (Outcome, String) {
+        let mut out = Vec::new();
+        let mut keys = ScriptedKeys {
+            keys: vec![key(code)],
+            index: 0,
+        };
+        let outcome = drive(&mut out, "0.3.29", color, &mut keys).unwrap();
+        (outcome, String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn colorless_launch_and_quit_emit_no_csi() {
+        let (launch, launch_text) = captured(false, KeyCode::Enter);
+        assert_eq!(launch, Outcome::Launch);
+        assert!(!launch_text.contains('\u{1b}'), "{launch_text:?}");
+        assert!(launch_text.contains("Prismattyc"));
+        assert!(launch_text.contains("v0.3.29"));
+        assert!(launch_text.contains("Quit"));
+
+        let (quit, quit_text) = captured(false, KeyCode::Char('q'));
+        assert_eq!(quit, Outcome::Quit);
+        assert!(!quit_text.contains('\u{1b}'), "{quit_text:?}");
+        assert!(quit_text.contains("Start session"));
+        assert!(quit_text.ends_with("\r\n"));
+    }
+
+    #[test]
+    fn colored_launch_clears_the_screen_and_quit_erases_the_line() {
+        let (launch, launch_text) = captured(true, KeyCode::Enter);
+        assert_eq!(launch, Outcome::Launch);
+        assert!(launch_text.contains("\u{1b}[2J\u{1b}[H\u{1b}[0m"));
+
+        let (quit, quit_text) = captured(true, KeyCode::Char('q'));
+        assert_eq!(quit, Outcome::Quit);
+        assert!(quit_text.contains("\u{1b}[2K\r"));
+    }
+
     #[test]
     fn colorless_output_has_no_ansi() {
         let page = render_main("0.0.0", 1, false, 0);
         assert!(!page.contains("\x1b["));
         let topic = render_topic(Topic::WhatsNew, "0.0.0", false);
         assert!(!topic.contains("\x1b["));
+    }
+
+    #[test]
+    fn color_follows_no_color_the_terminal_and_vt() {
+        assert!(color_enabled(false, true, true));
+        assert!(!color_enabled(true, true, true));
+        assert!(!color_enabled(false, false, true));
+        assert!(!color_enabled(false, true, false));
+    }
+
+    #[test]
+    fn a_pipe_prints_one_plain_page_and_a_terminal_does_not() {
+        assert!(should_print_plain(false, false, false));
+        assert!(!should_print_plain(true, false, false));
+        assert!(!should_print_plain(false, true, false));
+        assert!(!should_print_plain(false, false, true));
+        let page = plain_page("0.3.29");
+        assert!(!page.contains("\x1b["));
+        assert!(page.contains("Prismattyc"));
+        assert!(page.contains("v0.3.29"));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -68,7 +68,7 @@ impl Cache {
 }
 
 fn git(path: &Path, args: &[&str]) -> Option<String> {
-    let mut command = Command::new("git");
+    let mut command = prismattyc_mux::platform::hidden_command("git");
     command
         .arg("-C")
         .arg(path)

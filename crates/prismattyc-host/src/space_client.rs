@@ -240,6 +240,7 @@ fn run_save(job: SaveJob) -> Report {
         None
     };
     let mut command = Command::new(&job.pmux);
+    prismattyc_mux::platform::hide_console(&mut command);
     command.arg("space").arg("save").arg(&job.name);
     if let Some(path) = &private {
         command.arg("--view-path").arg(path);

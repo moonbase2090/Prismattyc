@@ -342,6 +342,8 @@ fn session_directory_from_snapshot(snapshot: Snapshot) -> Vec<crate::attach_adop
 }
 
 /// One `Snapshot` request on a fresh connection; `None` on any failure.
+///
+/// The connect and the snapshot read each give up after [`REQUEST_TIMEOUT`].
 pub(crate) fn live_snapshot() -> Option<Snapshot> {
     let socket = mux_socket().ok()?;
     live_snapshot_at(&socket)
@@ -372,7 +374,7 @@ struct Client {
 
 impl Client {
     fn connect(path: &Path, read_timeout: Duration) -> Result<Self> {
-        let stream = prismattyc_mux::local_socket::UnixStream::connect(path)
+        let stream = prismattyc_mux::local_socket::connect_timeout(path, read_timeout)
             .with_context(|| format!("connect {}", path.display()))?;
         Self::from_stream(stream, read_timeout)
     }
@@ -627,15 +629,16 @@ impl Client {
 
 /// One registered control connection for the long-lived snapshot cache.
 ///
-/// `on_connected` runs after `connect` returns and before the register read,
-/// so a caller can count the socket while a stalled daemon is still blocking.
+/// `on_connected` runs after `connect` returns and before the register read.
+/// The connect gives up after [`REQUEST_TIMEOUT`]; a caller can still count
+/// the socket while a daemon that accepted is blocking that read.
 pub(crate) struct SnapshotSocket {
     client: Client,
 }
 
 impl SnapshotSocket {
     pub(crate) fn open(path: &Path, on_connected: impl FnOnce()) -> Result<Self> {
-        let stream = prismattyc_mux::local_socket::UnixStream::connect(path)
+        let stream = prismattyc_mux::local_socket::connect_timeout(path, REQUEST_TIMEOUT)
             .with_context(|| format!("connect {}", path.display()))?;
         on_connected();
         Ok(Self {

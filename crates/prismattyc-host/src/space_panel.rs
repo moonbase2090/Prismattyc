@@ -658,11 +658,10 @@ fn command(host: &mut HostState, args: Vec<String>, kind: &'static str) {
     panel.pending = Some(rx);
     panel.rows.clear();
     panel.row("Loading…", "Your sessions keep running", Choice::None);
-    let bin = pmux_bin();
     let socket = host_mux_socket();
     std::thread::spawn(move || {
         let result = (|| -> Result<Payload, String> {
-            let mut cmd = std::process::Command::new(bin);
+            let mut cmd = pmux_command();
             if let Some(socket) = socket {
                 cmd.arg("--socket").arg(socket);
             }

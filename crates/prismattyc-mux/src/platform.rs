@@ -378,6 +378,102 @@ pub fn terminate_process(pid: u32) -> io::Result<()> {
         }
     }
 }
+/// `CREATE_NO_WINDOW`. A GUI parent that starts a console child without this
+/// flag gets a new console window.
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// `ENABLE_VIRTUAL_TERMINAL_PROCESSING`.
+pub const VT_OUTPUT_PROCESSING: u32 = 0x0004;
+/// `DISABLE_NEWLINE_AUTO_RETURN`.
+pub const VT_DISABLE_NEWLINE_AUTO_RETURN: u32 = 0x0008;
+/// `ENABLE_VIRTUAL_TERMINAL_INPUT`.
+pub const VT_INPUT: u32 = 0x0200;
+
+/// Flags for a short-lived helper. `CommandExt::creation_flags` replaces the
+/// whole mask, and Windows ignores `CREATE_NO_WINDOW` when it is combined
+/// with `DETACHED_PROCESS`, so this must not be applied to [`spawn_detached`].
+pub fn helper_creation_flags() -> u32 {
+    CREATE_NO_WINDOW
+}
+
+/// `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`.
+pub fn detach_creation_flags() -> u32 {
+    0x0000_0008 | 0x0000_0200
+}
+
+pub fn console_vt_output_flags() -> u32 {
+    VT_OUTPUT_PROCESSING | VT_DISABLE_NEWLINE_AUTO_RETURN
+}
+
+pub fn console_vt_input_flags() -> u32 {
+    VT_INPUT
+}
+
+/// Start `program` without allocating a console window on Windows.
+pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    hide_console(&mut command);
+    command
+}
+
+/// Hide a console child's window. No effect on Unix. Do not call this on a
+/// command that then goes through [`detach_command`]: the later call replaces
+/// these flags.
+pub fn hide_console(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(helper_creation_flags());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+    }
+}
+
+/// Color follows stdout. Enabling stderr must not make a rejected stdout
+/// look ready.
+pub fn stdout_vt_ready(stdout_accepted: bool, _stderr_accepted: bool) -> bool {
+    stdout_accepted
+}
+
+/// Enable virtual-terminal sequences on a console CLI.
+///
+/// Returns true when stdout accepted output processing. Stderr is enabled too,
+/// but its result does not decide color. A pipe, a file, or a rejected stdout
+/// mode returns false. Unix terminals already interpret the sequences, so this
+/// reports ready there.
+pub fn enable_console_vt() -> bool {
+    #[cfg(not(windows))]
+    {
+        true
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::System::Console::{
+            GetConsoleMode, GetStdHandle, SetConsoleMode, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
+            STD_OUTPUT_HANDLE,
+        };
+        unsafe fn enable(handle_id: u32, extra: u32) -> bool {
+            let handle = GetStdHandle(handle_id);
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                return false;
+            }
+            let mut mode = 0u32;
+            if GetConsoleMode(handle, &mut mode) == 0 {
+                return false;
+            }
+            SetConsoleMode(handle, mode | extra) != 0
+        }
+        unsafe {
+            let _input = enable(STD_INPUT_HANDLE, console_vt_input_flags());
+            let out = enable(STD_OUTPUT_HANDLE, console_vt_output_flags());
+            let err = enable(STD_ERROR_HANDLE, console_vt_output_flags());
+            stdout_vt_ready(out, err)
+        }
+    }
+}
+
 pub fn detach_command(command: &mut std::process::Command) {
     #[cfg(unix)]
     unsafe {
@@ -390,8 +486,7 @@ pub fn detach_command(command: &mut std::process::Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
-        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        command.creation_flags(detach_creation_flags());
     }
 }
 
@@ -872,5 +967,59 @@ mod tests {
             Err(_) => panic!("detached child kept the caller stdout pipe open"),
         }
         drop(child);
+    }
+}
+
+#[cfg(test)]
+mod console_flags {
+    #[test]
+    fn helper_hides_the_console_and_detach_stays_a_separate_mask() {
+        assert_eq!(super::helper_creation_flags(), 0x0800_0000);
+        assert_eq!(super::detach_creation_flags(), 0x0000_0008 | 0x0000_0200);
+        assert_eq!(
+            super::helper_creation_flags() & super::detach_creation_flags(),
+            0
+        );
+    }
+
+    #[test]
+    fn stdout_vt_ready_ignores_a_stderr_that_accepted_vt() {
+        assert!(!super::stdout_vt_ready(false, true));
+        assert!(super::stdout_vt_ready(true, false));
+        assert!(!super::stdout_vt_ready(false, false));
+        assert!(super::stdout_vt_ready(true, true));
+    }
+
+    #[test]
+    fn console_vt_flags_match_the_win32_values() {
+        assert_eq!(super::console_vt_output_flags(), 0x0004 | 0x0008);
+        assert_eq!(super::console_vt_input_flags(), 0x0200);
+        assert_ne!(
+            super::console_vt_output_flags(),
+            super::console_vt_input_flags()
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_terminals_already_accept_vt() {
+        assert!(super::enable_console_vt());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vt_flags_match_the_sdk() {
+        use windows_sys::Win32::System::Console::{
+            DISABLE_NEWLINE_AUTO_RETURN, ENABLE_VIRTUAL_TERMINAL_INPUT,
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+        };
+        assert_eq!(
+            super::console_vt_output_flags(),
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN
+        );
+        assert_eq!(
+            super::console_vt_input_flags(),
+            ENABLE_VIRTUAL_TERMINAL_INPUT
+        );
     }
 }

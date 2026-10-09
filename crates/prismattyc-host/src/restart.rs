@@ -168,6 +168,9 @@ fn perform(app: &mut App, request: &requests::Request) -> Result<()> {
     #[cfg(windows)]
     {
         use std::io::Write;
+        // The replacement claims the single-instance mutex. Release it first
+        // or the child focuses this window and exits.
+        super::instance::release();
         let mut child = command
             .stdin(std::process::Stdio::piped())
             .spawn()

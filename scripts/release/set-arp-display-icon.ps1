@@ -17,10 +17,10 @@ function Write-Trace([string]$Line) {
 if (-not $Apply) {
     # A child of the installer is stopped when msiexec exits, which is before the
     # uninstall key exists. Win32_Process.Create starts the helper outside that job.
-    $sysnative = Join-Path $env:SystemRoot 'Sysnative\WindowsPowerShell\v1.0\powershell.exe'
-    $system32 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $exe = $(if (Test-Path -LiteralPath $sysnative) { $sysnative } else { $system32 })
-    $command = "`"$exe`" -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Apply -ProductCode `"$ProductCode`" -Icon `"$Icon`""
+    # WMI is 64-bit, so System32 is the real system directory. Sysnative exists only
+    # for a 32-bit caller and is not a path WMI can start.
+    $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $command = "$exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Apply -ProductCode `"$ProductCode`" -Icon `"$Icon`""
     $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $command }
     Write-Trace "spawned=$($created.ReturnValue)"
     exit 0

@@ -535,6 +535,82 @@ fn install_remote(host: &mut HostState) {
     *host.remote.borrow_mut() = remote;
 }
 
+fn clear_toasts(host: &mut HostState) {
+    host.status_history = status_toasts::History::default();
+}
+
+fn divider_axes(host: &HostState) -> Vec<prismattyc_mux::Axis> {
+    host.mux
+        .dividers()
+        .into_iter()
+        .map(|divider| divider.axis)
+        .collect()
+}
+
+fn axis_count(axes: &[prismattyc_mux::Axis], axis: prismattyc_mux::Axis) -> usize {
+    axes.iter().filter(|item| **item == axis).count()
+}
+
+/// A blank split adds one pane on `axis` and leaves no naming prompt.
+fn expect_blank_split(host: &mut HostState, action: keybind::Action, axis: prismattyc_mux::Axis) {
+    host.session_prompt = None;
+    let panes = host.mux.active_pane_count();
+    let before = divider_axes(host);
+    assert_eq!(dispatch(host, action), Dispatch::Handled);
+    assert!(
+        host.session_prompt.is_none(),
+        "a blank split does not keep a naming prompt"
+    );
+    assert_eq!(host.mux.active_pane_count(), panes + 1);
+    assert_eq!(
+        axis_count(&divider_axes(host), axis),
+        axis_count(&before, axis) + 1,
+        "the new blank split is {axis:?}"
+    );
+}
+
+/// A named tab or split either opens on `axis` or records this attempt's pmux error.
+fn expect_named_terminal(
+    host: &mut HostState,
+    action: keybind::Action,
+    axis: Option<prismattyc_mux::Axis>,
+) {
+    host.session_prompt = None;
+    let panes = host.mux.active_pane_count();
+    let tabs = host.mux.tab_count();
+    let before = divider_axes(host);
+    assert_eq!(dispatch(host, action), Dispatch::Handled);
+    let grew = match axis {
+        Some(_) => host.mux.active_pane_count() > panes,
+        None => host.mux.tab_count() > tabs,
+    };
+    if grew {
+        assert!(
+            host.session_prompt.is_none(),
+            "a created terminal closes the naming prompt"
+        );
+        if let Some(axis) = axis {
+            assert_eq!(
+                axis_count(&divider_axes(host), axis),
+                axis_count(&before, axis) + 1,
+                "the new named split is {axis:?}"
+            );
+        }
+        return;
+    }
+    let error = host
+        .session_prompt
+        .as_ref()
+        .and_then(|prompt| prompt.error.clone());
+    assert_eq!(
+        error.as_deref(),
+        Some("current Space ownership is unresolved"),
+        "a named terminal in an unresolved space reports that"
+    );
+    assert_eq!(host.mux.active_pane_count(), panes);
+    assert_eq!(host.mux.tab_count(), tabs);
+}
+
 fn toast_text(host: &HostState) -> String {
     status_toasts::rows(&host.status_history, Instant::now())
         .into_iter()
@@ -656,6 +732,8 @@ fn verify_dispatch(host: &mut HostState) {
     assert_eq!(host.font_zoom_steps, 1);
     assert_eq!(dispatch(host, A::DecreaseFontSize), Dispatch::Handled);
     assert_eq!(host.font_zoom_steps, 0);
+    assert_eq!(dispatch(host, A::IncreaseFontSize), Dispatch::Handled);
+    assert_eq!(host.font_zoom_steps, 1);
     assert_eq!(dispatch(host, A::ResetFontSize), Dispatch::Handled);
     assert_eq!(host.font_zoom_steps, 0);
 
@@ -767,10 +845,11 @@ fn verify_dispatch(host: &mut HostState) {
 
     host.space_rail.names = vec!["alpha".into(), "beta".into()];
     host.space_rail.set_current(Some("alpha".into()));
+    clear_toasts(host);
     assert_eq!(dispatch(host, A::SpaceRailNext), Dispatch::Handled);
     assert!(
         toast_text(host).contains("opening space beta"),
-        "{}",
+        "next space asks to open beta, got {}",
         toast_text(host)
     );
     host.space_rail.names.clear();
@@ -784,30 +863,24 @@ fn verify_dispatch(host: &mut HostState) {
     assert_eq!(dispatch(host, A::OpenConfig), Dispatch::OpenConfig);
     assert_eq!(dispatch(host, A::Quit), Dispatch::Exit);
 
+    host.session_prompt = None;
     let tabs = host.mux.tab_count();
     assert_eq!(dispatch(host, A::NewBlankTab), Dispatch::Handled);
+    assert!(host.session_prompt.is_none());
     assert_eq!(host.mux.tab_count(), tabs + 1, "a blank tab opens a shell");
-    let tabs = host.mux.tab_count();
-    assert_eq!(dispatch(host, A::NewSessionTab), Dispatch::Handled);
-    assert!(
-        host.session_prompt.is_some() || host.mux.tab_count() > tabs,
-        "a named session either opens or keeps the naming error"
+    expect_named_terminal(host, A::NewSessionTab, None);
+    expect_blank_split(host, A::BlankSplitRight, prismattyc_mux::Axis::Horizontal);
+    expect_blank_split(host, A::BlankSplitDown, prismattyc_mux::Axis::Vertical);
+    expect_named_terminal(
+        host,
+        A::SessionSplitRight,
+        Some(prismattyc_mux::Axis::Horizontal),
     );
-    let panes = host.mux.active_pane_count();
-    assert_eq!(dispatch(host, A::BlankSplitRight), Dispatch::Handled);
-    assert!(
-        host.session_prompt.is_some() || host.mux.active_pane_count() > panes,
-        "a blank split adds a pane or keeps the error"
+    expect_named_terminal(
+        host,
+        A::SessionSplitDown,
+        Some(prismattyc_mux::Axis::Vertical),
     );
-    let panes = host.mux.active_pane_count();
-    assert_eq!(dispatch(host, A::BlankSplitDown), Dispatch::Handled);
-    assert!(host.session_prompt.is_some() || host.mux.active_pane_count() > panes);
-    let panes = host.mux.active_pane_count();
-    assert_eq!(dispatch(host, A::SessionSplitRight), Dispatch::Handled);
-    assert!(host.session_prompt.is_some() || host.mux.active_pane_count() > panes);
-    let panes = host.mux.active_pane_count();
-    assert_eq!(dispatch(host, A::SessionSplitDown), Dispatch::Handled);
-    assert!(host.session_prompt.is_some() || host.mux.active_pane_count() > panes);
 
     assert_eq!(dispatch(host, A::FocusLeft), Dispatch::Handled);
     while host.mux.tab_count() > 1 {

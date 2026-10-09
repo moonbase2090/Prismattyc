@@ -52,6 +52,11 @@ follow the app default.
 When `render_timer` is `osd`, `log`, or `both`, the macOS host compares dirty
 tiles with the previous frame and reports how many changed. With the timer off,
 it does not allocate the comparison buffer.
+The `osd` and `both` modes force full CPU repaints to redraw the timing panel.
+The panel reports `repaint=osd` for those frames, and `blit_sum` remains zero
+because scroll blits require partial rasterization. This does not switch the
+selected presenter. Use `render_timer = "log"` to measure partial repaints
+without the panel; each log entry names the actual `present_backend`.
 `pty_drain_budget_ms` caps PTY parsing in each event-loop pump. It defaults to
 8 ms, accepts 1–1000 ms, and hot-reloads; remaining output is drained on a later
 event-loop turn.

@@ -13,8 +13,7 @@ setting is enabled.
 
 New installations default to off. Existing saved workspaces default to on
 at the first upgrade launch unless explicitly disabled. Restoring starts
-new processes; it does not recover process memory, shell variables, or
-terminal scrollback.
+new processes; it does not recover process memory or shell variables.
 `pmux login` manages the setting, and `pmux doctor` reports its state.
 Running `pmux` through a symlink now finds its companion executables.
 

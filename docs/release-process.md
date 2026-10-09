@@ -83,8 +83,11 @@ architectures. The jobs generate manual pages with `scripts/install-man.sh`
 and package the result with `scripts/release/package.py`.
 
 The Windows job runs `scripts/release/build-windows.ps1` on Windows Server 2022.
-It builds and checks all six Windows executables before creating the release
-zip, manifest, and `SHA256SUMS-windows`.
+It builds and checks all six Windows executables before creating the per-user
+MSI, release zip, manifest, and `SHA256SUMS-windows`. When the Azure Artifact
+Signing repository variables are present it signs the executables, packages
+them, signs the MSI, and checks the signatures with `signtool verify /pa`.
+Missing signing settings publish an unsigned package instead of failing the job.
 
 The Apple job runs on `macos-26` (stable GitHub-hosted image with Xcode 26 and
 macOS SDK 26+; arm64, with x86_64 produced by cross-compile). It builds arm64

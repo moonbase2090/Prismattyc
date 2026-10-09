@@ -244,6 +244,9 @@ jobs:
     needs: validate
     runs-on: windows-2022
     timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -253,17 +256,142 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Build native Windows package
+      - name: Decide whether Artifact Signing is configured
+        id: signing
+        shell: pwsh
+        env:
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+        run: |
+          $names = @(
+            'AZURE_TENANT_ID',
+            'AZURE_CLIENT_ID',
+            'AZURE_SUBSCRIPTION_ID',
+            'AZURE_ARTIFACT_SIGNING_ENDPOINT',
+            'AZURE_ARTIFACT_SIGNING_ACCOUNT',
+            'AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE'
+          )
+          $enabled = $true
+          foreach ($name in $names) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              $enabled = $false
+            }
+          }
+          "enabled=$enabled" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          if ($enabled) {
+            Write-Host 'Windows code signing is enabled.'
+          } else {
+            Write-Host 'Windows code signing skipped: Azure Artifact Signing settings are absent.'
+          }
+
+      - name: Build native Windows binaries
+        if: steps.signing.outputs.enabled == 'True'
+        shell: pwsh
+        run: ./scripts/release/build-windows.ps1 -SkipPackage
+
+      - name: Sign in to Azure
+        if: steps.signing.outputs.enabled == 'True'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign Windows executables
+        if: steps.signing.outputs.enabled == 'True'
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+          files: |
+            ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\pmux.exe
+            ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\pmuxd.exe
+            ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\pmux-attach.exe
+            ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\pmux-mcp.exe
+            ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\prismattyc.exe
+            ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\prismattyc-host.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Package Windows ZIP and MSI
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-        run: ./scripts/release/build-windows.ps1 -Version $env:RELEASE_VERSION
+        run: |
+          if ('${{ steps.signing.outputs.enabled }}' -eq 'True') {
+            ./scripts/release/build-windows.ps1 -SkipBuild -Signed -Version $env:RELEASE_VERSION
+          } else {
+            ./scripts/release/build-windows.ps1 -Version $env:RELEASE_VERSION
+          }
+
+      - name: Sign the MSI
+        id: msi
+        if: steps.signing.outputs.enabled == 'True'
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem -LiteralPath build\windows-release -Filter *.msi | Select-Object -First 1
+          if (-not $msi) { throw 'MSI was not packaged.' }
+          "path=$($msi.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Sign Windows MSI
+        if: steps.signing.outputs.enabled == 'True'
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+          files: ${{ steps.msi.outputs.path }}
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Verify signatures and refresh checksums
+        if: steps.signing.outputs.enabled == 'True'
+        shell: pwsh
+        run: |
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
+            Sort-Object FullName | Select-Object -Last 1
+          if (-not $signtool) { throw 'signtool verify is not available.' }
+          Get-ChildItem build\windows-release\*.exe, build\windows-release\*.msi | ForEach-Object {
+            & $signtool.FullName verify /pa /v $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Signature check failed for $($_.Name)" }
+          }
+          python scripts/release/windows_msi.py --refresh-checksums build/windows-release --signed
 
       - name: Upload Windows x64 release assets
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: release-windows-x64
-          path: build/windows-release/*
+          path: |
+            build/windows-release/*
+            !build/windows-release/*.wix-build.log
+            !build/windows-release/*.wix-validate.log
           if-no-files-found: error
           retention-days: 7
 

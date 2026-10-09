@@ -1,0 +1,152 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <!--
+    Per-user MSI. UpgradeCode 681faa33-88f2-5c22-aeba-86ab1fffd4da is permanent.
+    ProductVersion is the numeric mapping in windows_msi.py, not the semver tag.
+  -->
+  <Package
+      Name="Prismattyc"
+      Manufacturer="Moonbase2090"
+      Version="$(var.ProductVersion)"
+      UpgradeCode="681faa33-88f2-5c22-aeba-86ab1fffd4da"
+      ProductCode="*"
+      Scope="perUser"
+      Compressed="yes"
+      InstallerVersion="500"
+      Language="1033">
+    <!-- Same ProductVersion replaces the previous build. Schedule after InstallInitialize so removal does not delete the product this install just registered. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of Prismattyc is already installed." Schedule="afterInstallInitialize" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Do not ask Restart Manager to close Prismattyc. -->
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />
+    <Property Id="ARPPRODUCTICON" Value="PrismattycIcon" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/moonbase2090/Prismattyc" />
+    <Property Id="ADDTOPATH" Secure="yes" Value="0" />
+
+    <Icon Id="PrismattycIcon" SourceFile="$(var.Repo)\scripts\release\prismattyc.ico" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="PROGRAMSFOLDER" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Prismattyc">
+          <Directory Id="BINFOLDER" Name="bin" />
+          <Directory Id="LICENSESFOLDER" Name="licenses" />
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <ComponentGroup Id="Binaries" Directory="BINFOLDER">
+      <Component Id="BinPmux" Guid="ec621ea3-fb15-50ab-8fb4-8656fb0cc8ee">
+        <File Source="$(var.Payload)\bin\pmux.exe" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="pmux" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="BinPmuxd" Guid="1ce3e651-008f-592b-8c6e-10ab888fb43d">
+        <File Source="$(var.Payload)\bin\pmuxd.exe" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="pmuxd" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="BinPmuxAttach" Guid="bc9b59c2-ff1d-5b2d-b73d-bacf4791f1f6">
+        <File Source="$(var.Payload)\bin\pmux-attach.exe" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="pmux-attach" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="BinPmuxMcp" Guid="60a2f87f-600d-5e38-b72d-c2df65537274">
+        <File Source="$(var.Payload)\bin\pmux-mcp.exe" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="pmux-mcp" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="BinPrismattyc" Guid="457834c4-2029-5583-ba76-3d28a39f83c7">
+        <File Source="$(var.Payload)\bin\prismattyc.exe" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="prismattyc" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="BinPrismattycHost" Guid="4c38b3bf-c46f-58c6-bebc-34ad4708ed9f">
+        <File Source="$(var.Payload)\bin\prismattyc-host.exe" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="prismattyc-host" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="ResetScript" Guid="fd10e19f-e8c0-57aa-ab95-9a9c8aa7cb49">
+        <File Source="$(var.Payload)\bin\reset-windows-update-pointer.ps1" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="reset-script" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="Docs" Directory="INSTALLFOLDER">
+      <Component Id="Readme" Guid="46d55b82-6be3-5ef6-a8dd-7a27a0f4bd2a">
+        <File Source="$(var.Payload)\README.txt" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="readme" Type="integer" Value="1" KeyPath="yes" />
+        <RemoveFolder Id="RemoveBin" Directory="BINFOLDER" On="uninstall" />
+        <RemoveFolder Id="RemoveLicenses" Directory="LICENSESFOLDER" On="uninstall" />
+        <RemoveFolder Id="RemoveInstall" Directory="INSTALLFOLDER" On="uninstall" />
+        <RemoveFolder Id="RemovePrograms" Directory="PROGRAMSFOLDER" On="uninstall" />
+      </Component>
+      <Component Id="VersionFile" Guid="b9a98cb6-ff37-5c7d-9f03-00e7f0320861">
+        <File Source="$(var.Payload)\VERSION" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="FullVersion" Type="string" Value="$(var.SourceVersion)" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="LicenseFiles" Directory="LICENSESFOLDER">
+      <Component Id="LicenseDejaVu" Guid="a7dd1f0d-97b2-5d34-a854-d540b6c45abd">
+        <File Source="$(var.Payload)\licenses\DejaVuSansMono-LICENSE.txt" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="license-dejavu" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="LicenseIbm" Guid="ead0a723-56d4-5144-a1c9-51bb4a8dbd9e">
+        <File Source="$(var.Payload)\licenses\IBMPlexSans-OFL.txt" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="license-ibm" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="LicenseJetBrains" Guid="c107ed35-3747-5acc-a2b5-b9baa0709991">
+        <File Source="$(var.Payload)\licenses\JetBrainsMonoNerdFont-OFL.txt" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="license-jetbrains" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="LicenseNerd" Guid="97f298c3-15c9-56f6-989c-90bd41a328e4">
+        <File Source="$(var.Payload)\licenses\NerdFonts-LICENSES.txt" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="license-nerd" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="LicenseNoto" Guid="0a6487d7-024b-5fc5-86c2-8de06f9ce562">
+        <File Source="$(var.Payload)\licenses\NotoSansSymbols2-OFL.txt" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="license-noto" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="LicenseMpl" Guid="6c2f57c7-5bca-50a1-96ce-526ca05e0bfa">
+        <File Source="$(var.Payload)\licenses\MPL-2.0.txt" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="license-mpl" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="LicenseNotice" Guid="7b41082e-a3c7-5ff6-9eff-3fa4468d2223">
+        <File Source="$(var.Payload)\licenses\NOTICE.txt" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="license-notice" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="LicenseOmarchy" Guid="63b63597-7844-5f02-9645-c17d60495f79">
+        <File Source="$(var.Payload)\licenses\OMARCHY-LICENSE.txt" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="license-omarchy" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Component Id="StartMenuShortcut" Guid="c0c3d453-c603-5369-b475-49b8a8a8f32c" Directory="ProgramMenuFolder">
+      <Shortcut Id="PrismattycHost" Name="Prismattyc" Target="[BINFOLDER]prismattyc-host.exe" WorkingDirectory="INSTALLFOLDER" />
+      <RemoveFolder Id="RemoveStartMenuShortcutFolder" On="uninstall" />
+      <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="shortcut" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <!-- Off unless msiexec is passed ADDTOPATH=1. Uninstall removes the entry this component added. -->
+    <Component Id="UserPath" Guid="d1120a5e-78db-5ce7-838b-22d81b149a62" Directory="BINFOLDER" Condition="ADDTOPATH = &quot;1&quot;">
+      <Environment Id="UserPathEntry" Name="PATH" Value="[BINFOLDER]" Action="set" Part="first" System="no" />
+      <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="path" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <CustomAction
+        Id="ResetUpdatePointer"
+        Directory="SystemFolder"
+        Execute="commit"
+        Impersonate="yes"
+        Return="check"
+        ExeCommand="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[BINFOLDER]reset-windows-update-pointer.ps1&quot;" />
+    <InstallExecuteSequence>
+      <Custom Action="ResetUpdatePointer" After="InstallFiles" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+
+    <Feature Id="Main">
+      <ComponentGroupRef Id="Binaries" />
+      <ComponentGroupRef Id="Docs" />
+      <ComponentGroupRef Id="LicenseFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="UserPath" />
+    </Feature>
+  </Package>
+</Wix>

@@ -37,6 +37,7 @@ def main():
     parser.add_argument('--target', choices=('x86_64-pc-windows-msvc', 'x86_64-pc-windows-gnu'), required=True)
     parser.add_argument('--bin-dir', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--signed', action='store_true')
     args = parser.parse_args()
     try:
         args.version, _base_version = parse_release_version(args.version)
@@ -55,7 +56,16 @@ def main():
     args.out.mkdir(parents=True, exist_ok=False)
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()
     dirty = bool(subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=normal'], cwd=repo, text=True).strip())
-    manifest = {'source_revision': revision, 'source_dirty': dirty, 'repository': 'moonbase2090/Prismattyc', 'version': args.version, 'target': args.target, 'assets': []}
+    manifest = {
+        'source_revision': revision,
+        'source_dirty': dirty,
+        'repository': 'moonbase2090/Prismattyc',
+        'version': args.version,
+        'target': args.target,
+        'signed': args.signed,
+        'signing': 'azure-artifact-signing' if args.signed else 'unsigned',
+        'assets': [],
+    }
     for name in BINARIES:
         target = args.out / f'prismattyc-v{args.version}-{args.target}-{name}.exe'
         shutil.copy2(bins / f'{name}.exe', target)
@@ -78,7 +88,8 @@ def main():
         (root / 'README.txt').write_text(
             'Prismattyc native Windows x64\n\n'
             'Requires Windows 10 version 1809 or newer (ConPTY), or Windows 11.\n'
-            'Extract the complete archive into a user-owned directory.\n'
+            'Install the MSI published next to this ZIP for a per-user Apps & features entry.\n'
+            'Extract the complete archive into a user-owned directory when you are not using the MSI.\n'
             'Launch bin\\prismattyc-host.exe for a window, or add bin to your user PATH.\n'
             'Use pmux.exe new NAME to create a persistent mux session.\n'
             'The default shell is COMSPEC (normally cmd.exe); pass -- powershell.exe\n'
@@ -87,12 +98,24 @@ def main():
             'Replacing or stopping pmuxd destroys active sessions; leave it running\n'
             'until you have closed them intentionally.\n'
             'Read licenses\\MPL-2.0.txt and licenses\\NOTICE.txt for licensing.\n', encoding='utf-8')
+        shutil.copy2(repo / 'scripts/release/reset-windows-update-pointer.ps1', root / 'bin/reset-windows-update-pointer.ps1')
         files = sorted(p for p in root.rglob('*') if p.is_file())
         (root / 'SHA256SUMS').write_text(''.join(f'{digest(p)}  {p.relative_to(root).as_posix()}\n' for p in files), encoding='utf-8')
         with zipfile.ZipFile(args.out / f'prismattyc-v{args.version}-{args.target}.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(p for p in root.rglob('*') if p.is_file()):
                 archive.write(path, path.relative_to(root.parent).as_posix())
-    files = sorted(p for p in args.out.iterdir() if p.is_file())
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from windows_msi import build_msi, msi_product_version
+        msi_name = f'prismattyc-v{args.version}-{args.target}.msi'
+        build_msi(root, repo, args.version, args.out / msi_name)
+        manifest['msi_product_version'] = msi_product_version(args.version)
+        msi_path = args.out / msi_name
+        manifest['assets'].append({'name': msi_name, 'size': msi_path.stat().st_size, 'sha256': digest(msi_path)})
+        (args.out / f'manifest-{args.target}.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+    files = sorted(
+        p for p in args.out.iterdir()
+        if p.is_file() and p.name != 'SHA256SUMS-windows' and not p.name.endswith(('.wix-build.log', '.wix-validate.log'))
+    )
     (args.out / 'SHA256SUMS-windows').write_text(''.join(f'{digest(p)}  {p.name}\n' for p in files), encoding='utf-8')
     print(json.dumps(manifest, indent=2))
 

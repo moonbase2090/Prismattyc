@@ -89,6 +89,8 @@ tab_strip = "auto"
 sidebar_width_px = 256
 # Collapse the Spaces sidebar to the icon strip. true|false.
 sidebar_collapsed = false
+# Show agent harness glyphs on sidebar pane rows. true|false.
+sidebar_harness_icons = true
 # Multi-pane title row: focused pane OSC title, or handle hover only. focused|hover.
 pane_titles = "focused"
 # Immediate hover blend for interactive strip, rail, and scrollbar chrome. 0.0-0.3.

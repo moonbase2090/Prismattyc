@@ -1131,6 +1131,7 @@ mod tests {
         "layout",
         "sidebar_width_px",
         "sidebar_collapsed",
+        "sidebar_harness_icons",
         "pane_titles",
         "focus_border",
         "focus_border_animation",

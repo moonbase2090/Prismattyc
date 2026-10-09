@@ -3161,8 +3161,26 @@ fn seat_mark(
             );
         }
         Seat::Kiro => {
-            stroke_line(buffer, stride, cx - s(6.0), cy - s(2.0), cx, cy + s(5.0), w, ink);
-            stroke_line(buffer, stride, cx, cy + s(5.0), cx + s(6.0), cy - s(2.0), w, ink);
+            stroke_line(
+                buffer,
+                stride,
+                cx - s(6.0),
+                cy - s(2.0),
+                cx,
+                cy + s(5.0),
+                w,
+                ink,
+            );
+            stroke_line(
+                buffer,
+                stride,
+                cx,
+                cy + s(5.0),
+                cx + s(6.0),
+                cy - s(2.0),
+                w,
+                ink,
+            );
             stroke_line(buffer, stride, cx - s(3.0), cy, cx + s(3.0), cy, w, muted);
         }
         Seat::Claude => {

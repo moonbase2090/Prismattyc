@@ -10235,7 +10235,11 @@ fn sidebar_row_icon_kind(row: &sidebar::TreeRow) -> sidebar_width::RowIconKind {
     }
 }
 
-fn sidebar_row_harness_seat(host: &HostState, row: &sidebar::TreeRow, live: bool) -> Option<sidebar_width::Seat> {
+fn sidebar_row_harness_seat(
+    host: &HostState,
+    row: &sidebar::TreeRow,
+    live: bool,
+) -> Option<sidebar_width::Seat> {
     if !host.spacing.sidebar_harness_icons || !live || row.kind != sidebar::RowKind::Pane {
         return None;
     }
@@ -10245,11 +10249,7 @@ fn sidebar_row_harness_seat(host: &HostState, row: &sidebar::TreeRow, live: bool
     sidebar_width::harness_seat_from_agent(agent)
 }
 
-fn sidebar_row_seat(
-    host: &HostState,
-    row: &sidebar::TreeRow,
-    live: bool,
-) -> sidebar_width::Seat {
+fn sidebar_row_seat(host: &HostState, row: &sidebar::TreeRow, live: bool) -> sidebar_width::Seat {
     sidebar_width::seat_for_row(
         sidebar_row_icon_kind(row),
         sidebar_row_harness_seat(host, row, live),

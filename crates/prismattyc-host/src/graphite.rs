@@ -598,6 +598,8 @@ pub(crate) type TabText = graphite_core::TabText;
 pub(crate) type TabSlot = graphite_core::TabSlot;
 pub(crate) type BarLayout = graphite_core::BarLayout;
 pub(crate) type DropTarget = graphite_core::DropTarget;
+pub(crate) type PaneStatus = graphite_core::PaneStatus;
+pub(crate) type RingSweep = graphite_core::RingSweep;
 
 /// Text metrics backed by the host's cached fontdue faces.
 struct ChromeMetrics;
@@ -1339,34 +1341,14 @@ pub(crate) fn pane_handle_rect(
     status: PaneStatus,
     focus_row: bool,
 ) -> Option<Rect> {
-    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
-    let p = |d: f32| chrome.px(d);
-    let head_h = p(PANE_HEADER_H).min(slot.h);
-    if slot.w < p(40.0) || head_h == 0 {
-        return None;
-    }
-    let x0 = slot.x as f32 + s(HEADER_PAD_X);
-    let px = s(HEADER_TEXT);
-    let status_w = status_width(chrome, status);
-    let text_end = slot
-        .right()
-        .saturating_sub(p(HEADER_PAD_X) + status_w.ceil() as usize + p(INNER_GAP))
-        as f32;
-    let text_x = x0 + s(HEADER_DOT) + s(INNER_GAP);
-    let face = if focus_row {
-        Face::SemiBold
-    } else {
-        Face::Regular
-    };
-    let shown = ellipsize(face, px, name, (text_end - text_x).max(0.0));
-    let end = (text_x + text_width(face, px, &shown)).ceil() as usize;
-    let end = end.min(text_end.ceil() as usize).max(x0.ceil() as usize);
-    Some(Rect::new(
-        x0.ceil() as usize,
-        slot.y,
-        end.saturating_sub(x0.ceil() as usize),
-        head_h,
-    ))
+    graphite_core::pane_handle_rect(
+        &ChromeMetrics,
+        chrome.scale_milli,
+        slot,
+        name,
+        status,
+        focus_row,
+    )
 }
 
 /// Drag chip for a header drag: the dot and name on a lifted chip centered
@@ -1438,41 +1420,6 @@ pub(crate) fn paint_drag_chip(
 // ---------------------------------------------------------------------------
 // Panes
 
-/// Right-hand status in a pane title row, most urgent first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PaneStatus {
-    Attention,
-    Mail(u32),
-    Unseen,
-    Running,
-    Focused,
-    Quiet,
-}
-
-impl PaneStatus {
-    pub(crate) fn decide(
-        attention: bool,
-        mail: u32,
-        unseen: bool,
-        running: bool,
-        focused: bool,
-    ) -> Self {
-        if attention {
-            Self::Attention
-        } else if mail > 0 {
-            Self::Mail(mail)
-        } else if unseen {
-            Self::Unseen
-        } else if running {
-            Self::Running
-        } else if focused {
-            Self::Focused
-        } else {
-            Self::Quiet
-        }
-    }
-}
-
 /// One pane title row.
 pub(crate) struct PaneHeader<'a> {
     pub name: &'a str,
@@ -1488,87 +1435,32 @@ pub(crate) struct PaneHeader<'a> {
 // ---------------------------------------------------------------------------
 // Light-cycle sweep (issue #111)
 
-/// Centerline of the 2 px focus ring around `slot`, sampled clockwise from
-/// the top-left corner at ~1 px arc steps — including across the corner
-/// arcs (arc-length stepping) — so quantized progress advances evenly and
-/// the head rounds the 8 px corners instead of cutting them.
-pub(crate) struct RingSweep {
-    samples: Vec<(f32, f32)>,
-}
-
-impl RingSweep {
-    /// Samples for the ring `paint_pane_chrome` draws: 1 px on the slot
-    /// edge, 1 px outside, corners on `radius`.
-    pub(crate) fn for_slot(slot: Rect, radius: f32) -> Self {
-        let (x0, y0) = (slot.x as f32, slot.y as f32);
-        let (x1, y1) = (slot.right() as f32, (slot.y + slot.h) as f32);
-        let r = radius.min((x1 - x0) / 2.0).min((y1 - y0) / 2.0).max(0.0);
-        let mut samples = Vec::new();
-        use std::f32::consts::{FRAC_PI_2, PI};
-        push_straight(&mut samples, x0 + r, y0, x1 - r, y0);
-        push_arc(&mut samples, x1 - r, y0 + r, r, -FRAC_PI_2, 0.0);
-        push_straight(&mut samples, x1, y0 + r, x1, y1 - r);
-        push_arc(&mut samples, x1 - r, y1 - r, r, 0.0, FRAC_PI_2);
-        push_straight(&mut samples, x1 - r, y1, x0 + r, y1);
-        push_arc(&mut samples, x0 + r, y1 - r, r, FRAC_PI_2, PI);
-        push_straight(&mut samples, x0, y1 - r, x0, y0 + r);
-        push_arc(&mut samples, x0 + r, y0 + r, r, PI, 3.0 * FRAC_PI_2);
-        Self { samples }
+/// Paint the first `traced` samples as a 2 px accent trail with the 3 px
+/// head box at the leading edge (`head = false` leaves the trail only).
+/// Trail and head hug the ring band, inside the 7 px `BorderUnderlay`
+/// strips the classic sweep budgets.
+pub(crate) fn paint_ring_sweep(
+    sweep: &RingSweep,
+    buffer: &mut [u32],
+    stride: usize,
+    traced: usize,
+    ink: Rgb,
+    head_ink: Rgb,
+    head: bool,
+) {
+    let n = traced.min(sweep.samples.len());
+    for &(sx, sy) in &sweep.samples[..n] {
+        stamp_disc(buffer, stride, sx, sy, ink);
     }
-
-    pub(crate) fn len(&self) -> usize {
-        self.samples.len()
-    }
-
-    /// Paint the first `traced` samples as a 2 px accent trail with the 3 px
-    /// head box at the leading edge (`head = false` leaves the trail only).
-    /// Trail and head hug the ring band, inside the 7 px `BorderUnderlay`
-    /// strips the classic sweep budgets.
-    pub(crate) fn paint(
-        &self,
-        buffer: &mut [u32],
-        stride: usize,
-        traced: usize,
-        ink: Rgb,
-        head_ink: Rgb,
-        head: bool,
-    ) {
-        let n = traced.min(self.samples.len());
-        for &(sx, sy) in &self.samples[..n] {
-            stamp_disc(buffer, stride, sx, sy, ink);
-        }
-        if head {
-            if let Some(&(hx, hy)) = self.samples[..n].last() {
-                let (cx, cy) = (hx.round() as i32, hy.round() as i32);
-                for dy in -1..=1 {
-                    for dx in -1..=1 {
-                        blend(buffer, stride, cx + dx, cy + dy, head_ink, 1.0);
-                    }
+    if head {
+        if let Some(&(hx, hy)) = sweep.samples[..n].last() {
+            let (cx, cy) = (hx.round() as i32, hy.round() as i32);
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    blend(buffer, stride, cx + dx, cy + dy, head_ink, 1.0);
                 }
             }
         }
-    }
-}
-
-/// One straight centerline run; the endpoint belongs to the next segment.
-fn push_straight(samples: &mut Vec<(f32, f32)>, ax: f32, ay: f32, bx: f32, by: f32) {
-    let len = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
-    if len < 0.5 {
-        return;
-    }
-    let steps = len.round() as usize;
-    for i in 0..steps {
-        let t = i as f32 / steps as f32;
-        samples.push((ax + (bx - ax) * t, ay + (by - ay) * t));
-    }
-}
-
-/// One corner arc with arc-length-spaced samples (~1 px apart).
-fn push_arc(samples: &mut Vec<(f32, f32)>, cx: f32, cy: f32, r: f32, a0: f32, a1: f32) {
-    let steps = ((a1 - a0).abs() * r).round().max(1.0) as usize;
-    for i in 0..steps {
-        let a = a0 + (a1 - a0) * i as f32 / steps as f32;
-        samples.push((cx + r * a.cos(), cy + r * a.sin()));
     }
 }
 
@@ -1825,7 +1717,15 @@ pub(crate) fn paint_pane_chrome(
             stroke_round_rect(buffer, stride, x0, y0, x1, y1, r, 1.0, tok.hairline);
             let sweep = RingSweep::for_slot(slot, r);
             let traced = (progress.clamp(0.0, 1.0) * sweep.len() as f32).round() as usize;
-            sweep.paint(buffer, stride, traced, accent, tok.cycle_head, cycle_head);
+            paint_ring_sweep(
+                &sweep,
+                buffer,
+                stride,
+                traced,
+                accent,
+                tok.cycle_head,
+                cycle_head,
+            );
         } else {
             stroke_round_rect(
                 buffer,
@@ -1852,40 +1752,11 @@ pub(crate) fn paint_pane_chrome(
 /// box would be republished on every pulse, and a box that appears only while
 /// the pane is running would expand to the whole slot when it disappears.
 pub(crate) fn activity_header_rects(chrome: ChromeGeom, slot: Rect) -> Vec<Rect> {
-    let head_h = chrome.px(PANE_HEADER_H).min(slot.h);
-    if slot.w < chrome.px(40.0) || head_h == 0 {
-        return Vec::new();
-    }
-    let pad = chrome.px(HEADER_PAD_X);
-    let dot = chrome.px(HEADER_DOT).max(1);
-    let cx = slot.x.saturating_add(pad).saturating_add(dot / 2);
-    let dot_left = cx.saturating_sub(dot / 2 + 2).max(slot.x);
-    let dot_right = cx.saturating_add(dot / 2 + 3).min(slot.right());
-    let dot_rect = Rect::new(dot_left, slot.y, dot_right.saturating_sub(dot_left), head_h);
-    // Wider than "needs you" / "new output" plus the right pad, at 1x and up.
-    let status_w = chrome.px(168.0).min(slot.w);
-    let status = Rect::new(
-        slot.right().saturating_sub(status_w),
-        slot.y,
-        status_w,
-        head_h,
-    );
-    vec![dot_rect, status]
+    graphite_core::activity_header_rects(chrome.scale_milli, slot)
 }
 
 fn status_width(chrome: ChromeGeom, status: PaneStatus) -> f32 {
-    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
-    let px = s(HEADER_TEXT);
-    match status {
-        PaneStatus::Attention => text_width(Face::SemiBold, px, "needs you"),
-        PaneStatus::Mail(count) => {
-            s(14.0) + s(6.0) + text_width(Face::Regular, px, &count.to_string())
-        }
-        PaneStatus::Unseen => text_width(Face::Regular, px, "new output"),
-        PaneStatus::Running => text_width(Face::Regular, px, "running"),
-        PaneStatus::Focused => text_width(Face::Regular, px, "focused"),
-        PaneStatus::Quiet => 0.0,
-    }
+    graphite_core::status_width(&ChromeMetrics, chrome.scale_milli, status)
 }
 
 fn envelope(buffer: &mut [u32], stride: usize, x: f32, cy: f32, w: f32, width: f32, ink: Rgb) {
@@ -4705,14 +4576,22 @@ mod tests {
 
         // Progress zero paints nothing.
         let mut buffer = vec![ground; w * h];
-        sweep.paint(&mut buffer, w, 0, accent, DARK.cycle_head, true);
+        paint_ring_sweep(&sweep, &mut buffer, w, 0, accent, DARK.cycle_head, true);
         assert!(buffer.iter().all(|&px| px == ground));
 
         // Quarter sweep: top edge traced, bottom still ground. (Trail
         // stamps blend, so only the solid head hits an exact color.)
         let traced = sweep.len() / 4;
         let mut buffer = vec![ground; w * h];
-        sweep.paint(&mut buffer, w, traced, accent, DARK.cycle_head, true);
+        paint_ring_sweep(
+            &sweep,
+            &mut buffer,
+            w,
+            traced,
+            accent,
+            DARK.cycle_head,
+            true,
+        );
         assert_ne!(at(&buffer, 20, 10), DARK.ground, "trail behind the head");
         assert_eq!(at(&buffer, 50, 69), DARK.ground, "remainder stays neutral");
         // The 3 px head box rides the leading edge in the token color.
@@ -4724,7 +4603,15 @@ mod tests {
 
         // Head off leaves the trail only.
         let mut headless = vec![ground; w * h];
-        sweep.paint(&mut headless, w, traced, accent, DARK.cycle_head, false);
+        paint_ring_sweep(
+            &sweep,
+            &mut headless,
+            w,
+            traced,
+            accent,
+            DARK.cycle_head,
+            false,
+        );
         assert_ne!(at(&headless, hx, hy), DARK.cycle_head);
         assert_ne!(
             at(&headless, 20, 10),

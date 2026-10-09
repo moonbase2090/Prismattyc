@@ -20695,23 +20695,6 @@ impl ApplicationHandler<UserAction> for App {
         }
     }
 
-    #[cfg(windows)]
-    fn focus_existing_window(&mut self) {
-        if self.windows.is_empty() {
-            self.pending_focus = true;
-            return;
-        }
-        let id = self
-            .windows
-            .iter()
-            .find(|(_, host)| host.window_focused)
-            .map(|(id, _)| *id)
-            .or_else(|| self.windows.keys().next().copied());
-        if let Some(host) = id.and_then(|id| self.windows.get(&id)) {
-            instance::foreground(&host.window);
-        }
-    }
-
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let pump_io = pump_timing::PumpIoScope::begin();
         let mut persist_time = Duration::ZERO;
@@ -20738,6 +20721,25 @@ impl ApplicationHandler<UserAction> for App {
         // Explicitly drop the clipboard owner before winit tears down platform
         // state. This also lets clipboard managers persist the final copy.
         self.windows.clear();
+    }
+}
+
+#[cfg(windows)]
+impl App {
+    fn focus_existing_window(&mut self) {
+        if self.windows.is_empty() {
+            self.pending_focus = true;
+            return;
+        }
+        let id = self
+            .windows
+            .iter()
+            .find(|(_, host)| host.window_focused)
+            .map(|(id, _)| *id)
+            .or_else(|| self.windows.keys().next().copied());
+        if let Some(host) = id.and_then(|id| self.windows.get(&id)) {
+            instance::foreground(&host.window);
+        }
     }
 }
 

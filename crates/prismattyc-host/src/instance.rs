@@ -169,20 +169,17 @@ fn signal_focus(event: windows_sys::Win32::Foundation::HANDLE) {
 /// Wait for a second bare launch and run `on_focus` on the host thread's proxy.
 #[cfg(windows)]
 pub fn watch(on_focus: impl Fn() + Send + 'static) {
-    let handle = FOCUS
+    let handle = *FOCUS
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .copied();
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(handle) = handle else {
         return;
     };
     let _ = std::thread::Builder::new()
         .name("prismattyc-host-focus".into())
         .spawn(move || {
-            use windows_sys::Win32::Foundation::HANDLE;
-            use windows_sys::Win32::System::Threading::{
-                ResetEvent, WaitForSingleObject, WAIT_OBJECT_0,
-            };
+            use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+            use windows_sys::Win32::System::Threading::{ResetEvent, WaitForSingleObject};
             let event = handle as HANDLE;
             loop {
                 if unsafe { WaitForSingleObject(event, u32::MAX) } != WAIT_OBJECT_0 {

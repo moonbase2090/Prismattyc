@@ -41,6 +41,9 @@ arboard = "3.6"
 [dev-dependencies]
 prismattyc-core = { path = "../prismattyc-core" }
 
+[build-dependencies]
+prismattyc-winres = { path = "../prismattyc-winres" }
+
 [target.'cfg(windows)'.dependencies]
 uds_windows = "1.2.1"
 sysinfo = { version = "0.37.2", default-features = false, features = ["system"] }

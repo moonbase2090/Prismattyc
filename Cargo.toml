@@ -10,6 +10,7 @@ members = [
     "crates/prismattyc-render",
     "crates/prismattyc-rich-client",
     "crates/pmux-mcp",
+    "crates/prismattyc-winres",
 ]
 resolver = "2"
 

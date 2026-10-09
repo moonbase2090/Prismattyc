@@ -75,6 +75,7 @@ class WindowsMsiTests(unittest.TestCase):
             self.assertIn(name, source)
         self.assertIn("reset-windows-update-pointer.ps1", source)
         self.assertIn("[SystemFolder]WindowsPowerShell\\v1.0\\powershell.exe", source)
+        self.assertIn("-WindowStyle Hidden", source)
         self.assertNotIn('ExeCommand="powershell.exe', source)
         self.assertIn("windows-current.json", reset)
         for forbidden in ("Stop-Process", "taskkill", "kill"):
@@ -181,9 +182,20 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn("native Windows", stderr.getvalue())
 
     def test_icon_is_a_windows_icon(self):
-        header = (ROOT / "scripts/release/prismattyc.ico").read_bytes()[:6]
-        self.assertEqual(header[:4], b"\x00\x00\x01\x00")
-        self.assertGreater(int.from_bytes(header[4:6], "little"), 0)
+        from pe_icon import contains_utf16, ico_sizes, icon_widths, synthetic_pe
+
+        data = (ROOT / "scripts/release/prismattyc.ico").read_bytes()
+        self.assertEqual(set(ico_sizes(data)), {16, 24, 32, 48, 256})
+        shortcut = (ROOT / "scripts/release/prismattyc.wxs").read_text(encoding="utf-8")
+        self.assertIn('Icon="PrismattycIcon"', shortcut)
+        self.assertIn('Name="Prismattyc"', shortcut)
+        self.assertEqual(icon_widths(synthetic_pe([32])), [32])
+        self.assertEqual(icon_widths(synthetic_pe([16, 24, 32, 48, 256])), [16, 24, 32, 48, 256])
+        self.assertEqual(icon_widths(synthetic_pe([32], icon_id=2)), [])
+        self.assertEqual(icon_widths(synthetic_pe([])), [])
+        marked = synthetic_pe([16]) + "Prismattyc".encode("utf-16le")
+        self.assertTrue(contains_utf16(marked, "Prismattyc"))
+        self.assertFalse(contains_utf16(synthetic_pe([16]), "Moonbase 2090 LLC"))
 
     def test_refresh_replaces_a_stale_msi_hash(self):
         with tempfile.TemporaryDirectory() as tmp:

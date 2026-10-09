@@ -119,7 +119,7 @@
     </ComponentGroup>
 
     <Component Id="StartMenuShortcut" Guid="c0c3d453-c603-5369-b475-49b8a8a8f32c" Directory="ProgramMenuFolder">
-      <Shortcut Id="PrismattycHost" Name="Prismattyc" Target="[BINFOLDER]prismattyc-host.exe" WorkingDirectory="INSTALLFOLDER" />
+      <Shortcut Id="PrismattycHost" Name="Prismattyc" Target="[BINFOLDER]prismattyc-host.exe" WorkingDirectory="INSTALLFOLDER" Icon="PrismattycIcon" />
       <RemoveFolder Id="RemoveStartMenuShortcutFolder" On="uninstall" />
       <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="shortcut" Type="integer" Value="1" KeyPath="yes" />
     </Component>
@@ -136,7 +136,7 @@
         Execute="commit"
         Impersonate="yes"
         Return="check"
-        ExeCommand="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[BINFOLDER]reset-windows-update-pointer.ps1&quot;" />
+        ExeCommand="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[BINFOLDER]reset-windows-update-pointer.ps1&quot;" />
     <InstallExecuteSequence>
       <Custom Action="ResetUpdatePointer" After="InstallFiles" Condition="NOT REMOVE~=&quot;ALL&quot;" />
     </InstallExecuteSequence>

@@ -39,6 +39,14 @@ try {
         Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'bin\pmux.exe') } |
         Select-Object -First 1
     if (-not $payload) { throw 'packaged zip has no bin\pmux.exe' }
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) { $python = Get-Command python3 -ErrorAction SilentlyContinue }
+    if (-not $python) { throw 'python is required to read the icon resource' }
+    $icons = @(
+        'prismattyc-host.exe', 'prismattyc.exe', 'pmux.exe', 'pmuxd.exe', 'pmux-attach.exe', 'pmux-mcp.exe'
+    ) | ForEach-Object { Join-Path (Join-Path $payload.FullName 'bin') $_ }
+    & $python.Source (Join-Path $repo 'scripts\release\pe_icon.py') @icons
+    if ($LASTEXITCODE -ne 0) { throw 'Windows executables are missing the Prismattyc icon resource' }
     $wxs = Join-Path $repo 'scripts\release\prismattyc.wxs'
     $olderBuilt = Join-Path $stage 'older.msi'
     $sameBuilt = Join-Path $stage 'same.msi'

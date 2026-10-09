@@ -248,10 +248,40 @@ pub fn render_topic(topic: Topic, version: &str, color: bool) -> String {
 #[must_use]
 pub fn should_show(explicit_program: bool, no_splash_flag: bool) -> bool {
     use std::io::IsTerminal;
-    if explicit_program || no_splash_flag || env_flag_enabled("PRISMATTYC_NO_SPLASH") {
+    if explicit_program || splash_suppressed(no_splash_flag) {
         return false;
     }
     io::stdin().is_terminal() && io::stdout().is_terminal()
+}
+
+/// `--no-splash` or `PRISMATTYC_NO_SPLASH`.
+#[must_use]
+pub fn splash_suppressed(no_splash_flag: bool) -> bool {
+    no_splash_flag || env_flag_enabled("PRISMATTYC_NO_SPLASH")
+}
+
+/// Color only when the user asked for it, stdout is a terminal, and that
+/// terminal accepted virtual-terminal processing.
+#[must_use]
+pub fn color_enabled(no_color: bool, terminal: bool, vt_ready: bool) -> bool {
+    !no_color && terminal && vt_ready
+}
+
+/// A bare launch whose stdout is not a console prints one plain page and
+/// returns. An explicit program, `--no-splash`, or a real terminal does not.
+#[must_use]
+pub fn should_print_plain(
+    explicit_program: bool,
+    no_splash: bool,
+    stdout_is_terminal: bool,
+) -> bool {
+    !explicit_program && !no_splash && !stdout_is_terminal
+}
+
+/// One colorless splash page for a pipe or a console without VT.
+#[must_use]
+pub fn plain_page(version: &str) -> String {
+    render_main(version, tip_index(day_of_year()), false, 0)
 }
 
 fn env_flag_enabled(name: &str) -> bool {
@@ -304,8 +334,7 @@ fn write_page(stdout: &mut impl Write, page: &str) -> Result<()> {
 /// With color on, the art animates (beam sweep, then the reflection loop)
 /// between keypresses: the loop polls for input one frame at a time and
 /// repaints the art rows in place. Any mapped key acts immediately.
-pub fn run(version: &str) -> Result<Outcome> {
-    let color = env::var_os("NO_COLOR").is_none();
+pub fn run(version: &str, color: bool) -> Result<Outcome> {
     let tip = tip_index(day_of_year());
     let mut stdout = io::stdout();
     let _raw = RawModeGuard::enter()?;
@@ -435,6 +464,26 @@ mod tests {
         assert!(!page.contains("\x1b["));
         let topic = render_topic(Topic::WhatsNew, "0.0.0", false);
         assert!(!topic.contains("\x1b["));
+    }
+
+    #[test]
+    fn color_follows_no_color_the_terminal_and_vt() {
+        assert!(color_enabled(false, true, true));
+        assert!(!color_enabled(true, true, true));
+        assert!(!color_enabled(false, false, true));
+        assert!(!color_enabled(false, true, false));
+    }
+
+    #[test]
+    fn a_pipe_prints_one_plain_page_and_a_terminal_does_not() {
+        assert!(should_print_plain(false, false, false));
+        assert!(!should_print_plain(true, false, false));
+        assert!(!should_print_plain(false, true, false));
+        assert!(!should_print_plain(false, false, true));
+        let page = plain_page("0.3.29");
+        assert!(!page.contains("\x1b["));
+        assert!(page.contains("Prismattyc"));
+        assert!(page.contains("v0.3.29"));
     }
 
     #[test]

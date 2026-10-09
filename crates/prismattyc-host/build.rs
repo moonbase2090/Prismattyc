@@ -43,4 +43,5 @@ fn main() {
     out.push_str("];\n");
     let dest = Path::new(&env::var("OUT_DIR").expect("OUT_DIR")).join("walkthrough_clips.rs");
     fs::write(dest, out).expect("write walkthrough_clips.rs");
+    prismattyc_winres::embed(prismattyc_winres::file_description("prismattyc-host"));
 }

@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+Windows builds embed the Prismattyc icon and version information in the packaged
+executables, and the Start menu shortcut uses that icon. The GUI stays
+`prismattyc-host.exe`. `prismattyc.exe` remains the CLI, with the file
+description Prismattyc CLI, and is not a Start shortcut. Helpers the GUI starts
+no longer open a console window. The login daemon starts detached, and the
+installer's update-pointer script starts PowerShell hidden. The CLI tools
+enable virtual-terminal processing, and a pipe prints a plain page. A second
+bare launch of the GUI focuses the existing window.
+
 ## [0.3.29] - 2026-10-08
 
 ### Since 0.3.3-rc.1

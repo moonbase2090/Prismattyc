@@ -26,7 +26,7 @@
     <Icon Id="PrismattycIcon" SourceFile="$(var.Repo)\scripts\release\prismattyc.ico" />
 
     <StandardDirectory Id="LocalAppDataFolder">
-      <Directory Name="Programs">
+      <Directory Id="PROGRAMSFOLDER" Name="Programs">
         <Directory Id="INSTALLFOLDER" Name="Prismattyc">
           <Directory Id="BINFOLDER" Name="bin" />
           <Directory Id="LICENSESFOLDER" Name="licenses" />
@@ -74,6 +74,7 @@
         <RemoveFolder Id="RemoveBin" Directory="BINFOLDER" On="uninstall" />
         <RemoveFolder Id="RemoveLicenses" Directory="LICENSESFOLDER" On="uninstall" />
         <RemoveFolder Id="RemoveInstall" Directory="INSTALLFOLDER" On="uninstall" />
+        <RemoveFolder Id="RemovePrograms" Directory="PROGRAMSFOLDER" On="uninstall" />
       </Component>
       <Component Id="VersionFile" Guid="b9a98cb6-ff37-5c7d-9f03-00e7f0320861">
         <File Source="$(var.Payload)\VERSION" />

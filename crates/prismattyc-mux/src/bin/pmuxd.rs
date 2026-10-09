@@ -162,11 +162,12 @@ fn main() -> Result<()> {
     if stopped_path.exists() {
         std::fs::remove_file(&stopped_path)?;
     }
-    let restore = cli.restore_workspace || prismattyc_mux::login::enabled(&cli.socket)?;
+    let login_enabled = prismattyc_mux::login::initialize_default(&cli.socket)?;
+    let restore = cli.restore_workspace || login_enabled;
     let saved = if restore {
         match prismattyc_mux::workspace::load(&cli.socket)? {
             Some(saved) => Some(saved),
-            None => prismattyc_mux::workspace::Workspace::from_saved_spaces(&cli.socket)?,
+            None => prismattyc_mux::workspace::Workspace::migrate_saved_spaces(&cli.socket)?,
         }
     } else {
         None

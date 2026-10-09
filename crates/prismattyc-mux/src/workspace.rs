@@ -110,6 +110,33 @@ pub fn load(socket: &Path) -> Result<Option<Workspace>> {
 }
 
 impl Workspace {
+    /// The daemon calls this while holding its instance lock, before binding.
+    /// Use the same ownership lock as Space mutations and persist identities
+    /// before a host can attach. Previewing a workspace stays read-only.
+    pub fn migrate_saved_spaces(socket: &Path) -> Result<Option<Self>> {
+        let directory = crate::layout_file::spaces_dir_for_socket(socket);
+        if !directory.is_dir() {
+            return Ok(None);
+        }
+        let lock = crate::platform::private_options()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(directory.join(".ownership.lock"))?;
+        crate::platform::lock_exclusive(&lock)?;
+        // Check the complete set before changing any files.
+        Self::from_saved_spaces(socket)?;
+        for entry in crate::list_spaces(&directory)? {
+            let mut space = crate::load_space(&directory, &entry.name)?;
+            if space.id.is_none() {
+                space.id = Some(crate::new_space_id()?);
+                space.version = crate::OWNED_SPACE_VERSION;
+                crate::save_space(&directory, &entry.name, &space)?;
+            }
+        }
+        Self::from_saved_spaces(socket)
+    }
+
     /// First upgrade from Space files. Later starts use the exact checkpoint,
     /// including an intentionally empty workspace, instead of reopening archives.
     pub fn from_saved_spaces(socket: &Path) -> Result<Option<Self>> {

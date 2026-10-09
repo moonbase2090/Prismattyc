@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise daemon login/reboot recovery with private HOME, data, and sockets.
 
-No login item is installed. --host also checks the real host's automatic
+Only --case service installs a private login item. --host checks the real host's automatic
 restore. Run that mode under Xvfb for neutral demo captures.
 """
 
@@ -45,7 +45,7 @@ class Fixture:
                     "XDG_CONFIG_HOME": str(root / "config"), "XDG_RUNTIME_DIR": str(self.runtime),
                     "PMUX_SOCKET": str(self.socket), "PRISMATTYC_NO_LOGIN_SERVICE": "1",
                     "PRISMATTYC_NO_AGENT_SKILLS": "1", "PRISMATTYC_E2E_WINDOW_CELLS": "100x32"}
-        for key in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_SESSION_TYPE"):
+        for key in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_SESSION_TYPE", "LLVM_PROFILE_FILE"):
             if key in os.environ:
                 self.env[key] = os.environ[key]
         for name in ("home", "data", "config/prismattyc"):
@@ -244,13 +244,13 @@ def reboot(f, with_host, capture=None):
             "host": "restored" if with_host else "not requested", "retired_id_reused": False, "result": "PASS"}
 
 
-def restored_host(f):
+def restored_host(f, space="restored"):
     try:
         status = json.loads(f.cli("render-status", "--json"))["windows"][0]
     except AssertionError:
         return None
     guards = status.get("last_raster", {}).get("guards", [])
-    return status if status.get("space") == "restored" and "restore-prompt" not in guards else None
+    return status if status.get("space") == space and "restore-prompt" not in guards else None
 
 
 def supervisor(f):
@@ -272,12 +272,32 @@ def supervisor(f):
     return {"case": "supervisor", "daemon_replaced": replacement != original, "intentional_stop": "honored", "result": "PASS"}
 
 
-def migration(f):
+def new_install(f):
+    config = f.root / "config/prismattyc/config.toml"
+    config.write_text('# first CLI-only launch\n')
+    f.cli("up", "--", "/bin/sh", "-c", "exec sleep 120")
+    assert "login restore: disabled" in f.cli("login", "status")
+    f.cli("space", "save", "first-space", "default")
+    assert "login restore: disabled" in f.cli("login", "status"), "saving a first Space opted in a new install"
+    time.sleep(1.5)
+    assert not list((f.root / "data/prismattyc/workspaces").glob("*/workspace.json"))
+    f.cli("stop")
+    f.daemon()
+    assert "login restore: disabled" in f.cli("login", "status"), "reboot changed the first-start choice"
+    return {"case": "new-install", "first_space": "still opted out", "restart": "still opted out", "result": "PASS"}
+
+
+def migration(f, with_host=False):
     config = f.root / "config/prismattyc/config.toml"
     config.write_text('start_at_login = false\n')
     daemon = f.daemon()
     f.cli("new", "--no-attach", "--agent", "worker", "legacy", "--", "/bin/sh", "-c", "exec sleep 120")
     f.cli("space", "save", "legacy-space", "legacy")
+    space_file = next((f.root / "data/prismattyc/spaces").rglob("legacy-space.json"))
+    legacy_space = json.loads(space_file.read_text())
+    legacy_space.pop("id", None)
+    legacy_space["version"] = 1
+    space_file.write_text(json.dumps(legacy_space))
     f.kill(daemon)
     assert not list((f.root / "data/prismattyc/workspaces").glob("*/workspace.json")), "opt-out wrote a workspace"
     shutil.rmtree(f.runtime)
@@ -288,7 +308,13 @@ def migration(f):
     sessions = f.snapshot()
     assert [s["name"] for s in sessions] == ["legacy"]
     assert sessions[0]["agent_id"] == "worker"
-    assert json.loads((f.runtime / "pmux.attach-tabs.json").read_text())["space"] == "legacy-space"
+    owner = json.loads(space_file.read_text()).get("id")
+    assert owner and sessions[0]["space_id"] == owner, "legacy Space ownership was not migrated"
+    view = json.loads((f.runtime / "pmux.attach-tabs.json").read_text())
+    assert view["space"] == "legacy-space" and view["space_id"] == owner
+    if with_host:
+        f.spawn("prismattyc-host")
+        wait_for(lambda: restored_host(f, "legacy-space"), "host restored migrated ownership")
     return {"case": "migration", "saved_space": "restored", "opt_out": "honored", "result": "PASS"}
 
 
@@ -335,20 +361,21 @@ def service(f):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bins", type=Path, required=True)
-    parser.add_argument("--case", choices=["single-instance", "concurrent", "foreground", "reboot", "supervisor", "migration", "corrupt", "service", "all"], default="all")
+    parser.add_argument("--case", choices=["single-instance", "concurrent", "foreground", "reboot", "supervisor", "new-install", "migration", "corrupt", "service", "all"], default="all")
     parser.add_argument("--host", action="store_true")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--capture", type=Path)
     args = parser.parse_args()
     bins = args.bins.resolve()
-    for name in ([args.case] if args.case != "all" else ["single-instance", "concurrent", "foreground", "reboot", "supervisor", "migration", "corrupt"]):
+    for name in ([args.case] if args.case != "all" else ["single-instance", "concurrent", "foreground", "reboot", "supervisor", "new-install", "migration", "corrupt"]):
         with tempfile.TemporaryDirectory(prefix="plogin-", dir="/tmp") as directory:
             fixture = Fixture(bins, Path(directory).resolve())
             try:
                 result = {"single-instance": lambda: single_instance(fixture),
                           "concurrent": lambda: concurrent_up(fixture), "foreground": lambda: foreground(fixture),
                           "reboot": lambda: reboot(fixture, args.host, args.capture),
-                          "supervisor": lambda: supervisor(fixture), "migration": lambda: migration(fixture),
+                          "supervisor": lambda: supervisor(fixture), "new-install": lambda: new_install(fixture),
+                          "migration": lambda: migration(fixture, args.host),
                           "corrupt": lambda: corrupt_checkpoint(fixture), "service": lambda: service(fixture)}[name]()
                 print(json.dumps(result), flush=True)
             finally:

@@ -311,8 +311,9 @@ impl Panel {
                     Choice::Preference("spaces.autosave".into(), (!enabled).to_string()),
                 );
                 let login = config.start_at_login.unwrap_or_else(|| {
-                    host_mux_socket()
-                        .is_some_and(|socket| prismattyc_mux::login::has_workspace(&socket))
+                    host_mux_socket().is_some_and(|socket| {
+                        prismattyc_mux::login::enabled(&socket).unwrap_or(false)
+                    })
                 });
                 self.row(
                     format!(

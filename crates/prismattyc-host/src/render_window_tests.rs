@@ -270,6 +270,11 @@ fn start_private_display(
 
 /// Give the child its own mux, configuration and display discovery paths.
 fn window_child_command(scratch: &Scratch, number: u32, test_name: &str) -> Command {
+    // These fixtures exercise manual restore and ID reuse after a fresh
+    // daemon. Keep login recovery an explicit choice in their private config.
+    let config_dir = scratch.0.join("config/prismattyc");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.toml"), "start_at_login = false\n").unwrap();
     let mut command = Command::new(std::env::current_exe().unwrap());
     command.args(["--exact", test_name, "--nocapture", "--test-threads=1"]);
     // Isolate host discovery and config writes from the developer's mux seat.

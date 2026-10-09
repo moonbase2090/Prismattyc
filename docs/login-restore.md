@@ -5,6 +5,8 @@
 default to `false`. On the first launch after an upgrade, an existing saved
 workspace defaults to `true`. An explicit choice always wins. Registration
 records that choice so a new installation stays opt-in after saving a Space.
+CLI-only starts record the initial default beside the checkpoint before
+creating sessions. An explicit config value overrides that record.
 
 | Command | Effect |
 | --- | --- |
@@ -57,7 +59,9 @@ existing durable mailbox database. Controller leases and PIDs are never
 restored.
 
 The first restore without a checkpoint imports this instance's saved Spaces
-and opens the most recently saved Space in the host. Conflicting session
+and opens the most recently saved Space in the host. Older files receive
+stable ownership IDs under the Space mutation lock before clients attach.
+Conflicting session
 names in those files produce an error. Later restarts use the exact
 checkpoint, including an intentionally empty workspace. A malformed
 checkpoint produces an error before starting children and remains available

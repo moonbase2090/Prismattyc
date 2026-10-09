@@ -69,3 +69,10 @@ fn invalid_checkpoint_never_launches_children_or_replaces_saved_state() {
     assert_eq!(proof["child_launches"], 1);
     assert_eq!(proof["checkpoint_preserved"], true);
 }
+
+#[test]
+fn cli_only_install_stays_opted_out_after_saving_a_space_and_restarting() {
+    let proof = run("new-install");
+    assert_eq!(proof["first_space"], "still opted out");
+    assert_eq!(proof["restart"], "still opted out");
+}

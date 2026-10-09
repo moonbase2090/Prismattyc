@@ -20743,6 +20743,13 @@ fn main() -> Result<()> {
     }
     cli.apply_config(&file_config);
     if !cli.explicit_program && cli.attach_sessions.is_empty() {
+        // Record the initial default before a fresh window can write its
+        // first cache. Native service registration stays in the worker.
+        if let Some(socket) = host_mux_socket() {
+            if let Err(error) = prismattyc_mux::login::initialize_default(&socket) {
+                eprintln!("prismattyc-host: login preference initialization failed: {error:#}");
+            }
+        }
         restore_prompt::sync_login_registration();
     }
     #[cfg(target_os = "macos")]

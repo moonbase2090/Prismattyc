@@ -30,7 +30,39 @@ pub fn has_workspace(socket: &Path) -> bool {
 }
 
 pub fn enabled(socket: &Path) -> Result<bool> {
-    Ok(preference()?.unwrap_or_else(|| has_workspace(socket)))
+    if let Some(choice) = preference()? {
+        return Ok(choice);
+    }
+    Ok(resolved_default(socket)?.unwrap_or_else(|| has_workspace(socket)))
+}
+
+fn default_path(socket: &Path) -> PathBuf {
+    crate::workspace::path(socket).with_file_name("login-default.json")
+}
+
+fn resolved_default(socket: &Path) -> Result<Option<bool>> {
+    match std::fs::read(default_path(socket)) {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Resolve before the first daemon can create a saved Space. This per-instance
+/// marker covers CLI-only starts without rewriting shared user configuration.
+pub fn initialize_default(socket: &Path) -> Result<bool> {
+    if let Some(choice) = preference()? {
+        return Ok(choice);
+    }
+    if let Some(choice) = resolved_default(socket)? {
+        return Ok(choice);
+    }
+    let choice = has_workspace(socket);
+    crate::workspace::write_private(
+        &default_path(socket),
+        if choice { b"true" } else { b"false" },
+    )?;
+    Ok(choice)
 }
 
 pub fn set_preference(enabled: bool) -> Result<()> {
@@ -169,7 +201,7 @@ pub fn sync(socket: &Path, executable: &Path) -> Result<()> {
     if std::env::var_os("PRISMATTYC_NO_LOGIN_SERVICE").is_some() {
         return Ok(());
     }
-    let enabled = enabled(socket)?;
+    let enabled = initialize_default(socket)?;
     // Resolve the migration once. A new install remains opt-in after it
     // creates its first Space; an existing saved workspace defaults on.
     if preference()?.is_none() {

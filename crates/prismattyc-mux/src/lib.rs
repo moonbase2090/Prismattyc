@@ -71,8 +71,8 @@ pub use image_paste::{
     paste_reference, write_paste_png, write_paste_png_in,
 };
 pub use inject_submit::{
-    classify_cmdline, detect_inject_agent, inject_agent_slug, inject_writes, pid_in_tree,
-    InjectAgent, CURSOR_SUBMIT,
+    classify_agent_argv0, classify_cmdline, detect_inject_agent, inject_agent_slug, inject_writes,
+    pid_in_tree, InjectAgent, CURSOR_SUBMIT,
 };
 
 pub use config::{

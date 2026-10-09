@@ -223,6 +223,8 @@ struct PaneSpacing {
     sidebar_width_px: u32,
     /// Sidebar collapsed to the icon strip.
     sidebar_collapsed: bool,
+    /// Harness glyphs on sidebar pane rows.
+    sidebar_harness_icons: bool,
     /// Window width used to keep pane room. Zero skips that clamp.
     sidebar_clamp_window_px: u32,
 }
@@ -260,6 +262,7 @@ impl From<&config::ConfigFile> for PaneSpacing {
             ],
             sidebar_width_px: sidebar.expanded_px.round() as u32,
             sidebar_collapsed: sidebar.collapsed,
+            sidebar_harness_icons: config.sidebar_harness_icons.unwrap_or(true),
             sidebar_clamp_window_px: 0,
         }
     }
@@ -10253,6 +10256,35 @@ fn focused_tab_index(host: &HostState, pane: PaneId) -> usize {
         .unwrap_or(0)
 }
 
+fn sidebar_row_icon_kind(row: &sidebar::TreeRow) -> sidebar_width::RowIconKind {
+    match row.kind {
+        sidebar::RowKind::Space => sidebar_width::RowIconKind::Space,
+        sidebar::RowKind::Tab => sidebar_width::RowIconKind::Tab,
+        sidebar::RowKind::Pane => sidebar_width::RowIconKind::Pane,
+    }
+}
+
+fn sidebar_row_harness_seat(
+    host: &HostState,
+    row: &sidebar::TreeRow,
+    live: bool,
+) -> Option<sidebar_width::Seat> {
+    if !host.spacing.sidebar_harness_icons || !live || row.kind != sidebar::RowKind::Pane {
+        return None;
+    }
+    let pane = pane_for_sidebar_row(host, row)?;
+    let child = host.mux.pane(pane).and_then(|runtime| runtime.child_pid());
+    let agent = prismattyc_mux::detect_inject_agent(child, None);
+    sidebar_width::harness_seat_from_agent(agent)
+}
+
+fn sidebar_row_seat(host: &HostState, row: &sidebar::TreeRow, live: bool) -> sidebar_width::Seat {
+    sidebar_width::seat_for_row(
+        sidebar_row_icon_kind(row),
+        sidebar_row_harness_seat(host, row, live),
+    )
+}
+
 fn pane_for_sidebar_row(host: &HostState, row: &sidebar::TreeRow) -> Option<PaneId> {
     let tab = row.tab?;
     let pane_index = match row.kind {
@@ -13405,6 +13437,7 @@ fn paint_graphite_sidebar(
     let mut dots: Vec<Option<graphite::Dot>> = Vec::new();
     let mut mails: Vec<u32> = Vec::new();
     let mut selected_tabs: Vec<bool> = Vec::new();
+    let mut row_seats: Vec<sidebar_width::Seat> = Vec::with_capacity(visible.len());
     for row in &visible {
         let space = &tree.spaces[row.space];
         match row.kind {
@@ -13455,6 +13488,7 @@ fn paint_graphite_sidebar(
                 ));
             }
         }
+        row_seats.push(sidebar_row_seat(host, row, space.current));
     }
     let tok = graphite::bar_tokens(&host.theme, host.bar_color);
     let accent = graphite::accent(&tok, focus_border_rgb(host.focus_border));
@@ -13484,7 +13518,6 @@ fn paint_graphite_sidebar(
             .filter_map(|(slot_index, (absolute, slot))| {
                 let row = visible.get(*absolute)?;
                 let space = tree.spaces.get(row.space)?;
-                let label = labels.get(*absolute).map(String::as_str).unwrap_or("");
                 let selected = match row.kind {
                     sidebar::RowKind::Space => space.current,
                     sidebar::RowKind::Tab => selected_tabs.get(*absolute).copied().unwrap_or(false),
@@ -13517,7 +13550,10 @@ fn paint_graphite_sidebar(
                 };
                 Some(graphite::IconMark {
                     slot: px_box(*slot),
-                    seat: sidebar_width::seat_for(row.kind == sidebar::RowKind::Space, label),
+                    seat: row_seats
+                        .get(*absolute)
+                        .copied()
+                        .unwrap_or(sidebar_width::Seat::Pane),
                     dot,
                     selected,
                     hovered: hover_row == Some(slot_index),
@@ -13589,6 +13625,10 @@ fn paint_graphite_sidebar(
                 }
             })
             .collect();
+        let paint_seats: Vec<sidebar_width::Seat> = painted_rows
+            .iter()
+            .map(|(row_index, _, _)| row_seats[*row_index])
+            .collect();
         host.sidebar_needs_you_hits = rows
             .iter()
             .enumerate()
@@ -13619,6 +13659,7 @@ fn paint_graphite_sidebar(
                 dock_right,
                 toggle,
                 toggle_hovered,
+                row_seats: &paint_seats,
             },
         );
         host.sidebar_rows = painted_rows
@@ -25903,6 +25944,7 @@ session mail (id 15)
             explicit_spacing: [false; 3],
             sidebar_width_px: 256,
             sidebar_collapsed: false,
+            sidebar_harness_icons: true,
             sidebar_clamp_window_px: 0,
         };
         let base = host_geom(&font, true, true, true, classic, 10);
@@ -25971,6 +26013,7 @@ session mail (id 15)
             explicit_spacing: [false; 3],
             sidebar_width_px: 256,
             sidebar_collapsed: false,
+            sidebar_harness_icons: true,
             sidebar_clamp_window_px: 0,
         };
         let geom = host_geom(&font, true, true, true, bars, 10);
@@ -26061,6 +26104,7 @@ session mail (id 15)
             explicit_spacing: [false; 3],
             sidebar_width_px: 256,
             sidebar_collapsed: false,
+            sidebar_harness_icons: true,
             sidebar_clamp_window_px: 0,
         };
         let mut geom = host_geom(&font, false, false, false, spacing, 0);
@@ -26127,6 +26171,7 @@ session mail (id 15)
             explicit_spacing: [false; 3],
             sidebar_width_px: 256,
             sidebar_collapsed: false,
+            sidebar_harness_icons: true,
             sidebar_clamp_window_px: 0,
         };
         let auto = host_geom(
@@ -26168,6 +26213,7 @@ session mail (id 15)
             explicit_spacing: [false; 3],
             sidebar_width_px: 256,
             sidebar_collapsed: false,
+            sidebar_harness_icons: true,
             sidebar_clamp_window_px: 0,
         };
         let off = host_geom(&font, false, false, false, base, 0);
@@ -26260,6 +26306,7 @@ session mail (id 15)
             explicit_spacing: [false; 3],
             sidebar_width_px: 256,
             sidebar_collapsed: false,
+            sidebar_harness_icons: true,
             sidebar_clamp_window_px: 0,
         };
         let classic_geom = host_geom(&font, false, true, false, classic, 0);
@@ -26353,6 +26400,7 @@ session mail (id 15)
             explicit_spacing: [false; 3],
             sidebar_width_px: 256,
             sidebar_collapsed: false,
+            sidebar_harness_icons: true,
             sidebar_clamp_window_px: 0,
         };
         let geom = host_geom(&font, false, false, false, spacing, 0);

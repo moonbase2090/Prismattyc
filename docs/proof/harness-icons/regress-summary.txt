@@ -1,0 +1,28 @@
+[regress 07:14:10] scratch: /tmp/prismattyc-regress-20261009-071410-Rjht (toolchain 1.90.0, target /tmp/prismattyc-regress-20261009-071410-Rjht/target)
+[regress 07:14:10] base 3f31446fe4a5e24e2e3365bdc0ad513627d58cc2
+[regress 07:14:10] head da1102d5c44ae7129af7863a0e810f2e1045e4f4
+[regress 07:14:10] [base] worktree at 3f31446fe4a5
+[regress 07:14:11] [base] cargo test --workspace --locked -- --list (and --ignored)
+[regress 07:15:05] [base] cargo test --workspace --locked --no-fail-fast
+[regress 07:15:59] [base] tests rc=0, 2608 results, 0 failed
+[regress 07:15:59] [base] probe dump
+[regress 07:16:19] [head] worktree at da1102d5c44a
+[regress 07:16:19] [head] cargo test --workspace --locked -- --list (and --ignored)
+[regress 07:17:09] [head] cargo test --workspace --locked --no-fail-fast
+[regress 07:18:09] [head] tests rc=0, 2610 results, 0 failed
+[regress 07:18:09] [head] probe dump
+=== prismattyc-regress-check summary ===
+base 3f31446fe4a5  head da1102d5c44a  toolchain 1.90.0  Darwin arm64  2026-10-09 07:18 MDT
+cargo test --workspace --locked --no-fail-fast: base rc=0, head rc=0
+counts base: 2606 passed, 0 failed, 0 flaky (failed, then passed on rerun), 2 ignored (2608 total)
+counts head: 2608 passed, 0 failed, 0 flaky (failed, then passed on rerun), 2 ignored (2610 total)
+list: removed=0 newly-ignored=0 newly-failing=0 preexisting-failing=0 added=3 ack-removed=1
+ACK-REMOVED:
+  prismattyc_host[unittests src/main.rs]::sidebar_width::tests::seat_icons_follow_the_label_and_spaces_stay_spaces
+ADDED:
+  prismattyc_host[unittests src/main.rs]::sidebar_width::tests::harness_seats_follow_argv0_basenames
+  prismattyc_host[unittests src/main.rs]::sidebar_width::tests::row_seats_keep_space_tab_and_pane_distinct
+  prismattyc_mux[unittests src/lib.rs]::inject_submit::tests::classify_argv0_basename
+probe: 130754 lines (colors, tokens, bar_layout, sidebar_layout, side_rail_px) base=73255d6734a095af head=73255d6734a095af kinds=default/default differing-lines=0 
+RESULT: CLEAN
+=== end summary ===

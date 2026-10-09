@@ -175,6 +175,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         value: ConfigValue::Bool(false),
     },
     ConfigKey {
+        name: "sidebar_harness_icons",
+        group: ConfigGroup::Appearance,
+        doc: "Show agent harness glyphs on sidebar pane rows",
+        range: "true|false",
+        value: ConfigValue::Bool(true),
+    },
+    ConfigKey {
         name: "pane_titles",
         group: ConfigGroup::Appearance,
         doc: "Multi-pane title row: focused pane OSC title, or handle hover only",
@@ -1142,6 +1149,7 @@ mod tests {
         "layout",
         "sidebar_width_px",
         "sidebar_collapsed",
+        "sidebar_harness_icons",
         "pane_titles",
         "focus_border",
         "focus_border_animation",

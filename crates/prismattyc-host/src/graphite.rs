@@ -2389,6 +2389,7 @@ const SIDEBAR_TEXT: f32 = 12.0;
 const SIDEBAR_INDENT: f32 = 14.0;
 /// Status dot diameter.
 const SIDEBAR_DOT: f32 = 6.0;
+const SIDEBAR_ROW_ICON: f32 = 14.0;
 /// Icon box inside a segment, and its interior tint.
 const ARRANGE_ICON_W: f32 = 16.0;
 const ARRANGE_ICON_H: f32 = 12.0;
@@ -2444,6 +2445,8 @@ pub(crate) struct SidebarPaint<'a> {
     /// Header control that collapses or expands the column.
     pub toggle: Rect,
     pub toggle_hovered: bool,
+    /// Per-row sidebar glyphs; empty skips icons in the expanded tree.
+    pub row_seats: &'a [crate::sidebar_width::Seat],
 }
 
 pub(crate) fn paint_sidebar(buffer: &mut [u32], stride: usize, paint: &SidebarPaint<'_>) {
@@ -2504,8 +2507,9 @@ pub(crate) fn paint_sidebar(buffer: &mut [u32], stride: usize, paint: &SidebarPa
             line,
         );
     }
-    for row in paint.rows {
-        paint_sidebar_row(buffer, stride, paint, row);
+    for (index, row) in paint.rows.iter().enumerate() {
+        let seat = paint.row_seats.get(index);
+        paint_sidebar_row(buffer, stride, paint, row, seat);
     }
     if let Some(thumb) = paint.layout.thumb {
         fill_round_rect(buffer, stride, thumb, s(3.0), tok.separator, 0xff);
@@ -2571,6 +2575,7 @@ fn paint_sidebar_row(
     stride: usize,
     paint: &SidebarPaint<'_>,
     row: &SidebarRow<'_>,
+    seat: Option<&crate::sidebar_width::Seat>,
 ) {
     let tok = paint.tok;
     let s = |d: f32| d * paint.chrome.scale_milli as f32 / 1000.0;
@@ -2585,6 +2590,25 @@ fn paint_sidebar_row(
     }
     let cy = slot.center_y();
     let mut x = slot.x as f32 + s(12.0) + row.depth as f32 * s(SIDEBAR_INDENT);
+    if let Some(seat) = seat {
+        let icon_w = s(SIDEBAR_ROW_ICON);
+        let icon_h = s(SIDEBAR_ROW_ICON);
+        let icon = Rect::new(
+            x as usize,
+            (cy - icon_h / 2.0) as usize,
+            icon_w as usize,
+            icon_h as usize,
+        );
+        let ink = if row.selected {
+            tok.text_strong
+        } else if row.depth == 0 {
+            tok.text
+        } else {
+            tok.muted
+        };
+        seat_mark(buffer, stride, paint.chrome, *seat, icon, ink, tok.muted);
+        x += icon_w + s(6.0);
+    }
     if let Some(collapsed) = row.chevron {
         if collapsed {
             chevron_right(buffer, stride, x, cy, s(10.0), s(1.5), tok.muted);
@@ -2965,18 +2989,70 @@ fn seat_mark(
             fill_round_rect(buffer, stride, back, s(2.0), muted, 0xff);
             outlined_round_rect(buffer, stride, front, s(2.0), ink, muted);
         }
-        Seat::Shell => {
-            chevron_right(buffer, stride, cx - s(4.0), cy, s(10.0), w, ink);
+        Seat::Tab => {
+            let tab = Rect::new(
+                (cx - s(6.0)) as usize,
+                (cy - s(5.0)) as usize,
+                s(11.0) as usize,
+                s(9.0) as usize,
+            );
+            outlined_round_rect(buffer, stride, tab, s(2.0), ink, muted);
             stroke_line(
                 buffer,
                 stride,
-                cx + s(1.0),
-                cy + s(3.0),
-                cx + s(6.0),
-                cy + s(3.0),
+                cx - s(6.0),
+                cy + s(4.0),
+                cx + s(5.0),
+                cy + s(4.0),
                 w,
                 ink,
             );
+        }
+        Seat::Pane => {
+            stroke_round_rect(
+                buffer,
+                stride,
+                cx - s(5.0),
+                cy - s(6.0),
+                cx + s(5.0),
+                cy + s(6.0),
+                s(2.0),
+                w,
+                ink,
+            );
+            stroke_line(
+                buffer,
+                stride,
+                cx - s(2.0),
+                cy - s(1.0),
+                cx + s(2.0),
+                cy - s(1.0),
+                w,
+                muted,
+            );
+        }
+        Seat::Kiro => {
+            stroke_line(
+                buffer,
+                stride,
+                cx - s(6.0),
+                cy - s(2.0),
+                cx,
+                cy + s(5.0),
+                w,
+                ink,
+            );
+            stroke_line(
+                buffer,
+                stride,
+                cx,
+                cy + s(5.0),
+                cx + s(6.0),
+                cy - s(2.0),
+                w,
+                ink,
+            );
+            stroke_line(buffer, stride, cx - s(3.0), cy, cx + s(3.0), cy, w, muted);
         }
         Seat::Claude => {
             for index in 0..4 {
@@ -3814,6 +3890,7 @@ mod sidebar_render_tests {
                 dock_right: false,
                 toggle: Rect::new(0, 0, 0, 0),
                 toggle_hovered: false,
+                row_seats: &[],
             },
         );
         assert!(
@@ -3888,6 +3965,7 @@ mod sidebar_render_tests {
                 dock_right: false,
                 toggle: Rect::new(0, 0, 0, 0),
                 toggle_hovered: false,
+                row_seats: &[],
             },
         );
         let focused = layout.rows[3];
@@ -3990,6 +4068,7 @@ mod sidebar_render_tests {
                         dock_right: false,
                         toggle: sidebar_toggle_rect(chrome, column_rect, layout.head, false),
                         toggle_hovered: false,
+                        row_seats: &[],
                     },
                 );
                 let span = Rect::new(column_rect.w, 0, w - column_rect.w, 44);
@@ -4059,7 +4138,7 @@ mod sidebar_render_tests {
             );
             let seats = [
                 crate::sidebar_width::Seat::Space,
-                crate::sidebar_width::Seat::Shell,
+                crate::sidebar_width::Seat::Tab,
                 crate::sidebar_width::Seat::Claude,
                 crate::sidebar_width::Seat::Codex,
                 crate::sidebar_width::Seat::Grok,
@@ -4152,6 +4231,7 @@ mod sidebar_render_tests {
                     dock_right: false,
                     toggle,
                     toggle_hovered: false,
+                    row_seats: &[],
                 },
             );
         }

@@ -83,7 +83,10 @@ class WindowsMsiTests(unittest.TestCase):
             source,
         )
         shortcut = source.split('Id="StartMenuShortcut"', 1)[1].split("</Component>", 1)[0]
-        self.assertIn('Win64="yes"', shortcut)
+        self.assertIn('Bitness="always64"', shortcut)
+        self.assertNotIn("Win64", source)
+        builder = (ROOT / "scripts/release/windows_msi.py").read_text(encoding="utf-8")
+        self.assertIn('"-arch",\n        "x64"', builder)
         self.assertNotIn("Win32_Process", source)
         self.assertNotIn('Impersonate="no"', source)
         self.assertNotIn("set-arp-display-icon", source)

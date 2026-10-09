@@ -142,7 +142,7 @@ Prismattyc PRs are trunk: they touch `prismattyc-host`. Label `trunk`. Proof is 
 
 `graphite-core` PRs land in the new repo. Treat them as trunk once Prismattyc depends on the crate. Until then they still need the red test commit, docs on every public item, and a reviewer who is not the author.
 
-The workspace version check in `scripts/check-workspace-version-bumped.sh` applies to Prismattyc PRs that will merge. Each of those PRs bumps the patch and updates `Cargo.toml`, `Cargo.lock`, `README.md`, and `docs/fidelity-matrix-v1.md`, per `CONTRIBUTING.md`. The bump does not publish a release. This sign-off document does not bump the version.
+The workspace version check in `scripts/check-workspace-version.sh` applies to Prismattyc PRs that will merge. P-rows and G-rows leave the version alone; only the release PR moves it, updating `Cargo.toml`, `Cargo.lock`, `README.md`, and `docs/fidelity-matrix-v1.md` together per `CONTRIBUTING.md`. Not bumping does not publish a release. This sign-off document does not touch the version.
 
 A behavior test that the core also needs is copied, not moved. The host test stays green as the integration check. The core copy pins the same decision against the core API and a fake measurer.
 
@@ -231,7 +231,7 @@ T2 through T5 can follow T1 one at a time. T6 follows T1 (a re-export can land a
 | Private lunatui fetch | lunatui is private, and `graphite-tui` depends on it. | The Graphite repo is public so P1 needs no token. T1 and the flagged S1 job wait until their CI can fetch lunatui, with a read credential until lunatui is public. |
 | crates.io name moves | The 2026-10-05 404s were not reservations, and this session could not recheck (HTTP 403). | `publish = false` and git pins. The publish PR rechecks the index and is a separate sign-off. |
 | Extraction PR while chrome is still moving | Sidebar width and session focus just landed (#174, #175). A parallel chrome feature will conflict with P6. | One host extraction PR at a time. Chrome feature work rebases onto the latest P-PR or waits. Behavior changes are not folded into a move PR. |
-| Trunk review load | Eight host PRs each need independent review and a version bump. | The split is the point of the plan. Combining two rows to save a review reintroduces the large PRs #164 warned about. |
+| Trunk review load | Eight host PRs each need independent review. | The split is the point of the plan. Combining two rows to save a review reintroduces the large PRs #164 warned about. |
 
 ## 7. Open questions
 
@@ -241,7 +241,7 @@ T2 through T5 can follow T1 one at a time. T6 follows T1 (a re-export can land a
 | Q2 | Should P2 retarget classic color helpers, or should the core vendor its own WCAG copy and leave `raster.rs` alone? | Forward the helpers. One formula is the way to keep Graphite derivation and classic contrast from drifting. The PR stays behavior-preserving and lists the classic tests. If review wants classic untouched, the fallback is a duplicated formula plus a differential test against `raster::contrast_ratio` on a fixed set of pairs, deleted when a later PR forwards. Prefer the forward. |
 | Q3 | When does `graphite-tui` start relative to Prismattyc? | After G3 the models are real enough to design widgets, and the code waits until lunatui PRs 26 and 28 have landed. Prismattyc P1–P8 do not wait on lunatui. |
 | Q4 | When to publish to crates.io. | After P3 (Prismattyc derives tokens from the published revision) and T1 (a second crate maps those tokens). Still a separate PR, still `publish = false` until that PR. Recheck crates.io in that PR. |
-| Q5 | Does this sign-off PR bump Prismattyc's workspace version? | No. It is docs-only and it is not a merge request. The version bump belongs to each later code PR that merges, per `CONTRIBUTING.md`. |
+| Q5 | Does this sign-off PR bump Prismattyc's workspace version? | No. It is docs-only and it is not a merge request. P-rows and G-rows never bump the version; only the release PR moves it, per `CONTRIBUTING.md`. |
 | Q6 | Should Prismattyc grow a `tests-first` CI job like lunatui's? | Not in this sequence. Each code PR links the red commit in the body. A CI job that enforces it would be its own trunk PR if MB2090 wants it after the first extraction PR shows the habit. |
 | Q7 | Where does `BarLayout` live once `mux.rs` stores it? | The core owns the layout struct. `mux.rs` stores that struct. Scale for painters is `scale_milli` on the layout. `ChromeGeom` remains the host's classic-or-graphite flag and is not a field of the core layout. |
 | Q8 | Who is the second consumer if Scorecard's TUI slips? | Prismattyc is consumer one. `graphite-tui`'s snapshot tests are consumer two for the models. Scorecard S1 is still required before calling the extraction finished, because D11 names Scorecard. Slipping S1 does not revert P1–P8. |

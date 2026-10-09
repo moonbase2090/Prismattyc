@@ -271,8 +271,8 @@ fn open_and_snapshot(
 ) -> Option<(SnapshotSocket, u64)> {
     let path = socket_path()?;
     let mut opened = SnapshotSocket::open(&path, || {
-        // Count before register/snapshot reads. A blackhole daemon blocks
-        // those reads for the 2 s timeout; the connect itself already happened.
+        // Count after the bounded connect and before the register read. A
+        // daemon that accepts and then stalls still blocks that read for 2 s.
         inner.connects.fetch_add(1, Ordering::Relaxed);
     })
     .ok()?;

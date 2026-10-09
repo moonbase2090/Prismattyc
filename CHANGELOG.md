@@ -11,7 +11,8 @@ installer's update-pointer script starts PowerShell hidden. The CLI tools
 enable virtual-terminal processing. A pipe, `NO_COLOR`, or a console that
 rejects it prints a plain page, and start and quit stay free of escape
 sequences. Color follows stdout. A second bare launch of the GUI focuses the
-existing window. The per-user Apps & features entry points its icon at
+existing window. A local daemon connect from the GUI gives up after two
+seconds. The per-user Apps & features entry points its icon at
 `prismattyc-host.exe`.
 
 ## [0.3.29] - 2026-10-08

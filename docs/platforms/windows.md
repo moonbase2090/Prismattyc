@@ -39,7 +39,10 @@ search does not offer it as a separate app. The other executables stay in
 `bin` and are added to PATH only when the install is given `ADDTOPATH=1`.
 
 A second bare launch of the GUI focuses the existing window. `pmux attach --all`
-and `pmux space open --new-window` still open another window. Programs the GUI
+and `pmux space open --new-window` still open another window. A connect from
+the GUI to the local daemon gives up after two seconds, so a stuck socket
+cannot stop the window from pumping. Login restore and login sync already run
+on a worker thread. Programs the GUI
 starts for itself, including `git` and `pmux`, are created with
 `CREATE_NO_WINDOW`, so they do not flash a console. The login Startup shortcut
 runs `pmux login run` through `wscript` with a hidden window. The installer's

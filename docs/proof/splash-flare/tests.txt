@@ -2,11 +2,11 @@
 
 === splash_flare_preserves_letter_ink_at_corners ===
 # cargo test -p prismattyc-host -- splash_flare_preserves_letter_ink_at_corners
-   Compiling prismattyc-core v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-core)
-   Compiling prismattyc-emulator v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-emulator)
-   Compiling prismattyc-render v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-render)
-   Compiling prismattyc-mux v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-mux)
-   Compiling prismattyc-host v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-host)
+   Compiling prismattyc-core v0.3.29 (/work/Prismattyc/crates/prismattyc-core)
+   Compiling prismattyc-emulator v0.3.29 (/work/Prismattyc/crates/prismattyc-emulator)
+   Compiling prismattyc-render v0.3.29 (/work/Prismattyc/crates/prismattyc-render)
+   Compiling prismattyc-mux v0.3.29 (/work/Prismattyc/crates/prismattyc-mux)
+   Compiling prismattyc-host v0.3.29 (/work/Prismattyc/crates/prismattyc-host)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 10.02s
      Running unittests src/main.rs (target/debug/deps/prismattyc_host-652b874acb990e28)
 

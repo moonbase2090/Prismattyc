@@ -4370,12 +4370,10 @@ fn rasterize_splash_lines(
         .min(buffer_height_px);
     let col_x0 = (stride_px.saturating_sub(block_w)) / 2;
     let mut row_y = (buffer_height_px.saturating_sub(block_h)) / 2;
-    // Flare glyphs (star, rays, streak) are painted last, nudged half a cell
-    // sideways toward the letter and half a row up, so each star overlays a
-    // block corner and its rays still emanate from it. The terminal
-    // front-end cannot do this; the cell grid is the same, only the host's
-    // pixels differ.
+    // Flare glyphs are nudged half a cell toward each letter corner; paint them
+    // (and pixel rays) before letter ink so stars never wash the wordmark.
     let mut stars: Vec<(char, usize, usize, [u8; 3])> = Vec::new();
+    let mut letters: Vec<(char, usize, usize, [u8; 3])> = Vec::new();
     let (nudge_x, nudge_y) = (font.cell_w / 2, font.cell_h / 2);
     // Art bounding box in pixels: rays never cross it.
     let art_top = row_y;
@@ -4421,7 +4419,7 @@ fn rasterize_splash_lines(
                     };
                     stars.push((ch, sx, sy, *rgb));
                 } else if ch != ' ' {
-                    blit_glyph(buffer, stride_px, font, ch, x, row_y, *rgb);
+                    letters.push((ch, x, row_y, *rgb));
                 }
                 x = x.saturating_add(font.cell_w);
                 col += 1;
@@ -4471,6 +4469,13 @@ fn rasterize_splash_lines(
                 );
             }
             star_index += 1;
+        }
+    }
+    for (ch, x, y, rgb) in letters {
+        if x.saturating_add(font.cell_w) <= stride_px
+            && y.saturating_add(font.cell_h) <= buffer_height_px
+        {
+            blit_glyph(buffer, stride_px, font, ch, x, y, rgb);
         }
     }
 }
@@ -10837,19 +10842,21 @@ mod tests {
     }
 
     #[test]
-    fn splash_flare_star_overlays_the_letter_corner() {
+    fn splash_flare_preserves_letter_ink_at_corners() {
         let Ok(font) = FontMetrics::load(14.0) else {
             return;
         };
-        // At rest the top-left star is light blue; nudged half a cell right
-        // and up it must leave non-ink, non-background pixels inside the
-        // P's corner cell (art column 0, row 0) and above the art row.
+        use prismattyc_core::splash::{
+            ART, FLARE_GLYPH, FLARE_PEAK_GLYPH, INK, RAY_GLYPH, STREAK_CORE_GLYPH, STREAK_GLYPH,
+        };
         let at = prismattyc_core::splash::SETTLED_MS + 2000;
         let lines = crate::splash::layout(crate::splash::Page::Main, "0.0.0-test", 0, Some(at));
         let (w, h) = (1100_usize, 420_usize);
         let bg = [0x10, 0x10, 0x18];
-        let mut buffer = vec![0u32; w * h];
-        rasterize_splash(&font, &lines, &mut buffer, w, h, bg, Some(at));
+        let bgp = pack_rgb(bg);
+        let ink = pack_rgb(INK);
+        let mut animated = vec![bgp; w * h];
+        rasterize_splash(&font, &lines, &mut animated, w, h, bg, Some(at));
         let max_cols = lines
             .iter()
             .map(|l| l.iter().map(|(t, _)| t.chars().count()).sum::<usize>())
@@ -10857,35 +10864,48 @@ mod tests {
             .unwrap();
         let col_x0 = (w - (max_cols * font.cell_w).min(w)) / 2;
         let row_y0 = (h - (lines.len() * font.cell_h).min(h)) / 2;
-        let corner_x = col_x0 + ART_MARGIN_LEFT * font.cell_w;
-        use prismattyc_core::splash::ART;
-        let ink = pack_rgb(prismattyc_core::splash::INK);
-        let bgp = pack_rgb(bg);
-        // Pixels in the corner cell and the half-cell above it.
-        let mut overlay = 0;
-        for y in row_y0.saturating_sub(font.cell_h / 2)..row_y0 + font.cell_h {
-            for x in corner_x..corner_x + font.cell_w {
-                let px = buffer[y * w + x];
-                if px != ink && px != bgp {
-                    overlay += 1;
+        let mut letters = vec![bgp; w * h];
+        let mut row_y = row_y0;
+        for (line_index, line) in lines.iter().enumerate() {
+            if line_index >= ART.len() {
+                break;
+            }
+            let mut x = col_x0;
+            for (text, rgb) in line {
+                for ch in text.chars() {
+                    if matches!(
+                        ch,
+                        FLARE_GLYPH
+                            | FLARE_PEAK_GLYPH
+                            | RAY_GLYPH
+                            | STREAK_GLYPH
+                            | STREAK_CORE_GLYPH
+                    ) {
+                        x = x.saturating_add(font.cell_w);
+                        continue;
+                    }
+                    if ch != ' ' {
+                        blit_glyph(&mut letters, w, &font, ch, x, row_y, *rgb);
+                    }
+                    x = x.saturating_add(font.cell_w);
                 }
             }
+            row_y = row_y.saturating_add(font.cell_h);
         }
-        assert!(overlay > 0, "star did not overlay the P's corner");
-        // Nudged up half a cell, the star and streak paint into the strip
-        // above the art's first row, across the left margin and the corner.
-        // Nothing else ever draws there.
+        for (px, (letter, anim)) in letters.iter().zip(animated.iter()).enumerate() {
+            if *letter == ink {
+                assert_eq!(*anim, ink, "flare washed letter ink at pixel {px}");
+            }
+        }
+        let corner_x = col_x0 + ART_MARGIN_LEFT * font.cell_w;
         let strip = (row_y0 - font.cell_h / 2..row_y0)
             .flat_map(|y| (col_x0..corner_x + font.cell_w).map(move |x| (x, y)))
-            .filter(|(x, y)| buffer[y * w + x] != bgp)
+            .filter(|(x, y)| animated[y * w + x] != bgp)
             .count();
-        assert!(strip > 0, "flare glyphs were not nudged upward");
-        // The rays below move with the star: the cell diagonally below-left
-        // of the corner (row 1, col -2) has its right half painted, but the
-        // far-left margin column's left half stays empty at every row.
+        assert!(strip > 0, "flare still paints in the margin above the art");
         let far_left = (row_y0..row_y0 + ART.len() * font.cell_h)
             .flat_map(|y| (col_x0..col_x0 + font.cell_w / 2).map(move |x| (x, y)))
-            .filter(|(x, y)| buffer[y * w + x] != bgp)
+            .filter(|(x, y)| animated[y * w + x] != bgp)
             .count();
         assert_eq!(
             far_left, 0,

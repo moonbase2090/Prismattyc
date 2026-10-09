@@ -1,11 +1,14 @@
 # Set DisplayIcon once the uninstall key exists.
 # Windows Installer creates that key after the install sequence returns, so the
 # sequence action starts a hidden helper and returns. The helper does not create a key.
+# -Root HKCU runs as the installing user. -Root HKLM runs as the system account.
+# The helper scans only that hive.
 [CmdletBinding()]
 param(
     [switch]$Apply,
     [Parameter(Mandatory = $true)][string]$ProductCode,
-    [Parameter(Mandatory = $true)][string]$Icon
+    [Parameter(Mandatory = $true)][string]$Icon,
+    [Parameter(Mandatory = $true)][ValidateSet('HKCU', 'HKLM')][string]$Root
 )
 $ErrorActionPreference = 'Continue'
 $trace = Join-Path ([System.IO.Path]::GetTempPath()) 'prismattyc-displayicon.txt'
@@ -17,22 +20,22 @@ function Write-Trace([string]$Line) {
 if (-not $Apply) {
     # A child of the installer is stopped when msiexec exits, which is before the
     # uninstall key exists. Win32_Process.Create starts the helper outside that job.
-    # WMI is 64-bit, so System32 is the real system directory. Sysnative exists only
-    # for a 32-bit caller and is not a path WMI can start.
+    # The helper keeps this process token. WMI is 64-bit, so System32 is the real
+    # system directory. Sysnative exists only for a 32-bit caller and is not a path
+    # WMI can start.
     $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $command = "$exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Apply -ProductCode `"$ProductCode`" -Icon `"$Icon`""
+    $command = "$exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Apply -ProductCode `"$ProductCode`" -Icon `"$Icon`" -Root $Root"
     $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $command }
-    Write-Trace "spawned=$($created.ReturnValue)"
+    Write-Trace "spawned=$($created.ReturnValue) root=$Root"
     exit 0
 }
 
-Write-Trace 'waiting'
+Write-Trace "waiting root=$Root"
 $deadline = (Get-Date).AddSeconds(20)
+$base = "${Root}:\Software\Microsoft\Windows\CurrentVersion\Uninstall"
 do {
     $wrote = $false
-    foreach ($root in @('HKCU', 'HKLM')) {
-        $base = "${root}:\Software\Microsoft\Windows\CurrentVersion\Uninstall"
-        if (-not (Test-Path -LiteralPath $base)) { continue }
+    if (Test-Path -LiteralPath $base) {
         foreach ($item in Get-ChildItem -LiteralPath $base) {
             $name = [string]$item.GetValue('DisplayName')
             $publisher = [string]$item.GetValue('Publisher')
@@ -51,5 +54,5 @@ do {
     if ($wrote) { exit 0 }
     Start-Sleep -Milliseconds 200
 } while ((Get-Date) -lt $deadline)
-Write-Trace 'gave-up'
+Write-Trace "gave-up root=$Root"
 exit 0

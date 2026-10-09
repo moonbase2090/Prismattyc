@@ -141,17 +141,25 @@
         Impersonate="yes"
         Return="check"
         ExeCommand="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[BINFOLDER]reset-windows-update-pointer.ps1&quot;" />
-    <!-- PublishProduct does not fill DisplayIcon, and the uninstall key is not visible until after this sequence returns. Start a hidden helper that sets the icon on the key once it exists. Do not create a key. -->
+    <!-- PublishProduct does not fill DisplayIcon, and the uninstall key is not visible until after this sequence returns. Each action starts a hidden helper that sets the icon once the key exists. Do not create a key. HKCU belongs to the installing user. HKLM requires the system account, and only a commit action runs as that account, so the helper it starts keeps the system token. -->
     <CustomAction
-        Id="SetArpDisplayIcon"
+        Id="SetArpDisplayIconHkcu"
         Directory="SystemFolder"
         Execute="immediate"
         Impersonate="yes"
         Return="ignore"
-        ExeCommand="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[BINFOLDER]set-arp-display-icon.ps1&quot; -ProductCode &quot;[ProductCode]&quot; -Icon &quot;[BINFOLDER]prismattyc-host.exe,0&quot;" />
+        ExeCommand="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[BINFOLDER]set-arp-display-icon.ps1&quot; -ProductCode &quot;[ProductCode]&quot; -Icon &quot;[BINFOLDER]prismattyc-host.exe,0&quot; -Root HKCU" />
+    <CustomAction
+        Id="SetArpDisplayIconHklm"
+        Directory="SystemFolder"
+        Execute="commit"
+        Impersonate="no"
+        Return="ignore"
+        ExeCommand="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[BINFOLDER]set-arp-display-icon.ps1&quot; -ProductCode &quot;[ProductCode]&quot; -Icon &quot;[BINFOLDER]prismattyc-host.exe,0&quot; -Root HKLM" />
     <InstallExecuteSequence>
       <Custom Action="ResetUpdatePointer" After="InstallFiles" Condition="NOT REMOVE~=&quot;ALL&quot;" />
-      <Custom Action="SetArpDisplayIcon" After="InstallFinalize" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="SetArpDisplayIconHklm" After="ResetUpdatePointer" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="SetArpDisplayIconHkcu" After="InstallFinalize" Condition="NOT REMOVE~=&quot;ALL&quot;" />
     </InstallExecuteSequence>
 
     <Feature Id="Main">

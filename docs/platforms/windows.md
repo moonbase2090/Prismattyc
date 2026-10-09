@@ -51,8 +51,9 @@ shows the publisher Moonbase2090 and the numeric MSI product version described
 below. Its icon is `DisplayIcon` on the uninstall key Windows Installer
 created, set to `prismattyc-host.exe,0`. That key appears after the installer
 returns. A hidden helper, started outside the installer process, then sets
-the icon. An elevated install records the
-key under HKLM. A standard per-user install records it under HKCU.
+the icon and does not create a key. An elevated install records the key under
+HKLM, and that helper runs as the system account. A standard per-user install
+records the key under HKCU, and that helper runs as the installing user.
 `pmux --version`
 still reports the semver.
 

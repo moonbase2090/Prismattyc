@@ -3266,11 +3266,7 @@ mod tests {
             (KeyCode::Null, none, None),
         ];
         for (code, mods, want) in rows {
-            assert_eq!(
-                enc(*code, *mods).as_deref(),
-                *want,
-                "{code:?} {mods:?}"
-            );
+            assert_eq!(enc(*code, *mods).as_deref(), *want, "{code:?} {mods:?}");
         }
     }
 

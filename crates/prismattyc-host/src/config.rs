@@ -209,6 +209,8 @@ pub struct ConfigFile {
     pub sidebar_width_px: Option<u32>,
     /// Spaces sidebar collapsed to the icon strip (issue #174). Default false.
     pub sidebar_collapsed: Option<bool>,
+    /// Show harness-specific glyphs on sidebar pane rows (default true).
+    pub sidebar_harness_icons: Option<bool>,
     /// Render timing output. Default `off`; hot-reloaded.
     pub render_timer: Option<RenderTimer>,
     /// macOS present path: `tiles` (default) or `iosurface`. Startup only.

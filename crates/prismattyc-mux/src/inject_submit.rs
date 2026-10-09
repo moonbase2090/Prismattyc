@@ -51,6 +51,16 @@ pub fn inject_agent_slug(agent: InjectAgent) -> Option<&'static str> {
 ///
 /// `name` is a single path basename. Matching is case-insensitive.
 /// `muse` and `muse-*` (including `muse-bin*`) are Muse. `museum` is not.
+/// Classify an argv[0] basename (`codex`, `kiro-cli`, `cursor-agent`, …).
+#[must_use]
+pub fn classify_agent_argv0(name: &str) -> Option<InjectAgent> {
+    let base = std::path::Path::new(name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(name);
+    classify_agent_file_name(base)
+}
+
 fn classify_agent_file_name(name: &str) -> Option<InjectAgent> {
     let name = name.to_ascii_lowercase();
     if name == "cursor-agent" || name.starts_with("cursor-agent-") || name.contains("cursor-agent")
@@ -323,6 +333,13 @@ pub fn detect_inject_agent(bound_pid: Option<u32>, root_pid: Option<u32>) -> Inj
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_argv0_basename() {
+        assert_eq!(classify_agent_argv0("kiro-cli"), Some(InjectAgent::Kiro));
+        assert_eq!(classify_agent_argv0("/bin/codex"), Some(InjectAgent::Codex));
+        assert_eq!(classify_agent_argv0("museum"), None);
+    }
 
     #[test]
     fn classify_cursor_agent() {

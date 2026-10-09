@@ -257,35 +257,66 @@ impl Drag {
     }
 }
 
-/// Icon family for the collapsed strip. Space rows are always [`Seat::Space`].
+/// Monochrome sidebar glyph for a space, tab, pane, or detected harness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Seat {
     Space,
-    Shell,
+    /// Browser-tab folder shape for tab rows.
+    Tab,
+    /// Generic pane row when no harness is running.
+    Pane,
     Claude,
     Codex,
     Grok,
+    Kiro,
     Muse,
     Composer,
 }
 
-pub fn seat_for(space: bool, label: &str) -> Seat {
-    if space {
-        return Seat::Space;
+/// Tree row kind for [`seat_for_row`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowIconKind {
+    Space,
+    Tab,
+    Pane,
+}
+
+/// Map argv[0] basename to a harness seat. Original simplified marks in
+/// `graphite::seat_mark`; names follow `inject_submit` probes.
+#[allow(dead_code)]
+#[must_use]
+pub fn harness_seat_from_argv0(basename: &str) -> Option<Seat> {
+    match prismattyc_mux::classify_agent_argv0(basename)? {
+        prismattyc_mux::InjectAgent::Claude => Some(Seat::Claude),
+        prismattyc_mux::InjectAgent::Codex => Some(Seat::Codex),
+        prismattyc_mux::InjectAgent::Grok => Some(Seat::Grok),
+        prismattyc_mux::InjectAgent::Kiro => Some(Seat::Kiro),
+        prismattyc_mux::InjectAgent::Muse => Some(Seat::Muse),
+        prismattyc_mux::InjectAgent::Cursor => Some(Seat::Composer),
+        prismattyc_mux::InjectAgent::Unknown => None,
     }
-    let lower = label.to_ascii_lowercase();
-    if lower.contains("claude") {
-        Seat::Claude
-    } else if lower.contains("codex") {
-        Seat::Codex
-    } else if lower.contains("grok") {
-        Seat::Grok
-    } else if lower.contains("muse") {
-        Seat::Muse
-    } else if lower.contains("composer") {
-        Seat::Composer
-    } else {
-        Seat::Shell
+}
+
+#[must_use]
+pub fn harness_seat_from_agent(agent: prismattyc_mux::InjectAgent) -> Option<Seat> {
+    match agent {
+        prismattyc_mux::InjectAgent::Claude => Some(Seat::Claude),
+        prismattyc_mux::InjectAgent::Codex => Some(Seat::Codex),
+        prismattyc_mux::InjectAgent::Grok => Some(Seat::Grok),
+        prismattyc_mux::InjectAgent::Kiro => Some(Seat::Kiro),
+        prismattyc_mux::InjectAgent::Muse => Some(Seat::Muse),
+        prismattyc_mux::InjectAgent::Cursor => Some(Seat::Composer),
+        prismattyc_mux::InjectAgent::Unknown => None,
+    }
+}
+
+/// Row-kind icon, with harness glyphs on pane rows when `harness` is set.
+#[must_use]
+pub fn seat_for_row(kind: RowIconKind, harness: Option<Seat>) -> Seat {
+    match kind {
+        RowIconKind::Space => Seat::Space,
+        RowIconKind::Tab => Seat::Tab,
+        RowIconKind::Pane => harness.unwrap_or(Seat::Pane),
     }
 }
 
@@ -595,14 +626,29 @@ mod tests {
     }
 
     #[test]
-    fn seat_icons_follow_the_label_and_spaces_stay_spaces() {
-        assert_eq!(seat_for(true, "Claude"), Seat::Space);
-        assert_eq!(seat_for(false, "Claude"), Seat::Claude);
-        assert_eq!(seat_for(false, "codex-review"), Seat::Codex);
-        assert_eq!(seat_for(false, "Grok"), Seat::Grok);
-        assert_eq!(seat_for(false, "muse"), Seat::Muse);
-        assert_eq!(seat_for(false, "Composer 1"), Seat::Composer);
-        assert_eq!(seat_for(false, "zsh"), Seat::Shell);
+    fn harness_seats_follow_argv0_basenames() {
+        assert_eq!(harness_seat_from_argv0("codex"), Some(Seat::Codex));
+        assert_eq!(harness_seat_from_argv0("claude"), Some(Seat::Claude));
+        assert_eq!(harness_seat_from_argv0("kiro-cli"), Some(Seat::Kiro));
+        assert_eq!(harness_seat_from_argv0("grok"), Some(Seat::Grok));
+        assert_eq!(harness_seat_from_argv0("muse-bin"), Some(Seat::Muse));
+        assert_eq!(
+            harness_seat_from_argv0("cursor-agent"),
+            Some(Seat::Composer)
+        );
+        assert_eq!(harness_seat_from_argv0("zsh"), None);
+        assert_eq!(harness_seat_from_argv0("museum"), None);
+    }
+
+    #[test]
+    fn row_seats_keep_space_tab_and_pane_distinct() {
+        assert_eq!(seat_for_row(RowIconKind::Space, None), Seat::Space);
+        assert_eq!(seat_for_row(RowIconKind::Tab, Some(Seat::Codex)), Seat::Tab);
+        assert_eq!(
+            seat_for_row(RowIconKind::Pane, Some(Seat::Claude)),
+            Seat::Claude
+        );
+        assert_eq!(seat_for_row(RowIconKind::Pane, None), Seat::Pane);
     }
 
     #[test]

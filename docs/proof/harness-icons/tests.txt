@@ -1,0 +1,5 @@
+# harness-icons proof (tester@repro)
+
+cargo test -p prismattyc-mux --lib classify_argv0_basename
+cargo test -p prismattyc-host harness_seat row_seats
+cargo test -p prismattyc-host seat_marks

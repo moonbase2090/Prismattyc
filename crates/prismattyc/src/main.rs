@@ -3270,70 +3270,39 @@ mod tests {
         }
     }
 
-    /// Every `encode_key_kitty_disambiguate` arm. A letter release is not a
-    /// functional key, so disambiguate-only reports nothing. An arrow release
-    /// still uses the functional form, and event types add the `:3` subfield.
+    /// Every press arm of `encode_key_kitty_disambiguate`. The helper is only
+    /// called with press metadata here (`event_type` 1, event reporting off).
+    /// `encode_key_kitty` never forwards a release in that state.
     #[test]
     fn encode_key_kitty_disambiguate_table_covers_every_arm() {
-        let enc = |code: KeyCode, mods: KeyModifiers, kind: KeyEventKind| {
-            let mut key = KeyEvent::new(code, mods);
-            key.kind = kind;
-            encode_key_kitty_disambiguate(key, 1, false, false)
+        let enc = |code: KeyCode, mods: KeyModifiers| {
+            encode_key_kitty_disambiguate(KeyEvent::new(code, mods), 1, false, false)
         };
-        let press = KeyEventKind::Press;
-        let release = KeyEventKind::Release;
         let none = KeyModifiers::NONE;
-        let rows: &[(KeyCode, KeyModifiers, KeyEventKind, Option<&[u8]>)] = &[
-            (KeyCode::Esc, none, press, Some(b"\x1b[27u")),
-            (KeyCode::Enter, none, press, Some(b"\r")),
-            (KeyCode::Tab, none, press, Some(b"\t")),
-            (KeyCode::Tab, KeyModifiers::SHIFT, press, Some(b"\x1b[9;2u")),
-            (
-                KeyCode::Tab,
-                KeyModifiers::CONTROL,
-                press,
-                Some(b"\x1b[9;5u"),
-            ),
-            (KeyCode::Tab, KeyModifiers::ALT, press, Some(b"\x1b[9;3u")),
-            (KeyCode::Tab, KeyModifiers::SUPER, press, Some(b"\x1b[9;9u")),
-            (KeyCode::BackTab, none, press, Some(b"\x1b[9;2u")),
-            (
-                KeyCode::BackTab,
-                KeyModifiers::CONTROL,
-                press,
-                Some(b"\x1b[9;6u"),
-            ),
-            (KeyCode::Backspace, none, press, Some(b"\x7f")),
+        let rows: &[(KeyCode, KeyModifiers, Option<&[u8]>)] = &[
+            (KeyCode::Esc, none, Some(b"\x1b[27u")),
+            (KeyCode::Enter, none, Some(b"\r")),
+            (KeyCode::Tab, none, Some(b"\t")),
+            (KeyCode::Tab, KeyModifiers::SHIFT, Some(b"\x1b[9;2u")),
+            (KeyCode::Tab, KeyModifiers::CONTROL, Some(b"\x1b[9;5u")),
+            (KeyCode::Tab, KeyModifiers::ALT, Some(b"\x1b[9;3u")),
+            (KeyCode::Tab, KeyModifiers::SUPER, Some(b"\x1b[9;9u")),
+            (KeyCode::BackTab, none, Some(b"\x1b[9;2u")),
+            (KeyCode::BackTab, KeyModifiers::CONTROL, Some(b"\x1b[9;6u")),
+            (KeyCode::Backspace, none, Some(b"\x7f")),
             (
                 KeyCode::Backspace,
                 KeyModifiers::CONTROL,
-                press,
                 Some(b"\x1b[127;5u"),
             ),
-            (KeyCode::Char('A'), KeyModifiers::SHIFT, press, Some(b"A")),
-            (
-                KeyCode::Char('b'),
-                KeyModifiers::ALT,
-                press,
-                Some(b"\x1b[98;3u"),
-            ),
-            (
-                KeyCode::Char('c'),
-                KeyModifiers::SUPER,
-                press,
-                Some(b"\x1b[99;9u"),
-            ),
-            (KeyCode::Up, none, press, Some(b"\x1b[A")),
-            (KeyCode::Char('a'), none, release, None),
-            (KeyCode::Up, none, release, Some(b"\x1b[A")),
-            (KeyCode::Null, none, press, None),
+            (KeyCode::Char('A'), KeyModifiers::SHIFT, Some(b"A")),
+            (KeyCode::Char('b'), KeyModifiers::ALT, Some(b"\x1b[98;3u")),
+            (KeyCode::Char('c'), KeyModifiers::SUPER, Some(b"\x1b[99;9u")),
+            (KeyCode::Up, none, Some(b"\x1b[A")),
+            (KeyCode::Null, none, None),
         ];
-        for (code, mods, kind, want) in rows {
-            assert_eq!(
-                enc(*code, *mods, *kind).as_deref(),
-                *want,
-                "{code:?} {mods:?} {kind:?}"
-            );
+        for (code, mods, want) in rows {
+            assert_eq!(enc(*code, *mods).as_deref(), *want, "{code:?} {mods:?}");
         }
 
         let mut repeat_esc = KeyEvent::new(KeyCode::Esc, none);
@@ -3342,6 +3311,9 @@ mod tests {
             encode_key_kitty_disambiguate(repeat_esc, 2, true, false),
             Some(b"\x1b[27;1:2u".to_vec())
         );
+        // Caller contract: a release is forwarded with event type 3 and
+        // event reporting on. That is the only helper input `encode_key_kitty`
+        // uses for a release.
         let mut release_up = KeyEvent::new(KeyCode::Up, none);
         release_up.kind = KeyEventKind::Release;
         assert_eq!(
@@ -3353,6 +3325,27 @@ mod tests {
         assert_eq!(
             encode_key_kitty_disambiguate(shifted_alt, 1, false, true),
             Some(b"\x1b[97:65;4u".to_vec())
+        );
+    }
+
+    /// Releases go through `encode_key_to_pty`. Disambiguate-only drops them.
+    /// Event reporting forwards Up as CSI `1;1:3 A`.
+    #[test]
+    fn kitty_disambiguate_releases_follow_the_caller() {
+        use prismattyc_emulator::{KITTY_DISAMBIGUATE, KITTY_EVENT_TYPES};
+
+        let disambiguate = KITTY_DISAMBIGUATE;
+        let with_events = KITTY_DISAMBIGUATE | KITTY_EVENT_TYPES;
+        let mut release_letter = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        release_letter.kind = KeyEventKind::Release;
+        let mut release_up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        release_up.kind = KeyEventKind::Release;
+
+        assert_eq!(encode_key_to_pty(release_letter, disambiguate), None);
+        assert_eq!(encode_key_to_pty(release_up, disambiguate), None);
+        assert_eq!(
+            encode_key_to_pty(release_up, with_events),
+            Some(b"\x1b[1;1:3A".to_vec())
         );
     }
 

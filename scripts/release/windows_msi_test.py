@@ -76,19 +76,26 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn("reset-windows-update-pointer.ps1", source)
         self.assertIn("[SystemFolder]WindowsPowerShell\\v1.0\\powershell.exe", source)
         self.assertIn("-WindowStyle Hidden", source)
-        self.assertIn('Id="SetArpDisplayIcon"', source)
+        self.assertIn('Id="SetArpDisplayIconHkcu"', source)
+        self.assertIn('Id="SetArpDisplayIconHklm"', source)
         self.assertIn("Test-Path -LiteralPath", source)
         self.assertNotIn("New-Item", source)
+        hkcu = source.split('Id="SetArpDisplayIconHkcu"', 1)[1].split("/>", 1)[0]
+        hklm = source.split('Id="SetArpDisplayIconHklm"', 1)[1].split("/>", 1)[0]
+        self.assertIn('Impersonate="yes"', hkcu)
         self.assertIn(
             r"HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\[ProductCode]",
-            source,
+            hkcu,
         )
+        self.assertNotIn("HKLM:", hkcu)
+        self.assertIn('Impersonate="no"', hklm)
         self.assertIn(
             r"HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\[ProductCode]",
-            source,
+            hklm,
         )
-        self.assertIn("prismattyc-host.exe,0", source)
-        self.assertIn("Prismattyc uninstall key was not found", source)
+        self.assertNotIn("HKCU:", hklm)
+        self.assertIn("prismattyc-host.exe,0", hkcu)
+        self.assertIn("prismattyc-host.exe,0", hklm)
         proof = (ROOT / "scripts/release/test-windows-msi.ps1").read_text(encoding="utf-8")
         self.assertIn("ARP DisplayIcon", proof)
         self.assertIn("prismattyc-host.exe'),0", proof)

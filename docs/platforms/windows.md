@@ -50,7 +50,8 @@ update-pointer script starts PowerShell hidden. Apps & features
 shows the publisher Moonbase2090 and the numeric MSI product version described
 below. Its icon is `DisplayIcon` on the uninstall key Windows Installer
 created, set to `prismattyc-host.exe,0`. An elevated install records that key
-under HKLM. A standard per-user install records it under HKCU. `pmux --version`
+under HKLM, and the system account writes the icon because the installing user
+cannot. A standard per-user install records the key under HKCU. `pmux --version`
 still reports the semver.
 
 ```powershell

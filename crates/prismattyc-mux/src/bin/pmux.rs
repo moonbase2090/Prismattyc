@@ -65,7 +65,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use prismattyc_mux::walkthrough::{
     boss_matches, bundled_boss, bundled_catalog, detect_step, load_progress, mux_detected,
     progress_path, reset_progress, save_progress, scoped_boss_space, BossVerdict, Catalog, Cursor,
@@ -92,7 +92,7 @@ use prismattyc_mux::{
 };
 
 const STOP_GRACE: Duration = Duration::from_secs(2);
-const UP_WAIT: Duration = Duration::from_secs(3);
+const UP_WAIT: Duration = Duration::from_secs(30);
 
 #[path = "pmux/lifecycle.rs"]
 mod lifecycle;
@@ -136,7 +136,9 @@ session
                                   create a named session; attach in a TTY
                                   unless --no-attach. --agent binds a mailbox
                                   (default: the session name).
-    doctor [SESSION]              child pid, lease, viewer vs nested attach
+    login <enable|disable|status|sync>
+                                  start at login and restore workspace
+    doctor [SESSION]              login state, child pid, lease, attach state
     render-status [--json]         registered host render guards and pane state
     kick SESSION                  SIGTERM nested attach, else viewers
     clients [SESSION] [--json]    list attach clients: pid, viewer/nested,
@@ -276,6 +278,7 @@ enum Verb {
     Update,
     Uninstall,
     Config,
+    Login,
     Up,
     Attach,
     Ls,
@@ -331,6 +334,7 @@ const VERBS: &[(&str, Verb)] = &[
     ("update", Verb::Update),
     ("uninstall", Verb::Uninstall),
     ("config", Verb::Config),
+    ("login", Verb::Login),
     ("up", Verb::Up),
     ("start", Verb::Up),
     ("attach", Verb::Attach),
@@ -515,6 +519,10 @@ fn main() -> Result<()> {
     // without changing PMUX_SOCKET's caller-identity semantics.
     std::env::set_var("PRISMATTYC_SPACES_SOCKET", &paths.socket);
     match verb {
+        Verb::Login => {
+            reject_session_flag(cli_session.as_deref(), "login")?;
+            cmd_login(&paths, &rest)
+        }
         Verb::Up => {
             reject_session_flag(cli_session.as_deref(), "up")?;
             cmd_up(&paths, program_from(rest))
@@ -715,7 +723,7 @@ _prismattyc_mux() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
   cmd="${COMP_WORDS[1]}"
-  local cmds="up start attach ls list whoami status-set send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session layout sync status stop restart versions update completions config skills"
+  local cmds="up start attach ls list whoami status-set send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session layout sync status stop restart versions update completions config skills login"
   case "$prev" in
     --instance) return ;;
     --session) return ;;
@@ -788,7 +796,7 @@ _arguments -C \
   '--session[Session name or id for stop]:name:' \
   '--socket[Absolute socket path]:path:_files' \
   '(-h --help)'{-h,--help}'[Help]' \
-  '1:command:(up start attach ls list whoami status-set send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session layout sync status stop restart versions update completions config skills)' \
+  '1:command:(up start attach ls list whoami status-set send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session layout sync status stop restart versions update completions config skills login)' \
   '*::arg:->args'
 case $state in
   args)
@@ -844,6 +852,8 @@ esac
 "#;
 
 const COMPLETIONS_FISH: &str = r#"# pmux fish completions
+complete -c pmux -n '__fish_use_subcommand' -a 'login' -d 'Start at login and restore workspace'
+complete -c pmux -n '__fish_seen_subcommand_from login' -a 'enable disable status sync'
 complete -c pmux -f
 complete -c pmux -s h -l help -d 'Help'
 complete -c pmux -l instance -d 'Instance name' -r
@@ -966,6 +976,17 @@ fn find_bin(keys: &[&str], names: &[&str]) -> PathBuf {
 }
 
 fn cmd_up(paths: &Paths, program: Vec<String>) -> Result<()> {
+    let deadline = Instant::now() + UP_WAIT;
+    while prismattyc_mux::daemon_lock::DaemonLock::is_held(&paths.socket)? {
+        if probe_socket_liveness(&paths.socket) == SocketLiveness::Live {
+            break;
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "timed out waiting for pmuxd startup"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
     match probe_socket_liveness(&paths.socket) {
         SocketLiveness::Live => {
             println!("already running");
@@ -1010,64 +1031,32 @@ fn cmd_up(paths: &Paths, program: Vec<String>) -> Result<()> {
         .with_context(|| format!("spawn {}", server.display()))?;
     let pid = child.id();
 
-    let deadline = Instant::now() + UP_WAIT;
     while Instant::now() < deadline {
-        // try_wait reaps a dead child; pid_alive would see the zombie's /proc
-        // entry forever and never take this branch.
-        if child.try_wait()?.is_some() {
-            if probe_socket_liveness(&paths.socket) == SocketLiveness::Live {
-                // Concurrent up/attach race: our child lost the bind and
-                // exited; someone else's server is live. Not a failure, and
-                // the pidfile must not be overwritten with the loser's pid.
-                println!("already running (a concurrent start won the bind)");
+        let exited = child.try_wait()?.is_some();
+        if probe_socket_liveness(&paths.socket) == SocketLiveness::Live {
+            // Only the daemon publishes its PID, after binding. An up caller
+            // cannot infer ownership from its child still running: on macOS
+            // the losing child may not have reached the lock yet.
+            if read_valid_pid(paths) == Some(pid) {
+                println!("started pmuxd");
+                println!("  pid:    {pid}");
+                println!("  socket: {}", paths.socket.display());
+                println!("  log:    {}", paths.logfile.display());
+                println!("  attach: pmux attach");
+                return Ok(());
+            }
+            if exited {
+                println!("already running (a concurrent start won the lock)");
                 println!("  socket: {}", paths.socket.display());
                 return Ok(());
             }
+        }
+        if exited && !prismattyc_mux::daemon_lock::DaemonLock::is_held(&paths.socket)? {
             let tail = log_tail(&paths.logfile, 20);
             bail!(
                 "server exited during start — log tail ({}):\n{tail}",
                 paths.logfile.display()
             );
-        }
-        if probe_socket_liveness(&paths.socket) == SocketLiveness::Live {
-            match listener_inode(&paths.socket) {
-                // Only this child holding the bound socket proves the Live
-                // probe is ours — a concurrent starter's cmdline is identical,
-                // so argv can't disambiguate the bind winner.
-                Some(inode) if pid_holds_socket(pid, inode) => {
-                    std::fs::write(&paths.pidfile, format!("{pid}\n"))
-                        .with_context(|| format!("write {}", paths.pidfile.display()))?;
-                    println!("started pmuxd");
-                    println!("  pid:    {pid}");
-                    println!("  socket: {}", paths.socket.display());
-                    println!("  log:    {}", paths.logfile.display());
-                    println!("  attach: pmux attach");
-                    return Ok(());
-                }
-                Some(_) => {
-                    // Another server holds the socket; our child is the bind
-                    // loser and about to exit on AddrInUse anyway.
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    println!("already running (a concurrent start won the bind)");
-                    println!("  socket: {}", paths.socket.display());
-                    return Ok(());
-                }
-                // Inode not readable yet — retry rather than misclassify.
-                // macOS has no /proc/net/unix: Live + our child still running
-                // is the bind proof.
-                None if !cfg!(target_os = "linux") && child.try_wait()?.is_none() => {
-                    std::fs::write(&paths.pidfile, format!("{pid}\n"))
-                        .with_context(|| format!("write {}", paths.pidfile.display()))?;
-                    println!("started pmuxd");
-                    println!("  pid:    {pid}");
-                    println!("  socket: {}", paths.socket.display());
-                    println!("  log:    {}", paths.logfile.display());
-                    println!("  attach: pmux attach");
-                    return Ok(());
-                }
-                None => {}
-            }
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -3443,6 +3432,7 @@ fn require_live(paths: &Paths) -> Result<()> {
 }
 
 fn cmd_doctor(paths: &Paths, key: Option<String>) -> Result<()> {
+    prismattyc_mux::login::report(&paths.socket)?;
     require_live(paths)?;
     let mut client = Client::connect(&paths.socket)?;
     let registered = client.request(|request_id| ControlRequest::RegisterClient {
@@ -3529,6 +3519,116 @@ fn cmd_doctor(paths: &Paths, key: Option<String>) -> Result<()> {
         bail!("no session matching {filter:?}");
     }
     Ok(())
+}
+
+fn cmd_login(paths: &Paths, rest: &[String]) -> Result<()> {
+    use prismattyc_mux::login;
+    if rest.len() != 1 {
+        return login::command_help();
+    }
+    let executable = prismattyc_mux::release_update::login_launcher()?;
+    match rest[0].as_str() {
+        "enable" | "disable" => {
+            login::set_preference(rest[0] == "enable")?;
+            login::sync(&paths.socket, &executable)?;
+            login::report(&paths.socket)
+        }
+        "sync" => login::sync(&paths.socket, &executable),
+        "status" => login::report(&paths.socket),
+        "run" => run_login_supervisor(paths),
+        "print" => {
+            #[cfg(target_os = "macos")]
+            println!(
+                "{}",
+                login::render_launch_agent(&paths.socket, &executable)?
+            );
+            #[cfg(target_os = "linux")]
+            println!(
+                "{}",
+                login::render_systemd_unit(&paths.socket, &executable)?
+            );
+            #[cfg(windows)]
+            println!(
+                "{} --socket {} login run",
+                executable.display(),
+                paths.socket.display()
+            );
+            Ok(())
+        }
+        _ => login::command_help(),
+    }
+}
+
+fn run_login_supervisor(paths: &Paths) -> Result<()> {
+    #[cfg(windows)]
+    unsafe {
+        windows_sys::Win32::System::Console::FreeConsole();
+    }
+    if let Some(parent) = paths.socket.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let lock = prismattyc_mux::platform::private_options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(paths.socket.with_extension("login.lock"))?;
+    match prismattyc_mux::platform::try_lock_exclusive(&lock) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    let mut delay = Duration::from_secs(1);
+    let mut observed_live = false;
+    loop {
+        if !prismattyc_mux::login::enabled(&paths.socket)? {
+            return Ok(());
+        }
+        match probe_socket_liveness(&paths.socket) {
+            SocketLiveness::Live => {
+                observed_live = true;
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+            SocketLiveness::Foreign => bail!("login restore refused a foreign socket"),
+            SocketLiveness::Missing | SocketLiveness::Stale => {}
+        }
+        if observed_live && paths.socket.with_extension("stopped").is_file() {
+            return Ok(());
+        }
+        let log = prismattyc_mux::platform::private_options()
+            .create(true)
+            .append(true)
+            .open(&paths.logfile)?;
+        let mut command = Command::new(find_bin(&["PMUX_SERVER"], &["pmuxd"]));
+        command
+            .arg("--socket")
+            .arg(&paths.socket)
+            .arg("--restore-workspace")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log.try_clone()?))
+            .stderr(Stdio::from(log));
+        prismattyc_mux::platform::detach_command(&mut command);
+        let started = Instant::now();
+        let mut child = command.spawn().context("start login daemon")?;
+        loop {
+            if let Some(status) = child.try_wait()? {
+                if status.success() {
+                    return Ok(());
+                }
+                break;
+            }
+            // Disabling login leaves this detached daemon's live sessions alone.
+            if !prismattyc_mux::login::enabled(&paths.socket)? {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        if started.elapsed() > Duration::from_secs(60) {
+            delay = Duration::from_secs(1);
+        }
+        std::thread::sleep(delay);
+        delay = (delay * 2).min(Duration::from_secs(30));
+    }
 }
 
 fn cmd_kick(paths: &Paths, key: &str) -> Result<()> {
@@ -7558,14 +7658,6 @@ fn find_server_pid(socket: &Path) -> Option<u32> {
     procinfo::find_server_pids(socket)
         .into_iter()
         .find(|&pid| inode.is_none_or(|inode| procinfo::pid_holds_socket(pid, inode)))
-}
-
-fn listener_inode(path: &Path) -> Option<u64> {
-    procinfo::listener_inode(path)
-}
-
-fn pid_holds_socket(pid: u32, inode: u64) -> bool {
-    procinfo::pid_holds_socket(pid, inode)
 }
 
 fn log_tail(path: &Path, lines: usize) -> String {

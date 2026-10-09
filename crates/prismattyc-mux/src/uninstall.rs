@@ -370,7 +370,7 @@ fn real_home_for_uid(uid: u32) -> Option<PathBuf> {
 /// Single source of truth for the data-file inventory, mirroring the per-
 /// domain helpers (mailbox, layout_file, walkthrough, pane_log_persist).
 const DATA_FILES: &[&str] = &["mail.db", "session-agents.json", "walkthrough.json"];
-const DATA_DIRS: &[&str] = &["spaces", "layouts"];
+const DATA_DIRS: &[&str] = &["spaces", "layouts", "workspaces"];
 
 /// Build the full inventory for the given directories and OS, filtered to the
 /// running OS. Pure: it never reads or writes the filesystem, so tests can
@@ -718,6 +718,11 @@ fn run_with_shutdown(
     // live sessions or report that nothing changed after stopping the daemon.
     if interactive {
         eprintln!("Warning: this stops the Prismattyc daemon and all sessions.");
+        for item in &plan {
+            if item.what == "workspace login registration" {
+                crate::login::remove_registration(&item.path)?;
+            }
+        }
         shutdown(dirs);
     }
 
@@ -920,6 +925,37 @@ pub fn planned_paths(dirs: &Dirs, keep_data: bool) -> Vec<PathBuf> {
 /// uninstall boundary and uses only paths derived from `Dirs`.
 fn removal_plan(dirs: &Dirs) -> Vec<Item> {
     let mut items = inventory(dirs);
+    let login_directory = match dirs.os {
+        Os::Macos => dirs
+            .home
+            .as_ref()
+            .map(|p| (p.join("Library/LaunchAgents"), "plist")),
+        Os::Linux => dirs
+            .config_home
+            .as_ref()
+            .map(|p| (p.join("systemd/user"), "service")),
+        Os::Windows => dirs.config_home.as_ref().map(|p| {
+            (
+                p.join("Microsoft/Windows/Start Menu/Programs/Startup"),
+                "lnk",
+            )
+        }),
+        Os::Any => None,
+    };
+    if let Some((directory, extension)) = login_directory {
+        for entry in std::fs::read_dir(directory).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some(extension)
+                && crate::login::registration_label(&path).is_some()
+            {
+                items.push(Item {
+                    path,
+                    category: Category::Integration,
+                    what: "workspace login registration".to_owned(),
+                });
+            }
+        }
+    }
     if dirs.os == Os::Macos {
         #[cfg(any(target_os = "macos", all(test, unix)))]
         {
@@ -1209,6 +1245,39 @@ mod tests {
         result.unwrap();
         assert!(!shutdown_called.get(), "declining must not stop the daemon");
         assert!(marker.exists(), "declining must leave the plan untouched");
+    }
+
+    #[test]
+    fn uninstall_removes_own_login_jobs_and_keeps_unrelated_jobs() {
+        for (os, directory, extension) in [
+            (Os::Macos, "home/Library/LaunchAgents", "plist"),
+            (Os::Linux, "config/systemd/user", "service"),
+            (
+                Os::Windows,
+                "config/Microsoft/Windows/Start Menu/Programs/Startup",
+                "lnk",
+            ),
+        ] {
+            let tmp = Scratch::new("login");
+            let dirs = fake_dirs(tmp.path(), os);
+            let directory = tmp.path().join(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            let own = directory.join(format!("dev.prismattyc.pmuxd.0123456789abcdef.{extension}"));
+            let unrelated = directory.join(format!("dev.prismattyc.pmuxd.unrelated.{extension}"));
+            std::fs::write(&own, "job").unwrap();
+            std::fs::write(&unrelated, "unrelated").unwrap();
+            let workspace = tmp.path().join("data/prismattyc/workspaces");
+            std::fs::create_dir_all(&workspace).unwrap();
+            let opts = Options {
+                yes: true,
+                dry_run: false,
+                keep_data: true,
+            };
+            run_with(&opts, &dirs, &mut Cursor::new(b""), false, &|_| None).unwrap();
+            assert!(!own.exists());
+            assert_eq!(std::fs::read_to_string(unrelated).unwrap(), "unrelated");
+            assert!(workspace.exists());
+        }
     }
 
     #[test]

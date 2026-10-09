@@ -808,6 +808,25 @@ pub fn installed_binary(binary: &str) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// Login services keep the stable launcher path across release activation.
+/// Development builds use their own executable and never select another install.
+pub fn login_launcher() -> Result<PathBuf> {
+    let current = std::env::current_exe()?.canonicalize()?;
+    if let Ok(root) = root() {
+        #[cfg(windows)]
+        if root.join("windows-current.json").is_file() {
+            return Ok(windows_update::load(&root)?.bin_dir.join("pmux.exe"));
+        }
+        if let Ok(directory) = default_bin_dir(&root) {
+            let candidate = directory.join(crate::platform::executable_name("pmux"));
+            if candidate.canonicalize().ok().as_ref() == Some(&current) {
+                return Ok(candidate);
+            }
+        }
+    }
+    Ok(current)
+}
+
 /// On macOS, create the app-bundled `pmux` PATH link when the current process
 /// belongs to `Prismattyc.app`. Other launches do not create a link.
 #[cfg(target_os = "macos")]

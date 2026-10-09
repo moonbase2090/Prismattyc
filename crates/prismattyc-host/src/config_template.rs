@@ -45,6 +45,7 @@ pub enum ConfigGroup {
 #[derive(Debug, Clone, Copy)]
 pub enum ConfigValue {
     Bool(bool),
+    CommentedBool(bool),
     Usize(usize),
     U32(u32),
     U64(u64),
@@ -109,6 +110,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         doc: "Show the launch splash on bare launches",
         range: "true|false",
         value: ConfigValue::Bool(true),
+    },
+    ConfigKey {
+        name: "start_at_login",
+        group: ConfigGroup::Appearance,
+        doc: "Start at login and restore workspace; existing saved workspaces default on, new installs off",
+        range: "true|false",
+        value: ConfigValue::CommentedBool(false),
     },
     ConfigKey {
         name: "splash_animation",
@@ -560,7 +568,7 @@ fn group_header(group: ConfigGroup) -> &'static str {
 
 fn format_value(value: ConfigValue) -> String {
     match value {
-        ConfigValue::Bool(v) => v.to_string(),
+        ConfigValue::Bool(v) | ConfigValue::CommentedBool(v) => v.to_string(),
         ConfigValue::Usize(v) => v.to_string(),
         ConfigValue::U32(v) => v.to_string(),
         ConfigValue::U64(v) => v.to_string(),
@@ -591,7 +599,9 @@ fn emit_key(out: &mut String, key: &ConfigKey) {
         ConfigValue::CommentedPath(_) if key.name == "font_fallback" => {
             out.push_str(&format!("# {} = [{rendered}]\n", key.name));
         }
-        ConfigValue::CommentedPath(_) | ConfigValue::CommentedString(_) => {
+        ConfigValue::CommentedPath(_)
+        | ConfigValue::CommentedString(_)
+        | ConfigValue::CommentedBool(_) => {
             out.push_str(&format!("# {} = {rendered}\n", key.name));
         }
         _ => out.push_str(&format!("{} = {rendered}\n", key.name)),
@@ -863,6 +873,14 @@ fn insert_toml_value(document: &mut toml_edit::DocumentMut, key: &ConfigKey) {
     }
     match key.value {
         ConfigValue::Bool(v) => document[key.name] = toml_edit::value(v),
+        ConfigValue::CommentedBool(value) => {
+            if !document_has_key_or_comment(document, key.name) {
+                document[key.name] = toml_edit::value(value);
+                if let Some(mut name) = document.key_mut(key.name) {
+                    name.leaf_decor_mut().set_prefix("# ");
+                }
+            }
+        }
         ConfigValue::Usize(v) => {
             document[key.name] = toml_edit::value(i64::try_from(v).unwrap_or(i64::MAX));
         }
@@ -1130,6 +1148,7 @@ mod tests {
         "focus_border_animation_ms",
         "focus_border_animation_head",
         "splash",
+        "start_at_login",
         "splash_animation",
         "reduced_motion",
         "install_agent_skills",

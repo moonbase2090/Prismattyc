@@ -4028,6 +4028,25 @@ impl ControlPlane {
         })
     }
 
+    /// Called only during restore, before clients can connect. Bypass sync
+    /// input fan-out: each restored pane has its own saved foreground job.
+    pub(crate) fn resume_workspace_command(
+        &mut self,
+        pane: u64,
+        command: &str,
+    ) -> anyhow::Result<()> {
+        let live = self
+            .live
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("restore requires a live runtime"))?;
+        live.write(pane, format!("{command}\r").into_bytes())
+            .map_err(|error| anyhow::anyhow!("resume pane {pane}: {error:?}"))
+    }
+
+    pub(crate) fn saved_workspace(&self) -> anyhow::Result<crate::workspace::Workspace> {
+        crate::workspace::Workspace::capture(self, self.domain.next_ids())
+    }
+
     pub fn handle(&mut self, request: ControlRequest) -> ControlResponse {
         let (version, request_id) = request.header();
         if request_id == 0 {

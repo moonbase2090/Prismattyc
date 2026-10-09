@@ -2882,6 +2882,9 @@ impl App {
             return;
         }
         let prior = std::mem::replace(&mut self.file_config, newest);
+        if self.file_config.start_at_login != prior.start_at_login {
+            restore_prompt::sync_login_registration();
+        }
         if self.file_config.remote != prior.remote
             && self
                 .remote
@@ -3610,6 +3613,7 @@ impl App {
             timing.record_phase(pump_timing::Phase::DrainPty, phase_started.elapsed());
             let phase_started = Instant::now();
             maybe_e2e_dismiss_splash(host);
+            restore_prompt::poll(host);
             let due_link_opens = host.link_click_gesture.take_due(Instant::now());
             for url in due_link_opens {
                 let _ = open_url(&url);
@@ -3688,7 +3692,12 @@ impl App {
                 earliest(
                     earliest(toast_end, notice_end),
                     earliest(
-                        earliest(splash_frame, cache_poll),
+                        earliest(
+                            earliest(splash_frame, cache_poll),
+                            host.restore_prompt
+                                .as_ref()
+                                .and_then(restore_prompt::RestorePrompt::deadline),
+                        ),
                         host.link_click_gesture.deadline(),
                     ),
                 ),
@@ -3915,14 +3924,37 @@ impl App {
         let prior_cache_stamp = attach_layout_path
             .as_ref()
             .and_then(|path| cache_stamp(path));
-        let restore_prompt = if startup.cache_writer && startup.attach == StartupAttachPlan::Bare {
-            attach_layout_path
-                .as_ref()
-                .and_then(|path| attach_tabs::load(path))
-                .and_then(restore_prompt::RestorePrompt::new)
-        } else {
-            None
-        };
+        let mut restore_prompt =
+            if startup.cache_writer && startup.attach == StartupAttachPlan::Bare {
+                attach_layout_path
+                    .as_ref()
+                    .and_then(|path| attach_tabs::load(path))
+                    .or_else(|| {
+                        host_mux_socket().and_then(|socket| {
+                            prismattyc_mux::workspace::load(&socket)
+                                .ok()
+                                .flatten()
+                                .or_else(|| {
+                                    prismattyc_mux::workspace::Workspace::from_saved_spaces(&socket)
+                                        .ok()
+                                        .flatten()
+                                })
+                                .and_then(|saved| saved.view)
+                        })
+                    })
+                    .and_then(restore_prompt::RestorePrompt::new)
+            } else {
+                None
+            };
+        if self.file_config.space_startup.as_deref() != Some("fresh") {
+            if let Some(prompt) = restore_prompt.as_mut() {
+                if let Some(socket) =
+                    host_mux_socket().filter(|s| prismattyc_mux::login::enabled(s).unwrap_or(false))
+                {
+                    prompt.arm(socket, find_mux_bin(), Arc::clone(&self.wake));
+                }
+            }
+        }
         // Consume this cache stamp once. While the choice is open the poll is
         // held; declining must not regroup this same cache on the next tick.
         let startup_cache_stamp = restore_prompt.as_ref().and(prior_cache_stamp);
@@ -20710,6 +20742,9 @@ fn main() -> Result<()> {
         eprintln!("prismattyc-host: warning: {warning}");
     }
     cli.apply_config(&file_config);
+    if !cli.explicit_program && cli.attach_sessions.is_empty() {
+        restore_prompt::sync_login_registration();
+    }
     #[cfg(target_os = "macos")]
     agent_skills::start(file_config.install_agent_skills(), pmux_bin());
     // Windowed host requires a display; fail clearly in pure SSH/CI. macOS and

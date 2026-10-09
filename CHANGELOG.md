@@ -13,9 +13,9 @@ rejects it prints a plain page, and start and quit stay free of escape
 sequences. Color follows stdout. A second bare launch of the GUI focuses the
 existing window. A local daemon connect from the GUI gives up after two
 seconds. The Apps & features entry points its icon at `prismattyc-host.exe`,
-on the uninstall key the installer created. The installer writes that icon
-into the machine uninstall key while it writes the registry, and does not
-start a helper to do it.
+on the uninstall key the installer created. An elevated install writes that icon into the machine uninstall key while
+it writes the registry. A non-elevated install skips that write, so a denied
+machine-key update cannot roll the install back. It does not start a helper.
 
 ## [0.3.30] - 2026-10-09
 

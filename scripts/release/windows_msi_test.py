@@ -84,6 +84,14 @@ class WindowsMsiTests(unittest.TestCase):
         )
         shortcut = source.split('Id="StartMenuShortcut"', 1)[1].split("</Component>", 1)[0]
         self.assertIn('Bitness="always64"', shortcut)
+        self.assertNotIn('Root="HKLM"', shortcut)
+        machine = source.split('Id="ArpDisplayIconMachine"', 1)[1].split("</Component>", 1)[0]
+        self.assertIn('Condition="Privileged"', machine)
+        self.assertIn(
+            'Root="HKLM" Key="Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\[ProductCode]" '
+            'Name="DisplayIcon" Type="string" Value="[BINFOLDER]prismattyc-host.exe,0"',
+            machine,
+        )
         self.assertNotIn("Win64", source)
         builder = (ROOT / "scripts/release/windows_msi.py").read_text(encoding="utf-8")
         self.assertIn('"-arch",\n        "x64"', builder)

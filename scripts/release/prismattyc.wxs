@@ -123,8 +123,16 @@
       <Shortcut Id="PrismattycHost" Name="Prismattyc" Target="[BINFOLDER]prismattyc-host.exe" WorkingDirectory="INSTALLFOLDER" Icon="PrismattycIcon" />
       <RemoveFolder Id="RemoveStartMenuShortcutFolder" On="uninstall" />
       <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="shortcut" Type="integer" Value="1" KeyPath="yes" />
-      <!-- The installer service writes this value. A helper started through WMI keeps the user token and cannot. -->
-      <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\[ProductCode]" Name="DisplayIcon" Type="string" Value="[BINFOLDER]prismattyc-host.exe,0" />
+    </Component>
+
+    <!--
+      A non-elevated per-user install writes the registry while impersonating
+      the user. An HKLM value there returns 1406 and rolls the install back.
+      RegisterProduct still creates the machine uninstall key. This component
+      writes DisplayIcon only when the install is elevated.
+    -->
+    <Component Id="ArpDisplayIconMachine" Guid="97f7d375-264b-530c-9142-b8cf93de2024" Directory="BINFOLDER" Bitness="always64" Condition="Privileged">
+      <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\[ProductCode]" Name="DisplayIcon" Type="string" Value="[BINFOLDER]prismattyc-host.exe,0" KeyPath="yes" />
     </Component>
 
     <!-- Off unless msiexec is passed ADDTOPATH=1. Uninstall removes the entry this component added. -->
@@ -149,6 +157,7 @@
       <ComponentGroupRef Id="Docs" />
       <ComponentGroupRef Id="LicenseFiles" />
       <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="ArpDisplayIconMachine" />
       <ComponentRef Id="UserPath" />
     </Feature>
   </Package>

@@ -353,9 +353,10 @@ mod tests {
         server.join().unwrap();
     }
 
-    /// macOS refuses a full unix listen queue. Linux returns `EAGAIN` without
-    /// starting the connect. Either way the call must come back at once. A
-    /// blocking `connect` on Linux waits here until `accept`.
+    /// macOS refuses once `listen(1)` has one pending connect. Linux allows a
+    /// few more, then returns `EAGAIN` without starting the connect. Either
+    /// way the call must come back at once. A blocking `connect` on Linux
+    /// waits here until `accept`.
     #[cfg(unix)]
     #[test]
     fn connect_timeout_does_not_spend_its_budget_on_a_full_listen_queue() {
@@ -369,8 +370,25 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         listen(&listener, 1).unwrap();
         let addr = SocketAddrUnix::new(&path).unwrap();
-        let held = super::open_nonblocking_unix().unwrap();
-        connect(&held, &addr).expect("the single queued connect");
+        let mut held = Vec::new();
+        let mut refused = false;
+        for _ in 0..64 {
+            let sock = super::open_nonblocking_unix().unwrap();
+            match connect(&sock, &addr) {
+                Ok(()) => held.push(sock),
+                Err(rustix::io::Errno::INTR) => {}
+                Err(rustix::io::Errno::INPROGRESS) => held.push(sock),
+                Err(_) => {
+                    refused = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            refused,
+            "listen queue still accepted {} connections",
+            held.len()
+        );
 
         let target = path.clone();
         let (tx, rx) = mpsc::channel();
@@ -399,26 +417,52 @@ mod tests {
         );
     }
 
-    /// `poll` on a unix socket that has not started `connect` waits until the
-    /// deadline. That is the path an in-progress connect uses.
+    /// `poll` for write waits out the deadline while the socket stays
+    /// unwritable. An in-progress connect uses that wait. An idle socket is
+    /// the wrong stimulus: Linux reports it writable before `connect`.
     #[cfg(unix)]
     #[test]
-    fn connect_wait_gives_up_when_nothing_connects() {
+    fn connect_wait_gives_up_when_the_socket_stays_unwritable() {
         use std::sync::mpsc;
 
-        let sock = super::open_nonblocking_unix().unwrap();
+        use rustix::io::{ioctl_fionbio, Errno};
+        use rustix::net::{socketpair, AddressFamily, SendFlags, SocketFlags, SocketType};
+
+        let (reader, writer) = socketpair(
+            AddressFamily::UNIX,
+            SocketType::STREAM,
+            SocketFlags::empty(),
+            None,
+        )
+        .unwrap();
+        ioctl_fionbio(&writer, true).unwrap();
+        let chunk = [0u8; 4096];
+        let mut filled = false;
+        for _ in 0..4096 {
+            match rustix::net::send(&writer, &chunk, SendFlags::empty()) {
+                Ok(_) => {}
+                Err(Errno::AGAIN) => {
+                    filled = true;
+                    break;
+                }
+                Err(err) => panic!("filling the send buffer failed: {err}"),
+            }
+        }
+        assert!(filled, "send buffer never filled");
+
         let timeout = Duration::from_millis(300);
         let (tx, rx) = mpsc::channel();
         let worker = thread::spawn(move || {
             let started = Instant::now();
-            let result = super::wait_until_connected(&sock, timeout);
+            let result = super::wait_until_connected(&writer, timeout);
             let _ = tx.send((
                 started.elapsed(),
                 result.map(|_| ()).map_err(|error| error.kind()),
             ));
         });
         let outcome = rx.recv_timeout(Duration::from_secs(3));
-        drop(worker);
+        drop(reader);
+        let _ = worker.join();
         let (waited, result) = outcome.expect("connect wait blocked past the timeout");
         assert_eq!(result, Err(std::io::ErrorKind::TimedOut), "{waited:?}");
         assert!(

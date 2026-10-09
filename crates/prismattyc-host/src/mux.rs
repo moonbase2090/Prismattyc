@@ -5898,12 +5898,23 @@ mod tests {
             adopted.by_pane.contains_key(&pane),
             "the async path leaves the adopted mark for clear_gone to settle"
         );
-        let gone = crate::attach_adopt::clear_gone(&mut runtime, &mut adopted, &[pane]);
-        assert!(
-            gone.is_empty(),
-            "the replica is not a pane whose attach left"
-        );
-        assert!(adopted.by_pane.is_empty());
+        let settle = Instant::now() + Duration::from_secs(12);
+        while !adopted.by_pane.is_empty() {
+            let _ = runtime.drain_all();
+            let gone = crate::attach_adopt::clear_gone(&mut runtime, &mut adopted, &[pane]);
+            assert!(
+                gone.is_empty(),
+                "the replica is not a pane whose attach left"
+            );
+            if adopted.by_pane.is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < settle,
+                "adopted mark did not settle after async promote"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
         assert_eq!(runtime.attach_session_of(pane), Some(session_id.as_str()));
     }
 

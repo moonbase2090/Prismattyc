@@ -8,8 +8,8 @@ Fail when:
 Global counts are informational for PRs. --release instead enforces the
 −10 target against the last refreshed baseline. A release at the C>threshold
 resident floor is done: coverage cannot bring those functions under
-threshold. Run --release before cutting a release tag, not for per-merge
-version stamps. Both modes print the counts, the C>threshold floor by crate, and
+threshold. Run --release before cutting a release tag, not on every
+merge. Both modes print the counts, the C>threshold floor by crate, and
 the top 10 functions above threshold per crate. Refresh the comparison
 baseline deliberately with scripts/crap-refresh.sh.
 """

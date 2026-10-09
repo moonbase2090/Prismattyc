@@ -299,7 +299,7 @@ local-actions run --event workflow_dispatch --job crap-release
 
 The Local Actions daemon must use that checkout as its root. Require
 `status: succeeded` and `exit_code: 0` for the returned run ID before you
-publish the tag. A per-merge `0.1.x` version stamp does not run this check.
+publish the tag. A feature or fix merge does not run this check.
 
 [The release workflow](../.github/workflows/crap-release.yml) captures
 coverage in the runner and invokes `scripts/crap-gate.py --release`.
@@ -309,7 +309,8 @@ current count, last refreshed baseline count, actual delta, and target.
 The regular `crap` job continues to enforce the file-scoped merge checks.
 
 The comparison source is the last deliberately refreshed baseline. It
-does not track each workspace version bump or update at merge time.
+does not track the workspace version or update at merge time; only the
+release PR moves the version.
 The release check counts that baseline's entries. The `previous_release`
 and `previous_above_count` fields describe the earlier refresh and remain
 visible for context. For example, a baseline count of 181 gives a release

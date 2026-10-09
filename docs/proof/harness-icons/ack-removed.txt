@@ -1,0 +1,1 @@
+prismattyc_host[unittests src/main.rs]::sidebar_width::tests::seat_icons_follow_the_label_and_spaces_stay_spaces

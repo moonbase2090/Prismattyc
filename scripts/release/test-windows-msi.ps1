@@ -104,6 +104,7 @@ function Get-PrismattycUninstallKeys {
                 Write-Output ([pscustomobject]@{
                     ProductCode    = $item.PSChildName
                     DisplayVersion = [string]$item.GetValue('DisplayVersion')
+                    DisplayIcon    = [string]$item.GetValue('DisplayIcon')
                     Hive           = $root
                 })
             }
@@ -145,6 +146,10 @@ function Assert-Installed {
     }
     if ($ProductVersion -and $entries[0].DisplayVersion -ne $ProductVersion) {
         throw "ARP version $($entries[0].DisplayVersion) is not $ProductVersion"
+    }
+    $expectedIcon = "$(Join-Path $install.Bin 'prismattyc-host.exe'),0"
+    if ($entries[0].DisplayIcon -ne $expectedIcon) {
+        throw "ARP DisplayIcon '$($entries[0].DisplayIcon)' in $($entries[0].Hive) is not $expectedIcon"
     }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $parts = @($userPath -split ';' | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') })

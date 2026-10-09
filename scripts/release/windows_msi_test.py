@@ -76,6 +76,19 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn("reset-windows-update-pointer.ps1", source)
         self.assertIn("[SystemFolder]WindowsPowerShell\\v1.0\\powershell.exe", source)
         self.assertIn("-WindowStyle Hidden", source)
+        self.assertIn('Id="SetArpDisplayIcon"', source)
+        self.assertIn(
+            r"HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\[ProductCode]",
+            source,
+        )
+        self.assertIn("prismattyc-host.exe,0", source)
+        self.assertNotIn(
+            r"HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\[ProductCode]",
+            source,
+        )
+        proof = (ROOT / "scripts/release/test-windows-msi.ps1").read_text(encoding="utf-8")
+        self.assertIn("ARP DisplayIcon", proof)
+        self.assertIn("prismattyc-host.exe'),0", proof)
         self.assertNotIn('ExeCommand="powershell.exe', source)
         self.assertIn("windows-current.json", reset)
         for forbidden in ("Stop-Process", "taskkill", "kill"):

@@ -84,7 +84,7 @@ ARM64 runners. `scripts/release/build-linux.sh` uses `cargo-zigbuild` with a
 names. The jobs run `scripts/release/smoke-linux-al2023.sh` before packaging.
 That check reports the maximum GLIBC symbol version from `objdump -T` for each
 binary, then runs `prismattyc --version`, `pmux --version`, and
-`pmuxd --version` in `amazonlinux:2023`. CI runs the same check for both
+`pmuxd --version` in `public.ecr.aws/amazonlinux/amazonlinux:2023`. CI runs the same check for both
 architectures. The jobs generate manual pages with `scripts/install-man.sh`
 and package the result with `scripts/release/package.py`.
 

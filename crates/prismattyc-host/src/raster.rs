@@ -4342,17 +4342,25 @@ pub(crate) fn rasterize_splash_art(
     );
 }
 
-fn rasterize_splash_lines(
+struct SplashBlitPlan {
+    stars: Vec<(char, usize, usize, [u8; 3])>,
+    letters: Vec<(char, usize, usize, [u8; 3])>,
+    art_left: usize,
+    art_top: usize,
+    art_right: usize,
+    art_bottom: usize,
+}
+
+fn plan_splash_blits(
     font: &FontMetrics,
     lines: &[Vec<(String, [u8; 3])>],
-    buffer: &mut [u32],
     stride_px: usize,
     buffer_height_px: usize,
     animation_ms: Option<u64>,
     art_only: bool,
-) {
+) -> Option<SplashBlitPlan> {
     if stride_px == 0 || buffer_height_px == 0 {
-        return;
+        return None;
     }
     let line_cols = |line: &[(String, [u8; 3])]| {
         line.iter()
@@ -4361,7 +4369,7 @@ fn rasterize_splash_lines(
     };
     let max_cols = lines.iter().map(|line| line_cols(line)).max().unwrap_or(0);
     if max_cols == 0 || lines.is_empty() {
-        return;
+        return None;
     }
     let block_w = max_cols.saturating_mul(font.cell_w).min(stride_px);
     let block_h = lines
@@ -4370,12 +4378,9 @@ fn rasterize_splash_lines(
         .min(buffer_height_px);
     let col_x0 = (stride_px.saturating_sub(block_w)) / 2;
     let mut row_y = (buffer_height_px.saturating_sub(block_h)) / 2;
-    // Flare glyphs are nudged half a cell toward each letter corner; paint them
-    // (and pixel rays) before letter ink so stars never wash the wordmark.
     let mut stars: Vec<(char, usize, usize, [u8; 3])> = Vec::new();
     let mut letters: Vec<(char, usize, usize, [u8; 3])> = Vec::new();
     let (nudge_x, nudge_y) = (font.cell_w / 2, font.cell_h / 2);
-    // Art bounding box in pixels: rays never cross it.
     let art_top = row_y;
     let art_bottom = row_y + ART.len() * font.cell_h;
     let art_left = col_x0 + ART_MARGIN_LEFT * font.cell_w;
@@ -4401,16 +4406,6 @@ fn rasterize_splash_lines(
                     FLARE_GLYPH | FLARE_PEAK_GLYPH | RAY_GLYPH | STREAK_GLYPH | STREAK_CORE_GLYPH
                 ) {
                     let top_left = col < ART_MARGIN_LEFT;
-                    // Both groups rise half a row: the top-left star onto the
-                    // P's top corner, the lower-right star onto the top-right
-                    // corner of the C's bottom arm, so its rays leave the
-                    // corner up-right and its streak runs right at that height.
-                    // The lower-right group moves a whole extra cell: the C's
-                    // right outline stroke (`╗`) sits between its block edge
-                    // and the margin, and the star belongs on the block edge.
-                    // The top-left group moves three-eighths of a cell right,
-                    // so the star's centre lands a couple of pixels outside
-                    // the P's corner rather than on top of the block edge.
                     let sy = row_y.saturating_sub(nudge_y);
                     let sx = if top_left {
                         x + nudge_x * 3 / 4
@@ -4427,6 +4422,47 @@ fn rasterize_splash_lines(
         }
         row_y = row_y.saturating_add(font.cell_h);
     }
+    Some(SplashBlitPlan {
+        stars,
+        letters,
+        art_left,
+        art_top,
+        art_right,
+        art_bottom,
+    })
+}
+
+fn rasterize_splash_lines(
+    font: &FontMetrics,
+    lines: &[Vec<(String, [u8; 3])>],
+    buffer: &mut [u32],
+    stride_px: usize,
+    buffer_height_px: usize,
+    animation_ms: Option<u64>,
+    art_only: bool,
+) {
+    let plan = plan_splash_blits(
+        font,
+        lines,
+        stride_px,
+        buffer_height_px,
+        animation_ms,
+        art_only,
+    );
+    let plan = match plan {
+        Some(plan) => plan,
+        None => return,
+    };
+    let SplashBlitPlan {
+        stars,
+        letters,
+        art_left,
+        art_top,
+        art_right,
+        art_bottom,
+    } = plan;
+    // Flare glyphs are nudged half a cell toward each letter corner; paint them
+    // (and pixel rays) before letter ink so stars never wash the wordmark.
     let mut star_index = 0usize;
     let levels = animation_ms.map(flare_intensities);
     for (ch, sx, sy, rgb) in stars {
@@ -10846,57 +10882,51 @@ mod tests {
         let Ok(font) = FontMetrics::load(14.0) else {
             return;
         };
-        use prismattyc_core::splash::{
-            ART, FLARE_GLYPH, FLARE_PEAK_GLYPH, INK, RAY_GLYPH, STREAK_CORE_GLYPH, STREAK_GLYPH,
-        };
-        let at = prismattyc_core::splash::SETTLED_MS + 2000;
+        use prismattyc_core::splash::{ART, ART_MARGIN_LEFT, INTRO_MS};
+        let at = INTRO_MS - 20;
         let lines = crate::splash::layout(crate::splash::Page::Main, "0.0.0-test", 0, Some(at));
         let (w, h) = (1100_usize, 420_usize);
         let bg = [0x10, 0x10, 0x18];
         let bgp = pack_rgb(bg);
-        let ink = pack_rgb(INK);
+        let plan = plan_splash_blits(&font, &lines, w, h, Some(at), false).expect("splash layout");
+        let mut letters = vec![bgp; w * h];
+        for (ch, x, y, rgb) in &plan.letters {
+            blit_glyph(&mut letters, w, &font, *ch, *x, *y, *rgb);
+        }
+        let mut flares_last = letters.clone();
+        for (ch, sx, sy, rgb) in &plan.stars {
+            if sx.saturating_add(font.cell_w) <= w && sy.saturating_add(font.cell_h) <= h {
+                blit_glyph(&mut flares_last, w, &font, *ch, *sx, *sy, *rgb);
+            }
+        }
+        let washed: Vec<usize> = letters
+            .iter()
+            .zip(flares_last.iter())
+            .enumerate()
+            .filter(|(_, (letter, flares))| **letter != bgp && **letter != **flares)
+            .map(|(px, _)| px)
+            .collect();
+        assert!(
+            !washed.is_empty(),
+            "nudged flare glyphs must overlap painted letter pixels at {at}ms \
+             (pre-fix paint order replaces them)"
+        );
         let mut animated = vec![bgp; w * h];
         rasterize_splash(&font, &lines, &mut animated, w, h, bg, Some(at));
-        let max_cols = lines
-            .iter()
-            .map(|l| l.iter().map(|(t, _)| t.chars().count()).sum::<usize>())
-            .max()
-            .unwrap();
+        for px in washed {
+            assert_eq!(
+                animated[px], letters[px],
+                "flare must paint under letter ink at pixel {px}"
+            );
+        }
+        let line_cols = |line: &[(String, [u8; 3])]| {
+            line.iter()
+                .map(|(text, _)| text.chars().count())
+                .sum::<usize>()
+        };
+        let max_cols = lines.iter().map(|line| line_cols(line)).max().unwrap();
         let col_x0 = (w - (max_cols * font.cell_w).min(w)) / 2;
         let row_y0 = (h - (lines.len() * font.cell_h).min(h)) / 2;
-        let mut letters = vec![bgp; w * h];
-        let mut row_y = row_y0;
-        for (line_index, line) in lines.iter().enumerate() {
-            if line_index >= ART.len() {
-                break;
-            }
-            let mut x = col_x0;
-            for (text, rgb) in line {
-                for ch in text.chars() {
-                    if matches!(
-                        ch,
-                        FLARE_GLYPH
-                            | FLARE_PEAK_GLYPH
-                            | RAY_GLYPH
-                            | STREAK_GLYPH
-                            | STREAK_CORE_GLYPH
-                    ) {
-                        x = x.saturating_add(font.cell_w);
-                        continue;
-                    }
-                    if ch != ' ' {
-                        blit_glyph(&mut letters, w, &font, ch, x, row_y, *rgb);
-                    }
-                    x = x.saturating_add(font.cell_w);
-                }
-            }
-            row_y = row_y.saturating_add(font.cell_h);
-        }
-        for (px, (letter, anim)) in letters.iter().zip(animated.iter()).enumerate() {
-            if *letter == ink {
-                assert_eq!(*anim, ink, "flare washed letter ink at pixel {px}");
-            }
-        }
         let corner_x = col_x0 + ART_MARGIN_LEFT * font.cell_w;
         let strip = (row_y0 - font.cell_h / 2..row_y0)
             .flat_map(|y| (col_x0..corner_x + font.cell_w).map(move |x| (x, y)))

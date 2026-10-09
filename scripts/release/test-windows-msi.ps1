@@ -159,7 +159,7 @@ function Assert-Installed {
     }
     $expectedIcon = "$(Join-Path $install.Bin 'prismattyc-host.exe'),0"
     # The helper sets DisplayIcon after msiexec creates the key and returns.
-    $deadline = (Get-Date).AddSeconds(5)
+    $deadline = (Get-Date).AddSeconds(10)
     while ($entries[0].DisplayIcon -ne $expectedIcon -and (Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 200
         $entries = @(Get-PrismattycUninstallKeys)

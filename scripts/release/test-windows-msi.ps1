@@ -38,11 +38,10 @@ function Get-PrismattycUninstallKey {
     foreach ($root in $roots) {
         if (-not (Test-Path -LiteralPath $root)) { continue }
         foreach ($item in Get-ChildItem -LiteralPath $root) {
-            $props = Get-ItemProperty -LiteralPath $item.PSPath
-            if ($props.DisplayName -eq 'Prismattyc' -and $props.Publisher -eq 'Moonbase2090') {
+            if ($item.GetValue('DisplayName') -eq 'Prismattyc' -and $item.GetValue('Publisher') -eq 'Moonbase2090') {
                 return [pscustomobject]@{
                     ProductCode    = $item.PSChildName
-                    DisplayVersion = [string]$props.DisplayVersion
+                    DisplayVersion = [string]$item.GetValue('DisplayVersion')
                 }
             }
         }
@@ -83,7 +82,7 @@ function Assert-Installed {
         throw "ARP version $($arp.DisplayVersion) is not $ProductVersion"
     }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    $parts = @($userPath -split ';' | Where-Object { $_ })
+    $parts = @($userPath -split ';' | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') })
     $listed = $parts -contains $install.Bin
     if ($PathExpected -xor $listed) {
         throw "PATH opt-in is $listed; expected $PathExpected"
@@ -98,7 +97,7 @@ function Assert-Removed {
     if (Test-Path -LiteralPath $shortcut) { throw "Start menu shortcut remains: $shortcut" }
     if (Get-PrismattycUninstallKey) { throw 'ARP entry remains after uninstall.' }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    if ($userPath -split ';' -contains $install.Bin) { throw 'User PATH still contains the install bin.' }
+    if (@($userPath -split ';' | ForEach-Object { $_.TrimEnd('\') }) -contains $install.Bin) { throw 'User PATH still contains the install bin.' }
     foreach ($path in $Survivors) {
         if (-not (Test-Path -LiteralPath $path)) { throw "Uninstall removed preserved data: $path" }
     }

@@ -59,6 +59,11 @@ Windows builds in this release are not code-signed. Azure Artifact Signing
 is awaiting Microsoft's organization validation, and the workflow skips
 signing until it is configured. SmartScreen may warn on first run.
 
+### Release versioning
+
+Workspace versions now change only in release PRs. Feature and fix PRs
+keep the current release version.
+
 ## [0.3.29] - 2026-10-08
 
 ### Since 0.3.3-rc.1

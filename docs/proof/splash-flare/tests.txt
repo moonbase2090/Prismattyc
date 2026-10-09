@@ -1,0 +1,40 @@
+# splash-flare proof (tester@repro)
+
+=== splash_flare_preserves_letter_ink_at_corners ===
+# cargo test -p prismattyc-host -- splash_flare_preserves_letter_ink_at_corners
+   Compiling prismattyc-core v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-core)
+   Compiling prismattyc-emulator v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-emulator)
+   Compiling prismattyc-render v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-render)
+   Compiling prismattyc-mux v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-mux)
+   Compiling prismattyc-host v0.3.29 (/Users/brandan/Projects/Moonbase2090/Prismattyc/crates/prismattyc-host)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.02s
+     Running unittests src/main.rs (target/debug/deps/prismattyc_host-652b874acb990e28)
+
+running 1 test
+test raster::tests::splash_flare_preserves_letter_ink_at_corners ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1079 filtered out; finished in 0.36s
+
+     Running tests/version.rs (target/debug/deps/version-a3e89fe38852ab0e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+
+=== splash_rays_rotate_and_stay_out_of_the_art ===
+# cargo test -p prismattyc-host -- splash_rays_rotate_and_stay_out_of_the_art
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running unittests src/main.rs (target/debug/deps/prismattyc_host-652b874acb990e28)
+
+running 1 test
+test raster::tests::splash_rays_rotate_and_stay_out_of_the_art ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1079 filtered out; finished in 0.33s
+
+     Running tests/version.rs (target/debug/deps/version-a3e89fe38852ab0e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+

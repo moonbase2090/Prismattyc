@@ -1,0 +1,29 @@
+[regress 03:21:14] scratch: /tmp/prismattyc-regress-20261009-032114-Mx1g (toolchain 1.90.0, target /tmp/prismattyc-regress-20261009-032114-Mx1g/target)
+[regress 03:21:15] base 3f31446fe4a5e24e2e3365bdc0ad513627d58cc2
+[regress 03:21:15] head b2ca21c40af27464d47d5dd03eb43eca4787d14e
+[regress 03:21:15] [base] worktree at 3f31446fe4a5
+[regress 03:21:15] [base] cargo test --workspace --locked -- --list (and --ignored)
+[regress 03:21:54] [base] cargo test --workspace --locked --no-fail-fast
+[regress 03:22:51] [base] tests rc=101, 2608 results, 1 failed
+[regress 03:23:07] [base] rich_prism_exits_when_host_pty_hangs_up passed on rerun 2 (flaky)
+[regress 03:23:07] [base] probe dump
+[regress 03:23:23] [head] worktree at b2ca21c40af2
+[regress 03:23:23] [head] cargo test --workspace --locked -- --list (and --ignored)
+[regress 03:24:01] [head] cargo test --workspace --locked --no-fail-fast
+[regress 03:24:55] [head] tests rc=0, 2608 results, 0 failed
+[regress 03:24:55] [head] probe dump
+=== prismattyc-regress-check summary ===
+base 3f31446fe4a5  head b2ca21c40af2  toolchain 1.90.0  Darwin arm64  2026-10-09 03:25 MDT
+cargo test --workspace --locked --no-fail-fast: base rc=101, head rc=0
+counts base: 2605 passed, 0 failed, 1 flaky (failed, then passed on rerun), 2 ignored (2608 total)
+counts head: 2606 passed, 0 failed, 0 flaky (failed, then passed on rerun), 2 ignored (2608 total)
+list: removed=0 newly-ignored=0 newly-failing=0 preexisting-failing=0 added=1 ack-removed=1
+FLAKY ON BASE:
+  transport_matrix[tests/transport_matrix.rs]::rich_prism_exits_when_host_pty_hangs_up
+ACK-REMOVED:
+  prismattyc_host[unittests src/main.rs]::raster::tests::splash_flare_star_overlays_the_letter_corner
+ADDED:
+  prismattyc_host[unittests src/main.rs]::raster::tests::splash_flare_preserves_letter_ink_at_corners
+probe: 130754 lines (colors, tokens, bar_layout, sidebar_layout, side_rail_px) base=73255d6734a095af head=73255d6734a095af kinds=default/default differing-lines=0 
+RESULT: CLEAN
+=== end summary ===

@@ -1,0 +1,1 @@
+prismattyc_host[unittests src/main.rs]::raster::tests::splash_flare_star_overlays_the_letter_corner

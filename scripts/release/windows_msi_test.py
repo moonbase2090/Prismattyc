@@ -92,6 +92,10 @@ class WindowsMsiTests(unittest.TestCase):
             'Name="DisplayIcon" Type="string" Value="[BINFOLDER]prismattyc-host.exe,0"',
             machine,
         )
+        hklm_value = machine.split('Root="HKLM"', 1)[1].split("/>", 1)[0]
+        self.assertNotIn('KeyPath="yes"', hklm_value)
+        hkcu_value = machine.split('Root="HKCU"', 1)[1].split("/>", 1)[0]
+        self.assertIn('KeyPath="yes"', hkcu_value)
         self.assertNotIn("Win64", source)
         builder = (ROOT / "scripts/release/windows_msi.py").read_text(encoding="utf-8")
         self.assertIn('"-arch",\n        "x64"', builder)

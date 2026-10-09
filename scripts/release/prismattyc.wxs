@@ -129,10 +129,12 @@
       A non-elevated per-user install writes the registry while impersonating
       the user. An HKLM value there returns 1406 and rolls the install back.
       RegisterProduct still creates the machine uninstall key. This component
-      writes DisplayIcon only when the install is elevated.
+      writes DisplayIcon only when the install is elevated. Its key path stays
+      under HKCU; an HKLM key path fails ICE38 on a per-user package.
     -->
-    <Component Id="ArpDisplayIconMachine" Guid="97f7d375-264b-530c-9142-b8cf93de2024" Directory="BINFOLDER" Bitness="always64" Condition="Privileged">
-      <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\[ProductCode]" Name="DisplayIcon" Type="string" Value="[BINFOLDER]prismattyc-host.exe,0" KeyPath="yes" />
+    <Component Id="ArpDisplayIconMachine" Guid="97f7d375-264b-530c-9142-b8cf93de2024" Directory="ProgramMenuFolder" Bitness="always64" Condition="Privileged">
+      <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="display-icon" Type="integer" Value="1" KeyPath="yes" />
+      <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\[ProductCode]" Name="DisplayIcon" Type="string" Value="[BINFOLDER]prismattyc-host.exe,0" />
     </Component>
 
     <!-- Off unless msiexec is passed ADDTOPATH=1. Uninstall removes the entry this component added. -->

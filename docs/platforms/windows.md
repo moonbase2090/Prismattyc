@@ -48,8 +48,10 @@ starts for itself, including `git` and `pmux`, are created with
 runs `pmux login run` through `wscript` with a hidden window. The installer's
 update-pointer script starts PowerShell hidden. Apps & features
 shows the publisher Moonbase2090 and the numeric MSI product version described
-below. Its icon is `DisplayIcon` on the per-user uninstall key, set to
-`prismattyc-host.exe,0`. `pmux --version` still reports the semver.
+below. Its icon is `DisplayIcon` on the uninstall key Windows Installer
+created, set to `prismattyc-host.exe,0`. An elevated install records that key
+under HKLM. A standard per-user install records it under HKCU. `pmux --version`
+still reports the semver.
 
 ```powershell
 msiexec /i prismattyc-v0.3.29-x86_64-pc-windows-msvc.msi /qn /norestart

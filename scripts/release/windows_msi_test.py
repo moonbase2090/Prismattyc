@@ -77,15 +77,18 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn("[SystemFolder]WindowsPowerShell\\v1.0\\powershell.exe", source)
         self.assertIn("-WindowStyle Hidden", source)
         self.assertIn('Id="SetArpDisplayIcon"', source)
+        self.assertIn("Test-Path -LiteralPath", source)
+        self.assertNotIn("New-Item", source)
         self.assertIn(
             r"HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\[ProductCode]",
             source,
         )
-        self.assertIn("prismattyc-host.exe,0", source)
-        self.assertNotIn(
+        self.assertIn(
             r"HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\[ProductCode]",
             source,
         )
+        self.assertIn("prismattyc-host.exe,0", source)
+        self.assertIn("Prismattyc uninstall key was not found", source)
         proof = (ROOT / "scripts/release/test-windows-msi.ps1").read_text(encoding="utf-8")
         self.assertIn("ARP DisplayIcon", proof)
         self.assertIn("prismattyc-host.exe'),0", proof)

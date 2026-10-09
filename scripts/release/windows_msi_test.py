@@ -78,7 +78,6 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn("-WindowStyle Hidden", source)
         self.assertIn('Id="SetArpDisplayIconHkcu"', source)
         self.assertIn('Id="SetArpDisplayIconHklm"', source)
-        self.assertIn("Test-Path -LiteralPath", source)
         self.assertNotIn("New-Item", source)
         hkcu = source.split('Id="SetArpDisplayIconHkcu"', 1)[1].split("/>", 1)[0]
         hklm = source.split('Id="SetArpDisplayIconHklm"', 1)[1].split("/>", 1)[0]
@@ -88,15 +87,22 @@ class WindowsMsiTests(unittest.TestCase):
             hkcu,
         )
         self.assertNotIn("HKLM:", hkcu)
+        self.assertNotIn("{", hkcu)
+        self.assertIn("-ErrorAction SilentlyContinue", hkcu)
+        self.assertIn("exit 0", hkcu)
         self.assertIn('Impersonate="no"', hklm)
         self.assertIn(
             r"HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\[ProductCode]",
             hklm,
         )
         self.assertNotIn("HKCU:", hklm)
+        self.assertNotIn("{", hklm)
+        self.assertIn("-ErrorAction SilentlyContinue", hklm)
+        self.assertIn("exit 0", hklm)
         self.assertIn("prismattyc-host.exe,0", hkcu)
         self.assertIn("prismattyc-host.exe,0", hklm)
         proof = (ROOT / "scripts/release/test-windows-msi.ps1").read_text(encoding="utf-8")
+        self.assertIn("'/l*v'", proof)
         self.assertIn("ARP DisplayIcon", proof)
         self.assertIn("prismattyc-host.exe'),0", proof)
         self.assertNotIn('ExeCommand="powershell.exe', source)

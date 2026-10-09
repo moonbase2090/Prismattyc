@@ -79,9 +79,19 @@ function Start-Msi {
 
 function Invoke-Msi {
     param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
-    $commandLine = New-MsiCommandLine $ArgumentList
+    $log = Join-Path ([System.IO.Path]::GetTempPath()) ('prismattyc-msi-{0}.log' -f [guid]::NewGuid().ToString('n'))
+    $commandLine = New-MsiCommandLine ($ArgumentList + @('/l*v', $log))
     $code = Start-Msi -CommandLine $commandLine
-    if ($code -ne 0) { throw "msiexec $commandLine exited $code" }
+    if ($code -ne 0) {
+        $detail = ''
+        if (Test-Path -LiteralPath $log) {
+            $matched = Select-String -LiteralPath $log -Pattern 'Error [0-9]|Custom action|Return value|SetArpDisplayIcon' | Select-Object -Last 30
+            if ($matched) { $detail = ($matched | ForEach-Object { $_.Line }) -join "`n" }
+        }
+        Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
+        throw "msiexec $commandLine exited $code`n$detail"
+    }
+    Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
 }
 
 function Get-PrismattycInstall {

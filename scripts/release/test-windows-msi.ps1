@@ -158,17 +158,22 @@ function Assert-Installed {
         throw "ARP version $($entries[0].DisplayVersion) is not $ProductVersion"
     }
     $expectedIcon = "$(Join-Path $install.Bin 'prismattyc-host.exe'),0"
-    if ($entries[0].DisplayIcon -ne $expectedIcon) {
-        $traces = @()
-        foreach ($root in @('HKCU', 'HKLM')) {
-            $trace = Join-Path ([System.IO.Path]::GetTempPath()) "prismattyc-displayicon-$root.txt"
-            if (Test-Path -LiteralPath $trace) {
-                $traces += (Get-Content -LiteralPath $trace -Raw).Trim()
-            }
-        }
+    # The helper sets DisplayIcon after msiexec creates the key and returns.
+    $deadline = (Get-Date).AddSeconds(5)
+    while ($entries[0].DisplayIcon -ne $expectedIcon -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 200
+        $entries = @(Get-PrismattycUninstallKeys)
+        if ($entries.Count -ne 1) { break }
+    }
+    if ($entries.Count -ne 1 -or $entries[0].DisplayIcon -ne $expectedIcon) {
+        $trace = Join-Path ([System.IO.Path]::GetTempPath()) 'prismattyc-displayicon.txt'
         $extra = ''
-        if ($traces.Count -gt 0) { $extra = "`n" + ($traces -join "`n") }
-        throw "ARP DisplayIcon '$($entries[0].DisplayIcon)' in $($entries[0].Hive) is not $expectedIcon$extra"
+        if (Test-Path -LiteralPath $trace) {
+            $extra = "`n" + ((Get-Content -LiteralPath $trace -Raw).Trim())
+        }
+        $shown = ''
+        if ($entries.Count -eq 1) { $shown = "$($entries[0].Hive)\$($entries[0].ProductCode) '$($entries[0].DisplayIcon)'" }
+        throw "ARP DisplayIcon is not $expectedIcon ($shown)$extra"
     }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $parts = @($userPath -split ';' | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') })

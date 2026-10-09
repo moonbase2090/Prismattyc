@@ -13,8 +13,8 @@ rejects it prints a plain page, and start and quit stay free of escape
 sequences. Color follows stdout. A second bare launch of the GUI focuses the
 existing window. A local daemon connect from the GUI gives up after two
 seconds. The Apps & features entry points its icon at `prismattyc-host.exe`,
-on the uninstall key the installer created. An elevated install sets that
-icon after install, as the user who ran it.
+on the uninstall key the installer created. A hidden helper sets that icon
+once the key exists, which is after the installer returns.
 
 ## [0.3.29] - 2026-10-08
 

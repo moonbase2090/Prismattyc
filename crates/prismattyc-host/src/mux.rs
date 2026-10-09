@@ -2585,7 +2585,18 @@ impl MuxRuntime {
             .collect()
     }
 
-    pub(crate) fn refresh_git_info(&mut self, snapshot: Option<&prismattyc_mux::Snapshot>) -> bool {
+    fn lookup_cwd(pid: u32, cached_cwd: Option<&HashMap<u32, PathBuf>>) -> Option<PathBuf> {
+        match cached_cwd {
+            Some(cached) => cached.get(&pid).cloned(),
+            None => prismattyc_mux::procinfo::cwd_of(pid),
+        }
+    }
+
+    pub(crate) fn refresh_git_info(
+        &mut self,
+        snapshot: Option<&prismattyc_mux::Snapshot>,
+        cached_cwd: Option<&HashMap<u32, PathBuf>>,
+    ) -> bool {
         let targets = self
             .panes
             .iter()
@@ -2599,11 +2610,14 @@ impl MuxRuntime {
                         .find(|p| p.id == remote)?;
                     remote
                         .child_pid
-                        .and_then(prismattyc_mux::procinfo::cwd_of)
+                        .and_then(|pid| Self::lookup_cwd(pid, cached_cwd))
                         .or_else(|| pane.emulator.cwd().map(Path::to_path_buf))
                         .or_else(|| remote.spawn.as_ref().and_then(|s| s.cwd.clone()))
+                } else if let Some(path) = pane.emulator.cwd().filter(|path| path.is_absolute()) {
+                    Some(path.to_path_buf())
                 } else {
-                    pane.cwd_for_split()
+                    pane.child_pid()
+                        .and_then(|pid| Self::lookup_cwd(pid, cached_cwd))
                 }?;
                 Some((*id, cwd))
             })

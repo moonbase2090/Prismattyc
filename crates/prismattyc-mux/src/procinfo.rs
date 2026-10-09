@@ -40,10 +40,27 @@ pub fn pids() -> Vec<u32> {
 /// Pids that look like a `pmuxd --socket PATH` on this host.
 #[must_use]
 pub fn find_server_pids(socket: &Path) -> Vec<u32> {
-    list_pids()
-        .into_iter()
-        .filter(|&pid| cmdline_matches_server(pid, socket))
-        .collect()
+    #[cfg(windows)]
+    {
+        // One process-list refresh. Per-pid `cmdline` walks the list again.
+        windows::server_pids(socket)
+    }
+    #[cfg(not(windows))]
+    {
+        list_pids()
+            .into_iter()
+            .filter(|&pid| cmdline_matches_server(pid, socket))
+            .collect()
+    }
+}
+
+/// One Windows process-list refresh: `pmuxd` pids for `socket`, and cwd for `cwd_pids`.
+#[cfg(windows)]
+pub fn server_pids_and_cwds(
+    socket: &Path,
+    cwd_pids: &[u32],
+) -> (Vec<u32>, std::collections::HashMap<u32, std::path::PathBuf>) {
+    windows::server_pids_and_cwds(socket, cwd_pids)
 }
 
 /// Test-only: `space save` records this string as the pane foreground command
@@ -371,6 +388,11 @@ pub fn cmdline_matches_server(pid: u32, socket: &Path) -> bool {
     let Some(args) = cmdline(pid) else {
         return false;
     };
+    argv_matches_server(&args, socket)
+}
+
+/// `args` is a `pmuxd --socket PATH` command line for `socket`.
+pub fn argv_matches_server(args: &[Vec<u8>], socket: &Path) -> bool {
     let Some(argv0) = args.first() else {
         return false;
     };
@@ -748,6 +770,41 @@ mod tests {
     }
 
     #[test]
+    fn argv_matches_server_requires_pmuxd_and_this_socket() {
+        let socket = Path::new("/tmp/prismattyc.sock");
+        let want = socket.as_os_str().as_encoded_bytes().to_vec();
+        assert!(argv_matches_server(
+            &[b"pmuxd".to_vec(), b"--socket".to_vec(), want.clone()],
+            socket,
+        ));
+        assert!(argv_matches_server(
+            &[
+                b"/usr/local/bin/pmuxd".to_vec(),
+                b"--socket".to_vec(),
+                want.clone(),
+            ],
+            socket,
+        ));
+        assert!(!argv_matches_server(
+            &[b"pmux".to_vec(), b"--socket".to_vec(), want.clone()],
+            socket,
+        ));
+        assert!(!argv_matches_server(
+            &[
+                b"pmuxd".to_vec(),
+                b"--socket".to_vec(),
+                b"/tmp/other.sock".to_vec(),
+            ],
+            socket,
+        ));
+        assert!(!argv_matches_server(
+            &[b"pmuxd".to_vec(), b"--socket".to_vec()],
+            socket
+        ));
+        assert!(!argv_matches_server(&[], socket));
+    }
+
+    #[test]
     fn shell_join_quotes_spaces() {
         assert_eq!(shell_join(&["claude".into()]), "claude");
         assert_eq!(
@@ -1008,6 +1065,16 @@ mod windows {
             self.pids.iter().map(|pid| pid.as_u32())
         }
 
+        pub fn agent(&self, root: u32) -> crate::InjectAgent {
+            match self.inspect(root) {
+                Some(Foreground::Running { args, .. }) => {
+                    crate::inject_submit::classify_windows_argv(&args)
+                        .unwrap_or(crate::InjectAgent::Unknown)
+                }
+                _ => crate::InjectAgent::Unknown,
+            }
+        }
+
         pub fn cmdline(&self, pid: u32) -> Option<Vec<Vec<u8>>> {
             self.system
                 .process(Pid::from_u32(pid))?
@@ -1228,5 +1295,53 @@ mod windows {
             CloseHandle(snapshot);
             (!result.is_empty()).then_some(result)
         }
+    }
+
+    /// One process-list refresh. `find_server_pids` used to refresh once per pid.
+    fn listed(with_cwd: bool) -> System {
+        let mut kind = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always);
+        if with_cwd {
+            kind = kind.with_cwd(UpdateKind::Always);
+        }
+        let mut system = System::new();
+        system.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+        system
+    }
+
+    fn matching_servers(system: &System, socket: &Path) -> Vec<u32> {
+        system
+            .processes()
+            .iter()
+            .filter_map(|(pid, process)| {
+                let args: Vec<Vec<u8>> = process
+                    .cmd()
+                    .iter()
+                    .map(|arg| arg.to_string_lossy().as_bytes().to_vec())
+                    .collect();
+                super::argv_matches_server(&args, socket).then_some(pid.as_u32())
+            })
+            .collect()
+    }
+
+    pub(super) fn server_pids(socket: &Path) -> Vec<u32> {
+        matching_servers(&listed(false), socket)
+    }
+
+    pub(super) fn server_pids_and_cwds(
+        socket: &Path,
+        cwd_pids: &[u32],
+    ) -> (Vec<u32>, HashMap<u32, std::path::PathBuf>) {
+        let system = listed(true);
+        let servers = matching_servers(&system, socket);
+        let mut cwds = HashMap::new();
+        for pid in cwd_pids {
+            if let Some(cwd) = system
+                .process(Pid::from_u32(*pid))
+                .and_then(|process| process.cwd())
+            {
+                cwds.insert(*pid, cwd.to_path_buf());
+            }
+        }
+        (servers, cwds)
     }
 }

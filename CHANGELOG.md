@@ -1,5 +1,68 @@
 # Changelog
 
+## [0.3.30] - 2026-10-09
+
+### Workspace recovery
+
+**Start at login and restore workspace** starts pmuxd at login without a
+host window and restores saved sessions, panes, tabs, and Space ownership.
+Mail remains in its durable store. A supervisor restarts the daemon after
+a crash, and concurrent starts cannot create duplicate sessions. The host
+selects **Restore workspace** and restores after three seconds when the
+setting is enabled.
+
+New installations default to off. Existing saved workspaces default to on
+at the first upgrade launch unless explicitly disabled. Restoring starts
+new processes; it does not recover process memory or shell variables.
+`pmux login` manages the setting, and `pmux doctor` reports its state.
+Running `pmux` through a symlink now finds its companion executables.
+
+### Rendering and responsiveness
+
+Sustained terminal output no longer freezes painting on macOS. PTY draining
+uses `pty_drain_budget_ms`, which defaults to 8 ms and can be changed live.
+
+macOS has an optional IOSurface presentation backend. Set
+`macos_present = "iosurface"` and restart to try it. The tile backend remains
+the default. The new backend handles resize and scale changes and falls
+back to tiles if allocation fails.
+
+Space file reads, team descriptions, and autosave commands run on background
+workers. Delayed saves stay with the Space visit that started them, and a
+save reports an error if its private view cannot be written. Autosave keeps
+newly moved sessions while attachment finishes.
+
+Muse mail notifications and automatic pane submission now work when the
+pane uses the Kitty keyboard protocol.
+
+### Appearance
+
+The Graphite sidebar uses distinct icons for Spaces, tabs, and panes in both
+the expanded tree and collapsed strip. Live pane icons identify the running
+agent from its foreground process. Set `sidebar_harness_icons = false` to
+use generic pane icons.
+
+Pane headers, status indicators, and animated focus rings now use shared
+Graphite pane calculations. Splash lens flares paint behind the letters so
+the wordmark remains legible.
+
+### Windows
+
+A per-user MSI installs the application and command-line tools, adds a Start
+menu shortcut, and registers an Apps & features entry. Adding the tools to
+PATH is optional. The installer supports upgrades and replacement builds
+of the same version while leaving a running daemon alone. Detached daemon
+starts no longer hold the launching command's standard handles open.
+
+Windows builds in this release are not code-signed. Azure Artifact Signing
+is awaiting Microsoft's organization validation, and the workflow skips
+signing until it is configured. SmartScreen may warn on first run.
+
+### Release versioning
+
+Workspace versions now change only in release PRs. Feature and fix PRs
+keep the current release version.
+
 ## [0.3.29] - 2026-10-08
 
 ### Since 0.3.3-rc.1

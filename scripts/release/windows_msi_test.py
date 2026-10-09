@@ -97,6 +97,7 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn("set-arp-display-icon-hklm.vbs", hklm)
         self.assertIn('Execute="commit"', hklm)
         self.assertIn('Impersonate="no"', hklm)
+        self.assertIn('Return="check"', hklm)
         self.assertNotIn('Execute="immediate"', hklm)
         self.assertNotIn("ExeCommand", hklm)
         self.assertNotIn("set-arp-display-icon.ps1", hklm)
@@ -109,6 +110,13 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn('Action="SetArpDisplayIconHklmData" After="ResetUpdatePointer"', source)
         self.assertIn('Action="SetArpDisplayIconHklm" After="SetArpDisplayIconHklmData"', source)
         self.assertEqual(source.count('Impersonate="no"'), 1)
+        for action in source.split("<CustomAction")[1:]:
+            body = action.split("/>", 1)[0]
+            if 'Impersonate="no"' not in body:
+                continue
+            self.assertNotIn("BINFOLDER", body)
+            self.assertNotIn("LocalAppData", body)
+            self.assertNotIn("set-arp-display-icon.ps1", body)
         self.assertNotIn("set-arp-display-icon-hklm.ps1", source)
         self.assertNotIn("set-arp-display-icon-hklm.vbs", source.replace('ScriptSourceFile="$(var.Repo)\\scripts\\release\\set-arp-display-icon-hklm.vbs"', ""))
         icon_script = (ROOT / "scripts/release/set-arp-display-icon.ps1").read_text(encoding="utf-8")
@@ -141,6 +149,7 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertNotIn("Invoke-Expression", decoded)
         self.assertIn("Set-ItemProperty", decoded)
         self.assertIn("DisplayIcon", decoded)
+        self.assertIn("exit 1", decoded)
         self.assertIn("PRISMATTYC_ARP_DATA=", decoded)
         self.assertIn("Win32_Process", hklm_vbs)
         self.assertIn(r"System32\WindowsPowerShell\v1.0\powershell.exe", hklm_vbs)
@@ -152,6 +161,7 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertNotIn("-File", hklm_vbs)
         self.assertNotIn("BINFOLDER", hklm_vbs)
         self.assertNotIn("LocalAppData", hklm_vbs)
+        self.assertIn("WScript.Quit 1", hklm_vbs)
         packager = (ROOT / "scripts/release/package-windows.py").read_text(encoding="utf-8")
         self.assertIn("set-arp-display-icon.ps1", packager)
         self.assertNotIn("set-arp-display-icon-hklm.ps1", packager)

@@ -29,7 +29,7 @@ function Write-Trace([string]$Line) {
 }
 if (-not $ProductCode -or -not $Root) {
     Write-Trace 'gave-up root=HKLM missing-data'
-    exit 0
+    exit 1
 }
 Write-Trace 'waiting root=HKLM'
 $icon = (Join-Path (Join-Path $Root.TrimEnd('\') 'bin') 'prismattyc-host.exe') + ',0'
@@ -51,6 +51,7 @@ do {
                 $wrote = $true
             } catch {
                 Write-Trace "error=$target $($_.Exception.Message)"
+                exit 1
             }
         }
     }

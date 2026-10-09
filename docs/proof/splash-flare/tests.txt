@@ -1,0 +1,65 @@
+# splash-flare proof (tester@repro)
+
+=== splash_flare_preserves_letter_ink_at_corners (pre-fix paint order, red) ===
+# Same test at tip, but rasterize_splash_lines paints letters before nudged flares
+# (base 3f31446 behavior). Proves the assertion discriminates the fix.
+# cargo test -p prismattyc-host -- splash_flare_preserves_letter_ink_at_corners
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.86s
+     Running unittests src/main.rs (target/debug/deps/prismattyc_host-652b874acb990e28)
+
+running 1 test
+test raster::tests::splash_flare_preserves_letter_ink_at_corners ... FAILED
+
+failures:
+
+---- raster::tests::splash_flare_preserves_letter_ink_at_corners stdout ----
+
+thread 'raster::tests::splash_flare_preserves_letter_ink_at_corners' panicked at crates/prismattyc-host/src/raster.rs:10917:13:
+assertion `left == right` failed: flare must paint under letter ink at pixel 44185
+  left: 4292470777
+ right: 4293454833
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    raster::tests::splash_flare_preserves_letter_ink_at_corners
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1079 filtered out; finished in 0.36s
+
+error: test failed, to rerun pass `-p prismattyc-host --bin prismattyc-host`
+
+=== splash_flare_preserves_letter_ink_at_corners (tip, green) ===
+# Probe: pixels where letter-only buffer disagrees with letters-then-flares composite
+# at INTRO_MS-20; animated splash must match letter-only on those pixels.
+# cargo test -p prismattyc-host -- splash_flare_preserves_letter_ink_at_corners
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.06s
+     Running unittests src/main.rs (target/debug/deps/prismattyc_host-652b874acb990e28)
+
+running 1 test
+test raster::tests::splash_flare_preserves_letter_ink_at_corners ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1079 filtered out; finished in 0.35s
+
+     Running tests/version.rs (target/debug/deps/version-a3e89fe38852ab0e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+
+=== splash_rays_rotate_and_stay_out_of_the_art ===
+# cargo test -p prismattyc-host -- splash_rays_rotate_and_stay_out_of_the_art
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running unittests src/main.rs (target/debug/deps/prismattyc_host-652b874acb990e28)
+
+running 1 test
+test raster::tests::splash_rays_rotate_and_stay_out_of_the_art ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1079 filtered out; finished in 0.33s
+
+     Running tests/version.rs (target/debug/deps/version-a3e89fe38852ab0e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+

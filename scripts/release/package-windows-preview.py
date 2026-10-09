@@ -62,8 +62,9 @@ No administrator access is needed. The installer verifies package checksums
 and runs --version on all six programs before copying them into:
 %LOCALAPPDATA%\\Programs\\Prismattyc\\windows-preview-<revision>
 It creates a Start menu shortcut named Prismattyc Windows Preview <revision>.
--AddToPath adds this build's bin directory to your user PATH. Omit that flag
-for a shortcut-only installation. Reopen your terminal after changing PATH.
+-AddToPath prepends this build's cmd directory of shims to your user PATH.
+Omit that flag for a shortcut-only installation. Reopen your terminal after
+changing PATH.
 
 Launch the revision-specific Prismattyc Windows Preview shortcut from Start, or run bin\\prismattyc-host.exe
 from the extracted archive for portable use. The default shell is cmd.exe.

@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Windows
+
+`ADDTOPATH=1` prepends the install `cmd` directory instead of `bin`.
+That directory holds `prismattyc.cmd`, `pmux.cmd`, `pmuxd.cmd`,
+`pmux-attach.cmd`, and `pmux-mcp.cmd`. Each shim forwards to the matching
+executable in `bin`. There is no host shim. Install and uninstall remove
+leftover `windows-preview-*` directories under
+`%LOCALAPPDATA%\Programs\Prismattyc` when they are not reparse points,
+along with their Start shortcuts and user PATH entries.
+
 ## [0.3.30] - 2026-10-09
 
 ### Workspace recovery

@@ -7,7 +7,7 @@ $ python3 scripts/release/render-dmg-background.py
   -> scripts/release/dmg-background.png (600x400)
   -> scripts/release/dmg-background@2x.png (1200x800)
 
-$ /Users/brandan/Library/Python/3.9/bin/dmgbuild \
+$ ~/Library/Python/3.9/bin/dmgbuild \
     -s scripts/release/dmgbuild_settings.py \
     -D "app=/Applications/Prismattyc.app" -D "root=$PWD" \
     Prismattyc /tmp/Prismattyc-indigo-proof.dmg

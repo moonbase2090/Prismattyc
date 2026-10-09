@@ -13,7 +13,7 @@ done
 
 docker run --rm --interactive \
   --volume "$bin_dir:/release:ro" \
-  amazonlinux:2023 \
+  public.ecr.aws/amazonlinux/amazonlinux:2023 \
   bash -s <<'AL2023'
 set -euo pipefail
 

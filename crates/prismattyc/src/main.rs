@@ -3221,6 +3221,134 @@ mod tests {
         assert_eq!(encode_key_to_pty(a, flags), Some(b"a".to_vec()));
     }
 
+    /// Every `encode_key_legacy` arm, including the three-way Tab split and
+    /// the keys the match does not claim.
+    #[test]
+    fn encode_key_legacy_table_covers_every_arm() {
+        let enc = |code: KeyCode, mods: KeyModifiers| encode_key_legacy(KeyEvent::new(code, mods));
+        let none = KeyModifiers::NONE;
+        let rows: &[(KeyCode, KeyModifiers, Option<&[u8]>)] = &[
+            (KeyCode::BackTab, KeyModifiers::SHIFT, Some(b"\x1b[Z")),
+            (KeyCode::Char('x'), none, Some(b"x")),
+            (KeyCode::Char(' '), KeyModifiers::CONTROL, Some(b"\0")),
+            (KeyCode::Enter, none, Some(b"\r")),
+            (
+                KeyCode::Enter,
+                KeyModifiers::CONTROL,
+                Some(b"\x1b[27;5;13~"),
+            ),
+            (KeyCode::Backspace, none, Some(b"\x7f")),
+            (
+                KeyCode::Backspace,
+                KeyModifiers::ALT,
+                Some(b"\x1b[27;3;127~"),
+            ),
+            (KeyCode::Tab, none, Some(b"\t")),
+            (KeyCode::Tab, KeyModifiers::SHIFT, Some(b"\x1b[Z")),
+            (KeyCode::Tab, KeyModifiers::CONTROL, Some(b"\x1b[27;5;9~")),
+            (KeyCode::Tab, KeyModifiers::ALT, Some(b"\x1b[27;3;9~")),
+            (KeyCode::Esc, none, Some(b"\x1b")),
+            (KeyCode::Up, none, Some(b"\x1b[A")),
+            (KeyCode::Down, none, Some(b"\x1b[B")),
+            (KeyCode::Right, none, Some(b"\x1b[C")),
+            (KeyCode::Left, none, Some(b"\x1b[D")),
+            (KeyCode::Home, none, Some(b"\x1b[H")),
+            (KeyCode::End, none, Some(b"\x1b[F")),
+            (KeyCode::PageUp, none, Some(b"\x1b[5~")),
+            (KeyCode::PageDown, none, Some(b"\x1b[6~")),
+            (KeyCode::PageDown, KeyModifiers::SHIFT, Some(b"\x1b[6;2~")),
+            (KeyCode::Delete, none, Some(b"\x1b[3~")),
+            (KeyCode::Insert, none, Some(b"\x1b[2~")),
+            (KeyCode::Insert, KeyModifiers::ALT, Some(b"\x1b[2;3~")),
+            (KeyCode::F(2), none, Some(b"\x1bOQ")),
+            (KeyCode::F(6), none, Some(b"\x1b[17~")),
+            (KeyCode::F(13), none, None),
+            (KeyCode::Null, none, None),
+        ];
+        for (code, mods, want) in rows {
+            assert_eq!(enc(*code, *mods).as_deref(), *want, "{code:?} {mods:?}");
+        }
+    }
+
+    /// Every press arm of `encode_key_kitty_disambiguate`. The helper is only
+    /// called with press metadata here (`event_type` 1, event reporting off).
+    /// `encode_key_kitty` never forwards a release in that state.
+    #[test]
+    fn encode_key_kitty_disambiguate_table_covers_every_arm() {
+        let enc = |code: KeyCode, mods: KeyModifiers| {
+            encode_key_kitty_disambiguate(KeyEvent::new(code, mods), 1, false, false)
+        };
+        let none = KeyModifiers::NONE;
+        let rows: &[(KeyCode, KeyModifiers, Option<&[u8]>)] = &[
+            (KeyCode::Esc, none, Some(b"\x1b[27u")),
+            (KeyCode::Enter, none, Some(b"\r")),
+            (KeyCode::Tab, none, Some(b"\t")),
+            (KeyCode::Tab, KeyModifiers::SHIFT, Some(b"\x1b[9;2u")),
+            (KeyCode::Tab, KeyModifiers::CONTROL, Some(b"\x1b[9;5u")),
+            (KeyCode::Tab, KeyModifiers::ALT, Some(b"\x1b[9;3u")),
+            (KeyCode::Tab, KeyModifiers::SUPER, Some(b"\x1b[9;9u")),
+            (KeyCode::BackTab, none, Some(b"\x1b[9;2u")),
+            (KeyCode::BackTab, KeyModifiers::CONTROL, Some(b"\x1b[9;6u")),
+            (KeyCode::Backspace, none, Some(b"\x7f")),
+            (
+                KeyCode::Backspace,
+                KeyModifiers::CONTROL,
+                Some(b"\x1b[127;5u"),
+            ),
+            (KeyCode::Char('A'), KeyModifiers::SHIFT, Some(b"A")),
+            (KeyCode::Char('b'), KeyModifiers::ALT, Some(b"\x1b[98;3u")),
+            (KeyCode::Char('c'), KeyModifiers::SUPER, Some(b"\x1b[99;9u")),
+            (KeyCode::Up, none, Some(b"\x1b[A")),
+            (KeyCode::Null, none, None),
+        ];
+        for (code, mods, want) in rows {
+            assert_eq!(enc(*code, *mods).as_deref(), *want, "{code:?} {mods:?}");
+        }
+
+        let mut repeat_esc = KeyEvent::new(KeyCode::Esc, none);
+        repeat_esc.kind = KeyEventKind::Repeat;
+        assert_eq!(
+            encode_key_kitty_disambiguate(repeat_esc, 2, true, false),
+            Some(b"\x1b[27;1:2u".to_vec())
+        );
+        // Caller contract: a release is forwarded with event type 3 and
+        // event reporting on. That is the only helper input `encode_key_kitty`
+        // uses for a release.
+        let mut release_up = KeyEvent::new(KeyCode::Up, none);
+        release_up.kind = KeyEventKind::Release;
+        assert_eq!(
+            encode_key_kitty_disambiguate(release_up, 3, true, false),
+            Some(b"\x1b[1;1:3A".to_vec())
+        );
+        let shifted_alt =
+            KeyEvent::new(KeyCode::Char('A'), KeyModifiers::ALT | KeyModifiers::SHIFT);
+        assert_eq!(
+            encode_key_kitty_disambiguate(shifted_alt, 1, false, true),
+            Some(b"\x1b[97:65;4u".to_vec())
+        );
+    }
+
+    /// Releases go through `encode_key_to_pty`. Disambiguate-only drops them.
+    /// Event reporting forwards Up as CSI `1;1:3 A`.
+    #[test]
+    fn kitty_disambiguate_releases_follow_the_caller() {
+        use prismattyc_emulator::{KITTY_DISAMBIGUATE, KITTY_EVENT_TYPES};
+
+        let disambiguate = KITTY_DISAMBIGUATE;
+        let with_events = KITTY_DISAMBIGUATE | KITTY_EVENT_TYPES;
+        let mut release_letter = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        release_letter.kind = KeyEventKind::Release;
+        let mut release_up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        release_up.kind = KeyEventKind::Release;
+
+        assert_eq!(encode_key_to_pty(release_letter, disambiguate), None);
+        assert_eq!(encode_key_to_pty(release_up, disambiguate), None);
+        assert_eq!(
+            encode_key_to_pty(release_up, with_events),
+            Some(b"\x1b[1;1:3A".to_vec())
+        );
+    }
+
     #[test]
     fn kitty_report_all_encodes_plain_keys_as_csi_u() {
         use prismattyc_emulator::{KITTY_DISAMBIGUATE, KITTY_REPORT_ALL, KITTY_REPORT_TEXT};

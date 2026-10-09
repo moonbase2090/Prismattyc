@@ -114,11 +114,13 @@ mod windows {
         #[cfg(test)]
         SET_MODE_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
         // Windows grants the current user full control and protects the DACL
-        // from inherited access. An inheritable directory ACE makes
-        // SetNamedSecurityInfo walk every existing child, so callers must
-        // not repeat this once the directory is already private.
+        // from inherited access. The directory ACE stays inheritable so a
+        // new child is private at creation. SetFileSecurity writes that
+        // DACL onto this directory only. SetNamedSecurityInfo would walk
+        // every existing child on the calling thread.
         let sid = user_sid()?;
-        let inherit = if path.is_dir() { "OICI" } else { "" };
+        let directory = path.is_dir();
+        let inherit = if directory { "OICI" } else { "" };
         let sddl = wide(std::ffi::OsStr::new(&format!(
             "D:P(A;{inherit};FA;;;{sid})"
         )));
@@ -134,6 +136,18 @@ mod windows {
                 return Err(io::Error::last_os_error());
             }
             let _guard = Local(sd);
+            if directory {
+                // BOOL: zero is failure. This does not propagate to children.
+                if SetFileSecurityW(
+                    wide(path.as_os_str()).as_ptr(),
+                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                    sd,
+                ) == 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                return Ok(());
+            }
             let mut present = 0;
             let mut defaulted = 0;
             let mut acl = ptr::null_mut();
@@ -264,9 +278,10 @@ mod windows {
     }
     /// Only apply a private DACL to an owned application directory, never a redirect.
     ///
-    /// A second call is a lookup. Rewriting an inheritable DACL propagates it
-    /// through the whole tree on the calling thread, which pinned the host
-    /// UI thread while it resolved the mux socket.
+    /// The first call writes the DACL with `SetFileSecurity`, which does not
+    /// walk existing children. A second call is a lookup. Repeating
+    /// `SetNamedSecurityInfo` on an inheritable DACL propagates it through
+    /// the whole tree on the calling thread.
     pub fn secure_directory(path: &Path) -> io::Result<()> {
         if require_private_directory(path).is_ok() {
             return Ok(());

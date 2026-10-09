@@ -47,17 +47,6 @@ impl Adopted {
         self.next = Some(now + POLL);
         true
     }
-
-    /// Keep the next poll a full interval after a scan that overran.
-    ///
-    /// `due` arms from the start. A process snapshot that takes longer than
-    /// the interval would otherwise run again on the next UI-thread pump.
-    pub(crate) fn finished(&mut self, now: Instant) {
-        let next = now + POLL;
-        if self.next.is_none_or(|armed| armed < next) {
-            self.next = Some(next);
-        }
-    }
 }
 
 /// The session a `pmux-attach` argv targets: `--pane` wins, then
@@ -359,17 +348,5 @@ mod tests {
         assert!(adopted.due(t0));
         assert!(!adopted.due(t0 + Duration::from_millis(500)));
         assert!(adopted.due(t0 + POLL));
-    }
-
-    #[test]
-    fn a_slow_poll_waits_a_full_interval_after_it_finishes() {
-        let mut adopted = Adopted::default();
-        let t0 = Instant::now();
-        assert!(adopted.due(t0));
-        let finished_at = t0 + POLL + Duration::from_millis(500);
-        adopted.finished(finished_at);
-        assert!(!adopted.due(finished_at));
-        assert!(!adopted.due(finished_at + POLL - Duration::from_millis(1)));
-        assert!(adopted.due(finished_at + POLL));
     }
 }

@@ -8438,7 +8438,6 @@ fn adopt_nested_attaches(host: &mut HostState, now: Instant) {
         mark_layout_dirty(host);
         host.dirty = true;
     }
-    host.adopted.finished(Instant::now());
 }
 
 fn session_id_from_attach_spawn(program: &str, args: &[String]) -> Option<String> {

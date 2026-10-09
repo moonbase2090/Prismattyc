@@ -40,24 +40,10 @@ pub fn pids() -> Vec<u32> {
 /// Pids that look like a `pmuxd --socket PATH` on this host.
 #[must_use]
 pub fn find_server_pids(socket: &Path) -> Vec<u32> {
-    server_candidate_pids()
+    list_pids()
         .into_iter()
         .filter(|&pid| cmdline_matches_server(pid, socket))
         .collect()
-}
-
-/// Pids whose command line is worth reading while looking for `pmuxd`.
-///
-/// On Windows, reading every process command line repeats a toolhelp
-/// snapshot per pid. The image name is already in one snapshot.
-#[cfg(not(windows))]
-fn server_candidate_pids() -> Vec<u32> {
-    list_pids()
-}
-
-#[cfg(windows)]
-fn server_candidate_pids() -> Vec<u32> {
-    windows::pmuxd_pids()
 }
 
 /// Test-only: `space save` records this string as the pane foreground command
@@ -1242,50 +1228,5 @@ mod windows {
             CloseHandle(snapshot);
             (!result.is_empty()).then_some(result)
         }
-    }
-
-    /// Pids whose image name is `pmuxd.exe`, from one toolhelp snapshot.
-    pub(super) fn pmuxd_pids() -> Vec<u32> {
-        use windows_sys::Win32::{Foundation::*, System::Diagnostics::ToolHelp::*};
-        unsafe {
-            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-            if snapshot == INVALID_HANDLE_VALUE {
-                return Vec::new();
-            }
-            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
-            entry.dwSize = std::mem::size_of_val(&entry) as u32;
-            let mut result = Vec::new();
-            if Process32FirstW(snapshot, &mut entry) != 0 {
-                let mut walked = 0u32;
-                loop {
-                    walked += 1;
-                    if walked > 65_536 {
-                        break;
-                    }
-                    let name = exe_file_name(&entry.szExeFile);
-                    if name.eq_ignore_ascii_case("pmuxd.exe") || name.eq_ignore_ascii_case("pmuxd")
-                    {
-                        result.push(entry.th32ProcessID);
-                    }
-                    if Process32NextW(snapshot, &mut entry) == 0 {
-                        if GetLastError() != ERROR_NO_MORE_FILES {
-                            CloseHandle(snapshot);
-                            return Vec::new();
-                        }
-                        break;
-                    }
-                }
-            }
-            CloseHandle(snapshot);
-            result
-        }
-    }
-
-    fn exe_file_name(wide_name: &[u16]) -> String {
-        let end = wide_name
-            .iter()
-            .position(|unit| *unit == 0)
-            .unwrap_or(wide_name.len());
-        String::from_utf16_lossy(&wide_name[..end])
     }
 }

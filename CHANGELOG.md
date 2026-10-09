@@ -4,7 +4,7 @@
 
 ### Fixed
 
-An idle Windows host no longer rewrites the runtime directory ACL on the UI thread. Resolving the mux socket applied an inheritable DACL on every call, and Windows then walked every child of that directory. The directory is secured once. A full process snapshot cannot start again until a second after the previous snapshot finishes, and finding `pmuxd` reads command lines only for processes named `pmuxd`. macOS socket resolution does not rewrite directory security.
+An idle Windows host no longer rewrites the runtime directory ACL on the UI thread. Resolving the mux socket applied an inheritable DACL on every call, and Windows then walked every child of that directory. The directory is secured once, and that write does not propagate to existing children. The idle event loop already waits until the next deadline or a wake. It polls only while PTY output or a wake is pending. macOS socket resolution does not rewrite directory security.
 
 ## [0.3.30] - 2026-10-09
 

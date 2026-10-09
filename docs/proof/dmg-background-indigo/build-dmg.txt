@@ -1,0 +1,18 @@
+# Local DMG build (composer-2, Oct 9 2026)
+
+Tip branch: feat/dmg-background-indigo
+App: /Applications/Prismattyc.app (icon unchanged; only background asset updated in repo)
+
+$ python3 scripts/release/render-dmg-background.py
+  -> scripts/release/dmg-background.png (600x400)
+  -> scripts/release/dmg-background@2x.png (1200x800)
+
+$ /Users/brandan/Library/Python/3.9/bin/dmgbuild \
+    -s scripts/release/dmgbuild_settings.py \
+    -D "app=/Applications/Prismattyc.app" -D "root=$PWD" \
+    Prismattyc /tmp/Prismattyc-indigo-proof.dmg
+
+-rw-r--r--  35788506 Oct  9 14:31 /tmp/Prismattyc-indigo-proof.dmg
+
+Finder window screenshot blocked in agent environment (screencapture: could not create image from display).
+Visual proof: docs/proof/dmg-background-indigo/background-1x.png matches dmg-background.png baked into the DMG.

@@ -8,8 +8,10 @@ executables, and the Start menu shortcut uses that icon. The GUI stays
 description Prismattyc CLI, and is not a Start shortcut. Helpers the GUI starts
 no longer open a console window. The login daemon starts detached, and the
 installer's update-pointer script starts PowerShell hidden. The CLI tools
-enable virtual-terminal processing, and a pipe prints a plain page. A second
-bare launch of the GUI focuses the existing window.
+enable virtual-terminal processing. A pipe, `NO_COLOR`, or a console that
+rejects it prints a plain page, and start and quit stay free of escape
+sequences. Color follows stdout. A second bare launch of the GUI focuses the
+existing window.
 
 ## [0.3.29] - 2026-10-08
 

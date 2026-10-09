@@ -430,11 +430,18 @@ pub fn hide_console(command: &mut std::process::Command) {
     }
 }
 
+/// Color follows stdout. Enabling stderr must not make a rejected stdout
+/// look ready.
+pub fn stdout_vt_ready(stdout_accepted: bool, _stderr_accepted: bool) -> bool {
+    stdout_accepted
+}
+
 /// Enable virtual-terminal sequences on a console CLI.
 ///
-/// Returns true when stdout or stderr accepted output processing. A pipe, a
-/// file, or a rejected mode returns false. Unix terminals already interpret
-/// the sequences, so this reports ready there.
+/// Returns true when stdout accepted output processing. Stderr is enabled too,
+/// but its result does not decide color. A pipe, a file, or a rejected stdout
+/// mode returns false. Unix terminals already interpret the sequences, so this
+/// reports ready there.
 pub fn enable_console_vt() -> bool {
     #[cfg(not(windows))]
     {
@@ -462,7 +469,7 @@ pub fn enable_console_vt() -> bool {
             let _input = enable(STD_INPUT_HANDLE, console_vt_input_flags());
             let out = enable(STD_OUTPUT_HANDLE, console_vt_output_flags());
             let err = enable(STD_ERROR_HANDLE, console_vt_output_flags());
-            out || err
+            stdout_vt_ready(out, err)
         }
     }
 }
@@ -973,6 +980,14 @@ mod console_flags {
             super::helper_creation_flags() & super::detach_creation_flags(),
             0
         );
+    }
+
+    #[test]
+    fn stdout_vt_ready_ignores_a_stderr_that_accepted_vt() {
+        assert!(!super::stdout_vt_ready(false, true));
+        assert!(super::stdout_vt_ready(true, false));
+        assert!(!super::stdout_vt_ready(false, false));
+        assert!(super::stdout_vt_ready(true, true));
     }
 
     #[test]

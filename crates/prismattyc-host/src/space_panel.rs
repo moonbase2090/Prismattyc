@@ -1144,14 +1144,21 @@ pub(super) fn activate(host: &mut HostState, index: usize) {
     host.window.request_redraw();
 }
 
+/// `winit::event::KeyEvent` cannot be built outside winit: its platform
+/// field is crate-private. The event loop calls this; tests call
+/// [`input_key_logical`] with the same logical key.
 pub(super) fn input_key(host: &mut HostState, event: &winit::event::KeyEvent) -> bool {
+    input_key_logical(host, &event.logical_key)
+}
+
+pub(super) fn input_key_logical(host: &mut HostState, logical_key: &Key) -> bool {
     let Some(panel) = host.space_panel.as_mut() else {
         return false;
     };
     let Some(input) = panel.input.as_mut() else {
         return false;
     };
-    match &event.logical_key {
+    match logical_key {
         Key::Named(NamedKey::Escape) => {
             panel.input = None;
         }
@@ -1883,3 +1890,10 @@ mod layout_tests {
         }
     }
 }
+
+// cargo-mutants 27.1 does not recognize nested cfg(all(test, ...)).
+// Keep cfg(test) separate so mutation targets exclude the test fixture.
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+#[path = "space_panel_input_tests.rs"]
+mod input_tests;

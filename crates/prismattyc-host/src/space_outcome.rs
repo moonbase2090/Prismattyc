@@ -229,6 +229,24 @@ impl Report {
 }
 
 #[cfg(test)]
+impl Report {
+    /// A saved open result the Space panel can render without opening a Space.
+    pub(crate) fn for_test(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            sequence: 1,
+            mode: "switch",
+            view: View::Applied,
+            target: "this window",
+            error: None,
+            seats: Vec::new(),
+            launch: "not observed",
+            session_basis: "before and after daemon snapshots",
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

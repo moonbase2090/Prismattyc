@@ -158,6 +158,9 @@ fn adopt_clears_nested_mark(promoted: bool, log_backed: bool) -> bool {
 ///
 /// Keep process-tree walking and mark mutation together so seam tests can
 /// drive the same operation as the host instead of setting state themselves.
+/// The Windows idle scan calls `discover_windows` instead, so this function
+/// is compiled for the unix pump and for tests.
+#[cfg(any(not(windows), test))]
 pub(crate) fn adopt_candidates(
     mux: &mut crate::mux::MuxRuntime,
     adopted: &mut Adopted,
@@ -182,7 +185,18 @@ pub(crate) fn adopt_candidates(
             snapshot.contains(root, pid) && snapshot.in_terminal_foreground(root, pid) == Some(true)
         })
     };
-    for (pane, pid, id, name) in &assignments {
+    commit_adoptions(mux, adopted, &assignments, socket);
+    assignments
+}
+
+/// Mark the panes in `assignments` and promote each one that has a log.
+pub(crate) fn commit_adoptions(
+    mux: &mut crate::mux::MuxRuntime,
+    adopted: &mut Adopted,
+    assignments: &[Adoption<PaneId>],
+    socket: &Path,
+) {
+    for (pane, pid, id, name) in assignments {
         mux.mark_attach_session(*pane, id.clone(), name.clone());
         let promoted = match mux.promote_to_log_replica(*pane, id, name, socket, Some(*pid)) {
             Ok(ok) => ok,
@@ -198,7 +212,100 @@ pub(crate) fn adopt_candidates(
             adopted.by_pane.insert(*pane, *pid);
         }
     }
-    assignments
+}
+
+/// One off-thread Windows scan: server pid, child cwds, agent icons, adoptions.
+#[cfg(windows)]
+#[derive(Debug)]
+pub(crate) struct WindowsDiscovery {
+    pub(crate) agents: Option<HashMap<u32, prismattyc_mux::InjectAgent>>,
+    pub(crate) server_pid: Option<u32>,
+    pub(crate) cwds: HashMap<u32, std::path::PathBuf>,
+    pub(crate) adoptions: Vec<Adoption<PaneId>>,
+}
+
+/// Collect a scan the UI thread can apply. Does not touch a `MuxRuntime`.
+///
+/// `cwd_pids` is the background cwd lookup. It includes daemon children of
+/// attached panes and is not an agent or adoption root. An empty `agent_roots`
+/// still returns those cwds.
+#[cfg(windows)]
+pub(crate) fn discover_windows(
+    agent_roots: &[u32],
+    candidates: &[(PaneId, u32)],
+    cwd_pids: &[u32],
+    socket: &Path,
+    directory: &[SessionEntry],
+) -> WindowsDiscovery {
+    let (server_pids, cwds) = prismattyc_mux::procinfo::server_pids_and_cwds(socket, cwd_pids);
+    let server_pid = server_pids.into_iter().min();
+    if agent_roots.is_empty() {
+        return WindowsDiscovery {
+            agents: Some(HashMap::new()),
+            server_pid,
+            cwds,
+            adoptions: Vec::new(),
+        };
+    }
+    if let Some(snapshot) = prismattyc_mux::procinfo::WindowsProcessSnapshot::capture(agent_roots) {
+        return WindowsDiscovery {
+            agents: Some(agents_from_snapshot(&snapshot, agent_roots)),
+            server_pid,
+            cwds,
+            adoptions: adoptions_from_snapshot(
+                &snapshot,
+                agent_roots,
+                candidates,
+                socket,
+                directory,
+            ),
+        };
+    }
+    let roots: Vec<u32> = candidates.iter().map(|(_, pid)| *pid).collect();
+    let adoptions = if roots.is_empty() {
+        Vec::new()
+    } else {
+        prismattyc_mux::procinfo::WindowsProcessSnapshot::capture(&roots)
+            .map(|snapshot| {
+                adoptions_from_snapshot(&snapshot, &roots, candidates, socket, directory)
+            })
+            .unwrap_or_default()
+    };
+    WindowsDiscovery {
+        agents: None,
+        server_pid,
+        cwds,
+        adoptions,
+    }
+}
+
+#[cfg(windows)]
+fn agents_from_snapshot(
+    snapshot: &prismattyc_mux::procinfo::WindowsProcessSnapshot,
+    roots: &[u32],
+) -> HashMap<u32, prismattyc_mux::InjectAgent> {
+    roots
+        .iter()
+        .copied()
+        .map(|root| (root, snapshot.agent(root)))
+        .collect()
+}
+
+#[cfg(windows)]
+fn adoptions_from_snapshot(
+    snapshot: &prismattyc_mux::procinfo::WindowsProcessSnapshot,
+    roots: &[u32],
+    candidates: &[(PaneId, u32)],
+    socket: &Path,
+    directory: &[SessionEntry],
+) -> Vec<Adoption<PaneId>> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let clients = snapshot_attach_clients(snapshot, roots, socket);
+    assign(candidates, &clients, directory, |root, pid| {
+        snapshot.contains(root, pid) && snapshot.in_terminal_foreground(root, pid) == Some(true)
+    })
 }
 
 /// Clear adopted marks whose pane or real attach process has gone away.

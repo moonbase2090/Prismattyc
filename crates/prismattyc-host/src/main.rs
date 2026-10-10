@@ -15401,6 +15401,21 @@ fn find_key_while_open(host: &mut HostState, logical: &Key) -> bool {
     true
 }
 
+fn handle_find_key_logical(
+    host: &mut HostState,
+    logical: &Key,
+    action: Option<keybind::Action>,
+    repeat: bool,
+) -> bool {
+    if find_key_on_alt_screen(host) {
+        return false;
+    }
+    if !host.find.active {
+        return find_key_try_open(host, logical, action, repeat);
+    }
+    find_key_while_open(host, logical)
+}
+
 /// Modal find overlay. While open, keys stay host-owned (no PTY inject).
 /// `action` is the key table's verdict for this (non-repeat) event.
 fn handle_find_key(
@@ -15408,14 +15423,7 @@ fn handle_find_key(
     event: &winit::event::KeyEvent,
     action: Option<keybind::Action>,
 ) -> bool {
-    if find_key_on_alt_screen(host) {
-        return false;
-    }
-    let logical = event.key_without_modifiers();
-    if !host.find.active {
-        return find_key_try_open(host, &logical, action, event.repeat);
-    }
-    find_key_while_open(host, &logical)
+    handle_find_key_logical(host, &event.key_without_modifiers(), action, event.repeat)
 }
 
 fn cycle_theme_index(selected: Option<usize>, count: usize, forward: bool) -> Option<usize> {

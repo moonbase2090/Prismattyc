@@ -16,6 +16,7 @@ pub(super) fn verify(host: &mut HostState) {
     verify_scrollback_navigation(host);
     verify_close_target_tab(host);
     verify_find_and_theme_modals(host);
+    verify_find_alt_screen_routing(host);
 }
 
 fn verify_find_and_theme_modals(host: &mut HostState) {
@@ -41,6 +42,42 @@ fn verify_find_and_theme_modals(host: &mut HostState) {
     cancel_theme_picker(host);
     assert!(host.theme_picker.is_none());
     assert_eq!(host.theme.id, original);
+}
+
+fn verify_find_alt_screen_routing(host: &mut HostState) {
+    host.find = FindMode::default();
+    let _ = host.emulator.feed(b"\x1b[?1049h");
+    assert!(host.emulator.screen().alt_active());
+    host.modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    assert!(!handle_find_key_logical(
+        host,
+        &Key::Character("f".into()),
+        Some(keybind::Action::Find),
+        false,
+    ));
+    assert!(!host.find.active);
+
+    let _ = host.emulator.feed(b"\x1b[?1049l");
+    open_find_prompt(host);
+    assert!(host.find.active);
+    let _ = host.emulator.feed(b"\x1b[?1049h");
+    assert!(!handle_find_key_logical(
+        host,
+        &Key::Character("x".into()),
+        None,
+        false,
+    ));
+    assert!(!host.find.active);
+    assert!(!handle_find_key_logical(
+        host,
+        &Key::Character("f".into()),
+        Some(keybind::Action::Find),
+        false,
+    ));
+    assert!(!host.find.active);
+
+    let _ = host.emulator.feed(b"\x1b[?1049l");
+    host.find = FindMode::default();
 }
 
 fn verify_scrollback_navigation(host: &mut HostState) {

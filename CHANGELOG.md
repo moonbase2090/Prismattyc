@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.32] - 2026-10-10
+
 ### Fixed
 
 - Idle panes redraw only when something on screen changes. Rewriting the same cells, or moving the cursor back to where it started, no longer schedules another frame. A blinking caret, including a cursor-visibility sequence faster than 500ms, repaints on a 500ms timer.

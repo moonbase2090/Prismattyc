@@ -28,6 +28,7 @@ fn verify_find_and_theme_modals(host: &mut HostState) {
         false,
     ));
     assert!(host.find.active);
+    host.modifiers = ModifiersState::empty();
     assert!(find_key_while_open(host, &Key::Character("z".into())));
     assert_eq!(host.find.query, "z");
     assert!(find_key_while_open(host, &Key::Named(NamedKey::Escape)));

@@ -71,6 +71,7 @@ pub(crate) enum OverlayKind {
     None,
     SessionPrompt {
         name: String,
+        header: String,
         renaming: bool,
         allow_blank: bool,
         selected: usize,
@@ -105,13 +106,7 @@ impl OverlayKind {
     fn title(&self) -> &str {
         match self {
             OverlayKind::None => "",
-            OverlayKind::SessionPrompt { renaming, .. } => {
-                if *renaming {
-                    "Rename session"
-                } else {
-                    "New session"
-                }
-            }
+            OverlayKind::SessionPrompt { header, .. } => header.as_str(),
             OverlayKind::RestorePrompt { .. } => "Restore last space?",
             OverlayKind::Splash { .. } => "Prismattyc — splash",
             OverlayKind::Palette { .. } => "Prismattyc — command palette",
@@ -589,6 +584,7 @@ fn overlay_rows(kind: &OverlayKind) -> (Vec<String>, Option<usize>, String) {
             renaming,
             allow_blank,
             selected,
+            ..
         } => {
             let mut rows = vec![if *renaming {
                 "Rename".into()

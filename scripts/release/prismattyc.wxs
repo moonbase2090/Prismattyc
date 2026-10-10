@@ -19,12 +19,13 @@
 
     <!-- Do not ask Restart Manager to close Prismattyc. -->
     <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />
-    <Property Id="ARPPRODUCTICON" Value="PrismattycIcon" />
+    <Property Id="ARPPRODUCTICON" Value="PrismattycIcon.exe" />
     <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/moonbase2090/Prismattyc" />
     <Property Id="ADDTOPATH" Secure="yes" Value="0" />
 
-    <Icon Id="PrismattycIcon" SourceFile="$(var.Repo)\scripts\release\prismattyc.ico" />
+    <!-- The id ends in .exe so Windows caches a file it can read as an icon. An extensionless id shows a generic Start shortcut. -->
+    <Icon Id="PrismattycIcon.exe" SourceFile="$(var.Payload)\bin\prismattyc-host.exe" />
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="PROGRAMSFOLDER" Name="Programs">
@@ -149,7 +150,7 @@
     </ComponentGroup>
 
     <Component Id="StartMenuShortcut" Guid="c0c3d453-c603-5369-b475-49b8a8a8f32c" Directory="ProgramMenuFolder" Bitness="always64">
-      <Shortcut Id="PrismattycHost" Name="Prismattyc" Target="[BINFOLDER]prismattyc-host.exe" WorkingDirectory="INSTALLFOLDER" Icon="PrismattycIcon" />
+      <Shortcut Id="PrismattycHost" Name="Prismattyc" Target="[BINFOLDER]prismattyc-host.exe" WorkingDirectory="INSTALLFOLDER" Icon="PrismattycIcon.exe" />
       <RemoveFolder Id="RemoveStartMenuShortcutFolder" On="uninstall" />
       <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="shortcut" Type="integer" Value="1" KeyPath="yes" />
     </Component>

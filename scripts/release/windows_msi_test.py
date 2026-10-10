@@ -311,7 +311,14 @@ class WindowsMsiTests(unittest.TestCase):
         data = (ROOT / "scripts/release/prismattyc.ico").read_bytes()
         self.assertEqual(set(ico_sizes(data)), {16, 24, 32, 48, 256})
         shortcut = (ROOT / "scripts/release/prismattyc.wxs").read_text(encoding="utf-8")
-        self.assertIn('Icon="PrismattycIcon"', shortcut)
+        self.assertIn('Id="PrismattycIcon.exe"', shortcut)
+        self.assertIn('Value="PrismattycIcon.exe"', shortcut)
+        self.assertIn('Icon="PrismattycIcon.exe"', shortcut)
+        self.assertIn(
+            'SourceFile="$(var.Payload)\\bin\\prismattyc-host.exe"',
+            shortcut,
+        )
+        self.assertNotIn('PrismattycIcon"', shortcut)
         self.assertIn('Name="Prismattyc"', shortcut)
         self.assertEqual(icon_widths(synthetic_pe([32])), [32])
         self.assertEqual(icon_widths(synthetic_pe([16, 24, 32, 48, 256])), [16, 24, 32, 48, 256])

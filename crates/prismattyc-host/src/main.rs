@@ -1001,6 +1001,81 @@ fn ime_blocks_host_keyboard(preedit: &Preedit) -> bool {
     !preedit.text.is_empty()
 }
 
+/// Inline name editors. The session-name overlay handles `Ime` itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InlineEditor {
+    None,
+    Tab,
+    Space,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImeTextRoute {
+    Pty(Vec<u8>),
+    Insert(String),
+    Ignore,
+}
+
+/// Windows delivers composed text as `Ime::Commit`. That text belongs in an
+/// open name editor. With no editor, it stays PTY input.
+fn ime_text_route(editor: InlineEditor, event: &Ime, preedit: &mut Preedit) -> ImeTextRoute {
+    if editor == InlineEditor::None {
+        return match ime_action(event, preedit) {
+            Some(bytes) => ImeTextRoute::Pty(bytes),
+            None => ImeTextRoute::Ignore,
+        };
+    }
+    match event {
+        Ime::Commit(text) => {
+            preedit.text.clear();
+            preedit.cursor = None;
+            ImeTextRoute::Insert(text.clone())
+        }
+        other => {
+            let _ = ime_action(other, preedit);
+            ImeTextRoute::Ignore
+        }
+    }
+}
+
+fn inline_editor(host: &HostState) -> InlineEditor {
+    if host.space_rail.edit.is_some() {
+        InlineEditor::Space
+    } else if host.tab_rename.is_some() {
+        InlineEditor::Tab
+    } else {
+        InlineEditor::None
+    }
+}
+
+fn apply_ime_text_route(host: &mut HostState, route: ImeTextRoute) {
+    match route {
+        ImeTextRoute::Pty(bytes) => {
+            let _ = host.try_send_bytes(bytes);
+        }
+        ImeTextRoute::Insert(text) => {
+            if host.space_rail.edit.is_some() {
+                for ch in text.chars() {
+                    let verdict = host.space_rail.key(space_rail::RailKey::Edit(
+                        space_rail::EditStroke::Insert(ch),
+                    ));
+                    apply_rail_verdict(host, verdict);
+                }
+            } else if let Some(edit) = host.tab_rename.as_mut() {
+                for ch in text.chars() {
+                    apply_rename_stroke(
+                        &mut edit.buffer,
+                        &mut edit.selected,
+                        RenameStroke::Insert(ch),
+                    );
+                }
+                host.dirty = true;
+            }
+        }
+        ImeTextRoute::Ignore => {}
+    }
+}
+
 struct HostState {
     window: Arc<Window>,
     present: Option<PresentBackend>,
@@ -8375,9 +8450,6 @@ fn sync_pane_title_notices(host: &mut HostState) {
 }
 
 fn begin_tab_rename(host: &mut HostState, index: Option<usize>) {
-    if !show_tab_strip(host) {
-        return;
-    }
     host.space_rail.leave();
     let index = index.unwrap_or_else(|| {
         host.mux
@@ -8400,14 +8472,18 @@ fn begin_tab_rename(host: &mut HostState, index: Option<usize>) {
         .get(index)
         .map(|tab| tab.title.clone())
         .unwrap_or_default();
-    host.tab_rename = Some(TabRename {
-        index,
-        window,
-        pane: None,
-        buffer: title,
-        selected: true,
-    });
-    host.dirty = true;
+    if rename_uses_strip(sidebar_mode(host), show_tab_strip(host)) {
+        host.tab_rename = Some(TabRename {
+            index,
+            window,
+            pane: None,
+            buffer: title,
+            selected: true,
+        });
+        host.dirty = true;
+        return;
+    }
+    session_prompt::rename_local_tab(host, window, title);
 }
 
 /// Edit the focused pane's title in the tab chip (PT-148). Commit stores it
@@ -8427,26 +8503,61 @@ fn begin_pane_rename_for(host: &mut HostState, index: usize, pane: PaneId) {
     if session_prompt::rename(host, pane, keybind::Action::RenamePane) {
         return;
     }
-    if !show_tab_strip(host) {
-        rail_error_toast(
-            host,
-            " pane titles need the tab strip (tab_strip = always) ",
-        );
-        return;
-    }
     host.space_rail.leave();
     let Some(window) = host.mux.window_at_tab(index) else {
         return;
     };
     let title = host.mux.pane_title(pane).unwrap_or_default().to_string();
-    host.tab_rename = Some(TabRename {
-        index,
-        window,
-        pane: Some(pane),
-        buffer: title,
-        selected: true,
-    });
-    host.dirty = true;
+    if rename_uses_strip(sidebar_mode(host), show_tab_strip(host)) {
+        host.tab_rename = Some(TabRename {
+            index,
+            window,
+            pane: Some(pane),
+            buffer: title,
+            selected: true,
+        });
+        host.dirty = true;
+        return;
+    }
+    session_prompt::rename_local_pane(host, pane, title);
+}
+
+/// The chip editor is drawn in the tab strip. Sidebar mode paints the sidebar
+/// instead, so a local rename uses the naming overlay.
+fn rename_uses_strip(sidebar: bool, strip_visible: bool) -> bool {
+    !sidebar && strip_visible
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RightClickRoute {
+    Sidebar,
+    Pane,
+    FallThrough,
+}
+
+/// A sidebar hit wins over a pane cell. A stale cell must not open the pane
+/// menu when the pointer is on the sidebar.
+fn right_click_route(sidebar_hit: bool, cursor_pane: bool) -> RightClickRoute {
+    if sidebar_hit {
+        RightClickRoute::Sidebar
+    } else if cursor_pane {
+        RightClickRoute::Pane
+    } else {
+        RightClickRoute::FallThrough
+    }
+}
+
+fn sidebar_pointer_hit(host: &HostState) -> bool {
+    if !sidebar_mode(host) {
+        return false;
+    }
+    let Some((x, y)) = host.pointer_px else {
+        return false;
+    };
+    if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+        return false;
+    }
+    sidebar_hit_at(host, x as usize, y as usize).is_some()
 }
 
 fn cancel_tab_rename(host: &mut HostState) {
@@ -9014,6 +9125,9 @@ fn rename_stroke_from_logical(logical: &Key) -> Option<RenameStroke> {
         Key::Named(NamedKey::Backspace) => Some(RenameStroke::Backspace),
         Key::Named(NamedKey::Space) => Some(RenameStroke::Insert(' ')),
         Key::Character(text) => text.chars().next().map(RenameStroke::Insert),
+        // Windows IME reports the key as Process and the text as Ime::Commit.
+        // Dropping select-all here would make that commit append.
+        Key::Named(NamedKey::Process) | Key::Unidentified(_) => None,
         _ => Some(RenameStroke::DropSelection),
     }
 }
@@ -11053,6 +11167,7 @@ fn space_rail_key_decision(
         Key::Named(NamedKey::End) => RailKey::Last,
         Key::Named(NamedKey::Backspace) => RailKey::Edit(EditStroke::Backspace),
         Key::Named(NamedKey::Space) => RailKey::Edit(EditStroke::Insert(' ')),
+        Key::Named(NamedKey::Process) | Key::Unidentified(_) => RailKey::Edit(EditStroke::Ignore),
         Key::Character(text) => match text.chars().next() {
             Some(ch) => RailKey::Edit(EditStroke::Insert(ch)),
             None => RailKey::Edit(EditStroke::DropSelection),
@@ -19929,9 +20044,8 @@ impl ApplicationHandler<UserAction> for App {
             }
             WindowEvent::RedrawRequested => unreachable!("handled above"),
             WindowEvent::Ime(ime) => {
-                if let Some(bytes) = ime_action(&ime, &mut host.preedit) {
-                    let _ = host.try_send_bytes(bytes);
-                }
+                let route = ime_text_route(inline_editor(host), &ime, &mut host.preedit);
+                apply_ime_text_route(host, route);
                 host.dirty = true;
                 host.window.request_redraw();
             }
@@ -20507,18 +20621,23 @@ impl ApplicationHandler<UserAction> for App {
                     && button == MouseButton::Right
                     && !host.modifiers.shift_key()
                 {
-                    if let Some((pane, _, _)) = host.cursor_cell {
-                        if host.mux.focus(pane) {
-                            mark_layout_dirty(host);
-                            host.window
-                                .set_title(&window_title(&host.mux, show_tab_strip(host)));
+                    match right_click_route(sidebar_pointer_hit(host), host.cursor_cell.is_some()) {
+                        RightClickRoute::Sidebar | RightClickRoute::FallThrough => {}
+                        RightClickRoute::Pane => {
+                            if let Some((pane, _, _)) = host.cursor_cell {
+                                if host.mux.focus(pane) {
+                                    mark_layout_dirty(host);
+                                    host.window
+                                        .set_title(&window_title(&host.mux, show_tab_strip(host)));
+                                }
+                                host.left_button_down = false;
+                                host.rich_pointer = None;
+                                host.app_mouse_button = None;
+                                open_context_menu(host, ContextMenuTarget::Pane(pane));
+                                host.window.request_redraw();
+                                return;
+                            }
                         }
-                        host.left_button_down = false;
-                        host.rich_pointer = None;
-                        host.app_mouse_button = None;
-                        open_context_menu(host, ContextMenuTarget::Pane(pane));
-                        host.window.request_redraw();
-                        return;
                     }
                 }
                 if state == ElementState::Pressed && handle_space_reorder_press(host, button) {
@@ -24368,6 +24487,66 @@ mod tests {
         preedit.cursor = Some((0, 3));
         assert_eq!(ime_action(&Ime::Disabled, &mut preedit), None);
         assert_eq!(preedit, Preedit::default());
+    }
+
+    #[test]
+    fn sidebar_local_rename_uses_the_overlay_and_a_visible_strip_keeps_the_chip() {
+        assert!(!rename_uses_strip(true, true));
+        assert!(!rename_uses_strip(true, false));
+        assert!(!rename_uses_strip(false, false));
+        assert!(rename_uses_strip(false, true));
+    }
+
+    #[test]
+    fn sidebar_right_click_wins_over_a_stale_pane_cell() {
+        assert_eq!(right_click_route(true, true), RightClickRoute::Sidebar);
+        assert_eq!(right_click_route(false, true), RightClickRoute::Pane);
+        assert_eq!(
+            right_click_route(false, false),
+            RightClickRoute::FallThrough
+        );
+    }
+
+    #[test]
+    fn ime_commit_fills_an_open_editor_and_stays_pty_input_otherwise() {
+        let mut preedit = Preedit {
+            text: "かな".into(),
+            cursor: Some((0, 3)),
+        };
+        assert_eq!(
+            ime_text_route(
+                InlineEditor::Space,
+                &Ime::Commit("名前".into()),
+                &mut preedit
+            ),
+            ImeTextRoute::Insert("名前".into())
+        );
+        assert_eq!(preedit, Preedit::default());
+
+        assert_eq!(
+            ime_text_route(
+                InlineEditor::Tab,
+                &Ime::Preedit("未".into(), Some((0, 3))),
+                &mut preedit
+            ),
+            ImeTextRoute::Ignore
+        );
+        assert_eq!(preedit.text, "未");
+
+        assert_eq!(
+            ime_text_route(InlineEditor::None, &Ime::Commit("ab".into()), &mut preedit),
+            ImeTextRoute::Pty(b"ab".to_vec())
+        );
+    }
+
+    #[test]
+    fn process_key_keeps_select_all_so_a_later_insert_replaces_the_name() {
+        assert!(rename_stroke_from_logical(&Key::Named(NamedKey::Process)).is_none());
+        let mut buffer = "local".to_string();
+        let mut selected = true;
+        apply_rename_stroke(&mut buffer, &mut selected, RenameStroke::Insert('z'));
+        assert_eq!(buffer, "z");
+        assert!(!selected);
     }
 
     #[test]

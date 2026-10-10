@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Sidebar rename of a local tab or pane opens the naming overlay. The tab strip is not painted in sidebar mode, so the old chip editor never appeared. An attached session still renames through the session overlay. IME commits type into an open tab or space name instead of the terminal. A right-click on the sidebar is not stolen by a pane cell under the pointer.
+
 ## [0.3.33] - 2026-10-10
 
 ### Fixed

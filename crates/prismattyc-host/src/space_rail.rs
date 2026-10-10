@@ -716,6 +716,9 @@ pub enum EditStroke {
     Backspace,
     /// A key that is neither text nor a command: drop the select-all state.
     DropSelection,
+    /// IME process/unidentified keys. Leave select-all in place so the
+    /// following commit replaces the name instead of appending to it.
+    Ignore,
 }
 
 /// A key while the rail owns the keyboard.
@@ -1256,6 +1259,7 @@ impl SpaceRail {
                             }
                         }
                         EditStroke::DropSelection => edit.selected = false,
+                        EditStroke::Ignore => {}
                     }
                     RailVerdict::Consumed
                 }
@@ -1968,6 +1972,12 @@ mod tests {
 
         rail.key(RailKey::Last);
         rail.key(RailKey::Rename);
+        rail.key(RailKey::Edit(EditStroke::Ignore));
+        assert!(rail.edit.as_ref().is_some_and(|edit| edit.selected));
+        assert_eq!(
+            rail.edit.as_ref().map(|edit| edit.buffer.as_str()),
+            Some("beta")
+        );
         rail.key(RailKey::Edit(EditStroke::DropSelection));
         rail.key(RailKey::Edit(EditStroke::Backspace));
         rail.key(RailKey::Edit(EditStroke::Insert('\n')));

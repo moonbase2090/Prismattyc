@@ -4,11 +4,31 @@ use super::*;
 
 #[derive(Clone, Debug)]
 enum Target {
-    Pane { axis: Option<prismattyc_mux::Axis> },
-    Layout { count: usize, quadrants: bool },
-    Add { space: String },
-    Space { space: String },
-    Rename { pane: PaneId, session: String },
+    Pane {
+        axis: Option<prismattyc_mux::Axis>,
+    },
+    Layout {
+        count: usize,
+        quadrants: bool,
+    },
+    Add {
+        space: String,
+    },
+    Space {
+        space: String,
+    },
+    Rename {
+        pane: PaneId,
+        session: String,
+    },
+    /// Window title for a local tab. Sidebar mode does not paint the tab strip.
+    LocalTab {
+        window: MuxWindowId,
+    },
+    /// Pane title for a local shell. No attach session, so no mailbox rename.
+    LocalPane {
+        pane: PaneId,
+    },
 }
 
 pub(super) struct Prompt {
@@ -58,7 +78,8 @@ fn begin(host: &mut HostState, target: Target, name: String) {
             axis: Some(prismattyc_mux::Axis::Vertical),
         } => Some(keybind::Action::SplitDown),
         Target::Layout { count, .. } => Some(keybind::Action::Layout(*count as u8)),
-        Target::Rename { .. } => Some(keybind::Action::RenamePane),
+        Target::Rename { .. } | Target::LocalPane { .. } => Some(keybind::Action::RenamePane),
+        Target::LocalTab { .. } => Some(keybind::Action::RenameTab),
         Target::Add { .. } | Target::Space { .. } => None,
     };
     host.session_prompt = Some(Prompt {
@@ -174,6 +195,16 @@ pub(super) fn rename(host: &mut HostState, pane: PaneId, action: keybind::Action
     true
 }
 
+/// Rename a local window when the tab strip is not on screen.
+pub(super) fn rename_local_tab(host: &mut HostState, window: MuxWindowId, title: String) {
+    begin(host, Target::LocalTab { window }, title);
+}
+
+/// Rename a local pane title when the tab strip is not on screen.
+pub(super) fn rename_local_pane(host: &mut HostState, pane: PaneId, title: String) {
+    begin(host, Target::LocalPane { pane }, title);
+}
+
 fn run(args: &[&str]) -> Result<String> {
     let output = pmux_command()
         .args(args)
@@ -216,7 +247,13 @@ fn spawn_standalone(
 }
 
 fn apply(host: &mut HostState, target: &Target, name: &str) -> Result<()> {
-    prismattyc_mux::mailbox::AgentId::new(name.to_string())?;
+    if matches!(target, Target::LocalTab { .. } | Target::LocalPane { .. }) {
+        if name.trim().is_empty() {
+            bail!("the name is empty");
+        }
+    } else {
+        prismattyc_mux::mailbox::AgentId::new(name.to_string())?;
+    }
     match target {
         Target::Pane { axis } => {
             if host.space_rail.current.is_some() {
@@ -262,6 +299,21 @@ fn apply(host: &mut HostState, target: &Target, name: &str) -> Result<()> {
                 }
             }
             host.last_space_refresh = None;
+        }
+        Target::LocalTab { window } => {
+            host.mux.rename_window(*window, name)?;
+        }
+        Target::LocalPane { pane } => {
+            let live = host
+                .mux
+                .tab_panes()
+                .iter()
+                .any(|(_, panes)| panes.contains(pane));
+            if !live {
+                bail!("this pane is gone; close and reopen the naming popup");
+            }
+            host.mux
+                .set_pane_title(*pane, Some(name.trim().to_string()));
         }
     }
     finish_arrangement(host);
@@ -492,26 +544,33 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
     let Some(prompt) = &host.session_prompt else {
         return;
     };
-    let renaming = matches!(prompt.target, Target::Rename { .. });
-    let (header, action) = if renaming {
-        ("Rename session", "Rename")
-    } else {
-        ("New session", "Create")
-    };
+    let renaming = is_rename(&prompt.target);
+    let header = prompt_header(&prompt.target);
+    let action = if renaming { "Rename" } else { "Create" };
     let subtitle = match &prompt.target {
         Target::Space { space } => format!("Space: {space} · Name its first session"),
         Target::Add { space } => format!("Space: {space} · One mailbox for this pane"),
         Target::Rename { .. } => "Pending mail stays. The old address forwards here.".into(),
+        Target::LocalTab { .. } => "Window title. A solo sidebar row shows it.".into(),
+        Target::LocalPane { .. } => "Pane title shown on the sidebar row.".into(),
         Target::Pane { .. } => "One name for the session and mailbox".into(),
         Target::Layout { count, .. } => format!(
             "Name the next session · {} of {count} panes",
             host.mux.active_pane_count() + 1
         ),
     };
+    let hint_label = if matches!(
+        prompt.target,
+        Target::LocalTab { .. } | Target::LocalPane { .. }
+    ) {
+        "Title"
+    } else {
+        "Agent ID"
+    };
     let hint = prompt
         .error
         .clone()
-        .unwrap_or_else(|| format!("Agent ID: {}", prompt.buffer.trim()));
+        .unwrap_or_else(|| format!("{hint_label}: {}", prompt.buffer.trim()));
     let mut rows = vec![PaletteRow::plain(action.into(), hint, "Enter".into())];
     if allows_blank(prompt) {
         rows.push(PaletteRow::plain(
@@ -554,10 +613,27 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
     );
 }
 
+fn is_rename(target: &Target) -> bool {
+    matches!(
+        target,
+        Target::Rename { .. } | Target::LocalTab { .. } | Target::LocalPane { .. }
+    )
+}
+
+fn prompt_header(target: &Target) -> &'static str {
+    match target {
+        Target::LocalTab { .. } => "Rename tab",
+        Target::LocalPane { .. } => "Rename pane",
+        Target::Rename { .. } => "Rename session",
+        _ => "New session",
+    }
+}
+
 pub(super) fn accessibility(prompt: &Prompt) -> a11y::OverlayKind {
     a11y::OverlayKind::SessionPrompt {
         name: prompt.buffer.clone(),
-        renaming: matches!(prompt.target, Target::Rename { .. }),
+        header: prompt_header(&prompt.target).to_string(),
+        renaming: is_rename(&prompt.target),
         allow_blank: allows_blank(prompt),
         selected: prompt.button,
     }

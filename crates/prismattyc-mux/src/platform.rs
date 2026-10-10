@@ -106,11 +106,21 @@ mod windows {
             )))
         }
     }
+    #[cfg(test)]
+    thread_local! {
+        static SET_MODE_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
     pub fn set_mode(path: &Path, _mode: u32) -> io::Result<()> {
+        #[cfg(test)]
+        SET_MODE_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
         // Windows grants the current user full control and protects the DACL
-        // from inherited access. Directory ACEs propagate to children.
+        // from inherited access. The directory ACE stays inheritable so a
+        // new child is private at creation. SetFileSecurity writes that
+        // DACL onto this directory only. SetNamedSecurityInfo would walk
+        // every existing child on the calling thread.
         let sid = user_sid()?;
-        let inherit = if path.is_dir() { "OICI" } else { "" };
+        let directory = path.is_dir();
+        let inherit = if directory { "OICI" } else { "" };
         let sddl = wide(std::ffi::OsStr::new(&format!(
             "D:P(A;{inherit};FA;;;{sid})"
         )));
@@ -126,6 +136,18 @@ mod windows {
                 return Err(io::Error::last_os_error());
             }
             let _guard = Local(sd);
+            if directory {
+                // BOOL: zero is failure. This does not propagate to children.
+                if SetFileSecurityW(
+                    wide(path.as_os_str()).as_ptr(),
+                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                    sd,
+                ) == 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                return Ok(());
+            }
             let mut present = 0;
             let mut defaulted = 0;
             let mut acl = ptr::null_mut();
@@ -255,7 +277,15 @@ mod windows {
         Ok(())
     }
     /// Only apply a private DACL to an owned application directory, never a redirect.
+    ///
+    /// The first call writes the DACL with `SetFileSecurity`, which does not
+    /// walk existing children. A second call is a lookup. Repeating
+    /// `SetNamedSecurityInfo` on an inheritable DACL propagates it through
+    /// the whole tree on the calling thread.
     pub fn secure_directory(path: &Path) -> io::Result<()> {
+        if require_private_directory(path).is_ok() {
+            return Ok(());
+        }
         directory_security(path, false)?;
         set_mode(path, 0o700)?;
         require_private_directory(path)
@@ -333,6 +363,38 @@ mod windows {
             let process = Handle(process);
             let mut exit = 0;
             GetExitCodeProcess(process.0, &mut exit) != 0 && exit == STILL_ACTIVE as u32
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn second_secure_directory_does_not_rewrite_the_dacl() {
+            let dir =
+                std::env::temp_dir().join(format!("prismattyc-secure-{}", std::process::id()));
+            let _cleanup = RemoveDir(&dir);
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            SET_MODE_CALLS.with(|calls| calls.set(0));
+            secure_directory(&dir).unwrap();
+            let once = SET_MODE_CALLS.with(|calls| calls.get());
+            assert_eq!(once, 1, "a new directory is secured once");
+            fs::write(dir.join("child.txt"), b"pane").unwrap();
+            secure_directory(&dir).unwrap();
+            assert_eq!(
+                SET_MODE_CALLS.with(|calls| calls.get()),
+                once,
+                "an already-private directory must not propagate a new DACL"
+            );
+        }
+
+        struct RemoveDir<'a>(&'a Path);
+        impl Drop for RemoveDir<'_> {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(self.0);
+            }
         }
     }
 }

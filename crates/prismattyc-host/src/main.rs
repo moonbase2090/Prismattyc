@@ -2755,6 +2755,10 @@ struct App {
     event_proxy: EventLoopProxy<UserAction>,
     /// Live `{stem}.host.pid` this process registered (PT-65).
     registered_host: Option<(PathBuf, u32)>,
+    /// Default attach-layout path. Remembered so an idle pump does not
+    /// resolve the mux socket again. On Windows that resolution used to
+    /// rewrite the runtime directory DACL on the UI thread.
+    default_layout_path: Option<PathBuf>,
     /// Throttle for [`App::retry_register_host_pid`].
     last_register_try: Option<Instant>,
     last_render_status: Option<Instant>,
@@ -2845,6 +2849,7 @@ impl App {
             keymap,
             event_proxy,
             registered_host: None,
+            default_layout_path: None,
             last_register_try: None,
             last_render_status: None,
             render_status_seq: 0,
@@ -3371,23 +3376,19 @@ impl App {
         if self.windows.is_empty() {
             return;
         }
-        let Some(default_view) =
-            host_mux_socket().map(|socket| attach_tabs::layout_path_from_socket(&socket))
-        else {
-            return;
-        };
-        if self.registered_host.is_some()
-            && self
-                .windows
-                .values()
-                .any(|host| host.attach_layout_path.as_ref() == Some(&default_view))
-        {
-            return;
-        }
         if self
             .windows
             .values()
             .any(|host| host.space_opens.blocks_persist())
+        {
+            return;
+        }
+        if self.registered_host.is_some()
+            && self.default_layout_path.as_ref().is_some_and(|path| {
+                self.windows
+                    .values()
+                    .any(|host| host.attach_layout_path.as_ref() == Some(path))
+            })
         {
             return;
         }
@@ -3399,6 +3400,20 @@ impl App {
             return;
         }
         self.last_register_try = Some(now);
+        let Some(default_view) =
+            host_mux_socket().map(|socket| attach_tabs::layout_path_from_socket(&socket))
+        else {
+            return;
+        };
+        self.default_layout_path = Some(default_view.clone());
+        if self.registered_host.is_some()
+            && self
+                .windows
+                .values()
+                .any(|host| host.attach_layout_path.as_ref() == Some(&default_view))
+        {
+            return;
+        }
         if self.registered_host.is_none() {
             self.register_host_pid_with(true);
         }

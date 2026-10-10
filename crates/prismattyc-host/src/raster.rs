@@ -4682,7 +4682,7 @@ pub(crate) fn rasterize_render_timer(
         summary.pump.total_us, summary.pump.slowest_phase, summary.pump.slowest_us,
     );
     let raster_text = format!(
-        " last/max raster={}/{}us frames={} cells_max={} blit_sum={} full={} ",
+        " last/max raster={}/{}us frames={} cells_max={} blit_sum={} repaint={} ",
         summary.last_raster_us,
         summary.max_raster_us,
         summary.frame_count,

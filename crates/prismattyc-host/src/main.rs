@@ -320,6 +320,7 @@ enum FullRepaintReason {
     Overflow,
     Fallback,
     NoDamage,
+    Osd,
 }
 
 impl FullRepaintReason {
@@ -332,6 +333,7 @@ impl FullRepaintReason {
             Self::Overflow => "overflow",
             Self::Fallback => "fallback",
             Self::NoDamage => "no-damage",
+            Self::Osd => "osd",
         }
     }
 
@@ -344,6 +346,7 @@ impl FullRepaintReason {
             Self::Overflow => 4,
             Self::Fallback => 5,
             Self::NoDamage => 6,
+            Self::Osd => 7,
         }
     }
 }
@@ -383,7 +386,7 @@ struct RenderWindow {
     frame_count: u64,
     max_cells_painted: u64,
     blit_sum: u64,
-    full_repaint_counts: [u64; 7],
+    full_repaint_counts: [u64; 8],
 }
 
 impl RenderWindow {
@@ -414,7 +417,8 @@ impl RenderWindow {
                     3 => FullRepaintReason::Scrollback,
                     4 => FullRepaintReason::Overflow,
                     5 => FullRepaintReason::Fallback,
-                    _ => FullRepaintReason::NoDamage,
+                    6 => FullRepaintReason::NoDamage,
+                    _ => FullRepaintReason::Osd,
                 });
             }
         }
@@ -6172,7 +6176,11 @@ fn rasterize_frame(
     guards.set(Guard::BellFlash, blockers.bell_flash);
     let unsupported_partial = partial_raster_blocked(blockers);
     if reason.is_none() && unsupported_partial {
-        reason = Some(FullRepaintReason::Fallback);
+        reason = Some(if blockers.osd {
+            FullRepaintReason::Osd
+        } else {
+            FullRepaintReason::Fallback
+        });
     }
     host.render_frame.full_repaint_reason = reason;
     let mut full = reason.is_some();
@@ -21986,6 +21994,7 @@ mod tests {
             (FullRepaintReason::Overflow, 4),
             (FullRepaintReason::Fallback, 5),
             (FullRepaintReason::NoDamage, 6),
+            (FullRepaintReason::Osd, 7),
         ];
         for (reason, expected) in cases {
             assert_eq!(reason.index(), expected, "{reason:?}");
@@ -22002,6 +22011,7 @@ mod tests {
             FullRepaintReason::Overflow,
             FullRepaintReason::Fallback,
             FullRepaintReason::NoDamage,
+            FullRepaintReason::Osd,
         ];
         for reason in cases {
             let now = Instant::now();

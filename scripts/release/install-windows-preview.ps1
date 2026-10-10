@@ -91,6 +91,12 @@ try {
     throw
 }
 $binDir = Join-Path $destination 'bin'
+$cmdDir = Join-Path $destination 'cmd'
+New-Item -ItemType Directory -Path $cmdDir | Out-Null
+foreach ($name in @('prismattyc', 'pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp')) {
+    $shim = "@echo off`n`"%~dp0..\bin\$name.exe`" %*`n"
+    [System.IO.File]::WriteAllText((Join-Path $cmdDir "$name.cmd"), $shim)
+}
 $startMenu = [Environment]::GetFolderPath('Programs')
 if ($startMenu) {
     try {
@@ -104,10 +110,10 @@ if ($startMenu) {
 if ($AddToPath) {
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $parts = @($userPath -split ';' | Where-Object { $_ })
-    if ($parts -notcontains $binDir) {
-        [Environment]::SetEnvironmentVariable('Path', ((@($binDir) + $parts) -join ';'), 'User')
+    if ($parts -notcontains $cmdDir) {
+        [Environment]::SetEnvironmentVariable('Path', ((@($cmdDir) + $parts) -join ';'), 'User')
     }
-    $env:Path = "$binDir;$env:Path"
+    $env:Path = "$cmdDir;$env:Path"
 }
 Write-Host "Installed Windows preview: $destination"
 Write-Host "Launch from Start: Prismattyc Windows Preview $($manifest.source_revision)"

@@ -90,7 +90,8 @@ def main():
             'Requires Windows 10 version 1809 or newer (ConPTY), or Windows 11.\n'
             'Install the MSI published next to this ZIP for a per-user Apps & features entry.\n'
             'Extract the complete archive into a user-owned directory when you are not using the MSI.\n'
-            'Launch bin\\prismattyc-host.exe for a window, or add bin to your user PATH.\n'
+            'Launch bin\\prismattyc-host.exe for a window. Do not add bin to PATH.\n'
+            'The cmd directory contains shims that forward to the executables in bin.\n'
             'Use pmux.exe new NAME to create a persistent mux session.\n'
             'The default shell is COMSPEC (normally cmd.exe); pass -- powershell.exe\n'
             'or -- pwsh.exe to select PowerShell. Configuration is under APPDATA,\n'
@@ -99,6 +100,11 @@ def main():
             'until you have closed them intentionally.\n'
             'Read licenses\\MPL-2.0.txt and licenses\\NOTICE.txt for licensing.\n', encoding='utf-8')
         shutil.copy2(repo / 'scripts/release/reset-windows-update-pointer.ps1', root / 'bin/reset-windows-update-pointer.ps1')
+        shutil.copy2(repo / 'scripts/release/remove-windows-preview-installs.ps1', root / 'bin/remove-windows-preview-installs.ps1')
+        cmd_shims = repo / 'scripts/release/cmd'
+        (root / 'cmd').mkdir()
+        for shim in sorted(cmd_shims.glob('*.cmd')):
+            shutil.copy2(shim, root / 'cmd' / shim.name)
         files = sorted(p for p in root.rglob('*') if p.is_file())
         (root / 'SHA256SUMS').write_text(''.join(f'{digest(p)}  {p.relative_to(root).as_posix()}\n' for p in files), encoding='utf-8')
         with zipfile.ZipFile(args.out / f'prismattyc-v{args.version}-{args.target}.zip', 'w', zipfile.ZIP_DEFLATED) as archive:

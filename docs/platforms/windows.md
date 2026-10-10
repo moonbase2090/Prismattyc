@@ -30,13 +30,16 @@ on Windows.
 The release asset is `prismattyc-vVERSION-x86_64-pc-windows-msvc.msi`. It is a
 per-user package: it does not request administrator rights. It installs the six
 executables, licenses, and `NOTICE` under
-`%LOCALAPPDATA%\Programs\Prismattyc`, with the executables in `bin`. A Start
-menu shortcut named Prismattyc launches `prismattyc-host.exe`. That is the
-only Start menu entry. It opens the GUI, which carries the Prismattyc icon
-and does not allocate a console. `prismattyc.exe` is the CLI. Its file
-description is Prismattyc CLI, and it is not a shortcut target, so Start
-search does not offer it as a separate app. The other executables stay in
-`bin` and are added to PATH only when the install is given `ADDTOPATH=1`.
+`%LOCALAPPDATA%\Programs\Prismattyc`. The six executables are in `bin`.
+Five command shims are in `cmd`: `prismattyc.cmd`, `pmux.cmd`, `pmuxd.cmd`,
+`pmux-attach.cmd`, and `pmux-mcp.cmd`. Each shim forwards to the executable
+of the same name in `bin`. There is no `prismattyc-host.cmd`. A Start menu
+shortcut named Prismattyc launches `prismattyc-host.exe`. That is the only
+Start menu entry. It opens the GUI, which carries the Prismattyc icon and
+does not allocate a console. `prismattyc.exe` is the CLI. Its file
+description is Prismattyc CLI, and it is not a shortcut target. The tools
+are added to PATH only when the install is given `ADDTOPATH=1`, and that
+entry is the `cmd` directory.
 
 A second bare launch of the GUI focuses the existing window. `pmux attach --all`
 and `pmux space open --new-window` still open another window. A connect from
@@ -60,9 +63,14 @@ msiexec /i prismattyc-v0.3.29-x86_64-pc-windows-msvc.msi /qn /norestart
 msiexec /i prismattyc-v0.3.29-x86_64-pc-windows-msvc.msi /qn /norestart ADDTOPATH=1
 ```
 
-`ADDTOPATH=1` prepends the install `bin` directory to the user PATH. The
+`ADDTOPATH=1` prepends the install `cmd` directory to the user PATH. The
 default is off, matching `install-windows-preview.ps1 -AddToPath`. Uninstall
-removes that PATH entry, the files, and the shortcut. It leaves `%APPDATA%`
+removes that PATH entry, the files, and the shortcut. Install and uninstall
+also remove leftover `windows-preview-*` directories directly under
+`%LOCALAPPDATA%\Programs\Prismattyc` when those directories are not reparse
+points, the Start shortcuts named `Prismattyc Windows Preview`, and user PATH
+entries that pointed into a removed preview or at the install `bin` directory.
+A reparse-point preview and its PATH entry stay. Uninstall leaves `%APPDATA%`
 configuration and `%LOCALAPPDATA%\Prismattyc` data in place. The update store
 is `$XDG_DATA_HOME/prismattyc/updates` when `XDG_DATA_HOME` is nonempty, and
 otherwise `%LOCALAPPDATA%\prismattyc\updates`.
@@ -99,7 +107,8 @@ uninstalls and checks that the install is gone while the preserved data files
 remain. The final line names only the phases that ran.
 
 Extract the ZIP into a directory you own when you are not using the MSI.
-Launch `bin\prismattyc-host.exe`, or add its `bin` directory to your user PATH.
+Launch `bin\prismattyc-host.exe`. Do not add `bin` to PATH. The `cmd`
+directory contains the shims.
 After that, `pmux update` or `prismattyc update` installs a newer published
 release and leaves running programs on the old version until they restart. The
 default shell is `%COMSPEC%`, normally `cmd.exe`. Select PowerShell with
@@ -191,8 +200,11 @@ whole ZIP, then run `powershell -NoProfile -ExecutionPolicy Bypass -File
 .\install.ps1` from its directory. It verifies the manifest files and bounded
 `--version` probes, installs into a new per-user directory under
 `%LOCALAPPDATA%\Programs\Prismattyc\windows-preview-<full-revision>`, and
-creates a revision-specific Start menu shortcut. Optional `-AddToPath` prepends
-its bin directory to the user PATH; omit it to keep command selection unchanged.
+creates a revision-specific Start menu shortcut. The installer writes a `cmd`
+directory of shims next to `bin`. Optional `-AddToPath` prepends that `cmd`
+directory to the user PATH; omit it to keep command selection unchanged.
+An MSI install removes leftover `windows-preview-*` directories under
+`%LOCALAPPDATA%\Programs\Prismattyc`.
 No running executable is overwritten and no host or daemon is started or stopped.
 Version probes do not establish interactive runtime or performance correctness;
 checksums do not authenticate an unsigned publisher. The preview uses the normal

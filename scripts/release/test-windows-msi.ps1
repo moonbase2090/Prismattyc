@@ -99,6 +99,7 @@ function Get-PrismattycInstall {
     [pscustomobject]@{
         Root = Join-Path $local 'Programs\Prismattyc'
         Bin  = Join-Path $local 'Programs\Prismattyc\bin'
+        Cmd  = Join-Path $local 'Programs\Prismattyc\cmd'
     }
 }
 
@@ -145,6 +146,13 @@ function Assert-Installed {
     foreach ($name in @('README.txt', 'VERSION', 'licenses\MPL-2.0.txt', 'licenses\NOTICE.txt')) {
         $path = Join-Path $install.Root $name
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing $path" }
+    }
+    foreach ($name in @('prismattyc', 'pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp')) {
+        $shim = Join-Path $install.Cmd "$name.cmd"
+        if (-not (Test-Path -LiteralPath $shim -PathType Leaf)) { throw "Missing $shim" }
+    }
+    if (Test-Path -LiteralPath (Join-Path $install.Cmd 'prismattyc-host.cmd')) {
+        throw 'prismattyc-host.cmd is installed'
     }
     if ($VersionText) {
         $versionFile = (Get-Content -LiteralPath (Join-Path $install.Root 'VERSION') -Raw).Trim()
@@ -200,10 +208,26 @@ function Assert-Installed {
         throw "ARP DisplayIcon is not $expectedIcon ($shown)$extra"
     }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    $parts = @($userPath -split ';' | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') })
-    $listed = $parts -contains $install.Bin
-    if ($PathExpected -xor $listed) {
-        throw "PATH opt-in is $listed; expected $PathExpected"
+    if ($null -eq $userPath) { $userPath = '' }
+    $parts = @($userPath -split ';' | Where-Object { $_ } | ForEach-Object { $_.Trim().TrimEnd('\') })
+    $binListed = @($parts | Where-Object { $_ -eq $install.Bin.TrimEnd('\') }).Count -gt 0
+    $cmdListed = @($parts | Where-Object { $_ -eq $install.Cmd.TrimEnd('\') }).Count -gt 0
+    if ($binListed) { throw 'User PATH still contains the install bin.' }
+    if ($PathExpected -xor $cmdListed) {
+        throw "PATH opt-in is $cmdListed; expected $PathExpected"
+    }
+    if ($PathExpected) {
+        $env:Path = @(
+            [Environment]::GetEnvironmentVariable('Path', 'Machine'),
+            [Environment]::GetEnvironmentVariable('Path', 'User')
+        ) -join ';'
+        $resolved = @(Get-Command -Name prismattyc -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
+        $expectedShim = Join-Path $install.Cmd 'prismattyc.cmd'
+        $shown = if ($resolved) { [string]$resolved.Source } else { '<none>' }
+        if (-not $resolved -or [string]::Compare($shown, $expectedShim, $true) -ne 0) {
+            throw "Get-Command prismattyc is $shown, not $expectedShim"
+        }
+        Write-Output "Get-Command prismattyc=$shown"
     }
 }
 
@@ -211,12 +235,16 @@ function Assert-Removed {
     param([string[]]$Survivors)
     $install = Get-PrismattycInstall
     if (Test-Path -LiteralPath $install.Bin) { throw "Bin directory remains: $($install.Bin)" }
+    if (Test-Path -LiteralPath $install.Cmd) { throw "Cmd directory remains: $($install.Cmd)" }
     $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Prismattyc.lnk'
     if (Test-Path -LiteralPath $shortcut) { throw "Start menu shortcut remains: $shortcut" }
     $entries = @(Get-PrismattycUninstallKeys)
     if ($entries.Count -ne 0) { throw "ARP has $($entries.Count) Prismattyc entries after uninstall." }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    if (@($userPath -split ';' | ForEach-Object { $_.TrimEnd('\') }) -contains $install.Bin) { throw 'User PATH still contains the install bin.' }
+    if ($null -eq $userPath) { $userPath = '' }
+    $parts = @($userPath -split ';' | ForEach-Object { $_.Trim().TrimEnd('\') })
+    if ($parts -contains $install.Bin) { throw 'User PATH still contains the install bin.' }
+    if ($parts -contains $install.Cmd.TrimEnd('\')) { throw 'User PATH still contains the install cmd.' }
     foreach ($path in $Survivors) {
         if (-not (Test-Path -LiteralPath $path)) { throw "Uninstall removed preserved data: $path" }
     }
@@ -267,6 +295,111 @@ function Assert-LockedExecutableSurvivesReinstall {
     }
 }
 
+function Add-UserPathEntry {
+    param([Parameter(Mandatory = $true)][string]$Entry)
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if ($null -eq $userPath) { $userPath = '' }
+    $parts = @($userPath.Split([char[]]@(';'), [System.StringSplitOptions]::RemoveEmptyEntries))
+    if ($parts -notcontains $Entry) {
+        $parts = @($Entry) + $parts
+        [Environment]::SetEnvironmentVariable('Path', ($parts -join ';'), 'User')
+    }
+}
+
+function Remove-UserPathEntry {
+    param([Parameter(Mandatory = $true)][string]$Entry)
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if ($null -eq $userPath) { return }
+    $key = $Entry.Trim().TrimEnd('\')
+    $parts = @($userPath.Split([char[]]@(';'), [System.StringSplitOptions]::RemoveEmptyEntries) | Where-Object { $_.Trim().TrimEnd('\') -ne $key })
+    [Environment]::SetEnvironmentVariable('Path', ($parts -join ';'), 'User')
+}
+
+function New-PreviewSweepFixtures {
+    param($Install)
+    $dead = Join-Path $Install.Root 'windows-preview-deadbeef'
+    $keep = Join-Path $Install.Root 'not-a-preview'
+    $sentinel = Join-Path ([System.IO.Path]::GetTempPath()) ('prismattyc-msi-junction-' + [guid]::NewGuid().ToString('n'))
+    $junction = Join-Path $Install.Root 'windows-preview-junction'
+    New-Item -ItemType Directory -Path $Install.Root -Force | Out-Null
+    New-Item -ItemType Directory -Path $dead -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $dead 'marker.txt') -Value 'remove' -Encoding ascii
+    New-Item -ItemType Directory -Path $keep -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $keep 'marker.txt') -Value 'keep' -Encoding ascii
+    New-Item -ItemType Directory -Path $sentinel -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $sentinel 'sentinel.txt') -Value 'keep' -Encoding ascii
+    if (Test-Path -LiteralPath $junction) {
+        $existing = Get-Item -LiteralPath $junction -Force
+        if (($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            [System.IO.Directory]::Delete($junction)
+        } else {
+            throw "preview junction path is a real directory: $junction"
+        }
+    }
+    New-Item -ItemType Junction -Path $junction -Target $sentinel | Out-Null
+    $keepPath = 'C:\prismattyc-msi-path-keep'
+    $dangling = Join-Path $Install.Root 'windows-preview-missing\bin'
+    $previewBin = Join-Path $dead 'bin'
+    $junctionBin = Join-Path $junction 'bin'
+    foreach ($entry in @($previewBin, $dangling, $junctionBin, $keepPath, $Install.Bin)) {
+        Add-UserPathEntry $entry
+    }
+    [pscustomobject]@{
+        Dead        = $dead
+        Keep        = $keep
+        Sentinel    = $sentinel
+        Junction    = $junction
+        KeepPath    = $keepPath
+        Dangling    = $dangling
+        PreviewBin  = $previewBin
+        JunctionBin = $junctionBin
+    }
+}
+
+function Assert-PreviewSweep {
+    param($Fixtures)
+    if (Test-Path -LiteralPath $Fixtures.Dead) { throw "sweep left $($Fixtures.Dead)" }
+    if (-not (Test-Path -LiteralPath (Join-Path $Fixtures.Keep 'marker.txt'))) {
+        throw 'sweep removed not-a-preview'
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $Fixtures.Sentinel 'sentinel.txt'))) {
+        throw 'sweep followed the preview junction'
+    }
+    if (-not (Test-Path -LiteralPath $Fixtures.Junction)) {
+        throw 'sweep removed the preview junction'
+    }
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if ($null -eq $userPath) { $userPath = '' }
+    $parts = @($userPath -split ';' | Where-Object { $_ } | ForEach-Object { $_.Trim().TrimEnd('\') })
+    if ($parts -notcontains $Fixtures.KeepPath) { throw "PATH lost $($Fixtures.KeepPath)" }
+    if ($parts -contains $Fixtures.PreviewBin.TrimEnd('\')) { throw "PATH still has $($Fixtures.PreviewBin)" }
+    if ($parts -contains $Fixtures.Dangling.TrimEnd('\')) { throw "PATH still has dangling $($Fixtures.Dangling)" }
+    if ($parts -notcontains $Fixtures.JunctionBin.TrimEnd('\')) { throw "PATH lost the junction preview $($Fixtures.JunctionBin)" }
+    Write-Output 'windows-preview-deadbeef removed'
+    Write-Output 'not-a-preview kept'
+    Write-Output 'prismattyc-msi-path-keep kept'
+    Write-Output 'preview junction left in place'
+}
+
+function Remove-PreviewSweepFixtures {
+    param($Fixtures, $Install)
+    if (-not $Fixtures) { return }
+    if ($Fixtures.Junction -and (Test-Path -LiteralPath $Fixtures.Junction)) {
+        $item = Get-Item -LiteralPath $Fixtures.Junction -Force -ErrorAction SilentlyContinue
+        if ($item -and (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            [System.IO.Directory]::Delete($Fixtures.Junction)
+        }
+    }
+    foreach ($path in @($Fixtures.Sentinel, $Fixtures.Dead, $Fixtures.Keep)) {
+        if ($path -and (Test-Path -LiteralPath $path)) {
+            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    foreach ($entry in @($Fixtures.PreviewBin, $Fixtures.Dangling, $Fixtures.JunctionBin, $Fixtures.KeepPath, $Install.Bin)) {
+        if ($entry) { Remove-UserPathEntry $entry }
+    }
+}
+
 $msiPath = (Resolve-Path -LiteralPath $Msi).Path
 $install = Get-PrismattycInstall
 $preserved = @(
@@ -279,16 +412,24 @@ Set-Content -LiteralPath $preserved[1] -Value 'keep' -Encoding ascii
 
 $tail = Get-MsiTail
 $installArgs = @('/i', $msiPath) + $tail
-if ($UpgradeFrom) {
-    $older = (Resolve-Path -LiteralPath $UpgradeFrom).Path
-    Invoke-Msi -ArgumentList (@('/i', $older) + $tail)
-}
-Invoke-Msi -ArgumentList $installArgs
-Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected ([bool]$AddToPath)
-Assert-LockedExecutableSurvivesReinstall -CommandLine (New-MsiCommandLine $installArgs)
+$fixtures = $null
+try {
+    $fixtures = New-PreviewSweepFixtures -Install $install
+    if ($UpgradeFrom) {
+        $older = (Resolve-Path -LiteralPath $UpgradeFrom).Path
+        Invoke-Msi -ArgumentList (@('/i', $older) + $tail)
+    }
+    Invoke-Msi -ArgumentList $installArgs
+    Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected ([bool]$AddToPath)
+    Assert-PreviewSweep -Fixtures $fixtures
+    Assert-LockedExecutableSurvivesReinstall -CommandLine (New-MsiCommandLine $installArgs)
 
-$installed = @(Get-PrismattycUninstallKeys)
-if ($installed.Count -ne 1) { throw "ARP has $($installed.Count) Prismattyc entries before uninstall." }
-Invoke-Msi -ArgumentList (@('/x', $installed[0].ProductCode, '/qn', '/norestart', 'REBOOT=ReallySuppress'))
-Assert-Removed -Survivors $preserved
-Write-Output ("MSI {0} checks passed." -f ((Get-MsiProofPhases) -join ', '))
+    $installed = @(Get-PrismattycUninstallKeys)
+    if ($installed.Count -ne 1) { throw "ARP has $($installed.Count) Prismattyc entries before uninstall." }
+    Invoke-Msi -ArgumentList (@('/x', $installed[0].ProductCode, '/qn', '/norestart', 'REBOOT=ReallySuppress'))
+    Assert-Removed -Survivors $preserved
+    Assert-PreviewSweep -Fixtures $fixtures
+    Write-Output ("MSI {0} checks passed." -f ((Get-MsiProofPhases) -join ', '))
+} finally {
+    Remove-PreviewSweepFixtures -Fixtures $fixtures -Install $install
+}

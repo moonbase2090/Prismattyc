@@ -201,9 +201,10 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertNotIn("prepends the install `bin` directory", docs)
         self.assertIn("windows-preview-*", docs)
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        unreleased = changelog.split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
-        self.assertIn("windows-preview-*", unreleased)
-        self.assertIn("`cmd`", unreleased)
+        # These notes shipped in 0.3.32. Unreleased is for later changes.
+        released = changelog.split("## [0.3.32]", 1)[1].split("\n## [", 1)[0]
+        self.assertIn("windows-preview-*", released)
+        self.assertIn("`cmd`", released)
 
     def test_workflows_name_every_signing_setting(self):
         for relative in (".github/workflows/release.yml", ".github/workflows/windows-package.yml"):
@@ -311,7 +312,14 @@ class WindowsMsiTests(unittest.TestCase):
         data = (ROOT / "scripts/release/prismattyc.ico").read_bytes()
         self.assertEqual(set(ico_sizes(data)), {16, 24, 32, 48, 256})
         shortcut = (ROOT / "scripts/release/prismattyc.wxs").read_text(encoding="utf-8")
-        self.assertIn('Icon="PrismattycIcon"', shortcut)
+        self.assertIn('Id="PrismattycIcon.exe"', shortcut)
+        self.assertIn('Value="PrismattycIcon.exe"', shortcut)
+        self.assertIn('Icon="PrismattycIcon.exe"', shortcut)
+        self.assertIn(
+            'SourceFile="$(var.Payload)\\bin\\prismattyc-host.exe"',
+            shortcut,
+        )
+        self.assertNotIn('PrismattycIcon"', shortcut)
         self.assertIn('Name="Prismattyc"', shortcut)
         self.assertEqual(icon_widths(synthetic_pe([32])), [32])
         self.assertEqual(icon_widths(synthetic_pe([16, 24, 32, 48, 256])), [16, 24, 32, 48, 256])

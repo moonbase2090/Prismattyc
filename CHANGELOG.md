@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The Windows Start menu shortcut names its icon `PrismattycIcon.exe` and takes that icon from `prismattyc-host.exe`. Windows no longer caches an extensionless icon for the shortcut.
+
 ## [0.3.32] - 2026-10-10
 
 ### Fixed

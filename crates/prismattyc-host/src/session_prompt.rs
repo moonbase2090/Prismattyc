@@ -19,7 +19,7 @@ pub(super) struct Prompt {
     button: usize,
     anchor: PaneId,
     space: Option<String>,
-    error: Option<String>,
+    pub(super) error: Option<String>,
 }
 
 fn suggested(space: &str) -> String {

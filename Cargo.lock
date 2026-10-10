@@ -2424,7 +2424,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "pmux-mcp"
-version = "0.3.32"
+version = "0.3.33"
 dependencies = [
  "prismattyc-core",
  "prismattyc-mux",
@@ -2526,7 +2526,7 @@ checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
 
 [[package]]
 name = "prismattyc"
-version = "0.3.32"
+version = "0.3.33"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -2543,7 +2543,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-core"
-version = "0.3.32"
+version = "0.3.33"
 dependencies = [
  "serde",
  "unicode-width",
@@ -2551,7 +2551,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-emulator"
-version = "0.3.32"
+version = "0.3.33"
 dependencies = [
  "anyhow",
  "libc",
@@ -2566,7 +2566,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-host"
-version = "0.3.32"
+version = "0.3.33"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -2613,7 +2613,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-labs"
-version = "0.3.32"
+version = "0.3.33"
 dependencies = [
  "prismattyc-core",
  "serde",
@@ -2623,7 +2623,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-mux"
-version = "0.3.32"
+version = "0.3.33"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2653,11 +2653,11 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-protocol"
-version = "0.3.32"
+version = "0.3.33"
 
 [[package]]
 name = "prismattyc-render"
-version = "0.3.32"
+version = "0.3.33"
 dependencies = [
  "prismattyc-core",
  "prismattyc-protocol",
@@ -2665,7 +2665,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-rich-client"
-version = "0.3.32"
+version = "0.3.33"
 dependencies = [
  "libc",
  "prismattyc-protocol",
@@ -2673,7 +2673,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-winres"
-version = "0.3.32"
+version = "0.3.33"
 dependencies = [
  "winresource",
 ]

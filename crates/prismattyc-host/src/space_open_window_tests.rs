@@ -291,7 +291,7 @@ impl ApplicationHandler<UserAction> for Proof {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.app.pump(event_loop, None);
+        self.app.pump(event_loop, None, None);
         for host in self.app.windows.values_mut() {
             let _ = host.mux.drain_all();
         }
@@ -410,7 +410,7 @@ impl ApplicationHandler<UserAction> for Proof {
                     .unwrap()
                     .space_rail
                     .current = None;
-                self.app.pump(event_loop, None);
+                self.app.pump(event_loop, None, None);
                 test_support::wait_for_attach_write(
                     self.app.windows.get(&self.windows[0]).unwrap(),
                 );
@@ -809,7 +809,7 @@ impl ApplicationHandler<UserAction> for StaleCacheProof {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.app.pump(event_loop, None);
+        self.app.pump(event_loop, None, None);
         for host in self.app.windows.values_mut() {
             let _ = host.mux.drain_all();
         }
@@ -1019,7 +1019,7 @@ impl ApplicationHandler<UserAction> for StaleDetachProof {
         if self.done {
             return;
         }
-        self.app.pump(event_loop, None);
+        self.app.pump(event_loop, None, None);
         for host in self.app.windows.values_mut() {
             let _ = host.mux.drain_all();
         }

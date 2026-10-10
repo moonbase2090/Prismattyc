@@ -645,6 +645,9 @@ pub struct Screen {
     hyperlinks: Vec<Hyperlink>,
     /// Per-frame cell/row dirty bits and scroll events (PT-242).
     damage: GridDamage,
+    /// While set, cursor motions do not mark cells. `Emulator::feed` marks
+    /// the net move once so a rewrite that returns home leaves no damage.
+    defer_cursor_damage: bool,
 }
 
 impl PartialEq for Screen {
@@ -832,6 +835,7 @@ impl Screen {
             active_hyperlink: None,
             hyperlinks: Vec::new(),
             damage: GridDamage::full(rows, columns),
+            defer_cursor_damage: false,
         }
     }
 
@@ -964,6 +968,7 @@ impl Screen {
             active_hyperlink: state.active_hyperlink.map(HyperlinkId),
             hyperlinks,
             damage: GridDamage::full(rows, columns),
+            defer_cursor_damage: false,
         };
         screen.configure_scrollback(columns);
         if skipped_rows > 0 {
@@ -1164,8 +1169,41 @@ impl Screen {
     }
 
     fn mark_cursor_cells(&mut self, old: Cursor, new: Cursor) {
+        // Same-cell CUP/CUF dirties nothing. A deferred feed marks the net
+        // move once at the end; cell writes use `mark_written_cells`.
+        if old == new || self.defer_cursor_damage {
+            return;
+        }
         self.damage.mark_cell(old.row, old.column);
         self.damage.mark_cell(new.row, new.column);
+    }
+
+    fn mark_written_cells(&mut self, old: Cursor, new: Cursor) {
+        self.damage.mark_cell(old.row, old.column);
+        if old != new {
+            self.damage.mark_cell(new.row, new.column);
+        }
+    }
+
+    /// Suppress cursor-motion damage until [`Self::end_deferred_cursor_damage`].
+    pub fn begin_deferred_cursor_damage(&mut self) {
+        self.defer_cursor_damage = true;
+    }
+
+    /// Mark only the net cursor move across a deferred feed.
+    pub fn end_deferred_cursor_damage(&mut self, start: Cursor) {
+        self.defer_cursor_damage = false;
+        let end = self.cursor();
+        if start != end {
+            self.damage.mark_cell(start.row, start.column);
+            self.damage.mark_cell(end.row, end.column);
+        }
+    }
+
+    /// Mark the live caret cell so a blink phase can repaint it.
+    pub fn mark_cursor_damage(&mut self) {
+        let cursor = self.cursor();
+        self.damage.mark_cell(cursor.row, cursor.column);
     }
 
     pub fn set_style(&mut self, style: Style) {
@@ -1976,11 +2014,18 @@ impl Screen {
         let columns = self.columns;
         let hyperlink = self.active_hyperlink;
         let autowrap = self.autowrap;
+        let row = self.active().cursor.row;
+        let col = self.active().cursor.column;
+        let style = self.active().style;
+        let replacement = Cell::glyph(character, style).with_hyperlink(hyperlink);
+        if self.cell_already_present(row, col, replacement, 1) {
+            // Same glyph: advance the cursor only. No epoch bump, and no
+            // per-cell damage while a feed is deferring cursor marks.
+            self.advance_cursor_by(1, autowrap, columns);
+            return;
+        }
         let (old_cursor, new_cursor) = {
             let buf = self.active_mut();
-            let row = buf.cursor.row;
-            let col = buf.cursor.column;
-            let style = buf.style;
             let cells = buf.cells.row_mut(row);
             if cells[col].wide_cont {
                 if col > 0 && !cells[col - 1].wide_cont {
@@ -1989,7 +2034,7 @@ impl Screen {
             } else if col + 1 < columns && cells[col + 1].wide_cont {
                 cells[col + 1] = Cell::default();
             }
-            cells[col] = Cell::glyph(character, style).with_hyperlink(hyperlink);
+            cells[col] = replacement;
             let old_cursor = Cursor { row, column: col };
             let next_col = col + 1;
             if next_col >= columns {
@@ -2003,9 +2048,52 @@ impl Screen {
             }
             (old_cursor, buf.cursor)
         };
-        self.mark_cursor_cells(old_cursor, new_cursor);
+        self.mark_written_cells(old_cursor, new_cursor);
         // Cell mutation: epoch consumers see put_char, not only scroll/alt.
         self.bump_epoch();
+    }
+
+    /// True when writing `lead` (and its continuation, when `width == 2`)
+    /// would not change the cells or clear a neighboring wide pair.
+    fn cell_already_present(&self, row: usize, col: usize, lead: Cell, width: usize) -> bool {
+        let columns = self.columns;
+        let cells = self.active().cells.row(row);
+        let Some(current) = cells.get(col) else {
+            return false;
+        };
+        if current.wide_cont || *current != lead {
+            return false;
+        }
+        if width == 2 {
+            if col + 1 >= columns {
+                return false;
+            }
+            let continuation =
+                Cell::wide_continuation(lead.style).with_hyperlink(lead.hyperlink_id());
+            cells[col + 1] == continuation
+        } else {
+            col + 1 >= columns || !cells[col + 1].wide_cont
+        }
+    }
+
+    fn advance_cursor_by(&mut self, width: usize, autowrap: bool, columns: usize) {
+        let old_cursor = self.cursor();
+        let new_cursor = {
+            let buf = self.active_mut();
+            let next_col = old_cursor.column + width;
+            if next_col >= columns {
+                if autowrap {
+                    buf.wrap_pending = true;
+                }
+                buf.cursor.column = columns.saturating_sub(1);
+            } else {
+                buf.cursor.column = next_col;
+            }
+            buf.cursor
+        };
+        if !self.defer_cursor_damage {
+            self.mark_cursor_cells(old_cursor, new_cursor);
+        }
     }
 
     fn put_char_slow(&mut self, character: char) {
@@ -2053,6 +2141,11 @@ impl Screen {
         let old_cursor = self.active().cursor;
         let row = old_cursor.row;
         let col = old_cursor.column;
+        let lead = Cell::glyph(character, style).with_hyperlink(hyperlink);
+        if self.cell_already_present(row, col, lead, width) {
+            self.advance_cursor_by(width, self.autowrap, columns);
+            return;
+        }
 
         // Overwriting either half of a wide pair clears both.
         self.clear_wide_pair_covering(row, col);
@@ -2081,7 +2174,7 @@ impl Screen {
             }
             buf.cursor
         };
-        self.mark_cursor_cells(old_cursor, new_cursor);
+        self.mark_written_cells(old_cursor, new_cursor);
         // Cell mutation: epoch consumers see put_char, not only scroll/alt.
         self.bump_epoch();
     }
@@ -5869,6 +5962,29 @@ mod tests {
         screen.put_char('b');
         screen.erase_chars(1);
         assert!(screen.content_epoch() > e3, "erase_chars must bump epoch");
+    }
+
+    #[test]
+    fn same_cell_cursor_address_does_not_mark_damage() {
+        let mut screen = Screen::new(4, 2, 0);
+        let _ = screen.take_damage();
+        screen.set_cursor_position(0, 0);
+        assert_eq!(screen.damage().dirty_row_count(), 0);
+        assert!(screen.damage().scroll_events().is_empty());
+    }
+
+    #[test]
+    fn identical_put_does_not_bump_epoch() {
+        let mut screen = Screen::new(4, 2, 0);
+        screen.put_char('a');
+        let epoch = screen.content_epoch();
+        screen.set_cursor_position(0, 0);
+        screen.put_char('a');
+        assert_eq!(
+            screen.content_epoch(),
+            epoch,
+            "rewriting the same cell must not bump the epoch"
+        );
     }
 
     #[test]

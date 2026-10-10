@@ -1158,6 +1158,12 @@ struct HostState {
     /// Last quantized pulse step painted; repaints only on step changes so an
     /// active-but-quiet pane animates at ~PULSE_STEPS fps, not the poll rate.
     last_pulse_step: u8,
+    /// Origin of the 500ms caret blink. Armed only while a caret should blink.
+    caret_blink_epoch: Instant,
+    /// True while the focused pane asked to blink, or a visibility storm latched.
+    caret_blink_armed: bool,
+    /// Current blink phase. True paints the caret.
+    last_caret_phase_on: bool,
     /// Window focus, tracked so decorative animation pauses when the window is
     /// in the background. Agent panes are active around the clock, so the dot
     /// pulse is otherwise a PERMANENT ~16 repaints/second — measured at 25-46%
@@ -2364,6 +2370,9 @@ struct ThemePicker {
 
 /// One breath of the active dot, and how many repaints it costs at most.
 const PULSE_PERIOD_MS: u128 = 1000;
+/// Caret blink half-period. Idle panes do not arm this. A visibility storm
+/// cannot schedule a redraw faster than this.
+const CARET_BLINK_MS: u128 = 500;
 const PULSE_STEPS: u128 = frame_damage::PULSE_STEPS as u128;
 
 /// One light-cycle border sweep, and its repaint budget. Runs once per focus
@@ -2590,6 +2599,107 @@ fn next_control_flow(
     match deadline {
         Some(when) => ControlFlow::WaitUntil(when),
         None => ControlFlow::Wait,
+    }
+}
+
+/// Next caret-blink boundary. The gap is [`CARET_BLINK_MS`].
+fn next_caret_blink_at(epoch: Instant, now: Instant) -> Instant {
+    let elapsed = now.saturating_duration_since(epoch).as_millis();
+    let step = CARET_BLINK_MS.max(1);
+    let next_ms = (elapsed / step + 1) * step;
+    let next = epoch + Duration::from_millis(u64::try_from(next_ms).unwrap_or(u64::MAX));
+    if next > now {
+        next
+    } else {
+        now + Duration::from_millis(1)
+    }
+}
+
+fn caret_blink_wanted(host: &HostState) -> bool {
+    if !host.window_focused || host.window_occluded {
+        return false;
+    }
+    let pane = host.mux.focused();
+    pane.emulator.cursor_blink() || pane.caret_blink_latched()
+}
+
+fn caret_blink_deadline(host: &HostState, now: Instant) -> Option<Instant> {
+    caret_blink_wanted(host).then(|| next_caret_blink_at(host.caret_blink_epoch, now))
+}
+
+/// Do not call `request_redraw` for the window whose `RedrawRequested` is
+/// already running. On Windows that re-arms `WM_PAINT` for another frame.
+fn should_request_redraw(dirty: bool, redraw_in_progress: bool) -> bool {
+    dirty && !redraw_in_progress
+}
+
+/// Effective DECTCEM bit for this frame. A latched storm or DECSCUSR blink
+/// follows the 500ms phase instead of the child's latest visibility byte.
+#[allow(clippy::too_many_arguments)]
+fn live_caret_visible(
+    cursor_visible: bool,
+    cursor_blink: bool,
+    storm: bool,
+    pane_focused: bool,
+    window_focused: bool,
+    window_occluded: bool,
+    phase_on: bool,
+) -> bool {
+    let animate = pane_focused && window_focused && !window_occluded;
+    if storm && animate {
+        return phase_on;
+    }
+    if !cursor_visible {
+        return false;
+    }
+    if cursor_blink && animate {
+        phase_on
+    } else {
+        true
+    }
+}
+
+fn settle_caret_blink(host: &mut HostState, now: Instant) {
+    let focused = host.mux.focused_id();
+    if host
+        .mux
+        .pane(focused)
+        .is_some_and(|pane| pane.visibility_storm_quiet(now))
+    {
+        if let Some(pane) = host.mux.pane_mut(focused) {
+            pane.clear_visibility_storm();
+            pane.emulator.mark_cursor_damage();
+        }
+        host.dirty = true;
+    }
+    if !caret_blink_wanted(host) {
+        if host.caret_blink_armed && !host.last_caret_phase_on {
+            host.dirty = true;
+            host.mux.focused_mut().emulator.mark_cursor_damage();
+        }
+        host.caret_blink_armed = false;
+        host.last_caret_phase_on = true;
+        return;
+    }
+    if !host.caret_blink_armed {
+        host.caret_blink_epoch = now;
+        host.caret_blink_armed = true;
+        if !host.last_caret_phase_on {
+            host.last_caret_phase_on = true;
+            host.dirty = true;
+            host.mux.focused_mut().emulator.mark_cursor_damage();
+        }
+        return;
+    }
+    let phase_on = (now
+        .saturating_duration_since(host.caret_blink_epoch)
+        .as_millis()
+        / CARET_BLINK_MS)
+        .is_multiple_of(2);
+    if phase_on != host.last_caret_phase_on {
+        host.last_caret_phase_on = phase_on;
+        host.dirty = true;
+        host.mux.focused_mut().emulator.mark_cursor_damage();
     }
 }
 
@@ -3527,6 +3637,7 @@ impl App {
         &mut self,
         event_loop: &ActiveEventLoop,
         existing_io_scope: Option<pump_timing::PumpIoScope>,
+        redrawing: Option<WindowId>,
     ) {
         // ONE drain pass per event-loop cycle, then yield. Looping on `more`
         // pinned the main (UI) thread: under sustained PTY output, drain_pty
@@ -3645,7 +3756,7 @@ impl App {
                     host.dirty = true;
                 }
             }
-            if host.dirty {
+            if should_request_redraw(host.dirty, redrawing == Some(id)) {
                 host.window.request_redraw();
             }
             if should_close_exited_host(
@@ -3719,7 +3830,10 @@ impl App {
                                 .as_ref()
                                 .and_then(restore_prompt::RestorePrompt::deadline),
                         ),
-                        host.link_click_gesture.deadline(),
+                        earliest(
+                            host.link_click_gesture.deadline(),
+                            caret_blink_deadline(host, now),
+                        ),
                     ),
                 ),
             );
@@ -4227,6 +4341,9 @@ impl App {
                 spacing,
                 pulse_epoch: Instant::now(),
                 last_pulse_step: 0,
+                caret_blink_epoch: Instant::now(),
+                caret_blink_armed: false,
+                last_caret_phase_on: true,
                 window_focused: true,
                 window_occluded: false,
                 light_cycle: self.cli.light_cycle,
@@ -6576,10 +6693,19 @@ fn rasterize_frame(
         let scroll = pane
             .view_scroll
             .min(pane.emulator.screen().max_view_scroll());
+        let caret_visible = live_caret_visible(
+            pane.emulator.cursor_visible(),
+            pane.emulator.cursor_blink(),
+            pane.caret_blink_latched(),
+            pane_id == focused,
+            host.window_focused,
+            host.window_occluded,
+            host.last_caret_phase_on,
+        );
         let overlay = overlay_paint_decision(OverlayPaintContext {
             pane_focused: pane_id == focused,
             live_view: scroll == 0,
-            cursor_visible: pane.emulator.cursor_visible(),
+            cursor_visible: caret_visible,
             preedit_present: !host.preedit.text.is_empty(),
             ime_modal,
             footer_visible,
@@ -8103,6 +8229,7 @@ impl App {
                 host.dirty = true;
             }
         }
+        settle_caret_blink(host, Instant::now());
         settle_pane_bells(host, Instant::now());
         // Settle an expired bell flash with one final repaint.
         if host
@@ -19404,7 +19531,7 @@ impl ApplicationHandler<UserAction> for App {
         if matches!(event, WindowEvent::RedrawRequested) {
             // Drain on the paint path so a child-EOF wake that only
             // produced a redraw still runs the exit cascade.
-            self.pump(event_loop, None);
+            self.pump(event_loop, None, Some(id));
             if let Some(host) = self.windows.get_mut(&id) {
                 // Output and scrollback can change the link under a stationary pointer.
                 sync_chrome_hover(host);
@@ -20763,7 +20890,7 @@ impl ApplicationHandler<UserAction> for App {
                 persist_time,
             );
         }
-        self.pump(event_loop, Some(pump_io));
+        self.pump(event_loop, Some(pump_io), None);
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
@@ -25832,6 +25959,47 @@ session mail (id 15)
             ..Default::default()
         });
         assert_eq!(bad.focus_border, DEFAULT_FOCUS_BORDER_INDEX);
+    }
+
+    #[test]
+    fn redraw_in_progress_does_not_request_another_frame() {
+        assert!(!should_request_redraw(true, true));
+        assert!(should_request_redraw(true, false));
+        assert!(!should_request_redraw(false, false));
+        assert!(!should_request_redraw(false, true));
+    }
+
+    #[test]
+    fn caret_blink_deadline_is_at_least_500ms() {
+        let epoch = Instant::now();
+        let first = next_caret_blink_at(epoch, epoch);
+        assert_eq!(first.duration_since(epoch), Duration::from_millis(500));
+        let second = next_caret_blink_at(epoch, first);
+        assert_eq!(second.duration_since(first), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn live_caret_follows_phase_only_while_blink_is_requested() {
+        assert!(live_caret_visible(
+            true, false, false, true, true, false, false
+        ));
+        assert!(!live_caret_visible(
+            true, true, false, true, true, false, false
+        ));
+        assert!(live_caret_visible(
+            true, true, false, true, true, false, true
+        ));
+        assert!(
+            !live_caret_visible(false, false, true, true, true, false, false),
+            "a visibility storm uses the phase, not the child's latest hide"
+        );
+        assert!(
+            live_caret_visible(true, false, true, true, false, false, false),
+            "an unfocused window paints the child's visibility and does not blink"
+        );
+        assert!(!live_caret_visible(
+            false, false, false, true, true, false, true
+        ));
     }
 
     #[test]

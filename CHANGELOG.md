@@ -2,9 +2,35 @@
 
 ## [Unreleased]
 
-### Fixed
+## [0.3.31] - 2026-10-09
 
-An idle Windows host no longer rewrites the runtime directory ACL on the UI thread. Resolving the mux socket applied an inheritable DACL on every call, and Windows then walked every child of that directory. The directory is secured once, and that write does not propagate to existing children. The idle event loop already waits until the next deadline or a wake. It polls only while PTY output or a wake is pending. macOS socket resolution does not rewrite directory security.
+### Windows idle CPU
+
+An idle `prismattyc-host` on Windows no longer keeps a CPU core busy.
+Resolving the mux socket applied an inheritable DACL to the runtime
+directory on every call, and Windows then walked every child of that
+directory on the UI thread. The directory is now secured once, and that
+write does not propagate to existing children. The idle event loop waits
+until the next deadline or a wake, and polls only while PTY output or a
+wake is pending. macOS socket resolution does not rewrite directory
+security.
+
+The Windows foreground-process scan that identifies the agent running in
+each pane now runs on a background worker instead of the UI thread.
+
+### Appearance
+
+The macOS DMG background uses a solid indigo drag arrow and underline.
+
+### Testing and CI
+
+The CRAP release gate is advisory: it reports a warning but never fails.
+Legacy and Kitty disambiguate key encodings are covered by table tests.
+Host transparency, side-rail clicks, and action dispatch have new tests.
+The AL2023 smoke check pulls its image from the ECR public mirror. OSD
+full-repaint diagnostics are clearer.
+
+Windows packages remain unsigned while Azure Artifact Signing is pending.
 
 ## [0.3.30] - 2026-10-09
 

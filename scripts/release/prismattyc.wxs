@@ -30,6 +30,7 @@
       <Directory Id="PROGRAMSFOLDER" Name="Programs">
         <Directory Id="INSTALLFOLDER" Name="Prismattyc">
           <Directory Id="BINFOLDER" Name="bin" />
+          <Directory Id="CMDFOLDER" Name="cmd" />
           <Directory Id="LICENSESFOLDER" Name="licenses" />
         </Directory>
       </Directory>
@@ -67,6 +68,33 @@
         <File Source="$(var.Payload)\bin\reset-windows-update-pointer.ps1" />
         <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="reset-script" Type="integer" Value="1" KeyPath="yes" />
       </Component>
+      <Component Id="SweepPreviewScript" Guid="a0bffa63-23ae-5f7d-8ccb-24e88f9e8a32">
+        <File Source="$(var.Payload)\bin\remove-windows-preview-installs.ps1" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="sweep-preview" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="CmdShims" Directory="CMDFOLDER">
+      <Component Id="CmdPrismattyc" Guid="23c6d700-f68a-5926-9db1-9f2b0d6a2ad7">
+        <File Source="$(var.Payload)\cmd\prismattyc.cmd" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="cmd-prismattyc" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="CmdPmux" Guid="8fcd856c-d99e-58ae-a50a-e67f5621144e">
+        <File Source="$(var.Payload)\cmd\pmux.cmd" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="cmd-pmux" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="CmdPmuxd" Guid="dd5a50cf-9409-5d01-a1b6-8cedd2ffa253">
+        <File Source="$(var.Payload)\cmd\pmuxd.cmd" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="cmd-pmuxd" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="CmdPmuxAttach" Guid="c043b00b-a56f-5428-942a-1de5f27e93ed">
+        <File Source="$(var.Payload)\cmd\pmux-attach.cmd" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="cmd-pmux-attach" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="CmdPmuxMcp" Guid="db5be5cf-1770-5cb1-aa4e-2e672179fabd">
+        <File Source="$(var.Payload)\cmd\pmux-mcp.cmd" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="cmd-pmux-mcp" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
     </ComponentGroup>
 
     <ComponentGroup Id="Docs" Directory="INSTALLFOLDER">
@@ -74,6 +102,7 @@
         <File Source="$(var.Payload)\README.txt" />
         <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="readme" Type="integer" Value="1" KeyPath="yes" />
         <RemoveFolder Id="RemoveBin" Directory="BINFOLDER" On="uninstall" />
+        <RemoveFolder Id="RemoveCmd" Directory="CMDFOLDER" On="uninstall" />
         <RemoveFolder Id="RemoveLicenses" Directory="LICENSESFOLDER" On="uninstall" />
         <RemoveFolder Id="RemoveInstall" Directory="INSTALLFOLDER" On="uninstall" />
         <RemoveFolder Id="RemovePrograms" Directory="PROGRAMSFOLDER" On="uninstall" />
@@ -138,8 +167,8 @@
     </Component>
 
     <!-- Off unless msiexec is passed ADDTOPATH=1. Uninstall removes the entry this component added. -->
-    <Component Id="UserPath" Guid="d1120a5e-78db-5ce7-838b-22d81b149a62" Directory="BINFOLDER" Condition="ADDTOPATH = &quot;1&quot;">
-      <Environment Id="UserPathEntry" Name="PATH" Value="[BINFOLDER]" Action="set" Part="first" System="no" />
+    <Component Id="UserPath" Guid="53a47e5b-aa37-5ecd-b181-850b9eceef74" Directory="CMDFOLDER" Condition="ADDTOPATH = &quot;1&quot;">
+      <Environment Id="UserPathEntry" Name="PATH" Value="[CMDFOLDER]" Action="set" Part="first" System="no" />
       <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="path" Type="integer" Value="1" KeyPath="yes" />
     </Component>
 
@@ -150,12 +179,30 @@
         Impersonate="yes"
         Return="check"
         ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[BINFOLDER]reset-windows-update-pointer.ps1&quot;" />
+    <!-- Deferred, not commit: a commit action runs after RemoveFiles has deleted the script. -->
+    <CustomAction
+        Id="SweepPreviewInstalls"
+        Directory="System64Folder"
+        Execute="deferred"
+        Impersonate="yes"
+        Return="ignore"
+        ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[BINFOLDER]remove-windows-preview-installs.ps1&quot;" />
+    <CustomAction
+        Id="SweepPreviewInstallsOnRemove"
+        Directory="System64Folder"
+        Execute="deferred"
+        Impersonate="yes"
+        Return="ignore"
+        ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[BINFOLDER]remove-windows-preview-installs.ps1&quot;" />
     <InstallExecuteSequence>
       <Custom Action="ResetUpdatePointer" After="InstallFiles" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="SweepPreviewInstalls" After="InstallFiles" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="SweepPreviewInstallsOnRemove" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
     </InstallExecuteSequence>
 
     <Feature Id="Main">
       <ComponentGroupRef Id="Binaries" />
+      <ComponentGroupRef Id="CmdShims" />
       <ComponentGroupRef Id="Docs" />
       <ComponentGroupRef Id="LicenseFiles" />
       <ComponentRef Id="StartMenuShortcut" />

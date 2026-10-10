@@ -2659,48 +2659,75 @@ fn live_caret_visible(
     }
 }
 
-fn settle_caret_blink(host: &mut HostState, now: Instant) {
+fn caret_phase_on(epoch: Instant, now: Instant) -> bool {
+    (now.saturating_duration_since(epoch).as_millis() / CARET_BLINK_MS).is_multiple_of(2)
+}
+
+struct CaretBlinkClock {
+    epoch: Instant,
+    armed: bool,
+    phase_on: bool,
+}
+
+/// Advance the 500ms caret clock. `true` means the caret cell must be repainted.
+fn settle_caret_clock(clock: &mut CaretBlinkClock, wanted: bool, now: Instant) -> bool {
+    if !wanted {
+        let repaint = clock.armed && !clock.phase_on;
+        clock.armed = false;
+        clock.phase_on = true;
+        return repaint;
+    }
+    if !clock.armed {
+        clock.epoch = now;
+        clock.armed = true;
+        if clock.phase_on {
+            return false;
+        }
+        clock.phase_on = true;
+        return true;
+    }
+    let phase_on = caret_phase_on(clock.epoch, now);
+    if phase_on == clock.phase_on {
+        return false;
+    }
+    clock.phase_on = phase_on;
+    true
+}
+
+fn clear_quiet_visibility_storm(host: &mut HostState, now: Instant) {
     let focused = host.mux.focused_id();
-    if host
-        .mux
-        .pane(focused)
-        .is_some_and(|pane| pane.visibility_storm_quiet(now))
+    let Some(pane) = host.mux.pane(focused) else {
+        return;
+    };
+    if !pane.visibility_storm_quiet(now) {
+        return;
+    }
     {
-        if let Some(pane) = host.mux.pane_mut(focused) {
-            pane.clear_visibility_storm();
-            pane.emulator.mark_cursor_damage();
-        }
-        host.dirty = true;
+        let Some(pane) = host.mux.pane_mut(focused) else {
+            return;
+        };
+        pane.clear_visibility_storm();
+        pane.emulator.mark_cursor_damage();
     }
-    if !caret_blink_wanted(host) {
-        if host.caret_blink_armed && !host.last_caret_phase_on {
-            host.dirty = true;
-            host.mux.focused_mut().emulator.mark_cursor_damage();
-        }
-        host.caret_blink_armed = false;
-        host.last_caret_phase_on = true;
+    host.dirty = true;
+}
+
+fn settle_caret_blink(host: &mut HostState, now: Instant) {
+    clear_quiet_visibility_storm(host, now);
+    let mut clock = CaretBlinkClock {
+        epoch: host.caret_blink_epoch,
+        armed: host.caret_blink_armed,
+        phase_on: host.last_caret_phase_on,
+    };
+    let repaint = settle_caret_clock(&mut clock, caret_blink_wanted(host), now);
+    host.caret_blink_epoch = clock.epoch;
+    host.caret_blink_armed = clock.armed;
+    host.last_caret_phase_on = clock.phase_on;
+    if !repaint {
         return;
     }
-    if !host.caret_blink_armed {
-        host.caret_blink_epoch = now;
-        host.caret_blink_armed = true;
-        if !host.last_caret_phase_on {
-            host.last_caret_phase_on = true;
-            host.dirty = true;
-            host.mux.focused_mut().emulator.mark_cursor_damage();
-        }
-        return;
-    }
-    let phase_on = (now
-        .saturating_duration_since(host.caret_blink_epoch)
-        .as_millis()
-        / CARET_BLINK_MS)
-        .is_multiple_of(2);
-    if phase_on != host.last_caret_phase_on {
-        host.last_caret_phase_on = phase_on;
-        host.dirty = true;
-        host.mux.focused_mut().emulator.mark_cursor_damage();
-    }
+    host.dirty = true;
+    host.mux.focused_mut().emulator.mark_cursor_damage();
 }
 
 impl Deref for HostState {
@@ -25976,6 +26003,113 @@ session mail (id 15)
         assert_eq!(first.duration_since(epoch), Duration::from_millis(500));
         let second = next_caret_blink_at(epoch, first);
         assert_eq!(second.duration_since(first), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn caret_phase_stays_on_for_500ms_then_turns_off() {
+        let epoch = Instant::now();
+        assert!(caret_phase_on(epoch, epoch));
+        assert!(caret_phase_on(epoch, epoch + Duration::from_millis(499)));
+        assert!(!caret_phase_on(epoch, epoch + Duration::from_millis(500)));
+        assert!(!caret_phase_on(epoch, epoch + Duration::from_millis(999)));
+        assert!(caret_phase_on(epoch, epoch + Duration::from_millis(1000)));
+    }
+
+    #[test]
+    fn caret_clock_disarms_without_a_repaint_when_the_phase_is_already_on() {
+        let now = Instant::now();
+        let mut clock = CaretBlinkClock {
+            epoch: now,
+            armed: true,
+            phase_on: true,
+        };
+        assert!(!settle_caret_clock(&mut clock, false, now));
+        assert!(!clock.armed);
+        assert!(clock.phase_on);
+
+        clock.armed = false;
+        assert!(!settle_caret_clock(&mut clock, false, now));
+        assert!(!clock.armed);
+    }
+
+    #[test]
+    fn caret_clock_paints_once_when_a_hidden_caret_is_disarmed() {
+        let now = Instant::now();
+        let mut clock = CaretBlinkClock {
+            epoch: now,
+            armed: true,
+            phase_on: false,
+        };
+        assert!(settle_caret_clock(&mut clock, false, now));
+        assert!(!clock.armed);
+        assert!(clock.phase_on);
+        assert!(!settle_caret_clock(
+            &mut clock,
+            false,
+            now + Duration::from_millis(500)
+        ));
+    }
+
+    #[test]
+    fn caret_clock_arms_without_a_repaint_when_the_caret_is_already_shown() {
+        let now = Instant::now();
+        let mut clock = CaretBlinkClock {
+            epoch: now - Duration::from_secs(5),
+            armed: false,
+            phase_on: true,
+        };
+        assert!(!settle_caret_clock(&mut clock, true, now));
+        assert!(clock.armed);
+        assert!(clock.phase_on);
+        assert_eq!(clock.epoch, now);
+    }
+
+    #[test]
+    fn caret_clock_shows_the_caret_when_arming_from_a_hidden_phase() {
+        let now = Instant::now();
+        let mut clock = CaretBlinkClock {
+            epoch: now - Duration::from_secs(5),
+            armed: false,
+            phase_on: false,
+        };
+        assert!(settle_caret_clock(&mut clock, true, now));
+        assert!(clock.armed);
+        assert!(clock.phase_on);
+        assert_eq!(clock.epoch, now);
+    }
+
+    #[test]
+    fn caret_clock_repaints_only_when_the_armed_phase_changes() {
+        let epoch = Instant::now();
+        let mut clock = CaretBlinkClock {
+            epoch,
+            armed: true,
+            phase_on: true,
+        };
+        assert!(!settle_caret_clock(
+            &mut clock,
+            true,
+            epoch + Duration::from_millis(499)
+        ));
+        assert!(clock.phase_on);
+        assert!(settle_caret_clock(
+            &mut clock,
+            true,
+            epoch + Duration::from_millis(500)
+        ));
+        assert!(!clock.phase_on);
+        assert!(!settle_caret_clock(
+            &mut clock,
+            true,
+            epoch + Duration::from_millis(999)
+        ));
+        assert!(settle_caret_clock(
+            &mut clock,
+            true,
+            epoch + Duration::from_millis(1000)
+        ));
+        assert!(clock.phase_on);
+        assert_eq!(clock.epoch, epoch);
     }
 
     #[test]

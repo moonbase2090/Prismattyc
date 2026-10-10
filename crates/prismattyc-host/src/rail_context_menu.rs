@@ -9,7 +9,7 @@ use crate::palette::ContextMenuKind;
 pub const RAIL_SPACE_ROWS: usize = 6;
 pub const RAIL_SESSION_ROWS: usize = 4;
 pub const RAIL_SESSION_SOLO_ROWS: usize = 5;
-pub const RAIL_PANE_ROWS: usize = 2;
+pub const RAIL_PANE_ROWS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RailSpaceAction {
@@ -32,6 +32,7 @@ pub enum RailSessionAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RailPaneAction {
     Focus,
+    Rename,
     ClosePane,
 }
 
@@ -89,7 +90,8 @@ pub fn session_action(index: usize) -> Option<RailSessionAction> {
 pub fn pane_action(index: usize) -> Option<RailPaneAction> {
     match index {
         0 => Some(RailPaneAction::Focus),
-        1 => Some(RailPaneAction::ClosePane),
+        1 => Some(RailPaneAction::Rename),
+        2 => Some(RailPaneAction::ClosePane),
         _ => None,
     }
 }
@@ -113,7 +115,7 @@ pub fn needs_confirmation(kind: ContextMenuKind, index: usize, confirmed: bool) 
         ContextMenuKind::RailSpace => matches!(index, 4 | 5),
         ContextMenuKind::RailSession => index == 2,
         ContextMenuKind::RailSessionSolo => matches!(index, 2 | 3),
-        ContextMenuKind::RailPane => index == 1,
+        ContextMenuKind::RailPane => index == 2,
         _ => false,
     }
 }
@@ -149,7 +151,8 @@ pub fn session_label(index: usize) -> Option<(&'static str, &'static str)> {
 pub fn pane_label(index: usize) -> Option<(&'static str, &'static str)> {
     match index {
         0 => Some(("Focus", "bring this pane to the keyboard")),
-        1 => Some(("Close pane…", "close this pane in the layout")),
+        1 => Some(("Rename", "change this pane title")),
+        2 => Some(("Close pane…", "close this pane in the layout")),
         _ => None,
     }
 }
@@ -210,15 +213,21 @@ mod tests {
     }
 
     #[test]
-    fn pane_menu_lists_focus_and_close_in_order() {
-        let expected = [RailPaneAction::Focus, RailPaneAction::ClosePane];
+    fn pane_menu_lists_focus_rename_and_close_in_order() {
+        let expected = [
+            RailPaneAction::Focus,
+            RailPaneAction::Rename,
+            RailPaneAction::ClosePane,
+        ];
         for (index, action) in expected.into_iter().enumerate() {
             assert_eq!(pane_action(index), Some(action), "row {index}");
             assert!(pane_label(index).is_some(), "label {index}");
         }
-        assert_eq!(pane_action(2), None);
+        assert_eq!(pane_action(3), None);
         assert_eq!(row_count(ContextMenuKind::RailPane), Some(RAIL_PANE_ROWS));
-        assert_eq!(pane_label(1).map(|(label, _)| label), Some("Close pane…"));
+        assert_eq!(pane_label(1).map(|(label, _)| label), Some("Rename"));
+        assert_eq!(pane_label(2).map(|(label, _)| label), Some("Close pane…"));
+        assert!(!needs_confirmation(ContextMenuKind::RailPane, 1, false));
     }
 
     #[test]
@@ -249,8 +258,9 @@ mod tests {
         assert!(needs_confirmation(ContextMenuKind::RailSession, 2, false));
         assert!(!needs_confirmation(ContextMenuKind::RailSession, 2, true));
         assert!(!needs_confirmation(ContextMenuKind::RailSession, 1, false));
-        assert!(needs_confirmation(ContextMenuKind::RailPane, 1, false));
-        assert!(!needs_confirmation(ContextMenuKind::RailPane, 1, true));
+        assert!(needs_confirmation(ContextMenuKind::RailPane, 2, false));
+        assert!(!needs_confirmation(ContextMenuKind::RailPane, 2, true));
+        assert!(!needs_confirmation(ContextMenuKind::RailPane, 1, false));
         assert!(!needs_confirmation(ContextMenuKind::RailPane, 0, false));
         assert!(needs_confirmation(
             ContextMenuKind::RailSessionSolo,

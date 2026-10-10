@@ -29,6 +29,10 @@ enum Target {
     LocalPane {
         pane: PaneId,
     },
+    /// Space file name. Sidebar mode does not paint the rail's inline editor.
+    RenameSpace {
+        space: String,
+    },
 }
 
 pub(super) struct Prompt {
@@ -80,7 +84,7 @@ fn begin(host: &mut HostState, target: Target, name: String) {
         Target::Layout { count, .. } => Some(keybind::Action::Layout(*count as u8)),
         Target::Rename { .. } | Target::LocalPane { .. } => Some(keybind::Action::RenamePane),
         Target::LocalTab { .. } => Some(keybind::Action::RenameTab),
-        Target::Add { .. } | Target::Space { .. } => None,
+        Target::Add { .. } | Target::Space { .. } | Target::RenameSpace { .. } => None,
     };
     host.session_prompt = Some(Prompt {
         target,
@@ -205,6 +209,17 @@ pub(super) fn rename_local_pane(host: &mut HostState, pane: PaneId, title: Strin
     begin(host, Target::LocalPane { pane }, title);
 }
 
+/// Rename a space when the rail editor is not painted.
+pub(super) fn rename_space(host: &mut HostState, name: String) {
+    begin(
+        host,
+        Target::RenameSpace {
+            space: name.clone(),
+        },
+        name,
+    );
+}
+
 fn run(args: &[&str]) -> Result<String> {
     let output = pmux_command()
         .args(args)
@@ -247,7 +262,10 @@ fn spawn_standalone(
 }
 
 fn apply(host: &mut HostState, target: &Target, name: &str) -> Result<()> {
-    if matches!(target, Target::LocalTab { .. } | Target::LocalPane { .. }) {
+    if matches!(
+        target,
+        Target::LocalTab { .. } | Target::LocalPane { .. } | Target::RenameSpace { .. }
+    ) {
         if name.trim().is_empty() {
             bail!("the name is empty");
         }
@@ -314,6 +332,30 @@ fn apply(host: &mut HostState, target: &Target, name: &str) -> Result<()> {
             }
             host.mux
                 .set_pane_title(*pane, Some(name.trim().to_string()));
+        }
+        Target::RenameSpace { space } => {
+            let name = name.trim();
+            if name == space {
+                return Ok(());
+            }
+            prismattyc_mux::validate_layout_name(name)?;
+            if host
+                .space_rail
+                .names
+                .iter()
+                .any(|existing| existing == name)
+            {
+                bail!("a space with that name exists");
+            }
+            run_pmux_space(&[
+                "space".into(),
+                "rename".into(),
+                space.clone(),
+                name.to_string(),
+            ])
+            .map_err(|error| anyhow::anyhow!(error))?;
+            resolve_host_space(host);
+            refresh_rail(host);
         }
     }
     finish_arrangement(host);
@@ -553,6 +595,7 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
         Target::Rename { .. } => "Pending mail stays. The old address forwards here.".into(),
         Target::LocalTab { .. } => "Window title. A solo sidebar row shows it.".into(),
         Target::LocalPane { .. } => "Pane title shown on the sidebar row.".into(),
+        Target::RenameSpace { .. } => "Space name shown on the sidebar.".into(),
         Target::Pane { .. } => "One name for the session and mailbox".into(),
         Target::Layout { count, .. } => format!(
             "Name the next session · {} of {count} panes",
@@ -561,9 +604,9 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
     };
     let hint_label = if matches!(
         prompt.target,
-        Target::LocalTab { .. } | Target::LocalPane { .. }
+        Target::LocalTab { .. } | Target::LocalPane { .. } | Target::RenameSpace { .. }
     ) {
-        "Title"
+        "Name"
     } else {
         "Agent ID"
     };
@@ -616,7 +659,10 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
 fn is_rename(target: &Target) -> bool {
     matches!(
         target,
-        Target::Rename { .. } | Target::LocalTab { .. } | Target::LocalPane { .. }
+        Target::Rename { .. }
+            | Target::LocalTab { .. }
+            | Target::LocalPane { .. }
+            | Target::RenameSpace { .. }
     )
 }
 
@@ -625,6 +671,7 @@ fn prompt_header(target: &Target) -> &'static str {
         Target::LocalTab { .. } => "Rename tab",
         Target::LocalPane { .. } => "Rename pane",
         Target::Rename { .. } => "Rename session",
+        Target::RenameSpace { .. } => "Rename space",
         _ => "New session",
     }
 }

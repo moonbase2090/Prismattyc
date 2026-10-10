@@ -15545,12 +15545,7 @@ fn handle_theme_picker_key(
 
     let logical = event.key_without_modifiers();
     if matches!(logical, Key::Named(NamedKey::Escape)) {
-        let picker = host.theme_picker.take().expect("picker is open");
-        apply_host_theme(host, picker.original);
-        host.window
-            .set_title(&window_title(&host.mux, show_tab_strip(host)));
-        host.dirty = true;
-        sync_chrome_hover(host);
+        cancel_theme_picker(host);
         return true;
     }
     if matches!(logical, Key::Named(NamedKey::Enter)) && !event.repeat {

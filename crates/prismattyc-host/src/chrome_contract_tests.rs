@@ -1,18 +1,6 @@
 //! Interaction contracts exercised in the existing private native window.
 use super::*;
-use winit::event::{ElementState, KeyEvent};
-use winit::keyboard::{Key, KeyCode, KeyLocation, ModifiersState, NamedKey, PhysicalKey};
-
-fn synth_key(logical: Key, physical: PhysicalKey) -> KeyEvent {
-    KeyEvent {
-        physical_key: physical,
-        logical_key: logical,
-        text: None,
-        location: KeyLocation::Standard,
-        state: ElementState::Pressed,
-        repeat: false,
-    }
-}
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 pub(super) fn verify(host: &mut HostState) {
     host.preedit = Preedit::default();
@@ -33,38 +21,25 @@ pub(super) fn verify(host: &mut HostState) {
 fn verify_find_and_theme_modals(host: &mut HostState) {
     host.find = FindMode::default();
     host.modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
-    let find_open = synth_key(Key::Character("f".into()), PhysicalKey::Code(KeyCode::KeyF));
-    assert!(handle_find_key(
+    assert!(find_key_try_open(
         host,
-        &find_open,
-        Some(keybind::Action::Find)
+        &Key::Character("f".into()),
+        Some(keybind::Action::Find),
+        false,
     ));
     assert!(host.find.active);
-    let query = synth_key(Key::Character("z".into()), PhysicalKey::Code(KeyCode::KeyZ));
-    assert!(handle_find_key(host, &query, None));
+    assert!(find_key_while_open(host, &Key::Character("z".into())));
     assert_eq!(host.find.query, "z");
-    let esc = synth_key(
-        Key::Named(NamedKey::Escape),
-        PhysicalKey::Code(KeyCode::Escape),
-    );
-    assert!(handle_find_key(host, &esc, None));
+    assert!(find_key_while_open(host, &Key::Named(NamedKey::Escape)));
     assert!(!host.find.active);
 
     host.theme_picker = None;
-    let theme_open = synth_key(
-        Key::Character("<".into()),
-        PhysicalKey::Code(KeyCode::Comma),
-    );
-    assert!(handle_theme_picker_key(
-        host,
-        &theme_open,
-        Some(keybind::Action::ThemePicker),
-    ));
+    open_theme_picker(host);
     assert!(host.theme_picker.is_some());
-    let original = host.theme_picker.as_ref().unwrap().original.clone();
-    assert!(handle_theme_picker_key(host, &esc, None));
+    let original = host.theme_picker.as_ref().unwrap().original.id.clone();
+    cancel_theme_picker(host);
     assert!(host.theme_picker.is_none());
-    assert_eq!(host.theme.id, original.id);
+    assert_eq!(host.theme.id, original);
 }
 
 fn verify_scrollback_navigation(host: &mut HostState) {

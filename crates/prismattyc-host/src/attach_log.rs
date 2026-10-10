@@ -312,6 +312,7 @@ pub(crate) fn session_names() -> HashMap<String, String> {
 /// (PT-210). Empty on any failure.
 pub(crate) fn session_directory() -> Vec<crate::attach_adopt::SessionEntry> {
     live_snapshot()
+        .as_ref()
         .map(session_directory_from_snapshot)
         .unwrap_or_default()
 }
@@ -321,11 +322,14 @@ pub(crate) fn session_directory() -> Vec<crate::attach_adopt::SessionEntry> {
 #[cfg(test)]
 pub(crate) fn session_directory_at(socket: &Path) -> Vec<crate::attach_adopt::SessionEntry> {
     live_snapshot_at(socket)
+        .as_ref()
         .map(session_directory_from_snapshot)
         .unwrap_or_default()
 }
 
-fn session_directory_from_snapshot(snapshot: Snapshot) -> Vec<crate::attach_adopt::SessionEntry> {
+pub(crate) fn session_directory_from_snapshot(
+    snapshot: &Snapshot,
+) -> Vec<crate::attach_adopt::SessionEntry> {
     snapshot
         .sessions
         .iter()

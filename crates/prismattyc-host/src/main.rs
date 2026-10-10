@@ -97,6 +97,8 @@ mod walkthrough;
 mod walkthrough_audio;
 #[cfg(target_os = "linux")]
 mod wayland_shm;
+#[cfg(any(windows, test))]
+mod windows_scan;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1301,6 +1303,18 @@ struct HostState {
     attach_rebound_same_id: HashSet<(u64, PaneId)>,
     /// Panes whose local shell runs a nested `pmux-attach` (PT-210).
     adopted: attach_adopt::Adopted,
+    /// Off-UI Windows process scan. The pump only reaps a finished job.
+    #[cfg(windows)]
+    windows_scan: windows_scan::Slot<attach_adopt::WindowsDiscovery>,
+    /// Last agent classification per pane child pid. A miss draws no harness icon.
+    #[cfg(windows)]
+    windows_agents: HashMap<u32, prismattyc_mux::InjectAgent>,
+    /// `pmuxd` pid from the last scan. `None` is a miss and does not clear the old pid.
+    #[cfg(windows)]
+    windows_server_pid: Option<u32>,
+    /// Child working directories from the last scan.
+    #[cfg(windows)]
+    windows_cwds: HashMap<u32, PathBuf>,
     /// Serialize helpers and fence cache writes until their layout applies.
     space_opens: space_open::Opens,
     space_open_observation: Option<space_outcome::Observation>,
@@ -2878,6 +2892,10 @@ struct App {
     event_proxy: EventLoopProxy<UserAction>,
     /// Live `{stem}.host.pid` this process registered (PT-65).
     registered_host: Option<(PathBuf, u32)>,
+    /// Default attach-layout path. Remembered so an idle pump does not
+    /// resolve the mux socket again. On Windows that resolution used to
+    /// rewrite the runtime directory DACL on the UI thread.
+    default_layout_path: Option<PathBuf>,
     /// Throttle for [`App::retry_register_host_pid`].
     last_register_try: Option<Instant>,
     last_render_status: Option<Instant>,
@@ -2968,6 +2986,7 @@ impl App {
             keymap,
             event_proxy,
             registered_host: None,
+            default_layout_path: None,
             last_register_try: None,
             last_render_status: None,
             render_status_seq: 0,
@@ -3494,23 +3513,19 @@ impl App {
         if self.windows.is_empty() {
             return;
         }
-        let Some(default_view) =
-            host_mux_socket().map(|socket| attach_tabs::layout_path_from_socket(&socket))
-        else {
-            return;
-        };
-        if self.registered_host.is_some()
-            && self
-                .windows
-                .values()
-                .any(|host| host.attach_layout_path.as_ref() == Some(&default_view))
-        {
-            return;
-        }
         if self
             .windows
             .values()
             .any(|host| host.space_opens.blocks_persist())
+        {
+            return;
+        }
+        if self.registered_host.is_some()
+            && self.default_layout_path.as_ref().is_some_and(|path| {
+                self.windows
+                    .values()
+                    .any(|host| host.attach_layout_path.as_ref() == Some(path))
+            })
         {
             return;
         }
@@ -3522,6 +3537,20 @@ impl App {
             return;
         }
         self.last_register_try = Some(now);
+        let Some(default_view) =
+            host_mux_socket().map(|socket| attach_tabs::layout_path_from_socket(&socket))
+        else {
+            return;
+        };
+        self.default_layout_path = Some(default_view.clone());
+        if self.registered_host.is_some()
+            && self
+                .windows
+                .values()
+                .any(|host| host.attach_layout_path.as_ref() == Some(&default_view))
+        {
+            return;
+        }
         if self.registered_host.is_none() {
             self.register_host_pid_with(true);
         }
@@ -3623,6 +3652,8 @@ impl App {
     fn poll_attach_tabs(&mut self) {
         let timing = &mut self.pump_timing;
         for host in self.windows.values_mut() {
+            #[cfg(windows)]
+            service_windows_process_scan(host, Instant::now());
             let started = Instant::now();
             poll_host_attach_tabs(host);
             timing.record_phase(pump_timing::Phase::PollHostAttachTabs, started.elapsed());
@@ -4433,6 +4464,14 @@ impl App {
                 attach_daemon_pid: None,
                 attach_rebound_same_id: HashSet::new(),
                 adopted: attach_adopt::Adopted::default(),
+                #[cfg(windows)]
+                windows_scan: windows_scan::Slot::default(),
+                #[cfg(windows)]
+                windows_agents: HashMap::new(),
+                #[cfg(windows)]
+                windows_server_pid: None,
+                #[cfg(windows)]
+                windows_cwds: HashMap::new(),
                 space_opens: space_open::Opens::default(),
                 space_open_observation: None,
                 last_space_open: None,
@@ -8522,11 +8561,99 @@ fn snapshot_covers_attachments<'a>(
     panes.all(|pane| bound_at.get(pane).is_none_or(|bound| *bound <= snapshot_at))
 }
 
+/// Reap the Windows process scan and start the next one when a second has passed.
+///
+/// The job is the only `CreateToolhelp32Snapshot` / `Process32NextW` walk for
+/// the idle pump. Reap does not wait. The snapshot is read only when a scan
+/// is due, and the adoption directory comes from that same snapshot.
+#[cfg(windows)]
+fn service_windows_process_scan(host: &mut HostState, now: Instant) {
+    if let Some(report) = host.windows_scan.reap() {
+        if let Some(agents) = report.agents {
+            host.windows_agents = agents;
+        }
+        host.windows_server_pid = report.server_pid;
+        host.windows_cwds = report.cwds;
+        apply_windows_adoptions(host, &report.adoptions);
+    }
+    if !host.windows_scan.due(now) {
+        return;
+    }
+    let Some(socket) = host_mux_socket() else {
+        return;
+    };
+    let snapshot = snapshot_client::snapshot_for_periodic(host.snapshot_client.as_deref());
+    let remote_children: Vec<windows_scan::RemoteChild> = snapshot
+        .as_ref()
+        .into_iter()
+        .flat_map(|snap| &snap.sessions)
+        .flat_map(|session| &session.windows)
+        .flat_map(|window| &window.panes)
+        .map(|pane| windows_scan::RemoteChild {
+            pane: pane.id,
+            child_pid: pane.child_pid,
+        })
+        .collect();
+    let views: Vec<windows_scan::PaneScanView<PaneId>> = host
+        .mux
+        .tab_panes()
+        .into_iter()
+        .flat_map(|(_, panes)| panes)
+        .map(|pane| windows_scan::PaneScanView {
+            pane,
+            local_child: host.mux.pane(pane).and_then(|runtime| runtime.child_pid()),
+            unmarked: host.mux.attach_session_of(pane).is_none(),
+            remote_pane: host.mux.remote_pane_id(pane),
+        })
+        .collect();
+    let request = windows_scan::windows_scan_request(&views, &remote_children);
+    let directory = snapshot
+        .as_ref()
+        .map(attach_log::session_directory_from_snapshot)
+        .unwrap_or_else(attach_log::session_directory);
+    host.windows_scan.start(now, move || {
+        attach_adopt::discover_windows(
+            &request.agent_roots,
+            &request.candidates,
+            &request.cwd_pids,
+            &socket,
+            &directory,
+        )
+    });
+}
+
+#[cfg(windows)]
+fn apply_windows_adoptions(host: &mut HostState, adoptions: &[attach_adopt::Adoption<PaneId>]) {
+    let Some(socket) = host_mux_socket() else {
+        return;
+    };
+    let pending: Vec<_> = adoptions
+        .iter()
+        .filter(|(pane, _, _, _)| {
+            host.mux.pane(*pane).is_some() && host.mux.attach_session_of(*pane).is_none()
+        })
+        .cloned()
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+    attach_adopt::commit_adoptions(&mut host.mux, &mut host.adopted, &pending, &socket);
+    for (pane, _, id, _) in &pending {
+        apply_attach_title_pin(host, *pane, id);
+        bind_attach_pane(host, *pane, id.clone());
+    }
+    mark_layout_dirty(host);
+    host.dirty = true;
+}
+
 /// Once a second: mark panes whose shell runs a nested `pmux-attach` on
 /// this host's socket, and unmark adopted panes whose attach exited
 /// (PT-210). Without the mark, `pmux new` / `pmux attach` typed into a
 /// pane left the tab cache empty, `pmux space save` recorded no tabs, and
 /// `space open` fanned the sessions out one tab per session.
+///
+/// On Windows the walk runs in `service_windows_process_scan`. This
+/// function only drops marks whose process has exited.
 fn adopt_nested_attaches(host: &mut HostState, now: Instant) {
     if !host.adopted.due(now) {
         return;
@@ -8546,41 +8673,36 @@ fn adopt_nested_attaches(host: &mut HostState, now: Instant) {
         changed = true;
     }
     // A bare shell has no children: no /proc walk for it.
-    let candidates: Vec<(PaneId, u32)> = live_panes
-        .iter()
-        .filter(|pane| host.mux.attach_session_of(**pane).is_none())
-        .filter_map(|pane| {
-            host.mux
-                .pane(*pane)
-                .and_then(|runtime| runtime.child_pid())
-                .map(|pid| (*pane, pid))
-        })
-        .filter(|(_, pid)| {
-            #[cfg(windows)]
-            {
-                let _ = pid;
-                true
-            }
-            #[cfg(not(windows))]
-            {
-                !prismattyc_mux::procinfo::children_of(*pid).is_empty()
-            }
-        })
-        .collect();
-    if !candidates.is_empty() {
-        if let Some(socket) = host_mux_socket() {
-            let directory = attach_log::session_directory();
-            let assignments = attach_adopt::adopt_candidates(
-                &mut host.mux,
-                &mut host.adopted,
-                &candidates,
-                &socket,
-                &directory,
-            );
-            for (pane, _pid, id, _name) in assignments {
-                apply_attach_title_pin(host, pane, &id);
-                bind_attach_pane(host, pane, id);
-                changed = true;
+    // Windows discovery is the background scan; capturing here walks
+    // CreateToolhelp32Snapshot on the UI thread.
+    #[cfg(not(windows))]
+    {
+        let candidates: Vec<(PaneId, u32)> = live_panes
+            .iter()
+            .filter(|pane| host.mux.attach_session_of(**pane).is_none())
+            .filter_map(|pane| {
+                host.mux
+                    .pane(*pane)
+                    .and_then(|runtime| runtime.child_pid())
+                    .map(|pid| (*pane, pid))
+            })
+            .filter(|(_, pid)| !prismattyc_mux::procinfo::children_of(*pid).is_empty())
+            .collect();
+        if !candidates.is_empty() {
+            if let Some(socket) = host_mux_socket() {
+                let directory = attach_log::session_directory();
+                let assignments = attach_adopt::adopt_candidates(
+                    &mut host.mux,
+                    &mut host.adopted,
+                    &candidates,
+                    &socket,
+                    &directory,
+                );
+                for (pane, _pid, id, _name) in assignments {
+                    apply_attach_title_pin(host, pane, &id);
+                    bind_attach_pane(host, pane, id);
+                    changed = true;
+                }
             }
         }
     }
@@ -9450,13 +9572,24 @@ fn resolve_host_space(host: &mut HostState) -> Option<prismattyc_mux::SavedSpace
 /// show the same id as the session `space open` just created. That match
 /// is not a live attachment.
 fn note_attach_daemon(host: &mut HostState) {
-    let Some(socket) = host_mux_socket() else {
-        return;
+    #[cfg(not(windows))]
+    let pid = {
+        let Some(socket) = host_mux_socket() else {
+            return;
+        };
+        prismattyc_mux::procinfo::find_server_pids(&socket)
+            .into_iter()
+            .min()
     };
-    let Some(pid) = prismattyc_mux::procinfo::find_server_pids(&socket)
-        .into_iter()
-        .min()
-    else {
+    #[cfg(windows)]
+    let pid = {
+        if host_mux_socket().is_none() {
+            return;
+        }
+        // A miss leaves the previous daemon pid in place, same as an empty scan.
+        host.windows_server_pid
+    };
+    let Some(pid) = pid else {
         return;
     };
     if host.attach_daemon_pid == Some(pid) {
@@ -9560,10 +9693,15 @@ fn refresh_space_views(host: &mut HostState) {
         return;
     }
     let observed = snapshot_client::snapshot_observed(host.snapshot_client.as_deref());
-    if host
-        .mux
-        .refresh_git_info(observed.as_ref().map(|(_, snapshot)| snapshot))
-    {
+    #[cfg(windows)]
+    let cached_cwd = host.windows_cwds.clone();
+    if host.mux.refresh_git_info(
+        observed.as_ref().map(|(_, snapshot)| snapshot),
+        #[cfg(windows)]
+        Some(&cached_cwd),
+        #[cfg(not(windows))]
+        None,
+    ) {
         host.dirty = true;
     }
     let Some((_, snapshot)) = observed else {
@@ -10461,6 +10599,11 @@ fn sidebar_row_harness_seat(
     }
     let pane = pane_for_sidebar_row(host, row)?;
     let child = host.mux.pane(pane).and_then(|runtime| runtime.child_pid());
+    #[cfg(windows)]
+    let agent = child
+        .and_then(|pid| host.windows_agents.get(&pid).copied())
+        .unwrap_or(prismattyc_mux::InjectAgent::Unknown);
+    #[cfg(not(windows))]
     let agent = prismattyc_mux::detect_inject_agent(child, None);
     sidebar_width::harness_seat_from_agent(agent)
 }

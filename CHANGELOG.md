@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+An idle Windows host no longer rewrites the runtime directory ACL on the UI thread. Resolving the mux socket applied an inheritable DACL on every call, and Windows then walked every child of that directory. The directory is secured once, and that write does not propagate to existing children. The idle event loop already waits until the next deadline or a wake. It polls only while PTY output or a wake is pending. macOS socket resolution does not rewrite directory security.
+
 ### Windows
 
 `ADDTOPATH=1` prepends the install `cmd` directory instead of `bin`.

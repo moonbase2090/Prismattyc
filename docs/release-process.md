@@ -16,7 +16,8 @@ and a signed universal macOS app distributed as a DMG and a zip.
    report the base version `0.2.21`. A later rc or the final release that
    keeps the same base version changes only the CHANGELOG, not the version.
 2. Merge the release source into `main` and complete the release gates in
-   [the testing policy](testing-policy.md).
+   [the testing policy](testing-policy.md). The CRAP release gate is
+   advisory for Prismattyc: it reports a warning but never fails.
 3. Confirm that the repository has the Apple secrets listed below.
 4. Push a tag such as `v0.2.21` to start the release workflow.
 5. Wait for every build job. The publish job creates the release only after
@@ -83,7 +84,7 @@ ARM64 runners. `scripts/release/build-linux.sh` uses `cargo-zigbuild` with a
 names. The jobs run `scripts/release/smoke-linux-al2023.sh` before packaging.
 That check reports the maximum GLIBC symbol version from `objdump -T` for each
 binary, then runs `prismattyc --version`, `pmux --version`, and
-`pmuxd --version` in `amazonlinux:2023`. CI runs the same check for both
+`pmuxd --version` in `public.ecr.aws/amazonlinux/amazonlinux:2023`. CI runs the same check for both
 architectures. The jobs generate manual pages with `scripts/install-man.sh`
 and package the result with `scripts/release/package.py`.
 

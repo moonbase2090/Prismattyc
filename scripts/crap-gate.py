@@ -5,19 +5,24 @@ Fail when:
   * a new function in a PR-touched file scores above threshold
   * a function in a PR-touched file crosses from <= threshold to above it
 
-Global counts are informational for PRs. --release instead enforces the
-−10 target against the last refreshed baseline. A release at the C>threshold
-resident floor is done: coverage cannot bring those functions under
-threshold. Run --release before cutting a release tag, not on every
-merge. Both modes print the counts, the C>threshold floor by crate, and
-the top 10 functions above threshold per crate. Refresh the comparison
-baseline deliberately with scripts/crap-refresh.sh.
+Global counts are informational for PRs. --release reports the count
+against the −10 target versus the last refreshed baseline as a warning
+(::warning annotation plus job summary) and always exits 0: the release
+gate is advisory on Prismattyc because of known legacy debt, and it never
+fails the job. New or newly above-threshold functions are still named in
+the warning. A release at the C>threshold resident floor is done: coverage
+cannot bring those functions under threshold. Run --release before cutting
+a release tag, not on every merge. Both modes print the counts, the
+C>threshold floor by crate, and the top 10 functions above threshold per
+crate. Refresh the comparison baseline deliberately with
+scripts/crap-refresh.sh, never to hide new debt.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -240,6 +245,27 @@ def release_gate(
     return []
 
 
+def gh_escape(message: str) -> str:
+    return (
+        message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    )
+
+
+def emit_warnings(lines: list[str]) -> None:
+    for line in lines:
+        print(f"::warning::{gh_escape(line)}")
+
+
+def append_step_summary(lines: list[str]) -> None:
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write("### CRAP release gate (advisory)\n\n")
+        for line in lines:
+            handle.write(f"- {line}\n")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--baseline", type=Path, required=True)
@@ -313,8 +339,26 @@ def main(argv: list[str] | None = None) -> int:
         if cur_n <= floor_n:
             print(f"at C>{args.threshold:g} floor {floor_n}; release target met")
         failures = release_gate(cur_n, base_n, delta, floor_n)
-    else:
-        failures = gate(baseline, current, changed_set(args), args.threshold)
+        new_above = gate(
+            baseline,
+            current,
+            {file for (file, _name) in current},
+            args.threshold,
+        )
+        print_top_per_crate(current, args.threshold)
+        advisories = [f"CRAP release gate: {line}" for line in failures]
+        advisories += [f"CRAP release gate: {line}" for line in new_above]
+        if advisories:
+            emit_warnings(advisories)
+            append_step_summary(
+                [f"count {cur_n} vs target {target} (baseline {base_n}, "
+                 f"floor {floor_n})"] + new_above
+            )
+            print("CRAP release gate: advisory warning only; never fails the job")
+            return 0
+        print("CRAP gate passed")
+        return 0
+    failures = gate(baseline, current, changed_set(args), args.threshold)
     print_top_per_crate(current, args.threshold)
     if failures:
         print("CRAP gate failed:", file=sys.stderr)

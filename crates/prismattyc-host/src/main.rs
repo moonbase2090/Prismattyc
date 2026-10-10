@@ -73,6 +73,9 @@ mod transparency;
 mod input_routing_tests;
 #[cfg(test)]
 #[cfg(target_os = "linux")]
+mod pty_event_tests;
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 mod render_window_tests;
 mod restore_prompt;
 mod rich;

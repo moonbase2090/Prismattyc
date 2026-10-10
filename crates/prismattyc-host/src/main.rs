@@ -15304,40 +15304,42 @@ fn finish_palette_result(host: &mut HostState, result: PaletteVerdict) -> Palett
     }
 }
 
-/// Modal find overlay. While open, keys stay host-owned (no PTY inject).
-/// `action` is the key table's verdict for this (non-repeat) event.
-fn handle_find_key(
-    host: &mut HostState,
-    event: &winit::event::KeyEvent,
-    action: Option<keybind::Action>,
-) -> bool {
-    if host.emulator.screen().alt_active() {
-        let had = host.find.active;
-        close_find(&mut host.find);
-        if had {
-            host.dirty = true;
-        }
+fn find_key_on_alt_screen(host: &mut HostState) -> bool {
+    if !host.emulator.screen().alt_active() {
         return false;
     }
-    let logical = event.key_without_modifiers();
-    if !host.find.active {
-        let open = action == Some(keybind::Action::Find)
-            || is_find_fallback_chord(&logical, host.modifiers)
-            || is_scroll_slash_find(&logical, host.modifiers, host.view_scroll);
-        if !open || event.repeat {
-            return false;
-        }
-        open_find_prompt(host);
-        return true;
+    let had = host.find.active;
+    close_find(&mut host.find);
+    if had {
+        host.dirty = true;
     }
+    true
+}
 
+fn find_key_try_open(
+    host: &mut HostState,
+    logical: &Key,
+    action: Option<keybind::Action>,
+    repeat: bool,
+) -> bool {
+    let open = action == Some(keybind::Action::Find)
+        || is_find_fallback_chord(logical, host.modifiers)
+        || is_scroll_slash_find(logical, host.modifiers, host.view_scroll);
+    if !open || repeat {
+        return false;
+    }
+    open_find_prompt(host);
+    true
+}
+
+fn find_key_while_open(host: &mut HostState, logical: &Key) -> bool {
     if matches!(logical, Key::Named(NamedKey::Escape)) {
         close_find(&mut host.find);
         host.selection.clear();
         host.dirty = true;
         return true;
     }
-    if is_copy_chord(&logical, host.modifiers, host.selection.range().is_some()) {
+    if is_copy_chord(logical, host.modifiers, host.selection.range().is_some()) {
         let _ = copy_selection_native(host);
         return true;
     }
@@ -15396,8 +15398,24 @@ fn handle_find_key(
             }
         }
     }
-    // Swallow remaining keys so they never reach the PTY.
     true
+}
+
+/// Modal find overlay. While open, keys stay host-owned (no PTY inject).
+/// `action` is the key table's verdict for this (non-repeat) event.
+fn handle_find_key(
+    host: &mut HostState,
+    event: &winit::event::KeyEvent,
+    action: Option<keybind::Action>,
+) -> bool {
+    if find_key_on_alt_screen(host) {
+        return false;
+    }
+    let logical = event.key_without_modifiers();
+    if !host.find.active {
+        return find_key_try_open(host, &logical, action, event.repeat);
+    }
+    find_key_while_open(host, &logical)
 }
 
 fn cycle_theme_index(selected: Option<usize>, count: usize, forward: bool) -> Option<usize> {
@@ -25988,6 +26006,14 @@ session mail (id 15)
         assert_eq!(cycle_theme_index(None, 6, false), Some(5));
         assert_eq!(cycle_theme_index(Some(5), 6, true), Some(0));
         assert_eq!(cycle_theme_index(Some(0), 6, false), Some(5));
+    }
+
+    #[test]
+    fn theme_picker_scroll_keeps_selection_visible() {
+        assert_eq!(theme_picker_scroll_for_selection(0, Some(5), 3, 10), 3);
+        assert_eq!(theme_picker_scroll_for_selection(4, Some(2), 3, 10), 2);
+        assert_eq!(theme_picker_scroll_for_selection(0, None, 3, 10), 0);
+        assert_eq!(theme_picker_scroll_for_selection(99, Some(1), 3, 4), 1);
     }
 
     #[test]

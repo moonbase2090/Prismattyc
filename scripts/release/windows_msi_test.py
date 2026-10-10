@@ -201,9 +201,10 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertNotIn("prepends the install `bin` directory", docs)
         self.assertIn("windows-preview-*", docs)
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        unreleased = changelog.split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
-        self.assertIn("windows-preview-*", unreleased)
-        self.assertIn("`cmd`", unreleased)
+        # These notes shipped in 0.3.32. Unreleased is for later changes.
+        released = changelog.split("## [0.3.32]", 1)[1].split("\n## [", 1)[0]
+        self.assertIn("windows-preview-*", released)
+        self.assertIn("`cmd`", released)
 
     def test_workflows_name_every_signing_setting(self):
         for relative in (".github/workflows/release.yml", ".github/workflows/windows-package.yml"):

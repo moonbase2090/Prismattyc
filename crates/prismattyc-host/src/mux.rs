@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use portable_pty::PtySize;
-use prismattyc_core::Selection;
-use prismattyc_emulator::{Emulator, EmulatorStateV1, PtySession};
+use prismattyc_core::{Cursor, GridDamage, Selection};
+use prismattyc_emulator::{CursorShape, Emulator, EmulatorStateV1, PlacedImage, PtySession};
 use prismattyc_mux::{
     apply_arrangement, even_horizontal_row, even_two_row_grid, even_vertical_column,
     layout_to_rects, Arrangement, Axis, CellRect, ClientView, Domain, PaneId, PaneLayout,
@@ -41,6 +41,105 @@ fn next_runtime_instance() -> u64 {
 pub(crate) const ACTIVE_WINDOW: Duration = Duration::from_millis(1500);
 /// Quiet gap before an unfocused pane's next output (or silence) badges.
 pub(crate) const QUIET_GAP: Duration = Duration::from_secs(3);
+/// Cursor-visibility flips closer than this latch a 500ms caret blink
+/// instead of scheduling a redraw per flip. Matches the host blink period.
+pub(crate) const VISIBILITY_STORM_MS: u128 = 500;
+
+/// Visibility-only DECTCEM flips. A burst faster than [`VISIBILITY_STORM_MS`]
+/// latches so the host timer owns the caret.
+#[derive(Debug, Clone, Copy)]
+struct VisibilityStorm {
+    last_flip: Option<Instant>,
+    latched: bool,
+}
+
+impl VisibilityStorm {
+    fn new() -> Self {
+        Self {
+            last_flip: None,
+            latched: false,
+        }
+    }
+
+    /// Record a visibility-only flip. Returns whether this flip should redraw.
+    fn note_flip(&mut self, now: Instant) -> bool {
+        let rapid = self
+            .last_flip
+            .is_some_and(|at| now.saturating_duration_since(at).as_millis() < VISIBILITY_STORM_MS);
+        self.last_flip = Some(now);
+        if rapid {
+            self.latched = true;
+            false
+        } else {
+            self.latched = false;
+            true
+        }
+    }
+
+    fn quiet(&self, now: Instant) -> bool {
+        self.latched
+            && self.last_flip.is_some_and(|at| {
+                now.saturating_duration_since(at).as_millis() >= VISIBILITY_STORM_MS
+            })
+    }
+}
+
+/// Bytes need a redraw when something visible changed. A visibility-only
+/// flip inside the storm window does not.
+fn chunk_needs_redraw(
+    structural: bool,
+    visibility_changed: bool,
+    storm: &mut VisibilityStorm,
+    now: Instant,
+) -> bool {
+    if structural {
+        true
+    } else if visibility_changed {
+        storm.note_flip(now)
+    } else {
+        false
+    }
+}
+
+struct ChunkSnapshot {
+    damage: GridDamage,
+    cursor: Cursor,
+    shape: CursorShape,
+    visible: bool,
+    blink: bool,
+    history: usize,
+    scrolled: u64,
+    images: u64,
+}
+
+fn image_stamp(images: &[PlacedImage]) -> u64 {
+    let mut stamp = images.len() as u64;
+    for image in images {
+        stamp = stamp
+            .wrapping_mul(0x9E37_79B1_85EB_CA87)
+            .wrapping_add(u64::from(image.id));
+        stamp = stamp
+            .wrapping_mul(0x9E37_79B1_85EB_CA87)
+            .wrapping_add(u64::from(image.placement_id));
+        stamp = stamp
+            .wrapping_mul(0x9E37_79B1_85EB_CA87)
+            .wrapping_add(image.anchor_abs_line);
+        stamp = stamp
+            .wrapping_mul(0x9E37_79B1_85EB_CA87)
+            .wrapping_add(u64::from(image.anchor_col));
+        stamp = stamp
+            .wrapping_mul(0x9E37_79B1_85EB_CA87)
+            .wrapping_add(u64::from(image.width));
+        stamp = stamp
+            .wrapping_mul(0x9E37_79B1_85EB_CA87)
+            .wrapping_add(u64::from(image.height));
+        let pixels = Arc::as_ptr(&image.rgba) as *const u8;
+        stamp = stamp
+            .wrapping_mul(0x9E37_79B1_85EB_CA87)
+            .wrapping_add(pixels as usize as u64);
+    }
+    stamp
+}
 
 /// Attention-based unseen badge. Focused panes never badge.
 fn apply_unseen_v2(
@@ -862,6 +961,8 @@ pub(crate) struct PaneRuntime {
     pub(crate) mail_depth: u32,
     /// When visible content last changed, on any pane (focused included).
     pub(crate) last_output_at: Option<Instant>,
+    /// DECTCEM flips faster than [`VISIBILITY_STORM_MS`].
+    visibility_storm: VisibilityStorm,
     /// Unfocused pane was streaming when focus left; badge once it goes quiet.
     finish_watch: bool,
     /// Latest agent-attention message for this pane until it is focused.
@@ -1497,6 +1598,7 @@ impl PaneRuntime {
             unseen_output: false,
             mail_depth: 0,
             last_output_at: None,
+            visibility_storm: VisibilityStorm::new(),
             finish_watch: false,
             attention: None,
             size_owner: None,
@@ -1515,6 +1617,56 @@ impl PaneRuntime {
 
     pub(crate) fn is_active(&self) -> bool {
         self.is_active_at(Instant::now())
+    }
+
+    /// A visibility storm is latched; the host blink timer owns the caret.
+    pub(crate) fn caret_blink_latched(&self) -> bool {
+        self.visibility_storm.latched
+    }
+
+    /// The storm has been quiet long enough to paint the child's visibility.
+    pub(crate) fn visibility_storm_quiet(&self, now: Instant) -> bool {
+        self.visibility_storm.quiet(now)
+    }
+
+    pub(crate) fn clear_visibility_storm(&mut self) {
+        self.visibility_storm.latched = false;
+    }
+
+    fn snapshot_chunk(&self) -> ChunkSnapshot {
+        let screen = self.emulator.screen();
+        ChunkSnapshot {
+            damage: screen.damage().clone(),
+            cursor: screen.cursor(),
+            shape: self.emulator.cursor_shape(),
+            visible: self.emulator.cursor_visible(),
+            blink: self.emulator.cursor_blink(),
+            history: screen.history_len(),
+            scrolled: screen.scrolled_lines(),
+            images: image_stamp(self.emulator.images()),
+        }
+    }
+
+    /// True when this chunk changed something the host should paint.
+    /// A no-op rewrite does not refresh activity (`content_epoch`).
+    fn visible_after_feed(&mut self, before: &ChunkSnapshot, now: Instant) -> bool {
+        let structural = {
+            let screen = self.emulator.screen();
+            screen.damage() != &before.damage
+                || screen.cursor() != before.cursor
+                || screen.history_len() != before.history
+                || screen.scrolled_lines() != before.scrolled
+                || self.emulator.cursor_shape() != before.shape
+                || self.emulator.cursor_blink() != before.blink
+                || image_stamp(self.emulator.images()) != before.images
+        };
+        let visibility_changed = self.emulator.cursor_visible() != before.visible;
+        chunk_needs_redraw(
+            structural,
+            visibility_changed,
+            &mut self.visibility_storm,
+            now,
+        )
     }
 
     fn resize_cells(
@@ -1703,6 +1855,7 @@ impl PaneRuntime {
                     return (true, content_changed, false);
                 }
                 Ok(Ok(bytes)) => {
+                    let before = self.snapshot_chunk();
                     while let Ok(grant) = self.grant_rx.try_recv() {
                         self.rich.apply_grant(grant);
                     }
@@ -1744,6 +1897,7 @@ impl PaneRuntime {
                         self.selection.clear();
                         self.keyboard_select_mode = false;
                     }
+                    let attention_before = self.attention.clone();
                     if self.attention.is_some() {
                         if let Some(message) = self.emulator.take_pending_attention() {
                             self.attention = Some(message);
@@ -1753,7 +1907,10 @@ impl PaneRuntime {
                             self.attention = None;
                         }
                     }
-                    dirty = true;
+                    // Attention is chrome, not grid damage. A no-op byte chunk can
+                    // still clear it, and that has to repaint.
+                    dirty |= attention_before != self.attention;
+                    dirty |= self.visible_after_feed(&before, Instant::now());
                     if i + 1 == MAX_PTY_DRAIN_PER_PANE {
                         more = true;
                     }
@@ -3915,6 +4072,7 @@ impl MuxRuntime {
                 if let Some(message) = runtime.emulator.take_pending_attention() {
                     runtime.attention = Some(message.clone());
                     attentions.push((pane, message));
+                    dirty = true;
                 }
                 if let Some(text) = runtime.emulator.take_pending_title() {
                     let title = pane_title_from_osc(&text);
@@ -5182,6 +5340,31 @@ mod tests {
     use std::process::{Child, Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn visibility_storm_does_not_redraw_faster_than_500ms() {
+        let mut storm = VisibilityStorm::new();
+        let start = Instant::now();
+        assert!(chunk_needs_redraw(false, true, &mut storm, start));
+        assert!(!storm.latched);
+        let soon = start + Duration::from_millis(100);
+        assert!(
+            !chunk_needs_redraw(false, true, &mut storm, soon),
+            "a second hide inside 500ms must not redraw"
+        );
+        assert!(storm.latched);
+        assert!(
+            chunk_needs_redraw(true, false, &mut storm, soon + Duration::from_millis(10)),
+            "a real cell change still redraws inside a storm"
+        );
+        let settled = soon + Duration::from_millis(VISIBILITY_STORM_MS as u64);
+        assert!(
+            chunk_needs_redraw(false, true, &mut storm, settled),
+            "a single hide after 500ms of stability still redraws"
+        );
+        assert!(!storm.latched);
+        assert!(!chunk_needs_redraw(false, false, &mut storm, settled));
+    }
 
     #[test]
     fn attached_pane_uses_the_daemon_child_cwd_instead_of_spawn_cwd() {

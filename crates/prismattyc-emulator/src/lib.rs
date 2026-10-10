@@ -213,6 +213,9 @@ pub struct EmulatorStateV1 {
     pub bracketed_paste: bool,
     pub cursor_visible: bool,
     pub cursor_shape: CursorShape,
+    /// DECSCUSR blink (Ps 1, 3, 5). Older snapshots omit it and stay steady.
+    #[serde(default)]
+    pub cursor_blink: bool,
     pub mouse: MouseModeStateV1,
     pub focus_report: bool,
     pub keyboard_main: KeyboardModeStateV1,
@@ -377,6 +380,9 @@ pub struct Emulator {
     cursor_visible: bool,
     /// Child cursor shape (DECSCUSR `CSI Ps SP q`). Default block.
     cursor_shape: CursorShape,
+    /// DECSCUSR blink. Ps 0/2/4/6 stay steady so an idle pane does not
+    /// gain a timer. Ps 1/3/5 blink.
+    cursor_blink: bool,
     /// Application mouse tracking / SGR flags (mouse input).
     mouse: MouseModeFlags,
     /// Focus in/out reporting (DECSET `?1004`). Host sends CSI I / CSI O.
@@ -423,6 +429,7 @@ impl Emulator {
             bracketed_paste: false,
             cursor_visible: true,
             cursor_shape: CursorShape::Block,
+            cursor_blink: false,
             mouse: MouseModeFlags::default(),
             focus_report: false,
             keyboard_main: KeyboardModeStack::default(),
@@ -451,6 +458,7 @@ impl Emulator {
             bracketed_paste: false,
             cursor_visible: true,
             cursor_shape: CursorShape::Block,
+            cursor_blink: false,
             mouse: MouseModeFlags::default(),
             focus_report: false,
             keyboard_main: KeyboardModeStack::default(),
@@ -494,6 +502,7 @@ impl Emulator {
             bracketed_paste: self.bracketed_paste,
             cursor_visible: self.cursor_visible,
             cursor_shape: self.cursor_shape,
+            cursor_blink: self.cursor_blink,
             mouse: MouseModeStateV1 {
                 m1000: self.mouse.m1000,
                 m1002: self.mouse.m1002,
@@ -546,6 +555,7 @@ impl Emulator {
             bracketed_paste: state.bracketed_paste,
             cursor_visible: state.cursor_visible,
             cursor_shape: state.cursor_shape,
+            cursor_blink: state.cursor_blink,
             mouse: MouseModeFlags {
                 m1000: state.mouse.m1000,
                 m1002: state.mouse.m1002,
@@ -618,6 +628,16 @@ impl Emulator {
     /// DECSCUSR shape. Host paints this; nested prism uses the outer caret.
     pub const fn cursor_shape(&self) -> CursorShape {
         self.cursor_shape
+    }
+
+    /// DECSCUSR blink (Ps 1, 3, 5). Steady shapes return false.
+    pub const fn cursor_blink(&self) -> bool {
+        self.cursor_blink
+    }
+
+    /// Mark the caret cell so a host blink phase can repaint it.
+    pub fn mark_cursor_damage(&mut self) {
+        self.screen.mark_cursor_damage();
     }
 
     /// Highest enabled application mouse tracking level (mouse input).
@@ -723,6 +743,8 @@ impl Emulator {
     /// Side-channel replies (e.g. CPR for `CSI 6 n`) accumulate in
     /// [`Self::pending_replies`] for the host to forward to the child PTY.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<CollectedApc> {
+        let cursor_before = self.screen.cursor();
+        self.screen.begin_deferred_cursor_damage();
         self.parser_boundary.push(bytes);
         let graphics_events = self.graphics_apc.push_with_offsets(bytes);
         let events = match self.apc.as_mut() {
@@ -754,6 +776,7 @@ impl Emulator {
         let clears_before = self.screen.full_clears();
         self.advance_parser(&bytes[offset..]);
         self.clear_graphics_if_screen_changed(alt_before, clears_before);
+        self.screen.end_deferred_cursor_damage(cursor_before);
         events
     }
 
@@ -770,6 +793,7 @@ impl Emulator {
             bracketed_paste,
             cursor_visible,
             cursor_shape,
+            cursor_blink,
             mouse,
             focus_report,
             keyboard_main,
@@ -791,6 +815,7 @@ impl Emulator {
                 bracketed_paste,
                 cursor_visible,
                 cursor_shape,
+                cursor_blink,
                 mouse,
                 focus_report,
                 keyboard_main,
@@ -836,6 +861,7 @@ struct ScreenPerformer<'a> {
     bracketed_paste: &'a mut bool,
     cursor_visible: &'a mut bool,
     cursor_shape: &'a mut CursorShape,
+    cursor_blink: &'a mut bool,
     mouse: &'a mut MouseModeFlags,
     focus_report: &'a mut bool,
     keyboard_main: &'a mut KeyboardModeStack,
@@ -1046,6 +1072,7 @@ impl Perform for ScreenPerformer<'_> {
                 // Keep app mouse (editors soft-reset mid-session) and bracketed paste.
                 *self.cursor_visible = true;
                 *self.cursor_shape = CursorShape::Block;
+                *self.cursor_blink = false;
                 *self.focus_report = false;
                 *self.cursor_keys_app = false;
             }
@@ -1053,14 +1080,21 @@ impl Perform for ScreenPerformer<'_> {
         }
 
         // DECSCUSR — CSI Ps SP q. Ghostty/xterm: 0/1/2 block, 3/4 underline, 5/6 bar.
+        // Odd Ps blinks. Ps 0 stays the steady default so an idle pane does
+        // not gain a redraw timer.
         if intermediates == b" " && action == 'q' {
             let ps = params_vec(params).first().copied().unwrap_or(0);
-            *self.cursor_shape = match ps {
-                0..=2 => CursorShape::Block,
-                3..=4 => CursorShape::Underline,
-                5..=6 => CursorShape::Bar,
+            let (shape, blink) = match ps {
+                0 | 2 => (CursorShape::Block, false),
+                1 => (CursorShape::Block, true),
+                3 => (CursorShape::Underline, true),
+                4 => (CursorShape::Underline, false),
+                5 => (CursorShape::Bar, true),
+                6 => (CursorShape::Bar, false),
                 _ => return,
             };
+            *self.cursor_shape = shape;
+            *self.cursor_blink = blink;
             return;
         }
 
@@ -1235,9 +1269,10 @@ impl Perform for ScreenPerformer<'_> {
                 // mouse input: RIS clears application mouse modes.
                 self.mouse.clear();
                 *self.focus_report = false;
-                // DECTCEM defaults to visible after RIS. DECSCUSR → block.
+                // DECTCEM defaults to visible after RIS. DECSCUSR → steady block.
                 *self.cursor_visible = true;
                 *self.cursor_shape = CursorShape::Block;
+                *self.cursor_blink = false;
                 // Kitty keyboard protocol: clear both screen stacks.
                 self.keyboard_main.clear();
                 self.keyboard_alt.clear();
@@ -3309,9 +3344,60 @@ mod tests {
         assert_eq!(emulator.cursor_shape(), CursorShape::Underline);
         let _ = emulator.feed(b"\x1b[5 q");
         assert_eq!(emulator.cursor_shape(), CursorShape::Bar);
+        assert!(emulator.cursor_blink(), "Ps 5 blinks");
+        let _ = emulator.feed(b"\x1b[6 q");
+        assert!(!emulator.cursor_blink(), "Ps 6 is a steady bar");
+        let _ = emulator.feed(b"\x1b[1 q");
+        assert!(emulator.cursor_blink(), "Ps 1 blinks");
+        let _ = emulator.feed(b"\x1b[2 q");
+        assert!(!emulator.cursor_blink(), "Ps 2 is a steady block");
+        let _ = emulator.feed(b"\x1b[3 q");
+        assert!(emulator.cursor_blink(), "Ps 3 blinks");
+        let _ = emulator.feed(b"\x1b[5 q");
+        assert!(emulator.cursor_blink() && emulator.cursor_shape() == CursorShape::Bar);
+        let _ = emulator.feed(b"\x1bc");
+        assert!(!emulator.cursor_blink(), "RIS clears blink");
         assert_eq!(CursorShape::Block.decscusr_steady_bytes(), b"\x1b[2 q");
         assert_eq!(CursorShape::Underline.decscusr_steady_bytes(), b"\x1b[4 q");
         assert_eq!(CursorShape::Bar.decscusr_steady_bytes(), b"\x1b[6 q");
+    }
+
+    #[test]
+    fn identical_rewrite_that_returns_home_leaves_no_damage() {
+        let mut emulator = Emulator::new(8, 3, 0);
+        let _ = emulator.feed(b"hello\r\n");
+        let _ = emulator.take_damage();
+        let epoch = emulator.screen().content_epoch();
+        let cursor = emulator.screen().cursor();
+        let _ = emulator.feed(b"\x1b[Hhello\r\n");
+        assert_eq!(emulator.screen().cursor(), cursor);
+        assert_eq!(emulator.screen().content_epoch(), epoch);
+        assert_eq!(emulator.screen().damage().dirty_row_count(), 0);
+        assert!(emulator.screen().damage().scroll_events().is_empty());
+    }
+
+    #[test]
+    fn changed_cell_still_marks_damage_and_bumps_epoch() {
+        let mut emulator = Emulator::new(8, 3, 0);
+        let _ = emulator.feed(b"hello");
+        let _ = emulator.take_damage();
+        let epoch = emulator.screen().content_epoch();
+        let _ = emulator.feed(b"!");
+        assert!(emulator.screen().content_epoch() > epoch);
+        assert!(emulator.screen().damage().dirty_row_count() > 0);
+    }
+
+    #[test]
+    fn cup_to_the_current_cell_does_not_mark_damage() {
+        let mut emulator = Emulator::new(8, 3, 0);
+        let _ = emulator.take_damage();
+        let _ = emulator.feed(b"\x1b[H");
+        assert_eq!(
+            emulator.screen().cursor(),
+            prismattyc_core::Cursor::default()
+        );
+        assert_eq!(emulator.screen().damage().dirty_row_count(), 0);
+        assert!(emulator.screen().damage().scroll_events().is_empty());
     }
 
     #[test]

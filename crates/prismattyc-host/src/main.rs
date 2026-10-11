@@ -41,6 +41,7 @@ mod mux;
 mod notify;
 mod palette;
 mod pane_bell;
+mod panic_log;
 mod paste_job;
 mod pixel_alpha;
 #[cfg(target_os = "macos")]
@@ -21392,6 +21393,13 @@ fn main() -> Result<()> {
             eprintln!("prismattyc-host: warning: {warning}");
         }
         return Ok(());
+    }
+    if let Some(runtime) =
+        host_mux_socket().and_then(|socket| socket.parent().map(Path::to_path_buf))
+    {
+        if let Err(error) = panic_log::install(&runtime) {
+            eprintln!("prismattyc-host: could not open panic log: {error}");
+        }
     }
     #[cfg(windows)]
     let wait_for_owner = restart_resume.is_some();

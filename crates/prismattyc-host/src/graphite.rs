@@ -3435,6 +3435,13 @@ pub(crate) fn paint_tooltip(
 ) -> Rect {
     let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
     let height = buffer.len() / stride.max(1);
+    let shown = ellipsize(
+        Face::Regular,
+        s(SIDEBAR_TEXT),
+        text,
+        (stride as f32 - s(TOOLTIP_PAD_X) * 2.0).max(0.0),
+    );
+    let text = shown.as_str();
     let w =
         (text_width(Face::Regular, s(SIDEBAR_TEXT), text) + s(TOOLTIP_PAD_X) * 2.0).ceil() as usize;
     let h = chrome.px(TOOLTIP_H);

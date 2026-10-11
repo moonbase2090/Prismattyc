@@ -250,6 +250,10 @@ pub fn session_title(space: &SavedSpace, session: &prismattyc_mux::SessionSnapsh
                 .map(|pane| pane.title.as_str())
                 .find(|title| !title.trim().is_empty())
         })
+        .or_else(|| {
+            let name = session.name.trim();
+            (!name.is_empty()).then_some(name)
+        })
         .or(session.agent_id.as_deref())
         .unwrap_or("shell")
         .to_string()
@@ -418,6 +422,22 @@ pub fn layout_ownership(
 mod tests {
     use super::*;
     use prismattyc_mux::SessionSnapshot;
+
+    #[test]
+    fn session_title_keeps_the_display_label_when_the_mailbox_is_lowercase() {
+        let space: SavedSpace = serde_json::from_value(serde_json::json!({
+            "version": 2, "saved_at_unix": 0, "sessions": []
+        }))
+        .unwrap();
+        let session = SessionSnapshot {
+            id: 1,
+            name: "Hello World".into(),
+            agent_id: Some("hello-world".into()),
+            space_id: None,
+            windows: vec![],
+        };
+        assert_eq!(session_title(&space, &session), "Hello World");
+    }
 
     fn snapshot() -> Snapshot {
         Snapshot {

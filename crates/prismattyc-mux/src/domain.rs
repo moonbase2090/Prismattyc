@@ -481,12 +481,21 @@ impl Domain {
     }
 
     /// Rename and bind one session without replacing its panes or processes.
-    pub fn name_session(&mut self, id: SessionId, name: &str) -> Result<(), DomainError> {
+    ///
+    /// `name` is the visible label. `agent` is the mailbox address derived
+    /// from it. They are equal only when the label is already an agent id.
+    pub fn name_session(
+        &mut self,
+        id: SessionId,
+        name: &str,
+        agent: &str,
+    ) -> Result<(), DomainError> {
         let name = validated_window_title(name)?;
+        let agent = validate_agent_id(agent)?;
         if self.sessions.values().any(|s| s.id != id && s.name == name) {
             return Err(DomainError::AgentIdInUse { agent_id: name });
         }
-        self.set_agent_id(id, Some(name.clone()))?;
+        self.set_agent_id(id, Some(agent))?;
         self.sessions.get_mut(&id).expect("validated session").name = name;
         Ok(())
     }

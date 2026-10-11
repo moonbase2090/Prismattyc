@@ -5208,55 +5208,76 @@ impl ControlPlane {
         raw: u64,
         name: String,
     ) -> Result<ControlResponseData, ControlError> {
-        let name = crate::mailbox::AgentId::new(name.trim().to_string())
-            .map_err(|e| ControlError::new(ControlErrorCode::InvalidRequest, e.to_string()))?
-            .to_string();
+        let display = name.trim().to_string();
+        if display.is_empty() || display.len() > 64 || display.contains('\0') {
+            return Err(ControlError::new(
+                ControlErrorCode::InvalidRequest,
+                "session name must be 1..=64 bytes and contain no NUL",
+            ));
+        }
         let id = session_id(raw)?;
         let old = self
             .domain
             .session(id)
             .ok_or_else(|| stale_id("session", raw))?
             .clone();
-        let old_agent = old.agent_id.as_deref().unwrap_or(&name);
+        let old_agent = old
+            .agent_id
+            .clone()
+            .unwrap_or_else(|| crate::session_name::agent_id_from_label(&old.name));
+        let agent = crate::session_name::unique_agent_id(
+            &crate::session_name::agent_id_from_label(&display),
+            |candidate| {
+                self.domain.sessions().any(|session| {
+                    session.id != id && session.agent_id.as_deref() == Some(candidate)
+                })
+            },
+        )
+        .map_err(|error| ControlError::new(ControlErrorCode::InvalidRequest, error))?;
+        let agent = crate::mailbox::AgentId::new(agent)
+            .map_err(|error| {
+                ControlError::new(ControlErrorCode::InvalidRequest, error.to_string())
+            })?
+            .to_string();
         let resolved = self
             .mail_store
-            .resolve(&name)
+            .resolve(&agent)
             .map_err(Self::mail_store_error)?;
-        if (resolved != name && resolved != old_agent)
+        if (resolved != agent && resolved != old_agent)
             || self
                 .mail_aliases
-                .get(&name)
-                .is_some_and(|owner| owner != old_agent)
+                .get(&agent)
+                .is_some_and(|owner| owner != &old_agent)
         {
             return Err(ControlError::new(
                 ControlErrorCode::InvalidRequest,
-                format!("mailbox address {name:?} is already reserved"),
+                format!("mailbox address {agent:?} is already reserved"),
             ));
         }
         // Validate topology first. After the durable mail transaction commits,
         // swapping the validated domain cannot fail.
         let mut domain = self.domain.clone();
         domain
-            .name_session(id, &name)
+            .name_session(id, &display, &agent)
             .map_err(control_domain_error)?;
         self.ensure_sequence_capacity()?;
         self.mail_store
-            .rename(old_agent, &name)
+            .rename(&old_agent, &agent)
             .map_err(Self::mail_store_error)?;
         for owner in self.mail_aliases.values_mut() {
-            if owner == old_agent {
-                *owner = name.clone();
+            if owner == &old_agent {
+                *owner = agent.clone();
             }
         }
-        self.mail_aliases.remove(&name);
+        self.mail_aliases.remove(&agent);
         self.domain = domain;
         crate::mailbox::agents::unbind(&old.name);
-        crate::mailbox::agents::bind(&name, &name);
-        self.refresh_mail_attention(&name);
+        crate::mailbox::agents::bind(&display, &agent);
+        self.refresh_mail_attention(&agent);
         self.mail_watch.ring();
         let sequence = self.emit(Event::SessionNamed {
             session_id: raw,
-            name,
+            name: display,
         });
         Ok(ControlResponseData::Mutation {
             ack: MutationAck { sequence },

@@ -169,16 +169,285 @@ collect_text_files() {
   done
 }
 
+# Expand an artifact into printable text for scanning: ASCII strings, UTF-16LE
+# strings, ZIP/tar.gz member payloads (including nested archives), symlink
+# targets, and archive / member comments. Writes UTF-8 text to $2.
+expand_artifact_text() {
+  local file="$1"
+  local out="$2"
+  python3 - "$file" "$out" <<'PY'
+import io
+import pathlib
+import sys
+import tarfile
+import zipfile
+
+src = pathlib.Path(sys.argv[1])
+out = pathlib.Path(sys.argv[2])
+MAX_DEPTH = 8
+MAX_BYTES = 32 * 1024 * 1024
+MAX_MEMBER = 8 * 1024 * 1024
+PRINTABLE = set(range(0x20, 0x7F)) | {0x09, 0x0A, 0x0D}
+chunks: list[str] = []
+emitted = 0
+bytes_read = 0
+
+
+class ArtifactError(Exception):
+    """An archive member could not be inspected."""
+
+
+def add_text(text: str) -> None:
+    global emitted
+    if not text:
+        return
+    encoded = text.encode("utf-8", "replace")
+    if emitted + len(encoded) > MAX_BYTES:
+        raise ArtifactError("scan budget exhausted")
+    emitted += len(encoded)
+    chunks.append(encoded.decode("utf-8", "replace"))
+
+
+def account_read(n: int) -> None:
+    global bytes_read
+    if n < 0:
+        raise ArtifactError("scan budget exhausted")
+    if bytes_read + n > MAX_BYTES:
+        raise ArtifactError("scan budget exhausted")
+    bytes_read += n
+
+
+def read_limited(stream, limit: int) -> bytes:
+    """Read a complete stream, failing if it exceeds ``limit`` bytes."""
+    if limit <= 0:
+        raise ArtifactError("scan budget exhausted")
+    parts: list[bytes] = []
+    remaining = limit
+    while remaining > 0:
+        block = stream.read(min(65536, remaining))
+        if not block:
+            data = b"".join(parts)
+            account_read(len(data))
+            return data
+        parts.append(block)
+        remaining -= len(block)
+    if stream.read(1):
+        raise ArtifactError("payload exceeds scan budget")
+    data = b"".join(parts)
+    account_read(len(data))
+    return data
+
+
+def ascii_strings(data: bytes, minimum: int = 6) -> None:
+    start = None
+    for index, byte in enumerate(data):
+        if byte in PRINTABLE:
+            if start is None:
+                start = index
+            continue
+        if start is not None and index - start >= minimum:
+            add_text(data[start:index].decode("ascii", "replace"))
+        start = None
+    if start is not None and len(data) - start >= minimum:
+        add_text(data[start:].decode("ascii", "replace"))
+
+
+def utf16le_strings(data: bytes, minimum: int = 6) -> None:
+    # Walk even offsets; also odd offsets so an unaligned payload is still found.
+    for offset in (0, 1):
+        if offset >= len(data):
+            continue
+        chars: list[str] = []
+        i = offset
+        while i + 1 < len(data):
+            code = data[i] | (data[i + 1] << 8)
+            i += 2
+            if 0x20 <= code < 0x7F or code in (0x09, 0x0A, 0x0D):
+                chars.append(chr(code))
+                continue
+            if len(chars) >= minimum:
+                add_text("".join(chars))
+            chars = []
+        if len(chars) >= minimum:
+            add_text("".join(chars))
+
+
+def safe_name(name: str) -> bool:
+    if name.startswith("/") or name.startswith("\\"):
+        return False
+    return ".." not in pathlib.PurePosixPath(name).parts
+
+
+def zip_required(name: str) -> bool:
+    lowered = name.lower()
+    return lowered.endswith((".zip", ".whl"))
+
+
+def tar_required(name: str) -> bool:
+    lowered = name.lower()
+    return lowered.endswith((".tar.gz", ".tgz", ".tar"))
+
+
+def looks_like_zip(name: str, data: bytes) -> bool:
+    if zip_required(name):
+        return True
+    return len(data) >= 4 and data[:2] == b"PK"
+
+
+def looks_like_tar_gz(name: str, data: bytes) -> bool:
+    if tar_required(name):
+        return True
+    return len(data) >= 2 and data[:2] == b"\x1f\x8b"
+
+
+def scan_bytes(name: str, data: bytes, depth: int) -> None:
+    add_text(name)
+    ascii_strings(data)
+    utf16le_strings(data)
+    nested_zip = looks_like_zip(name, data)
+    nested_tar = looks_like_tar_gz(name, data)
+    if nested_zip or nested_tar:
+        if depth >= MAX_DEPTH:
+            raise ArtifactError("archive nesting exceeds depth limit")
+        if nested_zip:
+            scan_zip_bytes(data, depth + 1, required=zip_required(name))
+        else:
+            scan_tar_bytes(data, name, depth + 1, required=tar_required(name))
+
+
+def member_budget() -> int:
+    remain = MAX_BYTES - bytes_read
+    if remain <= 0:
+        raise ArtifactError("scan budget exhausted")
+    return min(MAX_MEMBER, remain)
+
+
+def scan_zip_file(archive: zipfile.ZipFile, depth: int) -> None:
+    if archive.comment:
+        add_text(archive.comment.decode("utf-8", "replace"))
+    for info in archive.infolist():
+        if info.comment:
+            add_text(info.comment.decode("utf-8", "replace"))
+        add_text(info.filename)
+        # Symlink target is stored as the member payload for zip symlinks.
+        is_symlink = (info.external_attr >> 16) & 0o170000 == 0o120000
+        if info.is_dir() and not is_symlink:
+            continue
+        if not safe_name(info.filename):
+            raise ArtifactError("zip member path rejected")
+        try:
+            with archive.open(info) as handle:
+                payload = read_limited(handle, member_budget())
+        except ArtifactError:
+            raise
+        except Exception as exc:
+            raise ArtifactError("zip member could not be read") from exc
+        if is_symlink:
+            add_text(payload.decode("utf-8", "replace"))
+            continue
+        scan_bytes(info.filename, payload, depth)
+
+
+def scan_zip_bytes(data: bytes, depth: int, required: bool) -> None:
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except (OSError, zipfile.BadZipFile):
+        if required:
+            raise ArtifactError("zip could not be opened")
+        return
+    with archive:
+        scan_zip_file(archive, depth)
+
+
+def scan_tar_file(archive: tarfile.TarFile, depth: int) -> None:
+    for member in archive.getmembers():
+        add_text(member.name)
+        if member.issym() or member.islnk():
+            add_text(member.linkname or "")
+            continue
+        if not member.isfile():
+            continue
+        if not safe_name(member.name):
+            raise ArtifactError("tar member path rejected")
+        extracted = archive.extractfile(member)
+        if extracted is None:
+            raise ArtifactError("tar member could not be read")
+        try:
+            payload = read_limited(extracted, member_budget())
+        except ArtifactError:
+            raise
+        except Exception as exc:
+            raise ArtifactError("tar member could not be read") from exc
+        scan_bytes(member.name, payload, depth)
+
+
+def scan_tar_bytes(data: bytes, name: str, depth: int, required: bool) -> None:
+    lowered = name.lower()
+    if lowered.endswith((".tar.gz", ".tgz")) or data[:2] == b"\x1f\x8b":
+        mode = "r:gz"
+    else:
+        mode = "r:"
+    try:
+        archive = tarfile.open(fileobj=io.BytesIO(data), mode=mode)
+    except (OSError, tarfile.TarError):
+        if required:
+            raise ArtifactError("tar could not be opened")
+        return
+    with archive:
+        scan_tar_file(archive, depth)
+
+
+try:
+    # Prefer path-based archive opens so the outer file is never fully buffered.
+    if zip_required(src.name):
+        try:
+            with zipfile.ZipFile(src) as archive:
+                add_text(src.name)
+                scan_zip_file(archive, 0)
+        except ArtifactError:
+            raise
+        except (OSError, zipfile.BadZipFile) as exc:
+            raise ArtifactError("zip could not be opened") from exc
+    elif tar_required(src.name):
+        lowered = src.name.lower()
+        mode = "r:gz" if lowered.endswith((".tar.gz", ".tgz")) else "r:"
+        try:
+            with tarfile.open(src, mode=mode) as archive:
+                add_text(src.name)
+                scan_tar_file(archive, 0)
+        except ArtifactError:
+            raise
+        except (OSError, tarfile.TarError) as exc:
+            raise ArtifactError("tar could not be opened") from exc
+    else:
+        with src.open("rb") as handle:
+            raw = read_limited(handle, MAX_BYTES)
+        scan_bytes(src.name, raw, 0)
+except ArtifactError:
+    sys.stderr.write("check-release-text: artifact could not be read\n")
+    sys.exit(2)
+except OSError:
+    sys.stderr.write("check-release-text: artifact could not be read\n")
+    sys.exit(2)
+out.write_text("\n".join(chunks) + ("\n" if chunks else ""), encoding="utf-8")
+PY
+}
+
 scan_artifact() {
   local file="$1"
-  local strings_file="$tmp/strings"
+  local strings_file="$tmp/strings.$$.$RANDOM"
   [[ -f "$file" ]] || return 0
-  if ! command -v strings >/dev/null 2>&1; then
-    echo "check-release-text: strings is required to scan artifacts" >&2
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "check-release-text: python3 is required to scan artifacts" >&2
     fail=1
     return 0
   fi
-  strings -a -n 6 "$file" >"$strings_file" 2>/dev/null || true
+  if ! expand_artifact_text "$file" "$strings_file"; then
+    echo "check-release-text: artifact could not be read" >&2
+    fail=1
+    rm -f "$strings_file"
+    return 0
+  fi
   local isolated old_hits
   isolated="$(mktemp)"
   old_hits="$hits"
@@ -191,7 +460,7 @@ scan_artifact() {
       printf '%s:%s\n' "$file" "${hit#"$strings_file:"}" >>"$hits"
     done <"$isolated"
   fi
-  rm -f "$isolated"
+  rm -f "$isolated" "$strings_file"
 }
 
 scan_artifact_path() {

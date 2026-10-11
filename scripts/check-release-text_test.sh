@@ -148,6 +148,210 @@ if ! grep -q "^${artifact}:[0-9][0-9]*$" "$out"; then
   exit 1
 fi
 
+assert_artifact_hit() {
+  local label="$1"
+  local path="$2"
+  local forbidden="$3"
+  clean_tree "$work/$label"
+  local out err code=0
+  out="$(mktemp)"
+  err="$(mktemp)"
+  "$checker" --root "$work/$label" --artifact "$path" >"$out" 2>"$err" || code=$?
+  if [[ "$code" -eq 0 ]]; then
+    echo "$label: planted marker must fail" >&2
+    exit 1
+  fi
+  if grep -F -q -- "$forbidden" "$out" "$err"; then
+    echo "$label: report included matched text" >&2
+    exit 1
+  fi
+  if ! grep -q "^${path}:[0-9][0-9]*$" "$out"; then
+    echo "$label: report was not file:line" >&2
+    cat "$out" "$err" >&2
+    exit 1
+  fi
+  rm -f "$out" "$err"
+}
+
+marker="/Users/privateuser/secret"
+python3 - "$work" <<'PY'
+import io
+import pathlib
+import tarfile
+import zipfile
+
+work = pathlib.Path(__import__("sys").argv[1])
+marker = "/Users/privateuser/secret"
+desktop = "DESKTOP-SECRET123"
+
+# Plain ZIP member
+zip_path = work / "planted.zip"
+with zipfile.ZipFile(zip_path, "w") as archive:
+    archive.writestr("notes.txt", f"path {marker}\n")
+
+# tar.gz member
+tar_path = work / "planted.tar.gz"
+with tarfile.open(tar_path, "w:gz") as archive:
+    data = f"path {marker}\n".encode()
+    info = tarfile.TarInfo(name="notes.txt")
+    info.size = len(data)
+    archive.addfile(info, io.BytesIO(data))
+
+# Nested ZIP inside tar.gz
+nested_path = work / "nested.tar.gz"
+inner = io.BytesIO()
+with zipfile.ZipFile(inner, "w") as archive:
+    archive.writestr("inner.txt", f"path {marker}\n")
+inner_bytes = inner.getvalue()
+with tarfile.open(nested_path, "w:gz") as archive:
+    info = tarfile.TarInfo(name="inner.zip")
+    info.size = len(inner_bytes)
+    archive.addfile(info, io.BytesIO(inner_bytes))
+
+# ZIP comment
+comment_path = work / "comment.zip"
+with zipfile.ZipFile(comment_path, "w") as archive:
+    archive.writestr("ok.txt", "clean\n")
+    archive.comment = marker.encode()
+
+# ZIP symlink target
+symlink_zip = work / "symlink.zip"
+with zipfile.ZipFile(symlink_zip, "w") as archive:
+    info = zipfile.ZipInfo("link")
+    info.create_system = 3
+    info.external_attr = (0o120777 << 16)
+    archive.writestr(info, marker)
+
+# tar.gz symlink target
+symlink_tar = work / "symlink.tar.gz"
+with tarfile.open(symlink_tar, "w:gz") as archive:
+    info = tarfile.TarInfo(name="link")
+    info.type = tarfile.SYMTYPE
+    info.linkname = marker
+    archive.addfile(info)
+
+# UTF-16LE wide string in a binary blob
+utf16_path = work / "utf16le.bin"
+payload = b"pad\0" + desktop.encode("utf-16le") + b"\0\0tail"
+utf16_path.write_bytes(payload)
+PY
+
+assert_artifact_hit "zip" "$work/planted.zip" "$marker"
+assert_artifact_hit "targz" "$work/planted.tar.gz" "$marker"
+assert_artifact_hit "nested" "$work/nested.tar.gz" "$marker"
+assert_artifact_hit "zip-comment" "$work/comment.zip" "$marker"
+assert_artifact_hit "zip-symlink" "$work/symlink.zip" "$marker"
+assert_artifact_hit "tar-symlink" "$work/symlink.tar.gz" "$marker"
+assert_artifact_hit "utf16le" "$work/utf16le.bin" "DESKTOP-SECRET123"
+
+# Encrypted ZIP members are uninspectable; fail closed rather than exit 0.
+printf 'path %s\n' "$marker" >"$work/secret-notes.txt"
+if ! zip -q -P 'test-pass' -j "$work/encrypted.zip" "$work/secret-notes.txt"; then
+  echo "zip encryption helper unavailable" >&2
+  exit 1
+fi
+clean_tree "$work/encrypted"
+out="$(mktemp)"
+err="$(mktemp)"
+code=0
+"$checker" --root "$work/encrypted" --artifact "$work/encrypted.zip" >"$out" 2>"$err" || code=$?
+if [[ "$code" -eq 0 ]]; then
+  echo "encrypted zip must fail closed" >&2
+  cat "$out" "$err" >&2
+  exit 1
+fi
+if ! grep -F -q "artifact could not be read" "$err"; then
+  echo "encrypted zip missing fail-closed notice" >&2
+  cat "$err" >&2
+  exit 1
+fi
+rm -f "$out" "$err"
+
+# A ZIP member larger than the per-member budget must fail closed (no silent truncate).
+python3 - "$work/oversize.zip" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+path = pathlib.Path(sys.argv[1])
+payload = (b"A" * (8 * 1024 * 1024 + 64)) + b"DESKTOP-OVERSIZE1"
+with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+    archive.writestr("big.bin", payload)
+PY
+clean_tree "$work/oversize"
+out="$(mktemp)"
+err="$(mktemp)"
+code=0
+"$checker" --root "$work/oversize" --artifact "$work/oversize.zip" >"$out" 2>"$err" || code=$?
+if [[ "$code" -eq 0 ]]; then
+  echo "oversize zip member must fail closed" >&2
+  cat "$out" "$err" >&2
+  exit 1
+fi
+if ! grep -F -q "artifact could not be read" "$err"; then
+  echo "oversize zip missing fail-closed notice" >&2
+  cat "$err" >&2
+  exit 1
+fi
+rm -f "$out" "$err"
+
+# Nesting beyond the depth limit must fail closed (no silent skip).
+python3 - "$work/deep.zip" <<'PY'
+import io
+import pathlib
+import sys
+import zipfile
+
+marker = b"path /Users/privateuser/secret\n"
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, "w") as archive:
+    archive.writestr("notes.txt", marker)
+payload = buf.getvalue()
+# Ten zip layers so an archive remains when depth reaches the cap.
+for _ in range(9):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr("inner.zip", payload)
+    payload = buf.getvalue()
+pathlib.Path(sys.argv[1]).write_bytes(payload)
+PY
+clean_tree "$work/deep"
+out="$(mktemp)"
+err="$(mktemp)"
+code=0
+"$checker" --root "$work/deep" --artifact "$work/deep.zip" >"$out" 2>"$err" || code=$?
+if [[ "$code" -eq 0 ]]; then
+  echo "deeply nested zip must fail closed" >&2
+  cat "$out" "$err" >&2
+  exit 1
+fi
+if ! grep -F -q "artifact could not be read" "$err"; then
+  echo "deep zip missing fail-closed notice" >&2
+  cat "$out" "$err" >&2
+  exit 1
+fi
+rm -f "$out" "$err"
+
+# Compressed archives must not be accepted when the marker is only in members.
+# (The planted ZIP above fails; a clean ZIP still passes.)
+python3 - "$work/clean-artifact.zip" <<'PY'
+import pathlib, zipfile, sys
+path = pathlib.Path(sys.argv[1])
+with zipfile.ZipFile(path, "w") as archive:
+    archive.writestr("ok.txt", "public release notes\n")
+PY
+clean_tree "$work/clean-zip"
+out="$(mktemp)"
+err="$(mktemp)"
+code=0
+"$checker" --root "$work/clean-zip" --artifact "$work/clean-artifact.zip" >"$out" 2>"$err" || code=$?
+if [[ "$code" -ne 0 || -s "$out" || -s "$err" ]]; then
+  echo "clean zip artifact must pass" >&2
+  cat "$out" "$err" >&2
+  exit 1
+fi
+rm -f "$out" "$err"
+
 repo_out="$(mktemp)"
 repo_err="$(mktemp)"
 repo_code=0

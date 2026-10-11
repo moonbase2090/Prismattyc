@@ -2,10 +2,17 @@
 
 ## [Unreleased]
 
+## [0.3.34] - 2026-10-10
+
 ### Fixed
 
 - Sidebar rename of a local tab or pane opens the naming overlay. The tab strip is not painted in sidebar mode, so the old chip editor never appeared. An attached session still renames through the session overlay. IME commits type into an open tab or space name instead of the terminal. A right-click on the sidebar is not stolen by a pane cell under the pointer.
 - A split pane row in the sidebar can be renamed from its menu. F2 renames the row under the pointer, or the focused space when the sidebar already has the keyboard. Space rename in the sidebar opens the naming overlay.
+
+### Tests
+
+- Tests open a real window and check how the space panel handles activation, typed keys, the input length cap, and clipboard paste. No user-visible change.
+- Tests cover the find and theme picker overlays, including find staying closed over a fullscreen app on the alternate screen. No user-visible change.
 
 ## [0.3.33] - 2026-10-10
 

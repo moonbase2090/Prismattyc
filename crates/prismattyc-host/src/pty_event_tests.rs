@@ -292,7 +292,21 @@ fn verify_timers_and_hover(host: &mut HostState) {
     host.border_anim = Some(Instant::now());
     host.light_cycle_ms = 1_000_000;
     host.last_cycle_step = 255;
-    host.hyperlink_hover = Some(hover_key(host));
+    host.mux
+        .focused_mut()
+        .emulator
+        .feed(b"\x1b[Hhttps://moonbase2090.com/");
+    host.hyperlink_hover.update(
+        host.mux.focused_id(),
+        host.mux.focused().emulator.screen(),
+        0,
+        0,
+        0,
+    );
+    assert_eq!(
+        host.hyperlink_hover.url(),
+        Some("https://moonbase2090.com/")
+    );
     assert!(App::drain_pty(
         host,
         Instant::now() - Duration::from_millis(5)
@@ -300,7 +314,7 @@ fn verify_timers_and_hover(host: &mut HostState) {
     assert_eq!(host.splash.as_ref().unwrap().last_tick_ms, 7);
     assert_eq!(host.last_cycle_step, 0);
     assert!(
-        host.hyperlink_hover.is_some(),
+        host.hyperlink_hover.url() == Some("https://moonbase2090.com/"),
         "an expired budget does not parse PTY bytes"
     );
 
@@ -308,7 +322,7 @@ fn verify_timers_and_hover(host: &mut HostState) {
     host.window_focused = true;
     run_printf(host, r"OK%d\n", 11);
     assert!(
-        host.hyperlink_hover.is_none(),
+        host.hyperlink_hover.url().is_none(),
         "new pane bytes clear the hyperlink"
     );
 }
@@ -482,20 +496,6 @@ fn toast_labels(host: &HostState) -> Vec<&str> {
         .iter()
         .map(|toast| toast.label.as_str())
         .collect()
-}
-
-fn hover_key(host: &HostState) -> (HyperlinkHoverKey, bool) {
-    (
-        HyperlinkHoverKey {
-            pane: host.mux.focused_id(),
-            row: 0,
-            col: 0,
-            scroll: 0,
-            epoch: 1,
-            size: (2, 2),
-        },
-        false,
-    )
 }
 
 fn run_printf(host: &mut HostState, body: &str, n: u32) {

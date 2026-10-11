@@ -14,6 +14,80 @@ use winit::keyboard::ModifiersState;
 
 use crate::link_click::{Identity, Target};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HoverKey {
+    pane: prismattyc_mux::PaneId,
+    row: usize,
+    col: usize,
+    scroll: usize,
+    epoch: u64,
+    size: (usize, usize),
+}
+
+#[derive(Default)]
+pub struct HoverPreview {
+    key: Option<HoverKey>,
+    url: Option<String>,
+    label: Option<String>,
+}
+
+impl HoverPreview {
+    pub fn url(&self) -> Option<&str> {
+        self.url.as_deref()
+    }
+
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    /// Keep the last displayed URL until the next resolution can compare it.
+    pub fn invalidate(&mut self) {
+        self.key = None;
+    }
+
+    pub fn clear(&mut self) -> bool {
+        self.key = None;
+        self.label = None;
+        self.url.take().is_some()
+    }
+
+    /// Returns whether the visible destination changed, not whether the pointer moved.
+    pub fn update(
+        &mut self,
+        pane: prismattyc_mux::PaneId,
+        screen: &Screen,
+        scroll: usize,
+        row: usize,
+        col: usize,
+    ) -> bool {
+        let key = HoverKey {
+            pane,
+            row,
+            col,
+            scroll: scroll.min(screen.max_view_scroll()),
+            epoch: screen.content_epoch(),
+            size: (screen.columns(), screen.rows()),
+        };
+        if self.key == Some(key) {
+            return false;
+        }
+        let url = url_at(screen, key.scroll, row, col);
+        let changed = self.url != url;
+        if changed {
+            self.label = url.as_deref().and_then(preview_label);
+        }
+        self.key = Some(key);
+        self.url = url;
+        changed
+    }
+}
+
+fn preview_label(uri: &str) -> Option<String> {
+    let parsed = url::Url::parse(uri).ok()?;
+    let host = parsed.host_str()?;
+    Some(format!("Host: {host} | {uri}"))
+}
+
 /// Trailing characters stripped from a detected run (spike SGR-safe set).
 const TRAILING_PUNCT: &[char] = &[',', '.', ';', ':', '!', '?', ')', ']', '`'];
 
@@ -230,7 +304,9 @@ pub fn is_allowed_http_url(url: &str) -> bool {
     } else {
         return false;
     };
-    !rest.is_empty() && rest.bytes().all(|b| b > b' ' && b < 0x7f)
+    !rest.is_empty()
+        && rest.bytes().all(|b| b > b' ' && b < 0x7f)
+        && url::Url::parse(url).is_ok_and(|parsed| parsed.host().is_some())
 }
 
 /// Program + single URL argument. Never `sh -c`.
@@ -358,6 +434,77 @@ mod tests {
             None,
             "space after URL is a miss"
         );
+    }
+
+    fn preview_pane() -> prismattyc_mux::PaneId {
+        let domain = prismattyc_mux::Domain::bootstrap("preview").unwrap();
+        let window = domain.sessions().next().unwrap().windows[0];
+        domain.window(window).unwrap().layout.panes()[0]
+    }
+
+    #[test]
+    fn hover_preview_shows_destination_instead_of_osc8_label() {
+        let mut emulator = Emulator::new(64, 2, 0);
+        emulator.feed(
+            b"\x1b]8;;https://destination.example/manual\x1b\\https://label.example\x1b]8;;\x1b\\",
+        );
+        let mut preview = HoverPreview::default();
+        let pane = preview_pane();
+        assert!(preview.update(pane, emulator.screen(), 0, 0, 2));
+        assert_eq!(preview.url(), Some("https://destination.example/manual"));
+        assert_eq!(
+            preview.label(),
+            Some("Host: destination.example | https://destination.example/manual")
+        );
+        assert!(!preview.update(pane, emulator.screen(), 0, 0, 2));
+        assert!(!preview.update(pane, emulator.screen(), 0, 0, 4));
+        assert!(preview.clear());
+        assert_eq!(preview.url(), None);
+        assert_eq!(preview.label(), None);
+        assert!(!preview.clear());
+    }
+
+    #[test]
+    fn preview_puts_parsed_host_before_long_or_misleading_uri() {
+        let uri = format!(
+            "https://trusted.example:{}@evil.example/path",
+            "x".repeat(600)
+        );
+        assert!(is_allowed_http_url(&uri));
+        let label = preview_label(&uri).unwrap();
+        assert!(label.starts_with("Host: evil.example | https://trusted.example:"));
+        assert!(label.ends_with("@evil.example/path"));
+        assert_eq!(
+            preview_label("https://trusted.example\\@evil.example/path").as_deref(),
+            Some("Host: trusted.example | https://trusted.example\\@evil.example/path")
+        );
+        assert_eq!(
+            preview_label("https://%65vil.example/path").as_deref(),
+            Some("Host: evil.example | https://%65vil.example/path")
+        );
+        assert!(!is_allowed_http_url("https://%zz.example"));
+    }
+
+    #[test]
+    fn stationary_preview_changes_with_output_and_rejects_unsafe_links() {
+        let mut emulator = Emulator::new(64, 2, 0);
+        let pane = preview_pane();
+        let mut preview = HoverPreview::default();
+        emulator.feed(b"\x1b]8;;https://first.example\x1b\\docs\x1b]8;;\x1b\\");
+        preview.update(pane, emulator.screen(), 0, 0, 0);
+        assert_eq!(preview.url(), Some("https://first.example"));
+        emulator.feed(b"\r\x1b]8;;https://second.example\x1b\\docs\x1b]8;;\x1b\\");
+        preview.invalidate();
+        assert!(preview.update(pane, emulator.screen(), 0, 0, 0));
+        assert_eq!(preview.url(), Some("https://second.example"));
+        emulator.feed(b"\r\x1b]8;;javascript:alert(1)\x1b\\https://safe.example\x1b]8;;\x1b\\");
+        preview.invalidate();
+        assert!(preview.update(pane, emulator.screen(), 0, 0, 0));
+        assert_eq!(preview.url(), None);
+        emulator.feed(b"\r\x1b[2Kordinary text");
+        preview.invalidate();
+        assert!(!preview.update(pane, emulator.screen(), 0, 0, 0));
+        assert_eq!(preview.url(), None);
     }
 
     #[test]

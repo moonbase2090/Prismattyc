@@ -92,15 +92,22 @@ fn hyperlink_hover_respects_session_modal_and_view_lifetime() {
             host.mux.focused_mut().emulator = Emulator::new(cols, rows, 0);
             let link = b"https://moonbase2090.com/";
             let _ = host.mux.focused_mut().emulator.feed(link);
-            assert!(hyperlink_hover_at_pointer(host));
-            let (link_key, _) = host.hyperlink_hover.unwrap();
+            sync_chrome_hover(host);
+            assert_eq!(
+                host.hyperlink_hover.url(),
+                Some("https://moonbase2090.com/")
+            );
 
             session_prompt::retry_space(host, "hover-space".into(), "hover".into(), "".into());
             assert!(host.session_prompt.is_some());
             sync_chrome_hover(host);
-            assert!(!hyperlink_hover_at_pointer(host));
+            assert_eq!(host.hyperlink_hover.url(), None);
             session_prompt::finish(host, false);
-            assert!(hyperlink_hover_at_pointer(host));
+            sync_chrome_hover(host);
+            assert_eq!(
+                host.hyperlink_hover.url(),
+                Some("https://moonbase2090.com/")
+            );
 
             host.mux
                 .mark_attach_session(pane, "1".into(), "hover".into());
@@ -110,13 +117,17 @@ fn hyperlink_hover_respects_session_modal_and_view_lifetime() {
                 keybind::Action::RenamePane
             ));
             sync_chrome_hover(host);
-            assert!(!hyperlink_hover_at_pointer(host));
+            assert_eq!(host.hyperlink_hover.url(), None);
             session_prompt::finish(host, false);
-            assert!(hyperlink_hover_at_pointer(host));
+            sync_chrome_hover(host);
+            assert_eq!(
+                host.hyperlink_hover.url(),
+                Some("https://moonbase2090.com/")
+            );
 
             host.mux.retain_local_terminal(pane);
             assert!(!local_views::switch(host, Some("plain".into())).unwrap());
-            assert!(host.hyperlink_hover.is_none());
+            assert!(host.hyperlink_hover.url().is_none());
             let plain_pane = host.mux.focused_id();
             host.mux.retain_local_terminal(plain_pane);
             host.mux.focused_mut().emulator = Emulator::new(cols, rows, 0);
@@ -125,20 +136,26 @@ fn hyperlink_hover_respects_session_modal_and_view_lifetime() {
                 .focused_mut()
                 .emulator
                 .feed(&vec![b'x'; link.len()]);
-            assert!(!hyperlink_hover_at_pointer(host));
-            assert_eq!(host.hyperlink_hover.unwrap().0, link_key);
+            sync_chrome_hover(host);
+            assert_eq!(host.hyperlink_hover.url(), None);
 
             for _ in 0..2 {
                 assert!(local_views::switch(host, None).unwrap());
-                assert!(host.hyperlink_hover.is_none());
-                assert!(hyperlink_hover_at_pointer(host));
-                assert_eq!(host.hyperlink_hover.unwrap().0, link_key);
+                assert!(host.hyperlink_hover.url().is_none());
+                sync_chrome_hover(host);
+                assert_eq!(
+                    host.hyperlink_hover.url(),
+                    Some("https://moonbase2090.com/")
+                );
                 assert!(!local_views::switch(host, None).unwrap());
-                assert_eq!(host.hyperlink_hover, Some((link_key, true)));
+                assert_eq!(
+                    host.hyperlink_hover.url(),
+                    Some("https://moonbase2090.com/")
+                );
                 assert!(local_views::switch(host, Some("plain".into())).unwrap());
-                assert!(host.hyperlink_hover.is_none());
-                assert!(!hyperlink_hover_at_pointer(host));
-                assert_eq!(host.hyperlink_hover.unwrap().0, link_key);
+                assert!(host.hyperlink_hover.url().is_none());
+                sync_chrome_hover(host);
+                assert_eq!(host.hyperlink_hover.url(), None);
             }
             self.completed = true;
             self.app.windows.clear();

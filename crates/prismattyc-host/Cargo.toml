@@ -41,6 +41,7 @@ accesskit = "0.24"
 accesskit_winit = "0.32"
 wgpu = { version = "26", optional = true }
 pollster = { version = "0.4", optional = true }
+url = "2.5"
 
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }

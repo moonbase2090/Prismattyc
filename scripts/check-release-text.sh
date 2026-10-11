@@ -189,7 +189,8 @@ MAX_BYTES = 32 * 1024 * 1024
 MAX_MEMBER = 8 * 1024 * 1024
 PRINTABLE = set(range(0x20, 0x7F)) | {0x09, 0x0A, 0x0D}
 chunks: list[str] = []
-total = 0
+emitted = 0
+bytes_read = 0
 
 
 class ArtifactError(Exception):
@@ -197,16 +198,23 @@ class ArtifactError(Exception):
 
 
 def add_text(text: str) -> None:
-    global total
-    if not text or total >= MAX_BYTES:
+    global emitted
+    if not text:
         return
     encoded = text.encode("utf-8", "replace")
-    remain = MAX_BYTES - total
-    if len(encoded) > remain:
-        encoded = encoded[:remain]
-    total += len(encoded)
-    if encoded:
-        chunks.append(encoded.decode("utf-8", "replace"))
+    if emitted + len(encoded) > MAX_BYTES:
+        raise ArtifactError("scan budget exhausted")
+    emitted += len(encoded)
+    chunks.append(encoded.decode("utf-8", "replace"))
+
+
+def account_read(n: int) -> None:
+    global bytes_read
+    if n < 0:
+        raise ArtifactError("scan budget exhausted")
+    if bytes_read + n > MAX_BYTES:
+        raise ArtifactError("scan budget exhausted")
+    bytes_read += n
 
 
 def read_limited(stream, limit: int) -> bytes:
@@ -218,12 +226,16 @@ def read_limited(stream, limit: int) -> bytes:
     while remaining > 0:
         block = stream.read(min(65536, remaining))
         if not block:
-            return b"".join(parts)
+            data = b"".join(parts)
+            account_read(len(data))
+            return data
         parts.append(block)
         remaining -= len(block)
     if stream.read(1):
         raise ArtifactError("payload exceeds scan budget")
-    return b"".join(parts)
+    data = b"".join(parts)
+    account_read(len(data))
+    return data
 
 
 def ascii_strings(data: bytes, minimum: int = 6) -> None:
@@ -289,21 +301,22 @@ def looks_like_tar_gz(name: str, data: bytes) -> bool:
 
 
 def scan_bytes(name: str, data: bytes, depth: int) -> None:
-    if total >= MAX_BYTES:
-        raise ArtifactError("scan budget exhausted")
     add_text(name)
     ascii_strings(data)
     utf16le_strings(data)
-    if depth >= MAX_DEPTH:
-        return
-    if looks_like_zip(name, data):
-        scan_zip_bytes(data, depth + 1, required=zip_required(name))
-    elif looks_like_tar_gz(name, data):
-        scan_tar_bytes(data, name, depth + 1, required=tar_required(name))
+    nested_zip = looks_like_zip(name, data)
+    nested_tar = looks_like_tar_gz(name, data)
+    if nested_zip or nested_tar:
+        if depth >= MAX_DEPTH:
+            raise ArtifactError("archive nesting exceeds depth limit")
+        if nested_zip:
+            scan_zip_bytes(data, depth + 1, required=zip_required(name))
+        else:
+            scan_tar_bytes(data, name, depth + 1, required=tar_required(name))
 
 
 def member_budget() -> int:
-    remain = MAX_BYTES - total
+    remain = MAX_BYTES - bytes_read
     if remain <= 0:
         raise ArtifactError("scan budget exhausted")
     return min(MAX_MEMBER, remain)

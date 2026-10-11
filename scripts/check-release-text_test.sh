@@ -295,6 +295,43 @@ if ! grep -F -q "artifact could not be read" "$err"; then
 fi
 rm -f "$out" "$err"
 
+# Nesting beyond the depth limit must fail closed (no silent skip).
+python3 - "$work/deep.zip" <<'PY'
+import io
+import pathlib
+import sys
+import zipfile
+
+marker = b"path /Users/privateuser/secret\n"
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, "w") as archive:
+    archive.writestr("notes.txt", marker)
+payload = buf.getvalue()
+# Ten zip layers so an archive remains when depth reaches the cap.
+for _ in range(9):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr("inner.zip", payload)
+    payload = buf.getvalue()
+pathlib.Path(sys.argv[1]).write_bytes(payload)
+PY
+clean_tree "$work/deep"
+out="$(mktemp)"
+err="$(mktemp)"
+code=0
+"$checker" --root "$work/deep" --artifact "$work/deep.zip" >"$out" 2>"$err" || code=$?
+if [[ "$code" -eq 0 ]]; then
+  echo "deeply nested zip must fail closed" >&2
+  cat "$out" "$err" >&2
+  exit 1
+fi
+if ! grep -F -q "artifact could not be read" "$err"; then
+  echo "deep zip missing fail-closed notice" >&2
+  cat "$out" "$err" >&2
+  exit 1
+fi
+rm -f "$out" "$err"
+
 # Compressed archives must not be accepted when the marker is only in members.
 # (The planted ZIP above fails; a clean ZIP still passes.)
 python3 - "$work/clean-artifact.zip" <<'PY'

@@ -56,3 +56,7 @@ Missed mutants from cargo-mutants point to tests like these. See docs/mutation-t
 - Merge commits only. No admin overrides.
 - Code-scanning threads are resolved only when they are report-only or addressed, never just to unblock a merge.
 - Releases and tags need owner approval.
+
+## 8. Release text
+
+Release text and artifacts must not reference private infrastructure, hostnames, personal paths, or internal tooling.

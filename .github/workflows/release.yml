@@ -439,6 +439,22 @@ jobs:
           python3 scripts/release/changelog_notes.py CHANGELOG.md "$RELEASE_VERSION" > release-notes.md
           test -s release-notes.md
 
+      - name: Check release text
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_DENYLIST: ${{ secrets.RELEASE_DENYLIST }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/release-text
+          git for-each-ref "refs/tags/${RELEASE_TAG}" --format='%(contents)' > build/release-text/tag-message.txt
+          printf '%s\n' "$RELEASE_TAG" > build/release-text/title.txt
+          scripts/check-release-text.sh \
+            --root "$GITHUB_WORKSPACE" \
+            --extra release-notes.md \
+            --extra build/release-text/title.txt \
+            --extra build/release-text/tag-message.txt \
+            --artifact dist
+
       - name: Publish verified tag
         env:
           GH_TOKEN: ${{ github.token }}

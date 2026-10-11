@@ -169,16 +169,189 @@ collect_text_files() {
   done
 }
 
+# Expand an artifact into printable text for scanning: ASCII strings, UTF-16LE
+# strings, ZIP/tar.gz member payloads (including nested archives), symlink
+# targets, and archive / member comments. Writes UTF-8 text to $2.
+expand_artifact_text() {
+  local file="$1"
+  local out="$2"
+  python3 - "$file" "$out" <<'PY'
+import io
+import pathlib
+import sys
+import tarfile
+import zipfile
+
+src = pathlib.Path(sys.argv[1])
+out = pathlib.Path(sys.argv[2])
+MAX_DEPTH = 8
+MAX_BYTES = 32 * 1024 * 1024
+PRINTABLE = set(range(0x20, 0x7F)) | {0x09, 0x0A, 0x0D}
+chunks: list[str] = []
+total = 0
+
+
+def add_text(text: str) -> None:
+    global total
+    if not text or total >= MAX_BYTES:
+        return
+    encoded = text.encode("utf-8", "replace")
+    remain = MAX_BYTES - total
+    if len(encoded) > remain:
+        encoded = encoded[:remain]
+    total += len(encoded)
+    if encoded:
+        chunks.append(encoded.decode("utf-8", "replace"))
+
+
+def ascii_strings(data: bytes, minimum: int = 6) -> None:
+    start = None
+    for index, byte in enumerate(data):
+        if byte in PRINTABLE:
+            if start is None:
+                start = index
+            continue
+        if start is not None and index - start >= minimum:
+            add_text(data[start:index].decode("ascii", "replace"))
+        start = None
+    if start is not None and len(data) - start >= minimum:
+        add_text(data[start:].decode("ascii", "replace"))
+
+
+def utf16le_strings(data: bytes, minimum: int = 6) -> None:
+    # Walk even offsets; also odd offsets so an unaligned payload is still found.
+    for offset in (0, 1):
+        if offset >= len(data):
+            continue
+        chars: list[str] = []
+        i = offset
+        while i + 1 < len(data):
+            code = data[i] | (data[i + 1] << 8)
+            i += 2
+            if 0x20 <= code < 0x7F or code in (0x09, 0x0A, 0x0D):
+                chars.append(chr(code))
+                continue
+            if len(chars) >= minimum:
+                add_text("".join(chars))
+            chars = []
+        if len(chars) >= minimum:
+            add_text("".join(chars))
+
+
+def safe_name(name: str) -> bool:
+    if name.startswith("/") or name.startswith("\\"):
+        return False
+    return ".." not in pathlib.PurePosixPath(name).parts
+
+
+def looks_like_zip(name: str, data: bytes) -> bool:
+    lowered = name.lower()
+    if lowered.endswith((".zip", ".whl")):
+        return True
+    return len(data) >= 4 and data[:2] == b"PK"
+
+
+def looks_like_tar_gz(name: str, data: bytes) -> bool:
+    lowered = name.lower()
+    if lowered.endswith((".tar.gz", ".tgz")):
+        return True
+    if lowered.endswith(".tar"):
+        return True
+    return len(data) >= 2 and data[:2] == b"\x1f\x8b"
+
+
+def scan_bytes(name: str, data: bytes, depth: int) -> None:
+    if total >= MAX_BYTES:
+        return
+    add_text(name)
+    ascii_strings(data)
+    utf16le_strings(data)
+    if depth >= MAX_DEPTH:
+        return
+    if looks_like_zip(name, data):
+        scan_zip_bytes(data, depth + 1)
+    elif looks_like_tar_gz(name, data):
+        scan_tar_bytes(data, name, depth + 1)
+
+
+def scan_zip_bytes(data: bytes, depth: int) -> None:
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            if archive.comment:
+                add_text(archive.comment.decode("utf-8", "replace"))
+            for info in archive.infolist():
+                if info.comment:
+                    add_text(info.comment.decode("utf-8", "replace"))
+                add_text(info.filename)
+                # Symlink target is stored as the member payload for zip symlinks.
+                is_symlink = (info.external_attr >> 16) & 0o170000 == 0o120000
+                if info.is_dir() and not is_symlink:
+                    continue
+                if not safe_name(info.filename):
+                    add_text(info.filename)
+                    continue
+                try:
+                    payload = archive.read(info)
+                except Exception:
+                    continue
+                if is_symlink:
+                    add_text(payload.decode("utf-8", "replace"))
+                    continue
+                scan_bytes(info.filename, payload, depth)
+    except (OSError, zipfile.BadZipFile):
+        return
+
+
+def scan_tar_bytes(data: bytes, name: str, depth: int) -> None:
+    lowered = name.lower()
+    if lowered.endswith((".tar.gz", ".tgz")) or data[:2] == b"\x1f\x8b":
+        mode = "r:gz"
+    else:
+        mode = "r:"
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode=mode) as archive:
+            for member in archive.getmembers():
+                add_text(member.name)
+                if member.issym() or member.islnk():
+                    add_text(member.linkname or "")
+                    continue
+                if not member.isfile():
+                    continue
+                if not safe_name(member.name):
+                    continue
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    continue
+                try:
+                    payload = extracted.read()
+                except Exception:
+                    continue
+                scan_bytes(member.name, payload, depth)
+    except (OSError, tarfile.TarError):
+        return
+
+
+raw = src.read_bytes()
+scan_bytes(src.name, raw, 0)
+out.write_text("\n".join(chunks) + ("\n" if chunks else ""), encoding="utf-8")
+PY
+}
+
 scan_artifact() {
   local file="$1"
-  local strings_file="$tmp/strings"
+  local strings_file="$tmp/strings.$$.$RANDOM"
   [[ -f "$file" ]] || return 0
-  if ! command -v strings >/dev/null 2>&1; then
-    echo "check-release-text: strings is required to scan artifacts" >&2
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "check-release-text: python3 is required to scan artifacts" >&2
     fail=1
     return 0
   fi
-  strings -a -n 6 "$file" >"$strings_file" 2>/dev/null || true
+  if ! expand_artifact_text "$file" "$strings_file"; then
+    echo "check-release-text: artifact could not be read" >&2
+    fail=1
+    rm -f "$strings_file"
+    return 0
+  fi
   local isolated old_hits
   isolated="$(mktemp)"
   old_hits="$hits"
@@ -191,7 +364,7 @@ scan_artifact() {
       printf '%s:%s\n' "$file" "${hit#"$strings_file:"}" >>"$hits"
     done <"$isolated"
   fi
-  rm -f "$isolated"
+  rm -f "$isolated" "$strings_file"
 }
 
 scan_artifact_path() {

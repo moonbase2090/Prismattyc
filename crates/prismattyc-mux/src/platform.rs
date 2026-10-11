@@ -463,11 +463,29 @@ pub fn detach_creation_flags() -> u32 {
 }
 
 pub fn console_vt_output_flags() -> u32 {
+    VT_OUTPUT_PROCESSING
+}
+
+pub fn console_vt_raw_output_flags() -> u32 {
     VT_OUTPUT_PROCESSING | VT_DISABLE_NEWLINE_AUTO_RETURN
 }
 
 pub fn console_vt_input_flags() -> u32 {
     VT_INPUT
+}
+
+/// Line-oriented CLI output. Virtual-terminal processing stays on, and a
+/// newline still returns to column 0. A console that already disabled
+/// auto-return is corrected for this process.
+pub fn cli_console_output_mode(mode: u32) -> u32 {
+    (mode | VT_OUTPUT_PROCESSING) & !VT_DISABLE_NEWLINE_AUTO_RETURN
+}
+
+/// Full-screen attach. A bare line feed moves down without returning to
+/// column 0, matching the stream the pane writes. Drop restores the mode
+/// captured before this mask was applied.
+pub fn raw_console_output_mode(mode: u32) -> u32 {
+    mode | console_vt_raw_output_flags()
 }
 
 /// Start `program` without allocating a console window on Windows.
@@ -516,7 +534,7 @@ pub fn enable_console_vt() -> bool {
             GetConsoleMode, GetStdHandle, SetConsoleMode, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
             STD_OUTPUT_HANDLE,
         };
-        unsafe fn enable(handle_id: u32, extra: u32) -> bool {
+        unsafe fn apply(handle_id: u32, update: fn(u32) -> u32) -> bool {
             let handle = GetStdHandle(handle_id);
             if handle.is_null() || handle == INVALID_HANDLE_VALUE {
                 return false;
@@ -525,12 +543,15 @@ pub fn enable_console_vt() -> bool {
             if GetConsoleMode(handle, &mut mode) == 0 {
                 return false;
             }
-            SetConsoleMode(handle, mode | extra) != 0
+            SetConsoleMode(handle, update(mode)) != 0
+        }
+        fn input_mode(mode: u32) -> u32 {
+            mode | console_vt_input_flags()
         }
         unsafe {
-            let _input = enable(STD_INPUT_HANDLE, console_vt_input_flags());
-            let out = enable(STD_OUTPUT_HANDLE, console_vt_output_flags());
-            let err = enable(STD_ERROR_HANDLE, console_vt_output_flags());
+            let _input = apply(STD_INPUT_HANDLE, input_mode);
+            let out = apply(STD_OUTPUT_HANDLE, cli_console_output_mode);
+            let err = apply(STD_ERROR_HANDLE, cli_console_output_mode);
             stdout_vt_ready(out, err)
         }
     }
@@ -1054,11 +1075,22 @@ mod console_flags {
 
     #[test]
     fn console_vt_flags_match_the_win32_values() {
-        assert_eq!(super::console_vt_output_flags(), 0x0004 | 0x0008);
+        assert_eq!(super::console_vt_output_flags(), 0x0004);
+        assert_eq!(super::console_vt_raw_output_flags(), 0x0004 | 0x0008);
         assert_eq!(super::console_vt_input_flags(), 0x0200);
         assert_ne!(
             super::console_vt_output_flags(),
             super::console_vt_input_flags()
+        );
+        assert_eq!(super::cli_console_output_mode(0), 0x0004);
+        assert_eq!(super::cli_console_output_mode(0x0004 | 0x0008), 0x0004);
+        assert_eq!(
+            super::cli_console_output_mode(0x0001 | 0x0002 | 0x0008),
+            0x0001 | 0x0002 | 0x0004
+        );
+        assert_eq!(
+            super::raw_console_output_mode(0x0001),
+            0x0001 | 0x0004 | 0x0008
         );
     }
 
@@ -1077,7 +1109,15 @@ mod console_flags {
         };
         assert_eq!(
             super::console_vt_output_flags(),
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        );
+        assert_eq!(
+            super::console_vt_raw_output_flags(),
             ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN
+        );
+        assert_eq!(
+            super::cli_console_output_mode(DISABLE_NEWLINE_AUTO_RETURN),
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING
         );
         assert_eq!(
             super::console_vt_input_flags(),

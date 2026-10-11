@@ -767,6 +767,7 @@ fn configured_shell() -> Option<String> {
 /// A `COMSPEC` whose program name is `cmd` or `cmd.exe` is the Windows
 /// default, not an override. Anything else is an override and wins over the
 /// automatic PowerShell choice.
+#[cfg(any(windows, test))]
 pub(crate) fn choose_windows_shell(
     configured: Option<&str>,
     comspec: Option<&str>,
@@ -789,10 +790,12 @@ pub(crate) fn choose_windows_shell(
     "cmd.exe".into()
 }
 
+#[cfg(any(windows, test))]
 fn program_name(value: &str) -> &str {
     value.rsplit(['\\', '/']).next().unwrap_or(value)
 }
 
+#[cfg(any(windows, test))]
 fn is_stock_cmd(name: &str) -> bool {
     name.eq_ignore_ascii_case("cmd.exe") || name.eq_ignore_ascii_case("cmd")
 }

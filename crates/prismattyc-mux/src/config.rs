@@ -33,6 +33,8 @@ pub struct MuxSection {
     pub space_open_runs_commands: Option<SpaceOpenRunsCommands>,
     /// Who sets pane size when a TTY attach and the host share a window (PT-200).
     pub remote_size: Option<RemoteSizePolicy>,
+    /// Pane program. Empty uses the platform default.
+    pub shell: Option<String>,
 }
 
 /// Who `pmux space open` types a saved pane `command` into.
@@ -254,6 +256,12 @@ pub const MUX_KEYS: &[MuxKeySpec] = &[
         range: "latest|host",
         kind: MuxKeyKind::String("latest"),
     },
+    MuxKeySpec {
+        name: "shell",
+        doc: "Pane shell. Unset on Windows uses pwsh.exe when it is on PATH, then powershell.exe, then cmd.exe. Unset on Unix uses SHELL or /bin/sh. A COMSPEC whose program is not cmd.exe overrides the Windows automatic choice",
+        range: "program name or path",
+        kind: MuxKeyKind::CommentedPath("pwsh.exe"),
+    },
 ];
 
 /// Render the `[mux]` table with comments.
@@ -434,6 +442,7 @@ mod tests {
             Some(SpaceOpenRunsCommands::Agents)
         );
         assert_eq!(mux.remote_size, Some(RemoteSizePolicy::Latest));
+        assert!(mux.shell.is_none());
     }
 
     #[test]
@@ -534,6 +543,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                shell: None,
             };
             let (instance, socket) = resolve_mux_target(Some("other".into()), None, &file).unwrap();
             assert_eq!(instance, "other");
@@ -564,6 +574,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                shell: None,
             };
             let (instance, socket) = resolve_mux_target(
                 Some("cli".into()),
@@ -585,6 +596,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                shell: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
             assert_eq!(instance, "work");
@@ -602,6 +614,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                shell: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
             assert_eq!(instance, "from-env");
@@ -618,6 +631,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                shell: None,
             };
             assert!(resolve_mux_target(None, None, &file).is_err());
         });

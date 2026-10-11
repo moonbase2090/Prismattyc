@@ -6,6 +6,10 @@
 
 - A pane label keeps its case, spaces, and other characters. The mailbox address is the lowercase form of that label.
 
+### Windows
+
+New panes start `pwsh.exe` when it is on `PATH`, then `powershell.exe`, then `cmd.exe`. `[mux] shell` overrides that choice. A `COMSPEC` whose program name is not `cmd.exe` also overrides it. The Start menu shortcut still opens the GUI host, and a new pane stays inside that window.
+
 ## [0.3.34] - 2026-10-10
 
 ### Fixed

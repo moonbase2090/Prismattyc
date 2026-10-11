@@ -8528,6 +8528,35 @@ fn rename_uses_strip(sidebar: bool, strip_visible: bool) -> bool {
     !sidebar && strip_visible
 }
 
+/// The rail paints its own name editor. Sidebar mode does not, so a space
+/// rename opens the naming overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpaceRenameSurface {
+    Inline,
+    Overlay,
+}
+
+fn space_rename_surface(sidebar: bool) -> SpaceRenameSurface {
+    if sidebar {
+        SpaceRenameSurface::Overlay
+    } else {
+        SpaceRenameSurface::Inline
+    }
+}
+
+fn begin_space_rename(host: &mut HostState, chip: usize) {
+    let Some(name) = host.space_rail.names.get(chip).cloned() else {
+        return;
+    };
+    match space_rename_surface(sidebar_mode(host)) {
+        SpaceRenameSurface::Overlay => session_prompt::rename_space(host, name),
+        SpaceRenameSurface::Inline => {
+            host.space_rail.begin_rename(chip);
+            host.dirty = true;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RightClickRoute {
     Sidebar,
@@ -8544,6 +8573,122 @@ fn right_click_route(sidebar_hit: bool, cursor_pane: bool) -> RightClickRoute {
         RightClickRoute::Pane
     } else {
         RightClickRoute::FallThrough
+    }
+}
+
+/// Where a plain F2 goes while the sidebar is showing.
+///
+/// The pointer row wins. Otherwise a sidebar that already has keyboard focus
+/// renames its focused space. Anything else stays with the terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebarF2Route {
+    FallThrough,
+    Pointer(sidebar::RowKind),
+    FocusedSpace,
+}
+
+fn sidebar_f2_route(
+    sidebar: bool,
+    plain_f2: bool,
+    pointer_row: Option<sidebar::RowKind>,
+    rail_keyboard: bool,
+) -> SidebarF2Route {
+    if !sidebar || !plain_f2 {
+        return SidebarF2Route::FallThrough;
+    }
+    if let Some(row) = pointer_row {
+        return SidebarF2Route::Pointer(row);
+    }
+    if rail_keyboard {
+        return SidebarF2Route::FocusedSpace;
+    }
+    SidebarF2Route::FallThrough
+}
+
+fn pointer_sidebar_row(host: &HostState) -> Option<sidebar::TreeRow> {
+    let HoverTarget::Sidebar(graphite::SidebarHit::Row(index)) = host.hover_target? else {
+        return None;
+    };
+    host.sidebar_rows.get(index).map(|(_, row)| row.clone())
+}
+
+/// Start a rename for the sidebar row under the pointer, or the focused
+/// space when the sidebar already owns the keyboard. Returns whether F2
+/// was taken from the terminal.
+fn sidebar_f2_rename(host: &mut HostState, logical: &Key, repeat: bool) -> bool {
+    let plain_f2 = matches!(logical, Key::Named(NamedKey::F2))
+        && !host.modifiers.control_key()
+        && !host.modifiers.alt_key()
+        && !host.modifiers.super_key();
+    let pointer_row = pointer_sidebar_row(host);
+    let route = sidebar_f2_route(
+        sidebar_mode(host),
+        plain_f2,
+        pointer_row.as_ref().map(|row| row.kind),
+        host.space_rail.keyboard,
+    );
+    if matches!(route, SidebarF2Route::FallThrough) {
+        return false;
+    }
+    if repeat {
+        return true;
+    }
+    match route {
+        SidebarF2Route::FallThrough => false,
+        SidebarF2Route::Pointer(_) => start_sidebar_row_rename(host, pointer_row.as_ref()),
+        SidebarF2Route::FocusedSpace => {
+            let chip = host
+                .space_rail
+                .focus
+                .or_else(|| host.space_rail.current_index())
+                .unwrap_or(0);
+            begin_space_rename(host, chip);
+            host.session_prompt.is_some() || host.space_rail.edit.is_some()
+        }
+    }
+}
+
+fn start_sidebar_row_rename(host: &mut HostState, row: Option<&sidebar::TreeRow>) -> bool {
+    let Some(row) = row else {
+        return false;
+    };
+    let current = host
+        .sidebar_tree
+        .spaces
+        .get(row.space)
+        .is_some_and(|space| space.current);
+    match row.kind {
+        sidebar::RowKind::Space => {
+            let Some(name) = host
+                .sidebar_tree
+                .spaces
+                .get(row.space)
+                .map(|space| space.name.clone())
+            else {
+                return false;
+            };
+            let Some(chip) = space_rail_chip_for_name(host, &name) else {
+                return false;
+            };
+            begin_space_rename(host, chip);
+            host.session_prompt.is_some() || host.space_rail.edit.is_some()
+        }
+        sidebar::RowKind::Tab if current => {
+            let Some(tab) = row.tab else {
+                return false;
+            };
+            begin_tab_rename(host, Some(tab));
+            host.session_prompt.is_some() || host.tab_rename.is_some()
+        }
+        sidebar::RowKind::Pane if current => {
+            let Some(pane) = pane_for_sidebar_row(host, row) else {
+                return false;
+            };
+            let tab = row.tab.unwrap_or_else(|| focused_tab_index(host, pane));
+            begin_pane_rename_for(host, tab, pane);
+            host.session_prompt.is_some() || host.tab_rename.is_some()
+        }
+        sidebar::RowKind::Tab | sidebar::RowKind::Pane => false,
     }
 }
 
@@ -10796,10 +10941,7 @@ fn apply_rail_space_action(
         rail_context_menu::RailSpaceAction::OpenFocus => {
             open_space_from_host(host, name, SpaceOpenMode::Switch);
         }
-        rail_context_menu::RailSpaceAction::Rename => {
-            host.space_rail.begin_rename(chip);
-            host.dirty = true;
-        }
+        rail_context_menu::RailSpaceAction::Rename => begin_space_rename(host, chip),
         rail_context_menu::RailSpaceAction::SaveNow => save_space_from_host(host, name),
         rail_context_menu::RailSpaceAction::AddSession => {
             session_prompt::add_to_space(host, name.to_string())
@@ -10912,6 +11054,9 @@ fn apply_rail_pane_action(
             focus_sidebar_session(host, tab, Some(pane_index));
             Dispatch::Handled
         }
+        rail_context_menu::RailPaneAction::Rename => {
+            apply_pane_context_action(host, pane, PaneContextAction::Rename, program, child_args)
+        }
         rail_context_menu::RailPaneAction::ClosePane => {
             apply_pane_context_action(host, pane, PaneContextAction::Close, program, child_args)
         }
@@ -10929,10 +11074,7 @@ fn apply_space_context_action(host: &mut HostState, chip: usize, action: SpaceCo
         SpaceContextAction::Open(mode) => open_space_from_host(host, &name, mode),
         SpaceContextAction::Save => save_space_from_host(host, &name),
         SpaceContextAction::AddSession => session_prompt::add_to_space(host, name),
-        SpaceContextAction::Rename => {
-            host.space_rail.begin_rename(chip);
-            host.dirty = true;
-        }
+        SpaceContextAction::Rename => begin_space_rename(host, chip),
         SpaceContextAction::Move => {
             if move_target::begin(host) {
                 move_to_space_from_host(host, &name, false);
@@ -20209,6 +20351,10 @@ impl ApplicationHandler<UserAction> for App {
                     host.window.request_redraw();
                     return;
                 }
+                if sidebar_f2_rename(host, &event.logical_key, event.repeat) {
+                    host.window.request_redraw();
+                    return;
+                }
                 if handle_space_rail_key(host, &event) {
                     host.window.request_redraw();
                     return;
@@ -24525,6 +24671,45 @@ mod tests {
         assert_eq!(
             right_click_route(false, false),
             RightClickRoute::FallThrough
+        );
+    }
+
+    #[test]
+    fn sidebar_space_rename_uses_the_overlay() {
+        assert_eq!(space_rename_surface(true), SpaceRenameSurface::Overlay);
+        assert_eq!(space_rename_surface(false), SpaceRenameSurface::Inline);
+    }
+
+    #[test]
+    fn sidebar_f2_renames_the_pointer_row_or_the_focused_space() {
+        use sidebar::RowKind;
+        assert_eq!(
+            sidebar_f2_route(true, true, Some(RowKind::Pane), false),
+            SidebarF2Route::Pointer(RowKind::Pane)
+        );
+        assert_eq!(
+            sidebar_f2_route(true, true, Some(RowKind::Tab), true),
+            SidebarF2Route::Pointer(RowKind::Tab)
+        );
+        assert_eq!(
+            sidebar_f2_route(true, true, Some(RowKind::Space), false),
+            SidebarF2Route::Pointer(RowKind::Space)
+        );
+        assert_eq!(
+            sidebar_f2_route(true, true, None, true),
+            SidebarF2Route::FocusedSpace
+        );
+        assert_eq!(
+            sidebar_f2_route(true, true, None, false),
+            SidebarF2Route::FallThrough
+        );
+        assert_eq!(
+            sidebar_f2_route(false, true, Some(RowKind::Pane), true),
+            SidebarF2Route::FallThrough
+        );
+        assert_eq!(
+            sidebar_f2_route(true, false, Some(RowKind::Pane), true),
+            SidebarF2Route::FallThrough
         );
     }
 

@@ -1,4 +1,5 @@
-//! Owner-only files for local runtime and persisted state.
+//! Unix owner-only modes for local runtime and persisted state.
+//! Windows keeps its existing directory ACL policy.
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
@@ -49,10 +50,10 @@ pub fn create_dir(path: &Path) -> io::Result<()> {
 }
 
 /// Open without following symlinks and repair existing modes before use.
-/// Callers must truncate only after this function has validated the file.
+/// Truncate-at-open is disabled. Call `set_len` on the returned file to truncate.
 pub fn open(path: &Path, options: &OpenOptions) -> io::Result<File> {
-    #[allow(unused_mut)]
     let mut options = options.clone();
+    options.truncate(false);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -159,6 +160,7 @@ mod tests {
         let hard = dir.join("hardlink");
         fs::hard_link(&target, &hard).unwrap();
         assert!(write(&hard, b"overwrite").is_err());
+        assert!(open(&hard, OpenOptions::new().write(true).truncate(true)).is_err());
         assert_eq!(fs::read(&target).unwrap(), b"keep");
         assert_eq!(
             fs::metadata(&target).unwrap().permissions().mode() & 0o777,

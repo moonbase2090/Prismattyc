@@ -74,10 +74,18 @@ def run_case(bins, root, backend, case, allow_missing_panic_log):
         raise AssertionError('timeout: ' + label)
 
     def status():
-        data = json.loads(cli('render-status', '--json'))
-        if data.get('host_pid') != host.pid or not data.get('windows'):
-            return {}
-        return data['windows'][0]
+        deadline = time.monotonic() + 10
+        while True:
+            assert host.poll() is None, f'host exited: {host.returncode}'
+            try:
+                data = json.loads(cli('render-status', '--json'))
+                if data.get('host_pid') != host.pid or not data.get('windows'):
+                    return {}
+                return data['windows'][0]
+            except (subprocess.CalledProcessError, ValueError):
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(.1)
 
     def sessions():
         with socket.socket(socket.AF_UNIX) as stream:
@@ -160,6 +168,9 @@ def run_case(bins, root, backend, case, allow_missing_panic_log):
         print(f'PASS {backend} {case}', flush=True)
     except Exception as error:
         result['error'] = str(error)
+        if isinstance(error, subprocess.CalledProcessError):
+            result['stderr'] = error.stderr
+        result['host_exit'] = host.poll() if host is not None else None
         raise
     finally:
         (root / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
@@ -176,6 +187,7 @@ def main():
                         help='allow older builds without the panic hook for reproduction')
     args = parser.parse_args()
     assert sys.platform == 'darwin', 'requires macOS'
+    assert args.repeat > 0, '--repeat must be positive'
     assert quartz.AXIsProcessTrusted(), 'runner needs Accessibility permission'
     root = args.out or Path(tempfile.mkdtemp(prefix='space-delete-', dir='/tmp'))
     root = root.resolve()

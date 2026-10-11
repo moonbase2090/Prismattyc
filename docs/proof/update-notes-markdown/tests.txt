@@ -1,8 +1,8 @@
-   Compiling prismattyc-core v0.3.34 (/Users/brandan/worktrees/prismattyc-update-notes/crates/prismattyc-core)
-   Compiling prismattyc-render v0.3.34 (/Users/brandan/worktrees/prismattyc-update-notes/crates/prismattyc-render)
-   Compiling prismattyc-emulator v0.3.34 (/Users/brandan/worktrees/prismattyc-update-notes/crates/prismattyc-emulator)
-   Compiling prismattyc-mux v0.3.34 (/Users/brandan/worktrees/prismattyc-update-notes/crates/prismattyc-mux)
-   Compiling prismattyc-host v0.3.34 (/Users/brandan/worktrees/prismattyc-update-notes/crates/prismattyc-host)
+   Compiling prismattyc-core v0.3.34 (REPO/crates/prismattyc-core)
+   Compiling prismattyc-render v0.3.34 (REPO/crates/prismattyc-render)
+   Compiling prismattyc-emulator v0.3.34 (REPO/crates/prismattyc-emulator)
+   Compiling prismattyc-mux v0.3.34 (REPO/crates/prismattyc-mux)
+   Compiling prismattyc-host v0.3.34 (REPO/crates/prismattyc-host)
 warning: associated function `for_test` is never used
    --> crates/prismattyc-host/src/space_outcome.rs:234:19
     |

@@ -1007,12 +1007,10 @@ fn cmd_up(paths: &Paths, program: Vec<String>) -> Result<()> {
     }
 
     if let Some(dir) = paths.socket.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        prismattyc_mux::private_fs::create_dir(dir)
+            .with_context(|| format!("create {}", dir.display()))?;
     }
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&paths.logfile)
+    let log = prismattyc_mux::private_fs::append(&paths.logfile)
         .with_context(|| format!("open {}", paths.logfile.display()))?;
     let server = find_bin(&["PMUX_SERVER"], &["pmuxd"]);
     let mut command = Command::new(&server);
@@ -3564,7 +3562,7 @@ fn run_login_supervisor(paths: &Paths) -> Result<()> {
         windows_sys::Win32::System::Console::FreeConsole();
     }
     if let Some(parent) = paths.socket.parent() {
-        std::fs::create_dir_all(parent)?;
+        prismattyc_mux::private_fs::create_dir(parent)?;
     }
     let lock = prismattyc_mux::platform::private_options()
         .read(true)
@@ -3594,10 +3592,7 @@ fn run_login_supervisor(paths: &Paths) -> Result<()> {
         if observed_live && paths.socket.with_extension("stopped").is_file() {
             return Ok(());
         }
-        let log = prismattyc_mux::platform::private_options()
-            .create(true)
-            .append(true)
-            .open(&paths.logfile)?;
+        let log = prismattyc_mux::private_fs::append(&paths.logfile)?;
         let mut command = Command::new(find_bin(&["PMUX_SERVER"], &["pmuxd"]));
         command
             .arg("--socket")

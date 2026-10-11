@@ -599,12 +599,9 @@ pub fn layout_path(dir: &Path, name: &str) -> Result<PathBuf> {
 /// Write `layout` as pretty JSON. Creates `dir` when missing.
 pub fn save_layout(dir: &Path, name: &str, layout: &SavedLayout) -> Result<PathBuf> {
     let path = layout_path(dir, name)?;
-    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    crate::private_fs::create_dir(dir).with_context(|| format!("create {}", dir.display()))?;
     let body = serde_json::to_string_pretty(layout).context("serialize layout")?;
-    let mut file = fs::File::create(&path).with_context(|| format!("write {}", path.display()))?;
-    file.write_all(body.as_bytes())
-        .with_context(|| format!("write {}", path.display()))?;
-    file.write_all(b"\n")
+    crate::private_fs::write(&path, format!("{body}\n"))
         .with_context(|| format!("write {}", path.display()))?;
     Ok(path)
 }
@@ -782,7 +779,7 @@ fn spaces_dir_from(xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsStr
 pub fn save_space(dir: &Path, name: &str, space: &SavedSpace) -> Result<PathBuf> {
     let path = layout_path(dir, name)?;
     let append_to_custom_order = !path.exists() && space_order_path(dir).exists();
-    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    crate::private_fs::create_dir(dir).with_context(|| format!("create {}", dir.display()))?;
     let mut space = space.clone();
     space.created_at_unix_ms = Some(
         load_space(dir, name)
@@ -1061,11 +1058,11 @@ fn write_space_atomic(dir: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
         .unwrap_or("space.json");
     let temporary = dir.join(format!(".{file_name}.{}.{nonce}.tmp", std::process::id()));
     let result = (|| -> Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .with_context(|| format!("write {}", temporary.display()))?;
+        let mut file = crate::private_fs::open(
+            &temporary,
+            fs::OpenOptions::new().write(true).create_new(true),
+        )
+        .with_context(|| format!("write {}", temporary.display()))?;
         file.write_all(bytes)
             .with_context(|| format!("write {}", temporary.display()))?;
         file.sync_all()
@@ -1084,7 +1081,7 @@ fn write_space_atomic(dir: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn write_space_order(dir: &Path, names: &[String]) -> Result<()> {
-    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    crate::private_fs::create_dir(dir).with_context(|| format!("create {}", dir.display()))?;
     let path = space_order_path(dir);
     let nonce = SPACE_ORDER_WRITE_ID.fetch_add(1, Ordering::Relaxed);
     let temporary = dir.join(format!(
@@ -1094,11 +1091,11 @@ fn write_space_order(dir: &Path, names: &[String]) -> Result<()> {
     let mut bytes = serde_json::to_vec_pretty(names).context("serialize space order")?;
     bytes.push(b'\n');
     let result = (|| -> Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .with_context(|| format!("write {}", temporary.display()))?;
+        let mut file = crate::private_fs::open(
+            &temporary,
+            fs::OpenOptions::new().write(true).create_new(true),
+        )
+        .with_context(|| format!("write {}", temporary.display()))?;
         file.write_all(&bytes)
             .with_context(|| format!("write {}", temporary.display()))?;
         file.sync_all()

@@ -103,7 +103,7 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
         let executable = prismattyc_mux::release_update::installed_binary("pmux")
             .unwrap_or(std::env::current_exe()?);
         let log = paths.logfile.with_extension("restart.log");
-        let output = OpenOptions::new().create(true).append(true).open(&log)?;
+        let output = prismattyc_mux::private_fs::append(&log)?;
         let mut child = Command::new(executable);
         child
             .arg("--socket")

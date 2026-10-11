@@ -33,7 +33,7 @@ pub fn publish(pid_path: &Path, pid: u32, status: &Value) -> io::Result<()> {
     }
     let path = status_path(pid_path);
     let temporary = path.with_extension(format!("json.{pid}.tmp"));
-    fs::write(&temporary, serde_json::to_vec(status)?)?;
+    crate::private_fs::write(&temporary, serde_json::to_vec(status)?)?;
     fs::rename(temporary, path)
 }
 

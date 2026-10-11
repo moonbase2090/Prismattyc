@@ -244,20 +244,15 @@ fn blocked_checkpoint_writer_does_not_block_control_requests() {
         "sh",
         &["-c", "printf 'checkpoint ready'; exec cat"],
     );
-    // The snapshot exceeds the FIFO buffer. Reading one byte proves that the
-    // writer started; leaving the rest unread keeps that write blocked.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let mut byte = [0];
-        if reader.read(&mut byte).is_ok_and(|n| n == 1) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "checkpoint writer did not reach FIFO"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    // A FIFO cannot be a private state file. The writer must reject it before
+    // emitting data, while the control connection and PTY remain usable.
+    std::thread::sleep(Duration::from_millis(2300));
+    let mut byte = [0];
+    assert_eq!(
+        reader.read(&mut byte).unwrap(),
+        0,
+        "checkpoint wrote into FIFO"
+    );
     let mut stream = UnixStream::connect(&socket).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(1)))
@@ -303,6 +298,22 @@ fn blocked_checkpoint_writer_does_not_block_control_requests() {
         );
         std::thread::sleep(Duration::from_millis(5));
     }
+    // Removing the invalid destination lets the next checkpoint recover.
+    // This also proves that the worker actually persists, rather than skipping I/O.
+    std::fs::remove_file(&fifo).unwrap();
+    let path = persist_path(&data.0);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "checkpoint did not recover after FIFO removal"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let bytes = std::fs::read(&path).unwrap();
+    let first = bytes.split(|byte| *byte == b'\n').next().unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(first).unwrap();
+    assert_eq!(saved["panes"][0]["session"], "default");
 }
 
 fn socket_path() -> PathBuf {

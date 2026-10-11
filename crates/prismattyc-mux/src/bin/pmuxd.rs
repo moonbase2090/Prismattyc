@@ -158,6 +158,8 @@ fn main() -> Result<()> {
     }
     let instance = prismattyc_mux::daemon_lock::DaemonLock::acquire(&cli.socket)
         .context("acquire pmuxd instance lock")?;
+    prismattyc_mux::mailbox::agents::repair_permissions()
+        .context("repair session agent file permissions")?;
     let stopped_path = cli.socket.with_extension("stopped");
     if stopped_path.exists() {
         std::fs::remove_file(&stopped_path)?;
@@ -212,14 +214,14 @@ fn main() -> Result<()> {
                 prismattyc_mux::spaces_socket_identity(&cli.socket)
             }
         });
-        std::fs::write(identity_path, format!("{identity}\n"))
+        prismattyc_mux::private_fs::write(identity_path, format!("{identity}\n"))
             .context("write Spaces daemon identity")?;
     }
     let checkpoint =
         prismattyc_mux::workspace::Checkpointer::start(server.plane(), cli.socket.clone())?;
     println!("{}", server.path().display());
     server.wait_shutdown();
-    std::fs::write(&stopped_path, b"intentional shutdown\n")?;
+    prismattyc_mux::private_fs::write(&stopped_path, b"intentional shutdown\n")?;
     drop(checkpoint);
     drop(server);
     Ok(())

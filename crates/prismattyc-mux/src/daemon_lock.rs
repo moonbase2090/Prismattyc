@@ -9,17 +9,20 @@ pub struct DaemonLock(File);
 impl DaemonLock {
     pub fn acquire(socket: &Path) -> io::Result<Self> {
         if let Some(directory) = socket.parent() {
-            std::fs::create_dir_all(directory)?;
+            crate::private_fs::create_dir(directory)?;
+            repair_runtime_files(socket)?;
             #[cfg(windows)]
             crate::platform::require_private_directory(directory)?;
         }
         // Keep the inode after exit. Unlinking a lock lets a waiter and a
         // new opener acquire different files for the same instance.
-        let mut file = crate::platform::private_options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(socket.with_extension("lock"))?;
+        let mut file = crate::private_fs::open(
+            &socket.with_extension("lock"),
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true),
+        )?;
         crate::platform::try_lock_exclusive(&file)?;
         if matches!(
             crate::probe_socket_liveness(socket),
@@ -57,9 +60,26 @@ impl DaemonLock {
 
     pub fn publish_pid(&self, socket: &Path) -> io::Result<()> {
         let _ = &self.0;
-        std::fs::write(
+        crate::private_fs::write(
             socket.with_extension("pid"),
             format!("{}\n", std::process::id()),
         )
     }
+}
+
+fn repair_runtime_files(socket: &Path) -> io::Result<()> {
+    for extension in [
+        "log",
+        "pid",
+        "restart.log",
+        "host.pid",
+        "host.pid.lock",
+        "host.render.json",
+        "attach-tabs.json",
+        "login.lock",
+        "stopped",
+    ] {
+        crate::private_fs::repair_if_exists(&socket.with_extension(extension))?;
+    }
+    crate::private_fs::repair_if_exists(&crate::spaces_daemon_identity_path(socket))
 }

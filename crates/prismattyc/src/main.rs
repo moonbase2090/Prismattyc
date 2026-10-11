@@ -5241,24 +5241,15 @@ mod tests {
     /// payload can enqueue under PASTE_SEND_BUDGET.
     #[test]
     fn paste_payload_capped_at_one_mib() {
-        let (tx, rx) = mpsc::sync_channel::<ChildWrite>(8);
-        let huge = "a".repeat(MAX_PASTE_BYTES + 4096);
-        let expected_len = MAX_PASTE_BYTES + 12;
-        let consumer = thread::spawn(move || {
-            let mut got = Vec::new();
-            while got.len() < expected_len {
-                match rx.recv_timeout(Duration::from_millis(500)) {
-                    Ok(chunk) => got.extend_from_slice(&chunk.bytes),
-                    Err(_) => break,
-                }
-            }
-            got
-        });
-        let result = handle_paste(&huge, true, &tx);
-        assert_eq!(result, PasteEnqueueResult::Queued);
-        let bytes = consumer.join().expect("consumer");
-        // Wrapper is 6 + payload + 6.
-        assert_eq!(bytes.len(), MAX_PASTE_BYTES + 12);
+        let huge = "a".repeat(1_048_576 + 4096);
+        // This checks the cap; reserve room for the entire input so scheduling
+        // cannot turn it into the separately covered backpressure case.
+        let (tx, rx) =
+            mpsc::sync_channel::<ChildWrite>((huge.len() + 12).div_ceil(PASTE_CHUNK_BYTES));
+        assert_eq!(handle_paste(&huge, true, &tx), PasteEnqueueResult::Queued);
+        drop(tx);
+        let bytes: Vec<u8> = rx.into_iter().flat_map(|chunk| chunk.bytes).collect();
+        assert_eq!(bytes.len(), 1_048_576 + 12);
         assert_eq!(&bytes[..6], b"\x1b[200~");
         assert_eq!(&bytes[bytes.len() - 6..], b"\x1b[201~");
         assert!(bytes[6..bytes.len() - 6].iter().all(|&b| b == b'a'));

@@ -2887,6 +2887,7 @@ impl ControlPlane {
 
     /// Enable pane-log persist at `path` and restore if a file is already there.
     pub fn set_pane_log_path(&mut self, path: PathBuf) -> std::io::Result<()> {
+        crate::private_fs::repair_if_exists(&path)?;
         let worker = PersistWorker::start()?;
         self.pane_log_worker.take();
         self.pane_log_pending_mark = None;
@@ -7941,7 +7942,25 @@ fn verify_same_user(stream: &UnixStream) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn verify_same_user(stream: &UnixStream) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let mut uid = 0;
+    let mut gid = 0;
+    // The descriptor is live and both outputs point to initialized uid_t/gid_t values.
+    if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if uid != unsafe { libc::geteuid() } {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "control connection peer uid does not match server uid",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn verify_same_user(_stream: &UnixStream) -> io::Result<()> {
     // Access is gated by the socket and runtime directory permissions.
     // Windows requires an inheritable user-only parent DACL before binding.
@@ -8145,6 +8164,21 @@ mod tests {
     use std::time::Instant;
 
     static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn peer_verification_accepts_same_user_and_rejects_unconnected_socket() {
+        let (peer, _other) = UnixStream::pair().unwrap();
+        verify_same_user(&peer).unwrap();
+        let socket = rustix::net::socket(
+            rustix::net::AddressFamily::UNIX,
+            rustix::net::SocketType::STREAM,
+            None,
+        )
+        .unwrap();
+        let unconnected = UnixStream::from(socket);
+        assert!(verify_same_user(&unconnected).is_err());
+    }
 
     #[test]
     fn classify_control_request_id_splits_stale_awaited_ahead() {

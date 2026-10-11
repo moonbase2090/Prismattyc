@@ -98,11 +98,27 @@ impl Store {
     ///
     /// Propagates `SQLite` open and schema-migration errors.
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() && std::fs::create_dir_all(parent).is_err() {
-                return Err(rusqlite::Error::InvalidPath(parent.to_path_buf()));
+        let prepare = || -> std::io::Result<()> {
+            if let Some(parent) = path.parent() {
+                crate::private_fs::create_dir(parent)?;
             }
-        }
+            crate::private_fs::open(
+                path,
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true),
+            )?;
+            // SQLite derives new journal modes from the database. Repair old sidecars
+            // before SQLite can recover or reuse them.
+            for suffix in ["-journal", "-wal", "-shm"] {
+                let mut sidecar = path.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                crate::private_fs::repair_if_exists(Path::new(&sidecar))?;
+            }
+            Ok(())
+        };
+        prepare().map_err(|_| rusqlite::Error::InvalidPath(path.to_path_buf()))?;
         let conn = Connection::open(path)?;
         Self::init(conn)
     }

@@ -111,9 +111,7 @@ impl PersistWorker {
                             let mut bytes = serde_json::to_vec(&transaction)?;
                             bytes.push(b'\n');
                             // A partial append is repaired by a fresh atomic snapshot on retry.
-                            fs::OpenOptions::new()
-                                .append(true)
-                                .open(&path)?
+                            crate::private_fs::open(&path, fs::OpenOptions::new().append(true))?
                                 .write_all(&bytes)?;
                             journal_bytes = journal_bytes.saturating_add(bytes.len());
                         }
@@ -474,12 +472,12 @@ pub(crate) fn write_persist(path: &Path, file: &PersistFile) -> Result<(), Persi
 
 fn write_document(path: &Path, file: &impl Serialize) -> Result<(), PersistError> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        crate::private_fs::create_dir(parent)?;
     }
     let mut bytes = serde_json::to_vec(file)?;
     bytes.push(b'\n');
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, bytes)?;
+    crate::private_fs::write(&tmp, bytes)?;
     fs::rename(&tmp, path)?;
     Ok(())
 }

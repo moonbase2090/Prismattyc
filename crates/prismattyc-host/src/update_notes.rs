@@ -198,7 +198,8 @@ mod tests {
 
     #[test]
     fn renders_emphasis_without_markers() {
-        let rendered = render_release_notes_markdown("### Fixed\n\n- Uses **bold** and *italic*.\n");
+        let rendered =
+            render_release_notes_markdown("### Fixed\n\n- Uses **bold** and *italic*.\n");
         assert_eq!(rendered, "Fixed\n• Uses bold and italic.");
     }
 }

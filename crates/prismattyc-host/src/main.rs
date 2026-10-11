@@ -36,7 +36,6 @@ mod macos_menu;
 mod macos_update;
 #[cfg(target_os = "macos")]
 mod macos_window;
-mod update_notes;
 mod move_target;
 mod mux;
 mod notify;
@@ -67,6 +66,8 @@ mod terminal_switcher;
 #[cfg(test)]
 mod test_support;
 mod transparency;
+#[cfg(any(target_os = "macos", test))]
+mod update_notes;
 // cargo-mutants 27.1 does not recognize nested cfg(all(test, ...)).
 // Keep cfg(test) separate so mutation targets exclude the test fixture.
 #[cfg(test)]

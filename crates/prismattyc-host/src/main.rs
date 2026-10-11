@@ -1334,7 +1334,7 @@ struct HostState {
     /// Interactive chrome element under the pointer. Changes, rather than raw
     /// pointer motion, invalidate the frame (PT-96).
     hover_target: Option<HoverTarget>,
-    hyperlink_hover: Option<(HyperlinkHoverKey, bool)>,
+    hyperlink_hover: hyperlink::HoverPreview,
     /// Configured immediate hover blend (0.0-0.3).
     hover_blend: f32,
     /// Drag state for the host scrollback scrollbar (PT-40).
@@ -1690,16 +1690,6 @@ enum HoverTarget {
     /// Combined sidebar tree row, footer action, arrangement button, or
     /// list thumb (issue #113).
     Sidebar(graphite::SidebarHit),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HyperlinkHoverKey {
-    pane: PaneId,
-    row: usize,
-    col: usize,
-    scroll: usize,
-    epoch: u64,
-    size: (usize, usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4522,7 +4512,7 @@ impl App {
                 tab_rename: None,
                 pointer_px: None,
                 hover_target: None,
-                hyperlink_hover: None,
+                hyperlink_hover: hyperlink::HoverPreview::default(),
                 hover_blend: self.file_config.hover_blend(),
                 scrollbar_drag: None,
                 strip_drag: None,
@@ -6400,7 +6390,7 @@ fn rasterize_frame(
         preedit: !host.preedit.text.is_empty(),
         bell_toasts: !host.bell_toasts.is_empty() || git_hover_label(host).is_some(),
         title_notice: host.title_notice.is_some(),
-        hover_target: host.hover_target.is_some(),
+        hover_target: host.hover_target.is_some() || host.hyperlink_hover.url().is_some(),
         save_space: save_space_modal_open(host.space_rail.edit.as_ref()),
         transparency: host.transparency.is_some(),
     };
@@ -7433,6 +7423,16 @@ fn rasterize_frame(
             &label,
         );
     }
+    if let Some(label) = host.hyperlink_hover.label() {
+        graphite::paint_tooltip(
+            buffer,
+            width as usize,
+            geom.chrome,
+            &graphite::bar_tokens(&host.theme, host.bar_color),
+            graphite::Rect::new(0, height as usize, 0, 0),
+            label,
+        );
+    }
     if let Some(label) = git_hover_label(host) {
         let cols = (width as usize / host.font.cell_w.max(1))
             .saturating_sub(2)
@@ -8185,7 +8185,8 @@ impl App {
             );
         }
         if pty_dirty {
-            host.hyperlink_hover = None;
+            host.hyperlink_hover.invalidate();
+            sync_chrome_hover(host);
         }
         let more = more || parked_more;
         host.render_frame.timing.add_parse(parse_started.elapsed());
@@ -11770,6 +11771,8 @@ fn scroll_theme_picker_with_wheel(host: &mut HostState, delta: &MouseScrollDelta
 
 fn pointer_hover_blocked(host: &HostState) -> bool {
     host.restore_prompt.is_some()
+        || host.find.active
+        || host.tab_rename.is_some()
         || host.session_prompt.is_some()
         || host.transparency.is_some()
         || host.theme_picker.is_some()
@@ -12029,40 +12032,26 @@ fn cursor_for_hover(
     }
 }
 
-fn hyperlink_hover_at_pointer(host: &mut HostState) -> bool {
-    if pointer_hover_blocked(host) || host.left_button_down {
-        return false;
+fn sync_hyperlink_hover(host: &mut HostState, eligible: bool) -> bool {
+    if !eligible || pointer_hover_blocked(host) || host.left_button_down {
+        return host.hyperlink_hover.clear();
     }
-    let Some((x, y)) = host.pointer_px else {
-        return false;
-    };
-    let Some((pane, row, col)) =
-        cell_at_position(PhysicalPosition::new(x, y), &host.font, &host.mux)
-    else {
-        return false;
+    let hit = host
+        .pointer_px
+        .and_then(|(x, y)| cell_at_position(PhysicalPosition::new(x, y), &host.font, &host.mux));
+    let Some((pane, row, col)) = hit else {
+        return host.hyperlink_hover.clear();
     };
     let Some(runtime) = host.mux.pane(pane) else {
-        return false;
+        return host.hyperlink_hover.clear();
     };
-    let screen = runtime.emulator.screen();
-    let scroll = runtime.view_scroll.min(screen.max_view_scroll());
-    let key = HyperlinkHoverKey {
+    host.hyperlink_hover.update(
         pane,
+        runtime.emulator.screen(),
+        runtime.view_scroll,
         row,
         col,
-        scroll,
-        epoch: screen.content_epoch(),
-        size: (screen.columns(), screen.rows()),
-    };
-    if let Some((previous, hit)) = host.hyperlink_hover {
-        if previous == key {
-            return hit;
-        }
-    }
-    // Reuse click detection, but do not rescan the grid on every pixel of motion.
-    let hit = hyperlink::url_at(screen, scroll, row, col).is_some();
-    host.hyperlink_hover = Some((key, hit));
-    hit
+    )
 }
 
 /// Name under a collapsed-strip icon, or the collapse control's label.
@@ -12149,7 +12138,8 @@ fn sync_chrome_hover(host: &mut HostState) -> bool {
             .as_ref()
             .is_some_and(|drag| drag.active);
     let divider_axis = divider_axis_for_cursor(host);
-    let hyperlink = next.is_none() && hyperlink_hover_at_pointer(host);
+    let preview_changed = sync_hyperlink_hover(host, next.is_none() && divider_axis.is_none());
+    let hyperlink = host.hyperlink_hover.url().is_some();
     let cursor = cursor_for_hover(
         next,
         strip_dragging,
@@ -12169,7 +12159,7 @@ fn sync_chrome_hover(host: &mut HostState) -> bool {
     host.divider_cursor = divider_axis.is_some();
     let grip_changed = host.sidebar_grip_hot != grip;
     host.sidebar_grip_hot = grip;
-    if host.hover_target == next && !grip_changed {
+    if host.hover_target == next && !grip_changed && !preview_changed {
         return false;
     }
     host.hover_target = next;

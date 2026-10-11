@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MPL-2.0
-"""Assert the native hyperlink cursor on a private X11 display.
+"""Assert the native hyperlink cursor and destination preview on a private X11 display.
 
-Requires Xvfb, xdotool, ffmpeg, and libXfixes. Set PRISMATTYC_HOST to the
+Requires Xvfb, xdotool, ffmpeg, tesseract, and libXfixes. Set PRISMATTYC_HOST to the
 binary under test and HYPERLINK_HOVER_OUT to an empty artifact directory.
 """
 import ctypes as C
@@ -40,7 +40,7 @@ def row(n, color, label):
 def named(label):
     row(3, '20;60;80', label)
     sys.stdout.flush()
-link = '\x1b]8;;https://moonbase2090.com/\x1b\\Moonbase website\x1b]8;;\x1b\\'
+link = '\x1b]8;;https://moonbase2090.com/\x1b\\https://label.example\x1b]8;;\x1b\\'
 sys.stdout.write('\x1b[2J\x1b[H')
 row(1, '60;40;20', 'Ordinary terminal text')
 named(link)
@@ -52,6 +52,7 @@ while True:
     key = sys.stdin.read(1)
     if key == 'r': named('Ordinary replacement')
     if key == 'l': named(link)
+    if key == 'u': named('\x1b]8;;https://trusted.example:' + 'x' * 600 + '@evil.example/path\x1b\\https://label.example\x1b]8;;\x1b\\')
     if key == 's':
         sys.stdout.write('\x1b[1S')
         sys.stdout.flush()
@@ -150,6 +151,27 @@ while True:
             return locations
 
         positions = wait_for(points, 'rendered link rows missing')
+        geometry = dict(line.split('=', 1) for line in
+                        run('xdotool', 'getwindowgeometry', '--shell', win).decode().splitlines())
+        bottom = int(geometry['Y']) + int(geometry['HEIGHT'])
+        left = int(geometry['X'])
+        window_width = int(geometry['WIDTH'])
+
+        def preview(expected, name):
+            screenshot = out / (name + '.png')
+            capture(screenshot)
+            crop = out / (name + '-preview.png')
+            run('ffmpeg', '-v', 'error', '-i', str(screenshot), '-vf',
+                f'crop={window_width}:28:{left}:{bottom - 28},scale=iw*3:ih*3',
+                '-y', str(crop))
+            text = run('tesseract', str(crop), 'stdout', '--psm', '7').decode().strip()
+            result.setdefault('previews', {})[name] = text
+            if expected:
+                assert expected in text, f'{name}: missing destination in {text!r}'
+                assert 'label.example' not in text, f'{name}: showed OSC 8 label'
+            else:
+                assert 'moonbase2090.com' not in text, f'{name}: stale destination'
+
 
         def move(point):
             run('xdotool', 'mousemove', str(point[0]), str(point[1]))
@@ -172,21 +194,29 @@ while True:
             wait_for(lambda: cursor() == expected, name + ' cursor mismatch')
             result['cases'].append(name)
             if name == 'named-osc8':
-                capture(out / 'hand-over-link.png')
+                preview('https://moonbase2090.com/', 'hand-over-link')
+            elif name in ('plain', 'unsafe-target', 'unicode-target'):
+                preview(None, name)
 
         move(positions[1])
         for key, expected, name in [('ctrl+shift+p', arrow, 'palette-blocks-link'),
-                                    ('Escape', hand, 'palette-dismiss-restores-link')]:
+                                    ('Escape', hand, 'palette-dismiss-restores-link'),
+                                    ('ctrl+shift+f', arrow, 'find-blocks-link'),
+                                    ('Escape', hand, 'find-dismiss-restores-link')]:
             run('xdotool', 'key', key)
             time.sleep(2)
             assert cursor() == expected, name + ' cursor mismatch'
+            preview('https://moonbase2090.com/' if expected == hand else None, name)
             result['cases'].append(name)
-        for key, expected, name in [('r', arrow, 'stationary-link-removed'),
+        for key, expected, name in [('u', hand, 'long-userinfo-shows-host'),
+                                     ('r', arrow, 'stationary-link-removed'),
                                      ('l', hand, 'stationary-link-restored'),
                                      ('s', arrow, 'stationary-link-scrolled')]:
             run('xdotool', 'key', key)
             time.sleep(2)  # Assert after idle, without moving the pointer.
             assert cursor() == expected, name + ' cursor mismatch'
+            preview(('Host: evil.example' if name == 'long-userinfo-shows-host'
+                     else 'https://moonbase2090.com/') if expected == hand else None, name)
             result['cases'].append(name)
         assert host.poll() is None, 'host exited during hover checks'
         result['status'] = 'PASS'

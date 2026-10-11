@@ -244,6 +244,29 @@ assert_artifact_hit "zip-symlink" "$work/symlink.zip" "$marker"
 assert_artifact_hit "tar-symlink" "$work/symlink.tar.gz" "$marker"
 assert_artifact_hit "utf16le" "$work/utf16le.bin" "DESKTOP-SECRET123"
 
+# Encrypted ZIP members are uninspectable; fail closed rather than exit 0.
+printf 'path %s\n' "$marker" >"$work/secret-notes.txt"
+if ! zip -q -P 'test-pass' -j "$work/encrypted.zip" "$work/secret-notes.txt"; then
+  echo "zip encryption helper unavailable" >&2
+  exit 1
+fi
+clean_tree "$work/encrypted"
+out="$(mktemp)"
+err="$(mktemp)"
+code=0
+"$checker" --root "$work/encrypted" --artifact "$work/encrypted.zip" >"$out" 2>"$err" || code=$?
+if [[ "$code" -eq 0 ]]; then
+  echo "encrypted zip must fail closed" >&2
+  cat "$out" "$err" >&2
+  exit 1
+fi
+if ! grep -F -q "artifact could not be read" "$err"; then
+  echo "encrypted zip missing fail-closed notice" >&2
+  cat "$err" >&2
+  exit 1
+fi
+rm -f "$out" "$err"
+
 # Compressed archives must not be accepted when the marker is only in members.
 # (The planted ZIP above fails; a clean ZIP still passes.)
 python3 - "$work/clean-artifact.zip" <<'PY'

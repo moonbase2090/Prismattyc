@@ -19,6 +19,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
 use winit::event_loop::EventLoopProxy;
 
+use crate::update_notes::prepare_update_release_notes;
 use crate::UserAction;
 
 /// The File-menu items this app installs: (title, key equivalent). Keyboard
@@ -225,13 +226,11 @@ pub fn prompt_update(version: &str, release_notes: &str) -> bool {
     alert.setMessageText(&NSString::from_str(&format!(
         "Prismattyc {version} is available"
     )));
-    let notes = release_notes.trim();
+    let notes = prepare_update_release_notes(version, release_notes);
     let notes = if notes.is_empty() {
         "No release notes were published.".to_string()
-    } else if notes.chars().count() > 8_000 {
-        format!("{}…", notes.chars().take(8_000).collect::<String>())
     } else {
-        notes.to_string()
+        notes
     };
     alert.setInformativeText(&NSString::from_str(&notes));
     alert.addButtonWithTitle(&NSString::from_str("Install and Relaunch"));

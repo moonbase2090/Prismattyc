@@ -2131,13 +2131,31 @@ pub(super) fn session_naming_in_private_window() {
             let child = live.windows[0].panes[0].child_pid;
             assert_eq!(host.mux.tab_count(), 2);
             begin_pane_rename(host);
-            session_prompt::dispatch_key(host, &Key::Character("bad name".into()), false);
+            session_prompt::dispatch_key(host, &Key::Named(NamedKey::Backspace), false);
             session_prompt::dispatch_key(host, &Key::Named(NamedKey::Enter), false);
             assert!(
-                host.session_prompt.is_some(),
-                "invalid input must keep the popup open"
+                host.session_prompt
+                    .as_ref()
+                    .and_then(|prompt| prompt.error.as_deref())
+                    .is_some_and(|error| error.contains("empty")),
+                "an empty name must keep the popup open"
             );
             session_prompt::finish(host, false);
+            begin_pane_rename(host);
+            session_prompt::dispatch_key(host, &Key::Character("Bad Name".into()), false);
+            session_prompt::dispatch_key(host, &Key::Named(NamedKey::Enter), false);
+            assert!(
+                host.session_prompt.is_none(),
+                "a pane label keeps its case and spaces"
+            );
+            let labeled = attach_log::live_snapshot().unwrap();
+            let labeled = labeled
+                .sessions
+                .iter()
+                .find(|session| session.name == "Bad Name")
+                .unwrap();
+            assert_eq!(labeled.agent_id.as_deref(), Some("bad-name"));
+            assert_eq!(labeled.windows[0].panes[0].child_pid, child);
             begin_pane_rename(host);
             session_prompt::dispatch_key(host, &Key::Character("astra-spaces".into()), false);
             session_prompt::dispatch_key(host, &Key::Named(NamedKey::Enter), false);

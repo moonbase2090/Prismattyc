@@ -1,14 +1,11 @@
-17:=== prismattyc-regress-check summary ===
-18-base d1be4e843c9a  head 386abd41f24a  toolchain 1.90.0  Darwin arm64  2026-10-11 11:00 MDT
-19-cargo test --workspace --locked --no-fail-fast: base rc=101, head rc=101
-20-counts base: 2675 passed, 0 failed, 2 flaky (failed, then passed on rerun), 2 ignored (2679 total)
-21-counts head: 2676 passed, 0 failed, 1 flaky (failed, then passed on rerun), 2 ignored (2679 total)
-22-list: removed=0 newly-ignored=0 newly-failing=0 preexisting-failing=0 added=0 ack-removed=0
-23-FLAKY ON HEAD (failed, passed on isolated rerun):
-24-  prismattyc_mux[unittests src/lib.rs]::control::tests::inject_mail_quiet_unattended_writes_exact_bytes_once
-25-FLAKY ON BASE:
-26-  prismattyc_mux[unittests src/lib.rs]::control::tests::inject_mail_wrote_gets_one_bounded_verification_retry
-27-  transport_matrix[tests/transport_matrix.rs]::rich_prism_exits_when_host_pty_hangs_up
-28-probe: 130754 lines (colors, tokens, bar_layout, sidebar_layout, side_rail_px) base=73255d6734a095af head=73255d6734a095af kinds=default/default differing-lines=0 
-29:RESULT: CLEAN
-30-=== end summary ===
+15:=== prismattyc-regress-check summary ===
+16-base d1be4e843c9a  head 68111485e1b5  toolchain 1.90.0  Darwin arm64  2026-10-11 11:20 MDT
+17-cargo test --workspace --locked --no-fail-fast: base rc=101, head rc=0
+18-counts base: 2676 passed, 0 failed, 1 flaky (failed, then passed on rerun), 2 ignored (2679 total)
+19-counts head: 2677 passed, 0 failed, 0 flaky (failed, then passed on rerun), 2 ignored (2679 total)
+20-list: removed=0 newly-ignored=0 newly-failing=0 preexisting-failing=0 added=0 ack-removed=0
+21-FLAKY ON BASE:
+22-  prismattyc_host[unittests src/main.rs]::attach_log::tests::writer_resize_after_transport_err_logs_and_keeps_last_size
+23-probe: 130754 lines (colors, tokens, bar_layout, sidebar_layout, side_rail_px) base=73255d6734a095af head=73255d6734a095af kinds=default/default differing-lines=0 
+24:RESULT: CLEAN
+25-=== end summary ===

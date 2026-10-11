@@ -210,17 +210,19 @@ def add_text(text: str) -> None:
 
 
 def read_limited(stream, limit: int) -> bytes:
-    """Read at most ``limit`` bytes so compressed bombs cannot exhaust memory."""
+    """Read a complete stream, failing if it exceeds ``limit`` bytes."""
     if limit <= 0:
-        return b""
+        raise ArtifactError("scan budget exhausted")
     parts: list[bytes] = []
     remaining = limit
     while remaining > 0:
         block = stream.read(min(65536, remaining))
         if not block:
-            break
+            return b"".join(parts)
         parts.append(block)
         remaining -= len(block)
+    if stream.read(1):
+        raise ArtifactError("payload exceeds scan budget")
     return b"".join(parts)
 
 
@@ -288,7 +290,7 @@ def looks_like_tar_gz(name: str, data: bytes) -> bool:
 
 def scan_bytes(name: str, data: bytes, depth: int) -> None:
     if total >= MAX_BYTES:
-        return
+        raise ArtifactError("scan budget exhausted")
     add_text(name)
     ascii_strings(data)
     utf16le_strings(data)
@@ -303,8 +305,34 @@ def scan_bytes(name: str, data: bytes, depth: int) -> None:
 def member_budget() -> int:
     remain = MAX_BYTES - total
     if remain <= 0:
-        return 0
+        raise ArtifactError("scan budget exhausted")
     return min(MAX_MEMBER, remain)
+
+
+def scan_zip_file(archive: zipfile.ZipFile, depth: int) -> None:
+    if archive.comment:
+        add_text(archive.comment.decode("utf-8", "replace"))
+    for info in archive.infolist():
+        if info.comment:
+            add_text(info.comment.decode("utf-8", "replace"))
+        add_text(info.filename)
+        # Symlink target is stored as the member payload for zip symlinks.
+        is_symlink = (info.external_attr >> 16) & 0o170000 == 0o120000
+        if info.is_dir() and not is_symlink:
+            continue
+        if not safe_name(info.filename):
+            raise ArtifactError("zip member path rejected")
+        try:
+            with archive.open(info) as handle:
+                payload = read_limited(handle, member_budget())
+        except ArtifactError:
+            raise
+        except Exception as exc:
+            raise ArtifactError("zip member could not be read") from exc
+        if is_symlink:
+            add_text(payload.decode("utf-8", "replace"))
+            continue
+        scan_bytes(info.filename, payload, depth)
 
 
 def scan_zip_bytes(data: bytes, depth: int, required: bool) -> None:
@@ -315,27 +343,29 @@ def scan_zip_bytes(data: bytes, depth: int, required: bool) -> None:
             raise ArtifactError("zip could not be opened")
         return
     with archive:
-        if archive.comment:
-            add_text(archive.comment.decode("utf-8", "replace"))
-        for info in archive.infolist():
-            if info.comment:
-                add_text(info.comment.decode("utf-8", "replace"))
-            add_text(info.filename)
-            # Symlink target is stored as the member payload for zip symlinks.
-            is_symlink = (info.external_attr >> 16) & 0o170000 == 0o120000
-            if info.is_dir() and not is_symlink:
-                continue
-            if not safe_name(info.filename):
-                raise ArtifactError("zip member path rejected")
-            try:
-                with archive.open(info) as handle:
-                    payload = read_limited(handle, member_budget())
-            except Exception as exc:
-                raise ArtifactError("zip member could not be read") from exc
-            if is_symlink:
-                add_text(payload.decode("utf-8", "replace"))
-                continue
-            scan_bytes(info.filename, payload, depth)
+        scan_zip_file(archive, depth)
+
+
+def scan_tar_file(archive: tarfile.TarFile, depth: int) -> None:
+    for member in archive.getmembers():
+        add_text(member.name)
+        if member.issym() or member.islnk():
+            add_text(member.linkname or "")
+            continue
+        if not member.isfile():
+            continue
+        if not safe_name(member.name):
+            raise ArtifactError("tar member path rejected")
+        extracted = archive.extractfile(member)
+        if extracted is None:
+            raise ArtifactError("tar member could not be read")
+        try:
+            payload = read_limited(extracted, member_budget())
+        except ArtifactError:
+            raise
+        except Exception as exc:
+            raise ArtifactError("tar member could not be read") from exc
+        scan_bytes(member.name, payload, depth)
 
 
 def scan_tar_bytes(data: bytes, name: str, depth: int, required: bool) -> None:
@@ -351,29 +381,36 @@ def scan_tar_bytes(data: bytes, name: str, depth: int, required: bool) -> None:
             raise ArtifactError("tar could not be opened")
         return
     with archive:
-        for member in archive.getmembers():
-            add_text(member.name)
-            if member.issym() or member.islnk():
-                add_text(member.linkname or "")
-                continue
-            if not member.isfile():
-                continue
-            if not safe_name(member.name):
-                raise ArtifactError("tar member path rejected")
-            extracted = archive.extractfile(member)
-            if extracted is None:
-                raise ArtifactError("tar member could not be read")
-            try:
-                payload = read_limited(extracted, member_budget())
-            except Exception as exc:
-                raise ArtifactError("tar member could not be read") from exc
-            scan_bytes(member.name, payload, depth)
+        scan_tar_file(archive, depth)
 
 
 try:
-    raw = src.read_bytes()
-    scan_bytes(src.name, raw, 0)
-except ArtifactError as exc:
+    # Prefer path-based archive opens so the outer file is never fully buffered.
+    if zip_required(src.name):
+        try:
+            with zipfile.ZipFile(src) as archive:
+                add_text(src.name)
+                scan_zip_file(archive, 0)
+        except ArtifactError:
+            raise
+        except (OSError, zipfile.BadZipFile) as exc:
+            raise ArtifactError("zip could not be opened") from exc
+    elif tar_required(src.name):
+        lowered = src.name.lower()
+        mode = "r:gz" if lowered.endswith((".tar.gz", ".tgz")) else "r:"
+        try:
+            with tarfile.open(src, mode=mode) as archive:
+                add_text(src.name)
+                scan_tar_file(archive, 0)
+        except ArtifactError:
+            raise
+        except (OSError, tarfile.TarError) as exc:
+            raise ArtifactError("tar could not be opened") from exc
+    else:
+        with src.open("rb") as handle:
+            raw = read_limited(handle, MAX_BYTES)
+        scan_bytes(src.name, raw, 0)
+except ArtifactError:
     sys.stderr.write("check-release-text: artifact could not be read\n")
     sys.exit(2)
 except OSError:

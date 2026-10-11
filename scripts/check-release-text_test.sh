@@ -267,6 +267,34 @@ if ! grep -F -q "artifact could not be read" "$err"; then
 fi
 rm -f "$out" "$err"
 
+# A ZIP member larger than the per-member budget must fail closed (no silent truncate).
+python3 - "$work/oversize.zip" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+path = pathlib.Path(sys.argv[1])
+payload = (b"A" * (8 * 1024 * 1024 + 64)) + b"DESKTOP-OVERSIZE1"
+with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+    archive.writestr("big.bin", payload)
+PY
+clean_tree "$work/oversize"
+out="$(mktemp)"
+err="$(mktemp)"
+code=0
+"$checker" --root "$work/oversize" --artifact "$work/oversize.zip" >"$out" 2>"$err" || code=$?
+if [[ "$code" -eq 0 ]]; then
+  echo "oversize zip member must fail closed" >&2
+  cat "$out" "$err" >&2
+  exit 1
+fi
+if ! grep -F -q "artifact could not be read" "$err"; then
+  echo "oversize zip missing fail-closed notice" >&2
+  cat "$err" >&2
+  exit 1
+fi
+rm -f "$out" "$err"
+
 # Compressed archives must not be accepted when the marker is only in members.
 # (The planted ZIP above fails; a clean ZIP still passes.)
 python3 - "$work/clean-artifact.zip" <<'PY'

@@ -1,0 +1,18 @@
+=== prismattyc-regress-check summary ===
+base d1be4e843c9a  head 27c7e4e290cf  toolchain 1.90.0  Darwin arm64  2026-10-11 11:28 MDT
+cargo test --workspace --locked --no-fail-fast: base rc=101, head rc=0
+counts base: 2676 passed, 0 failed, 1 flaky (failed, then passed on rerun), 2 ignored (2679 total)
+counts head: 2683 passed, 0 failed, 0 flaky (failed, then passed on rerun), 2 ignored (2685 total)
+list: removed=0 newly-ignored=0 newly-failing=0 preexisting-failing=0 added=6 ack-removed=0
+FLAKY ON BASE:
+  umbrella_cli[tests/umbrella_cli.rs]::session_reopen_replays_saved_command_under_space_open_policy
+ADDED:
+  prismattyc_host[unittests src/main.rs]::update_notes::tests::drops_bracketed_version_heading_and_renders_body
+  prismattyc_host[unittests src/main.rs]::update_notes::tests::drops_plain_version_heading
+  prismattyc_host[unittests src/main.rs]::update_notes::tests::empty_notes_stay_empty
+  prismattyc_host[unittests src/main.rs]::update_notes::tests::keeps_body_when_heading_version_differs
+  prismattyc_host[unittests src/main.rs]::update_notes::tests::renders_emphasis_without_markers
+  prismattyc_host[unittests src/main.rs]::update_notes::tests::truncates_very_long_notes
+probe: 130754 lines (colors, tokens, bar_layout, sidebar_layout, side_rail_px) base=73255d6734a095af head=73255d6734a095af kinds=default/default differing-lines=0 
+RESULT: CLEAN
+=== end summary ===

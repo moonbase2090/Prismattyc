@@ -6,6 +6,12 @@
 
 - A pane label keeps its case, spaces, and other characters. The mailbox address is the lowercase form of that label.
 
+### Windows
+
+A quiet MSI install prepends the install `cmd` directory to the user PATH.
+`ADDTOPATH=0` leaves PATH unchanged. Uninstall removes the entry, and an
+upgrade leaves one entry.
+
 ## [0.3.34] - 2026-10-10
 
 ### Fixed

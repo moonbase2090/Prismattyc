@@ -10,6 +10,7 @@ param(
     [string]$ExpectedVersion = '',
     [string]$ExpectedProductVersion = '',
     [switch]$AddToPath,
+    [switch]$NoAddToPath,
     [switch]$FormatArguments
 )
 $ErrorActionPreference = 'Stop'
@@ -39,8 +40,14 @@ function Get-MsiProofPhases {
 }
 
 function Get-MsiTail {
+    if ($AddToPath -and $NoAddToPath) {
+        throw 'Pass only one of -AddToPath and -NoAddToPath.'
+    }
     $tail = @('/qn', '/norestart')
-    if ($AddToPath) { $tail += 'ADDTOPATH=1' } else { $tail += 'ADDTOPATH=0' }
+    # Omit the property so the package default applies. -AddToPath forces 1.
+    # -NoAddToPath forces 0.
+    if ($AddToPath) { $tail += 'ADDTOPATH=1' }
+    elseif ($NoAddToPath) { $tail += 'ADDTOPATH=0' }
     # Keep the runner from rebooting. This does not claim the copy failed.
     $tail += 'REBOOT=ReallySuppress'
     return $tail
@@ -210,24 +217,26 @@ function Assert-Installed {
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if ($null -eq $userPath) { $userPath = '' }
     $parts = @($userPath -split ';' | Where-Object { $_ } | ForEach-Object { $_.Trim().TrimEnd('\') })
-    $binListed = @($parts | Where-Object { $_ -eq $install.Bin.TrimEnd('\') }).Count -gt 0
-    $cmdListed = @($parts | Where-Object { $_ -eq $install.Cmd.TrimEnd('\') }).Count -gt 0
-    if ($binListed) { throw 'User PATH still contains the install bin.' }
-    if ($PathExpected -xor $cmdListed) {
-        throw "PATH opt-in is $cmdListed; expected $PathExpected"
-    }
+    $binCount = @($parts | Where-Object { $_ -eq $install.Bin.TrimEnd('\') }).Count
+    $cmdCount = @($parts | Where-Object { $_ -eq $install.Cmd.TrimEnd('\') }).Count
+    if ($binCount -ne 0) { throw 'User PATH still contains the install bin.' }
     if ($PathExpected) {
+        if ($cmdCount -ne 1) { throw "User PATH has $cmdCount install cmd entries; expected 1." }
         $env:Path = @(
             [Environment]::GetEnvironmentVariable('Path', 'Machine'),
             [Environment]::GetEnvironmentVariable('Path', 'User')
         ) -join ';'
-        $resolved = @(Get-Command -Name prismattyc -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
-        $expectedShim = Join-Path $install.Cmd 'prismattyc.cmd'
-        $shown = if ($resolved) { [string]$resolved.Source } else { '<none>' }
-        if (-not $resolved -or [string]::Compare($shown, $expectedShim, $true) -ne 0) {
-            throw "Get-Command prismattyc is $shown, not $expectedShim"
+        foreach ($name in @('prismattyc', 'pmux')) {
+            $resolved = @(Get-Command -Name $name -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
+            $expectedShim = Join-Path $install.Cmd "$name.cmd"
+            $shown = if ($resolved) { [string]$resolved.Source } else { '<none>' }
+            if (-not $resolved -or [string]::Compare($shown, $expectedShim, $true) -ne 0) {
+                throw "Get-Command $name is $shown, not $expectedShim"
+            }
+            Write-Output "Get-Command $name=$shown"
         }
-        Write-Output "Get-Command prismattyc=$shown"
+    } elseif ($cmdCount -ne 0) {
+        throw "User PATH has $cmdCount install cmd entries; expected 0."
     }
 }
 
@@ -243,8 +252,10 @@ function Assert-Removed {
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if ($null -eq $userPath) { $userPath = '' }
     $parts = @($userPath -split ';' | ForEach-Object { $_.Trim().TrimEnd('\') })
-    if ($parts -contains $install.Bin) { throw 'User PATH still contains the install bin.' }
-    if ($parts -contains $install.Cmd.TrimEnd('\')) { throw 'User PATH still contains the install cmd.' }
+    $binCount = @($parts | Where-Object { $_ -eq $install.Bin.TrimEnd('\') }).Count
+    $cmdCount = @($parts | Where-Object { $_ -eq $install.Cmd.TrimEnd('\') }).Count
+    if ($binCount -ne 0) { throw 'User PATH still contains the install bin.' }
+    if ($cmdCount -ne 0) { throw "User PATH has $cmdCount install cmd entries after uninstall." }
     foreach ($path in $Survivors) {
         if (-not (Test-Path -LiteralPath $path)) { throw "Uninstall removed preserved data: $path" }
     }
@@ -420,7 +431,7 @@ try {
         Invoke-Msi -ArgumentList (@('/i', $older) + $tail)
     }
     Invoke-Msi -ArgumentList $installArgs
-    Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected ([bool]$AddToPath)
+    Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected (-not [bool]$NoAddToPath)
     Assert-PreviewSweep -Fixtures $fixtures
     Assert-LockedExecutableSurvivesReinstall -CommandLine (New-MsiCommandLine $installArgs)
 

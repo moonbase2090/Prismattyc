@@ -37,9 +37,9 @@ of the same name in `bin`. There is no `prismattyc-host.cmd`. A Start menu
 shortcut named Prismattyc launches `prismattyc-host.exe`. That is the only
 Start menu entry. It opens the GUI, which carries the Prismattyc icon and
 does not allocate a console. `prismattyc.exe` is the CLI. Its file
-description is Prismattyc CLI, and it is not a shortcut target. The tools
-are added to PATH only when the install is given `ADDTOPATH=1`, and that
-entry is the `cmd` directory.
+description is Prismattyc CLI, and it is not a shortcut target. A quiet
+install prepends the `cmd` directory to the user PATH. `ADDTOPATH=0` leaves
+PATH unchanged. The entry is the `cmd` directory, not `bin`.
 
 A second bare launch of the GUI focuses the existing window. `pmux attach --all`
 and `pmux space open --new-window` still open another window. A connect from
@@ -60,13 +60,14 @@ still reports the semver.
 
 ```powershell
 msiexec /i prismattyc-v0.3.29-x86_64-pc-windows-msvc.msi /qn /norestart
-msiexec /i prismattyc-v0.3.29-x86_64-pc-windows-msvc.msi /qn /norestart ADDTOPATH=1
+msiexec /i prismattyc-v0.3.29-x86_64-pc-windows-msvc.msi /qn /norestart ADDTOPATH=0
 ```
 
-`ADDTOPATH=1` prepends the install `cmd` directory to the user PATH. The
-default is off, matching `install-windows-preview.ps1 -AddToPath`. Uninstall
-removes that PATH entry, the files, and the shortcut. Install and uninstall
-also remove leftover `windows-preview-*` directories directly under
+The first command prepends the install `cmd` directory to the user PATH.
+`ADDTOPATH=0` leaves PATH unchanged. An upgrade leaves one `cmd` entry.
+Uninstall removes that PATH entry, the files, and the shortcut. The preview
+installer still prepends the `cmd` directory only when `-AddToPath` is set.
+Install and uninstall also remove leftover `windows-preview-*` directories directly under
 `%LOCALAPPDATA%\Programs\Prismattyc` when those directories are not reparse
 points, the Start shortcuts named `Prismattyc Windows Preview`, and user PATH
 entries that pointed into a removed preview or at the install `bin` directory.

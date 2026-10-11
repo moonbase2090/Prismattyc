@@ -255,13 +255,13 @@ pub fn load(path: &Path) -> Option<AttachTabsFile> {
 pub fn save(path: &Path, file: &AttachTabsFile) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
-            fs::create_dir_all(dir)?;
+            crate::private_fs::create_dir(dir)?;
         }
     }
     let bytes = serde_json::to_vec_pretty(file)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let tmp = tmp_path(path);
-    fs::write(&tmp, &bytes)?;
+    crate::private_fs::write(&tmp, &bytes)?;
     if let Err(error) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(error);

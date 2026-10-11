@@ -51,10 +51,11 @@ pub fn live_host_pid(path: &Path) -> Option<u32> {
 pub fn register_host_pid(path: &Path, pid: u32) -> std::io::Result<bool> {
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
-            fs::create_dir_all(dir)?;
+            crate::private_fs::create_dir(dir)?;
         }
     }
     let _lock = exclusive_pid_lock(path)?;
+    crate::private_fs::repair_if_exists(path)?;
     if let Some(existing) = live_host_pid(path) {
         return Ok(existing == pid);
     }
@@ -65,12 +66,10 @@ pub fn register_host_pid(path: &Path, pid: u32) -> std::io::Result<bool> {
 fn exclusive_pid_lock(path: &Path) -> std::io::Result<fs::File> {
     let mut lock_path = path.as_os_str().to_os_string();
     lock_path.push(".lock");
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(PathBuf::from(lock_path))?;
+    let lock = crate::private_fs::open(
+        &PathBuf::from(lock_path),
+        fs::OpenOptions::new().create(true).read(true).write(true),
+    )?;
     crate::platform::lock_exclusive(&lock)?;
     Ok(lock)
 }
@@ -83,10 +82,8 @@ fn parse_pid_file(path: &Path) -> Option<u32> {
 
 fn try_create_pid_file(path: &Path, pid: u32) -> std::io::Result<()> {
     use std::io::Write;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+    let mut file =
+        crate::private_fs::open(path, fs::OpenOptions::new().write(true).create_new(true))?;
     file.write_all(format!("{pid}\n").as_bytes())?;
     Ok(())
 }
@@ -109,10 +106,10 @@ fn file_names_pid(path: &Path, pid: u32) -> bool {
 pub fn touch_host_ack(path: &Path) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
-            fs::create_dir_all(dir)?;
+            crate::private_fs::create_dir(dir)?;
         }
     }
-    fs::write(path, b"ok\n")
+    crate::private_fs::write(path, b"ok\n")
 }
 
 /// `PRISMATTYC_HOST=1` on a pane spawned by the windowed host.

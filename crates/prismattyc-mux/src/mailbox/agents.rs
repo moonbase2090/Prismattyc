@@ -22,8 +22,15 @@ fn map_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("session-agents.json"))
 }
 
+pub fn repair_permissions() -> std::io::Result<()> {
+    crate::private_fs::repair_if_exists(&map_path())
+}
+
 fn load() -> BTreeMap<String, String> {
     let path = map_path();
+    if crate::private_fs::repair_if_exists(&path).is_err() {
+        return BTreeMap::new();
+    }
     let Ok(raw) = fs::read_to_string(&path) else {
         return BTreeMap::new();
     };
@@ -33,10 +40,12 @@ fn load() -> BTreeMap<String, String> {
 fn save(map: &BTreeMap<String, String>) {
     let path = map_path();
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        if crate::private_fs::create_dir(parent).is_err() {
+            return;
+        }
     }
     if let Ok(raw) = serde_json::to_string_pretty(map) {
-        let _ = fs::write(path, raw);
+        let _ = crate::private_fs::write(path, raw);
     }
 }
 

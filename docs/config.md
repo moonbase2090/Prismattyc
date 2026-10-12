@@ -268,10 +268,10 @@ window_blur = false
 # ansi = ["#000000", "#cd0000", "#00cd00", "#cdcd00", "#0000ee", "#cd00cd", "#00cdcd", "#e5e5e5", "#7f7f7f", "#ff0000", "#00ff00", "#ffff00", "#5c5cff", "#ff00ff", "#00ffff", "#ffffff"]
 
 [mux]
-# A new pane uses COMSPEC on Windows, or cmd.exe when COMSPEC is unset.
+# A new pane uses [mux] shell when that value is set.
+# Otherwise it uses COMSPEC on Windows, or cmd.exe when COMSPEC is unset.
 # Elsewhere it uses SHELL, or /bin/sh when SHELL is unset.
 # One PowerShell pane: pmux new NAME -- powershell.exe
-# The commented shell key below opts in for every new pane. An uncommented unknown key drops this file.
 # Instance name used to derive pmux.sock / pmux-<instance>.sock. non-empty name, no '/'.
 instance = "default"
 # Absolute socket path; overrides instance when set. absolute path.

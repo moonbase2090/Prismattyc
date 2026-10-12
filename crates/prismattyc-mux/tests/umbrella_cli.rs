@@ -514,7 +514,8 @@ fn doctor_and_kick_viewer_leave_session() {
         doctor.contains("pane shell:") && doctor.contains("(from "),
         "{doctor}"
     );
-    assert!(doctor.contains("hint: pmux new NAME -- "), "{doctor}");
+    assert!(doctor.contains("hint: [mux] shell = "), "{doctor}");
+    assert!(doctor.contains("pmux new NAME -- "), "{doctor}");
 
     let mut viewer = spawn_viewer(&socket, "work");
     let pid = viewer.id();

@@ -17,10 +17,10 @@ use serde::Deserialize;
 
 use crate::remote_size::RemoteSizePolicy;
 
-/// `[mux]` keys. The host stores this so `deny_unknown_fields` accepts the
-/// table; only `prismattyc-mux` applies it.
+/// `[mux]` keys. The host stores this table so one config file can carry it.
+/// Keys this build does not know are ignored; see [`mux_unknown_key_warnings`].
+/// Unknown keys outside `[mux]` are still rejected by the host.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct MuxSection {
     /// Instance name used to derive `pmux.sock` / `pmux-<instance>.sock`.
     pub instance: Option<String>,
@@ -86,8 +86,8 @@ fn env_os_first(key: &str) -> Option<std::ffi::OsString> {
     std::env::var_os(key).filter(|value| !value.is_empty())
 }
 
-/// Missing file or missing table is defaults. Invalid TOML / unknown mux keys
-/// are errors so a typo does not silently fall through.
+/// Missing file or missing table is defaults. Invalid TOML is an error.
+/// An unknown key inside `[mux]` warns and is ignored so the known keys stay.
 pub fn load_mux_section(path: &Path) -> Result<MuxSection> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
@@ -99,9 +99,43 @@ pub fn load_mux_section(path: &Path) -> Result<MuxSection> {
     if raw.trim().is_empty() {
         return Ok(MuxSection::default());
     }
+    for warning in
+        mux_unknown_key_warnings(&raw).with_context(|| format!("parse {}", path.display()))?
+    {
+        eprintln!("prismattyc: warning: {warning}");
+    }
     let parsed: FileWithMux =
         toml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
     Ok(parsed.mux.unwrap_or_default())
+}
+
+/// Unknown `[mux]` key names, sorted. The warning names the key and not its
+/// value. Invalid TOML is an error. A missing table is empty.
+pub fn mux_unknown_key_warnings(raw: &str) -> Result<Vec<String>> {
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let value: toml::Value =
+        toml::from_str(raw).context("parse config while checking [mux] keys")?;
+    let Some(table) = value.as_table() else {
+        return Ok(Vec::new());
+    };
+    let Some(mux) = table.get("mux") else {
+        return Ok(Vec::new());
+    };
+    let Some(mux_table) = mux.as_table() else {
+        return Ok(Vec::new());
+    };
+    let mut unknown: Vec<&str> = mux_table
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !MUX_KEYS.iter().any(|spec| spec.name == *key))
+        .collect();
+    unknown.sort_unstable();
+    Ok(unknown
+        .into_iter()
+        .map(|key| format!("ignoring unknown [mux] key `{key}`"))
+        .collect())
 }
 
 /// CLI > env > file > built-in default. Returns `(instance, socket_override)`.
@@ -268,10 +302,10 @@ pub const MUX_KEYS: &[MuxKeySpec] = &[
 pub fn render_mux_section() -> String {
     let mut out = String::from("[mux]\n");
     out.push_str(
-        "# A new pane uses COMSPEC on Windows, or cmd.exe when COMSPEC is unset.\n\
+        "# A new pane uses [mux] shell when that value is set.\n\
+         # Otherwise it uses COMSPEC on Windows, or cmd.exe when COMSPEC is unset.\n\
          # Elsewhere it uses SHELL, or /bin/sh when SHELL is unset.\n\
-         # One PowerShell pane: pmux new NAME -- powershell.exe\n\
-         # The commented shell key below opts in for every new pane. An uncommented unknown key drops this file.\n",
+         # One PowerShell pane: pmux new NAME -- powershell.exe\n",
     );
     for key in MUX_KEYS {
         out.push_str(&format!("# {}. {}.\n", key.doc, key.range));
@@ -436,12 +470,14 @@ mod tests {
         let text = render_mux_section();
         assert!(text.starts_with("[mux]\n"));
         assert!(text.contains("pmux new NAME -- powershell.exe"));
+        assert!(!text.contains("is not a setting"));
+        assert!(!text.contains("drops this file"));
         assert!(
             !text.lines().any(|line| {
                 let trimmed = line.trim_start();
                 trimmed.starts_with("shell ") || trimmed.starts_with("shell=")
             }),
-            "the template must not set a shell key: {text}"
+            "the template must leave shell commented: {text}"
         );
         for key in MUX_KEYS {
             assert!(text.contains(key.name), "mux template missing {}", key.name);
@@ -519,10 +555,33 @@ mod tests {
     }
 
     #[test]
-    fn unknown_mux_key_is_rejected() {
-        let path = temp_cfg("bad");
-        std::fs::write(&path, "[mux]\nnot_a_key = true\n").unwrap();
-        assert!(load_mux_section(&path).is_err());
+    fn unknown_mux_key_keeps_known_keys() {
+        let path = temp_cfg("unknown");
+        std::fs::write(
+            &path,
+            "[mux]\nzed = 1\ninstance = \"work\"\nnot_a_key = true\n",
+        )
+        .unwrap();
+        let section = load_mux_section(&path).unwrap();
+        assert_eq!(section.instance.as_deref(), Some("work"));
+        assert_eq!(
+            mux_unknown_key_warnings("[mux]\nzed = 1\ninstance = \"work\"\nnot_a_key = true\n")
+                .unwrap(),
+            vec![
+                "ignoring unknown [mux] key `not_a_key`".to_string(),
+                "ignoring unknown [mux] key `zed`".to_string(),
+            ]
+        );
+        assert!(mux_unknown_key_warnings("theme = \"monokai\"\n")
+            .unwrap()
+            .is_empty());
+        std::fs::write(&path, "[mux]\ninstance = \n").unwrap();
+        assert!(load_mux_section(&path).is_err(), "invalid TOML still fails");
+        std::fs::write(&path, "[mux]\nattach_on_new = \"yes\"\n").unwrap();
+        assert!(
+            load_mux_section(&path).is_err(),
+            "a known key with the wrong type still fails"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

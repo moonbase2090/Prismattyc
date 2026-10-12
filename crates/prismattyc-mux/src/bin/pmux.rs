@@ -3429,8 +3429,10 @@ fn require_live(paths: &Paths) -> Result<()> {
 }
 
 fn cmd_doctor(paths: &Paths, key: Option<String>) -> Result<()> {
+    let configured = prismattyc_mux::platform::configured_shell();
     let shell = prismattyc_mux::platform::describe_pane_shell(
         cfg!(windows),
+        configured.as_deref(),
         std::env::var("COMSPEC").ok().as_deref(),
         std::env::var("SHELL").ok().as_deref(),
     );

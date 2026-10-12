@@ -2681,6 +2681,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "prismattyc-cmd-forwarder"
+version = "0.3.34"
+
+[[package]]
 name = "prismattyc-core"
 version = "0.3.34"
 dependencies = [

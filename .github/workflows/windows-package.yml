@@ -82,6 +82,7 @@ jobs:
             ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\pmux-mcp.exe
             ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\prismattyc.exe
             ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\prismattyc-host.exe
+            ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\prismattyc-cmd-forwarder.exe
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
@@ -142,6 +143,20 @@ jobs:
           Get-ChildItem build\windows-release\*.exe, build\windows-release\*.msi | ForEach-Object {
             & $signtool.FullName verify /pa /v $_.FullName
             if ($LASTEXITCODE -ne 0) { throw "Signature check failed for $($_.Name)" }
+          }
+          $zip = Get-ChildItem -LiteralPath build\windows-release -Filter *.zip | Select-Object -First 1
+          if (-not $zip) { throw 'Windows zip was not packaged.' }
+          $extract = Join-Path $env:RUNNER_TEMP 'prismattyc-cmd-verify'
+          if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
+          Expand-Archive -LiteralPath $zip.FullName -DestinationPath $extract -Force
+          $forwarders = @(Get-ChildItem -Path $extract -Recurse -Filter *.exe | Where-Object { $_.Directory.Name -eq 'cmd' })
+          if ($forwarders.Count -ne 5) { throw "Expected 5 signed cmd forwarders, found $($forwarders.Count)." }
+          if (@($forwarders | Where-Object { $_.Name -eq 'prismattyc-host.exe' }).Count -ne 0) {
+            throw 'prismattyc-host.exe must not be placed in cmd'
+          }
+          foreach ($file in $forwarders) {
+            & $signtool.FullName verify /pa /v $file.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Signature check failed for $($file.Name)" }
           }
           python scripts/release/windows_msi.py --refresh-checksums build/windows-release --signed
       - name: Prove per-user MSI install and upgrade

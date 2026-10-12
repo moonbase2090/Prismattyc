@@ -5,6 +5,7 @@
 ### Fixed
 
 - `pmux doctor` prints the pane shell a new pane would start, including a configured `[mux] shell`, before it checks the daemon.
+- The Windows `cmd` directory holds `prismattyc.exe`, `pmux.exe`, `pmuxd.exe`, `pmux-attach.exe`, and `pmux-mcp.exe`. Each one starts the matching program in `bin` directly. An upgrade removes the old `.cmd` shims. PATH still points at `cmd`, not `bin`. There is no host forwarder. When release signing is enabled, that forwarder is signed with the other tools and the package job verifies the five `cmd` copies.
 - An unknown key in `[mux]` warns and is ignored. The known mux settings and the rest of the file stay in effect for the daemon and the host. Invalid TOML still drops the file. Unknown keys outside `[mux]`, including `[a11y]` and `[spaces]`, are still rejected.
 - A pane label keeps its case, spaces, and other characters. The mailbox address is the lowercase form of that label.
 - Windows line-oriented `pmux`, `prismattyc`, and `pmux-attach` output returns to column 0. Virtual-terminal processing no longer disables newline auto-return for those commands. An attached console disables auto-return only while its raw mode is open, then restores the prior mode.
@@ -13,7 +14,7 @@
 
 MSI PATH changes remain opt-in with `ADDTOPATH=1`. Installer verification now
 checks that an opted-in upgrade leaves exactly one `cmd` entry, both commands
-resolve to their shims, and uninstall removes the entry.
+resolve to the `cmd` forwarders, and uninstall removes the entry.
 
 ### Windows
 

@@ -41,6 +41,7 @@ with tempfile.TemporaryDirectory(dir=args.out) as temp:
         if revision[:12].encode() not in path.read_bytes():
             parser.error(f'{name}: source revision not embedded in binary')
     shutil.copy2(Path(__file__).with_name('install-windows-preview.ps1'), root / 'install.ps1')
+    release.stage_cmd_forwarders(repo, root / 'cmd', 'x86_64-pc-windows-gnu')
     for name, source in [('MPL-2.0.txt', repo / 'LICENSE'), ('NOTICE.txt', repo / 'NOTICE.txt'), ('OMARCHY-LICENSE.txt', repo / 'crates/prismattyc-host/themes/OMARCHY-LICENSE.txt')]:
         shutil.copy2(source, root / 'licenses' / name)
     for source in (repo / 'crates/prismattyc-host/assets/fonts').glob('*.txt'):
@@ -62,7 +63,7 @@ No administrator access is needed. The installer verifies package checksums
 and runs --version on all six programs before copying them into:
 %LOCALAPPDATA%\\Programs\\Prismattyc\\windows-preview-<revision>
 It creates a Start menu shortcut named Prismattyc Windows Preview <revision>.
--AddToPath prepends this build's cmd directory of shims to your user PATH.
+-AddToPath prepends this build's cmd directory of forwarders to your user PATH.
 Omit that flag for a shortcut-only installation. Reopen your terminal after
 changing PATH.
 

@@ -64,7 +64,9 @@ fn apply_isolation(command: &mut Command, root: &Path) {
         .env_remove("PRISMATTYC_PANE_ID")
         .env_remove("PRISMATTYC_REPO")
         .env_remove("PMUX_ATTACH")
-        .env_remove("PRISMATTYC_HOST");
+        .env_remove("PRISMATTYC_HOST")
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY");
 }
 
 fn start_server(socket: &Path, root: &Path) -> ServerGuard {
@@ -281,29 +283,7 @@ fn attach_refuses_bad_args_and_execs_a_stand_in() {
     );
     std::fs::remove_file(&socket).unwrap();
 
-    let _server = start_server(&socket, &root);
-    let dumped = ok(&pmux(
-        &socket,
-        &root,
-        &extra,
-        &["attach", "--json", "--pane", "1", "--read-only"],
-    ));
-    assert!(dumped.contains("--json"), "{dumped}");
-    assert!(dumped.contains("--pane"), "{dumped}");
-    assert!(dumped.contains("--read-only"), "{dumped}");
-    assert!(dumped.contains(socket.to_str().unwrap()), "{dumped}");
-
-    let wrote = ok(&pmux(
-        &socket,
-        &root,
-        &extra,
-        &["attach", "--styled-json", "--write", "hello", "--fit"],
-    ));
-    assert!(wrote.contains("--styled-json"), "{wrote}");
-    assert!(wrote.contains("--write"), "{wrote}");
-    assert!(wrote.contains("hello"), "{wrote}");
-    assert!(wrote.contains("--fit"), "{wrote}");
-
+    let server = start_server(&socket, &root);
     fail(
         &pmux(
             &socket,
@@ -313,16 +293,48 @@ fn attach_refuses_bad_args_and_execs_a_stand_in() {
         ),
         "no longer running",
     );
+    #[cfg(target_os = "linux")]
+    {
+        fail(
+            &pmux(&socket, &root, &extra, &["attach", "--all"]),
+            "needs WAYLAND_DISPLAY",
+        );
+        let host_body = std::fs::read_to_string(&host_log).unwrap_or_default();
+        assert!(host_body.is_empty(), "{host_body}");
+    }
 
-    let all = pmux(&socket, &root, &extra, &["attach", "--all"]);
-    let all_text = text(&all);
-    let host_body = std::fs::read_to_string(&host_log).unwrap_or_default();
-    assert!(
-        all_text.contains("needs WAYLAND_DISPLAY")
-            || all_text.contains("--attach-session")
-            || host_body.contains("--attach-session"),
-        "{all_text} host={host_body}"
-    );
+    // `exec` replaces the instrumented process and leaves a coverage profile
+    // that cannot be merged. Local runs still check the stand-in arguments.
+    if std::env::var_os("LLVM_PROFILE_FILE").is_none() {
+        let dumped = ok(&pmux(
+            &socket,
+            &root,
+            &extra,
+            &["attach", "--json", "--pane", "1", "--read-only"],
+        ));
+        assert!(dumped.contains("--json"), "{dumped}");
+        assert!(dumped.contains("--pane"), "{dumped}");
+        assert!(dumped.contains("--read-only"), "{dumped}");
+        assert!(dumped.contains(socket.to_str().unwrap()), "{dumped}");
+
+        let wrote = ok(&pmux(
+            &socket,
+            &root,
+            &extra,
+            &["attach", "--styled-json", "--write", "hello", "--fit"],
+        ));
+        assert!(wrote.contains("--styled-json"), "{wrote}");
+        assert!(wrote.contains("--write"), "{wrote}");
+        assert!(wrote.contains("hello"), "{wrote}");
+        assert!(wrote.contains("--fit"), "{wrote}");
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let all = ok(&pmux(&socket, &root, &extra, &["attach", "--all"]));
+            assert!(all.contains("--attach-session"), "{all}");
+        }
+    }
+    drop(server);
     let _ = std::fs::remove_dir_all(&root);
 }
 

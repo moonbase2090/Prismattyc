@@ -63,7 +63,7 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn(f'UpgradeCode="{UPGRADE_CODE}"', source)
         self.assertIn('Scope="perUser"', source)
         self.assertIn('AllowSameVersionUpgrades="yes"', source)
-        self.assertIn('Schedule="afterInstallInitialize"', source)
+        self.assertIn('Schedule="afterInstallExecute"', source)
         self.assertIn('MSIRESTARTMANAGERCONTROL" Value="Disable"', source)
         self.assertIn('Id="ADDTOPATH" Secure="yes" Value="0"', source)
         self.assertIn('Name="PATH" Value="[CMDFOLDER]" Action="set" Part="first" System="no"', source)
@@ -155,7 +155,7 @@ class WindowsMsiTests(unittest.TestCase):
             (
                 "SweepPreviewInstallsOnRemove",
                 'Custom Action="SweepPreviewInstallsOnRemove" Before="RemoveFiles" '
-                'Condition="REMOVE~=&quot;ALL&quot;"',
+                'Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"',
             ),
         ):
             action = source.split(f'Id="{action_id}"', 1)[1].split("/>", 1)[0]

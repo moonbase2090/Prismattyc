@@ -3,6 +3,9 @@
 # would delete the junction target, so this script never walks a reparse point.
 # It does not stop any process, and it does not touch %APPDATA% or
 # %LOCALAPPDATA%\Prismattyc data.
+[CmdletBinding()]
+param([switch]$Uninstall)
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -82,8 +85,8 @@ foreach ($part in @($userPath.Split([char[]]@(';'), [System.StringSplitOptions]:
         $kept.Add($part)
         continue
     }
-    # Drop the install bin directory left by an older install or a preview.
-    if ($key -eq $binKey) { continue }
+    # Preserve an existing command directory until the application is removed.
+    if ($Uninstall -and $key -eq $binKey) { continue }
     $previewRoot = Get-PreviewDirectoryFromEntry $part
     if ($previewRoot) {
         if (-not (Test-Path -LiteralPath $previewRoot)) { continue }

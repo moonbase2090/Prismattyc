@@ -79,6 +79,7 @@ try {
     $script = Join-Path $repo 'scripts\release\test-windows-msi.ps1'
     & $script -Msi $newCopy -UpgradeFrom $olderCopy -ExpectedVersion $manifest.version -ExpectedProductVersion $manifest.msi_product_version -AddToPath 2>&1 | Tee-Object -Variable higher
     & $script -Msi $newCopy -UpgradeFrom $sameCopy -ExpectedVersion $manifest.version -ExpectedProductVersion $manifest.msi_product_version 2>&1 | Tee-Object -Variable same
+    & $script -Msi $newCopy -UpgradeFrom $sameCopy -ExpectedVersion $manifest.version -ExpectedProductVersion $manifest.msi_product_version -NoAddToPath 2>&1 | Tee-Object -Variable optedOut
     $text = @(
         "version=$($manifest.version)"
         "product_version=$($manifest.msi_product_version)"
@@ -90,6 +91,8 @@ try {
         ($higher | Out-String).TrimEnd()
         'same_version:'
         ($same | Out-String).TrimEnd()
+        'explicit_opt_out:'
+        ($optedOut | Out-String).TrimEnd()
     ) -join "`n"
     Write-Host $text
     if ($ProofPath) {

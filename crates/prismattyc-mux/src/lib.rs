@@ -76,8 +76,8 @@ pub use inject_submit::{
 };
 
 pub use config::{
-    load_mux_section, merge_mux_section, prism_config_path, render_mux_section,
-    resolve_attach_on_new, resolve_mux_target, resolve_remote_size,
+    load_mux_section, merge_mux_section, mux_unknown_key_warnings, prism_config_path,
+    render_mux_section, resolve_attach_on_new, resolve_mux_target, resolve_remote_size,
     resolve_space_open_runs_commands, write_config_atomic, MuxKeyKind, MuxKeySpec, MuxSection,
     SpaceOpenRunsCommands, MUX_KEYS,
 };

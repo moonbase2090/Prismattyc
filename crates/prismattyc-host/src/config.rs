@@ -393,6 +393,9 @@ pub struct ConfigFile {
     /// Validated by [`load`]; see [`ConfigFile::remote_destinations`].
     #[serde(default)]
     pub remote: Option<Vec<prismattyc_mux::remote_catalog::RemoteDestinationEntry>>,
+    /// Unknown `[mux]` keys from the file that was parsed. Not a config key.
+    #[serde(skip)]
+    pub(crate) mux_unknown_warnings: Vec<String>,
 }
 
 /// Host accessibility switches (PT-173 / PT-175).
@@ -441,6 +444,12 @@ impl ConfigFile {
     /// the macOS Command shortcuts enabled by `macos_shortcuts = true`.
     /// Empty when the flag is off or every explicit entry keeps (or
     /// intentionally unbinds with `[]`) its Command chord.
+    /// Warnings for `[mux]` keys this build does not read. Empty when the
+    /// table is absent or every key is known.
+    pub fn mux_unknown_key_warnings(&self) -> &[String] {
+        &self.mux_unknown_warnings
+    }
+
     pub fn macos_override_warnings(&self) -> Vec<String> {
         if !self.macos_shortcuts() {
             return Vec::new();
@@ -822,9 +831,16 @@ fn mutate_preference(path: &Path, mutate: impl FnOnce(&mut toml_edit::DocumentMu
     result
 }
 
+/// One host warning line. The key name is the whole extra detail.
+pub fn host_warning_line(warning: &str) -> String {
+    format!("prismattyc-host: warning: {warning}")
+}
+
 fn parse(raw: &str, path: &Path) -> Result<ConfigFile> {
     let mut config: ConfigFile =
         toml::from_str(raw).with_context(|| format!("parse {}", path.display()))?;
+    config.mux_unknown_warnings = prismattyc_mux::mux_unknown_key_warnings(raw)
+        .with_context(|| format!("parse {}", path.display()))?;
     if let Some(spec) = config.focus_border.as_deref() {
         anyhow::ensure!(
             crate::raster::parse_focus_border(spec).is_some(),
@@ -1576,6 +1592,7 @@ mod tests {
             "hover_blend = -0.01",
             "hover_blend = 0.31",
             "[a11y]\nnot_a_setting = true",
+            "[spaces]\nnot_a_setting = true",
             "pane_titles = \"always\"",
             "chrome_style = \"glass\"",
             "bar_color = \"teal\"",
@@ -1585,6 +1602,37 @@ mod tests {
             std::fs::write(&path, bad).unwrap();
             assert!(load(&path).is_err(), "should reject: {bad}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unknown_mux_key_keeps_host_settings() {
+        let dir = temp_dir("mux-unknown");
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "theme = \"monokai\"\n[mux]\ninstance = \"work\"\nnot_a_key = true\n",
+        )
+        .unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.theme.as_deref(), Some("monokai"));
+        assert_eq!(
+            loaded
+                .mux
+                .as_ref()
+                .and_then(|section| section.instance.as_deref()),
+            Some("work")
+        );
+        assert_eq!(
+            loaded.mux_unknown_key_warnings(),
+            ["ignoring unknown [mux] key `not_a_key`"]
+        );
+        assert_eq!(
+            host_warning_line(&loaded.mux_unknown_key_warnings()[0]),
+            "prismattyc-host: warning: ignoring unknown [mux] key `not_a_key`"
+        );
+        std::fs::write(&path, "theme = \"monokai\"\n[mux]\ninstance = \n").unwrap();
+        assert!(load(&path).is_err(), "invalid TOML still drops the file");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

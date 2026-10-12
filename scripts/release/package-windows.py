@@ -32,23 +32,26 @@ def validate_pe(path):
             raise ValueError(f'{path.name}: expected a Windows x64 PE32+ executable')
 
 
-def stage_cmd_forwarders(repo, destination, target):
-    """Build one forwarder and copy it under each cmd-directory name.
+def stage_cmd_forwarders(repo, destination, target, *, rebuild=True):
+    """Copy one forwarder under each cmd-directory name.
 
-    A missing toolchain or target fails here. This does not write a .cmd shim.
+    A signed package reuses the already signed executable. Rebuilding it would
+    replace that signature. An unsigned package builds it here. This does not
+    write a .cmd shim.
     """
-    command = [
-        'cargo', '+1.90.0', 'build', '--locked', '--release',
-        '-p', 'prismattyc-cmd-forwarder', '--target', target,
-    ]
-    completed = subprocess.run(command, cwd=repo)
-    if completed.returncode != 0:
-        raise SystemExit('cargo build of prismattyc-cmd-forwarder failed')
     metadata = json.loads(subprocess.check_output(
         ['cargo', '+1.90.0', 'metadata', '--locked', '--format-version', '1', '--no-deps'],
         cwd=repo, text=True,
     ))
     built = Path(metadata['target_directory']) / target / 'release' / 'prismattyc-cmd-forwarder.exe'
+    if rebuild:
+        command = [
+            'cargo', '+1.90.0', 'build', '--locked', '--release',
+            '-p', 'prismattyc-cmd-forwarder', '--target', target,
+        ]
+        completed = subprocess.run(command, cwd=repo)
+        if completed.returncode != 0:
+            raise SystemExit('cargo build of prismattyc-cmd-forwarder failed')
     if not built.is_file():
         raise SystemExit('prismattyc-cmd-forwarder.exe was not produced')
     destination.mkdir(parents=True)
@@ -139,7 +142,7 @@ def main():
             'Read licenses\\MPL-2.0.txt and licenses\\NOTICE.txt for licensing.\n', encoding='utf-8')
         shutil.copy2(repo / 'scripts/release/reset-windows-update-pointer.ps1', root / 'bin/reset-windows-update-pointer.ps1')
         shutil.copy2(repo / 'scripts/release/remove-windows-preview-installs.ps1', root / 'bin/remove-windows-preview-installs.ps1')
-        stage_cmd_forwarders(repo, root / 'cmd', args.target)
+        stage_cmd_forwarders(repo, root / 'cmd', args.target, rebuild=not args.signed)
         files = sorted(p for p in root.rglob('*') if p.is_file())
         (root / 'SHA256SUMS').write_text(''.join(f'{digest(p)}  {p.relative_to(root).as_posix()}\n' for p in files), encoding='utf-8')
         with zipfile.ZipFile(args.out / f'prismattyc-v{args.version}-{args.target}.zip', 'w', zipfile.ZIP_DEFLATED) as archive:

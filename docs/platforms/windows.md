@@ -122,8 +122,9 @@ starts that program.
 
 ## Code signing
 
-The Windows release job signs the six executables before packaging, then signs
-the MSI, when all of these repository variables are set:
+The Windows release job signs the six tool executables and
+`prismattyc-cmd-forwarder.exe` before packaging, then signs the MSI, when all
+of these repository variables are set:
 
 | Variable | Purpose |
 | --- | --- |
@@ -137,8 +138,10 @@ the MSI, when all of these repository variables are set:
 If any variable is missing, the job logs `Windows code signing skipped` and
 publishes an unsigned MSI and ZIP. A missing account is not a build failure.
 The manifest field `signing` is `unsigned` or `azure-artifact-signing`. When
-signing is on, the job runs `signtool verify /pa` on the packaged executables
-and the MSI. Signatures use SHA-256 and the RFC 3161 timestamp at
+signing is on, the job runs `signtool verify /pa` on the packaged executables,
+the five `cmd` forwarders inside the ZIP, and the MSI. A signed package copies
+the signed forwarder instead of building it again. Signatures use SHA-256 and
+the RFC 3161 timestamp at
 `http://timestamp.acs.microsoft.com`.
 
 Authentication is OpenID Connect through `azure/login` and

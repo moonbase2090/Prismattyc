@@ -179,6 +179,12 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn("remove-windows-preview-installs.ps1", packager)
         self.assertIn("prismattyc-cmd-forwarder", packager)
         self.assertIn("stage_cmd_forwarders", packager)
+        self.assertIn("rebuild=not args.signed", packager)
+        for workflow in (".github/workflows/windows-package.yml", ".github/workflows/release.yml"):
+            text = (ROOT / workflow).read_text(encoding="utf-8")
+            self.assertIn("prismattyc-cmd-forwarder.exe", text)
+            self.assertIn("Directory.Name -eq 'cmd'", text)
+            self.assertIn("Expected 5 signed cmd forwarders", text)
         self.assertNotIn("scripts/release/cmd", packager)
         self.assertNotIn("*.cmd", packager)
         self.assertNotIn("add bin to your user PATH", packager)

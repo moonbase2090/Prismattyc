@@ -4,6 +4,10 @@
 
 All PRs follow REVIEW_POLICY.md (leaf vs trunk, proof in every PR, independent review, feature gating).
 
+## Runtime proof
+
+For every PR, use [.cursor/skills/verify-prismattyc/SKILL.md](.cursor/skills/verify-prismattyc/SKILL.md) and its feature map to select and record runtime proof. Run `/maintain-verification-skill` when a PR changes how the application builds, runs, or is tested.
+
 ## Tests
 
 No tautological tests. A test must fail when the behavior it covers breaks. Don't write tests that:

@@ -5,6 +5,7 @@
 ### Fixed
 
 - A pane label keeps its case, spaces, and other characters. The mailbox address is the lowercase form of that label.
+- Windows line-oriented `pmux`, `prismattyc`, and `pmux-attach` output returns to column 0. Virtual-terminal processing no longer disables newline auto-return for those commands. An attached console disables auto-return only while its raw mode is open, then restores the prior mode.
 
 ## [0.3.34] - 2026-10-10
 

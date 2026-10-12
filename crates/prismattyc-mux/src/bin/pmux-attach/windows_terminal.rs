@@ -234,7 +234,11 @@ impl RawConsole {
             if SetConsoleMode(input, raw) == 0 {
                 return Err(io::Error::last_os_error());
             }
-            if SetConsoleMode(output, output_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) == 0 {
+            if SetConsoleMode(
+                output,
+                prismattyc_mux::platform::raw_console_output_mode(output_mode),
+            ) == 0
+            {
                 let error = io::Error::last_os_error();
                 SetConsoleMode(input, input_mode);
                 return Err(error);

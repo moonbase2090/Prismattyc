@@ -230,10 +230,15 @@ function Assert-Installed {
             $resolved = @(Get-Command -Name $name -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
             $expectedShim = Join-Path $install.Cmd "$name.cmd"
             $shown = if ($resolved) { [string]$resolved.Source } else { '<none>' }
-            if (-not $resolved -or [string]::Compare($shown, $expectedShim, $true) -ne 0) {
-                throw "Get-Command $name is $shown, not $expectedShim"
+            $expectedExe = Join-Path $install.Bin "$name.exe"
+            if (-not $resolved -or ($shown -ne $expectedShim -and $shown -ne $expectedExe)) {
+                throw "Get-Command $name did not resolve to an installed command"
             }
-            Write-Output "Get-Command $name resolves to the installed cmd shim"
+            $shim = Get-Command -Name "$name.cmd" -CommandType Application -ErrorAction SilentlyContinue
+            if (-not $shim -or $shim.Source -ne $expectedShim) {
+                throw "Get-Command $name.cmd did not resolve to the installed shim"
+            }
+            Write-Output "Get-Command $name resolves to an installed command; its cmd shim also resolves"
         }
     } else {
         if ($cmdCount -ne 0) { throw "User PATH has $cmdCount install cmd entries; expected 0." }

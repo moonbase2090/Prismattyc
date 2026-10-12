@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: MIT
 //! Clipboard paste delivery that never waits on the main thread (#195).
 //!
 //! With `async_paste = true`, every paste is one [`ChildWrite`] that carries a

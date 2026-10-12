@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: MIT
 //! Fixed-input grid and history probe. Args: workload units.
 //!
 //! For feed workloads, one unit replays one fixed ~1 MiB input block.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MPL-2.0
+# SPDX-License-Identifier: MIT
 """Assert the native hyperlink cursor and destination preview on a private X11 display.
 
 Requires Xvfb, xdotool, ffmpeg, tesseract, and libXfixes. Set PRISMATTYC_HOST to the

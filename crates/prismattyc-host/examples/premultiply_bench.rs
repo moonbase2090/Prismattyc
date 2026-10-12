@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: MIT
 //! Compare the previous per-pixel conversion with `pixel_alpha`'s chunked path.
 //!
 //! Run with `cargo run --release -p prismattyc-host --example premultiply_bench`.

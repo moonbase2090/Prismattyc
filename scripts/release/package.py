@@ -54,7 +54,7 @@ for name in (*BINARIES, 'pmux-pane-write'):
     if not (a.man_dir / f'{name}.1').is_file():
         p.error(f'missing manual: {name}.1')
 a.out.mkdir(parents=True, exist_ok=False)
-shutil.copy2(repo / 'LICENSE', a.out / 'MPL-2.0.txt')
+shutil.copy2(repo / 'LICENSE', a.out / 'MIT.txt')
 shutil.copy2(repo / 'NOTICE.txt', a.out / 'NOTICE.txt')
 manifest = {'repository': 'moonbase2090/Prismattyc', 'version': a.version, 'target': a.target, 'assets': []}
 for name in BINARIES:
@@ -68,7 +68,7 @@ with tempfile.TemporaryDirectory() as tmp:
     (root / 'bin').mkdir(parents=True)
     (root / 'share/man').mkdir(parents=True)
     (root / 'share/licenses').mkdir()
-    shutil.copy2(repo / 'LICENSE', root / 'share/licenses/MPL-2.0.txt')
+    shutil.copy2(repo / 'LICENSE', root / 'share/licenses/MIT.txt')
     shutil.copy2(repo / 'NOTICE.txt', root / 'share/licenses/NOTICE.txt')
     for notice in (repo / 'crates/prismattyc-host/assets/fonts').glob('*.txt'):
         shutil.copy2(notice, root / 'share/licenses' / notice.name)

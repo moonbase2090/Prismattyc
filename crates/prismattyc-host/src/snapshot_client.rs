@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: MIT
 //! Long-lived pmuxd snapshot cache for periodic host polls.
 //!
 //! One background thread owns the socket. It snapshots once, then pulls

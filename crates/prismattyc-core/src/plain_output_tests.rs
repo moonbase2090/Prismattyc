@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: MIT
 use super::*;
 
 fn assert_scalar_matches_general_path(screen: &mut Screen, character: char) {

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: MIT
 //! Fixed-input parser/screen probe. Args: workload history rows chunk repetitions.
 //! Prints one JSON record; use separate processes for repeated measurements.
 use prismattyc_emulator::Emulator;

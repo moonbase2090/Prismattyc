@@ -194,9 +194,7 @@ for published builds.
 
 ## License
 
-Prismattyc is licensed under the [Mozilla Public License 2.0](LICENSE).
-You can use it in commercial products. If you distribute modified MPL-covered
-files, you must make their source available under MPL-2.0.
+Prismattyc is licensed under the [MIT License](LICENSE).
 
 Third-party components retain their own terms. See [license scope and source
 availability](NOTICE.txt).

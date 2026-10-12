@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.3.35] - 2026-10-12
+
+### Changed
+
+- Prismattyc is now licensed under the MIT license.
+
 ### Fixed
 
 - `pmux doctor` prints the pane shell a new pane would start, including a configured `[mux] shell`, before it checks the daemon.

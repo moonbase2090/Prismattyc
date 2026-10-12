@@ -77,8 +77,8 @@ try {
     Copy-Item -LiteralPath $shipped.FullName -Destination $newCopy -Force
 
     $script = Join-Path $repo 'scripts\release\test-windows-msi.ps1'
-    $higher = & $script -Msi $newCopy -UpgradeFrom $olderCopy -ExpectedVersion $manifest.version -ExpectedProductVersion $manifest.msi_product_version -AddToPath 2>&1
-    $same = & $script -Msi $newCopy -UpgradeFrom $sameCopy -ExpectedVersion $manifest.version -ExpectedProductVersion $manifest.msi_product_version 2>&1
+    & $script -Msi $newCopy -UpgradeFrom $olderCopy -ExpectedVersion $manifest.version -ExpectedProductVersion $manifest.msi_product_version -AddToPath 2>&1 | Tee-Object -Variable higher
+    & $script -Msi $newCopy -UpgradeFrom $sameCopy -ExpectedVersion $manifest.version -ExpectedProductVersion $manifest.msi_product_version 2>&1 | Tee-Object -Variable same
     $text = @(
         "version=$($manifest.version)"
         "product_version=$($manifest.msi_product_version)"

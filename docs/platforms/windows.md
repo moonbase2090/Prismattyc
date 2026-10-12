@@ -40,6 +40,9 @@ does not allocate a console. `prismattyc.exe` is the CLI. Its file
 description is Prismattyc CLI, and it is not a shortcut target. A quiet
 install leaves command PATH opt-in. Pass `ADDTOPATH=1` to prepend the
 `cmd` directory to the user PATH. The entry is the `cmd` directory, not `bin`.
+Reinstalling the same MSI with `ADDTOPATH=1` adds or repairs that entry;
+`ADDTOPATH=0` removes the package-managed entry. Repeating either choice
+does not add duplicates.
 
 A second bare launch of the GUI focuses the existing window. `pmux attach --all`
 and `pmux space open --new-window` still open another window. A connect from

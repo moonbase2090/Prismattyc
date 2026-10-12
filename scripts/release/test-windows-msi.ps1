@@ -100,7 +100,7 @@ function Invoke-Msi {
     }
     if (Test-Path -LiteralPath $log) {
         foreach ($line in Get-Content -LiteralPath $log) {
-            if ($line -match '(Feature: CommandPath; Installed: [^;]+; Request: [^;]+; Action: [^;]+)') {
+            if ($line -match '(Feature: CommandPath;\s+Installed: [^;]+;\s+Request: [^;]+;\s+Action: [^;]+)') {
                 Write-Output $Matches[1]
             }
         }

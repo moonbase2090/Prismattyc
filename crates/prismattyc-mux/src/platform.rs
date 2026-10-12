@@ -759,15 +759,43 @@ pub fn executable_name(name: &str) -> String {
     }
 }
 pub fn default_shell() -> String {
+    let configured = configured_shell();
     #[cfg(windows)]
     {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into())
+        let comspec = std::env::var("COMSPEC").ok();
+        return choose_windows_shell(configured.as_deref(), comspec.as_deref());
     }
     #[cfg(not(windows))]
     {
+        if let Some(shell) = configured {
+            return shell;
+        }
         std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
     }
 }
+
+fn configured_shell() -> Option<String> {
+    let section = crate::config::load_mux_section(&crate::config::prism_config_path()).ok()?;
+    section.shell.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
+/// Explicit configuration overrides COMSPEC; an unset setting preserves Windows defaults.
+#[cfg(any(windows, test))]
+pub(crate) fn choose_windows_shell(configured: Option<&str>, comspec: Option<&str>) -> String {
+    configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            comspec
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("cmd.exe")
+        })
+        .to_string()
+}
+
 pub fn default_shell_command() -> Vec<String> {
     let mut command = vec![default_shell()];
     if cfg!(unix) {
@@ -1123,5 +1151,30 @@ mod console_flags {
             super::console_vt_input_flags(),
             ENABLE_VIRTUAL_TERMINAL_INPUT
         );
+    }
+
+    #[test]
+    fn windows_shell_is_opt_in_and_preserves_comspec() {
+        for configured in [None, Some(""), Some("  ")] {
+            assert_eq!(
+                super::choose_windows_shell(configured, Some(r"C:\Windows\System32\cmd.exe")),
+                r"C:\Windows\System32\cmd.exe"
+            );
+            assert_eq!(
+                super::choose_windows_shell(configured, Some(r"D:\tools\custom-shell.exe")),
+                r"D:\tools\custom-shell.exe"
+            );
+            assert_eq!(super::choose_windows_shell(configured, None), "cmd.exe");
+        }
+        assert_eq!(
+            super::choose_windows_shell(Some(" pwsh.exe "), Some("cmd.exe")),
+            "pwsh.exe"
+        );
+        assert_eq!(
+            super::choose_windows_shell(Some("powershell.exe"), None),
+            "powershell.exe"
+        );
+        assert_eq!(super::choose_windows_shell(None, Some("")), "cmd.exe");
+        assert_eq!(super::choose_windows_shell(None, Some("  ")), "cmd.exe");
     }
 }

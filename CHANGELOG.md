@@ -13,6 +13,10 @@ MSI PATH changes remain opt-in with `ADDTOPATH=1`. Installer verification now
 checks that an opted-in upgrade leaves exactly one `cmd` entry, both commands
 resolve to their shims, and uninstall removes the entry.
 
+### Windows
+
+`[mux] shell` selects an explicit pane shell, such as `pwsh.exe` or `powershell.exe`. Leaving it unset preserves `COMSPEC` on Windows, falling back to `cmd.exe` only when `COMSPEC` is absent or blank. Unix keeps `SHELL` or `/bin/sh` when unset.
+
 ## [0.3.34] - 2026-10-10
 
 ### Fixed

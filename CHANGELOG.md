@@ -8,7 +8,7 @@
 
 ### Windows
 
-New panes start `pwsh.exe` when it is on `PATH`, then `powershell.exe`, then `cmd.exe`. `[mux] shell` overrides that choice. A `COMSPEC` whose program name is not `cmd.exe` also overrides it. The Start menu shortcut still opens the GUI host, and a new pane stays inside that window.
+`[mux] shell` selects an explicit pane shell, such as `pwsh.exe` or `powershell.exe`. Leaving it unset preserves `COMSPEC` on Windows, falling back to `cmd.exe` only when `COMSPEC` is absent or blank. Unix keeps `SHELL` or `/bin/sh` when unset.
 
 ## [0.3.34] - 2026-10-10
 

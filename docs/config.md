@@ -278,7 +278,7 @@ attach_on_new = true
 space_open_runs_commands = "agents"
 # Who sets pane size when a TTY attach shares the host window. latest|host.
 remote_size = "latest"
-# Pane shell. Unset on Windows uses pwsh.exe when it is on PATH, then powershell.exe, then cmd.exe. Unset on Unix uses SHELL or /bin/sh. A COMSPEC whose program is not cmd.exe overrides the Windows automatic choice. program name or path.
+# Pane shell override. Unset on Windows preserves COMSPEC or cmd.exe. Set pwsh.exe or powershell.exe to opt in to PowerShell. Unset on Unix uses SHELL or /bin/sh. program name or path.
 # shell = "pwsh.exe"
 
 [keys]
@@ -811,7 +811,7 @@ instance = "default"                 # $XDG_RUNTIME_DIR/prismattyc/pmux.sock
 # attach_on_new = false              # default true: `pmux new` attaches in a TTY
 # space_open_runs_commands = "agents"  # agents|all|none; `pmux space open --no-run` skips
 # remote_size = "latest"               # latest|host; TTY attach fits, detach restores host
-# shell = "pwsh.exe"                    # unset: pwsh.exe, then powershell.exe, then cmd.exe on Windows
+# shell = "pwsh.exe"                    # unset: COMSPEC or cmd.exe on Windows
 ```
 
 Cmd+Q (quit) and Cmd+N (new window) are available by default.

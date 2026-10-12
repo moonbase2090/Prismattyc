@@ -258,7 +258,7 @@ pub const MUX_KEYS: &[MuxKeySpec] = &[
     },
     MuxKeySpec {
         name: "shell",
-        doc: "Pane shell. Unset on Windows uses pwsh.exe when it is on PATH, then powershell.exe, then cmd.exe. Unset on Unix uses SHELL or /bin/sh. A COMSPEC whose program is not cmd.exe overrides the Windows automatic choice",
+        doc: "Pane shell override. Unset on Windows preserves COMSPEC or cmd.exe. Set pwsh.exe or powershell.exe to opt in to PowerShell. Unset on Unix uses SHELL or /bin/sh",
         range: "program name or path",
         kind: MuxKeyKind::CommentedPath("pwsh.exe"),
     },

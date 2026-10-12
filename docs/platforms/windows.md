@@ -111,10 +111,9 @@ Launch `bin\prismattyc-host.exe`. Do not add `bin` to PATH. The `cmd`
 directory contains the shims.
 After that, `pmux update` or `prismattyc update` installs a newer published
 release and leaves running programs on the old version until they restart. The
-default shell is `pwsh.exe` when that program is on `PATH`, then
-`powershell.exe`, then `cmd.exe`. Set `[mux] shell` in `config.toml` to
-choose a program. A `COMSPEC` whose program name is not `cmd.exe` also
-overrides the automatic choice. An explicit program after `--` still
+default shell remains `%COMSPEC%`, or `cmd.exe` if that variable is absent or blank.
+Set `[mux] shell = "pwsh.exe"` or `shell = "powershell.exe"` in `config.toml`
+to opt in to PowerShell. An explicit shell setting overrides `COMSPEC`. An explicit program after `--` still
 starts that program.
 
 ## Code signing

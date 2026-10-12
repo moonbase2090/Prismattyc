@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A pane label keeps its case, spaces, and other characters. The mailbox address is the lowercase form of that label.
+
 ## [0.3.34] - 2026-10-10
 
 ### Fixed

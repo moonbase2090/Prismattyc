@@ -284,12 +284,12 @@ fn bind_existing_unassigned_session_and_reject_name_conflicts_without_changes() 
         "astra-spaces"
     );
     f.ok(&["new", "--no-attach", "taken-name", "--", "/bin/sh"]);
-    for invalid in ["taken-name", "Bad Name", "a", "--bad"] {
+    for invalid in ["taken-name", "", &"x".repeat(65)] {
         let out = f
             .cli(&["session", "name", invalid, "--session", "astra-spaces"])
             .output()
             .unwrap();
-        assert!(!out.status.success(), "invalid name {invalid} succeeded");
+        assert!(!out.status.success(), "invalid name {invalid:?} succeeded");
         let current = f.snapshot();
         let same = current
             .sessions
@@ -297,9 +297,30 @@ fn bind_existing_unassigned_session_and_reject_name_conflicts_without_changes() 
             .find(|s| s.id == session.id)
             .unwrap();
         assert_eq!(same.name, "astra-spaces");
+        assert_eq!(same.agent_id.as_deref(), Some("astra-spaces"));
         assert_eq!(same.windows[0].panes[0].id, pane);
         assert!(!f.spaces_dir().join(".session-name-transaction").exists());
     }
+    let visible = ok(f
+        .cli(&["session", "name", "Bad Name", "--session", "astra-spaces"])
+        .output()
+        .unwrap());
+    assert!(visible.contains("session: Bad Name\n"), "{visible}");
+    assert!(visible.contains("agent: bad-name\n"), "{visible}");
+    let named = f.snapshot();
+    let same = named.sessions.iter().find(|s| s.id == session.id).unwrap();
+    assert_eq!(same.name, "Bad Name");
+    assert_eq!(same.agent_id.as_deref(), Some("bad-name"));
+    assert_eq!(same.windows[0].panes[0].id, pane);
+    let who = ok(f
+        .cli(&["whoami", "--json"])
+        .env("PRISMATTYC_PANE_ID", pane.to_string())
+        .output()
+        .unwrap());
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&who).unwrap()["agent"],
+        "bad-name"
+    );
 }
 
 #[test]
@@ -348,6 +369,69 @@ fn mailbox_failure_leaves_the_session_and_saved_space_unchanged() {
     assert!(f
         .ok(&["mail", "--as", "work-1", "inbox"])
         .contains("open: 2 held: 0"));
+}
+
+#[test]
+fn pane_label_keeps_its_case_and_mail_uses_the_derived_address() {
+    let f = Fixture::new();
+    f.ok(&["space", "create", "work", "--no-attach"]);
+    f.ok(&["space", "add", "work"]);
+    let before = f.snapshot();
+    let original = before.sessions.iter().find(|s| s.name == "work-1").unwrap();
+    let out = f.ok(&["session", "name", "Hello World", "--session", "work-1"]);
+    assert!(out.contains("session: Hello World\n"), "{out}");
+    assert!(out.contains("agent: hello-world\n"), "{out}");
+    let after = f.snapshot();
+    let renamed = after.sessions.iter().find(|s| s.id == original.id).unwrap();
+    assert_eq!(renamed.name, "Hello World");
+    assert_eq!(renamed.agent_id.as_deref(), Some("hello-world"));
+    let saved = f.saved();
+    let hello = saved["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["name"] == "Hello World")
+        .unwrap();
+    assert_eq!(hello["agent"], "hello-world");
+    f.ok(&[
+        "mail",
+        "--as",
+        "sender",
+        "send",
+        "hello-world",
+        "--summary",
+        "kept case",
+    ]);
+    f.ok(&[
+        "mail",
+        "--as",
+        "sender",
+        "send",
+        "work-1",
+        "--summary",
+        "forwarded",
+    ]);
+    assert!(f
+        .ok(&["mail", "--as", "hello-world", "inbox"])
+        .contains("open: 2 held: 0"));
+    let collision = f
+        .cli(&["session", "name", "Hello World", "--session", "work-2"])
+        .output()
+        .unwrap();
+    assert!(
+        !collision.status.success(),
+        "duplicate visible name must fail"
+    );
+    let other = f.ok(&["session", "name", "hello world", "--session", "work-2"]);
+    assert!(other.contains("session: hello world\n"), "{other}");
+    assert!(other.contains("agent: hello-world-2\n"), "{other}");
+    let second = f
+        .snapshot()
+        .sessions
+        .into_iter()
+        .find(|session| session.name == "hello world")
+        .unwrap();
+    assert_eq!(second.agent_id.as_deref(), Some("hello-world-2"));
 }
 
 #[test]

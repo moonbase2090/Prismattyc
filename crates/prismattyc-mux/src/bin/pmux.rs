@@ -5034,8 +5034,9 @@ space    A file of sessions. A space is not a Session.
 verbs:
   name NAME [--session KEY]
   rename NAME [--session KEY]
-    Set the session name and agent ID together. Default: this pane.
-    Pending mail stays. Previous mailbox addresses forward to NAME.
+    Set the visible session name. Mail uses the lowercase address
+    derived from it. Default: this pane. Pending mail stays.
+    Previous mailbox addresses forward to the new address.
   reopen NAME --space SPACE [--no-run] [--no-claim]
     Reopen one saved session with its name, mailbox, and Space owner,
     then run its saved commands as space open does

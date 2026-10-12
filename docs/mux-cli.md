@@ -145,9 +145,11 @@ The Space `+` popup first asks for the Space name. It then asks for the
 first session name. The default tab strip stays visible with one pane.
 `tab_strip = "multi"` shows the strip only with multiple tabs.
 
-Right-click a pane and select **Rename session** to change its name and
-agent ID. Right-click a single-pane tab to open the same popup. A tab
-with multiple panes has a separate tab label.
+Right-click a pane and select **Rename session** to change its visible
+name. Case, spaces, and other characters stay in that name. The mailbox
+address is the lowercase form, so `Hello World` is mailed as
+`hello-world`. Right-click a single-pane tab to open the same popup. A
+tab with multiple panes has a separate tab label.
 
 From inside an existing session, run:
 
@@ -159,11 +161,12 @@ pmux mail inbox
 
 Use `pmux session name NAME --session KEY` to select a session by name
 or numeric ID. `pmux session rename` is an alias for `session name`.
-This also binds a session whose agent is unset. The session ID, pane ID,
-and running process stay the same. Saved Space references use the new
-name. Queued and claimed letters retain their IDs and state. Previous
-mailbox addresses forward to the new address, including after a daemon
-restart. Those addresses cannot be assigned to another mailbox.
+This also binds a session whose agent is unset. Mail uses the derived
+address, not the visible name. The session ID, pane ID, and running
+process stay the same. Saved Space references use the new name. Queued
+and claimed letters retain their IDs and state. Previous mailbox
+addresses forward to the new address, including after a daemon restart.
+Those addresses cannot be assigned to another mailbox.
 
 ```bash
 pmux space create work --session-name work-1 --no-attach

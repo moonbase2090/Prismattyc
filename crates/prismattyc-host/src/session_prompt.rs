@@ -264,10 +264,19 @@ fn spawn_standalone(
 fn apply(host: &mut HostState, target: &Target, name: &str) -> Result<()> {
     if matches!(
         target,
-        Target::LocalTab { .. } | Target::LocalPane { .. } | Target::RenameSpace { .. }
+        Target::LocalTab { .. }
+            | Target::LocalPane { .. }
+            | Target::RenameSpace { .. }
+            | Target::Rename { .. }
     ) {
         if name.trim().is_empty() {
             bail!("the name is empty");
+        }
+        if matches!(target, Target::Rename { .. }) {
+            let label = name.trim();
+            if label.len() > 64 || label.contains('\0') {
+                bail!("pane name must be 1..=64 bytes and contain no NUL");
+            }
         }
     } else {
         prismattyc_mux::mailbox::AgentId::new(name.to_string())?;
@@ -602,7 +611,10 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
             host.mux.active_pane_count() + 1
         ),
     };
-    let hint_label = if matches!(
+    let renaming_session = matches!(prompt.target, Target::Rename { .. });
+    let hint_label = if renaming_session {
+        "Mailbox"
+    } else if matches!(
         prompt.target,
         Target::LocalTab { .. } | Target::LocalPane { .. } | Target::RenameSpace { .. }
     ) {
@@ -610,10 +622,15 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
     } else {
         "Agent ID"
     };
+    let hint_value = if renaming_session {
+        prismattyc_mux::session_name::agent_id_from_label(prompt.buffer.trim())
+    } else {
+        prompt.buffer.trim().to_string()
+    };
     let hint = prompt
         .error
         .clone()
-        .unwrap_or_else(|| format!("{hint_label}: {}", prompt.buffer.trim()));
+        .unwrap_or_else(|| format!("{hint_label}: {hint_value}"));
     let mut rows = vec![PaletteRow::plain(action.into(), hint, "Enter".into())];
     if allows_blank(prompt) {
         rows.push(PaletteRow::plain(

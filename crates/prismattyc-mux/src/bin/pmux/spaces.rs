@@ -598,7 +598,11 @@ pub(super) fn name_session(paths: &Paths, args: Vec<String>) -> Result<()> {
         [name, flag, key] if flag == "--session" => (name.as_str(), Some(key.as_str())),
         _ => bail!("usage: pmux session name NAME [--session KEY]"),
     };
-    let name = prismattyc_mux::mailbox::AgentId::new(name.trim().to_string())?.to_string();
+    let display = name.trim();
+    if display.is_empty() || display.len() > 64 || display.contains('\0') {
+        bail!("session name must be 1..=64 bytes and contain no NUL");
+    }
+    let display = display.to_string();
     let mut client = connect(paths)?;
     let store = Store::lock(&mut client)?;
     let snapshot = take_snapshot(&mut client)?;
@@ -613,17 +617,31 @@ pub(super) fn name_session(paths: &Paths, args: Vec<String>) -> Result<()> {
     }
     .context("session not found; use --session NAME or run inside a pmux pane")?;
     let live = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
+    let agent = prismattyc_mux::session_name::unique_agent_id(
+        &prismattyc_mux::session_name::agent_id_from_label(&display),
+        |candidate| {
+            snapshot
+                .sessions
+                .iter()
+                .any(|session| session.id != id && session.agent_id.as_deref() == Some(candidate))
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
+    let name = display;
     let mut files = definitions()?;
     for (_, space) in &mut files {
         for record in &mut space.sessions {
             if record.name != live.name {
-                if record.name == name || record.agent.as_deref() == Some(&name) {
+                if record.name == name
+                    || record.agent.as_deref() == Some(name.as_str())
+                    || record.agent.as_deref() == Some(agent.as_str())
+                {
                     bail!("name {name:?} belongs to another saved session");
                 }
                 continue;
             }
             record.name.clone_from(&name);
-            record.agent = Some(name.clone());
+            record.agent = Some(agent.clone());
             for window in &mut record.windows {
                 if window.title == live.name || window.title == "shell" {
                     window.title.clone_from(&name);
@@ -666,7 +684,7 @@ pub(super) fn name_session(paths: &Paths, args: Vec<String>) -> Result<()> {
         &serde_json::to_vec(&tx)?,
     )?;
     store.recover_name(&mut client)?;
-    println!("session: {name}\nagent: {name}\nid: {id}");
+    println!("session: {name}\nagent: {agent}\nid: {id}");
     Ok(())
 }
 

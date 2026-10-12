@@ -443,8 +443,16 @@ jobs:
             echo 'no release assets were downloaded' >&2
             exit 1
           fi
+          # WiX debug database is a build by-product, not a release asset.
+          find dist -type f -name '*.wixpdb' -delete
+          if find dist -mindepth 1 -type d | grep -q .; then
+            echo 'dist must be flat; unexpected subdirectory' >&2
+            exit 1
+          fi
           cd dist
-          sha256sum * > SHA256SUMS
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\0' \
+            | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS.tmp
+          mv SHA256SUMS.tmp SHA256SUMS
 
       - name: Build release notes from the changelog
         env:

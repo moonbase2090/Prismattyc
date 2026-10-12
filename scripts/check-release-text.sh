@@ -110,6 +110,46 @@ scan_emails() {
   done <<<"$out"
 }
 
+# Compiled artifacts always embed CI runner build paths, third-party crate
+# author emails and identifiers that look like host.local. For artifacts, strip
+# the known GitHub-hosted runner prefixes and skip the email and .local checks;
+# every other generic pattern and the full private denylist still apply.
+artifact_patterns=(
+  '/Users/'
+  '(^|[^A-Za-z0-9])/home/[a-z]'
+  'C:\\Users'
+  '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+  '(ghp|gho|ghs|ghu|github_pat)_[A-Za-z0-9_]{20,}'
+  '\b(10\.[0-9]+\.[0-9]+\.[0-9]+|192\.168\.[0-9]+\.[0-9]+|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]+\.[0-9]+)\b'
+)
+
+strip_ci_paths() {
+  sed -E \
+    -e 's#/home/runner/#<ci>/#g' \
+    -e 's#/Users/runner/#<ci>/#g' \
+    -e 's#[A-Za-z]:\\Users\\(runneradmin|RUNNER~1)\\#<ci>\\#Ig' \
+    "$1"
+}
+
+scan_artifact_text() {
+  local file="$1"
+  local pattern
+  # Case-sensitive: a case-insensitive match also hits update-desktop-database.
+  local out
+  out="$(grep -n -E -I -- 'DESKTOP-[A-Z0-9]+' "$file" 2>/dev/null)" || true
+  while IFS= read -r pattern; do
+    [[ -n "$pattern" ]] && report_line "$file" "${pattern%%:*}"
+  done <<<"$out"
+  for pattern in "${artifact_patterns[@]}"; do
+    scan_pattern "$file" "$pattern"
+  done
+  if [[ "${#denylist[@]}" -gt 0 ]]; then
+    for pattern in "${denylist[@]}"; do
+      scan_pattern "$file" "$pattern"
+    done
+  fi
+}
+
 scan_text_file() {
   local file="$1"
   local pattern
@@ -177,6 +217,7 @@ expand_artifact_text() {
   local out="$2"
   python3 - "$file" "$out" <<'PY'
 import io
+import os
 import pathlib
 import sys
 import tarfile
@@ -185,8 +226,8 @@ import zipfile
 src = pathlib.Path(sys.argv[1])
 out = pathlib.Path(sys.argv[2])
 MAX_DEPTH = 8
-MAX_BYTES = 32 * 1024 * 1024
-MAX_MEMBER = 8 * 1024 * 1024
+MAX_BYTES = int(os.environ.get("RELEASE_TEXT_MAX_BYTES", 512 * 1024 * 1024))
+MAX_MEMBER = int(os.environ.get("RELEASE_TEXT_MAX_MEMBER", 256 * 1024 * 1024))
 PRINTABLE = set(range(0x20, 0x7F)) | {0x09, 0x0A, 0x0D}
 chunks: list[str] = []
 emitted = 0
@@ -423,11 +464,8 @@ try:
         with src.open("rb") as handle:
             raw = read_limited(handle, MAX_BYTES)
         scan_bytes(src.name, raw, 0)
-except ArtifactError:
-    sys.stderr.write("check-release-text: artifact could not be read\n")
-    sys.exit(2)
-except OSError:
-    sys.stderr.write("check-release-text: artifact could not be read\n")
+except (ArtifactError, OSError):
+    # The caller reports the unreadable artifact once.
     sys.exit(2)
 out.write_text("\n".join(chunks) + ("\n" if chunks else ""), encoding="utf-8")
 PY
@@ -452,7 +490,9 @@ scan_artifact() {
   isolated="$(mktemp)"
   old_hits="$hits"
   hits="$isolated"
-  scan_text_file "$strings_file"
+  strip_ci_paths "$strings_file" >"$strings_file.ci"
+  mv "$strings_file.ci" "$strings_file"
+  scan_artifact_text "$strings_file"
   hits="$old_hits"
   if [[ -s "$isolated" ]]; then
     local hit

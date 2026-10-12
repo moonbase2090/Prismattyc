@@ -40,6 +40,10 @@ does not allocate a console. `prismattyc.exe` is the CLI. Its file
 description is Prismattyc CLI, and it is not a shortcut target. A quiet
 install leaves command PATH opt-in. Pass `ADDTOPATH=1` to prepend the
 `cmd` directory to the user PATH. The entry is the `cmd` directory, not `bin`.
+An existing install `bin` PATH entry is preserved during installation and
+upgrade, including when ADDTOPATH is omitted or `0`. This keeps previously
+working commands available. Uninstall removes the preserved `bin` entry and the package-managed `cmd`
+entry from PATH. A clean opt-out install does not add a new PATH entry.
 
 A second bare launch of the GUI focuses the existing window. `pmux attach --all`
 and `pmux space open --new-window` still open another window. A connect from

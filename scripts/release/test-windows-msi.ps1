@@ -219,7 +219,7 @@ function Assert-Installed {
     $parts = @($userPath -split ';' | Where-Object { $_ } | ForEach-Object { $_.Trim().TrimEnd('\') })
     $binCount = @($parts | Where-Object { $_ -eq $install.Bin.TrimEnd('\') }).Count
     $cmdCount = @($parts | Where-Object { $_ -eq $install.Cmd.TrimEnd('\') }).Count
-    if ($binCount -ne 0) { throw 'User PATH still contains the install bin.' }
+    if ($binCount -ne 1) { throw "User PATH has $binCount install bin entries; expected the preserved entry." }
     if ($PathExpected) {
         if ($cmdCount -ne 1) { throw "User PATH has $cmdCount install cmd entries; expected 1." }
         $env:Path = @(
@@ -233,10 +233,22 @@ function Assert-Installed {
             if (-not $resolved -or [string]::Compare($shown, $expectedShim, $true) -ne 0) {
                 throw "Get-Command $name is $shown, not $expectedShim"
             }
-            Write-Output "Get-Command $name=$shown"
+            Write-Output "Get-Command $name resolves to the installed cmd shim"
         }
-    } elseif ($cmdCount -ne 0) {
-        throw "User PATH has $cmdCount install cmd entries; expected 0."
+    } else {
+        if ($cmdCount -ne 0) { throw "User PATH has $cmdCount install cmd entries; expected 0." }
+        $env:Path = @(
+            [Environment]::GetEnvironmentVariable('Path', 'Machine'),
+            [Environment]::GetEnvironmentVariable('Path', 'User')
+        ) -join ';'
+        foreach ($name in @('prismattyc', 'pmux')) {
+            $resolved = @(Get-Command -Name $name -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
+            $expectedExe = Join-Path $install.Bin "$name.exe"
+            if (-not $resolved -or [string]::Compare([string]$resolved.Source, $expectedExe, $true) -ne 0) {
+                throw "Get-Command $name did not resolve through the preserved install bin"
+            }
+            Write-Output "Get-Command $name resolves through the preserved install bin"
+        }
     }
 }
 
@@ -425,11 +437,11 @@ $tail = Get-MsiTail
 $installArgs = @('/i', $msiPath) + $tail
 $fixtures = $null
 try {
-    $fixtures = New-PreviewSweepFixtures -Install $install
     if ($UpgradeFrom) {
         $older = (Resolve-Path -LiteralPath $UpgradeFrom).Path
         Invoke-Msi -ArgumentList (@('/i', $older) + $tail)
     }
+    $fixtures = New-PreviewSweepFixtures -Install $install
     Invoke-Msi -ArgumentList $installArgs
     Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected ([bool]$AddToPath)
     Assert-PreviewSweep -Fixtures $fixtures

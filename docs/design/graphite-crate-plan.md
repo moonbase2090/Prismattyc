@@ -81,7 +81,7 @@ Core hit enums carry indexes, not mux ids. `bar_hit` today returns `StripHit::Sp
 | --- | --- |
 | Repo | `github.com/moonbase2090/graphite` |
 | Crates | `graphite-core`, then `graphite-tui` when its PR opens |
-| License | MPL-2.0, same as Prismattyc and the lunatui PRD |
+| License | MIT, same as Prismattyc and the lunatui PRD |
 | `graphite-core` | Edition 2021, `rust-version = "1.85"`, `publish = false` |
 | `graphite-tui` | Matches the lunatui crate it depends on (PRD recommendation: edition 2024, MSRV 1.88) |
 | Prismattyc | Stays edition 2021, MSRV 1.90. A 1.85 core is a legal dependency. |
@@ -168,7 +168,7 @@ T6 (lunatui's `graphite` feature) and S1 land in those repos under their own rev
 
 | PR | Title | Tests (written first) | Acceptance |
 | --- | --- | --- | --- |
-| G0 | Repository scaffold | CI builds the empty crate on Linux and macOS. A test asserts `rust-version` is 1.85. CI also runs `cargo +1.85 check --locked`. | MPL-2.0 `LICENSE`, `publish = false`, public GitHub repo, `cargo fmt`, `cargo clippy -- -D warnings`, `cargo doc` with no warnings. No lunatui dependency in `Cargo.lock`. A clone with no token succeeds. That public fetch is what P1's unauthenticated `--locked` build relies on. |
+| G0 | Repository scaffold | CI builds the empty crate on Linux and macOS. A test asserts `rust-version` is 1.85. CI also runs `cargo +1.85 check --locked`. | MIT `LICENSE`, `publish = false`, public GitHub repo, `cargo fmt`, `cargo clippy -- -D warnings`, `cargo doc` with no warnings. No lunatui dependency in `Cargo.lock`. A clone with no token succeeds. That public fetch is what P1's unauthenticated `--locked` build relies on. |
 | G1 | Tokens, bar presets, WCAG color | WCAG anchors (black on white is 21; the existing `0x777777` point). Every `DARK` and `LIGHT` field pinned to the values in `graphite.rs` on `2a4dd0f`. Bar-preset table from the design brief (Graphite, Harbor, Moss, Plum/Sand). `step_bar_color` wraps, and the theme-bars cycle includes `None`. Accent reaches 3:1 on both bar luminances. Text pairs meet 4.5:1 where today's `token_text_pairs_meet_wcag_aa` and `bar_color_presets_meet_brief_contrast` require it. | Public tokens match the brief. No `Theme` type. No font crate. |
 | G2 | `ThemeSource` and derivation | Brief ids with unchanged chrome colors return `DARK` or `LIGHT` verbatim. A non-brief fixture's derived tokens are pinned field by field against today's `derive_tokens`. An explicit bar preset replaces both bar fills. Readability runs again only off the brief. A chrome override that changes `chrome_bg` or `chrome_fg` leaves the brief path. | Same results as `prismattyc_themes_keep_the_brief_tokens`, `other_themes_derive_graphite_tokens_from_the_theme`, `explicit_bar_color_overrides_theme_bars`, `chrome_overrides_reach_graphite`, and `derived_text_stays_readable`. |
 | G3 | Scale, `Rect`, `TextMetrics`, ellipsize | Scale 1000 and 2000 match `ChromeGeom::px` for the design constants, including the 220 px side rail at 18 columns. Ellipsize tests use a fake measurer (one cell per scalar) and cover short text, exact fit, and a cut. `Rect::contains` covers edges. | Core has no fontdue. A fake measurer is enough to lay out. |

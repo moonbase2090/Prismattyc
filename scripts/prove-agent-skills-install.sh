@@ -58,7 +58,7 @@ SH
   done
   cp "$root/assets/brand/prismattyc-icon-tile.svg" "$payload/share/prismattyc.svg"
   cp "$root/docs/man/pmux-pane-write.1" "$payload/share/man/pmux.1"
-  cp "$root/LICENSE" "$payload/share/licenses/MPL-2.0.txt"
+  cp "$root/LICENSE" "$payload/share/licenses/MIT.txt"
   cp "$root/NOTICE.txt" "$payload/share/licenses/NOTICE.txt"
   cp "$root/scripts/release/install.sh" "$payload/install.sh"
   printf 'proof\n' >"$payload/VERSION"

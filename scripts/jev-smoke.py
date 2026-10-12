@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MPL-2.0
+# SPDX-License-Identifier: MIT
 """Send one trivial Jev request through Cloudflare AI Gateway and report the result.
 
 Default mode reuses the JevClient from scripts/jev-shadow.py, so a pass proves the

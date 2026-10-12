@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MPL-2.0
+# SPDX-License-Identifier: MIT
 """Measure private daemon control latency with full history and checkpointing."""
 import argparse
 import hashlib

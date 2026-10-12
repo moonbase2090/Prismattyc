@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: MIT
 //! Print chunk-sensitive behavior in the parser and emulator independently.
 use prismattyc_emulator::Emulator;
 

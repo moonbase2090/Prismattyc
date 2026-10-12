@@ -42,7 +42,7 @@ with tempfile.TemporaryDirectory(dir=args.out) as temp:
             parser.error(f'{name}: source revision not embedded in binary')
     shutil.copy2(Path(__file__).with_name('install-windows-preview.ps1'), root / 'install.ps1')
     release.stage_cmd_forwarders(repo, root / 'cmd', 'x86_64-pc-windows-gnu')
-    for name, source in [('MPL-2.0.txt', repo / 'LICENSE'), ('NOTICE.txt', repo / 'NOTICE.txt'), ('OMARCHY-LICENSE.txt', repo / 'crates/prismattyc-host/themes/OMARCHY-LICENSE.txt')]:
+    for name, source in [('MIT.txt', repo / 'LICENSE'), ('NOTICE.txt', repo / 'NOTICE.txt'), ('OMARCHY-LICENSE.txt', repo / 'crates/prismattyc-host/themes/OMARCHY-LICENSE.txt')]:
         shutil.copy2(source, root / 'licenses' / name)
     for source in (repo / 'crates/prismattyc-host/assets/fonts').glob('*.txt'):
         shutil.copy2(source, root / 'licenses' / source.name)

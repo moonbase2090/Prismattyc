@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: MIT
 //! Space file reads, team describe, and autosave run on one worker thread.
 //! The main thread submits a job and applies the report on a later pump.
 //! Drop joins the worker. It does not call `measure_subprocess_wait`.

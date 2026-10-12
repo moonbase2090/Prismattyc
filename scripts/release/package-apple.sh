@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MPL-2.0
+# SPDX-License-Identifier: MIT
 # Assemble, sign, notarize, staple, and package the universal macOS app.
 set -euo pipefail
 
@@ -83,7 +83,7 @@ MACOS="$APP/Contents/MacOS"
 RESOURCES="$APP/Contents/Resources"
 mkdir -p "$MACOS" "$RESOURCES"
 cp "$ROOT/assets/brand/macos/prismattyc.icns" "$RESOURCES/prismattyc.icns"
-cp "$ROOT/LICENSE" "$RESOURCES/MPL-2.0.txt"
+cp "$ROOT/LICENSE" "$RESOURCES/MIT.txt"
 cp "$ROOT/NOTICE.txt" "$RESOURCES/NOTICE.txt"
 cp "$ROOT/crates/prismattyc-host/themes/OMARCHY-LICENSE.txt" "$RESOURCES/OMARCHY-LICENSE.txt"
 cp "$ROOT/crates/prismattyc-host/assets/fonts/"*.txt "$RESOURCES/"

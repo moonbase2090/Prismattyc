@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: MIT
 //! Fixed-size timing and wait counters for the windowed host pump.
 
 use std::cell::Cell;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MPL-2.0
+# SPDX-License-Identifier: MIT
 """Offline checks for advisory Jev pull request triage."""
 
 from __future__ import annotations
@@ -141,7 +141,7 @@ class JevPrTriageTests(unittest.TestCase):
         self.assertFalse(triage.path_touches_ci("scripts/jev-pr-triage.py"))
         self.assertTrue(triage.path_touches_license("LICENSE"))
         self.assertTrue(triage.path_touches_license("NOTICE.txt"))
-        self.assertTrue(triage.path_touches_license("docs/MPL-2.0-notes.md"))
+        self.assertTrue(triage.path_touches_license("docs/MIT-notes.md"))
         self.assertTrue(triage.dropped_path("docs/design/shot.png"))
         self.assertTrue(triage.dropped_path("Cargo.lock"))
         self.assertTrue(triage.dropped_path("e2e/artifacts/shot.png"))
@@ -428,7 +428,7 @@ class JevPrTriageTests(unittest.TestCase):
         self.assertNotIn("pull_request_target", script)
         self.assertNotIn("REQUEST_CHANGES", script)
         self.assertNotIn("/reviews", script)
-        self.assertIn("SPDX-License-Identifier: MPL-2.0", script)
+        self.assertIn("SPDX-License-Identifier: MIT", script)
 
 
 if __name__ == "__main__":

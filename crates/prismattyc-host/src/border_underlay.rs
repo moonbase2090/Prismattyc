@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: MIT
 //! Retain only pixels covered by a transient border, including its head.
 use crate::frame_damage::{border_strips, frame_damage_intersects, FrameDamage, PixelRect};
 

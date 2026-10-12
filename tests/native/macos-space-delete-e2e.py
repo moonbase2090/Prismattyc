@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MPL-2.0
+# SPDX-License-Identifier: MIT
 """Exercise saved-space deletion through the native rail menu on both Mac presenters.
 
 Requires a logged-in macOS desktop and Accessibility permission for the runner.

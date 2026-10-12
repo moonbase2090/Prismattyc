@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MPL-2.0
+# SPDX-License-Identifier: MIT
 """Check OSD repaint reasons against real macOS presenter logs and frame dumps."""
 import argparse
 from pathlib import Path

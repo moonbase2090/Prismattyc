@@ -183,7 +183,7 @@ jobs:
           path: |
             dist/linux-x86_64/*
             !dist/linux-x86_64/SHA256SUMS
-            !dist/linux-x86_64/MPL-2.0.txt
+            !dist/linux-x86_64/MIT.txt
             !dist/linux-x86_64/NOTICE.txt
           if-no-files-found: error
           retention-days: 7
@@ -234,7 +234,7 @@ jobs:
           path: |
             dist/linux-arm64/*
             !dist/linux-arm64/SHA256SUMS
-            !dist/linux-arm64/MPL-2.0.txt
+            !dist/linux-arm64/MIT.txt
             !dist/linux-arm64/NOTICE.txt
           if-no-files-found: error
           retention-days: 7

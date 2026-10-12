@@ -2826,7 +2826,7 @@ mod tests {
             "manifest-aarch64-unknown-linux-gnu.json",
             "manifest-x86_64-pc-windows-msvc.json",
             "manifest-x86_64-unknown-linux-gnu.json",
-            "MPL-2.0.txt",
+            "MIT.txt",
             "NOTICE.txt",
             "prismattyc-aarch64-unknown-linux-gnu.tar.gz",
             "prismattyc-v0.2.21-aarch64-unknown-linux-gnu-pmux",

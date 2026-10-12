@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: MIT
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PresentTiming {
     pub(crate) backend: &'static str,

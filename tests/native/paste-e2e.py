@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MPL-2.0
+# SPDX-License-Identifier: MIT
 """#195 acceptance: a clipboard paste must not stall the native window.
 
 Runs a real host window on the current X display with a slow-reading child

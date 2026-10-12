@@ -16,7 +16,7 @@ if ($manifest.kind -cne 'dogfood-preview' -or $manifest.target -cne 'x86_64-pc-w
 Write-Warning 'Unsigned preview. Checksums detect corruption, not publisher authenticity. Native runtime is unverified.'
 $expectedBins = @('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host')
 $requiredFiles = @('README.txt', 'SOURCE.txt', 'install.ps1', 'source.tar.gz',
-    'licenses/MPL-2.0.txt', 'licenses/NOTICE.txt', 'licenses/OMARCHY-LICENSE.txt',
+    'licenses/MIT.txt', 'licenses/NOTICE.txt', 'licenses/OMARCHY-LICENSE.txt',
     'licenses/JetBrainsMonoNerdFont-OFL.txt', 'licenses/NerdFonts-LICENSES.txt',
     'licenses/NotoSansSymbols2-OFL.txt', 'licenses/DejaVuSansMono-LICENSE.txt')
 $requiredFiles += @($expectedBins | ForEach-Object { "bin/$_.exe" })

@@ -110,7 +110,7 @@ def main():
         shutil.copy2(bins / f'{name}.exe', target)
         manifest['assets'].append({'name': target.name, 'size': target.stat().st_size, 'sha256': digest(target)})
     (args.out / f'manifest-{args.target}.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
-    shutil.copy2(repo / 'LICENSE', args.out / 'MPL-2.0.txt')
+    shutil.copy2(repo / 'LICENSE', args.out / 'MIT.txt')
     shutil.copy2(repo / 'NOTICE.txt', args.out / 'NOTICE.txt')
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp) / f'prismattyc-{args.version}-windows-x64'
@@ -120,7 +120,7 @@ def main():
             shutil.copy2(bins / f'{name}.exe', root / 'bin' / f'{name}.exe')
         for path in (repo / 'crates/prismattyc-host/assets/fonts').glob('*.txt'):
             shutil.copy2(path, root / 'licenses' / path.name)
-        shutil.copy2(repo / 'LICENSE', root / 'licenses/MPL-2.0.txt')
+        shutil.copy2(repo / 'LICENSE', root / 'licenses/MIT.txt')
         shutil.copy2(repo / 'NOTICE.txt', root / 'licenses/NOTICE.txt')
         shutil.copy2(repo / 'crates/prismattyc-host/themes/OMARCHY-LICENSE.txt', root / 'licenses/OMARCHY-LICENSE.txt')
         (root / 'VERSION').write_text(args.version + '\n', encoding='utf-8')
@@ -139,7 +139,7 @@ def main():
             'and runtime/data files are under LOCALAPPDATA.\n'
             'Replacing or stopping pmuxd destroys active sessions; leave it running\n'
             'until you have closed them intentionally.\n'
-            'Read licenses\\MPL-2.0.txt and licenses\\NOTICE.txt for licensing.\n', encoding='utf-8')
+            'Read licenses\\MIT.txt and licenses\\NOTICE.txt for licensing.\n', encoding='utf-8')
         shutil.copy2(repo / 'scripts/release/reset-windows-update-pointer.ps1', root / 'bin/reset-windows-update-pointer.ps1')
         shutil.copy2(repo / 'scripts/release/remove-windows-preview-installs.ps1', root / 'bin/remove-windows-preview-installs.ps1')
         stage_cmd_forwarders(repo, root / 'cmd', args.target, rebuild=not args.signed)

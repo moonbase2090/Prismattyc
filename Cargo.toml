@@ -11,6 +11,7 @@ members = [
     "crates/prismattyc-rich-client",
     "crates/pmux-mcp",
     "crates/prismattyc-winres",
+    "crates/prismattyc-cmd-forwarder",
 ]
 resolver = "2"
 

@@ -92,10 +92,16 @@ try {
 }
 $binDir = Join-Path $destination 'bin'
 $cmdDir = Join-Path $destination 'cmd'
-New-Item -ItemType Directory -Path $cmdDir | Out-Null
 foreach ($name in @('prismattyc', 'pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp')) {
-    $shim = "@echo off`n`"%~dp0..\bin\$name.exe`" %*`n"
-    [System.IO.File]::WriteAllText((Join-Path $cmdDir "$name.cmd"), $shim)
+    $forwarder = Join-Path $cmdDir "$name.exe"
+    if (-not (Test-Path -LiteralPath $forwarder -PathType Leaf)) {
+        throw "Missing cmd forwarder: cmd\$name.exe"
+    }
+}
+foreach ($name in @('prismattyc-host.exe', 'prismattyc.cmd', 'pmux.cmd', 'pmuxd.cmd', 'pmux-attach.cmd', 'pmux-mcp.cmd')) {
+    if (Test-Path -LiteralPath (Join-Path $cmdDir $name)) {
+        throw "Unexpected cmd entry: $name"
+    }
 }
 $startMenu = [Environment]::GetFolderPath('Programs')
 if ($startMenu) {

@@ -13,6 +13,7 @@ import zipfile
 from release_version import parse_release_version, reports_release_version
 
 BINARIES = ('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host')
+CMD_FORWARDERS = ('prismattyc', 'pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp')
 
 
 def digest(path):
@@ -29,6 +30,44 @@ def validate_pe(path):
         pe = stream.read(26)
         if len(pe) != 26 or pe[:4] != b'PE\0\0' or struct.unpack_from('<H', pe, 4)[0] != 0x8664 or struct.unpack_from('<H', pe, 24)[0] != 0x20B:
             raise ValueError(f'{path.name}: expected a Windows x64 PE32+ executable')
+
+
+def stage_cmd_forwarders(repo, destination, target, *, rebuild=True):
+    """Copy one forwarder under each cmd-directory name.
+
+    A signed package reuses the already signed executable. Rebuilding it would
+    replace that signature. An unsigned package builds it here. This does not
+    write a .cmd shim.
+    """
+    metadata = json.loads(subprocess.check_output(
+        ['cargo', '+1.90.0', 'metadata', '--locked', '--format-version', '1', '--no-deps'],
+        cwd=repo, text=True,
+    ))
+    built = Path(metadata['target_directory']) / target / 'release' / 'prismattyc-cmd-forwarder.exe'
+    if rebuild:
+        command = [
+            'cargo', '+1.90.0', 'build', '--locked', '--release',
+            '-p', 'prismattyc-cmd-forwarder', '--target', target,
+        ]
+        completed = subprocess.run(command, cwd=repo)
+        if completed.returncode != 0:
+            raise SystemExit('cargo build of prismattyc-cmd-forwarder failed')
+    if not built.is_file():
+        raise SystemExit('prismattyc-cmd-forwarder.exe was not produced')
+    destination.mkdir(parents=True)
+    copies = []
+    for name in CMD_FORWARDERS:
+        dest = destination / f'{name}.exe'
+        shutil.copy2(built, dest)
+        validate_pe(dest)
+        copies.append(dest)
+    digest0 = digest(copies[0])
+    for path in copies[1:]:
+        if digest(path) != digest0:
+            raise SystemExit('cmd forwarders are not copies of one executable')
+    host = destination / 'prismattyc-host.exe'
+    if host.exists():
+        raise SystemExit('prismattyc-host.exe must not be placed in cmd')
 
 
 def main():
@@ -91,7 +130,9 @@ def main():
             'Install the MSI published next to this ZIP for a per-user Apps & features entry.\n'
             'Extract the complete archive into a user-owned directory when you are not using the MSI.\n'
             'Launch bin\\prismattyc-host.exe for a window. Do not add bin to PATH.\n'
-            'The cmd directory contains shims that forward to the executables in bin.\n'
+            'The cmd directory contains prismattyc.exe, pmux.exe, pmuxd.exe,\n'
+            'pmux-attach.exe, and pmux-mcp.exe. Each one starts the executable\n'
+            'of the same name in bin. There is no prismattyc-host.exe in cmd.\n'
             'Use pmux.exe new NAME to create a persistent mux session.\n'
             'The default shell is COMSPEC (normally cmd.exe); pass -- powershell.exe\n'
             'or -- pwsh.exe to select PowerShell. Configuration is under APPDATA,\n'
@@ -101,10 +142,7 @@ def main():
             'Read licenses\\MPL-2.0.txt and licenses\\NOTICE.txt for licensing.\n', encoding='utf-8')
         shutil.copy2(repo / 'scripts/release/reset-windows-update-pointer.ps1', root / 'bin/reset-windows-update-pointer.ps1')
         shutil.copy2(repo / 'scripts/release/remove-windows-preview-installs.ps1', root / 'bin/remove-windows-preview-installs.ps1')
-        cmd_shims = repo / 'scripts/release/cmd'
-        (root / 'cmd').mkdir()
-        for shim in sorted(cmd_shims.glob('*.cmd')):
-            shutil.copy2(shim, root / 'cmd' / shim.name)
+        stage_cmd_forwarders(repo, root / 'cmd', args.target, rebuild=not args.signed)
         files = sorted(p for p in root.rglob('*') if p.is_file())
         (root / 'SHA256SUMS').write_text(''.join(f'{digest(p)}  {p.relative_to(root).as_posix()}\n' for p in files), encoding='utf-8')
         with zipfile.ZipFile(args.out / f'prismattyc-v{args.version}-{args.target}.zip', 'w', zipfile.ZIP_DEFLATED) as archive:

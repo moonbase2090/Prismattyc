@@ -162,8 +162,13 @@ function Assert-Installed {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing $path" }
     }
     foreach ($name in @('prismattyc', 'pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp')) {
-        $shim = Join-Path $install.Cmd "$name.cmd"
-        if (-not (Test-Path -LiteralPath $shim -PathType Leaf)) { throw "Missing $shim" }
+        $forwarder = Join-Path $install.Cmd "$name.exe"
+        if (-not (Test-Path -LiteralPath $forwarder -PathType Leaf)) { throw "Missing $forwarder" }
+        $oldShim = Join-Path $install.Cmd "$name.cmd"
+        if (Test-Path -LiteralPath $oldShim) { throw "Old shim remains: $oldShim" }
+    }
+    if (Test-Path -LiteralPath (Join-Path $install.Cmd 'prismattyc-host.exe')) {
+        throw 'prismattyc-host.exe is installed in cmd'
     }
     if (Test-Path -LiteralPath (Join-Path $install.Cmd 'prismattyc-host.cmd')) {
         throw 'prismattyc-host.cmd is installed'
@@ -235,7 +240,7 @@ function Assert-Installed {
         ) -join ';'
         foreach ($name in @('prismattyc', 'pmux')) {
             $resolved = @(Get-Command -Name $name -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
-            $expectedShim = Join-Path $install.Cmd "$name.cmd"
+            $expectedShim = Join-Path $install.Cmd "$name.exe"
             $shown = if ($resolved) { [string]$resolved.Source } else { '<none>' }
             if (-not $resolved -or [string]::Compare($shown, $expectedShim, $true) -ne 0) {
                 throw "Get-Command $name is $shown, not $expectedShim"

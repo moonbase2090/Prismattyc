@@ -81,23 +81,28 @@
 
     <ComponentGroup Id="CmdShims" Directory="CMDFOLDER">
       <Component Id="CmdPrismattyc" Guid="23c6d700-f68a-5926-9db1-9f2b0d6a2ad7">
-        <File Source="$(var.Payload)\cmd\prismattyc.cmd" />
+        <File Source="$(var.Payload)\cmd\prismattyc.exe" />
+        <RemoveFile Id="RemoveOldCmdPrismattyc" Name="prismattyc.cmd" On="both" />
         <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="cmd-prismattyc" Type="integer" Value="1" KeyPath="yes" />
       </Component>
       <Component Id="CmdPmux" Guid="8fcd856c-d99e-58ae-a50a-e67f5621144e">
-        <File Source="$(var.Payload)\cmd\pmux.cmd" />
+        <File Source="$(var.Payload)\cmd\pmux.exe" />
+        <RemoveFile Id="RemoveOldCmdPmux" Name="pmux.cmd" On="both" />
         <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="cmd-pmux" Type="integer" Value="1" KeyPath="yes" />
       </Component>
       <Component Id="CmdPmuxd" Guid="dd5a50cf-9409-5d01-a1b6-8cedd2ffa253">
-        <File Source="$(var.Payload)\cmd\pmuxd.cmd" />
+        <File Source="$(var.Payload)\cmd\pmuxd.exe" />
+        <RemoveFile Id="RemoveOldCmdPmuxd" Name="pmuxd.cmd" On="both" />
         <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="cmd-pmuxd" Type="integer" Value="1" KeyPath="yes" />
       </Component>
       <Component Id="CmdPmuxAttach" Guid="c043b00b-a56f-5428-942a-1de5f27e93ed">
-        <File Source="$(var.Payload)\cmd\pmux-attach.cmd" />
+        <File Source="$(var.Payload)\cmd\pmux-attach.exe" />
+        <RemoveFile Id="RemoveOldCmdPmuxAttach" Name="pmux-attach.cmd" On="both" />
         <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="cmd-pmux-attach" Type="integer" Value="1" KeyPath="yes" />
       </Component>
       <Component Id="CmdPmuxMcp" Guid="db5be5cf-1770-5cb1-aa4e-2e672179fabd">
-        <File Source="$(var.Payload)\cmd\pmux-mcp.cmd" />
+        <File Source="$(var.Payload)\cmd\pmux-mcp.exe" />
+        <RemoveFile Id="RemoveOldCmdPmuxMcp" Name="pmux-mcp.cmd" On="both" />
         <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="cmd-pmux-mcp" Type="integer" Value="1" KeyPath="yes" />
       </Component>
     </ComponentGroup>

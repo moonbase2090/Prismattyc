@@ -1,0 +1,12 @@
+[package]
+name = "prismattyc-cmd-forwarder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Small Windows cmd-directory forwarder. The file name selects ../bin/<name>.exe."
+
+[[bin]]
+name = "prismattyc-cmd-forwarder"
+path = "src/main.rs"

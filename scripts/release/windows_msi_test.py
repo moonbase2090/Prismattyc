@@ -136,17 +136,16 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertNotIn("prismattyc.exe", user_path)
         self.assertIn('<Directory Id="CMDFOLDER" Name="cmd" />', source)
         self.assertNotIn("prismattyc-host.cmd", source)
-        self.assertNotIn(r"\cmd\prismattyc.exe", source)
-        self.assertNotIn("/cmd/prismattyc.exe", source)
+        cmd_group = source.split('Id="CmdShims"', 1)[1].split("</ComponentGroup>", 1)[0]
+        self.assertNotIn("prismattyc-host", cmd_group)
         names = ("prismattyc", "pmux", "pmuxd", "pmux-attach", "pmux-mcp")
         for name in names:
-            shim = ROOT / "scripts/release/cmd" / f"{name}.cmd"
-            self.assertEqual(
-                shim.read_text(encoding="utf-8"),
-                f'@echo off\n"%~dp0..\\bin\\{name}.exe" %*\n',
-            )
-            self.assertIn(f"cmd\\{name}.cmd", source)
+            self.assertIn(f'Source="$(var.Payload)\\cmd\\{name}.exe"', cmd_group)
+            self.assertIn(f'Name="{name}.cmd" On="both"', cmd_group)
+            self.assertNotIn(f'Source="$(var.Payload)\\cmd\\{name}.cmd"', cmd_group)
+            self.assertFalse((ROOT / "scripts/release/cmd" / f"{name}.cmd").exists())
         self.assertFalse((ROOT / "scripts/release/cmd/prismattyc-host.cmd").exists())
+        self.assertFalse((ROOT / "scripts/release/cmd/prismattyc-host.exe").exists())
         for action_id, schedule in (
             (
                 "SweepPreviewInstalls",
@@ -178,13 +177,25 @@ class WindowsMsiTests(unittest.TestCase):
             self.assertNotIn(forbidden, sweep)
         packager = (ROOT / "scripts/release/package-windows.py").read_text(encoding="utf-8")
         self.assertIn("remove-windows-preview-installs.ps1", packager)
-        self.assertIn("scripts/release/cmd", packager)
+        self.assertIn("prismattyc-cmd-forwarder", packager)
+        self.assertIn("stage_cmd_forwarders", packager)
+        self.assertIn("rebuild=not args.signed", packager)
+        for workflow in (".github/workflows/windows-package.yml", ".github/workflows/release.yml"):
+            text = (ROOT / workflow).read_text(encoding="utf-8")
+            self.assertIn("prismattyc-cmd-forwarder.exe", text)
+            self.assertIn("Directory.Name -eq 'cmd'", text)
+            self.assertIn("Expected 5 signed cmd forwarders", text)
+        self.assertNotIn("scripts/release/cmd", packager)
+        self.assertNotIn("*.cmd", packager)
         self.assertNotIn("add bin to your user PATH", packager)
         self.assertIn("Do not add bin to PATH.", packager)
         preview = (ROOT / "scripts/release/install-windows-preview.ps1").read_text(encoding="utf-8")
         self.assertNotIn("@($binDir)", preview)
         self.assertIn("$cmdDir", preview)
+        self.assertIn("Missing cmd forwarder", preview)
+        self.assertNotIn("@echo off", preview)
         self.assertNotIn("prismattyc-host.cmd", preview)
+        self.assertNotIn('"$name.cmd"', preview)
         preview_packager = (ROOT / "scripts/release/package-windows-preview.py").read_text(encoding="utf-8")
         self.assertNotIn("adds this build's bin directory", preview_packager)
         self.assertIn("cmd directory", preview_packager)

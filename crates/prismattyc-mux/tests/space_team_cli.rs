@@ -510,7 +510,11 @@ fn team_and_template_commands_change_the_space() {
         &[("PRISMATTYC_HOST", host)],
         &["space", "template", "create", "kit", "shown"],
     ));
-    assert!(shown.contains("opened host"), "{shown}");
+    // macOS spawns the host. Linux without a display prints the attach recipe.
+    assert!(
+        shown.contains("opened host") || shown.contains("pmux attach shown-1"),
+        "{shown}"
+    );
 
     let _ = server.child.kill();
     let _ = server.child.wait();

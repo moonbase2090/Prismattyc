@@ -282,7 +282,7 @@ clean_tree "$work/oversize"
 out="$(mktemp)"
 err="$(mktemp)"
 code=0
-"$checker" --root "$work/oversize" --artifact "$work/oversize.zip" >"$out" 2>"$err" || code=$?
+RELEASE_TEXT_MAX_MEMBER=8388608 "$checker" --root "$work/oversize" --artifact "$work/oversize.zip" >"$out" 2>"$err" || code=$?
 if [[ "$code" -eq 0 ]]; then
   echo "oversize zip member must fail closed" >&2
   cat "$out" "$err" >&2

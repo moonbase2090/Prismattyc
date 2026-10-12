@@ -2,7 +2,14 @@
 
 ## [Unreleased]
 
-## [0.3.35] - 2026-10-12
+## [0.3.36] - 2026-10-12
+
+### Fixed
+
+- The pmux-mcp tutorial uses a generic AWS profile name in its example.
+- The release check scans published binaries without flagging build-runner paths, and checksums cover only regular release files.
+
+## [0.3.35] - 2026-10-12 (not published)
 
 ### Changed
 

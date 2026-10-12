@@ -41,7 +41,7 @@ If the operator explicitly requests an AWS SSO login, the same mechanism
 can run the command in a shell pane:
 
 ```bash
-pmux pane-write 15 --text 'aws sso login --profile bmaj' --submit enter --json
+pmux pane-write 15 --text 'aws sso login --profile my-profile' --submit enter --json
 ```
 
 The login may require the operator to finish browser authentication.

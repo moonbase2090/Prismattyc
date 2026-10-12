@@ -31,9 +31,11 @@ The release asset is `prismattyc-vVERSION-x86_64-pc-windows-msvc.msi`. It is a
 per-user package: it does not request administrator rights. It installs the six
 executables, licenses, and `NOTICE` under
 `%LOCALAPPDATA%\Programs\Prismattyc`. The six executables are in `bin`.
-Five command shims are in `cmd`: `prismattyc.cmd`, `pmux.cmd`, `pmuxd.cmd`,
-`pmux-attach.cmd`, and `pmux-mcp.cmd`. Each shim forwards to the executable
-of the same name in `bin`. There is no `prismattyc-host.cmd`. A Start menu
+Five command forwarders are in `cmd`: `prismattyc.exe`, `pmux.exe`,
+`pmuxd.exe`, `pmux-attach.exe`, and `pmux-mcp.exe`. Each one starts the
+executable of the same name in `bin` directly. There is no
+`prismattyc-host.exe` in `cmd`, and an upgrade removes the old `.cmd` shims.
+A Start menu
 shortcut named Prismattyc launches `prismattyc-host.exe`. That is the only
 Start menu entry. It opens the GUI, which carries the Prismattyc icon and
 does not allocate a console. `prismattyc.exe` is the CLI. Its file
@@ -108,7 +110,7 @@ remain. The final line names only the phases that ran.
 
 Extract the ZIP into a directory you own when you are not using the MSI.
 Launch `bin\prismattyc-host.exe`. Do not add `bin` to PATH. The `cmd`
-directory contains the shims.
+directory contains the forwarders.
 After that, `pmux update` or `prismattyc update` installs a newer published
 release and leaves running programs on the old version until they restart. The
 default shell is `%COMSPEC%`, normally `cmd.exe`. Select PowerShell with
@@ -200,8 +202,9 @@ whole ZIP, then run `powershell -NoProfile -ExecutionPolicy Bypass -File
 .\install.ps1` from its directory. It verifies the manifest files and bounded
 `--version` probes, installs into a new per-user directory under
 `%LOCALAPPDATA%\Programs\Prismattyc\windows-preview-<full-revision>`, and
-creates a revision-specific Start menu shortcut. The installer writes a `cmd`
-directory of shims next to `bin`. Optional `-AddToPath` prepends that `cmd`
+creates a revision-specific Start menu shortcut. The package includes a `cmd`
+directory of forwarders next to `bin`. The installer checks that those
+executables are present and does not write a `.cmd` shim. Optional `-AddToPath` prepends that `cmd`
 directory to the user PATH; omit it to keep command selection unchanged.
 An MSI install removes leftover `windows-preview-*` directories under
 `%LOCALAPPDATA%\Programs\Prismattyc`.

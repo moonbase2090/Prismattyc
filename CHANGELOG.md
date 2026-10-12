@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- The Windows `cmd` directory holds `prismattyc.exe`, `pmux.exe`, `pmuxd.exe`, `pmux-attach.exe`, and `pmux-mcp.exe`. Each one starts the matching program in `bin` directly. An upgrade removes the old `.cmd` shims. PATH still points at `cmd`, not `bin`. There is no host forwarder.
 - A pane label keeps its case, spaces, and other characters. The mailbox address is the lowercase form of that label.
 - Windows line-oriented `pmux`, `prismattyc`, and `pmux-attach` output returns to column 0. Virtual-terminal processing no longer disables newline auto-return for those commands. An attached console disables auto-return only while its raw mode is open, then restores the prior mode.
 

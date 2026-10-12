@@ -776,6 +776,58 @@ pub fn default_shell_command() -> Vec<String> {
     command
 }
 
+/// The program a new pane starts, and the place that choice came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneShell {
+    pub program: String,
+    pub source: &'static str,
+}
+
+/// `windows` selects COMSPEC, otherwise SHELL. Blank values use the built-in
+/// default. This does not look at the config file.
+pub fn describe_pane_shell(windows: bool, comspec: Option<&str>, shell: Option<&str>) -> PaneShell {
+    fn filled(value: Option<&str>) -> Option<&str> {
+        value.map(str::trim).filter(|text| !text.is_empty())
+    }
+    if windows {
+        match filled(comspec) {
+            Some(program) => PaneShell {
+                program: program.to_string(),
+                source: "COMSPEC",
+            },
+            None => PaneShell {
+                program: "cmd.exe".to_string(),
+                source: "default",
+            },
+        }
+    } else {
+        match filled(shell) {
+            Some(program) => PaneShell {
+                program: program.to_string(),
+                source: "SHELL",
+            },
+            None => PaneShell {
+                program: "/bin/sh".to_string(),
+                source: "default",
+            },
+        }
+    }
+}
+
+/// Doctor text for the pane shell. The Windows hint is the command that
+/// works today. `shell = "powershell.exe"` is not a config key.
+pub fn format_pane_shell_report(shell: &PaneShell, windows: bool) -> String {
+    let hint = if windows {
+        "hint: pmux new NAME -- powershell.exe"
+    } else {
+        "hint: pmux new NAME -- /bin/sh"
+    };
+    format!(
+        "pane shell: {} (from {})\n{hint}\n",
+        shell.program, shell.source
+    )
+}
+
 /// A private job whose drop terminates the probe and every descendant.
 #[cfg(windows)]
 pub struct ProbeJob(windows_sys::Win32::Foundation::HANDLE);
@@ -900,6 +952,43 @@ pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod pane_shell_tests {
+    use super::{describe_pane_shell, format_pane_shell_report};
+
+    #[test]
+    fn windows_shell_reports_comspec_or_the_default() {
+        let from_env = describe_pane_shell(true, Some(r"C:\Windows\System32\cmd.exe"), None);
+        assert_eq!(from_env.program, r"C:\Windows\System32\cmd.exe");
+        assert_eq!(from_env.source, "COMSPEC");
+        assert_eq!(
+            format_pane_shell_report(&from_env, true),
+            "pane shell: C:\\Windows\\System32\\cmd.exe (from COMSPEC)\nhint: pmux new NAME -- powershell.exe\n"
+        );
+        let blank = describe_pane_shell(true, Some("  "), Some("/bin/zsh"));
+        assert_eq!(blank.program, "cmd.exe");
+        assert_eq!(blank.source, "default");
+        assert_eq!(
+            format_pane_shell_report(&blank, true),
+            "pane shell: cmd.exe (from default)\nhint: pmux new NAME -- powershell.exe\n"
+        );
+    }
+
+    #[test]
+    fn unix_shell_reports_shell_or_the_default() {
+        let from_env = describe_pane_shell(false, Some("cmd.exe"), Some(" /bin/zsh "));
+        assert_eq!(from_env.program, "/bin/zsh");
+        assert_eq!(from_env.source, "SHELL");
+        assert_eq!(
+            format_pane_shell_report(&from_env, false),
+            "pane shell: /bin/zsh (from SHELL)\nhint: pmux new NAME -- /bin/sh\n"
+        );
+        let missing = describe_pane_shell(false, None, None);
+        assert_eq!(missing.program, "/bin/sh");
+        assert_eq!(missing.source, "default");
     }
 }
 

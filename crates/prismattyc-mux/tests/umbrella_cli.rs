@@ -508,11 +508,13 @@ fn doctor_and_kick_viewer_leave_session() {
 
     let empty = umbrella(&socket, &["doctor", "work"]);
     assert!(empty.status.success(), "{}", stderr(&empty));
+    let doctor = stdout(&empty);
+    assert!(doctor.contains("attach: none"), "{doctor}");
     assert!(
-        stdout(&empty).contains("attach: none"),
-        "{}",
-        stdout(&empty)
+        doctor.contains("pane shell:") && doctor.contains("(from "),
+        "{doctor}"
     );
+    assert!(doctor.contains("hint: pmux new NAME -- "), "{doctor}");
 
     let mut viewer = spawn_viewer(&socket, "work");
     let pid = viewer.id();

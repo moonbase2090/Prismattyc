@@ -98,6 +98,13 @@ function Invoke-Msi {
         Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
         throw "msiexec $commandLine exited $code`n$detail"
     }
+    if (Test-Path -LiteralPath $log) {
+        foreach ($line in Get-Content -LiteralPath $log) {
+            if ($line -match '(Feature: CommandPath; Installed: [^;]+; Request: [^;]+; Action: [^;]+)') {
+                Write-Output $Matches[1]
+            }
+        }
+    }
     Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
 }
 
@@ -430,10 +437,12 @@ try {
         $older = (Resolve-Path -LiteralPath $UpgradeFrom).Path
         Invoke-Msi -ArgumentList (@('/i', $older) + $tail)
     }
+    Write-Output "install: ADDTOPATH=$([int][bool]$AddToPath)"
     Invoke-Msi -ArgumentList $installArgs
     Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected ([bool]$AddToPath)
     Assert-PreviewSweep -Fixtures $fixtures
     foreach ($choice in @('0', '1', '1', '0', '1')) {
+        Write-Output "same-package: ADDTOPATH=$choice"
         Invoke-Msi -ArgumentList @('/i', $msiPath, '/qn', '/norestart', "ADDTOPATH=$choice", 'REBOOT=ReallySuppress')
         Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected ($choice -eq '1')
         Write-Output "same-package ADDTOPATH=${choice}: PATH and command resolution passed"
@@ -442,6 +451,7 @@ try {
     Invoke-Msi -ArgumentList @('/i', $msiPath, '/qn', '/norestart', 'ADDTOPATH=1', 'REBOOT=ReallySuppress')
     Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected $true
     Write-Output 'same-package ADDTOPATH=1 repairs a missing PATH entry'
+    Write-Output "install: ADDTOPATH=$([int][bool]$AddToPath)"
     Invoke-Msi -ArgumentList $installArgs
     Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected ([bool]$AddToPath)
     Assert-LockedExecutableSurvivesReinstall -CommandLine (New-MsiCommandLine $installArgs)

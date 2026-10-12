@@ -23,6 +23,10 @@
     <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/moonbase2090/Prismattyc" />
     <Property Id="ADDTOPATH" Secure="yes" Value="0" />
+    <Property Id="USERPATHREGISTERED">
+      <RegistrySearch Id="FindUserPathRegistration" Root="HKCU"
+                      Key="Software\Moonbase2090\Prismattyc" Name="path" Type="raw" />
+    </Property>
 
     <!-- The id ends in .exe so Windows caches a file it can read as an icon. An extensionless id shows a generic Start shortcut. -->
     <Icon Id="PrismattycIcon.exe" SourceFile="$(var.Payload)\bin\prismattyc-host.exe" />
@@ -202,9 +206,9 @@
     </InstallExecuteSequence>
 
     <SetProperty Id="ADDLOCAL" Value="CommandPath" Before="CostFinalize" Sequence="execute"
-                 Condition="Installed AND ADDTOPATH = &quot;1&quot; AND NOT REMOVE" />
+                 Condition="Installed AND ADDTOPATH = &quot;1&quot; AND NOT REMOVE AND NOT USERPATHREGISTERED" />
     <SetProperty Id="REINSTALL" Value="CommandPath" Before="CostFinalize" Sequence="execute"
-                 Condition="Installed AND ADDTOPATH = &quot;1&quot; AND NOT REMOVE" />
+                 Condition="Installed AND ADDTOPATH = &quot;1&quot; AND NOT REMOVE AND USERPATHREGISTERED" />
     <SetProperty Id="REMOVE" Value="CommandPath" Before="CostFinalize" Sequence="execute"
                  Condition="Installed AND ADDTOPATH = &quot;0&quot; AND NOT REMOVE" />
 

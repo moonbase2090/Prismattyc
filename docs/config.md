@@ -271,7 +271,7 @@ window_blur = false
 # A new pane uses COMSPEC on Windows, or cmd.exe when COMSPEC is unset.
 # Elsewhere it uses SHELL, or /bin/sh when SHELL is unset.
 # One PowerShell pane: pmux new NAME -- powershell.exe
-# shell = "powershell.exe" is not a setting. An uncommented unknown key drops this file.
+# The commented shell key below opts in for every new pane. An uncommented unknown key drops this file.
 # Instance name used to derive pmux.sock / pmux-<instance>.sock. non-empty name, no '/'.
 instance = "default"
 # Absolute socket path; overrides instance when set. absolute path.
@@ -282,6 +282,8 @@ attach_on_new = true
 space_open_runs_commands = "agents"
 # Who sets pane size when a TTY attach shares the host window. latest|host.
 remote_size = "latest"
+# Pane shell override. Unset on Windows preserves COMSPEC or cmd.exe. Set pwsh.exe or powershell.exe to opt in to PowerShell. Unset on Unix uses SHELL or /bin/sh. program name or path.
+# shell = "pwsh.exe"
 
 [keys]
 # Host actions. An entry replaces that action's default chords.
@@ -813,6 +815,7 @@ instance = "default"                 # $XDG_RUNTIME_DIR/prismattyc/pmux.sock
 # attach_on_new = false              # default true: `pmux new` attaches in a TTY
 # space_open_runs_commands = "agents"  # agents|all|none; `pmux space open --no-run` skips
 # remote_size = "latest"               # latest|host; TTY attach fits, detach restores host
+# shell = "pwsh.exe"                    # unset: COMSPEC or cmd.exe on Windows
 ```
 
 Cmd+Q (quit) and Cmd+N (new window) are available by default.

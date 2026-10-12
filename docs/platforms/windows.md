@@ -37,9 +37,9 @@ of the same name in `bin`. There is no `prismattyc-host.cmd`. A Start menu
 shortcut named Prismattyc launches `prismattyc-host.exe`. That is the only
 Start menu entry. It opens the GUI, which carries the Prismattyc icon and
 does not allocate a console. `prismattyc.exe` is the CLI. Its file
-description is Prismattyc CLI, and it is not a shortcut target. The tools
-are added to PATH only when the install is given `ADDTOPATH=1`, and that
-entry is the `cmd` directory.
+description is Prismattyc CLI, and it is not a shortcut target. A quiet
+install leaves command PATH opt-in. Pass `ADDTOPATH=1` to prepend the
+`cmd` directory to the user PATH. The entry is the `cmd` directory, not `bin`.
 
 A second bare launch of the GUI focuses the existing window. `pmux attach --all`
 and `pmux space open --new-window` still open another window. A connect from
@@ -59,14 +59,16 @@ machine-key update cannot roll the install back. It does not start a helper.
 still reports the semver.
 
 ```powershell
-msiexec /i prismattyc-v0.3.29-x86_64-pc-windows-msvc.msi /qn /norestart
-msiexec /i prismattyc-v0.3.29-x86_64-pc-windows-msvc.msi /qn /norestart ADDTOPATH=1
+msiexec /i prismattyc-v0.3.34-x86_64-pc-windows-msvc.msi /qn /norestart
+msiexec /i prismattyc-v0.3.34-x86_64-pc-windows-msvc.msi /qn /norestart ADDTOPATH=1
 ```
 
-`ADDTOPATH=1` prepends the install `cmd` directory to the user PATH. The
-default is off, matching `install-windows-preview.ps1 -AddToPath`. Uninstall
-removes that PATH entry, the files, and the shortcut. Install and uninstall
-also remove leftover `windows-preview-*` directories directly under
+The first command does not add a PATH entry. The second opts in with
+`ADDTOPATH=1`; an opted-in upgrade leaves one `cmd` entry. `ADDTOPATH=0`
+explicitly disables adding the entry.
+Uninstall removes that PATH entry, the files, and the shortcut. The preview
+installer still prepends the `cmd` directory only when `-AddToPath` is set.
+Install and uninstall also remove leftover `windows-preview-*` directories directly under
 `%LOCALAPPDATA%\Programs\Prismattyc` when those directories are not reparse
 points, the Start shortcuts named `Prismattyc Windows Preview`, and user PATH
 entries that pointed into a removed preview or at the install `bin` directory.
@@ -111,8 +113,10 @@ Launch `bin\prismattyc-host.exe`. Do not add `bin` to PATH. The `cmd`
 directory contains the shims.
 After that, `pmux update` or `prismattyc update` installs a newer published
 release and leaves running programs on the old version until they restart. The
-default shell is `%COMSPEC%`, normally `cmd.exe`. Select PowerShell with
-`-- powershell.exe` or `-- pwsh.exe`.
+default shell remains `%COMSPEC%`, or `cmd.exe` if that variable is absent or blank.
+Set `[mux] shell = "pwsh.exe"` or `shell = "powershell.exe"` in `config.toml`
+to opt in to PowerShell. An explicit shell setting overrides `COMSPEC`. An explicit program after `--` still
+starts that program.
 
 ## Code signing
 

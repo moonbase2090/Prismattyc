@@ -45,6 +45,10 @@ install leaves command PATH opt-in. Pass `ADDTOPATH=1` to prepend the
 Reinstalling the same MSI with `ADDTOPATH=1` adds or repairs that entry;
 `ADDTOPATH=0` removes the package-managed entry. Repeating either choice
 does not add duplicates.
+An existing install `bin` PATH entry is preserved during installation and
+upgrade, including when ADDTOPATH is omitted or `0`. This keeps previously
+working commands available. Uninstall removes the preserved `bin` entry and the package-managed `cmd`
+entry from PATH. A clean opt-out install does not add a new PATH entry.
 
 A second bare launch of the GUI focuses the existing window. `pmux attach --all`
 and `pmux space open --new-window` still open another window. A connect from

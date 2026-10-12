@@ -10647,6 +10647,78 @@ mod tests {
         let request = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(request["type"], "snapshot");
     }
+
+    #[test]
+    fn rm_named_json_removes_spaces_and_layouts() {
+        let dir = std::env::temp_dir().join(format!(
+            "pmux-rm-named-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let space = "{\"version\":2,\"saved_at_unix\":1,\"sessions\":[]}\n";
+        let layout = "{\"version\":1,\"saved_at_unix\":1,\"session\":\"demo\",\"windows\":[{\"title\":\"t\",\"cols\":80,\"rows\":24,\"root\":{\"kind\":\"leaf\"}}]}\n";
+        std::fs::write(dir.join("alpha.json"), space).unwrap();
+        std::fs::write(dir.join("beta.json"), space).unwrap();
+        std::fs::write(dir.join("note.txt"), "keep\n").unwrap();
+
+        let usage = cmd_rm_named_json(&dir, vec!["--nope".into()], SPACE_RM_USAGE, "space")
+            .unwrap_err()
+            .to_string();
+        assert!(usage.contains("usage: pmux space rm"), "{usage}");
+        assert!(dir.join("alpha.json").exists());
+
+        let missing = cmd_rm_named_json(&dir, Vec::new(), SPACE_RM_USAGE, "space")
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("usage: pmux space rm"), "{missing}");
+
+        let mixed = cmd_rm_named_json(
+            &dir,
+            vec!["--all".into(), "alpha".into()],
+            SPACE_RM_USAGE,
+            "space",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(mixed.contains("usage: pmux space rm"), "{mixed}");
+
+        cmd_rm_named_json(&dir, vec!["alpha".into()], SPACE_RM_USAGE, "space").unwrap();
+        assert!(!dir.join("alpha.json").exists());
+        assert!(dir.join("beta.json").exists());
+
+        let gone = cmd_rm_named_json(
+            &dir,
+            vec!["missing".into(), "beta".into()],
+            SPACE_RM_USAGE,
+            "space",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(gone.contains("no such file"), "{gone}");
+        assert!(!dir.join("beta.json").exists());
+        assert!(dir.join("note.txt").exists());
+
+        cmd_rm_named_json(&dir, vec!["--all".into()], SPACE_RM_USAGE, "space").unwrap();
+
+        std::fs::write(dir.join("one.json"), layout).unwrap();
+        std::fs::write(dir.join("two.json"), layout).unwrap();
+        cmd_rm_named_json(&dir, vec!["one".into()], LAYOUT_RM_USAGE, "layout").unwrap();
+        assert!(!dir.join("one.json").exists());
+        cmd_rm_named_json(&dir, vec!["--all".into()], LAYOUT_RM_USAGE, "layout").unwrap();
+        assert!(!dir.join("two.json").exists());
+        assert!(dir.join("note.txt").exists());
+        cmd_rm_named_json(&dir, vec!["--all".into()], LAYOUT_RM_USAGE, "layout").unwrap();
+
+        let bad = cmd_rm_named_json(&dir, vec!["../x".into()], LAYOUT_RM_USAGE, "layout")
+            .unwrap_err()
+            .to_string();
+        assert!(bad.contains("layout name"), "{bad}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(windows)]

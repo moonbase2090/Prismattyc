@@ -239,6 +239,8 @@ fn restart_plans_and_cooperative_components() {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    let status = ok(&pmux(&server_socket, &root, &[], &["status"]));
+    assert!(status.contains("running"), "{status}");
     let _ = pmux(&server_socket, &root, &[], &["stop"]);
     drop(server);
 

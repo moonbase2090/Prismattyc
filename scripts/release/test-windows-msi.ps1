@@ -246,9 +246,10 @@ function Assert-Installed {
             if (-not $resolved -or ($shown -ne $expectedShim -and $shown -ne $expectedExe)) {
                 throw "Get-Command $name did not resolve to an installed command"
             }
-            $shim = Get-Command -Name "$name.cmd" -CommandType Application -ErrorAction SilentlyContinue
+            $shim = @(Get-Command -Name "$name.exe" -All -CommandType Application -ErrorAction SilentlyContinue) |
+                Where-Object { $_.Source -eq $expectedShim } | Select-Object -First 1
             if (-not $shim -or $shim.Source -ne $expectedShim) {
-                throw "Get-Command $name.cmd did not resolve to the installed shim"
+                throw "Get-Command $name.exe did not find the installed cmd forwarder"
             }
             Write-Output "Get-Command $name resolves to an installed command; its cmd shim also resolves"
         }

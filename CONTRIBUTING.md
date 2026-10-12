@@ -73,7 +73,7 @@ and per-run validation reports out of the product source tree.
 
 ## License contributions
 
-Contribute original code and documentation under MPL-2.0. The repository
+Contribute original code and documentation under MIT. The repository
 [license](LICENSE) and [notice](NOTICE.txt) describe its scope. Add
-`SPDX-License-Identifier: MPL-2.0` in a comment when you create a source
+`SPDX-License-Identifier: MIT` in a comment when you create a source
 file. Preserve existing third-party license and copyright notices.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: MIT
 //! A static, pane-owned visual bell with one cleanup deadline.
 use prismattyc_protocol::ViewerId;
 use std::time::{Duration, Instant};

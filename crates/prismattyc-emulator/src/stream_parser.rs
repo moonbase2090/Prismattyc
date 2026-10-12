@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: MIT
 //! Complete a split UTF-8 scalar without allowing parser lookahead to consume
 //! following characters. Ordinary buffers still use VTE's bulk advance path.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MPL-2.0
+# SPDX-License-Identifier: MIT
 """Boundary cases for paste-e2e.py's frame-gap measurement (`window_gaps`).
 
 A stall before the first frame after the paste key, or one that runs past the

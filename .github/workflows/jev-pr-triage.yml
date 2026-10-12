@@ -1,5 +1,5 @@
 name: Jev PR triage
-# SPDX-License-Identifier: MPL-2.0
+# SPDX-License-Identifier: MIT
 # Advisory only. This workflow does not fail the check, block a merge,
 # approve a pull request, or request changes. It stays off until the
 # repository variable JEV_PR_TRIAGE_ENABLED is true.

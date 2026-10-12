@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MPL-2.0
+# SPDX-License-Identifier: MIT
 # Native performance acceptance for the pixel-alpha conversion path.
 set -euo pipefail
 

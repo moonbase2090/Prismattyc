@@ -72,7 +72,7 @@ class WindowsMsiTests(unittest.TestCase):
             self.assertIn(f"{name}.exe", source)
         for path in (ROOT / "crates/prismattyc-host/assets/fonts").glob("*.txt"):
             self.assertIn(path.name, source)
-        for name in ("MPL-2.0.txt", "NOTICE.txt", "OMARCHY-LICENSE.txt"):
+        for name in ("MIT.txt", "NOTICE.txt", "OMARCHY-LICENSE.txt"):
             self.assertIn(name, source)
         self.assertIn("reset-windows-update-pointer.ps1", source)
         self.assertIn("[System64Folder]WindowsPowerShell\\v1.0\\powershell.exe", source)

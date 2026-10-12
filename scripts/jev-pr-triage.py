@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MPL-2.0
+# SPDX-License-Identifier: MIT
 """Advisory Jev triage for a pull request. Always exits 0.
 
 The job may add ``triage:*`` labels and one sticky comment. It does not
@@ -101,7 +101,7 @@ def path_touches_ci(path: str) -> bool:
 
 def path_touches_license(path: str) -> bool:
     name = Path(path).name
-    return name in LICENSE_NAMES or name.startswith("LICENSE") or "MPL-2.0" in path
+    return name in LICENSE_NAMES or name.startswith("LICENSE") or "MIT" in path
 
 
 def path_rank(path: str) -> tuple[int, str]:
@@ -337,7 +337,7 @@ def question_bank(repo: Path) -> dict[str, dict[str, Any]]:
         },
         "touches_license": {
             "type": "noul",
-            "instructions": "Does this PR change license headers, LICENSE, NOTICE.txt, or MPL-2.0 terms?",
+            "instructions": "Does this PR change license headers, LICENSE, NOTICE.txt, or MIT terms?",
             "criteria": {
                 "true": "It edits LICENSE, NOTICE.txt, an SPDX header, or the license terms.",
                 "false": "License files and SPDX headers are unchanged. Using an already-licensed file is false.",

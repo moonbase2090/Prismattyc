@@ -136,8 +136,8 @@
         <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="license-noto" Type="integer" Value="1" KeyPath="yes" />
       </Component>
       <Component Id="LicenseMpl" Guid="6c2f57c7-5bca-50a1-96ce-526ca05e0bfa">
-        <File Source="$(var.Payload)\licenses\MPL-2.0.txt" />
-        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="license-mpl" Type="integer" Value="1" KeyPath="yes" />
+        <File Source="$(var.Payload)\licenses\MIT.txt" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="license-mit" Type="integer" Value="1" KeyPath="yes" />
       </Component>
       <Component Id="LicenseNotice" Guid="7b41082e-a3c7-5ff6-9eff-3fa4468d2223">
         <File Source="$(var.Payload)\licenses\NOTICE.txt" />

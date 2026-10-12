@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MPL-2.0
+# SPDX-License-Identifier: MIT
 """Slow-reading pane child for paste-e2e.py.
 
 Raw mode, so pasted bytes arrive unchanged. Prints a tick every 10 ms, which

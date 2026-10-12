@@ -150,7 +150,7 @@ function Assert-Installed {
         $path = Join-Path $install.Bin "$name.exe"
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing $path" }
     }
-    foreach ($name in @('README.txt', 'VERSION', 'licenses\MPL-2.0.txt', 'licenses\NOTICE.txt')) {
+    foreach ($name in @('README.txt', 'VERSION', 'licenses\MIT.txt', 'licenses\NOTICE.txt')) {
         $path = Join-Path $install.Root $name
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing $path" }
     }

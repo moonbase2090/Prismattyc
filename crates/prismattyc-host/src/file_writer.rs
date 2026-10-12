@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: MIT
 //! Latest-wins file writes that must not block the host event loop.
 
 use std::collections::{HashMap, HashSet};

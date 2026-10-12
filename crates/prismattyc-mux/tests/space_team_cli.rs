@@ -5,7 +5,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use prismattyc_mux::space_team::TeamClient;
 
 mod support;
 use support::clear_command_env;
@@ -55,6 +57,9 @@ fn start_server(socket: &Path, data: &Path) -> ServerGuard {
             .arg("--socket")
             .arg(socket)
             .args(["--", "/bin/sh", "-c", "exec sleep 999"])
+            .env("SHELL", "/bin/sh")
+            .env("HOME", data)
+            .env("XDG_CONFIG_HOME", data.join("config"))
             .env("XDG_DATA_HOME", data)
             .env("PMUX_SESSION_AGENTS", data.join("session-agents.json"))
             .stdout(Stdio::null())
@@ -84,6 +89,9 @@ fn pmux_env(socket: &Path, data: &Path, extra: &[(&str, &str)], args: &[&str]) -
         .arg("--socket")
         .arg(socket)
         .args(args)
+        .env("SHELL", "/bin/sh")
+        .env("HOME", data)
+        .env("XDG_CONFIG_HOME", data.join("config"))
         .env("XDG_DATA_HOME", data)
         .env("PMUX_SESSION_AGENTS", data.join("session-agents.json"))
         .env_remove("PMUX_AGENT")
@@ -364,6 +372,14 @@ fn team_and_template_commands_change_the_space() {
         "{resolved}"
     );
 
+    let requests = TeamClient::connect(&socket).unwrap().requests().unwrap();
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.pane_id.to_string() != pane),
+        "resolved attention survived in daemon state: {requests:?}"
+    );
+
     ok(&pmux(
         &socket,
         &data,
@@ -389,6 +405,7 @@ fn team_and_template_commands_change_the_space() {
     );
     let pane = request[0]["pane_id"].as_u64().unwrap().to_string();
     let revision = request[0]["revision"].as_u64().unwrap().to_string();
+    let before_snooze = unix_ms();
     let snoozed = ok(&pmux(
         &socket,
         &data,
@@ -403,6 +420,17 @@ fn team_and_template_commands_change_the_space() {
         ],
     ));
     assert!(snoozed.contains("attention updated"), "{snoozed}");
+    let after_snooze = unix_ms();
+    let requests = TeamClient::connect(&socket).unwrap().requests().unwrap();
+    let retained = requests
+        .iter()
+        .find(|request| request.pane_id.to_string() == pane)
+        .expect("snooze must retain the request, unlike resolve");
+    assert_eq!(retained.message, "check later");
+    assert_eq!(retained.revision.to_string(), revision);
+    assert!(retained.snoozed_until_ms >= before_snooze + 600_000);
+    assert!(retained.snoozed_until_ms <= after_snooze + 600_000);
+    assert!(retained.snoozed_until_ms > after_snooze);
 
     let saved_template = ok(&pmux(
         &socket,
@@ -472,25 +500,6 @@ fn team_and_template_commands_change_the_space() {
         "{prepared}"
     );
     assert!(find_named(&data, "prepared").is_file());
-    let launched = text(&pmux(
-        &socket,
-        &data,
-        &[
-            "space",
-            "template",
-            "create",
-            "kit",
-            "launched",
-            "--launch",
-            "--prepare-only",
-        ],
-    ));
-    // A shell that is already the foreground work is not launched over.
-    assert!(
-        launched.contains("requested commands started")
-            || launched.contains("already has foreground work; launch was not repeated"),
-        "{launched}"
-    );
     let quiet = ok(&pmux(
         &socket,
         &data,
@@ -524,4 +533,138 @@ fn team_and_template_commands_change_the_space() {
         &["space", "template", "preview", "kit", "later"],
     ));
     assert!(offline.contains("Daemon unavailable"), "{offline}");
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+fn wait_for(mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !condition() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for fixture state"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn launch_template(socket: &Path, data: &Path) -> PathBuf {
+    ok(&pmux(
+        socket,
+        data,
+        &["new", "--no-attach", "origin", "--", "/bin/sh"],
+    ));
+    ok(&pmux(socket, data, &["space", "save", "source", "origin"]));
+    ok(&pmux(
+        socket,
+        data,
+        &[
+            "space",
+            "template",
+            "save",
+            "launch-kit",
+            "--space",
+            "source",
+        ],
+    ));
+    let template_path = find_named(data, "launch-kit");
+    let mut template: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&template_path).unwrap()).unwrap();
+    assert_eq!(
+        template["definition"]["sessions"].as_array().unwrap().len(),
+        1
+    );
+    let marker = data.join("launched.txt");
+    let root = &mut template["definition"]["sessions"][0]["windows"][0]["root"];
+    assert_eq!(root["kind"], "leaf");
+    root["program"] = serde_json::Value::Null;
+    root["command"] = format!("printf 'template-executed' > '{}'", marker.display()).into();
+    std::fs::write(&template_path, serde_json::to_vec(&template).unwrap()).unwrap();
+    assert!(!marker.exists());
+    marker
+}
+
+#[test]
+fn template_launch_runs_the_saved_command() {
+    let socket = socket_path();
+    let data = data_dir();
+    let _server = start_server(&socket, &data);
+    let marker = launch_template(&socket, &data);
+    let output = pmux(
+        &socket,
+        &data,
+        &[
+            "space",
+            "template",
+            "create",
+            "launch-kit",
+            "destination",
+            "--launch",
+            "--prepare-only",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output));
+    wait_for(|| marker.exists());
+    assert_eq!(
+        std::fs::read_to_string(marker).unwrap(),
+        "template-executed"
+    );
+}
+
+#[test]
+fn template_launch_refuses_occupied_pane_without_replacing_work() {
+    let socket = socket_path();
+    let data = data_dir();
+    let _server = start_server(&socket, &data);
+    let marker = launch_template(&socket, &data);
+    let occupied_pid = data.join("occupied.pid");
+    let shell = data.join("occupied-shell");
+    std::fs::write(
+        &shell,
+        format!(
+            "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec sleep 60\n",
+            occupied_pid.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = pmux_env(
+        &socket,
+        &data,
+        &[("SHELL", shell.to_str().unwrap())],
+        &[
+            "space",
+            "template",
+            "create",
+            "launch-kit",
+            "destination",
+            "--launch",
+            "--prepare-only",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output));
+    assert!(text(&output).contains("already has foreground work; launch was not repeated"));
+    assert!(!marker.exists(), "refused launch ran the saved command");
+    let pid: u32 = std::fs::read_to_string(occupied_pid)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let snapshot = TeamClient::connect(&socket).unwrap().snapshot().unwrap();
+    let current = &snapshot
+        .sessions
+        .iter()
+        .find(|s| s.name == "destination-1")
+        .unwrap()
+        .windows[0]
+        .panes[0];
+    assert_eq!(current.child_pid, Some(pid));
+    assert!(prismattyc_mux::procinfo::pid_alive(pid));
+    assert!(prismattyc_mux::procinfo::live_foreground_command(pid)
+        .is_some_and(|command| command.contains("sleep 60")));
 }

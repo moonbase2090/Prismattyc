@@ -233,7 +233,7 @@ function Assert-Installed {
             if (-not $resolved -or [string]::Compare($shown, $expectedShim, $true) -ne 0) {
                 throw "Get-Command $name is $shown, not $expectedShim"
             }
-            Write-Output "Get-Command $name=$shown"
+            Write-Output "Get-Command $name resolves to the installed cmd shim"
         }
     } elseif ($cmdCount -ne 0) {
         throw "User PATH has $cmdCount install cmd entries; expected 0."
@@ -433,6 +433,17 @@ try {
     Invoke-Msi -ArgumentList $installArgs
     Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected ([bool]$AddToPath)
     Assert-PreviewSweep -Fixtures $fixtures
+    foreach ($choice in @('0', '1', '1', '0', '1')) {
+        Invoke-Msi -ArgumentList @('/i', $msiPath, '/qn', '/norestart', "ADDTOPATH=$choice", 'REBOOT=ReallySuppress')
+        Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected ($choice -eq '1')
+        Write-Output "same-package ADDTOPATH=${choice}: PATH and command resolution passed"
+    }
+    Remove-UserPathEntry $install.Cmd
+    Invoke-Msi -ArgumentList @('/i', $msiPath, '/qn', '/norestart', 'ADDTOPATH=1', 'REBOOT=ReallySuppress')
+    Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected $true
+    Write-Output 'same-package ADDTOPATH=1 repairs a missing PATH entry'
+    Invoke-Msi -ArgumentList $installArgs
+    Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected ([bool]$AddToPath)
     Assert-LockedExecutableSurvivesReinstall -CommandLine (New-MsiCommandLine $installArgs)
 
     $installed = @(Get-PrismattycUninstallKeys)

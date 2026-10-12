@@ -8,9 +8,9 @@
 
 ### Windows
 
-A quiet MSI install prepends the install `cmd` directory to the user PATH.
-`ADDTOPATH=0` leaves PATH unchanged. Uninstall removes the entry, and an
-upgrade leaves one entry.
+MSI PATH changes remain opt-in with `ADDTOPATH=1`. Installer verification now
+checks that an opted-in upgrade leaves exactly one `cmd` entry, both commands
+resolve to their shims, and uninstall removes the entry.
 
 ## [0.3.34] - 2026-10-10
 

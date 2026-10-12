@@ -65,7 +65,7 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn('AllowSameVersionUpgrades="yes"', source)
         self.assertIn('Schedule="afterInstallInitialize"', source)
         self.assertIn('MSIRESTARTMANAGERCONTROL" Value="Disable"', source)
-        self.assertIn('Id="ADDTOPATH" Secure="yes" Value="1"', source)
+        self.assertIn('Id="ADDTOPATH" Secure="yes" Value="0"', source)
         self.assertIn('Name="PATH" Value="[CMDFOLDER]" Action="set" Part="first" System="no"', source)
         self.assertNotIn("ProgramFiles", source)
         for name in ("pmux", "pmuxd", "pmux-attach", "pmux-mcp", "prismattyc", "prismattyc-host"):

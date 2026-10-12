@@ -38,8 +38,8 @@ shortcut named Prismattyc launches `prismattyc-host.exe`. That is the only
 Start menu entry. It opens the GUI, which carries the Prismattyc icon and
 does not allocate a console. `prismattyc.exe` is the CLI. Its file
 description is Prismattyc CLI, and it is not a shortcut target. A quiet
-install prepends the `cmd` directory to the user PATH. `ADDTOPATH=0` leaves
-PATH unchanged. The entry is the `cmd` directory, not `bin`.
+install leaves command PATH opt-in. Pass `ADDTOPATH=1` to prepend the
+`cmd` directory to the user PATH. The entry is the `cmd` directory, not `bin`.
 
 A second bare launch of the GUI focuses the existing window. `pmux attach --all`
 and `pmux space open --new-window` still open another window. A connect from
@@ -59,12 +59,13 @@ machine-key update cannot roll the install back. It does not start a helper.
 still reports the semver.
 
 ```powershell
-msiexec /i prismattyc-v0.3.29-x86_64-pc-windows-msvc.msi /qn /norestart
-msiexec /i prismattyc-v0.3.29-x86_64-pc-windows-msvc.msi /qn /norestart ADDTOPATH=0
+msiexec /i prismattyc-v0.3.34-x86_64-pc-windows-msvc.msi /qn /norestart
+msiexec /i prismattyc-v0.3.34-x86_64-pc-windows-msvc.msi /qn /norestart ADDTOPATH=1
 ```
 
-The first command prepends the install `cmd` directory to the user PATH.
-`ADDTOPATH=0` leaves PATH unchanged. An upgrade leaves one `cmd` entry.
+The first command does not add a PATH entry. The second opts in with
+`ADDTOPATH=1`; an opted-in upgrade leaves one `cmd` entry. `ADDTOPATH=0`
+explicitly disables adding the entry.
 Uninstall removes that PATH entry, the files, and the shortcut. The preview
 installer still prepends the `cmd` directory only when `-AddToPath` is set.
 Install and uninstall also remove leftover `windows-preview-*` directories directly under

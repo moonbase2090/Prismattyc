@@ -431,7 +431,7 @@ try {
         Invoke-Msi -ArgumentList (@('/i', $older) + $tail)
     }
     Invoke-Msi -ArgumentList $installArgs
-    Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected (-not [bool]$NoAddToPath)
+    Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected ([bool]$AddToPath)
     Assert-PreviewSweep -Fixtures $fixtures
     Assert-LockedExecutableSurvivesReinstall -CommandLine (New-MsiCommandLine $installArgs)
 

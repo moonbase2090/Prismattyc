@@ -3159,6 +3159,9 @@ impl App {
         for host in self.windows.values_mut() {
             host.pending_full_repaint = Some(FullRepaintReason::Fallback);
         }
+        for warning in self.file_config.mux_unknown_key_warnings() {
+            eprintln!("{}", config::host_warning_line(warning));
+        }
         if self.file_config.keys != prior.keys
             || self.file_config.macos_shortcuts() != prior.macos_shortcuts()
         {
@@ -21392,6 +21395,9 @@ fn main() -> Result<()> {
         for warning in file_config.macos_override_warnings() {
             eprintln!("prismattyc-host: warning: {warning}");
         }
+        for warning in file_config.mux_unknown_key_warnings() {
+            eprintln!("{}", config::host_warning_line(warning));
+        }
         return Ok(());
     }
     if let Some(runtime) =
@@ -21431,6 +21437,9 @@ fn main() -> Result<()> {
     });
     for warning in file_config.macos_override_warnings() {
         eprintln!("prismattyc-host: warning: {warning}");
+    }
+    for warning in file_config.mux_unknown_key_warnings() {
+        eprintln!("{}", config::host_warning_line(warning));
     }
     cli.apply_config(&file_config);
     if !cli.explicit_program && cli.attach_sessions.is_empty() {

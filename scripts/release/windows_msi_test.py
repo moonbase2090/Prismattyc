@@ -66,6 +66,7 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn('Schedule="afterInstallInitialize"', source)
         self.assertIn('MSIRESTARTMANAGERCONTROL" Value="Disable"', source)
         self.assertIn('Id="ADDTOPATH" Secure="yes" Value="0"', source)
+        self.assertIn('Name="PATH" Value="[CMDFOLDER]" Action="set" Part="first" System="no"', source)
         self.assertNotIn("ProgramFiles", source)
         for name in ("pmux", "pmuxd", "pmux-attach", "pmux-mcp", "prismattyc", "prismattyc-host"):
             self.assertIn(f"{name}.exe", source)
@@ -199,6 +200,8 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn("sweep followed the preview junction", proof)
         self.assertIn("User PATH still contains the install bin.", proof)
         self.assertIn("$install.Cmd", proof)
+        self.assertIn("NoAddToPath", proof)
+        self.assertIn("expected 1", proof)
         prove = (ROOT / "scripts/release/prove-windows-msi.ps1").read_text(encoding="utf-8")
         self.assertIn("-AddToPath", prove)
         docs = (ROOT / "docs/platforms/windows.md").read_text(encoding="utf-8")
@@ -276,13 +279,19 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn(r'"C:\MSI Proof\new.msi"', quoted)
         self.assertIn(r'"C:\MSI Proof\older.msi"', quoted)
         self.assertNotIn('"/qn"', quoted)
-        self.assertIn("/qn /norestart ADDTOPATH=0 REBOOT=ReallySuppress", quoted)
+        self.assertIn("/qn /norestart REBOOT=ReallySuppress", quoted)
+        self.assertNotIn("ADDTOPATH=", quoted)
         self.assertIn("phases=install,upgrade,version,locked-file,uninstall", quoted)
         plain = formatted(["-Msi", r"C:\plain\new.msi"])
         self.assertNotIn("upgrade", plain)
         self.assertNotIn(r'"C:\plain\new.msi"', plain)
         self.assertIn(r"C:\plain\new.msi", plain)
+        self.assertNotIn("ADDTOPATH=", plain)
         self.assertIn("phases=install,locked-file,uninstall", plain)
+        opted_in = formatted(["-Msi", r"C:\plain\new.msi", "-AddToPath"])
+        self.assertIn("/qn /norestart ADDTOPATH=1 REBOOT=ReallySuppress", opted_in)
+        opted_out = formatted(["-Msi", r"C:\plain\new.msi", "-NoAddToPath"])
+        self.assertIn("/qn /norestart ADDTOPATH=0 REBOOT=ReallySuppress", opted_out)
 
     def test_package_script_refuses_non_windows_before_building(self):
         if sys.platform == "win32":

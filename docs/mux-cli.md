@@ -69,7 +69,7 @@ pmux attention work "needs input" # send OSC 9 to the session pane
 pmux attention work                  # default message: needs your attention
 pmux new work            # create a named session (TTY: attach)
 pmux new work --no-attach  # create only; print the attach hint
-pmux doctor              # child pid, lease, VIEWER vs NESTED attach
+pmux doctor              # pane shell, child pid, lease, VIEWER vs NESTED attach
 pmux doctor work         # same, one session
 pmux render-status --json # live host render guards, frame age, and pane state
 pmux kick work           # SIGTERM nested attach, else viewers; session stays

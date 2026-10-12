@@ -19,7 +19,7 @@
 //! pmux join-pane PANE --to TAB  move a pane onto another window [-h|-v]
 //! pmux arrange SESSION KIND     retile a session window (main-vertical, …)
 //! pmux new NAME [PROGRAM...]    create a named session (TTY: attach)
-//! pmux doctor [SESSION]         child / lease / viewer vs nested attach
+//! pmux doctor [SESSION]         pane shell, child / lease / viewer vs nested attach
 //! pmux kick SESSION             SIGTERM nested attach, else viewers
 //! pmux clients [SESSION] [--json]  list attach clients (pid, kind, session, pane)
 //! pmux detach --other [SESSION] SIGTERM every attach except your own
@@ -138,7 +138,7 @@ session
                                   (default: the session name).
     login <enable|disable|status|sync>
                                   start at login and restore workspace
-    doctor [SESSION]              login state, child pid, lease, attach state
+    doctor [SESSION]              pane shell, login state, child pid, lease, attach state
     render-status [--json]         registered host render guards and pane state
     kick SESSION                  SIGTERM nested attach, else viewers
     clients [SESSION] [--json]    list attach clients: pid, viewer/nested,
@@ -3429,6 +3429,17 @@ fn require_live(paths: &Paths) -> Result<()> {
 }
 
 fn cmd_doctor(paths: &Paths, key: Option<String>) -> Result<()> {
+    let configured = prismattyc_mux::platform::configured_shell();
+    let shell = prismattyc_mux::platform::describe_pane_shell(
+        cfg!(windows),
+        configured.as_deref(),
+        std::env::var("COMSPEC").ok().as_deref(),
+        std::env::var("SHELL").ok().as_deref(),
+    );
+    print!(
+        "{}",
+        prismattyc_mux::platform::format_pane_shell_report(&shell, cfg!(windows))
+    );
     prismattyc_mux::login::report(&paths.socket)?;
     require_live(paths)?;
     let mut client = Client::connect(&paths.socket)?;

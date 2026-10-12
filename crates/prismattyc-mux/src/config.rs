@@ -301,6 +301,12 @@ pub const MUX_KEYS: &[MuxKeySpec] = &[
 /// Render the `[mux]` table with comments.
 pub fn render_mux_section() -> String {
     let mut out = String::from("[mux]\n");
+    out.push_str(
+        "# A new pane uses [mux] shell when that value is set.\n\
+         # Otherwise it uses COMSPEC on Windows, or cmd.exe when COMSPEC is unset.\n\
+         # Elsewhere it uses SHELL, or /bin/sh when SHELL is unset.\n\
+         # One PowerShell pane: pmux new NAME -- powershell.exe\n",
+    );
     for key in MUX_KEYS {
         out.push_str(&format!("# {}. {}.\n", key.doc, key.range));
         match key.kind {
@@ -463,6 +469,16 @@ mod tests {
     fn mux_template_contains_every_key() {
         let text = render_mux_section();
         assert!(text.starts_with("[mux]\n"));
+        assert!(text.contains("pmux new NAME -- powershell.exe"));
+        assert!(!text.contains("is not a setting"));
+        assert!(!text.contains("drops this file"));
+        assert!(
+            !text.lines().any(|line| {
+                let trimmed = line.trim_start();
+                trimmed.starts_with("shell ") || trimmed.starts_with("shell=")
+            }),
+            "the template must leave shell commented: {text}"
+        );
         for key in MUX_KEYS {
             assert!(text.contains(key.name), "mux template missing {}", key.name);
         }

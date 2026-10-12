@@ -774,7 +774,7 @@ pub fn default_shell() -> String {
     }
 }
 
-fn configured_shell() -> Option<String> {
+pub fn configured_shell() -> Option<String> {
     let section = crate::config::load_mux_section(&crate::config::prism_config_path()).ok()?;
     section.shell.and_then(|value| {
         let trimmed = value.trim();
@@ -783,7 +783,6 @@ fn configured_shell() -> Option<String> {
 }
 
 /// Explicit configuration overrides COMSPEC; an unset setting preserves Windows defaults.
-#[cfg(any(windows, test))]
 pub(crate) fn choose_windows_shell(configured: Option<&str>, comspec: Option<&str>) -> String {
     configured
         .map(str::trim)
@@ -802,6 +801,68 @@ pub fn default_shell_command() -> Vec<String> {
         command.push("-l".into());
     }
     command
+}
+
+/// The program a new pane starts, and the place that choice came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneShell {
+    pub program: String,
+    pub source: &'static str,
+}
+
+/// Report the program `default_shell` would start. A non-empty `[mux] shell`
+/// wins. Otherwise `windows` selects COMSPEC, or SHELL. Blank values use the
+/// built-in default.
+pub fn describe_pane_shell(
+    windows: bool,
+    configured: Option<&str>,
+    comspec: Option<&str>,
+    shell: Option<&str>,
+) -> PaneShell {
+    fn filled(value: Option<&str>) -> Option<&str> {
+        value.map(str::trim).filter(|text| !text.is_empty())
+    }
+    if let Some(program) = filled(configured) {
+        return PaneShell {
+            program: program.to_string(),
+            source: "config",
+        };
+    }
+    if windows {
+        let source = if filled(comspec).is_some() {
+            "COMSPEC"
+        } else {
+            "default"
+        };
+        return PaneShell {
+            program: choose_windows_shell(None, comspec),
+            source,
+        };
+    }
+    match filled(shell) {
+        Some(program) => PaneShell {
+            program: program.to_string(),
+            source: "SHELL",
+        },
+        None => PaneShell {
+            program: "/bin/sh".to_string(),
+            source: "default",
+        },
+    }
+}
+
+/// Doctor text for the pane shell. The hint names the opt-in config and a
+/// one-pane command.
+pub fn format_pane_shell_report(shell: &PaneShell, windows: bool) -> String {
+    let hint = if windows {
+        "hint: [mux] shell = \"powershell.exe\", or pmux new NAME -- powershell.exe"
+    } else {
+        "hint: [mux] shell = \"/bin/sh\", or pmux new NAME -- /bin/sh"
+    };
+    format!(
+        "pane shell: {} (from {})\n{hint}\n",
+        shell.program, shell.source
+    )
 }
 
 /// A private job whose drop terminates the probe and every descendant.
@@ -928,6 +989,49 @@ pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod pane_shell_tests {
+    use super::{describe_pane_shell, format_pane_shell_report};
+
+    #[test]
+    fn windows_shell_reports_comspec_or_the_default() {
+        let from_env = describe_pane_shell(true, None, Some(r"C:\Windows\System32\cmd.exe"), None);
+        assert_eq!(from_env.program, r"C:\Windows\System32\cmd.exe");
+        assert_eq!(from_env.source, "COMSPEC");
+        assert_eq!(
+            format_pane_shell_report(&from_env, true),
+            "pane shell: C:\\Windows\\System32\\cmd.exe (from COMSPEC)\nhint: [mux] shell = \"powershell.exe\", or pmux new NAME -- powershell.exe\n"
+        );
+        let configured = describe_pane_shell(true, Some(" powershell.exe "), Some("cmd.exe"), None);
+        assert_eq!(configured.program, "powershell.exe");
+        assert_eq!(configured.source, "config");
+        let blank = describe_pane_shell(true, Some("  "), Some("  "), Some("/bin/zsh"));
+        assert_eq!(blank.program, "cmd.exe");
+        assert_eq!(blank.source, "default");
+        assert_eq!(
+            format_pane_shell_report(&blank, true),
+            "pane shell: cmd.exe (from default)\nhint: [mux] shell = \"powershell.exe\", or pmux new NAME -- powershell.exe\n"
+        );
+    }
+
+    #[test]
+    fn unix_shell_reports_shell_or_the_default() {
+        let from_env = describe_pane_shell(false, None, Some("cmd.exe"), Some(" /bin/zsh "));
+        assert_eq!(from_env.program, "/bin/zsh");
+        assert_eq!(from_env.source, "SHELL");
+        assert_eq!(
+            format_pane_shell_report(&from_env, false),
+            "pane shell: /bin/zsh (from SHELL)\nhint: [mux] shell = \"/bin/sh\", or pmux new NAME -- /bin/sh\n"
+        );
+        let configured = describe_pane_shell(false, Some(" /bin/bash "), None, Some("/bin/zsh"));
+        assert_eq!(configured.program, "/bin/bash");
+        assert_eq!(configured.source, "config");
+        let missing = describe_pane_shell(false, None, None, None);
+        assert_eq!(missing.program, "/bin/sh");
+        assert_eq!(missing.source, "default");
     }
 }
 

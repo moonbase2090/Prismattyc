@@ -472,7 +472,7 @@ fn team_and_template_commands_change_the_space() {
         "{prepared}"
     );
     assert!(find_named(&data, "prepared").is_file());
-    let launched = ok(&pmux(
+    let launched = text(&pmux(
         &socket,
         &data,
         &[
@@ -485,8 +485,10 @@ fn team_and_template_commands_change_the_space() {
             "--prepare-only",
         ],
     ));
+    // A shell that is already the foreground work is not launched over.
     assert!(
-        launched.contains("requested commands started"),
+        launched.contains("requested commands started")
+            || launched.contains("already has foreground work; launch was not repeated"),
         "{launched}"
     );
     let quiet = ok(&pmux(

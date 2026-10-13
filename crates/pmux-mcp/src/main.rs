@@ -556,7 +556,10 @@ mod tests {
     fn test_mcp() -> PmuxMcp {
         let agent = AgentId::new("mutant-kill-agent").expect("agent id");
         // Nonexistent socket: tools that reach pmux must not look like success.
-        PmuxMcp::new(agent, PathBuf::from("/tmp/pmux-mcp-mutant-kill-missing.sock"))
+        PmuxMcp::new(
+            agent,
+            PathBuf::from("/tmp/pmux-mcp-mutant-kill-missing.sock"),
+        )
     }
 
     fn tool_text(result: &CallToolResult) -> String {

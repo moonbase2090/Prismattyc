@@ -6,17 +6,24 @@ It is self-contained. It needs no daemon and no external services.
 
 ## 1. Quickstart
 
-Prismattyc is a terminal multiplexer. Three binaries:
+Prismattyc is a terminal application with a built-in multiplexer. Its
+programs:
 
+- `prismattyc-host` — the desktop application: tabs, split panes, Spaces,
+  and the Graphite sidebar.
 - `pmuxd` — the daemon. It owns the PTYs and all session state.
-- `pmux` — the CLI. It talks to the daemon over a Unix socket.
-- `pmux-attach` — the full-screen client.
+- `pmux` — the CLI. It talks to the daemon over its control socket.
+- `pmux-attach` — the full-screen terminal client.
+- `pmux-mcp` — the MCP server for agents.
+
+Release downloads exist for Linux, macOS, and Windows. See `README.md`.
 
 Core commands:
 
 - `pmux ls` — list sessions, windows, and panes, with live/dead state.
 - `pmux new NAME [-- PROGRAM...]` — create a session. NAME becomes your
-  mailbox address by default.
+  mailbox address by default. A label keeps its case and spaces; the
+  mailbox address is its lowercase form.
 - `pmux attach NAME` — view a session. Detach with `C-\ d`. Scroll with
   PageUp; `C-\ [` enters scroll mode. `C-\ s` toggles sync input across
   panes in the window.
@@ -45,7 +52,7 @@ Core commands:
   a session. Inside attach, `C-\ n` / `C-\ p` cycle sessions.
   Missing sessions can restore saved commands under
   `[mux] space_open_runs_commands = agents|all|none`. `--no-run` disables replay.
-  `pmux space ls` lists Spaces. `pmux space rm NAME` deletes a definition
+  `pmux space ls` lists Spaces. `pmux space rm NAME` (alias `delete`) deletes a definition
   and releases its sessions without stopping them. `pmux space clear`
   removes all definitions except names passed with `--keep NAME`.
   Legacy files with conflicting session references require resolution;
@@ -247,7 +254,10 @@ Crates:
 
 - `prismattyc-emulator` owns the PTY and the VT parser.
 - `prismattyc-render` turns emulator state into cells and styled runs.
-- `prismattyc-mux` owns the rest: domain (sessions, windows, panes),
+- `prismattyc-host` is the desktop application, including the Graphite
+  chrome and the Spaces sidebar.
+- `pmux-mcp` exposes pmux to agents over MCP.
+- `prismattyc-mux` owns the session side: domain (sessions, windows, panes),
   control plane (versioned JSON protocol over a Unix socket; snapshot
   plus event stream), and the live runtime (one LivePane per pane).
 
@@ -264,9 +274,7 @@ Key invariants:
 - Spawned children get a scrubbed environment. Color suppressors and
   stale discovery keys are stripped before the mux stamps its own.
 
-Read next: `docs/architecture.md`,
-`docs/architecture.md`, `docs/control-plane.md`,
-`docs/architecture.md`.
+Read next: `docs/architecture.md` and `docs/control-plane.md`.
 
 ## 6. Operations
 
@@ -277,8 +285,8 @@ Read next: `docs/architecture.md`,
   passed `NO_COLOR` and friends to every pane child. Apps went monochrome
   and TUI cursors vanished. The daemon now strips color suppressors at
   spawn. Clean launches stay the habit.
-- `pmux doctor SESSION` — child pid, lease state, viewer vs nested
-  attach. First tool for "is it stuck?".
+- `pmux doctor SESSION` — the pane shell a new pane would start, child
+  pid, lease state, viewer vs nested attach. First tool for "is it stuck?".
 - `pmux kick SESSION` — SIGTERM a nested attach, else viewers. Never
   destroys the session or the pane child.
 - Hung session: follow `docs/hung-session-recovery.md`. Do not

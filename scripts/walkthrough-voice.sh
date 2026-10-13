@@ -156,7 +156,7 @@ fi
 need curl
 need ffmpeg
 
-# Some ffmpeg builds ship without libvorbis. Keep the ElevenLabs MP3 then.
+# Some ffmpeg builds ship without libvorbis. Keep the MP3 then.
 HAVE_VORBIS=0
 if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libvorbis; then
   HAVE_VORBIS=1

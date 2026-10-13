@@ -1,5 +1,7 @@
 schema_version = 1
 # Intro clip for PT-197. Not a catalog step. The voice script reads this.
+# A step may set `spoken` to override the narration text (for example, to
+# voice "pmux" as "P Mucks"). The caption keeps the written spelling.
 intro = "Welcome to the Prismattyc walkthrough."
 
 [[level]]
@@ -66,7 +68,7 @@ show_me = { kind = "host_action", action = "move_pane_next_tab" }
 
 [[level.step]]
 id = "tabs.drag"
-caption = "Drag the tab one slot to the right."
+caption = "Move the tab down one row in the sidebar."
 hint = "Use the key shown in the caption."
 command = "move_tab_right"
 audio = "tabs.drag"
@@ -80,6 +82,7 @@ title = "Seats"
 [[level.step]]
 id = "seats.new"
 caption = "Create a new pmux seat."
+spoken = "Create a new P Mucks seat."
 hint = "Run pmux new."
 command = "pmux_new"
 audio = "seats.new"
@@ -110,7 +113,7 @@ title = "Spaces"
 
 [[level.step]]
 id = "spaces.save"
-caption = "Save this space from the rail."
+caption = "Save this space from its sidebar row."
 hint = "Right-click the space in the sidebar and choose Save now."
 command = "save_space"
 audio = "spaces.save"
@@ -119,7 +122,7 @@ show_me = { kind = "space_event", event = "saved" }
 
 [[level.step]]
 id = "spaces.open"
-caption = "Open the saved space from its chip menu."
+caption = "Open the saved space from its row menu."
 hint = "Click the space in the sidebar, or choose Open / Focus from its menu."
 command = "open_space"
 audio = "spaces.open"

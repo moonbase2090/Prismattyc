@@ -4963,6 +4963,57 @@ mod tests {
     }
 
     #[test]
+    fn mouse_button_code_distinguishes_buttons() {
+        assert_eq!(mouse_button_code(MouseButton::Left), Some(0));
+        assert_eq!(mouse_button_code(MouseButton::Middle), Some(1));
+        assert_eq!(mouse_button_code(MouseButton::Right), Some(2));
+    }
+
+    #[test]
+    fn encode_mouse_report_sgr_control_adds_sixteen() {
+        let mut emulator = Emulator::new(40, 10, 0);
+        let _ = emulator.feed(b"\x1b[?1000h\x1b[?1006h");
+        let middle = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Middle),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::CONTROL,
+        };
+        // Middle is 1; Control adds 16 → 17. `+= 16` vs `*= 16` diverge here.
+        assert_eq!(
+            encode_mouse_report(middle, &emulator).unwrap(),
+            b"\x1b[<17;1;1M"
+        );
+        let right = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 3,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            encode_mouse_report(right, &emulator).unwrap(),
+            b"\x1b[<2;4;2M"
+        );
+    }
+
+    #[test]
+    fn encode_mouse_report_sgr_alt_adds_eight() {
+        let mut emulator = Emulator::new(40, 10, 0);
+        let _ = emulator.feed(b"\x1b[?1000h\x1b[?1006h");
+        let middle = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Middle),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::ALT,
+        };
+        // Middle is 1; Alt adds 8 → 9. `+= 8` vs `*= 8` diverge here.
+        assert_eq!(
+            encode_mouse_report(middle, &emulator).unwrap(),
+            b"\x1b[<9;1;1M"
+        );
+    }
+
+    #[test]
     fn encode_mouse_report_sgr_release_and_wheel() {
         let mut emulator = Emulator::new(40, 10, 0);
         let _ = emulator.feed(b"\x1b[?1000h\x1b[?1006h");

@@ -121,8 +121,9 @@ pub fn art_glyph_rgb(ch: char, index: usize, width: usize) -> [u8; 3] {
 // Two lens flares sit just outside the art, behind the top-left corner of
 // the first letter and the lower-right corner of the last. They twinkle
 // during holds and flash when the beam or a reflection reaches them. Flare
-// glyphs (star, rays, streak) are drawn only in the margins; inside the art
-// a flare only tints, so no letter stroke is ever replaced.
+// glyphs (star, rays, streak) are drawn only in the margins; solid ink
+// fills stay exact INK under a flare (theme remaps only exact INK), and
+// outline strokes may brighten but never dim.
 // ---------------------------------------------------------------------------
 
 /// One art cell: glyph and colour. Spaces are never painted.
@@ -472,16 +473,18 @@ pub fn art_frame(elapsed_ms: u64) -> Vec<Vec<ArtCell>> {
                 let core = smoothstep(1.0 - d / CORE_HALF);
                 rgb = lerp_rgb(rgb, WHITE, (halo + core).min(0.95));
             }
-            // Flare glow and streak tint everything nearby.
-            // Outline strokes take only a little tint, so their spectrum
-            // colour stays readable next to a flare.
-            if center.is_none() {
-                let amount = if ch == '█' || in_margin {
-                    tint
+            // Flare glow/streak: margins keep the cool sparkle tint. Solid ink
+            // strokes stay exact INK (or whatever brighter the beam already
+            // painted) so a theme remap of INK cannot leave a gray patch where
+            // the flare washed the fill. Outline strokes brighten only.
+            if center.is_none() && ch != '█' {
+                let amount = if in_margin { tint } else { tint * 0.35 };
+                if in_margin {
+                    rgb = lerp_rgb(rgb, FLARE_WHITE, amount);
                 } else {
-                    tint * 0.35
-                };
-                rgb = lerp_rgb(rgb, FLARE_WHITE, amount);
+                    let lit = lerp_rgb(rgb, WHITE, amount);
+                    rgb = [rgb[0].max(lit[0]), rgb[1].max(lit[1]), rgb[2].max(lit[2])];
+                }
             }
             cells.push((glyph, rgb));
         }
@@ -641,6 +644,41 @@ mod tests {
             );
         }
         assert!(in_hold(SETTLED_MS));
+    }
+
+    #[test]
+    fn art_stroke_cells_never_darker_than_ink() {
+        // Flare glow/streak used to lerp solid fills toward FLARE_WHITE /
+        // FLARE_TINT, which both left █ cells off exact INK (and could dim a
+        // channel). Theme remaps only exact INK, so those cells painted as a
+        // gray wash beside remapped neighbors. Every solid stroke must stay
+        // at or above INK in each channel at every frame; during a hold with
+        // no beam/reflection they must remain pure INK.
+        for ms in (0u64..=INTRO_MS + LOOP_MS).step_by(FRAME_MS as usize) {
+            for (row_i, row) in art_frame(ms).iter().enumerate() {
+                for (col_i, (ch, rgb)) in row.iter().enumerate() {
+                    if *ch != '█' {
+                        continue;
+                    }
+                    assert!(
+                        rgb[0] >= INK[0] && rgb[1] >= INK[1] && rgb[2] >= INK[2],
+                        "█ darker than INK at {ms}ms row {row_i} col {col_i}: {rgb:?}"
+                    );
+                }
+            }
+        }
+        for ms in [
+            SETTLED_MS,
+            SETTLED_MS + FLASH_MS as u64 + 80,
+            SETTLED_MS + 1500,
+        ] {
+            assert!(in_hold(ms), "{ms}ms should be a hold");
+            for (ch, rgb) in art_frame(ms).iter().flatten() {
+                if *ch == '█' {
+                    assert_eq!(*rgb, INK, "hold-frame ink stroke must stay pure INK");
+                }
+            }
+        }
     }
 
     #[test]

@@ -38,7 +38,7 @@ processes across a computer restart.
 | --- | --- |
 | Linux x86_64 and ARM64 | Release downloads for systems with glibc 2.28 or newer. Runs on Wayland and X11. |
 | macOS, Apple Silicon and Intel | Universal signed and notarized release downloads. |
-| Windows x86_64 | Release binaries are available, but Windows is not a supported platform yet. |
+| Windows x86_64 | Signed MSI installer and portable zip release downloads, signed by Moonbase 2090 LLC. |
 
 ## Install on Linux
 
@@ -108,6 +108,22 @@ To preview removal, run `pmux uninstall --dry-run`. Run `pmux uninstall` to
 remove Prismattyc. Add `--keep-data` to keep Spaces and configuration. On
 macOS, uninstall removes `pmux` only when its link matches the one created by
 Prismattyc. See [uninstall details](docs/update-and-restart.md#uninstall).
+
+## Install on Windows
+
+The MSI installer is recommended:
+
+1. Download `prismattyc-vX.Y.Z-x86_64-pc-windows-msvc.msi` from
+   [GitHub Releases](https://github.com/moonbase2090/Prismattyc/releases).
+2. Run the installer. It adds `pmux` to your user `PATH`; open a new
+   terminal afterwards to use it.
+
+For a portable install, download
+`prismattyc-vX.Y.Z-x86_64-pc-windows-msvc.zip`, extract it, and run
+`bin\prismattyc-host.exe`.
+
+The Windows build is signed but new, so if SmartScreen warns, click
+More info, then Run anyway.
 
 ## Use sessions from the command line
 

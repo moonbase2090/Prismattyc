@@ -111,7 +111,7 @@ title = "Spaces"
 [[level.step]]
 id = "spaces.save"
 caption = "Save this space from the rail."
-hint = "Click +, or right-click a chip and choose Save this window here."
+hint = "Right-click the space in the sidebar and choose Save now."
 command = "save_space"
 audio = "spaces.save"
 expect = { kind = "space_event", event = "saved" }
@@ -120,7 +120,7 @@ show_me = { kind = "space_event", event = "saved" }
 [[level.step]]
 id = "spaces.open"
 caption = "Open the saved space from its chip menu."
-hint = "Click the chip to switch, or choose Open from its menu."
+hint = "Click the space in the sidebar, or choose Open / Focus from its menu."
 command = "open_space"
 audio = "spaces.open"
 expect = { kind = "space_event", event = "opened" }

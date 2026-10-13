@@ -6,6 +6,9 @@
 # Usage:
 #   ELEVENLABS_API_KEY=... ./scripts/walkthrough-voice.sh [--voice NAME] [--force] [--dry-run]
 #
+# Each clip voices the step's `spoken` text when set, otherwise its caption.
+# Clips are reused only when the spoken text and voice id both match.
+#
 # Default voice is Russ. The voice id is resolved at run time. Never hard-code it.
 # Fails the whole run on any clip error. Does not leave a partial set in dest.
 
@@ -128,8 +131,9 @@ for level in data.get("level", []):
     for step in level.get("step", []):
         step_id = step.get("audio") or step.get("id")
         caption = step.get("caption") or ""
+        spoken = step.get("spoken") or caption
         if step_id:
-            print(f"{step_id}\t{caption}")
+            print(f"{step_id}\t{spoken}")
 PY
 }
 
@@ -151,6 +155,14 @@ fi
 
 need curl
 need ffmpeg
+
+# Some ffmpeg builds ship without libvorbis. Keep the ElevenLabs MP3 then.
+HAVE_VORBIS=0
+if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libvorbis; then
+  HAVE_VORBIS=1
+else
+  echo "walkthrough-voice: ffmpeg has no libvorbis; keeping MP3 clips" >&2
+fi
 
 if [ -z "${ELEVENLABS_API_KEY:-}" ]; then
   echo "walkthrough-voice: set ELEVENLABS_API_KEY" >&2
@@ -191,15 +203,17 @@ while IFS=$'\t' read -r step_id caption; do
   hash="$(caption_hash "$caption")"
   existing_hash="$(printf '%s' "$old_manifest" | jq -r --arg id "$step_id" '
     (.clips // [])[] | select(.step_id == $id) | .caption_hash // empty' | head -n 1)"
+  existing_vid="$(printf '%s' "$old_manifest" | jq -r '.voice_id // empty')"
   existing_path="$(printf '%s' "$old_manifest" | jq -r --arg id "$step_id" '
     (.clips // [])[] | select(.step_id == $id) | .path // empty' | head -n 1)"
   if [ "$FORCE" -eq 0 ] && [ -n "$existing_hash" ] && [ "$existing_hash" = "$hash" ] \
+    && [ "$existing_vid" = "$voice_id" ] \
     && [ -n "$existing_path" ] && [ -f "$DEST/$existing_path" ]; then
     cp "$DEST/$existing_path" "$stage/$existing_path"
     clips_json="$(printf '%s' "$clips_json" | jq --arg id "$step_id" --arg path "$existing_path" \
       --arg vid "$voice_id" --arg hash "$hash" \
       '. + [{step_id:$id, path:$path, voice_id:$vid, caption_hash:$hash}]')"
-    echo "skip $step_id (caption unchanged)"
+    echo "skip $step_id (text and voice unchanged)"
     continue
   fi
 
@@ -217,15 +231,18 @@ while IFS=$'\t' read -r step_id caption; do
     break
   fi
   ogg="$stage/${step_id}.ogg"
-  if ! ffmpeg -y -loglevel error -i "$mp3" -c:a libvorbis -q:a 0 "$ogg"; then
-    echo "walkthrough-voice: ffmpeg failed for $step_id" >&2
-    fail=1
-    break
+  if [ "$HAVE_VORBIS" -eq 1 ]; then
+    if ! ffmpeg -y -loglevel error -i "$mp3" -c:a libvorbis -q:a 0 "$ogg"; then
+      echo "walkthrough-voice: ffmpeg failed for $step_id" >&2
+      fail=1
+      break
+    fi
   fi
   use_path="${step_id}.ogg"
   use_file="$ogg"
-  ogg_size="$(wc -c <"$ogg")"
   mp3_size="$(wc -c <"$mp3")"
+  ogg_size=$((mp3_size + 1))
+  [ -f "$ogg" ] && ogg_size="$(wc -c <"$ogg")"
   if [ "$mp3_size" -lt "$ogg_size" ]; then
     cp "$mp3" "$stage/${step_id}.mp3"
     use_path="${step_id}.mp3"

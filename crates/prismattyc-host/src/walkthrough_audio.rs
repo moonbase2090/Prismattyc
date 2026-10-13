@@ -128,14 +128,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_manifest_parses_and_has_no_clips() {
+    fn bundled_manifest_matches_bundled_clips() {
         let manifest = load_manifest().expect("bundled manifest");
-        assert_eq!(manifest.voice, "Russ");
+        assert!(manifest.voice.starts_with("Daniel"), "{}", manifest.voice);
+        assert!(!manifest.voice_id.is_empty());
         assert_eq!(manifest.model, "eleven_multilingual_v2");
-        assert!(manifest.clips.is_empty());
-        assert!(clip_lookup("window.split-right").is_none());
-        assert!(clip_lookup("intro").is_none());
-        assert!(CLIPS.is_empty());
+        assert_eq!(manifest.clips.len(), CLIPS.len());
+        for clip in &manifest.clips {
+            assert_eq!(clip.voice_id, manifest.voice_id, "{}", clip.step_id);
+        }
+        assert!(clip_lookup("window.split-right").is_some());
+        assert!(clip_lookup("intro").is_some());
+        assert!(clip_lookup("no.such-step").is_none());
     }
 
     #[test]
@@ -211,5 +215,9 @@ mod tests {
         assert!(text.contains("window.split-right\t"), "{text}");
         assert!(text.contains("power.find\t"), "{text}");
         assert!(text.contains("Welcome to the Prismattyc walkthrough."));
+        assert!(
+            text.contains("seats.new\tCreate a new P Mucks seat."),
+            "{text}"
+        );
     }
 }

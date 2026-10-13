@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Walkthrough captions use sidebar row wording instead of the old rail and chip names. The tab-move step now says to move the tab down one row in the sidebar.
+- Walkthrough narration is bundled, voiced by ElevenLabs Daniel. A step can set `spoken` to change what is voiced without changing its caption, so "pmux" is voiced as "P Mucks".
+- `scripts/walkthrough-voice.sh` regenerates a clip when the voice changes, and keeps MP3 clips when ffmpeg has no libvorbis.
+
 ## [0.3.36] - 2026-10-12
 
 ### Fixed

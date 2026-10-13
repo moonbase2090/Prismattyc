@@ -551,6 +551,22 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn test_mcp() -> PmuxMcp {
+        let agent = AgentId::new("mutant-kill-agent").expect("agent id");
+        // Nonexistent socket: tools that reach pmux must not look like success.
+        PmuxMcp::new(agent, PathBuf::from("/tmp/pmux-mcp-mutant-kill-missing.sock"))
+    }
+
+    fn tool_text(result: &CallToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|block| block.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     #[test]
     fn tools_cover_the_mailbox_verbs() {
@@ -598,6 +614,80 @@ mod tests {
         assert!(
             !text.contains("live seat (`0@1`)"),
             "old seat wording must not remain: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pmux_space_attention_rejects_unknown_action() {
+        let mcp = test_mcp();
+        let result = mcp
+            .pmux_space_attention(Parameters(SpaceAttentionArgs {
+                name: "demo".into(),
+                session: "s".into(),
+                pane: 1,
+                revision: 1,
+                action: "ignore".into(),
+            }))
+            .await
+            .expect("tool result");
+        assert_eq!(result.is_error, Some(true));
+        let text = tool_text(&result);
+        assert!(
+            text.contains("action must be resolve or snooze"),
+            "unknown action must fail closed: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pmux_space_attention_resolve_is_not_the_action_error() {
+        // Deleting `!` in the action guard would treat "resolve" as invalid.
+        let mcp = test_mcp();
+        let result = mcp
+            .pmux_space_attention(Parameters(SpaceAttentionArgs {
+                name: "demo".into(),
+                session: "s".into(),
+                pane: 1,
+                revision: 1,
+                action: "resolve".into(),
+            }))
+            .await
+            .expect("tool result");
+        let text = tool_text(&result);
+        assert!(
+            !text.contains("action must be resolve or snooze"),
+            "resolve must reach the Space command path: {text}"
+        );
+        assert_ne!(
+            result,
+            CallToolResult::default(),
+            "resolve must not collapse to an empty default result"
+        );
+        assert!(
+            result.is_error == Some(true) || !result.content.is_empty(),
+            "missing daemon must still produce a tool-level error payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn pmux_space_link_invokes_space_command_not_empty_default() {
+        let mcp = test_mcp();
+        let result = mcp
+            .pmux_space_link(Parameters(SpaceLinkArgs {
+                name: "demo".into(),
+                label: "docs".into(),
+                target: "https://example.com/x".into(),
+            }))
+            .await
+            .expect("tool result");
+        assert_ne!(
+            result,
+            CallToolResult::default(),
+            "link must not short-circuit to Ok(Default::default())"
+        );
+        assert_eq!(result.is_error, Some(true));
+        assert!(
+            !tool_text(&result).is_empty(),
+            "failed link must report why the Space command did not run"
         );
     }
 }

@@ -1142,6 +1142,8 @@ impl Screen {
     }
 
     fn apply_scroll_event(&mut self, event: ScrollDamage) {
+        // Reject inverted regions before clamping so a top past the
+        // viewport cannot collapse into a single-row blank.
         if event.delta == 0 || event.bottom < event.top {
             return;
         }
@@ -1152,6 +1154,8 @@ impl Screen {
         }
         let height = bottom - top + 1;
         let n = (event.delta.unsigned_abs() as usize).min(height);
+        let columns = self.columns;
+        let style = self.active().style;
         let buf = self.active_mut();
         if event.delta > 0 {
             if n < height {
@@ -1160,10 +1164,29 @@ impl Screen {
                     buf.wrapped.copy_within(top + n..=bottom, top);
                 }
             }
-        } else if n < height {
-            buf.cells.scroll_down(top, bottom, n);
+            // Match scroll_up_region: blank vacated bottom rows when n == height too.
+            let fill_start = (bottom + 1 - n) * columns;
+            let fill_end = (bottom + 1) * columns;
+            erase_range(&mut buf.cells, fill_start, fill_end, style);
             if bottom < buf.wrapped.len() {
-                buf.wrapped.copy_within(top..=bottom - n, top + n);
+                for row in (bottom + 1 - n)..=bottom {
+                    buf.wrapped[row] = false;
+                }
+            }
+        } else {
+            if n < height {
+                buf.cells.scroll_down(top, bottom, n);
+                if bottom < buf.wrapped.len() {
+                    buf.wrapped.copy_within(top..=bottom - n, top + n);
+                }
+            }
+            let fill_start = top * columns;
+            let fill_end = (top + n) * columns;
+            erase_range(&mut buf.cells, fill_start, fill_end, style);
+            if bottom < buf.wrapped.len() {
+                for row in top..top + n {
+                    buf.wrapped[row] = false;
+                }
             }
         }
     }
@@ -5476,6 +5499,60 @@ mod tests {
         assert_eq!(text(&screen, 1), " ");
         assert_eq!(text(&screen, 2), " ");
         assert_eq!(text(&screen, 3), "d");
+    }
+
+    #[test]
+    fn apply_scroll_event_single_row_region_blanks_that_row() {
+        // bottom == top must still blank (rejects `bottom < top` → `<=`).
+        let mut screen = Screen::new(3, 3, 0);
+        for (row, ch) in ['a', 'b', 'c'].iter().enumerate() {
+            screen.set_cursor_position(row, 0);
+            screen.put_char(*ch);
+        }
+        screen.apply_scroll_event(ScrollDamage {
+            top: 1,
+            bottom: 1,
+            delta: 1,
+        });
+        assert_eq!(text(&screen, 0), "a  ");
+        assert_eq!(text(&screen, 1), "   ");
+        assert_eq!(text(&screen, 2), "c  ");
+    }
+
+    #[test]
+    fn apply_scroll_event_inverted_region_is_noop() {
+        // bottom < top returns before clamping; otherwise top=10,bottom=0 on a
+        // 3-row screen collapses to blanking the last row (`<` → `==`).
+        let mut screen = Screen::new(3, 3, 0);
+        for (row, ch) in ['a', 'b', 'c'].iter().enumerate() {
+            screen.set_cursor_position(row, 0);
+            screen.put_char(*ch);
+        }
+        screen.apply_scroll_event(ScrollDamage {
+            top: 10,
+            bottom: 0,
+            delta: 1,
+        });
+        assert_eq!(text(&screen, 0), "a  ");
+        assert_eq!(text(&screen, 1), "b  ");
+        assert_eq!(text(&screen, 2), "c  ");
+    }
+
+    #[test]
+    fn apply_scroll_event_multi_row_moves_and_blanks() {
+        let mut screen = Screen::new(3, 3, 0);
+        for (row, ch) in ['a', 'b', 'c'].iter().enumerate() {
+            screen.set_cursor_position(row, 0);
+            screen.put_char(*ch);
+        }
+        screen.apply_scroll_event(ScrollDamage {
+            top: 0,
+            bottom: 2,
+            delta: 1,
+        });
+        assert_eq!(text(&screen, 0), "b  ");
+        assert_eq!(text(&screen, 1), "c  ");
+        assert_eq!(text(&screen, 2), "   ");
     }
 
     #[test]

@@ -2,5 +2,101 @@
   "voice": "default",
   "voice_id": "",
   "model": "default",
-  "clips": []
+  "clips": [
+    {
+      "step_id": "intro",
+      "path": "intro.mp3",
+      "caption_hash": "bdf5ccdb50968bd1c6d4f1b25e8d7f0f9997d8eafa16446fec5c3e0f01f5fe9e"
+    },
+    {
+      "step_id": "window.split-right",
+      "path": "window.split-right.mp3",
+      "caption_hash": "048ffefc2a8e9df995b5bceeeb55f7a29c659c0118a33548c9fde39513546ca6"
+    },
+    {
+      "step_id": "window.focus-right",
+      "path": "window.focus-right.mp3",
+      "caption_hash": "21f1cfd330bfc909b6d9a48926752182ebef1d202cb5d72397d7c4b26d5389b5"
+    },
+    {
+      "step_id": "window.close-pane",
+      "path": "window.close-pane.mp3",
+      "caption_hash": "ce47d8ddc0560ce1abf6db0b90e415b6539f22e347f30c01583ad20eaaddc582"
+    },
+    {
+      "step_id": "tabs.new",
+      "path": "tabs.new.mp3",
+      "caption_hash": "b7e3f936d81dcf1f6ed711d4680308928b823dbff3a49f11714b4af1cf65e5f0"
+    },
+    {
+      "step_id": "tabs.rename",
+      "path": "tabs.rename.mp3",
+      "caption_hash": "02d64abed554d096d814387365774845b95b6af08c8c0fc0720fffe81f51fb32"
+    },
+    {
+      "step_id": "tabs.move-pane",
+      "path": "tabs.move-pane.mp3",
+      "caption_hash": "cf0057ce355fdcd5e0a67b1ef958f650475928782a2a6c3918167f486d2531b1"
+    },
+    {
+      "step_id": "tabs.drag",
+      "path": "tabs.drag.mp3",
+      "caption_hash": "a6e4168d03cd67af4990075c4dadf14f85f28d043fc3222df708a2236b5e865a"
+    },
+    {
+      "step_id": "seats.new",
+      "path": "seats.new.mp3",
+      "caption_hash": "85e1bc90dc18b3fe5218c366844b705c4a9fa1ecd3af8a243f714d535d527db9"
+    },
+    {
+      "step_id": "seats.attach-all",
+      "path": "seats.attach-all.mp3",
+      "caption_hash": "a1edf9cb247db468703a120e40032577166d28aa8e9d71f1d48a1a2a0a1d49ca"
+    },
+    {
+      "step_id": "seats.mail",
+      "path": "seats.mail.mp3",
+      "caption_hash": "07e88b10178977a4dc3385a9c8b1e534fd9d8643e545e74463935b02672f4474"
+    },
+    {
+      "step_id": "spaces.save",
+      "path": "spaces.save.mp3",
+      "caption_hash": "30814928b419f9edd668d8324532c553dd811e5e241c6a8f6dcbb61c4ed08f3f"
+    },
+    {
+      "step_id": "spaces.open",
+      "path": "spaces.open.mp3",
+      "caption_hash": "0d71c7935374984f0a1a638ba7e2a869770b559131a74a18e82c14dce07cab9f"
+    },
+    {
+      "step_id": "spaces.reopen",
+      "path": "spaces.reopen.mp3",
+      "caption_hash": "d7fac0c52c9106af70a6c21e5261a2a1379100b061ae220b094c16f9436c1706"
+    },
+    {
+      "step_id": "power.palette",
+      "path": "power.palette.mp3",
+      "caption_hash": "c532a41cd4645cb532cdeed817514a31399972be31b7c7bd47370b604fce8b77"
+    },
+    {
+      "step_id": "power.preset",
+      "path": "power.preset.mp3",
+      "caption_hash": "68aa0dd0721936656372ecd5621ddb864a9de6f471a3f7af9b834a32d196ca79"
+    },
+    {
+      "step_id": "power.zoom",
+      "path": "power.zoom.mp3",
+      "caption_hash": "b0fd416ec6d386e935fe57d252caaa4d408dfbac48c1bd6340e2984c0eb873ee"
+    },
+    {
+      "step_id": "power.find",
+      "path": "power.find.mp3",
+      "caption_hash": "c5f182e07a1e0d8facd18ba263ddeb330b13335e343006ea0e6e697371fad56e"
+    },
+    {
+      "step_id": "boss.reproduce-space",
+      "path": "boss.reproduce-space.mp3",
+      "caption_hash": "0c7879b1fe38fe6971d852986007874d10410b96c0465368a48c2d449e4f467b"
+    }
+  ]
 }

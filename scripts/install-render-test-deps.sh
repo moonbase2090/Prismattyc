@@ -3,7 +3,7 @@
 set -euo pipefail
 # Xvfb supplies the server. winit loads these client libraries at runtime.
 packages=(xvfb libx11-6 libx11-xcb1 libxcursor1 libxi6 libxrandr2
-          libxkbcommon-x11-0 libxcb1 libxcb-shm0 fonts-noto-cjk)
+          libxkbcommon0 libxkbcommon-x11-0 libxcb1 libxcb-shm0 fonts-noto-cjk)
 if dpkg-query -W -f='${Status}\n' "${packages[@]}" 2>/dev/null \
     | awk '$0 != "install ok installed" { bad = 1 } END { exit bad }'; then
   exit 0

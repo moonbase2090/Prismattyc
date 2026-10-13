@@ -271,7 +271,7 @@ jobs:
           chmod +x build/mutants/tools/bin/cargo-mutants build/mutants/tools/bin/cargo-nextest
           echo "$GITHUB_WORKSPACE/build/mutants/tools/bin" >> "$GITHUB_PATH"
 
-      - name: Install Rust toolchain and tmux
+      - name: Install Rust toolchain and test dependencies
         run: |
           set -euo pipefail
           if ! command -v rustup >/dev/null 2>&1; then
@@ -284,6 +284,7 @@ jobs:
           rustup default 1.90.0
           sudo apt-get update -qq
           sudo apt-get install -y -qq tmux
+          ./scripts/install-render-test-deps.sh
           echo "TMUX_TMPDIR=$RUNNER_TEMP/mutants-tmux" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/mutants-tmux"
 
@@ -330,31 +331,31 @@ jobs:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
       - name: No mutatable Rust changes
-        if: ${{ needs.plan.outputs.in_diff_has_mutants != 'true' }}
+        if: ${{ needs.plan.outputs.in_diff_has_mutants != 'true' && !(github.event_name == 'workflow_dispatch' && matrix.shard == 0) }}
         run: echo "No mutatable Rust changes since the selected base"
 
       - name: Check out current head with history
-        if: ${{ needs.plan.outputs.in_diff_has_mutants == 'true' }}
+        if: ${{ needs.plan.outputs.in_diff_has_mutants == 'true' || (github.event_name == 'workflow_dispatch' && matrix.shard == 0) }}
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0, Node 24
         with:
           ref: ${{ needs.plan.outputs.head_sha }}
           fetch-depth: 0
 
       - name: Download pinned mutation tools
-        if: ${{ needs.plan.outputs.in_diff_has_mutants == 'true' }}
+        if: ${{ needs.plan.outputs.in_diff_has_mutants == 'true' || (github.event_name == 'workflow_dispatch' && matrix.shard == 0) }}
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0, Node 24
         with:
           name: mutants-nightly-plan
           path: build/mutants
 
       - name: Add mutation tools to PATH
-        if: ${{ needs.plan.outputs.in_diff_has_mutants == 'true' }}
+        if: ${{ needs.plan.outputs.in_diff_has_mutants == 'true' || (github.event_name == 'workflow_dispatch' && matrix.shard == 0) }}
         run: |
           chmod +x build/mutants/tools/bin/cargo-mutants build/mutants/tools/bin/cargo-nextest
           echo "$GITHUB_WORKSPACE/build/mutants/tools/bin" >> "$GITHUB_PATH"
 
-      - name: Install Rust toolchain and tmux
-        if: ${{ needs.plan.outputs.in_diff_has_mutants == 'true' }}
+      - name: Install Rust toolchain and test dependencies
+        if: ${{ needs.plan.outputs.in_diff_has_mutants == 'true' || (github.event_name == 'workflow_dispatch' && matrix.shard == 0) }}
         run: |
           set -euo pipefail
           if ! command -v rustup >/dev/null 2>&1; then
@@ -367,11 +368,12 @@ jobs:
           rustup default 1.90.0
           sudo apt-get update -qq
           sudo apt-get install -y -qq tmux
+          ./scripts/install-render-test-deps.sh
           echo "TMUX_TMPDIR=$RUNNER_TEMP/mutants-tmux" >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/mutants-tmux"
 
       - name: Run current-head mutation baseline once
-        if: ${{ needs.plan.outputs.in_diff_has_mutants == 'true' && matrix.shard == 0 && (needs.plan.outputs.head_sha != needs.plan.outputs.cycle_sha || needs.plan.outputs.nextest_profile == 'mutants-slow') }}
+        if: ${{ matrix.shard == 0 && (github.event_name == 'workflow_dispatch' || (needs.plan.outputs.in_diff_has_mutants == 'true' && (needs.plan.outputs.head_sha != needs.plan.outputs.cycle_sha || needs.plan.outputs.nextest_profile == 'mutants-slow'))) }}
         timeout-minutes: 60
         run: |
           set -euo pipefail
@@ -391,7 +393,7 @@ jobs:
         run: ./scripts/mutants-nightly.sh
 
       - name: Clean up orphaned test services
-        if: ${{ always() && needs.plan.outputs.in_diff_has_mutants == 'true' }}
+        if: ${{ always() && (needs.plan.outputs.in_diff_has_mutants == 'true' || (github.event_name == 'workflow_dispatch' && matrix.shard == 0)) }}
         run: python3 scripts/mutants-nightly-process-cleanup.py --phase after
 
       - name: Add in-diff outcomes to the job summary

@@ -486,8 +486,8 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey {
         name: "walkthrough_voice",
         group: ConfigGroup::BellsAttention,
-        doc: "ElevenLabs voice name for scripts/walkthrough-voice.sh (generation only)",
-        range: "voice name",
+        doc: "Narration profile for regenerating clips (generation only)",
+        range: "narration profile",
         value: ConfigValue::String(crate::config::DEFAULT_WALKTHROUGH_VOICE),
     },
     ConfigKey {

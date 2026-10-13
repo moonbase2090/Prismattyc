@@ -1,6 +1,6 @@
 {
-  "voice": "Russ",
+  "voice": "default",
   "voice_id": "",
-  "model": "eleven_multilingual_v2",
+  "model": "default",
   "clips": []
 }

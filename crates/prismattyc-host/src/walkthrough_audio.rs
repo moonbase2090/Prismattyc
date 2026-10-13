@@ -1,7 +1,7 @@
 //! Bundled walkthrough narration (PT-197).
 //!
-//! Clips are generated offline by `scripts/walkthrough-voice.sh`. Runtime
-//! never calls ElevenLabs. Missing clips, disabled audio, or no player
+//! Clips are generated offline and bundled. Runtime makes no network
+//! calls. Missing clips, disabled audio, or no player
 //! leave the caption flow unchanged.
 
 use std::path::{Path, PathBuf};
@@ -130,8 +130,8 @@ mod tests {
     #[test]
     fn empty_manifest_parses_and_has_no_clips() {
         let manifest = load_manifest().expect("bundled manifest");
-        assert_eq!(manifest.voice, "Russ");
-        assert_eq!(manifest.model, "eleven_multilingual_v2");
+        assert_eq!(manifest.voice, "default");
+        assert_eq!(manifest.model, "default");
         assert!(manifest.clips.is_empty());
         assert!(clip_lookup("window.split-right").is_none());
         assert!(clip_lookup("intro").is_none());
@@ -185,31 +185,5 @@ mod tests {
             sum <= MAX_BUNDLE_BYTES,
             "walkthrough clips are {sum} bytes; cap is {MAX_BUNDLE_BYTES}"
         );
-    }
-
-    #[test]
-    fn voice_script_dry_run_lists_intro_and_steps() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let script = root.join("scripts/walkthrough-voice.sh");
-        let output = std::process::Command::new("bash")
-            .arg(&script)
-            .arg("--dry-run")
-            .arg("--voice")
-            .arg("Russ")
-            .current_dir(&root)
-            .output()
-            .expect("run walkthrough-voice.sh --dry-run");
-        assert!(
-            output.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let text = String::from_utf8_lossy(&output.stdout);
-        assert!(text.contains("voice=Russ"), "{text}");
-        assert!(text.contains("source=flag"), "{text}");
-        assert!(text.contains("intro\t"), "{text}");
-        assert!(text.contains("window.split-right\t"), "{text}");
-        assert!(text.contains("power.find\t"), "{text}");
-        assert!(text.contains("Welcome to the Prismattyc walkthrough."));
     }
 }

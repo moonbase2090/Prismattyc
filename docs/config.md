@@ -767,7 +767,9 @@ the current list is taller than the window. `Enter` atomically updates the
 config choices, but the picker lists the curated built-ins.
 
 Use the `open_config` palette action to open `config.toml` in `$VISUAL`, then
-`$EDITOR`, or `nano`. The action creates the default template only when the
+`$EDITOR`, in a new terminal window. When neither is set, macOS and Linux use
+`nano` in that window, and Windows opens Notepad (`notepad.exe`) in its own
+window with no terminal window. The action creates the default template only when the
 file is missing. It does not parse the file before opening the editor, so you
 can repair malformed TOML.
 

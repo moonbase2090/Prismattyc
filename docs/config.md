@@ -204,8 +204,8 @@ attention_badge = true
 os_notify_attention = true
 # Play bundled walkthrough narration; missing clips stay silent. true|false.
 walkthrough_audio = true
-# ElevenLabs voice name for scripts/walkthrough-voice.sh (generation only). voice name.
-walkthrough_voice = "russ"
+# Narration profile for regenerating clips (generation only). narration profile.
+walkthrough_voice = "default"
 
 # -- background --
 # Window background PNG; absolute path, PNG only. absolute path.
@@ -1134,8 +1134,8 @@ the file applies changes on the next poll tick:
   Disabling the option clears a live accent; it does not replay it in the old mode.
 - `walkthrough_audio` — apply to the next walkthrough clip. Deleting the
   key restores `true`. Missing clips, `false`, or no player leave captions
-  unchanged. `walkthrough_voice` is generation-time only
-  (`scripts/walkthrough-voice.sh --voice`); playback uses bundled clips.
+  unchanged. `walkthrough_voice` is generation-time only;
+  playback uses bundled clips.
 - `attention_sound` / `attention_badge` / `os_notify_attention` — apply to
   the next agent-attention signal; deleting a key restores sound, badge, and
   OS notifications. Attention OS notifications still throttle per pane.

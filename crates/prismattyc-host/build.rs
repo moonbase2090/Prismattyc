@@ -22,7 +22,7 @@ fn main() {
     let manifest = Path::new("assets/walkthrough/manifest.json");
     println!("cargo:rerun-if-changed={}", manifest.display());
     let text = fs::read_to_string(manifest).unwrap_or_else(|_| {
-        r#"{"voice":"Russ","voice_id":"","model":"eleven_multilingual_v2","clips":[]}"#.into()
+        r#"{"voice":"default","voice_id":"","model":"default","clips":[]}"#.into()
     });
     let parsed: Manifest = serde_json::from_str(&text).unwrap_or(Manifest { clips: Vec::new() });
     let mut out = String::from(

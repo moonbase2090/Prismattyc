@@ -1,7 +1,7 @@
 {
-  "voice": "narration",
+  "voice": "default",
   "voice_id": "",
-  "model": "",
+  "model": "default",
   "clips": [
     {
       "step_id": "intro",

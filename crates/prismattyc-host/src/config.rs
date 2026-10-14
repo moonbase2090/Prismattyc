@@ -43,7 +43,7 @@ pub const DEFAULT_SPACE_RAIL: &str = "bottom";
 /// `0` means the built-in cap of 28.
 pub const DEFAULT_SPACE_RAIL_CHIP_COLS: usize = 0;
 pub const SPACE_RAIL_CHIP_COLS_RANGE: std::ops::RangeInclusive<usize> = 6..=40;
-pub const DEFAULT_WALKTHROUGH_VOICE: &str = "russ";
+pub const DEFAULT_WALKTHROUGH_VOICE: &str = "default";
 
 /// Render instrumentation output. Off keeps the hot path silent; `osd` paints
 /// the last frame on screen; `log` writes it to stderr; `both` does both.
@@ -339,8 +339,8 @@ pub struct ConfigFile {
     /// Play bundled walkthrough narration clips. Default true. Missing clips
     /// stay silent. Hot-reloaded.
     pub walkthrough_audio: Option<bool>,
-    /// ElevenLabs voice name for `scripts/walkthrough-voice.sh`. Generation
-    /// time only; playback uses whatever clips are bundled. Default `russ`.
+    /// Narration profile used when clips are regenerated. Generation
+    /// time only; playback uses whatever clips are bundled. Default `default`.
     pub walkthrough_voice: Option<String>,
     /// Absolute path to a PNG painted under the cell grid. PNG only.
     pub background_image: Option<PathBuf>,
@@ -1450,10 +1450,10 @@ mod tests {
         assert!(!loaded.os_notify_attention());
         assert!(ConfigFile::default().walkthrough_audio());
         assert!(ConfigFile::default().walkthrough_voice.is_none());
-        std::fs::write(&path, "walkthrough_voice = \"Daniel\"\n").unwrap();
+        std::fs::write(&path, "walkthrough_voice = \"narrator-b\"\n").unwrap();
         assert_eq!(
             load(&path).unwrap().walkthrough_voice.as_deref(),
-            Some("Daniel")
+            Some("narrator-b")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

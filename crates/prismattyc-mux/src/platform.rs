@@ -156,20 +156,145 @@ mod windows {
             {
                 return Err(io::Error::last_os_error());
             }
-            let code = SetNamedSecurityInfoW(
+            // Owner and DACL in one call. An elevated token would otherwise
+            // leave the new file owned by BUILTIN\Administrators, which
+            // `owned_socket` refuses.
+            let mut owner = ptr::null_mut();
+            if ConvertStringSidToSidW(wide(std::ffi::OsStr::new(&sid)).as_ptr(), &mut owner) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let _owner = Local(owner);
+            let info = OWNER_SECURITY_INFORMATION
+                | DACL_SECURITY_INFORMATION
+                | PROTECTED_DACL_SECURITY_INFORMATION;
+            set_security(path, info, owner, acl)?;
+        }
+        Ok(())
+    }
+    fn set_security(
+        path: &Path,
+        info: u32,
+        owner: *mut core::ffi::c_void,
+        acl: *mut ACL,
+    ) -> io::Result<()> {
+        let apply = |owner| unsafe {
+            SetNamedSecurityInfoW(
                 wide(path.as_os_str()).as_ptr(),
                 SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                ptr::null_mut(),
+                info,
+                owner,
                 ptr::null_mut(),
                 acl,
                 ptr::null_mut(),
-            );
-            if code != 0 {
-                return Err(io::Error::from_raw_os_error(code as i32));
+            )
+        };
+        let mut code = apply(owner);
+        if code == ERROR_INVALID_OWNER || code == ERROR_ACCESS_DENIED {
+            if enable_restore_privilege() {
+                code = apply(owner);
+                disable_restore_privilege();
             }
         }
+        if code != 0 {
+            return Err(io::Error::from_raw_os_error(code as i32));
+        }
         Ok(())
+    }
+    fn enable_restore_privilege() -> bool {
+        adjust_restore_privilege(SE_PRIVILEGE_ENABLED)
+    }
+    fn disable_restore_privilege() {
+        let _ = adjust_restore_privilege(0);
+    }
+    fn adjust_restore_privilege(attributes: u32) -> bool {
+        unsafe {
+            let mut token = ptr::null_mut();
+            if OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                &mut token,
+            ) == 0
+            {
+                return false;
+            }
+            let token = Handle(token);
+            let mut luid = std::mem::zeroed();
+            if LookupPrivilegeValueW(ptr::null(), SE_RESTORE_NAME, &mut luid) == 0 {
+                return false;
+            }
+            let mut privileges = TOKEN_PRIVILEGES {
+                PrivilegeCount: 1,
+                Privileges: [LUID_AND_ATTRIBUTES {
+                    Luid: luid,
+                    Attributes: attributes,
+                }],
+            };
+            let ok = AdjustTokenPrivileges(
+                token.0,
+                0,
+                &mut privileges,
+                0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            );
+            ok != 0 && GetLastError() != ERROR_NOT_ALL_ASSIGNED
+        }
+    }
+    fn sid_eq(left: *mut core::ffi::c_void, text: &str) -> bool {
+        if left.is_null() {
+            return false;
+        }
+        unsafe {
+            let mut right = ptr::null_mut();
+            if ConvertStringSidToSidW(wide(std::ffi::OsStr::new(text)).as_ptr(), &mut right) == 0 {
+                return false;
+            }
+            let _right = Local(right);
+            EqualSid(left, right) != 0
+        }
+    }
+    /// User-owned, or an elevated create whose owner is still
+    /// BUILTIN\Administrators but whose DACL was already replaced with the
+    /// private user ACL. Anything else stays foreign and is not unlinked.
+    fn security_is_user_socket(
+        owner: *mut core::ffi::c_void,
+        dacl: *mut ACL,
+        sd: *mut core::ffi::c_void,
+    ) -> bool {
+        let Ok(user) = user_sid() else {
+            return false;
+        };
+        if sid_eq(owner, &user) {
+            return true;
+        }
+        if !sid_eq(owner, "S-1-5-32-544") {
+            return false;
+        }
+        use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+        unsafe {
+            let mut control = 0;
+            let mut revision = 0;
+            if GetSecurityDescriptorControl(sd, &mut control, &mut revision) == 0
+                || control & SE_DACL_PROTECTED == 0
+                || dacl.is_null()
+                || (*dacl).AceCount != 1
+            {
+                return false;
+            }
+            let mut ace = ptr::null_mut();
+            if GetAce(dacl, 0, &mut ace) == 0 {
+                return false;
+            }
+            let header = &*ace.cast::<ACE_HEADER>();
+            if header.AceType != 0 || u32::from(header.AceFlags) & INHERITED_ACE != 0 {
+                return false;
+            }
+            let allowed = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+            if allowed.Mask != FILE_ALL_ACCESS {
+                return false;
+            }
+            sid_eq((&allowed.SidStart as *const u32).cast_mut().cast(), &user)
+        }
     }
     pub fn user_directory() -> io::Result<std::path::PathBuf> {
         let base = std::env::var_os("LOCALAPPDATA")
@@ -188,6 +313,13 @@ mod windows {
         Ok(dir)
     }
     fn directory_security(path: &Path, require_private: bool) -> io::Result<()> {
+        directory_security_claim(path, require_private, true)
+    }
+    fn directory_security_claim(
+        path: &Path,
+        require_private: bool,
+        claim_admin_owner: bool,
+    ) -> io::Result<()> {
         use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
         // Refuse redirects at every existing component before touching a DACL.
         for ancestor in path.ancestors() {
@@ -234,10 +366,17 @@ mod windows {
             }
             let _sid = Local(expected);
             if owner.is_null() || EqualSid(owner, expected) == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "runtime directory belongs to another user",
-                ));
+                // An elevated creator owns new directories as Administrators.
+                // Take the owner back before the private DACL is applied.
+                if !claim_admin_owner || !sid_eq(owner, "S-1-5-32-544") {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "runtime directory belongs to another user",
+                    ));
+                }
+                drop(_guard);
+                set_security(path, OWNER_SECURITY_INFORMATION, expected, ptr::null_mut())?;
+                return directory_security_claim(path, require_private, false);
             }
             if !require_private {
                 return Ok(());
@@ -324,14 +463,15 @@ mod windows {
                 return false;
             }
             let mut owner = ptr::null_mut();
+            let mut dacl = ptr::null_mut();
             let mut sd = ptr::null_mut();
             let code = GetNamedSecurityInfoW(
                 wide(path.as_os_str()).as_ptr(),
                 SE_FILE_OBJECT,
-                OWNER_SECURITY_INFORMATION,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
                 &mut owner,
                 ptr::null_mut(),
-                ptr::null_mut(),
+                &mut dacl,
                 ptr::null_mut(),
                 &mut sd,
             );
@@ -339,16 +479,7 @@ mod windows {
                 return false;
             }
             let _guard = Local(sd);
-            let Ok(sid) = user_sid() else {
-                return false;
-            };
-            let mut expected = ptr::null_mut();
-            if ConvertStringSidToSidW(wide(std::ffi::OsStr::new(&sid)).as_ptr(), &mut expected) == 0
-            {
-                return false;
-            }
-            let _sid = Local(expected);
-            EqualSid(owner, expected) != 0
+            security_is_user_socket(owner, dacl, sd)
         }
     }
     pub fn process_alive(pid: u32) -> bool {
@@ -369,6 +500,7 @@ mod windows {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::ptr;
 
         #[test]
         fn second_secure_directory_does_not_rewrite_the_dacl() {
@@ -388,6 +520,184 @@ mod windows {
                 once,
                 "an already-private directory must not propagate a new DACL"
             );
+        }
+
+        #[test]
+        fn administrators_owned_private_socket_counts_as_the_user() {
+            let user = user_sid().unwrap();
+            assert!(
+                accepts_sddl(&format!("O:{user}D:(A;;GA;;;WD)")),
+                "a user-owned socket stays usable"
+            );
+            assert!(
+                accepts_sddl(&format!("O:BAD:P(A;;FA;;;{user})")),
+                "an elevated install's private socket must not stay foreign"
+            );
+            assert!(
+                !accepts_sddl("O:BAD:P(A;;FA;;;BA)"),
+                "an Administrators ACL is foreign"
+            );
+            assert!(
+                !accepts_sddl(&format!("O:BAD:(A;;FA;;;{user})")),
+                "an unprotected Administrators-owned DACL is foreign"
+            );
+            assert!(
+                !accepts_sddl(&format!("O:SYD:P(A;;FA;;;{user})")),
+                "a system-owned socket is foreign"
+            );
+        }
+
+        #[test]
+        fn set_mode_assigns_the_user_owner_and_private_dacl() {
+            let dir = std::env::temp_dir().join(format!("prismattyc-owner-{}", std::process::id()));
+            let _cleanup = RemoveDir(&dir);
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            let file = dir.join("endpoint");
+            fs::write(&file, b"x").unwrap();
+            set_mode(&file, 0o600).unwrap();
+            let user = user_sid().unwrap();
+            assert_eq!(owner_text(&file).unwrap(), user);
+            assert!(
+                file_dacl_is_private_user(&file),
+                "set_mode must leave one protected user ACE"
+            );
+        }
+
+        #[test]
+        #[ignore = "planting an Administrators owner needs an elevated token"]
+        fn secure_directory_claims_an_administrators_owner() {
+            let dir = std::env::temp_dir().join(format!("prismattyc-claim-{}", std::process::id()));
+            let _cleanup = RemoveDir(&dir);
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            let mut admins = ptr::null_mut();
+            unsafe {
+                if ConvertStringSidToSidW(
+                    wide(std::ffi::OsStr::new("S-1-5-32-544")).as_ptr(),
+                    &mut admins,
+                ) == 0
+                {
+                    panic!("Administrators SID");
+                }
+            }
+            let _admins = Local(admins);
+            set_security(&dir, OWNER_SECURITY_INFORMATION, admins, ptr::null_mut())
+                .expect("an elevated token can assign the Administrators owner");
+            secure_directory(&dir).unwrap();
+            assert_eq!(owner_text(&dir).unwrap(), user_sid().unwrap());
+            require_private_directory(&dir).unwrap();
+        }
+
+        fn accepts_sddl(sddl: &str) -> bool {
+            unsafe {
+                let mut sd = ptr::null_mut();
+                if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    wide(std::ffi::OsStr::new(sddl)).as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut sd,
+                    ptr::null_mut(),
+                ) == 0
+                {
+                    return false;
+                }
+                let _guard = Local(sd);
+                let mut owner = ptr::null_mut();
+                let mut owner_defaulted = 0;
+                if GetSecurityDescriptorOwner(sd, &mut owner, &mut owner_defaulted) == 0 {
+                    return false;
+                }
+                let mut present = 0;
+                let mut dacl = ptr::null_mut();
+                let mut dacl_defaulted = 0;
+                if GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut dacl_defaulted) == 0
+                {
+                    return false;
+                }
+                security_is_user_socket(
+                    owner,
+                    if present == 0 { ptr::null_mut() } else { dacl },
+                    sd,
+                )
+            }
+        }
+
+        fn owner_text(path: &Path) -> io::Result<String> {
+            unsafe {
+                let mut owner = ptr::null_mut();
+                let mut sd = ptr::null_mut();
+                let code = GetNamedSecurityInfoW(
+                    wide(path.as_os_str()).as_ptr(),
+                    SE_FILE_OBJECT,
+                    OWNER_SECURITY_INFORMATION,
+                    &mut owner,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    &mut sd,
+                );
+                if code != 0 {
+                    return Err(io::Error::from_raw_os_error(code as i32));
+                }
+                let _guard = Local(sd);
+                let mut text = ptr::null_mut();
+                if ConvertSidToStringSidW(owner, &mut text) == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let _text = Local(text.cast());
+                let mut n = 0;
+                while *text.add(n) != 0 {
+                    n += 1;
+                }
+                Ok(String::from_utf16_lossy(std::slice::from_raw_parts(
+                    text, n,
+                )))
+            }
+        }
+
+        fn file_dacl_is_private_user(path: &Path) -> bool {
+            unsafe {
+                let mut dacl = ptr::null_mut();
+                let mut sd = ptr::null_mut();
+                let code = GetNamedSecurityInfoW(
+                    wide(path.as_os_str()).as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    &mut dacl,
+                    ptr::null_mut(),
+                    &mut sd,
+                );
+                if code != 0 {
+                    return false;
+                }
+                let _guard = Local(sd);
+                let mut control = 0;
+                let mut revision = 0;
+                if GetSecurityDescriptorControl(sd, &mut control, &mut revision) == 0
+                    || control & SE_DACL_PROTECTED == 0
+                    || dacl.is_null()
+                    || (*dacl).AceCount != 1
+                {
+                    return false;
+                }
+                let mut ace = ptr::null_mut();
+                if GetAce(dacl, 0, &mut ace) == 0 {
+                    return false;
+                }
+                let header = &*ace.cast::<ACE_HEADER>();
+                if header.AceType != 0 || u32::from(header.AceFlags) & INHERITED_ACE != 0 {
+                    return false;
+                }
+                let allowed = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+                use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+                allowed.Mask == FILE_ALL_ACCESS
+                    && sid_eq(
+                        (&allowed.SidStart as *const u32).cast_mut().cast(),
+                        &user_sid().unwrap(),
+                    )
+            }
         }
 
         struct RemoveDir<'a>(&'a Path);

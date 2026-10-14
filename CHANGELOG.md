@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- A Windows MSI install prepends `%LOCALAPPDATA%\Programs\Prismattyc\cmd` to the user PATH, registers `pmuxd` to start at logon, and runs `pmux up` before the installer returns. If `pmux up` fails, the installer writes a warning and still finishes. Uninstall removes that PATH entry and the logon registration. `ADDTOPATH=0` still leaves PATH unchanged and still starts `pmuxd`.
+- A Windows MSI install prepends `%LOCALAPPDATA%\Programs\Prismattyc\cmd` to the user PATH, registers `pmuxd` to start at logon, and runs `pmux up` before the installer returns. If `pmux up` fails, the installer writes a warning and still finishes. An elevated install assigns the socket to the user instead of leaving it owned by `BUILTIN\Administrators`. A stale socket that already has that Administrators owner and the private user ACL can be replaced by a later `pmux up`. Uninstall removes that PATH entry and the logon registration. `ADDTOPATH=0` still leaves PATH unchanged and still starts `pmuxd`.
 
 ### Changed
 

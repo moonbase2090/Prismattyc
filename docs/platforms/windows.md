@@ -65,7 +65,11 @@ runs `bin\pmux.exe up`, which starts `pmuxd` when the default socket is down
 and leaves a running daemon alone. A commit action runs that script after
 the files are installed. If `pmux up` fails, the script writes a warning and
 the install still finishes with the files in place. Sign in again, or run
-`pmux up` from the `cmd` directory, before creating a session. Uninstall
+`pmux up` from the `cmd` directory, before creating a session. An elevated
+installer still starts `pmuxd` as the same user. The socket owner is that
+user, and a socket left owned by `BUILTIN\Administrators` with the private
+user ACL is accepted so a later non-elevated `pmux up` can use or replace it.
+Uninstall
 removes the Run value and does not stop a daemon that is already running. Apps & features
 shows the publisher Moonbase2090 and the numeric MSI product version described
 below. Its icon is `DisplayIcon` on the uninstall key Windows Installer
@@ -247,7 +251,9 @@ daemon. Do not stop that daemon to try the preview while it owns active sessions
 - Default sockets live under `%LOCALAPPDATA%\Prismattyc\run`. The directory
   belongs to the current user and has an inheritable user-only DACL before a
   socket is bound. Reparse-point directories and foreign-owned endpoints are
-  rejected. An explicit socket path needs a parent directory with the same
+  rejected. A `BUILTIN\Administrators` owner is accepted only when the endpoint
+  DACL is already the protected user-only ACL written for an elevated create.
+  An explicit socket path needs a parent directory with the same
   private DACL; the daemon does not change permissions on arbitrary parents.
 - Configuration uses `%APPDATA%`; persistent data uses `%LOCALAPPDATA%`.
   Explicit XDG configuration/data overrides are still accepted.

@@ -1361,11 +1361,27 @@ mod tests {
     use std::path::PathBuf;
 
     fn sleep_spawn(env: BTreeMap<String, String>) -> SpawnSpec {
-        SpawnSpec {
-            program: "/bin/sleep".into(),
-            argv: vec!["30".into()],
-            cwd: Some(PathBuf::from("/tmp")),
-            env,
+        #[cfg(unix)]
+        {
+            SpawnSpec {
+                program: "/bin/sleep".into(),
+                argv: vec!["30".into()],
+                cwd: Some(PathBuf::from("/tmp")),
+                env,
+            }
+        }
+        #[cfg(windows)]
+        {
+            SpawnSpec {
+                program: r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".into(),
+                argv: vec![
+                    "-NoProfile".into(),
+                    "-Command".into(),
+                    "Start-Sleep -Seconds 30".into(),
+                ],
+                cwd: Some(std::env::temp_dir()),
+                env,
+            }
         }
     }
 
@@ -1441,14 +1457,30 @@ mod tests {
     }
 
     fn env_report_spawn(env: BTreeMap<String, String>) -> SpawnSpec {
-        SpawnSpec {
-            program: "/bin/sh".into(),
-            argv: vec![
-                "-c".into(),
-                "printf 'PANE=%s\\nSOCK=%s\\nAGENT=%s\\nPACK=%s\\n' \"$PRISMATTYC_PANE_ID\" \"$PMUX_SOCKET\" \"$PMUX_AGENT\" \"$PMUX_TUTORIAL_PACK\"; if env | grep -q '^PRISMATTYC_SESSION_ID='; then printf 'HAS_SESSION=1\\n'; else printf 'HAS_SESSION=0\\n'; fi; if env | grep -q '^PMUX_AGENT='; then printf 'HAS_AGENT=1\\n'; else printf 'HAS_AGENT=0\\n'; fi; exec sleep 30".into(),
-            ],
-            cwd: Some(PathBuf::from("/tmp")),
-            env,
+        #[cfg(unix)]
+        {
+            SpawnSpec {
+                program: "/bin/sh".into(),
+                argv: vec![
+                    "-c".into(),
+                    "printf 'PANE=%s\\nSOCK=%s\\nAGENT=%s\\nPACK=%s\\n' \"$PRISMATTYC_PANE_ID\" \"$PMUX_SOCKET\" \"$PMUX_AGENT\" \"$PMUX_TUTORIAL_PACK\"; if env | grep -q '^PRISMATTYC_SESSION_ID='; then printf 'HAS_SESSION=1\\n'; else printf 'HAS_SESSION=0\\n'; fi; if env | grep -q '^PMUX_AGENT='; then printf 'HAS_AGENT=1\\n'; else printf 'HAS_AGENT=0\\n'; fi; exec sleep 30".into(),
+                ],
+                cwd: Some(PathBuf::from("/tmp")),
+                env,
+            }
+        }
+        #[cfg(windows)]
+        {
+            SpawnSpec {
+                program: r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".into(),
+                argv: vec![
+                    "-NoProfile".into(),
+                    "-Command".into(),
+                    "$p=$env:PRISMATTYC_PANE_ID; $s=$env:PMUX_SOCKET; $a=$env:PMUX_AGENT; $k=$env:PMUX_TUTORIAL_PACK; [Console]::Out.Write(\"PANE=$p`nSOCK=$s`nAGENT=$a`nPACK=$k`n\"); if ($null -eq $env:PRISMATTYC_SESSION_ID) { [Console]::Out.Write('HAS_SESSION=0`n') } else { [Console]::Out.Write('HAS_SESSION=1`n') }; if ($null -eq $env:PMUX_AGENT) { [Console]::Out.Write('HAS_AGENT=0`n') } else { [Console]::Out.Write('HAS_AGENT=1`n') }; [Console]::Out.Flush(); Start-Sleep -Seconds 30".into(),
+                ],
+                cwd: Some(std::env::temp_dir()),
+                env,
+            }
         }
     }
 
@@ -1503,6 +1535,10 @@ mod tests {
         assert!(pane.observe_death(9).is_none());
     }
 
+    // ConPTY keeps the output pipe open after the client exits, so `drain`
+    // does not see the death edge. This notice is covered again when Windows
+    // exit polling lands.
+    #[cfg(unix)]
     #[test]
     fn true_exiting_emits_notice_when_seated() {
         let mut env = BTreeMap::new();

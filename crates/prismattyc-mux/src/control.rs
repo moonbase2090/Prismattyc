@@ -8436,13 +8436,334 @@ mod tests {
         client
     }
 
-    fn spawn() -> SpawnSpec {
-        SpawnSpec {
-            program: "/bin/sh".into(),
-            argv: vec!["-l".into()],
-            cwd: Some(PathBuf::from("/tmp")),
-            env: BTreeMap::from([("TERM".into(), "prism".into())]),
+    /// Absolute socket path stamped into a guest. Windows uses a short drive
+    /// path so an 80-column pane can show `SOCK=` on one row.
+    fn reported_guest_socket(name: &str) -> PathBuf {
+        #[cfg(unix)]
+        {
+            std::env::temp_dir().join(name)
         }
+        #[cfg(windows)]
+        {
+            PathBuf::from(format!(r"C:\{name}"))
+        }
+    }
+
+    /// Login shell for tests that only need a live pane, not a scripted guest.
+    /// Windows has no `/bin/sh`; `cmd /d /k` stays up the way a login shell does.
+    fn spawn() -> SpawnSpec {
+        #[cfg(unix)]
+        {
+            SpawnSpec {
+                program: "/bin/sh".into(),
+                argv: vec!["-l".into()],
+                cwd: Some(PathBuf::from("/tmp")),
+                env: BTreeMap::from([("TERM".into(), "prism".into())]),
+            }
+        }
+        #[cfg(windows)]
+        {
+            SpawnSpec {
+                program: r"C:\Windows\System32\cmd.exe".into(),
+                argv: vec!["/d".into(), "/k".into()],
+                cwd: Some(std::env::temp_dir()),
+                env: BTreeMap::from([("TERM".into(), "prism".into())]),
+            }
+        }
+    }
+
+    /// Run a guest script. Unix keeps `/bin/sh -c`. Windows translates the
+    /// known scripts into PowerShell and starts them under `cmd /d /c`, which
+    /// is the ConPTY child the foreground walk expects.
+    fn sh_c(script: &str) -> SpawnSpec {
+        #[cfg(unix)]
+        {
+            SpawnSpec {
+                program: "/bin/sh".into(),
+                argv: vec!["-c".into(), script.into()],
+                cwd: Some(PathBuf::from("/tmp")),
+                env: BTreeMap::new(),
+            }
+        }
+        #[cfg(windows)]
+        {
+            windows_powershell(&translate_guest_script(script))
+        }
+    }
+
+    #[cfg(windows)]
+    const WINDOWS_GUEST_PREAMBLE: &str = r#"$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class PrismRawConsole {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr GetStdHandle(int nStdHandle);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetConsoleMode(IntPtr handle, out uint mode);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetConsoleMode(IntPtr handle, uint mode);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool ReadFile(IntPtr handle, byte[] buffer, uint count, out uint read, IntPtr overlapped);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool WriteFile(IntPtr handle, byte[] buffer, uint count, out uint written, IntPtr overlapped);
+
+    static void WriteBytes(IntPtr output, byte[] buffer, uint count) {
+        uint written;
+        WriteFile(output, buffer, count, out written, IntPtr.Zero);
+    }
+
+    public static void EchoForever() {
+        IntPtr input = GetStdHandle(-10);
+        IntPtr output = GetStdHandle(-11);
+        byte[] buffer = new byte[1];
+        uint read;
+        while (ReadFile(input, buffer, 1, out read, IntPtr.Zero) && read > 0) {
+            WriteBytes(output, buffer, read);
+        }
+    }
+
+    public static void StartEcho() {
+        var thread = new System.Threading.Thread(EchoForever);
+        thread.IsBackground = true;
+        thread.Start();
+    }
+
+    public static void EchoCount(int count, bool woke) {
+        IntPtr input = GetStdHandle(-10);
+        IntPtr output = GetStdHandle(-11);
+        byte[] buffer = new byte[1];
+        uint read;
+        int got = 0;
+        while (got < count) {
+            if (!ReadFile(input, buffer, 1, out read, IntPtr.Zero) || read == 0) return;
+            WriteBytes(output, buffer, read);
+            got += (int)read;
+        }
+        if (woke) {
+            WriteBytes(output, System.Text.Encoding.ASCII.GetBytes("WOKE\n"), 5);
+        }
+        while (ReadFile(input, buffer, 1, out read, IntPtr.Zero) && read > 0) {
+            WriteBytes(output, buffer, read);
+        }
+    }
+
+    public static void StartTick() {
+        var thread = new System.Threading.Thread(() => {
+            System.Threading.Thread.Sleep(80);
+            WriteBytes(GetStdHandle(-11), System.Text.Encoding.ASCII.GetBytes("TICK\n"), 5);
+        });
+        thread.IsBackground = true;
+        thread.Start();
+    }
+}
+'@
+function Set-GuestInput([string]$Kind) {
+    $handle = [PrismRawConsole]::GetStdHandle(-10)
+    $mode = [uint32]0
+    if (-not [PrismRawConsole]::GetConsoleMode($handle, [ref]$mode)) { return }
+    if ($Kind -eq 'raw') {
+        # ENABLE_VIRTUAL_TERMINAL_INPUT. The kitty fixture must read the
+        # pane-write bytes, not a cooked translation of them.
+        $mode = 0x200
+    } elseif ($Kind -eq 'noecho') {
+        # Clear ENABLE_LINE_INPUT (2) and ENABLE_ECHO_INPUT (4).
+        $mode = $mode -band (-bnot 2) -band (-bnot 4)
+    } else {
+        # Drop line buffering but keep echo. A Unix pty echoes into the
+        # screen, and mail inject treats that change as the guest accepting
+        # the write.
+        $mode = $mode -band (-bnot 2)
+    }
+    [void][PrismRawConsole]::SetConsoleMode($handle, $mode)
+}
+Set-GuestInput 'line'
+function Write-Text([string]$Text) {
+    [Console]::Out.Write($Text)
+    [Console]::Out.Flush()
+}
+function Read-Exact([int]$Count) {
+    $stdin = [Console]::OpenStandardInput()
+    $buffer = New-Object byte[] $Count
+    $got = 0
+    while ($got -lt $Count) {
+        $read = $stdin.Read($buffer, $got, $Count - $got)
+        if ($read -le 0) { break }
+        $got += $read
+    }
+    if ($got -le 0) { return New-Object byte[] 0 }
+    return ,$buffer[0..($got - 1)]
+}
+"#;
+
+    #[cfg(windows)]
+    fn windows_powershell(body: &str) -> SpawnSpec {
+        use std::sync::atomic::AtomicU64;
+        static NEXT_SCRIPT: AtomicU64 = AtomicU64::new(1);
+        let path = std::env::temp_dir().join(format!(
+            "prism-live-{}-{}.ps1",
+            std::process::id(),
+            NEXT_SCRIPT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, body).expect("write Windows guest script");
+        SpawnSpec {
+            program: r"C:\Windows\System32\cmd.exe".into(),
+            argv: vec![
+                "/d".into(),
+                "/c".into(),
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".into(),
+                "-NoProfile".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+                path.display().to_string(),
+            ],
+            cwd: Some(std::env::temp_dir()),
+            env: BTreeMap::new(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn ps_with_preamble(tail: &str) -> String {
+        let mut body = String::from(WINDOWS_GUEST_PREAMBLE);
+        body.push_str(tail);
+        body
+    }
+
+    #[cfg(windows)]
+    fn translate_guest_script(script: &str) -> String {
+        const READY_SLEEP: &str = "printf 'READY\\n'; exec sleep 999";
+        const READY_STTY_SLEEP: &str = "printf 'READY\\n'; stty -echo 2>/dev/null; exec sleep 999";
+        const READY_CAT: &str = "printf 'READY\\n'; exec cat";
+        const READY_TICK: &str = "printf 'READY\\n'; stty -echo 2>/dev/null; (sleep 0.1; printf 'TICK\\n') & exec sleep 999";
+        const DISCARD_PREFIX: &str = "printf 'READY\\n'; dd bs=1 count=";
+        const DISCARD_SLEEP: &str = " of=/dev/null 2>/dev/null; exec sleep 999";
+        const DISCARD_WOKE: &str = " of=/dev/null 2>/dev/null; printf 'WOKE\\n'; exec sleep 999";
+        const HEX_PREFIX: &str =
+            "stty raw -echo 2>/dev/null; printf '\\033[=3;1u\\nREADY\\n'; dd bs=1 count=";
+        const HEX_SUFFIX: &str = " 2>/dev/null | od -An -tx1; printf 'WOKE\\n'; exec sleep 999";
+
+        if script == "exec sleep 999" {
+            return ps_with_preamble("[PrismRawConsole]::StartEcho()\nStart-Sleep -Seconds 999\n");
+        }
+        if script == READY_SLEEP {
+            return ps_with_preamble(
+                "[PrismRawConsole]::StartEcho()\nWrite-Text \"READY`n\"\nStart-Sleep -Seconds 999\n",
+            );
+        }
+        if script == READY_STTY_SLEEP {
+            return ps_with_preamble(
+                "Set-GuestInput 'noecho'\nWrite-Text \"READY`n\"\nStart-Sleep -Seconds 999\n",
+            );
+        }
+        if script == READY_CAT {
+            return ps_with_preamble(
+                "Write-Text \"READY`n\"\n\
+                 $stdin = [Console]::OpenStandardInput()\n\
+                 $stdout = [Console]::OpenStandardOutput()\n\
+                 $buf = New-Object byte[] 256\n\
+                 while ($true) {\n\
+                   $n = $stdin.Read($buf, 0, 256)\n\
+                   if ($n -le 0) { break }\n\
+                   $stdout.Write($buf, 0, $n)\n\
+                   $stdout.Flush()\n\
+                 }\n",
+            );
+        }
+        if script == READY_TICK {
+            // Echo is off, matching `stty -echo`. TICK is the output that
+            // moves the pane revision inside the inject epoch window. A
+            // thread keeps that print in this console; it is not a second
+            // foreground process group.
+            return ps_with_preamble(
+                "Set-GuestInput 'noecho'\n\
+                 Write-Text \"READY`n\"\n\
+                 [PrismRawConsole]::StartTick()\n\
+                 Start-Sleep -Seconds 999\n",
+            );
+        }
+        if let Some(count) = exact_count(script, DISCARD_PREFIX, DISCARD_SLEEP) {
+            return ps_with_preamble(&format!(
+                "Write-Text \"READY`n\"\n[PrismRawConsole]::EchoCount({count}, $false)\n"
+            ));
+        }
+        if let Some(count) = exact_count(script, DISCARD_PREFIX, DISCARD_WOKE) {
+            return ps_with_preamble(&format!(
+                "Write-Text \"READY`n\"\n[void](Read-Exact {count})\nWrite-Text \"WOKE`n\"\nStart-Sleep -Seconds 999\n"
+            ));
+        }
+        if let Some(count) = exact_count(script, HEX_PREFIX, HEX_SUFFIX) {
+            return ps_with_preamble(&format!(
+                "Set-GuestInput 'raw'\n\
+                 Write-Text ([char]27 + \"[=3;1u`nREADY`n\")\n\
+                 $bytes = Read-Exact {count}\n\
+                 $hex = ($bytes | ForEach-Object {{ $_.ToString('x2') }}) -join ' '\n\
+                 Write-Text ($hex + \"`nWOKE`n\")\n\
+                 Start-Sleep -Seconds 999\n"
+            ));
+        }
+        panic!("no Windows translation for live guest script: {script}");
+    }
+
+    #[cfg(windows)]
+    fn exact_count(script: &str, prefix: &str, suffix: &str) -> Option<usize> {
+        let count = script.strip_prefix(prefix)?.strip_suffix(suffix)?;
+        if count.is_empty() || !count.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        count.parse().ok()
+    }
+
+    #[cfg(windows)]
+    fn ps_echo_loop(label: &str) -> String {
+        ps_with_preamble(&format!(
+            "Write-Text \"{label}`n\"\n\
+             $stdin = [Console]::OpenStandardInput()\n\
+             $one = New-Object byte[] 1\n\
+             $line = New-Object System.Collections.Generic.List[byte]\n\
+             while ($true) {{\n\
+               $n = $stdin.Read($one, 0, 1)\n\
+               if ($n -le 0) {{ break }}\n\
+               if ($one[0] -eq 10) {{\n\
+                 $text = [System.Text.Encoding]::UTF8.GetString($line.ToArray())\n\
+                 Write-Text (\"ECHO:\" + $text + \"`n\")\n\
+                 $line.Clear()\n\
+               }} elseif ($one[0] -ne 13) {{\n\
+                 [void]$line.Add($one[0])\n\
+               }}\n\
+             }}\n"
+        ))
+    }
+
+    #[cfg(windows)]
+    fn ps_env_report() -> String {
+        ps_with_preamble(
+            "$pane = [Environment]::GetEnvironmentVariable('PRISMATTYC_PANE_ID')\n\
+             $sock = [Environment]::GetEnvironmentVariable('PMUX_SOCKET')\n\
+             $session = [Environment]::GetEnvironmentVariable('PRISMATTYC_SESSION_ID')\n\
+             Write-Text (\"PANE=\" + $pane + \"`nSOCK=\" + $sock + \"`n\")\n\
+             if ($null -eq $session) { Write-Text \"HAS_SESSION=0`n\" } else { Write-Text \"HAS_SESSION=1`n\" }\n\
+             Start-Sleep -Seconds 30\n",
+        )
+    }
+
+    #[cfg(windows)]
+    fn ps_numbered_scroll() -> String {
+        ps_with_preamble(
+            "for ($i = 1; $i -le 80; $i++) {\n\
+               Write-Text (\"L{0:D3}`n\" -f $i)\n\
+             }\n\
+             $stdin = [Console]::OpenStandardInput()\n\
+             $stdout = [Console]::OpenStandardOutput()\n\
+             $buf = New-Object byte[] 256\n\
+             while ($true) {\n\
+               $n = $stdin.Read($buf, 0, 256)\n\
+               if ($n -le 0) { break }\n\
+               $stdout.Write($buf, 0, $n)\n\
+               $stdout.Flush()\n\
+             }\n",
+        )
     }
 
     #[test]
@@ -10397,12 +10718,7 @@ mod tests {
             version: PROTOCOL_VERSION,
             request_id: 2,
             name: "seat".into(),
-            spawn: SpawnSpec {
-                program: "/bin/sh".into(),
-                argv: vec!["-c".into(), "exec sleep 999".into()],
-                cwd: Some(PathBuf::from("/tmp")),
-                env: BTreeMap::new(),
-            },
+            spawn: sh_c("exec sleep 999"),
             cols: None,
             rows: None,
             agent_id: Some("operator-a".into()),
@@ -10439,15 +10755,9 @@ mod tests {
             version: PROTOCOL_VERSION,
             request_id: 5,
             name: "seat".into(),
-            spawn: SpawnSpec {
-                program: "/bin/sh".into(),
-                argv: vec![
-                    "-c".into(),
-                    "printf 'READY\\n'; dd bs=1 count=10 of=/dev/null 2>/dev/null; printf 'WOKE\\n'; exec sleep 999".into(),
-                ],
-                cwd: Some(PathBuf::from("/tmp")),
-                env: BTreeMap::new(),
-            },
+            spawn: sh_c(
+                "printf 'READY\\n'; dd bs=1 count=10 of=/dev/null 2>/dev/null; printf 'WOKE\\n'; exec sleep 999",
+            ),
             cols: None,
             rows: None,
             agent_id: Some("operator-a".into()),
@@ -11935,16 +12245,23 @@ mod tests {
     }
 
     fn live_shell_spawn(label: &str) -> SpawnSpec {
-        SpawnSpec {
-            program: "/bin/sh".into(),
-            argv: vec![
-                "-c".into(),
-                format!(
-                    "printf '{label}\\n'; while IFS= read -r line; do printf 'ECHO:%s\\n' \"$line\"; done"
-                ),
-            ],
-            cwd: Some(PathBuf::from("/tmp")),
-            env: BTreeMap::new(),
+        assert!(
+            !label.is_empty()
+                && label
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric()
+                        || character == '-'
+                        || character == '_')
+        );
+        #[cfg(unix)]
+        {
+            sh_c(&format!(
+                "printf '{label}\\n'; while IFS= read -r line; do printf 'ECHO:%s\\n' \"$line\"; done"
+            ))
+        }
+        #[cfg(windows)]
+        {
+            windows_powershell(&ps_echo_loop(label))
         }
     }
 
@@ -11965,7 +12282,7 @@ mod tests {
             None,
         )
         .unwrap();
-        // The fixture child is `/bin/sh`; inject tests model an agent pane.
+        // The fixture child is a shell; inject tests model an agent pane.
         plane.set_inject_agent_override(Some(crate::InjectAgent::Claude));
         (plane, window.get(), pane.get())
     }
@@ -12007,14 +12324,15 @@ mod tests {
     }
 
     fn env_report_spawn() -> SpawnSpec {
-        SpawnSpec {
-            program: "/bin/sh".into(),
-            argv: vec![
-                "-c".into(),
-                "printf 'PANE=%s\\nSOCK=%s\\n' \"$PRISMATTYC_PANE_ID\" \"$PMUX_SOCKET\"; if env | grep -q '^PRISMATTYC_SESSION_ID='; then printf 'HAS_SESSION=1\\n'; else printf 'HAS_SESSION=0\\n'; fi; exec sleep 30".into(),
-            ],
-            cwd: Some(PathBuf::from("/tmp")),
-            env: BTreeMap::new(),
+        #[cfg(unix)]
+        {
+            sh_c(
+                "printf 'PANE=%s\\nSOCK=%s\\n' \"$PRISMATTYC_PANE_ID\" \"$PMUX_SOCKET\"; if env | grep -q '^PRISMATTYC_SESSION_ID='; then printf 'HAS_SESSION=1\\n'; else printf 'HAS_SESSION=0\\n'; fi; exec sleep 30",
+            )
+        }
+        #[cfg(windows)]
+        {
+            windows_powershell(&ps_env_report())
         }
     }
 
@@ -12084,7 +12402,9 @@ mod tests {
         let window = session.windows[0];
         let pane = domain.window(window).unwrap().layout.panes()[0];
         let pane_id = pane.get();
-        let socket = PathBuf::from("/tmp/prism-pm122-guest.sock");
+        // An 80-column pane wraps a long temp path, so the SOCK= line would
+        // no longer contain the path as one string. Keep this absolute and short.
+        let socket = reported_guest_socket("prism-pm122-guest.sock");
         let mut plane = ControlPlane::new_live(
             domain,
             [WindowBounds {
@@ -12215,7 +12535,7 @@ mod tests {
         let window = session.windows[0];
         let pane = domain.window(window).unwrap().layout.panes()[0];
         let pane_id = pane.get();
-        let socket = PathBuf::from("/tmp/prism-pm122-move.sock");
+        let socket = reported_guest_socket("prism-pm122-move.sock");
         let mut plane = ControlPlane::new_live(
             domain,
             [WindowBounds {
@@ -14416,15 +14736,15 @@ mod tests {
     }
 
     fn numbered_scroll_spawn() -> SpawnSpec {
-        SpawnSpec {
-            program: "/bin/sh".into(),
-            argv: vec![
-                "-c".into(),
-                "i=1; while [ \"$i\" -le 80 ]; do printf 'L%03d\\n' \"$i\"; i=$((i+1)); done; exec cat"
-                    .into(),
-            ],
-            cwd: Some(PathBuf::from("/tmp")),
-            env: BTreeMap::new(),
+        #[cfg(unix)]
+        {
+            sh_c(
+                "i=1; while [ \"$i\" -le 80 ]; do printf 'L%03d\\n' \"$i\"; i=$((i+1)); done; exec cat",
+            )
+        }
+        #[cfg(windows)]
+        {
+            windows_powershell(&ps_numbered_scroll())
         }
     }
 
@@ -15342,10 +15662,9 @@ mod tests {
         assert_eq!(nbytes, PMUX_MAIL_NOTIFICATION.len() + 1);
     }
 
-    // Unix only: live_inject_fixture runs `/bin/sh -c` in `/tmp`, and the fake
-    // agent is a symlink to `/bin/sleep`. Windows does classify a foreground
-    // `muse-bin-*.exe` through the single shell-child chain, but proving it
-    // needs a ConPTY pane fixture this module does not have yet (#314).
+    // Unix only: the fake agent is a symlink to `/bin/sleep`. The Windows proof
+    // is the cfg(windows) test of the same name, which walks cmd, then
+    // PowerShell, then `muse-bin-*.exe`.
     #[cfg(unix)]
     #[test]
     fn doorbell_writes_when_foreground_is_muse() {
@@ -15369,6 +15688,78 @@ mod tests {
         .unwrap();
         let script = format!(". {}", run.display());
         let (mut plane, pane) = live_inject_fixture(&script);
+        let client = registered_client(plane.handle(ControlRequest::RegisterClient {
+            version: PROTOCOL_VERSION,
+            request_id: 1,
+        }));
+        wait_spawn_then_quiet(&mut plane, pane, "READY");
+        let set = plane.handle(ControlRequest::MailAttentionSet {
+            version: PROTOCOL_VERSION,
+            request_id: 2,
+            client_id: client,
+            pane_id: pane,
+            cell: MAIL_ATTENTION_CELL.into(),
+            gen: 1,
+            queue_rev: 1,
+            depth: 1,
+            wake: Some(MailWake::Armed),
+            bound_pid: None,
+        });
+        assert!(matches!(set.body, ControlResponseBody::Ok { .. }));
+        quiet_unattended(&mut plane, pane);
+
+        plane.set_inject_agent_override(None);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while plane.foreground_agent_for(pane) != crate::InjectAgent::Muse {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "foreground muse never appeared under the pane child"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(plane.guest_keyboard_flags_for(pane), 3);
+        let (outcome, nbytes) = mail_inject(inject_mail(&mut plane, client, pane, 3));
+        assert_eq!(outcome, MailInjectOutcome::Wrote);
+        assert_eq!(nbytes, 28);
+        assert_eq!(
+            plane
+                .mail_inject_last
+                .get(&pane)
+                .map(|diagnostic| diagnostic.agent.as_str()),
+            Some("muse")
+        );
+        assert!(plane
+            .mail_nudges
+            .get(&pane)
+            .is_some_and(|nudge| nudge.verification));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn doorbell_writes_when_foreground_is_muse() {
+        // Windows has no foreground process group. Classification follows one
+        // shell-child chain: cmd, then PowerShell, then `muse-bin-*.exe`.
+        // The renamed ping is silent so its output cannot look like a busy pane.
+        let dir = std::env::temp_dir().join(format!("pt183-muse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let muse = dir.join("muse-bin-1.4.3-R5018.1.exe");
+        std::fs::copy(r"C:\Windows\System32\ping.exe", &muse).unwrap();
+        let muse_literal = muse.display().to_string().replace('\'', "''");
+        let body = ps_with_preamble(&format!(
+            "[PrismRawConsole]::StartEcho()\n\
+             Write-Text ([char]27 + \"[=3;1u`nREADY`n\")\n\
+             $proc = New-Object System.Diagnostics.Process\n\
+             $proc.StartInfo.FileName = '{muse_literal}'\n\
+             $proc.StartInfo.Arguments = '-n 120 127.0.0.1'\n\
+             $proc.StartInfo.UseShellExecute = $false\n\
+             $proc.StartInfo.RedirectStandardOutput = $true\n\
+             $proc.StartInfo.RedirectStandardError = $true\n\
+             $proc.StartInfo.CreateNoWindow = $true\n\
+             [void]$proc.Start()\n\
+             $proc.WaitForExit()\n"
+        ));
+        let (mut plane, pane) = live_inject_plane(windows_powershell(&body));
         let client = registered_client(plane.handle(ControlRequest::RegisterClient {
             version: PROTOCOL_VERSION,
             request_id: 1,
@@ -15903,7 +16294,7 @@ mod tests {
         quiet_unattended(plane, pane);
     }
 
-    fn live_inject_fixture(script: &str) -> (ControlPlane, u64) {
+    fn live_inject_plane(spec: SpawnSpec) -> (ControlPlane, u64) {
         let domain = Domain::bootstrap("inject").unwrap();
         let session = domain.sessions().next().unwrap();
         let window = session.windows[0];
@@ -15916,20 +16307,16 @@ mod tests {
                 rows: 24,
             }],
             Some(32),
-            [(
-                pane.get(),
-                SpawnSpec {
-                    program: "/bin/sh".into(),
-                    argv: vec!["-c".into(), script.into()],
-                    cwd: Some(PathBuf::from("/tmp")),
-                    env: BTreeMap::new(),
-                },
-            )],
+            [(pane.get(), spec)],
             None,
         )
         .unwrap();
         plane.set_inject_agent_override(Some(crate::InjectAgent::Claude));
         (plane, pane.get())
+    }
+
+    fn live_inject_fixture(script: &str) -> (ControlPlane, u64) {
+        live_inject_plane(sh_c(script))
     }
 
     #[test]

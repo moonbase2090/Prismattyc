@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A quiet Windows install no longer hides a failed `pmuxd` start. The start script's warning and the `pmux up` exit code now go into the MSI log, and every install and logon start records its result in `%LOCALAPPDATA%\Prismattyc\pmuxd-start.txt`. The install still succeeds.
+
 ## [0.3.37] - 2026-10-14
 
 ### Fixed

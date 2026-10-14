@@ -94,6 +94,10 @@ function Invoke-Msi {
     param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
     $log = Join-Path ([System.IO.Path]::GetTempPath()) ('prismattyc-msi-{0}.log' -f [guid]::NewGuid().ToString('n'))
     $commandLine = New-MsiCommandLine ($ArgumentList + @('/l*v', $log))
+    # The start script rewrites this on every install. Remove it so a stale
+    # result cannot pass for this one.
+    Remove-Item -LiteralPath (Get-StartStatusPath) -ErrorAction SilentlyContinue
+    $script:MsiStartLine = ''
     $code = Start-Msi -CommandLine $commandLine
     if ($code -ne 0) {
         $detail = ''
@@ -109,9 +113,20 @@ function Invoke-Msi {
             if ($line -match '(Feature: CommandPath;\s+Installed: [^;]+;\s+Request: [^;]+;\s+Action: [^;]+)') {
                 Write-Output $Matches[1]
             }
+            # WixQuietExec copies the start script's output into the log.
+            if ($line -match '(pmuxd is running\.|WARNING: Prismattyc is installed, but pmuxd did not start\..*?)\s*$') {
+                $script:MsiStartLine = $Matches[1]
+                Write-Output "MSI log: $($Matches[1])"
+            }
         }
     }
     Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
+}
+
+$script:MsiStartLine = ''
+
+function Get-StartStatusPath {
+    return Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Prismattyc\pmuxd-start.txt'
 }
 
 function Get-PrismattycInstall {
@@ -485,6 +500,11 @@ function Assert-PmuxdReady {
         if ($item) { $value = [string]$item.PrismattycPmuxd }
     }
     if ($value -notlike '*start-windows-pmuxd.ps1*') { throw "pmuxd autostart is missing: $value" }
+    $statusPath = Get-StartStatusPath
+    if (-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) { throw "The install did not record a pmuxd start result in $statusPath" }
+    $recorded = Get-Content -LiteralPath $statusPath -Raw
+    if ($recorded -notmatch '(?m)^exit: 0\r?$') { throw "The install recorded a failed pmuxd start: $recorded" }
+    if ($script:MsiStartLine -ne 'pmuxd is running.') { throw "The MSI log has no pmuxd start result: '$($script:MsiStartLine)'" }
     $pmux = Join-Path $install.Bin 'pmux.exe'
     $status = & $pmux status 2>&1 | Out-String
     if ($status -notmatch 'status:\s+running') { throw "pmux status is not running: $status" }

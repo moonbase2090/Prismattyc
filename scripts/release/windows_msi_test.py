@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -68,11 +69,20 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn('Id="ADDTOPATH" Secure="yes" Value="1"', source)
         self.assertIn('Name="PrismattycPmuxd"', source)
         self.assertIn("start-windows-pmuxd.ps1", source)
-        start = source.split('Id="StartPmuxd"', 1)[1].split("/>", 1)[0]
+        start = re.search(r'<CustomAction\s+Id="StartPmuxd"(.*?)/>', source, re.S).group(1)
         self.assertIn('Execute="commit"', start)
         self.assertIn('Impersonate="yes"', start)
         self.assertIn('Return="ignore"', start)
         self.assertNotIn('Return="check"', start)
+        # WixQuietExec copies the script's output into the MSI log. An ExeCommand
+        # action would drop the warning on a quiet install.
+        self.assertIn('BinaryRef="Wix4UtilCA_X64"', start)
+        self.assertIn('DllEntry="WixQuietExec64"', start)
+        self.assertNotIn("ExeCommand", start)
+        command = re.search(r'<SetProperty Id="StartPmuxd"(.*?)/>', source, re.S).group(1)
+        self.assertIn('Before="StartPmuxd"', command)
+        self.assertIn('Sequence="execute"', command)
+        self.assertIn("[BINFOLDER]start-windows-pmuxd.ps1", command)
         self.assertIn(
             'Custom Action="StartPmuxd" After="ResetUpdatePointer" '
             'Condition="NOT REMOVE~=&quot;ALL&quot;"',
@@ -112,6 +122,9 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertNotIn("Win64", source)
         builder = (ROOT / "scripts/release/windows_msi.py").read_text(encoding="utf-8")
         self.assertIn('"-arch",\n        "x64"', builder)
+        self.assertIn('"-ext",\n        WIX_UTIL_EXTENSION', builder)
+        build_script = (ROOT / "scripts/release/build-windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("wix extension add --global WixToolset.Util.wixext/5.0.2", build_script)
         self.assertNotIn("Win32_Process", source)
         self.assertNotIn('Impersonate="no"', source)
         self.assertNotIn("set-arp-display-icon", source)
@@ -411,10 +424,17 @@ public class Stub {
             empty = root / "empty"
             empty.mkdir()
             log = root / "args.txt"
+            local = root / "local"
+            status = local / "Prismattyc" / "pmuxd-start.txt"
+
+            def recorded():
+                lines = status.read_text(encoding="utf-8").splitlines()
+                return dict(line.split(": ", 1) for line in lines)
 
             def run(code):
                 env = os.environ.copy()
                 env["PATH"] = str(empty)
+                env["LOCALAPPDATA"] = str(local)
                 env["PMUX_STUB_LOG"] = str(log)
                 env["PMUX_STUB_CODE"] = code
                 if log.exists():
@@ -438,14 +458,22 @@ public class Stub {
             ok = run("0")
             self.assertEqual(ok.returncode, 0, ok.stderr + ok.stdout)
             self.assertEqual(log.read_text(encoding="utf-8"), "up")
+            self.assertEqual(recorded()["exit"], "0")
+            self.assertEqual(recorded()["result"], "pmuxd is running")
             bad = run("3")
             self.assertEqual(bad.returncode, 3, bad.stderr + bad.stdout)
             self.assertEqual(log.read_text(encoding="utf-8"), "up")
+            # WixQuietExec logs stdout, so the warning must be there, and the
+            # status file must replace the earlier success.
+            self.assertIn("WARNING: Prismattyc is installed, but pmuxd did not start. pmux up exited 3.", bad.stdout)
+            self.assertEqual(recorded()["exit"], "3")
+            self.assertTrue(recorded()["result"].startswith("pmuxd did not start. pmux up exited 3."))
             missing = root / "missing"
             missing.mkdir()
             shutil.copy2(script, missing / "start-windows-pmuxd.ps1")
             env = os.environ.copy()
             env["PATH"] = str(empty)
+            env["LOCALAPPDATA"] = str(local)
             gone = subprocess.run(
                 [
                     powershell(),
@@ -462,7 +490,9 @@ public class Stub {
                 check=False,
             )
             self.assertNotEqual(gone.returncode, 0)
-            self.assertIn("Missing", gone.stderr)
+            self.assertIn("Missing", gone.stdout)
+            self.assertEqual(recorded()["exit"], "1")
+            self.assertIn("Missing", recorded()["result"])
 
     def test_refresh_replaces_a_stale_msi_hash(self):
         with tempfile.TemporaryDirectory() as tmp:

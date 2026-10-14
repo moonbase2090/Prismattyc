@@ -40,11 +40,11 @@ shortcut named Prismattyc launches `prismattyc-host.exe`. That is the only
 Start menu entry. It opens the GUI, which carries the Prismattyc icon and
 does not allocate a console. `prismattyc.exe` is the CLI. Its file
 description is Prismattyc CLI, and it is not a shortcut target. A quiet
-install leaves command PATH opt-in. Pass `ADDTOPATH=1` to prepend the
-`cmd` directory to the user PATH. The entry is the `cmd` directory, not `bin`.
-Reinstalling the same MSI with `ADDTOPATH=1` adds or repairs that entry;
-`ADDTOPATH=0` removes the package-managed entry. Repeating either choice
-does not add duplicates.
+install prepends the `cmd` directory to the user PATH. The entry is the
+`cmd` directory, not `bin`. Pass `ADDTOPATH=0` to leave PATH unchanged.
+Reinstalling the same MSI with `ADDTOPATH` omitted or `ADDTOPATH=1` adds or
+repairs that entry. `ADDTOPATH=0` removes the package-managed entry.
+Repeating either choice does not add duplicates.
 An existing install `bin` PATH entry is preserved during installation and
 upgrade, including when ADDTOPATH is omitted or `0`. This keeps previously
 working commands available. Uninstall removes the preserved `bin` entry and the package-managed `cmd`
@@ -58,24 +58,36 @@ on a worker thread. Programs the GUI
 starts for itself, including `git` and `pmux`, are created with
 `CREATE_NO_WINDOW`, so they do not flash a console. The login Startup shortcut
 runs `pmux login run` through `wscript` with a hidden window. The installer's
-update-pointer script starts PowerShell hidden. Apps & features
+update-pointer script starts PowerShell hidden. The same install writes
+`PrismattycPmuxd` under the per-user Run key. That value runs
+`start-windows-pmuxd.ps1` with a hidden window at the next logon. The script
+runs `bin\pmux.exe up`, which starts `pmuxd` when the default socket is down
+and leaves a running daemon alone. A commit action runs that script after
+the files are installed. If `pmux up` fails, the script writes a warning and
+the install still finishes with the files in place. Sign in again, or run
+`pmux up` from the `cmd` directory, before creating a session. Uninstall
+removes the Run value and does not stop a daemon that is already running. Apps & features
 shows the publisher Moonbase2090 and the numeric MSI product version described
 below. Its icon is `DisplayIcon` on the uninstall key Windows Installer
 created, set to `prismattyc-host.exe,0`. An elevated install writes that value into the machine uninstall key while
 it writes the registry. A non-elevated install skips that write, so a denied
-machine-key update cannot roll the install back. It does not start a helper.
+machine-key update cannot roll the install back. That display-icon write does not start a helper.
 `pmux --version`
 still reports the semver.
 
 ```powershell
 msiexec /i prismattyc-v0.3.34-x86_64-pc-windows-msvc.msi /qn /norestart
-msiexec /i prismattyc-v0.3.34-x86_64-pc-windows-msvc.msi /qn /norestart ADDTOPATH=1
+msiexec /i prismattyc-v0.3.34-x86_64-pc-windows-msvc.msi /qn /norestart ADDTOPATH=0
 ```
 
-The first command does not add a PATH entry. The second opts in with
-`ADDTOPATH=1`; an opted-in upgrade leaves one `cmd` entry. `ADDTOPATH=0`
-explicitly disables adding the entry.
-Uninstall removes that PATH entry, the files, and the shortcut. The preview
+The first command prepends one `cmd` entry, registers `pmuxd` for logon, and
+starts it. The second leaves PATH unchanged and still starts `pmuxd`.
+`ADDTOPATH=0` explicitly disables adding the entry. An upgrade that omits
+`ADDTOPATH` leaves one `cmd` entry.
+Uninstall removes that PATH entry, the Run value, the files, and the
+shortcut. Stop `pmuxd` before an upgrade when this session must run the new
+executable. The installer does not stop a running daemon, so Windows may
+leave an in-use `pmuxd.exe` until reboot. The preview
 installer still prepends the `cmd` directory only when `-AddToPath` is set.
 Install and uninstall also remove leftover `windows-preview-*` directories directly under
 `%LOCALAPPDATA%\Programs\Prismattyc` when those directories are not reparse

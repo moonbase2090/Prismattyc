@@ -8292,10 +8292,22 @@ mod tests {
         let mut nonce = [0_u8; 8];
         getrandom::fill(&mut nonce).expect("test socket nonce");
         let nonce = u64::from_ne_bytes(nonce);
-        PathBuf::from(format!(
-            "/tmp/prism-control-test-{}-{serial}-{nonce:016x}.sock",
-            std::process::id()
-        ))
+        #[cfg(unix)]
+        {
+            PathBuf::from(format!(
+                "/tmp/prism-control-test-{}-{serial}-{nonce:016x}.sock",
+                std::process::id()
+            ))
+        }
+        // Windows binds only under a parent with the private user DACL. Keep
+        // the names short: an AF_UNIX path holds at most 108 bytes.
+        #[cfg(windows)]
+        {
+            let dir = std::env::temp_dir().join(format!("pct-{}", std::process::id()));
+            fs::create_dir_all(&dir).unwrap();
+            crate::platform::secure_directory(&dir).unwrap();
+            dir.join(format!("{serial}-{nonce:016x}.sock"))
+        }
     }
 
     /// the accept loop runs the listener non-blocking, and macOS
@@ -8433,15 +8445,22 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn socket_is_private_and_protocol_errors_are_structured() {
         let (plane, _, _) = fixture(8);
         let path = socket_path();
         let server = ControlServer::bind(&path, plane).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(server.path()).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(server.path()).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        #[cfg(windows)]
+        assert!(
+            crate::platform::private_to_user(server.path()),
+            "the socket must be owned by the user with a protected user-only DACL"
+        );
 
         let mut stream = UnixStream::connect(server.path()).unwrap();
         let incompatible = request(
@@ -11498,14 +11517,32 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    fn shrink_receive_buffer(stream: &UnixStream, bytes: usize) {
+        #[cfg(unix)]
+        rustix::net::sockopt::set_socket_recv_buffer_size(stream, bytes).unwrap();
+        #[cfg(windows)]
+        unsafe {
+            use std::os::windows::io::AsRawSocket;
+            use windows_sys::Win32::Networking::WinSock::*;
+            let size = bytes as i32;
+            let result = setsockopt(
+                stream.as_raw_socket() as usize,
+                SOL_SOCKET,
+                SO_RCVBUF,
+                (&size as *const i32).cast(),
+                std::mem::size_of::<i32>() as i32,
+            );
+            assert_eq!(result, 0, "SO_RCVBUF failed: {}", WSAGetLastError());
+        }
+    }
+
     #[test]
     fn phase2a_slow_observer_response_backpressure_does_not_block_fast_client() {
         let (plane, _, _) = fixture(8);
         let path = socket_path();
         let server = ControlServer::bind(&path, plane).unwrap();
         let mut slow = UnixStream::connect(server.path()).unwrap();
-        rustix::net::sockopt::set_socket_recv_buffer_size(&slow, 1024).unwrap();
+        shrink_receive_buffer(&slow, 1024);
         let mut pipelined = Vec::new();
         for request_id in 1..=2048 {
             serde_json::to_writer(
@@ -15305,6 +15342,10 @@ mod tests {
         assert_eq!(nbytes, PMUX_MAIL_NOTIFICATION.len() + 1);
     }
 
+    // Unix only: live_inject_fixture runs `/bin/sh -c` in `/tmp`, and the fake
+    // agent is a symlink to `/bin/sleep`. Windows does classify a foreground
+    // `muse-bin-*.exe` through the single shell-child chain, but proving it
+    // needs a ConPTY pane fixture this module does not have yet (#314).
     #[cfg(unix)]
     #[test]
     fn doorbell_writes_when_foreground_is_muse() {
@@ -15443,6 +15484,10 @@ mod tests {
         );
     }
 
+    // Unix only: the behavior is the terminal's foreground process group,
+    // which Windows does not have. docs/platforms/windows.md: background jobs
+    // cannot be distinguished from foreground jobs there, so this case is
+    // not reachable on Windows.
     #[cfg(unix)]
     #[test]
     fn doorbell_defers_when_the_agent_is_only_a_background_job() {
@@ -15501,6 +15546,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // Unix only: it needs a foreground agent beside a background one. Windows
+    // has no foreground process group, and a branching process chain stays
+    // Unknown there (docs/platforms/windows.md).
     #[cfg(unix)]
     #[test]
     fn doorbell_submit_chord_follows_the_foreground_agent_not_a_background_one() {

@@ -133,6 +133,9 @@ def main():
             'The cmd directory contains prismattyc.exe, pmux.exe, pmuxd.exe,\n'
             'pmux-attach.exe, and pmux-mcp.exe. Each one starts the executable\n'
             'of the same name in bin. There is no prismattyc-host.exe in cmd.\n'
+            'The MSI prepends the cmd directory to the user PATH and starts pmuxd.\n'
+            'Pass ADDTOPATH=0 to leave PATH unchanged. Uninstall removes that\n'
+            'PATH entry and the logon registration for pmuxd.\n'
             'Use pmux.exe new NAME to create a persistent mux session.\n'
             'The default shell is COMSPEC (normally cmd.exe); pass -- powershell.exe\n'
             'or -- pwsh.exe to select PowerShell. Configuration is under APPDATA,\n'
@@ -142,6 +145,7 @@ def main():
             'Read licenses\\MIT.txt and licenses\\NOTICE.txt for licensing.\n', encoding='utf-8')
         shutil.copy2(repo / 'scripts/release/reset-windows-update-pointer.ps1', root / 'bin/reset-windows-update-pointer.ps1')
         shutil.copy2(repo / 'scripts/release/remove-windows-preview-installs.ps1', root / 'bin/remove-windows-preview-installs.ps1')
+        shutil.copy2(repo / 'scripts/release/start-windows-pmuxd.ps1', root / 'bin/start-windows-pmuxd.ps1')
         stage_cmd_forwarders(repo, root / 'cmd', args.target, rebuild=not args.signed)
         files = sorted(p for p in root.rglob('*') if p.is_file())
         (root / 'SHA256SUMS').write_text(''.join(f'{digest(p)}  {p.relative_to(root).as_posix()}\n' for p in files), encoding='utf-8')

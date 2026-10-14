@@ -115,9 +115,11 @@ The MSI installer is recommended:
 
 1. Download `prismattyc-vX.Y.Z-x86_64-pc-windows-msvc.msi` from
    [GitHub Releases](https://github.com/moonbase2090/Prismattyc/releases).
-2. Run the installer. It leaves `PATH` unchanged by default. To add the
-   command directory to your `PATH`, install with `ADDTOPATH=1`, then open
-   a new terminal. See [Windows](docs/platforms/windows.md).
+2. Run the installer. It prepends the `cmd` directory under
+   `%LOCALAPPDATA%\Programs\Prismattyc` to your user PATH, registers
+   `pmuxd` to start at logon, and starts `pmuxd` before the installer
+   returns. Open a new terminal to use `pmux`. Pass `ADDTOPATH=0` to leave
+   PATH unchanged. See [Windows](docs/platforms/windows.md).
 
 For a portable install, download
 `prismattyc-vX.Y.Z-x86_64-pc-windows-msvc.zip`, extract it, and run

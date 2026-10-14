@@ -1,6 +1,7 @@
 # Install, upgrade, and uninstall the per-user Prismattyc MSI.
 # Run on Windows with nothing in %LOCALAPPDATA%\Programs\Prismattyc\bin executing.
-# The MSI does not stop pmuxd. This test locks one installed executable and
+# The MSI starts pmuxd and does not stop it. This test stops an installed
+# pmuxd before replacing files. It then locks one installed executable and
 # records the msiexec exit code instead of treating Restart Manager as proof.
 [CmdletBinding()]
 param(
@@ -39,13 +40,18 @@ function Get-MsiProofPhases {
     return $phases
 }
 
+function Get-PathExpected {
+    # The package default adds the cmd directory. Only -NoAddToPath opts out.
+    return -not [bool]$NoAddToPath
+}
+
 function Get-MsiTail {
     if ($AddToPath -and $NoAddToPath) {
         throw 'Pass only one of -AddToPath and -NoAddToPath.'
     }
     $tail = @('/qn', '/norestart')
-    # Omit the property so the package default applies. -AddToPath forces 1.
-    # -NoAddToPath forces 0.
+    # Omit the property so the package default applies. The default adds the
+    # cmd directory. -AddToPath forces 1. -NoAddToPath forces 0.
     if ($AddToPath) { $tail += 'ADDTOPATH=1' }
     elseif ($NoAddToPath) { $tail += 'ADDTOPATH=0' }
     # Keep the runner from rebooting. This does not claim the copy failed.
@@ -286,6 +292,11 @@ function Assert-Removed {
     $cmdCount = @($parts | Where-Object { $_ -eq $install.Cmd.TrimEnd('\') }).Count
     if ($binCount -ne 0) { throw 'User PATH still contains the install bin.' }
     if ($cmdCount -ne 0) { throw "User PATH has $cmdCount install cmd entries after uninstall." }
+    $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    if (Test-Path -LiteralPath $runKey) {
+        $left = Get-ItemProperty -LiteralPath $runKey -Name 'PrismattycPmuxd' -ErrorAction SilentlyContinue
+        if ($left -and $left.PrismattycPmuxd) { throw 'pmuxd autostart remains after uninstall' }
+    }
     foreach ($path in $Survivors) {
         if (-not (Test-Path -LiteralPath $path)) { throw "Uninstall removed preserved data: $path" }
     }
@@ -441,6 +452,83 @@ function Remove-PreviewSweepFixtures {
     }
 }
 
+function Stop-InstalledPmuxd {
+    $install = Get-PrismattycInstall
+    $prefix = $install.Bin.TrimEnd('\')
+    $owned = @(Get-Process -Name 'pmuxd' -ErrorAction SilentlyContinue | Where-Object {
+        $_.Path -and $_.Path.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($owned.Count -eq 0) { return }
+    $pmux = Join-Path $install.Bin 'pmux.exe'
+    if (Test-Path -LiteralPath $pmux -PathType Leaf) {
+        $stop = Start-Process -FilePath $pmux -ArgumentList 'stop' -PassThru -WindowStyle Hidden
+        if (-not $stop.WaitForExit(20000)) {
+            try { $stop.Kill() } catch { }
+        }
+    }
+    foreach ($proc in $owned) {
+        if (-not $proc.HasExited) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Assert-PmuxdReady {
+    param([bool]$PathExpected)
+    $install = Get-PrismattycInstall
+    $script = Join-Path $install.Bin 'start-windows-pmuxd.ps1'
+    if (-not (Test-Path -LiteralPath $script -PathType Leaf)) { throw "Missing $script" }
+    $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    $value = ''
+    if (Test-Path -LiteralPath $runKey) {
+        $item = Get-ItemProperty -LiteralPath $runKey -Name 'PrismattycPmuxd' -ErrorAction SilentlyContinue
+        if ($item) { $value = [string]$item.PrismattycPmuxd }
+    }
+    if ($value -notlike '*start-windows-pmuxd.ps1*') { throw "pmuxd autostart is missing: $value" }
+    $pmux = Join-Path $install.Bin 'pmux.exe'
+    $status = & $pmux status 2>&1 | Out-String
+    if ($status -notmatch 'status:\s+running') { throw "pmux status is not running: $status" }
+    if ($status -notmatch 'pid:\s+(\d+)') { throw "pmux status has no pid: $status" }
+    $serverPid = [int]$Matches[1]
+    $image = (Get-Process -Id $serverPid -ErrorAction Stop).Path
+    $expected = Join-Path $install.Bin 'pmuxd.exe'
+    if ([string]::Compare($image, $expected, $true) -ne 0) {
+        throw "pmuxd image $image is not $expected"
+    }
+    if ($PathExpected) {
+        $user = [Environment]::GetEnvironmentVariable('Path', 'User')
+        $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+        if ($null -eq $user) { $user = '' }
+        if ($null -eq $machine) { $machine = '' }
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = Join-Path $env:SystemRoot 'System32\cmd.exe'
+        $psi.Arguments = '/d /s /c "pmux ls"'
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.EnvironmentVariables['Path'] = "$machine;$user"
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $psi
+        if (-not $process.Start()) { throw 'pmux ls did not start' }
+        $outTask = $process.StandardOutput.ReadToEndAsync()
+        $errTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(20000)) {
+            try { $process.Kill() } catch { }
+            throw 'pmux ls timed out'
+        }
+        $process.WaitForExit()
+        $text = $outTask.Result + $errTask.Result
+        if ($process.ExitCode -ne 0) { throw "pmux ls failed ($($process.ExitCode)): $text" }
+        Write-Output 'pmux ls works from a new process'
+    } else {
+        $listed = & $pmux ls 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { throw "pmux ls failed: $listed" }
+        Write-Output 'pmux ls works through the installed pmux'
+    }
+    Write-Output "pmuxd pid $serverPid is the installed executable"
+}
+
 $msiPath = (Resolve-Path -LiteralPath $Msi).Path
 $install = Get-PrismattycInstall
 $preserved = @(
@@ -456,29 +544,41 @@ $installArgs = @('/i', $msiPath) + $tail
 $fixtures = $null
 try {
     if ($UpgradeFrom) {
+        Stop-InstalledPmuxd
         $older = (Resolve-Path -LiteralPath $UpgradeFrom).Path
         Invoke-Msi -ArgumentList (@('/i', $older) + $tail)
+        Stop-InstalledPmuxd
     }
-    Write-Output "install: ADDTOPATH=$([int][bool]$AddToPath)"
+    Write-Output ("install: ADDTOPATH=" + [int](Get-PathExpected))
     $fixtures = New-PreviewSweepFixtures -Install $install
+    Stop-InstalledPmuxd
     Invoke-Msi -ArgumentList $installArgs
-    Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected ([bool]$AddToPath)
+    Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected (Get-PathExpected)
+    Assert-PmuxdReady -PathExpected (Get-PathExpected)
     Assert-PreviewSweep -Fixtures $fixtures
     foreach ($choice in @('0', '1', '1', '0', '1')) {
         Write-Output "same-package: ADDTOPATH=$choice"
+        Stop-InstalledPmuxd
         Invoke-Msi -ArgumentList @('/i', $msiPath, '/qn', '/norestart', "ADDTOPATH=$choice", 'REBOOT=ReallySuppress')
         Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected ($choice -eq '1')
+        Assert-PmuxdReady -PathExpected ($choice -eq '1')
         Write-Output "same-package ADDTOPATH=${choice}: PATH and command resolution passed"
     }
+    Stop-InstalledPmuxd
     Remove-UserPathEntry $install.Cmd
     Invoke-Msi -ArgumentList @('/i', $msiPath, '/qn', '/norestart', 'ADDTOPATH=1', 'REBOOT=ReallySuppress')
     Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected $true
+    Assert-PmuxdReady -PathExpected $true
     Write-Output 'same-package ADDTOPATH=1 repairs a missing PATH entry'
-    Write-Output "install: ADDTOPATH=$([int][bool]$AddToPath)"
+    Write-Output ("install: ADDTOPATH=" + [int](Get-PathExpected))
+    Stop-InstalledPmuxd
     Invoke-Msi -ArgumentList $installArgs
-    Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected ([bool]$AddToPath)
+    Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected (Get-PathExpected)
+    Assert-PmuxdReady -PathExpected (Get-PathExpected)
+    Stop-InstalledPmuxd
     Assert-LockedExecutableSurvivesReinstall -CommandLine (New-MsiCommandLine $installArgs)
 
+    Stop-InstalledPmuxd
     $installed = @(Get-PrismattycUninstallKeys)
     if ($installed.Count -ne 1) { throw "ARP has $($installed.Count) Prismattyc entries before uninstall." }
     Invoke-Msi -ArgumentList (@('/x', $installed[0].ProductCode, '/qn', '/norestart', 'REBOOT=ReallySuppress'))
@@ -486,5 +586,6 @@ try {
     Assert-PreviewSweep -Fixtures $fixtures
     Write-Output ("MSI {0} checks passed." -f ((Get-MsiProofPhases) -join ', '))
 } finally {
+    Stop-InstalledPmuxd
     Remove-PreviewSweepFixtures -Fixtures $fixtures -Install $install
 }

@@ -22,7 +22,7 @@
     <Property Id="ARPPRODUCTICON" Value="PrismattycIcon.exe" />
     <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/moonbase2090/Prismattyc" />
-    <Property Id="ADDTOPATH" Secure="yes" Value="0" />
+    <Property Id="ADDTOPATH" Secure="yes" Value="1" />
     <Property Id="USERPATHREGISTERED">
       <RegistrySearch Id="FindUserPathRegistration" Root="HKCU"
                       Key="Software\Moonbase2090\Prismattyc" Name="path" Type="raw" />
@@ -76,6 +76,11 @@
       <Component Id="SweepPreviewScript" Guid="a0bffa63-23ae-5f7d-8ccb-24e88f9e8a32">
         <File Source="$(var.Payload)\bin\remove-windows-preview-installs.ps1" />
         <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="sweep-preview" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="PmuxdAutostart" Guid="e55edd8c-93c6-4f34-89c0-7cc63693bcb3">
+        <File Source="$(var.Payload)\bin\start-windows-pmuxd.ps1" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="pmuxd-autostart" Type="integer" Value="1" KeyPath="yes" />
+        <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="PrismattycPmuxd" Type="string" Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[BINFOLDER]start-windows-pmuxd.ps1&quot;" />
       </Component>
     </ComponentGroup>
 
@@ -204,10 +209,23 @@
         Impersonate="yes"
         Return="ignore"
         ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[BINFOLDER]remove-windows-preview-installs.ps1&quot; -Uninstall" />
+    <!--
+      Commit, after the files exist. Uninstall does not run it.
+      ignore: pmux up can fail after the files are already committed.
+      The script writes a warning and the install still succeeds.
+    -->
+    <CustomAction
+        Id="StartPmuxd"
+        Directory="System64Folder"
+        Execute="commit"
+        Impersonate="yes"
+        Return="ignore"
+        ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[BINFOLDER]start-windows-pmuxd.ps1&quot;" />
     <InstallExecuteSequence>
       <Custom Action="ResetUpdatePointer" After="InstallFiles" Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="SweepPreviewInstalls" After="InstallFiles" Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="SweepPreviewInstallsOnRemove" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="StartPmuxd" After="ResetUpdatePointer" Condition="NOT REMOVE~=&quot;ALL&quot;" />
     </InstallExecuteSequence>
 
     <SetProperty Id="ADDLOCAL" Value="CommandPath" Before="CostFinalize" Sequence="execute"

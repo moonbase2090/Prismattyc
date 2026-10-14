@@ -65,7 +65,19 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn('AllowSameVersionUpgrades="yes"', source)
         self.assertIn('Schedule="afterInstallExecute"', source)
         self.assertIn('MSIRESTARTMANAGERCONTROL" Value="Disable"', source)
-        self.assertIn('Id="ADDTOPATH" Secure="yes" Value="0"', source)
+        self.assertIn('Id="ADDTOPATH" Secure="yes" Value="1"', source)
+        self.assertIn('Name="PrismattycPmuxd"', source)
+        self.assertIn("start-windows-pmuxd.ps1", source)
+        start = source.split('Id="StartPmuxd"', 1)[1].split("/>", 1)[0]
+        self.assertIn('Execute="commit"', start)
+        self.assertIn('Impersonate="yes"', start)
+        self.assertIn('Return="ignore"', start)
+        self.assertNotIn('Return="check"', start)
+        self.assertIn(
+            'Custom Action="StartPmuxd" After="ResetUpdatePointer" '
+            'Condition="NOT REMOVE~=&quot;ALL&quot;"',
+            source,
+        )
         self.assertIn('Name="PATH" Value="[CMDFOLDER]" Action="set" Part="first" System="no"', source)
         self.assertNotIn("ProgramFiles", source)
         for name in ("pmux", "pmuxd", "pmux-attach", "pmux-mcp", "prismattyc", "prismattyc-host"):
@@ -177,6 +189,8 @@ class WindowsMsiTests(unittest.TestCase):
             self.assertNotIn(forbidden, sweep)
         packager = (ROOT / "scripts/release/package-windows.py").read_text(encoding="utf-8")
         self.assertIn("remove-windows-preview-installs.ps1", packager)
+        self.assertIn("start-windows-pmuxd.ps1", packager)
+        self.assertIn("starts pmuxd", packager)
         self.assertIn("prismattyc-cmd-forwarder", packager)
         self.assertIn("stage_cmd_forwarders", packager)
         self.assertIn("rebuild=not args.signed", packager)
@@ -207,6 +221,11 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn("User PATH still contains the install bin.", proof)
         self.assertIn("$install.Cmd", proof)
         self.assertIn("NoAddToPath", proof)
+        self.assertIn("Get-PathExpected", proof)
+        self.assertIn("Assert-PmuxdReady", proof)
+        self.assertIn("Stop-InstalledPmuxd", proof)
+        self.assertIn("PrismattycPmuxd", proof)
+        self.assertIn("pmux ls works from a new process", proof)
         self.assertIn("expected 1", proof)
         prove = (ROOT / "scripts/release/prove-windows-msi.ps1").read_text(encoding="utf-8")
         self.assertIn("-AddToPath", prove)
@@ -348,6 +367,102 @@ class WindowsMsiTests(unittest.TestCase):
         marked = synthetic_pe([16]) + "Prismattyc".encode("utf-16le")
         self.assertTrue(contains_utf16(marked, "Prismattyc"))
         self.assertFalse(contains_utf16(synthetic_pe([16]), "Moonbase 2090 LLC"))
+
+    def test_start_script_runs_sibling_pmux_up_and_returns_its_code(self):
+        if sys.platform != "win32":
+            self.skipTest("the launcher stub is a Windows executable")
+        windir = Path(os.environ.get("WINDIR", r"C:\Windows"))
+        csc = windir / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "csc.exe"
+        if not csc.is_file():
+            csc = windir / "Microsoft.NET" / "Framework" / "v4.0.30319" / "csc.exe"
+        self.assertTrue(csc.is_file(), "csc.exe is required")
+        script = ROOT / "scripts/release/start-windows-pmuxd.ps1"
+        source = script.read_text(encoding="utf-8")
+        self.assertIn("CreateNoWindow = $true", source)
+        self.assertIn("Arguments = 'up'", source)
+        self.assertIn("WaitForExit(30000)", source)
+        self.assertNotIn("Stop-Process", source)
+        self.assertNotIn("--restore-workspace", source)
+        self.assertIn("WARNING: Prismattyc is installed, but pmuxd did not start.", source)
+        stub = """
+using System;
+using System.IO;
+public class Stub {
+  public static int Main(string[] args) {
+    File.WriteAllText(Environment.GetEnvironmentVariable("PMUX_STUB_LOG"), string.Join("\\n", args));
+    string code = Environment.GetEnvironmentVariable("PMUX_STUB_CODE");
+    if (string.IsNullOrEmpty(code)) return 0;
+    return int.Parse(code);
+  }
+}
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "stub.cs").write_text(stub, encoding="utf-8")
+            exe = root / "pmux.exe"
+            compiled = subprocess.run(
+                [str(csc), "/nologo", "/target:exe", f"/out:{exe}", str(root / "stub.cs")],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+            shutil.copy2(script, root / "start-windows-pmuxd.ps1")
+            empty = root / "empty"
+            empty.mkdir()
+            log = root / "args.txt"
+
+            def run(code):
+                env = os.environ.copy()
+                env["PATH"] = str(empty)
+                env["PMUX_STUB_LOG"] = str(log)
+                env["PMUX_STUB_CODE"] = code
+                if log.exists():
+                    log.unlink()
+                return subprocess.run(
+                    [
+                        powershell(),
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(root / "start-windows-pmuxd.ps1"),
+                    ],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            ok = run("0")
+            self.assertEqual(ok.returncode, 0, ok.stderr + ok.stdout)
+            self.assertEqual(log.read_text(encoding="utf-8"), "up")
+            bad = run("3")
+            self.assertEqual(bad.returncode, 3, bad.stderr + bad.stdout)
+            self.assertEqual(log.read_text(encoding="utf-8"), "up")
+            missing = root / "missing"
+            missing.mkdir()
+            shutil.copy2(script, missing / "start-windows-pmuxd.ps1")
+            env = os.environ.copy()
+            env["PATH"] = str(empty)
+            gone = subprocess.run(
+                [
+                    powershell(),
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(missing / "start-windows-pmuxd.ps1"),
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(gone.returncode, 0)
+            self.assertIn("Missing", gone.stderr)
 
     def test_refresh_replaces_a_stale_msi_hash(self):
         with tempfile.TemporaryDirectory() as tmp:

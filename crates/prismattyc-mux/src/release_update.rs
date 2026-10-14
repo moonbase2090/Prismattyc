@@ -2713,6 +2713,7 @@ mod tests {
         assert!(verify(&path, &release.assets[0]).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
+    #[cfg(unix)]
     #[test]
     fn activation_switches_complete_set_and_rollback_restores_original() {
         let dir = temporary();
@@ -2760,6 +2761,7 @@ mod tests {
         }
         fs::remove_dir_all(dir).unwrap();
     }
+    #[cfg(unix)]
     #[test]
     fn incomplete_legacy_install_does_not_replace_any_launcher() {
         let dir = temporary();

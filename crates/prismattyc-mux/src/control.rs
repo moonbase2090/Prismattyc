@@ -8433,11 +8433,13 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn socket_is_private_and_protocol_errors_are_structured() {
         let (plane, _, _) = fixture(8);
         let path = socket_path();
         let server = ControlServer::bind(&path, plane).unwrap();
+        use std::os::unix::fs::PermissionsExt;
         let mode = fs::metadata(server.path()).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
 
@@ -11496,6 +11498,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn phase2a_slow_observer_response_backpressure_does_not_block_fast_client() {
         let (plane, _, _) = fixture(8);
@@ -15302,6 +15305,7 @@ mod tests {
         assert_eq!(nbytes, PMUX_MAIL_NOTIFICATION.len() + 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn doorbell_writes_when_foreground_is_muse() {
         // The shipped Muse binary is `muse-bin-<version>`. A symlink with
@@ -15439,6 +15443,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn doorbell_defers_when_the_agent_is_only_a_background_job() {
         // A shell prompt in the foreground and a detached background process
@@ -15496,6 +15501,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn doorbell_submit_chord_follows_the_foreground_agent_not_a_background_one() {
         // Foreground `claude` (one chunk) behind a shell, with a detached

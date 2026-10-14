@@ -2,8 +2,11 @@
 
 ## [Unreleased]
 
+## [0.3.37] - 2026-10-14
+
 ### Fixed
 
+- The Windows installer now adds pmux to PATH and starts the background service at install and at sign-in. Elevated installs no longer leave an unusable socket.
 - A Windows MSI install prepends `%LOCALAPPDATA%\Programs\Prismattyc\cmd` to the user PATH, registers `pmuxd` to start at logon, and runs `pmux up` before the installer returns. If `pmux up` fails, the installer writes a warning and still finishes. An elevated install assigns the socket to the user instead of leaving it owned by `BUILTIN\Administrators`. A stale socket that already has that Administrators owner and the private user ACL can be replaced by a later `pmux up`. Uninstall removes that PATH entry and the logon registration. `ADDTOPATH=0` still leaves PATH unchanged and still starts `pmuxd`.
 
 ### Changed

@@ -37,6 +37,11 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'WiX installation failed.' }
         $env:PATH = "$(Join-Path $env:USERPROFILE '.dotnet\tools');$env:PATH"
     }
+    # WixQuietExec copies the pmuxd start script's output into the MSI log.
+    if (-not ((wix extension list --global) -match '^WixToolset\.Util\.wixext 5\.0\.2\b')) {
+        wix extension add --global WixToolset.Util.wixext/5.0.2
+        if ($LASTEXITCODE -ne 0) { throw 'WiX Util extension installation failed.' }
+    }
     $metadata = cargo +1.90.0 metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed.' }
     if ([string]::IsNullOrWhiteSpace($Version)) {

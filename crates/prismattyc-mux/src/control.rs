@@ -15869,27 +15869,45 @@ function Read-Exact([int]$Count) {
                 }
                 let image = String::from_utf16_lossy(&buffer[..length as usize]);
                 let image = image.trim_start_matches(r"\\?\");
-                if !image.eq_ignore_ascii_case(&muse_exe.display().to_string()) {
+                // Volume and file index, so an 8.3 TEMP path and the long path
+                // still name this run's copy.
+                if !same_file(muse_exe, std::path::Path::new(image)) {
                     CloseHandle(handle);
                     return None;
                 }
                 Some(StopMuse(handle))
             }
         }
+        fn same_file(left: &std::path::Path, right: &std::path::Path) -> bool {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::{
+                GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+            };
+            fn identity(path: &std::path::Path) -> Option<(u32, u64)> {
+                let file = std::fs::File::open(path).ok()?;
+                let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+                if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+                    return None;
+                }
+                let index = ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64);
+                Some((info.dwVolumeSerialNumber, index))
+            }
+            matches!((identity(left), identity(right)), (Some(left), Some(right)) if left == right)
+        }
         let mut stop_muse = None;
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while plane.foreground_agent_for(pane) != crate::InjectAgent::Muse {
+        loop {
             if stop_muse.is_none() {
                 stop_muse = open_spawned_muse(&pid_path, &muse);
+            }
+            if stop_muse.is_some() && plane.foreground_agent_for(pane) == crate::InjectAgent::Muse {
+                break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
                 "foreground muse never appeared under the pane child"
             );
             std::thread::sleep(Duration::from_millis(20));
-        }
-        if stop_muse.is_none() {
-            stop_muse = open_spawned_muse(&pid_path, &muse);
         }
         let _stop_muse = stop_muse.expect("spawned muse process handle");
         assert_eq!(plane.guest_keyboard_flags_for(pane), 3);

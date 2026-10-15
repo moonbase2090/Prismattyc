@@ -31,6 +31,8 @@ pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
 }
 
+#[cfg(all(windows, test))]
+pub(crate) use windows::private_to_user;
 #[cfg(windows)]
 pub use windows::{
     owned_socket, process_alive, require_private_directory, secure_directory, set_mode,
@@ -498,6 +500,93 @@ mod windows {
     }
 
     #[cfg(test)]
+    pub(crate) fn owner_text(path: &Path) -> io::Result<String> {
+        unsafe {
+            let mut owner = ptr::null_mut();
+            let mut sd = ptr::null_mut();
+            let code = GetNamedSecurityInfoW(
+                wide(path.as_os_str()).as_ptr(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                &mut owner,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut sd,
+            );
+            if code != 0 {
+                return Err(io::Error::from_raw_os_error(code as i32));
+            }
+            let _guard = Local(sd);
+            let mut text = ptr::null_mut();
+            if ConvertSidToStringSidW(owner, &mut text) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let _text = Local(text.cast());
+            let mut n = 0;
+            while *text.add(n) != 0 {
+                n += 1;
+            }
+            Ok(String::from_utf16_lossy(std::slice::from_raw_parts(
+                text, n,
+            )))
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn file_dacl_is_private_user(path: &Path) -> bool {
+        unsafe {
+            let mut dacl = ptr::null_mut();
+            let mut sd = ptr::null_mut();
+            let code = GetNamedSecurityInfoW(
+                wide(path.as_os_str()).as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut dacl,
+                ptr::null_mut(),
+                &mut sd,
+            );
+            if code != 0 {
+                return false;
+            }
+            let _guard = Local(sd);
+            let mut control = 0;
+            let mut revision = 0;
+            if GetSecurityDescriptorControl(sd, &mut control, &mut revision) == 0
+                || control & SE_DACL_PROTECTED == 0
+                || dacl.is_null()
+                || (*dacl).AceCount != 1
+            {
+                return false;
+            }
+            let mut ace = ptr::null_mut();
+            if GetAce(dacl, 0, &mut ace) == 0 {
+                return false;
+            }
+            let header = &*ace.cast::<ACE_HEADER>();
+            if header.AceType != 0 || u32::from(header.AceFlags) & INHERITED_ACE != 0 {
+                return false;
+            }
+            let allowed = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+            use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+            allowed.Mask == FILE_ALL_ACCESS
+                && sid_eq(
+                    (&allowed.SidStart as *const u32).cast_mut().cast(),
+                    &user_sid().unwrap(),
+                )
+        }
+    }
+
+    /// The Windows counterpart of mode 0o600: owned by the current user, with
+    /// a protected DACL whose only entry gives that user full access.
+    #[cfg(test)]
+    pub(crate) fn private_to_user(path: &Path) -> bool {
+        owner_text(path).ok() == user_sid().ok() && file_dacl_is_private_user(path)
+    }
+
+    #[cfg(test)]
     mod tests {
         use super::*;
         use std::ptr;
@@ -619,84 +708,6 @@ mod windows {
                     if present == 0 { ptr::null_mut() } else { dacl },
                     sd,
                 )
-            }
-        }
-
-        fn owner_text(path: &Path) -> io::Result<String> {
-            unsafe {
-                let mut owner = ptr::null_mut();
-                let mut sd = ptr::null_mut();
-                let code = GetNamedSecurityInfoW(
-                    wide(path.as_os_str()).as_ptr(),
-                    SE_FILE_OBJECT,
-                    OWNER_SECURITY_INFORMATION,
-                    &mut owner,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    &mut sd,
-                );
-                if code != 0 {
-                    return Err(io::Error::from_raw_os_error(code as i32));
-                }
-                let _guard = Local(sd);
-                let mut text = ptr::null_mut();
-                if ConvertSidToStringSidW(owner, &mut text) == 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                let _text = Local(text.cast());
-                let mut n = 0;
-                while *text.add(n) != 0 {
-                    n += 1;
-                }
-                Ok(String::from_utf16_lossy(std::slice::from_raw_parts(
-                    text, n,
-                )))
-            }
-        }
-
-        fn file_dacl_is_private_user(path: &Path) -> bool {
-            unsafe {
-                let mut dacl = ptr::null_mut();
-                let mut sd = ptr::null_mut();
-                let code = GetNamedSecurityInfoW(
-                    wide(path.as_os_str()).as_ptr(),
-                    SE_FILE_OBJECT,
-                    DACL_SECURITY_INFORMATION,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    &mut dacl,
-                    ptr::null_mut(),
-                    &mut sd,
-                );
-                if code != 0 {
-                    return false;
-                }
-                let _guard = Local(sd);
-                let mut control = 0;
-                let mut revision = 0;
-                if GetSecurityDescriptorControl(sd, &mut control, &mut revision) == 0
-                    || control & SE_DACL_PROTECTED == 0
-                    || dacl.is_null()
-                    || (*dacl).AceCount != 1
-                {
-                    return false;
-                }
-                let mut ace = ptr::null_mut();
-                if GetAce(dacl, 0, &mut ace) == 0 {
-                    return false;
-                }
-                let header = &*ace.cast::<ACE_HEADER>();
-                if header.AceType != 0 || u32::from(header.AceFlags) & INHERITED_ACE != 0 {
-                    return false;
-                }
-                let allowed = &*ace.cast::<ACCESS_ALLOWED_ACE>();
-                use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
-                allowed.Mask == FILE_ALL_ACCESS
-                    && sid_eq(
-                        (&allowed.SidStart as *const u32).cast_mut().cast(),
-                        &user_sid().unwrap(),
-                    )
             }
         }
 

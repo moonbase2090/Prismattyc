@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.38] - 2026-10-14
+
 ### Fixed
 
 - Installing a Windows MSI over another build of the same version now replaces the installed executables. Before, Windows Installer kept the old files because their file versions were equal.

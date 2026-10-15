@@ -2,6 +2,17 @@
 
 This policy applies to every pull request, whether a person or an agent wrote it.
 
+## Suspended until MB2090 says otherwise
+
+Until MB2090 says otherwise:
+
+- A pull request does not need a Proof section.
+- Extra review gates are off. That includes Opus checkpoints, a new review at a new tip, a second reviewer, and dry-run demands.
+- Green CI is enough to merge.
+- Reviewers may still post findings. A finding does not block the merge. File it as a follow-up issue and fix it after deployment.
+
+The no-PII rule and the authorship rules still apply. While this note is in effect, it suspends section 2, the proof and extra-review requirements in sections 3 and 4, and the review exceptions that demand another review.
+
 ## 1. Classify every PR
 
 **Trunk**: the change touches shared code that other parts depend on:

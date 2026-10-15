@@ -3,11 +3,14 @@
 # The MSI starts pmuxd and does not stop it. This test stops an installed
 # pmuxd before replacing files. It then locks one installed executable and
 # records the msiexec exit code instead of treating Restart Manager as proof.
+# -SameVersionFrom installs another build of the same product version first and
+# then checks that every installed executable is the one in -Msi.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string]$Msi,
     [string]$UpgradeFrom = '',
+    [string]$SameVersionFrom = '',
     [string]$ExpectedVersion = '',
     [string]$ExpectedProductVersion = '',
     [switch]$AddToPath,
@@ -35,6 +38,7 @@ function New-MsiCommandLine {
 function Get-MsiProofPhases {
     $phases = @('install')
     if ($UpgradeFrom) { $phases += 'upgrade' }
+    if ($SameVersionFrom) { $phases += 'same-version' }
     if ($ExpectedVersion -or $ExpectedProductVersion) { $phases += 'version' }
     $phases += @('locked-file', 'uninstall')
     return $phases
@@ -63,6 +67,9 @@ if ($FormatArguments) {
     $tail = Get-MsiTail
     if ($UpgradeFrom) {
         Write-Output ('upgrade=' + (New-MsiCommandLine (@('/i', $UpgradeFrom) + $tail)))
+    }
+    if ($SameVersionFrom) {
+        Write-Output ('same-version=' + (New-MsiCommandLine (@('/i', $SameVersionFrom) + $tail)))
     }
     Write-Output ('install=' + (New-MsiCommandLine (@('/i', $Msi) + $tail)))
     Write-Output ('phases=' + ((Get-MsiProofPhases) -join ','))
@@ -325,6 +332,61 @@ function Read-AllBytes {
     return $buffer
 }
 
+function Get-MsiProductVersion {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $installer = New-Object -ComObject WindowsInstaller.Installer
+    $database = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($Path, 0))
+    $view = $database.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $database,
+        @("SELECT Value FROM Property WHERE Property = 'ProductVersion'"))
+    $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null) | Out-Null
+    $record = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+    if ($null -eq $record) { throw "$Path has no ProductVersion" }
+    $value = $record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, 1)
+    $view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null) | Out-Null
+    return $value
+}
+
+$PayloadExecutables = @('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host')
+
+function Get-MsiPayloadHashes {
+    # An administrative install extracts the package's files without installing it.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $target = Join-Path ([System.IO.Path]::GetTempPath()) ('prismattyc-msi-payload-' + [guid]::NewGuid().ToString('n'))
+    New-Item -ItemType Directory -Path $target | Out-Null
+    try {
+        $code = Start-Msi -CommandLine (New-MsiCommandLine @('/a', $Path, '/qn', "TARGETDIR=$target"))
+        if ($code -ne 0) { throw "msiexec /a $Path exited $code" }
+        $hashes = @{}
+        foreach ($name in $PayloadExecutables) {
+            $found = @(Get-ChildItem -LiteralPath $target -Recurse -File -Filter "$name.exe" |
+                Where-Object { $_.Directory.Name -eq 'bin' })
+            if ($found.Count -ne 1) { throw "$Path has $($found.Count) bin\$name.exe payloads" }
+            $hashes[$name] = (Get-FileHash -LiteralPath $found[0].FullName -Algorithm SHA256).Hash
+        }
+        return $hashes
+    } finally {
+        Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Assert-InstalledMatchesPayload {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Expected,
+        [Parameter(Mandatory = $true)][hashtable]$Previous,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $install = Get-PrismattycInstall
+    foreach ($name in $PayloadExecutables) {
+        $path = Join-Path $install.Bin "$name.exe"
+        $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        if ($actual -ne $Expected[$name]) {
+            $which = if ($actual -eq $Previous[$name]) { 'the other same-version build' } else { 'neither package' }
+            throw "Installed $name.exe is from $which, not $Label"
+        }
+    }
+    Write-Output "same-version: every installed executable matches $(Split-Path -Leaf $Label)"
+}
+
 function Assert-LockedExecutableSurvivesReinstall {
     param([Parameter(Mandatory = $true)][string]$CommandLine)
     $install = Get-PrismattycInstall
@@ -549,6 +611,23 @@ try {
         Invoke-Msi -ArgumentList (@('/i', $older) + $tail)
         Stop-InstalledPmuxd
     }
+    $sameVersion = $null
+    if ($SameVersionFrom) {
+        $earlier = (Resolve-Path -LiteralPath $SameVersionFrom).Path
+        $earlierVersion = Get-MsiProductVersion $earlier
+        $newVersion = Get-MsiProductVersion $msiPath
+        if ($earlierVersion -ne $newVersion) {
+            throw "-SameVersionFrom is product version $earlierVersion, but -Msi is $newVersion"
+        }
+        $sameVersion = @{ Previous = Get-MsiPayloadHashes $earlier; Expected = Get-MsiPayloadHashes $msiPath }
+        $differs = @($PayloadExecutables | Where-Object { $sameVersion.Previous[$_] -ne $sameVersion.Expected[$_] })
+        if ($differs.Count -eq 0) { throw 'Both packages carry identical executables, so a same-version install proves nothing.' }
+        Write-Output "same-version: product version $newVersion; $($differs.Count) executables differ between the builds"
+        Stop-InstalledPmuxd
+        Invoke-Msi -ArgumentList (@('/i', $earlier) + $tail)
+        Assert-InstalledMatchesPayload -Expected $sameVersion.Previous -Previous $sameVersion.Expected -Label $earlier
+        Stop-InstalledPmuxd
+    }
     Write-Output ("install: ADDTOPATH=" + [int](Get-PathExpected))
     $fixtures = New-PreviewSweepFixtures -Install $install
     Stop-InstalledPmuxd
@@ -556,6 +635,9 @@ try {
     Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected (Get-PathExpected)
     Assert-PmuxdReady -PathExpected (Get-PathExpected)
     Assert-PreviewSweep -Fixtures $fixtures
+    if ($sameVersion) {
+        Assert-InstalledMatchesPayload -Expected $sameVersion.Expected -Previous $sameVersion.Previous -Label $msiPath
+    }
     foreach ($choice in @('0', '1', '1', '0', '1')) {
         Write-Output "same-package: ADDTOPATH=$choice"
         Stop-InstalledPmuxd

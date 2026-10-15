@@ -109,8 +109,10 @@ stable `X.Y.Z` uses slot 999. `X.Y.Z-rc.N` uses slot N, from 1 through 998.
 `0.3.30-rc.1` is `0.3.30001`. The UpgradeCode
 `681faa33-88f2-5c22-aeba-86ab1fffd4da` stays fixed so a newer MSI replaces the
 older one. A rebuild of the same product version also replaces the installed
-product and leaves one Apps & features entry. Other prerelease spellings are
-rejected.
+product and leaves one Apps & features entry. Every build of one version shares
+a file version, so the package sets `REINSTALLMODE=emus`, which replaces files
+of an equal version. The rebuild's executables are the ones installed.
+Other prerelease spellings are rejected.
 
 The installer does not stop a running daemon or host. Restart Manager is
 disabled. That alone does not decide whether Windows replaces an in-use file
@@ -127,7 +129,11 @@ directory `platform::data_home` uses. It does not stop or restart any process.
 MSI path that contains spaces stays one argument. It installs with
 `msiexec /qn`, checks the files, shortcut, Apps & features entry, and
 `--version` when expected versions are passed, and upgrades from an older MSI
-when `-UpgradeFrom` is set. It then locks one installed executable, runs
+when `-UpgradeFrom` is set. `-SameVersionFrom` installs another build of the
+same product version first. After the main install, every executable in `bin`
+must match the main MSI's payload, which the script extracts with
+`msiexec /a`. The two packages must share a product version and differ in at
+least one executable. It then locks one installed executable, runs
 msiexec again with `REBOOT=ReallySuppress`, and fails if that lock does not
 survive or the file bytes change. It prints the msiexec exit code. It
 uninstalls and checks that the install is gone while the preserved data files

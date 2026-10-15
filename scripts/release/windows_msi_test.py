@@ -330,6 +330,9 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn("/qn /norestart ADDTOPATH=1 REBOOT=ReallySuppress", opted_in)
         opted_out = formatted(["-Msi", r"C:\plain\new.msi", "-NoAddToPath"])
         self.assertIn("/qn /norestart ADDTOPATH=0 REBOOT=ReallySuppress", opted_out)
+        same = formatted(["-Msi", r"C:\plain\new.msi", "-SameVersionFrom", r"C:\MSI Proof\rebuild.msi"])
+        self.assertIn(r'same-version=/i "C:\MSI Proof\rebuild.msi" /qn /norestart REBOOT=ReallySuppress', same)
+        self.assertIn("phases=install,same-version,locked-file,uninstall", same)
 
     def test_package_script_refuses_non_windows_before_building(self):
         if sys.platform == "win32":

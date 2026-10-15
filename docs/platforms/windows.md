@@ -116,8 +116,10 @@ stable `X.Y.Z` uses slot 999. `X.Y.Z-rc.N` uses slot N, from 1 through 998.
 `0.3.30-rc.1` is `0.3.30001`. The UpgradeCode
 `681faa33-88f2-5c22-aeba-86ab1fffd4da` stays fixed so a newer MSI replaces the
 older one. A rebuild of the same product version also replaces the installed
-product and leaves one Apps & features entry. Other prerelease spellings are
-rejected.
+product and leaves one Apps & features entry. Every build of one version shares
+a file version, so the package sets `REINSTALLMODE=emus`, which replaces files
+of an equal version. The rebuild's executables are the ones installed.
+Other prerelease spellings are rejected.
 
 The installer does not stop a running daemon or host. Restart Manager is
 disabled. That alone does not decide whether Windows replaces an in-use file
@@ -130,11 +132,28 @@ that same store and leaves the staged payloads in place. The script uses the
 installer process environment, so a nonempty `XDG_DATA_HOME` selects the same
 directory `platform::data_home` uses. It does not stop or restart any process.
 
+Live proofs that install Prismattyc, start `pmuxd`, or open the host run as a
+local Windows user created for that proof, in a profile with no Prismattyc
+install. They do not run in the account that owns the development session.
+Issue #307 was proved that way. Issues #310, #311, and #312 will use the
+same account. The owner's PATH, Run key, and
+`%LOCALAPPDATA%` stay unchanged. The mux ConPTY fixture is
+`cargo test -p prismattyc-mux --lib`. It does not install Prismattyc, write
+the Run key, or use the default socket. It does start ConPTY guests in
+whichever account runs it. Cleanup compares the volume serial and file index
+of the child that test started, then terminates that process handle. It does
+not kill by image name. Whether this cargo test must also run as the proof
+account is follow-up #320 and does not block a merge.
+
 `scripts/release/test-windows-msi.ps1` quotes every msiexec argument, so an
 MSI path that contains spaces stays one argument. It installs with
 `msiexec /qn`, checks the files, shortcut, Apps & features entry, and
 `--version` when expected versions are passed, and upgrades from an older MSI
-when `-UpgradeFrom` is set. It then locks one installed executable, runs
+when `-UpgradeFrom` is set. `-SameVersionFrom` installs another build of the
+same product version first. After the main install, every executable in `bin`
+must match the main MSI's payload, which the script extracts with
+`msiexec /a`. The two packages must share a product version and differ in at
+least one executable. It then locks one installed executable, runs
 msiexec again with `REBOOT=ReallySuppress`, and fails if that lock does not
 survive or the file bytes change. It prints the msiexec exit code. It
 uninstalls and checks that the install is gone while the preserved data files

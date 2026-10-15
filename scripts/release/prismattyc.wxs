@@ -19,6 +19,12 @@
 
     <!-- Do not ask Restart Manager to close Prismattyc. -->
     <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />
+    <!--
+      e instead of the default o: replace files of an equal version too. Every
+      build of one release shares a file version, so a same-version rebuild
+      would otherwise keep the old executables.
+    -->
+    <Property Id="REINSTALLMODE" Value="emus" />
     <Property Id="ARPPRODUCTICON" Value="PrismattycIcon.exe" />
     <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/moonbase2090/Prismattyc" />

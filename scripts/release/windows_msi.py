@@ -33,6 +33,9 @@ SIGNING_ENV = (
 SIGNING_SKIPPED = (
     "Windows code signing skipped: Azure Artifact Signing settings are absent."
 )
+# WixQuietExec, which copies the pmuxd start script's output into the MSI log.
+# Pinned to the WiX release in build-windows.ps1.
+WIX_UTIL_EXTENSION = "WixToolset.Util.wixext/5.0.2"
 _RC = re.compile(r"^rc\.(0|[1-9][0-9]*)$")
 _MSI_FIELD_MAX = 65535
 _PATCH_MAX = 64
@@ -72,6 +75,8 @@ def build_msi(payload: Path, repo: Path, version: str, out_msi: Path) -> None:
         str(repo / "scripts/release/prismattyc.wxs"),
         "-arch",
         "x64",
+        "-ext",
+        WIX_UTIL_EXTENSION,
         "-d",
         f"ProductVersion={product_version}",
         "-d",

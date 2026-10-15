@@ -22,8 +22,9 @@ metadata, licenses, and SHA-256 checksums to `build/windows-release`. Use
 `x86_64-pc-windows-msvc`. The GNU target additionally requires a native MinGW
 toolchain on PATH. WiX 5.0.2 compiles the MSI and is installed with
 `dotnet tool install --global wix --version 5.0.2` when it is not already on
-PATH. WiX's directory-name check fails on macOS and Linux, so the MSI is built
-on Windows.
+PATH. The build also adds the `WixToolset.Util.wixext` 5.0.2 extension with
+`wix extension add --global` when it is missing. WiX's directory-name check
+fails on macOS and Linux, so the MSI is built on Windows.
 
 ## Install the MSI
 
@@ -65,7 +66,13 @@ runs `bin\pmux.exe up`, which starts `pmuxd` when the default socket is down
 and leaves a running daemon alone. A commit action runs that script after
 the files are installed. If `pmux up` fails, the script writes a warning and
 the install still finishes with the files in place. Sign in again, or run
-`pmux up` from the `cmd` directory, before creating a session. An elevated
+`pmux up` from the `cmd` directory, before creating a session. The commit action
+runs the script through WixQuietExec, so its output is in the MSI log: either
+`pmuxd is running.` or the `WARNING: Prismattyc is installed, but pmuxd did not
+start.` line with the reason and the `pmux up` exit code. Each run, at install
+and at logon, also overwrites `%LOCALAPPDATA%\Prismattyc\pmuxd-start.txt` with
+the time, `exit: N`, and the result. A quiet install shows nothing, so check
+that file or `msiexec /l*v` when `pmux` cannot reach the daemon. An elevated
 installer still starts `pmuxd` as the same user. The socket owner is that
 user, and a socket left owned by `BUILTIN\Administrators` with the private
 user ACL is accepted so a later non-elevated `pmux up` can use or replace it.

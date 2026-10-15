@@ -4022,13 +4022,7 @@ impl App {
         config_editor: bool,
     ) -> Result<WindowId> {
         let editor_command = if config_editor {
-            let path = config::config_path();
-            config_template::ensure_template(&path)?;
-            let visual = std::env::var("VISUAL").ok();
-            let editor = std::env::var("EDITOR").ok();
-            let mut command = resolve_editor_command(visual.as_deref(), editor.as_deref());
-            command.args.push(path.to_string_lossy().into_owned());
-            Some(command)
+            Some(config_editor_command()?)
         } else {
             None
         };
@@ -19251,19 +19245,46 @@ enum Dispatch {
 pub(crate) struct EditorCommand {
     pub(crate) program: String,
     pub(crate) args: Vec<String>,
+    /// A GUI editor that opens its own window. The host starts it directly
+    /// instead of running it in a terminal pane.
+    pub(crate) detached: bool,
 }
 
 /// Resolve an editor without invoking a shell. Empty or malformed candidates
 /// are skipped so a bad `$VISUAL` does not hide a usable `$EDITOR`.
 pub(crate) fn resolve_editor_command(visual: Option<&str>, editor: Option<&str>) -> EditorCommand {
+    resolve_editor_command_for(cfg!(windows), visual, editor)
+}
+
+/// `$VISUAL` and `$EDITOR` run in a terminal pane on every platform. Without
+/// them, Windows opens Notepad in its own window; `nano` is not part of
+/// Windows. macOS and Linux keep `nano` in a pane.
+fn resolve_editor_command_for(
+    windows: bool,
+    visual: Option<&str>,
+    editor: Option<&str>,
+) -> EditorCommand {
     visual
         .into_iter()
         .chain(editor)
         .find_map(parse_editor_command)
         .unwrap_or_else(|| EditorCommand {
-            program: "nano".into(),
+            program: if windows { "notepad.exe" } else { "nano" }.into(),
             args: Vec::new(),
+            detached: windows,
         })
+}
+
+/// The config editor command with the config path appended. Creates the
+/// default template first when the file does not exist.
+fn config_editor_command() -> Result<EditorCommand> {
+    let path = config::config_path();
+    config_template::ensure_template(&path)?;
+    let visual = std::env::var("VISUAL").ok();
+    let editor = std::env::var("EDITOR").ok();
+    let mut command = resolve_editor_command(visual.as_deref(), editor.as_deref());
+    command.args.push(path.to_string_lossy().into_owned());
+    Ok(command)
 }
 
 fn parse_editor_command(value: &str) -> Option<EditorCommand> {
@@ -19320,6 +19341,7 @@ fn parse_editor_command(value: &str) -> Option<EditorCommand> {
     Some(EditorCommand {
         program,
         args: words.collect(),
+        detached: false,
     })
 }
 
@@ -21230,11 +21252,27 @@ impl ApplicationHandler<UserAction> for App {
                     eprintln!("prismattyc-host: new window failed: {e:#}");
                 }
             }
-            UserAction::OpenConfig => {
-                if let Err(e) = self.open_window(event_loop, true) {
-                    eprintln!("prismattyc-host: config window failed: {e:#}");
+            UserAction::OpenConfig => match config_editor_command() {
+                Ok(command) if command.detached => {
+                    // A GUI editor opens its own window. A host window
+                    // around it would only show an empty pane.
+                    if let Err(e) = std::process::Command::new(&command.program)
+                        .args(&command.args)
+                        .spawn()
+                    {
+                        eprintln!(
+                            "prismattyc-host: config editor {} failed: {e}",
+                            command.program
+                        );
+                    }
                 }
-            }
+                Ok(_) => {
+                    if let Err(e) = self.open_window(event_loop, true) {
+                        eprintln!("prismattyc-host: config window failed: {e:#}");
+                    }
+                }
+                Err(e) => eprintln!("prismattyc-host: config window failed: {e:#}"),
+            },
             #[cfg(target_os = "macos")]
             UserAction::CheckForUpdates => match self.update_check_inflight {
                 None => {
@@ -23384,6 +23422,7 @@ mod tests {
                 EditorCommand {
                     program: "nano".into(),
                     args: vec![],
+                    detached: false,
                 },
             ),
             (
@@ -23392,6 +23431,7 @@ mod tests {
                 EditorCommand {
                     program: "nano".into(),
                     args: vec![],
+                    detached: false,
                 },
             ),
             (
@@ -23400,6 +23440,7 @@ mod tests {
                 EditorCommand {
                     program: "code".into(),
                     args: vec!["--wait".into()],
+                    detached: false,
                 },
             ),
             (
@@ -23408,6 +23449,7 @@ mod tests {
                 EditorCommand {
                     program: "editor with spaces".into(),
                     args: vec!["--new".into()],
+                    detached: false,
                 },
             ),
             (
@@ -23416,12 +23458,45 @@ mod tests {
                 EditorCommand {
                     program: "nvim".into(),
                     args: vec!["--clean".into()],
+                    detached: false,
                 },
             ),
         ];
         for (visual, editor, expected) in cases {
-            assert_eq!(resolve_editor_command(visual, editor), expected);
+            assert_eq!(resolve_editor_command_for(false, visual, editor), expected);
         }
+    }
+
+    #[test]
+    fn windows_config_editor_falls_back_to_notepad_in_its_own_window() {
+        let notepad = EditorCommand {
+            program: "notepad.exe".into(),
+            args: vec![],
+            detached: true,
+        };
+        assert_eq!(resolve_editor_command_for(true, None, None), notepad);
+        assert_eq!(
+            resolve_editor_command_for(true, Some(""), Some("  ")),
+            notepad
+        );
+        assert_eq!(
+            resolve_editor_command_for(true, Some("unterminated\""), None),
+            notepad
+        );
+        // $VISUAL and $EDITOR still win on Windows, in a terminal pane.
+        assert_eq!(
+            resolve_editor_command_for(true, None, Some("nvim --clean")),
+            EditorCommand {
+                program: "nvim".into(),
+                args: vec!["--clean".into()],
+                detached: false,
+            }
+        );
+        // This build uses the fallback for its own platform.
+        assert_eq!(
+            resolve_editor_command(None, None).program,
+            if cfg!(windows) { "notepad.exe" } else { "nano" }
+        );
     }
 
     #[test]

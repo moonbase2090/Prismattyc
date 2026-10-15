@@ -8,6 +8,7 @@
 
 - Installing a Windows MSI over another build of the same version now replaces the installed executables. Before, Windows Installer kept the old files because their file versions were equal.
 - A quiet Windows install no longer hides a failed `pmuxd` start. The start script's warning and the `pmux up` exit code now go into the MSI log, and every install and logon start records its result in `%LOCALAPPDATA%\Prismattyc\pmuxd-start.txt`. The install still succeeds.
+- On Windows, Open config with no `VISUAL` or `EDITOR` set opens `config.toml` in Notepad instead of trying to run `nano`. `VISUAL` and `EDITOR` still take precedence on every platform.
 
 ## [0.3.37] - 2026-10-14
 

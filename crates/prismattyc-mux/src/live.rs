@@ -1360,12 +1360,47 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
-    fn sleep_spawn(env: BTreeMap<String, String>) -> SpawnSpec {
+    #[cfg(windows)]
+    fn windows_system(name: &str) -> String {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        PathBuf::from(root)
+            .join("System32")
+            .join(name)
+            .display()
+            .to_string()
+    }
+
+    /// `cmd /d /c` plus a quiet ping. PowerShell startup is slow enough that a
+    /// full default-thread run leaves the pane blank for the whole wait.
+    #[cfg(windows)]
+    fn cmd_for(command: &str, env: BTreeMap<String, String>) -> SpawnSpec {
         SpawnSpec {
-            program: "/bin/sleep".into(),
-            argv: vec!["30".into()],
-            cwd: Some(PathBuf::from("/tmp")),
+            program: windows_system("cmd.exe"),
+            argv: vec![
+                "/d".into(),
+                "/c".into(),
+                format!("{command}& ping -n 31 127.0.0.1 >nul"),
+            ],
+            cwd: Some(std::env::temp_dir()),
             env,
+        }
+    }
+
+    fn sleep_spawn(env: BTreeMap<String, String>) -> SpawnSpec {
+        #[cfg(unix)]
+        {
+            SpawnSpec {
+                program: "/bin/sleep".into(),
+                argv: vec!["30".into()],
+                cwd: Some(PathBuf::from("/tmp")),
+                env,
+            }
+        }
+        #[cfg(windows)]
+        {
+            // `rem` comments out the rest of the line, including the ping that
+            // keeps the ConPTY child alive.
+            cmd_for("cd .", env)
         }
     }
 
@@ -1441,19 +1476,32 @@ mod tests {
     }
 
     fn env_report_spawn(env: BTreeMap<String, String>) -> SpawnSpec {
-        SpawnSpec {
-            program: "/bin/sh".into(),
-            argv: vec![
-                "-c".into(),
-                "printf 'PANE=%s\\nSOCK=%s\\nAGENT=%s\\nPACK=%s\\n' \"$PRISMATTYC_PANE_ID\" \"$PMUX_SOCKET\" \"$PMUX_AGENT\" \"$PMUX_TUTORIAL_PACK\"; if env | grep -q '^PRISMATTYC_SESSION_ID='; then printf 'HAS_SESSION=1\\n'; else printf 'HAS_SESSION=0\\n'; fi; if env | grep -q '^PMUX_AGENT='; then printf 'HAS_AGENT=1\\n'; else printf 'HAS_AGENT=0\\n'; fi; exec sleep 30".into(),
-            ],
-            cwd: Some(PathBuf::from("/tmp")),
-            env,
+        #[cfg(unix)]
+        {
+            SpawnSpec {
+                program: "/bin/sh".into(),
+                argv: vec![
+                    "-c".into(),
+                    "printf 'PANE=%s\\nSOCK=%s\\nAGENT=%s\\nPACK=%s\\n' \"$PRISMATTYC_PANE_ID\" \"$PMUX_SOCKET\" \"$PMUX_AGENT\" \"$PMUX_TUTORIAL_PACK\"; if env | grep -q '^PRISMATTYC_SESSION_ID='; then printf 'HAS_SESSION=1\\n'; else printf 'HAS_SESSION=0\\n'; fi; if env | grep -q '^PMUX_AGENT='; then printf 'HAS_AGENT=1\\n'; else printf 'HAS_AGENT=0\\n'; fi; exec sleep 30".into(),
+                ],
+                cwd: Some(PathBuf::from("/tmp")),
+                env,
+            }
+        }
+        #[cfg(windows)]
+        {
+            cmd_for(
+                "echo PANE=%PRISMATTYC_PANE_ID%& echo SOCK=%PMUX_SOCKET%& echo AGENT=%PMUX_AGENT%& echo PACK=%PMUX_TUTORIAL_PACK%& if defined PRISMATTYC_SESSION_ID (echo HAS_SESSION=1) else (echo HAS_SESSION=0)& if defined PMUX_AGENT (echo HAS_AGENT=1) else (echo HAS_AGENT=0)",
+                env,
+            )
         }
     }
 
     fn wait_for_pane_text(pane: &mut LivePane, pane_id: u64, needle: &str) -> String {
-        for _ in 0..200 {
+        // cmd prints immediately. The longer Windows budget covers a full
+        // default-thread run, where many ConPTY guests start together.
+        let attempts = if cfg!(windows) { 600 } else { 200 };
+        for _ in 0..attempts {
             let _ = pane.drain(pane_id);
             let text = pane.content(pane_id).lines.join("\n");
             if text.contains(needle) {
@@ -1503,6 +1551,10 @@ mod tests {
         assert!(pane.observe_death(9).is_none());
     }
 
+    // ConPTY keeps the output pipe open after the client exits, so `drain`
+    // does not see the death edge. This notice is covered again when Windows
+    // exit polling lands.
+    #[cfg(unix)]
     #[test]
     fn true_exiting_emits_notice_when_seated() {
         let mut env = BTreeMap::new();

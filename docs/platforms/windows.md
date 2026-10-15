@@ -125,6 +125,19 @@ that same store and leaves the staged payloads in place. The script uses the
 installer process environment, so a nonempty `XDG_DATA_HOME` selects the same
 directory `platform::data_home` uses. It does not stop or restart any process.
 
+Live proofs that install Prismattyc, start `pmuxd`, or open the host run as a
+local Windows user created for that proof, in a profile with no Prismattyc
+install. They do not run in the account that owns the development session.
+Issue #307 was proved that way. Issues #310, #311, and #312 will use the
+same account. The owner's PATH, Run key, and
+`%LOCALAPPDATA%` stay unchanged. The mux ConPTY fixture is
+`cargo test -p prismattyc-mux --lib`. It does not install Prismattyc, write
+the Run key, or use the default socket. It does start ConPTY guests in
+whichever account runs it. Cleanup compares the volume serial and file index
+of the child that test started, then terminates that process handle. It does
+not kill by image name. Whether this cargo test must also run as the proof
+account is follow-up #320 and does not block a merge.
+
 `scripts/release/test-windows-msi.ps1` quotes every msiexec argument, so an
 MSI path that contains spaces stays one argument. It installs with
 `msiexec /qn`, checks the files, shortcut, Apps & features entry, and

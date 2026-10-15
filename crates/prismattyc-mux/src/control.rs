@@ -8436,12 +8436,14 @@ mod tests {
         client
     }
 
-    /// Absolute socket path stamped into a guest. Windows uses a short drive
-    /// path so an 80-column pane can show `SOCK=` on one row.
+    /// Absolute socket path stamped into a guest. A split leaves a 40-column
+    /// pane, so the path has to stay short enough for `SOCK=` to fit on one row.
+    /// Windows uses a drive-root path. Unix uses `/tmp` rather than the system
+    /// temp directory, which is long enough on macOS to wrap.
     fn reported_guest_socket(name: &str) -> PathBuf {
         #[cfg(unix)]
         {
-            std::env::temp_dir().join(name)
+            PathBuf::from(format!("/tmp/{name}"))
         }
         #[cfg(windows)]
         {
@@ -8464,7 +8466,7 @@ mod tests {
         #[cfg(windows)]
         {
             SpawnSpec {
-                program: r"C:\Windows\System32\cmd.exe".into(),
+                program: windows_system("cmd.exe"),
                 argv: vec!["/d".into(), "/k".into()],
                 cwd: Some(std::env::temp_dir()),
                 env: BTreeMap::from([("TERM".into(), "prism".into())]),
@@ -8472,9 +8474,56 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    fn windows_system(name: &str) -> String {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        PathBuf::from(root)
+            .join("System32")
+            .join(name)
+            .display()
+            .to_string()
+    }
+
+    /// UTF-16LE base64 for `powershell -EncodedCommand`. Avoids a temp `.ps1`.
+    #[cfg(windows)]
+    fn encode_utf16_base64(script: &str) -> String {
+        let wide: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut encoded = String::new();
+        let mut index = 0;
+        while index + 3 <= wide.len() {
+            let chunk = ((wide[index] as u32) << 16)
+                | ((wide[index + 1] as u32) << 8)
+                | (wide[index + 2] as u32);
+            encoded.push(TABLE[((chunk >> 18) & 63) as usize] as char);
+            encoded.push(TABLE[((chunk >> 12) & 63) as usize] as char);
+            encoded.push(TABLE[((chunk >> 6) & 63) as usize] as char);
+            encoded.push(TABLE[(chunk & 63) as usize] as char);
+            index += 3;
+        }
+        let rest = wide.len() - index;
+        if rest == 1 {
+            let chunk = (wide[index] as u32) << 16;
+            encoded.push(TABLE[((chunk >> 18) & 63) as usize] as char);
+            encoded.push(TABLE[((chunk >> 12) & 63) as usize] as char);
+            encoded.push('=');
+            encoded.push('=');
+        } else if rest == 2 {
+            let chunk = ((wide[index] as u32) << 16) | ((wide[index + 1] as u32) << 8);
+            encoded.push(TABLE[((chunk >> 18) & 63) as usize] as char);
+            encoded.push(TABLE[((chunk >> 12) & 63) as usize] as char);
+            encoded.push(TABLE[((chunk >> 6) & 63) as usize] as char);
+            encoded.push('=');
+        }
+        encoded
+    }
+
     /// Run a guest script. Unix keeps `/bin/sh -c`. Windows translates the
-    /// known scripts into PowerShell and starts them under `cmd /d /c`, which
-    /// is the ConPTY child the foreground walk expects.
+    /// known scripts into PowerShell. The encoded command is longer than
+    /// `cmd /c` accepts (8191 characters), so PowerShell is the ConPTY child.
+    /// The foreground walk treats `powershell` as a shell and follows its
+    /// single child.
     fn sh_c(script: &str) -> SpawnSpec {
         #[cfg(unix)]
         {
@@ -8599,25 +8648,12 @@ function Read-Exact([int]$Count) {
 
     #[cfg(windows)]
     fn windows_powershell(body: &str) -> SpawnSpec {
-        use std::sync::atomic::AtomicU64;
-        static NEXT_SCRIPT: AtomicU64 = AtomicU64::new(1);
-        let path = std::env::temp_dir().join(format!(
-            "prism-live-{}-{}.ps1",
-            std::process::id(),
-            NEXT_SCRIPT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::write(&path, body).expect("write Windows guest script");
         SpawnSpec {
-            program: r"C:\Windows\System32\cmd.exe".into(),
+            program: windows_system(r"WindowsPowerShell\v1.0\powershell.exe"),
             argv: vec![
-                "/d".into(),
-                "/c".into(),
-                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".into(),
                 "-NoProfile".into(),
-                "-ExecutionPolicy".into(),
-                "Bypass".into(),
-                "-File".into(),
-                path.display().to_string(),
+                "-EncodedCommand".into(),
+                encode_utf16_base64(body),
             ],
             cwd: Some(std::env::temp_dir()),
             env: BTreeMap::new(),
@@ -8734,18 +8770,6 @@ function Read-Exact([int]$Count) {
                }}\n\
              }}\n"
         ))
-    }
-
-    #[cfg(windows)]
-    fn ps_env_report() -> String {
-        ps_with_preamble(
-            "$pane = [Environment]::GetEnvironmentVariable('PRISMATTYC_PANE_ID')\n\
-             $sock = [Environment]::GetEnvironmentVariable('PMUX_SOCKET')\n\
-             $session = [Environment]::GetEnvironmentVariable('PRISMATTYC_SESSION_ID')\n\
-             Write-Text (\"PANE=\" + $pane + \"`nSOCK=\" + $sock + \"`n\")\n\
-             if ($null -eq $session) { Write-Text \"HAS_SESSION=0`n\" } else { Write-Text \"HAS_SESSION=1`n\" }\n\
-             Start-Sleep -Seconds 30\n",
-        )
     }
 
     #[cfg(windows)]
@@ -12332,7 +12356,18 @@ function Read-Exact([int]$Count) {
         }
         #[cfg(windows)]
         {
-            windows_powershell(&ps_env_report())
+            // cmd prints the env lines in a few milliseconds. PowerShell under
+            // a full default-thread run was still blank when the wait ended.
+            SpawnSpec {
+                program: windows_system("cmd.exe"),
+                argv: vec![
+                    "/d".into(),
+                    "/c".into(),
+                    "echo PANE=%PRISMATTYC_PANE_ID%& echo SOCK=%PMUX_SOCKET%& if defined PRISMATTYC_SESSION_ID (echo HAS_SESSION=1) else (echo HAS_SESSION=0)& ping -n 31 127.0.0.1 >nul".into(),
+                ],
+                cwd: Some(std::env::temp_dir()),
+                env: BTreeMap::new(),
+            }
         }
     }
 
@@ -15739,19 +15774,33 @@ function Read-Exact([int]$Count) {
     #[test]
     fn doorbell_writes_when_foreground_is_muse() {
         // Windows has no foreground process group. Classification follows one
-        // shell-child chain: cmd, then PowerShell, then `muse-bin-*.exe`.
+        // shell-child chain: PowerShell, then `muse-bin-*.exe`.
         // The renamed ping is silent so its output cannot look like a busy pane.
         let dir = std::env::temp_dir().join(format!("pt183-muse-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        // Kill the renamed ping even if an assertion fails, then drop the copy.
+        // `-n 120` was still running after the pane exited and locked the file.
+        struct StopMuse(std::path::PathBuf);
+        impl Drop for StopMuse {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new(windows_system("taskkill.exe"))
+                    .args(["/F", "/IM", "muse-bin-1.4.3-R5018.1.exe"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _stop = StopMuse(dir.clone());
         let muse = dir.join("muse-bin-1.4.3-R5018.1.exe");
-        std::fs::copy(r"C:\Windows\System32\ping.exe", &muse).unwrap();
+        std::fs::copy(windows_system("ping.exe"), &muse).unwrap();
         let muse_literal = muse.display().to_string().replace('\'', "''");
         let body = ps_with_preamble(&format!(
             "[PrismRawConsole]::StartEcho()\n\
              Write-Text ([char]27 + \"[=3;1u`nREADY`n\")\n\
              $proc = New-Object System.Diagnostics.Process\n\
              $proc.StartInfo.FileName = '{muse_literal}'\n\
-             $proc.StartInfo.Arguments = '-n 120 127.0.0.1'\n\
+             $proc.StartInfo.Arguments = '-n 30 127.0.0.1'\n\
              $proc.StartInfo.UseShellExecute = $false\n\
              $proc.StartInfo.RedirectStandardOutput = $true\n\
              $proc.StartInfo.RedirectStandardError = $true\n\
@@ -15804,7 +15853,6 @@ function Read-Exact([int]$Count) {
             .mail_nudges
             .get(&pane)
             .is_some_and(|nudge| nudge.verification));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -16256,7 +16304,10 @@ function Read-Exact([int]$Count) {
     }
 
     fn wait_spawn_then_quiet(plane: &mut ControlPlane, pane: u64, needle: &str) {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        // Add-Type in the Windows guest can take longer than 3s when a full
+        // default-thread run starts many PowerShell processes together.
+        let budget_secs = if cfg!(windows) { 15 } else { 3 };
+        let deadline = Instant::now() + Duration::from_secs(budget_secs);
         // Phase 1: wait for the spawn marker to appear.
         loop {
             plane.drain_for_test();

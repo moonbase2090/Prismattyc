@@ -1360,6 +1360,32 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
+    #[cfg(windows)]
+    fn windows_system(name: &str) -> String {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        PathBuf::from(root)
+            .join("System32")
+            .join(name)
+            .display()
+            .to_string()
+    }
+
+    /// `cmd /d /c` plus a quiet ping. PowerShell startup is slow enough that a
+    /// full default-thread run leaves the pane blank for the whole wait.
+    #[cfg(windows)]
+    fn cmd_for(command: &str, env: BTreeMap<String, String>) -> SpawnSpec {
+        SpawnSpec {
+            program: windows_system("cmd.exe"),
+            argv: vec![
+                "/d".into(),
+                "/c".into(),
+                format!("{command}& ping -n 31 127.0.0.1 >nul"),
+            ],
+            cwd: Some(std::env::temp_dir()),
+            env,
+        }
+    }
+
     fn sleep_spawn(env: BTreeMap<String, String>) -> SpawnSpec {
         #[cfg(unix)]
         {
@@ -1372,16 +1398,9 @@ mod tests {
         }
         #[cfg(windows)]
         {
-            SpawnSpec {
-                program: r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".into(),
-                argv: vec![
-                    "-NoProfile".into(),
-                    "-Command".into(),
-                    "Start-Sleep -Seconds 30".into(),
-                ],
-                cwd: Some(std::env::temp_dir()),
-                env,
-            }
+            // `rem` comments out the rest of the line, including the ping that
+            // keeps the ConPTY child alive.
+            cmd_for("cd .", env)
         }
     }
 
@@ -1471,21 +1490,18 @@ mod tests {
         }
         #[cfg(windows)]
         {
-            SpawnSpec {
-                program: r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".into(),
-                argv: vec![
-                    "-NoProfile".into(),
-                    "-Command".into(),
-                    "$p=$env:PRISMATTYC_PANE_ID; $s=$env:PMUX_SOCKET; $a=$env:PMUX_AGENT; $k=$env:PMUX_TUTORIAL_PACK; [Console]::Out.Write(\"PANE=$p`nSOCK=$s`nAGENT=$a`nPACK=$k`n\"); if ($null -eq $env:PRISMATTYC_SESSION_ID) { [Console]::Out.Write('HAS_SESSION=0`n') } else { [Console]::Out.Write('HAS_SESSION=1`n') }; if ($null -eq $env:PMUX_AGENT) { [Console]::Out.Write('HAS_AGENT=0`n') } else { [Console]::Out.Write('HAS_AGENT=1`n') }; [Console]::Out.Flush(); Start-Sleep -Seconds 30".into(),
-                ],
-                cwd: Some(std::env::temp_dir()),
+            cmd_for(
+                "echo PANE=%PRISMATTYC_PANE_ID%& echo SOCK=%PMUX_SOCKET%& echo AGENT=%PMUX_AGENT%& echo PACK=%PMUX_TUTORIAL_PACK%& if defined PRISMATTYC_SESSION_ID (echo HAS_SESSION=1) else (echo HAS_SESSION=0)& if defined PMUX_AGENT (echo HAS_AGENT=1) else (echo HAS_AGENT=0)",
                 env,
-            }
+            )
         }
     }
 
     fn wait_for_pane_text(pane: &mut LivePane, pane_id: u64, needle: &str) -> String {
-        for _ in 0..200 {
+        // cmd prints immediately. The longer Windows budget covers a full
+        // default-thread run, where many ConPTY guests start together.
+        let attempts = if cfg!(windows) { 600 } else { 200 };
+        for _ in 0..attempts {
             let _ = pane.drain(pane_id);
             let text = pane.content(pane_id).lines.join("\n");
             if text.contains(needle) {

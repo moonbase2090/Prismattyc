@@ -2713,7 +2713,26 @@ mod tests {
         assert!(verify(&path, &release.assets[0]).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
-    #[cfg(unix)]
+    /// The bytes a launch of `binary` from `bins` runs: through the `current`
+    /// link on Unix, through the version directory `windows-current.json`
+    /// selects on Windows.
+    fn launched(root: &Path, bins: &Path, binary: &str) -> Vec<u8> {
+        #[cfg(unix)]
+        {
+            let _ = root;
+            fs::read(bins.join(binary)).unwrap()
+        }
+        #[cfg(windows)]
+        {
+            let _ = bins;
+            fs::read(
+                current_directory(root)
+                    .unwrap()
+                    .join(crate::platform::executable_name(binary)),
+            )
+            .unwrap()
+        }
+    }
     #[test]
     fn activation_switches_complete_set_and_rollback_restores_original() {
         let dir = temporary();
@@ -2722,25 +2741,35 @@ mod tests {
         fs::create_dir_all(root.join("v0.2.0-test")).unwrap();
         fs::create_dir(&bins).unwrap();
         for binary in BINARIES {
-            fs::write(bins.join(binary), b"old").unwrap();
-            fs::write(root.join("v0.2.0-test").join(binary), b"new").unwrap();
+            let name = crate::platform::executable_name(binary);
+            fs::write(bins.join(&name), b"old").unwrap();
+            fs::write(root.join("v0.2.0-test").join(&name), b"new").unwrap();
         }
-        prepare_launchers(&root, &bins).unwrap();
-        for binary in BINARIES {
-            assert_eq!(fs::read(bins.join(binary)).unwrap(), b"old");
+        #[cfg(unix)]
+        {
+            prepare_launchers(&root, &bins).unwrap();
+            for binary in BINARIES {
+                assert_eq!(fs::read(bins.join(binary)).unwrap(), b"old");
+            }
+            // Repeat preparation after a simulated interruption; no old file is lost.
+            prepare_launchers(&root, &bins).unwrap();
         }
-        // Repeat preparation after a simulated interruption; no old file is lost.
-        prepare_launchers(&root, &bins).unwrap();
         activate(&root, Path::new("v0.2.0-test"), &bins).unwrap();
         for binary in BINARIES {
-            assert_eq!(fs::read(bins.join(binary)).unwrap(), b"new");
+            assert_eq!(launched(&root, &bins, binary), b"new");
         }
         rollback(&root).unwrap();
         for binary in BINARIES {
-            assert_eq!(fs::read(bins.join(binary)).unwrap(), b"old");
+            assert_eq!(launched(&root, &bins, binary), b"old");
         }
         rollback(&root).unwrap();
-        assert_eq!(fs::read(bins.join("pmux")).unwrap(), b"new");
+        assert_eq!(launched(&root, &bins, "pmux"), b"new");
+        // Windows selects a directory and never rewrites a launcher in place.
+        #[cfg(windows)]
+        for binary in BINARIES {
+            let name = crate::platform::executable_name(binary);
+            assert_eq!(fs::read(bins.join(name)).unwrap(), b"old");
+        }
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
@@ -2761,7 +2790,6 @@ mod tests {
         }
         fs::remove_dir_all(dir).unwrap();
     }
-    #[cfg(unix)]
     #[test]
     fn incomplete_legacy_install_does_not_replace_any_launcher() {
         let dir = temporary();
@@ -2769,10 +2797,26 @@ mod tests {
         let bins = dir.join("bin");
         fs::create_dir_all(&root).unwrap();
         fs::create_dir(&bins).unwrap();
-        fs::write(bins.join("pmux"), b"old").unwrap();
-        assert!(prepare_launchers(&root, &bins).is_err());
-        assert!(!root.join("current").exists());
-        assert_eq!(fs::read(bins.join("pmux")).unwrap(), b"old");
+        let pmux = bins.join(crate::platform::executable_name("pmux"));
+        fs::write(&pmux, b"old").unwrap();
+        #[cfg(unix)]
+        {
+            assert!(prepare_launchers(&root, &bins).is_err());
+            assert!(!root.join("current").exists());
+        }
+        #[cfg(windows)]
+        {
+            // The new version is complete; only the installed set is not.
+            fs::create_dir(root.join("v0.2.0-test")).unwrap();
+            for binary in BINARIES {
+                let name = crate::platform::executable_name(binary);
+                fs::write(root.join("v0.2.0-test").join(name), b"new").unwrap();
+            }
+            assert!(activate(&root, Path::new("v0.2.0-test"), &bins).is_err());
+            assert!(!root.join("windows-current.json").exists());
+            assert!(!root.join("legacy").exists());
+        }
+        assert_eq!(fs::read(&pmux).unwrap(), b"old");
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

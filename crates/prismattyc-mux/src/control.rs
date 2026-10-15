@@ -15778,23 +15778,24 @@ function Read-Exact([int]$Count) {
         // The renamed ping is silent so its output cannot look like a busy pane.
         let dir = std::env::temp_dir().join(format!("pt183-muse-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        // Kill the renamed ping even if an assertion fails, then drop the copy.
-        // `-n 120` was still running after the pane exited and locked the file.
-        struct StopMuse(std::path::PathBuf);
-        impl Drop for StopMuse {
+        // Removes this run's directory only. It does not kill by image name.
+        struct MuseDir(std::path::PathBuf);
+        impl Drop for MuseDir {
             fn drop(&mut self) {
-                let _ = std::process::Command::new(windows_system("taskkill.exe"))
-                    .args(["/F", "/IM", "muse-bin-1.4.3-R5018.1.exe"])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-                let _ = std::fs::remove_dir_all(&self.0);
+                for _ in 0..40 {
+                    if std::fs::remove_dir_all(&self.0).is_ok() || !self.0.exists() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
             }
         }
-        let _stop = StopMuse(dir.clone());
+        let _dir = MuseDir(dir.clone());
         let muse = dir.join("muse-bin-1.4.3-R5018.1.exe");
         std::fs::copy(windows_system("ping.exe"), &muse).unwrap();
         let muse_literal = muse.display().to_string().replace('\'', "''");
+        let pid_path = dir.join("muse.pid");
+        let pid_literal = pid_path.display().to_string().replace('\'', "''");
         let body = ps_with_preamble(&format!(
             "[PrismRawConsole]::StartEcho()\n\
              Write-Text ([char]27 + \"[=3;1u`nREADY`n\")\n\
@@ -15806,6 +15807,7 @@ function Read-Exact([int]$Count) {
              $proc.StartInfo.RedirectStandardError = $true\n\
              $proc.StartInfo.CreateNoWindow = $true\n\
              [void]$proc.Start()\n\
+             [System.IO.File]::WriteAllText('{pid_literal}', \"$($proc.Id)\", [System.Text.Encoding]::ASCII)\n\
              $proc.WaitForExit()\n"
         ));
         let (mut plane, pane) = live_inject_plane(windows_powershell(&body));
@@ -15830,14 +15832,66 @@ function Read-Exact([int]$Count) {
         quiet_unattended(&mut plane, pane);
 
         plane.set_inject_agent_override(None);
+        // Armed only after this run's ping has started. The handle is that
+        // process, so drop cannot kill another worktree's copy of the image.
+        struct StopMuse(windows_sys::Win32::Foundation::HANDLE);
+        impl Drop for StopMuse {
+            fn drop(&mut self) {
+                unsafe {
+                    use windows_sys::Win32::{Foundation::*, System::Threading::*};
+                    TerminateProcess(self.0, 1);
+                    WaitForSingleObject(self.0, 2000);
+                    CloseHandle(self.0);
+                }
+            }
+        }
+        fn open_spawned_muse(
+            pid_path: &std::path::Path,
+            muse_exe: &std::path::Path,
+        ) -> Option<StopMuse> {
+            use windows_sys::Win32::{Foundation::*, System::Threading::*};
+            let text = std::fs::read_to_string(pid_path).ok()?;
+            let pid: u32 = text.trim().trim_start_matches('\u{feff}').parse().ok()?;
+            unsafe {
+                let handle = OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+                    0,
+                    pid,
+                );
+                if handle.is_null() {
+                    return None;
+                }
+                let mut buffer = [0u16; 1024];
+                let mut length = buffer.len() as u32;
+                if QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length) == 0 {
+                    CloseHandle(handle);
+                    return None;
+                }
+                let image = String::from_utf16_lossy(&buffer[..length as usize]);
+                let image = image.trim_start_matches(r"\\?\");
+                if !image.eq_ignore_ascii_case(&muse_exe.display().to_string()) {
+                    CloseHandle(handle);
+                    return None;
+                }
+                Some(StopMuse(handle))
+            }
+        }
+        let mut stop_muse = None;
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while plane.foreground_agent_for(pane) != crate::InjectAgent::Muse {
+            if stop_muse.is_none() {
+                stop_muse = open_spawned_muse(&pid_path, &muse);
+            }
             assert!(
                 std::time::Instant::now() < deadline,
                 "foreground muse never appeared under the pane child"
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+        if stop_muse.is_none() {
+            stop_muse = open_spawned_muse(&pid_path, &muse);
+        }
+        let _stop_muse = stop_muse.expect("spawned muse process handle");
         assert_eq!(plane.guest_keyboard_flags_for(pane), 3);
         let (outcome, nbytes) = mail_inject(inject_mail(&mut plane, client, pane, 3));
         assert_eq!(outcome, MailInjectOutcome::Wrote);

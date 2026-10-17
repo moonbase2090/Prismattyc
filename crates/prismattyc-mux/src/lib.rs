@@ -30,6 +30,7 @@ pub mod mailbox;
 mod pane_log;
 mod pane_log_persist;
 pub mod procinfo;
+pub mod prompt_idle;
 pub mod release_update;
 pub mod remote_catalog;
 mod remote_size;

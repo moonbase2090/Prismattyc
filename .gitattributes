@@ -1,0 +1,2 @@
+.githooks/* text eol=lf
+scripts/install-hooks.sh text eol=lf

@@ -1,0 +1,36 @@
+name: Formatting hook
+on:
+  pull_request:
+    paths:
+      - '.githooks/**'
+      - '.gitattributes'
+      - 'scripts/install-hooks.*'
+      - 'scripts/pre-commit_test.py'
+      - '.github/workflows/format-hook.yml'
+  push:
+    paths:
+      - '.githooks/**'
+      - '.gitattributes'
+      - 'scripts/install-hooks.*'
+      - 'scripts/pre-commit_test.py'
+      - '.github/workflows/format-hook.yml'
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    env:
+      RUSTUP_TOOLCHAIN: '1.90.0'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Install formatter
+        run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt
+      - name: Exercise staged formatting and hook installation
+        run: python scripts/pre-commit_test.py

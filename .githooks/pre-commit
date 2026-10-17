@@ -1,0 +1,41 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+set -eu
+
+cd "$(git rev-parse --show-toplevel)"
+if git diff --cached --quiet --diff-filter=ACMR -- '*.rs'; then
+    exit 0
+fi
+
+stage=$(mktemp -d "${TMPDIR:-/tmp}/prismattyc-fmt.XXXXXX")
+trap 'rm -rf "$stage"' EXIT
+trap 'exit 1' HUP INT TERM
+cat > "$stage/Cargo.toml" <<'MANIFEST'
+[workspace]
+[package]
+name = "staged-format-check"
+version = "0.0.0"
+edition = "2021"
+autobins = false
+autolib = false
+MANIFEST
+
+# NUL-delimited arguments preserve spaces, quotes and newlines in staged paths.
+git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' > "$stage/paths"
+xargs -0 sh -eu -c '
+    stage=$1
+    shift
+    for path do
+        blob=$(git rev-parse ":$path")
+        if [ ! -f "$stage/$blob.rs" ]; then
+            git show ":$path" > "$stage/$blob.rs"
+            printf "\n[[bin]]\nname = \"f%s\"\npath = \"%s.rs\"\n" "$blob" "$blob" >> "$stage/Cargo.toml"
+        fi
+    done
+' sh "$stage" < "$stage/paths"
+
+# Each staged file is a target; unstaged child modules must not be traversed.
+if ! cargo fmt --manifest-path "$stage/Cargo.toml" --check -- --config skip_children=true; then
+    printf '%s\n' 'Fix: cargo fmt --all (then stage the formatted files again)' >&2
+    exit 1
+fi

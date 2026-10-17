@@ -5,6 +5,8 @@ Use Rust 1.90 or newer. Keep dependency changes in `Cargo.lock` and use
 
 ## Check a change
 
+Run `sh scripts/install-hooks.sh` once per clone, or `./scripts/install-hooks.ps1` in PowerShell, to check staged Rust formatting before commits.
+
 Run these commands from the repository root:
 
 ```bash

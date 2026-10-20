@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.3.39] - 2026-10-20
+
+### Added
+
+- Track how long a pane remains at a confirmed empty prompt, with resets for input, output, pane changes, child processes, and uncertain or busy readiness.
+
+## [0.3.39-rc.1] - 2026-10-20
+
+This build is a prerelease. A tag such as `v0.3.39-rc.1` is published with
+`--prerelease --latest=false`. `pmux update` and the app menu do not offer it.
+Install the assets from the release, or opt in with `pmux update --pre`.
+The binaries report the base version, `0.3.39`.
+
 ## [0.3.38] - 2026-10-14
 
 ### Fixed

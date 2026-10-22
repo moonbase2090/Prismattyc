@@ -1,0 +1,50 @@
+# cargo-deny: advisories, licenses, bans, and sources.
+# https://embarkstudios.github.io/cargo-deny/
+# The allow-list was surveyed against Cargo.lock. The project is MIT.
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# Unmaintained and unsound notices fail only for direct dependencies.
+# Transitive ones are tracked upstream and show up as warnings.
+unmaintained = "workspace"
+unsound = "workspace"
+
+ignore = [
+  # rustybuzz and ttf-parser are unmaintained with no patched release. The text
+  # stack still depends on them directly; the replacement is harfrust and
+  # read-fonts/skrifa, which needs its own change.
+  { id = "RUSTSEC-2026-0206", reason = "rustybuzz unmaintained, no fixed release; migration to harfrust tracked separately" },
+  { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained, no fixed release; migration to skrifa tracked separately" },
+]
+
+[licenses]
+version = 2
+allow = [
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.8
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# graphite-core is pinned to a commit in the org repo.
+allow-git = ["https://github.com/moonbase2090/graphite"]
+

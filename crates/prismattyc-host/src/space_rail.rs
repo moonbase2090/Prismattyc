@@ -1036,9 +1036,10 @@ impl SpaceRail {
         self.dir_stamp = dir_stamp(dir);
         self.last_poll = Some(Instant::now());
         self.infer_tried = None;
-        let names: Vec<String> = prismattyc_mux::list_spaces(dir)
-            .map(|entries| entries.into_iter().map(|entry| entry.name).collect())
-            .unwrap_or_default();
+        self.set_names(list_names(dir))
+    }
+
+    fn set_names(&mut self, names: Vec<String>) -> bool {
         if names == self.names {
             return false;
         }
@@ -1060,10 +1061,9 @@ impl SpaceRail {
         true
     }
 
-    /// Once a second, re-read the directory when its mtime moved (a
-    /// `pmux space save` / `rm` from a terminal). Returns whether the chip
-    /// list changed.
-    pub fn poll(&mut self, dir: &Path, now: Instant) -> bool {
+    /// True when the saved-Space directory is due for a scan. The scan itself
+    /// reads the filesystem, so the host runs it on the Space worker.
+    pub fn poll_due(&mut self, now: Instant) -> bool {
         if self
             .last_poll
             .is_some_and(|last| now.duration_since(last) < REFRESH_INTERVAL)
@@ -1071,11 +1071,24 @@ impl SpaceRail {
             return false;
         }
         self.last_poll = Some(now);
-        let stamp = dir_stamp(dir);
-        if stamp == self.dir_stamp && !self.names.is_empty() {
+        true
+    }
+
+    /// What the worker compares the directory against: the stamp this rail
+    /// last applied, and whether it already holds a name list.
+    pub fn scan_baseline(&self) -> (Option<SystemTime>, bool) {
+        (self.dir_stamp, !self.names.is_empty())
+    }
+
+    /// Apply a worker scan. `names` is `None` when the directory stamp did not
+    /// change. Returns whether the chip list changed.
+    pub fn apply_scan(&mut self, stamp: Option<SystemTime>, names: Option<Vec<String>>) -> bool {
+        let Some(names) = names else {
             return false;
-        }
-        self.refresh(dir)
+        };
+        self.dir_stamp = stamp;
+        self.infer_tried = None;
+        self.set_names(names)
     }
 
     pub fn set_current(&mut self, name: Option<String>) {
@@ -1421,6 +1434,26 @@ fn normalized_tabs<I: IntoIterator<Item = Vec<String>>>(tabs: I) -> Vec<Vec<Stri
 
 fn dir_stamp(dir: &Path) -> Option<SystemTime> {
     std::fs::metadata(dir).ok()?.modified().ok()
+}
+
+fn list_names(dir: &Path) -> Vec<String> {
+    prismattyc_mux::list_spaces(dir)
+        .map(|entries| entries.into_iter().map(|entry| entry.name).collect())
+        .unwrap_or_default()
+}
+
+/// One worker-side directory scan: the new stamp, and the names only when
+/// the stamp moved from `baseline` (a `pmux space save` / `rm` from a
+/// terminal) or the rail has none yet.
+pub fn scan_spaces_dir(
+    dir: &Path,
+    baseline: (Option<SystemTime>, bool),
+) -> (Option<SystemTime>, Option<Vec<String>>) {
+    let stamp = dir_stamp(dir);
+    if stamp == baseline.0 && baseline.1 {
+        return (stamp, None);
+    }
+    (stamp, Some(list_names(dir)))
 }
 
 /// What one chip paints as (built by the host from [`SpaceRail`]).
@@ -2289,8 +2322,40 @@ mod tests {
         assert_eq!(rail.focus, Some(1), "focus clamps to the + chip");
         assert!(rail.confirm.is_none());
         assert_eq!(rail.current_index(), None);
-        // poll is throttled: an immediate second poll does nothing.
-        assert!(!rail.poll(&dir, Instant::now()));
+        // The scan is throttled: only the first call in a second is due.
+        // `refresh` above counts as a scan, so the first due call is a second out.
+        let now = Instant::now() + REFRESH_INTERVAL;
+        assert!(rail.poll_due(now));
+        assert!(!rail.poll_due(now));
+        assert!(rail.poll_due(now + REFRESH_INTERVAL));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn worker_scan_skips_the_listing_until_the_directory_stamp_moves() {
+        let dir = std::env::temp_dir().join(format!(
+            "prismattyc-rail-scan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (stamp, first) = scan_spaces_dir(&dir, (None, false));
+        assert_eq!(first, Some(Vec::new()), "no names yet: always list");
+        let (same, skipped) = scan_spaces_dir(&dir, (stamp, true));
+        assert_eq!(same, stamp);
+        assert_eq!(skipped, None, "unchanged stamp with names: no listing");
+        let (_, moved) = scan_spaces_dir(&dir, (Some(std::time::UNIX_EPOCH), true));
+        assert_eq!(moved, Some(Vec::new()), "moved stamp: list again");
+
+        let mut rail = SpaceRail::new(None);
+        assert!(!rail.apply_scan(stamp, None), "no listing: nothing changes");
+        assert!(rail.apply_scan(stamp, Some(vec!["one".into()])));
+        assert_eq!(rail.names, vec!["one".to_string()]);
+        assert_eq!(rail.scan_baseline(), (stamp, true));
+        assert!(!rail.apply_scan(stamp, Some(vec!["one".into()])));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

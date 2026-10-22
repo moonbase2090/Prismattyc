@@ -3841,8 +3841,9 @@ impl App {
                 continue;
             };
             let phase_started = Instant::now();
-            if host.space_rail.poll(&spaces_dir(), rail_now) {
-                rail_changed(host);
+            if host.space_rail.poll_due(rail_now) {
+                let baseline = host.space_rail.scan_baseline();
+                let _ = host.space_client.submit_scan(spaces_dir(), baseline);
             }
             timing.record_phase(pump_timing::Phase::SpaceRailPoll, phase_started.elapsed());
             let phase_started = Instant::now();
@@ -10058,6 +10059,11 @@ fn drain_space_client(host: &mut HostState) {
                         }
                         host.dirty = true;
                     }
+                }
+            }
+            space_client::Report::Scan { stamp, names, .. } => {
+                if host.space_rail.apply_scan(stamp, names) {
+                    rail_changed(host);
                 }
             }
             space_client::Report::Refresh {

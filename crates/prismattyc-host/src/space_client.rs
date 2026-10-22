@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{self, ThreadId};
+use std::time::SystemTime;
 
 use prismattyc_mux::team_attention::AttentionRequest;
 use prismattyc_mux::SavedSpace;
@@ -18,15 +19,23 @@ use prismattyc_mux::Snapshot;
 use crate::mux::Wake;
 
 enum Job {
-    Poll { dir: PathBuf, name: String },
+    Poll {
+        dir: PathBuf,
+        name: String,
+    },
     Save(SaveJob),
     Refresh(RefreshJob),
+    Scan {
+        dir: PathBuf,
+        baseline: (Option<SystemTime>, bool),
+    },
 }
 
 enum Kind {
     Poll,
     Save,
     Refresh,
+    Scan,
 }
 
 /// `pmux space save` arguments captured on the main thread.
@@ -72,6 +81,12 @@ pub(crate) enum Report {
         #[cfg_attr(not(test), allow(dead_code))]
         thread: ThreadId,
     },
+    Scan {
+        stamp: Option<SystemTime>,
+        names: Option<Vec<String>>,
+        #[allow(dead_code)]
+        thread: ThreadId,
+    },
     Refresh {
         pane_names: HashMap<String, Vec<String>>,
         attention: HashMap<String, usize>,
@@ -87,6 +102,7 @@ struct Flags {
     poll: AtomicBool,
     save: AtomicBool,
     refresh: AtomicBool,
+    scan: AtomicBool,
     busy: AtomicUsize,
 }
 
@@ -105,6 +121,7 @@ impl Client {
             poll: AtomicBool::new(false),
             save: AtomicBool::new(false),
             refresh: AtomicBool::new(false),
+            scan: AtomicBool::new(false),
             busy: AtomicUsize::new(0),
         });
         let flags_thread = Arc::clone(&flags);
@@ -130,6 +147,10 @@ impl Client {
 
     pub(crate) fn submit_refresh(&self, job: RefreshJob) -> bool {
         self.enqueue(Job::Refresh(job), Kind::Refresh)
+    }
+
+    pub(crate) fn submit_scan(&self, dir: PathBuf, baseline: (Option<SystemTime>, bool)) -> bool {
+        self.enqueue(Job::Scan { dir, baseline }, Kind::Scan)
     }
 
     pub(crate) fn refresh_busy(&self) -> bool {
@@ -175,6 +196,7 @@ impl Client {
             Kind::Poll => &self.flags.poll,
             Kind::Save => &self.flags.save,
             Kind::Refresh => &self.flags.refresh,
+            Kind::Scan => &self.flags.scan,
         }
     }
 }
@@ -196,11 +218,13 @@ fn worker(jobs: Receiver<Job>, reports: Sender<Report>, flags: Arc<Flags>, wake:
             Job::Poll { dir, name } => (Kind::Poll, run_poll(dir, name)),
             Job::Save(job) => (Kind::Save, run_save(job)),
             Job::Refresh(job) => (Kind::Refresh, run_refresh(job)),
+            Job::Scan { dir, baseline } => (Kind::Scan, run_scan(&dir, baseline)),
         };
         let flag = match kind {
             Kind::Poll => &flags.poll,
             Kind::Save => &flags.save,
             Kind::Refresh => &flags.refresh,
+            Kind::Scan => &flags.scan,
         };
         // The report is queued before the flag drops so a settled caller
         // that sees `busy == 0` can drain it.
@@ -216,6 +240,15 @@ fn run_poll(dir: PathBuf, name: String) -> Report {
     Report::Poll {
         name,
         space,
+        thread: thread::current().id(),
+    }
+}
+
+fn run_scan(dir: &std::path::Path, baseline: (Option<SystemTime>, bool)) -> Report {
+    let (stamp, names) = crate::space_rail::scan_spaces_dir(dir, baseline);
+    Report::Scan {
+        stamp,
+        names,
         thread: thread::current().id(),
     }
 }

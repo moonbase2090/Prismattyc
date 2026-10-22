@@ -142,8 +142,8 @@ same account. The owner's PATH, Run key, and
 the Run key, or use the default socket. It does start ConPTY guests in
 whichever account runs it. Cleanup compares the volume serial and file index
 of the child that test started, then terminates that process handle. It does
-not kill by image name. Whether this cargo test must also run as the proof
-account is follow-up #320 and does not block a merge.
+not kill by image name. It may run in the development account because it does
+not install Prismattyc, write the Run key, or use the default socket.
 
 `scripts/release/test-windows-msi.ps1` quotes every msiexec argument, so an
 MSI path that contains spaces stays one argument. It installs with

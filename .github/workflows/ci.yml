@@ -30,7 +30,7 @@ env:
 jobs:
   format:
     name: Format
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Check out repository
@@ -113,7 +113,7 @@ jobs:
 
   check:
     name: Check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - name: Check out repository
@@ -176,7 +176,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Check out repository
@@ -231,7 +231,7 @@ jobs:
   # Periodic: .github/workflows/phase3-rich-nightly.yml
   phase3-rich:
     name: Phase 3 rich harness
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - name: Check out repository
@@ -278,7 +278,7 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Check out repository
@@ -318,7 +318,7 @@ jobs:
   # - pmux-mcp: Mail* UnixStream
   windows-check:
     name: Windows check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Check out repository
@@ -373,7 +373,7 @@ jobs:
 
   windows-test:
     name: Windows test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Check out repository
@@ -498,7 +498,7 @@ jobs:
   spaces-e2e:
     name: Spaces e2e (PT-219)
     if: ${{ github.actor == 'nektos/act' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     # Job container: act attaches the host Docker socket. Fail if the
     # image is missing; do not skip.
@@ -607,7 +607,7 @@ jobs:
   walkthrough-caption-e2e:
     name: Walkthrough caption e2e (PT-297)
     if: ${{ github.actor == 'nektos/act' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     # Same X11 native test container as spaces-e2e. Fail if the image is missing.
     env:
@@ -699,7 +699,7 @@ jobs:
     # docs/testing-policy.md.
     name: Spaces e2e Wayland (PT-290)
     if: ${{ github.actor == 'nektos/act' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       LA_HEAVY: "1"
@@ -784,7 +784,7 @@ jobs:
   render-bench:
     name: Render bench (PT-246)
     if: ${{ github.actor == 'nektos/act' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       LA_HEAVY: "1"
@@ -869,7 +869,7 @@ jobs:
   crap:
     name: CRAP
     if: ${{ github.actor == 'nektos/act' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     # act mounts the Docker socket for container jobs. The fallback needs
     # that socket to read the host worktree gitdir in a read-only sidecar.
@@ -986,7 +986,7 @@ jobs:
   crap-refresh:
     name: CRAP refresh
     if: ${{ github.actor == 'nektos/act' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     # Job container so act attaches the host Docker socket and the
     # written baseline can be copied onto the host worktree.
@@ -1063,7 +1063,7 @@ jobs:
   mutants:
     name: Mutants
     if: ${{ github.actor == 'nektos/act' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     # Job container so act attaches the host Docker socket. The overlay
     # copy has a worktree .git file whose gitdir lives on the host.

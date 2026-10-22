@@ -34,7 +34,7 @@ env:
 jobs:
   plan:
     name: Plan pinned rotation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     outputs:
       cycle_sha: ${{ steps.plan.outputs.cycle_sha }}
@@ -180,7 +180,7 @@ jobs:
   baseline:
     name: Baseline complete test suite
     needs: [plan]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
       - name: Check out workflow revision
@@ -241,7 +241,7 @@ jobs:
     name: Mutants shard ${{ matrix.shard }}/${{ needs.plan.outputs.shard_count }}
     if: ${{ needs.plan.outputs.nextest_profile == 'mutants' }}
     needs: [plan, baseline]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
     strategy:
       fail-fast: false
@@ -322,7 +322,7 @@ jobs:
   mutants-in-diff:
     name: Mutants changed since selected base (shard ${{ matrix.shard }}/16)
     needs: [plan]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
     strategy:
       fail-fast: false
@@ -418,7 +418,7 @@ jobs:
     name: Merge mutation results
     if: ${{ always() && needs.plan.outputs.nextest_profile == 'mutants' }}
     needs: [plan, mutants-nightly, mutants-in-diff]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Check out workflow revision
@@ -479,7 +479,7 @@ jobs:
     name: Jev shadow evaluation
     if: ${{ always() && needs.plan.result == 'success' && github.ref == 'refs/heads/main' && needs.plan.outputs.nextest_profile == 'mutants' }}
     needs: [plan, mutants-nightly]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
       contents: read

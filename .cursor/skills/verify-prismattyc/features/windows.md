@@ -32,3 +32,21 @@ The mux ConPTY fixture is `cargo test -p prismattyc-mux --lib`. It does not inst
 ## Gotchas
 
 The package proof's explicit PATH option does not alone prove an installer default; test a plain install and `ADDTOPATH=0` when those semantics change. Packaging/installer runs are not isolated by the Unix helper. macOS screenshots and chooser-unit tests are not Windows runtime proof. If the test desktop cannot be reached, report the missing connection and requested exact-tip checks to the coordinator; keep the PR's runtime proof marked outstanding.
+
+## Bundled font licenses
+
+The ZIP payload copies all font license text files from
+`crates/prismattyc-host/assets/fonts`. MSI authoring must list those same files
+as components. This includes `IBMPlexMono-LICENSE.txt` and
+`CommitMono-LICENSE-FONT.txt` for the optional bundled candidates. Check the
+actual installed or extracted package for those files and `NOTICE.txt`.
+
+The source authoring check is portable and does not run Windows:
+
+```sh
+PYTHONPATH=scripts/release python3 -m unittest \
+  windows_msi_test.WindowsMsiTests.test_installer_is_per_user_and_does_not_stop_processes
+```
+
+That assertion does not replace MSI build, installation, or native Windows
+runtime proof.

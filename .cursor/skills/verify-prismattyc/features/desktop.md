@@ -56,11 +56,17 @@ Inspect the classic and Graphite sections/font-size PNGs from the first command.
 They are offscreen painter output, with selected-row hit tests and visible-label
 assertions. They are not native desktop captures.
 
-After desktop allocation, run the dedicated native fixture:
+After desktop allocation, use Python 3.11 or newer for the dedicated native fixture:
 
 ```sh
 python3 tests/native/macos-settings-e2e.py --bins "$verify_bins" \
   --out "$verify_evidence/settings-native" --revision "$(git rev-parse HEAD)"
+```
+
+The headless fixture-boundary checks can run without a desktop:
+
+```sh
+python3 tests/native/macos-settings-e2e_test.py
 ```
 
 It checks its own host PID/frame, uses native keys for enablement/navigation/text

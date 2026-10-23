@@ -19,6 +19,17 @@ import time
 import tomllib
 
 
+def checked_window_status(data,host_pid,now_ms,after_ms=0):
+    assert data['host_pid']==host_pid,'Render status belongs to another host'
+    window=data['windows'][0]
+    raster=window['last_raster'];stamp=raster['unix_ms']
+    assert raster['present_succeeded'],'Last frame did not present'
+    assert isinstance(stamp,int) and not isinstance(stamp,bool),'Raster timestamp must be integer milliseconds'
+    assert now_ms-5000<=stamp<=now_ms+1000,'Last successful frame is stale or in the future'
+    assert stamp>after_ms,'No successful frame after the native action'
+    return window
+
+
 class Desktop:
     def __init__(self):
         self.ax=C.CDLL('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices')
@@ -51,6 +62,7 @@ class Desktop:
             (self.cf.CFRetain,[p],p),
             (self.cf.CFGetTypeID,[p],C.c_ulong),
             (self.cf.CFStringGetTypeID,[],C.c_ulong),
+            (self.cf.CFBooleanGetValue,[p],C.c_bool),
         ]:
             fn.argtypes=args;fn.restype=result
 
@@ -79,8 +91,20 @@ class Desktop:
         name=self.utf8(name,self.sel(b'UTF8String')) if name else b''
         if bundle==b'com.apple.loginwindow' or name==b'loginwindow':raise RuntimeError('Unlocked logged-in desktop is required')
 
-    def key(self,pid,code,flags=0):
+    def require_focused(self,pid):
         self.prerequisite()
+        app=self.ax.AXUIElementCreateApplication(pid)
+        front=self.attr(app,'AXFrontmost');focused=self.attr(app,'AXFocusedWindow')
+        try:
+            assert front and self.cf.CFBooleanGetValue(front),'Owned host is not frontmost'
+            assert focused,'Owned host has no focused window'
+        finally:
+            if front:self.cf.CFRelease(front)
+            if focused:self.cf.CFRelease(focused)
+            self.cf.CFRelease(app)
+
+    def key(self,pid,code,flags=0):
+        self.require_focused(pid)
         for pressed in [True,False]:
             event=self.ax.CGEventCreateKeyboardEvent(None,code,pressed)
             if not event:raise RuntimeError('Keyboard event allocation failed')
@@ -114,7 +138,9 @@ class Desktop:
             visit(app)
             assert len(found)==1, f'Expected one accessible row containing {fragment!r}, found {len(found)}'
             action=self.string('AXPress')
-            try:assert self.ax.AXUIElementPerformAction(found[0],action)==0, 'Row AXPress failed'
+            try:
+                self.require_focused(pid)
+                assert self.ax.AXUIElementPerformAction(found[0],action)==0, 'Row AXPress failed'
             finally:self.cf.CFRelease(action)
         finally:
             for node in found:self.cf.CFRelease(node)
@@ -149,6 +175,22 @@ def stop(process):
         except subprocess.TimeoutExpired:process.kill();process.wait(timeout=5)
 
 
+def finish_evidence(root,result,commands,captures,host,daemon,clipboard):
+    errors=[]
+    for label,operation in [
+        ('host cleanup',lambda:stop(host)),
+        ('daemon cleanup',lambda:stop(daemon)),
+        ('clipboard restore',lambda:subprocess.run(['/usr/bin/pbcopy'],input=clipboard,check=True)),
+    ]:
+        try:operation()
+        except Exception as error:errors.append(f'{label}: {error}')
+    result.update(host_reaped=host is None or host.poll() is not None,daemon_reaped=daemon is None or daemon.poll() is not None)
+    if errors:result.update(status='FAIL',cleanup_errors=errors)
+    for filename,value in [('result.json',result),('commands.json',commands),('captures.json',captures)]:
+        (root/filename).write_text(json.dumps(value,indent=2)+'\n')
+    if errors:raise RuntimeError('; '.join(errors))
+
+
 def run_case(args,desktop,style):
     root=args.out/style;root.mkdir()
     for name in ['home','config','data','state','runtime']: (root/name).mkdir(mode=0o700)
@@ -159,6 +201,7 @@ def run_case(args,desktop,style):
     env.update(HOME=str(root/'home'),SHELL=str(wrapper),PATH=f'{args.bins}:/usr/bin:/bin:/usr/sbin:/sbin',PMUX_SOCKET=str(root/'runtime/pmux.sock'),XDG_RUNTIME_DIR=str(root/'runtime'),XDG_CONFIG_HOME=str(root/'config'),XDG_DATA_HOME=str(root/'data'),XDG_STATE_HOME=str(root/'state'),PRISMATTYC_CONFIG=str(config),PRISMATTYC_NO_AGENT_SKILLS='1',PRISMATTYC_DUMP_PRESENT=str(root/'present.png'))
     daemon=host=None;commands=[];captures=[];result={'style':style,'revision':args.revision,'status':'FAIL'}
     clipboard=subprocess.check_output(['/usr/bin/pbpaste'])
+    last_action_ms=0
     def cli(*argv):
         proc=subprocess.run([str(args.bins/'pmux'),*map(str,argv)],env=env,capture_output=True,text=True,timeout=20)
         commands.append({'args':argv,'exit':proc.returncode,'stdout':proc.stdout,'stderr':proc.stderr})
@@ -174,10 +217,9 @@ def run_case(args,desktop,style):
             except (FileNotFoundError,ValueError,KeyError,AssertionError):pass
             time.sleep(.1)
         raise AssertionError('Timeout: '+label)
-    def status():
-        value=json.loads(cli('render-status','--json'));assert value['host_pid']==host.pid
-        window=value['windows'][0];assert window['last_raster']['present_succeeded']
-        return window
+    def status(after_ms=0):
+        assert host.poll() is None,'Owned host has exited'
+        return checked_window_status(json.loads(cli('render-status','--json')),host.pid,int(time.time()*1000),after_ms)
     def identities():
         with socket.socket(socket.AF_UNIX) as stream:
             stream.settimeout(5);stream.connect(env['PMUX_SOCKET'])
@@ -187,11 +229,20 @@ def run_case(args,desktop,style):
     def pane_lines():return [line.rstrip() for line in cli('save-buffer','sample-1','-').splitlines() if line.strip()]
     def saved():return tomllib.loads(config.read_text())
     def key(code,flags=0):
+        nonlocal last_action_ms
         assert status()['focused'],'Owned host must be focused before native input'
+        last_action_ms=int(time.time()*1000)
         desktop.key(host.pid,code,flags)
-    def capture(label):
+    def press_row(fragment):
+        nonlocal last_action_ms
+        assert status()['focused'],'Owned host must be focused before Accessibility input'
+        last_action_ms=int(time.time()*1000)
+        desktop.press_row(host.pid,fragment)
+    def capture(label,overlay):
         time.sleep(.3)
-        wait(lambda:status()['last_raster']['present_succeeded'],'frame for '+label)
+        window=wait(lambda:status(last_action_ms),'fresh frame after action for '+label)
+        assert window['focused'],'Owned window lost focus before capture'
+        assert bool(window.get('context_menu'))==overlay,'Unexpected overlay state for '+label
         captures.extend(desktop.capture(host.pid,root/(label+'.png')))
         shutil.copy2(config,root/(label+'.toml'))
         shutil.copy2(root/'present.png',root/(label+'-framebuffer.png'))
@@ -203,47 +254,43 @@ def run_case(args,desktop,style):
         with (root/'host.log').open('w') as log:
             host=subprocess.Popen([str(args.bins/'prismattyc-host'),'--no-splash','--attach-session','sample-1'],env=env,cwd=root,stdout=log,stderr=log)
         wait(lambda:status().get('space')=='sample','owned host')
+        desktop.prerequisite()
         running=desktop.running(desktop.cls(b'NSRunningApplication'),desktop.sel(b'runningApplicationWithProcessIdentifier:'),host.pid)
         assert running and desktop.activate(running,desktop.sel(b'activateWithOptions:'),2),'Owned host activation failed'
         wait(lambda:status()['focused'],'focused host')
         before=identities();wait(lambda:any('0O 1Il {} [] != ->' in line for line in pane_lines()),'neutral comparison text')
-        before_text=pane_lines();capture('default-font')
+        before_text=pane_lines();capture('default-font',False)
         key(97) # F6 opens legacy settings.
         key(115) # Home.
         if style=='graphite':key(125);key(125) # Skip layout choices.
         key(36)
-        wait(lambda:saved().get('settings_panel') is True,'full settings enable');capture('enabled')
+        wait(lambda:saved().get('settings_panel') is True,'full settings enable');capture('enabled',True)
         key(124);key(123);key(124) # Fonts, Appearance, Fonts, without modifiers.
         key(125);key(125);key(125);key(36);key(36) # Font size, exact edit.
         subprocess.run(['/usr/bin/pbcopy'],input=b'18.5',check=True);key(9,1<<20);key(36)
-        desktop.press_row(host.pid,': Save ')
-        wait(lambda:saved().get('font_px')==18.5,'literal font size save');capture('saved-size')
-        key(36);desktop.press_row(host.pid,': Reset / inherit ')
-        wait(lambda:'font_px' not in saved(),'font size reset');capture('reset-size')
+        press_row(': Save ')
+        wait(lambda:saved().get('font_px')==18.5,'literal font size save');capture('saved-size',True)
+        key(36);press_row(': Reset / inherit ')
+        wait(lambda:'font_px' not in saved(),'font size reset');capture('reset-size',True)
         key(53);key(53);wait(lambda:not status().get('context_menu'),'settings closed')
         assert identities()==before,'Modal arrow bindings changed live sessions'
         assert pane_lines()==before_text,'Modal navigation or text reached the PTY'
         for identity,label in [('bundled:ibm-plex-mono','IBM Plex Mono'),('bundled:commit-mono','Commit Mono')]:
             key(97);key(124);key(125);key(36)
-            desktop.press_row(host.pid,label+' (bundled)');desktop.press_row(host.pid,': Save ')
+            press_row(label+' (bundled)');press_row(': Save ')
             wait(lambda:saved().get('font')==identity,'font selection')
             wait(lambda:('font '+label+' (') in (root/'host.log').read_text(),'actual primary font load')
-            key(53);key(53);time.sleep(1);capture(identity.split(':')[1])
+            key(53);key(53);time.sleep(1);capture(identity.split(':')[1],False)
         key(97);key(125);key(36) # Appearance, first setting, exact bool editor.
-        desktop.press_row(host.pid,': Reset / inherit ')
+        press_row(': Reset / inherit ')
         wait(lambda:'settings_panel' not in saved(),'gate reset')
-        capture('legacy-restored')
+        capture('legacy-restored',True)
         result.update(status='PASS',sessions='preserved',font_px='saved-and-reset',fonts='selected-through-native-accessibility',gate='enabled-and-reset')
     except Exception as error:
         result['error']=str(error)
         raise
     finally:
-        stop(host);stop(daemon)
-        subprocess.run(['/usr/bin/pbcopy'],input=clipboard,check=True)
-        result.update(host_reaped=host is None or host.poll() is not None,daemon_reaped=daemon is None or daemon.poll() is not None)
-        (root/'result.json').write_text(json.dumps(result,indent=2)+'\n')
-        (root/'commands.json').write_text(json.dumps(commands,indent=2)+'\n')
-        (root/'captures.json').write_text(json.dumps(captures,indent=2)+'\n')
+        finish_evidence(root,result,commands,captures,host,daemon,clipboard)
     return result
 
 

@@ -10,8 +10,8 @@ use std::sync::OnceLock;
 
 use objc2::ffi as objc2_ffi;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, AnyObject, Sel};
-use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
+use objc2::{define_class, msg_send, sel, DefinedClass, Encode, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSControlStateValueOff,
     NSControlStateValueOn, NSEventModifierFlags, NSMenu, NSMenuItem,
@@ -307,9 +307,36 @@ extern "C-unwind" fn application_dock_menu_imp(
     .unwrap_or(ptr::null_mut())
 }
 
+// winit does not implement this delegate callback. A Dock click otherwise
+// leaves a minimized window behind when another window is still visible.
+extern "C-unwind" fn application_reopen_imp(
+    _this: *mut AnyObject,
+    _cmd: Sel,
+    _app: *mut AnyObject,
+    _has_visible_windows: Bool,
+) -> Bool {
+    std::panic::catch_unwind(|| {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return Bool::YES;
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        for window in app.windows() {
+            if window.isMiniaturized() {
+                window.deminiaturize(None);
+                window.makeKeyAndOrderFront(None);
+                return Bool::NO;
+            }
+        }
+        // Keep AppKit's default activation when nothing needs restoring.
+        Bool::YES
+    })
+    .unwrap_or(Bool::YES)
+}
+
 /// Injects `applicationDockMenu:` into winit's live `NSApplicationDelegate`
 /// class so right-clicking the Dock tile shows "New Window" wired to the
 /// same action target as File > New Window (Task 5's `NEW_WINDOW_TARGET`).
+/// Also installs the Dock reopen callback to restore minimized windows.
 ///
 /// Idempotent: checks `instance_method` first so calling this more than
 /// once (e.g. across several `open_window` calls, defensively) does not
@@ -330,6 +357,28 @@ pub fn install_dock_menu() {
             return;
         }
         let class = (*delegate).class();
+        let reopen = sel!(applicationShouldHandleReopen:hasVisibleWindows:);
+        if class.instance_method(reopen).is_none() {
+            // Objective-C BOOL is architecture-dependent on macOS.
+            let types = std::ffi::CString::new(format!("{}@:@{}", Bool::ENCODING, Bool::ENCODING))
+                .expect("Objective-C type encodings contain no NUL");
+            // SAFETY: the callback matches this delegate selector's return,
+            // receiver, selector, application argument, and BOOL argument.
+            let imp = core::mem::transmute::<
+                extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject, Bool) -> Bool,
+                objc2::runtime::Imp,
+            >(application_reopen_imp);
+            if !objc2_ffi::class_addMethod(
+                class as *const AnyClass as *mut AnyClass,
+                reopen,
+                imp,
+                types.as_ptr(),
+            )
+            .as_bool()
+            {
+                eprintln!("prismattyc-host: Dock reopen handler installation failed");
+            }
+        }
         let sel = sel!(applicationDockMenu:);
         if class.instance_method(sel).is_some() {
             // Already injected; do not add it a second time.

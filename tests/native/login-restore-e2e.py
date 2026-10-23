@@ -44,7 +44,7 @@ class Fixture:
                     "HOME": str(root / "home"), "XDG_DATA_HOME": str(root / "data"),
                     "XDG_CONFIG_HOME": str(root / "config"), "XDG_RUNTIME_DIR": str(self.runtime),
                     "PMUX_SOCKET": str(self.socket), "PRISMATTYC_NO_LOGIN_SERVICE": "1",
-                    "PRISMATTYC_NO_AGENT_SKILLS": "1", "PRISMATTYC_E2E_WINDOW_CELLS": "100x32"}
+                    "PRISMATTYC_NO_AGENT_SKILLS": "1", "PRISMATTYC_DEFAULT_SPACE": "0", "PRISMATTYC_E2E_WINDOW_CELLS": "100x32"}
         for key in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_SESSION_TYPE", "LLVM_PROFILE_FILE"):
             if key in os.environ:
                 self.env[key] = os.environ[key]

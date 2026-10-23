@@ -420,6 +420,32 @@ pub fn write_config_atomic(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+/// Atomically replace a generated artifact without leaving a persistent sidecar.
+/// Service/startup directories consume their contents; config locks belong only
+/// to configuration transactions, not generated registration files.
+pub fn write_file_atomic(path: &Path, contents: &str) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).context("create artifact directory")?;
+    }
+    if let Some(warning) = replace_file(
+        path,
+        contents,
+        Replacement::Unconditional,
+        sync_config_directory,
+    )? {
+        eprintln!("prismattyc: file saved, but directory sync failed: {warning}");
+    }
+    Ok(())
+}
+
+enum Replacement<'a> {
+    Unconditional,
+    IfUnchanged(Option<&'a str>),
+}
+
 fn locked_config<T>(
     path: &Path,
     edit: impl FnOnce(&str) -> Result<(String, T)>,
@@ -480,6 +506,34 @@ fn locked_config_with_sync<T>(
             durability_warning: None,
         });
     }
+    let durability_warning = replace_file(
+        &target,
+        &contents,
+        Replacement::IfUnchanged(original.as_deref()),
+        sync_directory,
+    )?;
+    Ok(ConfigCommit {
+        value,
+        changed: true,
+        durability_warning,
+    })
+}
+
+fn replace_file(
+    path: &Path,
+    contents: &str,
+    condition: Replacement<'_>,
+    sync_directory: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<Option<String>> {
+    let target = path;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let filename = path
+        .file_name()
+        .context("artifact filename")?
+        .to_string_lossy();
     let nonce = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
@@ -498,35 +552,32 @@ fn locked_config_with_sync<T>(
             .context("create temporary config")?;
         file.write_all(contents.as_bytes())
             .context("write temporary config")?;
-        if let Ok(metadata) = std::fs::metadata(&target) {
+        if let Ok(metadata) = std::fs::metadata(target) {
             std::fs::set_permissions(&temporary, metadata.permissions())
                 .context("preserve config permissions")?;
         }
         file.sync_all().context("sync temporary config")?;
         // Cooperating writers are serialized. Detect external edits made before
         // this check; an editor ignoring the advisory lock can still race rename.
-        let current = match std::fs::read_to_string(&target) {
-            Ok(raw) => Some(raw),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error).context("recheck config before replacement"),
-        };
-        anyhow::ensure!(
-            current == original,
-            "config changed outside the settings editor; retry the edit"
-        );
-        std::fs::rename(&temporary, &target).context("replace config")?;
+        if let Replacement::IfUnchanged(expected) = condition {
+            let current = match std::fs::read_to_string(target) {
+                Ok(raw) => Some(raw),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error).context("recheck config before replacement"),
+            };
+            anyhow::ensure!(
+                current.as_deref() == expected,
+                "config changed outside the settings editor; retry the edit"
+            );
+        }
+        std::fs::rename(&temporary, target).context("replace config")?;
         Ok(())
     })();
     if let Err(error) = before {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }
-    let durability_warning = sync_directory(parent).err().map(|error| error.to_string());
-    Ok(ConfigCommit {
-        value,
-        changed: true,
-        durability_warning,
-    })
+    Ok(sync_directory(parent).err().map(|error| error.to_string()))
 }
 
 fn first_name(candidates: [Option<String>; 3]) -> Option<String> {
@@ -638,6 +689,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("config.toml")
+    }
+
+    #[test]
+    fn generated_artifact_replacement_leaves_only_the_requested_file() {
+        let path = temp_cfg("generated-artifact").with_file_name("pmux.service");
+        write_file_atomic(&path, "[Service]\nExecStart=/opt/pmux login run\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[Service]\nExecStart=/opt/pmux login run\n"
+        );
+        write_file_atomic(&path, "[Service]\nExecStart=/opt/new-pmux login run\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[Service]\nExecStart=/opt/new-pmux login run\n"
+        );
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("pmux.service")]);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

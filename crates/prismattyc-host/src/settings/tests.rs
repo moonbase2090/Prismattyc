@@ -283,7 +283,7 @@ fn every_setting_saves_literal_values_through_input_and_loads_them() {
     {
         let key = control.key();
         fixture.open_key(&key);
-        let value = store::value_at(&example, &control.paths[0])
+        let value = crate::config_document::value_at(&example, &control.paths[0])
             .unwrap_or_else(|| panic!("independent literal missing for {key}"));
         match &control.kind {
             Kind::Font => {
@@ -328,7 +328,8 @@ fn every_setting_saves_literal_values_through_input_and_loads_them() {
             }
             _ => {
                 for (index, path) in control.paths.iter().enumerate() {
-                    let value = store::value_at(&example, path).expect("literal field");
+                    let value =
+                        crate::config_document::value_at(&example, path).expect("literal field");
                     fixture.editor_row(
                         |command| matches!(command,Command::Field(field)if *field==index),
                     );
@@ -343,8 +344,12 @@ fn every_setting_saves_literal_values_through_input_and_loads_them() {
             .unwrap();
         let loaded = serde_json::to_value(config::load(&fixture.panel.path).unwrap()).unwrap();
         for path in &control.paths {
-            let expected = store::value_at(&example, path).unwrap();
-            assert_eq!(store::value_at(&raw, path), Some(expected), "saved {key}");
+            let expected = crate::config_document::value_at(&example, path).unwrap();
+            assert_eq!(
+                crate::config_document::value_at(&raw, path),
+                Some(expected),
+                "saved {key}"
+            );
             assert_eq!(
                 json_at(&loaded, path),
                 Some(&serde_json::to_value(expected).unwrap()),

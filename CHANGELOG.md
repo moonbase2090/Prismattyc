@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A fresh install, or a config without `theme`, now paints Prismattyc Dark instead of following the OS appearance. `theme = "prismattyc"` still follows the OS.
+
 ## [0.3.40] - 2026-10-22
 
 ### Fixed

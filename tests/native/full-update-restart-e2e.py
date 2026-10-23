@@ -183,11 +183,25 @@ def main():
             (out / 'before-restore.json').write_text(json.dumps(snapshot(), indent=2))
             assert not any(s['name'] == 'work' for s in snapshot()['sessions']), 'startup recreated a session before restore consent'
             capture('restore-offer')
+            backups = list((out / 'data').rglob('session-configurations/update-*.json'))
+            assert len(backups) == 1, backups
+            saved_view = json.loads(backups[0].read_text())['view']
+            assert saved_view['focused_session'] == 'work', saved_view
+            assert saved_view['tabs'] == [{'title': 'work', 'sessions': ['work']}], saved_view
+            assert saved_view['session_names']['work'] == 'work', saved_view
             choose('Restore sessions')
             wait(lambda: marker.read_text() == 'xx', 'saved command relaunched')
             wait(lambda: any('Session restoration finished.' in r for r in (status().get('space_details') or {}).get('rows', [])), 'restoration result')
-            wait(lambda: status().get('focused_session') == 'work', 'restored window session')
+            def restored_focus():
+                target = status().get('focused_session')
+                sessions = snapshot()['sessions']
+                focused = next((s for s in sessions if str(s['id']) == target), None)
+                return focused if focused and focused['name'] == 'work' else None
+
+            focused = wait(restored_focus, 'restored window session named work')
+            (out / 'restored-focus.json').write_text(json.dumps(focused, indent=2))
             capture('restore-result')
+            record('saved work view restored and focused session resolves to work')
         else:
             backup = out / 'configuration.json'
             cli('session-config', 'save', backup)

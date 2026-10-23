@@ -43,9 +43,9 @@ values warn and use `"tiles"`. Other platforms ignore this key.
 The classic `prismattyc` binary does not
 read this file. `chrome_style` defaults to `graphite`. Leave that key
 commented, or omit it, to follow the app default. `chrome_style = "classic"`
-keeps the previous chrome and applies live. `theme` defaults to `prismattyc`
-(follow the system appearance). Leave that key commented, or omit it, to
-follow the app default.
+keeps the previous chrome and applies live. `theme` defaults to
+`prismattyc-dark`. Set `theme = "prismattyc"` to follow the system appearance.
+Leave that key commented, or omit it, to follow the app default.
 
 ## Keys
 
@@ -66,8 +66,8 @@ event-loop turn.
 # Edit in place. CLI flags and PRISMATTYC_* env vars still win.
 
 # -- appearance / theme --
-# Named theme: built-in slug, display name, sibling themes/ file, or absolute TOML path. Omit this key to follow the app default (prismattyc). theme slug or absolute path.
-# theme = "prismattyc"
+# Named theme: built-in slug, display name, sibling themes/ file, or absolute TOML path. Omit this key to follow the app default (prismattyc-dark). prismattyc follows the OS appearance. theme slug or absolute path.
+# theme = "prismattyc-dark"
 # Render timings and counters. off|osd|log|both.
 render_timer = "off"
 # macOS present backend; startup only, ignored on other platforms, unknown values warn and use tiles. tiles|iosurface.
@@ -714,11 +714,11 @@ Prismattyc ships 32 built-in themes:
 | `hive-tri-tone-light` | Hive Tri-Tone Light |
 | `hive-muted-professional-light` | Hive Muted Professional Light |
 
-`prismattyc` is the default for new installs and for a config without `theme`.
-It follows the OS appearance (macOS, Windows, and desktops that report one) and
-paints Prismattyc Dark or Prismattyc Light, so the Graphite chrome, the
-terminal ground, text, cursor, and selection, and the macOS title band all use
-one palette; it falls back to Dark when the system reports nothing.
+`prismattyc-dark` is the default for new installs and for a config without
+`theme`. `prismattyc` follows the OS appearance (macOS, Windows, and desktops
+that report one) and paints Prismattyc Dark or Prismattyc Light, so the Graphite
+chrome, the terminal ground, text, cursor, and selection, and the macOS title
+band all use one palette; it falls back to Dark when the system reports nothing.
 `prismattyc-dark` and `prismattyc-light` pin one side. `prismattyc-default` is
 the earlier palette and stays available by name. Any other theme, a theme file,
 or `[theme_overrides]` keeps its own colors; overrides are re-applied after an

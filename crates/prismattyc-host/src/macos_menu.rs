@@ -15,9 +15,9 @@ use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThr
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSControlStateValueOff,
     NSControlStateValueOn, NSEventModifierFlags, NSMenu, NSMenuItem, NSModalResponseOK,
-    NSSavePanel,
+    NSResponder, NSSavePanel, NSView,
 };
-use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
+use objc2_foundation::{NSObjectProtocol, NSString};
 use winit::event_loop::EventLoopProxy;
 
 use crate::keybind::{Action, Chord, KeyMap, KeySpec};
@@ -94,9 +94,9 @@ struct NewWindowTargetIvars {
 
 define_class!(
     // SAFETY:
-    // - The superclass NSObject does not have any subclassing requirements.
+    // - The superclass NSResponder has no subclassing requirements.
     // - `NewWindowTarget` does not implement `Drop`.
-    #[unsafe(super = NSObject)]
+    #[unsafe(super = NSResponder)]
     #[thread_kind = MainThreadOnly]
     #[ivars = NewWindowTargetIvars]
     struct NewWindowTarget;
@@ -112,6 +112,21 @@ define_class!(
         #[unsafe(method(newWindow:))]
         fn new_window(&self, _sender: Option<&AnyObject>) {
             let _ = self.ivars().proxy.send_event(UserAction::NewWindow);
+        }
+
+        #[unsafe(method(copy:))]
+        fn copy(&self, _sender: Option<&AnyObject>) {
+            let _ = self.ivars().proxy.send_event(UserAction::RunAction(Action::Copy));
+        }
+
+        #[unsafe(method(paste:))]
+        fn paste(&self, _sender: Option<&AnyObject>) {
+            let _ = self.ivars().proxy.send_event(UserAction::RunAction(Action::Paste));
+        }
+
+        #[unsafe(method(selectAll:))]
+        fn select_all(&self, _sender: Option<&AnyObject>) {
+            let _ = self.ivars().proxy.send_event(UserAction::RunAction(Action::SelectAll));
         }
 
         #[unsafe(method(saveSessionConfiguration:))]
@@ -177,21 +192,6 @@ define_class!(
             else {
                 return;
             };
-            // A native dialog's text field gets the standard responder action
-            // before the terminal or a host-drawn editor behind the dialog.
-            let native_action = match action {
-                Action::Copy => Some(sel!(copy:)),
-                Action::Paste => Some(sel!(paste:)),
-                Action::SelectAll => Some(sel!(selectAll:)),
-                _ => None,
-            };
-            if let Some(selector) = native_action {
-                let app = NSApplication::sharedApplication(self.mtm());
-                // SAFETY: all selectors use AppKit's standard action signature.
-                if unsafe { app.sendAction_to_from(selector, None, Some(sender)) } {
-                    return;
-                }
-            }
             let _ = self.ivars().proxy.send_event(UserAction::RunAction(*action));
         }
     }
@@ -302,18 +302,50 @@ fn refresh_menu_shortcuts(menu: &NSMenu, keymap: &KeyMap) {
         if let Some(submenu) = item.submenu() {
             refresh_menu_shortcuts(&submenu, keymap);
         }
-        if item.action() != Some(sel!(runAction:)) {
-            continue;
-        }
-        if let Some((_, action)) = item
+        if let Some((title, action)) = item
             .tag()
             .checked_sub(1)
             .and_then(|tag| usize::try_from(tag).ok())
             .and_then(|index| MENU_HOST_ACTIONS.get(index))
         {
-            set_action_shortcut(&item, keymap, *action);
+            if item.action() == Some(action_selector(*action)) && item.title().to_string() == *title
+            {
+                set_action_shortcut(&item, keymap, *action);
+            }
         }
     }
+}
+
+fn action_selector(action: Action) -> Sel {
+    match action {
+        Action::Copy => sel!(copy:),
+        Action::Paste => sel!(paste:),
+        Action::SelectAll => sel!(selectAll:),
+        _ => sel!(runAction:),
+    }
+}
+
+/// Insert a window-owned clipboard fallback after its content view. Native
+/// dialog editors remain earlier responders for standard clipboard actions.
+pub fn install_clipboard_responder(
+    window: &winit::window::Window,
+    proxy: EventLoopProxy<UserAction>,
+) -> Option<Retained<NSResponder>> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let mtm = MainThreadMarker::new()?;
+    let handle = window.window_handle().ok()?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return None;
+    };
+    // SAFETY: winit supplies a live NSView. The returned responder is retained
+    // by HostState for this window's lifetime; its original chain is preserved.
+    let view: &NSView = unsafe { &*handle.ns_view.as_ptr().cast() };
+    let responder = NewWindowTarget::new(mtm, proxy);
+    unsafe {
+        responder.setNextResponder(view.nextResponder().as_deref());
+        view.setNextResponder(Some(&responder));
+    }
+    Some(responder.into_super())
 }
 
 /// Builds a menu item for `MENU_HOST_ACTIONS[index]`, wired to `target`.
@@ -331,8 +363,10 @@ fn host_action_item(
     // SAFETY: `runAction:` is defined on `NewWindowTarget` above and takes the
     // one-argument action signature AppKit expects; `target` outlives the menu.
     unsafe {
-        item.setTarget(Some(target));
-        item.setAction(Some(sel!(runAction:)));
+        if !matches!(action, Action::Copy | Action::Paste | Action::SelectAll) {
+            item.setTarget(Some(target));
+        }
+        item.setAction(Some(action_selector(action)));
     }
     item
 }

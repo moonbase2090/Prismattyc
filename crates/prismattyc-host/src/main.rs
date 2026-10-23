@@ -1083,6 +1083,8 @@ fn apply_ime_text_route(host: &mut HostState, route: ImeTextRoute) {
 
 struct HostState {
     window: Arc<Window>,
+    #[cfg(target_os = "macos")]
+    _clipboard_responder: Option<objc2::rc::Retained<objc2_app_kit::NSResponder>>,
     present: Option<PresentBackend>,
     font: FontMetrics,
     font_base_px: f32,
@@ -4393,10 +4395,15 @@ impl App {
         };
         let walkthrough = None;
         let palette_recent_path = palette_recent_path();
+        #[cfg(target_os = "macos")]
+        let clipboard_responder =
+            macos_menu::install_clipboard_responder(&window, self.event_proxy.clone());
         self.windows.insert(
             id,
             HostState {
                 window,
+                #[cfg(target_os = "macos")]
+                _clipboard_responder: clipboard_responder,
                 present: Some(present),
                 font,
                 font_base_px: base_px,

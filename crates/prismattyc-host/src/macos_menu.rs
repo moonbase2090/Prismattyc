@@ -34,6 +34,40 @@ pub fn dock_menu_titles() -> &'static [&'static str] {
     &["New Window"]
 }
 
+/// Adds the standard Window menu (Minimize, Zoom) to `main_menu`. Both items
+/// have no explicit target, so AppKit routes them to the key window through
+/// the responder chain.
+fn add_window_menu(mtm: MainThreadMarker, main_menu: &NSMenu) -> Retained<NSMenu> {
+    let window_menu_item = NSMenuItem::new(mtm);
+    window_menu_item.setTitle(&NSString::from_str("Window"));
+    let window_menu = NSMenu::new(mtm);
+    window_menu.setTitle(&NSString::from_str("Window"));
+
+    let minimize_item = NSMenuItem::new(mtm);
+    minimize_item.setTitle(&NSString::from_str("Minimize"));
+    minimize_item.setKeyEquivalent(&NSString::from_str("m"));
+    minimize_item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+    // SAFETY: `performMiniaturize:` is a standard `NSWindow` action; leaving
+    // the target unset routes it through the responder chain.
+    unsafe {
+        minimize_item.setAction(Some(sel!(performMiniaturize:)));
+    }
+    window_menu.addItem(&minimize_item);
+
+    let zoom_item = NSMenuItem::new(mtm);
+    zoom_item.setTitle(&NSString::from_str("Zoom"));
+    // SAFETY: `performZoom:` is a standard `NSWindow` action; leaving the
+    // target unset routes it through the responder chain.
+    unsafe {
+        zoom_item.setAction(Some(sel!(performZoom:)));
+    }
+    window_menu.addItem(&zoom_item);
+
+    window_menu_item.setSubmenu(Some(&window_menu));
+    main_menu.addItem(&window_menu_item);
+    window_menu
+}
+
 /// Backing storage for `NewWindowTarget`'s selector-callable state.
 struct NewWindowTargetIvars {
     proxy: EventLoopProxy<UserAction>,
@@ -201,7 +235,12 @@ pub fn install_main_menu(proxy: EventLoopProxy<UserAction>, automatic_checks: bo
     file_menu_item.setSubmenu(Some(&file_menu));
     main_menu.addItem(&file_menu_item);
 
-    NSApplication::sharedApplication(mtm).setMainMenu(Some(&main_menu));
+    let window_menu = add_window_menu(mtm, &main_menu);
+
+    let app = NSApplication::sharedApplication(mtm);
+    app.setMainMenu(Some(&main_menu));
+    // AppKit fills this menu with the open windows and keeps it updated.
+    app.setWindowsMenu(Some(&window_menu));
     eprintln!("prismattyc-host: menu bar installed (Check for Updates)");
 }
 

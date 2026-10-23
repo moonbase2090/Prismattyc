@@ -35,7 +35,8 @@ Run these non-window probes with the same Rust toolchain and build environment
 as Launch:
 
 ```sh
-cargo +1.90.0 test -p prismattyc-host settings::tests --locked -- --test-threads=1
+PRISMATTYC_DUMP_SETTINGS="$verify_evidence/settings-painter" \
+  cargo +1.90.0 test -p prismattyc-host settings::tests --locked -- --test-threads=1
 cargo +1.90.0 test -p prismattyc-mux config::tests --lib --locked -- --test-threads=1
 python3 scripts/check-settings-mutations.py --revision HEAD \
   --target "$verify_target" --out "$verify_evidence/settings-mutations"
@@ -50,6 +51,24 @@ assertion failures for a missing control, writer, finite choice, and newly
 accepted field without a control. It retains baseline, failure logs, and
 `result.json`, then removes its owned worktree. Serialize this command with
 other builds using the same Cargo target.
+
+Inspect the classic and Graphite sections/font-size PNGs from the first command.
+They are offscreen painter output, with selected-row hit tests and visible-label
+assertions. They are not native desktop captures.
+
+After desktop allocation, run the dedicated native fixture:
+
+```sh
+python3 tests/native/macos-settings-e2e.py --bins "$verify_bins" \
+  --out "$verify_evidence/settings-native" --revision "$(git rev-parse HEAD)"
+```
+
+It checks its own host PID/frame, uses native keys for enablement/navigation/text
+and Accessibility actions for visible editor commands, captures only owned
+windows, checks durable values and unchanged session/PTY content, and compares
+both bundled fonts on identical terminal content. Inspect its captures and
+`result.json`; an unexecuted fixture is not proof. The read-only
+`--check-desktop-only` option checks prerequisites without starting processes.
 
 These probes do not prove desktop pixels or native input routing. Existing
 rail-delete and restart fixtures do not cover the settings editor. Native

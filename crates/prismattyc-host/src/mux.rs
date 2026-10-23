@@ -5477,6 +5477,45 @@ mod tests {
     }
 
     #[test]
+    fn live_alt_retention_updates_background_and_future_panes() {
+        let mut runtime = MuxRuntime::spawn_with_geom(
+            "/bin/sh",
+            &[],
+            80,
+            24,
+            HostGeom::tight(1, 1),
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+        let first = runtime.focused_id();
+        runtime.new_tab("/bin/sh", &[]).unwrap();
+        let second = runtime.focused_id();
+        assert_ne!(first, second);
+        runtime.set_alt_screen_scrollback(true);
+        runtime.new_tab("/bin/sh", &[]).unwrap();
+        for pane in runtime.panes.values_mut() {
+            feed_alt_lines(&mut pane.emulator, 30);
+            assert!(
+                pane.emulator.screen().max_view_scroll() > 0,
+                "active/background/new pane retains alt history"
+            );
+        }
+        runtime.set_alt_screen_scrollback(false);
+        runtime.new_tab("/bin/sh", &[]).unwrap();
+        for pane in runtime.panes.values_mut() {
+            let _ = pane.emulator.feed(b"\x1bc");
+            feed_alt_lines(&mut pane.emulator, 30);
+            assert_eq!(
+                pane.emulator.screen().max_view_scroll(),
+                0,
+                "disabled retention applies to every pane"
+            );
+        }
+    }
+
+    #[test]
     fn take_pane_damage_returns_and_clears_damage_without_a_window() {
         let mut runtime = MuxRuntime::spawn("sh", &[], 4, 2).expect("test mux runtime");
         let pane = runtime.focused_id();

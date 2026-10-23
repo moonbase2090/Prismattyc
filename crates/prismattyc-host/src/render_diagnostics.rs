@@ -2,6 +2,18 @@
 use super::{App, Duration, Instant, TransientOverlayState};
 use std::fmt;
 
+/// Distinguish an exec replacement even when the operating system keeps its PID.
+pub(super) fn instance_id() -> &'static str {
+    static INSTANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    INSTANCE.get_or_init(|| {
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!("{}-{started}", std::process::id())
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Guard {
     Pending,
@@ -274,6 +286,7 @@ impl App {
             let frame = host.render_frame;
             let last_raster = serde_json::json!({
                 "unix_ms": frame.raster_at_unix_ms,
+                "capture_seq": host.dump_present_seq,
                 "present_succeeded": frame.present_succeeded,
                 "raster_mode": if frame.full_repaint_reason.is_some() { "full" } else { "partial" },
                 "full_repaint_reason": frame.full_repaint_reason.map(super::FullRepaintReason::as_str),
@@ -364,6 +377,7 @@ impl App {
         let status = serde_json::json!({
             "schema_version": 1,
             "host_pid": pid,
+            "host_instance": instance_id(),
             "host_version": env!("CARGO_PKG_VERSION"),
             "host_git_hash": prismattyc_core::git_hash(),
             "status_seq": self.render_status_seq,

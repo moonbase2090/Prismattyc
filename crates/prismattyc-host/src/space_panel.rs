@@ -7,6 +7,7 @@ use std::sync::mpsc::{self, Receiver};
 
 #[derive(Clone)]
 enum Choice {
+    FullUpdate(update_flow::Action),
     Maintenance,
     Command(Vec<String>),
     None,
@@ -52,6 +53,7 @@ enum Page {
     Templates,
     Preview(String, String),
     Text(String),
+    Update(String, Vec<(String, update_flow::Action)>),
     /// Recent messages (#171): (message, age and state) rows, newest first.
     Messages(Vec<(String, String)>),
 }
@@ -86,6 +88,7 @@ pub(super) struct Panel {
     input: Option<Input>,
     submitted: Option<Input>,
     pending: Option<Receiver<Result<Payload, String>>>,
+    update_action: Option<update_flow::Action>,
     pub scroll: usize,
     columns: usize,
     /// Live `layout` while Graphite chrome is on, else None. The Layout rows
@@ -221,18 +224,11 @@ impl Panel {
                     Choice::None,
                 );
                 #[cfg_attr(target_os = "macos", allow(unused_mut))]
-                let mut actions = vec![
-                    (
-                        "Check for updates",
-                        "Compare installed and available release versions",
-                        vec!["update", "--check"],
-                    ),
-                    (
-                        "Install latest release",
-                        "Verify and install all components; running sessions continue",
-                        vec!["update"],
-                    ),
-                ];
+                let mut actions = vec![(
+                    "Check for updates",
+                    "Compare installed and available release versions",
+                    vec!["update", "--check"],
+                )];
                 // macOS replaces Prismattyc.app and deletes the old copy, so there
                 // is no previous installation to restore from this menu.
                 #[cfg(not(target_os = "macos"))]
@@ -268,6 +264,11 @@ impl Panel {
                         vec!["restart", "--daemon"],
                     ),
                 ]);
+                self.row(
+                    "Update and restart all components",
+                    "Review running sessions and optionally save their configuration",
+                    Choice::FullUpdate(update_flow::Action::Start),
+                );
                 for (label, detail, args) in actions {
                     self.row(
                         label,
@@ -537,6 +538,14 @@ impl Panel {
                 }
                 self.row("Back to team", "", Choice::Back);
             }
+            Page::Update(text, actions) => {
+                for line in text.lines() {
+                    self.row(line, "", Choice::None);
+                }
+                for (label, action) in actions {
+                    self.row(label, "", Choice::FullUpdate(action));
+                }
+            }
             Page::Text(text) => {
                 for line in text.lines() {
                     self.row(line, "", Choice::None);
@@ -586,6 +595,47 @@ fn waiting_label(n: usize) -> String {
         1 => "1 session needs you".into(),
         _ => format!("{n} sessions need you"),
     }
+}
+
+pub(super) fn keeps_on_focus_loss(host: &HostState) -> bool {
+    host.space_panel
+        .as_ref()
+        .is_some_and(|panel| matches!(panel.page, Page::Update(..)))
+}
+
+pub(super) fn take_update_action(host: &mut HostState) -> Option<update_flow::Action> {
+    host.space_panel.as_mut()?.update_action.take()
+}
+
+pub(super) fn update_page(
+    host: &mut HostState,
+    text: &str,
+    actions: &[(&str, update_flow::Action)],
+) {
+    if host.space_panel.is_none() {
+        settings(host);
+    }
+    let panel = host.space_panel.as_mut().unwrap();
+    panel.pending = None;
+    panel.maintenance = true;
+    panel.page = Page::Update(
+        text.into(),
+        actions
+            .iter()
+            .map(|(label, action)| ((*label).into(), *action))
+            .collect(),
+    );
+    panel.scroll = 0;
+    panel.rebuild();
+    if let Some(menu) = &mut host.context_menu {
+        menu.selected = panel
+            .rows
+            .iter()
+            .position(|row| matches!(row.choice, Choice::FullUpdate(_)))
+            .unwrap_or(0);
+    }
+    host.dirty = true;
+    host.window.request_redraw();
 }
 
 pub(super) fn maintenance(host: &mut HostState) {
@@ -684,13 +734,22 @@ fn command(host: &mut HostState, args: Vec<String>, kind: &'static str) {
             if let Some(socket) = socket {
                 cmd.arg("--socket").arg(socket);
             }
+            cmd.args(args);
+            if kind == "maintenance" {
+                cmd.arg("--json");
+            }
             let output = cmd
-                .args(args)
                 .stdin(std::process::Stdio::null())
                 .output()
                 .map_err(|e| e.to_string())?;
             if !output.status.success() {
-                return Err(String::from_utf8_lossy(&output.stderr).trim().into());
+                return Err(format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+                .trim()
+                .into());
             }
             let text = String::from_utf8_lossy(&output.stdout).into_owned();
             match kind {
@@ -731,9 +790,9 @@ pub(super) fn open(host: &mut HostState, name: String) {
         input: None,
         submitted: None,
         pending: None,
+        update_action: None,
         scroll: 0,
-        columns: (host.window.inner_size().width as usize / host.font.cell_w.max(1))
-            .saturating_sub(10),
+        columns: panel_columns(host),
         chrome_layout: (host.spacing.chrome_style == config::ChromeStyle::Graphite)
             .then_some(host.spacing.layout),
     });
@@ -751,6 +810,7 @@ pub(super) fn rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
     } else {
         match &panel.page {
             Page::Maintenance => "UPDATE AND RESTART".into(),
+            Page::Update(..) => "UPDATE AND RESTART".into(),
             Page::Text(_) if panel.maintenance => "UPDATE AND RESTART RESULT".into(),
             Page::Settings => "SPACES SETTINGS".into(),
             Page::Layout => "LAYOUT".into(),
@@ -789,7 +849,32 @@ pub(super) fn status(host: &HostState) -> Option<serde_json::Value> {
     )
 }
 
+fn panel_columns(host: &HostState) -> usize {
+    let size = host.window.inner_size();
+    let geom = raster::palette_geom(
+        size.width as usize / host.font.cell_w.max(1),
+        size.height as usize / host.font.cell_h.max(1),
+        host.font.cell_h,
+    );
+    geom.width_cells
+        .saturating_sub(geom.inset_cells * 2 + 2)
+        .max(12)
+}
+
 pub(super) fn poll(host: &mut HostState) {
+    let columns = panel_columns(host);
+    if let Some(panel) = host.space_panel.as_mut() {
+        if panel.columns != columns
+            && matches!(
+                panel.page,
+                Page::Text(_) | Page::Update(..) | Page::Maintenance
+            )
+        {
+            panel.columns = columns;
+            panel.rebuild();
+            host.dirty = true;
+        }
+    }
     focus_pending(host);
     let Some(panel) = host.space_panel.as_mut() else {
         return;
@@ -934,6 +1019,9 @@ pub(super) fn activate(host: &mut HostState, index: usize) {
         Choice::Maintenance => {
             panel.page = Page::Maintenance;
             panel.rebuild();
+        }
+        Choice::FullUpdate(action) => {
+            panel.update_action = Some(action);
         }
         Choice::Command(args) => {
             command(host, args, "maintenance");
@@ -1375,7 +1463,7 @@ fn focus_pending(host: &mut HostState) {
     }
 }
 
-fn maintenance_result(text: &str) -> String {
+pub(super) fn maintenance_result(text: &str) -> String {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
         return text.to_owned();
     };
@@ -1383,41 +1471,79 @@ fn maintenance_result(text: &str) -> String {
     if let Some(components) = value["components"].as_array() {
         for component in components {
             let result = component.get("response").unwrap_or(component);
-            lines.push(format!(
-                "{}: {}. {}",
-                component["component"].as_str().unwrap_or("Component"),
-                result["status"].as_str().unwrap_or("unknown"),
-                result["detail"].as_str().unwrap_or("")
-            ));
+            let name = component["component"].as_str().unwrap_or("Component");
+            let label = match name {
+                "daemon" => "Session daemon",
+                "host" => "Prismattyc app",
+                "mcp" => "MCP server",
+                other => other,
+            };
+            let message = match result["status"].as_str().unwrap_or("") {
+                "restarted" => "restarted successfully",
+                "not_registered" if name == "mcp" => "not running, nothing to restart",
+                "not_registered" => {
+                    "no restart connection found; reopen the app manually if it is running"
+                }
+                "deferred" => "still running the previous version; restart postponed",
+                "pending" => {
+                    "restart has not been confirmed; check running versions before retrying"
+                }
+                "failed" => "restart failed",
+                _ => "could not confirm the restart; check running versions",
+            };
+            let detail = result["detail"].as_str().unwrap_or("");
+            lines.push(format!("{label}: {message}."));
+            if !detail.is_empty() && result["status"] != "not_registered" {
+                lines.push(detail.into());
+            }
         }
     } else if let Some(installed) = value["installed"].as_array() {
         for component in installed {
+            let Some(version) = component["version"].as_str() else {
+                continue;
+            };
             lines.push(format!(
-                "Installed {}: {}",
-                component["component"].as_str().unwrap_or("component"),
-                component["version"].as_str().unwrap_or("unavailable")
+                "Installed {}: {version}",
+                component["component"].as_str().unwrap_or("component")
             ));
         }
-        lines.push(format!(
-            "Running daemon: {}",
-            value["daemon"]["version"].as_str().unwrap_or("unknown")
-        ));
+        let daemon = if value["daemon"]["status"] == "not_running" {
+            "not running"
+        } else {
+            value["daemon"]["version"]
+                .as_str()
+                .unwrap_or("version cannot be read; restart to update it")
+        };
+        lines.push(format!("Running daemon: {daemon}"));
         if let Some(running) = value["running"].as_array() {
             for component in running {
                 lines.push(format!(
-                    "Running {} (PID {}): {}",
+                    "Running {}: {}",
                     component["component"].as_str().unwrap_or("component"),
-                    component["pid"],
-                    component["version"].as_str().unwrap_or("unknown")
+                    component["version"]
+                        .as_str()
+                        .unwrap_or("version cannot be read")
                 ));
             }
         }
-    } else {
+    } else if value["status"] == "checked" {
+        let installed = value["installed"].as_str().unwrap_or("unknown");
+        let available = value["available"].as_str().unwrap_or("unknown");
         lines.push(format!(
-            "{}: {}",
-            value["status"].as_str().unwrap_or("Result"),
-            value["version"].as_str().unwrap_or("")
+            "Installed release: {installed}\nLatest release: {available}"
         ));
+        lines.push(if value["update_available"] == true { "An update is available. Choose Update and restart all components to install it." } else { "The installed release is up to date. Check installed and running versions to see whether a restart is needed." }.into());
+    } else {
+        let version = value["version"].as_str().unwrap_or("");
+        lines.push(match value["status"].as_str().unwrap_or("") {
+            "installed" | "updated" => format!("Prismattyc {version} was installed. Running components must restart to use it."),
+            "rolled_back" => format!("Prismattyc was restored to {version}. Restart running components to use it."),
+            "scheduled" => "The restart is running in the background. Check running versions to confirm it finished.".into(),
+            _ => "The operation returned no recognized result. Check installed and running versions.".into(),
+        });
+        if let Some(message) = value["message"].as_str() {
+            lines.push(message.into());
+        }
     }
     lines.join("\n")
 }
@@ -1425,6 +1551,23 @@ fn maintenance_result(text: &str) -> String {
 #[cfg(test)]
 mod maintenance_tests {
     use super::*;
+
+    #[test]
+    fn maintenance_uses_plain_language_for_absent_mcp_and_update_availability() {
+        assert_eq!(
+            maintenance_result(
+                r#"{"components":[{"component":"mcp","status":"not_registered","detail":"no cooperative component found"}]}"#
+            ),
+            "MCP server: not running, nothing to restart."
+        );
+        assert_eq!(maintenance_result(r#"{"status":"checked","installed":"0.3.38","available":"0.3.41","update_available":true}"#), "Installed release: 0.3.38\nLatest release: 0.3.41\nAn update is available. Choose Update and restart all components to install it.");
+        assert_eq!(
+            maintenance_result(
+                r#"{"installed":[{"component":"pmux","version":"0.3.41"},{"component":"pmux-mcp","version":null}],"daemon":{"status":"not_running"}}"#
+            ),
+            "Installed pmux: 0.3.41\nRunning daemon: not running"
+        );
+    }
 
     #[test]
     fn maintenance_summary_keeps_deferred_restarts_and_version_mismatches_visible() {
@@ -1436,17 +1579,17 @@ mod maintenance_tests {
             maintenance_result(
                 r#"{"components":[{"component":"daemon","response":{"status":"deferred","detail":"live sessions"}},{"component":"host","status":"restarted","detail":"ready"}]}"#
             ),
-            "daemon: deferred. live sessions\nhost: restarted. ready"
+            "Session daemon: still running the previous version; restart postponed.\nlive sessions\nPrismattyc app: restarted successfully.\nready"
         );
         assert_eq!(
             maintenance_result(
                 r#"{"installed":[{"component":"host","version":"0.2.1"}],"daemon":{"version":"0.2.0"},"running":[{"component":"host","pid":123,"version":"0.2.0"}]}"#
             ),
-            "Installed host: 0.2.1\nRunning daemon: 0.2.0\nRunning host (PID 123): 0.2.0"
+            "Installed host: 0.2.1\nRunning daemon: 0.2.0\nRunning host: 0.2.0"
         );
         assert_eq!(
             maintenance_result(r#"{"status":"updated","version":"0.2.1"}"#),
-            "updated: 0.2.1"
+            "Prismattyc 0.2.1 was installed. Running components must restart to use it."
         );
     }
 }
@@ -1467,6 +1610,7 @@ mod layout_tests {
             input: None,
             submitted: None,
             pending: None,
+            update_action: None,
             scroll: 0,
             columns: 100,
             chrome_layout,

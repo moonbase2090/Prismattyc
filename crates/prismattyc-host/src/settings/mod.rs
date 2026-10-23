@@ -81,6 +81,13 @@ struct EditorRow {
     command: Command,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum InputResult {
+    Consumed,
+    Close,
+    Paste,
+}
+
 pub(super) struct Panel {
     path: PathBuf,
     wake: crate::mux::Wake,
@@ -311,6 +318,26 @@ impl Panel {
     }
 
     /// Return true only when the modal closes. Every event is otherwise consumed.
+    pub fn input_key(&mut self, key: &Key, mods: ModifiersState, repeat: bool) -> InputResult {
+        let text_focus = matches!(
+            self.focus,
+            Focus::Editing(Editor {
+                cursor: EditorFocus::Text { .. },
+                ..
+            })
+        );
+        if text_focus
+            && (mods.control_key() || mods.super_key())
+            && matches!(key,Key::Character(text)if text.eq_ignore_ascii_case("v"))
+        {
+            InputResult::Paste
+        } else if self.key(key, mods, repeat) {
+            InputResult::Close
+        } else {
+            InputResult::Consumed
+        }
+    }
+
     pub fn key(&mut self, key: &Key, mods: ModifiersState, repeat: bool) -> bool {
         if repeat && matches!(key, Key::Named(NamedKey::Enter | NamedKey::Escape)) {
             return false;
@@ -1346,7 +1373,26 @@ fn display_value(value: &toml::Value) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
+fn prepare_entry(
+    session_prompt: bool,
+    restore_prompt: bool,
+    rail: &mut crate::space_rail::SpaceRail,
+) -> bool {
+    if session_prompt || restore_prompt {
+        return false;
+    }
+    rail.leave();
+    true
+}
+
 pub(super) fn open(host: &mut crate::HostState) {
+    if !prepare_entry(
+        host.session_prompt.is_some(),
+        host.restore_prompt.is_some(),
+        &mut host.space_rail,
+    ) {
+        return;
+    }
     let mut panel = match Panel::open(&config::config_path()) {
         Ok(panel) => panel,
         Err(error) => {
@@ -1389,15 +1435,17 @@ pub(super) fn handle_key(host: &mut crate::HostState, event: &winit::event::KeyE
         event.text.as_deref(),
         host.modifiers,
     );
-    let paste = matches!(&logical,Key::Character(text) if text.eq_ignore_ascii_case("v"))
-        && (host.modifiers.control_key() || host.modifiers.super_key());
-    let close = if paste {
-        if let Ok(text) = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
-            panel.paste(&text);
+    let close = match panel.input_key(&logical, host.modifiers, event.repeat) {
+        InputResult::Paste => {
+            if let Ok(text) =
+                arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text())
+            {
+                panel.paste(&text);
+            }
+            false
         }
-        false
-    } else {
-        panel.key(&logical, host.modifiers, event.repeat)
+        InputResult::Close => true,
+        InputResult::Consumed => false,
     };
     if close {
         crate::close_context_menu(host);

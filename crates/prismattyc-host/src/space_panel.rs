@@ -1515,9 +1515,17 @@ mod layout_tests {
         assert_eq!(graphite.rows[0].label, "Layout: Bars");
         assert_eq!(graphite.rows[1].label, "Layout: Sidebar");
         assert_eq!(graphite.rows[1].detail, "Selected");
-        assert!(graphite.rows[2].label.starts_with("Rail: "));
+        assert_eq!(graphite.rows[2].label, "Enable full settings (preview)");
+        assert!(
+            matches!(&graphite.rows[2].choice,Choice::Preference(key,value)if key=="settings_panel"&&value=="true")
+        );
+        assert!(graphite.rows[3].label.starts_with("Rail: "));
         let classic = panel(Page::Settings, None);
-        assert!(classic.rows[0].label.starts_with("Rail: "));
+        assert_eq!(classic.rows[0].label, "Enable full settings (preview)");
+        assert!(
+            matches!(&classic.rows[0].choice,Choice::Preference(key,value)if key=="settings_panel"&&value=="true")
+        );
+        assert!(classic.rows[1].label.starts_with("Rail: "));
         assert!(!classic
             .rows
             .iter()

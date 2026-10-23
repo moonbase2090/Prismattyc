@@ -169,7 +169,11 @@ fn patch(
                 }
             }
         }
-        table.insert(key, Item::Value(value));
+        if let Some(item) = table.get_mut(key) {
+            *item = Item::Value(value);
+        } else {
+            table.insert(key, Item::Value(value));
+        }
     } else {
         if let Some(key) = table.key(key) {
             collect_comments(

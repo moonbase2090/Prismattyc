@@ -177,6 +177,21 @@ define_class!(
             else {
                 return;
             };
+            // A native dialog's text field gets the standard responder action
+            // before the terminal or a host-drawn editor behind the dialog.
+            let native_action = match action {
+                Action::Copy => Some(sel!(copy:)),
+                Action::Paste => Some(sel!(paste:)),
+                Action::SelectAll => Some(sel!(selectAll:)),
+                _ => None,
+            };
+            if let Some(selector) = native_action {
+                let app = NSApplication::sharedApplication(self.mtm());
+                // SAFETY: all selectors use AppKit's standard action signature.
+                if unsafe { app.sendAction_to_from(selector, None, Some(sender)) } {
+                    return;
+                }
+            }
             let _ = self.ivars().proxy.send_event(UserAction::RunAction(*action));
         }
     }
@@ -286,6 +301,9 @@ fn refresh_menu_shortcuts(menu: &NSMenu, keymap: &KeyMap) {
     for item in menu.itemArray() {
         if let Some(submenu) = item.submenu() {
             refresh_menu_shortcuts(&submenu, keymap);
+        }
+        if item.action() != Some(sel!(runAction:)) {
+            continue;
         }
         if let Some((_, action)) = item
             .tag()

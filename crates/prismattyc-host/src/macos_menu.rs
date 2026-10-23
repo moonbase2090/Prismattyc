@@ -333,6 +333,32 @@ extern "C-unwind" fn application_reopen_imp(
     .unwrap_or(Bool::YES)
 }
 
+// SAFETY: called only with winit's live NSApplicationDelegate class.
+unsafe fn install_reopen_handler(class: &AnyClass) {
+    let reopen = sel!(applicationShouldHandleReopen:hasVisibleWindows:);
+    if class.instance_method(reopen).is_none() {
+        // Objective-C BOOL is architecture-dependent on macOS.
+        let types = std::ffi::CString::new(format!("{}@:@{}", Bool::ENCODING, Bool::ENCODING))
+            .expect("Objective-C type encodings contain no NUL");
+        // SAFETY: the callback matches this delegate selector's return,
+        // receiver, selector, application argument, and BOOL argument.
+        let imp = core::mem::transmute::<
+            extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject, Bool) -> Bool,
+            objc2::runtime::Imp,
+        >(application_reopen_imp);
+        if !objc2_ffi::class_addMethod(
+            class as *const AnyClass as *mut AnyClass,
+            reopen,
+            imp,
+            types.as_ptr(),
+        )
+        .as_bool()
+        {
+            eprintln!("prismattyc-host: Dock reopen handler installation failed");
+        }
+    }
+}
+
 /// Injects `applicationDockMenu:` into winit's live `NSApplicationDelegate`
 /// class so right-clicking the Dock tile shows "New Window" wired to the
 /// same action target as File > New Window (Task 5's `NEW_WINDOW_TARGET`).
@@ -357,28 +383,7 @@ pub fn install_dock_menu() {
             return;
         }
         let class = (*delegate).class();
-        let reopen = sel!(applicationShouldHandleReopen:hasVisibleWindows:);
-        if class.instance_method(reopen).is_none() {
-            // Objective-C BOOL is architecture-dependent on macOS.
-            let types = std::ffi::CString::new(format!("{}@:@{}", Bool::ENCODING, Bool::ENCODING))
-                .expect("Objective-C type encodings contain no NUL");
-            // SAFETY: the callback matches this delegate selector's return,
-            // receiver, selector, application argument, and BOOL argument.
-            let imp = core::mem::transmute::<
-                extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject, Bool) -> Bool,
-                objc2::runtime::Imp,
-            >(application_reopen_imp);
-            if !objc2_ffi::class_addMethod(
-                class as *const AnyClass as *mut AnyClass,
-                reopen,
-                imp,
-                types.as_ptr(),
-            )
-            .as_bool()
-            {
-                eprintln!("prismattyc-host: Dock reopen handler installation failed");
-            }
-        }
+        install_reopen_handler(class);
         let sel = sel!(applicationDockMenu:);
         if class.instance_method(sel).is_some() {
             // Already injected; do not add it a second time.

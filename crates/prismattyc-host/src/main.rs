@@ -9982,18 +9982,8 @@ fn refresh_space_views(host: &mut HostState) {
         .attach_pane_sessions
         .iter()
         .filter_map(|(pane, id)| {
-            let session = snapshot.sessions.iter().find(|s| s.id.to_string() == *id)?;
             let recorded = host.mux.attach_name_of(*pane);
-            // A restarted daemon recycles numeric ids. The pane's recorded
-            // name is the session; do not adopt whoever now sits at the old id.
-            if recorded.is_some_and(|name| {
-                snapshot
-                    .sessions
-                    .iter()
-                    .any(|live| live.name == name && live.id.to_string() != *id)
-            }) {
-                return None;
-            }
+            let session = space_view::bound_session(&snapshot, id, recorded)?;
             (recorded != Some(session.name.as_str()))
                 .then(|| (*pane, id.clone(), session.name.clone()))
         })
@@ -13897,10 +13887,11 @@ fn graphite_sidebar_tree(
         .current
         .clone()
         .or_else(|| host.mux.space_id.clone());
-    let snapshot = host
+    let observed = host
         .snapshot_client
         .as_ref()
-        .and_then(|client| client.fresh());
+        .and_then(|client| client.fresh_observed());
+    let snapshot = observed.as_ref().map(|(_, snapshot)| snapshot);
     let names: Vec<Vec<String>> = host
         .mux
         .tab_panes()
@@ -13910,19 +13901,13 @@ fn graphite_sidebar_tree(
                 .iter()
                 .filter_map(|pane| {
                     let recorded = host.mux.attach_name_of(*pane)?;
-                    let id = host.mux.attach_session_of(*pane);
-                    Some(
-                        snapshot
-                            .as_ref()
-                            .and_then(|snapshot| {
-                                snapshot.sessions.iter().find(|session| {
-                                    session.space_id == host.mux.space_id
-                                        && session.space_id.is_some()
-                                        && id == Some(session.id.to_string().as_str())
-                                })
-                            })
-                            .map_or_else(|| recorded.to_string(), |session| session.name.clone()),
-                    )
+                    Some(space_view::bound_session_name(
+                        recorded,
+                        host.mux.attach_session_of(*pane),
+                        host.mux.space_id.as_deref(),
+                        host.attach_bound_at.get(pane).copied(),
+                        observed.as_ref(),
+                    ))
                 })
                 .collect()
         })
@@ -13950,7 +13935,7 @@ fn graphite_sidebar_tree(
             continue;
         }
         if let Ok(space) = load_space(&spaces_dir(), name) {
-            let (tabs, order) = sidebar::saved_tabs(&space, snapshot.as_ref());
+            let (tabs, order) = sidebar::saved_tabs(&space, snapshot);
             saved.push((name.clone(), tabs, order));
         }
     }
@@ -27778,6 +27763,53 @@ session mail (id 15)
         assert_eq!(
             sidebar_click_decision(SidebarHit::Toggle, None, false, None),
             SidebarClick::ToggleStrip
+        );
+    }
+
+    #[test]
+    fn sidebar_recycled_session_id_keeps_click_target_on_recorded_session() {
+        let observed = (
+            SystemTime::UNIX_EPOCH,
+            prismattyc_mux::Snapshot {
+                sequence: 1,
+                sessions: vec![
+                    prismattyc_mux::SessionSnapshot {
+                        id: 7,
+                        name: "stranger".into(),
+                        agent_id: None,
+                        space_id: Some("owner-a".into()),
+                        windows: vec![],
+                    },
+                    prismattyc_mux::SessionSnapshot {
+                        id: 9,
+                        name: "agent-1".into(),
+                        agent_id: None,
+                        space_id: Some("owner-a".into()),
+                        windows: vec![],
+                    },
+                ],
+            },
+        );
+        let name = space_view::bound_session_name(
+            "agent-1",
+            Some("7"),
+            Some("owner-a"),
+            None,
+            Some(&observed),
+        );
+        assert_eq!(name, "agent-1");
+        let pending = sidebar::PendingSession {
+            space: "space-a".into(),
+            title: name,
+            tab: Some(0),
+        };
+        assert_eq!(
+            sidebar::pending_session_slot(
+                &pending,
+                Some("space-a"),
+                &[vec!["stranger"], vec!["agent-1"]]
+            ),
+            Some((1, 0))
         );
     }
 

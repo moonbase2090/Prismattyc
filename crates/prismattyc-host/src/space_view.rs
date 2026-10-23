@@ -201,6 +201,46 @@ pub fn refresh_resolution(
     RefreshResolution::Current
 }
 
+/// An ID can be recycled by a restarted daemon. A recorded name that is still
+/// live under another ID takes precedence over the old numeric binding.
+pub fn bound_session<'a>(
+    snapshot: &'a Snapshot,
+    id: &str,
+    recorded: Option<&str>,
+) -> Option<&'a prismattyc_mux::SessionSnapshot> {
+    if recorded.is_some_and(|name| {
+        snapshot
+            .sessions
+            .iter()
+            .any(|session| session.name == name && session.id.to_string() != id)
+    }) {
+        return None;
+    }
+    snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id.to_string() == id)
+}
+
+/// Resolve a display name only from an observation that can judge this binding.
+/// Otherwise retain the recorded identity, including offline and remote names.
+pub fn bound_session_name(
+    recorded: &str,
+    id: Option<&str>,
+    owner: Option<&str>,
+    bound_at: Option<SystemTime>,
+    observed: Option<&(SystemTime, Snapshot)>,
+) -> String {
+    let resolved = observed.and_then(|(fetched_at, snapshot)| {
+        if bound_at.is_some_and(|bound| bound > *fetched_at) {
+            return None;
+        }
+        let session = bound_session(snapshot, id?, Some(recorded))?;
+        (owner.is_some() && session.space_id.as_deref() == owner).then_some(session.name.as_str())
+    });
+    resolved.unwrap_or(recorded).to_string()
+}
+
 /// Show the session identity even when its panes have no optional title.
 /// One session appears once, including when its mux layout has several panes.
 pub fn pane_names(space: &SavedSpace, snapshot: &Snapshot) -> Vec<String> {
@@ -422,6 +462,103 @@ pub fn layout_ownership(
 mod tests {
     use super::*;
     use prismattyc_mux::SessionSnapshot;
+
+    #[test]
+    fn bound_session_rejects_a_recycled_id_when_recorded_name_is_still_live() {
+        let live = Snapshot {
+            sequence: 1,
+            sessions: vec![
+                SessionSnapshot {
+                    id: 7,
+                    name: "stranger".into(),
+                    agent_id: None,
+                    space_id: Some("owner-a".into()),
+                    windows: vec![],
+                },
+                SessionSnapshot {
+                    id: 9,
+                    name: "agent-1".into(),
+                    agent_id: None,
+                    space_id: Some("owner-a".into()),
+                    windows: vec![],
+                },
+            ],
+        };
+        assert_eq!(
+            bound_session(&live, "7", Some("agent-1")).map(|session| session.name.as_str()),
+            None
+        );
+        assert_eq!(
+            bound_session(&live, "9", Some("agent-1")).map(|session| session.name.as_str()),
+            Some("agent-1")
+        );
+        assert_eq!(
+            bound_session(&live, "7", Some("before-rename")).map(|session| session.name.as_str()),
+            Some("stranger")
+        );
+    }
+
+    #[test]
+    fn bound_display_name_retains_recorded_identity_until_observation_is_authoritative() {
+        let mut live = Snapshot {
+            sequence: 1,
+            sessions: vec![
+                SessionSnapshot {
+                    id: 7,
+                    name: "stranger".into(),
+                    agent_id: None,
+                    space_id: Some("owner-a".into()),
+                    windows: vec![],
+                },
+                SessionSnapshot {
+                    id: 9,
+                    name: "agent-1".into(),
+                    agent_id: None,
+                    space_id: Some("owner-a".into()),
+                    windows: vec![],
+                },
+            ],
+        };
+        let at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(20);
+        let observed = (at, live.clone());
+        assert_eq!(
+            bound_session_name("agent-1", Some("7"), Some("owner-a"), None, Some(&observed)),
+            "agent-1"
+        );
+        assert_eq!(
+            bound_session_name("agent-1", Some("9"), Some("owner-a"), None, Some(&observed)),
+            "agent-1"
+        );
+        live.sessions[0].name = "Agent Renamed".into();
+        live.sessions.remove(1);
+        let observed = (at, live);
+        assert_eq!(
+            bound_session_name("agent-1", Some("7"), Some("owner-a"), None, Some(&observed)),
+            "Agent Renamed"
+        );
+        assert_eq!(
+            bound_session_name("agent-1", Some("7"), Some("owner-b"), None, Some(&observed)),
+            "agent-1"
+        );
+        assert_eq!(
+            bound_session_name(
+                "agent-1",
+                Some("7"),
+                Some("owner-a"),
+                Some(at + std::time::Duration::from_secs(1)),
+                Some(&observed)
+            ),
+            "agent-1"
+        );
+        assert_eq!(
+            bound_session_name("remote-session", Some("7"), None, None, Some(&observed)),
+            "remote-session"
+        );
+        assert_eq!(
+            bound_session_name("agent-1", Some("7"), Some("owner-a"), None, None),
+            "agent-1"
+        );
+    }
 
     #[test]
     fn session_title_keeps_the_display_label_when_the_mailbox_is_lowercase() {

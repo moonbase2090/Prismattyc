@@ -20,6 +20,13 @@ pub(crate) fn ensure_pmuxd_started(pmux: &Path, socket: &Path) -> Result<()> {
         };
         anyhow::bail!("pmuxd startup failed: {detail}");
     }
+    prismattyc_mux::default_space::ensure(
+        pmux,
+        socket,
+        &prismattyc_mux::spaces_dir_for_socket(socket),
+        Some("default"),
+    )
+    .context("ensure default Space")?;
     Ok(())
 }
 
@@ -34,6 +41,7 @@ mod tests {
     struct PrivateMux {
         pmux: std::path::PathBuf,
         socket: std::path::PathBuf,
+        spaces: std::path::PathBuf,
         root: std::path::PathBuf,
     }
 
@@ -45,6 +53,7 @@ mod tests {
                 .stdin(Stdio::null())
                 .output();
             let _ = std::fs::remove_dir_all(&self.root);
+            let _ = std::fs::remove_dir_all(&self.spaces);
         }
     }
 
@@ -58,13 +67,23 @@ mod tests {
             NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&root).unwrap();
+        let socket = root.join("pmux.sock");
+        let spaces = prismattyc_mux::spaces_dir_for_socket(&socket);
         let private_mux = PrivateMux {
             pmux: pmux.clone(),
-            socket: root.join("pmux.sock"),
+            socket,
+            spaces: spaces.clone(),
             root,
         };
 
         ensure_pmuxd_started(&private_mux.pmux, &private_mux.socket).unwrap();
+        assert!(prismattyc_mux::list_spaces(&spaces)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.name == "default"));
+
+        std::fs::remove_dir_all(&spaces).unwrap();
+        assert!(prismattyc_mux::list_spaces(&spaces).unwrap().is_empty());
         ensure_pmuxd_started(&private_mux.pmux, &private_mux.socket).unwrap();
 
         let status = Command::new(&private_mux.pmux)
@@ -77,6 +96,17 @@ mod tests {
             String::from_utf8_lossy(&status.stdout).contains("status: running"),
             "pmuxd did not report ready: {}",
             String::from_utf8_lossy(&status.stdout)
+        );
+        let spaces_output = Command::new(&private_mux.pmux)
+            .args(["space", "ls"])
+            .env("PMUX_SOCKET", &private_mux.socket)
+            .output()
+            .unwrap();
+        assert!(spaces_output.status.success());
+        assert!(
+            String::from_utf8_lossy(&spaces_output.stdout).contains("default"),
+            "default Space was not recreated: {}",
+            String::from_utf8_lossy(&spaces_output.stdout)
         );
     }
 }

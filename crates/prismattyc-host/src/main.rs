@@ -4150,13 +4150,14 @@ impl App {
         // An explicit session selection must not inherit another Space's
         // global cache merely because this process becomes the registered host.
         let stored_layout = stored_layout.filter(|layout| {
-            explicit_view.is_some()
-                || attach_sessions.iter().all(|target| {
-                    layout
-                        .tabs
-                        .iter()
-                        .any(|tab| tab.sessions.contains(&target.session))
-                })
+            restore_prompt::cache_matches_space(layout, &spaces_dir())
+                && (explicit_view.is_some()
+                    || attach_sessions.iter().all(|target| {
+                        layout
+                            .tabs
+                            .iter()
+                            .any(|tab| tab.sessions.contains(&target.session))
+                    }))
         });
         let startup_space = if (first_window || self.restart_view.is_some()) && !config_editor {
             stored_layout
@@ -4205,6 +4206,7 @@ impl App {
                                 .and_then(|saved| saved.view)
                         })
                     })
+                    .filter(|layout| restore_prompt::cache_matches_space(layout, &spaces_dir()))
                     .and_then(restore_prompt::RestorePrompt::new)
             } else {
                 None

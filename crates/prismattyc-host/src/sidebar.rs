@@ -45,6 +45,8 @@ pub struct SpaceNode {
 /// with the layout panes (empty means none waiting).
 pub struct LiveTab<'a> {
     pub info: &'a TabInfo,
+    /// Attached session display names, separate from local child titles.
+    pub session_names: &'a [String],
     pub mail: &'a [u32],
     pub attention: &'a [bool],
 }
@@ -116,7 +118,7 @@ impl TabNode {
     /// Saved tab from another space's file: structure only, no live state.
     pub fn saved(title: &str, sessions: &[String]) -> Self {
         TabNode {
-            title: title.to_string(),
+            title: tab_label(title, sessions),
             selected: false,
             unseen: false,
             attention: false,
@@ -133,6 +135,54 @@ impl TabNode {
                 .collect(),
         }
     }
+}
+
+/// Keep session identity visible without discarding an explicit window title.
+fn tab_label(title: &str, sessions: &[String]) -> String {
+    match sessions {
+        [session] if !session.is_empty() => {
+            if title.trim().is_empty() || title == "main" || title == session {
+                session.clone()
+            } else {
+                format!("{title} · {session}")
+            }
+        }
+        _ => title.to_string(),
+    }
+}
+
+/// Resolve live names by verified Space ownership. Names that cannot be linked
+/// to a live identity remain saved/offline rows, rather than borrowing a name.
+pub fn saved_tabs(
+    space: &prismattyc_mux::SavedSpace,
+    snapshot: Option<&prismattyc_mux::Snapshot>,
+) -> (Vec<SavedSpaceTab>, Vec<String>) {
+    let owned: Vec<_> = snapshot
+        .into_iter()
+        .flat_map(|snapshot| &snapshot.sessions)
+        .filter(|session| space.id.is_some() && session.space_id == space.id)
+        .collect();
+    // SavedSpaceTab members are names, including numeric names, not daemon IDs.
+    let name = |key: &str| {
+        owned
+            .iter()
+            .find(|session| session.name == key)
+            .map_or_else(|| key.to_string(), |session| session.name.clone())
+    };
+    let mut tabs = space.tabs.clone();
+    for tab in &mut tabs {
+        tab.sessions = tab.sessions.iter().map(|key| name(key)).collect();
+    }
+    let mut order: Vec<_> = prismattyc_mux::space_sessions_in_tab_order(space)
+        .iter()
+        .map(|key| name(key))
+        .collect();
+    for session in owned {
+        if !order.contains(&session.name) {
+            order.push(session.name.clone());
+        }
+    }
+    (tabs, order)
 }
 
 /// A session row is highlighted only while its space is current and that
@@ -157,6 +207,7 @@ pub fn session_titles(info: &TabInfo) -> Vec<String> {
 pub struct PendingSession {
     pub space: String,
     pub title: String,
+    pub tab: Option<usize>,
 }
 
 /// Where to focus once `current_space` is the pending space and a live
@@ -169,6 +220,14 @@ pub fn pending_session_slot(
 ) -> Option<(usize, usize)> {
     if current_space != Some(pending.space.as_str()) || pending.title.is_empty() {
         return None;
+    }
+    if let Some(tab) = pending.tab {
+        if let Some(pane) = tabs
+            .get(tab)
+            .and_then(|panes| panes.iter().position(|title| *title == pending.title))
+        {
+            return Some((tab, pane));
+        }
     }
     for (tab, panes) in tabs.iter().enumerate() {
         if let Some(pane) = panes.iter().position(|title| *title == pending.title) {
@@ -310,10 +369,16 @@ impl SidebarTree {
     pub fn build(spaces: &[SpaceInput<'_>]) -> Self {
         let mut tree = SidebarTree::default();
         for space in spaces {
-            let tabs = match &space.tabs {
+            let mut tabs: Vec<TabNode> = match &space.tabs {
                 TabsSource::Live(tabs) => tabs
                     .iter()
-                    .map(|tab| TabNode::live(tab.info, tab.mail, tab.attention))
+                    .map(|tab| {
+                        let mut node = TabNode::live(tab.info, tab.mail, tab.attention);
+                        if node.panes.len() == 1 && !tab.session_names.is_empty() {
+                            node.title = tab_label(&tab.info.title, tab.session_names);
+                        }
+                        node
+                    })
                     .collect(),
                 TabsSource::Saved {
                     tabs,
@@ -335,6 +400,12 @@ impl SidebarTree {
                     nodes
                 }
             };
+            let titles: Vec<_> = tabs.iter().map(|tab| tab.title.clone()).collect();
+            for (index, tab) in tabs.iter_mut().enumerate() {
+                if titles.iter().filter(|title| **title == tab.title).count() > 1 {
+                    tab.title = format!("{} · window {}", tab.title, index + 1);
+                }
+            }
             tree.spaces.push(SpaceNode {
                 name: space.name.to_string(),
                 current: space.current,
@@ -374,6 +445,255 @@ mod tests {
     }
 
     #[test]
+    fn saved_single_session_row_shows_identity_instead_of_generic_window_title() {
+        let tabs = [SavedSpaceTab {
+            title: "main".into(),
+            sessions: vec!["agent-1".into()],
+            layout: None,
+        }];
+        let tree = SidebarTree::build(&[SpaceInput {
+            name: "space-a",
+            current: false,
+            collapsed: false,
+            attention: 0,
+            tabs: TabsSource::Saved {
+                tabs: &tabs,
+                extra_sessions: &[],
+            },
+        }]);
+        assert_eq!(tree.spaces[0].tabs[0].title, "agent-1");
+    }
+
+    #[test]
+    fn session_labels_are_invariant_when_selection_switches_spaces() {
+        let saved: Vec<_> = [
+            ("main", "agent-1"),
+            ("logs", "agent-2"),
+            ("Review", "agent-3"),
+        ]
+        .into_iter()
+        .map(|(title, session)| {
+            vec![SavedSpaceTab {
+                title: title.into(),
+                sessions: vec![session.into()],
+                layout: None,
+            }]
+        })
+        .collect();
+        let names = ["space-a", "space-b", "space-c"];
+        let identities: Vec<_> = saved.iter().map(|tabs| tabs[0].sessions.clone()).collect();
+        let infos: Vec<_> = saved
+            .iter()
+            .map(|tabs| {
+                let mut info = live_tab(&tabs[0].title, true, vec![], None);
+                info.pane_title = Some(tabs[0].sessions[0].clone());
+                info
+            })
+            .collect();
+        for selected in 0..3 {
+            let live = [LiveTab {
+                info: &infos[selected],
+                session_names: &identities[selected],
+                mail: &[],
+                attention: &[],
+            }];
+            let inputs: Vec<_> = (0..3)
+                .map(|index| SpaceInput {
+                    name: names[index],
+                    current: index == selected,
+                    collapsed: false,
+                    attention: 0,
+                    tabs: if index == selected {
+                        TabsSource::Live(&live)
+                    } else {
+                        TabsSource::Saved {
+                            tabs: &saved[index],
+                            extra_sessions: &[],
+                        }
+                    },
+                })
+                .collect();
+            let tree = SidebarTree::build(&inputs);
+            let labels: Vec<_> = tree
+                .spaces
+                .iter()
+                .map(|space| space.tabs[0].title.as_str())
+                .collect();
+            assert_eq!(labels, ["agent-1", "logs · agent-2", "Review · agent-3"]);
+            assert_eq!(tree.spaces[1].tabs[0].panes[0].title, "agent-2");
+        }
+    }
+
+    #[test]
+    fn local_rows_keep_their_title_policy_without_a_session_identity() {
+        let mut info = live_tab("Local notes", true, vec![], None);
+        info.pane_title = Some("shell title".into());
+        let live = [LiveTab {
+            info: &info,
+            session_names: &[],
+            mail: &[],
+            attention: &[],
+        }];
+        let tree = SidebarTree::build(&[SpaceInput {
+            name: "space-a",
+            current: true,
+            collapsed: false,
+            attention: 0,
+            tabs: TabsSource::Live(&live),
+        }]);
+        assert_eq!(tree.spaces[0].tabs[0].title, "Local notes");
+        assert_eq!(tree.spaces[0].tabs[0].panes[0].title, "shell title");
+    }
+
+    #[test]
+    fn repeated_windows_keep_session_identity_and_custom_titles() {
+        let tabs: Vec<_> = ["main", "main", "Review"]
+            .into_iter()
+            .map(|title| SavedSpaceTab {
+                title: title.into(),
+                sessions: vec!["agent-1".into()],
+                layout: None,
+            })
+            .collect();
+        let tree = SidebarTree::build(&[SpaceInput {
+            name: "space-a",
+            current: false,
+            collapsed: false,
+            attention: 0,
+            tabs: TabsSource::Saved {
+                tabs: &tabs,
+                extra_sessions: &[],
+            },
+        }]);
+        assert_eq!(
+            tree.spaces[0]
+                .tabs
+                .iter()
+                .map(|tab| tab.title.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "agent-1 · window 1",
+                "agent-1 · window 2",
+                "Review · agent-1"
+            ]
+        );
+        let pending = PendingSession {
+            space: "space-a".into(),
+            title: "agent-1".into(),
+            tab: Some(1),
+        };
+        assert_eq!(
+            pending_session_slot(
+                &pending,
+                Some("space-a"),
+                &[vec!["agent-1"], vec!["agent-1"], vec!["agent-1"]]
+            ),
+            Some((1, 0))
+        );
+        assert_eq!(
+            pending_session_slot(
+                &pending,
+                Some("space-b"),
+                &[vec!["agent-1"], vec!["agent-1"]]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn pending_focus_follows_session_when_tabs_reorder_during_open() {
+        let pending = PendingSession {
+            space: "space-b".into(),
+            title: "agent-2".into(),
+            tab: Some(1),
+        };
+        assert_eq!(
+            pending_session_slot(
+                &pending,
+                Some("space-b"),
+                &[vec!["agent-2"], vec!["agent-1"]]
+            ),
+            Some((0, 0))
+        );
+        assert_eq!(
+            pending_session_slot(
+                &pending,
+                Some("space-b"),
+                &[vec!["agent-1"], vec!["agent-2"]]
+            ),
+            Some((1, 0))
+        );
+        assert_eq!(
+            pending_session_slot(
+                &pending,
+                Some("space-b"),
+                &[vec!["agent-1"], vec!["agent-3"]]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn saved_identity_uses_owned_live_names_and_keeps_offline_remote_fallbacks() {
+        let space: prismattyc_mux::SavedSpace = serde_json::from_value(serde_json::json!({
+            "version": 2, "id":"owner-a", "saved_at_unix":0, "sessions":[],
+            "tabs":[{"title":"main", "sessions":["agent-old"]}, {"title":"Notes", "sessions":["offline"]},
+                {"title":"Remote", "sessions":["remote-session"]}, {"title":"main", "sessions":["8"]}]
+        })).unwrap();
+        let snapshot = prismattyc_mux::Snapshot {
+            sequence: 1,
+            sessions: vec![
+                prismattyc_mux::SessionSnapshot {
+                    id: 7,
+                    name: "Agent Renamed".into(),
+                    agent_id: None,
+                    space_id: Some("owner-a".into()),
+                    windows: vec![],
+                },
+                prismattyc_mux::SessionSnapshot {
+                    id: 8,
+                    name: "foreign".into(),
+                    agent_id: None,
+                    space_id: Some("owner-b".into()),
+                    windows: vec![],
+                },
+                prismattyc_mux::SessionSnapshot {
+                    id: 9,
+                    name: "agent-new".into(),
+                    agent_id: None,
+                    space_id: Some("owner-a".into()),
+                    windows: vec![],
+                },
+            ],
+        };
+        let (tabs, order) = saved_tabs(&space, Some(&snapshot));
+        assert_eq!(
+            tabs.iter()
+                .map(|tab| tab.sessions[0].as_str())
+                .collect::<Vec<_>>(),
+            ["agent-old", "offline", "remote-session", "8"]
+        );
+        assert_eq!(
+            order,
+            [
+                "agent-old",
+                "offline",
+                "remote-session",
+                "8",
+                "Agent Renamed",
+                "agent-new"
+            ]
+        );
+        assert_eq!(saved_tabs(&space, None).0[0].sessions, ["agent-old"]);
+        let mut legacy = space.clone();
+        legacy.id = None;
+        assert_eq!(
+            saved_tabs(&legacy, Some(&snapshot)).0[0].sessions,
+            ["agent-old"]
+        );
+    }
+
+    #[test]
     fn live_tabs_expand_handles_with_focus_and_activity() {
         let infos = [
             live_tab(
@@ -392,6 +712,7 @@ mod tests {
             .zip(attentions.iter())
             .map(|((info, mail), attention)| LiveTab {
                 info,
+                session_names: &[],
                 mail,
                 attention,
             })
@@ -528,6 +849,7 @@ mod tests {
                 attention: 0,
                 tabs: TabsSource::Live(&[LiveTab {
                     info,
+                    session_names: &[],
                     mail: &[],
                     attention: &[],
                 }]),
@@ -655,6 +977,7 @@ mod tests {
         let pending = PendingSession {
             space: "mail".to_string(),
             title: "composer-2".to_string(),
+            tab: None,
         };
         let tabs = [vec!["prismattyc-1", "prismattyc-3"], vec!["composer-2"]];
         assert_eq!(
@@ -670,6 +993,7 @@ mod tests {
         let missing = PendingSession {
             space: "mail".to_string(),
             title: String::new(),
+            tab: None,
         };
         assert_eq!(pending_session_slot(&missing, Some("mail"), &tabs), None);
     }

@@ -1163,6 +1163,7 @@ fn macos_chord(action: Action) -> Option<&'static str> {
 fn platform_default_chords(action: Action, mac_platform: bool) -> Vec<&'static str> {
     if mac_platform {
         match action {
+            Action::OpenConfig => return vec!["super+,"],
             Action::FocusLeft => return vec!["ctrl+alt+left"],
             Action::FocusRight => return vec!["ctrl+alt+right"],
             _ => {}
@@ -2147,6 +2148,19 @@ mod tests {
         assert!(custom.chords(Action::Copy).is_empty());
         assert!(custom.chords(Action::Quit).is_empty());
         assert_eq!(custom.spellings(Action::NewWindow), vec!["ctrl+alt+n"]);
+    }
+
+    #[test]
+    fn macos_settings_binding_respects_overrides_and_unbinding() {
+        let mac = KeyMap::from_config_with_platform(None, false, true).unwrap();
+        assert_eq!(mac.spellings(Action::OpenConfig), vec!["super+,"]);
+        let custom =
+            KeyMap::from_config_with_platform(Some(&one("open_config", "ctrl+alt+,")), false, true)
+                .unwrap();
+        assert_eq!(custom.spellings(Action::OpenConfig), vec!["ctrl+alt+,"]);
+        let keys = BTreeMap::from([("open_config".into(), KeysValue::Many(vec![]))]);
+        let unbound = KeyMap::from_config_with_platform(Some(&keys), false, true).unwrap();
+        assert!(unbound.chords(Action::OpenConfig).is_empty());
     }
 
     #[test]

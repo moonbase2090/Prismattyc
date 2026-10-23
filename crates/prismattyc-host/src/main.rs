@@ -3175,6 +3175,8 @@ impl App {
         {
             // Rebuild the key table; the chord strip labels repaint with it.
             self.keymap = Arc::new(self.file_config.loaded_keymap());
+            #[cfg(target_os = "macos")]
+            macos_menu::refresh_shortcuts(&self.keymap);
             for warning in self.file_config.macos_override_warnings() {
                 eprintln!("prismattyc-host: warning: {warning}");
             }
@@ -19732,6 +19734,63 @@ fn dispatch_strip_action(
     dispatch_action(host, action, program, child_args)
 }
 
+/// Native menu clipboard actions must edit the active name field before
+/// considering the terminal behind it.
+#[cfg(target_os = "macos")]
+fn handle_editor_clipboard_action(host: &mut HostState, action: keybind::Action) -> bool {
+    use keybind::Action;
+    if !matches!(action, Action::Copy | Action::Paste | Action::SelectAll) {
+        return false;
+    }
+    let has_editor = host.session_prompt.is_some()
+        || host.tab_rename.is_some()
+        || host.space_rail.edit.is_some();
+    if !has_editor {
+        return false;
+    }
+    let pasted = if action == Action::Paste {
+        if host.clipboard.is_none() {
+            host.clipboard = arboard::Clipboard::new().ok();
+        }
+        host.clipboard
+            .as_mut()
+            .and_then(|clipboard| clipboard.get_text().ok())
+    } else {
+        None
+    };
+    let (buffer, selected) = if let Some(prompt) = host.session_prompt.as_mut() {
+        (&mut prompt.buffer, &mut prompt.selected)
+    } else if let Some(edit) = host.tab_rename.as_mut() {
+        (&mut edit.buffer, &mut edit.selected)
+    } else if let Some(edit) = host.space_rail.edit.as_mut() {
+        (&mut edit.buffer, &mut edit.selected)
+    } else {
+        return false;
+    };
+    match action {
+        Action::SelectAll => *selected = true,
+        Action::Paste => {
+            if let Some(text) = pasted {
+                for ch in text.trim().chars().filter(|ch| !ch.is_control()) {
+                    apply_rename_stroke(buffer, selected, RenameStroke::Insert(ch));
+                }
+            }
+        }
+        Action::Copy if *selected => {
+            let text = buffer.clone();
+            if host.clipboard.is_none() {
+                host.clipboard = arboard::Clipboard::new().ok();
+            }
+            if let Some(clipboard) = host.clipboard.as_mut() {
+                let _ = clipboard.set_text(text);
+            }
+        }
+        _ => {}
+    }
+    host.dirty = true;
+    true
+}
+
 fn dispatch_palette_mouse_action(
     host: &mut HostState,
     action: keybind::Action,
@@ -21300,13 +21359,41 @@ impl ApplicationHandler<UserAction> for App {
                 }
             }
             #[cfg(target_os = "macos")]
-            UserAction::RunAction(action) => {
-                if let Some(host) = self.windows.values_mut().find(|h| h.window_focused) {
-                    let _ = dispatch_action(host, action, &self.cli.program, &self.cli.child_args);
-                    host.dirty = true;
-                    host.window.request_redraw();
+            UserAction::RunAction(action) => match action {
+                keybind::Action::NewWindow => {
+                    let _ = self.event_proxy.send_event(UserAction::NewWindow);
                 }
-            }
+                keybind::Action::OpenConfig => {
+                    let _ = self.event_proxy.send_event(UserAction::OpenConfig);
+                }
+                keybind::Action::Quit => event_loop.exit(),
+                _ => {
+                    if let Some(host) = self.windows.values_mut().find(|h| h.window_focused) {
+                        let dispatch = if handle_editor_clipboard_action(host, action) {
+                            Dispatch::Handled
+                        } else {
+                            dispatch_palette_mouse_action(
+                                host,
+                                action,
+                                &self.cli.program,
+                                &self.cli.child_args,
+                            )
+                        };
+                        match dispatch {
+                            Dispatch::Exit => event_loop.exit(),
+                            Dispatch::OpenWindow => {
+                                let _ = self.event_proxy.send_event(UserAction::NewWindow);
+                            }
+                            Dispatch::OpenConfig => {
+                                let _ = self.event_proxy.send_event(UserAction::OpenConfig);
+                            }
+                            Dispatch::Handled => {}
+                        }
+                        host.dirty = true;
+                        host.window.request_redraw();
+                    }
+                }
+            },
             UserAction::OpenConfig => match config_editor_command() {
                 Ok(command) if command.detached => {
                     // A GUI editor opens its own window. A host window
@@ -21548,8 +21635,13 @@ fn main() -> Result<()> {
         );
     }
 
-    let event_loop: EventLoop<UserAction> =
-        EventLoop::with_user_event().build().context("event loop")?;
+    let mut event_loop_builder = EventLoop::with_user_event();
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::EventLoopBuilderExtMacOS;
+        event_loop_builder.with_default_menu(false);
+    }
+    let event_loop: EventLoop<UserAction> = event_loop_builder.build().context("event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
     #[cfg(target_os = "macos")]
@@ -21559,6 +21651,7 @@ fn main() -> Result<()> {
         macos_menu::install_main_menu(
             proxy.clone(),
             file_config.automatic_update_checks.unwrap_or(true),
+            &file_config.loaded_keymap(),
         );
     }
 

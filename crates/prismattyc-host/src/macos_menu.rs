@@ -19,6 +19,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
 use winit::event_loop::EventLoopProxy;
 
+use crate::keybind::Action;
 use crate::update_notes::prepare_update_release_notes;
 use crate::UserAction;
 
@@ -134,8 +135,92 @@ define_class!(
         fn rollback_update(&self, _sender: Option<&AnyObject>) {
             let _ = self.ivars().proxy.send_event(UserAction::RollbackUpdate);
         }
+
+        /// Runs the host action at `MENU_HOST_ACTIONS[tag]` on the focused
+        /// window, the same dispatch the keymap uses.
+        #[unsafe(method(runAction:))]
+        fn run_action(&self, sender: Option<&AnyObject>) {
+            let Some(sender) = sender else { return };
+            // SAFETY: `sender` is the NSMenuItem that invoked this action, and
+            // `tag` is a plain NSInteger getter on NSMenuItem.
+            let tag: isize = unsafe { msg_send![sender, tag] };
+            let Some((_, action)) = usize::try_from(tag)
+                .ok()
+                .and_then(|index| MENU_HOST_ACTIONS.get(index))
+            else {
+                return;
+            };
+            let _ = self.ivars().proxy.send_event(UserAction::RunAction(*action));
+        }
     }
 );
+
+/// Edit and View items that route to the host keymap's actions. Each item's
+/// tag is its index here. They carry no key equivalent: the host keymap
+/// already owns these chords, so a menu key equivalent would dispatch twice.
+const MENU_HOST_ACTIONS: &[(&str, Action)] = &[
+    ("Copy", Action::Copy),
+    ("Paste", Action::Paste),
+    ("Select All", Action::SelectAll),
+    ("Find…", Action::Find),
+    ("Zoom In", Action::IncreaseFontSize),
+    ("Zoom Out", Action::DecreaseFontSize),
+    ("Actual Size", Action::ResetFontSize),
+    ("Toggle Sidebar", Action::SidebarCollapse),
+    ("Zoom Pane", Action::ZoomPane),
+];
+
+/// Builds a menu item for `MENU_HOST_ACTIONS[index]`, wired to `target`.
+fn host_action_item(
+    mtm: MainThreadMarker,
+    target: &NewWindowTarget,
+    index: usize,
+) -> Retained<NSMenuItem> {
+    let item = NSMenuItem::new(mtm);
+    let (title, _) = MENU_HOST_ACTIONS[index];
+    item.setTitle(&NSString::from_str(title));
+    item.setTag(index as isize);
+    // SAFETY: `runAction:` is defined on `NewWindowTarget` above and takes the
+    // one-argument action signature AppKit expects; `target` outlives the menu.
+    unsafe {
+        item.setTarget(Some(target));
+        item.setAction(Some(sel!(runAction:)));
+    }
+    item
+}
+
+/// Adds the Edit menu and the host-backed View items to `main_menu`. Copy,
+/// Paste and the zoom items run through the keymap; Enter Full Screen uses
+/// AppKit's own action.
+fn add_edit_and_view_menus(mtm: MainThreadMarker, target: &NewWindowTarget, main_menu: &NSMenu) {
+    let edit_menu_item = NSMenuItem::new(mtm);
+    edit_menu_item.setTitle(&NSString::from_str("Edit"));
+    let edit_menu = NSMenu::new(mtm);
+    edit_menu.setTitle(&NSString::from_str("Edit"));
+    for index in 0..=3 {
+        edit_menu.addItem(&host_action_item(mtm, target, index));
+    }
+    edit_menu_item.setSubmenu(Some(&edit_menu));
+    main_menu.addItem(&edit_menu_item);
+
+    let view_menu_item = NSMenuItem::new(mtm);
+    view_menu_item.setTitle(&NSString::from_str("View"));
+    let view_menu = NSMenu::new(mtm);
+    view_menu.setTitle(&NSString::from_str("View"));
+    for index in 4..MENU_HOST_ACTIONS.len() {
+        view_menu.addItem(&host_action_item(mtm, target, index));
+    }
+    view_menu.addItem(&NSMenuItem::separatorItem(mtm));
+    view_menu.addItem(&standard_item(
+        mtm,
+        "Enter Full Screen",
+        sel!(toggleFullScreen:),
+        "",
+        NSEventModifierFlags::empty(),
+    ));
+    view_menu_item.setSubmenu(Some(&view_menu));
+    main_menu.addItem(&view_menu_item);
+}
 
 impl NewWindowTarget {
     fn new(mtm: MainThreadMarker, proxy: EventLoopProxy<UserAction>) -> Retained<Self> {
@@ -287,6 +372,7 @@ pub fn install_main_menu(proxy: EventLoopProxy<UserAction>, automatic_checks: bo
     file_menu_item.setSubmenu(Some(&file_menu));
     main_menu.addItem(&file_menu_item);
 
+    add_edit_and_view_menus(mtm, &target, &main_menu);
     let window_menu = add_window_menu(mtm, &main_menu);
 
     let app = NSApplication::sharedApplication(mtm);

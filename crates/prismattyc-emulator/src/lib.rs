@@ -195,6 +195,10 @@ impl KeyboardModeStack {
     }
 }
 
+/// End a replaced child's mouse/focus/paste protocols without clearing its output.
+/// CAN cancels an unfinished control sequence before the mode reset is parsed.
+pub const RESET_INPUT_REPORTING: &[u8] = b"\x18\x1b[?1000;1002;1003;1004;1006;2004;7700l";
+
 const MAX_ATTENTION_BYTES: usize = 512;
 const MAX_TITLE_BYTES: usize = 1024;
 
@@ -614,6 +618,12 @@ impl Emulator {
         placement_id: u32,
     ) -> Option<&graphics::VirtualPlacement> {
         self.graphics.virtual_placement(image_id, placement_id)
+    }
+
+    /// Reset per-child mouse, focus, and paste modes after process replacement
+    /// or exit. Importing a live child's state must preserve these modes.
+    pub fn reset_input_reporting(&mut self) {
+        let _ = self.feed(RESET_INPUT_REPORTING);
     }
 
     pub const fn bracketed_paste(&self) -> bool {
@@ -2542,6 +2552,28 @@ mod tests {
             "ISO Pi colon RGB with trailing bold"
         );
         assert!(row[0].style.bold, "trailing SGR 1 after ISO Pi truecolor");
+    }
+
+    #[test]
+    fn child_input_reset_cancels_partial_sequence_and_preserves_saved_text() {
+        let mut emulator = Emulator::new(40, 4, 100);
+        emulator.feed(b"saved output\r\n\x1b[?1000;1002;1003;1004;1006;2004;7700h\x1b[?");
+        emulator.reset_input_reporting();
+        assert_eq!(emulator.mouse_tracking(), MouseTracking::Off);
+        assert!(!emulator.mouse_sgr());
+        assert!(!emulator.mouse_wheel_only());
+        assert!(!emulator.focus_report());
+        assert!(!emulator.bracketed_paste());
+        emulator.feed(b"new shell");
+        let mut rows = Vec::new();
+        for row in 0..2 {
+            let mut text = String::new();
+            for cell in emulator.screen().view_row(row).unwrap() {
+                cell.write_grapheme_into(&mut text);
+            }
+            rows.push(text.trim_end().to_owned());
+        }
+        assert_eq!(rows, ["saved output", "new shell"]);
     }
 
     #[test]

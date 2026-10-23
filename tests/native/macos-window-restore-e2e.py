@@ -9,6 +9,7 @@ assert sys.platform == "darwin", "Run on a logged-in macOS desktop with Accessib
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--bins', type=pathlib.Path, required=True)
 parser.add_argument('--out', type=pathlib.Path, required=True)
+parser.add_argument('--revision', required=True, help='expected full source commit')
 args = parser.parse_args()
 bins = args.bins.resolve()
 out = args.out.resolve()
@@ -51,6 +52,8 @@ try:
         assert time.monotonic()<end, 'render status timeout'
         try:
             status = json.loads(cli('render-status', '--json'))
+            assert status.get('host_git_hash') == args.revision[:12], (
+                'wrong host build', status.get('host_git_hash'), args.revision[:12])
             if (status['host_pid'] == host.pid and status.get('windows')
                     and status['windows'][0].get('last_raster', {}).get('present_succeeded')):
                 break
@@ -89,9 +92,11 @@ if (count of windows) is 2 then exit repeat
 delay 0.1
 end repeat
 if (count of windows) is not 2 then error "Expected two fixture windows, saw " & (count of windows)
+log "stage: two visible windows before screenshot"
 my captureFixture(fixture, {json.dumps(str(out / "before-minimize.png"))})
+log "stage: initial window lookup after screenshot"
 set targetWindow to front window
-set windowTitle to name of targetWindow
+log "stage: initial minimize button"
 click (first button of targetWindow whose subrole is "AXMinimizeButton")
 delay 2
 set beforeRestore to value of attribute "AXMinimized" of every window
@@ -138,6 +143,7 @@ if (count of windows) is not 2 then error "All-minimized restore changed window 
 click (first button of front window whose subrole is "AXCloseButton")
 delay 1
 if (count of windows) is not 1 then error "Expected one remaining window"
+log "stage: last minimized window remains"
 if (value of attribute "AXMinimized" of window 1) is not true then error "Expected the last window to remain minimized"
 end tell
 tell process "Dock" to perform action "AXPress" of UI element "WindowRestoreFixture" of list 1

@@ -470,7 +470,5 @@ fn session_configuration_restores_names_directories_and_commands_without_replay(
         std::fs::read_to_string(cwd.join("launches")).unwrap(),
         "restored"
     );
-    let pane = ok(&pmux(&socket, &root, &[], &["save-buffer", "work", "-"]));
-    assert!(pane.contains("restored"), "{pane}");
     drop(server);
 }

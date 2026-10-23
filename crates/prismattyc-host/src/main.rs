@@ -12702,6 +12702,7 @@ enum SidebarClick {
     OpenSession {
         space: String,
         title: String,
+        tab: Option<usize>,
     },
     OpenSpace(String),
     BeginNewSpace,
@@ -12747,7 +12748,14 @@ fn sidebar_click_decision(
                         .map(SidebarClick::SelectTab)
                         .unwrap_or(SidebarClick::Ignore)
                 } else if saved {
-                    SidebarClick::OpenSpace(name.to_string())
+                    match session_title.filter(|title| !title.is_empty()) {
+                        Some(title) => SidebarClick::OpenSession {
+                            space: name.to_string(),
+                            title: title.to_string(),
+                            tab: clicked.tab,
+                        },
+                        None => SidebarClick::OpenSpace(name.to_string()),
+                    }
                 } else {
                     SidebarClick::Ignore
                 }
@@ -12767,6 +12775,7 @@ fn sidebar_click_decision(
                         Some(title) if !title.is_empty() => SidebarClick::OpenSession {
                             space: name.to_string(),
                             title: title.to_string(),
+                            tab: clicked.tab,
                         },
                         _ => SidebarClick::OpenSpace(name.to_string()),
                     }
@@ -12815,6 +12824,7 @@ fn icon_click_decision(
                         Some(title) if !title.is_empty() => SidebarClick::OpenSession {
                             space: name.to_string(),
                             title: title.to_string(),
+                            tab: clicked.tab,
                         },
                         _ => SidebarClick::OpenSpace(name.to_string()),
                     }
@@ -12838,12 +12848,14 @@ fn icon_click_decision(
 
 /// Pane title for a session row, in the same order the tree paints.
 fn session_title_of(tree: &sidebar::SidebarTree, row: &sidebar::TreeRow) -> Option<String> {
-    if row.kind != sidebar::RowKind::Pane {
-        return None;
-    }
     let space = tree.spaces.get(row.space)?;
     let tab = space.tabs.get(row.tab?)?;
-    Some(tab.panes.get(row.pane?)?.title.clone())
+    let pane = match row.kind {
+        sidebar::RowKind::Pane => row.pane?,
+        sidebar::RowKind::Tab => 0,
+        sidebar::RowKind::Space => return None,
+    };
+    Some(tab.panes.get(pane)?.title.clone())
 }
 
 /// Select the session's tab and focus that pane. `None` keeps the tab's
@@ -13050,10 +13062,11 @@ fn handle_sidebar_click(host: &mut HostState, button: MouseButton) -> StripClick
             sidebar_resize::toggle(host);
             StripClickResult::Handled
         }
-        SidebarClick::OpenSession { space, title } => {
+        SidebarClick::OpenSession { space, title, tab } => {
             host.pending_session_focus = Some(sidebar::PendingSession {
                 space: space.clone(),
                 title,
+                tab,
             });
             apply_rail_verdict(host, space_rail::RailVerdict::Open(space));
             host.dirty = true;
@@ -13884,24 +13897,61 @@ fn graphite_sidebar_tree(
         .current
         .clone()
         .or_else(|| host.mux.space_id.clone());
-    let live: Vec<sidebar::LiveTab> = tabs
+    let snapshot = host
+        .snapshot_client
+        .as_ref()
+        .and_then(|client| client.fresh());
+    let names: Vec<Vec<String>> = host
+        .mux
+        .tab_panes()
+        .iter()
+        .map(|(_, panes)| {
+            panes
+                .iter()
+                .filter_map(|pane| {
+                    let recorded = host.mux.attach_name_of(*pane)?;
+                    let id = host.mux.attach_session_of(*pane);
+                    Some(
+                        snapshot
+                            .as_ref()
+                            .and_then(|snapshot| {
+                                snapshot.sessions.iter().find(|session| {
+                                    session.space_id == host.mux.space_id
+                                        && session.space_id.is_some()
+                                        && id == Some(session.id.to_string().as_str())
+                                })
+                            })
+                            .map_or_else(|| recorded.to_string(), |session| session.name.clone()),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let mut live_infos = tabs.to_vec();
+    for (index, info) in live_infos.iter_mut().enumerate() {
+        if names.get(index).is_none_or(Vec::is_empty) {
+            // Local shells keep their existing title-row policy.
+            info.title = graphite_tab_text(host, index, &tabs[index], None).label;
+        }
+    }
+    let live: Vec<sidebar::LiveTab> = live_infos
         .iter()
         .enumerate()
         .map(|(index, info)| sidebar::LiveTab {
             info,
+            session_names: names.get(index).map(Vec::as_slice).unwrap_or(&[]),
             mail: mail.get(index).map(Vec::as_slice).unwrap_or(&[]),
             attention: attention.get(index).map(Vec::as_slice).unwrap_or(&[]),
         })
         .collect();
-    // Saved spaces stay alive for the build below; the tree copies titles.
-    let mut saved: Vec<(String, prismattyc_mux::SavedSpace, Vec<String>)> = Vec::new();
+    let mut saved = Vec::new();
     for name in &host.space_rail.names {
         if Some(name) == current.as_ref() {
             continue;
         }
         if let Ok(space) = load_space(&spaces_dir(), name) {
-            let order = prismattyc_mux::space_sessions_in_tab_order(&space);
-            saved.push((name.clone(), space, order));
+            let (tabs, order) = sidebar::saved_tabs(&space, snapshot.as_ref());
+            saved.push((name.clone(), tabs, order));
         }
     }
     let mut inputs: Vec<sidebar::SpaceInput> = Vec::new();
@@ -13924,14 +13974,14 @@ fn graphite_sidebar_tree(
                 attention,
                 tabs: sidebar::TabsSource::Live(&live),
             });
-        } else if let Some((_, space, order)) = saved.iter().find(|(saved, _, _)| saved == name) {
+        } else if let Some((_, tabs, order)) = saved.iter().find(|(saved, _, _)| saved == name) {
             inputs.push(sidebar::SpaceInput {
                 name: name.as_str(),
                 current: false,
                 collapsed,
                 attention,
                 tabs: sidebar::TabsSource::Saved {
-                    tabs: &space.tabs,
+                    tabs,
                     extra_sessions: order,
                 },
             });
@@ -14042,7 +14092,7 @@ fn paint_graphite_sidebar(
                 };
                 match decided {
                     Some(text) => {
-                        labels.push(text.label);
+                        labels.push(tab.map(|tab| tab.title.clone()).unwrap_or_default());
                         dots.push(Some(text.dot));
                         selected_tabs.push(text.selected);
                     }
@@ -27638,6 +27688,7 @@ session mail (id 15)
             SidebarClick::OpenSession {
                 space: "mail".to_string(),
                 title: "composer-2".to_string(),
+                tab: Some(1),
             },
             "a session in another space opens that space, then focuses the pane"
         );
@@ -27731,6 +27782,69 @@ session mail (id 15)
     }
 
     #[test]
+    fn sidebar_custom_label_click_keeps_session_and_window_identity() {
+        let tabs: Vec<_> = ["main", "Review"]
+            .into_iter()
+            .map(|title| prismattyc_mux::SavedSpaceTab {
+                title: title.into(),
+                sessions: vec!["agent-2".into()],
+                layout: None,
+            })
+            .collect();
+        let tree = sidebar::SidebarTree::build(&[sidebar::SpaceInput {
+            name: "space-b",
+            current: false,
+            collapsed: false,
+            attention: 0,
+            tabs: sidebar::TabsSource::Saved {
+                tabs: &tabs,
+                extra_sessions: &[],
+            },
+        }]);
+        let row = sidebar::visible_rows(&tree)
+            .into_iter()
+            .find(|row| row.tab == Some(1))
+            .unwrap();
+        assert_eq!(tree.spaces[0].tabs[1].title, "Review · agent-2");
+        let title = session_title_of(&tree, &row).unwrap();
+        assert_eq!(title, "agent-2");
+        assert_eq!(
+            sidebar_click_decision(
+                graphite::SidebarHit::Row(2),
+                Some((&row, "space-b", false)),
+                true,
+                Some(&title)
+            ),
+            SidebarClick::OpenSession {
+                space: "space-b".into(),
+                title: "agent-2".into(),
+                tab: Some(1)
+            }
+        );
+        let pending = sidebar::PendingSession {
+            space: "space-b".into(),
+            title,
+            tab: row.tab,
+        };
+        assert_eq!(
+            sidebar::pending_session_slot(
+                &pending,
+                Some("space-a"),
+                &[vec!["agent-2"], vec!["agent-2"]]
+            ),
+            None
+        );
+        assert_eq!(
+            sidebar::pending_session_slot(
+                &pending,
+                Some("space-b"),
+                &[vec!["agent-2"], vec!["agent-2"]]
+            ),
+            Some((1, 0))
+        );
+    }
+
+    #[test]
     fn icon_click_decision_opens_spaces_and_focuses_sessions() {
         use graphite::SidebarHit;
         let row = |kind, tab, pane| sidebar::TreeRow {
@@ -27785,6 +27899,7 @@ session mail (id 15)
             SidebarClick::OpenSession {
                 space: "mail".to_string(),
                 title: "composer-2".to_string(),
+                tab: Some(1),
             },
             "a titled session icon focuses that pane after the space opens"
         );

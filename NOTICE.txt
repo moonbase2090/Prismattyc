@@ -6,3 +6,21 @@ Licensed under the MIT License. See LICENSE in the repository root.
 
 Third-party dependencies and bundled assets retain their existing licenses and
 copyright notices.
+
+Optional bundled terminal fonts (the default font chain is unchanged):
+
+IBM Plex Mono Regular
+Copyright (c) 2017 IBM Corp. Reserved Font Name "Plex".
+SIL Open Font License 1.1. Full license:
+crates/prismattyc-host/assets/fonts/IBMPlexMono-LICENSE.txt
+Upstream: https://github.com/IBM/plex
+Revision: 71f558992315a12ca1f06a2215d57962a1992162
+Font SHA-256: 7c6fbddca4b700be918f5f6183d9bd4464fa427fe435f0b480d77fe2bb8c5a43
+
+Commit Mono Regular 400 (V143)
+Copyright (c) 2023 Eigil Nikolajsen.
+SIL Open Font License 1.1. Full license:
+crates/prismattyc-host/assets/fonts/CommitMono-LICENSE-FONT.txt
+Upstream: https://github.com/eigilnikolajsen/commit-mono
+Revision: d407cd2bf8e01ca1db70544052fbbb9606406c3b
+Font SHA-256: 04fdcd6c5db353f8f420bcbaf0bc1e2058f639f6c65a933b7c51e53987ae902e

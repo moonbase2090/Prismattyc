@@ -129,7 +129,8 @@ fn begin_creation(host: &mut HostState, target: Target, name: String) {
     let mode = config::load(&config::config_path())
         .unwrap_or_default()
         .session_naming
-        .unwrap_or_default();
+        .map(crate::config::SessionNaming::as_str)
+        .unwrap_or("ask");
     begin(host, target, name);
     if mode == "auto" || mode == "blank" {
         finish_choice(host, true, mode == "blank");
@@ -145,7 +146,7 @@ pub(super) fn create_pane(host: &mut HostState, axis: Option<prismattyc_mux::Axi
     if config::load(&config::config_path())
         .unwrap_or_default()
         .session_naming
-        .as_deref()
+        .map(crate::config::SessionNaming::as_str)
         == Some("blank")
     {
         direct(host, axis, true);

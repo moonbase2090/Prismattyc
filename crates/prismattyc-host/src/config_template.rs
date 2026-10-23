@@ -69,6 +69,13 @@ pub struct ConfigKey {
 /// Every `ConfigFile` field except the skipped `resolved_theme`.
 pub const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey {
+        name: "settings_panel",
+        group: ConfigGroup::Appearance,
+        doc: "Enable the complete settings panel; opt in from Space settings",
+        range: "true|false",
+        value: ConfigValue::Bool(false),
+    },
+    ConfigKey {
         name: "theme",
         group: ConfigGroup::Appearance,
         doc:
@@ -398,6 +405,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         doc: "Widest space chip in cells (chips fit their labels); 0 = 28",
         range: "0 or 6-40",
         value: ConfigValue::Usize(DEFAULT_SPACE_RAIL_CHIP_COLS),
+    },
+    ConfigKey {
+        name: "space_rail_pane_names",
+        group: ConfigGroup::Layout,
+        doc: "Show live session names in saved Space chips",
+        range: "true|false",
+        value: ConfigValue::Bool(true),
     },
     ConfigKey {
         name: "visual_bell",
@@ -1063,10 +1077,13 @@ pub fn write_config(path: Option<&Path>, merge: bool) -> Result<()> {
             Ok(())
         }
         Some(path) if merge => {
-            let raw = std::fs::read_to_string(path)
-                .with_context(|| format!("read {} for --merge", path.display()))?;
-            let merged = merge_template(&raw)?;
-            write_config_atomic(path, &merged)
+            prismattyc_mux::transact_config(path, |document| {
+                anyhow::ensure!(path.exists(), "config must exist for --merge");
+                *document = merge_template(&document.to_string())?.parse()?;
+                Ok(())
+            })?
+            .report();
+            Ok(())
         }
         Some(path) => write_config_atomic(path, &render_template()),
     }
@@ -1077,8 +1094,14 @@ pub fn ensure_template(path: &Path) -> Result<bool> {
     if path.exists() {
         return Ok(false);
     }
-    write_config_atomic(path, &render_template())?;
-    Ok(true)
+    Ok(prismattyc_mux::transact_config(path, |document| {
+        if path.exists() {
+            return Ok(false);
+        }
+        *document = render_template().parse()?;
+        Ok(true)
+    })?
+    .report())
 }
 
 /// Range text used by `--help`.
@@ -1134,106 +1157,28 @@ mod tests {
     use crate::MAX_INITIAL_PANES;
     use prismattyc_mux::MUX_KEYS;
 
-    const CONFIG_FILE_FIELDS: &[&str] = &[
-        "theme",
-        "render_timer",
-        "macos_present",
-        "render_timer_log_every_frame",
-        "pty_drain_budget_ms",
-        "async_file_writes",
-        "tab_strip",
-        "link_click",
-        "async_paste",
-        "chrome_style",
-        "bar_color",
-        "layout",
-        "sidebar_width_px",
-        "sidebar_collapsed",
-        "sidebar_harness_icons",
-        "pane_titles",
-        "focus_border",
-        "focus_border_animation",
-        "focus_border_animation_ms",
-        "focus_border_animation_head",
-        "splash",
-        "start_at_login",
-        "splash_animation",
-        "reduced_motion",
-        "install_agent_skills",
-        "automatic_update_checks",
-        "font",
-        "font_fallback",
-        "font_px",
-        "font_ligatures",
-        "font_features",
-        "macos_shortcuts",
-        "panes",
-        "window_padding_px",
-        "pane_gap_px",
-        "pane_padding_px",
-        "space_rail",
-        "space_reorder",
-        "snapshot_client",
-        "selective_border_rings",
-        "space_autosave",
-        "session_naming",
-        "space_startup",
-        "space_rail_width_cols",
-        "restore_blank_terminals",
-        "alt_screen_scrollback",
-        "space_rail_chip_cols",
-        "visual_bell",
-        "pane_visual_bell",
-        "audible_bell",
-        "bell_toaster",
-        "bell_toaster_ms",
-        "drag_toaster",
-        "toasts",
-        "os_notify_bell",
-        "attention_sound",
-        "attention_badge",
-        "os_notify_attention",
-        "walkthrough_audio",
-        "walkthrough_voice",
-        "background_image",
-        "background_opacity",
-        "background_blur_px",
-        "pane_opacity_active",
-        "overlay_opacity",
-        "pane_opacity_inactive",
-        "window_opacity",
-        "chrome_opacity",
-        "window_blur",
-        "hover_blend",
-        "mux",
-        "keys",
-        "a11y",
-        "spaces",
-        "theme_overrides",
-        "remote",
-    ];
-
     #[test]
     fn table_and_template_cover_every_config_file_field() {
         let template = render_template();
-        for field in CONFIG_FILE_FIELDS {
+        let fields = crate::config_schema::properties(crate::config_schema::schema()).unwrap();
+        for field in fields.keys().map(String::as_str) {
             let present = template.contains(&format!("{field} ="))
                 || template.contains(&format!("# {field} ="))
                 || template.contains(&format!("[{field}]"));
             assert!(present, "template missing {field}");
             if !matches!(
-                *field,
+                field,
                 "mux" | "keys" | "a11y" | "spaces" | "theme_overrides" | "remote"
             ) {
                 assert!(
-                    CONFIG_KEYS.iter().any(|key| key.name == *field),
+                    CONFIG_KEYS.iter().any(|key| key.name == field),
                     "CONFIG_KEYS missing {field}"
                 );
             }
         }
         for key in CONFIG_KEYS {
             assert!(
-                CONFIG_FILE_FIELDS.contains(&key.name),
+                fields.contains_key(key.name),
                 "CONFIG_KEYS extra {}",
                 key.name
             );

@@ -34,6 +34,28 @@ pub fn dock_menu_titles() -> &'static [&'static str] {
     &["New Window"]
 }
 
+/// A menu item that sends an AppKit standard action through the responder
+/// chain (no explicit target), so the system handles it.
+fn standard_item(
+    mtm: MainThreadMarker,
+    title: &str,
+    action: Sel,
+    key: &str,
+    modifiers: NSEventModifierFlags,
+) -> Retained<NSMenuItem> {
+    let item = NSMenuItem::new(mtm);
+    item.setTitle(&NSString::from_str(title));
+    item.setKeyEquivalent(&NSString::from_str(key));
+    item.setKeyEquivalentModifierMask(modifiers);
+    // SAFETY: each `action` is a standard `NSApplication`/`NSWindow` selector
+    // with the one-argument action signature; no target means the responder
+    // chain delivers it.
+    unsafe {
+        item.setAction(Some(action));
+    }
+    item
+}
+
 /// Adds the standard Window menu (Minimize, Zoom) to `main_menu`. Both items
 /// have no explicit target, so AppKit routes them to the key window through
 /// the responder chain.
@@ -167,6 +189,14 @@ pub fn install_main_menu(proxy: EventLoopProxy<UserAction>, automatic_checks: bo
     // carry a submenu for the app menu (bold app name) to render correctly.
     let app_menu_item = NSMenuItem::new(mtm);
     let app_menu = NSMenu::new(mtm);
+    app_menu.addItem(&standard_item(
+        mtm,
+        "About Prismattyc",
+        sel!(orderFrontStandardAboutPanel:),
+        "",
+        NSEventModifierFlags::empty(),
+    ));
+    app_menu.addItem(&NSMenuItem::separatorItem(mtm));
     let check_item = NSMenuItem::new(mtm);
     check_item.setTitle(&NSString::from_str("Check for Updates…"));
     // SAFETY: `target` is retained for the app lifetime and implements this
@@ -198,6 +228,28 @@ pub fn install_main_menu(proxy: EventLoopProxy<UserAction>, automatic_checks: bo
         rollback_item.setAction(Some(sel!(rollbackUpdate:)));
     }
     app_menu.addItem(&rollback_item);
+    app_menu.addItem(&NSMenuItem::separatorItem(mtm));
+    app_menu.addItem(&standard_item(
+        mtm,
+        "Hide Prismattyc",
+        sel!(hide:),
+        "h",
+        NSEventModifierFlags::Command,
+    ));
+    app_menu.addItem(&standard_item(
+        mtm,
+        "Hide Others",
+        sel!(hideOtherApplications:),
+        "h",
+        NSEventModifierFlags::Command | NSEventModifierFlags::Option,
+    ));
+    app_menu.addItem(&standard_item(
+        mtm,
+        "Show All",
+        sel!(unhideAllApplications:),
+        "",
+        NSEventModifierFlags::empty(),
+    ));
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
 
     let quit_item = NSMenuItem::new(mtm);

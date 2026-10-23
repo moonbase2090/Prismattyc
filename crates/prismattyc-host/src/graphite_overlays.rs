@@ -382,7 +382,11 @@ pub(crate) fn palette(
                     graphite::text_width(Face::Mono, small_px, &row.chord_label).ceil() as usize;
                 let chord_x = text_right.saturating_sub(chord_px);
                 let gap = chrome.px(14.0);
-                let name_w = chrome.px(190.0).min(chord_x.saturating_sub(text_x + gap));
+                let name_w = if row.full_width {
+                    text_right.saturating_sub(text_x)
+                } else {
+                    chrome.px(190.0).min(chord_x.saturating_sub(text_x + gap))
+                };
                 let name = graphite::ellipsize(Face::Regular, px, &row.name, name_w as f32);
                 let description_x = text_x.saturating_add(name_w).saturating_add(gap);
                 let description_right = chord_x.saturating_sub(gap);
@@ -1508,6 +1512,60 @@ mod tests {
             graphite: true,
             scale_milli: 1_000,
         }
+    }
+
+    #[test]
+    fn full_width_result_paints_text_beyond_the_name_column() {
+        let font = FontMetrics::load(14.0).expect("bundled font");
+        let render = |suffix: &str| {
+            let mut row = PaletteRow::plain(
+                format!("{}{suffix}", "M".repeat(36)),
+                String::new(),
+                String::new(),
+            );
+            row.full_width = true;
+            let rows = [row];
+            let sections = [raster::PaletteSection {
+                header: "RESULT",
+                subtitle: "",
+                rows: &rows,
+            }];
+            let frame = PaletteFrame {
+                layout_mode: PaletteLayoutMode::ContentFit,
+                query: None,
+                query_focused: false,
+                chips: None,
+                sections: &sections,
+                selected: 0,
+                scroll: 0,
+                detail: None,
+                footer: "",
+            };
+            let mut buffer = vec![0; 1024 * 600];
+            let layout = palette(
+                &font,
+                &graphite::DARK,
+                graphite_chrome(),
+                [98, 168, 255],
+                &frame,
+                OverlaySurface::default(),
+                &mut buffer,
+                1024,
+                600,
+                None,
+                None,
+            )
+            .unwrap();
+            (buffer, layout)
+        };
+        let (before, layout) = render("0.3.40");
+        let (after, _) = render("0.3.41");
+        let start = layout.panel_x + layout.geom.inset_cells * font.cell_w + 200;
+        assert!(
+            (0..600).any(|y| (start..layout.panel_x + layout.panel_w)
+                .any(|x| before[y * 1024 + x] != after[y * 1024 + x])),
+            "the version suffix must be visible beyond the old 190-pixel name column"
+        );
     }
 
     #[test]

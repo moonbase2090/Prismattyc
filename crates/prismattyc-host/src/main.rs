@@ -2884,6 +2884,10 @@ enum UserAction {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     NewWindow,
     OpenConfig,
+    /// A macOS menu item asked for a host action. Runs on the focused window,
+    /// the same dispatch the keymap uses.
+    #[cfg(target_os = "macos")]
+    RunAction(keybind::Action),
     #[cfg(target_os = "macos")]
     CheckForUpdates,
     #[cfg(target_os = "macos")]
@@ -21293,6 +21297,14 @@ impl ApplicationHandler<UserAction> for App {
             UserAction::NewWindow => {
                 if let Err(e) = self.open_window(event_loop, false) {
                     eprintln!("prismattyc-host: new window failed: {e:#}");
+                }
+            }
+            #[cfg(target_os = "macos")]
+            UserAction::RunAction(action) => {
+                if let Some(host) = self.windows.values_mut().find(|h| h.window_focused) {
+                    let _ = dispatch_action(host, action, &self.cli.program, &self.cli.child_args);
+                    host.dirty = true;
+                    host.window.request_redraw();
                 }
             }
             UserAction::OpenConfig => match config_editor_command() {

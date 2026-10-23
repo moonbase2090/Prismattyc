@@ -3127,26 +3127,19 @@ impl App {
                 }
             }
         }
-        let Some(mut newest) = newest else { return };
-        if newest.async_file_writes() != self.file_config.async_file_writes() {
-            eprintln!("prismattyc-host: async_file_writes changes take effect after restart");
-            newest.async_file_writes = self.file_config.async_file_writes;
-        }
-        #[cfg(target_os = "macos")]
-        if newest.macos_present != self.file_config.macos_present {
-            eprintln!("prismattyc-host: macos_present changes take effect after restart");
-            newest.macos_present = self.file_config.macos_present.clone();
-        }
-        if newest == self.file_config {
-            return;
-        }
-        let prior = std::mem::replace(&mut self.file_config, newest);
-        for host in self.windows.values_mut() {
-            if let Some(panel) = host.settings.as_mut() {
-                panel.refresh();
+        let Some(newest) = newest else { return };
+        let Some(newest) = prepare_config_reload(
+            newest,
+            &self.file_config,
+            self.windows.values_mut().filter_map(|host| {
+                let panel = host.settings.as_mut()?;
                 host.dirty = true;
-            }
-        }
+                Some(panel)
+            }),
+        ) else {
+            return;
+        };
+        let prior = std::mem::replace(&mut self.file_config, newest);
         if self.file_config.start_at_login != prior.start_at_login {
             restore_prompt::sync_login_registration();
         }
@@ -5033,6 +5026,27 @@ fn sidebar_header_shown(host: &HostState) -> bool {
 
 /// Focused pane viewport as one document (accessibility D-A4). Scrollback stays
 /// out of the live node.
+/// Refresh saved views before comparing the configuration the running host can apply.
+fn prepare_config_reload<'a>(
+    mut newest: config::ConfigFile,
+    running: &config::ConfigFile,
+    panels: impl Iterator<Item = &'a mut settings::Panel>,
+) -> Option<config::ConfigFile> {
+    for panel in panels {
+        panel.refresh();
+    }
+    if newest.async_file_writes() != running.async_file_writes() {
+        eprintln!("prismattyc-host: async_file_writes changes take effect after restart");
+        newest.async_file_writes = running.async_file_writes;
+    }
+    #[cfg(target_os = "macos")]
+    if newest.macos_present != running.macos_present {
+        eprintln!("prismattyc-host: macos_present changes take effect after restart");
+        newest.macos_present = running.macos_present.clone();
+    }
+    (newest != *running).then_some(newest)
+}
+
 fn focused_document(host: &HostState) -> a11y::DocumentSnap {
     let pane = host.mux.focused();
     let screen = pane.emulator.screen();

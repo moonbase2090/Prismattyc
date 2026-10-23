@@ -700,3 +700,111 @@ fn legacy_autosave_writer_keeps_inline_extensions_and_reset_keeps_comments() {
         assert!(raw.contains(comment), "lost {comment}: {raw}");
     }
 }
+
+#[test]
+fn host_input_adapter_captures_paste_chord_and_pastes_only_in_text() {
+    let mut fixture = Fixture::new("[keys]\ncopy = []\n");
+    fixture.open_key("keys.copy");
+    fixture.editor_row(|command| matches!(command, Command::Add));
+    fixture.press(NamedKey::Enter);
+    fixture.editor_row(|command| matches!(command, Command::Field(0)));
+    fixture.press(NamedKey::Enter);
+    assert_eq!(
+        fixture
+            .panel
+            .input_key(&Key::Character("v".into()), ModifiersState::CONTROL, false),
+        InputResult::Consumed
+    );
+    fixture.save();
+    let loaded = serde_json::to_value(config::load(&fixture.panel.path).unwrap()).unwrap();
+    assert_eq!(loaded["keys"]["copy"], serde_json::json!(["ctrl+v"]));
+    fixture.open_key("walkthrough_voice");
+    fixture.press(NamedKey::Enter);
+    assert_eq!(
+        fixture
+            .panel
+            .input_key(&Key::Character("v".into()), ModifiersState::CONTROL, false),
+        InputResult::Paste
+    );
+    fixture.panel.paste("clipboard voice");
+    fixture.press(NamedKey::Enter);
+    fixture.save();
+    assert_eq!(
+        config::load(&fixture.panel.path)
+            .unwrap()
+            .walkthrough_voice
+            .as_deref(),
+        Some("clipboard voice")
+    );
+}
+
+#[test]
+fn host_reload_boundary_updates_saved_startup_values_before_effective_dedup() {
+    let mut fixture = Fixture::new("async_file_writes=false\n");
+    let running = config::load(&fixture.panel.path).unwrap();
+    config::save_preference(
+        &fixture.panel.path,
+        "async_file_writes",
+        toml_edit::value(true),
+    )
+    .unwrap();
+    let newest = config::load(&fixture.panel.path).unwrap();
+    assert!(
+        crate::prepare_config_reload(newest, &running, std::iter::once(&mut fixture.panel))
+            .is_none()
+    );
+    assert_eq!(fixture.panel.config.async_file_writes, Some(true));
+    #[cfg(target_os = "macos")]
+    {
+        config::save_preference(
+            &fixture.panel.path,
+            "macos_present",
+            toml_edit::value("iosurface"),
+        )
+        .unwrap();
+        let newest = config::load(&fixture.panel.path).unwrap();
+        assert!(crate::prepare_config_reload(
+            newest,
+            &running,
+            std::iter::once(&mut fixture.panel)
+        )
+        .is_none());
+        assert_eq!(
+            fixture.panel.config.macos_present.as_deref(),
+            Some("iosurface")
+        );
+    }
+    config::save_preference(&fixture.panel.path, "font_px", toml_edit::value(22.0)).unwrap();
+    let newest = config::load(&fixture.panel.path).unwrap();
+    let effective =
+        crate::prepare_config_reload(newest, &running, std::iter::once(&mut fixture.panel))
+            .unwrap();
+    assert_eq!(effective.font_px, Some(22.0));
+    assert_eq!(effective.async_file_writes, Some(false));
+    assert_eq!(fixture.panel.config.async_file_writes, Some(true));
+}
+
+#[test]
+fn host_settings_entry_keeps_blocking_prompt_and_releases_rail_editor() {
+    for (session, restore) in [(true, false), (false, true), (false, false)] {
+        let mut rail = crate::space_rail::SpaceRail::new(Some("sample".into()));
+        rail.focus = Some(0);
+        rail.keyboard = true;
+        rail.edit = Some(crate::space_rail::RailEdit {
+            target: Some(0),
+            buffer: "unsaved name".into(),
+            selected: true,
+        });
+        let opened = prepare_entry(session, restore, &mut rail);
+        if session || restore {
+            assert!(!opened);
+            assert_eq!(rail.edit.unwrap().buffer, "unsaved name");
+        } else {
+            assert!(opened);
+            assert!(rail.edit.is_none());
+            assert!(rail.focus.is_none());
+            assert!(!rail.keyboard);
+        }
+        assert_eq!(rail.current.as_deref(), Some("sample"));
+    }
+}

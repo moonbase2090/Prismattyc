@@ -180,7 +180,7 @@ const MENU_HOST_ACTIONS: &[(&str, Action)] = &[
     ("New Pane", Action::SplitRight),
     ("Close Pane", Action::ClosePane),
     ("Close Tab", Action::CloseTab),
-    ("New Session…", Action::NewSessionTab),
+    ("New Session", Action::NewSessionTab),
     ("Open Space…", Action::OpenSpace),
     ("Settings…", Action::OpenConfig),
     ("Quit Prismattyc", Action::Quit),
@@ -200,6 +200,31 @@ fn key_equivalent(chord: Chord) -> Option<(String, NSEventModifierFlags)> {
             NamedKey::ArrowDown => "\u{f701}".into(),
             NamedKey::ArrowLeft => "\u{f702}".into(),
             NamedKey::ArrowRight => "\u{f703}".into(),
+            NamedKey::Insert => "\u{f727}".into(),
+            NamedKey::F1 => "\u{f704}".into(),
+            NamedKey::F2 => "\u{f705}".into(),
+            NamedKey::F3 => "\u{f706}".into(),
+            NamedKey::F4 => "\u{f707}".into(),
+            NamedKey::F5 => "\u{f708}".into(),
+            NamedKey::F6 => "\u{f709}".into(),
+            NamedKey::F7 => "\u{f70a}".into(),
+            NamedKey::F8 => "\u{f70b}".into(),
+            NamedKey::F9 => "\u{f70c}".into(),
+            NamedKey::F10 => "\u{f70d}".into(),
+            NamedKey::F11 => "\u{f70e}".into(),
+            NamedKey::F12 => "\u{f70f}".into(),
+            NamedKey::F13 => "\u{f710}".into(),
+            NamedKey::F14 => "\u{f711}".into(),
+            NamedKey::F15 => "\u{f712}".into(),
+            NamedKey::F16 => "\u{f713}".into(),
+            NamedKey::F17 => "\u{f714}".into(),
+            NamedKey::F18 => "\u{f715}".into(),
+            NamedKey::F19 => "\u{f716}".into(),
+            NamedKey::F20 => "\u{f717}".into(),
+            NamedKey::F21 => "\u{f718}".into(),
+            NamedKey::F22 => "\u{f719}".into(),
+            NamedKey::F23 => "\u{f71a}".into(),
+            NamedKey::F24 => "\u{f71b}".into(),
             NamedKey::Home => "\u{f729}".into(),
             NamedKey::End => "\u{f72b}".into(),
             NamedKey::PageUp => "\u{f72c}".into(),
@@ -670,6 +695,29 @@ mod tests {
         assert_eq!(
             modifiers,
             NSEventModifierFlags::Command | NSEventModifierFlags::Shift
+        );
+    }
+
+    #[test]
+    fn function_and_navigation_shortcuts_keep_native_keys() {
+        use super::*;
+        let (key, modifiers) = key_equivalent(Chord::parse("ctrl+alt+f5").unwrap()).unwrap();
+        assert_eq!(key, "\u{f708}");
+        assert_eq!(
+            modifiers,
+            NSEventModifierFlags::Control | NSEventModifierFlags::Option
+        );
+        assert_eq!(
+            key_equivalent(Chord::parse("super+left").unwrap())
+                .unwrap()
+                .0,
+            "\u{f702}"
+        );
+        assert_eq!(
+            key_equivalent(Chord::parse("super+f24").unwrap())
+                .unwrap()
+                .0,
+            "\u{f71b}"
         );
     }
 

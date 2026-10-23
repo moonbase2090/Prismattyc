@@ -14,24 +14,77 @@ use objc2::runtime::{AnyClass, AnyObject, Sel};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSControlStateValueOff,
-    NSControlStateValueOn, NSEventModifierFlags, NSMenu, NSMenuItem,
+    NSControlStateValueOn, NSEventModifierFlags, NSMenu, NSMenuItem, NSModalResponseOK,
+    NSResponder, NSSavePanel, NSView,
 };
-use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
+use objc2_foundation::{NSObjectProtocol, NSString};
 use winit::event_loop::EventLoopProxy;
 
+use crate::keybind::{Action, Chord, KeyMap, KeySpec};
 use crate::update_notes::prepare_update_release_notes;
 use crate::UserAction;
-
-/// The File-menu items this app installs: (title, key equivalent). Keyboard
-/// equivalents stay empty so the configurable host keymap owns shortcuts.
-pub fn menu_item_table() -> &'static [(&'static str, &'static str)] {
-    &[("New Window", "")]
-}
+use winit::keyboard::NamedKey;
 
 /// The Dock right-click menu items this app installs. Pure and AppKit-free
 /// so it is unit-testable without a display (Task 7).
 pub fn dock_menu_titles() -> &'static [&'static str] {
     &["New Window"]
+}
+
+/// A menu item that sends an AppKit standard action through the responder
+/// chain (no explicit target), so the system handles it.
+fn standard_item(
+    mtm: MainThreadMarker,
+    title: &str,
+    action: Sel,
+    key: &str,
+    modifiers: NSEventModifierFlags,
+) -> Retained<NSMenuItem> {
+    let item = NSMenuItem::new(mtm);
+    item.setTitle(&NSString::from_str(title));
+    item.setKeyEquivalent(&NSString::from_str(key));
+    item.setKeyEquivalentModifierMask(modifiers);
+    // SAFETY: each `action` is a standard `NSApplication`/`NSWindow` selector
+    // with the one-argument action signature; no target means the responder
+    // chain delivers it.
+    unsafe {
+        item.setAction(Some(action));
+    }
+    item
+}
+
+/// Adds the standard Window menu (Minimize, Zoom) to `main_menu`. Both items
+/// have no explicit target, so AppKit routes them to the key window through
+/// the responder chain.
+fn add_window_menu(mtm: MainThreadMarker, main_menu: &NSMenu) -> Retained<NSMenu> {
+    let window_menu_item = NSMenuItem::new(mtm);
+    window_menu_item.setTitle(&NSString::from_str("Window"));
+    let window_menu = NSMenu::new(mtm);
+    window_menu.setTitle(&NSString::from_str("Window"));
+
+    let minimize_item = NSMenuItem::new(mtm);
+    minimize_item.setTitle(&NSString::from_str("Minimize"));
+    minimize_item.setKeyEquivalent(&NSString::from_str("m"));
+    minimize_item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+    // SAFETY: `performMiniaturize:` is a standard `NSWindow` action; leaving
+    // the target unset routes it through the responder chain.
+    unsafe {
+        minimize_item.setAction(Some(sel!(performMiniaturize:)));
+    }
+    window_menu.addItem(&minimize_item);
+
+    let zoom_item = NSMenuItem::new(mtm);
+    zoom_item.setTitle(&NSString::from_str("Zoom"));
+    // SAFETY: `performZoom:` is a standard `NSWindow` action; leaving the
+    // target unset routes it through the responder chain.
+    unsafe {
+        zoom_item.setAction(Some(sel!(performZoom:)));
+    }
+    window_menu.addItem(&zoom_item);
+
+    window_menu_item.setSubmenu(Some(&window_menu));
+    main_menu.addItem(&window_menu_item);
+    window_menu
 }
 
 /// Backing storage for `NewWindowTarget`'s selector-callable state.
@@ -41,9 +94,9 @@ struct NewWindowTargetIvars {
 
 define_class!(
     // SAFETY:
-    // - The superclass NSObject does not have any subclassing requirements.
+    // - The superclass NSResponder has no subclassing requirements.
     // - `NewWindowTarget` does not implement `Drop`.
-    #[unsafe(super = NSObject)]
+    #[unsafe(super = NSResponder)]
     #[thread_kind = MainThreadOnly]
     #[ivars = NewWindowTargetIvars]
     struct NewWindowTarget;
@@ -59,6 +112,52 @@ define_class!(
         #[unsafe(method(newWindow:))]
         fn new_window(&self, _sender: Option<&AnyObject>) {
             let _ = self.ivars().proxy.send_event(UserAction::NewWindow);
+        }
+
+        #[unsafe(method(copy:))]
+        fn copy(&self, _sender: Option<&AnyObject>) {
+            let _ = self.ivars().proxy.send_event(UserAction::RunAction(Action::Copy));
+        }
+
+        #[unsafe(method(paste:))]
+        fn paste(&self, _sender: Option<&AnyObject>) {
+            let _ = self.ivars().proxy.send_event(UserAction::RunAction(Action::Paste));
+        }
+
+        #[unsafe(method(selectAll:))]
+        fn select_all(&self, _sender: Option<&AnyObject>) {
+            let _ = self.ivars().proxy.send_event(UserAction::RunAction(Action::SelectAll));
+        }
+
+        #[unsafe(method(saveSessionConfiguration:))]
+        fn save_session_configuration(&self, _sender: Option<&AnyObject>) {
+            let panel = NSSavePanel::savePanel(self.mtm());
+            panel.setTitle(Some(&NSString::from_str("Save Session Configuration")));
+            panel.setMessage(Some(&NSString::from_str("Save session names, folders, launch commands and pane layouts. Unsaved work inside programs is not saved. Choose a new filename to keep existing backups.")));
+            panel.setNameFieldStringValue(&NSString::from_str("Prismattyc Sessions.json"));
+            panel.setCanCreateDirectories(true);
+            if panel.runModal() != NSModalResponseOK { return; }
+            let Some(path) = panel.URL().and_then(|url| url.path()) else { return; };
+            let path = std::path::PathBuf::from(path.to_string());
+            let proxy = self.ivars().proxy.clone();
+            let pmux = crate::find_mux_bin();
+            std::thread::spawn(move || {
+                let result = save_configuration(&pmux, &path);
+                let _ = proxy.send_event(UserAction::SessionConfigurationSaved(result));
+            });
+        }
+
+        #[unsafe(method(openHelp:))]
+        fn open_help(&self, sender: Option<&AnyObject>) {
+            let Some(sender) = sender else { return };
+            let tag: isize = unsafe { msg_send![sender, tag] };
+            let url = match -tag - 1 {
+                0 => "https://github.com/moonbase2090/Prismattyc/wiki",
+                1 => "https://github.com/moonbase2090/Prismattyc/issues/new",
+                2 => "https://github.com/moonbase2090/Prismattyc/releases",
+                _ => return,
+            };
+            let _ = crate::open_url(url);
         }
 
         #[unsafe(method(checkForUpdates:))]
@@ -78,8 +177,250 @@ define_class!(
         fn rollback_update(&self, _sender: Option<&AnyObject>) {
             let _ = self.ivars().proxy.send_event(UserAction::RollbackUpdate);
         }
+
+        /// Runs the host action at `MENU_HOST_ACTIONS[tag]` on the focused
+        /// window, the same dispatch the keymap uses.
+        #[unsafe(method(runAction:))]
+        fn run_action(&self, sender: Option<&AnyObject>) {
+            let Some(sender) = sender else { return };
+            // SAFETY: `sender` is the NSMenuItem that invoked this action, and
+            // `tag` is a plain NSInteger getter on NSMenuItem.
+            let tag: isize = unsafe { msg_send![sender, tag] };
+            let Some((_, action)) = usize::try_from(tag - 1)
+                .ok()
+                .and_then(|index| MENU_HOST_ACTIONS.get(index))
+            else {
+                return;
+            };
+            let _ = self.ivars().proxy.send_event(UserAction::RunAction(*action));
+        }
     }
 );
+
+/// Menu tags are one-based indices, leaving zero for native AppKit items.
+const MENU_HOST_ACTIONS: &[(&str, Action)] = &[
+    ("Copy", Action::Copy),
+    ("Paste", Action::Paste),
+    ("Select All", Action::SelectAll),
+    ("Find…", Action::Find),
+    ("Zoom In", Action::IncreaseFontSize),
+    ("Zoom Out", Action::DecreaseFontSize),
+    ("Actual Size", Action::ResetFontSize),
+    ("Toggle Sidebar", Action::SidebarCollapse),
+    ("Zoom Pane", Action::ZoomPane),
+    ("Theme…", Action::ThemePicker),
+    ("New Window", Action::NewWindow),
+    ("New Tab", Action::NewTab),
+    ("New Pane", Action::SplitRight),
+    ("Close Pane", Action::ClosePane),
+    ("Close Tab", Action::CloseTab),
+    ("New Session", Action::NewSessionTab),
+    ("Open Space…", Action::OpenSpace),
+    ("Settings…", Action::OpenConfig),
+    ("Quit Prismattyc", Action::Quit),
+];
+
+fn key_equivalent(chord: Chord) -> Option<(String, NSEventModifierFlags)> {
+    let key = match chord.key {
+        KeySpec::Char(ch) => ch.to_string(),
+        KeySpec::Named(named) => match named {
+            NamedKey::Enter => "\r".into(),
+            NamedKey::Tab => "\t".into(),
+            NamedKey::Space => " ".into(),
+            NamedKey::Escape => "\u{1b}".into(),
+            NamedKey::Backspace => "\u{8}".into(),
+            NamedKey::Delete => "\u{f728}".into(),
+            NamedKey::ArrowUp => "\u{f700}".into(),
+            NamedKey::ArrowDown => "\u{f701}".into(),
+            NamedKey::ArrowLeft => "\u{f702}".into(),
+            NamedKey::ArrowRight => "\u{f703}".into(),
+            NamedKey::Insert => "\u{f727}".into(),
+            NamedKey::F1 => "\u{f704}".into(),
+            NamedKey::F2 => "\u{f705}".into(),
+            NamedKey::F3 => "\u{f706}".into(),
+            NamedKey::F4 => "\u{f707}".into(),
+            NamedKey::F5 => "\u{f708}".into(),
+            NamedKey::F6 => "\u{f709}".into(),
+            NamedKey::F7 => "\u{f70a}".into(),
+            NamedKey::F8 => "\u{f70b}".into(),
+            NamedKey::F9 => "\u{f70c}".into(),
+            NamedKey::F10 => "\u{f70d}".into(),
+            NamedKey::F11 => "\u{f70e}".into(),
+            NamedKey::F12 => "\u{f70f}".into(),
+            NamedKey::F13 => "\u{f710}".into(),
+            NamedKey::F14 => "\u{f711}".into(),
+            NamedKey::F15 => "\u{f712}".into(),
+            NamedKey::F16 => "\u{f713}".into(),
+            NamedKey::F17 => "\u{f714}".into(),
+            NamedKey::F18 => "\u{f715}".into(),
+            NamedKey::F19 => "\u{f716}".into(),
+            NamedKey::F20 => "\u{f717}".into(),
+            NamedKey::F21 => "\u{f718}".into(),
+            NamedKey::F22 => "\u{f719}".into(),
+            NamedKey::F23 => "\u{f71a}".into(),
+            NamedKey::F24 => "\u{f71b}".into(),
+            NamedKey::Home => "\u{f729}".into(),
+            NamedKey::End => "\u{f72b}".into(),
+            NamedKey::PageUp => "\u{f72c}".into(),
+            NamedKey::PageDown => "\u{f72d}".into(),
+            _ => return None,
+        },
+    };
+    let mut modifiers = NSEventModifierFlags::empty();
+    modifiers.set(NSEventModifierFlags::Command, chord.super_key);
+    modifiers.set(NSEventModifierFlags::Control, chord.ctrl);
+    modifiers.set(NSEventModifierFlags::Option, chord.alt);
+    modifiers.set(NSEventModifierFlags::Shift, chord.shift);
+    Some((key, modifiers))
+}
+
+fn set_action_shortcut(item: &NSMenuItem, keymap: &KeyMap, action: Action) {
+    let mut chords = keymap.chords(action);
+    // Prefer the platform's Command binding when there are portable aliases.
+    chords.sort_by_key(|chord| !chord.super_key);
+    let (key, modifiers) = chords
+        .into_iter()
+        .find_map(key_equivalent)
+        .unwrap_or_else(|| (String::new(), NSEventModifierFlags::empty()));
+    item.setKeyEquivalent(&NSString::from_str(&key));
+    item.setKeyEquivalentModifierMask(modifiers);
+}
+
+/// Refresh visible equivalents when the authoritative keymap reloads.
+pub fn refresh_shortcuts(keymap: &KeyMap) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let Some(menu) = NSApplication::sharedApplication(mtm).mainMenu() else {
+        return;
+    };
+    refresh_menu_shortcuts(&menu, keymap);
+}
+
+fn refresh_menu_shortcuts(menu: &NSMenu, keymap: &KeyMap) {
+    for item in menu.itemArray() {
+        if let Some(submenu) = item.submenu() {
+            refresh_menu_shortcuts(&submenu, keymap);
+        }
+        if let Some((title, action)) = item
+            .tag()
+            .checked_sub(1)
+            .and_then(|tag| usize::try_from(tag).ok())
+            .and_then(|index| MENU_HOST_ACTIONS.get(index))
+        {
+            if item.action() == Some(action_selector(*action)) && item.title().to_string() == *title
+            {
+                set_action_shortcut(&item, keymap, *action);
+            }
+        }
+    }
+}
+
+fn action_selector(action: Action) -> Sel {
+    match action {
+        Action::Copy => sel!(copy:),
+        Action::Paste => sel!(paste:),
+        Action::SelectAll => sel!(selectAll:),
+        _ => sel!(runAction:),
+    }
+}
+
+/// Insert a window-owned clipboard fallback after its content view. Native
+/// dialog editors remain earlier responders for standard clipboard actions.
+pub fn install_clipboard_responder(
+    window: &winit::window::Window,
+    proxy: EventLoopProxy<UserAction>,
+) -> Option<Retained<NSResponder>> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let mtm = MainThreadMarker::new()?;
+    let handle = window.window_handle().ok()?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return None;
+    };
+    // SAFETY: winit supplies a live NSView. The returned responder is retained
+    // by HostState for this window's lifetime; its original chain is preserved.
+    let view: &NSView = unsafe { &*handle.ns_view.as_ptr().cast() };
+    let responder = NewWindowTarget::new(mtm, proxy);
+    unsafe {
+        responder.setNextResponder(view.nextResponder().as_deref());
+        view.setNextResponder(Some(&responder));
+    }
+    Some(responder.into_super())
+}
+
+/// Builds a menu item for `MENU_HOST_ACTIONS[index]`, wired to `target`.
+fn host_action_item(
+    mtm: MainThreadMarker,
+    target: &NewWindowTarget,
+    index: usize,
+    keymap: &KeyMap,
+) -> Retained<NSMenuItem> {
+    let item = NSMenuItem::new(mtm);
+    let (title, action) = MENU_HOST_ACTIONS[index];
+    item.setTitle(&NSString::from_str(title));
+    item.setTag(index as isize + 1);
+    set_action_shortcut(&item, keymap, action);
+    // SAFETY: `runAction:` is defined on `NewWindowTarget` above and takes the
+    // one-argument action signature AppKit expects; `target` outlives the menu.
+    unsafe {
+        if !matches!(action, Action::Copy | Action::Paste | Action::SelectAll) {
+            item.setTarget(Some(target));
+        }
+        item.setAction(Some(action_selector(action)));
+    }
+    item
+}
+
+/// Adds the Edit menu and the host-backed View items to `main_menu`. Copy,
+/// Paste and the zoom items run through the keymap; Enter Full Screen uses
+/// AppKit's own action.
+fn add_edit_and_view_menus(
+    mtm: MainThreadMarker,
+    target: &NewWindowTarget,
+    main_menu: &NSMenu,
+    keymap: &KeyMap,
+) {
+    let edit_menu_item = NSMenuItem::new(mtm);
+    edit_menu_item.setTitle(&NSString::from_str("Edit"));
+    let edit_menu = NSMenu::new(mtm);
+    edit_menu.setTitle(&NSString::from_str("Edit"));
+    for (title, action, key, modifiers) in [
+        ("Undo", sel!(undo:), "z", NSEventModifierFlags::Command),
+        (
+            "Redo",
+            sel!(redo:),
+            "z",
+            NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
+        ),
+        ("Cut", sel!(cut:), "x", NSEventModifierFlags::Command),
+    ] {
+        edit_menu.addItem(&standard_item(mtm, title, action, key, modifiers));
+    }
+    edit_menu.addItem(&NSMenuItem::separatorItem(mtm));
+    for index in 0..=3 {
+        edit_menu.addItem(&host_action_item(mtm, target, index, keymap));
+    }
+    edit_menu_item.setSubmenu(Some(&edit_menu));
+    main_menu.addItem(&edit_menu_item);
+
+    let view_menu_item = NSMenuItem::new(mtm);
+    view_menu_item.setTitle(&NSString::from_str("View"));
+    let view_menu = NSMenu::new(mtm);
+    view_menu.setTitle(&NSString::from_str("View"));
+    for index in 4..10 {
+        view_menu.addItem(&host_action_item(mtm, target, index, keymap));
+    }
+    view_menu.addItem(&NSMenuItem::separatorItem(mtm));
+    view_menu.addItem(&standard_item(
+        mtm,
+        "Enter Full Screen",
+        sel!(toggleFullScreen:),
+        "",
+        NSEventModifierFlags::empty(),
+    ));
+    view_menu_item.setSubmenu(Some(&view_menu));
+    main_menu.addItem(&view_menu_item);
+}
 
 impl NewWindowTarget {
     fn new(mtm: MainThreadMarker, proxy: EventLoopProxy<UserAction>) -> Retained<Self> {
@@ -114,11 +455,15 @@ unsafe impl Sync for MainThreadOnlyMenuItemBox {}
 static AUTOMATIC_UPDATE_ITEM: OnceLock<MainThreadOnlyMenuItemBox> = OnceLock::new();
 
 /// Installs the real macOS menu bar: an application submenu (required by
-/// AppKit for `NSApp.mainMenu` to behave) plus a File menu with "New Window".
-/// Keyboard shortcuts are handled by the configurable host keymap. Must run
+/// AppKit for `NSApp.mainMenu` to behave), File, Edit, View, Window, and Help.
+/// Menu shortcuts come from the configurable host keymap. Must run
 /// on the main thread, before or shortly after launch so the
 /// menu and key equivalent are live from the first window (Task 5).
-pub fn install_main_menu(proxy: EventLoopProxy<UserAction>, automatic_checks: bool) {
+pub fn install_main_menu(
+    proxy: EventLoopProxy<UserAction>,
+    automatic_checks: bool,
+    keymap: &KeyMap,
+) {
     let Some(mtm) = MainThreadMarker::new() else {
         eprintln!("prismattyc-host: menu bar: not main thread; skipping install");
         return;
@@ -133,6 +478,14 @@ pub fn install_main_menu(proxy: EventLoopProxy<UserAction>, automatic_checks: bo
     // carry a submenu for the app menu (bold app name) to render correctly.
     let app_menu_item = NSMenuItem::new(mtm);
     let app_menu = NSMenu::new(mtm);
+    app_menu.addItem(&standard_item(
+        mtm,
+        "About Prismattyc",
+        sel!(orderFrontStandardAboutPanel:),
+        "",
+        NSEventModifierFlags::empty(),
+    ));
+    app_menu.addItem(&NSMenuItem::separatorItem(mtm));
     let check_item = NSMenuItem::new(mtm);
     check_item.setTitle(&NSString::from_str("Check for Updates…"));
     // SAFETY: `target` is retained for the app lifetime and implements this
@@ -165,44 +518,102 @@ pub fn install_main_menu(proxy: EventLoopProxy<UserAction>, automatic_checks: bo
     }
     app_menu.addItem(&rollback_item);
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
+    app_menu.addItem(&host_action_item(mtm, &target, 17, keymap));
+    app_menu.addItem(&NSMenuItem::separatorItem(mtm));
+    let services_menu = NSMenu::new(mtm);
+    let services_item = NSMenuItem::new(mtm);
+    services_item.setTitle(&NSString::from_str("Services"));
+    services_item.setSubmenu(Some(&services_menu));
+    app_menu.addItem(&services_item);
+    app_menu.addItem(&NSMenuItem::separatorItem(mtm));
+    app_menu.addItem(&standard_item(
+        mtm,
+        "Hide Prismattyc",
+        sel!(hide:),
+        "h",
+        NSEventModifierFlags::Command,
+    ));
+    app_menu.addItem(&standard_item(
+        mtm,
+        "Hide Others",
+        sel!(hideOtherApplications:),
+        "h",
+        NSEventModifierFlags::Command | NSEventModifierFlags::Option,
+    ));
+    app_menu.addItem(&standard_item(
+        mtm,
+        "Show All",
+        sel!(unhideAllApplications:),
+        "",
+        NSEventModifierFlags::empty(),
+    ));
+    app_menu.addItem(&NSMenuItem::separatorItem(mtm));
 
-    let quit_item = NSMenuItem::new(mtm);
-    quit_item.setTitle(&NSString::from_str("Quit Prismattyc"));
-    quit_item.setKeyEquivalent(&NSString::from_str(""));
-    // SAFETY: `terminate:` is a valid selector on the responder chain
-    // (`NSApplication`); leaving target unset routes it there.
-    unsafe {
-        quit_item.setAction(Some(sel!(terminate:)));
-    }
-    app_menu.addItem(&quit_item);
+    app_menu.addItem(&host_action_item(mtm, &target, 18, keymap));
     app_menu_item.setSubmenu(Some(&app_menu));
     main_menu.addItem(&app_menu_item);
 
-    // File menu: "New Window" via the action-target object above. Its key
-    // equivalent is empty; the host keymap handles the configurable chord.
     let file_menu_item = NSMenuItem::new(mtm);
     file_menu_item.setTitle(&NSString::from_str("File"));
     let file_menu = NSMenu::new(mtm);
     file_menu.setTitle(&NSString::from_str("File"));
-    for (title, key) in menu_item_table() {
-        let item = NSMenuItem::new(mtm);
-        item.setTitle(&NSString::from_str(title));
-        item.setKeyEquivalent(&NSString::from_str(key));
-        item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
-        // SAFETY: `target` is kept alive for the process lifetime in
-        // `NEW_WINDOW_TARGET`; `newWindow:` is defined above and matches the
-        // one-argument action-method signature AppKit expects.
-        unsafe {
-            item.setTarget(Some(&target));
-            item.setAction(Some(sel!(newWindow:)));
-        }
-        file_menu.addItem(&item);
+    for index in 10..17 {
+        file_menu.addItem(&host_action_item(mtm, &target, index, keymap));
     }
+    file_menu.addItem(&NSMenuItem::separatorItem(mtm));
+    let save_item = NSMenuItem::new(mtm);
+    save_item.setTitle(&NSString::from_str("Save Session Configuration…"));
+    unsafe {
+        save_item.setTarget(Some(&target));
+        save_item.setAction(Some(sel!(saveSessionConfiguration:)));
+    }
+    file_menu.addItem(&save_item);
     file_menu_item.setSubmenu(Some(&file_menu));
     main_menu.addItem(&file_menu_item);
 
-    NSApplication::sharedApplication(mtm).setMainMenu(Some(&main_menu));
+    add_edit_and_view_menus(mtm, &target, &main_menu, keymap);
+    let window_menu = add_window_menu(mtm, &main_menu);
+
+    let help_menu = NSMenu::new(mtm);
+    help_menu.setTitle(&NSString::from_str("Help"));
+    for (index, title) in ["Prismattyc Help", "Report an Issue…", "Release Notes"]
+        .iter()
+        .enumerate()
+    {
+        let item = NSMenuItem::new(mtm);
+        item.setTitle(&NSString::from_str(title));
+        // Negative tags distinguish Help items from host-action tags.
+        item.setTag(-(index as isize) - 1);
+        unsafe {
+            item.setTarget(Some(&target));
+            item.setAction(Some(sel!(openHelp:)));
+        }
+        help_menu.addItem(&item);
+    }
+    let help_item = NSMenuItem::new(mtm);
+    help_item.setTitle(&NSString::from_str("Help"));
+    help_item.setSubmenu(Some(&help_menu));
+    main_menu.addItem(&help_item);
+    let app = NSApplication::sharedApplication(mtm);
+    app.setHelpMenu(Some(&help_menu));
+    app.setMainMenu(Some(&main_menu));
+    // AppKit fills this menu with the open windows and keeps it updated.
+    app.setWindowsMenu(Some(&window_menu));
+    app.setServicesMenu(Some(&services_menu));
     eprintln!("prismattyc-host: menu bar installed (Check for Updates)");
+}
+
+fn save_configuration(pmux: &std::path::Path, path: &std::path::Path) -> Result<String, String> {
+    let output = std::process::Command::new(pmux)
+        .args(["session-config", "save"])
+        .arg(path)
+        .output()
+        .map_err(|error| format!("Could not start the session configuration save: {error}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
 }
 
 pub fn set_automatic_checks_enabled(enabled: bool) {
@@ -360,11 +771,52 @@ pub fn install_dock_menu() {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn menu_table_lists_new_window_cmd_n() {
-        let table = crate::macos_menu::menu_item_table();
-        assert!(table
-            .iter()
-            .any(|(title, key)| *title == "New Window" && key.is_empty()));
+    fn configured_chord_becomes_native_equivalent() {
+        use super::*;
+        let chord = Chord::parse("ctrl+alt+shift+x").unwrap();
+        let (key, modifiers) = key_equivalent(chord).unwrap();
+        assert_eq!(key, "x");
+        assert_eq!(
+            modifiers,
+            NSEventModifierFlags::Control
+                | NSEventModifierFlags::Option
+                | NSEventModifierFlags::Shift
+        );
+        let (key, modifiers) = key_equivalent(Chord::parse("super+shift+=").unwrap()).unwrap();
+        assert_eq!(key, "=");
+        assert_eq!(
+            modifiers,
+            NSEventModifierFlags::Command | NSEventModifierFlags::Shift
+        );
+    }
+
+    #[test]
+    fn function_and_navigation_shortcuts_keep_native_keys() {
+        use super::*;
+        let (key, modifiers) = key_equivalent(Chord::parse("ctrl+alt+f5").unwrap()).unwrap();
+        assert_eq!(key, "\u{f708}");
+        assert_eq!(
+            modifiers,
+            NSEventModifierFlags::Control | NSEventModifierFlags::Option
+        );
+        assert_eq!(
+            key_equivalent(Chord::parse("super+delete").unwrap())
+                .unwrap()
+                .0,
+            "\u{f728}"
+        );
+        assert_eq!(
+            key_equivalent(Chord::parse("super+left").unwrap())
+                .unwrap()
+                .0,
+            "\u{f702}"
+        );
+        assert_eq!(
+            key_equivalent(Chord::parse("super+f24").unwrap())
+                .unwrap()
+                .0,
+            "\u{f71b}"
+        );
     }
 
     #[test]

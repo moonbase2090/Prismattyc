@@ -801,6 +801,14 @@ pub fn installed_binary(binary: &str) -> Option<PathBuf> {
     if !BINARIES.contains(&binary) {
         return None;
     }
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| app_bundle_from_executable(&exe))
+    {
+        let path = bundle.join("Contents/MacOS").join(binary);
+        return path.is_file().then_some(path);
+    }
     let root = root().ok()?;
     let path = current_directory(&root)
         .ok()?

@@ -219,6 +219,11 @@ pub(super) fn versions(paths: &Paths) -> Result<()> {
     let mut installed = Vec::new();
     for binary in prismattyc_mux::release_update::BINARIES {
         let executable = prismattyc_mux::release_update::installed_binary(binary)
+            .or_else(|| {
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|exe| prismattyc_mux::executable::sibling(&exe, &[binary]))
+            })
             .unwrap_or_else(|| find_bin(&[], &[binary]));
         let label = prismattyc_mux::release_update::version_label(&executable).ok();
         installed.push(json!({"component":binary,"path":executable,"version":label}));

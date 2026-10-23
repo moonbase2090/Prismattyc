@@ -229,7 +229,7 @@ fn key_equivalent(chord: Chord) -> Option<(String, NSEventModifierFlags)> {
             NamedKey::Space => " ".into(),
             NamedKey::Escape => "\u{1b}".into(),
             NamedKey::Backspace => "\u{8}".into(),
-            NamedKey::Delete => "\u{7f}".into(),
+            NamedKey::Delete => "\u{f728}".into(),
             NamedKey::ArrowUp => "\u{f700}".into(),
             NamedKey::ArrowDown => "\u{f701}".into(),
             NamedKey::ArrowLeft => "\u{f702}".into(),
@@ -764,6 +764,12 @@ mod tests {
         assert_eq!(
             modifiers,
             NSEventModifierFlags::Control | NSEventModifierFlags::Option
+        );
+        assert_eq!(
+            key_equivalent(Chord::parse("super+delete").unwrap())
+                .unwrap()
+                .0,
+            "\u{f728}"
         );
         assert_eq!(
             key_equivalent(Chord::parse("super+left").unwrap())

@@ -359,7 +359,7 @@ pub const MAIL_INJECT_INPUT_IDLE_MS: u64 = 10_000;
 /// Clear a leftover dirty composer after this long with no write and no output.
 pub const MAIL_INJECT_DIRTY_IDLE_MS: u64 = 60_000;
 /// A pane with output history counts as quiet after this long with no PTY
-/// output. The idle trigger (WP-28) fires once per quiet episode; new
+/// output. The idle trigger fires once per quiet episode; new
 /// output re-arms it.
 pub const PANE_IDLE_TRIGGER_MS: u64 = 60_000;
 const MAIL_INJECT_EPOCH_WAIT_MS: u64 = 250;

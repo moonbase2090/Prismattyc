@@ -487,9 +487,10 @@ pub(crate) fn read_persist(path: &Path) -> Result<PersistFile, RestoreFail> {
     parse_persist_bytes(&bytes)
 }
 
-/// Apply Output/Resize to a replica. Do not send DSR/CPR/DA to a child.
+/// Replay screen output, geometry, and child exit without sending terminal replies.
 pub(crate) fn replay_event(emulator: &mut Emulator, event: &PaneEvent) {
     match event {
+        PaneEvent::Exited { .. } => emulator.reset_input_reporting(),
         PaneEvent::Output { bytes } => {
             let _ = emulator.feed(bytes);
             let _ = emulator.take_pending_replies();
@@ -559,6 +560,32 @@ mod tests {
 
     const FIXTURE: &[u8] =
         include_bytes!("../../prismattyc-emulator/tests/fixtures/pt72-session.bin");
+
+    #[test]
+    fn replayed_exit_clears_input_reporting_without_clearing_text() {
+        let mut emulator = Emulator::new(40, 4, 100);
+        emulator.feed(b"saved output\x1b[?1000;1002;1003;1004;1006;2004;7700h");
+        replay_event(
+            &mut emulator,
+            &PaneEvent::Exited {
+                code: Some(0),
+                signal: None,
+            },
+        );
+        assert_eq!(
+            emulator.mouse_tracking(),
+            prismattyc_emulator::MouseTracking::Off
+        );
+        assert!(!emulator.mouse_sgr());
+        assert!(!emulator.mouse_wheel_only());
+        assert!(!emulator.focus_report());
+        assert!(!emulator.bracketed_paste());
+        let mut text = String::new();
+        for cell in emulator.screen().view_row(0).unwrap() {
+            cell.write_grapheme_into(&mut text);
+        }
+        assert!(text.starts_with("saved output"));
+    }
 
     #[test]
     fn worker_reuses_unchanged_panes_removes_closed_panes_and_drains_on_drop() {

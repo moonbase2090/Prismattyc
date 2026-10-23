@@ -1836,6 +1836,7 @@ impl PaneRuntime {
 
     fn mark_child_exited(&mut self) {
         self.child_alive = false;
+        self.emulator.reset_input_reporting();
         if self.exit_status.is_none() {
             self.exit_status = self
                 .session
@@ -1939,7 +1940,7 @@ impl PaneRuntime {
                 .and_then(|session| session.try_wait().ok().flatten())
             {
                 self.exit_status = Some(status);
-                self.child_alive = false;
+                self.mark_child_exited();
                 dirty = true;
             }
         }
@@ -2170,7 +2171,7 @@ impl PaneRuntime {
                     (Some(code), None) => format!("exited {code}"),
                     (None, None) => "exited".into(),
                 });
-                self.child_alive = false;
+                self.mark_child_exited();
             }
             // Title, Cwd, Status and Attention are all derivable from the
             // Output bytes the replica already applied. Re-applying them
@@ -7254,18 +7255,67 @@ mod tests {
         assert!(runtime.all_children_exited());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn exited_local_child_stops_input_reporting_and_keeps_output() {
+        let mut runtime = MuxRuntime::spawn(
+            "/bin/sh",
+            &[
+                "-c".into(),
+                r"printf '\033[?1000;1002;1003;1006;1004;2004;7700hEXIT_MARKER'".into(),
+            ],
+            80,
+            24,
+        )
+        .unwrap();
+        let pane = runtime.focused_id();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runtime.panes[&pane].child_alive && Instant::now() < deadline {
+            runtime.panes.get_mut(&pane).unwrap().drain();
+            thread::sleep(Duration::from_millis(5));
+        }
+        let child = &runtime.panes[&pane];
+        assert!(!child.child_alive, "child did not exit");
+        let mut text = String::new();
+        for cell in child.emulator.screen().view_row(0).unwrap() {
+            cell.write_grapheme_into(&mut text);
+        }
+        assert!(text.starts_with("EXIT_MARKER"));
+        assert_eq!(
+            child.emulator.mouse_tracking(),
+            prismattyc_emulator::MouseTracking::Off
+        );
+        assert!(!child.emulator.mouse_sgr());
+        assert!(!child.emulator.mouse_wheel_only());
+        assert!(!child.emulator.focus_report());
+        assert!(!child.emulator.bracketed_paste());
+    }
+
     #[test]
     fn placeholder_reopen_respawns_child() {
         let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
         let pane = runtime.focused_id();
         runtime.mark_attach_session(pane, "9".into(), "work".into());
-        runtime.panes.get_mut(&pane).unwrap().child_alive = false;
+        let child = runtime.panes.get_mut(&pane).unwrap();
+        let _ = child
+            .emulator
+            .feed(b"old app\x1b[?1003;1006;1004;2004;7700h");
+        child.child_alive = false;
         assert!(runtime.drain_all().0);
         assert!(runtime.is_placeholder(pane));
         assert!(runtime.respawn_attach(pane, "/bin/sh", &[]).unwrap());
         assert!(!runtime.is_placeholder(pane));
         assert!(runtime.panes[&pane].child_alive);
         assert_eq!(runtime.attach_session_of(pane), Some("9"));
+        let emulator = &runtime.panes[&pane].emulator;
+        assert_eq!(
+            emulator.mouse_tracking(),
+            prismattyc_emulator::MouseTracking::Off
+        );
+        assert!(!emulator.mouse_sgr());
+        assert!(!emulator.mouse_wheel_only());
+        assert!(!emulator.focus_report());
+        assert!(!emulator.bracketed_paste());
     }
 
     #[test]

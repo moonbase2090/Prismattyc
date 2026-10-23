@@ -2889,6 +2889,8 @@ enum UserAction {
     #[cfg(target_os = "macos")]
     RunAction(keybind::Action),
     #[cfg(target_os = "macos")]
+    SessionConfigurationSaved(Result<String, String>),
+    #[cfg(target_os = "macos")]
     CheckForUpdates,
     #[cfg(target_os = "macos")]
     ToggleAutomaticUpdateChecks,
@@ -21393,6 +21395,16 @@ impl ApplicationHandler<UserAction> for App {
                         host.window.request_redraw();
                     }
                 }
+            },
+            #[cfg(target_os = "macos")]
+            UserAction::SessionConfigurationSaved(result) => match result {
+                Ok(message) => {
+                    macos_menu::show_update_message("Session Configuration Saved", &message)
+                }
+                Err(message) => macos_menu::show_update_message(
+                    "Could Not Save Session Configuration",
+                    &message,
+                ),
             },
             UserAction::OpenConfig => match config_editor_command() {
                 Ok(command) if command.detached => {

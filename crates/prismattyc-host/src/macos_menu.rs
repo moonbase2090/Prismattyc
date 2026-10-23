@@ -14,7 +14,8 @@ use objc2::runtime::{AnyClass, AnyObject, Sel};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSControlStateValueOff,
-    NSControlStateValueOn, NSEventModifierFlags, NSMenu, NSMenuItem,
+    NSControlStateValueOn, NSEventModifierFlags, NSMenu, NSMenuItem, NSModalResponseOK,
+    NSSavePanel,
 };
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
 use winit::event_loop::EventLoopProxy;
@@ -111,6 +112,24 @@ define_class!(
         #[unsafe(method(newWindow:))]
         fn new_window(&self, _sender: Option<&AnyObject>) {
             let _ = self.ivars().proxy.send_event(UserAction::NewWindow);
+        }
+
+        #[unsafe(method(saveSessionConfiguration:))]
+        fn save_session_configuration(&self, _sender: Option<&AnyObject>) {
+            let panel = NSSavePanel::savePanel(self.mtm());
+            panel.setTitle(Some(&NSString::from_str("Save Session Configuration")));
+            panel.setMessage(Some(&NSString::from_str("Save session names, folders, launch commands and pane layouts. Unsaved work inside programs is not saved. Choose a new filename to keep existing backups.")));
+            panel.setNameFieldStringValue(&NSString::from_str("Prismattyc Sessions.json"));
+            panel.setCanCreateDirectories(true);
+            if panel.runModal() != NSModalResponseOK { return; }
+            let Some(path) = panel.URL().and_then(|url| url.path()) else { return; };
+            let path = std::path::PathBuf::from(path.to_string());
+            let proxy = self.ivars().proxy.clone();
+            let pmux = crate::find_mux_bin();
+            std::thread::spawn(move || {
+                let result = save_configuration(&pmux, &path);
+                let _ = proxy.send_event(UserAction::SessionConfigurationSaved(result));
+            });
         }
 
         #[unsafe(method(openHelp:))]
@@ -489,6 +508,14 @@ pub fn install_main_menu(
     for index in 10..17 {
         file_menu.addItem(&host_action_item(mtm, &target, index, keymap));
     }
+    file_menu.addItem(&NSMenuItem::separatorItem(mtm));
+    let save_item = NSMenuItem::new(mtm);
+    save_item.setTitle(&NSString::from_str("Save Session Configuration…"));
+    unsafe {
+        save_item.setTarget(Some(&target));
+        save_item.setAction(Some(sel!(saveSessionConfiguration:)));
+    }
+    file_menu.addItem(&save_item);
     file_menu_item.setSubmenu(Some(&file_menu));
     main_menu.addItem(&file_menu_item);
 
@@ -522,6 +549,19 @@ pub fn install_main_menu(
     app.setWindowsMenu(Some(&window_menu));
     app.setServicesMenu(Some(&services_menu));
     eprintln!("prismattyc-host: menu bar installed (Check for Updates)");
+}
+
+fn save_configuration(pmux: &std::path::Path, path: &std::path::Path) -> Result<String, String> {
+    let output = std::process::Command::new(pmux)
+        .args(["session-config", "save"])
+        .arg(path)
+        .output()
+        .map_err(|error| format!("Could not start the session configuration save: {error}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
 }
 
 pub fn set_automatic_checks_enabled(enabled: bool) {

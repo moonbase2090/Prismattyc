@@ -1768,12 +1768,10 @@ const CHILD_ENV_COLOR_STRIP: &[&str] = &[
 pub fn resolve_child_terminfo_dir() -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
 
-    for key in ["PRISMATTYC_TERMINFO"] {
-        if let Ok(raw) = std::env::var(key) {
-            let p = PathBuf::from(raw);
-            if has_terminfo_entry(&p) {
-                return p.canonicalize().ok().or(Some(p));
-            }
+    if let Ok(raw) = std::env::var("PRISMATTYC_TERMINFO") {
+        let p = PathBuf::from(raw);
+        if has_terminfo_entry(&p) {
+            return p.canonicalize().ok().or(Some(p));
         }
     }
 

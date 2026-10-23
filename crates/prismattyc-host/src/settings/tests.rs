@@ -808,3 +808,134 @@ fn host_settings_entry_keeps_blocking_prompt_and_releases_rail_editor() {
         assert_eq!(rail.current.as_deref(), Some("sample"));
     }
 }
+
+#[test]
+fn settings_painters_keep_selected_rows_visible_and_clickable_in_both_chromes() {
+    use crate::raster::{
+        FontMetrics, OverlaySurface, PaletteFrame, PaletteLayoutMode, PaletteSection,
+    };
+    let font = FontMetrics::load_with(15.0, None, &[]).unwrap();
+    let theme = crate::theme::shipped_default();
+    let mut fixture = Fixture::new("font_px=18.5\n");
+    for editor in [false, true] {
+        if editor {
+            fixture.open_key("font_px");
+        }
+        let (header, rows) = fixture.panel.rows();
+        assert_eq!(
+            rows[fixture.panel.selected()].name,
+            if editor { "Value: 18.5" } else { "Appearance" }
+        );
+        for graphite in [false, true] {
+            let sections = [PaletteSection {
+                header: &header,
+                subtitle: "",
+                rows: &rows,
+            }];
+            let frame = PaletteFrame {
+                layout_mode: PaletteLayoutMode::FixedHeight,
+                query: None,
+                query_focused: false,
+                chips: None,
+                sections: &sections,
+                selected: fixture.panel.selected(),
+                scroll: 0,
+                detail: None,
+                footer: "↑/↓ rows · ←/→ section or value · Enter edit/reset · Escape back",
+            };
+            let (width, height) = (1200, 800);
+            let mut pixels = vec![crate::raster::pack_argb(255, theme.default_bg); width * height];
+            let layout = crate::paint_palette_overlay(
+                &font,
+                &theme,
+                crate::mux::ChromeGeom {
+                    graphite,
+                    scale_milli: 1000,
+                },
+                [0x62, 0xa8, 0xff],
+                &frame,
+                OverlaySurface::default(),
+                &mut pixels,
+                width,
+                height,
+            )
+            .expect("settings paints");
+            let row = layout
+                .rows
+                .iter()
+                .find(|row| row.global == fixture.panel.selected())
+                .expect("selected setting is visible");
+            assert_eq!(
+                crate::raster::palette_hit(
+                    &layout,
+                    layout.panel_x + layout.panel_w / 2,
+                    row.y + layout.geom.row_pitch_px / 2
+                ),
+                Some(fixture.panel.selected())
+            );
+            let mut blank_rows = rows.clone();
+            blank_rows[fixture.panel.selected()].name.clear();
+            let blank_sections = [PaletteSection {
+                header: &header,
+                subtitle: "",
+                rows: &blank_rows,
+            }];
+            let blank_frame = PaletteFrame {
+                sections: &blank_sections,
+                ..frame
+            };
+            let mut blank_pixels =
+                vec![crate::raster::pack_argb(255, theme.default_bg); width * height];
+            crate::paint_palette_overlay(
+                &font,
+                &theme,
+                crate::mux::ChromeGeom {
+                    graphite,
+                    scale_milli: 1000,
+                },
+                [0x62, 0xa8, 0xff],
+                &blank_frame,
+                OverlaySurface::default(),
+                &mut blank_pixels,
+                width,
+                height,
+            )
+            .unwrap();
+            let band = row.y * width..(row.y + layout.geom.row_pitch_px).min(height) * width;
+            assert!(
+                pixels[band.clone()] != blank_pixels[band],
+                "selected label paints visible glyphs"
+            );
+            if let Some(dir) = std::env::var_os("PRISMATTYC_DUMP_SETTINGS") {
+                let dir = PathBuf::from(dir);
+                std::fs::create_dir_all(&dir).unwrap();
+                crate::write_present_png(
+                    &dir.join(format!(
+                        "{}-{}.png",
+                        if graphite { "graphite" } else { "classic" },
+                        if editor { "font-size" } else { "sections" }
+                    )),
+                    &pixels,
+                    width as u32,
+                    height as u32,
+                )
+                .unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn root_rows_show_saved_values_before_help_text() {
+    let fixture = Fixture::new("focus_border_animation_ms=850\n");
+    let rows = fixture.panel.rows().1;
+    let row = rows
+        .iter()
+        .find(|row| row.name == "Focus border animation ms")
+        .unwrap();
+    assert!(
+        row.describe.starts_with("850 · Live after config reload"),
+        "{}",
+        row.describe
+    );
+}

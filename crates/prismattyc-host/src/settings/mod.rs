@@ -172,7 +172,7 @@ impl Panel {
         )];
         rows.extend(self.indices().into_iter().map(|index| {
             let control = &self.controls[index];
-            let mut detail = format!("{} · {}", control.help, control.timing);
+            let mut detail = format!("{} · {}", self.shown(control), control.timing);
             if control.key() == "font" && !self.effective_font.is_empty() {
                 detail.push_str(&format!(" · Using {}", self.effective_font));
             }
@@ -185,11 +185,10 @@ impl Panel {
             {
                 detail.push_str(" · Environment/CLI override may take precedence");
             }
-            PaletteRow::plain(
-                format!("{}: {}", control.label, self.shown(control)),
-                detail,
-                "Enter edit/reset".into(),
-            )
+            if !control.help.is_empty() {
+                detail.push_str(&format!(" · {}", control.help));
+            }
+            PaletteRow::plain(control.label.clone(), detail, "Enter".into())
         }));
         rows
     }

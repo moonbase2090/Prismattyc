@@ -1648,7 +1648,7 @@ future_remote = { values = [3, 4] }
         save_preference(&path, "font_px", toml_edit::value(17.5)).unwrap();
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.font_px, Some(17.5));
-        assert_eq!(loaded.a11y_announce(), true);
+        assert!(loaded.a11y_announce());
         assert_eq!(loaded.remote_destinations().unwrap()[0].label, "Dev box");
         assert!(loaded.keys.as_ref().unwrap().contains_key("copy"));
         assert!(!loaded.keys.as_ref().unwrap().contains_key("future_action"));

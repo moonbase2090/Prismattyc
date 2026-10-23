@@ -20,7 +20,9 @@ use crate::remote_size::RemoteSizePolicy;
 /// `[mux]` keys. The host stores this table so one config file can carry it.
 /// Keys this build does not know are ignored; see [`mux_unknown_key_warnings`].
 /// Unknown keys outside `[mux]` are still rejected by the host.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Deserialize, schemars::JsonSchema, serde::Serialize,
+)]
 pub struct MuxSection {
     /// Instance name used to derive `pmux.sock` / `pmux-<instance>.sock`.
     pub instance: Option<String>,
@@ -40,6 +42,7 @@ pub struct MuxSection {
 /// Who `pmux space open` types a saved pane `command` into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub enum SpaceOpenRunsCommands {
     /// Sessions that stored an agent id (default).
     #[default]
@@ -376,15 +379,107 @@ fn insert_commented_path(table: &mut toml_edit::Table, name: &str, path: &str) {
     }
 }
 
-/// Write `contents` to `path` via a sibling temp file, fsync, and rename.
+/// A completed replacement. A directory sync failure does not undo a rename.
+#[derive(Debug)]
+pub struct ConfigCommit<T> {
+    pub value: T,
+    pub changed: bool,
+    pub durability_warning: Option<String>,
+}
+
+impl<T> ConfigCommit<T> {
+    /// Legacy callers still report a durability warning without replaying an edit.
+    pub fn report(self) -> T {
+        if let Some(warning) = self.durability_warning {
+            eprintln!("prismattyc: config saved, but directory sync failed: {warning}");
+        }
+        self.value
+    }
+}
+
+/// Serialize a complete fresh-read edit across host processes. Locks a stable
+/// sibling file, since replacing the config changes its inode. Existing symlinks
+/// resolve to their target, preserving the user's link and one lock identity.
+pub fn transact_config<T>(
+    path: &Path,
+    edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<T>,
+) -> Result<ConfigCommit<T>> {
+    locked_config(path, |raw| {
+        let mut document = raw
+            .parse::<toml_edit::DocumentMut>()
+            .context("parse config before edit")?;
+        let value = edit(&mut document)?;
+        Ok((document.to_string(), value))
+    })
+}
+
+/// Deliberately replace the entire document (for an explicit template write).
+/// Read/modify/write callers use `transact_config` instead of a stale string.
 pub fn write_config_atomic(path: &Path, contents: &str) -> Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("create config directory {}", parent.display()))?;
-    let filename = path
+    locked_config(path, |_| Ok((contents.to_string(), ())))?.report();
+    Ok(())
+}
+
+fn locked_config<T>(
+    path: &Path,
+    edit: impl FnOnce(&str) -> Result<(String, T)>,
+) -> Result<ConfigCommit<T>> {
+    locked_config_with_sync(path, edit, sync_config_directory)
+}
+
+fn sync_config_directory(parent: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(parent)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = parent;
+        Ok(())
+    }
+}
+
+fn locked_config_with_sync<T>(
+    path: &Path,
+    edit: impl FnOnce(&str) -> Result<(String, T)>,
+    sync_directory: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<ConfigCommit<T>> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent).context("create config directory")?;
+    let target = if std::fs::symlink_metadata(path).is_ok() {
+        std::fs::canonicalize(path).context("resolve config path")?
+    } else {
+        std::fs::canonicalize(parent)?.join(path.file_name().context("config filename")?)
+    };
+    let parent = target.parent().context("config parent")?;
+    let filename = target
         .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("config.toml");
+        .context("config filename")?
+        .to_string_lossy();
+    let lock_path = parent.join(format!(".{filename}.lock"));
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let lock = options.open(&lock_path).context("open config lock")?;
+    lock.lock().context("lock config")?;
+    let original = match std::fs::read_to_string(&target) {
+        Ok(raw) => Some(raw),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("read config under lock"),
+    };
+    let raw = original.as_deref().unwrap_or_default();
+    let (contents, value) = edit(raw)?;
+    if contents == raw && target.exists() {
+        return Ok(ConfigCommit {
+            value,
+            changed: false,
+            durability_warning: None,
+        });
+    }
     let nonce = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
@@ -393,30 +488,45 @@ pub fn write_config_atomic(path: &Path, contents: &str) -> Result<()> {
         ".{filename}.prism-config-{}-{nonce}",
         std::process::id()
     ));
-    let result = (|| -> Result<()> {
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
+    let before = (|| -> Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
         #[cfg(unix)]
-        opts.mode(0o644);
-        let mut file = opts
+        options.mode(0o600);
+        let mut file = options
             .open(&temporary)
-            .with_context(|| format!("create {}", temporary.display()))?;
+            .context("create temporary config")?;
         file.write_all(contents.as_bytes())
-            .with_context(|| format!("write {}", temporary.display()))?;
-        file.sync_all()
-            .with_context(|| format!("sync {}", temporary.display()))?;
-        if let Ok(metadata) = std::fs::metadata(path) {
+            .context("write temporary config")?;
+        if let Ok(metadata) = std::fs::metadata(&target) {
             std::fs::set_permissions(&temporary, metadata.permissions())
-                .with_context(|| format!("preserve permissions for {}", path.display()))?;
+                .context("preserve config permissions")?;
         }
-        std::fs::rename(&temporary, path)
-            .with_context(|| format!("replace {} with {}", path.display(), temporary.display()))?;
+        file.sync_all().context("sync temporary config")?;
+        // Cooperating writers are serialized. Detect external edits made before
+        // this check; an editor ignoring the advisory lock can still race rename.
+        let current = match std::fs::read_to_string(&target) {
+            Ok(raw) => Some(raw),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).context("recheck config before replacement"),
+        };
+        anyhow::ensure!(
+            current == original,
+            "config changed outside the settings editor; retry the edit"
+        );
+        std::fs::rename(&temporary, &target).context("replace config")?;
         Ok(())
     })();
-    if result.is_err() {
+    if let Err(error) = before {
         let _ = std::fs::remove_file(&temporary);
+        return Err(error);
     }
-    result
+    let durability_warning = sync_directory(parent).err().map(|error| error.to_string());
+    Ok(ConfigCommit {
+        value,
+        changed: true,
+        durability_warning,
+    })
 }
 
 fn first_name(candidates: [Option<String>; 3]) -> Option<String> {
@@ -528,6 +638,93 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("config.toml")
+    }
+
+    #[test]
+    fn committed_write_reports_directory_sync_failure_without_replay() {
+        let path = temp_cfg("durability");
+        std::fs::write(&path, "entries = []\n").unwrap();
+        let calls = std::cell::Cell::new(0);
+        let result = locked_config_with_sync(
+            &path,
+            |raw| {
+                calls.set(calls.get() + 1);
+                let mut document: toml_edit::DocumentMut = raw.parse()?;
+                document["entries"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push("one addition");
+                Ok((document.to_string(), 17))
+            },
+            |_| Err(std::io::Error::other("injected directory sync failure")),
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(result.value, 17);
+        assert!(result.changed);
+        assert_eq!(
+            result.durability_warning.as_deref(),
+            Some("injected directory sync failure")
+        );
+        let saved: toml::Value = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(
+            saved["entries"].as_array().unwrap(),
+            &vec![toml::Value::String("one addition".into())]
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn external_removal_of_empty_file_is_a_conflict() {
+        let path = temp_cfg("external-removal");
+        std::fs::write(&path, "").unwrap();
+        let result = transact_config(&path, |document| {
+            std::fs::remove_file(&path)?;
+            document["font_px"] = toml_edit::value(18.0);
+            Ok(())
+        });
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("changed outside"));
+        assert!(!path.exists());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_retains_symlink_and_target_permissions() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let path = temp_cfg("symlink");
+        let target = path.with_file_name("target.toml");
+        std::fs::write(&target, "# existing\nfont_px = 15.0\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        symlink(&target, &path).unwrap();
+        transact_config(&path, |document| {
+            document["font_px"] = toml_edit::value(18.0);
+            Ok(())
+        })
+        .unwrap();
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "# existing\nfont_px = 18.0\n"
+        );
+        std::fs::remove_file(&target).unwrap();
+        assert!(transact_config(&path, |_| Ok(())).is_err());
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

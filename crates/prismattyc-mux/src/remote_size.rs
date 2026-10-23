@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 /// `[mux] remote_size` policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub enum RemoteSizePolicy {
     /// Last active client wins (default).
     #[default]

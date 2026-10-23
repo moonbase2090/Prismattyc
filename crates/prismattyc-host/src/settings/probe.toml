@@ -1,0 +1,112 @@
+# Independent save/load examples. Values are deliberately explicit overrides.
+settings_panel = true
+tab_strip = "multi"
+link_click = "modifier"
+async_paste = true
+pane_titles = "hover"
+chrome_style = "classic"
+bar_color = "moss"
+layout = "sidebar"
+sidebar_width_px = 350
+sidebar_collapsed = true
+sidebar_harness_icons = true
+render_timer = "both"
+macos_present = "tiles"
+pty_drain_budget_ms = 7
+render_timer_log_every_frame = true
+async_file_writes = true
+theme = "tokyo-night"
+focus_border = "violet"
+focus_border_animation = "light-cycle"
+focus_border_animation_ms = 850
+focus_border_animation_head = true
+splash = true
+start_at_login = true
+splash_animation = true
+reduced_motion = true
+install_agent_skills = true
+automatic_update_checks = true
+font = "bundled:ibm-plex-mono"
+font_fallback = ["bundled:commit-mono", "bundled:ibm-plex-mono"]
+font_px = 18.5
+font_ligatures = true
+font_features = ["liga", "-calt"]
+panes = 3
+window_padding_px = 7
+pane_gap_px = 9
+pane_padding_px = 11
+space_rail = "right"
+space_reorder = true
+snapshot_client = true
+selective_border_rings = true
+space_rail_chip_cols = 12
+space_rail_width_cols = 20
+restore_blank_terminals = true
+alt_screen_scrollback = true
+space_rail_pane_names = true
+space_autosave = true
+session_naming = "blank"
+space_startup = "fresh"
+visual_bell = true
+pane_visual_bell = true
+audible_bell = true
+bell_toaster = true
+bell_toaster_ms = 3500
+drag_toaster = true
+toasts = "errors"
+os_notify_bell = true
+attention_sound = true
+attention_badge = true
+os_notify_attention = true
+walkthrough_audio = true
+walkthrough_voice = "sample-voice"
+background_image = "/tmp/settings-background.png"
+background_opacity = 0.5
+background_blur_px = 8
+pane_opacity_active = 0.75
+overlay_opacity = 0.5
+pane_opacity_inactive = 0.25
+window_opacity = 0.75
+chrome_opacity = 0.5
+window_blur = true
+hover_blend = 0.125
+macos_shortcuts = true
+
+[a11y]
+os_tree = true
+announce = true
+
+[spaces]
+autosave = true
+
+[theme_overrides]
+default_fg = "#123456"
+default_bg = "#234567"
+chrome_fg = "#345678"
+chrome_bg = "#456789"
+tab_active_bg = "#56789a"
+pane_backdrop = "#6789ab"
+pane_border = "#789abc"
+overlay_bg = "#89abcd"
+unseen_badge = "#9abcde"
+mail_letter = "#abcdef"
+active_badge = "#bcdef0"
+attention_badge = "#cdef01"
+cursor_fg = "#def012"
+cursor_bg = "#ef0123"
+selection_fg = "#f01234"
+selection_bg = "#012345"
+ansi = ["#000001", "#000002", "#000003", "#000004", "#000005", "#000006", "#000007", "#000008", "#000009", "#00000a", "#00000b", "#00000c", "#00000d", "#00000e", "#00000f", "#000010"]
+
+[mux]
+instance = "settings-example"
+socket = "/tmp/settings-example.sock"
+attach_on_new = true
+space_open_runs_commands = "all"
+remote_size = "latest"
+shell = "/bin/sh"
+
+[[remote]]
+id = "sample-box"
+ssh = "sample-host"
+label = "Sample destination"

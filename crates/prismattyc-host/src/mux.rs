@@ -2206,6 +2206,16 @@ impl PaneRuntime {
 }
 
 impl MuxRuntime {
+    /// Change retention for existing panes and all future/recreated emulators.
+    /// Already discarded output cannot be recovered by enabling this policy.
+    pub(crate) fn set_alt_screen_scrollback(&mut self, retain: bool) {
+        self.alt_screen_scrollback = retain;
+        for pane in self.panes.values_mut() {
+            pane.alt_screen_scrollback = retain;
+            pane.emulator.set_retain_alt_history(retain);
+        }
+    }
+
     pub(crate) fn toggle_rich_focus(&mut self) -> bool {
         if !self.focused().experimental_rich() {
             return false;

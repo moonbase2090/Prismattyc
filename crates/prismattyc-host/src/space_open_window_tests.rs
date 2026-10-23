@@ -1157,7 +1157,7 @@ fn launch_reopen_child(test_name: &str, recycle_ids: bool) {
     )
     .unwrap();
     let config = config::ConfigFile {
-        space_startup: Some("fresh".into()),
+        space_startup: Some(crate::config::SpaceStartup::Fresh),
         space_autosave: Some(false),
         ..config::ConfigFile::default()
     };
@@ -1524,7 +1524,7 @@ fn space_reopen_after_daemon_restart_reused_ids_reconnect_each_view() {
     )
     .unwrap();
     let config = config::ConfigFile {
-        space_startup: Some("fresh".into()),
+        space_startup: Some(crate::config::SpaceStartup::Fresh),
         space_autosave: Some(false),
         ..config::ConfigFile::default()
     };

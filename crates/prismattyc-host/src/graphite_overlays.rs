@@ -233,7 +233,7 @@ pub(crate) fn palette(
     }
 
     if let Some((labels, selected_chip)) = frame.chips {
-        let hint = "C-←/→ filter";
+        let hint = "←/→ filter";
         let hint_w = graphite::text_width(Face::Mono, small_px, hint).ceil() as usize;
         let hint_x = text_right.saturating_sub(hint_w);
         for chip in &layout.filter_chips {

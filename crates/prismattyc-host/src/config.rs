@@ -6,7 +6,6 @@
 //! mtime poller on the file path (not the parent directory). Rename-replace
 //! flips the inode, so editor saves are caught without inotify.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -49,6 +48,7 @@ pub const DEFAULT_WALKTHROUGH_VOICE: &str = "default";
 /// the last frame on screen; `log` writes it to stderr; `both` does both.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub enum RenderTimer {
     #[default]
     Off,
@@ -88,6 +88,7 @@ impl MacosPresent {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub enum TabStripMode {
     #[default]
     Auto,
@@ -100,6 +101,7 @@ pub enum TabStripMode {
 /// selectable.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub enum ChromeStyle {
     Classic,
     #[default]
@@ -112,6 +114,7 @@ pub enum ChromeStyle {
 /// `chrome_style = "graphite"`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub enum BarColor {
     #[default]
     Graphite,
@@ -124,6 +127,7 @@ pub enum BarColor {
 /// title; `hover` keeps the PT-148 handle-hover preview only.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub enum PaneTitlesMode {
     #[default]
     Focused,
@@ -135,6 +139,7 @@ pub enum PaneTitlesMode {
 /// Only read when `chrome_style = "graphite"`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub enum LayoutMode {
     #[default]
     Bars,
@@ -156,6 +161,7 @@ impl LayoutMode {
 /// stay in Recent messages. Bell, paste, and drag chips have their own keys.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub enum ToastLevel {
     #[default]
     All,
@@ -180,11 +186,31 @@ impl ToastLevel {
     }
 }
 
+macro_rules! config_choice {
+    ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize, schemars::JsonSchema)]
+        pub enum $name {
+            $(#[serde(rename = $value)] $variant),+
+        }
+        impl $name {
+            pub const fn as_str(self) -> &'static str {
+                match self { $(Self::$variant => $value),+ }
+            }
+        }
+    };
+}
+config_choice!(FocusBorderAnimation { None => "none", LightCycle => "light-cycle" });
+config_choice!(SessionNaming { Ask => "ask", Auto => "auto", Blank => "blank" });
+config_choice!(SpaceStartup { Ask => "ask", Restore => "restore", Fresh => "fresh" });
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub struct ConfigFile {
     /// Tab strip visibility: `auto`, `always`, or `multi` (default `auto`).
     pub tab_strip: Option<TabStripMode>,
+    /// Enable the complete settings editor. Off by default during rollout.
+    pub settings_panel: Option<bool>,
     /// Open links with a plain click (default) or require Cmd/Ctrl-click.
     pub link_click: Option<crate::link_click::Mode>,
     /// Deliver pastes on the pane writer thread and encode image pastes off
@@ -232,10 +258,11 @@ pub struct ConfigFile {
     /// Focus border color: spectrum name (`coral`…`ink`) or 0-based index
     /// (bare integer or string). Validated by [`load`].
     #[serde(default, deserialize_with = "focus_border_spec")]
+    #[schemars(with = "Option<FocusBorderSpec>")]
     pub focus_border: Option<String>,
     /// Focus border animation: `"light-cycle"` traces the border like a Tron
     /// light cycle on focus change; `"none"` (default) keeps it static.
-    pub focus_border_animation: Option<String>,
+    pub focus_border_animation: Option<FocusBorderAnimation>,
     /// Light-cycle sweep duration in milliseconds (50–5000; default 280).
     pub focus_border_animation_ms: Option<u64>,
     /// Draw the bright "vehicle" box at the sweep's leading edge (default
@@ -279,7 +306,7 @@ pub struct ConfigFile {
     /// Pane chrome to terminal cell content, in physical pixels.
     pub pane_padding_px: Option<usize>,
     /// Spaces rail edge: `bottom` (default), `left`, `top`, `right`, `off`.
-    pub space_rail: Option<String>,
+    pub space_rail: Option<crate::space_rail::RailSide>,
     /// Enable dragging and keyboard reordering of saved spaces. Default false.
     pub space_reorder: Option<bool>,
     /// Keep one pmuxd snapshot connection for periodic polls.
@@ -305,9 +332,9 @@ pub struct ConfigFile {
     /// Missing both means on.
     pub space_autosave: Option<bool>,
     /// Ask for session names or assign suggested names automatically.
-    pub session_naming: Option<String>,
+    pub session_naming: Option<SessionNaming>,
     /// Startup behavior: ask (default), restore, or fresh.
-    pub space_startup: Option<String>,
+    pub space_startup: Option<SpaceStartup>,
     /// Flash the window on BEL (invert for ~120ms). Default true.
     pub visual_bell: Option<bool>,
     /// Use a static pane perimeter instead of the full-window visual flash and
@@ -393,14 +420,15 @@ pub struct ConfigFile {
     /// Validated by [`load`]; see [`ConfigFile::remote_destinations`].
     #[serde(default)]
     pub remote: Option<Vec<prismattyc_mux::remote_catalog::RemoteDestinationEntry>>,
-    /// Unknown `[mux]` keys from the file that was parsed. Not a config key.
+    /// Ignored future field names from the parsed file. Not a config key.
     #[serde(skip)]
-    pub(crate) mux_unknown_warnings: Vec<String>,
+    pub(crate) unknown_warnings: Vec<String>,
 }
 
 /// Host accessibility switches (PT-173 / PT-175).
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub struct A11ySection {
     pub os_tree: Option<bool>,
     pub announce: Option<bool>,
@@ -409,6 +437,7 @@ pub struct A11ySection {
 /// Space arrangement autosave (issue #161).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub struct SpacesSection {
     /// Save after a structural change. `None` follows [`ConfigFile::space_autosave`], then on.
     pub autosave: Option<bool>,
@@ -444,10 +473,10 @@ impl ConfigFile {
     /// the macOS Command shortcuts enabled by `macos_shortcuts = true`.
     /// Empty when the flag is off or every explicit entry keeps (or
     /// intentionally unbinds with `[]`) its Command chord.
-    /// Warnings for `[mux]` keys this build does not read. Empty when the
-    /// table is absent or every key is known.
-    pub fn mux_unknown_key_warnings(&self) -> &[String] {
-        &self.mux_unknown_warnings
+    /// Warnings for future fields this build does not read. Values are never
+    /// included, and unknown action names never enter the executable keymap.
+    pub fn unknown_key_warnings(&self) -> &[String] {
+        &self.unknown_warnings
     }
 
     pub fn macos_override_warnings(&self) -> Vec<String> {
@@ -566,10 +595,7 @@ impl ConfigFile {
 
     /// Validated by [`load`]; an unknown spelling never reaches here.
     pub fn space_rail(&self) -> crate::space_rail::RailSide {
-        self.space_rail
-            .as_deref()
-            .and_then(crate::space_rail::RailSide::parse)
-            .unwrap_or_default()
+        self.space_rail.unwrap_or_default()
     }
 
     pub fn space_rail_chip_cols(&self) -> usize {
@@ -695,20 +721,21 @@ fn valid_feature_tag(tag: &str) -> bool {
 
 /// `focus_border = "violet"` and `focus_border = 4` both work: TOML integers
 /// are folded into the string form that `parse_focus_border` accepts.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+enum FocusBorderSpec {
+    Text(String),
+    Index(i64),
+}
+
 fn focus_border_spec<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Spec {
-        Text(String),
-        Index(i64),
-    }
     Ok(
-        Option::<Spec>::deserialize(deserializer)?.map(|spec| match spec {
-            Spec::Text(text) => text,
-            Spec::Index(index) => index.to_string(),
+        Option::<FocusBorderSpec>::deserialize(deserializer)?.map(|spec| match spec {
+            FocusBorderSpec::Text(text) => text,
+            FocusBorderSpec::Index(index) => index.to_string(),
         }),
     )
 }
@@ -751,84 +778,41 @@ pub fn save_theme(path: &Path, theme_id: &str) -> Result<()> {
 
 /// Save one preference atomically and preserve unrelated settings and comments.
 pub fn save_preference(path: &Path, key: &str, value: toml_edit::Item) -> Result<()> {
+    let value = crate::config_document::item_value(value)?;
     mutate_preference(path, |document| {
-        document[key] = value;
+        crate::config_document::set_value(document, &[key.to_string()], Some(value))
     })
 }
 
-/// Write `[spaces] autosave` without rewriting the rest of the file.
+/// Write the canonical autosave path without replacing inline tables or siblings.
 pub fn save_spaces_autosave(path: &Path, enabled: bool) -> Result<()> {
     mutate_preference(path, |document| {
-        if document
-            .get("spaces")
-            .and_then(|item| item.as_table())
-            .is_none()
-        {
-            let mut table = toml_edit::Table::new();
-            table.set_implicit(false);
-            document["spaces"] = toml_edit::Item::Table(table);
-        }
-        if let Some(table) = document["spaces"].as_table_mut() {
-            table["autosave"] = toml_edit::value(enabled);
-        }
+        crate::config_document::set_value(
+            document,
+            &["spaces".into(), "autosave".into()],
+            Some(enabled.into()),
+        )
     })
 }
 
-/// Remove one top-level key and preserve the rest of the file.
+/// Remove one top-level override while keeping its comments and other values.
 pub fn clear_preference(path: &Path, key: &str) -> Result<()> {
     mutate_preference(path, |document| {
-        document.remove(key);
+        crate::config_document::set_value(document, &[key.to_string()], None)
     })
 }
 
-fn mutate_preference(path: &Path, mutate: impl FnOnce(&mut toml_edit::DocumentMut)) -> Result<()> {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
-    };
-    let mut document = raw
-        .parse::<toml_edit::DocumentMut>()
-        .with_context(|| format!("parse {} before saving a preference", path.display()))?;
-    mutate(&mut document);
-    parse(&document.to_string(), path)?;
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("create config directory {}", parent.display()))?;
-    let filename = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("config.toml");
-    let nonce = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary = parent.join(format!(
-        ".{filename}.prism-theme-{}-{nonce}",
-        std::process::id()
-    ));
-    let result = (|| -> Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .with_context(|| format!("create {}", temporary.display()))?;
-        file.write_all(document.to_string().as_bytes())
-            .with_context(|| format!("write {}", temporary.display()))?;
-        file.sync_all()
-            .with_context(|| format!("sync {}", temporary.display()))?;
-        if let Ok(metadata) = std::fs::metadata(path) {
-            std::fs::set_permissions(&temporary, metadata.permissions())
-                .with_context(|| format!("preserve permissions for {}", path.display()))?;
-        }
-        std::fs::rename(&temporary, path)
-            .with_context(|| format!("replace {} with {}", path.display(), temporary.display()))?;
+fn mutate_preference(
+    path: &Path,
+    mutate: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<()>,
+) -> Result<()> {
+    prismattyc_mux::transact_config(path, |document| {
+        mutate(document)?;
+        parse(&document.to_string(), path)?;
         Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result
+    })?
+    .report();
+    Ok(())
 }
 
 /// One host warning line. The key name is the whole extra detail.
@@ -836,11 +820,28 @@ pub fn host_warning_line(warning: &str) -> String {
     format!("prismattyc-host: warning: {warning}")
 }
 
-fn parse(raw: &str, path: &Path) -> Result<ConfigFile> {
-    let mut config: ConfigFile =
+pub(crate) fn parse(raw: &str, path: &Path) -> Result<ConfigFile> {
+    let raw_value: toml::Value =
         toml::from_str(raw).with_context(|| format!("parse {}", path.display()))?;
-    config.mux_unknown_warnings = prismattyc_mux::mux_unknown_key_warnings(raw)
+    let (known, mut warnings) = crate::config_schema::known(raw_value);
+    warnings.extend(prismattyc_mux::mux_unknown_key_warnings(raw)?);
+    let mut config: ConfigFile = known
+        .try_into()
         .with_context(|| format!("parse {}", path.display()))?;
+    config.unknown_warnings = warnings;
+    for font in config
+        .font
+        .iter()
+        .chain(config.font_fallback.iter().flatten())
+    {
+        if let Some(id) = font.to_str().filter(|id| id.starts_with("bundled:")) {
+            anyhow::ensure!(
+                crate::bundled_fonts::find(id).is_some(),
+                "unknown bundled font {id:?}"
+            );
+        }
+    }
+
     if let Some(spec) = config.focus_border.as_deref() {
         anyhow::ensure!(
             crate::raster::parse_focus_border(spec).is_some(),
@@ -853,7 +854,10 @@ fn parse(raw: &str, path: &Path) -> Result<ConfigFile> {
         crate::theme::apply_overrides(&mut theme, overrides)?;
     }
     config.resolved_theme = Some(theme);
-    if let Some(animation) = config.focus_border_animation.as_deref() {
+    if let Some(animation) = config
+        .focus_border_animation
+        .map(crate::config::FocusBorderAnimation::as_str)
+    {
         anyhow::ensure!(
             matches!(animation, "light-cycle" | "none"),
             "focus_border_animation {animation:?} is not \"light-cycle\" or \"none\""
@@ -919,19 +923,25 @@ fn parse(raw: &str, path: &Path) -> Result<ConfigFile> {
             );
         }
     }
-    if let Some(mode) = config.session_naming.as_deref() {
+    if let Some(mode) = config
+        .session_naming
+        .map(crate::config::SessionNaming::as_str)
+    {
         anyhow::ensure!(
             matches!(mode, "ask" | "auto" | "blank"),
             "session_naming must be ask, auto, or blank"
         );
     }
-    if let Some(startup) = config.space_startup.as_deref() {
+    if let Some(startup) = config
+        .space_startup
+        .map(crate::config::SpaceStartup::as_str)
+    {
         anyhow::ensure!(
             matches!(startup, "ask" | "restore" | "fresh"),
             "space_startup must be ask, restore, or fresh"
         );
     }
-    if let Some(spec) = config.space_rail.as_deref() {
+    if let Some(spec) = config.space_rail.map(crate::space_rail::RailSide::as_str) {
         anyhow::ensure!(
             crate::space_rail::RailSide::parse(spec).is_some(),
             "space_rail {spec:?} must be bottom, left, top, right, or off"
@@ -1152,7 +1162,6 @@ mod tests {
             "[[remote]]\nid = \"x\"\nssh = \"-oProxyCommand=sh\"\n",
             "[[remote]]\nid = \"Bad Id\"\nssh = \"x\"\n",
             "[[remote]]\nid = \"x\"\nssh = \"a\"\n[[remote]]\nid = \"x\"\nssh = \"b\"\n",
-            "[[remote]]\nid = \"x\"\nssh = \"a\"\nport = 22\n",
         ] {
             std::fs::write(&path, bad).unwrap();
             assert!(load(&path).is_err(), "{bad:?} must be rejected");
@@ -1297,7 +1306,6 @@ mod tests {
             .unwrap()
         );
         for bad in [
-            "[keys]\nsplit_rite = \"ctrl+alt+enter\"\n",
             "[keys]\nfind = \"ctrl+bogus\"\n",
             "[keys]\nfind = \"shift+f\"\n",
             "[keys]\nsplit_right = \"ctrl+shift+w\"\n",
@@ -1329,7 +1337,10 @@ mod tests {
         assert_eq!(ConfigFile::default().splash_animation, None);
         std::fs::write(&path, "focus_border_animation = \"light-cycle\"\n").unwrap();
         assert_eq!(
-            load(&path).unwrap().focus_border_animation.as_deref(),
+            load(&path)
+                .unwrap()
+                .focus_border_animation
+                .map(crate::config::FocusBorderAnimation::as_str),
             Some("light-cycle")
         );
         std::fs::write(&path, "render_timer = \"osd\"\n").unwrap();
@@ -1351,7 +1362,10 @@ mod tests {
         assert!(load(&path).is_err());
         std::fs::write(&path, "focus_border_animation = \"none\"\n").unwrap();
         assert_eq!(
-            load(&path).unwrap().focus_border_animation.as_deref(),
+            load(&path)
+                .unwrap()
+                .focus_border_animation
+                .map(crate::config::FocusBorderAnimation::as_str),
             Some("none")
         );
         std::fs::write(
@@ -1544,14 +1558,13 @@ mod tests {
     }
 
     #[test]
-    fn invalid_values_and_unknown_keys_are_rejected() {
+    fn invalid_known_values_are_rejected() {
         let dir = temp_dir("invalid");
         let path = dir.join("config.toml");
         for bad in [
             "font_px = 200.0",
             "panes = 0",
             "panes = 99",
-            "not_a_setting = true",
             "font_px = \"large\"",
             "focus_border = \"nope\"",
             "focus_border = 99",
@@ -1591,8 +1604,6 @@ mod tests {
             "window_blur = \"yes\"",
             "hover_blend = -0.01",
             "hover_blend = 0.31",
-            "[a11y]\nnot_a_setting = true",
-            "[spaces]\nnot_a_setting = true",
             "pane_titles = \"always\"",
             "chrome_style = \"glass\"",
             "bar_color = \"teal\"",
@@ -1603,6 +1614,158 @@ mod tests {
             assert!(load(&path).is_err(), "should reject: {bad}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn future_fields_and_actions_survive_known_edits_and_reload() {
+        let dir = temp_dir("future-preservation");
+        let path = dir.join("config.toml");
+        let original = r##"# keep the introduction
+future_root = { enabled = true, values = [1, 2] } # future root note
+font_px = 15.0 # size note
+[a11y]
+announce = true
+future_tree = { mode = "later" }
+[spaces]
+autosave = true
+future_space = ["first", "second"]
+[theme_overrides]
+attention_badge = "#123456"
+future_color = "#abcdef"
+[mux]
+instance = "work"
+future_policy = { mode = "later" }
+[keys]
+copy = "ctrl+shift+c"
+future_action = { not_a_chord = true }
+[[remote]]
+id = "devbox"
+ssh = "devbox"
+label = "Dev box"
+future_remote = { values = [3, 4] }
+"##;
+        std::fs::write(&path, original).unwrap();
+        save_preference(&path, "font_px", toml_edit::value(17.5)).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.font_px, Some(17.5));
+        assert_eq!(loaded.a11y_announce(), true);
+        assert_eq!(loaded.remote_destinations().unwrap()[0].label, "Dev box");
+        assert!(loaded.keys.as_ref().unwrap().contains_key("copy"));
+        assert!(!loaded.keys.as_ref().unwrap().contains_key("future_action"));
+        assert_eq!(loaded.unknown_key_warnings().len(), 7);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        for text in [
+            "# keep the introduction",
+            "# future root note",
+            "# size note",
+            "future_root = { enabled = true, values = [1, 2] }",
+            "future_tree = { mode = \"later\" }",
+            "future_space = [\"first\", \"second\"]",
+            "future_color = \"#abcdef\"",
+            "future_policy = { mode = \"later\" }",
+            "future_action = { not_a_chord = true }",
+            "future_remote = { values = [3, 4] }",
+        ] {
+            assert!(raw.contains(text), "lost {text:?}: {raw}");
+        }
+        let before = raw.clone();
+        assert!(save_preference(&path, "font_px", toml_edit::value("large")).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unknown_projection_does_not_hide_bad_known_nested_values() {
+        let dir = temp_dir("known-nested-invalid");
+        let path = dir.join("config.toml");
+        for raw in [
+            "future = true\nfont_px = \"large\"",
+            "[a11y]\nfuture = true\nannounce = \"yes\"",
+            "[spaces]\nfuture = true\nautosave = \"yes\"",
+            "[theme_overrides]\nfuture = true\ndefault_fg = \"bad\"",
+            "[keys]\nfuture = {}\ncopy = \"not-a-chord\"",
+            "[[remote]]\nfuture = true\nid = \"bad id\"\nssh = \"host\"",
+            "remote = [1]\nfuture = true",
+            "[mux]\nfuture = true\nattach_on_new = \"yes\"",
+        ] {
+            assert!(
+                parse(raw, &path).is_err(),
+                "accepted invalid known setting: {raw}"
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn separate_process_edits_merge_against_the_latest_document() {
+        const CHILD: &str = "PRISMATTYC_CONFIG_WRITER_TEST";
+        if let Ok(directory) = std::env::var(CHILD) {
+            let dir = PathBuf::from(directory);
+            let role = std::env::var("PRISMATTYC_CONFIG_WRITER_ROLE").unwrap();
+            let path = dir.join("config.toml");
+            // Both editors can have read the same original snapshot.
+            assert!(std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("font_px = 15.0"));
+            std::fs::write(dir.join(format!("ready-{role}")), "ready").unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !dir.join("start").exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "parent did not release writers"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if role == "font" {
+                save_preference(&path, "font_px", toml_edit::value(17.5)).unwrap();
+                assert_eq!(load(&path).unwrap().font_px, Some(17.5));
+            } else {
+                save_preference(&path, "window_padding_px", toml_edit::value(11)).unwrap();
+                assert_eq!(load(&path).unwrap().window_padding_px, Some(11));
+            }
+            return;
+        }
+        let dir = temp_dir("process-editors");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "# keep\nfont_px = 15.0\nwindow_padding_px = 3\n").unwrap();
+        let children: Vec<_> = ["font", "padding"]
+            .into_iter()
+            .map(|role| {
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "config::tests::separate_process_edits_merge_against_the_latest_document",
+                    ])
+                    .env(CHILD, &dir)
+                    .env("PRISMATTYC_CONFIG_WRITER_ROLE", role)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !(dir.join("ready-font").exists() && dir.join("ready-padding").exists()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "writers did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::fs::write(dir.join("start"), "go").unwrap();
+        for child in children {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "child: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.font_px, Some(17.5));
+        assert_eq!(loaded.window_padding_px, Some(11));
+        assert!(std::fs::read_to_string(&path).unwrap().contains("# keep"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1624,11 +1787,11 @@ mod tests {
             Some("work")
         );
         assert_eq!(
-            loaded.mux_unknown_key_warnings(),
+            loaded.unknown_key_warnings(),
             ["ignoring unknown [mux] key `not_a_key`"]
         );
         assert_eq!(
-            host_warning_line(&loaded.mux_unknown_key_warnings()[0]),
+            host_warning_line(&loaded.unknown_key_warnings()[0]),
             "prismattyc-host: warning: ignoring unknown [mux] key `not_a_key`"
         );
         std::fs::write(&path, "theme = \"monokai\"\n[mux]\ninstance = \n").unwrap();
@@ -1682,10 +1845,6 @@ mod tests {
                 // is still rejected.
                 "theme = \"prismattyc-default\"\n[theme_overrides]\nselection_fg = \"#000000\"\n",
                 "selection_fg and selection_bg",
-            ),
-            (
-                "[theme_overrides]\nnot_a_colour = \"#000000\"\n",
-                "not_a_colour",
             ),
         ] {
             std::fs::write(&path, raw).unwrap();
@@ -1794,7 +1953,12 @@ mod tests {
         save_preference(&path, "space_startup", toml_edit::value("restore")).unwrap();
         save_preference(&path, "session_naming", toml_edit::value("auto")).unwrap();
         let config = load(&path).unwrap();
-        assert_eq!(config.session_naming.as_deref(), Some("auto"));
+        assert_eq!(
+            config
+                .session_naming
+                .map(crate::config::SessionNaming::as_str),
+            Some("auto")
+        );
         assert_eq!(config.space_rail(), crate::space_rail::RailSide::Right);
         assert_eq!(config.space_autosave, Some(true));
         assert!(config.space_autosave_enabled());

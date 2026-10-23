@@ -12,7 +12,10 @@ mod attach_adopt;
 mod attach_log;
 mod attach_tabs;
 mod border_underlay;
+mod bundled_fonts;
 mod config;
+mod config_document;
+mod config_schema;
 mod config_template;
 mod daemon_startup;
 mod file_writer;
@@ -84,6 +87,7 @@ mod render_window_tests;
 mod restore_prompt;
 mod rich;
 mod session_prompt;
+mod settings;
 mod sidebar;
 mod space_client;
 mod space_open;
@@ -688,7 +692,11 @@ impl Cli {
                 self.panes = panes;
             }
         }
-        self.light_cycle = matches!(file.focus_border_animation.as_deref(), Some("light-cycle"));
+        self.light_cycle = matches!(
+            file.focus_border_animation
+                .map(crate::config::FocusBorderAnimation::as_str),
+            Some("light-cycle")
+        );
         self.light_cycle_ms = file
             .focus_border_animation_ms
             .map_or(DEFAULT_LIGHT_CYCLE_MS, u128::from);
@@ -1178,6 +1186,8 @@ struct HostState {
     /// Prismattyc theme switches between Dark and Light (#145).
     theme_overrides: Option<theme::ThemeOverrides>,
     theme_picker: Option<ThemePicker>,
+    settings: Option<settings::Panel>,
+    ui_wake: mux::Wake,
     /// Graphite transparency dialog (#112). Classic chrome leaves this empty.
     transparency: Option<transparency::Dialog>,
     palette: Option<Palette>,
@@ -3131,6 +3141,12 @@ impl App {
             return;
         }
         let prior = std::mem::replace(&mut self.file_config, newest);
+        for host in self.windows.values_mut() {
+            if let Some(panel) = host.settings.as_mut() {
+                panel.refresh();
+                host.dirty = true;
+            }
+        }
         if self.file_config.start_at_login != prior.start_at_login {
             restore_prompt::sync_login_registration();
         }
@@ -3160,7 +3176,7 @@ impl App {
         for host in self.windows.values_mut() {
             host.pending_full_repaint = Some(FullRepaintReason::Fallback);
         }
-        for warning in self.file_config.mux_unknown_key_warnings() {
+        for warning in self.file_config.unknown_key_warnings() {
             eprintln!("{}", config::host_warning_line(warning));
         }
         if self.file_config.keys != prior.keys
@@ -3184,6 +3200,21 @@ impl App {
         };
 
         for host in self.windows.values_mut() {
+            if self.file_config.bar_color != prior.bar_color {
+                host.bar_color = self.file_config.bar_color;
+                host.pending_full_repaint = Some(FullRepaintReason::Theme);
+                host.dirty = true;
+            }
+            if self.file_config.alt_screen_scrollback() != prior.alt_screen_scrollback() {
+                let retain =
+                    self.cli.alt_screen_scrollback || self.file_config.alt_screen_scrollback();
+                host.emulator.set_retain_alt_history(retain);
+                host.mux.set_alt_screen_scrollback(retain);
+                for parked in host.local_views.parked.values_mut() {
+                    parked.mux.set_alt_screen_scrollback(retain);
+                }
+                host.dirty = true;
+            }
             let selective_border_rings = self.file_config.selective_border_rings.unwrap_or(false);
             if host.selective_border_rings != selective_border_rings {
                 host.selective_border_rings = selective_border_rings;
@@ -3362,7 +3393,9 @@ impl App {
             }
             if self.file_config.focus_border_animation != prior.focus_border_animation {
                 host.light_cycle = matches!(
-                    self.file_config.focus_border_animation.as_deref(),
+                    self.file_config
+                        .focus_border_animation
+                        .map(crate::config::FocusBorderAnimation::as_str),
                     Some("light-cycle")
                 );
                 if !host.light_cycle {
@@ -4211,7 +4244,12 @@ impl App {
             } else {
                 None
             };
-        if self.file_config.space_startup.as_deref() != Some("fresh") {
+        if self
+            .file_config
+            .space_startup
+            .map(crate::config::SpaceStartup::as_str)
+            != Some("fresh")
+        {
             if let Some(prompt) = restore_prompt.as_mut() {
                 if let Some(socket) =
                     host_mux_socket().filter(|s| prismattyc_mux::login::enabled(s).unwrap_or(false))
@@ -4410,6 +4448,8 @@ impl App {
                 theme,
                 theme_overrides: self.file_config.theme_overrides.clone(),
                 theme_picker: None,
+                settings: None,
+                ui_wake: self.wake.clone(),
                 transparency: None,
                 palette: None,
                 palette_layout: None,
@@ -4592,9 +4632,17 @@ impl App {
             let configured = host.theme.clone();
             apply_host_theme(host, configured);
             host.cache_writer = !config_editor;
-            host.local_views.fresh = self.file_config.space_startup.as_deref() == Some("fresh");
+            host.local_views.fresh = self
+                .file_config
+                .space_startup
+                .map(crate::config::SpaceStartup::as_str)
+                == Some("fresh");
             if host.restore_prompt.is_some() {
-                match self.file_config.space_startup.as_deref() {
+                match self
+                    .file_config
+                    .space_startup
+                    .map(crate::config::SpaceStartup::as_str)
+                {
                     Some("restore") => restore_prompt::finish(host, true),
                     Some("fresh") => restore_prompt::finish(host, false),
                     _ => {}
@@ -5045,6 +5093,16 @@ fn focused_document(host: &HostState) -> a11y::DocumentSnap {
 }
 
 fn chrome_overlay(host: &HostState) -> a11y::OverlayKind {
+    if let Some(panel) = host.settings.as_ref() {
+        let (header, rows) = panel.rows();
+        return a11y::OverlayKind::Palette {
+            rows: rows
+                .into_iter()
+                .map(|row| format!("{header}: {} {}", row.name, row.describe))
+                .collect(),
+            selected: panel.selected(),
+        };
+    }
     if host.space_panel.is_some() {
         if let Some((header, rows)) = space_panel::rows(host) {
             return a11y::OverlayKind::Palette {
@@ -5166,6 +5224,16 @@ fn dispatch_overlay_activate(
             }
         }
         apply_transparency_input(host, transparency::Input::Enter);
+        return Dispatch::Handled;
+    }
+    if let Some(panel) = host.settings.as_mut() {
+        panel.activate(index);
+        let selected = panel.selected();
+        if let Some(menu) = host.context_menu.as_mut() {
+            menu.selected = selected;
+        }
+        host.dirty = true;
+        host.window.request_redraw();
         return Dispatch::Handled;
     }
     if host.space_panel.is_some() {
@@ -7884,10 +7952,11 @@ fn rasterize_frame(
                 }]
             };
             // Settings pages are fixed size and scroll inside (Graphite rule).
-            let layout_mode = if host
-                .space_panel
-                .as_ref()
-                .is_some_and(space_panel::Panel::fixed_size)
+            let layout_mode = if host.settings.is_some()
+                || host
+                    .space_panel
+                    .as_ref()
+                    .is_some_and(space_panel::Panel::fixed_size)
             {
                 PaletteLayoutMode::FixedHeight
             } else {
@@ -7900,9 +7969,16 @@ fn rasterize_frame(
                 chips: None,
                 sections: &sections,
                 selected,
-                scroll: host.space_panel.as_ref().map_or(0, |panel| panel.scroll),
+                scroll: host.settings.as_ref().map_or_else(
+                    || host.space_panel.as_ref().map_or(0, |panel| panel.scroll),
+                    |panel| panel.scroll,
+                ),
                 detail: None,
-                footer: "Enter select · Esc close · ↑↓ move",
+                footer: if host.settings.is_some() {
+                    "↑/↓ rows · ←/→ section or value · Enter edit/reset · Escape back"
+                } else {
+                    "Enter select · Esc close · ↑↓ move"
+                },
             };
             paint_palette_overlay(
                 &host.font,
@@ -7920,6 +7996,9 @@ fn rasterize_frame(
         None
     };
     if let Some(layout) = painted_context {
+        if let Some(panel) = host.settings.as_mut() {
+            panel.scroll = layout.start;
+        }
         if let Some(panel) = host.space_panel.as_mut() {
             panel.scroll = layout.start;
         }
@@ -9942,6 +10021,7 @@ fn refresh_space_views_settled(host: &mut HostState) {
 }
 
 fn refresh_space_views(host: &mut HostState) {
+    settings::poll(host);
     space_panel::poll(host);
     drain_space_client(host);
     let now = Instant::now();
@@ -10556,6 +10636,7 @@ fn open_context_menu(host: &mut HostState, target: ContextMenuTarget) {
 }
 
 fn close_context_menu(host: &mut HostState) {
+    host.settings = None;
     host.space_panel = None;
     if host.context_menu.take().is_some() {
         host.context_menu_target = None;
@@ -10594,6 +10675,9 @@ fn pane_space_membership(session: &str, spaces: &[String]) -> String {
 }
 
 fn context_menu_rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
+    if let Some(panel) = host.settings.as_ref() {
+        return Some(panel.rows());
+    }
     if host.space_panel.is_some() {
         return space_panel::rows(host);
     }
@@ -11556,6 +11640,12 @@ fn apply_palette_pointer(host: &mut HostState) {
             host.dirty = true;
         }
     }
+    let row = if let Some(panel) = host.settings.as_mut() {
+        panel.hover(row);
+        panel.selected()
+    } else {
+        row
+    };
     if let Some(menu) = host.context_menu.as_mut() {
         if menu.selected != row {
             menu.selected = row;
@@ -15955,6 +16045,7 @@ fn open_transparency(host: &mut HostState) -> bool {
     host.palette_layout = None;
     host.theme_picker = None;
     host.context_menu = None;
+    host.settings = None;
     host.context_menu_target = None;
     host.space_picker = None;
     host.move_target = None;
@@ -20108,7 +20199,19 @@ impl ApplicationHandler<UserAction> for App {
                     host.last_app_mouse_cell = None;
                 }
                 WindowEvent::MouseWheel { delta, .. } => {
-                    if host.palette.is_some() {
+                    if let Some(panel) = host.settings.as_mut() {
+                        let rows = match delta {
+                            MouseScrollDelta::LineDelta(_, y) => (-*y * 3.0).round() as i32,
+                            MouseScrollDelta::PixelDelta(position) => {
+                                (-position.y / host.font.cell_h.max(1) as f64).round() as i32
+                            }
+                        };
+                        panel.scroll_rows(rows);
+                        if let Some(menu) = host.context_menu.as_mut() {
+                            menu.selected = panel.selected();
+                        }
+                        host.dirty = true;
+                    } else if host.palette.is_some() {
                         scroll_palette_with_wheel(host, delta);
                     } else if host.theme_picker.is_some() {
                         scroll_theme_picker_with_wheel(host, delta);
@@ -20249,6 +20352,14 @@ impl ApplicationHandler<UserAction> for App {
             }
             WindowEvent::RedrawRequested => unreachable!("handled above"),
             WindowEvent::Ime(ime) => {
+                if let Some(panel) = host.settings.as_mut() {
+                    if let Ime::Commit(text) = &ime {
+                        panel.paste(text);
+                    }
+                    host.dirty = true;
+                    host.window.request_redraw();
+                    return;
+                }
                 let route = ime_text_route(inline_editor(host), &ime, &mut host.preedit);
                 apply_ime_text_route(host, route);
                 host.dirty = true;
@@ -20315,6 +20426,9 @@ impl ApplicationHandler<UserAction> for App {
                     }
                     sync_chrome_hover(host);
                     host.window.request_redraw();
+                    return;
+                }
+                if settings::handle_key(host, &event) {
                     return;
                 }
                 if ime_blocks_host_keyboard(&host.preedit) {
@@ -21457,7 +21571,7 @@ fn main() -> Result<()> {
         for warning in file_config.macos_override_warnings() {
             eprintln!("prismattyc-host: warning: {warning}");
         }
-        for warning in file_config.mux_unknown_key_warnings() {
+        for warning in file_config.unknown_key_warnings() {
             eprintln!("{}", config::host_warning_line(warning));
         }
         return Ok(());
@@ -21500,7 +21614,7 @@ fn main() -> Result<()> {
     for warning in file_config.macos_override_warnings() {
         eprintln!("prismattyc-host: warning: {warning}");
     }
-    for warning in file_config.mux_unknown_key_warnings() {
+    for warning in file_config.unknown_key_warnings() {
         eprintln!("{}", config::host_warning_line(warning));
     }
     cli.apply_config(&file_config);
@@ -26849,7 +26963,7 @@ session mail (id 15)
         assert_eq!(cli.light_cycle_ms, DEFAULT_LIGHT_CYCLE_MS);
         assert!(cli.light_cycle_head, "vehicle head defaults on");
         cli.apply_config(&config::ConfigFile {
-            focus_border_animation: Some("light-cycle".into()),
+            focus_border_animation: Some(crate::config::FocusBorderAnimation::LightCycle),
             focus_border_animation_ms: Some(600),
             focus_border_animation_head: Some(false),
             ..Default::default()
@@ -26859,7 +26973,7 @@ session mail (id 15)
         assert!(!cli.light_cycle_head);
         // Explicit "none" and a removed key both turn it back off.
         cli.apply_config(&config::ConfigFile {
-            focus_border_animation: Some("none".into()),
+            focus_border_animation: Some(crate::config::FocusBorderAnimation::None),
             ..Default::default()
         });
         assert!(!cli.light_cycle);

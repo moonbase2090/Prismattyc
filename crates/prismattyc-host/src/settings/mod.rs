@@ -3,7 +3,6 @@
 
 mod controls;
 mod fonts;
-use crate::config_document as store;
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
@@ -12,9 +11,9 @@ use anyhow::{Context, Result};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
+use crate::config_document::{Change, Destination, Edit};
 use crate::{config, palette::PaletteRow};
 use controls::{Control, Kind, Section};
-use store::{Change, Destination, Edit};
 
 #[derive(Clone, Debug)]
 enum Focus {
@@ -98,7 +97,7 @@ pub(super) struct Panel {
     section: usize,
     remembered: Vec<usize>,
     focus: Focus,
-    pending: Option<Receiver<std::result::Result<store::Receipt, String>>>,
+    pending: Option<Receiver<std::result::Result<crate::config_document::Receipt, String>>>,
     font_scan: Option<Receiver<Vec<fonts::Choice>>>,
     fonts_loaded: bool,
     refresh_pending: bool,
@@ -146,7 +145,7 @@ impl Panel {
     }
 
     fn configured(&self, control: &Control) -> Option<toml::Value> {
-        store::value_at(&self.values, &control.paths[0]).cloned()
+        crate::config_document::value_at(&self.values, &control.paths[0]).cloned()
     }
 
     fn shown(&self, control: &Control) -> String {
@@ -508,7 +507,7 @@ impl Panel {
                     .map(|v| strings(Some(v)))
                     .unwrap_or_else(|| self.config.loaded_theme().ansi.iter().map(rgb).collect()),
             ),
-            Kind::Remote => Draft::Remote(store::destinations(&self.config)),
+            Kind::Remote => Draft::Remote(crate::config_document::destinations(&self.config)),
             Kind::Font => {
                 if !self.fonts_loaded && self.font_scan.is_none() {
                     let (tx, rx) = mpsc::channel();
@@ -546,7 +545,7 @@ impl Panel {
                         .iter()
                         .zip(defaults)
                         .map(|(path, default)| {
-                            store::value_at(&self.values, path)
+                            crate::config_document::value_at(&self.values, path)
                                 .cloned()
                                 .unwrap_or_else(|| rgb(&default).into())
                         })
@@ -568,7 +567,7 @@ impl Panel {
         self.focus = Focus::Editing(Editor {
             control: index,
             base: self.values.clone(),
-            remote_before: store::destinations(&self.config),
+            remote_before: crate::config_document::destinations(&self.config),
             draft,
             cursor: EditorFocus::Row(0),
         });
@@ -584,7 +583,9 @@ impl Panel {
         self.notice = "Saving…".into();
         let wake = self.wake.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(store::commit(&path, edit).map_err(|error| format!("{error:#}")));
+            let _ = tx.send(
+                crate::config_document::commit(&path, edit).map_err(|error| format!("{error:#}")),
+            );
             wake();
         });
     }
@@ -1190,7 +1191,7 @@ impl Panel {
                         .iter()
                         .map(|path| Change {
                             path: path.clone(),
-                            expected: store::value_at(&editor.base, path).cloned(),
+                            expected: crate::config_document::value_at(&editor.base, path).cloned(),
                             value: None,
                         })
                         .collect();
@@ -1207,7 +1208,7 @@ impl Panel {
                 ]
                 .into_iter()
                 .map(|path| Change {
-                    expected: store::value_at(&editor.base, &path).cloned(),
+                    expected: crate::config_document::value_at(&editor.base, &path).cloned(),
                     path,
                     value: None,
                 })
@@ -1327,7 +1328,7 @@ impl Panel {
                 .zip(values)
                 .map(|(path, value)| Change {
                     path: path.clone(),
-                    expected: store::value_at(&editor.base, path).cloned(),
+                    expected: crate::config_document::value_at(&editor.base, path).cloned(),
                     value,
                 })
                 .collect(),

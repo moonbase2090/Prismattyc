@@ -4797,6 +4797,8 @@ Each session belongs to only one Space. Other Spaces keep running.
   catalog                   Print running Spaces as versioned JSON (read-only).
   rm [NAME...] [--all]       Delete definitions; keep sessions alive.
   clear [--keep NAME]        Delete all except kept names; keep sessions alive.
+  reset NAME --confirm NAME  Back up and reset one saved Space.
+  reset --all --confirm \"RESET ALL\"  Back up all definitions and release all owners.
 Version-1 migration rejects ambiguous ownership. Originals: legacy-backups/.
 `pmux layout save space` and `pmux layout apply space` remain aliases.
 Files: $XDG_DATA_HOME/prismattyc/spaces or ~/.local/share/prismattyc/spaces
@@ -4824,6 +4826,7 @@ enum SpaceVerb {
     Attach(Vec<String>),
     Rm(Vec<String>),
     Clear(Vec<String>),
+    Reset(Vec<String>),
     Add(Vec<String>),
     Remove(Vec<String>),
     Ls,
@@ -4847,6 +4850,7 @@ fn parse_space_verb(rest: Vec<String>) -> Result<SpaceVerb, SpaceUsage> {
         Some("attach") => Ok(SpaceVerb::Attach(rest.into_iter().skip(1).collect())),
         Some("rm") | Some("delete") => Ok(SpaceVerb::Rm(rest.into_iter().skip(1).collect())),
         Some("clear") => Ok(SpaceVerb::Clear(rest.into_iter().skip(1).collect())),
+        Some("reset") => Ok(SpaceVerb::Reset(rest.into_iter().skip(1).collect())),
         Some("add") => Ok(SpaceVerb::Add(rest.into_iter().skip(1).collect())),
         Some("remove") => Ok(SpaceVerb::Remove(rest.into_iter().skip(1).collect())),
         Some("ls") if rest.len() == 1 => Ok(SpaceVerb::Ls),
@@ -4877,6 +4881,7 @@ fn cmd_space(paths: &Paths, rest: Vec<String>) -> Result<()> {
         SpaceVerb::Catalog => cmd_space_catalog(paths),
         SpaceVerb::Rm(args) => space_commands::delete_spaces(paths, args, false),
         SpaceVerb::Clear(args) => space_commands::delete_spaces(paths, args, true),
+        SpaceVerb::Reset(args) => space_commands::reset::run(paths, args),
         SpaceVerb::Add(args) => space_commands::add(paths, args),
         SpaceVerb::Remove(args) => space_commands::remove(paths, args),
     }

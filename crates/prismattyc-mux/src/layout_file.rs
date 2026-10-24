@@ -879,6 +879,20 @@ pub fn rename_space(dir: &Path, old: &str, new: &str) -> Result<PathBuf> {
     }
 }
 
+/// Session names listed in `{dir}/{name}.json`, including sessions that
+/// [`load_space`] skips. Removal uses this to drop a broken entry by name.
+pub fn listed_space_sessions(dir: &Path, name: &str) -> Result<Vec<String>> {
+    let path = layout_path(dir, name)?;
+    let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let space: SavedSpace =
+        serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
+    Ok(space
+        .sessions
+        .into_iter()
+        .map(|session| session.name)
+        .collect())
+}
+
 /// Read `{dir}/{name}.json` as a space file.
 pub fn load_space(dir: &Path, name: &str) -> Result<SavedSpace> {
     let path = layout_path(dir, name)?;
@@ -1631,6 +1645,18 @@ mod tests {
             load_space(&dir, "mixed").expect("one windowless session must not fail the load");
         let names: Vec<&str> = loaded.sessions.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["mixed"], "only the session with windows stays");
+        assert_eq!(
+            listed_space_sessions(&dir, "mixed").unwrap(),
+            ["mixed", "broken"],
+            "the file still lists the broken entry, so it can be removed by name"
+        );
+        // Saving what was loaded never writes the windowless entry back.
+        save_space(&dir, "mixed", &loaded).unwrap();
+        assert_eq!(
+            listed_space_sessions(&dir, "mixed").unwrap(),
+            ["mixed"],
+            "a save after load drops the windowless entry"
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -4797,8 +4797,7 @@ Each session belongs to only one Space. Other Spaces keep running.
   catalog                   Print running Spaces as versioned JSON (read-only).
   rm [NAME...] [--all]       Delete definitions; keep sessions alive.
   clear [--keep NAME]        Delete all except kept names; keep sessions alive.
-  reset NAME --confirm NAME  Back up and reset one saved Space.
-  reset --all --confirm \"RESET ALL\"  Back up all definitions and release all owners.
+  reset NAME|--all --confirm TEXT  Back up and reset; confirm NAME or RESET ALL.
 Version-1 migration rejects ambiguous ownership. Originals: legacy-backups/.
 `pmux layout save space` and `pmux layout apply space` remain aliases.
 Files: $XDG_DATA_HOME/prismattyc/spaces or ~/.local/share/prismattyc/spaces

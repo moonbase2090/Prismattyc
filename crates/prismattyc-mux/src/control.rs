@@ -8179,6 +8179,20 @@ fn control_peer_closed(stream: &UnixStream) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `sleep` that runs under any argv[0], for fake-agent symlinks such as
+    /// `claude` or `muse-bin-*`. Ubuntu 26.04 makes `/bin/sleep` a uutils
+    /// multicall binary that refuses to run when argv[0] names another
+    /// utility, so prefer the GNU build that it ships alongside.
+    #[cfg(unix)]
+    fn fake_agent_sleep() -> &'static str {
+        const GNU_SLEEP: &str = "/usr/bin/gnusleep";
+        if std::path::Path::new(GNU_SLEEP).is_file() {
+            GNU_SLEEP
+        } else {
+            "/bin/sleep"
+        }
+    }
     use prismattyc_core::test_time_budget;
     use std::io::{Read, Write};
     use std::sync::atomic::AtomicU64;
@@ -15711,7 +15725,7 @@ function Read-Exact([int]$Count) {
         std::fs::create_dir_all(&dir).unwrap();
         let muse = dir.join("muse-bin-1.4.3-R5018.1");
         let _ = std::fs::remove_file(&muse);
-        std::os::unix::fs::symlink("/bin/sleep", &muse).unwrap();
+        std::os::unix::fs::symlink(fake_agent_sleep(), &muse).unwrap();
         let run = dir.join("run.sh");
         std::fs::write(
             &run,
@@ -16009,7 +16023,7 @@ function Read-Exact([int]$Count) {
         std::fs::create_dir_all(&dir).unwrap();
         let fake = dir.join("claude");
         let _ = std::fs::remove_file(&fake);
-        std::os::unix::fs::symlink("/bin/sleep", &fake).unwrap();
+        std::os::unix::fs::symlink(fake_agent_sleep(), &fake).unwrap();
         let script = format!(
             "python3 -c 'import os,sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' {} 30 >/dev/null 2>&1 & printf 'READY\\n'; exec sleep 999",
             fake.display()
@@ -16072,7 +16086,7 @@ function Read-Exact([int]$Count) {
         let codex = dir.join("codex");
         for link in [&claude, &codex] {
             let _ = std::fs::remove_file(link);
-            std::os::unix::fs::symlink("/bin/sleep", link).unwrap();
+            std::os::unix::fs::symlink(fake_agent_sleep(), link).unwrap();
         }
         // The pane child sources a script file so its own cmdline names no
         // agent and dash cannot exec-optimise the tail. `codex` is a level-1

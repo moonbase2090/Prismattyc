@@ -102,6 +102,7 @@ mod theme;
 mod title_row;
 mod walkthrough;
 mod walkthrough_audio;
+mod walkthrough_demo;
 #[cfg(target_os = "linux")]
 mod wayland_shm;
 #[cfg(any(windows, test))]
@@ -1220,6 +1221,8 @@ struct HostState {
     e2e_second_dump_at: Option<Instant>,
     /// In-memory walkthrough (PT-193). XDG progress is PT-195.
     walkthrough: Option<walkthrough::WalkthroughLive>,
+    walkthrough_demo: Option<walkthrough_demo::Job>,
+    walkthrough_save_after_open: bool,
     /// Effective key table for labels (the dispatcher reads `App::keymap`).
     keymap: Arc<keybind::KeyMap>,
     /// Whether the experimental rich action is enabled for palette rows.
@@ -3734,6 +3737,7 @@ impl App {
             timing.record_phase(pump_timing::Phase::PollHostAttachTabs, started.elapsed());
             let started = Instant::now();
             advance_space_opens(host);
+            poll_walkthrough_demo(host);
             timing.record_phase(pump_timing::Phase::AdvanceSpaceOpens, started.elapsed());
             let started = Instant::now();
             refresh_space_views(host);
@@ -4461,6 +4465,8 @@ impl App {
                 dump_present_seq: 0,
                 e2e_second_dump_at: None,
                 walkthrough,
+                walkthrough_demo: None,
+                walkthrough_save_after_open: false,
                 keymap: self.keymap.clone(),
                 experimental_rich: self.cli.experimental_rich,
                 focus_border: self.cli.focus_border,
@@ -9690,6 +9696,8 @@ fn open_space_from_host(host: &mut HostState, name: &str, mode: SpaceOpenMode) {
     if !host.space_opens.blocks_persist()
         && mode == SpaceOpenMode::Switch
         && host.space_rail.current.as_deref() == Some(name)
+        && !walkthrough_at(host, "spaces.open")
+        && !host.walkthrough_save_after_open
     {
         rail_toast(host, &format!(" {name} is the current space "));
         return;
@@ -9816,7 +9824,26 @@ fn report_space_open(host: &mut HostState, completed: space_open::Completion) {
     } else {
         rail_toast(host, &format!(" {label} "));
     }
+    if completed.mode == SpaceOpenMode::Switch
+        && completed.applied == Some(true)
+        && !report.is_error()
+    {
+        observe_walkthrough(
+            host,
+            walkthrough::Detected::SpaceEvent {
+                event: "opened".into(),
+            },
+        );
+    }
+    let save_selected = std::mem::take(&mut host.walkthrough_save_after_open)
+        && walkthrough_at(host, "spaces.save")
+        && completed.applied == Some(true)
+        && !report.is_error();
+    let name = report.name.clone();
     host.last_space_open = Some(report);
+    if save_selected {
+        save_space_from_host(host, &name);
+    }
 }
 
 /// Follow a renamed Space without adopting a new owner under its old name.
@@ -10464,6 +10491,12 @@ fn save_space_from_host_with(host: &mut HostState, name: &str, toast: bool) -> b
             host.space_polish.armed = false;
             if toast {
                 rail_toast(host, " Saved ");
+                observe_walkthrough(
+                    host,
+                    walkthrough::Detected::SpaceEvent {
+                        event: "saved".into(),
+                    },
+                );
             }
             true
         }
@@ -15397,6 +15430,7 @@ fn apply_space_picker_verdict(
             true
         }
         SpacePickerVerdict::Close => {
+            host.walkthrough_save_after_open = false;
             host.move_target = None;
             host.terminal_targets = None;
             host.space_picker = None;
@@ -17358,7 +17392,19 @@ fn handle_mux_command(
                 host.dirty = true;
             }
             if !matches!(command, MuxCommand::RenameTab | MuxCommand::RenamePane) {
-                observe_host_action(host, action, true);
+                let ok = changed
+                    || !matches!(
+                        command,
+                        MuxCommand::MoveTab(_) | MuxCommand::MovePaneToTab(_)
+                    );
+                observe_host_action(host, action, ok);
+                if !ok && matches!(command, MuxCommand::MoveTab(_)) {
+                    if let Some(live) = host.walkthrough.as_mut() {
+                        live.set_mismatch_hint(
+                            "Create another tab, then try moving this tab again.".into(),
+                        );
+                    }
+                }
             }
             false
         }
@@ -18485,6 +18531,106 @@ fn observe_host_action(host: &mut HostState, action: keybind::Action, ok: bool) 
     );
 }
 
+fn walkthrough_at(host: &HostState, id: &str) -> bool {
+    host.walkthrough
+        .as_ref()
+        .and_then(|live| live.current_step())
+        .is_some_and(|step| step.id == id)
+}
+
+fn poll_walkthrough_demo(host: &mut HostState) {
+    let Some(job) = host.walkthrough_demo.as_ref() else {
+        return;
+    };
+    let Some(result) = job.poll() else {
+        return;
+    };
+    let command = job.command;
+    host.walkthrough_demo = None;
+    match result {
+        Ok(message) => {
+            rail_toast(host, &message);
+            observe_walkthrough(
+                host,
+                walkthrough::Detected::CommandEvent {
+                    command: command.into(),
+                    result: "ok".into(),
+                },
+            );
+        }
+        Err(message) => {
+            rail_error_toast(host, &message);
+            if let Some(live) = host.walkthrough.as_mut() {
+                if matches!(live.show_me(), Some(prismattyc_mux::walkthrough::ShowMe::CommandEvent { command: current }) if current == command)
+                {
+                    live.set_mismatch_hint(message);
+                }
+            }
+        }
+    }
+    host.dirty = true;
+}
+
+fn run_walkthrough_demo(host: &mut HostState, program: &str, child_args: &[String]) {
+    use prismattyc_mux::walkthrough::ShowMe;
+    let demo = host
+        .walkthrough
+        .as_ref()
+        .and_then(|live| live.show_me().cloned());
+    match demo {
+        Some(ShowMe::HostAction { action }) => {
+            if let Some(action) = keybind::Action::from_name(&action) {
+                let _ = dispatch_strip_action(host, action, program, child_args);
+            }
+        }
+        Some(ShowMe::SpaceEvent { event }) if event == "saved" => {
+            if host.space_rail.current.is_some() {
+                apply_save_space_action(host);
+            } else {
+                host.walkthrough_save_after_open = true;
+                open_space_picker(host, Some(keybind::Action::OpenSpace));
+                if let Some(live) = host.walkthrough.as_mut() {
+                    live.set_mismatch_hint("Choose the Space to open and save.".into());
+                }
+            }
+        }
+        Some(ShowMe::SpaceEvent { event }) if event == "opened" => {
+            open_space_picker(host, Some(keybind::Action::OpenSpace));
+        }
+        Some(ShowMe::CommandEvent { command }) if command == "pmux_new" => {
+            session_prompt::direct(host, None, false);
+        }
+        Some(ShowMe::CommandEvent { command })
+            if matches!(command.as_str(), "attach_all" | "mail_commit") =>
+        {
+            if host.walkthrough_demo.is_some() {
+                return;
+            }
+            let result = host_mux_socket()
+                .context("daemon socket unavailable")
+                .and_then(|socket| walkthrough_demo::Job::start(&command, socket));
+            match result {
+                Ok(job) => {
+                    host.walkthrough_demo = Some(job);
+                    if let Some(live) = host.walkthrough.as_mut() {
+                        live.set_mismatch_hint("Running the demonstration…".into());
+                    }
+                }
+                Err(error) => {
+                    if let Some(live) = host.walkthrough.as_mut() {
+                        live.set_mismatch_hint(error.to_string());
+                    }
+                }
+            }
+        }
+        _ => {
+            if let Some(live) = host.walkthrough.as_mut() {
+                live.set_mismatch_hint("Complete this action to continue.".into());
+            }
+        }
+    }
+}
+
 fn handle_caption_click(
     host: &mut HostState,
     button: MouseButton,
@@ -18534,20 +18680,7 @@ fn handle_caption_click(
                     }
                 }
                 walkthrough::CaptionHit::ShowMe => {
-                    let action = host
-                        .walkthrough
-                        .as_ref()
-                        .and_then(walkthrough::WalkthroughLive::show_me_action)
-                        .and_then(keybind::Action::from_name);
-                    if let Some(action) = action {
-                        let _ = dispatch_action(host, action, program, child_args);
-                    } else if let Some(fact) = host
-                        .walkthrough
-                        .as_ref()
-                        .and_then(walkthrough::WalkthroughLive::show_me_stub)
-                    {
-                        observe_walkthrough(host, fact);
-                    }
+                    run_walkthrough_demo(host, program, child_args);
                 }
             }
             host.dirty = true;

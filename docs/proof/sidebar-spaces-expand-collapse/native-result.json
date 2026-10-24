@@ -1,0 +1,39 @@
+{
+  "status": "PASS",
+  "host_pid": 25304,
+  "spaces_before": [
+    "default",
+    "lab",
+    "mail",
+    "ops"
+  ],
+  "spaces_after": [
+    "default",
+    "lab",
+    "mail",
+    "ops"
+  ],
+  "before_present": "before-present.png",
+  "after_present": "after-present.png",
+  "os_capture_before": {
+    "ok": false,
+    "bounds": [
+      540.0,
+      191.0,
+      1019.0,
+      625.0
+    ],
+    "stderr": "could not create image from rect\n"
+  },
+  "os_capture_after": {
+    "ok": false,
+    "bounds": [
+      540.0,
+      191.0,
+      1019.0,
+      625.0
+    ],
+    "stderr": "could not create image from rect\n"
+  },
+  "proof_kind": "PRISMATTYC_DUMP_PRESENT host framebuffer (not desktop composition)"
+}

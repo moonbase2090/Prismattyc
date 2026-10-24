@@ -12747,7 +12747,7 @@ fn sidebar_click_decision(
                         .map(SidebarClick::SelectTab)
                         .unwrap_or(SidebarClick::Ignore)
                 } else if saved {
-                    SidebarClick::OpenSpace(name.to_string())
+                    open_saved_row(name, session_title)
                 } else {
                     SidebarClick::Ignore
                 }
@@ -12763,13 +12763,7 @@ fn sidebar_click_decision(
                         _ => SidebarClick::Ignore,
                     }
                 } else if saved {
-                    match session_title {
-                        Some(title) if !title.is_empty() => SidebarClick::OpenSession {
-                            space: name.to_string(),
-                            title: title.to_string(),
-                        },
-                        _ => SidebarClick::OpenSpace(name.to_string()),
-                    }
+                    open_saved_row(name, session_title)
                 } else {
                     SidebarClick::Ignore
                 }
@@ -12809,19 +12803,7 @@ fn icon_click_decision(
                     })
                     .unwrap_or(SidebarClick::Ignore),
             },
-            Some((clicked, name, false)) => {
-                if clicked.kind == sidebar::RowKind::Pane {
-                    match session_title {
-                        Some(title) if !title.is_empty() => SidebarClick::OpenSession {
-                            space: name.to_string(),
-                            title: title.to_string(),
-                        },
-                        _ => SidebarClick::OpenSpace(name.to_string()),
-                    }
-                } else {
-                    SidebarClick::OpenSpace(name.to_string())
-                }
-            }
+            Some((_, name, false)) => open_saved_row(name, session_title),
             None => SidebarClick::Ignore,
         },
         SidebarHit::Action(0) => SidebarClick::Run(keybind::Action::NewTab),
@@ -12836,14 +12818,29 @@ fn icon_click_decision(
     }
 }
 
-/// Pane title for a session row, in the same order the tree paints.
-fn session_title_of(tree: &sidebar::SidebarTree, row: &sidebar::TreeRow) -> Option<String> {
-    if row.kind != sidebar::RowKind::Pane {
-        return None;
+/// A row in a space that is not current. Its session opens the space and
+/// then focuses that pane; without a title the space opens on its own focus.
+fn open_saved_row(space: &str, session_title: Option<&str>) -> SidebarClick {
+    match session_title {
+        Some(title) if !title.is_empty() => SidebarClick::OpenSession {
+            space: space.to_string(),
+            title: title.to_string(),
+        },
+        _ => SidebarClick::OpenSpace(space.to_string()),
     }
+}
+
+/// Session title for a row, in the same order the tree paints. A pane row
+/// names its own pane. A tab row names the tab's first session, since a
+/// single-session tab shows no pane row of its own.
+fn session_title_of(tree: &sidebar::SidebarTree, row: &sidebar::TreeRow) -> Option<String> {
     let space = tree.spaces.get(row.space)?;
     let tab = space.tabs.get(row.tab?)?;
-    Some(tab.panes.get(row.pane?)?.title.clone())
+    match row.kind {
+        sidebar::RowKind::Space => None,
+        sidebar::RowKind::Tab => Some(tab.panes.first()?.title.clone()),
+        sidebar::RowKind::Pane => Some(tab.panes.get(row.pane?)?.title.clone()),
+    }
 }
 
 /// Select the session's tab and focus that pane. `None` keeps the tab's
@@ -27575,6 +27572,68 @@ session mail (id 15)
             ),
             "→ (no target)",
             "a stale index never panics"
+        );
+    }
+
+    #[test]
+    fn saved_tab_row_in_another_space_focuses_its_session() {
+        use graphite::SidebarHit;
+        let tabs = vec![prismattyc_mux::SavedSpaceTab {
+            title: "main".to_string(),
+            sessions: vec!["shell".to_string(), "logs".to_string()],
+            layout: None,
+        }];
+        let extra = vec!["prismattyc-1".to_string()];
+        let tree = sidebar::SidebarTree::build(&[sidebar::SpaceInput {
+            name: "mail",
+            current: false,
+            collapsed: false,
+            attention: 0,
+            tabs: sidebar::TabsSource::Saved {
+                tabs: &tabs,
+                extra_sessions: &extra,
+            },
+        }]);
+        let rows = sidebar::visible_rows(&tree);
+        // A session outside every saved tab is a single-session tab, so its
+        // only row is the tab row. The saved tab's pane rows sit under it.
+        let session_tab = rows
+            .iter()
+            .find(|row| row.kind == sidebar::RowKind::Tab && row.tab == Some(1))
+            .expect("the extra session paints a tab row");
+        let saved_tab = rows
+            .iter()
+            .find(|row| row.kind == sidebar::RowKind::Tab && row.tab == Some(0))
+            .expect("the saved tab paints a tab row");
+        let session_title = session_title_of(&tree, session_tab);
+        assert_eq!(session_title.as_deref(), Some("prismattyc-1"));
+        assert_eq!(
+            session_title_of(&tree, saved_tab).as_deref(),
+            Some("shell"),
+            "a multi-session tab names its first session"
+        );
+        let open_session = SidebarClick::OpenSession {
+            space: "mail".to_string(),
+            title: "prismattyc-1".to_string(),
+        };
+        assert_eq!(
+            sidebar_click_decision(
+                SidebarHit::Row(1),
+                Some((session_tab, "mail", false)),
+                true,
+                session_title.as_deref(),
+            ),
+            open_session,
+            "the sidebar opens the space, then focuses the clicked session"
+        );
+        assert_eq!(
+            icon_click_decision(
+                SidebarHit::Row(1),
+                Some((session_tab, "mail", false)),
+                session_title.as_deref(),
+            ),
+            open_session,
+            "the collapsed strip does the same"
         );
     }
 

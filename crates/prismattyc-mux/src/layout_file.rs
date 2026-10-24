@@ -895,13 +895,20 @@ pub fn load_space(dir: &Path, name: &str) -> Result<SavedSpace> {
     if space.version == OWNED_SPACE_VERSION && !space.id.as_deref().is_some_and(valid_space_id) {
         bail!("space {name:?} has no valid stable identity");
     }
+    // A session without windows must not make the whole Space unreadable:
+    // skip it, so the Space still opens and can be removed or re-saved.
+    space.sessions.retain(|session| {
+        if session.windows.is_empty() {
+            eprintln!(
+                "pmux: space {name:?} skipped session {:?}: it has no windows",
+                session.name
+            );
+            return false;
+        }
+        true
+    });
     if space.sessions.is_empty() && space.version == SAVED_SPACE_VERSION {
         bail!("space {name:?} has no sessions");
-    }
-    for session in &space.sessions {
-        if session.windows.is_empty() {
-            bail!("space {name:?} session {:?} has no windows", session.name);
-        }
     }
     space.created_at_unix_ms = Some(creation_time_ms(&path, &space));
     Ok(space)
@@ -1606,6 +1613,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Alpha", "Beta", "Epsilon"]
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn windowless_session_is_skipped_so_the_space_still_loads() {
+        let dir =
+            std::env::temp_dir().join(format!("prism-space-windowless-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut space = one_session_space("mixed");
+        let mut broken = stub_space_session("broken");
+        broken.windows.clear();
+        space.sessions.push(broken);
+        fs::write(dir.join("mixed.json"), serde_json::to_vec(&space).unwrap()).unwrap();
+        let loaded =
+            load_space(&dir, "mixed").expect("one windowless session must not fail the load");
+        let names: Vec<&str> = loaded.sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["mixed"], "only the session with windows stays");
         fs::remove_dir_all(&dir).unwrap();
     }
 

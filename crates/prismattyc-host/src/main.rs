@@ -8740,6 +8740,16 @@ fn attach_records_from_live(host: &HostState) -> attach_tabs::AttachTabsFile {
     file
 }
 
+/// Why a walkthrough tab move did nothing. Moving right fails on the last tab,
+/// and a newly created tab is the last one, so a second tab alone is not enough.
+fn move_tab_refusal_hint(tab_count: usize) -> &'static str {
+    if tab_count < 2 {
+        "Create another tab, then select the first tab and try again."
+    } else {
+        "Select a tab that has another tab to its right, then try again."
+    }
+}
+
 fn mark_layout_dirty(host: &mut HostState) {
     host.layout_dirty = true;
     observe_boss_walkthrough(host);
@@ -17432,10 +17442,9 @@ fn handle_mux_command(
                     );
                 observe_host_action(host, action, ok);
                 if !ok && matches!(command, MuxCommand::MoveTab(_)) {
+                    let tab_count = host.mux.tab_infos().len();
                     if let Some(live) = host.walkthrough.as_mut() {
-                        live.set_mismatch_hint(
-                            "Create another tab, then try moving this tab again.".into(),
-                        );
+                        live.set_mismatch_hint(move_tab_refusal_hint(tab_count).into());
                     }
                 }
             }
@@ -27803,6 +27812,15 @@ session mail (id 15)
             "→ (no target)",
             "a stale index never panics"
         );
+    }
+
+    #[test]
+    fn move_tab_refusal_hint_names_the_last_tab_boundary() {
+        assert!(move_tab_refusal_hint(1).contains("Create another tab"));
+        assert!(move_tab_refusal_hint(0).contains("select the first tab"));
+        let two = move_tab_refusal_hint(2);
+        assert!(!two.contains("Create another tab"), "{two}");
+        assert!(two.contains("another tab to its right"), "{two}");
     }
 
     #[test]

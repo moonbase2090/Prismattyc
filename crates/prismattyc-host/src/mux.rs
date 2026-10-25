@@ -195,6 +195,8 @@ pub(crate) struct HostGeom {
     pub inner_pad: usize,
     /// Reserved top strip when `tab_count > 1`. Zero on the single-tab path.
     pub top_chrome_px: usize,
+    /// Pane arrangement header below the tab strip.
+    pub pane_header_px: usize,
     /// Right gutter reserved for the host scrollbar (PT-80). Subtracted from
     /// the content box before PTY cols. Zero when `inner_pad` already fits
     /// `SCROLLBAR_GUTTER_PX` (the bar sits in the right padding).
@@ -514,6 +516,7 @@ impl HostGeom {
             rail_gap: 0,
             inner_pad: 0,
             top_chrome_px: 0,
+            pane_header_px: 0,
             scrollbar_gutter_px: 0,
             rail_side: RailSide::Off,
             rail_px: 0,
@@ -539,7 +542,9 @@ impl HostGeom {
         } else {
             0
         };
-        self.top_chrome_px.saturating_add(rail)
+        self.top_chrome_px
+            .saturating_add(rail)
+            .saturating_add(self.pane_header_px)
     }
 
     /// Chrome reserved below the pane area (a bottom rail).
@@ -6584,6 +6589,7 @@ mod tests {
             rail_gap: 5,
             inner_pad: 5,
             top_chrome_px: 0,
+            pane_header_px: 0,
             scrollbar_gutter_px: 8,
             rail_side: RailSide::Off,
             rail_px: 0,
@@ -6631,6 +6637,7 @@ mod tests {
             rail_gap: 0,
             inner_pad: 0,
             top_chrome_px: 0,
+            pane_header_px: 0,
             scrollbar_gutter_px: 0,
             rail_side: RailSide::Off,
             rail_px: 0,
@@ -6687,6 +6694,7 @@ mod tests {
                     rail_gap: pane_gap,
                     inner_pad,
                     top_chrome_px: 0,
+                    pane_header_px: 0,
                     scrollbar_gutter_px: scrollbar_gutter_for(inner_pad),
                     rail_side: RailSide::Off,
                     rail_px: 0,
@@ -6747,6 +6755,7 @@ mod tests {
             rail_gap: 5,
             inner_pad: 5,
             top_chrome_px: 0,
+            pane_header_px: 0,
             scrollbar_gutter_px: 8,
             rail_side: RailSide::Off,
             rail_px: 0,
@@ -6817,6 +6826,7 @@ mod tests {
             rail_gap: 5,
             inner_pad: 5,
             top_chrome_px: 16,
+            pane_header_px: 0,
             scrollbar_gutter_px: 8,
             rail_side: RailSide::Off,
             rail_px: 0,
@@ -6865,6 +6875,7 @@ mod tests {
             rail_gap: 5,
             inner_pad: 5,
             top_chrome_px: 0,
+            pane_header_px: 0,
             scrollbar_gutter_px: 8,
             rail_side: RailSide::Off,
             rail_px: 0,
@@ -8363,6 +8374,7 @@ mod tests {
                 rail_gap: 0,
                 inner_pad: 0,
                 top_chrome_px: 32,
+                pane_header_px: 0,
                 scrollbar_gutter_px: 0,
                 rail_side: RailSide::Off,
                 rail_px: 0,
@@ -8480,6 +8492,7 @@ mod tests {
                 rail_gap: 0,
                 inner_pad: 16,
                 top_chrome_px: 32,
+                pane_header_px: 0,
                 scrollbar_gutter_px: 0,
                 rail_side: RailSide::Off,
                 rail_px: 0,
@@ -8556,6 +8569,7 @@ mod tests {
                 rail_gap: 0,
                 inner_pad: 0,
                 top_chrome_px: 16,
+                pane_header_px: 0,
                 scrollbar_gutter_px: 0,
                 rail_side: RailSide::Off,
                 rail_px: 0,
@@ -8666,6 +8680,7 @@ mod tests {
                 rail_gap: 0,
                 inner_pad: 0,
                 top_chrome_px: 16,
+                pane_header_px: 0,
                 scrollbar_gutter_px: 0,
                 rail_side: RailSide::Off,
                 rail_px: 0,
@@ -8823,6 +8838,7 @@ mod tests {
                 rail_gap: gap,
                 inner_pad: 0,
                 top_chrome_px: 16,
+                pane_header_px: 0,
                 scrollbar_gutter_px: 0,
                 rail_side: RailSide::Off,
                 rail_px: 0,
@@ -8863,6 +8879,7 @@ mod tests {
             rail_gap: configured,
             inner_pad: 0,
             top_chrome_px: 16,
+            pane_header_px: 0,
             scrollbar_gutter_px: 0,
             rail_side: RailSide::Off,
             rail_px: 0,
@@ -8933,6 +8950,7 @@ mod tests {
             rail_gap: 0,
             inner_pad: 0,
             top_chrome_px: 16,
+            pane_header_px: 0,
             scrollbar_gutter_px: 0,
             rail_side: RailSide::Off,
             rail_px: 0,
@@ -8992,6 +9010,7 @@ mod tests {
                 rail_gap: 0,
                 inner_pad: 0,
                 top_chrome_px: 32,
+                pane_header_px: 0,
                 scrollbar_gutter_px: 0,
                 rail_side: RailSide::Off,
                 rail_px: 0,
@@ -9165,6 +9184,7 @@ mod tests {
                 rail_gap: 4,
                 inner_pad: 0,
                 top_chrome_px: 0,
+                pane_header_px: 0,
                 scrollbar_gutter_px: 0,
                 rail_side: RailSide::Off,
                 rail_px: 0,

@@ -51,6 +51,17 @@ fn window_shapes(windows: &[SavedWindow]) -> String {
     serde_json::Value::Array(shapes).to_string()
 }
 
+/// How a session that is in the file but gone from the daemon is treated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Closes {
+    /// Leave the Space alone (daemon shutdown tears sessions down).
+    Keep,
+    /// Drop it, but never write a Space with no sessions.
+    Drop,
+    /// Drop it, even the last one: the daemon saw this Space in use.
+    DropAll,
+}
+
 /// What the live daemon says about one Space file.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Plan {
@@ -65,7 +76,7 @@ pub(crate) enum Plan {
     Changed(Box<SavedSpace>, String),
 }
 
-pub(crate) fn plan(saved: &SavedSpace, snapshot: &Snapshot, allow_empty: bool) -> Plan {
+pub(crate) fn plan(saved: &SavedSpace, snapshot: &Snapshot, closes: Closes) -> Plan {
     let Some(id) = saved.id.as_deref() else {
         return Plan::Mismatch;
     };
@@ -75,6 +86,9 @@ pub(crate) fn plan(saved: &SavedSpace, snapshot: &Snapshot, allow_empty: bool) -
     let mut fingerprint = String::new();
     for entry in &saved.sessions {
         let Some(live) = snapshot.sessions.iter().find(|s| s.name == entry.name) else {
+            if closes == Closes::Keep {
+                return Plan::Mismatch;
+            }
             closed.push(&entry.name);
             fingerprint.push_str(&format!("closed:{};", entry.name));
             continue;
@@ -96,7 +110,7 @@ pub(crate) fn plan(saved: &SavedSpace, snapshot: &Snapshot, allow_empty: bool) -
     let unlisted = snapshot.sessions.iter().any(|live| {
         live.space_id.as_deref() == Some(id) && !saved.sessions.iter().any(|e| e.name == live.name)
     });
-    if unlisted || (next.sessions.is_empty() && !allow_empty) {
+    if unlisted || (next.sessions.is_empty() && closes != Closes::DropAll) {
         return Plan::Mismatch;
     }
     if fingerprint.is_empty() {
@@ -131,7 +145,7 @@ pub(crate) fn plan(saved: &SavedSpace, snapshot: &Snapshot, allow_empty: bool) -
 /// shapes. `pmux space open` uses this to tell a finished retry from one that
 /// found a half-built session and skipped it.
 pub fn restore_matches(saved: &SavedSpace, snapshot: &Snapshot) -> bool {
-    plan(saved, snapshot, false) == Plan::InSync
+    plan(saved, snapshot, Closes::Drop) == Plan::InSync
 }
 
 /// `[spaces] autosave`, else the legacy `space_autosave`, else on. The host
@@ -175,23 +189,46 @@ struct State {
     /// Fingerprint seen on the previous pass for each Space name. A change is
     /// written when the same fingerprint is seen twice.
     pending: HashMap<String, String>,
-    /// Space ids seen owning a live session since the daemon started. Only
-    /// such a Space may be saved with no sessions left: that is a close. A
-    /// Space that was never opened is just a file the daemon has not loaded.
-    observed: HashSet<String>,
+}
+
+/// The daemon's view for one pass.
+struct Live {
+    snapshot: Snapshot,
+    /// Space ids that have owned a session since the daemon started. The
+    /// plane records this when a session is moved into a Space, so a Space
+    /// opened and closed between two ticks is still known.
+    owned: HashSet<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    /// Debounced: a change is written when it holds for two ticks.
+    Tick,
+    /// The daemon is shutting down: write what has changed now, but never
+    /// treat a missing session as closed, because shutdown tears them down.
+    Final,
+}
+
+fn closes(live: &Live, saved: &SavedSpace, pass: Pass) -> Closes {
+    match saved.id.as_ref() {
+        _ if pass == Pass::Final => Closes::Keep,
+        Some(id) if live.owned.contains(id) => Closes::DropAll,
+        _ => Closes::Drop,
+    }
 }
 
 fn sync(
     dir: &Path,
     config: &Path,
     state: &mut State,
-    snapshot: impl Fn() -> Result<Snapshot>,
+    pass: Pass,
+    live: impl Fn() -> Result<Live>,
 ) -> Result<()> {
     if !autosave_enabled(config) || !dir.is_dir() || transfer_pending(dir) {
         state.pending.clear();
         return Ok(());
     }
-    let live = snapshot()?;
+    let now = live()?;
     let mut due = Vec::new();
     let mut seen = HashSet::new();
     for entry in list_spaces(dir)? {
@@ -201,26 +238,15 @@ fn sync(
         if restoring(dir, &saved) {
             continue;
         }
-        if let Some(id) = saved.id.as_deref() {
-            if live
-                .sessions
-                .iter()
-                .any(|s| s.space_id.as_deref() == Some(id))
-            {
-                state.observed.insert(id.to_string());
-            }
-        }
-        let allow_empty = saved
-            .id
-            .as_ref()
-            .is_some_and(|id| state.observed.contains(id));
-        if let Plan::Changed(_, fingerprint) = plan(&saved, &live, allow_empty) {
-            seen.insert(entry.name.clone());
-            if state.pending.get(&entry.name) == Some(&fingerprint) {
-                due.push((entry.name, fingerprint));
-            } else {
-                state.pending.insert(entry.name, fingerprint);
-            }
+        let Plan::Changed(_, fingerprint) = plan(&saved, &now.snapshot, closes(&now, &saved, pass))
+        else {
+            continue;
+        };
+        seen.insert(entry.name.clone());
+        if pass == Pass::Final || state.pending.get(&entry.name) == Some(&fingerprint) {
+            due.push((entry.name, fingerprint));
+        } else {
+            state.pending.insert(entry.name, fingerprint);
         }
     }
     state.pending.retain(|name, _| seen.contains(name));
@@ -241,7 +267,7 @@ fn sync(
     if transfer_pending(dir) {
         return Ok(());
     }
-    let live = snapshot()?;
+    let now = live()?;
     for (name, fingerprint) in due {
         let Ok(saved) = load_space(dir, &name) else {
             continue;
@@ -249,11 +275,8 @@ fn sync(
         if restoring(dir, &saved) {
             continue;
         }
-        let allow_empty = saved
-            .id
-            .as_ref()
-            .is_some_and(|id| state.observed.contains(id));
-        if let Plan::Changed(next, again) = plan(&saved, &live, allow_empty) {
+        if let Plan::Changed(next, again) = plan(&saved, &now.snapshot, closes(&now, &saved, pass))
+        {
             if again == fingerprint {
                 save_space(dir, &name, &next)?;
                 state.pending.remove(&name);
@@ -277,19 +300,30 @@ impl Worker {
                 let dir = spaces_dir_for_socket(&socket);
                 let config = crate::prism_config_path();
                 let mut state = State::default();
-                while matches!(
-                    receiver.recv_timeout(TICK),
-                    Err(mpsc::RecvTimeoutError::Timeout)
-                ) {
-                    let result = sync(&dir, &config, &mut state, || {
-                        plane
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                let live = || -> Result<Live> {
+                    let plane = plane
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    Ok(Live {
+                        snapshot: plane
                             .snapshot()
-                            .map_err(|error| anyhow::anyhow!("{error:?}"))
-                    });
-                    if let Err(error) = result {
+                            .map_err(|error| anyhow::anyhow!("{error:?}"))?,
+                        owned: plane.spaces_owned(),
+                    })
+                };
+                let mut pass = Pass::Tick;
+                loop {
+                    if let Err(error) = sync(&dir, &config, &mut state, pass, live) {
                         eprintln!("pmuxd: Space autosave failed: {error:#}");
+                    }
+                    if pass == Pass::Final {
+                        break;
+                    }
+                    if !matches!(
+                        receiver.recv_timeout(TICK),
+                        Err(mpsc::RecvTimeoutError::Timeout)
+                    ) {
+                        pass = Pass::Final;
                     }
                 }
             })?;
@@ -418,6 +452,22 @@ mod tests {
         dir
     }
 
+    fn live_with(snapshot: &Snapshot, owned: &[&str]) -> Live {
+        Live {
+            snapshot: snapshot.clone(),
+            owned: owned.iter().map(|id| id.to_string()).collect(),
+        }
+    }
+
+    fn live_of(snapshot: &Snapshot) -> Live {
+        let owned: Vec<_> = snapshot
+            .sessions
+            .iter()
+            .filter_map(|s| s.space_id.as_deref())
+            .collect();
+        live_with(snapshot, &owned)
+    }
+
     fn changed(plan: Plan) -> SavedSpace {
         match plan {
             Plan::Changed(space, _) => *space,
@@ -438,11 +488,15 @@ mod tests {
         let file = saved(&before);
 
         let cd = snapshot(vec![session("a", Some(SPACE), &[("", "/two")])]);
-        assert_eq!(plan(&file, &cd, false), Plan::InSync, "cwd is not layout");
+        assert_eq!(
+            plan(&file, &cd, Closes::Drop),
+            Plan::InSync,
+            "cwd is not layout"
+        );
 
         let titled = snapshot(vec![session("a", Some(SPACE), &[("build", "/one")])]);
         assert_eq!(
-            leaf_title(&changed(plan(&file, &titled, false))).as_deref(),
+            leaf_title(&changed(plan(&file, &titled, Closes::Drop))).as_deref(),
             Some("build")
         );
 
@@ -451,7 +505,7 @@ mod tests {
             Some(SPACE),
             &[("", "/one"), ("", "/one")],
         )]);
-        let next = changed(plan(&file, &split, false));
+        let next = changed(plan(&file, &split, Closes::Drop));
         assert!(matches!(
             &next.sessions[0].windows[0].root,
             SavedNode::Split { ratio, .. } if (*ratio - 0.4).abs() < 1e-9
@@ -483,7 +537,7 @@ mod tests {
         let kept = |name: &str, space: Option<&str>| session(name, space, &[("", "/x")]);
 
         let closed = snapshot(vec![kept("a", Some(SPACE))]);
-        let next = changed(plan(&file, &closed, false));
+        let next = changed(plan(&file, &closed, Closes::Drop));
         assert_eq!(next.sessions.len(), 1);
         assert_eq!(next.sessions[0].name, "a");
         assert_eq!(next.tabs.len(), 1);
@@ -492,7 +546,7 @@ mod tests {
 
         let moved = snapshot(vec![kept("a", Some(SPACE)), kept("b", Some("other"))]);
         assert_eq!(
-            plan(&file, &moved, false),
+            plan(&file, &moved, Closes::Drop),
             Plan::Mismatch,
             "b is in another Space"
         );
@@ -503,21 +557,21 @@ mod tests {
             kept("c", Some(SPACE)),
         ]);
         assert_eq!(
-            plan(&file, &unlisted, false),
+            plan(&file, &unlisted, Closes::Drop),
             Plan::Mismatch,
             "c is not listed"
         );
 
         let renamed = snapshot(vec![kept("a", Some(SPACE)), kept("b2", Some(SPACE))]);
         assert_eq!(
-            plan(&file, &renamed, false),
+            plan(&file, &renamed, Closes::Drop),
             Plan::Mismatch,
             "rename not yet saved"
         );
 
         let none = snapshot(vec![]);
         assert_eq!(
-            plan(&file, &none, false),
+            plan(&file, &none, Closes::Drop),
             Plan::Mismatch,
             "never save an empty Space"
         );
@@ -532,10 +586,10 @@ mod tests {
         let mut state = State::default();
         let live = snapshot(vec![session("a", Some(SPACE), &[("build", "/x")])]);
 
-        sync(&dir, &config, &mut state, || Ok(live.clone())).unwrap();
+        sync(&dir, &config, &mut state, Pass::Tick, || Ok(live_of(&live))).unwrap();
         assert_eq!(leaf_title(&load_space(&dir, "desk").unwrap()), None);
 
-        sync(&dir, &config, &mut state, || Ok(live.clone())).unwrap();
+        sync(&dir, &config, &mut state, Pass::Tick, || Ok(live_of(&live))).unwrap();
         let written = load_space(&dir, "desk").unwrap();
         assert_eq!(leaf_title(&written).as_deref(), Some("build"));
         assert_eq!(written.id.as_deref(), Some(SPACE));
@@ -552,7 +606,7 @@ mod tests {
         let mut state = State::default();
         for title in ["one", "two", "three"] {
             let live = snapshot(vec![session("a", Some(SPACE), &[(title, "/x")])]);
-            sync(&dir, &config, &mut state, || Ok(live.clone())).unwrap();
+            sync(&dir, &config, &mut state, Pass::Tick, || Ok(live_of(&live))).unwrap();
         }
         assert_eq!(leaf_title(&load_space(&dir, "desk").unwrap()), None);
         let _ = std::fs::remove_dir_all(&dir);
@@ -571,7 +625,10 @@ mod tests {
         std::fs::write(&marker, "").unwrap();
         let mut state = State::default();
         for _ in 0..4 {
-            sync(&dir, &config, &mut state, || Ok(partial.clone())).unwrap();
+            sync(&dir, &config, &mut state, Pass::Tick, || {
+                Ok(live_of(&partial))
+            })
+            .unwrap();
         }
         assert!(matches!(
             &load_space(&dir, "desk").unwrap().sessions[0].windows[0].root,
@@ -581,7 +638,10 @@ mod tests {
         // The next open finished and removed the marker; a later close saves.
         std::fs::remove_file(&marker).unwrap();
         for _ in 0..2 {
-            sync(&dir, &config, &mut state, || Ok(partial.clone())).unwrap();
+            sync(&dir, &config, &mut state, Pass::Tick, || {
+                Ok(live_of(&partial))
+            })
+            .unwrap();
         }
         assert!(matches!(
             &load_space(&dir, "desk").unwrap().sessions[0].windows[0].root,
@@ -601,9 +661,9 @@ mod tests {
         let config = dir.join("missing.toml");
         let live = snapshot(vec![session("a", Some(SPACE), &[("", "/x")])]);
         let mut state = State::default();
-        sync(&dir, &config, &mut state, || Ok(live.clone())).unwrap();
+        sync(&dir, &config, &mut state, Pass::Tick, || Ok(live_of(&live))).unwrap();
         assert_eq!(load_space(&dir, "desk").unwrap().sessions.len(), 2);
-        sync(&dir, &config, &mut state, || Ok(live.clone())).unwrap();
+        sync(&dir, &config, &mut state, Pass::Tick, || Ok(live_of(&live))).unwrap();
         assert_eq!(load_space(&dir, "desk").unwrap().sessions.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -619,16 +679,22 @@ mod tests {
         // A daemon that just started and never saw the Space: leave the file.
         let mut fresh = State::default();
         for _ in 0..4 {
-            sync(&dir, &config, &mut fresh, || Ok(none.clone())).unwrap();
+            sync(&dir, &config, &mut fresh, Pass::Tick, || {
+                Ok(live_with(&none, &[]))
+            })
+            .unwrap();
         }
         assert_eq!(load_space(&dir, "desk").unwrap().sessions.len(), 1);
 
         // The Space was seen in use, then its only session went away.
         let mut state = State::default();
         let live = snapshot(one.to_vec());
-        sync(&dir, &config, &mut state, || Ok(live.clone())).unwrap();
+        sync(&dir, &config, &mut state, Pass::Tick, || Ok(live_of(&live))).unwrap();
         for _ in 0..2 {
-            sync(&dir, &config, &mut state, || Ok(none.clone())).unwrap();
+            sync(&dir, &config, &mut state, Pass::Tick, || {
+                Ok(live_with(&none, &[SPACE]))
+            })
+            .unwrap();
         }
         let emptied = load_space(&dir, "desk").unwrap();
         assert!(emptied.sessions.is_empty() && emptied.tabs.is_empty());
@@ -646,6 +712,62 @@ mod tests {
     }
 
     #[test]
+    fn a_space_opened_and_closed_between_ticks_is_still_a_close() {
+        // The plane recorded the ownership, so the worker does not need to
+        // have polled while the session was alive.
+        let dir = scratch("quick");
+        let one = [session("a", Some(SPACE), &[("", "/x")])];
+        save_space(&dir, "desk", &saved(&one)).unwrap();
+        let config = dir.join("missing.toml");
+        let none = snapshot(vec![]);
+        let mut state = State::default();
+        for _ in 0..2 {
+            sync(&dir, &config, &mut state, Pass::Tick, || {
+                Ok(live_with(&none, &[SPACE]))
+            })
+            .unwrap();
+        }
+        assert!(load_space(&dir, "desk").unwrap().sessions.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shutdown_writes_a_pending_change_at_once_but_never_counts_missing_sessions_as_closed() {
+        let dir = scratch("final");
+        let both = [
+            session("a", Some(SPACE), &[("", "/x")]),
+            session("b", Some(SPACE), &[("", "/x")]),
+        ];
+        save_space(&dir, "desk", &saved(&both)).unwrap();
+        let config = dir.join("missing.toml");
+        let mut state = State::default();
+
+        // A rename made less than one tick before shutdown is flushed.
+        let renamed = snapshot(vec![
+            session("a", Some(SPACE), &[("build", "/x")]),
+            session("b", Some(SPACE), &[("", "/x")]),
+        ]);
+        sync(&dir, &config, &mut state, Pass::Final, || {
+            Ok(live_of(&renamed))
+        })
+        .unwrap();
+        let written = load_space(&dir, "desk").unwrap();
+        assert!(matches!(
+            &written.sessions[0].windows[0].root,
+            SavedNode::Leaf { title: Some(t), .. } if t == "build"
+        ));
+
+        // Sessions torn down by the shutdown itself are not closes.
+        let torn = snapshot(vec![session("a", Some(SPACE), &[("build", "/x")])]);
+        sync(&dir, &config, &mut state, Pass::Final, || {
+            Ok(live_with(&torn, &[SPACE]))
+        })
+        .unwrap();
+        assert_eq!(load_space(&dir, "desk").unwrap().sessions.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn opt_out_and_a_pending_transfer_block_the_write() {
         let dir = scratch("blocked");
         let before = snapshot(vec![session("a", Some(SPACE), &[("", "/x")])]);
@@ -658,20 +780,20 @@ mod tests {
         let off = dir.join("off.toml");
         std::fs::write(&off, "[spaces]\nautosave = false\n").unwrap();
         for _ in 0..3 {
-            sync(&dir, &off, &mut state, || Ok(live.clone())).unwrap();
+            sync(&dir, &off, &mut state, Pass::Tick, || Ok(live_of(&live))).unwrap();
         }
         assert!(untouched(&dir), "spaces.autosave = false is honored");
 
         let legacy = dir.join("legacy.toml");
         std::fs::write(&legacy, "space_autosave = false\n").unwrap();
         for _ in 0..3 {
-            sync(&dir, &legacy, &mut state, || Ok(live.clone())).unwrap();
+            sync(&dir, &legacy, &mut state, Pass::Tick, || Ok(live_of(&live))).unwrap();
         }
         assert!(untouched(&dir), "legacy space_autosave = false is honored");
 
         std::fs::write(dir.join(".ownership-transaction"), "{}").unwrap();
         for _ in 0..3 {
-            sync(&dir, &on, &mut state, || Ok(live.clone())).unwrap();
+            sync(&dir, &on, &mut state, Pass::Tick, || Ok(live_of(&live))).unwrap();
         }
         assert!(untouched(&dir), "a pending transfer is never raced");
         let _ = std::fs::remove_dir_all(&dir);

@@ -3959,6 +3959,11 @@ impl ControlPlane {
         true
     }
 
+    /// Space ids that have owned a session since this daemon started.
+    pub fn spaces_owned(&self) -> std::collections::HashSet<String> {
+        self.domain.spaces_owned().clone()
+    }
+
     pub fn snapshot(&self) -> Result<Snapshot, ControlError> {
         let mut sessions = Vec::new();
         for session in self.domain.sessions() {

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Long-running demonstrations complete from daemon replies or a constructed host view.
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};

@@ -865,6 +865,26 @@ pub(super) fn prepare_open(store: &Store, client: &mut Client, name: &str) -> Re
     Ok(space)
 }
 
+/// Mark a Space as being rebuilt from its file. The daemon does not autosave
+/// over it until [`end_restore`], so a restore that fails part way cannot
+/// replace the saved layout with the partial one.
+pub(super) fn begin_restore(space: &SavedSpace) -> Result<()> {
+    if let Some(id) = &space.id {
+        let marker = prismattyc_mux::space_autosave::restoring_marker(&spaces_dir(), id);
+        std::fs::write(&marker, b"").with_context(|| format!("write {}", marker.display()))?;
+    }
+    Ok(())
+}
+
+pub(super) fn end_restore(space: &SavedSpace) {
+    if let Some(id) = &space.id {
+        let _ = std::fs::remove_file(prismattyc_mux::space_autosave::restoring_marker(
+            &spaces_dir(),
+            id,
+        ));
+    }
+}
+
 pub(super) fn claim_saved_session(
     client: &mut Client,
     space: &SavedSpace,
@@ -933,6 +953,7 @@ pub(super) fn save_owned(
             to: Some(id),
         },
     )?;
+    end_restore(space);
     Ok(path)
 }
 

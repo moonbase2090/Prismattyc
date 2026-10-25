@@ -1,11 +1,15 @@
+// SPDX-License-Identifier: MIT
 //! Daemon-side autosave of Space window layouts (PT-56).
 //!
 //! The desktop host saves the Space it shows. Nothing saved a layout change
 //! made without a host window (pane titles, splits, closed panes), so a
 //! daemon restart reopened the older arrangement. This worker rewrites the
-//! per-session `windows` of a Space file when the live shape differs.
-//! Membership, tabs and focus are owned by `pmux space` and the host and are
-//! never touched here.
+//! per-session `windows` of a Space file when the live shape differs, and
+//! drops a session that no longer exists. A session that moved to another
+//! Space, a member the file does not list, and a Space whose last `space
+//! open` did not finish are left alone. Tab order and focus belong to the
+//! host.
+use crate::attach_tabs::{layout_for_sessions, remap_layout};
 use crate::control::{ControlPlane, Snapshot};
 use crate::layout_file::{
     from_sessions, list_spaces, load_space, save_space, spaces_dir_for_socket, SavedNode,
@@ -50,13 +54,13 @@ fn window_shapes(windows: &[SavedWindow]) -> String {
 /// What the live daemon says about one Space file.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Plan {
-    /// The live sessions are not the file's sessions one to one: a session
-    /// failed to restore, left the Space, or the file does not list a member.
+    /// The live sessions are not the file's sessions: one moved to another
+    /// Space, a member is not listed in the file, or nothing is left.
     Mismatch,
     /// Same members, same window shapes.
     InSync,
-    /// Same members, different shapes: the file with the live windows, and
-    /// a fingerprint of the change.
+    /// The file with the live windows and without sessions that no longer
+    /// exist, and a fingerprint of the change.
     Changed(Box<SavedSpace>, String),
 }
 
@@ -64,38 +68,62 @@ pub(crate) fn plan(saved: &SavedSpace, snapshot: &Snapshot) -> Plan {
     let Some(id) = saved.id.as_deref() else {
         return Plan::Mismatch;
     };
-    let owned: Vec<_> = snapshot
-        .sessions
-        .iter()
-        .filter(|session| session.space_id.as_deref() == Some(id))
-        .collect();
-    if owned.len() != saved.sessions.len() {
-        return Plan::Mismatch;
-    }
     let mut next = saved.clone();
+    next.sessions.clear();
+    let mut closed: Vec<&str> = Vec::new();
     let mut fingerprint = String::new();
-    for entry in &mut next.sessions {
-        let Some(live) = owned.iter().find(|session| session.name == entry.name) else {
+    for entry in &saved.sessions {
+        let Some(live) = snapshot.sessions.iter().find(|s| s.name == entry.name) else {
+            closed.push(&entry.name);
+            fingerprint.push_str(&format!("closed:{};", entry.name));
+            continue;
+        };
+        if live.space_id.as_deref() != Some(id) || live.windows.is_empty() {
+            return Plan::Mismatch;
+        }
+        let Some(windows) = from_sessions(&[live]).sessions.pop().map(|s| s.windows) else {
             return Plan::Mismatch;
         };
-        let Some(windows) = (!live.windows.is_empty())
-            .then(|| from_sessions(&[*live]).sessions.pop())
-            .flatten()
-            .map(|session| session.windows)
-        else {
-            return Plan::Mismatch;
-        };
+        let mut kept = entry.clone();
         let live_shape = window_shapes(&windows);
         if live_shape != window_shapes(&entry.windows) {
             fingerprint.push_str(&format!("{}:{live_shape};", entry.name));
-            entry.windows = windows;
+            kept.windows = windows;
         }
+        next.sessions.push(kept);
+    }
+    let unlisted = snapshot.sessions.iter().any(|live| {
+        live.space_id.as_deref() == Some(id) && !saved.sessions.iter().any(|e| e.name == live.name)
+    });
+    if unlisted || next.sessions.is_empty() {
+        return Plan::Mismatch;
     }
     if fingerprint.is_empty() {
-        Plan::InSync
-    } else {
-        Plan::Changed(Box::new(next), fingerprint)
+        return Plan::InSync;
     }
+    if !closed.is_empty() {
+        for tab in &mut next.tabs {
+            tab.sessions.retain(|name| !closed.contains(&name.as_str()));
+            let layout = tab.layout.take().and_then(|node| {
+                remap_layout(&node, |name| {
+                    (!closed.contains(&name)).then(|| name.to_string())
+                })
+            });
+            tab.layout = layout_for_sessions(layout, &tab.sessions);
+        }
+        next.tabs.retain(|tab| !tab.sessions.is_empty());
+        if next.active_tab >= next.tabs.len() {
+            next.active_tab = 0;
+        }
+        if next
+            .focused_session
+            .as_deref()
+            .is_some_and(|name| closed.contains(&name))
+        {
+            next.focused_session = None;
+        }
+    }
+    Plan::Changed(Box::new(next), fingerprint)
 }
 
 /// `[spaces] autosave`, else the legacy `space_autosave`, else on. The host
@@ -119,16 +147,26 @@ fn transfer_pending(dir: &Path) -> bool {
     dir.join(".ownership-transaction").exists()
 }
 
+/// `pmux space open` writes this before it builds a Space and removes it
+/// only after every session and title is in place, so a restore that failed
+/// or was killed keeps it. `pmux space save` removes it too.
+pub fn restoring_marker(dir: &Path, space_id: &str) -> PathBuf {
+    dir.join(format!(".restoring-{space_id}"))
+}
+
+fn restoring(dir: &Path, saved: &SavedSpace) -> bool {
+    saved
+        .id
+        .as_deref()
+        .is_some_and(|id| restoring_marker(dir, id).exists())
+}
+
 /// What the worker remembers between passes.
 #[derive(Default)]
 struct State {
     /// Fingerprint seen on the previous pass for each Space name. A change is
     /// written when the same fingerprint is seen twice.
     pending: HashMap<String, String>,
-    /// Space ids seen in sync with their file since this daemon started. A
-    /// Space that never matched its file (a restore that failed or is still
-    /// running) is never saved over.
-    baselined: HashSet<String>,
 }
 
 fn sync(
@@ -148,22 +186,16 @@ fn sync(
         let Ok(saved) = load_space(dir, &entry.name) else {
             continue;
         };
-        let Some(id) = saved.id.clone() else {
+        if restoring(dir, &saved) {
             continue;
-        };
-        match plan(&saved, &live) {
-            Plan::InSync => {
-                state.baselined.insert(id);
+        }
+        if let Plan::Changed(_, fingerprint) = plan(&saved, &live) {
+            seen.insert(entry.name.clone());
+            if state.pending.get(&entry.name) == Some(&fingerprint) {
+                due.push((entry.name, fingerprint));
+            } else {
+                state.pending.insert(entry.name, fingerprint);
             }
-            Plan::Changed(_, fingerprint) if state.baselined.contains(&id) => {
-                seen.insert(entry.name.clone());
-                if state.pending.get(&entry.name) == Some(&fingerprint) {
-                    due.push((entry.name, fingerprint));
-                } else {
-                    state.pending.insert(entry.name, fingerprint);
-                }
-            }
-            Plan::Changed(..) | Plan::Mismatch => {}
         }
     }
     state.pending.retain(|name, _| seen.contains(name));
@@ -189,6 +221,9 @@ fn sync(
         let Ok(saved) = load_space(dir, &name) else {
             continue;
         };
+        if restoring(dir, &saved) {
+            continue;
+        }
         if let Plan::Changed(next, again) = plan(&saved, &live) {
             if again == fingerprint {
                 save_space(dir, &name, &next)?;
@@ -361,14 +396,6 @@ mod tests {
         }
     }
 
-    /// A state that has already seen `before` in sync, like a daemon that
-    /// restored the Space cleanly.
-    fn baselined(dir: &Path, config: &Path, before: &Snapshot) -> State {
-        let mut state = State::default();
-        sync(dir, config, &mut state, || Ok(before.clone())).unwrap();
-        state
-    }
-
     fn leaf_title(space: &SavedSpace) -> Option<String> {
         match &space.sessions[0].windows[0].root {
             SavedNode::Leaf { title, .. } => title.clone(),
@@ -404,29 +431,59 @@ mod tests {
     }
 
     #[test]
-    fn a_space_that_does_not_match_the_daemon_is_never_saved_over() {
+    fn a_closed_session_is_dropped_but_a_moved_or_unlisted_one_blocks_the_save() {
         let before = [
             session("a", Some(SPACE), &[("", "/x")]),
             session("b", Some(SPACE), &[("", "/x")]),
         ];
-        let file = saved(&before);
-        let titled = |name: &str, space: Option<&str>| session(name, space, &[("t", "/x")]);
+        let mut file = saved(&before);
+        file.tabs = vec![
+            crate::layout_file::SavedSpaceTab {
+                title: "a".into(),
+                sessions: vec!["a".into()],
+                layout: None,
+            },
+            crate::layout_file::SavedSpaceTab {
+                title: "b".into(),
+                sessions: vec!["b".into()],
+                layout: None,
+            },
+        ];
+        file.active_tab = 1;
+        file.focused_session = Some("b".into());
+        let kept = |name: &str, space: Option<&str>| session(name, space, &[("", "/x")]);
 
-        let missing = snapshot(vec![titled("a", Some(SPACE))]);
-        assert_eq!(plan(&file, &missing), Plan::Mismatch, "b did not restore");
+        let closed = snapshot(vec![kept("a", Some(SPACE))]);
+        let next = changed(plan(&file, &closed));
+        assert_eq!(next.sessions.len(), 1);
+        assert_eq!(next.sessions[0].name, "a");
+        assert_eq!(next.tabs.len(), 1);
+        assert_eq!(next.active_tab, 0);
+        assert_eq!(next.focused_session, None);
 
-        let foreign = snapshot(vec![titled("a", Some(SPACE)), titled("b", Some("other"))]);
-        assert_eq!(plan(&file, &foreign), Plan::Mismatch, "b left the Space");
+        let moved = snapshot(vec![kept("a", Some(SPACE)), kept("b", Some("other"))]);
+        assert_eq!(plan(&file, &moved), Plan::Mismatch, "b is in another Space");
 
-        let extra = snapshot(vec![
-            titled("a", Some(SPACE)),
-            titled("b", Some(SPACE)),
-            titled("c", Some(SPACE)),
+        let unlisted = snapshot(vec![
+            kept("a", Some(SPACE)),
+            kept("b", Some(SPACE)),
+            kept("c", Some(SPACE)),
         ]);
-        assert_eq!(plan(&file, &extra), Plan::Mismatch, "c is not listed");
+        assert_eq!(plan(&file, &unlisted), Plan::Mismatch, "c is not listed");
 
-        let both = snapshot(vec![titled("a", Some(SPACE)), titled("b", Some(SPACE))]);
-        assert!(matches!(plan(&file, &both), Plan::Changed(..)));
+        let renamed = snapshot(vec![kept("a", Some(SPACE)), kept("b2", Some(SPACE))]);
+        assert_eq!(
+            plan(&file, &renamed),
+            Plan::Mismatch,
+            "rename not yet saved"
+        );
+
+        let none = snapshot(vec![]);
+        assert_eq!(
+            plan(&file, &none),
+            Plan::Mismatch,
+            "never save an empty Space"
+        );
     }
 
     #[test]
@@ -435,7 +492,7 @@ mod tests {
         let before = snapshot(vec![session("a", Some(SPACE), &[("", "/x")])]);
         save_space(&dir, "desk", &saved(&before.sessions)).unwrap();
         let config = dir.join("missing.toml");
-        let mut state = baselined(&dir, &config, &before);
+        let mut state = State::default();
         let live = snapshot(vec![session("a", Some(SPACE), &[("build", "/x")])]);
 
         sync(&dir, &config, &mut state, || Ok(live.clone())).unwrap();
@@ -455,7 +512,7 @@ mod tests {
         let before = snapshot(vec![session("a", Some(SPACE), &[("", "/x")])]);
         save_space(&dir, "desk", &saved(&before.sessions)).unwrap();
         let config = dir.join("missing.toml");
-        let mut state = baselined(&dir, &config, &before);
+        let mut state = State::default();
         for title in ["one", "two", "three"] {
             let live = snapshot(vec![session("a", Some(SPACE), &[(title, "/x")])]);
             sync(&dir, &config, &mut state, || Ok(live.clone())).unwrap();
@@ -465,35 +522,52 @@ mod tests {
     }
 
     #[test]
-    fn a_space_that_never_matched_its_file_is_not_overwritten() {
-        // Two panes saved; the restore produced one. This is a restore that
-        // failed part way, not a pane the user closed.
-        let dir = scratch("partial");
+    fn a_space_whose_restore_did_not_finish_is_not_overwritten() {
+        // Two panes saved; the restore produced one. The marker `space open`
+        // leaves behind until it finishes is what tells this from a close.
+        let dir = scratch("restoring");
         let full = [session("a", Some(SPACE), &[("", "/x"), ("", "/x")])];
         save_space(&dir, "desk", &saved(&full)).unwrap();
         let config = dir.join("missing.toml");
         let partial = snapshot(vec![session("a", Some(SPACE), &[("", "/x")])]);
+        let marker = restoring_marker(&dir, SPACE);
+        std::fs::write(&marker, "").unwrap();
         let mut state = State::default();
         for _ in 0..4 {
             sync(&dir, &config, &mut state, || Ok(partial.clone())).unwrap();
         }
-        let kept = load_space(&dir, "desk").unwrap();
         assert!(matches!(
-            &kept.sessions[0].windows[0].root,
+            &load_space(&dir, "desk").unwrap().sessions[0].windows[0].root,
             SavedNode::Split { .. }
         ));
 
-        // Once the restore completes, a later close is saved.
-        let restored = snapshot(full.to_vec());
-        sync(&dir, &config, &mut state, || Ok(restored.clone())).unwrap();
+        // The next open finished and removed the marker; a later close saves.
+        std::fs::remove_file(&marker).unwrap();
         for _ in 0..2 {
             sync(&dir, &config, &mut state, || Ok(partial.clone())).unwrap();
         }
-        let closed = load_space(&dir, "desk").unwrap();
         assert!(matches!(
-            &closed.sessions[0].windows[0].root,
+            &load_space(&dir, "desk").unwrap().sessions[0].windows[0].root,
             SavedNode::Leaf { .. }
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_closed_session_leaves_the_file_after_one_tick_of_debounce() {
+        let dir = scratch("closed");
+        let both = [
+            session("a", Some(SPACE), &[("", "/x")]),
+            session("b", Some(SPACE), &[("", "/x")]),
+        ];
+        save_space(&dir, "desk", &saved(&both)).unwrap();
+        let config = dir.join("missing.toml");
+        let live = snapshot(vec![session("a", Some(SPACE), &[("", "/x")])]);
+        let mut state = State::default();
+        sync(&dir, &config, &mut state, || Ok(live.clone())).unwrap();
+        assert_eq!(load_space(&dir, "desk").unwrap().sessions.len(), 2);
+        sync(&dir, &config, &mut state, || Ok(live.clone())).unwrap();
+        assert_eq!(load_space(&dir, "desk").unwrap().sessions.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -503,7 +577,7 @@ mod tests {
         let before = snapshot(vec![session("a", Some(SPACE), &[("", "/x")])]);
         save_space(&dir, "desk", &saved(&before.sessions)).unwrap();
         let on = dir.join("on.toml");
-        let mut state = baselined(&dir, &on, &before);
+        let mut state = State::default();
         let live = snapshot(vec![session("a", Some(SPACE), &[("build", "/x")])]);
         let untouched = |dir: &Path| leaf_title(&load_space(dir, "desk").unwrap()).is_none();
 

@@ -55,7 +55,8 @@ fn window_shapes(windows: &[SavedWindow]) -> String {
 #[derive(Debug, PartialEq)]
 pub(crate) enum Plan {
     /// The live sessions are not the file's sessions: one moved to another
-    /// Space, a member is not listed in the file, or nothing is left.
+    /// Space, a member is not listed in the file, or nothing is left and
+    /// the daemon never saw the Space in use.
     Mismatch,
     /// Same members, same window shapes.
     InSync,
@@ -64,7 +65,7 @@ pub(crate) enum Plan {
     Changed(Box<SavedSpace>, String),
 }
 
-pub(crate) fn plan(saved: &SavedSpace, snapshot: &Snapshot) -> Plan {
+pub(crate) fn plan(saved: &SavedSpace, snapshot: &Snapshot, allow_empty: bool) -> Plan {
     let Some(id) = saved.id.as_deref() else {
         return Plan::Mismatch;
     };
@@ -95,7 +96,7 @@ pub(crate) fn plan(saved: &SavedSpace, snapshot: &Snapshot) -> Plan {
     let unlisted = snapshot.sessions.iter().any(|live| {
         live.space_id.as_deref() == Some(id) && !saved.sessions.iter().any(|e| e.name == live.name)
     });
-    if unlisted || next.sessions.is_empty() {
+    if unlisted || (next.sessions.is_empty() && !allow_empty) {
         return Plan::Mismatch;
     }
     if fingerprint.is_empty() {
@@ -124,6 +125,13 @@ pub(crate) fn plan(saved: &SavedSpace, snapshot: &Snapshot) -> Plan {
         }
     }
     Plan::Changed(Box::new(next), fingerprint)
+}
+
+/// True when the live daemon holds exactly the file's sessions and window
+/// shapes. `pmux space open` uses this to tell a finished retry from one that
+/// found a half-built session and skipped it.
+pub fn restore_matches(saved: &SavedSpace, snapshot: &Snapshot) -> bool {
+    plan(saved, snapshot, false) == Plan::InSync
 }
 
 /// `[spaces] autosave`, else the legacy `space_autosave`, else on. The host
@@ -167,6 +175,10 @@ struct State {
     /// Fingerprint seen on the previous pass for each Space name. A change is
     /// written when the same fingerprint is seen twice.
     pending: HashMap<String, String>,
+    /// Space ids seen owning a live session since the daemon started. Only
+    /// such a Space may be saved with no sessions left: that is a close. A
+    /// Space that was never opened is just a file the daemon has not loaded.
+    observed: HashSet<String>,
 }
 
 fn sync(
@@ -189,7 +201,20 @@ fn sync(
         if restoring(dir, &saved) {
             continue;
         }
-        if let Plan::Changed(_, fingerprint) = plan(&saved, &live) {
+        if let Some(id) = saved.id.as_deref() {
+            if live
+                .sessions
+                .iter()
+                .any(|s| s.space_id.as_deref() == Some(id))
+            {
+                state.observed.insert(id.to_string());
+            }
+        }
+        let allow_empty = saved
+            .id
+            .as_ref()
+            .is_some_and(|id| state.observed.contains(id));
+        if let Plan::Changed(_, fingerprint) = plan(&saved, &live, allow_empty) {
             seen.insert(entry.name.clone());
             if state.pending.get(&entry.name) == Some(&fingerprint) {
                 due.push((entry.name, fingerprint));
@@ -224,7 +249,11 @@ fn sync(
         if restoring(dir, &saved) {
             continue;
         }
-        if let Plan::Changed(next, again) = plan(&saved, &live) {
+        let allow_empty = saved
+            .id
+            .as_ref()
+            .is_some_and(|id| state.observed.contains(id));
+        if let Plan::Changed(next, again) = plan(&saved, &live, allow_empty) {
             if again == fingerprint {
                 save_space(dir, &name, &next)?;
                 state.pending.remove(&name);
@@ -409,11 +438,11 @@ mod tests {
         let file = saved(&before);
 
         let cd = snapshot(vec![session("a", Some(SPACE), &[("", "/two")])]);
-        assert_eq!(plan(&file, &cd), Plan::InSync, "cwd is not layout");
+        assert_eq!(plan(&file, &cd, false), Plan::InSync, "cwd is not layout");
 
         let titled = snapshot(vec![session("a", Some(SPACE), &[("build", "/one")])]);
         assert_eq!(
-            leaf_title(&changed(plan(&file, &titled))).as_deref(),
+            leaf_title(&changed(plan(&file, &titled, false))).as_deref(),
             Some("build")
         );
 
@@ -422,7 +451,7 @@ mod tests {
             Some(SPACE),
             &[("", "/one"), ("", "/one")],
         )]);
-        let next = changed(plan(&file, &split));
+        let next = changed(plan(&file, &split, false));
         assert!(matches!(
             &next.sessions[0].windows[0].root,
             SavedNode::Split { ratio, .. } if (*ratio - 0.4).abs() < 1e-9
@@ -454,7 +483,7 @@ mod tests {
         let kept = |name: &str, space: Option<&str>| session(name, space, &[("", "/x")]);
 
         let closed = snapshot(vec![kept("a", Some(SPACE))]);
-        let next = changed(plan(&file, &closed));
+        let next = changed(plan(&file, &closed, false));
         assert_eq!(next.sessions.len(), 1);
         assert_eq!(next.sessions[0].name, "a");
         assert_eq!(next.tabs.len(), 1);
@@ -462,25 +491,33 @@ mod tests {
         assert_eq!(next.focused_session, None);
 
         let moved = snapshot(vec![kept("a", Some(SPACE)), kept("b", Some("other"))]);
-        assert_eq!(plan(&file, &moved), Plan::Mismatch, "b is in another Space");
+        assert_eq!(
+            plan(&file, &moved, false),
+            Plan::Mismatch,
+            "b is in another Space"
+        );
 
         let unlisted = snapshot(vec![
             kept("a", Some(SPACE)),
             kept("b", Some(SPACE)),
             kept("c", Some(SPACE)),
         ]);
-        assert_eq!(plan(&file, &unlisted), Plan::Mismatch, "c is not listed");
+        assert_eq!(
+            plan(&file, &unlisted, false),
+            Plan::Mismatch,
+            "c is not listed"
+        );
 
         let renamed = snapshot(vec![kept("a", Some(SPACE)), kept("b2", Some(SPACE))]);
         assert_eq!(
-            plan(&file, &renamed),
+            plan(&file, &renamed, false),
             Plan::Mismatch,
             "rename not yet saved"
         );
 
         let none = snapshot(vec![]);
         assert_eq!(
-            plan(&file, &none),
+            plan(&file, &none, false),
             Plan::Mismatch,
             "never save an empty Space"
         );
@@ -569,6 +606,43 @@ mod tests {
         sync(&dir, &config, &mut state, || Ok(live.clone())).unwrap();
         assert_eq!(load_space(&dir, "desk").unwrap().sessions.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn closing_the_last_session_is_saved_but_an_unopened_space_is_not_emptied() {
+        let dir = scratch("last");
+        let one = [session("a", Some(SPACE), &[("", "/x")])];
+        save_space(&dir, "desk", &saved(&one)).unwrap();
+        let config = dir.join("missing.toml");
+        let none = snapshot(vec![]);
+
+        // A daemon that just started and never saw the Space: leave the file.
+        let mut fresh = State::default();
+        for _ in 0..4 {
+            sync(&dir, &config, &mut fresh, || Ok(none.clone())).unwrap();
+        }
+        assert_eq!(load_space(&dir, "desk").unwrap().sessions.len(), 1);
+
+        // The Space was seen in use, then its only session went away.
+        let mut state = State::default();
+        let live = snapshot(one.to_vec());
+        sync(&dir, &config, &mut state, || Ok(live.clone())).unwrap();
+        for _ in 0..2 {
+            sync(&dir, &config, &mut state, || Ok(none.clone())).unwrap();
+        }
+        let emptied = load_space(&dir, "desk").unwrap();
+        assert!(emptied.sessions.is_empty() && emptied.tabs.is_empty());
+        assert_eq!(emptied.id.as_deref(), Some(SPACE), "identity is kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_half_built_session_does_not_count_as_a_finished_restore() {
+        let full = [session("a", Some(SPACE), &[("", "/x"), ("", "/x")])];
+        let file = saved(&full);
+        let partial = snapshot(vec![session("a", Some(SPACE), &[("", "/x")])]);
+        assert!(!restore_matches(&file, &partial));
+        assert!(restore_matches(&file, &snapshot(full.to_vec())));
     }
 
     #[test]

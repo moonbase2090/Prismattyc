@@ -867,21 +867,42 @@ pub(super) fn prepare_open(store: &Store, client: &mut Client, name: &str) -> Re
 
 /// Mark a Space as being rebuilt from its file. The daemon does not autosave
 /// over it until [`end_restore`], so a restore that fails part way cannot
-/// replace the saved layout with the partial one.
-pub(super) fn begin_restore(space: &SavedSpace) -> Result<()> {
-    if let Some(id) = &space.id {
-        let marker = prismattyc_mux::space_autosave::restoring_marker(&spaces_dir(), id);
-        std::fs::write(&marker, b"").with_context(|| format!("write {}", marker.display()))?;
-    }
-    Ok(())
+/// replace the saved layout with the partial one. Returns whether a marker
+/// from an earlier, unfinished restore was already there.
+pub(super) fn begin_restore(space: &SavedSpace) -> Result<bool> {
+    let Some(id) = &space.id else {
+        return Ok(false);
+    };
+    let marker = prismattyc_mux::space_autosave::restoring_marker(&spaces_dir(), id);
+    let prior = marker.exists();
+    std::fs::write(&marker, b"").with_context(|| format!("write {}", marker.display()))?;
+    Ok(prior)
 }
 
-pub(super) fn end_restore(space: &SavedSpace) {
-    if let Some(id) = &space.id {
-        let _ = std::fs::remove_file(prismattyc_mux::space_autosave::restoring_marker(
-            &spaces_dir(),
-            id,
-        ));
+/// Clear the marker. A retry after an unfinished restore keeps it unless the
+/// live sessions now match the file: `space open` skips a session that
+/// already exists, so a half-built one would otherwise count as restored.
+pub(super) fn end_restore(
+    space: &SavedSpace,
+    snapshot: Option<&Snapshot>,
+    prior_unfinished: bool,
+) -> Result<()> {
+    let Some(id) = &space.id else {
+        return Ok(());
+    };
+    if let Some(snapshot) = snapshot.filter(|_| prior_unfinished) {
+        if !prismattyc_mux::space_autosave::restore_matches(space, snapshot) {
+            eprintln!(
+                "pmux: an earlier open of this Space did not finish and its sessions do not match the saved layout; autosave stays off for it until it is saved"
+            );
+            return Ok(());
+        }
+    }
+    let marker = prismattyc_mux::space_autosave::restoring_marker(&spaces_dir(), id);
+    match std::fs::remove_file(&marker) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", marker.display())),
     }
 }
 
@@ -953,7 +974,7 @@ pub(super) fn save_owned(
             to: Some(id),
         },
     )?;
-    end_restore(space);
+    end_restore(space, None, false)?;
     Ok(path)
 }
 

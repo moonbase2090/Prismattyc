@@ -1,0 +1,23 @@
+{
+  "tested_revision": "fcfd03f03252e2d4ef4f0097c6fd5135c023f5d93",
+  "executable": "prismattyc-host 0.3.41 (fcfd03f03252)",
+  "os": "macOS 26.6.2 arm64, fresh clean guest, no Prismattyc installed",
+  "proof_kind": "host-built binaries copied into the guest; guest desktop driven only by keyboard and pointer events over the VM's VNC server; step state read from the host's walkthrough dump and `pmux ls`; presented framebuffers cropped to the app window",
+  "binary_sha256": {
+    "pmux": "34d89ff176fb092414954cd5a19453bf72fdce13cbda5d8f20f4ae6438dca49f",
+    "pmuxd": "4fd6e2359d22e7a7459c652da204aafcde0378e1a259aee46c168f3f82cb3fc5",
+    "prismattyc-host": "5542e82948e3162a1e4921cc5b701a8032cfdc98f96baa2f4d33160d868602dc"
+  },
+  "observed": [
+    "walkthrough window.split-right completes after the real split; the next caption is window.focus-right",
+    "[show me] on window.focus-right and window.close-pane runs the action and advances",
+    "[show me] on tabs.new opens the new-session name prompt and the step stays active; cancelling leaves the daemon at 2 sessions and the step on tabs.new",
+    "[show me] again, then accepting the name, creates the session (daemon sessions 2 to 3) and only then completes tabs.new",
+    "[show me] on tabs.rename opens the rename prompt; accepting a new name renames the session in the daemon and completes the step",
+    "[show me] on tabs.move-pane completes; with one tab left, [show me] on tabs.drag stays on the step and the caption says to create another tab"
+  ],
+  "not_shown": [
+    "tabs.drag did not advance after a second tab was created; it was only retried twice before the turn ended, and whether the move was refused at the last position or fails to advance is not established",
+    "steps after tabs.drag: attach-all window, mail send/claim/commit, Space save and open were not reached in this turn"
+  ]
+}

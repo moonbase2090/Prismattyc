@@ -13,6 +13,7 @@
 ### Fixed
 
 - Spaces with windowless or stale saved entries now recover instead of failing to open.
+- The Single, Split, and Grid arrangement controls now appear in the pane header in every window layout, including tabs, the top Space rail, and hidden tabs.
 
 ### Security
 

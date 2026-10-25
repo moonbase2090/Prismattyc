@@ -745,11 +745,25 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Every readable Space file. An unreadable file is skipped with a warning,
+/// so one bad Space does not block operations on the others.
 fn definitions() -> Result<Vec<(String, SavedSpace)>> {
-    list_spaces(&spaces_dir())?
-        .into_iter()
-        .map(|entry| Ok((entry.name.clone(), load_space(&spaces_dir(), &entry.name)?)))
-        .collect()
+    let mut loaded = Vec::new();
+    for entry in list_spaces(&spaces_dir())? {
+        match load_space(&spaces_dir(), &entry.name) {
+            Ok(space) => loaded.push((entry.name, space)),
+            Err(error) => eprintln!("pmux: skipping space {:?}: {error:#}", entry.name),
+        }
+    }
+    Ok(loaded)
+}
+
+/// Whether a saved Space file still carries `owner`. A session whose owner
+/// has no file is stale: add and move may take it over.
+fn owner_is_saved(owner: &str, definitions: &[(String, SavedSpace)]) -> bool {
+    definitions
+        .iter()
+        .any(|(_, space)| space.id.as_deref() == Some(owner))
 }
 
 fn validate_definitions(files: &[(String, SavedSpace)]) -> Result<()> {
@@ -1162,14 +1176,22 @@ pub(super) fn add(paths: &Paths, args: Vec<String>) -> Result<()> {
         bail!("use --session for an existing session or --name for a new one");
     }
     let mut space = prepare_open(&store, &mut client, &name)?;
+    let mut from = None;
     let record = if let Some(key) = session {
         let snapshot = take_snapshot(&mut client)?;
         let live = resolve_space_sessions(&snapshot, &[key])?[0];
-        if live.space_id.is_some() {
-            bail!(
-                "session {:?} already has a Space owner; use Move",
+        if let Some(owner) = live.space_id.as_deref() {
+            if owner_is_saved(owner, &definitions()?) {
+                bail!(
+                    "session {:?} already has a Space owner; use Move",
+                    live.name
+                );
+            }
+            eprintln!(
+                "pmux: session {:?} belonged to a Space with no saved file; taking it over",
                 live.name
             );
+            from = Some(owner.to_string());
         }
         from_sessions(&[live]).sessions.remove(0)
     } else {
@@ -1195,7 +1217,7 @@ pub(super) fn add(paths: &Paths, args: Vec<String>) -> Result<()> {
             } else {
                 vec![]
             },
-            from: None,
+            from,
             to: space.id.clone(),
         },
     )?;
@@ -1266,7 +1288,10 @@ pub(super) fn remove(paths: &Paths, args: Vec<String>) -> Result<()> {
         .iter()
         .find(|s| s.name == key || s.id.to_string() == key);
     let session = live.map_or(key.as_str(), |s| s.name.as_str());
-    if !space.sessions.iter().any(|s| s.name == session) {
+    // A windowless entry is skipped on load but still listed in the file;
+    // removing it rewrites the file without it.
+    let listed = prismattyc_mux::listed_space_sessions(&spaces_dir(), &name)?;
+    if !space.sessions.iter().any(|s| s.name == session) && !listed.iter().any(|s| s == session) {
         bail!("session {session:?} is not in Space {name:?}");
     }
     remove_record(&mut space, session);
@@ -1348,9 +1373,20 @@ pub(super) fn move_work(paths: &Paths, args: Vec<String>) -> Result<()> {
             _ => false,
         })
         .context("source session or pane is not live")?;
+    // A session whose owner has no saved file is stale and counts as unowned.
+    let stale_owner = match source.space_id.as_deref() {
+        Some(owner) if !owner_is_saved(owner, &definitions()?) => Some(owner.to_string()),
+        _ => None,
+    };
     // A newly nested session may not belong to a Space yet. Claim its whole
     // seat directly, without first changing the parent Space or restarting it.
-    if source.space_id.is_none() {
+    if source.space_id.is_none() || stale_owner.is_some() {
+        if let Some(owner) = &stale_owner {
+            eprintln!(
+                "pmux: session {:?} belonged to Space {owner} with no saved file; taking it over",
+                source.name
+            );
+        }
         let pane_count = source.windows.iter().map(|w| w.panes.len()).sum::<usize>();
         anyhow::ensure!(
             destination.is_none() && (whole_session || pane_count == 1),
@@ -1368,7 +1404,7 @@ pub(super) fn move_work(paths: &Paths, args: Vec<String>) -> Result<()> {
                 pane_move: None,
                 deleted: vec![],
                 sessions: vec![source.name.clone()],
-                from: None,
+                from: stale_owner,
                 to: to.id.clone(),
                 files: vec![(target.clone(), to)],
             },
@@ -1747,4 +1783,34 @@ fn undo(paths: &Paths, path: &Path) -> Result<()> {
     std::fs::remove_file(path)?;
     println!("Previous Space membership restored; processes kept running");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prismattyc_mux::{SavedSpace, OWNED_SPACE_VERSION};
+
+    fn saved_space(id: &str) -> SavedSpace {
+        SavedSpace {
+            version: OWNED_SPACE_VERSION,
+            id: Some(id.to_string()),
+            created_at_unix_ms: None,
+            saved_at_unix: 1,
+            sessions: vec![],
+            tabs: vec![],
+            active_tab: 0,
+            focused_session: None,
+        }
+    }
+
+    #[test]
+    fn owner_with_a_saved_file_is_live_and_one_without_is_stale() {
+        let definitions = [("lightwell".to_string(), saved_space(&"a".repeat(32)))];
+        assert!(owner_is_saved(&"a".repeat(32), &definitions));
+        assert!(
+            !owner_is_saved(&"b".repeat(32), &definitions),
+            "an owner whose Space file is gone is stale"
+        );
+        assert!(!owner_is_saved(&"a".repeat(32), &[]));
+    }
 }

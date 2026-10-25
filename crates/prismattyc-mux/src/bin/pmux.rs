@@ -5386,8 +5386,24 @@ fn cmd_layout_save_space(paths: &Paths, rest: Vec<String>, usage: &'static str) 
             bail!("session {:?} has no windows to save", session.name);
         }
     }
-    let mut space = from_sessions(&sessions);
     let saved_names: Vec<String> = sessions.iter().map(|s| s.name.clone()).collect();
+    if session_keys.is_empty() {
+        let existing = match load_space(&spaces_dir(), &name) {
+            Ok(space) => space.sessions.into_iter().map(|s| s.name).collect(),
+            Err(_) if !spaces_dir().join(format!("{name}.json")).exists() => vec![],
+            Err(error) => {
+                return Err(error.context("existing space is unreadable; not overwriting"))
+            }
+        };
+        let omitted = omitted_space_members(&existing, &saved_names);
+        if !omitted.is_empty() {
+            bail!(
+                "space {name:?} has sessions this save would drop: {}; name them as SESSION arguments",
+                omitted.join(", ")
+            );
+        }
+    }
+    let mut space = from_sessions(&sessions);
     let cache = attach_tabs::load(&paths.space_view_path());
     let had_cache = cache.is_some();
     if let Some(file) = cache {
@@ -5450,6 +5466,16 @@ fn space_save_span_line(paths: &Paths, sessions: &[&SessionSnapshot]) -> Option<
         spaces.push((entry.name, members));
     }
     attach_tabs::space_save_span_warning(cache_space, &live, &spaces)
+}
+
+/// Members of the Space already on disk that a new save would leave out.
+/// Overwriting the file with them missing drops them from the Space.
+fn omitted_space_members(existing: &[String], saved_names: &[String]) -> Vec<String> {
+    existing
+        .iter()
+        .filter(|name| !saved_names.contains(name))
+        .cloned()
+        .collect()
 }
 
 /// Give each saved live session the attach-tabs cache omits its own
@@ -9431,6 +9457,21 @@ mod tests {
         assert!(parse_space_verb(args(&["save", "--help"])).unwrap() == SpaceVerb::Help);
         assert!(parse_space_verb(args(&["open", "-h"])).unwrap() == SpaceVerb::Help);
         assert!(parse_space_verb(args(&["ls", "--help"])).unwrap() == SpaceVerb::Help);
+    }
+
+    #[test]
+    fn space_save_reports_members_a_window_save_would_drop() {
+        let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            omitted_space_members(&names(&["lw-a", "lw-b", "lw-c"]), &names(&["lw-a"])),
+            names(&["lw-b", "lw-c"]),
+            "sessions on disk but not in the window are reported"
+        );
+        assert!(
+            omitted_space_members(&names(&["lw-a"]), &names(&["lw-a", "new"])).is_empty(),
+            "a save that keeps every member and adds one drops nothing"
+        );
+        assert!(omitted_space_members(&[], &names(&["new"])).is_empty());
     }
 
     #[test]

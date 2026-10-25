@@ -605,9 +605,9 @@ dependencies = [
 
 [[package]]
 name = "clipboard-win"
-version = "5.4.1"
+version = "5.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bde03770d3df201d4fb868f2c9c59e66a3e4e2bd06692a0fe701e7103c7e84d4"
+checksum = "39ed3668f121a65e4ce95efeba22ad1f8ad6c6628397a5dd773118514a5e1804"
 dependencies = [
  "error-code",
 ]
@@ -2554,7 +2554,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "pmux-mcp"
-version = "0.3.40"
+version = "0.3.41"
 dependencies = [
  "prismattyc-core",
  "prismattyc-mux",
@@ -2665,7 +2665,7 @@ checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
 
 [[package]]
 name = "prismattyc"
-version = "0.3.40"
+version = "0.3.41"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -2682,11 +2682,11 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-cmd-forwarder"
-version = "0.3.40"
+version = "0.3.41"
 
 [[package]]
 name = "prismattyc-core"
-version = "0.3.40"
+version = "0.3.41"
 dependencies = [
  "serde",
  "unicode-width",
@@ -2694,7 +2694,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-emulator"
-version = "0.3.40"
+version = "0.3.41"
 dependencies = [
  "anyhow",
  "libc",
@@ -2709,7 +2709,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-host"
-version = "0.3.40"
+version = "0.3.41"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -2757,7 +2757,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-labs"
-version = "0.3.40"
+version = "0.3.41"
 dependencies = [
  "prismattyc-core",
  "serde",
@@ -2767,7 +2767,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-mux"
-version = "0.3.40"
+version = "0.3.41"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2797,11 +2797,11 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-protocol"
-version = "0.3.40"
+version = "0.3.41"
 
 [[package]]
 name = "prismattyc-render"
-version = "0.3.40"
+version = "0.3.41"
 dependencies = [
  "prismattyc-core",
  "prismattyc-protocol",
@@ -2809,7 +2809,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-rich-client"
-version = "0.3.40"
+version = "0.3.41"
 dependencies = [
  "libc",
  "prismattyc-protocol",
@@ -2817,7 +2817,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-winres"
-version = "0.3.40"
+version = "0.3.41"
 dependencies = [
  "winresource",
 ]
@@ -3647,9 +3647,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",

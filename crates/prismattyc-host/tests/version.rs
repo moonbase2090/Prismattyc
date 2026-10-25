@@ -87,7 +87,8 @@ fn write_config_prints_template_and_exits_zero() {
     assert!(out.status.success(), "{:?}", out.status.code());
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        text.lines().any(|line| line == "# theme = \"prismattyc\""),
+        text.lines()
+            .any(|line| line == "# theme = \"prismattyc-dark\""),
         "fresh installs show the default without pinning it: {text}"
     );
     assert!(
@@ -113,7 +114,8 @@ fn write_config_without_path_prints_template_and_exits_zero() {
     assert!(out.status.success(), "{:?}", out.status.code());
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        text.lines().any(|line| line == "# theme = \"prismattyc\""),
+        text.lines()
+            .any(|line| line == "# theme = \"prismattyc-dark\""),
         "fresh installs show the default without pinning it: {text}"
     );
     assert!(
@@ -134,7 +136,8 @@ fn write_config_file_contains_complete_template() {
     let text = std::fs::read_to_string(&custom).expect("custom config should be readable");
     assert!(text.starts_with("# Prismattyc host config."));
     assert!(
-        text.lines().any(|line| line == "# theme = \"prismattyc\""),
+        text.lines()
+            .any(|line| line == "# theme = \"prismattyc-dark\""),
         "a written template comments the default theme: {text}"
     );
     assert!(

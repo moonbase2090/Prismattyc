@@ -18,7 +18,7 @@ use crate::keybind::{self, Action};
 
 /// Default cell size in px before display scaling (`FONT_PX` in main).
 pub const DEFAULT_FONT_PX: f32 = 15.0;
-const DEFAULT_THEME: &str = "prismattyc";
+const DEFAULT_THEME: &str = "prismattyc-dark";
 const DEFAULT_FOCUS_BORDER: &str = "blue";
 const DEFAULT_FOCUS_ANIMATION: &str = "none";
 const DEFAULT_FOCUS_ANIMATION_MS: u64 = 280;
@@ -72,7 +72,7 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         name: "theme",
         group: ConfigGroup::Appearance,
         doc:
-            "Named theme: built-in slug, display name, sibling themes/ file, or absolute TOML path. Omit this key to follow the app default (prismattyc)",
+            "Named theme: built-in slug, display name, sibling themes/ file, or absolute TOML path. Omit this key to follow the app default (prismattyc-dark). prismattyc follows the OS appearance",
         range: "theme slug or absolute path",
         value: ConfigValue::CommentedString(DEFAULT_THEME),
     },
@@ -1265,7 +1265,7 @@ mod tests {
         assert!(
             template
                 .lines()
-                .any(|line| line == "# theme = \"prismattyc\""),
+                .any(|line| line == "# theme = \"prismattyc-dark\""),
             "fresh installs show the default without pinning it"
         );
         assert!(
@@ -1579,7 +1579,7 @@ mod tests {
         assert!(
             omitted
                 .lines()
-                .any(|line| line == "# theme = \"prismattyc\""),
+                .any(|line| line == "# theme = \"prismattyc-dark\""),
             "merge must comment a missing theme: {omitted}"
         );
         assert!(

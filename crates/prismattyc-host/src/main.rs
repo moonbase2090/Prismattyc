@@ -14,6 +14,7 @@ mod attach_tabs;
 mod border_underlay;
 mod config;
 mod config_template;
+mod daemon_startup;
 mod file_writer;
 mod frame_damage;
 mod git_info;
@@ -4149,13 +4150,14 @@ impl App {
         // An explicit session selection must not inherit another Space's
         // global cache merely because this process becomes the registered host.
         let stored_layout = stored_layout.filter(|layout| {
-            explicit_view.is_some()
-                || attach_sessions.iter().all(|target| {
-                    layout
-                        .tabs
-                        .iter()
-                        .any(|tab| tab.sessions.contains(&target.session))
-                })
+            restore_prompt::cache_matches_space(layout, &spaces_dir())
+                && (explicit_view.is_some()
+                    || attach_sessions.iter().all(|target| {
+                        layout
+                            .tabs
+                            .iter()
+                            .any(|tab| tab.sessions.contains(&target.session))
+                    }))
         });
         let startup_space = if (first_window || self.restart_view.is_some()) && !config_editor {
             stored_layout
@@ -4204,6 +4206,7 @@ impl App {
                                 .and_then(|saved| saved.view)
                         })
                     })
+                    .filter(|layout| restore_prompt::cache_matches_space(layout, &spaces_dir()))
                     .and_then(restore_prompt::RestorePrompt::new)
             } else {
                 None
@@ -19976,10 +19979,31 @@ fn mouse_input_decision(context: MouseInputContext) -> MouseInputDecision {
     }
 }
 
+impl App {
+    fn ensure_pmuxd_for_startup(&self) -> Result<()> {
+        let socket = host_mux_socket().context("mux socket path")?;
+        daemon_startup::ensure_pmuxd_started(&pmux_bin(), &socket)
+    }
+}
+
 impl ApplicationHandler<UserAction> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if !self.windows.is_empty() {
             return;
+        }
+        if let Err(error) = self.ensure_pmuxd_for_startup() {
+            eprintln!("prismattyc-host: failed to start pmuxd: {error:#}");
+            self.exit_code = 1;
+            event_loop.exit();
+            return;
+        }
+        if !self.cli.explicit_program && self.cli.attach_sessions.is_empty() {
+            if let Some(socket) = host_mux_socket() {
+                if let Err(error) = prismattyc_mux::login::initialize_default(&socket) {
+                    eprintln!("prismattyc-host: login preference initialization failed: {error:#}");
+                }
+            }
+            restore_prompt::sync_login_registration();
         }
         if restart::resume(self, event_loop) {
             return;
@@ -21480,16 +21504,6 @@ fn main() -> Result<()> {
         eprintln!("{}", config::host_warning_line(warning));
     }
     cli.apply_config(&file_config);
-    if !cli.explicit_program && cli.attach_sessions.is_empty() {
-        // Record the initial default before a fresh window can write its
-        // first cache. Native service registration stays in the worker.
-        if let Some(socket) = host_mux_socket() {
-            if let Err(error) = prismattyc_mux::login::initialize_default(&socket) {
-                eprintln!("prismattyc-host: login preference initialization failed: {error:#}");
-            }
-        }
-        restore_prompt::sync_login_registration();
-    }
     #[cfg(target_os = "macos")]
     agent_skills::start(file_config.install_agent_skills(), pmux_bin());
     // Windowed host requires a display; fail clearly in pure SSH/CI. macOS and

@@ -144,7 +144,7 @@ pub(crate) struct ChromeSnapshot {
     pub document: Option<DocumentSnap>,
     pub live: Option<LiveSnap>,
     pub caption: Option<String>,
-    /// Arrange button names while the sidebar header shows them; empty
+    /// Arrange button names while the pane header shows them; empty
     /// otherwise. The buttons paint icons, so these are their only names.
     pub arrange: Vec<String>,
     pub arrange_current: Option<usize>,

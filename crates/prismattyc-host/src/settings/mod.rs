@@ -410,9 +410,11 @@ impl Panel {
         let next = match &control.kind {
             Kind::Bool => Some(toml::Value::Boolean(right)),
             Kind::Integer { min, max, step } => Some(toml::Value::Integer(
-                (current.and_then(toml::Value::as_integer).unwrap_or(*min)
-                    + if right { *step } else { -*step })
-                .clamp(*min, *max),
+                current
+                    .and_then(toml::Value::as_integer)
+                    .unwrap_or(*min)
+                    .saturating_add(if right { *step } else { -*step })
+                    .clamp(*min, *max),
             )),
             Kind::Float { min, max, step } => {
                 let value = current
@@ -430,12 +432,12 @@ impl Panel {
                     if old == 0 {
                         6
                     } else {
-                        (old + 1).min(40)
+                        old.saturating_add(1).min(40)
                     }
                 } else if old <= 6 {
                     0
                 } else {
-                    old - 1
+                    old.saturating_sub(1)
                 };
                 Some(value.into())
             }
@@ -1098,10 +1100,12 @@ impl Panel {
                 Kind::Bool => *value = right.into(),
                 Kind::Choice(choices) => *value = cycle_choice(choices, Some(value), right),
                 Kind::Integer { min, max, step } => {
-                    *value = (value.as_integer().unwrap_or(*min)
-                        + if right { *step } else { -*step })
-                    .clamp(*min, *max)
-                    .into()
+                    *value = value
+                        .as_integer()
+                        .unwrap_or(*min)
+                        .saturating_add(if right { *step } else { -*step })
+                        .clamp(*min, *max)
+                        .into()
                 }
                 Kind::Float { min, max, step } => {
                     *value = ((value

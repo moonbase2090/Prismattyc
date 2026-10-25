@@ -944,3 +944,21 @@ fn root_rows_show_saved_values_before_help_text() {
         row.describe
     );
 }
+
+#[test]
+fn stepping_an_extreme_integer_clamps_instead_of_overflowing() {
+    let mut fixture = Fixture::new("");
+    fixture.open_key("panes");
+    fixture.text("9223372036854775807");
+    fixture.press(NamedKey::ArrowRight);
+    fixture.save();
+    let saved = std::fs::read_to_string(&fixture.panel.path).unwrap();
+    assert!(saved.contains("panes = 8"), "{saved}");
+
+    fixture.open_key("panes");
+    fixture.text("-9223372036854775808");
+    fixture.press(NamedKey::ArrowLeft);
+    fixture.save();
+    let saved = std::fs::read_to_string(&fixture.panel.path).unwrap();
+    assert!(saved.contains("panes = 1"), "{saved}");
+}

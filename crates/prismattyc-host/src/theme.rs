@@ -208,13 +208,13 @@ pub fn builtins() -> &'static [Theme] {
 /// Prismattyc Dark or Prismattyc Light from the system setting.
 pub const FOLLOW_OS_ID: &str = "prismattyc";
 
-/// What a new install, or a config with no `theme`, gets: Prismattyc
-/// matching the system appearance. The legacy `prismattyc-default` palette
-/// stays available by name.
+/// What a new install, or a config with no `theme`, gets: Prismattyc Dark,
+/// whatever the system appearance. `theme = "prismattyc"` still follows the
+/// OS, and the legacy `prismattyc-default` palette stays available by name.
 pub fn shipped_default() -> Theme {
     BUILTINS
         .iter()
-        .find(|theme| theme.id == FOLLOW_OS_ID)
+        .find(|theme| theme.id == "prismattyc-dark")
         .cloned()
         .unwrap_or_else(|| default_theme().clone())
 }
@@ -714,19 +714,30 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// #145: the shipped default follows the OS and resolves to the Graphite
-    /// Dark or Light palette for chrome and terminal alike; other themes and
-    /// overrides are left alone.
+    /// A fresh install paints Prismattyc Dark whatever the OS appearance is:
+    /// the shipped default is not the follow-OS theme.
     #[test]
-    fn prismattyc_follows_the_os_appearance() {
+    fn shipped_default_is_prismattyc_dark() {
         let shipped = shipped_default();
-        assert_eq!(shipped.id, FOLLOW_OS_ID);
-        assert!(follows_os(&shipped));
+        assert_eq!(shipped.id, "prismattyc-dark");
+        assert!(!follows_os(&shipped));
+        assert_eq!(shipped.variant, ThemeVariant::Dark);
         assert_eq!(
             load(None, Path::new("/nonexistent/config.toml")).unwrap(),
             shipped
         );
-        let light = resolve_follow_os(&shipped, true, None);
+        assert_eq!(resolve_follow_os(&shipped, true, None), shipped);
+    }
+
+    /// #145: `theme = "prismattyc"` stays selectable and follows the OS,
+    /// resolving to the Graphite Dark or Light palette for chrome and terminal
+    /// alike; other themes and overrides are left alone.
+    #[test]
+    fn explicit_prismattyc_follows_the_os_appearance() {
+        let follow = load(Some("prismattyc"), Path::new("/nonexistent/config.toml")).unwrap();
+        assert_eq!(follow.id, FOLLOW_OS_ID);
+        assert!(follows_os(&follow));
+        let light = resolve_follow_os(&follow, true, None);
         assert_eq!(light.variant, ThemeVariant::Light);
         assert_eq!(light.id, FOLLOW_OS_ID, "keeps following after resolution");
         assert_eq!(
@@ -743,7 +754,7 @@ mod tests {
             default_bg: Some("#123456".into()),
             ..ThemeOverrides::default()
         };
-        let tinted = resolve_follow_os(&shipped, true, Some(&overrides));
+        let tinted = resolve_follow_os(&follow, true, Some(&overrides));
         assert_eq!(tinted.default_bg, [0x12, 0x34, 0x56]);
         assert_eq!(tinted.variant, ThemeVariant::Light);
         // A theme that does not follow the OS is never swapped.

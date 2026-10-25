@@ -50,6 +50,7 @@ fn exercise() {
     let log_dir = runtime();
     let _daemon = Daemon(
         Command::new(&pmuxd)
+            .env("PRISMATTYC_DEFAULT_SPACE", "0")
             .arg("--socket")
             .arg(&socket)
             .args(["--", "/bin/sh"])

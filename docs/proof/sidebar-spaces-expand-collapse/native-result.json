@@ -1,6 +1,6 @@
 {
   "status": "PASS",
-  "host_pid": 70197,
+  "host_pid": 97438,
   "spaces_before": [
     "default",
     "lab",
@@ -13,8 +13,12 @@
     "mail",
     "ops"
   ],
+  "span_before": 288,
+  "span_after_collapse": 144,
+  "span_after_expand": 288,
   "before_present": "before-present.png",
   "after_present": "after-present.png",
+  "expanded_present": "expanded-present.png",
   "os_capture_before": {
     "ok": false,
     "bounds": [

@@ -30,5 +30,6 @@
     "titlebar_points": 32.0
   },
   "scale": 0.5,
-  "titlebar_points": 32.0
+  "titlebar_points": 32.0,
+  "click_method": "cghidEventTap + activate (pointer_px via CursorMoved)"
 }

@@ -1,6 +1,6 @@
 {
-  "tested_revision": "fcfd03f03252e2d4ef4f0097c6fd5135c023f5d93",
-  "executable": "prismattyc-host 0.3.41 (fcfd03f03252)",
+  "tested_revision": "fcfd0f03252e2d4ef4f0097c6fd5135c023f5d93",
+  "executable": "prismattyc-host 0.3.41 (fcfd0f03252)",
   "os": "macOS 26.6.2 arm64, fresh clean guest, no Prismattyc installed",
   "proof_kind": "host-built binaries copied into the guest; guest desktop driven only by keyboard and pointer events over the VM's VNC server; step state read from the host's walkthrough dump and `pmux ls`; presented framebuffers cropped to the app window",
   "binary_sha256": {

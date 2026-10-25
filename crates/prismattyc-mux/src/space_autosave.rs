@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
-/// A changed shape must hold for two ticks before it is written.
-const TICK: Duration = Duration::from_secs(1);
+/// A changed shape must hold for two ticks (one second) before it is written.
+const TICK: Duration = Duration::from_millis(500);
 
 fn shape(node: &SavedNode) -> serde_json::Value {
     match node {
@@ -47,38 +47,55 @@ fn window_shapes(windows: &[SavedWindow]) -> String {
     serde_json::Value::Array(shapes).to_string()
 }
 
-/// The Space with its sessions' windows replaced by the live ones, and a
-/// fingerprint of the change. `None` when nothing differs, or when the live
-/// daemon does not match the file one to one: a session that failed to
-/// restore, or a member the file does not list yet, must not be saved over.
-pub(crate) fn updated_space(
-    saved: &SavedSpace,
-    snapshot: &Snapshot,
-) -> Option<(SavedSpace, String)> {
-    let id = saved.id.as_deref()?;
+/// What the live daemon says about one Space file.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Plan {
+    /// The live sessions are not the file's sessions one to one: a session
+    /// failed to restore, left the Space, or the file does not list a member.
+    Mismatch,
+    /// Same members, same window shapes.
+    InSync,
+    /// Same members, different shapes: the file with the live windows, and
+    /// a fingerprint of the change.
+    Changed(Box<SavedSpace>, String),
+}
+
+pub(crate) fn plan(saved: &SavedSpace, snapshot: &Snapshot) -> Plan {
+    let Some(id) = saved.id.as_deref() else {
+        return Plan::Mismatch;
+    };
     let owned: Vec<_> = snapshot
         .sessions
         .iter()
         .filter(|session| session.space_id.as_deref() == Some(id))
         .collect();
     if owned.len() != saved.sessions.len() {
-        return None;
+        return Plan::Mismatch;
     }
     let mut next = saved.clone();
     let mut fingerprint = String::new();
     for entry in &mut next.sessions {
-        let live = owned.iter().find(|session| session.name == entry.name)?;
-        if live.windows.is_empty() {
-            return None;
-        }
-        let windows = from_sessions(&[*live]).sessions.pop()?.windows;
+        let Some(live) = owned.iter().find(|session| session.name == entry.name) else {
+            return Plan::Mismatch;
+        };
+        let Some(windows) = (!live.windows.is_empty())
+            .then(|| from_sessions(&[*live]).sessions.pop())
+            .flatten()
+            .map(|session| session.windows)
+        else {
+            return Plan::Mismatch;
+        };
         let live_shape = window_shapes(&windows);
         if live_shape != window_shapes(&entry.windows) {
             fingerprint.push_str(&format!("{}:{live_shape};", entry.name));
             entry.windows = windows;
         }
     }
-    (!fingerprint.is_empty()).then_some((next, fingerprint))
+    if fingerprint.is_empty() {
+        Plan::InSync
+    } else {
+        Plan::Changed(Box::new(next), fingerprint)
+    }
 }
 
 /// `[spaces] autosave`, else the legacy `space_autosave`, else on. The host
@@ -102,16 +119,26 @@ fn transfer_pending(dir: &Path) -> bool {
     dir.join(".ownership-transaction").exists()
 }
 
-/// One pass. `pending` holds the fingerprint seen on the previous pass for
-/// each Space; a Space is written when the same fingerprint is seen twice.
+/// What the worker remembers between passes.
+#[derive(Default)]
+struct State {
+    /// Fingerprint seen on the previous pass for each Space name. A change is
+    /// written when the same fingerprint is seen twice.
+    pending: HashMap<String, String>,
+    /// Space ids seen in sync with their file since this daemon started. A
+    /// Space that never matched its file (a restore that failed or is still
+    /// running) is never saved over.
+    baselined: HashSet<String>,
+}
+
 fn sync(
     dir: &Path,
     config: &Path,
-    pending: &mut HashMap<String, String>,
+    state: &mut State,
     snapshot: impl Fn() -> Result<Snapshot>,
 ) -> Result<()> {
     if !autosave_enabled(config) || !dir.is_dir() || transfer_pending(dir) {
-        pending.clear();
+        state.pending.clear();
         return Ok(());
     }
     let live = snapshot()?;
@@ -121,22 +148,31 @@ fn sync(
         let Ok(saved) = load_space(dir, &entry.name) else {
             continue;
         };
-        let Some((_, fingerprint)) = updated_space(&saved, &live) else {
+        let Some(id) = saved.id.clone() else {
             continue;
         };
-        seen.insert(entry.name.clone());
-        if pending.get(&entry.name) == Some(&fingerprint) {
-            due.push((entry.name, fingerprint));
-        } else {
-            pending.insert(entry.name, fingerprint);
+        match plan(&saved, &live) {
+            Plan::InSync => {
+                state.baselined.insert(id);
+            }
+            Plan::Changed(_, fingerprint) if state.baselined.contains(&id) => {
+                seen.insert(entry.name.clone());
+                if state.pending.get(&entry.name) == Some(&fingerprint) {
+                    due.push((entry.name, fingerprint));
+                } else {
+                    state.pending.insert(entry.name, fingerprint);
+                }
+            }
+            Plan::Changed(..) | Plan::Mismatch => {}
         }
     }
-    pending.retain(|name, _| seen.contains(name));
+    state.pending.retain(|name, _| seen.contains(name));
     if due.is_empty() {
         return Ok(());
     }
-    // Same lock as every `pmux space` edit. Take it before the second
-    // snapshot so a transfer in flight cannot interleave with this write.
+    // Same lock as every `pmux space` edit, and `space open` holds it for the
+    // whole restore. Take it before the second snapshot so a transfer or a
+    // restore in flight cannot interleave with this write.
     let lock = crate::platform::private_options()
         .create(true)
         .truncate(false)
@@ -153,12 +189,11 @@ fn sync(
         let Ok(saved) = load_space(dir, &name) else {
             continue;
         };
-        match updated_space(&saved, &live) {
-            Some((next, again)) if again == fingerprint => {
+        if let Plan::Changed(next, again) = plan(&saved, &live) {
+            if again == fingerprint {
                 save_space(dir, &name, &next)?;
-                pending.remove(&name);
+                state.pending.remove(&name);
             }
-            _ => {}
         }
     }
     Ok(())
@@ -177,12 +212,12 @@ impl Worker {
             .spawn(move || {
                 let dir = spaces_dir_for_socket(&socket);
                 let config = crate::prism_config_path();
-                let mut pending = HashMap::new();
+                let mut state = State::default();
                 while matches!(
                     receiver.recv_timeout(TICK),
                     Err(mpsc::RecvTimeoutError::Timeout)
                 ) {
-                    let result = sync(&dir, &config, &mut pending, || {
+                    let result = sync(&dir, &config, &mut state, || {
                         plane
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -319,27 +354,48 @@ mod tests {
         dir
     }
 
+    fn changed(plan: Plan) -> SavedSpace {
+        match plan {
+            Plan::Changed(space, _) => *space,
+            other => panic!("expected a change, got {other:?}"),
+        }
+    }
+
+    /// A state that has already seen `before` in sync, like a daemon that
+    /// restored the Space cleanly.
+    fn baselined(dir: &Path, config: &Path, before: &Snapshot) -> State {
+        let mut state = State::default();
+        sync(dir, config, &mut state, || Ok(before.clone())).unwrap();
+        state
+    }
+
+    fn leaf_title(space: &SavedSpace) -> Option<String> {
+        match &space.sessions[0].windows[0].root {
+            SavedNode::Leaf { title, .. } => title.clone(),
+            other => panic!("expected a leaf, got {other:?}"),
+        }
+    }
+
     #[test]
     fn a_new_pane_title_or_split_is_a_change_but_a_cwd_move_is_not() {
         let before = [session("a", Some(SPACE), &[("", "/one")])];
         let file = saved(&before);
 
         let cd = snapshot(vec![session("a", Some(SPACE), &[("", "/two")])]);
-        assert!(updated_space(&file, &cd).is_none(), "cwd is not layout");
+        assert_eq!(plan(&file, &cd), Plan::InSync, "cwd is not layout");
 
         let titled = snapshot(vec![session("a", Some(SPACE), &[("build", "/one")])]);
-        let (next, _) = updated_space(&file, &titled).expect("title change");
-        assert!(matches!(
-            &next.sessions[0].windows[0].root,
-            SavedNode::Leaf { title: Some(t), .. } if t == "build"
-        ));
+        assert_eq!(
+            leaf_title(&changed(plan(&file, &titled))).as_deref(),
+            Some("build")
+        );
 
         let split = snapshot(vec![session(
             "a",
             Some(SPACE),
             &[("", "/one"), ("", "/one")],
         )]);
-        let (next, _) = updated_space(&file, &split).expect("split");
+        let next = changed(plan(&file, &split));
         assert!(matches!(
             &next.sessions[0].windows[0].root,
             SavedNode::Split { ratio, .. } if (*ratio - 0.4).abs() < 1e-9
@@ -354,76 +410,89 @@ mod tests {
             session("b", Some(SPACE), &[("", "/x")]),
         ];
         let file = saved(&before);
-        let changed = |name: &str, space: Option<&str>| session(name, space, &[("t", "/x")]);
+        let titled = |name: &str, space: Option<&str>| session(name, space, &[("t", "/x")]);
 
-        let missing = snapshot(vec![changed("a", Some(SPACE))]);
-        assert!(
-            updated_space(&file, &missing).is_none(),
-            "b did not restore"
-        );
+        let missing = snapshot(vec![titled("a", Some(SPACE))]);
+        assert_eq!(plan(&file, &missing), Plan::Mismatch, "b did not restore");
 
-        let foreign = snapshot(vec![changed("a", Some(SPACE)), changed("b", Some("other"))]);
-        assert!(updated_space(&file, &foreign).is_none(), "b left the Space");
+        let foreign = snapshot(vec![titled("a", Some(SPACE)), titled("b", Some("other"))]);
+        assert_eq!(plan(&file, &foreign), Plan::Mismatch, "b left the Space");
 
         let extra = snapshot(vec![
-            changed("a", Some(SPACE)),
-            changed("b", Some(SPACE)),
-            changed("c", Some(SPACE)),
+            titled("a", Some(SPACE)),
+            titled("b", Some(SPACE)),
+            titled("c", Some(SPACE)),
         ]);
-        assert!(updated_space(&file, &extra).is_none(), "c is not listed");
+        assert_eq!(plan(&file, &extra), Plan::Mismatch, "c is not listed");
 
-        let both = snapshot(vec![changed("a", Some(SPACE)), changed("b", Some(SPACE))]);
-        assert!(updated_space(&file, &both).is_some());
+        let both = snapshot(vec![titled("a", Some(SPACE)), titled("b", Some(SPACE))]);
+        assert!(matches!(plan(&file, &both), Plan::Changed(..)));
     }
 
     #[test]
     fn the_file_is_rewritten_after_the_change_holds_one_tick_and_not_before() {
         let dir = scratch("debounce");
-        let before = [session("a", Some(SPACE), &[("", "/x")])];
-        save_space(&dir, "desk", &saved(&before)).unwrap();
+        let before = snapshot(vec![session("a", Some(SPACE), &[("", "/x")])]);
+        save_space(&dir, "desk", &saved(&before.sessions)).unwrap();
         let config = dir.join("missing.toml");
+        let mut state = baselined(&dir, &config, &before);
         let live = snapshot(vec![session("a", Some(SPACE), &[("build", "/x")])]);
-        let mut pending = HashMap::new();
 
-        sync(&dir, &config, &mut pending, || Ok(live.clone())).unwrap();
-        let first = load_space(&dir, "desk").unwrap();
-        assert!(matches!(
-            &first.sessions[0].windows[0].root,
-            SavedNode::Leaf { title: None, .. }
-        ));
+        sync(&dir, &config, &mut state, || Ok(live.clone())).unwrap();
+        assert_eq!(leaf_title(&load_space(&dir, "desk").unwrap()), None);
 
-        sync(&dir, &config, &mut pending, || Ok(live.clone())).unwrap();
-        let second = load_space(&dir, "desk").unwrap();
-        assert!(matches!(
-            &second.sessions[0].windows[0].root,
-            SavedNode::Leaf { title: Some(t), .. } if t == "build"
-        ));
-        assert!(pending.is_empty());
-
-        let reopened = load_space(&dir, "desk").unwrap();
-        assert_eq!(reopened.id.as_deref(), Some(SPACE));
+        sync(&dir, &config, &mut state, || Ok(live.clone())).unwrap();
+        let written = load_space(&dir, "desk").unwrap();
+        assert_eq!(leaf_title(&written).as_deref(), Some("build"));
+        assert_eq!(written.id.as_deref(), Some(SPACE));
+        assert!(state.pending.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_flapping_change_is_not_written() {
         let dir = scratch("flap");
-        save_space(
-            &dir,
-            "desk",
-            &saved(&[session("a", Some(SPACE), &[("", "/x")])]),
-        )
-        .unwrap();
+        let before = snapshot(vec![session("a", Some(SPACE), &[("", "/x")])]);
+        save_space(&dir, "desk", &saved(&before.sessions)).unwrap();
         let config = dir.join("missing.toml");
-        let mut pending = HashMap::new();
+        let mut state = baselined(&dir, &config, &before);
         for title in ["one", "two", "three"] {
             let live = snapshot(vec![session("a", Some(SPACE), &[(title, "/x")])]);
-            sync(&dir, &config, &mut pending, || Ok(live.clone())).unwrap();
+            sync(&dir, &config, &mut state, || Ok(live.clone())).unwrap();
         }
-        let saved = load_space(&dir, "desk").unwrap();
+        assert_eq!(leaf_title(&load_space(&dir, "desk").unwrap()), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_space_that_never_matched_its_file_is_not_overwritten() {
+        // Two panes saved; the restore produced one. This is a restore that
+        // failed part way, not a pane the user closed.
+        let dir = scratch("partial");
+        let full = [session("a", Some(SPACE), &[("", "/x"), ("", "/x")])];
+        save_space(&dir, "desk", &saved(&full)).unwrap();
+        let config = dir.join("missing.toml");
+        let partial = snapshot(vec![session("a", Some(SPACE), &[("", "/x")])]);
+        let mut state = State::default();
+        for _ in 0..4 {
+            sync(&dir, &config, &mut state, || Ok(partial.clone())).unwrap();
+        }
+        let kept = load_space(&dir, "desk").unwrap();
         assert!(matches!(
-            &saved.sessions[0].windows[0].root,
-            SavedNode::Leaf { title: None, .. }
+            &kept.sessions[0].windows[0].root,
+            SavedNode::Split { .. }
+        ));
+
+        // Once the restore completes, a later close is saved.
+        let restored = snapshot(full.to_vec());
+        sync(&dir, &config, &mut state, || Ok(restored.clone())).unwrap();
+        for _ in 0..2 {
+            sync(&dir, &config, &mut state, || Ok(partial.clone())).unwrap();
+        }
+        let closed = load_space(&dir, "desk").unwrap();
+        assert!(matches!(
+            &closed.sessions[0].windows[0].root,
+            SavedNode::Leaf { .. }
         ));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -431,39 +500,30 @@ mod tests {
     #[test]
     fn opt_out_and_a_pending_transfer_block_the_write() {
         let dir = scratch("blocked");
-        save_space(
-            &dir,
-            "desk",
-            &saved(&[session("a", Some(SPACE), &[("", "/x")])]),
-        )
-        .unwrap();
+        let before = snapshot(vec![session("a", Some(SPACE), &[("", "/x")])]);
+        save_space(&dir, "desk", &saved(&before.sessions)).unwrap();
+        let on = dir.join("on.toml");
+        let mut state = baselined(&dir, &on, &before);
         let live = snapshot(vec![session("a", Some(SPACE), &[("build", "/x")])]);
-        let untouched = |dir: &Path| {
-            matches!(
-                &load_space(dir, "desk").unwrap().sessions[0].windows[0].root,
-                SavedNode::Leaf { title: None, .. }
-            )
-        };
+        let untouched = |dir: &Path| leaf_title(&load_space(dir, "desk").unwrap()).is_none();
 
         let off = dir.join("off.toml");
         std::fs::write(&off, "[spaces]\nautosave = false\n").unwrap();
-        let mut pending = HashMap::new();
         for _ in 0..3 {
-            sync(&dir, &off, &mut pending, || Ok(live.clone())).unwrap();
+            sync(&dir, &off, &mut state, || Ok(live.clone())).unwrap();
         }
         assert!(untouched(&dir), "spaces.autosave = false is honored");
 
         let legacy = dir.join("legacy.toml");
         std::fs::write(&legacy, "space_autosave = false\n").unwrap();
         for _ in 0..3 {
-            sync(&dir, &legacy, &mut pending, || Ok(live.clone())).unwrap();
+            sync(&dir, &legacy, &mut state, || Ok(live.clone())).unwrap();
         }
         assert!(untouched(&dir), "legacy space_autosave = false is honored");
 
         std::fs::write(dir.join(".ownership-transaction"), "{}").unwrap();
-        let on = dir.join("on.toml");
         for _ in 0..3 {
-            sync(&dir, &on, &mut pending, || Ok(live.clone())).unwrap();
+            sync(&dir, &on, &mut state, || Ok(live.clone())).unwrap();
         }
         assert!(untouched(&dir), "a pending transfer is never raced");
         let _ = std::fs::remove_dir_all(&dir);

@@ -4,17 +4,17 @@
     {
       "alt_active": false,
       "attach_policy": {
-        "batches": 6,
+        "batches": 1,
         "coalesced_bytes": 0,
         "coalesced_frames": 0,
         "dropped_bytes": 0,
         "dropped_frames": 0,
-        "frames": 7,
-        "notice": "attach policy active: 6 batches / 7 frames; coalesced 0 frames / 0 bytes",
+        "frames": 1,
+        "notice": "attach policy active: 1 batches / 1 frames; coalesced 0 frames / 0 bytes",
         "reader_blocked_ms": 0,
         "reader_queue_budget_bytes": 8388608,
         "reader_queue_bytes": 64,
-        "reader_queue_high_water_bytes": 16773,
+        "reader_queue_high_water_bytes": 8595,
         "superseded_bytes": 0,
         "superseded_frames": 0
       },
@@ -39,7 +39,7 @@
         "reader_blocked_ms": 0,
         "reader_queue_budget_bytes": 8388608,
         "reader_queue_bytes": 64,
-        "reader_queue_high_water_bytes": 17534,
+        "reader_queue_high_water_bytes": 17401,
         "superseded_bytes": 0,
         "superseded_frames": 0
       },
@@ -64,7 +64,7 @@
         "reader_blocked_ms": 0,
         "reader_queue_budget_bytes": 8388608,
         "reader_queue_bytes": 64,
-        "reader_queue_high_water_bytes": 16773,
+        "reader_queue_high_water_bytes": 16752,
         "superseded_bytes": 0,
         "superseded_frames": 0
       },
@@ -89,7 +89,7 @@
         "reader_blocked_ms": 0,
         "reader_queue_budget_bytes": 8388608,
         "reader_queue_bytes": 64,
-        "reader_queue_high_water_bytes": 17527,
+        "reader_queue_high_water_bytes": 17401,
         "superseded_bytes": 0,
         "superseded_frames": 0
       },
@@ -106,12 +106,10 @@
   "focused_pane": 4,
   "focused_session": "7",
   "last_raster": {
-    "cells_painted": 5128,
-    "full_repaint_reason": "resize",
-    "guard_mask": 1342180865,
+    "cells_painted": 1500,
+    "full_repaint_reason": "fallback",
+    "guard_mask": 1342180352,
     "guards": [
-      "pending",
-      "layout-transition",
       "chrome-geometry",
       "previous-overlay",
       "bell-toasts",
@@ -121,105 +119,105 @@
       "backend": "iosurface",
       "busy_surface_stalls": 0,
       "changed_tiles": null,
-      "commit_us": 31,
+      "commit_us": 91,
       "dirty_tiles": 0,
       "write_bytes": 9668272,
-      "write_us": 11433
+      "write_us": 11692
     },
     "present_succeeded": true,
     "raster_mode": "full",
     "rows_scrolled_as_blit": 0,
     "timing": {
-      "damage_us": 420,
-      "parse_us": 1821,
-      "present_us": 11482,
-      "raster_us": 76833
+      "damage_us": 27,
+      "parse_us": 26,
+      "present_us": 11802,
+      "raster_us": 71384
     },
-    "unix_ms": 1792888008731
+    "unix_ms": 1792888420166
   },
   "last_space_open": null,
   "local_terminal_panes": [],
   "occluded": false,
   "pane_count": 4,
   "pump": {
-    "max_1s_us": 6566,
+    "max_1s_us": 12697,
     "phases": {
       "adopt_nested_attaches": {
         "last_us": 0,
-        "max_1s_us": 27
+        "max_1s_us": 14
       },
       "advance_space_opens": {
-        "last_us": 2,
-        "max_1s_us": 4
+        "last_us": 1,
+        "max_1s_us": 3
       },
       "apply_pending_session_focus": {
         "last_us": 0,
         "max_1s_us": 0
       },
       "drain_pty": {
-        "last_us": 2082,
-        "max_1s_us": 2082
+        "last_us": 37,
+        "max_1s_us": 50
       },
       "infer_current_space": {
         "last_us": 0,
-        "max_1s_us": 1
+        "max_1s_us": 0
       },
       "local_views::persist_and_restore": {
         "last_us": 0,
-        "max_1s_us": 58
+        "max_1s_us": 40
       },
       "persist_attach_layout_from_live": {
-        "last_us": 319,
+        "last_us": 374,
         "max_1s_us": 0
       },
       "poll_config_reload": {
-        "last_us": 1,
-        "max_1s_us": 5
+        "last_us": 0,
+        "max_1s_us": 2
       },
       "poll_host_attach_tabs": {
-        "last_us": 8,
-        "max_1s_us": 11
+        "last_us": 5,
+        "max_1s_us": 8
       },
       "publish_render_status": {
-        "last_us": 1,
-        "max_1s_us": 1
+        "last_us": 0,
+        "max_1s_us": 0
       },
       "refresh_space_views": {
-        "last_us": 72,
-        "max_1s_us": 1216
+        "last_us": 12602,
+        "max_1s_us": 12602
       },
       "remote_rail.poll": {
-        "last_us": 3,
-        "max_1s_us": 5
+        "last_us": 1,
+        "max_1s_us": 3
       },
       "restart::poll": {
         "last_us": 0,
-        "max_1s_us": 5067
+        "max_1s_us": 4771
       },
       "retry_register_host_pid": {
-        "last_us": 2,
-        "max_1s_us": 4
+        "last_us": 1,
+        "max_1s_us": 2
       },
       "space_rail.poll": {
-        "last_us": 37,
-        "max_1s_us": 79
+        "last_us": 32,
+        "max_1s_us": 35
       },
       "sync_remote_rail": {
-        "last_us": 2,
-        "max_1s_us": 6
+        "last_us": 1,
+        "max_1s_us": 3
       },
       "window_bookkeeping": {
-        "last_us": 9,
-        "max_1s_us": 13
+        "last_us": 5,
+        "max_1s_us": 14
       }
     },
-    "slowest_phase": "drain_pty",
-    "slowest_us": 2082,
+    "slowest_phase": "refresh_space_views",
+    "slowest_us": 12602,
     "socket_round_trips": {
-      "count_1s": 1,
-      "last_pump_count": 0,
-      "last_pump_us": 0,
-      "time_1s_us": 982
+      "count_1s": 2,
+      "last_pump_count": 1,
+      "last_pump_us": 5372,
+      "time_1s_us": 12145
     },
     "subprocess_waits": {
       "count_1s": 0,
@@ -227,12 +225,12 @@
       "last_pump_us": 0,
       "time_1s_us": 0
     },
-    "total_us": 2234
+    "total_us": 12697
   },
   "render_sample": {
-    "frames": 1,
-    "interval_us": 1378909,
-    "seq": 3
+    "frames": 2,
+    "interval_us": 1050576,
+    "seq": 5
   },
   "selected_tab": 0,
   "session_prompt_open": false,
@@ -280,7 +278,10 @@
       "default"
     ],
     "lab": [
-      "lab-1"
+      "lab-1",
+      "lab-2",
+      "lab-3",
+      "lab-4"
     ],
     "mail": [
       "mail-1",
@@ -339,5 +340,5 @@
       ]
     ]
   ],
-  "window_id": "WindowId(531420414592)"
+  "window_id": "WindowId(509308158592)"
 }

@@ -14,7 +14,7 @@
         "reader_blocked_ms": 0,
         "reader_queue_budget_bytes": 8388608,
         "reader_queue_bytes": 64,
-        "reader_queue_high_water_bytes": 16773,
+        "reader_queue_high_water_bytes": 16752,
         "superseded_bytes": 0,
         "superseded_frames": 0
       },
@@ -39,7 +39,7 @@
         "reader_blocked_ms": 0,
         "reader_queue_budget_bytes": 8388608,
         "reader_queue_bytes": 64,
-        "reader_queue_high_water_bytes": 16773,
+        "reader_queue_high_water_bytes": 16752,
         "superseded_bytes": 0,
         "superseded_frames": 0
       },
@@ -58,30 +58,32 @@
   "last_raster": {
     "cells_painted": 1840,
     "full_repaint_reason": "fallback",
-    "guard_mask": 1073743872,
+    "guard_mask": 1342180352,
     "guards": [
+      "chrome-geometry",
       "previous-overlay",
+      "bell-toasts",
       "hover-target"
     ],
     "present": {
       "backend": "iosurface",
       "busy_surface_stalls": 0,
       "changed_tiles": null,
-      "commit_us": 93,
+      "commit_us": 87,
       "dirty_tiles": 0,
       "write_bytes": 9668272,
-      "write_us": 11235
+      "write_us": 11832
     },
     "present_succeeded": true,
     "raster_mode": "full",
     "rows_scrolled_as_blit": 0,
     "timing": {
-      "damage_us": 62,
-      "parse_us": 29,
-      "present_us": 11346,
-      "raster_us": 70552
+      "damage_us": 22,
+      "parse_us": 17,
+      "present_us": 11937,
+      "raster_us": 70242
     },
-    "unix_ms": 1792888022496
+    "unix_ms": 1792888425529
   },
   "last_space_open": {
     "error": null,
@@ -121,22 +123,22 @@
   "occluded": false,
   "pane_count": 1,
   "pump": {
-    "max_1s_us": 13002,
+    "max_1s_us": 6797,
     "phases": {
       "adopt_nested_attaches": {
         "last_us": 0,
-        "max_1s_us": 13
+        "max_1s_us": 15
       },
       "advance_space_opens": {
         "last_us": 1,
-        "max_1s_us": 2
+        "max_1s_us": 3
       },
       "apply_pending_session_focus": {
         "last_us": 0,
         "max_1s_us": 0
       },
       "drain_pty": {
-        "last_us": 9,
+        "last_us": 15,
         "max_1s_us": 44
       },
       "infer_current_space": {
@@ -145,27 +147,27 @@
       },
       "local_views::persist_and_restore": {
         "last_us": 0,
-        "max_1s_us": 41
+        "max_1s_us": 0
       },
       "persist_attach_layout_from_live": {
-        "last_us": 330,
+        "last_us": 389,
         "max_1s_us": 0
       },
       "poll_config_reload": {
         "last_us": 0,
-        "max_1s_us": 3
+        "max_1s_us": 2
       },
       "poll_host_attach_tabs": {
-        "last_us": 2,
-        "max_1s_us": 12
+        "last_us": 3,
+        "max_1s_us": 10
       },
       "publish_render_status": {
         "last_us": 0,
-        "max_1s_us": 1
+        "max_1s_us": 0
       },
       "refresh_space_views": {
         "last_us": 0,
-        "max_1s_us": 12900
+        "max_1s_us": 1741
       },
       "remote_rail.poll": {
         "last_us": 0,
@@ -173,32 +175,32 @@
       },
       "restart::poll": {
         "last_us": 0,
-        "max_1s_us": 4317
+        "max_1s_us": 4902
       },
       "retry_register_host_pid": {
         "last_us": 0,
         "max_1s_us": 2
       },
       "space_rail.poll": {
-        "last_us": 23,
-        "max_1s_us": 33
+        "last_us": 28,
+        "max_1s_us": 40
       },
       "sync_remote_rail": {
         "last_us": 0,
         "max_1s_us": 3
       },
       "window_bookkeeping": {
-        "last_us": 1,
-        "max_1s_us": 7
+        "last_us": 2,
+        "max_1s_us": 16
       }
     },
     "slowest_phase": "space_rail.poll",
-    "slowest_us": 23,
+    "slowest_us": 28,
     "socket_round_trips": {
-      "count_1s": 2,
+      "count_1s": 1,
       "last_pump_count": 0,
       "last_pump_us": 0,
-      "time_1s_us": 11942
+      "time_1s_us": 1609
     },
     "subprocess_waits": {
       "count_1s": 0,
@@ -206,11 +208,11 @@
       "last_pump_us": 0,
       "time_1s_us": 0
     },
-    "total_us": 40
+    "total_us": 57
   },
   "render_sample": {
-    "frames": 1,
-    "interval_us": 6578053,
+    "frames": 2,
+    "interval_us": 1018598,
     "seq": 10
   },
   "selected_tab": 1,
@@ -299,5 +301,5 @@
       ]
     ]
   ],
-  "window_id": "WindowId(531420414592)"
+  "window_id": "WindowId(509308158592)"
 }

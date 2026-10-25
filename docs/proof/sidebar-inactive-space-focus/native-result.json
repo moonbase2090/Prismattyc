@@ -42,5 +42,6 @@
     }
   ],
   "revision": "515196f1dbfa64f9230b58c9772cee491062a105",
-  "proof_kind": "PRISMATTYC_DUMP_PRESENT host framebuffer (not desktop composition)"
+  "proof_kind": "PRISMATTYC_DUMP_PRESENT host framebuffer (not desktop composition)",
+  "prompt": "neutral PS1='$ ' via proof shell"
 }

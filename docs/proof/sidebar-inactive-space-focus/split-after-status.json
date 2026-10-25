@@ -14,7 +14,7 @@
         "reader_blocked_ms": 0,
         "reader_queue_budget_bytes": 8388608,
         "reader_queue_bytes": 64,
-        "reader_queue_high_water_bytes": 16773,
+        "reader_queue_high_water_bytes": 16752,
         "superseded_bytes": 0,
         "superseded_frames": 0
       },
@@ -39,7 +39,7 @@
         "reader_blocked_ms": 0,
         "reader_queue_budget_bytes": 8388608,
         "reader_queue_bytes": 64,
-        "reader_queue_high_water_bytes": 16773,
+        "reader_queue_high_water_bytes": 16752,
         "superseded_bytes": 0,
         "superseded_frames": 0
       },
@@ -58,30 +58,32 @@
   "last_raster": {
     "cells_painted": 1840,
     "full_repaint_reason": "fallback",
-    "guard_mask": 1073743872,
+    "guard_mask": 1342180352,
     "guards": [
+      "chrome-geometry",
       "previous-overlay",
+      "bell-toasts",
       "hover-target"
     ],
     "present": {
       "backend": "iosurface",
       "busy_surface_stalls": 0,
       "changed_tiles": null,
-      "commit_us": 84,
+      "commit_us": 89,
       "dirty_tiles": 0,
       "write_bytes": 9668272,
-      "write_us": 11436
+      "write_us": 11273
     },
     "present_succeeded": true,
     "raster_mode": "full",
     "rows_scrolled_as_blit": 0,
     "timing": {
-      "damage_us": 53,
-      "parse_us": 43,
-      "present_us": 11540,
-      "raster_us": 71254
+      "damage_us": 23,
+      "parse_us": 22,
+      "present_us": 11382,
+      "raster_us": 69669
     },
-    "unix_ms": 1792888001700
+    "unix_ms": 1792888411960
   },
   "last_space_open": {
     "error": null,
@@ -121,14 +123,14 @@
   "occluded": false,
   "pane_count": 1,
   "pump": {
-    "max_1s_us": 12539,
+    "max_1s_us": 13098,
     "phases": {
       "adopt_nested_attaches": {
         "last_us": 0,
-        "max_1s_us": 12
+        "max_1s_us": 16
       },
       "advance_space_opens": {
-        "last_us": 0,
+        "last_us": 1,
         "max_1s_us": 2
       },
       "apply_pending_session_focus": {
@@ -136,8 +138,8 @@
         "max_1s_us": 0
       },
       "drain_pty": {
-        "last_us": 9,
-        "max_1s_us": 38
+        "last_us": 36,
+        "max_1s_us": 43
       },
       "infer_current_space": {
         "last_us": 0,
@@ -145,60 +147,60 @@
       },
       "local_views::persist_and_restore": {
         "last_us": 0,
-        "max_1s_us": 33
+        "max_1s_us": 42
       },
       "persist_attach_layout_from_live": {
-        "last_us": 349,
+        "last_us": 314,
         "max_1s_us": 0
       },
       "poll_config_reload": {
         "last_us": 0,
-        "max_1s_us": 1
+        "max_1s_us": 2
       },
       "poll_host_attach_tabs": {
-        "last_us": 2,
-        "max_1s_us": 6
+        "last_us": 3,
+        "max_1s_us": 8
       },
       "publish_render_status": {
         "last_us": 0,
         "max_1s_us": 0
       },
       "refresh_space_views": {
-        "last_us": 0,
-        "max_1s_us": 12440
+        "last_us": 13001,
+        "max_1s_us": 13001
       },
       "remote_rail.poll": {
-        "last_us": 0,
-        "max_1s_us": 2
+        "last_us": 2,
+        "max_1s_us": 3
       },
       "restart::poll": {
         "last_us": 0,
-        "max_1s_us": 3747
+        "max_1s_us": 4550
       },
       "retry_register_host_pid": {
-        "last_us": 0,
-        "max_1s_us": 2
+        "last_us": 1,
+        "max_1s_us": 1
       },
       "space_rail.poll": {
-        "last_us": 27,
-        "max_1s_us": 31
+        "last_us": 33,
+        "max_1s_us": 33
       },
       "sync_remote_rail": {
-        "last_us": 0,
+        "last_us": 2,
         "max_1s_us": 3
       },
       "window_bookkeeping": {
-        "last_us": 1,
-        "max_1s_us": 6
+        "last_us": 7,
+        "max_1s_us": 17
       }
     },
-    "slowest_phase": "space_rail.poll",
-    "slowest_us": 27,
+    "slowest_phase": "refresh_space_views",
+    "slowest_us": 13001,
     "socket_round_trips": {
       "count_1s": 2,
-      "last_pump_count": 0,
-      "last_pump_us": 0,
-      "time_1s_us": 6539
+      "last_pump_count": 1,
+      "last_pump_us": 5724,
+      "time_1s_us": 12040
     },
     "subprocess_waits": {
       "count_1s": 0,
@@ -206,12 +208,12 @@
       "last_pump_us": 0,
       "time_1s_us": 0
     },
-    "total_us": 43
+    "total_us": 13098
   },
   "render_sample": {
-    "frames": 1,
-    "interval_us": 6394449,
-    "seq": 10
+    "frames": 2,
+    "interval_us": 1039428,
+    "seq": 11
   },
   "selected_tab": 1,
   "session_prompt_open": false,
@@ -297,5 +299,5 @@
       ]
     ]
   ],
-  "window_id": "WindowId(510348264064)"
+  "window_id": "WindowId(509542957696)"
 }

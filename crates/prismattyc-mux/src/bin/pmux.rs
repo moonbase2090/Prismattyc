@@ -1704,6 +1704,7 @@ fn control_event_kind(event: &Event) -> &'static str {
         Event::MailAttentionChanged { .. } => "MailAttentionChanged",
         Event::PaneAttention { .. } => "PaneAttention",
         Event::PaneAttentionCleared { .. } => "PaneAttentionCleared",
+        Event::PaneIdle { .. } => "PaneIdle",
         Event::LeaseChanged { .. } => "LeaseChanged",
         Event::SessionNamed { .. } => "SessionNamed",
         Event::SessionCreated { .. } => "SessionCreated",

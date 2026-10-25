@@ -47,3 +47,35 @@ fresh shells. It does not restore the old shell's environment or scrollback.
 
 See [configuration](config.md) for creation defaults, restoration settings,
 and keyboard shortcuts.
+
+## Reset saved Spaces
+
+Use reset to recover saved definitions that cannot be opened or removed normally.
+A running daemon is required. Reset backs up the original files before releasing
+Space ownership and removing definitions. Sessions, processes, and mail remain alive.
+
+Reset one Space by repeating its name as confirmation:
+
+```sh
+pmux space reset work --confirm work
+```
+
+Reset all saved Spaces, including broken definitions and ownership whose saved
+file is missing:
+
+```sh
+pmux space reset --all --confirm "RESET ALL"
+```
+
+The command prints JSON containing `reset`, `backup`, and `released_sessions`.
+The backup is a new timestamped directory under `reset-backups` in the saved
+Spaces directory. It contains the original file bytes and an ownership receipt.
+Existing backups are never replaced. All-space reset also backs up and removes
+custom Space ordering. Repeating a completed reset is safe.
+
+If the backup fails, reset leaves saved definitions and ownership unchanged.
+If a later step fails, the backup remains available; rerun the same command to
+finish. A pending ownership transfer or session rename must finish before reset.
+When a broken single-Space file has no usable identity and live ownership cannot
+be identified, use all-space reset. Duplicate identities also require all-space
+reset. Reset does not restore backup files automatically.

@@ -903,8 +903,12 @@ fn verify_background(host: &mut HostState) {
             host.window.inner_size().height
         )
     );
+    // The row under the pane header: the header bar paints over the
+    // background, the ground beside the panes does not.
+    let ground = (host.mux.geom().top_chrome_px + host.mux.geom().pane_header_px)
+        * host.window.inner_size().width as usize;
     assert_eq!(
-        image[host.mux.geom().top_chrome_px * host.window.inner_size().width as usize] & 0xffffff,
+        image[ground] & 0xffffff,
         0xff0000,
         "background image covers the outer window ground"
     );
@@ -917,7 +921,7 @@ fn verify_background(host: &mut HostState) {
     host.window_alpha = 127;
     let translucent = frame(host);
     assert_eq!(
-        translucent[host.mux.geom().top_chrome_px * host.window.inner_size().width as usize] >> 24,
+        translucent[ground] >> 24,
         127,
         "cached background must adopt the new alpha"
     );

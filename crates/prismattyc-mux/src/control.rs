@@ -358,6 +358,10 @@ pub const MAIL_INJECT_NUDGE_DELAY_MS: u64 = 3_000;
 pub const MAIL_INJECT_INPUT_IDLE_MS: u64 = 10_000;
 /// Clear a leftover dirty composer after this long with no write and no output.
 pub const MAIL_INJECT_DIRTY_IDLE_MS: u64 = 60_000;
+/// A pane with output history counts as quiet after this long with no PTY
+/// output. The idle trigger fires once per quiet episode; new
+/// output re-arms it.
+pub const PANE_IDLE_TRIGGER_MS: u64 = 60_000;
 const MAIL_INJECT_EPOCH_WAIT_MS: u64 = 250;
 const MAIL_INJECT_EPOCH_SLICE_MS: u64 = 10;
 
@@ -2155,6 +2159,13 @@ pub enum Event {
     PaneAttentionCleared {
         pane_id: u64,
     },
+    /// A pane with output history went quiet: no PTY output for at least
+    /// [`PANE_IDLE_TRIGGER_MS`]. Fires once per quiet episode; new output
+    /// re-arms it. `idle_ms` is the quiet duration when the trigger fired.
+    PaneIdle {
+        pane_id: u64,
+        idle_ms: u64,
+    },
     LeaseChanged {
         pane_id: u64,
         controller_id: Option<u64>,
@@ -2317,6 +2328,9 @@ pub struct ControlPlane {
     inject_agent_override: Option<crate::InjectAgent>,
     /// Last OutputActivity timestamp per pane (unix ms).
     last_output_at_ms: HashMap<u64, u64>,
+    /// Panes whose idle trigger already fired for the current quiet episode.
+    /// New output removes the pane (re-arm); pane removal drops it too.
+    pane_idle_fired: HashSet<u64>,
     /// PTY bytes per pane in the quiet window `(unix_ms, nbytes)`.
     output_bytes: HashMap<u64, VecDeque<(u64, usize)>>,
     /// Last reported focused pane per client. Not topology.
@@ -2444,6 +2458,7 @@ impl ControlPlane {
             #[cfg(test)]
             inject_agent_override: None,
             last_output_at_ms: HashMap::new(),
+            pane_idle_fired: HashSet::new(),
             output_bytes: HashMap::new(),
             client_pane_focus: HashMap::new(),
             client_viewports: HashMap::new(),
@@ -2603,6 +2618,29 @@ impl ControlPlane {
             .get(&pane_raw)
             .map(|record| record.writes)
             .unwrap_or(0)
+    }
+
+    /// Fire one [`Event::PaneIdle`] per pane whose last PTY output is older
+    /// than [`PANE_IDLE_TRIGGER_MS`]. Edge-triggered: a pane fires once per
+    /// quiet episode and new output (via [`emit_output_activity`]) re-arms
+    /// it. Panes with no output history never fire. Called from the
+    /// maintenance tick; tests call it directly.
+    pub(crate) fn check_pane_idle(&mut self) {
+        let now = now_unix_ms();
+        let mut quiet = Vec::new();
+        for (&pane_id, &at_ms) in self.last_output_at_ms.iter() {
+            if self.pane_idle_fired.contains(&pane_id) {
+                continue;
+            }
+            let idle_ms = now.saturating_sub(at_ms);
+            if idle_ms >= PANE_IDLE_TRIGGER_MS {
+                quiet.push((pane_id, idle_ms));
+            }
+        }
+        for (pane_id, idle_ms) in quiet {
+            self.pane_idle_fired.insert(pane_id);
+            self.emit(Event::PaneIdle { pane_id, idle_ms });
+        }
     }
 
     pub(crate) fn retry_mail_nudges(&mut self) {
@@ -3450,6 +3488,7 @@ impl ControlPlane {
         self.write_ledger.remove(&pane_raw);
         self.last_input_at_ms.remove(&pane_raw);
         self.last_output_at_ms.remove(&pane_raw);
+        self.pane_idle_fired.remove(&pane_raw);
         self.output_bytes.remove(&pane_raw);
         self.mail_inject.remove(&pane_raw);
         self.mail_inject_last.remove(&pane_raw);
@@ -3957,6 +3996,11 @@ impl ControlPlane {
         self.mail_nudges.remove(&pane_raw);
         self.emit_mail_attention_changed(None, pane_raw, Some(queue_rev));
         true
+    }
+
+    /// Space ids that have owned a session since this daemon started.
+    pub fn spaces_owned(&self) -> std::collections::HashSet<String> {
+        self.domain.spaces_owned().clone()
     }
 
     pub fn snapshot(&self) -> Result<Snapshot, ControlError> {
@@ -6600,6 +6644,8 @@ impl ControlPlane {
     ) {
         let now = now_unix_ms();
         self.last_output_at_ms.insert(pane_id, now);
+        // New output ends the quiet episode: re-arm the idle trigger.
+        self.pane_idle_fired.remove(&pane_id);
         self.note_output_bytes(pane_id, nbytes, now);
         if let Some(existing) = self.events.iter_mut().rev().find(|envelope| {
             matches!(
@@ -7192,6 +7238,7 @@ impl ControlServer {
                             guard.drain_live();
                             guard.maybe_persist_pane_logs();
                             guard.retry_mail_nudges();
+                            guard.check_pane_idle();
                             guard.pane_log_watch()
                         };
                         watch.ring_pending();
@@ -8179,6 +8226,20 @@ fn control_peer_closed(stream: &UnixStream) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `sleep` that runs under any argv[0], for fake-agent symlinks such as
+    /// `claude` or `muse-bin-*`. Ubuntu 26.04 makes `/bin/sleep` a uutils
+    /// multicall binary that refuses to run when argv[0] names another
+    /// utility, so prefer the GNU build that it ships alongside.
+    #[cfg(unix)]
+    fn fake_agent_sleep() -> &'static str {
+        const GNU_SLEEP: &str = "/usr/bin/gnusleep";
+        if std::path::Path::new(GNU_SLEEP).is_file() {
+            GNU_SLEEP
+        } else {
+            "/bin/sleep"
+        }
+    }
     use prismattyc_core::test_time_budget;
     use std::io::{Read, Write};
     use std::sync::atomic::AtomicU64;
@@ -15622,6 +15683,128 @@ function Read-Exact([int]$Count) {
         plane.clear_output_bytes(pane);
     }
 
+    fn pane_idle_since(plane: &mut ControlPlane, pane: u64, idle_ms: u64) {
+        plane.stamp_last_output_at_ms(pane, now_unix_ms().saturating_sub(idle_ms));
+    }
+
+    fn pane_idle_events(plane: &ControlPlane, after: u64) -> Vec<(u64, u64)> {
+        plane
+            .events_after(after, None)
+            .unwrap()
+            .events
+            .iter()
+            .filter_map(|envelope| match envelope.event {
+                Event::PaneIdle { pane_id, idle_ms } => Some((pane_id, idle_ms)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pane_idle_fires_for_quiet_pane() {
+        let (mut plane, _, pane) = fixture(8);
+        pane_idle_since(&mut plane, pane, PANE_IDLE_TRIGGER_MS + 5_000);
+        let after = plane.sequence();
+        plane.check_pane_idle();
+        let fired = pane_idle_events(&plane, after);
+        assert_eq!(fired.len(), 1, "one idle trigger, got {fired:?}");
+        assert_eq!(fired[0].0, pane);
+        assert!(
+            fired[0].1 >= PANE_IDLE_TRIGGER_MS,
+            "idle_ms names the quiet duration, got {}",
+            fired[0].1
+        );
+    }
+
+    #[test]
+    fn pane_idle_fires_once_per_quiet_episode() {
+        let (mut plane, _, pane) = fixture(8);
+        pane_idle_since(&mut plane, pane, PANE_IDLE_TRIGGER_MS + 5_000);
+        plane.check_pane_idle();
+        let after = plane.sequence();
+        // Still quiet, no new output: the trigger must not repeat.
+        plane.check_pane_idle();
+        assert!(
+            pane_idle_events(&plane, after).is_empty(),
+            "second check fired again without new output"
+        );
+    }
+
+    #[test]
+    fn pane_idle_ignores_fresh_or_missing_output() {
+        let (mut plane, _, pane) = fixture(8);
+        // Fresh output is not quiet.
+        pane_idle_since(&mut plane, pane, PANE_IDLE_TRIGGER_MS - 30_000);
+        let after = plane.sequence();
+        plane.check_pane_idle();
+        assert!(
+            pane_idle_events(&plane, after).is_empty(),
+            "fired below the quiet threshold"
+        );
+        // A pane with no output history never went quiet: unrelated panes
+        // must not fire either.
+        let (mut fresh, _, _) = fixture(8);
+        let fresh_after = fresh.sequence();
+        fresh.check_pane_idle();
+        assert!(
+            pane_idle_events(&fresh, fresh_after).is_empty(),
+            "fired for a pane with no output history"
+        );
+    }
+
+    #[test]
+    fn pane_idle_live_output_rearms_then_quiet_fires() {
+        let (mut plane, _, pane) = live_fixture("IDLELIVE");
+        // Real PTY output flows through drain_live into emit_output_activity,
+        // so the pane is freshly active: no trigger.
+        wait_live_echo(&mut plane, pane, "IDLELIVE");
+        plane.drain_for_test();
+        let after_output = plane.sequence();
+        plane.check_pane_idle();
+        assert!(
+            pane_idle_events(&plane, after_output).is_empty(),
+            "fired right after real PTY output"
+        );
+        // Backdate to stand in for a sustained quiet spell (the 60 s
+        // threshold is not waited out); the trigger must fire once.
+        pane_idle_since(&mut plane, pane, PANE_IDLE_TRIGGER_MS + 5_000);
+        plane.check_pane_idle();
+        let fired = pane_idle_events(&plane, after_output);
+        assert_eq!(
+            fired.len(),
+            1,
+            "quiet live pane did not fire, got {fired:?}"
+        );
+        assert_eq!(fired[0].0, pane);
+        assert!(fired[0].1 >= PANE_IDLE_TRIGGER_MS);
+    }
+
+    #[test]
+    fn pane_output_rearms_idle_trigger() {
+        let (mut plane, _, pane) = fixture(8);
+        pane_idle_since(&mut plane, pane, PANE_IDLE_TRIGGER_MS + 5_000);
+        plane.check_pane_idle();
+        let after_first = plane.sequence();
+        assert_eq!(pane_idle_events(&plane, 0).len(), 1);
+        // New output through the production drain path ends the episode.
+        plane.emit_output_activity(pane, 7, true, 128);
+        plane.check_pane_idle();
+        assert!(
+            pane_idle_events(&plane, after_first).is_empty(),
+            "fired right after fresh output"
+        );
+        // Going quiet again fires a second trigger.
+        pane_idle_since(&mut plane, pane, PANE_IDLE_TRIGGER_MS + 5_000);
+        plane.check_pane_idle();
+        let fired = pane_idle_events(&plane, after_first);
+        assert_eq!(
+            fired.len(),
+            1,
+            "re-armed episode did not fire, got {fired:?}"
+        );
+        assert_eq!(fired[0].0, pane);
+    }
+
     fn inject_mail(
         plane: &mut ControlPlane,
         client: u64,
@@ -15711,7 +15894,7 @@ function Read-Exact([int]$Count) {
         std::fs::create_dir_all(&dir).unwrap();
         let muse = dir.join("muse-bin-1.4.3-R5018.1");
         let _ = std::fs::remove_file(&muse);
-        std::os::unix::fs::symlink("/bin/sleep", &muse).unwrap();
+        std::os::unix::fs::symlink(fake_agent_sleep(), &muse).unwrap();
         let run = dir.join("run.sh");
         std::fs::write(
             &run,
@@ -16009,7 +16192,7 @@ function Read-Exact([int]$Count) {
         std::fs::create_dir_all(&dir).unwrap();
         let fake = dir.join("claude");
         let _ = std::fs::remove_file(&fake);
-        std::os::unix::fs::symlink("/bin/sleep", &fake).unwrap();
+        std::os::unix::fs::symlink(fake_agent_sleep(), &fake).unwrap();
         let script = format!(
             "python3 -c 'import os,sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' {} 30 >/dev/null 2>&1 & printf 'READY\\n'; exec sleep 999",
             fake.display()
@@ -16072,7 +16255,7 @@ function Read-Exact([int]$Count) {
         let codex = dir.join("codex");
         for link in [&claude, &codex] {
             let _ = std::fs::remove_file(link);
-            std::os::unix::fs::symlink("/bin/sleep", link).unwrap();
+            std::os::unix::fs::symlink(fake_agent_sleep(), link).unwrap();
         }
         // The pane child sources a script file so its own cmdline names no
         // agent and dash cannot exec-optimise the tail. `codex` is a level-1

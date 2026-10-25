@@ -668,3 +668,200 @@ fn template_launch_refuses_occupied_pane_without_replacing_work() {
     assert!(prismattyc_mux::procinfo::live_foreground_command(pid)
         .is_some_and(|command| command.contains("sleep 60")));
 }
+
+#[test]
+fn reset_saved_spaces_backs_up_bytes_and_preserves_live_sessions() {
+    let socket = socket_path();
+    let data = data_dir();
+    let _server = start_server(&socket, &data);
+    for (space, session) in [("alpha", "reset-a"), ("beta", "reset-b")] {
+        ok(&pmux(
+            &socket,
+            &data,
+            &[
+                "space",
+                "create",
+                space,
+                "--session-name",
+                session,
+                "--no-attach",
+            ],
+        ));
+    }
+    let alpha = find_named(&data, "alpha");
+    let beta = find_named(&data, "beta");
+    let mut broken: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&alpha).unwrap()).unwrap();
+    broken["sessions"][0]["windows"] = serde_json::json!([]);
+    std::fs::write(&alpha, serde_json::to_vec(&broken).unwrap()).unwrap();
+    let original = std::fs::read(&alpha).unwrap();
+    let before = TeamClient::connect(&socket).unwrap().snapshot().unwrap();
+    ok(&pmux(
+        &socket,
+        &data,
+        &[
+            "mail",
+            "--as",
+            "reset-a",
+            "send",
+            "reset-a",
+            "--summary",
+            "retained",
+            "--body",
+            "mail survives reset",
+        ],
+    ));
+    fail(
+        &pmux(
+            &socket,
+            &data,
+            &["space", "reset", "alpha", "--confirm", "wrong"],
+        ),
+        "confirmation",
+    );
+    assert_eq!(std::fs::read(&alpha).unwrap(), original);
+    assert!(!alpha.parent().unwrap().join("reset-backups").exists());
+    let result = ok(&pmux(
+        &socket,
+        &data,
+        &["space", "reset", "alpha", "--confirm", "alpha"],
+    ));
+    let receipt: serde_json::Value = serde_json::from_str(&result).unwrap();
+    let backup = Path::new(receipt["backup"].as_str().unwrap());
+    assert_eq!(std::fs::read(backup.join("alpha.json")).unwrap(), original);
+    assert!(!alpha.exists());
+    assert!(beta.exists());
+    let claimed = ok(&pmux(
+        &socket,
+        &data,
+        &["mail", "--as", "reset-a", "claim", "--json"],
+    ));
+    let letters: serde_json::Value = serde_json::from_str(&claimed).unwrap();
+    assert_eq!(letters["letters"][0]["body"], "mail survives reset");
+    let after = TeamClient::connect(&socket).unwrap().snapshot().unwrap();
+    for name in ["reset-a", "reset-b"] {
+        let old = before.sessions.iter().find(|s| s.name == name).unwrap();
+        let live = after.sessions.iter().find(|s| s.name == name).unwrap();
+        assert_eq!(live.id, old.id);
+        assert_eq!(
+            live.windows[0].panes[0].child_pid,
+            old.windows[0].panes[0].child_pid
+        );
+        assert!(prismattyc_mux::procinfo::pid_alive(
+            live.windows[0].panes[0].child_pid.unwrap()
+        ));
+        if name == "reset-a" {
+            assert_eq!(live.space_id, None);
+        } else {
+            assert_eq!(live.space_id, old.space_id);
+            assert!(live.space_id.is_some());
+        }
+    }
+    ok(&pmux(
+        &socket,
+        &data,
+        &["space", "reset", "alpha", "--confirm", "alpha"],
+    ));
+    assert_eq!(std::fs::read(backup.join("alpha.json")).unwrap(), original);
+}
+
+#[test]
+fn reset_all_handles_corrupt_definitions_and_orphan_ownership() {
+    let socket = socket_path();
+    let data = data_dir();
+    let _server = start_server(&socket, &data);
+    for (space, session) in [("alpha", "orphan-a"), ("beta", "orphan-b")] {
+        ok(&pmux(
+            &socket,
+            &data,
+            &[
+                "space",
+                "create",
+                space,
+                "--session-name",
+                session,
+                "--no-attach",
+            ],
+        ));
+    }
+    let alpha = find_named(&data, "alpha");
+    let beta = find_named(&data, "beta");
+    std::fs::remove_file(alpha).unwrap();
+    std::fs::write(&beta, b"broken json\n").unwrap();
+    let result = ok(&pmux(
+        &socket,
+        &data,
+        &["space", "reset", "--all", "--confirm", "RESET ALL"],
+    ));
+    let receipt: serde_json::Value = serde_json::from_str(&result).unwrap();
+    let backup = Path::new(receipt["backup"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read(backup.join("beta.json")).unwrap(),
+        b"broken json\n"
+    );
+    assert!(!beta.exists());
+    let snapshot = TeamClient::connect(&socket).unwrap().snapshot().unwrap();
+    for name in ["orphan-a", "orphan-b"] {
+        let live = snapshot.sessions.iter().find(|s| s.name == name).unwrap();
+        assert_eq!(live.space_id, None);
+        assert!(prismattyc_mux::procinfo::pid_alive(
+            live.windows[0].panes[0].child_pid.unwrap()
+        ));
+    }
+    ok(&pmux(
+        &socket,
+        &data,
+        &["space", "reset", "--all", "--confirm", "RESET ALL"],
+    ));
+    assert_eq!(
+        std::fs::read(backup.join("beta.json")).unwrap(),
+        b"broken json\n"
+    );
+}
+
+#[test]
+fn reset_backup_failure_preserves_definition_and_ownership() {
+    let socket = socket_path();
+    let data = data_dir();
+    let _server = start_server(&socket, &data);
+    ok(&pmux(
+        &socket,
+        &data,
+        &[
+            "space",
+            "create",
+            "alpha",
+            "--session-name",
+            "protected",
+            "--no-attach",
+        ],
+    ));
+    let alpha = find_named(&data, "alpha");
+    let original = std::fs::read(&alpha).unwrap();
+    let before = TeamClient::connect(&socket).unwrap().snapshot().unwrap();
+    let owner = before
+        .sessions
+        .iter()
+        .find(|s| s.name == "protected")
+        .unwrap()
+        .space_id
+        .clone();
+    std::fs::write(alpha.parent().unwrap().join("reset-backups"), b"blocked").unwrap();
+    let output = pmux(
+        &socket,
+        &data,
+        &["space", "reset", "alpha", "--confirm", "alpha"],
+    );
+    fail(&output, "backup");
+    assert_eq!(std::fs::read(&alpha).unwrap(), original);
+    let after = TeamClient::connect(&socket).unwrap().snapshot().unwrap();
+    assert_eq!(
+        after
+            .sessions
+            .iter()
+            .find(|s| s.name == "protected")
+            .unwrap()
+            .space_id,
+        owner
+    );
+}

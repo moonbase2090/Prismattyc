@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.3.42] - 2026-10-25
+
+### Added
+
+- pmuxd autosaves Space window layouts, so a Space reopens with its panes after a restart or an interrupted restore.
+- `pmux space reset` resets a saved Space after confirmation and keeps a backup of the previous layout.
+- A pane idle event fires once when a pane with output goes quiet, and re-arms when new output arrives.
+
+### Fixed
+
+- Spaces with windowless or stale saved entries now recover instead of failing to open.
+
+### Security
+
+- Updated tokio and clipboard-win to clear a tokio I/O-safety advisory and a yanked clipboard-win release.
+
 ## [0.3.41] - 2026-10-22
 
 ### Changed

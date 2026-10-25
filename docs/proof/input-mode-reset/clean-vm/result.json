@@ -1,0 +1,25 @@
+{
+  "tested_revision": "d428f9110ea3ec3b801b91162679ff7eddbab166",
+  "executable": "prismattyc-host 0.3.41 (d428f9110ea3)",
+  "os": "macOS 26.6.2 arm64, fresh clean guest, no Prismattyc installed",
+  "proof_kind": "host-built binaries copied into the guest; the app window driven by pointer and keyboard events over the VM's VNC server; the child process records its raw input to files read back over ssh; presented app window cropped",
+  "binary_sha256": {
+    "pmux": "60cccbf098978c06a2c69a287321d01bd42b9f0cdea7072fe96fa8e211afead4",
+    "pmux-attach": "7d7e10d2dfd1de94c49e2dfb0fcdeed3df9da2a640fab9038a13b9fde3b2e267",
+    "pmuxd": "33c2b753c4f518cb8564cf5693bc5993a4155b02677f4e45a7356802e4f34c3e",
+    "prismattyc-host": "d01b5ef49ea2730a4109162f45bae8e967b0ecdf5e2ee7f6c224fd408892a89c"
+  },
+  "fixture": "fixture-run.sh: a POSIX shell child per pane. In old mode it prints a marker and turns on mouse (1000/1002/1003/1006), focus (1004), paste (2004) and 7700 reporting at once. In new mode it prints a ready line, waits for one key, then turns reporting on by its own output. Every launch is numbered and its raw input is written to input-N.bin. The daemon runs with --restore-workspace and is restarted with `pmux restart --daemon --stop-sessions`.",
+  "observed": [
+    "before restart: a pointer click over the old child's pane reached it as SGR reports (input-5: ESC [ < 35;19;13 M, ESC [ < 0;19;13 M, ESC [ < 0;19;13 m)",
+    "after the daemon restart the Space's session was restored with its saved screen text kept and a replacement child (launch 6, not opted in) running in the same pane",
+    "pointer clicks over the replacement pane before it opted in delivered 0 bytes to it (input-6 empty), so no stale mouse reporting reached the new child",
+    "after the replacement received one key and turned reporting on itself, the same pointer clicks reached it as SGR reports (input-6: e, then ESC [ < 35;19;13 M and the rest), so the reset does not block a child that opts in again"
+  ],
+  "not_shown": [
+    "the unfixed build in the same guest (an earlier host-independent attach-recorder baseline is in baseline.json)",
+    "zsh interaction",
+    "Linux and Windows runtime",
+    "daemon exit and replay-only restore paths, which have unit tests"
+  ]
+}

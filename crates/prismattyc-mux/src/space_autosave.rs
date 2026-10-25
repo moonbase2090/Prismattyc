@@ -54,8 +54,6 @@ fn window_shapes(windows: &[SavedWindow]) -> String {
 /// How a session that is in the file but gone from the daemon is treated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Closes {
-    /// Leave the Space alone (daemon shutdown tears sessions down).
-    Keep,
     /// Drop it, but never write a Space with no sessions.
     Drop,
     /// Drop it, even the last one: the daemon saw this Space in use.
@@ -86,9 +84,6 @@ pub(crate) fn plan(saved: &SavedSpace, snapshot: &Snapshot, closes: Closes) -> P
     let mut fingerprint = String::new();
     for entry in &saved.sessions {
         let Some(live) = snapshot.sessions.iter().find(|s| s.name == entry.name) else {
-            if closes == Closes::Keep {
-                return Plan::Mismatch;
-            }
             closed.push(&entry.name);
             fingerprint.push_str(&format!("closed:{};", entry.name));
             continue;
@@ -204,14 +199,14 @@ struct Live {
 enum Pass {
     /// Debounced: a change is written when it holds for two ticks.
     Tick,
-    /// The daemon is shutting down: write what has changed now, but never
-    /// treat a missing session as closed, because shutdown tears them down.
+    /// The daemon is shutting down. The worker is stopped before the server
+    /// and its sessions are torn down, so the live view is still the user's.
+    /// Write what has changed now, without the debounce.
     Final,
 }
 
-fn closes(live: &Live, saved: &SavedSpace, pass: Pass) -> Closes {
+fn closes(live: &Live, saved: &SavedSpace) -> Closes {
     match saved.id.as_ref() {
-        _ if pass == Pass::Final => Closes::Keep,
         Some(id) if live.owned.contains(id) => Closes::DropAll,
         _ => Closes::Drop,
     }
@@ -238,7 +233,7 @@ fn sync(
         if restoring(dir, &saved) {
             continue;
         }
-        let Plan::Changed(_, fingerprint) = plan(&saved, &now.snapshot, closes(&now, &saved, pass))
+        let Plan::Changed(_, fingerprint) = plan(&saved, &now.snapshot, closes(&now, &saved))
         else {
             continue;
         };
@@ -275,8 +270,7 @@ fn sync(
         if restoring(dir, &saved) {
             continue;
         }
-        if let Plan::Changed(next, again) = plan(&saved, &now.snapshot, closes(&now, &saved, pass))
-        {
+        if let Plan::Changed(next, again) = plan(&saved, &now.snapshot, closes(&now, &saved)) {
             if again == fingerprint {
                 save_space(dir, &name, &next)?;
                 state.pending.remove(&name);
@@ -732,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_writes_a_pending_change_at_once_but_never_counts_missing_sessions_as_closed() {
+    fn shutdown_writes_pending_changes_and_closes_at_once() {
         let dir = scratch("final");
         let both = [
             session("a", Some(SPACE), &[("", "/x")]),
@@ -757,13 +751,13 @@ mod tests {
             SavedNode::Leaf { title: Some(t), .. } if t == "build"
         ));
 
-        // Sessions torn down by the shutdown itself are not closes.
-        let torn = snapshot(vec![session("a", Some(SPACE), &[("build", "/x")])]);
+        // A session stopped on purpose just before shutdown is a close.
+        let stopped = snapshot(vec![session("a", Some(SPACE), &[("build", "/x")])]);
         sync(&dir, &config, &mut state, Pass::Final, || {
-            Ok(live_with(&torn, &[SPACE]))
+            Ok(live_with(&stopped, &[SPACE]))
         })
         .unwrap();
-        assert_eq!(load_space(&dir, "desk").unwrap().sessions.len(), 2);
+        assert_eq!(load_space(&dir, "desk").unwrap().sessions.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

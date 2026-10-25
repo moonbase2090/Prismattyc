@@ -458,7 +458,8 @@ impl Domain {
                 .expect("validated session")
                 .space_id = to.map(str::to_owned);
         }
-        if let Some(to) = to {
+        // An empty request is a capability check; nothing moved.
+        if let Some(to) = to.filter(|_| !sessions.is_empty()) {
             self.spaces_owned.insert(to.to_owned());
         }
         Ok(())
@@ -1228,6 +1229,21 @@ mod tests {
     }
     use super::*;
     use crate::layout::{Axis, Split};
+
+    #[test]
+    fn only_a_transfer_that_moves_a_session_records_the_space_as_owned() {
+        let mut domain = Domain::bootstrap("first").unwrap();
+        let first = domain.sessions().next().unwrap().id;
+        let a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        domain.transfer_space_sessions(&[], None, Some(a)).unwrap();
+        assert!(domain.spaces_owned().is_empty(), "a capability check");
+        domain
+            .transfer_space_sessions(&[first], None, Some(b))
+            .unwrap();
+        assert!(domain.spaces_owned().contains(b));
+        assert!(!domain.spaces_owned().contains(a));
+    }
 
     #[test]
     fn bootstrap_single_leaf() {

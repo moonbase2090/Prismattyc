@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.3.41] - 2026-10-22
+
+### Changed
+
+- Fresh installs and configs without `theme` now use Prismattyc Dark instead of following the OS appearance. `theme = "prismattyc"` still follows the OS.
+
+### Fixed
+
+- The app starts pmuxd before its startup flows and recreates the default Space when none exists, including when pmuxd is already running.
+
+## [0.3.40] - 2026-10-22
+
+### Fixed
+
+- Create a default Space when pmuxd starts and finds none, so a new install can open a session right away. Restarts never add a second default, and a Space is recreated if all Spaces were removed.
+
 ## [0.3.39] - 2026-10-20
 
 ### Added

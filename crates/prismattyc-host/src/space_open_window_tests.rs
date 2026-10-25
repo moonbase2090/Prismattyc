@@ -39,6 +39,7 @@ fn isolated_space_windows_create_move_and_render() {
     let socket = host_mux_socket().unwrap();
     let _daemon = Daemon(
         Command::new(pmuxd)
+            .env("PRISMATTYC_DEFAULT_SPACE", "0")
             .arg("--socket")
             .arg(&socket)
             .args(["--", "/bin/sh"])
@@ -750,6 +751,7 @@ fn stale_snapshot_keeps_a_newer_layout_pending() {
     let socket = host_mux_socket().unwrap();
     let _daemon = Daemon(
         Command::new(pmuxd)
+            .env("PRISMATTYC_DEFAULT_SPACE", "0")
             .arg("--socket")
             .arg(&socket)
             .args(["--", "/bin/sh"])
@@ -921,6 +923,7 @@ fn stale_cache_does_not_detach_a_newer_attachment() {
     let socket = host_mux_socket().unwrap();
     let _daemon = Daemon(
         Command::new(pmuxd)
+            .env("PRISMATTYC_DEFAULT_SPACE", "0")
             .arg("--socket")
             .arg(&socket)
             .args(["--", "/bin/sh"])
@@ -1124,6 +1127,7 @@ fn launch_reopen_child(test_name: &str, recycle_ids: bool) {
     let socket = host_mux_socket().unwrap();
     let daemon = Daemon(
         Command::new(&pmuxd)
+            .env("PRISMATTYC_DEFAULT_SPACE", "0")
             .arg("--socket")
             .arg(&socket)
             .args(["--", "/bin/sh"])
@@ -1297,6 +1301,7 @@ fn replace_daemon(daemon: &mut Daemon, pmuxd: &Path, socket: &Path) {
     let _ = daemon.0.wait();
     let _ = std::fs::remove_file(socket);
     daemon.0 = Command::new(pmuxd)
+        .env("PRISMATTYC_DEFAULT_SPACE", "0")
         .arg("--socket")
         .arg(socket)
         .args(["--", "/bin/sh"])
@@ -1489,6 +1494,7 @@ fn space_reopen_after_daemon_restart_reused_ids_reconnect_each_view() {
     let socket = host_mux_socket().unwrap();
     let daemon = Daemon(
         Command::new(&pmuxd)
+            .env("PRISMATTYC_DEFAULT_SPACE", "0")
             .arg("--socket")
             .arg(&socket)
             .args(["--", "/bin/sh"])

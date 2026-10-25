@@ -174,6 +174,8 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    // A fresh daemon starts with one session; the default Space adopts it.
+    let adopt = saved.is_none().then_some(BOOTSTRAP_SESSION);
     let mut plane = match saved.as_ref() {
         Some(saved) => saved.restore(&cli.socket)?,
         None => bootstrap_plane(&cli)?,
@@ -204,7 +206,6 @@ fn main() -> Result<()> {
     }
     let server = ControlServer::bind(&cli.socket, plane)
         .with_context(|| format!("bind {}", cli.socket.display()))?;
-    instance.publish_pid(&cli.socket)?;
     let identity_path = prismattyc_mux::spaces_daemon_identity_path(&cli.socket);
     if !identity_path.exists() {
         let identity = std::env::var("PRISMATTYC_DAEMON_IDENTITY").unwrap_or_else(|_| {
@@ -217,6 +218,10 @@ fn main() -> Result<()> {
         prismattyc_mux::private_fs::write(identity_path, format!("{identity}\n"))
             .context("write Spaces daemon identity")?;
     }
+    // Clients wait for the published pid, so the default Space exists
+    // before any of them can open one.
+    ensure_default_space(&cli.socket, adopt);
+    instance.publish_pid(&cli.socket)?;
     let checkpoint =
         prismattyc_mux::workspace::Checkpointer::start(server.plane(), cli.socket.clone())?;
     println!("{}", server.path().display());
@@ -227,8 +232,28 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Create the default Space when this start finds none. A failure is
+/// logged and never stops the daemon.
+fn ensure_default_space(socket: &std::path::Path, adopt: Option<&str>) {
+    use prismattyc_mux::default_space::{ensure, Outcome};
+    let exe = std::env::current_exe().unwrap_or_default();
+    let Some(pmux) = prismattyc_mux::executable::sibling(&exe, &["pmux"]) else {
+        eprintln!("pmuxd: default Space skipped: pmux not found next to pmuxd");
+        return;
+    };
+    let dir = prismattyc_mux::spaces_dir_for_socket(socket);
+    match ensure(&pmux, socket, &dir, adopt) {
+        Ok(Outcome::Created) => eprintln!("pmuxd: created the default Space"),
+        Ok(Outcome::Exists | Outcome::Disabled) => {}
+        Err(err) => eprintln!("pmuxd: default Space not created: {err:#}"),
+    }
+}
+
+/// Name of the session a daemon starts with when nothing is restored.
+const BOOTSTRAP_SESSION: &str = "default";
+
 fn bootstrap_plane(cli: &Cli) -> Result<ControlPlane> {
-    let domain = Domain::bootstrap("default")?;
+    let domain = Domain::bootstrap(BOOTSTRAP_SESSION)?;
     let session = domain
         .sessions()
         .next()

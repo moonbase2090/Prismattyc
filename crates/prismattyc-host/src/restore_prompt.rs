@@ -9,6 +9,22 @@ pub(super) struct RestorePrompt {
     startup: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
 }
 
+pub(super) fn cache_matches_space(
+    layout: &attach_tabs::AttachTabsFile,
+    dir: &std::path::Path,
+) -> bool {
+    let Some(name) = layout.space.as_deref() else {
+        return true;
+    };
+    let Ok(space) = load_space(dir, name) else {
+        return false;
+    };
+    layout
+        .space_id
+        .as_deref()
+        .is_none_or(|cached_id| space.id.as_deref() == Some(cached_id))
+}
+
 impl RestorePrompt {
     pub(super) fn new(layout: attach_tabs::AttachTabsFile) -> Option<Self> {
         layout
@@ -353,6 +369,41 @@ mod tests {
             ..Default::default()
         })
         .is_none());
+    }
+
+    #[test]
+    fn cache_for_missing_or_replaced_space_is_not_restored() {
+        let dir = std::env::temp_dir().join(format!(
+            "restore-prompt-space-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = attach_tabs::AttachTabsFile {
+            space: Some("default".into()),
+            space_id: Some("old-owner".into()),
+            ..Default::default()
+        };
+        assert!(!cache_matches_space(&layout, &dir));
+
+        let space = prismattyc_mux::SavedSpace {
+            version: prismattyc_mux::SAVED_SPACE_VERSION,
+            id: Some("new-owner".into()),
+            created_at_unix_ms: None,
+            saved_at_unix: 1,
+            sessions: vec![prismattyc_mux::stub_space_session("default")],
+            tabs: Vec::new(),
+            active_tab: 0,
+            focused_session: None,
+        };
+        prismattyc_mux::save_space(&dir, "default", &space).unwrap();
+        assert!(!cache_matches_space(&layout, &dir));
+        let mut current = layout;
+        current.space_id = prismattyc_mux::load_space(&dir, "default").unwrap().id;
+        assert!(cache_matches_space(&current, &dir));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -3,8 +3,12 @@ use std::process::Command;
 use portable_pty::CommandBuilder;
 
 /// Remove ambient mux routing and pane-log settings from a test child.
+///
+/// It also turns off the default Space, so a test starts from zero Spaces.
+/// Tests of the default Space remove that setting again.
 pub fn clear_command_env(command: &mut Command) {
     command
+        .env("PRISMATTYC_DEFAULT_SPACE", "0")
         .env_remove("PMUX_SOCKET")
         .env_remove("PMUX_PANE_LOG")
         .env_remove("PRISMATTYC_PANE_ID");

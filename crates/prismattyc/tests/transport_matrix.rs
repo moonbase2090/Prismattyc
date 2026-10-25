@@ -286,7 +286,10 @@ fn t2_tmux_passthrough_off_is_classic_only_no_leak() {
             "/bin/sh",
             "-c",
             &format!(
-                "printf T2START; cat '{}'; printf T2DONE; sleep 0.4",
+                // Keep the pane alive long enough for slow CI runners to
+                // collect the classic-only output before tmux exit-empty
+                // removes it. The harness returns immediately on T2START.
+                "printf T2START; cat '{}'; printf T2DONE; sleep 30",
                 file.display()
             ),
         ],

@@ -7,6 +7,7 @@ A saved space groups sessions and remembers a layout. Removing its saved definit
 - `space-create-save`: create an isolated workspace and save it.
 - `space-open-rename`: reopen the saved space and rename its definition.
 - `space-remove`: remove the definition while preserving live shell output.
+- `space-reset`: confirm a single/all reset, retain original-byte backups, and release ownership while sessions and mail survive.
 
 ## How to get to it (user POV)
 
@@ -24,3 +25,14 @@ Preconditions: the skill's Unix Launch variables and a fresh output directory.
 ## Gotchas
 
 A session belongs to one space. Use explicit names in automation; avoid `rm --all` or `clear` outside an isolated daemon. CLI removal does not prove a native context menu, confirmation, focus, or next-frame presentation; use [Desktop UI](desktop.md) for those behaviors.
+
+## Reset recovery
+
+Run `cargo +1.90.0 test -p prismattyc-mux --locked --test space_team_cli reset_ -- --test-threads=1`.
+The tests start private daemons and temporary data directories. Require three
+passing tests. They drive `space reset NAME --confirm NAME` and
+`space reset --all --confirm "RESET ALL"`, then inspect backups and live state.
+They cover incorrect confirmation, windowless and corrupt definitions, orphaned
+ownership, repeated reset, backup failure, retained unrelated ownership, process
+identity, and mail preservation. Never substitute the installed daemon or live
+saved files. These tests run on Unix; Windows runtime proof remains separate.

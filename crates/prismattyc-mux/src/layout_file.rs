@@ -879,6 +879,20 @@ pub fn rename_space(dir: &Path, old: &str, new: &str) -> Result<PathBuf> {
     }
 }
 
+/// Session names listed in `{dir}/{name}.json`, including sessions that
+/// [`load_space`] skips. Removal uses this to drop a broken entry by name.
+pub fn listed_space_sessions(dir: &Path, name: &str) -> Result<Vec<String>> {
+    let path = layout_path(dir, name)?;
+    let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let space: SavedSpace =
+        serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
+    Ok(space
+        .sessions
+        .into_iter()
+        .map(|session| session.name)
+        .collect())
+}
+
 /// Read `{dir}/{name}.json` as a space file.
 pub fn load_space(dir: &Path, name: &str) -> Result<SavedSpace> {
     let path = layout_path(dir, name)?;
@@ -895,13 +909,20 @@ pub fn load_space(dir: &Path, name: &str) -> Result<SavedSpace> {
     if space.version == OWNED_SPACE_VERSION && !space.id.as_deref().is_some_and(valid_space_id) {
         bail!("space {name:?} has no valid stable identity");
     }
+    // A session without windows must not make the whole Space unreadable:
+    // skip it, so the Space still opens and can be removed or re-saved.
+    space.sessions.retain(|session| {
+        if session.windows.is_empty() {
+            eprintln!(
+                "pmux: space {name:?} skipped session {:?}: it has no windows",
+                session.name
+            );
+            return false;
+        }
+        true
+    });
     if space.sessions.is_empty() && space.version == SAVED_SPACE_VERSION {
         bail!("space {name:?} has no sessions");
-    }
-    for session in &space.sessions {
-        if session.windows.is_empty() {
-            bail!("space {name:?} session {:?} has no windows", session.name);
-        }
     }
     space.created_at_unix_ms = Some(creation_time_ms(&path, &space));
     Ok(space)
@@ -1605,6 +1626,36 @@ mod tests {
                 .map(|entry| entry.name)
                 .collect::<Vec<_>>(),
             ["Alpha", "Beta", "Epsilon"]
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn windowless_session_is_skipped_so_the_space_still_loads() {
+        let dir =
+            std::env::temp_dir().join(format!("prism-space-windowless-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut space = one_session_space("mixed");
+        let mut broken = stub_space_session("broken");
+        broken.windows.clear();
+        space.sessions.push(broken);
+        fs::write(dir.join("mixed.json"), serde_json::to_vec(&space).unwrap()).unwrap();
+        let loaded =
+            load_space(&dir, "mixed").expect("one windowless session must not fail the load");
+        let names: Vec<&str> = loaded.sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["mixed"], "only the session with windows stays");
+        assert_eq!(
+            listed_space_sessions(&dir, "mixed").unwrap(),
+            ["mixed", "broken"],
+            "the file still lists the broken entry, so it can be removed by name"
+        );
+        // Saving what was loaded never writes the windowless entry back.
+        save_space(&dir, "mixed", &loaded).unwrap();
+        assert_eq!(
+            listed_space_sessions(&dir, "mixed").unwrap(),
+            ["mixed"],
+            "a save after load drops the windowless entry"
         );
         fs::remove_dir_all(&dir).unwrap();
     }

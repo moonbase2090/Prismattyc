@@ -1716,7 +1716,7 @@ pub(crate) fn paint_pane_chrome(
             // the accent trail settles into the 2 px ring at completion.
             stroke_round_rect(buffer, stride, x0, y0, x1, y1, r, 1.0, tok.hairline);
             let sweep = RingSweep::for_slot(slot, r);
-            let traced = (progress.clamp(0.0, 1.0) * sweep.len() as f32).round() as usize;
+            let traced = sweep.traced_at(progress, graphite_core::MotionCurve::Linear);
             paint_ring_sweep(
                 &sweep,
                 buffer,

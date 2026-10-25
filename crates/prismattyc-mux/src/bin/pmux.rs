@@ -1704,6 +1704,7 @@ fn control_event_kind(event: &Event) -> &'static str {
         Event::MailAttentionChanged { .. } => "MailAttentionChanged",
         Event::PaneAttention { .. } => "PaneAttention",
         Event::PaneAttentionCleared { .. } => "PaneAttentionCleared",
+        Event::PaneIdle { .. } => "PaneIdle",
         Event::LeaseChanged { .. } => "LeaseChanged",
         Event::SessionNamed { .. } => "SessionNamed",
         Event::SessionCreated { .. } => "SessionCreated",
@@ -4797,6 +4798,7 @@ Each session belongs to only one Space. Other Spaces keep running.
   catalog                   Print running Spaces as versioned JSON (read-only).
   rm [NAME...] [--all]       Delete definitions; keep sessions alive.
   clear [--keep NAME]        Delete all except kept names; keep sessions alive.
+  reset NAME|--all --confirm TEXT  Back up and reset; confirm NAME or RESET ALL.
 Version-1 migration rejects ambiguous ownership. Originals: legacy-backups/.
 `pmux layout save space` and `pmux layout apply space` remain aliases.
 Files: $XDG_DATA_HOME/prismattyc/spaces or ~/.local/share/prismattyc/spaces
@@ -4824,6 +4826,7 @@ enum SpaceVerb {
     Attach(Vec<String>),
     Rm(Vec<String>),
     Clear(Vec<String>),
+    Reset(Vec<String>),
     Add(Vec<String>),
     Remove(Vec<String>),
     Ls,
@@ -4847,6 +4850,7 @@ fn parse_space_verb(rest: Vec<String>) -> Result<SpaceVerb, SpaceUsage> {
         Some("attach") => Ok(SpaceVerb::Attach(rest.into_iter().skip(1).collect())),
         Some("rm") | Some("delete") => Ok(SpaceVerb::Rm(rest.into_iter().skip(1).collect())),
         Some("clear") => Ok(SpaceVerb::Clear(rest.into_iter().skip(1).collect())),
+        Some("reset") => Ok(SpaceVerb::Reset(rest.into_iter().skip(1).collect())),
         Some("add") => Ok(SpaceVerb::Add(rest.into_iter().skip(1).collect())),
         Some("remove") => Ok(SpaceVerb::Remove(rest.into_iter().skip(1).collect())),
         Some("ls") if rest.len() == 1 => Ok(SpaceVerb::Ls),
@@ -4877,6 +4881,7 @@ fn cmd_space(paths: &Paths, rest: Vec<String>) -> Result<()> {
         SpaceVerb::Catalog => cmd_space_catalog(paths),
         SpaceVerb::Rm(args) => space_commands::delete_spaces(paths, args, false),
         SpaceVerb::Clear(args) => space_commands::delete_spaces(paths, args, true),
+        SpaceVerb::Reset(args) => space_commands::reset::run(paths, args),
         SpaceVerb::Add(args) => space_commands::add(paths, args),
         SpaceVerb::Remove(args) => space_commands::remove(paths, args),
     }
@@ -5385,8 +5390,24 @@ fn cmd_layout_save_space(paths: &Paths, rest: Vec<String>, usage: &'static str) 
             bail!("session {:?} has no windows to save", session.name);
         }
     }
-    let mut space = from_sessions(&sessions);
     let saved_names: Vec<String> = sessions.iter().map(|s| s.name.clone()).collect();
+    if session_keys.is_empty() {
+        let existing = match load_space(&spaces_dir(), &name) {
+            Ok(space) => space.sessions.into_iter().map(|s| s.name).collect(),
+            Err(_) if !spaces_dir().join(format!("{name}.json")).exists() => vec![],
+            Err(error) => {
+                return Err(error.context("existing space is unreadable; not overwriting"))
+            }
+        };
+        let omitted = omitted_space_members(&existing, &saved_names);
+        if !omitted.is_empty() {
+            bail!(
+                "space {name:?} has sessions this save would drop: {}; name them as SESSION arguments",
+                omitted.join(", ")
+            );
+        }
+    }
+    let mut space = from_sessions(&sessions);
     let cache = attach_tabs::load(&paths.space_view_path());
     let had_cache = cache.is_some();
     if let Some(file) = cache {
@@ -5449,6 +5470,16 @@ fn space_save_span_line(paths: &Paths, sessions: &[&SessionSnapshot]) -> Option<
         spaces.push((entry.name, members));
     }
     attach_tabs::space_save_span_warning(cache_space, &live, &spaces)
+}
+
+/// Members of the Space already on disk that a new save would leave out.
+/// Overwriting the file with them missing drops them from the Space.
+fn omitted_space_members(existing: &[String], saved_names: &[String]) -> Vec<String> {
+    existing
+        .iter()
+        .filter(|name| !saved_names.contains(name))
+        .cloned()
+        .collect()
 }
 
 /// Give each saved live session the attach-tabs cache omits its own
@@ -5683,6 +5714,7 @@ fn apply_layout_args(paths: &Paths, args: ApplyArgs) -> Result<()> {
                 bail!("cannot add a different Space to this view; use Switch or New window");
             }
             refuse_space_path_escape(&dir, &space_path)?;
+            let prior_unfinished = space_commands::begin_restore(&space)?;
             let mut applied = Vec::new();
             for session in &space.sessions {
                 let snapshot = take_snapshot(&mut client)?;
@@ -5728,6 +5760,8 @@ fn apply_layout_args(paths: &Paths, args: ApplyArgs) -> Result<()> {
             let snapshot = take_snapshot(&mut client)?;
             run_space_open_commands(&mut client, client_id, &snapshot, &space, &applied, policy)?;
             restore_saved_pane_titles(&mut client, &snapshot, &space, &applied)?;
+            let after = take_snapshot(&mut client)?;
+            space_commands::end_restore(&space, Some(&after), prior_unfinished)?;
             if !host {
                 drop(client);
                 return Ok(());
@@ -9430,6 +9464,21 @@ mod tests {
         assert!(parse_space_verb(args(&["save", "--help"])).unwrap() == SpaceVerb::Help);
         assert!(parse_space_verb(args(&["open", "-h"])).unwrap() == SpaceVerb::Help);
         assert!(parse_space_verb(args(&["ls", "--help"])).unwrap() == SpaceVerb::Help);
+    }
+
+    #[test]
+    fn space_save_reports_members_a_window_save_would_drop() {
+        let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            omitted_space_members(&names(&["lw-a", "lw-b", "lw-c"]), &names(&["lw-a"])),
+            names(&["lw-b", "lw-c"]),
+            "sessions on disk but not in the window are reported"
+        );
+        assert!(
+            omitted_space_members(&names(&["lw-a"]), &names(&["lw-a", "new"])).is_empty(),
+            "a save that keeps every member and adds one drops nothing"
+        );
+        assert!(omitted_space_members(&[], &names(&["new"])).is_empty());
     }
 
     #[test]

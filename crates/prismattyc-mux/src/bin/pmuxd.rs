@@ -224,9 +224,12 @@ fn main() -> Result<()> {
     instance.publish_pid(&cli.socket)?;
     let checkpoint =
         prismattyc_mux::workspace::Checkpointer::start(server.plane(), cli.socket.clone())?;
+    let space_autosave =
+        prismattyc_mux::space_autosave::Worker::start(server.plane(), cli.socket.clone())?;
     println!("{}", server.path().display());
     server.wait_shutdown();
     prismattyc_mux::private_fs::write(&stopped_path, b"intentional shutdown\n")?;
+    drop(space_autosave);
     drop(checkpoint);
     drop(server);
     Ok(())

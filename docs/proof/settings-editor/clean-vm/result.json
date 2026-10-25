@@ -1,0 +1,24 @@
+{
+  "tested_revision": "7b58b036c227ea00a582bde2d3063e6b98837fb4",
+  "executable": "prismattyc-host 0.3.41 (7b58b036c227)",
+  "os": "macOS 26.6.2 arm64, fresh clean guest, no Prismattyc installed",
+  "proof_kind": "host-built binaries copied into the guest; guest desktop driven only by keyboard events over the VM's VNC server; saved file read back from the guest; presented app window cropped",
+  "binary_sha256": {
+    "pmux": "637db5364accaa3e28c503b8a88f2b6df125556637dfc01e0c2b52b595e5d0de",
+    "pmuxd": "18e5b4e7fa9c4f7344d1c497346fc7ac4943faada783f03c8afba8a1fd9bede2",
+    "prismattyc-host": "f083577aadb6de0d0235904493a2983c02dc6006eef48d37c5ce7e867d2ed878"
+  },
+  "config_before": "settings_panel = true plus four startup keys",
+  "observed": [
+    "the command palette action space_settings opens the settings editor (title 'Prismattyc - settings', Appearance section)",
+    "Layout section, Window padding px: typed 9223372036854775807 as the exact value, confirmed, pressed Right: the value shows 128 (the control's maximum) and the host keeps running; before the fix in this PR branch's last commit this sequence panicked with an arithmetic overflow",
+    "Save: the status line reads 'Saved. Live options reload automatically.' and the config file gains window_padding_px = 128 while every other key is unchanged (final-config.toml)",
+    "the transaction leaves a hidden .config.toml.lock beside the config and keeps the file mode (644)"
+  ],
+  "not_shown": [
+    "font comparison and bundled font rendering",
+    "the remote destination editor and key binding capture",
+    "cancel and external-edit conflict paths",
+    "Linux and Windows runtime"
+  ]
+}

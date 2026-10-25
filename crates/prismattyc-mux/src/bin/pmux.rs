@@ -5714,6 +5714,7 @@ fn apply_layout_args(paths: &Paths, args: ApplyArgs) -> Result<()> {
                 bail!("cannot add a different Space to this view; use Switch or New window");
             }
             refuse_space_path_escape(&dir, &space_path)?;
+            let prior_unfinished = space_commands::begin_restore(&space)?;
             let mut applied = Vec::new();
             for session in &space.sessions {
                 let snapshot = take_snapshot(&mut client)?;
@@ -5759,6 +5760,8 @@ fn apply_layout_args(paths: &Paths, args: ApplyArgs) -> Result<()> {
             let snapshot = take_snapshot(&mut client)?;
             run_space_open_commands(&mut client, client_id, &snapshot, &space, &applied, policy)?;
             restore_saved_pane_titles(&mut client, &snapshot, &space, &applied)?;
+            let after = take_snapshot(&mut client)?;
+            space_commands::end_restore(&space, Some(&after), prior_unfinished)?;
             if !host {
                 drop(client);
                 return Ok(());

@@ -37,6 +37,7 @@ pub mod remote_catalog;
 mod remote_size;
 mod rich;
 pub mod session_name;
+pub mod space_autosave;
 pub mod space_team;
 pub mod space_template;
 pub mod supervisor;

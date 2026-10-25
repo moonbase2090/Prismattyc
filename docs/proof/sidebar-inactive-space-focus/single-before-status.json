@@ -1,0 +1,238 @@
+{
+  "context_menu": null,
+  "current_panes": [
+    {
+      "alt_active": false,
+      "attach_policy": {
+        "batches": 2,
+        "coalesced_bytes": 0,
+        "coalesced_frames": 0,
+        "dropped_bytes": 0,
+        "dropped_frames": 0,
+        "frames": 3,
+        "notice": "attach policy active: 2 batches / 3 frames; coalesced 0 frames / 0 bytes",
+        "reader_blocked_ms": 0,
+        "reader_queue_budget_bytes": 8388608,
+        "reader_queue_bytes": 64,
+        "reader_queue_high_water_bytes": 16773,
+        "superseded_bytes": 0,
+        "superseded_frames": 0
+      },
+      "experimental_rich": false,
+      "local_child_pid": null,
+      "pane_id": "PaneId(1)",
+      "remote_pane_id": 2,
+      "stored_images": 0,
+      "view_scroll": 0,
+      "workspace_layout": false
+    }
+  ],
+  "focused": true,
+  "focused_pane": 1,
+  "focused_session": "lab-1",
+  "last_raster": {
+    "cells_painted": 1840,
+    "full_repaint_reason": "fallback",
+    "guard_mask": 1342179328,
+    "guards": [
+      "previous-overlay",
+      "bell-toasts",
+      "hover-target"
+    ],
+    "present": {
+      "backend": "iosurface",
+      "busy_surface_stalls": 0,
+      "changed_tiles": null,
+      "commit_us": 90,
+      "dirty_tiles": 0,
+      "write_bytes": 9668272,
+      "write_us": 11637
+    },
+    "present_succeeded": true,
+    "raster_mode": "full",
+    "rows_scrolled_as_blit": 0,
+    "timing": {
+      "damage_us": 21,
+      "parse_us": 56,
+      "present_us": 11748,
+      "raster_us": 72902
+    },
+    "unix_ms": 1792887967079
+  },
+  "last_space_open": null,
+  "local_terminal_panes": [],
+  "occluded": false,
+  "pane_count": 1,
+  "pump": {
+    "max_1s_us": 8718,
+    "phases": {
+      "adopt_nested_attaches": {
+        "last_us": 0,
+        "max_1s_us": 14
+      },
+      "advance_space_opens": {
+        "last_us": 2,
+        "max_1s_us": 2
+      },
+      "apply_pending_session_focus": {
+        "last_us": 0,
+        "max_1s_us": 0
+      },
+      "drain_pty": {
+        "last_us": 41,
+        "max_1s_us": 41
+      },
+      "infer_current_space": {
+        "last_us": 0,
+        "max_1s_us": 0
+      },
+      "local_views::persist_and_restore": {
+        "last_us": 0,
+        "max_1s_us": 46
+      },
+      "persist_attach_layout_from_live": {
+        "last_us": 338,
+        "max_1s_us": 0
+      },
+      "poll_config_reload": {
+        "last_us": 1,
+        "max_1s_us": 1
+      },
+      "poll_host_attach_tabs": {
+        "last_us": 11,
+        "max_1s_us": 11
+      },
+      "publish_render_status": {
+        "last_us": 0,
+        "max_1s_us": 0
+      },
+      "refresh_space_views": {
+        "last_us": 76,
+        "max_1s_us": 3515
+      },
+      "remote_rail.poll": {
+        "last_us": 3,
+        "max_1s_us": 3
+      },
+      "restart::poll": {
+        "last_us": 0,
+        "max_1s_us": 5026
+      },
+      "retry_register_host_pid": {
+        "last_us": 2,
+        "max_1s_us": 2
+      },
+      "space_rail.poll": {
+        "last_us": 32,
+        "max_1s_us": 35
+      },
+      "sync_remote_rail": {
+        "last_us": 3,
+        "max_1s_us": 3
+      },
+      "window_bookkeeping": {
+        "last_us": 7,
+        "max_1s_us": 7
+      }
+    },
+    "slowest_phase": "refresh_space_views",
+    "slowest_us": 76,
+    "socket_round_trips": {
+      "count_1s": 1,
+      "last_pump_count": 0,
+      "last_pump_us": 0,
+      "time_1s_us": 3375
+    },
+    "subprocess_waits": {
+      "count_1s": 0,
+      "last_pump_count": 0,
+      "last_pump_us": 0,
+      "time_1s_us": 0
+    },
+    "total_us": 194
+  },
+  "render_sample": {
+    "frames": 1,
+    "interval_us": 1187863,
+    "seq": 3
+  },
+  "selected_tab": 0,
+  "session_prompt_open": false,
+  "sidebar_space_rows": [
+    {
+      "height": 48,
+      "name": "default",
+      "width": 512,
+      "x": 0,
+      "y": 88
+    },
+    {
+      "height": 48,
+      "name": "lab",
+      "width": 512,
+      "x": 0,
+      "y": 184
+    },
+    {
+      "height": 48,
+      "name": "mail",
+      "width": 512,
+      "x": 0,
+      "y": 280
+    }
+  ],
+  "space": "lab",
+  "space_attention_counts": {},
+  "space_chips": [],
+  "space_details": null,
+  "space_open_pending": false,
+  "space_order": [
+    "default",
+    "lab",
+    "mail"
+  ],
+  "space_picker_open": false,
+  "space_rail_position": "left",
+  "space_rail_px": 0,
+  "space_rail_width_cols": 18,
+  "space_reorder_drag_active": false,
+  "space_save_status": "Save unavailable",
+  "space_session_names": {
+    "default": [
+      "default"
+    ],
+    "lab": [
+      "lab-1"
+    ],
+    "mail": [
+      "mail-1",
+      "target"
+    ]
+  },
+  "space_undo_available": false,
+  "tab_count": 1,
+  "tab_git_labels": [
+    null
+  ],
+  "tab_layouts": [
+    [
+      "lab-1",
+      "Leaf(PaneId(1))"
+    ]
+  ],
+  "tab_strip_height": 88,
+  "tab_strip_y": 0,
+  "terminal_switcher": null,
+  "visible_pane_slots": [
+    [
+      1,
+      [
+        528,
+        104,
+        1494,
+        1066
+      ]
+    ]
+  ],
+  "window_id": "WindowId(521555427968)"
+}

@@ -1,0 +1,300 @@
+{
+  "context_menu": null,
+  "current_panes": [
+    {
+      "alt_active": false,
+      "attach_policy": {
+        "batches": 2,
+        "coalesced_bytes": 0,
+        "coalesced_frames": 0,
+        "dropped_bytes": 0,
+        "dropped_frames": 0,
+        "frames": 3,
+        "notice": "attach policy active: 2 batches / 3 frames; coalesced 0 frames / 0 bytes",
+        "reader_blocked_ms": 0,
+        "reader_queue_budget_bytes": 8388608,
+        "reader_queue_bytes": 64,
+        "reader_queue_high_water_bytes": 16773,
+        "superseded_bytes": 0,
+        "superseded_frames": 0
+      },
+      "experimental_rich": false,
+      "local_child_pid": null,
+      "pane_id": "PaneId(3)",
+      "remote_pane_id": 3,
+      "stored_images": 0,
+      "view_scroll": 0,
+      "workspace_layout": false
+    },
+    {
+      "alt_active": false,
+      "attach_policy": {
+        "batches": 2,
+        "coalesced_bytes": 0,
+        "coalesced_frames": 0,
+        "dropped_bytes": 0,
+        "dropped_frames": 0,
+        "frames": 3,
+        "notice": "attach policy active: 2 batches / 3 frames; coalesced 0 frames / 0 bytes",
+        "reader_blocked_ms": 0,
+        "reader_queue_budget_bytes": 8388608,
+        "reader_queue_bytes": 64,
+        "reader_queue_high_water_bytes": 16773,
+        "superseded_bytes": 0,
+        "superseded_frames": 0
+      },
+      "experimental_rich": false,
+      "local_child_pid": null,
+      "pane_id": "PaneId(2)",
+      "remote_pane_id": 4,
+      "stored_images": 0,
+      "view_scroll": 0,
+      "workspace_layout": false
+    }
+  ],
+  "focused": true,
+  "focused_pane": 2,
+  "focused_session": "4",
+  "last_raster": {
+    "cells_painted": 1840,
+    "full_repaint_reason": "fallback",
+    "guard_mask": 1073743872,
+    "guards": [
+      "previous-overlay",
+      "hover-target"
+    ],
+    "present": {
+      "backend": "iosurface",
+      "busy_surface_stalls": 0,
+      "changed_tiles": null,
+      "commit_us": 88,
+      "dirty_tiles": 0,
+      "write_bytes": 9668272,
+      "write_us": 11337
+    },
+    "present_succeeded": true,
+    "raster_mode": "full",
+    "rows_scrolled_as_blit": 0,
+    "timing": {
+      "damage_us": 54,
+      "parse_us": 34,
+      "present_us": 11444,
+      "raster_us": 71362
+    },
+    "unix_ms": 1792887980987
+  },
+  "last_space_open": {
+    "error": null,
+    "launch": "not observed",
+    "mode": "switch",
+    "name": "mail",
+    "seats": [
+      {
+        "live": {
+          "id": 3,
+          "panes": 1,
+          "running_panes": 1,
+          "windows": 1
+        },
+        "name": "mail-1",
+        "saved_panes": 1,
+        "state": "reused"
+      },
+      {
+        "live": {
+          "id": 4,
+          "panes": 1,
+          "running_panes": 1,
+          "windows": 1
+        },
+        "name": "target",
+        "saved_panes": 1,
+        "state": "reused"
+      }
+    ],
+    "sequence": 1,
+    "session_basis": "before and after daemon snapshots",
+    "target": "this window",
+    "view": "applied"
+  },
+  "local_terminal_panes": [],
+  "occluded": false,
+  "pane_count": 1,
+  "pump": {
+    "max_1s_us": 18545,
+    "phases": {
+      "adopt_nested_attaches": {
+        "last_us": 0,
+        "max_1s_us": 13
+      },
+      "advance_space_opens": {
+        "last_us": 1,
+        "max_1s_us": 2
+      },
+      "apply_pending_session_focus": {
+        "last_us": 0,
+        "max_1s_us": 0
+      },
+      "drain_pty": {
+        "last_us": 38,
+        "max_1s_us": 38
+      },
+      "infer_current_space": {
+        "last_us": 0,
+        "max_1s_us": 0
+      },
+      "local_views::persist_and_restore": {
+        "last_us": 0,
+        "max_1s_us": 41
+      },
+      "persist_attach_layout_from_live": {
+        "last_us": 343,
+        "max_1s_us": 0
+      },
+      "poll_config_reload": {
+        "last_us": 0,
+        "max_1s_us": 2
+      },
+      "poll_host_attach_tabs": {
+        "last_us": 3,
+        "max_1s_us": 6
+      },
+      "publish_render_status": {
+        "last_us": 0,
+        "max_1s_us": 1
+      },
+      "refresh_space_views": {
+        "last_us": 18447,
+        "max_1s_us": 18447
+      },
+      "remote_rail.poll": {
+        "last_us": 2,
+        "max_1s_us": 2
+      },
+      "restart::poll": {
+        "last_us": 0,
+        "max_1s_us": 4151
+      },
+      "retry_register_host_pid": {
+        "last_us": 1,
+        "max_1s_us": 1
+      },
+      "space_rail.poll": {
+        "last_us": 32,
+        "max_1s_us": 33
+      },
+      "sync_remote_rail": {
+        "last_us": 2,
+        "max_1s_us": 2
+      },
+      "window_bookkeeping": {
+        "last_us": 6,
+        "max_1s_us": 6
+      }
+    },
+    "slowest_phase": "refresh_space_views",
+    "slowest_us": 18447,
+    "socket_round_trips": {
+      "count_1s": 3,
+      "last_pump_count": 2,
+      "last_pump_us": 11385,
+      "time_1s_us": 12960
+    },
+    "subprocess_waits": {
+      "count_1s": 0,
+      "last_pump_count": 0,
+      "last_pump_us": 0,
+      "time_1s_us": 0
+    },
+    "total_us": 18545
+  },
+  "render_sample": {
+    "frames": 1,
+    "interval_us": 7325664,
+    "seq": 9
+  },
+  "selected_tab": 1,
+  "session_prompt_open": false,
+  "sidebar_space_rows": [
+    {
+      "height": 48,
+      "name": "default",
+      "width": 512,
+      "x": 0,
+      "y": 88
+    },
+    {
+      "height": 48,
+      "name": "lab",
+      "width": 512,
+      "x": 0,
+      "y": 184
+    },
+    {
+      "height": 48,
+      "name": "mail",
+      "width": 512,
+      "x": 0,
+      "y": 280
+    }
+  ],
+  "space": "mail",
+  "space_attention_counts": {},
+  "space_chips": [],
+  "space_details": null,
+  "space_open_pending": false,
+  "space_order": [
+    "default",
+    "lab",
+    "mail"
+  ],
+  "space_picker_open": false,
+  "space_rail_position": "left",
+  "space_rail_px": 0,
+  "space_rail_width_cols": 18,
+  "space_reorder_drag_active": false,
+  "space_save_status": "Saved",
+  "space_session_names": {
+    "default": [
+      "default"
+    ],
+    "lab": [
+      "lab-1"
+    ],
+    "mail": [
+      "mail-1",
+      "target"
+    ]
+  },
+  "space_undo_available": false,
+  "tab_count": 2,
+  "tab_git_labels": [
+    null,
+    null
+  ],
+  "tab_layouts": [
+    [
+      "mail-1",
+      "Leaf(PaneId(3))"
+    ],
+    [
+      "target",
+      "Leaf(PaneId(2))"
+    ]
+  ],
+  "tab_strip_height": 88,
+  "tab_strip_y": 0,
+  "terminal_switcher": null,
+  "visible_pane_slots": [
+    [
+      2,
+      [
+        528,
+        104,
+        1494,
+        1066
+      ]
+    ]
+  ],
+  "window_id": "WindowId(521555427968)"
+}

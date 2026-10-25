@@ -1,0 +1,46 @@
+{
+  "status": "PASS",
+  "cases": [
+    {
+      "layout": "single",
+      "ok": true,
+      "before_space": "lab",
+      "before_session": "lab-1",
+      "after_space": "mail",
+      "after_session": "4",
+      "target_session_id": "4",
+      "selected_tab": 1,
+      "before_present": "single-before-present.png",
+      "after_present": "single-after-present.png",
+      "present_changed": true
+    },
+    {
+      "layout": "split",
+      "ok": true,
+      "before_space": "lab",
+      "before_session": "5",
+      "after_space": "mail",
+      "after_session": "4",
+      "target_session_id": "4",
+      "selected_tab": 1,
+      "before_present": "split-before-present.png",
+      "after_present": "split-after-present.png",
+      "present_changed": true
+    },
+    {
+      "layout": "grid",
+      "ok": true,
+      "before_space": "lab",
+      "before_session": "7",
+      "after_space": "mail",
+      "after_session": "4",
+      "target_session_id": "4",
+      "selected_tab": 1,
+      "before_present": "grid-before-present.png",
+      "after_present": "grid-after-present.png",
+      "present_changed": true
+    }
+  ],
+  "revision": "515196f1dbfa64f9230b58c9772cee491062a105",
+  "proof_kind": "PRISMATTYC_DUMP_PRESENT host framebuffer (not desktop composition)"
+}

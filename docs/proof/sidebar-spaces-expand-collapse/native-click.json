@@ -19,15 +19,15 @@
   ],
   "layout": {
     "sidebar_w": 512,
-    "scale": 2.0,
+    "scale": 2,
     "size": 36,
     "fold_rect": [
-      412,
+      412.0,
       26.0,
       36,
       36
     ],
-    "toggle_x": 456
+    "titlebar_points": 32.0
   },
   "scale": 0.5,
   "titlebar_points": 32.0

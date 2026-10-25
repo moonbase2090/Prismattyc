@@ -27583,7 +27583,7 @@ session mail (id 15)
             sessions: vec!["shell".to_string(), "logs".to_string()],
             layout: None,
         }];
-        let extra = vec!["prismattyc-1".to_string()];
+        let extra = vec!["worker-a".to_string()];
         let tree = sidebar::SidebarTree::build(&[sidebar::SpaceInput {
             name: "mail",
             current: false,
@@ -27606,7 +27606,7 @@ session mail (id 15)
             .find(|row| row.kind == sidebar::RowKind::Tab && row.tab == Some(0))
             .expect("the saved tab paints a tab row");
         let session_title = session_title_of(&tree, session_tab);
-        assert_eq!(session_title.as_deref(), Some("prismattyc-1"));
+        assert_eq!(session_title.as_deref(), Some("worker-a"));
         assert_eq!(
             session_title_of(&tree, saved_tab).as_deref(),
             Some("shell"),
@@ -27614,7 +27614,7 @@ session mail (id 15)
         );
         let open_session = SidebarClick::OpenSession {
             space: "mail".to_string(),
-            title: "prismattyc-1".to_string(),
+            title: "worker-a".to_string(),
         };
         assert_eq!(
             sidebar_click_decision(

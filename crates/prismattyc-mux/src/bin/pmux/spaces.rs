@@ -1,6 +1,9 @@
 //! Exclusive Space operations. The daemon owns live membership; the store
 //! serializes definitions and retains an interrupted transaction for recovery.
 
+#[path = "spaces/reset.rs"]
+pub(super) mod reset;
+
 use super::*;
 use serde::{Deserialize, Serialize};
 

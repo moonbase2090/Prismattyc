@@ -116,6 +116,7 @@ mod tests {
         assert!(DisplayName::new("bad\nname").is_err());
         assert!(DisplayName::new(&"x".repeat(65)).is_err());
     }
+
     #[test]
     fn suggestions_are_mail_addresses_and_skip_existing_names() {
         assert_eq!(

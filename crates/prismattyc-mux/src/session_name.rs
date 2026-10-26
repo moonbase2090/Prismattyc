@@ -7,8 +7,14 @@ pub struct DisplayName(String);
 impl DisplayName {
     pub fn new(raw: &str) -> Result<Self, &'static str> {
         let name = raw.trim();
-        if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
-            return Err("display name must be 1..=64 bytes without control characters");
+        if name.is_empty() {
+            return Err("display name must not be empty");
+        }
+        if name.len() > 64 {
+            return Err("display name must be at most 64 bytes");
+        }
+        if name.chars().any(char::is_control) {
+            return Err("display name must not contain control characters");
         }
         Ok(Self(name.to_string()))
     }

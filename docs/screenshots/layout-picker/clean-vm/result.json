@@ -1,0 +1,55 @@
+{
+  "tested_revision": "cdae5b7720826e66f163c6c46c13d4e673f481d3",
+  "os": "macOS 26.6.2",
+  "host_sha256": "66c4faddb54a855367254a602cbf701f6bdb43a4d4737ae84fa6a5929b926752",
+  "proof_kind": "guest host framebuffer; native input; read-only render-status assertions",
+  "window_cells": "40x18",
+  "assertions": [
+    "native Split gives 2 visible panes",
+    "native Grid gives 4 visible panes",
+    "native Single gives 1 visible pane",
+    "configured Ctrl+Alt+F3 restores 4 visible panes"
+  ],
+  "cases": [
+    {
+      "case": "graphite-sidebar",
+      "status": "PASS"
+    },
+    {
+      "case": "graphite-collapsed",
+      "status": "PASS"
+    },
+    {
+      "case": "graphite-tabs",
+      "status": "PASS"
+    },
+    {
+      "case": "graphite-top",
+      "status": "PASS"
+    },
+    {
+      "case": "graphite-hidden-tabs",
+      "status": "PASS"
+    },
+    {
+      "case": "classic-sidebar",
+      "status": "PASS"
+    },
+    {
+      "case": "classic-collapsed",
+      "status": "PASS"
+    },
+    {
+      "case": "classic-tabs",
+      "status": "PASS"
+    },
+    {
+      "case": "classic-top",
+      "status": "PASS"
+    },
+    {
+      "case": "classic-hidden-tabs",
+      "status": "PASS"
+    }
+  ]
+}

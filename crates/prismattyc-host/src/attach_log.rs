@@ -353,7 +353,7 @@ pub(crate) fn live_snapshot() -> Option<Snapshot> {
     live_snapshot_at(&socket)
 }
 
-fn live_snapshot_at(socket: &Path) -> Option<Snapshot> {
+pub(crate) fn live_snapshot_at(socket: &Path) -> Option<Snapshot> {
     let _timing = crate::pump_timing::PumpIoTimer::socket_round_trip();
     let mut client = Client::connect(socket, REQUEST_TIMEOUT).ok()?;
     match client.request(|request_id| ControlRequest::Snapshot {
@@ -363,6 +363,57 @@ fn live_snapshot_at(socket: &Path) -> Option<Snapshot> {
         Ok(ControlResponseData::Snapshot { snapshot }) => Some(snapshot),
         _ => None,
     }
+}
+
+pub(crate) fn walkthrough_mail_demo(socket: &Path) -> Result<String> {
+    let mut client = Client::connect(socket, REQUEST_TIMEOUT)?;
+    let client_id = client.client_id;
+    let agent = format!("walkthrough-{}", prismattyc_mux::new_space_id()?);
+    client.request(|request_id| ControlRequest::MailHello {
+        version: PROTOCOL_VERSION,
+        request_id,
+        client_id,
+        agent: agent.clone(),
+    })?;
+    let sent = client.request(|request_id| ControlRequest::MailSend {
+        version: PROTOCOL_VERSION,
+        request_id,
+        client_id,
+        to: agent.clone(),
+        summary: "Walkthrough letter".into(),
+        body: "Send, claim, then commit this demonstration letter.".into(),
+    })?;
+    let ControlResponseData::MailSent { id, .. } = sent else {
+        bail!("mail demonstration did not return a sent letter");
+    };
+    let claimed = client.request(|request_id| ControlRequest::MailClaim {
+        version: PROTOCOL_VERSION,
+        request_id,
+        client_id,
+    })?;
+    let ControlResponseData::MailLetters { letters } = claimed else {
+        bail!("mail demonstration did not return claimed letters");
+    };
+    anyhow::ensure!(
+        letters.iter().any(|letter| letter.id == id),
+        "demonstration letter was not claimed"
+    );
+    let committed = client.request(|request_id| ControlRequest::MailCommit {
+        version: PROTOCOL_VERSION,
+        request_id,
+        client_id,
+        ids: vec![id.clone()],
+    })?;
+    anyhow::ensure!(
+        matches!(
+            committed,
+            ControlResponseData::MailCommitted { committed: 1 }
+        ),
+        "demonstration letter was not committed"
+    );
+    Ok(format!(
+        "Sent, claimed, and committed {id} in a private demonstration mailbox."
+    ))
 }
 
 /// One NDJSON control connection with its own registered client identity.
@@ -3589,6 +3640,96 @@ mod tests {
         drop(to_tx);
         writer.join().expect("writer thread");
         let _ = server.join();
+    }
+
+    #[test]
+    fn walkthrough_mail_commits_only_its_private_letter_and_checks_the_reply() {
+        use prismattyc_mux::mailbox::{AgentId, Store};
+        for reject_commit in [false, true] {
+            let socket = test_socket("tour-mail");
+            let _guard = UnlinkOnDrop(socket.clone());
+            let listener = prismattyc_mux::local_socket::UnixListener::bind(&socket).unwrap();
+            let server = thread::spawn(move || {
+                let mut store = Store::open_in_memory().unwrap();
+                let user = AgentId::new("existing-user").unwrap();
+                let (user_letter, _) = store
+                    .send("sender", &user, "Keep this", "Untouched")
+                    .unwrap();
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut identity = None;
+                let mut sent_id = None;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 {
+                        break;
+                    }
+                    let request: ControlRequest = serde_json::from_str(&line).unwrap();
+                    let (id, response) = match request {
+                        ControlRequest::RegisterClient { request_id, .. } => (
+                            request_id,
+                            ControlResponseData::ClientRegistered { client_id: 1 },
+                        ),
+                        ControlRequest::MailHello {
+                            request_id, agent, ..
+                        } => {
+                            assert!(agent.starts_with("walkthrough-"));
+                            identity = Some(AgentId::new(agent.clone()).unwrap());
+                            (request_id, ControlResponseData::MailSeated { agent })
+                        }
+                        ControlRequest::MailSend {
+                            request_id,
+                            to,
+                            summary,
+                            body,
+                            ..
+                        } => {
+                            let agent = identity.as_ref().unwrap();
+                            assert_eq!(to, agent.as_str());
+                            let (id, depth) =
+                                store.send(agent.as_str(), agent, &summary, &body).unwrap();
+                            sent_id = Some(id.clone());
+                            (request_id, ControlResponseData::MailSent { id, depth })
+                        }
+                        ControlRequest::MailClaim { request_id, .. } => {
+                            let letters = store.claim(identity.as_ref().unwrap()).unwrap();
+                            (request_id, ControlResponseData::MailLetters { letters })
+                        }
+                        ControlRequest::MailCommit {
+                            request_id, ids, ..
+                        } => {
+                            assert_eq!(ids, vec![sent_id.clone().unwrap()]);
+                            let committed = if reject_commit {
+                                0
+                            } else {
+                                store.commit(identity.as_ref().unwrap(), &ids).unwrap()
+                            };
+                            (request_id, ControlResponseData::MailCommitted { committed })
+                        }
+                        other => panic!("unexpected request: {other:?}"),
+                    };
+                    write_ok(&mut stream, id, response);
+                }
+                assert_eq!(store.depth(&user).unwrap(), (1, 0));
+                assert_eq!(store.claim(&user).unwrap()[0].id, user_letter);
+                assert_eq!(
+                    store.depth(identity.as_ref().unwrap()).unwrap(),
+                    if reject_commit { (0, 1) } else { (0, 0) }
+                );
+            });
+            let result = walkthrough_mail_demo(&socket);
+            if reject_commit {
+                assert!(result.unwrap_err().to_string().contains("not committed"));
+            } else {
+                assert!(result
+                    .unwrap()
+                    .contains("Sent, claimed, and committed msg:"));
+            }
+            server.join().unwrap();
+        }
     }
 
     struct UnlinkOnDrop(PathBuf);

@@ -446,6 +446,15 @@ fn finish_choice(host: &mut HostState, accept: bool, blank: bool) {
         };
         match result {
             Ok(()) => {
+                if !blank && matches!(prompt.target, Target::Pane { .. }) {
+                    observe_walkthrough(
+                        host,
+                        walkthrough::Detected::CommandEvent {
+                            command: "pmux_new".into(),
+                            result: "ok".into(),
+                        },
+                    );
+                }
                 if let Target::Layout { count, quadrants } = prompt.target {
                     if host.mux.active_pane_count() < count {
                         create_layout(host, count, quadrants);

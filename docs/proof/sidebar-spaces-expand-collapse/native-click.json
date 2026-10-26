@@ -1,0 +1,35 @@
+{
+  "content": [
+    430.0,
+    44.0
+  ],
+  "screen": [
+    755.0,
+    245.0
+  ],
+  "bounds": [
+    540.0,
+    191.0,
+    1019.0,
+    625.0
+  ],
+  "present_wh": [
+    2038,
+    1186
+  ],
+  "layout": {
+    "sidebar_w": 512,
+    "scale": 2,
+    "size": 36,
+    "fold_rect": [
+      412.0,
+      26.0,
+      36,
+      36
+    ],
+    "titlebar_points": 32.0
+  },
+  "scale": 0.5,
+  "titlebar_points": 32.0,
+  "click_method": "cghidEventTap + activate (pointer_px via CursorMoved)"
+}

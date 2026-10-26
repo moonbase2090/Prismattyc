@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [0.3.42] - 2026-10-25
+
+### Added
+
+- pmuxd autosaves Space window layouts and preserves the saved layout when a restore is interrupted.
+- `pmux space reset` resets a saved Space after confirmation and keeps a backup of the previous layout.
+- A pane idle event fires once when a pane with output goes quiet, and re-arms when new output arrives.
+
+### Fixed
+
+- Spaces with windowless or stale saved entries now recover instead of failing to open.
+- The Single, Split, and Grid arrangement controls now appear in the pane header in every window layout, including tabs, the top Space rail, and hidden tabs.
+
+### Security
+
+- Updated tokio and clipboard-win to clear a tokio I/O-safety advisory and a yanked clipboard-win release.
+
+## [0.3.42-rc.1] - 2026-10-25
+
+This build is a prerelease. A tag such as `v0.3.42-rc.1` is published with
+`--prerelease --latest=false`. `pmux update` and the app menu do not offer it.
+Install the assets from the release, or opt in with `pmux update --pre`.
+The binaries report the base version, `0.3.42`.
+
 ## [0.3.41] - 2026-10-22
 
 ### Changed

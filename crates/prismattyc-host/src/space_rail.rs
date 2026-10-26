@@ -1031,6 +1031,23 @@ impl SpaceRail {
         }
     }
 
+    /// True when any named space is collapsed in the sidebar tree.
+    pub fn any_collapsed<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> bool {
+        names.into_iter().any(|name| self.is_collapsed(name))
+    }
+
+    /// Collapse or expand every named space. Used by the sidebar header
+    /// expand-all / collapse-all control.
+    pub fn set_all_collapsed<'a>(
+        &mut self,
+        names: impl IntoIterator<Item = &'a str>,
+        collapsed: bool,
+    ) {
+        for name in names {
+            self.set_collapsed(name, collapsed);
+        }
+    }
+
     /// Reload the chip list from `dir`. Returns whether anything changed.
     pub fn refresh(&mut self, dir: &Path) -> bool {
         self.dir_stamp = dir_stamp(dir);
@@ -2386,6 +2403,21 @@ mod tests {
         assert!(!rail.is_collapsed("lab"));
         // Unknown names are simply not collapsed.
         assert!(!rail.is_collapsed("mail"));
+    }
+
+    #[test]
+    fn set_all_collapsed_expands_or_collapses_every_named_space() {
+        let mut rail = SpaceRail::new(None);
+        let names = ["lab", "mail", "ops"];
+        assert!(!rail.any_collapsed(names));
+        rail.set_all_collapsed(names, true);
+        assert!(rail.any_collapsed(names));
+        assert!(names.iter().all(|name| rail.is_collapsed(name)));
+        rail.set_collapsed("mail", false);
+        assert!(rail.any_collapsed(names), "mixed state still reports any");
+        rail.set_all_collapsed(names, false);
+        assert!(!rail.any_collapsed(names));
+        assert!(names.iter().all(|name| !rail.is_collapsed(name)));
     }
 
     #[test]

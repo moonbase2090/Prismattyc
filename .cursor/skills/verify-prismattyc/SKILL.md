@@ -36,6 +36,14 @@ For short-lived CLI drives, the helper below starts a fresh private `pmuxd` for 
 
 Each `--out` must be new. A successful drive prints `"status": "PASS"`. For desktop UI, use the native fixture in [desktop](features/desktop.md); it owns separate host and daemon processes. For Windows use [Windows](features/windows.md), not this Unix launch recipe.
 
+## CI and test portability
+
+For changes to process-detection fixtures or Linux test runners, follow the
+[session and mail portability checks](features/sessions-mail.md#linux-test-portability).
+The Ubuntu 26.04 preview job in `.github/workflows/ci.yml` is advisory
+(`continue-on-error: true`); record its actual result separately from required
+CI. A green aggregate does not establish that the preview suite passed.
+
 ## Doctor
 
 The CLI helper performs a read-only doctor before the drive, after success, and after a failed drive when the daemon is still alive: check its owned process, check the private socket, run that build's `pmux --version` and `pmux ls`. Inspect `doctor.jsonl` and compare the version with `revision.txt`; a response from an unrelated installed binary is not proof.

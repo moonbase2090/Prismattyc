@@ -1716,7 +1716,7 @@ pub(crate) fn paint_pane_chrome(
             // the accent trail settles into the 2 px ring at completion.
             stroke_round_rect(buffer, stride, x0, y0, x1, y1, r, 1.0, tok.hairline);
             let sweep = RingSweep::for_slot(slot, r);
-            let traced = (progress.clamp(0.0, 1.0) * sweep.len() as f32).round() as usize;
+            let traced = sweep.traced_at(progress, graphite_core::MotionCurve::Linear);
             paint_ring_sweep(
                 &sweep,
                 buffer,
@@ -2445,6 +2445,11 @@ pub(crate) struct SidebarPaint<'a> {
     /// Header control that collapses or expands the column.
     pub toggle: Rect,
     pub toggle_hovered: bool,
+    /// Expand-all / collapse-all for Space groups; empty when unused.
+    pub tree_fold: Rect,
+    pub tree_fold_hovered: bool,
+    /// Next click expands every Space when true; otherwise collapses them.
+    pub tree_fold_expand: bool,
     /// Per-row sidebar glyphs; empty skips icons in the expanded tree.
     pub row_seats: &'a [crate::sidebar_width::Seat],
 }
@@ -2461,13 +2466,21 @@ pub(crate) fn paint_sidebar(buffer: &mut [u32], stride: usize, paint: &SidebarPa
     let line = pack_argb(0xff, tok.status_line);
     let s = |d: f32| d * paint.chrome.scale_milli as f32 / 1000.0;
     let pad = paint.chrome.px(12.0);
+    let fold = paint.tree_fold;
     let title_right = if paint.dock_right {
         column.right()
+    } else if fold.w > 0 {
+        fold.x.min(paint.toggle.x).min(column.right())
     } else {
         paint.toggle.x.min(column.right())
     };
     let title_left = if paint.dock_right {
-        paint.toggle.right().max(column.x)
+        let after_toggle = paint.toggle.right().max(column.x);
+        if fold.w > 0 {
+            fold.right().max(after_toggle)
+        } else {
+            after_toggle
+        }
     } else {
         column.x
     };
@@ -2482,6 +2495,15 @@ pub(crate) fn paint_sidebar(buffer: &mut [u32], stride: usize, paint: &SidebarPa
         tok.text,
         title_left,
         title_right,
+    );
+    paint_sidebar_tree_fold(
+        buffer,
+        stride,
+        paint.chrome,
+        fold,
+        paint.tree_fold_expand,
+        paint.tree_fold_hovered,
+        tok,
     );
     paint_sidebar_toggle(
         buffer,
@@ -2797,6 +2819,38 @@ fn paint_sidebar_grip(
         for x in x0..x0.saturating_add(thickness).min(column.right()) {
             set(buffer, stride, x, y, color);
         }
+    }
+}
+
+/// Double-chevron control: down means expand all, right means collapse all.
+fn paint_sidebar_tree_fold(
+    buffer: &mut [u32],
+    stride: usize,
+    chrome: ChromeGeom,
+    slot: Rect,
+    expand: bool,
+    hovered: bool,
+    tok: &Tokens,
+) {
+    if slot.w == 0 || slot.h == 0 {
+        return;
+    }
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    if hovered {
+        fill_round_rect(buffer, stride, slot, s(4.0), tok.tab_hover, 0xff);
+    }
+    let ink = tok.muted;
+    let w = s(1.4);
+    let size = s(8.0);
+    let cx = slot.x as f32 + slot.w as f32 / 2.0;
+    let cy = slot.center_y();
+    if expand {
+        // Two stacked down-chevrons.
+        chevron_down(buffer, stride, cx, cy - s(3.0), size, w, ink);
+        chevron_down(buffer, stride, cx, cy + s(3.0), size, w, ink);
+    } else {
+        chevron_right(buffer, stride, slot.x as f32 + s(3.0), cy, size, w, ink);
+        chevron_right(buffer, stride, slot.x as f32 + s(7.0), cy, size, w, ink);
     }
 }
 
@@ -3167,6 +3221,8 @@ pub(crate) enum SidebarHit {
     Action(usize),
     Arrange(usize),
     Toggle,
+    /// Expand or collapse every Space group in the tree header.
+    TreeFold,
     Thumb,
 }
 
@@ -3178,6 +3234,30 @@ pub(crate) fn sidebar_toggle_rect(
     dock_right: bool,
 ) -> Rect {
     graphite_core::sidebar_toggle_rect(chrome.scale_milli, column, head, dock_right)
+}
+
+/// Expand-all / collapse-all control, parked beside the column toggle.
+pub(crate) fn sidebar_tree_fold_rect(
+    chrome: ChromeGeom,
+    column: Rect,
+    toggle: Rect,
+    dock_right: bool,
+) -> Rect {
+    if toggle.w == 0 || toggle.h == 0 || column.w == 0 {
+        return Rect::new(0, 0, 0, 0);
+    }
+    let gap = chrome.px(4.0);
+    let size = toggle.w.min(toggle.h).min(column.w);
+    let y = toggle.y;
+    let x = if dock_right {
+        toggle.right().saturating_add(gap)
+    } else {
+        toggle.x.saturating_sub(gap.saturating_add(size))
+    };
+    if x < column.x || x.saturating_add(size) > column.right() {
+        return Rect::new(0, 0, 0, 0);
+    }
+    Rect::new(x, y, size, size.min(toggle.h))
 }
 
 /// Hit-test the painted sidebar: thumb first (it overlaps the list edge),
@@ -3217,6 +3297,7 @@ pub(crate) struct SidebarHitTargets<'a> {
     pub arrange: &'a [Rect; 3],
     pub thumb: Option<Rect>,
     pub toggle: Rect,
+    pub tree_fold: Rect,
 }
 
 pub(crate) fn sidebar_hit(
@@ -3241,6 +3322,9 @@ pub(crate) fn sidebar_hit(
             graphite_core::SidebarHit::Thumb => SidebarHit::Thumb,
             _ => unreachable!(),
         });
+    }
+    if targets.tree_fold.w > 0 && targets.tree_fold.contains(px, py) {
+        return Some(SidebarHit::TreeFold);
     }
     if let Some((row, _)) = targets
         .needs_you
@@ -3803,6 +3887,7 @@ mod sidebar_render_tests {
                 actions: &[Rect::new(0, 0, 0, 0); 3],
                 arrange: &[Rect::new(0, 0, 0, 0); 3],
                 thumb: None,
+                tree_fold: Rect::new(0, 0, 0, 0),
                 toggle: Rect::new(0, 0, 0, 0),
             },
             badge.x + 2,
@@ -3817,6 +3902,7 @@ mod sidebar_render_tests {
         let layout = sidebar_layout(chrome, column(600), 60, 0);
         let header = sidebar_header_layout(chrome, Rect::new(256, 0, 768, 44));
         let toggle = sidebar_toggle_rect(chrome, layout.column, layout.head, false);
+        let fold = sidebar_tree_fold_rect(chrome, layout.column, toggle, false);
         let hit = |x: usize, y: usize| {
             sidebar_hit(
                 &SidebarHitTargets {
@@ -3825,6 +3911,7 @@ mod sidebar_render_tests {
                     actions: &layout.actions,
                     arrange: &header.buttons,
                     thumb: layout.thumb,
+                    tree_fold: fold,
                     toggle,
                 },
                 x,
@@ -3849,6 +3936,11 @@ mod sidebar_render_tests {
         assert_eq!(
             hit(toggle.x + 2, toggle.y + toggle.h / 2),
             Some(SidebarHit::Toggle)
+        );
+        assert!(fold.w > 0, "tree fold sits beside the column toggle");
+        assert_eq!(
+            hit(fold.x + 2, fold.y + fold.h / 2),
+            Some(SidebarHit::TreeFold)
         );
     }
 
@@ -3897,6 +3989,9 @@ mod sidebar_render_tests {
                 dock_right: false,
                 toggle: Rect::new(0, 0, 0, 0),
                 toggle_hovered: false,
+                tree_fold: Rect::new(0, 0, 0, 0),
+                tree_fold_hovered: false,
+                tree_fold_expand: false,
                 row_seats: &[],
             },
         );
@@ -3972,6 +4067,9 @@ mod sidebar_render_tests {
                 dock_right: false,
                 toggle: Rect::new(0, 0, 0, 0),
                 toggle_hovered: false,
+                tree_fold: Rect::new(0, 0, 0, 0),
+                tree_fold_hovered: false,
+                tree_fold_expand: false,
                 row_seats: &[],
             },
         );
@@ -4057,6 +4155,8 @@ mod sidebar_render_tests {
                         }
                     })
                     .collect();
+                let toggle = sidebar_toggle_rect(chrome, column_rect, layout.head, false);
+                let tree_fold = sidebar_tree_fold_rect(chrome, column_rect, toggle, false);
                 paint_sidebar(
                     &mut buffer,
                     w,
@@ -4073,8 +4173,12 @@ mod sidebar_render_tests {
                         alpha: 0xff,
                         grip_hot: false,
                         dock_right: false,
-                        toggle: sidebar_toggle_rect(chrome, column_rect, layout.head, false),
+                        toggle,
                         toggle_hovered: false,
+                        tree_fold,
+                        tree_fold_hovered: false,
+                        // top still: collapse-all glyph; scrolled: expand-all
+                        tree_fold_expand: still == "scrolled",
                         row_seats: &[],
                     },
                 );
@@ -4238,6 +4342,9 @@ mod sidebar_render_tests {
                     dock_right: false,
                     toggle,
                     toggle_hovered: false,
+                    tree_fold: Rect::new(0, 0, 0, 0),
+                    tree_fold_hovered: false,
+                    tree_fold_expand: false,
                     row_seats: &[],
                 },
             );
@@ -5700,6 +5807,7 @@ mod p6_sidebar_overlap_tests {
             actions: &actions,
             arrange: &arrange,
             thumb: Some(Rect::new(250, 44, 6, 146)),
+            tree_fold: Rect::new(0, 0, 0, 0),
             toggle: Rect::new(0, 0, 0, 0),
         };
         assert_eq!(sidebar_hit(&targets, 251, 46), Some(SidebarHit::Thumb));

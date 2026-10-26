@@ -3,7 +3,7 @@
 //! **Server topology only** (PRD §2.8.3): focus and active-tab selection are
 //! per-client view state ([`ClientView`]), not stored on [`Window`]/[`Session`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::geometry::{self, suggested_focus_after_close};
 use crate::ids::{ClientId, PaneId, SessionId, WindowId};
@@ -185,6 +185,9 @@ pub struct Domain {
     pane_owner: HashMap<PaneId, WindowId>,
     /// Session insertion order for stable listing.
     session_order: Vec<SessionId>,
+    /// Space ids a session was moved into since this daemon started.
+    /// `space_autosave` saves a Space with no sessions left only if it is here.
+    spaces_owned: HashSet<String>,
 }
 
 impl Default for Domain {
@@ -362,6 +365,7 @@ impl Domain {
             panes: HashMap::new(),
             pane_owner: HashMap::new(),
             session_order: Vec::new(),
+            spaces_owned: HashSet::new(),
         }
     }
 
@@ -454,7 +458,16 @@ impl Domain {
                 .expect("validated session")
                 .space_id = to.map(str::to_owned);
         }
+        // An empty request is a capability check; nothing moved.
+        if let Some(to) = to.filter(|_| !sessions.is_empty()) {
+            self.spaces_owned.insert(to.to_owned());
+        }
         Ok(())
+    }
+
+    /// Space ids that have owned a session since this daemon started.
+    pub fn spaces_owned(&self) -> &HashSet<String> {
+        &self.spaces_owned
     }
 
     /// Bind `agent_id` on an existing session. Unique across live sessions.
@@ -1216,6 +1229,21 @@ mod tests {
     }
     use super::*;
     use crate::layout::{Axis, Split};
+
+    #[test]
+    fn only_a_transfer_that_moves_a_session_records_the_space_as_owned() {
+        let mut domain = Domain::bootstrap("first").unwrap();
+        let first = domain.sessions().next().unwrap().id;
+        let a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        domain.transfer_space_sessions(&[], None, Some(a)).unwrap();
+        assert!(domain.spaces_owned().is_empty(), "a capability check");
+        domain
+            .transfer_space_sessions(&[first], None, Some(b))
+            .unwrap();
+        assert!(domain.spaces_owned().contains(b));
+        assert!(!domain.spaces_owned().contains(a));
+    }
 
     #[test]
     fn bootstrap_single_leaf() {

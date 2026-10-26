@@ -2062,6 +2062,9 @@ pub(super) fn session_naming_in_private_window() {
     std::env::set_var("PMUX", bin.join("pmux"));
     let socket = host_mux_socket().unwrap();
     std::env::set_var("PMUX_SESSION_AGENTS", socket.with_extension("agents.json"));
+    let mut mux = toml_edit::Table::new();
+    mux.insert("allow_mixed_case_session_names", toml_edit::value(true));
+    config::save_preference(&config::config_path(), "mux", toml_edit::Item::Table(mux)).unwrap();
     let _daemon = ChildGuard(
         Command::new(bin.join("pmuxd"))
             .arg("--socket")

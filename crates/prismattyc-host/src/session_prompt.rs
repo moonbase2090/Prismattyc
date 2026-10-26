@@ -278,7 +278,23 @@ fn apply(host: &mut HostState, target: &Target, name: &str) -> Result<()> {
             }
         }
     } else {
-        prismattyc_mux::session_name::DisplayName::new(name).map_err(anyhow::Error::msg)?;
+        let mux = config::load(&config::config_path())
+            .unwrap_or_default()
+            .mux
+            .unwrap_or_default();
+        let existing = match target {
+            Target::Rename { pane, session } => attach_log::session_names()
+                .get(session)
+                .cloned()
+                .or_else(|| host.mux.attach_name_of(*pane).map(str::to_string)),
+            _ => None,
+        };
+        prismattyc_mux::session_name::DisplayName::with_mixed_case_policy(
+            name,
+            mux.allow_mixed_case_session_names(),
+            existing.as_deref(),
+        )
+        .map_err(anyhow::Error::msg)?;
     }
     match target {
         Target::Pane { axis } => {

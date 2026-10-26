@@ -598,16 +598,12 @@ impl Store {
     }
 }
 
-pub(super) fn name_session(paths: &Paths, args: Vec<String>) -> Result<()> {
+pub(super) fn name_session(paths: &Paths, args: Vec<String>, allow_mixed_case: bool) -> Result<()> {
     let (name, key) = match args.as_slice() {
         [name] => (name.as_str(), None),
         [name, flag, key] if flag == "--session" => (name.as_str(), Some(key.as_str())),
         _ => bail!("usage: pmux session name NAME [--session KEY]"),
     };
-    let display = prismattyc_mux::session_name::DisplayName::new(name)
-        .map_err(anyhow::Error::msg)?
-        .as_str()
-        .to_string();
     let mut client = connect(paths)?;
     let store = Store::lock(&mut client)?;
     let snapshot = take_snapshot(&mut client)?;
@@ -622,6 +618,14 @@ pub(super) fn name_session(paths: &Paths, args: Vec<String>) -> Result<()> {
     }
     .context("session not found; use --session NAME or run inside a pmux pane")?;
     let live = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
+    let display = prismattyc_mux::session_name::DisplayName::with_mixed_case_policy(
+        name,
+        allow_mixed_case,
+        Some(&live.name),
+    )
+    .map_err(anyhow::Error::msg)?
+    .as_str()
+    .to_string();
     let reserved = occupied_names(&mut client)?;
     let agent =
         prismattyc_mux::session_name::unique_agent_id(
@@ -1030,12 +1034,17 @@ fn fresh_record(
     client: &mut Client,
     space: &str,
     requested: Option<&str>,
+    allow_mixed_case: bool,
 ) -> Result<prismattyc_mux::SavedSpaceSession> {
     let name = match requested {
-        Some(name) => prismattyc_mux::session_name::DisplayName::new(name)
-            .map_err(anyhow::Error::msg)?
-            .as_str()
-            .to_string(),
+        Some(name) => prismattyc_mux::session_name::DisplayName::with_mixed_case_policy(
+            name,
+            allow_mixed_case,
+            None,
+        )
+        .map_err(anyhow::Error::msg)?
+        .as_str()
+        .to_string(),
         None => suggest_name(client, space)?,
     };
     let occupied = occupied_names(client)?;
@@ -1157,7 +1166,7 @@ pub(super) fn reopen(paths: &Paths, args: Vec<String>) -> Result<()> {
     )
 }
 
-pub(super) fn create(paths: &Paths, args: Vec<String>) -> Result<()> {
+pub(super) fn create(paths: &Paths, args: Vec<String>, allow_mixed_case: bool) -> Result<()> {
     let mut args = args;
     let requested = if let Some(index) = args.iter().position(|arg| arg == "--session-name") {
         args.remove(index);
@@ -1190,7 +1199,7 @@ pub(super) fn create(paths: &Paths, args: Vec<String>) -> Result<()> {
     if path.exists() {
         bail!("Space {name:?} already exists");
     }
-    let record = fresh_record(&mut client, name, requested.as_deref())?;
+    let record = fresh_record(&mut client, name, requested.as_deref(), allow_mixed_case)?;
     let mut space = from_sessions(&[]);
     identify(&mut space)?;
     prismattyc_mux::space_add_session(&mut space, record.clone(), Some(&record.name))?;
@@ -1213,7 +1222,7 @@ pub(super) fn create(paths: &Paths, args: Vec<String>) -> Result<()> {
     apply_layout_args(paths, parsed)
 }
 
-pub(super) fn add(paths: &Paths, args: Vec<String>) -> Result<()> {
+pub(super) fn add(paths: &Paths, args: Vec<String>, allow_mixed_case: bool) -> Result<()> {
     let mut client = connect(paths)?;
     let store = Store::lock(&mut client)?;
     let mut args = args.into_iter();
@@ -1254,7 +1263,7 @@ pub(super) fn add(paths: &Paths, args: Vec<String>) -> Result<()> {
         }
         from_sessions(&[live]).sessions.remove(0)
     } else {
-        fresh_record(&mut client, &name, requested.as_deref())?
+        fresh_record(&mut client, &name, requested.as_deref(), allow_mixed_case)?
     };
     let exists = take_snapshot(&mut client)?
         .sessions
@@ -1566,7 +1575,7 @@ fn move_pane(
         }
         session.name.clone()
     } else {
-        let mut record = fresh_record(client, &target, None)?;
+        let mut record = fresh_record(client, &target, None, false)?;
         record.agent = None; // TransferSpacePane carries the source binding.
         if !live_pane.title.is_empty() {
             record.windows[0].title = live_pane.title.clone();

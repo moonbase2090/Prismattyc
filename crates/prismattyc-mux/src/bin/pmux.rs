@@ -615,7 +615,7 @@ fn main() -> Result<()> {
         Verb::MailDoorbell => cmd_mail(&paths, parse_mail_args(cli_session, rest)?),
         Verb::Space => {
             reject_session_flag(cli_session.as_deref(), "space")?;
-            match cmd_space(&paths, rest) {
+            match cmd_space(&paths, rest, &file) {
                 Err(err) if err.is::<SpaceUsage>() => {
                     eprint!("{SPACE_USAGE}");
                     std::process::exit(2);
@@ -625,7 +625,7 @@ fn main() -> Result<()> {
         }
         Verb::Session => {
             reject_session_flag(cli_session.as_deref(), "session")?;
-            match cmd_session(&paths, rest) {
+            match cmd_session(&paths, rest, &file) {
                 Err(err) if err.is::<SessionUsage>() => {
                     eprint!("{SESSION_USAGE}");
                     std::process::exit(2);
@@ -2372,6 +2372,12 @@ fn exec_attach_session(paths: &Paths, session: &str, space: Option<&str>) -> Res
 
 fn cmd_new(paths: &Paths, rest: Vec<String>, file: &prismattyc_mux::MuxSection) -> Result<()> {
     let parsed = parse_new_args(rest)?;
+    prismattyc_mux::session_name::DisplayName::with_mixed_case_policy(
+        &parsed.name,
+        file.allow_mixed_case_session_names(),
+        None,
+    )
+    .map_err(anyhow::Error::msg)?;
     let want_attach = resolve_attach_on_new(parsed.attach, file)?;
     let mut client = Client::connect(&paths.socket)?;
     let _ = client.request(|request_id| ControlRequest::RegisterClient {
@@ -5016,12 +5022,14 @@ fn parse_space_verb(rest: Vec<String>) -> Result<SpaceVerb, SpaceUsage> {
     }
 }
 
-fn cmd_space(paths: &Paths, rest: Vec<String>) -> Result<()> {
+fn cmd_space(paths: &Paths, rest: Vec<String>, file: &prismattyc_mux::MuxSection) -> Result<()> {
     let (paths, rest) = paths.with_view_argument(rest)?;
     let paths = &paths;
     match parse_space_verb(rest).map_err(anyhow::Error::from)? {
         SpaceVerb::Team(args) => space_commands::team(paths, args),
-        SpaceVerb::Create(args) => space_commands::create(paths, args),
+        SpaceVerb::Create(args) => {
+            space_commands::create(paths, args, file.allow_mixed_case_session_names())
+        }
         SpaceVerb::Move(args) => space_commands::move_work(paths, args),
         SpaceVerb::Rename(args) => space_commands::rename(paths, args),
         SpaceVerb::Help => {
@@ -5039,7 +5047,9 @@ fn cmd_space(paths: &Paths, rest: Vec<String>) -> Result<()> {
         SpaceVerb::Rm(args) => space_commands::delete_spaces(paths, args, false),
         SpaceVerb::Clear(args) => space_commands::delete_spaces(paths, args, true),
         SpaceVerb::Reset(args) => space_commands::reset::run(paths, args),
-        SpaceVerb::Add(args) => space_commands::add(paths, args),
+        SpaceVerb::Add(args) => {
+            space_commands::add(paths, args, file.allow_mixed_case_session_names())
+        }
         SpaceVerb::Remove(args) => space_commands::remove(paths, args),
     }
 }
@@ -5287,14 +5297,16 @@ fn parse_clear_keep(args: Vec<String>, usage: &'static str, allow_all: bool) -> 
     Ok(ClearOpts { all, keep })
 }
 
-fn cmd_session(paths: &Paths, rest: Vec<String>) -> Result<()> {
+fn cmd_session(paths: &Paths, rest: Vec<String>, file: &prismattyc_mux::MuxSection) -> Result<()> {
     match parse_session_verb(rest).map_err(anyhow::Error::from)? {
         SessionVerb::Help => {
             print!("{SESSION_USAGE}");
             Ok(())
         }
         SessionVerb::Reopen(args) => space_commands::reopen(paths, args),
-        SessionVerb::Name(args) => space_commands::name_session(paths, args),
+        SessionVerb::Name(args) => {
+            space_commands::name_session(paths, args, file.allow_mixed_case_session_names())
+        }
         SessionVerb::Suggest(args) => {
             let space = match args.as_slice() {
                 [] => "session",

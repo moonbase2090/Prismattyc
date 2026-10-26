@@ -404,6 +404,22 @@ pub(crate) fn pane_title_from_osc(text: &str) -> Option<String> {
     Some(text.to_string())
 }
 
+/// The pane a same-tab pane drag reorders with when it ends on another
+/// pane's handle in that tab. Drops onto other tabs, the empty end, or the
+/// dragged pane's own handle are not swaps.
+pub(crate) fn pane_drop_swap_target(
+    from_tab: usize,
+    pane: PaneId,
+    hit: Option<StripHit>,
+) -> Option<PaneId> {
+    match hit {
+        Some(StripHit::Pane {
+            tab, pane: target, ..
+        }) if tab == from_tab && target != pane => Some(target),
+        _ => None,
+    }
+}
+
 /// Hit in the tab strip (PT-69).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StripHit {
@@ -4871,6 +4887,20 @@ impl MuxRuntime {
         self.replace_layout(next)
     }
 
+    /// Exchange two panes of the active window; focus stays where it was.
+    /// Used by a same-tab pane drag that ends on another pane's handle.
+    pub(crate) fn swap_panes(&mut self, a: PaneId, b: PaneId) -> Result<bool> {
+        self.unzoom()?;
+        let window = self.active_window();
+        let Some(layout) = self.domain.window(window).map(|win| win.layout.clone()) else {
+            return Ok(false);
+        };
+        let Some(next) = layout.swap_leaves(a, b) else {
+            return Ok(false);
+        };
+        self.replace_layout(next)
+    }
+
     /// Rotate every pane of the active window one slot (+1 forward, -1
     /// back); focus stays with the same pane (PT-125).
     pub(crate) fn rotate_panes(&mut self, delta: i32) -> Result<bool> {
@@ -9272,6 +9302,53 @@ mod tests {
         runtime.toggle_zoom().unwrap();
         assert!(runtime.swap_focused(1).unwrap());
         assert!(runtime.zoomed_pane().is_none());
+    }
+
+    #[test]
+    fn swap_panes_exchanges_two_panes_in_the_same_window() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let a = runtime.focused_id();
+        let b = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let c = runtime
+            .split_focused("/bin/sh", &[], Axis::Vertical, 0.5)
+            .unwrap();
+        let order = |r: &MuxRuntime| r.domain.window(r.active_window()).unwrap().layout.panes();
+        assert_eq!(order(&runtime), vec![a, b, c]);
+        // A pane dropped on another pane's handle swaps with it; focus stays.
+        runtime.focus(b);
+        assert!(runtime.swap_panes(a, c).unwrap());
+        assert_eq!(order(&runtime), vec![c, b, a]);
+        assert_eq!(runtime.focused_id(), b);
+        assert!(!runtime.swap_panes(a, a).unwrap(), "same pane is a no-op");
+    }
+
+    #[test]
+    fn pane_drop_swaps_only_with_another_pane_in_the_same_tab() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let pane = runtime.focused_id();
+        let other = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let handle = |tab, pane| {
+            Some(StripHit::Pane {
+                tab,
+                pane,
+                handle: 0,
+            })
+        };
+        assert_eq!(
+            pane_drop_swap_target(0, pane, handle(0, other)),
+            Some(other)
+        );
+        assert_eq!(pane_drop_swap_target(0, pane, handle(0, pane)), None);
+        assert_eq!(pane_drop_swap_target(0, pane, handle(1, other)), None);
+        assert_eq!(
+            pane_drop_swap_target(0, pane, Some(StripHit::EmptyEnd)),
+            None
+        );
+        assert_eq!(pane_drop_swap_target(0, pane, None), None);
     }
 
     #[test]

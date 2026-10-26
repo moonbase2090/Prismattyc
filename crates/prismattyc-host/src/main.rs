@@ -14878,24 +14878,34 @@ fn finish_strip_drag(host: &mut HostState) -> bool {
     }
     let stride = host.window.inner_size().width as usize;
     let hit = host.mux.tab_strip_hit(x as usize, y as usize, stride, true);
-    let changed = match (drag.kind, hit) {
-        (StripDragKind::Tab(from), Some(mux::StripHit::Tab { index: to, .. })) => {
-            host.mux.reorder_tab(from, to).unwrap_or(false)
+    let swap = match drag.kind {
+        StripDragKind::Pane { tab, pane } => {
+            mux::pane_drop_swap_target(tab, pane, hit).map(|target| (pane, target))
         }
-        (StripDragKind::Tab(from), Some(mux::StripHit::EmptyEnd | mux::StripHit::NewTab)) => {
-            let last = host.mux.tab_count().saturating_sub(1);
-            host.mux.reorder_tab(from, last).unwrap_or(false)
+        StripDragKind::Tab(_) => None,
+    };
+    let changed = if let Some((from, to)) = swap {
+        host.mux.swap_panes(from, to).unwrap_or(false)
+    } else {
+        match (drag.kind, hit) {
+            (StripDragKind::Tab(from), Some(mux::StripHit::Tab { index: to, .. })) => {
+                host.mux.reorder_tab(from, to).unwrap_or(false)
+            }
+            (StripDragKind::Tab(from), Some(mux::StripHit::EmptyEnd | mux::StripHit::NewTab)) => {
+                let last = host.mux.tab_count().saturating_sub(1);
+                host.mux.reorder_tab(from, last).unwrap_or(false)
+            }
+            (StripDragKind::Pane { pane, .. }, Some(mux::StripHit::Tab { index, .. })) => host
+                .mux
+                .window_at_tab(index)
+                .map(|dest| host.mux.move_pane_to_window(pane, dest).unwrap_or(false))
+                .unwrap_or(false),
+            (
+                StripDragKind::Pane { pane, .. },
+                Some(mux::StripHit::EmptyEnd | mux::StripHit::NewTab),
+            ) => host.mux.move_pane_to_new_tab(pane).unwrap_or(false),
+            _ => false,
         }
-        (StripDragKind::Pane { pane, .. }, Some(mux::StripHit::Tab { index, .. })) => host
-            .mux
-            .window_at_tab(index)
-            .map(|dest| host.mux.move_pane_to_window(pane, dest).unwrap_or(false))
-            .unwrap_or(false),
-        (
-            StripDragKind::Pane { pane, .. },
-            Some(mux::StripHit::EmptyEnd | mux::StripHit::NewTab),
-        ) => host.mux.move_pane_to_new_tab(pane).unwrap_or(false),
-        _ => false,
     };
     if changed {
         mark_layout_dirty(host);

@@ -1968,7 +1968,13 @@ fn verify_decision_handlers(host: &mut HostState) {
         "clearing a tab name must remove the live fixed name"
     );
     // Read back the live attach record for this window's tab. The projection
-    // is the one a save would write; disk I/O is not exercised here.
+    // is the one a save would write; disk I/O is not exercised here. The
+    // harness host has no attached session, so seed the focused pane first.
+    host.mux.mark_attach_session(
+        host.mux.focused_id(),
+        "proof-session".to_string(),
+        "Proof".to_string(),
+    );
     let tab_index = host
         .mux
         .tab_infos()

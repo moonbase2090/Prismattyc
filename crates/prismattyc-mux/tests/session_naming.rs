@@ -342,6 +342,62 @@ fn session_names_and_lookup_remain_exact_case_sensitive_strings() {
 }
 
 #[test]
+fn new_skips_mailbox_addresses_reserved_by_saved_spaces() {
+    let f = Fixture::new();
+    f.ok(&[
+        "space",
+        "create",
+        "Reserve",
+        "--session-name",
+        "Reserved Place",
+        "--no-attach",
+    ]);
+    f.ok(&[
+        "space",
+        "create",
+        "Team",
+        "--session-name",
+        "Graphite Worker",
+        "--no-attach",
+    ]);
+    let mut saved = f.saved_space("Reserve");
+    saved["sessions"][0]["agent"] = serde_json::json!("graphite-main");
+    std::fs::write(
+        f.spaces_dir().join("Reserve.json"),
+        serde_json::to_vec_pretty(&saved).unwrap(),
+    )
+    .unwrap();
+
+    f.ok(&[
+        "session",
+        "name",
+        "Graphite Main",
+        "--session",
+        "Graphite Worker",
+    ]);
+    let renamed = f.snapshot();
+    let session = renamed
+        .sessions
+        .iter()
+        .find(|session| session.name == "Graphite Main")
+        .unwrap();
+    assert_eq!(session.agent_id.as_deref(), Some("graphite-main-2"));
+    assert_eq!(
+        f.saved_space("Team")["sessions"][0]["agent"],
+        "graphite-main-2"
+    );
+
+    f.ok(&["new", "--no-attach", "Graphite-Main"]);
+    let snapshot = f.snapshot();
+    let session = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.name == "Graphite-Main")
+        .unwrap();
+    assert_eq!(session.agent_id.as_deref(), Some("graphite-main-3"));
+}
+
+#[test]
 fn bind_existing_unassigned_session_and_reject_name_conflicts_without_changes() {
     let f = Fixture::new();
     f.ok(&[
@@ -545,6 +601,7 @@ fn interrupted_rename_reconciles_saved_references_before_the_next_space_operatio
         request_id: 1,
         session_id: old.id,
         name: "renamed".into(),
+        agent_id: None,
     };
     writeln!(stream, "{}", serde_json::to_string(&req).unwrap()).unwrap();
     let mut line = String::new();

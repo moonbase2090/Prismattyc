@@ -533,6 +533,8 @@ struct SessionNaming {
     id: u64,
     old: String,
     new: String,
+    #[serde(default)]
+    agent: Option<String>,
     panes: Vec<(u64, Option<u32>)>,
     files: Vec<(String, SavedSpace)>,
 }
@@ -565,6 +567,7 @@ impl Store {
             request_id,
             session_id: tx.id,
             name: tx.new.clone(),
+            agent_id: tx.agent.clone(),
         }) {
             if let Ok(after) = take_snapshot(client) {
                 if after
@@ -675,6 +678,7 @@ pub(super) fn name_session(paths: &Paths, args: Vec<String>) -> Result<()> {
         id,
         old: live.name.clone(),
         new: name.clone(),
+        agent: Some(agent.clone()),
         panes: live
             .windows
             .iter()
@@ -996,7 +1000,7 @@ pub(super) fn save_owned(
     Ok(path)
 }
 
-fn occupied_names(client: &mut Client) -> Result<Vec<String>> {
+pub(super) fn occupied_names(client: &mut Client) -> Result<Vec<String>> {
     let response = client.request(|request_id| ControlRequest::SessionNames {
         version: PROTOCOL_VERSION,
         request_id,

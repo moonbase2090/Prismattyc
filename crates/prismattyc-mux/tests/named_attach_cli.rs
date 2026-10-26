@@ -753,6 +753,7 @@ fn control_plane_answers_a_private_daemon() {
             request_id,
             session_id,
             name: "renamed".into(),
+            agent_id: None,
         }),
     ));
     assert!(

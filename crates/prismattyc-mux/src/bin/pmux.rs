@@ -2378,6 +2378,18 @@ fn cmd_new(paths: &Paths, rest: Vec<String>, file: &prismattyc_mux::MuxSection) 
         version: PROTOCOL_VERSION,
         request_id,
     })?;
+    let store = space_commands::Store::lock(&mut client)?;
+    let (agent_id, derive_agent_id) = if parsed.derive_agent_id {
+        let occupied = space_commands::occupied_names(&mut client)?;
+        let agent = prismattyc_mux::session_name::unique_agent_id(
+            &prismattyc_mux::session_name::agent_id_from_label(&parsed.name),
+            |candidate| occupied.iter().any(|name| name == candidate),
+        )
+        .map_err(anyhow::Error::msg)?;
+        (Some(agent), false)
+    } else {
+        (parsed.agent_id, false)
+    };
     let spawn = SpawnSpec {
         program: parsed.program[0].clone(),
         argv: parsed.program[1..].to_vec(),
@@ -2391,10 +2403,11 @@ fn cmd_new(paths: &Paths, rest: Vec<String>, file: &prismattyc_mux::MuxSection) 
         spawn,
         cols: None,
         rows: None,
-        agent_id: parsed.agent_id,
-        derive_agent_id: parsed.derive_agent_id,
+        agent_id,
+        derive_agent_id,
         headless: parsed.headless,
     })?;
+    drop(store);
     let ControlResponseData::Session {
         session_id,
         name,

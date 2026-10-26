@@ -123,6 +123,7 @@ fn identity_change_checkpoint_survives_unclean_restart() {
         request_id: 0,
         session_id: old_session,
         name: "old".into(),
+        agent_id: None,
     }));
     wait_persisted_session(&path, "old");
 

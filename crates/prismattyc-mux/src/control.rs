@@ -872,6 +872,9 @@ pub enum ControlRequest {
         request_id: u64,
         session_id: u64,
         name: String,
+        /// Optional mailbox chosen by the CLI after checking saved Spaces.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
     },
     /// Client-local session selection (PRD §2.8.3). Does not destroy others.
     SwitchSession {
@@ -4889,8 +4892,11 @@ impl ControlPlane {
                 Ok(ControlResponseData::SessionNames { names })
             }
             ControlRequest::NameSession {
-                session_id, name, ..
-            } => self.name_session(session_id, name),
+                session_id,
+                name,
+                agent_id,
+                ..
+            } => self.name_session(session_id, name, agent_id),
             ControlRequest::CreateSession {
                 name,
                 spawn,
@@ -5270,6 +5276,7 @@ impl ControlPlane {
         &mut self,
         raw: u64,
         name: String,
+        requested_agent: Option<String>,
     ) -> Result<ControlResponseData, ControlError> {
         let display = crate::session_name::DisplayName::new(&name)
             .map_err(|error| ControlError::new(ControlErrorCode::InvalidRequest, error))?
@@ -5285,20 +5292,28 @@ impl ControlPlane {
             .agent_id
             .clone()
             .unwrap_or_else(|| crate::session_name::agent_id_from_label(&old.name));
-        let agent = crate::session_name::unique_agent_id(
-            &crate::session_name::agent_id_from_label(&display),
-            |candidate| {
-                self.domain.sessions().any(|session| {
-                    session.id != id && session.agent_id.as_deref() == Some(candidate)
-                }) || self.mail_aliases.contains_key(candidate)
-                    || self
-                        .mail_store
-                        .resolve(candidate)
-                        .map(|resolved| resolved != candidate && resolved != old_agent)
-                        .unwrap_or(true)
-            },
-        )
-        .map_err(|error| ControlError::new(ControlErrorCode::InvalidRequest, error))?;
+        let agent = if let Some(agent) = requested_agent {
+            crate::mailbox::AgentId::new(agent)
+                .map_err(|error| {
+                    ControlError::new(ControlErrorCode::InvalidRequest, error.to_string())
+                })?
+                .to_string()
+        } else {
+            crate::session_name::unique_agent_id(
+                &crate::session_name::agent_id_from_label(&display),
+                |candidate| {
+                    self.domain.sessions().any(|session| {
+                        session.id != id && session.agent_id.as_deref() == Some(candidate)
+                    }) || self.mail_aliases.contains_key(candidate)
+                        || self
+                            .mail_store
+                            .resolve(candidate)
+                            .map(|resolved| resolved != candidate && resolved != old_agent)
+                            .unwrap_or(true)
+                },
+            )
+            .map_err(|error| ControlError::new(ControlErrorCode::InvalidRequest, error))?
+        };
         let agent = crate::mailbox::AgentId::new(agent)
             .map_err(|error| {
                 ControlError::new(ControlErrorCode::InvalidRequest, error.to_string())
@@ -5309,6 +5324,9 @@ impl ControlPlane {
             .resolve(&agent)
             .map_err(Self::mail_store_error)?;
         if (resolved != agent && resolved != old_agent)
+            || self.domain.sessions().any(|session| {
+                session.id != id && session.agent_id.as_deref() == Some(agent.as_str())
+            })
             || self
                 .mail_aliases
                 .get(&agent)
@@ -12694,6 +12712,7 @@ function Read-Exact([int]$Count) {
             request_id: 3,
             session_id,
             name: "renamed".into(),
+            agent_id: None,
         });
         assert!(
             matches!(renamed.body, ControlResponseBody::Ok { .. }),

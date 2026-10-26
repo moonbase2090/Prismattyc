@@ -11295,7 +11295,11 @@ fn activate_context_menu(
                 match index {
                     0 => begin_tab_rename(host, Some(tab_index)),
                     1 => {
-                        let _ = host.mux.set_fixed_tab_name(window, None);
+                        if host.mux.set_fixed_tab_name(window, None).is_ok() {
+                            mark_layout_dirty(host);
+                            host.window
+                                .set_title(&window_title(&host.mux, show_tab_strip(host)));
+                        }
                         host.dirty = true;
                         host.window.request_redraw();
                     }

@@ -31,6 +31,14 @@ impl Drop for Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::configured(false)
+    }
+
+    fn new_with_mixed_case_names() -> Self {
+        Self::configured(true)
+    }
+
+    fn configured(allow_mixed_case_names: bool) -> Self {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
             "pmux-naming-{}-{}",
@@ -43,6 +51,15 @@ impl Fixture {
             dir,
             server: None,
         };
+        if allow_mixed_case_names {
+            let config_dir = f.dir.join("config/prismattyc");
+            std::fs::create_dir_all(&config_dir).unwrap();
+            std::fs::write(
+                config_dir.join("config.toml"),
+                "[mux]\nallow_mixed_case_session_names = true\n",
+            )
+            .unwrap();
+        }
         f.start();
         f
     }
@@ -268,7 +285,7 @@ fn readable_space_sessions_rename_keeps_process_mail_and_old_addresses() {
 
 #[test]
 fn mixed_case_display_names_keep_case_and_use_lowercase_unique_mailboxes() {
-    let f = Fixture::new();
+    let f = Fixture::new_with_mixed_case_names();
     f.ok(&["new", "--no-attach", "Graphite-Main"]);
     let created = f.snapshot();
     let session = created
@@ -315,7 +332,7 @@ fn mixed_case_display_names_keep_case_and_use_lowercase_unique_mailboxes() {
 
 #[test]
 fn session_names_and_lookup_remain_exact_case_sensitive_strings() {
-    let f = Fixture::new();
+    let f = Fixture::new_with_mixed_case_names();
     f.ok(&["new", "--no-attach", "Graphite-Main"]);
     f.ok(&["new", "--no-attach", "graphite-main"]);
     let snapshot = f.snapshot();
@@ -343,7 +360,7 @@ fn session_names_and_lookup_remain_exact_case_sensitive_strings() {
 
 #[test]
 fn new_skips_mailbox_addresses_reserved_by_saved_spaces() {
-    let f = Fixture::new();
+    let f = Fixture::new_with_mixed_case_names();
     f.ok(&[
         "space",
         "create",
@@ -399,7 +416,7 @@ fn new_skips_mailbox_addresses_reserved_by_saved_spaces() {
 
 #[test]
 fn bind_existing_unassigned_session_and_reject_name_conflicts_without_changes() {
-    let f = Fixture::new();
+    let f = Fixture::new_with_mixed_case_names();
     f.ok(&[
         "new",
         "--no-attach",
@@ -514,7 +531,7 @@ fn mailbox_failure_leaves_the_session_and_saved_space_unchanged() {
 
 #[test]
 fn pane_label_keeps_its_case_and_mail_uses_the_derived_address() {
-    let f = Fixture::new();
+    let f = Fixture::new_with_mixed_case_names();
     f.ok(&["space", "create", "work", "--no-attach"]);
     f.ok(&["space", "add", "work"]);
     let before = f.snapshot();

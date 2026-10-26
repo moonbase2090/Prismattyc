@@ -186,7 +186,84 @@ fn ack_is_fresh(ack: &Path, since: SystemTime) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
+    use std::process::{Child, Command, Stdio};
+    use std::thread;
+
+    struct PidKeeper {
+        child: Child,
+        ready_dir: PathBuf,
+    }
+
+    impl PidKeeper {
+        fn spawn() -> Self {
+            let executable = std::env::current_exe().expect("current test executable");
+            let ready_dir = temp_dir("keeper");
+            let ready_path = ready_dir.join("ready");
+            let mut child = Command::new(executable)
+                .args([
+                    "--exact",
+                    "host_register::tests::pid_keeper",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("PMUX_TEST_PID_KEEPER", "1")
+                .env("PMUX_TEST_PID_KEEPER_READY", &ready_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn pid keeper test process");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if let Some(status) = child.try_wait().expect("check pid keeper process") {
+                    let _ = fs::remove_dir_all(&ready_dir);
+                    panic!("pid keeper exited before becoming live: {status}");
+                }
+                if ready_path.exists() && crate::procinfo::pid_alive(child.id()) {
+                    return Self { child, ready_dir };
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_dir_all(&ready_dir);
+            panic!("pid keeper process did not become live");
+        }
+
+        fn id(&self) -> u32 {
+            self.child.id()
+        }
+    }
+
+    impl Drop for PidKeeper {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = fs::remove_dir_all(&self.ready_dir);
+        }
+    }
+
+    /// Child process used by the host-registration tests for a live PID.
+    #[test]
+    #[ignore = "spawned by PidKeeper"]
+    fn pid_keeper() {
+        if std::env::var_os("PMUX_TEST_PID_KEEPER").is_none() {
+            return;
+        }
+        let ready = std::env::var_os("PMUX_TEST_PID_KEEPER_READY")
+            .expect("PidKeeper supplies a readiness path");
+        fs::write(ready, b"ready").expect("publish pid keeper readiness");
+        loop {
+            thread::park_timeout(Duration::from_secs(60));
+        }
+    }
+
+    fn dead_pid() -> u32 {
+        let keeper = PidKeeper::spawn();
+        let pid = keeper.id();
+        drop(keeper);
+        pid
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -227,9 +304,7 @@ mod tests {
         fs::write(&path, "not-a-pid\n").unwrap();
         assert_eq!(live_host_pid(&path), None, "unparseable");
 
-        let child = Command::new("true").spawn().unwrap();
-        let dead = child.id();
-        let _ = child.wait_with_output();
+        let dead = dead_pid();
         fs::write(&path, format!("{dead}\n")).unwrap();
         assert_eq!(live_host_pid(&path), None, "dead pid");
 
@@ -261,9 +336,7 @@ mod tests {
     fn stale_pid_file_is_replaced() {
         let dir = temp_dir("stale");
         let path = dir.join("pmux.host.pid");
-        let child = Command::new("true").spawn().unwrap();
-        let dead = child.id();
-        let _ = child.wait_with_output();
+        let dead = dead_pid();
         fs::write(&path, format!("{dead}\n")).unwrap();
         let live = std::process::id();
         assert!(register_host_pid(&path, live).unwrap());
@@ -273,13 +346,13 @@ mod tests {
 
     #[test]
     fn concurrent_register_leaves_one_live_owner() {
+        let left = PidKeeper::spawn();
+        let right = PidKeeper::spawn();
+        let left_pid = left.id();
+        let right_pid = right.id();
         for round in 0..8 {
             let dir = temp_dir(&format!("race{round}"));
             let path = dir.join("pmux.host.pid");
-            let mut left = Command::new("sleep").arg("8").spawn().unwrap();
-            let mut right = Command::new("sleep").arg("8").spawn().unwrap();
-            let left_pid = left.id();
-            let right_pid = right.id();
             let path_a = path.clone();
             let path_b = path.clone();
             let (ok_a, ok_b) = std::thread::scope(|scope| {
@@ -296,27 +369,21 @@ mod tests {
             assert!(winner == left_pid || winner == right_pid);
             assert_eq!(ok_a, winner == left_pid);
             assert_eq!(ok_b, winner == right_pid);
-            let _ = left.kill();
-            let _ = right.kill();
-            let _ = left.wait();
-            let _ = right.wait();
             let _ = fs::remove_dir_all(&dir);
         }
     }
 
     #[test]
     fn concurrent_stale_replace_leaves_one_live_owner() {
+        let left = PidKeeper::spawn();
+        let right = PidKeeper::spawn();
+        let left_pid = left.id();
+        let right_pid = right.id();
         for round in 0..8 {
             let dir = temp_dir(&format!("stale-race{round}"));
             let path = dir.join("pmux.host.pid");
-            let dead = Command::new("true").spawn().unwrap();
-            let dead_pid = dead.id();
-            let _ = dead.wait_with_output();
+            let dead_pid = dead_pid();
             fs::write(&path, format!("{dead_pid}\n")).unwrap();
-            let mut left = Command::new("sleep").arg("8").spawn().unwrap();
-            let mut right = Command::new("sleep").arg("8").spawn().unwrap();
-            let left_pid = left.id();
-            let right_pid = right.id();
             let path_a = path.clone();
             let path_b = path.clone();
             let (ok_a, ok_b) = std::thread::scope(|scope| {
@@ -331,10 +398,6 @@ mod tests {
             );
             let winner = live_host_pid(&path).expect("winner still live");
             assert!(winner == left_pid || winner == right_pid);
-            let _ = left.kill();
-            let _ = right.kill();
-            let _ = left.wait();
-            let _ = right.wait();
             let _ = fs::remove_dir_all(&dir);
         }
     }

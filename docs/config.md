@@ -282,10 +282,10 @@ attach_on_new = true
 space_open_runs_commands = "agents"
 # Who sets pane size when a TTY attach shares the host window. latest|host.
 remote_size = "latest"
-# Permit user-entered session labels with mixed case or spaces. Off by default.
-allow_mixed_case_session_names = false
 # Pane shell override. Unset on Windows preserves COMSPEC or cmd.exe. Set pwsh.exe or powershell.exe to opt in to PowerShell. Unset on Unix uses SHELL or /bin/sh. program name or path.
 # shell = "pwsh.exe"
+# Allow mixed-case and spaced session labels. true|false; default false.
+allow_mixed_case_session_names = false
 
 [keys]
 # Host actions. An entry replaces that action's default chords.

@@ -632,6 +632,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                allow_mixed_case_session_names: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(Some("other".into()), None, &file).unwrap();
@@ -663,6 +664,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                allow_mixed_case_session_names: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(
@@ -685,6 +687,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                allow_mixed_case_session_names: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
@@ -703,6 +706,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                allow_mixed_case_session_names: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
@@ -720,6 +724,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                allow_mixed_case_session_names: None,
                 shell: None,
             };
             assert!(resolve_mux_target(None, None, &file).is_err());

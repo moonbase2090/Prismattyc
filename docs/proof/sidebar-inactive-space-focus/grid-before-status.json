@@ -1,0 +1,344 @@
+{
+  "context_menu": null,
+  "current_panes": [
+    {
+      "alt_active": false,
+      "attach_policy": {
+        "batches": 1,
+        "coalesced_bytes": 0,
+        "coalesced_frames": 0,
+        "dropped_bytes": 0,
+        "dropped_frames": 0,
+        "frames": 1,
+        "notice": "attach policy active: 1 batches / 1 frames; coalesced 0 frames / 0 bytes",
+        "reader_blocked_ms": 0,
+        "reader_queue_budget_bytes": 8388608,
+        "reader_queue_bytes": 64,
+        "reader_queue_high_water_bytes": 8595,
+        "superseded_bytes": 0,
+        "superseded_frames": 0
+      },
+      "experimental_rich": false,
+      "local_child_pid": null,
+      "pane_id": "PaneId(1)",
+      "remote_pane_id": 2,
+      "stored_images": 0,
+      "view_scroll": 0,
+      "workspace_layout": false
+    },
+    {
+      "alt_active": false,
+      "attach_policy": {
+        "batches": 4,
+        "coalesced_bytes": 0,
+        "coalesced_frames": 0,
+        "dropped_bytes": 0,
+        "dropped_frames": 0,
+        "frames": 5,
+        "notice": "attach policy active: 4 batches / 5 frames; coalesced 0 frames / 0 bytes",
+        "reader_blocked_ms": 0,
+        "reader_queue_budget_bytes": 8388608,
+        "reader_queue_bytes": 64,
+        "reader_queue_high_water_bytes": 17401,
+        "superseded_bytes": 0,
+        "superseded_frames": 0
+      },
+      "experimental_rich": false,
+      "local_child_pid": null,
+      "pane_id": "PaneId(2)",
+      "remote_pane_id": 5,
+      "stored_images": 0,
+      "view_scroll": 0,
+      "workspace_layout": false
+    },
+    {
+      "alt_active": false,
+      "attach_policy": {
+        "batches": 2,
+        "coalesced_bytes": 0,
+        "coalesced_frames": 0,
+        "dropped_bytes": 0,
+        "dropped_frames": 0,
+        "frames": 3,
+        "notice": "attach policy active: 2 batches / 3 frames; coalesced 0 frames / 0 bytes",
+        "reader_blocked_ms": 0,
+        "reader_queue_budget_bytes": 8388608,
+        "reader_queue_bytes": 64,
+        "reader_queue_high_water_bytes": 16752,
+        "superseded_bytes": 0,
+        "superseded_frames": 0
+      },
+      "experimental_rich": false,
+      "local_child_pid": null,
+      "pane_id": "PaneId(3)",
+      "remote_pane_id": 6,
+      "stored_images": 0,
+      "view_scroll": 0,
+      "workspace_layout": false
+    },
+    {
+      "alt_active": false,
+      "attach_policy": {
+        "batches": 2,
+        "coalesced_bytes": 0,
+        "coalesced_frames": 0,
+        "dropped_bytes": 0,
+        "dropped_frames": 0,
+        "frames": 3,
+        "notice": "attach policy active: 2 batches / 3 frames; coalesced 0 frames / 0 bytes",
+        "reader_blocked_ms": 0,
+        "reader_queue_budget_bytes": 8388608,
+        "reader_queue_bytes": 64,
+        "reader_queue_high_water_bytes": 17401,
+        "superseded_bytes": 0,
+        "superseded_frames": 0
+      },
+      "experimental_rich": false,
+      "local_child_pid": null,
+      "pane_id": "PaneId(4)",
+      "remote_pane_id": 7,
+      "stored_images": 0,
+      "view_scroll": 0,
+      "workspace_layout": false
+    }
+  ],
+  "focused": true,
+  "focused_pane": 4,
+  "focused_session": "7",
+  "last_raster": {
+    "cells_painted": 1500,
+    "full_repaint_reason": "fallback",
+    "guard_mask": 1342180352,
+    "guards": [
+      "chrome-geometry",
+      "previous-overlay",
+      "bell-toasts",
+      "hover-target"
+    ],
+    "present": {
+      "backend": "iosurface",
+      "busy_surface_stalls": 0,
+      "changed_tiles": null,
+      "commit_us": 91,
+      "dirty_tiles": 0,
+      "write_bytes": 9668272,
+      "write_us": 11692
+    },
+    "present_succeeded": true,
+    "raster_mode": "full",
+    "rows_scrolled_as_blit": 0,
+    "timing": {
+      "damage_us": 27,
+      "parse_us": 26,
+      "present_us": 11802,
+      "raster_us": 71384
+    },
+    "unix_ms": 1792888420166
+  },
+  "last_space_open": null,
+  "local_terminal_panes": [],
+  "occluded": false,
+  "pane_count": 4,
+  "pump": {
+    "max_1s_us": 12697,
+    "phases": {
+      "adopt_nested_attaches": {
+        "last_us": 0,
+        "max_1s_us": 14
+      },
+      "advance_space_opens": {
+        "last_us": 1,
+        "max_1s_us": 3
+      },
+      "apply_pending_session_focus": {
+        "last_us": 0,
+        "max_1s_us": 0
+      },
+      "drain_pty": {
+        "last_us": 37,
+        "max_1s_us": 50
+      },
+      "infer_current_space": {
+        "last_us": 0,
+        "max_1s_us": 0
+      },
+      "local_views::persist_and_restore": {
+        "last_us": 0,
+        "max_1s_us": 40
+      },
+      "persist_attach_layout_from_live": {
+        "last_us": 374,
+        "max_1s_us": 0
+      },
+      "poll_config_reload": {
+        "last_us": 0,
+        "max_1s_us": 2
+      },
+      "poll_host_attach_tabs": {
+        "last_us": 5,
+        "max_1s_us": 8
+      },
+      "publish_render_status": {
+        "last_us": 0,
+        "max_1s_us": 0
+      },
+      "refresh_space_views": {
+        "last_us": 12602,
+        "max_1s_us": 12602
+      },
+      "remote_rail.poll": {
+        "last_us": 1,
+        "max_1s_us": 3
+      },
+      "restart::poll": {
+        "last_us": 0,
+        "max_1s_us": 4771
+      },
+      "retry_register_host_pid": {
+        "last_us": 1,
+        "max_1s_us": 2
+      },
+      "space_rail.poll": {
+        "last_us": 32,
+        "max_1s_us": 35
+      },
+      "sync_remote_rail": {
+        "last_us": 1,
+        "max_1s_us": 3
+      },
+      "window_bookkeeping": {
+        "last_us": 5,
+        "max_1s_us": 14
+      }
+    },
+    "slowest_phase": "refresh_space_views",
+    "slowest_us": 12602,
+    "socket_round_trips": {
+      "count_1s": 2,
+      "last_pump_count": 1,
+      "last_pump_us": 5372,
+      "time_1s_us": 12145
+    },
+    "subprocess_waits": {
+      "count_1s": 0,
+      "last_pump_count": 0,
+      "last_pump_us": 0,
+      "time_1s_us": 0
+    },
+    "total_us": 12697
+  },
+  "render_sample": {
+    "frames": 2,
+    "interval_us": 1050576,
+    "seq": 5
+  },
+  "selected_tab": 0,
+  "session_prompt_open": false,
+  "sidebar_space_rows": [
+    {
+      "height": 48,
+      "name": "default",
+      "width": 512,
+      "x": 0,
+      "y": 88
+    },
+    {
+      "height": 48,
+      "name": "lab",
+      "width": 512,
+      "x": 0,
+      "y": 184
+    },
+    {
+      "height": 48,
+      "name": "mail",
+      "width": 512,
+      "x": 0,
+      "y": 472
+    }
+  ],
+  "space": "lab",
+  "space_attention_counts": {},
+  "space_chips": [],
+  "space_details": null,
+  "space_open_pending": false,
+  "space_order": [
+    "default",
+    "lab",
+    "mail"
+  ],
+  "space_picker_open": false,
+  "space_rail_position": "left",
+  "space_rail_px": 0,
+  "space_rail_width_cols": 18,
+  "space_reorder_drag_active": false,
+  "space_save_status": "Saving\u2026",
+  "space_session_names": {
+    "default": [
+      "default"
+    ],
+    "lab": [
+      "lab-1",
+      "lab-2",
+      "lab-3",
+      "lab-4"
+    ],
+    "mail": [
+      "mail-1",
+      "target"
+    ]
+  },
+  "space_undo_available": false,
+  "tab_count": 1,
+  "tab_git_labels": [
+    null
+  ],
+  "tab_layouts": [
+    [
+      "lab-1",
+      "Split(Split { axis: Vertical, ratio: 0.5, first: Split(Split { axis: Horizontal, ratio: 0.5, first: Leaf(PaneId(1)), second: Leaf(PaneId(2)) }), second: Split(Split { axis: Horizontal, ratio: 0.5, first: Leaf(PaneId(3)), second: Leaf(PaneId(4)) }) })"
+    ]
+  ],
+  "tab_strip_height": 88,
+  "tab_strip_y": 0,
+  "terminal_switcher": null,
+  "visible_pane_slots": [
+    [
+      1,
+      [
+        536,
+        112,
+        722,
+        517
+      ]
+    ],
+    [
+      2,
+      [
+        1274,
+        112,
+        740,
+        517
+      ]
+    ],
+    [
+      3,
+      [
+        536,
+        645,
+        722,
+        517
+      ]
+    ],
+    [
+      4,
+      [
+        1274,
+        645,
+        740,
+        517
+      ]
+    ]
+  ],
+  "window_id": "WindowId(509308158592)"
+}

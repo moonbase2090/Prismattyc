@@ -1,0 +1,20 @@
+{
+  "tested_revision": "710da3eed361a7d823f3dd0bc964fde633fb43c8",
+  "executable": "prismattyc-host 0.3.41 (710da3eed361)",
+  "os": "macOS 26.6.2 arm64, fresh clean guest, no Prismattyc installed",
+  "proof_kind": "host-built binaries copied into the guest; guest desktop driven only by pointer events over the VM's VNC server; presented app window cropped",
+  "binary_sha256": {
+    "pmux": "33553988b4304f6625caee8dca825560fe4065d74771a53afe9854e9454dc50d",
+    "pmuxd": "f25a1bff202a9bead6bdcb67a44034e7098f8f3e4c842b5c1ddc9c9747ebe850",
+    "prismattyc-host": "8c8168886d90d79fafa0836b9fa64d8ad7243829e5ad36ff0e47b8aad2e10970"
+  },
+  "layout": "sidebar; four Spaces (default, lab, mail, ops) with one session each",
+  "observed": [
+    "before: all four Space groups expanded with their child rows",
+    "first click on the Spaces header control: every group collapses, child rows disappear, tooltip reads Expand all Spaces",
+    "second click: every group expands again with its child rows, tooltip reads Collapse all Spaces"
+  ],
+  "not_shown": [
+    "Linux and Windows runtime; keyboard access to the control (it is pointer-only by design in this PR)"
+  ]
+}

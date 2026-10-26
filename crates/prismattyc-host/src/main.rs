@@ -1143,6 +1143,8 @@ struct HostState {
     sidebar_thumb_drag: Option<(f64, usize)>,
     /// Header (or strip) control that collapses the sidebar.
     sidebar_toggle: graphite::Rect,
+    /// Expand-all / collapse-all control in the Spaces column header.
+    sidebar_tree_fold: graphite::Rect,
     /// Collapsed-strip hit boxes from the last paint.
     sidebar_icons: sidebar_width::IconStrip,
     /// Grip drag. The struct owns the pending width between reflows.
@@ -4441,6 +4443,7 @@ impl App {
                 sidebar_scroll: 0,
                 sidebar_thumb_drag: None,
                 sidebar_toggle: graphite::Rect::new(0, 0, 0, 0),
+                sidebar_tree_fold: graphite::Rect::new(0, 0, 0, 0),
                 sidebar_icons: sidebar_width::icon_strip(0, 0, 0, 0, 1, 0, 0, 0),
                 sidebar_drag: None,
                 sidebar_drag_at: None,
@@ -12124,6 +12127,18 @@ fn sidebar_icon_tooltip(host: &HostState) -> Option<(graphite::Rect, String)> {
                 "Collapse sidebar".to_string()
             },
         )),
+        Some(HoverTarget::Sidebar(graphite::SidebarHit::TreeFold))
+            if !host.spacing.sidebar_collapsed =>
+        {
+            Some((
+                host.sidebar_tree_fold,
+                if sidebar_tree_fold_expands(host) {
+                    "Expand all Spaces".to_string()
+                } else {
+                    "Collapse all Spaces".to_string()
+                },
+            ))
+        }
         Some(HoverTarget::Sidebar(graphite::SidebarHit::Row(index)))
             if host.spacing.sidebar_collapsed =>
         {
@@ -12743,6 +12758,8 @@ fn handle_rail_click(host: &mut HostState, button: MouseButton) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SidebarClick {
     ToggleCollapse(String),
+    /// Expand every Space group, or collapse every Space group.
+    ToggleTreeFold,
     SelectTab(usize),
     /// Session row or icon: select its tab, then focus that pane.
     /// `pane` is `None` for a tab icon, which keeps the tab's own focus.
@@ -12764,6 +12781,21 @@ enum SidebarClick {
     /// Focus the next pane that needs attention in the current Space.
     JumpNeedsYou,
     Ignore,
+}
+
+/// Names of Space groups currently shown in the sidebar tree.
+fn sidebar_space_names(host: &HostState) -> Vec<&str> {
+    host.sidebar_tree
+        .spaces
+        .iter()
+        .map(|space| space.name.as_str())
+        .collect()
+}
+
+/// True when the header fold control should expand every Space next.
+fn sidebar_tree_fold_expands(host: &HostState) -> bool {
+    let names = sidebar_space_names(host);
+    names.is_empty() || host.space_rail.any_collapsed(names)
 }
 
 /// Action behind each sidebar Arrange button, in `SIDEBAR_ARRANGE` order.
@@ -12835,6 +12867,7 @@ fn sidebar_click_decision(
             .map(SidebarClick::Run)
             .unwrap_or(SidebarClick::Ignore),
         (SidebarHit::Toggle, _) => SidebarClick::ToggleStrip,
+        (SidebarHit::TreeFold, _) => SidebarClick::ToggleTreeFold,
         (SidebarHit::Thumb, _) => SidebarClick::StartThumbDrag,
         _ => SidebarClick::Ignore,
     }
@@ -12885,6 +12918,7 @@ fn icon_click_decision(
             .unwrap_or(SidebarClick::Ignore),
         SidebarHit::Thumb => SidebarClick::StartThumbDrag,
         SidebarHit::NeedsYou(_) => SidebarClick::JumpNeedsYou,
+        SidebarHit::TreeFold => SidebarClick::Ignore,
         SidebarHit::Action(_) => SidebarClick::Ignore,
     }
 }
@@ -13092,6 +13126,19 @@ fn handle_sidebar_click(host: &mut HostState, button: MouseButton) -> StripClick
             // Per-window collapse memory from PR1.
             let collapsed = host.space_rail.is_collapsed(&name);
             host.space_rail.set_collapsed(&name, !collapsed);
+            host.dirty = true;
+            StripClickResult::Handled
+        }
+        SidebarClick::ToggleTreeFold => {
+            let collapse = !sidebar_tree_fold_expands(host);
+            let names: Vec<String> = host
+                .sidebar_tree
+                .spaces
+                .iter()
+                .map(|space| space.name.clone())
+                .collect();
+            host.space_rail
+                .set_all_collapsed(names.iter().map(String::as_str), collapse);
             host.dirty = true;
             StripClickResult::Handled
         }
@@ -14231,6 +14278,7 @@ fn paint_graphite_sidebar(
         host.sidebar_list = px_box(strip.list);
         host.sidebar_thumb = None;
         host.sidebar_toggle = toggle;
+        host.sidebar_tree_fold = graphite::Rect::new(0, 0, 0, 0);
         host.sidebar_icons = strip;
         host.sidebar_needs_you_hits.clear();
     } else {
@@ -14275,6 +14323,12 @@ fn paint_graphite_sidebar(
             })
             .collect();
         let toggle = graphite::sidebar_toggle_rect(geom.chrome, column, layout.head, dock_right);
+        let tree_fold = graphite::sidebar_tree_fold_rect(geom.chrome, column, toggle, dock_right);
+        let tree_fold_expand = sidebar_tree_fold_expands(host);
+        let tree_fold_hovered = matches!(
+            host.hover_target,
+            Some(HoverTarget::Sidebar(graphite::SidebarHit::TreeFold))
+        );
         graphite::paint_sidebar(
             buffer,
             stride,
@@ -14297,6 +14351,9 @@ fn paint_graphite_sidebar(
                 dock_right,
                 toggle,
                 toggle_hovered,
+                tree_fold,
+                tree_fold_hovered,
+                tree_fold_expand,
                 row_seats: &paint_seats,
             },
         );
@@ -14308,6 +14365,7 @@ fn paint_graphite_sidebar(
         host.sidebar_list = layout.list;
         host.sidebar_thumb = layout.thumb;
         host.sidebar_toggle = toggle;
+        host.sidebar_tree_fold = tree_fold;
         host.sidebar_icons = sidebar_width::icon_strip(0, 0, 0, 0, 1, 0, 0, 0);
     }
     paint_pane_header(host, buffer, stride, geom);
@@ -14395,6 +14453,7 @@ fn sidebar_hit_at(host: &HostState, px: usize, py: usize) -> Option<graphite::Si
             actions: &host.sidebar_actions,
             arrange: &host.sidebar_arrange,
             thumb: host.sidebar_thumb,
+            tree_fold: host.sidebar_tree_fold,
             toggle: host.sidebar_toggle,
         },
         px,
@@ -27973,6 +28032,10 @@ session mail (id 15)
             sidebar_click_decision(SidebarHit::Toggle, None, false, None),
             SidebarClick::ToggleStrip
         );
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::TreeFold, None, false, None),
+            SidebarClick::ToggleTreeFold
+        );
     }
 
     #[test]
@@ -28108,6 +28171,7 @@ session mail (id 15)
                 actions: &layout.actions,
                 arrange: &[graphite::Rect::new(0, 0, 0, 0); 3],
                 thumb: layout.thumb,
+                tree_fold: graphite::Rect::new(0, 0, 0, 0),
                 toggle: graphite::Rect::new(0, 0, 0, 0),
             },
             slot.x + 8,
@@ -28149,6 +28213,7 @@ session mail (id 15)
             actions: &layout.actions,
             arrange: &header.buttons,
             thumb: layout.thumb,
+            tree_fold: graphite::Rect::new(0, 0, 0, 0),
             toggle,
         };
         let hit = |rect: graphite::Rect| {

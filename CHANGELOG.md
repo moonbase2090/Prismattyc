@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.3.43] - 2026-10-26
+
+### Added
+
+- The Spaces sidebar header has an expand-all and collapse-all control.
+
+### Fixed
+
+- Clicking a pane in an inactive Space focuses that session in that Space.
+- Walkthrough "Show me" steps wait for the demonstrated action to finish before they advance.
+
 ## [0.3.42] - 2026-10-25
 
 ### Added

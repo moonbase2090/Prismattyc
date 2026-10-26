@@ -4907,16 +4907,16 @@ fn chrome_snapshot(host: &HostState, live: Option<a11y::LiveSnap>) -> a11y::Chro
                 (notice.tab == index && Instant::now() < notice.until)
                     .then_some((notice.handle, notice.title.as_str()))
             });
-            let title = title_row::title_row_decision(
-                host.pane_titles,
-                info.handles,
-                info.title.as_str(),
-                info.fixed_name.as_deref(),
-                info.pane_title.as_deref(),
-                &info.handle_titles,
+            let title = title_row::title_row_decision(title_row::TitleRowInput {
+                mode: host.pane_titles,
+                handles: info.handles,
+                tab_title: info.title.as_str(),
+                fixed_name: info.fixed_name.as_deref(),
+                pane_title: info.pane_title.as_deref(),
+                handle_titles: &info.handle_titles,
                 hover_handle,
                 notice,
-            )
+            })
             .label
             .to_string();
             let title = info
@@ -14001,16 +14001,16 @@ fn graphite_tab_text(
         Some(mux::StripHit::Pane { tab, handle, .. }) if tab == index => Some(handle),
         _ => None,
     };
-    let decided = title_row::title_row_decision(
-        host.pane_titles,
-        tab.handles,
-        tab.title.as_str(),
-        tab.fixed_name.as_deref(),
-        tab.pane_title.as_deref(),
-        &tab.handle_titles,
+    let decided = title_row::title_row_decision(title_row::TitleRowInput {
+        mode: host.pane_titles,
+        handles: tab.handles,
+        tab_title: tab.title.as_str(),
+        fixed_name: tab.fixed_name.as_deref(),
+        pane_title: tab.pane_title.as_deref(),
+        handle_titles: &tab.handle_titles,
         hover_handle,
-        None,
-    );
+        notice: None,
+    });
     let meta = match (tab.handles > 1, tab.zoomed) {
         (true, true) => Some(format!("{} panes · zoomed", tab.handles)),
         (true, false) => Some(format!("{} panes", tab.handles)),

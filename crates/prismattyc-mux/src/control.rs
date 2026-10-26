@@ -2282,6 +2282,11 @@ struct CheckpointCapture {
     mark: u64,
 }
 
+struct SessionAgentBinding {
+    explicit: Option<String>,
+    derive: bool,
+}
+
 /// Display-free owner of control-visible mux topology and event history.
 ///
 /// `new_live` additionally binds one server-owned PTY/emulator per pane. The
@@ -4895,7 +4900,17 @@ impl ControlPlane {
                 derive_agent_id,
                 headless,
                 ..
-            } => self.create_session(name, spawn, cols, rows, agent_id, derive_agent_id, headless),
+            } => self.create_session(
+                name,
+                spawn,
+                cols,
+                rows,
+                SessionAgentBinding {
+                    explicit: agent_id,
+                    derive: derive_agent_id,
+                },
+                headless,
+            ),
             ControlRequest::SetClientSpace {
                 client_id,
                 space_id,
@@ -5340,8 +5355,7 @@ impl ControlPlane {
         spawn: SpawnSpec,
         cols: Option<u32>,
         rows: Option<u32>,
-        agent_id: Option<String>,
-        derive_agent_id: bool,
+        agent_binding: SessionAgentBinding,
         headless: bool,
     ) -> Result<ControlResponseData, ControlError> {
         self.ensure_sequence_capacity()?;
@@ -5351,13 +5365,13 @@ impl ControlPlane {
         let display_name = crate::session_name::DisplayName::new(&name)
             .map_err(|error| ControlError::new(ControlErrorCode::InvalidRequest, error))?;
         let name = display_name.as_str();
-        if agent_id.is_some() && derive_agent_id {
+        if agent_binding.explicit.is_some() && agent_binding.derive {
             return Err(ControlError::new(
                 ControlErrorCode::InvalidRequest,
                 "explicit and derived mailbox addresses cannot be combined",
             ));
         }
-        let agent_id = if derive_agent_id {
+        let agent_id = if agent_binding.derive {
             let base = crate::session_name::agent_id_from_label(name);
             Some(
                 crate::session_name::unique_agent_id(&base, |candidate| {
@@ -5374,7 +5388,7 @@ impl ControlPlane {
                 .map_err(|error| ControlError::new(ControlErrorCode::InvalidRequest, error))?,
             )
         } else {
-            agent_id
+            agent_binding.explicit
         };
         if let Some(agent) = &agent_id {
             crate::mailbox::AgentId::new(agent.clone()).map_err(|error| {

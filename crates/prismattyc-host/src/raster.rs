@@ -5043,16 +5043,16 @@ pub fn rasterize_tab_strip_with_theme(
             .notice
             .filter(|(tab, _, _)| *tab == i)
             .map(|(_, handle, text)| (handle, text));
-        let decided = title_row_decision(
-            title_row.mode,
-            tab.handles,
-            tab.title.as_str(),
-            tab.fixed_name.as_deref(),
-            tab.pane_title.as_deref(),
-            &tab.handle_titles,
+        let decided = title_row_decision(crate::title_row::TitleRowInput {
+            mode: title_row.mode,
+            handles: tab.handles,
+            tab_title: tab.title.as_str(),
+            fixed_name: tab.fixed_name.as_deref(),
+            pane_title: tab.pane_title.as_deref(),
+            handle_titles: &tab.handle_titles,
             hover_handle,
             notice,
-        );
+        });
         let label = match editing.and_then(|(idx, text, _)| (idx == i).then_some(text)) {
             Some(text) => text,
             None => zoomed_label(decided.label, tab.zoomed, tab.handles, &mut zoomed_title),

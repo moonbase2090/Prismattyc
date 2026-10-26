@@ -11,6 +11,17 @@ pub(crate) struct TitleRowDecision<'a> {
     pub notice_handle: Option<usize>,
 }
 
+pub(crate) struct TitleRowInput<'a> {
+    pub mode: PaneTitlesMode,
+    pub handles: usize,
+    pub tab_title: &'a str,
+    pub fixed_name: Option<&'a str>,
+    pub pane_title: Option<&'a str>,
+    pub handle_titles: &'a [String],
+    pub hover_handle: Option<usize>,
+    pub notice: Option<(usize, &'a str)>,
+}
+
 /// An unfocused handle whose title changed between snapshots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TitleNotice {
@@ -21,16 +32,17 @@ pub(crate) struct TitleNotice {
 
 /// A fixed user label, then hover, notice, focused pane (when allowed), and
 /// finally the fallback tab title.
-pub(crate) fn title_row_decision<'a>(
-    mode: PaneTitlesMode,
-    handles: usize,
-    tab_title: &'a str,
-    fixed_name: Option<&'a str>,
-    pane_title: Option<&'a str>,
-    handle_titles: &'a [String],
-    hover_handle: Option<usize>,
-    notice: Option<(usize, &'a str)>,
-) -> TitleRowDecision<'a> {
+pub(crate) fn title_row_decision(input: TitleRowInput<'_>) -> TitleRowDecision<'_> {
+    let TitleRowInput {
+        mode,
+        handles,
+        tab_title,
+        fixed_name,
+        pane_title,
+        handle_titles,
+        hover_handle,
+        notice,
+    } = input;
     let notice_handle = notice.map(|(handle, _)| handle);
     if let Some(text) = fixed_name.filter(|text| !text.is_empty()) {
         return TitleRowDecision {
@@ -122,16 +134,16 @@ mod tests {
     #[test]
     fn hover_wins_then_notice_then_focused_then_tab_name() {
         let handles = titles(&["pane 1", "Waiting for you"]);
-        let hover = title_row_decision(
-            PaneTitlesMode::Focused,
-            2,
-            "main",
-            None,
-            Some("focused"),
-            &handles,
-            Some(1),
-            Some((0, "old notice")),
-        );
+        let hover = title_row_decision(TitleRowInput {
+            mode: PaneTitlesMode::Focused,
+            handles: 2,
+            tab_title: "main",
+            fixed_name: None,
+            pane_title: Some("focused"),
+            handle_titles: &handles,
+            hover_handle: Some(1),
+            notice: Some((0, "old notice")),
+        });
         assert_eq!(
             hover,
             TitleRowDecision {
@@ -139,16 +151,16 @@ mod tests {
                 notice_handle: Some(0),
             }
         );
-        let notice = title_row_decision(
-            PaneTitlesMode::Focused,
-            2,
-            "main",
-            None,
-            Some("focused"),
-            &handles,
-            None,
-            Some((1, "Waiting for you")),
-        );
+        let notice = title_row_decision(TitleRowInput {
+            mode: PaneTitlesMode::Focused,
+            handles: 2,
+            tab_title: "main",
+            fixed_name: None,
+            pane_title: Some("focused"),
+            handle_titles: &handles,
+            hover_handle: None,
+            notice: Some((1, "Waiting for you")),
+        });
         assert_eq!(
             notice,
             TitleRowDecision {
@@ -156,16 +168,16 @@ mod tests {
                 notice_handle: Some(1),
             }
         );
-        let focused = title_row_decision(
-            PaneTitlesMode::Focused,
-            2,
-            "main",
-            None,
-            Some("focused"),
-            &handles,
-            None,
-            None,
-        );
+        let focused = title_row_decision(TitleRowInput {
+            mode: PaneTitlesMode::Focused,
+            handles: 2,
+            tab_title: "main",
+            fixed_name: None,
+            pane_title: Some("focused"),
+            handle_titles: &handles,
+            hover_handle: None,
+            notice: None,
+        });
         assert_eq!(
             focused,
             TitleRowDecision {
@@ -173,16 +185,16 @@ mod tests {
                 notice_handle: None,
             }
         );
-        let tab = title_row_decision(
-            PaneTitlesMode::Focused,
-            2,
-            "main",
-            None,
-            None,
-            &handles,
-            None,
-            None,
-        );
+        let tab = title_row_decision(TitleRowInput {
+            mode: PaneTitlesMode::Focused,
+            handles: 2,
+            tab_title: "main",
+            fixed_name: None,
+            pane_title: None,
+            handle_titles: &handles,
+            hover_handle: None,
+            notice: None,
+        });
         assert_eq!(
             tab,
             TitleRowDecision {
@@ -194,44 +206,44 @@ mod tests {
 
     #[test]
     fn hover_mode_keeps_single_pane_title_and_hides_multi_pane_focus() {
-        let solo = title_row_decision(
-            PaneTitlesMode::Hover,
-            0,
-            "main",
-            None,
-            Some("build"),
-            &[],
-            None,
-            None,
-        );
+        let solo = title_row_decision(TitleRowInput {
+            mode: PaneTitlesMode::Hover,
+            handles: 0,
+            tab_title: "main",
+            fixed_name: None,
+            pane_title: Some("build"),
+            handle_titles: &[],
+            hover_handle: None,
+            notice: None,
+        });
         assert_eq!(solo.label, "build");
         let handle_titles = titles(&["a", "b"]);
-        let multi = title_row_decision(
-            PaneTitlesMode::Hover,
-            2,
-            "main",
-            None,
-            Some("focused"),
-            &handle_titles,
-            None,
-            None,
-        );
+        let multi = title_row_decision(TitleRowInput {
+            mode: PaneTitlesMode::Hover,
+            handles: 2,
+            tab_title: "main",
+            fixed_name: None,
+            pane_title: Some("focused"),
+            handle_titles: &handle_titles,
+            hover_handle: None,
+            notice: None,
+        });
         assert_eq!(multi.label, "main");
     }
 
     #[test]
     fn fixed_tab_name_overrides_hover_notice_and_focused_pane() {
         let handles = titles(&["pane 1", "Waiting for you"]);
-        let result = title_row_decision(
-            PaneTitlesMode::Focused,
-            2,
-            "fallback",
-            Some("Release Work"),
-            Some("focused pane"),
-            &handles,
-            Some(1),
-            Some((0, "new notice")),
-        );
+        let result = title_row_decision(TitleRowInput {
+            mode: PaneTitlesMode::Focused,
+            handles: 2,
+            tab_title: "fallback",
+            fixed_name: Some("Release Work"),
+            pane_title: Some("focused pane"),
+            handle_titles: &handles,
+            hover_handle: Some(1),
+            notice: Some((0, "new notice")),
+        });
         assert_eq!(
             result,
             TitleRowDecision {

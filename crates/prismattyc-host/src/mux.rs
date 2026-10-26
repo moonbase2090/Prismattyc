@@ -4887,6 +4887,16 @@ impl MuxRuntime {
         self.replace_layout(next)
     }
 
+    /// The pane in the active window whose full slot, chrome included,
+    /// contains the pixel. Used by a pane-header drag released over another
+    /// pane's body.
+    pub(crate) fn pane_at_px(&self, x: usize, y: usize) -> Option<PaneId> {
+        self.rects.iter().find_map(|(pane, rect)| {
+            let (sx, sy, sw, sh) = self.geom.pane_slot_px(*rect);
+            (x >= sx && x < sx + sw && y >= sy && y < sy + sh).then_some(*pane)
+        })
+    }
+
     /// Exchange two panes of the active window; focus stays where it was.
     /// Used by a same-tab pane drag that ends on another pane's handle.
     pub(crate) fn swap_panes(&mut self, a: PaneId, b: PaneId) -> Result<bool> {
@@ -9322,6 +9332,44 @@ mod tests {
         assert_eq!(order(&runtime), vec![c, b, a]);
         assert_eq!(runtime.focused_id(), b);
         assert!(!runtime.swap_panes(a, a).unwrap(), "same pane is a no-op");
+    }
+
+    #[test]
+    fn pane_at_px_finds_the_pane_whose_slot_holds_the_pointer() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let a = runtime.focused_id();
+        let b = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let geom = HostGeom {
+            cell_w: 10,
+            cell_h: 20,
+            window_pad: 5,
+            slack_x: 0,
+            slack_y: 0,
+            pane_gap: 5,
+            rail_gap: 5,
+            inner_pad: 5,
+            top_chrome_px: 0,
+            pane_header_px: 0,
+            scrollbar_gutter_px: 8,
+            rail_side: RailSide::Off,
+            rail_px: 0,
+            rail_chip_cols: 0,
+            sidebar_px: 0,
+            chrome: ChromeGeom::CLASSIC,
+        };
+        runtime.set_geom(geom).unwrap();
+        let rects: HashMap<PaneId, CellRect> = runtime.rects().collect();
+        let centre = |pane| {
+            let (x, y, w, h) = geom.pane_slot_px(rects[&pane]);
+            (x + w / 2, y + h / 2)
+        };
+        let (ax, ay) = centre(a);
+        let (bx, by) = centre(b);
+        assert_eq!(runtime.pane_at_px(ax, ay), Some(a));
+        assert_eq!(runtime.pane_at_px(bx, by), Some(b));
+        assert_eq!(runtime.pane_at_px(0, 0), None, "outside every slot");
     }
 
     #[test]

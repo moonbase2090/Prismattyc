@@ -14879,9 +14879,13 @@ fn finish_strip_drag(host: &mut HostState) -> bool {
     let stride = host.window.inner_size().width as usize;
     let hit = host.mux.tab_strip_hit(x as usize, y as usize, stride, true);
     let swap = match drag.kind {
-        StripDragKind::Pane { tab, pane } => {
-            mux::pane_drop_swap_target(tab, pane, hit).map(|target| (pane, target))
-        }
+        StripDragKind::Pane { tab, pane } => mux::pane_drop_swap_target(tab, pane, hit)
+            .or_else(|| {
+                host.mux
+                    .pane_at_px(x as usize, y as usize)
+                    .filter(|target| *target != pane)
+            })
+            .map(|target| (pane, target)),
         StripDragKind::Tab(_) => None,
     };
     let changed = if let Some((from, to)) = swap {

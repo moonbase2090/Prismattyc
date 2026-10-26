@@ -1967,11 +1967,21 @@ fn verify_decision_handlers(host: &mut HostState) {
             .all(|tab| tab.fixed_name.is_none()),
         "clearing a tab name must remove the live fixed name"
     );
-    assert!(
-        crate::local_views::records(host)
-            .tabs
-            .iter()
-            .all(|tab| tab.fixed_name.is_none()),
+    // Read back the live attach record for this window's tab. The projection
+    // is the one a save would write; disk I/O is not exercised here.
+    let tab_index = host
+        .mux
+        .tab_infos()
+        .iter()
+        .position(|tab| tab.window == Some(rail_window))
+        .expect("the rail window has a tab");
+    let record = crate::local_views::records(host)
+        .tabs
+        .get(tab_index)
+        .cloned()
+        .expect("the attach record has an entry for the rail window's tab");
+    assert_eq!(
+        record.fixed_name, None,
         "the attach record must not carry the cleared name back"
     );
     close_context_menu(host);

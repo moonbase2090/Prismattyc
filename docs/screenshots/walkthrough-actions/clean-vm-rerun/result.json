@@ -1,0 +1,38 @@
+{
+  "tested_revision": "7306300d7cb83faab5543e945866c06d0a1deb59",
+  "executable": "prismattyc-host 0.3.41 (7306300d7cb8)",
+  "os": "macOS 26.6.2 arm64, fresh clean guest, no Prismattyc installed",
+  "proof_kind": "host-built binaries copied into the guest; the app window driven by pointer and keyboard events over the VM's VNC server; step state from the host's walkthrough dump; tab order from the attach-tabs file; presented app window cropped",
+  "binary_sha256": {
+    "pmux": "bdace2ae5e0f59167a6808b52b09f3e40f099dea5a971a2fde3b4ad0b898388e",
+    "pmuxd": "a48756e8dd5470b7be6550991f0b45fc3fa81e816360a64acb977ebda3c315ca",
+    "prismattyc-host": "a90caf795ce81614f881c12b9763d0cdfbfbaf74b82cdd1b47dd7f1b6d9c5275"
+  },
+  "completed_steps_in_order": [
+    "window.split-right",
+    "window.focus-right",
+    "window.close-pane",
+    "tabs.new",
+    "tabs.rename",
+    "tabs.move-pane",
+    "tabs.drag",
+    "seats.new",
+    "seats.attach-all",
+    "seats.mail",
+    "spaces.save",
+    "spaces.open"
+  ],
+  "observed": [
+    "tabs.drag with the first tab explicitly selected: attach-tabs order [main, beta] before and [beta, main] after one show me, and the step advanced (the earlier stall was the last-tab boundary, not a completion bug)",
+    "seats.attach-all opened a second host window showing all four attached sessions (session-1, alpha, beta, session-3) and wrote a separate walkthrough attach-tabs file; the original window kept its own view",
+    "seats.mail: the pane shows 'Sent, claimed, and committed msg:00000000000000000001 in a private demonstration mailbox.' and the step advanced",
+    "spaces.save: with no open Space the picker appeared; cancelling left the step on spaces.save and the Space file unchanged; running show me again and choosing the Space saved it (file modified, status line 'default . Saved') and advanced the step",
+    "spaces.open: show me opened the picker; choosing the Space applied it (host log: 'default: view applied; 1 reused session (live layouts retained)') and advanced the step to spaces.reopen"
+  ],
+  "not_shown": [
+    "spaces.reopen and any step after it",
+    "the saved Space file holds only the sessions the default Space owns (one), so a saved arrangement with several sessions was not compared",
+    "failed tab move refusal path in this run (shown in the earlier partial run)",
+    "Linux and Windows runtime"
+  ]
+}

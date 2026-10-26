@@ -1944,6 +1944,38 @@ fn verify_decision_handlers(host: &mut HostState) {
     );
     close_context_menu(host);
 
+    // Clear tab name from the tab-row menu: the fixed name must go, the layout
+    // must be marked for save, and the record written from live state must not
+    // carry the old name back.
+    let rail_window = host.mux.active_window();
+    host.mux
+        .set_fixed_tab_name(rail_window, Some("Graphite-Main"))
+        .unwrap();
+    host.layout_dirty = false;
+    host.context_menu_target = Some(ContextMenuTarget::RailTab(rail_window));
+    host.context_menu = Some(ContextMenu::new(ContextMenuKind::RailTab));
+    activate_context_menu(host, 1, "/bin/sh", &args);
+    assert!(
+        host.layout_dirty,
+        "clearing a tab name must mark the layout for save"
+    );
+    assert!(
+        host.mux
+            .tab_infos()
+            .iter()
+            .filter(|tab| tab.window == Some(rail_window))
+            .all(|tab| tab.fixed_name.is_none()),
+        "clearing a tab name must remove the live fixed name"
+    );
+    assert!(
+        crate::local_views::records(host)
+            .tabs
+            .iter()
+            .all(|tab| tab.fixed_name.is_none()),
+        "the attach record must not carry the cleared name back"
+    );
+    close_context_menu(host);
+
     host.tab_strip_mode = config::TabStripMode::Always;
     App::refit_geom(host, host.window.inner_size(), Some("decision test"));
     // Graphite hit-testing uses the bar stored by the last paint. Classic

@@ -113,8 +113,13 @@ impl Fixture {
             .join(format!("sha256-{digest:x}"))
     }
     fn saved(&self) -> serde_json::Value {
-        serde_json::from_slice(&std::fs::read(self.spaces_dir().join("work.json")).unwrap())
-            .unwrap()
+        self.saved_space("work")
+    }
+    fn saved_space(&self, name: &str) -> serde_json::Value {
+        serde_json::from_slice(
+            &std::fs::read(self.spaces_dir().join(format!("{name}.json"))).unwrap(),
+        )
+        .unwrap()
     }
 }
 fn ok(out: Output) -> String {
@@ -249,10 +254,90 @@ fn readable_space_sessions_rename_keeps_process_mail_and_old_addresses() {
     assert!(f
         .ok(&["mail", "--as", "reviewer-next", "inbox"])
         .contains("open: 3 held: 1"));
-    let refused = f.cli(&["new", "--no-attach", "work-1"]).output().unwrap();
+    // The display label is reusable after the rename, but the derived mailbox
+    // must skip the old forwarding address.
+    f.ok(&["new", "--no-attach", "work-1"]);
+    let recreated = f.snapshot();
+    let reused_label = recreated
+        .sessions
+        .iter()
+        .find(|session| session.name == "work-1")
+        .unwrap();
+    assert_eq!(reused_label.agent_id.as_deref(), Some("work-1-2"));
+}
+
+#[test]
+fn mixed_case_display_names_keep_case_and_use_lowercase_unique_mailboxes() {
+    let f = Fixture::new();
+    f.ok(&["new", "--no-attach", "Graphite-Main"]);
+    let created = f.snapshot();
+    let session = created
+        .sessions
+        .iter()
+        .find(|session| session.name == "Graphite-Main")
+        .unwrap();
+    assert_eq!(session.agent_id.as_deref(), Some("graphite-main"));
+
+    f.ok(&[
+        "session",
+        "name",
+        "Graphite Main",
+        "--session",
+        "Graphite-Main",
+    ]);
+    let renamed = f.snapshot();
+    let session = renamed
+        .sessions
+        .iter()
+        .find(|session| session.name == "Graphite Main")
+        .unwrap();
+    assert_eq!(session.agent_id.as_deref(), Some("graphite-main"));
+
+    f.ok(&[
+        "space",
+        "create",
+        "Team",
+        "--session-name",
+        "Graphite Worker",
+        "--no-attach",
+    ]);
+    let saved = f.saved_space("Team");
+    assert_eq!(saved["sessions"][0]["name"], "Graphite Worker");
+    assert_eq!(saved["sessions"][0]["agent"], "graphite-worker");
+    let live = f.snapshot();
+    let session = live
+        .sessions
+        .iter()
+        .find(|session| session.name == "Graphite Worker")
+        .unwrap();
+    assert_eq!(session.agent_id.as_deref(), Some("graphite-worker"));
+}
+
+#[test]
+fn session_names_and_lookup_remain_exact_case_sensitive_strings() {
+    let f = Fixture::new();
+    f.ok(&["new", "--no-attach", "Graphite-Main"]);
+    f.ok(&["new", "--no-attach", "graphite-main"]);
+    let snapshot = f.snapshot();
+    let upper = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.name == "Graphite-Main")
+        .unwrap();
+    let lower = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.name == "graphite-main")
+        .unwrap();
+    assert_eq!(upper.agent_id.as_deref(), Some("graphite-main"));
+    assert_eq!(lower.agent_id.as_deref(), Some("graphite-main-2"));
     assert!(
-        !refused.status.success(),
-        "old forwarding address must not be stolen"
+        !f.cli(&["new", "--no-attach", "Graphite-Main"])
+            .output()
+            .unwrap()
+            .status
+            .success(),
+        "an exact duplicate display name is rejected"
     );
 }
 

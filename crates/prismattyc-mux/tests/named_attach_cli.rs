@@ -793,6 +793,7 @@ fn control_plane_answers_a_private_daemon() {
             cols: Some(80),
             rows: Some(24),
             agent_id: None,
+            derive_agent_id: false,
             headless: false,
         }),
     ));

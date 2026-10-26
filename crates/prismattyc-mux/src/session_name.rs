@@ -1,5 +1,23 @@
 //! Human-readable session names shared by the CLI and host naming popup.
 
+/// A case-preserving, validated session display name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayName(String);
+
+impl DisplayName {
+    pub fn new(raw: &str) -> Result<Self, &'static str> {
+        let name = raw.trim();
+        if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
+            return Err("display name must be 1..=64 bytes without control characters");
+        }
+        Ok(Self(name.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Suggest the first unused address under a Space name.
 #[must_use]
 pub fn suggest(space: &str, occupied: &[String]) -> String {
@@ -82,6 +100,16 @@ pub fn unique_agent_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_names_preserve_case_and_trim_outer_space() {
+        assert_eq!(
+            DisplayName::new("  Graphite-Main ").unwrap().as_str(),
+            "Graphite-Main"
+        );
+        assert!(DisplayName::new("bad\nname").is_err());
+        assert!(DisplayName::new(&"x".repeat(65)).is_err());
+    }
     #[test]
     fn suggestions_are_mail_addresses_and_skip_existing_names() {
         assert_eq!(

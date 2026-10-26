@@ -269,6 +269,7 @@ impl Workspace {
                     .iter()
                     .map(|s| AttachTabRecord {
                         title: s.name.clone(),
+                        fixed_name: None,
                         sessions: vec![names[&s.name].clone()],
                         layout: None,
                     })
@@ -279,6 +280,7 @@ impl Workspace {
                     .iter()
                     .map(|tab| AttachTabRecord {
                         title: tab.title.clone(),
+                        fixed_name: tab.fixed_name.clone(),
                         sessions: tab
                             .sessions
                             .iter()

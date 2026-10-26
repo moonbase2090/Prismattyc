@@ -139,6 +139,7 @@ fn identity_change_checkpoint_survives_unclean_restart() {
         cols: None,
         rows: None,
         agent_id: None,
+        derive_agent_id: false,
         headless: true,
     })) {
         ControlResponseData::Session { session_id, .. } => session_id,

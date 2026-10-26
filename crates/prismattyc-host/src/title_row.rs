@@ -19,18 +19,25 @@ pub(crate) struct TitleNotice {
     pub title: String,
 }
 
-/// Hover, then a live notice, then the focused pane title (when the mode
-/// allows it), then the tab name.
+/// A fixed user label, then hover, notice, focused pane (when allowed), and
+/// finally the fallback tab title.
 pub(crate) fn title_row_decision<'a>(
     mode: PaneTitlesMode,
     handles: usize,
     tab_title: &'a str,
+    fixed_name: Option<&'a str>,
     pane_title: Option<&'a str>,
     handle_titles: &'a [String],
     hover_handle: Option<usize>,
     notice: Option<(usize, &'a str)>,
 ) -> TitleRowDecision<'a> {
     let notice_handle = notice.map(|(handle, _)| handle);
+    if let Some(text) = fixed_name.filter(|text| !text.is_empty()) {
+        return TitleRowDecision {
+            label: text,
+            notice_handle,
+        };
+    }
     if let Some(handle) = hover_handle {
         if let Some(text) = handle_titles
             .get(handle)
@@ -119,6 +126,7 @@ mod tests {
             PaneTitlesMode::Focused,
             2,
             "main",
+            None,
             Some("focused"),
             &handles,
             Some(1),
@@ -135,6 +143,7 @@ mod tests {
             PaneTitlesMode::Focused,
             2,
             "main",
+            None,
             Some("focused"),
             &handles,
             None,
@@ -151,6 +160,7 @@ mod tests {
             PaneTitlesMode::Focused,
             2,
             "main",
+            None,
             Some("focused"),
             &handles,
             None,
@@ -167,6 +177,7 @@ mod tests {
             PaneTitlesMode::Focused,
             2,
             "main",
+            None,
             None,
             &handles,
             None,
@@ -187,6 +198,7 @@ mod tests {
             PaneTitlesMode::Hover,
             0,
             "main",
+            None,
             Some("build"),
             &[],
             None,
@@ -198,12 +210,35 @@ mod tests {
             PaneTitlesMode::Hover,
             2,
             "main",
+            None,
             Some("focused"),
             &handle_titles,
             None,
             None,
         );
         assert_eq!(multi.label, "main");
+    }
+
+    #[test]
+    fn fixed_tab_name_overrides_hover_notice_and_focused_pane() {
+        let handles = titles(&["pane 1", "Waiting for you"]);
+        let result = title_row_decision(
+            PaneTitlesMode::Focused,
+            2,
+            "fallback",
+            Some("Release Work"),
+            Some("focused pane"),
+            &handles,
+            Some(1),
+            Some((0, "new notice")),
+        );
+        assert_eq!(
+            result,
+            TitleRowDecision {
+                label: "Release Work",
+                notice_handle: Some(0),
+            }
+        );
     }
 
     #[test]

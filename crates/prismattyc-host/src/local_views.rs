@@ -152,7 +152,8 @@ pub(super) fn records(host: &HostState) -> attach_tabs::AttachTabsFile {
             .mux
             .tab_panes()
             .into_iter()
-            .map(|(title, panes)| {
+            .enumerate()
+            .map(|(index, (title, panes))| {
                 let mut seen = HashSet::new();
                 let sessions: Vec<String> = panes
                     .iter()
@@ -172,6 +173,11 @@ pub(super) fn records(host: &HostState) -> attach_tabs::AttachTabsFile {
                     });
                 attach_tabs::AttachTabRecord {
                     title,
+                    fixed_name: host
+                        .mux
+                        .window_at_tab(index)
+                        .and_then(|window| host.mux.fixed_tab_name(window))
+                        .map(str::to_string),
                     sessions,
                     layout,
                 }
@@ -265,6 +271,7 @@ fn live_layout(owner: &Option<String>) -> Result<attach_tabs::AttachTabsFile> {
         .filter(|s| &s.space_id == owner)
         .map(|s| attach_tabs::AttachTabRecord {
             title: s.name.clone(),
+            fixed_name: None,
             sessions: vec![s.id.to_string()],
             layout: None,
         })

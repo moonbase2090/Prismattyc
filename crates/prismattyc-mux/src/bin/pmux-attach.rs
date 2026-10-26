@@ -6070,6 +6070,7 @@ fn main() -> Result<()> {
             cols: None,
             rows: None,
             agent_id: None,
+            derive_agent_id: false,
             headless: false,
         })?;
         let ControlResponseData::Session { session_id, .. } = created else {

@@ -54,7 +54,12 @@ pub fn apply_with_placeholders(
     let file = named_file(file, names, &mut id_of_name);
     let live = live_session_tabs(mux, pane_sessions, names);
     let diff = regroup_diff(&live, &file);
-    let mut changed = !diff.is_noop();
+    let mut changed = !diff.is_noop()
+        || file.tabs.iter().enumerate().any(|(index, tab)| {
+            mux.window_at_tab(index)
+                .and_then(|window| mux.fixed_tab_name(window))
+                != tab.fixed_name.as_deref()
+        });
 
     let attach_id = |name: &str| {
         id_of_name
@@ -176,6 +181,7 @@ pub fn apply_with_placeholders(
     for (index, tab) in file.tabs.iter().enumerate() {
         if let Some(&window) = dest.get(index) {
             let _ = mux.rename_window(window, &tab.title);
+            let _ = mux.set_fixed_tab_name(window, tab.fixed_name.as_deref());
         }
     }
 
@@ -280,6 +286,7 @@ fn named_file(
             let layout = layout_for_sessions(layout, &sessions);
             AttachTabRecord {
                 title: tab.title.clone(),
+                fixed_name: tab.fixed_name.clone(),
                 sessions,
                 layout,
             }
@@ -488,6 +495,7 @@ mod tests {
                 .iter()
                 .map(|(title, sessions)| AttachTabRecord {
                     title: (*title).into(),
+                    fixed_name: None,
                     sessions: sessions.iter().map(|s| (*s).to_string()).collect(),
                     layout: None,
                 })
@@ -1020,6 +1028,7 @@ mod tests {
             title: saved.tabs[0].title.clone(),
             sessions: saved.tabs[0].sessions.clone(),
             layout: saved.tabs[0].layout.clone(),
+            fixed_name: None,
         })
         .unwrap();
         assert!(
@@ -1034,6 +1043,7 @@ mod tests {
                     title: back.title,
                     sessions: back.sessions,
                     layout: back.layout,
+                    fixed_name: None,
                 }],
                 ..Default::default()
             },
@@ -1112,6 +1122,7 @@ mod tests {
                         .map(str::to_string)
                         .collect(),
                     layout: Some(layout),
+                    fixed_name: None,
                 }],
                 ..Default::default()
             },

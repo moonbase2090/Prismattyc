@@ -351,7 +351,10 @@ pub(crate) enum DetachView {
 /// Compact per-tab strip model for the windowed host (tab controls).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TabInfo {
+    pub window: Option<WindowId>,
     pub title: String,
+    /// User-selected host-tab label. `None` keeps follow-focus behavior.
+    pub fixed_name: Option<String>,
     pub selected: bool,
     pub unseen: bool,
     pub active: bool,
@@ -2447,6 +2450,9 @@ pub(crate) struct MuxRuntime {
     graphite_bar: Option<crate::graphite::BarLayout>,
     /// Previously selected tab, for `select_last_tab` (PT-127).
     last_window: Option<WindowId>,
+    /// Explicit labels for host tabs, kept out of the shared Domain because
+    /// its Window type also represents daemon windows.
+    fixed_tab_names: HashMap<WindowId, String>,
     domain: Domain,
     view: ClientView,
     panes: HashMap<PaneId, PaneRuntime>,
@@ -2605,6 +2611,7 @@ impl MuxRuntime {
             last_pane: HashMap::new(),
             graphite_bar: None,
             last_window: None,
+            fixed_tab_names: HashMap::new(),
             zoomed: None,
         })
     }
@@ -3015,7 +3022,9 @@ impl MuxRuntime {
                     .focused_pane(window)
                     .and_then(|id| self.git_info.label(id));
                 TabInfo {
+                    window: Some(window),
                     title,
+                    fixed_name: self.fixed_tab_names.get(&window).cloned(),
                     selected: window == active,
                     unseen,
                     active: active_output,
@@ -4609,6 +4618,7 @@ impl MuxRuntime {
             .map(|win| win.layout.panes())
             .unwrap_or_default();
         self.domain.destroy_window(window).context("destroy tab")?;
+        self.fixed_tab_names.remove(&window);
         for pane in panes {
             self.panes.remove(&pane);
         }
@@ -4660,6 +4670,43 @@ impl MuxRuntime {
 
     pub(crate) fn rename_window(&mut self, window: WindowId, title: &str) -> Result<bool> {
         self.domain.rename_window(window, title)?;
+        Ok(true)
+    }
+
+    pub(crate) fn fixed_tab_name(&self, window: WindowId) -> Option<&str> {
+        self.fixed_tab_names.get(&window).map(String::as_str)
+    }
+
+    pub(crate) fn set_fixed_tab_name(
+        &mut self,
+        window: WindowId,
+        name: Option<&str>,
+    ) -> Result<bool> {
+        anyhow::ensure!(self.domain.window(window).is_some(), "tab no longer exists");
+        let name = match name.map(str::trim).filter(|name| !name.is_empty()) {
+            Some(name) => {
+                anyhow::ensure!(name.len() <= 64, "tab name must be at most 64 bytes");
+                anyhow::ensure!(
+                    !name.chars().any(char::is_control),
+                    "tab name must not contain control characters"
+                );
+                Some(name.to_string())
+            }
+            None => None,
+        };
+        match name {
+            Some(name) => {
+                if self.fixed_tab_names.get(&window) == Some(&name) {
+                    return Ok(false);
+                }
+                self.fixed_tab_names.insert(window, name);
+            }
+            None => {
+                if self.fixed_tab_names.remove(&window).is_none() {
+                    return Ok(false);
+                }
+            }
+        }
         Ok(true)
     }
 
@@ -4925,6 +4972,12 @@ impl MuxRuntime {
 
     pub(crate) fn window_at_tab(&self, index: usize) -> Option<WindowId> {
         self.window_ids().get(index).copied()
+    }
+
+    pub(crate) fn tab_window_by_token(&self, token: u64) -> Option<WindowId> {
+        self.window_ids()
+            .into_iter()
+            .find(|window| window.get() == token)
     }
 
     pub(crate) fn cycle_tab(&mut self, delta: i32) -> Result<bool> {

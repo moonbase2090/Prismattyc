@@ -601,11 +601,10 @@ pub(super) fn name_session(paths: &Paths, args: Vec<String>) -> Result<()> {
         [name, flag, key] if flag == "--session" => (name.as_str(), Some(key.as_str())),
         _ => bail!("usage: pmux session name NAME [--session KEY]"),
     };
-    let display = name.trim();
-    if display.is_empty() || display.len() > 64 || display.contains('\0') {
-        bail!("session name must be 1..=64 bytes and contain no NUL");
-    }
-    let display = display.to_string();
+    let display = prismattyc_mux::session_name::DisplayName::new(name)
+        .map_err(anyhow::Error::msg)?
+        .as_str()
+        .to_string();
     let mut client = connect(paths)?;
     let store = Store::lock(&mut client)?;
     let snapshot = take_snapshot(&mut client)?;
@@ -620,16 +619,18 @@ pub(super) fn name_session(paths: &Paths, args: Vec<String>) -> Result<()> {
     }
     .context("session not found; use --session NAME or run inside a pmux pane")?;
     let live = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
-    let agent = prismattyc_mux::session_name::unique_agent_id(
-        &prismattyc_mux::session_name::agent_id_from_label(&display),
-        |candidate| {
-            snapshot
-                .sessions
-                .iter()
-                .any(|session| session.id != id && session.agent_id.as_deref() == Some(candidate))
-        },
-    )
-    .map_err(anyhow::Error::msg)?;
+    let reserved = occupied_names(&mut client)?;
+    let agent =
+        prismattyc_mux::session_name::unique_agent_id(
+            &prismattyc_mux::session_name::agent_id_from_label(&display),
+            |candidate| {
+                snapshot.sessions.iter().any(|session| {
+                    session.id != id && session.agent_id.as_deref() == Some(candidate)
+                }) || (reserved.iter().any(|used| used == candidate)
+                    && live.agent_id.as_deref() != Some(candidate))
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
     let name = display;
     let mut files = definitions()?;
     for (_, space) in &mut files {
@@ -1027,14 +1028,23 @@ fn fresh_record(
     requested: Option<&str>,
 ) -> Result<prismattyc_mux::SavedSpaceSession> {
     let name = match requested {
-        Some(name) => prismattyc_mux::mailbox::AgentId::new(name.trim().to_string())?.to_string(),
+        Some(name) => prismattyc_mux::session_name::DisplayName::new(name)
+            .map_err(anyhow::Error::msg)?
+            .as_str()
+            .to_string(),
         None => suggest_name(client, space)?,
     };
-    if occupied_names(client)?.contains(&name) {
+    let occupied = occupied_names(client)?;
+    if occupied.contains(&name) {
         bail!("session name {name:?} is already in use");
     }
+    let agent = prismattyc_mux::session_name::unique_agent_id(
+        &prismattyc_mux::session_name::agent_id_from_label(&name),
+        |candidate| occupied.iter().any(|used| used == candidate),
+    )
+    .map_err(anyhow::Error::msg)?;
     let mut record = prismattyc_mux::stub_space_session(name.clone());
-    record.agent = Some(name.clone());
+    record.agent = Some(agent);
     record.windows[0].title = name;
     if let SavedNode::Leaf { cwd, .. } = &mut record.windows[0].root {
         *cwd = prismattyc_mux::platform::home_dir()
@@ -1566,6 +1576,7 @@ fn move_pane(
             cols: None,
             rows: None,
             agent_id: None,
+            derive_agent_id: false,
             headless: true,
         })?;
         let ControlResponseData::Session { session_id, .. } = response else {

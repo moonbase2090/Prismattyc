@@ -13058,11 +13058,7 @@ fn icon_click_decision(
 
 /// A row in a space that is not current. Its session opens the space and
 /// then focuses that pane; without a title the space opens on its own focus.
-fn open_saved_row(
-    space: &str,
-    session_title: Option<&str>,
-    tab: Option<usize>,
-) -> SidebarClick {
+fn open_saved_row(space: &str, session_title: Option<&str>, tab: Option<usize>) -> SidebarClick {
     match session_title {
         Some(title) if !title.is_empty() => SidebarClick::OpenSession {
             space: space.to_string(),
@@ -28132,6 +28128,7 @@ session mail (id 15)
         let open_session = SidebarClick::OpenSession {
             space: "mail".to_string(),
             title: "worker-a".to_string(),
+            tab: Some(1),
         };
         assert_eq!(
             sidebar_click_decision(
@@ -28375,6 +28372,7 @@ session mail (id 15)
                 title: title.into(),
                 sessions: vec!["agent-2".into()],
                 layout: None,
+                fixed_name: None,
             })
             .collect();
         let tree = sidebar::SidebarTree::build(&[sidebar::SpaceInput {

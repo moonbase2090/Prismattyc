@@ -461,6 +461,7 @@ mod tests {
             title: "main".into(),
             sessions: vec!["agent-1".into()],
             layout: None,
+            fixed_name: None,
         }];
         let tree = SidebarTree::build(&[SpaceInput {
             name: "space-a",
@@ -488,6 +489,7 @@ mod tests {
                 title: title.into(),
                 sessions: vec![session.into()],
                 layout: None,
+                fixed_name: None,
             }]
         })
         .collect();
@@ -564,6 +566,7 @@ mod tests {
                 title: title.into(),
                 sessions: vec!["agent-1".into()],
                 layout: None,
+                fixed_name: None,
             })
             .collect();
         let tree = SidebarTree::build(&[SpaceInput {

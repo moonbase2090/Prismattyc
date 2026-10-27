@@ -164,6 +164,7 @@ fn timing(key: &str) -> &'static str {
             "Next endpoint resolution / host launch; live backend unchanged"
         }
         "mux.attach_on_new" => "Next pmux new",
+        "mux.allow_mixed_case_session_names" => "Next session name",
         "mux.space_open_runs_commands" => "Next Space open",
         "mux.remote_size" => "Next daemon start; no automatic restart",
         "mux.shell" => "Next shell selection",
@@ -327,6 +328,11 @@ pub(super) fn catalog() -> Vec<Control> {
         row(Section::Mux, "mux.instance", Kind::Text),
         row(Section::Mux, "mux.socket", Kind::Text),
         row(Section::Mux, "mux.attach_on_new", Kind::Bool),
+        row(
+            Section::Mux,
+            "mux.allow_mixed_case_session_names",
+            Kind::Bool,
+        ),
         row(
             Section::Mux,
             "mux.space_open_runs_commands",

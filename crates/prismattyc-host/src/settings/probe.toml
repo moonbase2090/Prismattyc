@@ -102,6 +102,7 @@ ansi = ["#000001", "#000002", "#000003", "#000004", "#000005", "#000006", "#0000
 instance = "settings-example"
 socket = "/tmp/settings-example.sock"
 attach_on_new = true
+allow_mixed_case_session_names = true
 space_open_runs_commands = "all"
 remote_size = "latest"
 shell = "/bin/sh"

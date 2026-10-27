@@ -5697,3 +5697,36 @@ fn pane_write_wire_rejects_recycled_child_and_foreign_connection() {
             .dirty_input
     );
 }
+
+#[test]
+fn space_rename_updates_the_attached_view_name() {
+    let socket = socket_path();
+    let _guard = start_server(&socket);
+    let data = layout_data_dir();
+    let xdg = &[("XDG_DATA_HOME", data.0.as_path())];
+    let a = umbrella(
+        &socket,
+        &["new", "--no-attach", "pt-rename-a", "--", "/bin/sh"],
+    );
+    assert!(a.status.success(), "{}", stderr(&a));
+    let save = umbrella_env(&socket, xdg, &["space", "save", "alpha", "pt-rename-a"]);
+    assert!(save.status.success(), "{}", stderr(&save));
+    attach_tabs::save(
+        &attach_tabs::layout_path_from_socket(&socket),
+        &attach_tabs::AttachTabsFile {
+            space: Some("alpha".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let renamed = umbrella_env(&socket, xdg, &["space", "rename", "alpha", "beta"]);
+    assert!(renamed.status.success(), "{}", stderr(&renamed));
+
+    let cache = attach_tabs::load(&attach_tabs::layout_path_from_socket(&socket)).expect("cache");
+    assert_eq!(
+        cache.space.as_deref(),
+        Some("beta"),
+        "rename must update the attached view's Space name"
+    );
+}

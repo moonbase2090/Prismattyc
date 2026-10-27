@@ -137,6 +137,9 @@ pub struct SavedSpace {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SavedSpaceTab {
     pub title: String,
+    /// Explicit host tab label, absent for the historical follow-focus mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_name: Option<String>,
     pub sessions: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<crate::attach_tabs::TabLayoutNode>,
@@ -203,6 +206,7 @@ pub fn space_add_session(
         .unwrap_or_else(|| name.clone());
     space.tabs.push(SavedSpaceTab {
         title,
+        fixed_name: None,
         sessions: vec![name],
         layout: None,
     });
@@ -1760,6 +1764,7 @@ mod tests {
                 title: "t1".into(),
                 sessions: vec!["b".into(), "a".into()],
                 layout: None,
+                fixed_name: None,
             }],
             active_tab: 0,
             focused_session: Some("a".into()),
@@ -1963,6 +1968,7 @@ mod tests {
                 title: name.into(),
                 sessions: vec![name.into()],
                 layout: None,
+                fixed_name: None,
             }],
             active_tab: 0,
             focused_session: Some(name.into()),

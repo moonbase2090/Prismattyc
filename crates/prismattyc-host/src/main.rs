@@ -25,6 +25,7 @@ mod git_info;
 mod gpu;
 mod graphite;
 mod graphite_overlays;
+mod host_tab_requests;
 mod hyperlink;
 mod icon;
 mod instance;
@@ -790,8 +791,11 @@ fn open_attach_session_tabs(
     let mux_bin = mux_bin.to_string_lossy();
     let mut pane_sessions = Vec::new();
     for (index, (title, members)) in grouped.groups.iter().enumerate() {
+        let fixed_name = grouped.fixed_names.get(index).and_then(Option::as_deref);
         let start = if index == 0 {
-            mux.rename_window(mux.active_window(), title)?;
+            let window = mux.active_window();
+            mux.rename_window(window, title)?;
+            mux.set_fixed_tab_name(window, fixed_name)?;
             let pane = mux.focused_id();
             mux.mark_attach_session(pane, members[0].session.clone(), members[0].title.clone());
             pane_sessions.push((pane, members[0].session.clone()));
@@ -800,6 +804,7 @@ fn open_attach_session_tabs(
             let first = &members[0];
             let window = mux.new_tab(&mux_bin, &attach_session_args(first))?;
             mux.rename_window(window, title)?;
+            mux.set_fixed_tab_name(window, fixed_name)?;
             let pane = mux.focused_id();
             mux.mark_attach_session(pane, first.session.clone(), first.title.clone());
             pane_sessions.push((pane, first.session.clone()));
@@ -1720,6 +1725,7 @@ enum ContextMenuTarget {
     RailSession(PaneId),
     RailSessionSolo(PaneId),
     RailPane(PaneId),
+    RailTab(prismattyc_mux::WindowId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1810,7 +1816,8 @@ fn context_menu_choice(kind: ContextMenuKind, index: usize) -> ContextMenuChoice
         ContextMenuKind::RailSpace
         | ContextMenuKind::RailSession
         | ContextMenuKind::RailSessionSolo
-        | ContextMenuKind::RailPane => ContextMenuChoice::Noop,
+        | ContextMenuKind::RailPane
+        | ContextMenuKind::RailTab => ContextMenuChoice::Noop,
     }
 }
 
@@ -1829,7 +1836,8 @@ fn context_menu_action(target: ContextMenuTarget, index: usize) -> ContextMenuAc
         ContextMenuTarget::RailSpace(_)
         | ContextMenuTarget::RailSession(_)
         | ContextMenuTarget::RailSessionSolo(_)
-        | ContextMenuTarget::RailPane(_) => ContextMenuAction::Noop,
+        | ContextMenuTarget::RailPane(_)
+        | ContextMenuTarget::RailTab(_) => ContextMenuAction::Noop,
     }
 }
 
@@ -1884,6 +1892,7 @@ fn context_menu_kind(target: ContextMenuTarget) -> ContextMenuKind {
         ContextMenuTarget::RailSession(_) => ContextMenuKind::RailSession,
         ContextMenuTarget::RailSessionSolo(_) => ContextMenuKind::RailSessionSolo,
         ContextMenuTarget::RailPane(_) => ContextMenuKind::RailPane,
+        ContextMenuTarget::RailTab(_) => ContextMenuKind::RailTab,
     }
 }
 
@@ -4939,15 +4948,16 @@ fn chrome_snapshot(host: &HostState, live: Option<a11y::LiveSnap>) -> a11y::Chro
                 (notice.tab == index && Instant::now() < notice.until)
                     .then_some((notice.handle, notice.title.as_str()))
             });
-            let title = title_row::title_row_decision(
-                host.pane_titles,
-                info.handles,
-                info.title.as_str(),
-                info.pane_title.as_deref(),
-                &info.handle_titles,
+            let title = title_row::title_row_decision(title_row::TitleRowInput {
+                mode: host.pane_titles,
+                handles: info.handles,
+                tab_title: info.title.as_str(),
+                fixed_name: info.fixed_name.as_deref(),
+                pane_title: info.pane_title.as_deref(),
+                handle_titles: &info.handle_titles,
                 hover_handle,
                 notice,
-            )
+            })
             .label
             .to_string();
             let title = info
@@ -8574,16 +8584,16 @@ fn begin_tab_rename(host: &mut HostState, index: Option<usize>) {
     let Some(window) = host.mux.window_at_tab(index) else {
         return;
     };
-    if let Some((_, panes)) = host.mux.tab_panes().get(index) {
-        if panes.len() == 1 && session_prompt::rename(host, panes[0], keybind::Action::RenameTab) {
-            return;
-        }
-    }
     let title = host
         .mux
         .tab_infos()
         .get(index)
-        .map(|tab| tab.title.clone())
+        .map(|tab| {
+            tab.fixed_name
+                .clone()
+                .or_else(|| tab.pane_title.clone())
+                .unwrap_or_else(|| tab.title.clone())
+        })
         .unwrap_or_default();
     if rename_uses_strip(sidebar_mode(host), show_tab_strip(host)) {
         host.tab_rename = Some(TabRename {
@@ -9359,7 +9369,7 @@ fn commit_tab_rename(host: &mut HostState) {
         observe_host_action(host, keybind::Action::RenamePane, pane_ok);
         return;
     }
-    match host.mux.rename_window(edit.window, &edit.buffer) {
+    match host.mux.set_fixed_tab_name(edit.window, Some(&edit.buffer)) {
         Ok(_) => {
             mark_layout_dirty(host);
             host.window
@@ -10899,6 +10909,25 @@ fn context_menu_rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
                 .collect();
             (header, rows)
         }
+        ContextMenuTarget::RailTab(window) => {
+            let tab = host
+                .mux
+                .tab_infos()
+                .into_iter()
+                .find(|tab| tab.window == Some(window))?;
+            let header = tab.fixed_name.unwrap_or(tab.title);
+            let rows = [
+                ("Rename tab", "set a fixed name for this tab"),
+                ("Clear tab name", "return this tab to follow-focus naming"),
+                ("Session actions…", "open the session menu for this tab"),
+            ]
+            .into_iter()
+            .map(|(label, description)| {
+                PaletteRow::plain(label.to_string(), description.to_string(), String::new())
+            })
+            .collect();
+            (header, rows)
+        }
         ContextMenuTarget::RailSession(pane) => {
             let header = host
                 .mux
@@ -11048,20 +11077,6 @@ fn pane_for_sidebar_row(host: &HostState, row: &sidebar::TreeRow) -> Option<Pane
         .tab_panes()
         .get(tab)
         .and_then(|(_, panes)| panes.get(pane_index).copied())
-}
-
-fn sidebar_tab_pane_count(host: &HostState, row: &sidebar::TreeRow) -> usize {
-    let Some(tab) = row.tab else {
-        return 1;
-    };
-    if let Some((_, panes)) = host.mux.tab_panes().get(tab) {
-        return panes.len().max(1);
-    }
-    host.mux
-        .tab_infos()
-        .get(tab)
-        .map(|info| if info.handles == 0 { 1 } else { info.handles })
-        .unwrap_or(1)
 }
 
 fn close_space_from_host(host: &mut HostState, name: &str) {
@@ -11365,6 +11380,41 @@ fn activate_context_menu(
         ContextMenuTarget::RailPane(pane) => {
             if let Some(action) = rail_context_menu::pane_action(index) {
                 return apply_rail_pane_action(host, pane, action, program, child_args);
+            }
+            Dispatch::Handled
+        }
+        ContextMenuTarget::RailTab(window) => {
+            let tabs = host.mux.tab_infos();
+            if let Some((tab_index, _)) = tabs
+                .iter()
+                .enumerate()
+                .find(|(_, tab)| tab.window == Some(window))
+            {
+                match index {
+                    0 => begin_tab_rename(host, Some(tab_index)),
+                    1 => {
+                        if host.mux.set_fixed_tab_name(window, None).is_ok() {
+                            mark_layout_dirty(host);
+                            host.window
+                                .set_title(&window_title(&host.mux, show_tab_strip(host)));
+                        }
+                        host.dirty = true;
+                        host.window.request_redraw();
+                    }
+                    2 => {
+                        if let Some((_, panes)) = host.mux.tab_panes().get(tab_index) {
+                            if let Some(pane) = panes.first().copied() {
+                                let target = if panes.len() > 1 {
+                                    ContextMenuTarget::RailSession(pane)
+                                } else {
+                                    ContextMenuTarget::RailSessionSolo(pane)
+                                };
+                                open_context_menu(host, target);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
             Dispatch::Handled
         }
@@ -12253,7 +12303,7 @@ fn sidebar_icon_tooltip(host: &HostState) -> Option<(graphite::Rect, String)> {
                 sidebar::RowKind::Tab => row
                     .tab
                     .and_then(|tab| space.tabs.get(tab))
-                    .map(|tab| tab.title.clone())
+                    .map(|tab| tab.fixed_name.clone().unwrap_or_else(|| tab.title.clone()))
                     .filter(|title| !title.is_empty())
                     .unwrap_or_else(|| "Tab".to_string()),
                 sidebar::RowKind::Pane => row
@@ -13094,13 +13144,19 @@ fn open_sidebar_context_menu(host: &mut HostState, row: &sidebar::TreeRow, space
             }
         }
         sidebar::RowKind::Tab => {
-            if let Some(pane) = pane_for_sidebar_row(host, row) {
-                let target = if sidebar::show_pane_rows(sidebar_tab_pane_count(host, row)) {
-                    ContextMenuTarget::RailSession(pane)
-                } else {
-                    ContextMenuTarget::RailSessionSolo(pane)
-                };
-                open_context_menu(host, target);
+            let current = host.space_rail.current.as_deref() == Some(space_name)
+                && host
+                    .sidebar_tree
+                    .spaces
+                    .get(row.space)
+                    .is_some_and(|space| space.name == space_name);
+            if current {
+                if let Some(window) = row
+                    .tab
+                    .and_then(|index| host.mux.tab_infos().get(index).and_then(|tab| tab.window))
+                {
+                    open_context_menu(host, ContextMenuTarget::RailTab(window));
+                }
             }
         }
         sidebar::RowKind::Pane => {
@@ -13435,7 +13491,7 @@ fn drag_toast_label(host: &HostState, stride: usize) -> Option<String> {
         .mux
         .tab_infos()
         .into_iter()
-        .map(|tab| tab.title)
+        .map(|tab| tab.fixed_name.unwrap_or(tab.title))
         .collect();
     let subject = match drag.kind {
         StripDragKind::Tab(index) => drag_toast_subject(&DragSubject::Tab(
@@ -14053,15 +14109,16 @@ fn graphite_tab_text(
         Some(mux::StripHit::Pane { tab, handle, .. }) if tab == index => Some(handle),
         _ => None,
     };
-    let decided = title_row::title_row_decision(
-        host.pane_titles,
-        tab.handles,
-        tab.title.as_str(),
-        tab.pane_title.as_deref(),
-        &tab.handle_titles,
+    let decided = title_row::title_row_decision(title_row::TitleRowInput {
+        mode: host.pane_titles,
+        handles: tab.handles,
+        tab_title: tab.title.as_str(),
+        fixed_name: tab.fixed_name.as_deref(),
+        pane_title: tab.pane_title.as_deref(),
+        handle_titles: &tab.handle_titles,
         hover_handle,
-        None,
-    );
+        notice: None,
+    });
     let meta = match (tab.handles > 1, tab.zoomed) {
         (true, true) => Some(format!("{} panes · zoomed", tab.handles)),
         (true, false) => Some(format!("{} panes", tab.handles)),
@@ -14250,7 +14307,12 @@ fn paint_graphite_sidebar(
                         selected_tabs.push(text.selected);
                     }
                     None => {
-                        labels.push(tab.map(|tab| tab.title.clone()).unwrap_or_default());
+                        labels.push(
+                            tab.map(|tab| {
+                                tab.fixed_name.clone().unwrap_or_else(|| tab.title.clone())
+                            })
+                            .unwrap_or_default(),
+                        );
                         dots.push(Some(graphite::Dot::Idle));
                         selected_tabs.push(false);
                     }
@@ -14503,7 +14565,7 @@ fn paint_pane_header(host: &mut HostState, buffer: &mut [u32], stride: usize, ge
             let tab = tabs
                 .iter()
                 .find(|tab| tab.selected)
-                .map(|tab| tab.title.clone())
+                .map(|tab| tab.fixed_name.clone().unwrap_or_else(|| tab.title.clone()))
                 .unwrap_or_default();
             if tab.is_empty() {
                 space
@@ -21755,6 +21817,7 @@ impl ApplicationHandler<UserAction> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        host_tab_requests::poll(self);
         let pump_io = pump_timing::PumpIoScope::begin();
         let mut persist_time = Duration::ZERO;
         for host in self.windows.values_mut() {
@@ -21774,6 +21837,7 @@ impl ApplicationHandler<UserAction> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        host_tab_requests::cleanup();
         for host in self.windows.values_mut() {
             persist_attach_layout_from_live(host);
         }
@@ -28005,6 +28069,7 @@ session mail (id 15)
             title: "main".to_string(),
             sessions: vec!["shell".to_string(), "logs".to_string()],
             layout: None,
+            fixed_name: None,
         }];
         let extra = vec!["worker-a".to_string()];
         let tree = sidebar::SidebarTree::build(&[sidebar::SpaceInput {
@@ -28336,6 +28401,7 @@ session mail (id 15)
                             attention: false,
                         },
                     ],
+                    fixed_name: None,
                 }],
             }],
         };

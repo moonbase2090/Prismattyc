@@ -724,6 +724,8 @@ pub enum ContextMenuKind {
     RailSessionSolo,
     /// Sidebar pane row under a session (issue #181).
     RailPane,
+    /// Named host tab row in the sidebar.
+    RailTab,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

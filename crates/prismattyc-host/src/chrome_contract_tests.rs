@@ -187,7 +187,10 @@ fn verify_rename_and_rail(host: &mut HostState) {
     });
     commit_tab_rename(host);
     assert!(host.tab_rename.is_none());
-    assert_eq!(host.mux.tab_infos()[index].title, "Review workspace");
+    assert_eq!(
+        host.mux.tab_infos()[index].fixed_name.as_deref(),
+        Some("Review workspace")
+    );
     assert!(host.layout_dirty);
     host.spacing.space_rail = space_rail::RailSide::Left;
     host.spacing.space_rail_width_cols = 14;

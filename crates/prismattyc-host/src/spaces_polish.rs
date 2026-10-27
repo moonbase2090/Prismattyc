@@ -127,6 +127,7 @@ pub(super) fn undo(host: &mut HostState) {
 #[derive(Debug, Clone, PartialEq)]
 struct TabSnap {
     title: String,
+    fixed_name: Option<String>,
     sessions: Vec<String>,
     layout: Option<prismattyc_mux::attach_tabs::TabLayoutNode>,
 }
@@ -151,6 +152,7 @@ fn snaps_from_attach(file: &attach_tabs::AttachTabsFile) -> Vec<TabSnap> {
             let layout = prismattyc_mux::attach_tabs::layout_for_sessions(layout, &sessions);
             TabSnap {
                 title: tab.title.clone(),
+                fixed_name: tab.fixed_name.clone(),
                 sessions,
                 layout,
             }
@@ -173,6 +175,7 @@ fn saved_snaps(space: &prismattyc_mux::SavedSpace) -> Vec<TabSnap> {
                     .first()
                     .map(|window| window.title.clone())
                     .unwrap_or_else(|| session.name.clone()),
+                fixed_name: None,
                 sessions: vec![session.name.clone()],
                 layout: None,
             })
@@ -183,6 +186,7 @@ fn saved_snaps(space: &prismattyc_mux::SavedSpace) -> Vec<TabSnap> {
             .iter()
             .map(|tab| TabSnap {
                 title: tab.title.clone(),
+                fixed_name: tab.fixed_name.clone(),
                 sessions: tab.sessions.clone(),
                 layout: tab.layout.clone(),
             })
@@ -635,6 +639,7 @@ mod tests {
                 first: Box::new(leaf("s1")),
                 second: Box::new(leaf("s2")),
             }),
+            fixed_name: None,
         };
         let wide = split(0.25);
         let even = split(0.5);
@@ -693,6 +698,7 @@ mod tests {
                     title: snap.title.clone(),
                     sessions: snap.sessions.clone(),
                     layout: snap.layout.clone(),
+                    fixed_name: None,
                 })
                 .collect(),
             active_tab: 0,
@@ -745,6 +751,7 @@ mod tests {
                     title: tab.title.clone(),
                     sessions: tab.sessions.clone(),
                     layout: tab.layout.clone(),
+                    fixed_name: None,
                 })
                 .collect(),
             ..AttachTabsFile::default()

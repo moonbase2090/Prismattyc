@@ -31,6 +31,14 @@ impl Drop for Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::configured(false)
+    }
+
+    fn new_with_mixed_case_names() -> Self {
+        Self::configured(true)
+    }
+
+    fn configured(allow_mixed_case_names: bool) -> Self {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
             "pmux-naming-{}-{}",
@@ -43,6 +51,15 @@ impl Fixture {
             dir,
             server: None,
         };
+        if allow_mixed_case_names {
+            let config_dir = f.dir.join("config/prismattyc");
+            std::fs::create_dir_all(&config_dir).unwrap();
+            std::fs::write(
+                config_dir.join("config.toml"),
+                "[mux]\nallow_mixed_case_session_names = true\n",
+            )
+            .unwrap();
+        }
         f.start();
         f
     }
@@ -113,8 +130,13 @@ impl Fixture {
             .join(format!("sha256-{digest:x}"))
     }
     fn saved(&self) -> serde_json::Value {
-        serde_json::from_slice(&std::fs::read(self.spaces_dir().join("work.json")).unwrap())
-            .unwrap()
+        self.saved_space("work")
+    }
+    fn saved_space(&self, name: &str) -> serde_json::Value {
+        serde_json::from_slice(
+            &std::fs::read(self.spaces_dir().join(format!("{name}.json"))).unwrap(),
+        )
+        .unwrap()
     }
 }
 fn ok(out: Output) -> String {
@@ -249,16 +271,152 @@ fn readable_space_sessions_rename_keeps_process_mail_and_old_addresses() {
     assert!(f
         .ok(&["mail", "--as", "reviewer-next", "inbox"])
         .contains("open: 3 held: 1"));
-    let refused = f.cli(&["new", "--no-attach", "work-1"]).output().unwrap();
+    // The display label is reusable after the rename, but the derived mailbox
+    // must skip the old forwarding address.
+    f.ok(&["new", "--no-attach", "work-1"]);
+    let recreated = f.snapshot();
+    let reused_label = recreated
+        .sessions
+        .iter()
+        .find(|session| session.name == "work-1")
+        .unwrap();
+    assert_eq!(reused_label.agent_id.as_deref(), Some("work-1-2"));
+}
+
+#[test]
+fn mixed_case_display_names_keep_case_and_use_lowercase_unique_mailboxes() {
+    let f = Fixture::new_with_mixed_case_names();
+    f.ok(&["new", "--no-attach", "Graphite-Main"]);
+    let created = f.snapshot();
+    let session = created
+        .sessions
+        .iter()
+        .find(|session| session.name == "Graphite-Main")
+        .unwrap();
+    assert_eq!(session.agent_id.as_deref(), Some("graphite-main"));
+
+    f.ok(&[
+        "session",
+        "name",
+        "Graphite Main",
+        "--session",
+        "Graphite-Main",
+    ]);
+    let renamed = f.snapshot();
+    let session = renamed
+        .sessions
+        .iter()
+        .find(|session| session.name == "Graphite Main")
+        .unwrap();
+    assert_eq!(session.agent_id.as_deref(), Some("graphite-main"));
+
+    f.ok(&[
+        "space",
+        "create",
+        "Team",
+        "--session-name",
+        "Graphite Worker",
+        "--no-attach",
+    ]);
+    let saved = f.saved_space("Team");
+    assert_eq!(saved["sessions"][0]["name"], "Graphite Worker");
+    assert_eq!(saved["sessions"][0]["agent"], "graphite-worker");
+    let live = f.snapshot();
+    let session = live
+        .sessions
+        .iter()
+        .find(|session| session.name == "Graphite Worker")
+        .unwrap();
+    assert_eq!(session.agent_id.as_deref(), Some("graphite-worker"));
+}
+
+#[test]
+fn session_names_and_lookup_remain_exact_case_sensitive_strings() {
+    let f = Fixture::new_with_mixed_case_names();
+    f.ok(&["new", "--no-attach", "Graphite-Main"]);
+    f.ok(&["new", "--no-attach", "graphite-main"]);
+    let snapshot = f.snapshot();
+    let upper = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.name == "Graphite-Main")
+        .unwrap();
+    let lower = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.name == "graphite-main")
+        .unwrap();
+    assert_eq!(upper.agent_id.as_deref(), Some("graphite-main"));
+    assert_eq!(lower.agent_id.as_deref(), Some("graphite-main-2"));
     assert!(
-        !refused.status.success(),
-        "old forwarding address must not be stolen"
+        !f.cli(&["new", "--no-attach", "Graphite-Main"])
+            .output()
+            .unwrap()
+            .status
+            .success(),
+        "an exact duplicate display name is rejected"
     );
 }
 
 #[test]
+fn new_skips_mailbox_addresses_reserved_by_saved_spaces() {
+    let f = Fixture::new_with_mixed_case_names();
+    f.ok(&[
+        "space",
+        "create",
+        "Reserve",
+        "--session-name",
+        "Reserved Place",
+        "--no-attach",
+    ]);
+    f.ok(&[
+        "space",
+        "create",
+        "Team",
+        "--session-name",
+        "Graphite Worker",
+        "--no-attach",
+    ]);
+    let mut saved = f.saved_space("Reserve");
+    saved["sessions"][0]["agent"] = serde_json::json!("graphite-main");
+    std::fs::write(
+        f.spaces_dir().join("Reserve.json"),
+        serde_json::to_vec_pretty(&saved).unwrap(),
+    )
+    .unwrap();
+
+    f.ok(&[
+        "session",
+        "name",
+        "Graphite Main",
+        "--session",
+        "Graphite Worker",
+    ]);
+    let renamed = f.snapshot();
+    let session = renamed
+        .sessions
+        .iter()
+        .find(|session| session.name == "Graphite Main")
+        .unwrap();
+    assert_eq!(session.agent_id.as_deref(), Some("graphite-main-2"));
+    assert_eq!(
+        f.saved_space("Team")["sessions"][0]["agent"],
+        "graphite-main-2"
+    );
+
+    f.ok(&["new", "--no-attach", "Graphite-Main"]);
+    let snapshot = f.snapshot();
+    let session = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.name == "Graphite-Main")
+        .unwrap();
+    assert_eq!(session.agent_id.as_deref(), Some("graphite-main-3"));
+}
+
+#[test]
 fn bind_existing_unassigned_session_and_reject_name_conflicts_without_changes() {
-    let f = Fixture::new();
+    let f = Fixture::new_with_mixed_case_names();
     f.ok(&[
         "new",
         "--no-attach",
@@ -373,7 +531,7 @@ fn mailbox_failure_leaves_the_session_and_saved_space_unchanged() {
 
 #[test]
 fn pane_label_keeps_its_case_and_mail_uses_the_derived_address() {
-    let f = Fixture::new();
+    let f = Fixture::new_with_mixed_case_names();
     f.ok(&["space", "create", "work", "--no-attach"]);
     f.ok(&["space", "add", "work"]);
     let before = f.snapshot();
@@ -460,6 +618,7 @@ fn interrupted_rename_reconciles_saved_references_before_the_next_space_operatio
         request_id: 1,
         session_id: old.id,
         name: "renamed".into(),
+        agent_id: None,
     };
     writeln!(stream, "{}", serde_json::to_string(&req).unwrap()).unwrap();
     let mut line = String::new();

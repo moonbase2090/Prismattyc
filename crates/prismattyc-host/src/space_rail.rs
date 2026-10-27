@@ -2190,6 +2190,7 @@ mod tests {
                     title: (*title).into(),
                     sessions: members.iter().map(|m| (*m).to_string()).collect(),
                     layout: None,
+                    fixed_name: None,
                 })
                 .collect(),
             active_tab: 0,

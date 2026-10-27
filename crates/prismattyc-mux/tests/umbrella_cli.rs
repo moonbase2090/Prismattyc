@@ -43,6 +43,22 @@ fn socket_path() -> PathBuf {
     ))
 }
 
+/// A config file that opts in to mixed-case session names. Tests that create
+/// such names pass it as `PRISMATTYC_CONFIG` on each `pmux` process.
+fn mixed_case_opt_in_config() -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "pmux-umbrella-config-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).expect("config dir");
+    let path = dir.join("config.toml");
+    std::fs::write(&path, "[mux]\nallow_mixed_case_session_names = true\n").expect("config");
+    path
+}
+
 fn umbrella(socket: &Path, args: &[&str]) -> Output {
     umbrella_vars(socket, &[], args)
 }
@@ -649,11 +665,20 @@ fn attach_write_all_is_write_payload_not_all_flag() {
 
 #[test]
 fn attach_all_passes_session_id_not_ambiguous_name() {
+    let cfg = mixed_case_opt_in_config();
     let socket = socket_path();
     let _guard = start_server(&socket);
-    let created = umbrella(&socket, &["new", "1", "--", "/bin/sh"]);
+    let created = umbrella_env(
+        &socket,
+        &[("PRISMATTYC_CONFIG", cfg.as_path())],
+        &["new", "1", "--", "/bin/sh"],
+    );
     assert!(created.status.success(), "{}", stderr(&created));
-    let created_comma = umbrella(&socket, &["new", "a,b", "--", "/bin/sh"]);
+    let created_comma = umbrella_env(
+        &socket,
+        &[("PRISMATTYC_CONFIG", cfg.as_path())],
+        &["new", "a,b", "--", "/bin/sh"],
+    );
     assert!(created_comma.status.success(), "{}", stderr(&created_comma));
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
@@ -690,7 +715,11 @@ fn attach_all_passes_session_id_not_ambiguous_name() {
         "expected exactly the two created session ids: {text}"
     );
 
-    let ambiguous = umbrella(&socket, &["attach", "1", "--json"]);
+    let ambiguous = umbrella_env(
+        &socket,
+        &[("PRISMATTYC_CONFIG", cfg.as_path())],
+        &["attach", "1", "--json"],
+    );
     assert!(!ambiguous.status.success(), "{}", stderr(&ambiguous));
     assert!(
         stderr(&ambiguous).contains("ambiguous"),
@@ -699,7 +728,11 @@ fn attach_all_passes_session_id_not_ambiguous_name() {
     );
 
     for id in ids {
-        let dump = umbrella(&socket, &["attach", "--session-id", &id, "--json"]);
+        let dump = umbrella_env(
+            &socket,
+            &[("PRISMATTYC_CONFIG", cfg.as_path())],
+            &["attach", "--session-id", &id, "--json"],
+        );
         assert!(
             dump.status.success(),
             "session-id {id} failed: {}",
@@ -1948,6 +1981,7 @@ fn move_seats(snapshot: &Snapshot) -> Vec<MoveSeat> {
 
 #[test]
 fn space_move_explicit_id_disambiguates_owned_and_unassigned_sessions() {
+    let cfg = mixed_case_opt_in_config();
     for owned in [false, true] {
         let socket = socket_path();
         let _guard = start_server(&socket);
@@ -1964,7 +1998,11 @@ fn space_move_explicit_id_disambiguates_owned_and_unassigned_sessions() {
             + 2)
         .to_string();
         for name in [collision.as_str(), "intended", "destination"] {
-            let result = umbrella(&socket, &["new", "--no-attach", name, "--", "/bin/sh"]);
+            let result = umbrella_env(
+                &socket,
+                &[("PRISMATTYC_CONFIG", cfg.as_path())],
+                &["new", "--no-attach", name, "--", "/bin/sh"],
+            );
             assert!(result.status.success(), "{}", stderr(&result));
         }
         // Use two panes so an ID-selected whole-session move cannot be mistaken
@@ -3795,6 +3833,7 @@ fn space_open_switch_rejects_shared_save_and_cross_space_add() {
                 title: "alpha".into(),
                 sessions: vec![id_a.clone()],
                 layout: None,
+                fixed_name: None,
             }],
             space: Some("alpha".into()),
             ..Default::default()
@@ -3958,11 +3997,13 @@ fn space_save_copies_fake_attach_tabs_cache() {
                     title: "seats".into(),
                     sessions: vec![id_a.clone(), id_b.clone()],
                     layout: None,
+                    fixed_name: None,
                 },
                 attach_tabs::AttachTabRecord {
                     title: "solo".into(),
                     sessions: vec![id_b.clone()],
                     layout: None,
+                    fixed_name: None,
                 },
             ],
             active_tab: 1,
@@ -4054,6 +4095,7 @@ fn space_save_and_open_round_trip_the_tab_split_tree() {
                 title: "grid".into(),
                 sessions: ids.clone(),
                 layout: Some(layout),
+                fixed_name: None,
             }],
             ..Default::default()
         },
@@ -4149,6 +4191,7 @@ fn space_save_tabs_a_live_session_the_cache_omits() {
                 title: "one".into(),
                 sessions: vec![id_a],
                 layout: None,
+                fixed_name: None,
             }],
             active_tab: 0,
             focused_session: None,
@@ -4244,11 +4287,13 @@ fn space_open_restores_two_tabs_three_plus_two() {
                     title: "PRISMATTYC".into(),
                     sessions: vec![ids[0].clone(), ids[1].clone(), ids[2].clone()],
                     layout: None,
+                    fixed_name: None,
                 },
                 attach_tabs::AttachTabRecord {
                     title: "WEBSITE".into(),
                     sessions: vec![ids[3].clone(), ids[4].clone()],
                     layout: None,
+                    fixed_name: None,
                 },
             ],
             active_tab: 1,
@@ -4302,6 +4347,7 @@ fn space_open_tabless_space_replaces_stale_cache_with_one_tab_per_session() {
                 title: "stale".into(),
                 sessions: vec!["99".into()],
                 layout: None,
+                fixed_name: None,
             }],
             active_tab: 1,
             focused_session: Some("99".into()),
@@ -4336,6 +4382,7 @@ fn space_open_tabless_space_replaces_stale_cache_with_one_tab_per_session() {
             title: "pt66-empty-a".into(),
             sessions: vec![live_id],
             layout: None,
+            fixed_name: None,
         }],
         "{loaded:?}"
     );
@@ -4380,6 +4427,7 @@ fn space_open_tty_prints_attach_recipe_in_tab_order() {
                 title: "seats".into(),
                 sessions: vec![id_b.clone(), id_a.clone()],
                 layout: None,
+                fixed_name: None,
             }],
             active_tab: 0,
             focused_session: Some(id_a),

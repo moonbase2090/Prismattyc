@@ -37,6 +37,16 @@ pub struct MuxSection {
     pub remote_size: Option<RemoteSizePolicy>,
     /// Pane program. Empty uses the platform default.
     pub shell: Option<String>,
+    /// Allow user-entered session labels to preserve mixed case and spaces.
+    /// Default false to keep session labels in the mailbox-address format.
+    pub allow_mixed_case_session_names: Option<bool>,
+}
+
+impl MuxSection {
+    /// Mixed-case session labels are opt-in.
+    pub fn allow_mixed_case_session_names(&self) -> bool {
+        self.allow_mixed_case_session_names.unwrap_or(false)
+    }
 }
 
 /// Who `pmux space open` types a saved pane `command` into.
@@ -298,6 +308,12 @@ pub const MUX_KEYS: &[MuxKeySpec] = &[
         doc: "Pane shell override. Unset on Windows preserves COMSPEC or cmd.exe. Set pwsh.exe or powershell.exe to opt in to PowerShell. Unset on Unix uses SHELL or /bin/sh",
         range: "program name or path",
         kind: MuxKeyKind::CommentedPath("pwsh.exe"),
+    },
+    MuxKeySpec {
+        name: "allow_mixed_case_session_names",
+        doc: "Allow mixed-case and spaced session labels",
+        range: "true|false; default false",
+        kind: MuxKeyKind::Bool(false),
     },
 ];
 
@@ -885,6 +901,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                allow_mixed_case_session_names: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(Some("other".into()), None, &file).unwrap();
@@ -916,6 +933,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                allow_mixed_case_session_names: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(
@@ -938,6 +956,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                allow_mixed_case_session_names: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
@@ -956,6 +975,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                allow_mixed_case_session_names: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
@@ -973,6 +993,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                allow_mixed_case_session_names: None,
                 shell: None,
             };
             assert!(resolve_mux_target(None, None, &file).is_err());

@@ -526,6 +526,7 @@ mod tests {
                 title: "t".into(),
                 sessions: sessions.iter().map(|name| name.to_string()).collect(),
                 layout: None,
+                fixed_name: None,
             }],
             active_tab: 0,
             focused_session: focus.map(str::to_string),

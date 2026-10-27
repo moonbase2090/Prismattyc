@@ -288,6 +288,8 @@ space_open_runs_commands = "agents"
 remote_size = "latest"
 # Pane shell override. Unset on Windows preserves COMSPEC or cmd.exe. Set pwsh.exe or powershell.exe to opt in to PowerShell. Unset on Unix uses SHELL or /bin/sh. program name or path.
 # shell = "pwsh.exe"
+# Allow mixed-case and spaced session labels. true|false; default false.
+allow_mixed_case_session_names = false
 
 [keys]
 # Host actions. An entry replaces that action's default chords.
@@ -862,6 +864,7 @@ instance = "default"                 # $XDG_RUNTIME_DIR/prismattyc/pmux.sock
 # attach_on_new = false              # default true: `pmux new` attaches in a TTY
 # space_open_runs_commands = "agents"  # agents|all|none; `pmux space open --no-run` skips
 # remote_size = "latest"               # latest|host; TTY attach fits, detach restores host
+# allow_mixed_case_session_names = false  # default false; permit mixed-case or spaced session labels
 # shell = "pwsh.exe"                    # unset: COMSPEC or cmd.exe on Windows
 ```
 
@@ -1261,6 +1264,10 @@ The preference persists across launches. These direct actions override it:
 | `session_split_down` | Ctrl+Alt+Shift+B | Session split below |
 
 You can rebind these actions under `[keys]` or run them from the palette.
+Session labels use lowercase mailbox addresses by default. To allow mixed-case
+or spaced labels entered in the naming popup or with `pmux new`, set
+`allow_mixed_case_session_names = true` under `[mux]`. Existing saved Space
+labels continue to restore when this setting is off.
 Blank terminals belong to the Space view where you open them. Switching
 Spaces hides that view and keeps its shells running. Returning restores
 its tabs, split layout, and focus.

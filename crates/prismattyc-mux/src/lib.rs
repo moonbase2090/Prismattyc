@@ -20,6 +20,7 @@ pub mod executable;
 mod geometry;
 pub mod host_register;
 pub mod host_render_status;
+pub mod host_tabs;
 mod ids;
 mod image_paste;
 mod inject_submit;

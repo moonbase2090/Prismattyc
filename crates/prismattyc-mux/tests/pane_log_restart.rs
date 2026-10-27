@@ -123,6 +123,7 @@ fn identity_change_checkpoint_survives_unclean_restart() {
         request_id: 0,
         session_id: old_session,
         name: "old".into(),
+        agent_id: None,
     }));
     wait_persisted_session(&path, "old");
 
@@ -139,6 +140,7 @@ fn identity_change_checkpoint_survives_unclean_restart() {
         cols: None,
         rows: None,
         agent_id: None,
+        derive_agent_id: false,
         headless: true,
     })) {
         ControlResponseData::Session { session_id, .. } => session_id,

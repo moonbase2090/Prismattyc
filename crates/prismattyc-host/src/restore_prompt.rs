@@ -351,6 +351,7 @@ mod tests {
                 title: "saved".into(),
                 sessions: vec!["gone".into()],
                 layout: None,
+                fixed_name: None,
             }],
             ..Default::default()
         })
@@ -365,6 +366,7 @@ mod tests {
                 title: "empty".into(),
                 sessions: vec![],
                 layout: None,
+                fixed_name: None,
             }],
             ..Default::default()
         })

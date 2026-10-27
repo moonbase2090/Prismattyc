@@ -830,6 +830,9 @@ pub enum ControlRequest {
         /// Opt-in mailbox address. Absent/`null` means no agent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_id: Option<String>,
+        /// Derive a valid, unique mailbox address from the display name.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        derive_agent_id: bool,
         /// No window, no pane, no PTY.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         headless: bool,
@@ -869,6 +872,9 @@ pub enum ControlRequest {
         request_id: u64,
         session_id: u64,
         name: String,
+        /// Optional mailbox chosen by the CLI after checking saved Spaces.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
     },
     /// Client-local session selection (PRD §2.8.3). Does not destroy others.
     SwitchSession {
@@ -2277,6 +2283,11 @@ struct CheckpointCapture {
     panes: Vec<PendingPane>,
     captured: std::collections::HashMap<u64, (u64, String, usize)>,
     mark: u64,
+}
+
+struct SessionAgentBinding {
+    explicit: Option<String>,
+    derive: bool,
 }
 
 /// Display-free owner of control-visible mux topology and event history.
@@ -4881,17 +4892,31 @@ impl ControlPlane {
                 Ok(ControlResponseData::SessionNames { names })
             }
             ControlRequest::NameSession {
-                session_id, name, ..
-            } => self.name_session(session_id, name),
+                session_id,
+                name,
+                agent_id,
+                ..
+            } => self.name_session(session_id, name, agent_id),
             ControlRequest::CreateSession {
                 name,
                 spawn,
                 cols,
                 rows,
                 agent_id,
+                derive_agent_id,
                 headless,
                 ..
-            } => self.create_session(name, spawn, cols, rows, agent_id, headless),
+            } => self.create_session(
+                name,
+                spawn,
+                cols,
+                rows,
+                SessionAgentBinding {
+                    explicit: agent_id,
+                    derive: derive_agent_id,
+                },
+                headless,
+            ),
             ControlRequest::SetClientSpace {
                 client_id,
                 space_id,
@@ -5251,14 +5276,12 @@ impl ControlPlane {
         &mut self,
         raw: u64,
         name: String,
+        requested_agent: Option<String>,
     ) -> Result<ControlResponseData, ControlError> {
-        let display = name.trim().to_string();
-        if display.is_empty() || display.len() > 64 || display.contains('\0') {
-            return Err(ControlError::new(
-                ControlErrorCode::InvalidRequest,
-                "session name must be 1..=64 bytes and contain no NUL",
-            ));
-        }
+        let display = crate::session_name::DisplayName::new(&name)
+            .map_err(|error| ControlError::new(ControlErrorCode::InvalidRequest, error))?
+            .as_str()
+            .to_string();
         let id = session_id(raw)?;
         let old = self
             .domain
@@ -5269,15 +5292,28 @@ impl ControlPlane {
             .agent_id
             .clone()
             .unwrap_or_else(|| crate::session_name::agent_id_from_label(&old.name));
-        let agent = crate::session_name::unique_agent_id(
-            &crate::session_name::agent_id_from_label(&display),
-            |candidate| {
-                self.domain.sessions().any(|session| {
-                    session.id != id && session.agent_id.as_deref() == Some(candidate)
-                })
-            },
-        )
-        .map_err(|error| ControlError::new(ControlErrorCode::InvalidRequest, error))?;
+        let agent = if let Some(agent) = requested_agent {
+            crate::mailbox::AgentId::new(agent)
+                .map_err(|error| {
+                    ControlError::new(ControlErrorCode::InvalidRequest, error.to_string())
+                })?
+                .to_string()
+        } else {
+            crate::session_name::unique_agent_id(
+                &crate::session_name::agent_id_from_label(&display),
+                |candidate| {
+                    self.domain.sessions().any(|session| {
+                        session.id != id && session.agent_id.as_deref() == Some(candidate)
+                    }) || self.mail_aliases.contains_key(candidate)
+                        || self
+                            .mail_store
+                            .resolve(candidate)
+                            .map(|resolved| resolved != candidate && resolved != old_agent)
+                            .unwrap_or(true)
+                },
+            )
+            .map_err(|error| ControlError::new(ControlErrorCode::InvalidRequest, error))?
+        };
         let agent = crate::mailbox::AgentId::new(agent)
             .map_err(|error| {
                 ControlError::new(ControlErrorCode::InvalidRequest, error.to_string())
@@ -5288,6 +5324,9 @@ impl ControlPlane {
             .resolve(&agent)
             .map_err(Self::mail_store_error)?;
         if (resolved != agent && resolved != old_agent)
+            || self.domain.sessions().any(|session| {
+                session.id != id && session.agent_id.as_deref() == Some(agent.as_str())
+            })
             || self
                 .mail_aliases
                 .get(&agent)
@@ -5334,21 +5373,48 @@ impl ControlPlane {
         spawn: SpawnSpec,
         cols: Option<u32>,
         rows: Option<u32>,
-        agent_id: Option<String>,
+        agent_binding: SessionAgentBinding,
         headless: bool,
     ) -> Result<ControlResponseData, ControlError> {
         self.ensure_sequence_capacity()?;
         if !headless {
             spawn.validate()?;
         }
-        let name = name.trim();
-        if name.is_empty() || name.len() > 64 || name.contains('\0') {
+        let display_name = crate::session_name::DisplayName::new(&name)
+            .map_err(|error| ControlError::new(ControlErrorCode::InvalidRequest, error))?;
+        let name = display_name.as_str();
+        if agent_binding.explicit.is_some() && agent_binding.derive {
             return Err(ControlError::new(
                 ControlErrorCode::InvalidRequest,
-                "session name must be 1..=64 bytes and contain no NUL",
+                "explicit and derived mailbox addresses cannot be combined",
             ));
         }
+        let agent_id = if agent_binding.derive {
+            let base = crate::session_name::agent_id_from_label(name);
+            Some(
+                crate::session_name::unique_agent_id(&base, |candidate| {
+                    self.domain
+                        .sessions()
+                        .any(|session| session.agent_id.as_deref() == Some(candidate))
+                        || self.mail_aliases.contains_key(candidate)
+                        || self
+                            .mail_store
+                            .resolve(candidate)
+                            .map(|resolved| resolved != candidate)
+                            .unwrap_or(true)
+                })
+                .map_err(|error| ControlError::new(ControlErrorCode::InvalidRequest, error))?,
+            )
+        } else {
+            agent_binding.explicit
+        };
         if let Some(agent) = &agent_id {
+            crate::mailbox::AgentId::new(agent.clone()).map_err(|error| {
+                ControlError::new(
+                    ControlErrorCode::InvalidRequest,
+                    format!("invalid mailbox address {agent:?}: {error}"),
+                )
+            })?;
             let resolved = self
                 .mail_store
                 .resolve(agent)
@@ -9106,6 +9172,7 @@ function Read-Exact([int]$Count) {
             cols: Some(80),
             rows: Some(24),
             agent_id: None,
+            derive_agent_id: false,
             headless: false,
         });
         let (work_session, work_window, work_pane) = session_ids(&created);
@@ -9140,6 +9207,7 @@ function Read-Exact([int]$Count) {
             cols: None,
             rows: None,
             agent_id: None,
+            derive_agent_id: false,
             headless: false,
         });
         assert_eq!(error_code(&dup), ControlErrorCode::InvalidRequest);
@@ -9151,6 +9219,7 @@ function Read-Exact([int]$Count) {
             cols: None,
             rows: None,
             agent_id: None,
+            derive_agent_id: false,
             headless: false,
         });
         assert_eq!(error_code(&empty), ControlErrorCode::InvalidRequest);
@@ -9194,6 +9263,7 @@ function Read-Exact([int]$Count) {
             cols: None,
             rows: None,
             agent_id: None,
+            derive_agent_id: false,
             headless: false,
         });
         let work = session_ids(&created).0;
@@ -9266,6 +9336,7 @@ function Read-Exact([int]$Count) {
             cols: None,
             rows: None,
             agent_id: Some("operator-a".into()),
+            derive_agent_id: false,
             headless: false,
         });
         assert!(matches!(created.body, ControlResponseBody::Ok { .. }));
@@ -9288,9 +9359,50 @@ function Read-Exact([int]$Count) {
             cols: None,
             rows: None,
             agent_id: Some("operator-a".into()),
+            derive_agent_id: false,
             headless: false,
         });
         assert_eq!(error_code(&dup), ControlErrorCode::InvalidRequest);
+        for (request_id, name, expected_agent) in [
+            (3, "Graphite-Main", "graphite-main"),
+            (4, "Graphite Main", "graphite-main-2"),
+        ] {
+            let response = plane.handle(ControlRequest::CreateSession {
+                version: PROTOCOL_VERSION,
+                request_id,
+                name: name.into(),
+                spawn: spawn(),
+                cols: None,
+                rows: None,
+                agent_id: None,
+                derive_agent_id: true,
+                headless: false,
+            });
+            assert!(matches!(response.body, ControlResponseBody::Ok { .. }));
+            let session = plane
+                .snapshot()
+                .unwrap()
+                .sessions
+                .into_iter()
+                .find(|session| session.name == name)
+                .unwrap();
+            assert_eq!(session.agent_id.as_deref(), Some(expected_agent));
+        }
+        let invalid_explicit = plane.handle(ControlRequest::CreateSession {
+            version: PROTOCOL_VERSION,
+            request_id: 5,
+            name: "explicit-check".into(),
+            spawn: spawn(),
+            cols: None,
+            rows: None,
+            agent_id: Some("Upper-Agent".into()),
+            derive_agent_id: false,
+            headless: false,
+        });
+        assert_eq!(
+            error_code(&invalid_explicit),
+            ControlErrorCode::InvalidRequest
+        );
         match prior {
             Some(value) => std::env::set_var("PMUX_SESSION_AGENTS", value),
             None => std::env::remove_var("PMUX_SESSION_AGENTS"),
@@ -9309,6 +9421,7 @@ function Read-Exact([int]$Count) {
             cols: None,
             rows: None,
             agent_id: Some("worker-bot".into()),
+            derive_agent_id: false,
             headless: true,
         });
         let ControlResponseBody::Ok {
@@ -9353,6 +9466,7 @@ function Read-Exact([int]$Count) {
             cols: None,
             rows: None,
             agent_id: Some("worker-bot".into()),
+            derive_agent_id: false,
             headless: true,
         });
         assert!(matches!(created.body, ControlResponseBody::Ok { .. }));
@@ -9577,6 +9691,7 @@ function Read-Exact([int]$Count) {
             cols: None,
             rows: None,
             agent_id: Some("bound-agent".into()),
+            derive_agent_id: false,
             headless: false,
         });
         assert!(matches!(created.body, ControlResponseBody::Ok { .. }));
@@ -9612,6 +9727,7 @@ function Read-Exact([int]$Count) {
             cols: None,
             rows: None,
             agent_id: Some("operator-a".into()),
+            derive_agent_id: false,
             headless: false,
         });
         assert!(matches!(created.body, ControlResponseBody::Ok { .. }));
@@ -9652,6 +9768,7 @@ function Read-Exact([int]$Count) {
                 cols: None,
                 rows: None,
                 agent_id: Some(agent.into()),
+                derive_agent_id: false,
                 headless: false,
             });
             assert!(matches!(created.body, ControlResponseBody::Ok { .. }));
@@ -10522,6 +10639,7 @@ function Read-Exact([int]$Count) {
             cols: None,
             rows: None,
             agent_id: Some("operator-a".into()),
+            derive_agent_id: false,
             headless: false,
         });
         let (_, _, peer_pane) = session_ids(&created);
@@ -10590,6 +10708,7 @@ function Read-Exact([int]$Count) {
             cols: None,
             rows: None,
             agent_id: Some("operator-a".into()),
+            derive_agent_id: false,
             headless: false,
         });
         let (_, _, peer_pane) = session_ids(&created);
@@ -10654,6 +10773,7 @@ function Read-Exact([int]$Count) {
                 cols: None,
                 rows: None,
                 agent_id: Some(agent.into()),
+                derive_agent_id: false,
                 headless: false,
             });
             assert!(matches!(created.body, ControlResponseBody::Ok { .. }));
@@ -10807,6 +10927,7 @@ function Read-Exact([int]$Count) {
             cols: None,
             rows: None,
             agent_id: Some("operator-a".into()),
+            derive_agent_id: false,
             headless: false,
         });
         let (session, _, gone_pane) = session_ids(&created);
@@ -10846,6 +10967,7 @@ function Read-Exact([int]$Count) {
             cols: None,
             rows: None,
             agent_id: Some("operator-a".into()),
+            derive_agent_id: false,
             headless: false,
         });
         let (_, _, pane) = session_ids(&recreated);
@@ -12590,6 +12712,7 @@ function Read-Exact([int]$Count) {
             request_id: 3,
             session_id,
             name: "renamed".into(),
+            agent_id: None,
         });
         assert!(
             matches!(renamed.body, ControlResponseBody::Ok { .. }),
@@ -12668,6 +12791,7 @@ function Read-Exact([int]$Count) {
             cols: Some(80),
             rows: Some(24),
             agent_id: None,
+            derive_agent_id: false,
             headless: false,
         });
         let (dst_session, dst_window, dst_pane) = session_ids(&created);
@@ -16498,6 +16622,7 @@ function Read-Exact([int]$Count) {
             cols: None,
             rows: None,
             agent_id: Some("operator-a".into()),
+            derive_agent_id: false,
             headless: false,
         });
         let (_, _, pane) = session_ids(&created);

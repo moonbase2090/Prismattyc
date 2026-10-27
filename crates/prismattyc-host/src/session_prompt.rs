@@ -263,24 +263,39 @@ fn spawn_standalone(
 }
 
 fn apply(host: &mut HostState, target: &Target, name: &str) -> Result<()> {
-    if matches!(
+    if matches!(target, Target::LocalTab { .. }) {
+        // Blank clears a fixed tab label.
+    } else if matches!(
         target,
-        Target::LocalTab { .. }
-            | Target::LocalPane { .. }
-            | Target::RenameSpace { .. }
-            | Target::Rename { .. }
+        Target::LocalPane { .. } | Target::RenameSpace { .. }
     ) {
         if name.trim().is_empty() {
             bail!("the name is empty");
         }
-        if matches!(target, Target::Rename { .. }) {
+        if matches!(target, Target::LocalPane { .. }) {
             let label = name.trim();
-            if label.len() > 64 || label.contains('\0') {
-                bail!("pane name must be 1..=64 bytes and contain no NUL");
+            if label.len() > 64 || label.chars().any(char::is_control) {
+                bail!("pane name must be 1..=64 bytes without control characters");
             }
         }
     } else {
-        prismattyc_mux::mailbox::AgentId::new(name.to_string())?;
+        let mux = config::load(&config::config_path())
+            .unwrap_or_default()
+            .mux
+            .unwrap_or_default();
+        let existing = match target {
+            Target::Rename { pane, session } => attach_log::session_names()
+                .get(session)
+                .cloned()
+                .or_else(|| host.mux.attach_name_of(*pane).map(str::to_string)),
+            _ => None,
+        };
+        prismattyc_mux::session_name::DisplayName::with_mixed_case_policy(
+            name,
+            mux.allow_mixed_case_session_names(),
+            existing.as_deref(),
+        )
+        .map_err(anyhow::Error::msg)?;
     }
     match target {
         Target::Pane { axis } => {
@@ -329,7 +344,7 @@ fn apply(host: &mut HostState, target: &Target, name: &str) -> Result<()> {
             host.last_space_refresh = None;
         }
         Target::LocalTab { window } => {
-            host.mux.rename_window(*window, name)?;
+            host.mux.set_fixed_tab_name(*window, Some(name))?;
         }
         Target::LocalPane { pane } => {
             let live = host

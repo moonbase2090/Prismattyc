@@ -195,6 +195,7 @@ fn mail_full_loop_two_sessions_no_external_watcher() {
         cols: None,
         rows: None,
         agent_id: Some("kiro-pm".into()),
+        derive_agent_id: false,
         headless: false,
     }));
     let ControlResponseData::Session {

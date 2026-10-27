@@ -1,0 +1,7 @@
+splash = false
+start_at_login = false
+automatic_update_checks = false
+install_agent_skills = false
+settings_panel = true
+session_naming = "auto"
+window_padding_px = 128

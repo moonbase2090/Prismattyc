@@ -17,6 +17,7 @@ default = []
 gpu = ["dep:wgpu", "dep:pollster"]
 
 [dependencies]
+schemars = { version = "1", features = ["derive"] }
 anyhow.workspace = true
 mutants = "0.0.3"
 getrandom = "0.3"

@@ -2211,6 +2211,16 @@ impl PaneRuntime {
 }
 
 impl MuxRuntime {
+    /// Change retention for existing panes and all future/recreated emulators.
+    /// Already discarded output cannot be recovered by enabling this policy.
+    pub(crate) fn set_alt_screen_scrollback(&mut self, retain: bool) {
+        self.alt_screen_scrollback = retain;
+        for pane in self.panes.values_mut() {
+            pane.alt_screen_scrollback = retain;
+            pane.emulator.set_retain_alt_history(retain);
+        }
+    }
+
     pub(crate) fn toggle_rich_focus(&mut self) -> bool {
         if !self.focused().experimental_rich() {
             return false;
@@ -5468,6 +5478,45 @@ mod tests {
             if retain {
                 assert!(depth > 0, "opt-in must retain alt scrollback");
             }
+        }
+    }
+
+    #[test]
+    fn live_alt_retention_updates_background_and_future_panes() {
+        let mut runtime = MuxRuntime::spawn_with_geom(
+            "/bin/sh",
+            &[],
+            80,
+            24,
+            HostGeom::tight(1, 1),
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+        let first = runtime.focused_id();
+        runtime.new_tab("/bin/sh", &[]).unwrap();
+        let second = runtime.focused_id();
+        assert_ne!(first, second);
+        runtime.set_alt_screen_scrollback(true);
+        runtime.new_tab("/bin/sh", &[]).unwrap();
+        for pane in runtime.panes.values_mut() {
+            feed_alt_lines(&mut pane.emulator, 30);
+            assert!(
+                pane.emulator.screen().max_view_scroll() > 0,
+                "active/background/new pane retains alt history"
+            );
+        }
+        runtime.set_alt_screen_scrollback(false);
+        runtime.new_tab("/bin/sh", &[]).unwrap();
+        for pane in runtime.panes.values_mut() {
+            let _ = pane.emulator.feed(b"\x1bc");
+            feed_alt_lines(&mut pane.emulator, 30);
+            assert_eq!(
+                pane.emulator.screen().max_view_scroll(),
+                0,
+                "disabled retention applies to every pane"
+            );
         }
     }
 

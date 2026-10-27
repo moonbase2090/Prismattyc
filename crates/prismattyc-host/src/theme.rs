@@ -607,6 +607,7 @@ pub fn derived_pane_backdrop(variant: ThemeVariant, default_bg: Rgb) -> Rgb {
 /// `#RRGGBB`. `ansi` must list all 16 colours.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub struct ThemeOverrides {
     pub default_fg: Option<String>,
     pub default_bg: Option<String>,

@@ -349,6 +349,7 @@ pub struct FontMetrics {
     /// used by rustybuzz and fontdue so shaped glyph IDs rasterize correctly.
     primary_bytes: Vec<u8>,
     primary_index: u32,
+    primary_name: String,
     /// CBDT color-emoji font bytes (e.g. Noto Color Emoji). Kept for `ttf_parser::Face`.
     emoji_fonts: Vec<Vec<u8>>,
     /// Ghostty-style lazy system faces (CJK, etc.). Not bundled.
@@ -364,6 +365,9 @@ pub struct FontMetrics {
 }
 
 impl FontMetrics {
+    pub(crate) fn primary_name(&self) -> &str {
+        &self.primary_name
+    }
     /// Test convenience: default chain only.
     #[cfg(test)]
     pub fn load(px: f32) -> anyhow::Result<Self> {
@@ -388,6 +392,7 @@ impl FontMetrics {
             lazy_fonts: Vec::new(),
             primary_bytes: BAKED_MONO.to_vec(),
             primary_index: 0,
+            primary_name: BAKED_MONO_NAME.to_string(),
             emoji_fonts: Vec::new(),
             cover_cache: RefCell::new(HashMap::new()),
             fallback_fonts: RefCell::new(HashMap::new()),
@@ -481,11 +486,21 @@ impl FontMetrics {
         if !emoji_names.is_empty() {
             eprintln!("prismattyc-host: color emoji: {}", emoji_names.join(", "));
         }
+        let primary_name = ttf_parser::Face::parse(&primary_bytes, 0)
+            .ok()
+            .and_then(|face| {
+                face.names()
+                    .into_iter()
+                    .filter(|name| name.name_id == ttf_parser::name_id::FAMILY)
+                    .find_map(|name| name.to_string())
+            })
+            .unwrap_or_else(|| names[0].clone());
         let mut metrics = Self {
             fonts,
             lazy_fonts,
             primary_bytes,
             primary_index: 0,
+            primary_name,
             emoji_fonts,
             cover_cache: RefCell::new(HashMap::new()),
             fallback_fonts: RefCell::new(HashMap::new()),
@@ -1028,7 +1043,14 @@ fn font_chain(primary_override: Option<&Path>, extra_fallbacks: &[PathBuf]) -> V
 }
 
 fn push_font(out: &mut Vec<FontSource>, seen: &mut std::collections::HashSet<PathBuf>, p: PathBuf) {
-    if p.is_file() && seen.insert(p.clone()) {
+    if let Some(font) = p.to_str().and_then(crate::bundled_fonts::find) {
+        if seen.insert(p) {
+            out.push(FontSource::Baked {
+                name: font.name,
+                bytes: font.bytes,
+            });
+        }
+    } else if p.is_file() && seen.insert(p.clone()) {
         out.push(FontSource::Path(p));
     }
 }
@@ -3439,7 +3461,7 @@ fn palette_filter_chips(
     let text_right = x
         .saturating_add(width)
         .saturating_sub(font.cell_w.saturating_mul(geom.inset_cells));
-    let hint_cells = text_cells("C-←/→ filter");
+    let hint_cells = text_cells("←/→ filter");
     let hint_x = text_right.saturating_sub(hint_cells.saturating_mul(font.cell_w));
     let mut chip_x = text_x.saturating_add(font.cell_w);
     for (index, label) in labels.iter().enumerate() {
@@ -3693,7 +3715,7 @@ pub fn rasterize_palette_with_hover(
     }
 
     if let Some((labels, selected_chip)) = frame.chips {
-        let hint = "C-←/→ filter";
+        let hint = "←/→ filter";
         let hint_cells = text_cells(hint);
         let hint_x = text_right.saturating_sub(hint_cells.saturating_mul(font.cell_w));
         for chip in &layout.filter_chips {

@@ -10,6 +10,7 @@ const OPEN_DELAY: Duration = Duration::from_millis(MULTI_CLICK_MS as u64);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub enum Mode {
     #[default]
     Plain,

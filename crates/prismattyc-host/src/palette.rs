@@ -458,6 +458,14 @@ impl Palette {
                 }
                 NamedKey::Escape => PaletteVerdict::Close,
                 NamedKey::Enter => self.activate_selected(keymap, rich),
+                NamedKey::ArrowLeft => {
+                    self.cycle_filter(-1);
+                    PaletteVerdict::Consumed
+                }
+                NamedKey::ArrowRight => {
+                    self.cycle_filter(1);
+                    PaletteVerdict::Consumed
+                }
                 NamedKey::ArrowUp => self.move_selection(-1, keymap, rich),
                 NamedKey::ArrowDown => self.move_selection(1, keymap, rich),
                 NamedKey::PageUp => self.page_selection(-1, keymap, rich),

@@ -228,7 +228,7 @@ impl Report {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 impl Report {
     /// A saved open result the Space panel can render without opening a Space.
     pub(crate) fn for_test(name: &str) -> Self {

@@ -679,25 +679,21 @@ and comments and appends missing [mux] keys.
         bail!("usage: pmux config init [--merge]");
     }
     let path = prism_config_path();
-    if merge {
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("read {} for --merge", path.display()))?;
-        let mut document = raw
-            .parse::<toml_edit::DocumentMut>()
-            .with_context(|| format!("parse {}", path.display()))?;
-        prismattyc_mux::merge_mux_section(&mut document);
-        prismattyc_mux::write_config_atomic(&path, &document.to_string())?;
-    } else if path.exists() {
-        bail!(
-            "{} already exists; pass --merge to add missing [mux] keys",
-            path.display()
-        );
-    } else {
-        prismattyc_mux::write_config_atomic(
-            &path,
-            &format!("{}\n", prismattyc_mux::render_mux_section()),
-        )?;
-    }
+    prismattyc_mux::transact_config(&path, |document| {
+        if merge {
+            anyhow::ensure!(path.exists(), "config must exist for --merge");
+            prismattyc_mux::merge_mux_section(document);
+        } else {
+            anyhow::ensure!(
+                !path.exists(),
+                "{} already exists; pass --merge to add missing [mux] keys",
+                path.display()
+            );
+            *document = format!("{}\n", prismattyc_mux::render_mux_section()).parse()?;
+        }
+        Ok(())
+    })?
+    .report();
     println!("{}", path.display());
     Ok(())
 }

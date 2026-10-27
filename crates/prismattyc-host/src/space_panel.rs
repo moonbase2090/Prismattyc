@@ -287,6 +287,11 @@ impl Panel {
             Page::Settings => {
                 self.layout_rows();
                 let config = config::load(&config::config_path()).unwrap_or_default();
+                self.row(
+                    "Enable full settings (preview)",
+                    "Configure all preferences with arrow keys",
+                    Choice::Preference("settings_panel".into(), "true".into()),
+                );
                 for side in ["bottom", "left", "top", "right"] {
                     self.row(
                         format!("Rail: {side}"),
@@ -342,7 +347,12 @@ impl Panel {
                 ] {
                     self.row(
                         label,
-                        if config.session_naming.as_deref().unwrap_or("ask") == value {
+                        if config
+                            .session_naming
+                            .map(crate::config::SessionNaming::as_str)
+                            .unwrap_or("ask")
+                            == value
+                        {
                             "Selected"
                         } else {
                             detail
@@ -361,7 +371,12 @@ impl Panel {
                 ] {
                     self.row(
                         label,
-                        if config.space_startup.as_deref().unwrap_or("ask") == value {
+                        if config
+                            .space_startup
+                            .map(crate::config::SpaceStartup::as_str)
+                            .unwrap_or("ask")
+                            == value
+                        {
                             "Selected"
                         } else {
                             detail
@@ -631,6 +646,10 @@ fn show_messages(host: &mut HostState) {
 }
 
 pub(super) fn settings(host: &mut HostState) {
+    if config::load(&config::config_path()).is_ok_and(|file| file.settings_panel.unwrap_or(false)) {
+        crate::settings::open(host);
+        return;
+    }
     open(host, host.space_rail.current.clone().unwrap_or_default());
     let panel = host.space_panel.as_mut().unwrap();
     panel.pending = None;
@@ -696,6 +715,7 @@ fn command(host: &mut HostState, args: Vec<String>, kind: &'static str) {
 }
 
 pub(super) fn open(host: &mut HostState, name: String) {
+    host.settings = None;
     let owner = load_space(&spaces_dir(), &name).ok().and_then(|s| s.id);
     host.context_menu = Some(ContextMenu::new(ContextMenuKind::SpaceChip));
     host.context_menu_target = Some(ContextMenuTarget::SpaceChip(0));
@@ -928,7 +948,8 @@ pub(super) fn activate(host: &mut HostState, index: usize) {
             let saved = if key == "spaces.autosave" {
                 config::save_spaces_autosave(&config::config_path(), value == "true")
             } else {
-                let item = if key == "space_autosave"
+                let item = if key == "settings_panel"
+                    || key == "space_autosave"
                     || key == "restore_blank_terminals"
                     || key == "start_at_login"
                 {
@@ -939,6 +960,9 @@ pub(super) fn activate(host: &mut HostState, index: usize) {
                 config::save_preference(&config::config_path(), &key, item)
             };
             match saved {
+                Ok(()) if key == "settings_panel" => {
+                    crate::settings::open(host);
+                }
                 Ok(()) if key == "toasts" => {
                     panel.rebuild();
                     // Apply now; the config watcher confirms it shortly.
@@ -1491,9 +1515,17 @@ mod layout_tests {
         assert_eq!(graphite.rows[0].label, "Layout: Bars");
         assert_eq!(graphite.rows[1].label, "Layout: Sidebar");
         assert_eq!(graphite.rows[1].detail, "Selected");
-        assert!(graphite.rows[2].label.starts_with("Rail: "));
+        assert_eq!(graphite.rows[2].label, "Enable full settings (preview)");
+        assert!(
+            matches!(&graphite.rows[2].choice,Choice::Preference(key,value)if key=="settings_panel"&&value=="true")
+        );
+        assert!(graphite.rows[3].label.starts_with("Rail: "));
         let classic = panel(Page::Settings, None);
-        assert!(classic.rows[0].label.starts_with("Rail: "));
+        assert_eq!(classic.rows[0].label, "Enable full settings (preview)");
+        assert!(
+            matches!(&classic.rows[0].choice,Choice::Preference(key,value)if key=="settings_panel"&&value=="true")
+        );
+        assert!(classic.rows[1].label.starts_with("Rail: "));
         assert!(!classic
             .rows
             .iter()

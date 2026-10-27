@@ -195,6 +195,7 @@ pub struct SshDestination {
 /// `[[remote]]` entry in the shared config file.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub struct RemoteDestinationEntry {
     pub id: String,
     pub ssh: String,

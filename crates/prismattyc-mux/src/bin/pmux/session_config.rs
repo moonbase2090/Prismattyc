@@ -107,6 +107,7 @@ fn restore(client: &mut Client, client_id: u64, paths: &Paths, file: &Path) -> R
                 cols: None,
                 rows: None,
                 agent_id: saved.agent.clone(),
+                derive_agent_id: false,
                 headless: true,
             })?;
             ApplyResult::Created {

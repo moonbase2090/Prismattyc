@@ -398,6 +398,7 @@ fn login_preference_keeps_comments_and_unrelated_config() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
 fn session_configuration_restores_names_directories_and_commands_without_replay() {
     let root = temp_root("session-configuration");
     let socket = socket_path(&root);

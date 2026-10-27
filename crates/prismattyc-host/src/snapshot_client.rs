@@ -506,7 +506,7 @@ mod tests {
     fn flag_off_does_not_start_a_client() {
         let wake = noop_wake();
         assert!(start_snapshot_client(false, wake).is_none());
-        assert!(!crate::config::ConfigFile::default().snapshot_client_enabled());
+        assert!(crate::config::ConfigFile::default().snapshot_client_enabled());
     }
 
     #[test]

@@ -512,7 +512,7 @@ impl ConfigFile {
 
     /// Long-lived snapshot cache. Missing means off.
     pub fn snapshot_client_enabled(&self) -> bool {
-        self.snapshot_client.unwrap_or(false)
+        self.snapshot_client.unwrap_or(true)
     }
 
     pub fn render_timer_log_every_frame(&self) -> bool {
@@ -1223,7 +1223,7 @@ mod tests {
         assert!(ConfigFile::default().install_agent_skills.unwrap_or(true));
         assert!(!ConfigFile::default().space_reorder.unwrap_or(false));
         assert!(ConfigFile::default().async_file_writes());
-        assert!(!ConfigFile::default().snapshot_client_enabled());
+        assert!(ConfigFile::default().snapshot_client_enabled());
         assert!(!ConfigFile::default()
             .selective_border_rings
             .unwrap_or(false));

@@ -354,7 +354,7 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         group: ConfigGroup::Layout,
         doc: "Keep one pmuxd snapshot connection for periodic polls. Startup only",
         range: "true | false",
-        value: ConfigValue::Bool(false),
+        value: ConfigValue::Bool(true),
     },
     ConfigKey {
         name: "selective_border_rings",
@@ -1226,8 +1226,8 @@ mod tests {
         assert_eq!(parsed.link_click(), crate::link_click::Mode::Plain);
         assert_eq!(parsed.chrome_style(), crate::config::ChromeStyle::Graphite);
         assert_eq!(parsed.space_reorder, Some(false));
-        assert_eq!(parsed.snapshot_client, Some(false));
-        assert!(!parsed.snapshot_client_enabled());
+        assert_eq!(parsed.snapshot_client, Some(true));
+        assert!(parsed.snapshot_client_enabled());
         assert_eq!(parsed.selective_border_rings, Some(false));
         assert!(
             template

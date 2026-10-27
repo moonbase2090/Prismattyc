@@ -8266,6 +8266,7 @@ fn rasterize_frame(
 
 impl App {
     fn resize_grid(host: &mut HostState, physical: PhysicalSize<u32>) {
+        space_panel::resize(host, physical.width);
         Self::refit_geom(host, physical, None);
     }
 

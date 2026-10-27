@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.3.45] - 2026-10-26
+
+### Added
+
+- Fixed user-named tabs stay visible in the sidebar across restarts; `pmux tab list` and `pmux tab name` manage them.
+- Mixed-case and spaced session labels can be enabled with `allow_mixed_case_session_names`; the setting defaults off.
+
 ## [0.3.44] - 2026-10-26
 
 ### Added

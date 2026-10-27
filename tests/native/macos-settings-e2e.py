@@ -265,6 +265,21 @@ def run_case(args,desktop,style):
         if style=='graphite':key(125);key(125) # Skip layout choices.
         key(36)
         wait(lambda:saved().get('settings_panel') is True,'full settings enable');capture('enabled',True)
+        key(125);key(125) # Enter Appearance settings and select tab_strip.
+        key(36)
+        wait(lambda:saved().get('tab_strip')=='always','Enter cycles and persists a finite choice')
+        capture('choice-cycled-with-enter',True)
+        key(123)
+        wait(lambda:saved().get('tab_strip','auto')=='auto','Left cycles to the previous choice')
+        key(124)
+        wait(lambda:saved().get('tab_strip')=='always','Right cycles to the next choice')
+        capture('choice-cycled-with-arrows',True)
+        key(36,1<<17) # Shift+Enter opens the detailed choice editor.
+        capture('choice-editor',True)
+        press_row(': Reset / inherit ')
+        wait(lambda:'tab_strip' not in saved(),'choice reset')
+        capture('choice-reset',True)
+        key(53);key(53) # Close the editor and return to section navigation.
         key(124);key(123);key(124) # Fonts, Appearance, Fonts, without modifiers.
         key(125);key(125);key(125);key(36);key(36) # Font size, exact edit.
         subprocess.run(['/usr/bin/pbcopy'],input=b'18.5',check=True);key(9,1<<20);key(36)
@@ -285,7 +300,7 @@ def run_case(args,desktop,style):
         press_row(': Reset / inherit ')
         wait(lambda:'settings_panel' not in saved(),'gate reset')
         capture('legacy-restored',True)
-        result.update(status='PASS',sessions='preserved',font_px='saved-and-reset',fonts='selected-through-native-accessibility',gate='enabled-and-reset')
+        result.update(status='PASS',sessions='preserved',choice_cycle='enter-arrow-directions-shift-enter-reset',font_px='saved-and-reset',fonts='selected-through-native-accessibility',gate='enabled-and-reset')
     except Exception as error:
         result['error']=str(error)
         raise

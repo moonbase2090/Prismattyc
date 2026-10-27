@@ -74,6 +74,11 @@ pub(super) enum Kind {
     Remote,
     Binding(Action),
 }
+impl Kind {
+    pub(super) fn cycles_on_enter(&self) -> bool {
+        matches!(self, Self::Bool | Self::Choice(_) | Self::BorderColor)
+    }
+}
 #[derive(Clone, Debug)]
 pub(super) struct Control {
     pub section: Section,

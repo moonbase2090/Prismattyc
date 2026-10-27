@@ -184,10 +184,21 @@ impl Panel {
             {
                 detail.push_str(" · Environment/CLI override may take precedence");
             }
+            if control.kind.cycles_on_enter() {
+                detail.push_str(" · Enter cycles; Shift+Enter opens editor");
+            }
             if !control.help.is_empty() {
                 detail.push_str(&format!(" · {}", control.help));
             }
-            PaletteRow::plain(control.label.clone(), detail, "Enter".into())
+            PaletteRow::plain(
+                control.label.clone(),
+                detail,
+                if control.kind.cycles_on_enter() {
+                    "Cycle".into()
+                } else {
+                    "Enter".into()
+                },
+            )
         }));
         rows
     }
@@ -384,7 +395,11 @@ impl Panel {
                     }
                     Key::Named(NamedKey::Enter) if self.pending.is_none() => {
                         if let Some(&index) = indices.get(row) {
-                            self.edit(index)
+                            if mods.shift_key() || !self.controls[index].kind.cycles_on_enter() {
+                                self.edit(index)
+                            } else {
+                                self.step(index, true);
+                            }
                         }
                     }
                     _ => {}

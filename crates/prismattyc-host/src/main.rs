@@ -13035,7 +13035,7 @@ fn icon_click_decision(
                     .unwrap_or(SidebarClick::Ignore),
             },
             Some((clicked, name, false)) => {
-                if clicked.kind == sidebar::RowKind::Pane {
+                if matches!(clicked.kind, sidebar::RowKind::Tab | sidebar::RowKind::Pane) {
                     open_saved_row(name, session_title, clicked.tab)
                 } else {
                     SidebarClick::OpenSpace(name.to_string())

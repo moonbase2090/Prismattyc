@@ -2467,20 +2467,15 @@ pub(crate) fn paint_sidebar(buffer: &mut [u32], stride: usize, paint: &SidebarPa
     let s = |d: f32| d * paint.chrome.scale_milli as f32 / 1000.0;
     let pad = paint.chrome.px(12.0);
     let fold = paint.tree_fold;
-    let title_right = if paint.dock_right {
-        column.right()
-    } else if fold.w > 0 {
+    let title_right = if fold.w > 0 {
         fold.x.min(paint.toggle.x).min(column.right())
+    } else if paint.dock_right {
+        column.right()
     } else {
         paint.toggle.x.min(column.right())
     };
     let title_left = if paint.dock_right {
-        let after_toggle = paint.toggle.right().max(column.x);
-        if fold.w > 0 {
-            fold.right().max(after_toggle)
-        } else {
-            after_toggle
-        }
+        paint.toggle.right().max(column.x)
     } else {
         column.x
     };
@@ -3236,25 +3231,39 @@ pub(crate) fn sidebar_toggle_rect(
     graphite_core::sidebar_toggle_rect(chrome.scale_milli, column, head, dock_right)
 }
 
-/// Expand-all / collapse-all control, parked beside the column toggle.
+/// Expand-all / collapse-all control beside the sidebar title.
 pub(crate) fn sidebar_tree_fold_rect(
     chrome: ChromeGeom,
     column: Rect,
     toggle: Rect,
     dock_right: bool,
+    title: &str,
 ) -> Rect {
     if toggle.w == 0 || toggle.h == 0 || column.w == 0 {
         return Rect::new(0, 0, 0, 0);
     }
     let gap = chrome.px(4.0);
+    let pad = chrome.px(12.0);
     let size = toggle.w.min(toggle.h).min(column.w);
     let y = toggle.y;
-    let x = if dock_right {
-        toggle.right().saturating_add(gap)
+    let title_left = if dock_right {
+        toggle.right().max(column.x)
     } else {
-        toggle.x.saturating_sub(gap.saturating_add(size))
+        column.x
     };
-    if x < column.x || x.saturating_add(size) > column.right() {
+    let title_x = title_left.saturating_add(pad);
+    let title_width = text_width(
+        Face::SemiBold,
+        TAB_TEXT * chrome.scale_milli as f32 / 1000.0,
+        title,
+    )
+    .ceil() as usize;
+    let x = title_x.saturating_add(title_width).saturating_add(gap);
+    let right = x.saturating_add(size);
+    if x < column.x
+        || right > column.right()
+        || (!dock_right && right.saturating_add(gap) > toggle.x)
+    {
         return Rect::new(0, 0, 0, 0);
     }
     Rect::new(x, y, size, size.min(toggle.h))
@@ -3902,7 +3911,17 @@ mod sidebar_render_tests {
         let layout = sidebar_layout(chrome, column(600), 60, 0);
         let header = sidebar_header_layout(chrome, Rect::new(256, 0, 768, 44));
         let toggle = sidebar_toggle_rect(chrome, layout.column, layout.head, false);
-        let fold = sidebar_tree_fold_rect(chrome, layout.column, toggle, false);
+        let fold = sidebar_tree_fold_rect(chrome, layout.column, toggle, false, "Spaces");
+        let label_x = layout.column.x + chrome.px(12.0);
+        let label_width = text_width(Face::SemiBold, TAB_TEXT, "Spaces").ceil() as usize;
+        assert_eq!(fold.x, label_x + label_width + chrome.px(4.0));
+        let right_column = Rect::new(700, 44, 240, 420);
+        let right_toggle = sidebar_toggle_rect(chrome, right_column, layout.head, true);
+        let right_fold = sidebar_tree_fold_rect(chrome, right_column, right_toggle, true, "Spaces");
+        assert_eq!(
+            right_fold.x,
+            right_toggle.right() + chrome.px(12.0) + label_width + chrome.px(4.0)
+        );
         let hit = |x: usize, y: usize| {
             sidebar_hit(
                 &SidebarHitTargets {
@@ -3937,7 +3956,7 @@ mod sidebar_render_tests {
             hit(toggle.x + 2, toggle.y + toggle.h / 2),
             Some(SidebarHit::Toggle)
         );
-        assert!(fold.w > 0, "tree fold sits beside the column toggle");
+        assert!(fold.w > 0, "tree fold sits beside the Spaces title");
         assert_eq!(
             hit(fold.x + 2, fold.y + fold.h / 2),
             Some(SidebarHit::TreeFold)
@@ -4156,7 +4175,8 @@ mod sidebar_render_tests {
                     })
                     .collect();
                 let toggle = sidebar_toggle_rect(chrome, column_rect, layout.head, false);
-                let tree_fold = sidebar_tree_fold_rect(chrome, column_rect, toggle, false);
+                let tree_fold =
+                    sidebar_tree_fold_rect(chrome, column_rect, toggle, false, "Spaces");
                 paint_sidebar(
                     &mut buffer,
                     w,

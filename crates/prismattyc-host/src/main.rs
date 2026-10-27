@@ -14486,7 +14486,8 @@ fn paint_graphite_sidebar(
             })
             .collect();
         let toggle = graphite::sidebar_toggle_rect(geom.chrome, column, layout.head, dock_right);
-        let tree_fold = graphite::sidebar_tree_fold_rect(geom.chrome, column, toggle, dock_right);
+        let tree_fold =
+            graphite::sidebar_tree_fold_rect(geom.chrome, column, toggle, dock_right, "Spaces");
         let tree_fold_expand = sidebar_tree_fold_expands(host);
         let tree_fold_hovered = matches!(
             host.hover_target,

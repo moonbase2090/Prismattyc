@@ -27,6 +27,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use prismattyc_emulator::{Emulator, EmulatorStateV1};
 use prismattyc_mux::{
     classify_control_request_id, default_socket_path, next_stale_skip, ControlError,
     ControlErrorCode, ControlIdMatch, ControlRequest, ControlResponse, ControlResponseBody,
@@ -107,6 +108,13 @@ struct HostReservationPart {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) struct HostReservation(Vec<HostReservationPart>);
+
+impl HostReservation {
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        Self(Vec::new())
+    }
+}
 
 impl HostByteBudget {
     fn new(cap: usize) -> Self {
@@ -586,6 +594,8 @@ impl Client {
         let mut expected_offset = 0u64;
         let mut expected_total = None;
         let mut expected_sequence = None;
+        let mut state_bytes = Vec::new();
+        let mut reservations = Vec::new();
         loop {
             if stop.load(Ordering::Relaxed) {
                 bail!("pane state transfer stopped");
@@ -621,20 +631,29 @@ impl Client {
             expected_total = Some(total_bytes);
             expected_sequence = Some(through_seq);
             expected_offset = next_offset;
-            events_tx
-                .send(LogMessage::RestoreChunk {
-                    through_seq,
-                    offset,
-                    total_bytes: total,
-                    data,
-                    done,
-                    reservation,
-                })
-                .map_err(|_| anyhow::anyhow!("pane state receiver closed"))?;
-            if let Some(wake) = wake {
-                wake();
-            }
+            state_bytes
+                .try_reserve(data.len())
+                .context("pane state could not fit in memory")?;
+            state_bytes.extend_from_slice(&data);
+            reservations.push(reservation);
             if done {
+                let restored = serde_json::from_slice::<EmulatorStateV1>(&state_bytes)
+                    .map_err(|error| error.to_string())
+                    .and_then(|state| {
+                        Emulator::import_state(state)
+                            .map(Box::new)
+                            .map_err(|error| error.to_string())
+                    });
+                events_tx
+                    .send(LogMessage::RestoreReady {
+                        through_seq,
+                        restored,
+                        reservations,
+                    })
+                    .map_err(|_| anyhow::anyhow!("pane state receiver closed"))?;
+                if let Some(wake) = wake {
+                    wake();
+                }
                 return Ok(through_seq);
             }
         }
@@ -838,22 +857,18 @@ pub(crate) struct PolicyCounters {
 }
 
 /// What the reader thread hands the host thread, in log order.
-#[derive(Debug)]
 pub(crate) enum LogMessage {
-    /// Bounded piece of the saved emulator state used to seed a fresh replica.
-    RestoreChunk {
+    /// Off-thread decoded saved state used to seed a fresh replica.
+    RestoreReady {
         through_seq: u64,
-        offset: u64,
-        total_bytes: usize,
-        data: Vec<u8>,
-        done: bool,
-        reservation: HostReservation,
+        restored: std::result::Result<Box<Emulator>, String>,
+        reservations: Vec<HostReservation>,
     },
     /// Discard an incomplete state transfer before falling back to log replay.
     RestoreReset,
     /// One subscribe response, with its byte reservation held until consumed.
     Batch {
-        snapshot: Option<Box<PaneStyled>>,
+        snapshot: Option<(u32, u32, Vec<u8>)>,
         events: Vec<PaneLogFrame>,
         /// Output at or before this sequence restores state without alerts.
         replay_through: u64,
@@ -866,6 +881,20 @@ pub(crate) enum LogMessage {
     Ended { reason: Option<String> },
     /// Writer `WritePane` failed. Pane stays read-only; toast the host.
     WriteFailed { reason: String },
+}
+
+impl std::fmt::Debug for LogMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let variant = match self {
+            Self::RestoreReady { .. } => "RestoreReady",
+            Self::RestoreReset => "RestoreReset",
+            Self::Batch { .. } => "Batch",
+            Self::Reset => "Reset",
+            Self::Ended { .. } => "Ended",
+            Self::WriteFailed { .. } => "WriteFailed",
+        };
+        f.write_str(variant)
+    }
 }
 
 /// Toast chip after [`LogMessage::WriteFailed`]. Not a BEL; not gated on
@@ -1319,7 +1348,13 @@ fn reader_loop(
             if gap || !events.is_empty() {
                 if events_tx
                     .send(LogMessage::Batch {
-                        snapshot: gap.then_some(snapshot).flatten().map(Box::new),
+                        snapshot: gap.then_some(snapshot).flatten().map(|styled| {
+                            (
+                                styled.content.cols,
+                                styled.content.rows,
+                                snapshot_to_ansi(&styled),
+                            )
+                        }),
                         events,
                         replay_through,
                         reservation,
@@ -2811,25 +2846,20 @@ mod tests {
         server.join().unwrap();
         drop(events_tx);
 
-        let mut refreshed_bytes = Vec::new();
-        let mut refreshed_offset = 0u64;
+        let mut restored = None;
         for event in events_rx {
-            if let LogMessage::RestoreChunk {
+            if let LogMessage::RestoreReady {
                 through_seq,
-                offset,
-                data,
+                restored: Ok(emulator),
                 ..
             } = event
             {
                 if through_seq == 10 {
-                    assert_eq!(offset, refreshed_offset);
-                    refreshed_offset += data.len() as u64;
-                    refreshed_bytes.extend_from_slice(&data);
+                    restored = Some(emulator.export_state().expect("export refreshed state"));
                 }
             }
         }
-        let restored: prismattyc_emulator::EmulatorStateV1 =
-            serde_json::from_slice(&refreshed_bytes).expect("refreshed pane state");
+        let restored = restored.expect("refreshed pane state");
         assert!(restored
             .screen
             .scrollback
@@ -2933,19 +2963,18 @@ mod tests {
         server.join().unwrap();
         drop(events_tx);
 
-        let mut refreshed_bytes = Vec::new();
+        let mut restored = None;
         for event in events_rx {
-            if let LogMessage::RestoreChunk {
+            if let LogMessage::RestoreReady {
                 through_seq: 10,
-                data,
+                restored: Ok(emulator),
                 ..
             } = event
             {
-                refreshed_bytes.extend_from_slice(&data);
+                restored = Some(emulator.export_state().expect("export restored state"));
             }
         }
-        let restored: prismattyc_emulator::EmulatorStateV1 =
-            serde_json::from_slice(&refreshed_bytes).expect("post-restart pane state");
+        let restored = restored.expect("post-restart pane state");
         assert!(restored
             .screen
             .scrollback
@@ -3096,25 +3125,20 @@ mod tests {
         server.join().unwrap();
         drop(events_tx);
 
-        let mut restored_bytes = Vec::new();
-        let mut restored_offset = 0u64;
+        let mut restored = None;
         for event in events_rx {
-            if let LogMessage::RestoreChunk {
+            if let LogMessage::RestoreReady {
                 through_seq,
-                offset,
-                data,
+                restored: Ok(emulator),
                 ..
             } = event
             {
                 if through_seq == 10 {
-                    assert_eq!(offset, restored_offset);
-                    restored_offset += data.len() as u64;
-                    restored_bytes.extend_from_slice(&data);
+                    restored = Some(emulator.export_state().expect("export reconnected state"));
                 }
             }
         }
-        let restored: prismattyc_emulator::EmulatorStateV1 =
-            serde_json::from_slice(&restored_bytes).expect("reconnected pane state");
+        let restored = restored.expect("reconnected pane state");
         assert!(restored
             .screen
             .scrollback

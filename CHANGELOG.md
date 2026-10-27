@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.3.44] - 2026-10-26
+
+### Added
+
+- An opt-in complete settings editor, enabled with `settings_panel = true`, edits every config key from the palette.
+
+### Changed
+
+- The transport harness reports child and reader state when a test fails.
+
 ## [0.3.43] - 2026-10-26
 
 ### Added

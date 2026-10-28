@@ -96,7 +96,8 @@ def main():
         host = subprocess.Popen([HOST, "--no-splash"], env=env, stdout=log, stderr=subprocess.STDOUT)
     wid = None
     try:
-        wid = wait(lambda: (xdo("search", "--onlyvisible", "--pid", str(host.pid)).stdout.split() or [None])[-1], 20)
+        # A search with no match exits non-zero; treat that as "not yet", not as a failure, and retry.
+        wid = wait(lambda: (run("xdotool", "search", "--onlyvisible", "--pid", str(host.pid)).stdout.split() or [None])[-1], 20)
         if not wid:
             raise Failure("no host window")
         xdo("windowsize", "--sync", wid, "1000", "600")

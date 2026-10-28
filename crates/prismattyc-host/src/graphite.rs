@@ -230,6 +230,12 @@ impl ChromeFont {
         }
     }
 
+    /// True when the face has its own glyph for `ch`. Characters without one
+    /// are skipped, so a status symbol cannot draw as a box.
+    fn covers(&self, face: Face, ch: char) -> bool {
+        self.face(face).has_glyph(ch)
+    }
+
     fn glyph(&self, face: Face, ch: char, px: f32) -> Arc<Glyph> {
         let key = (face, ch, (px * 64.0).round() as u32);
         if let Ok(cache) = self.cache.lock() {
@@ -269,7 +275,7 @@ pub(crate) fn text_width(face: Face, px: f32, text: &str) -> f32 {
     };
     let mut width = 0.0;
     let mut prev = None;
-    for ch in text.chars() {
+    for ch in text.chars().filter(|ch| font.covers(face, *ch)) {
         if let Some(prev) = prev {
             width += font.kern(face, prev, ch, px);
         }
@@ -323,7 +329,7 @@ pub(crate) fn draw_text(
     let baseline = (center_y + px * CAP_HEIGHT_EM / 2.0).round();
     let mut pen = x;
     let mut prev = None;
-    for ch in text.chars() {
+    for ch in text.chars().filter(|ch| font.covers(face, *ch)) {
         if let Some(prev) = prev {
             pen += font.kern(face, prev, ch, px);
         }
@@ -4647,6 +4653,16 @@ mod tests {
                 "{bar:?} tabs-bar ground paints its preset fill"
             );
         }
+    }
+
+    #[test]
+    fn chrome_text_skips_status_symbols_the_font_lacks() {
+        // Claude Code prefixes its pane title with a status symbol that the
+        // chrome font has no glyph for. It must not draw a box or take width.
+        let plain = text_width(Face::Regular, 13.0, "Emsso");
+        assert_eq!(text_width(Face::Regular, 13.0, "✳Emsso"), plain);
+        assert_eq!(text_width(Face::Regular, 13.0, "⠋Emsso"), plain);
+        assert!(plain > 0.0);
     }
 
     #[test]

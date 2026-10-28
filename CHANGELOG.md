@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+## [0.3.49] - 2026-10-28
+
+### Fixed
+
+- Menus, pickers and popups now size to their longest row within the available screen width, so labels are no longer cut off with an ellipsis when there is room. When space is tight, shortened rows keep version suffixes and path basenames.
+
+## [0.3.48] - 2026-10-28
+
+### Added
+
+- `pmux new` supports `--cwd DIR` to choose a session's starting directory and `--help`/`-h` to show its usage.
+
+### Changed
+
+- Font coverage is indexed once per font path, reducing repeated file reads during fallback lookup.
+
+## [0.3.47] - 2026-10-28
+
+### Added
+
+- Clicking the Dock icon restores a minimized window, including when another window remains visible.
+
+### Changed
+
+- Paste handling and render-status and attach-cache writes use worker threads by default to keep the window responsive.
+- Sidebar session labels stay stable when switching Spaces, and saved rows open the matching tab or pane.
+
 ## [0.3.46] - 2026-10-27
 
 ### Changed

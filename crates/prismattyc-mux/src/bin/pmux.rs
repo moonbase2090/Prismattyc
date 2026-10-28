@@ -146,6 +146,8 @@ session
     session-config <save|restore> FILE
                                   save or restore all session configurations
                                   (default: derive a unique lowercase address).
+    session-config <save|restore> FILE
+                                  save or restore all session configurations
     login <enable|disable|status|sync>
                                   start at login and restore workspace
     doctor [SESSION]              pane shell, login state, child pid, lease, attach state

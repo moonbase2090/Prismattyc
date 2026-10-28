@@ -4,7 +4,6 @@ Read this index before selecting proof. Each feature file names the user entry p
 
 - [Sessions and mail](sessions-mail.md): real shell output, mailbox claim/commit, and live process preservation.
 - [Saved spaces](spaces.md): create, save, open, rename, and delete saved definitions while sessions remain alive.
-- [Desktop UI](desktop.md): native rail deletion, session naming, restart rendering, the complete settings editor, and complete updates with session restoration.
 - [Desktop UI](desktop.md): native rail deletion, session naming, restart rendering, the complete settings editor, complete updates with session restoration, and macOS Dock restoration.
 - [Windows](windows.md): installer lifecycle, console newlines, and new-pane shell selection.
 

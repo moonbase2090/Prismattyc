@@ -9571,6 +9571,77 @@ mod tests {
     }
 
     #[test]
+    fn pane_drag_press_then_release_swaps_the_two_panes_in_order() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let a = runtime.focused_id();
+        let b = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let geom = HostGeom {
+            cell_w: 10,
+            cell_h: 20,
+            window_pad: 5,
+            slack_x: 0,
+            slack_y: 0,
+            pane_gap: 5,
+            rail_gap: 5,
+            inner_pad: 5,
+            top_chrome_px: 0,
+            pane_header_px: 0,
+            scrollbar_gutter_px: 8,
+            rail_side: RailSide::Off,
+            rail_px: 0,
+            rail_chip_cols: 0,
+            sidebar_px: 0,
+            chrome: ChromeGeom::CLASSIC,
+        };
+        runtime.set_geom(geom).unwrap();
+        let slot_of = |runtime: &MuxRuntime, pane| {
+            let rect: HashMap<PaneId, CellRect> = runtime.rects().collect();
+            let (x, y, w, h) = geom.pane_slot_px(rect[&pane]);
+            (x + w / 2, y + h / 2)
+        };
+        let order_before = runtime.rects().collect::<HashMap<_, _>>();
+        // Press on a's slot, release on b's slot: the drop is the same-tab
+        // pane under the pointer, so the drop resolves to b and swaps.
+        let press = slot_of(&runtime, a);
+        let release = slot_of(&runtime, b);
+        assert_eq!(runtime.pane_at_px(press.0, press.1), Some(a));
+        assert_eq!(runtime.pane_at_px(release.0, release.1), Some(b));
+        let target = runtime
+            .pane_at_px(release.0, release.1)
+            .filter(|target| *target != a)
+            .expect("release lands on another pane");
+        assert!(runtime.swap_panes(a, target).unwrap());
+        let order_after = runtime.rects().collect::<HashMap<_, _>>();
+        assert_eq!(order_after[&a], order_before[&b], "a takes b's slot");
+        assert_eq!(order_after[&b], order_before[&a], "b takes a's slot");
+    }
+
+    #[test]
+    fn pane_drag_handle_release_on_another_pane_swaps_in_the_same_tab() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let a = runtime.focused_id();
+        let b = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        // Strip-handle release: the hit names pane b in tab 0, so the drop
+        // target is b and only the same-tab swap applies.
+        let hit = Some(StripHit::Pane {
+            tab: 0,
+            pane: b,
+            handle: 0,
+        });
+        let target = pane_drop_swap_target(0, a, hit).expect("same-tab drop");
+        assert_eq!(target, b);
+        let before = runtime.rects().collect::<HashMap<_, _>>();
+        assert!(runtime.swap_panes(a, target).unwrap());
+        let after = runtime.rects().collect::<HashMap<_, _>>();
+        assert_eq!(after[&a], before[&b]);
+        assert_eq!(after[&b], before[&a]);
+    }
+
+    #[test]
     fn pane_drop_swaps_only_with_another_pane_in_the_same_tab() {
         let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
         let pane = runtime.focused_id();

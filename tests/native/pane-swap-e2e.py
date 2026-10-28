@@ -116,7 +116,10 @@ def main():
         # Wait for the host to attach and size its pane (not the default 80x24).
         if not wait(lambda: any(size != "80x24" for size in pane_sizes(env)), 15):
             raise Failure(f"host did not size its pane (pane sizes={pane_sizes(env)}); host is not driving PMUX_SOCKET")
-        if not wait(lambda: "no attach clients" not in run(PMUX, "clients", env=env).stdout, 15):
+        def has_attach_client():
+            text = run(PMUX, "clients", env=env).stdout.strip()
+            return bool(text) and "no attach clients" not in text
+        if not wait(has_attach_client, 15):
             raise Failure("host did not attach to the driver daemon: 'pmux clients' shows no attach client")
         if not wait(dump.exists, 15):
             raise Failure("no present dump")

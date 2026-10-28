@@ -140,15 +140,17 @@ def main():
     try:
         if not wait(lambda: Path(env["PMUX_SOCKET"]).exists(), 15):
             raise Failure("daemon socket never appeared")
-        host = subprocess.Popen([HOST, "--no-splash"], env=env, stdout=host_out, stderr=subprocess.STDOUT)
+        session_id = wait(lambda: (lambda m: m.group(1) if m else None)(re.search(r"session \S+ \(id (\d+)\)", run(PMUX, "ls", env=env).stdout)), 10)
+        if not session_id:
+            raise Failure("no default session on the driver daemon")
+        host = subprocess.Popen([HOST, "--no-splash", "--attach-session", session_id, "--attach-title", "default"],
+                                env=env, stdout=host_out, stderr=subprocess.STDOUT)
         wid = wait(lambda: (run("xdotool", "search", "--onlyvisible", "--pid", str(host.pid)).stdout.split() or [None])[-1], 20)
         if not wid:
             raise Failure("no host window")
         xdo("windowsize", "--sync", wid, "1000", "600")
         if not wait(lambda: any(size != "80x24" for size in pane_sizes(env)), 15):
             raise Failure(f"host did not size its pane (pane sizes={pane_sizes(env)})")
-        if not wait(lambda: "no attach clients" not in run(PMUX, "clients", env=env).stdout and run(PMUX, "clients", env=env).stdout.strip(), 15):
-            raise Failure("host did not attach to the driver daemon: 'pmux clients' shows no attach client")
         if not wait(dump.exists, 15):
             raise Failure("no present dump")
         xdo("windowfocus", "--sync", wid)

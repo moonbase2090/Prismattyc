@@ -75,7 +75,14 @@ def main():
         geom = dict(line.split("=", 1) for line in run("xdotool", "getwindowgeometry", "--shell", wid).stdout.splitlines())
         width, height = int(geom["WIDTH"]), int(geom["HEIGHT"])
         win_x, win_y = int(geom["X"]), int(geom["Y"])
-        before = wait_for(lambda: (lambda p: p if len(p) == 2 else None)(pane_positions(env)), "two panes")
+        deadline = time.monotonic() + 15.0
+        before = pane_positions(env)
+        while len(before) != 2 and time.monotonic() < deadline:
+            time.sleep(0.2)
+            before = pane_positions(env)
+        if len(before) != 2:
+            ls = run(PMUX, "ls", env=env)
+            fail("expected two panes", found=before, ls_stdout=ls.stdout.strip(), ls_stderr=ls.stderr.strip(), present_png=str(dump))
         panes = sorted(before, key=lambda p: before[p])
         a, b = panes[0], panes[1]
         # Release on pane B's body, per the host's pane_at_px fallback.

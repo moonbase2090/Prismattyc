@@ -147,7 +147,9 @@ def main():
         pane_a_rect = (xa * cell_w, ya * cell_h, (xa + ca) * cell_w, (ya + ra) * cell_h)
         if not (pane_a_rect[0] <= press[0] - win_x <= pane_a_rect[2] and pane_a_rect[1] <= press[1] - win_y <= pane_a_rect[3]):
             raise Failure(f"press not on pane A handle: press={press} pane_a_rect={pane_a_rect}")
-        release = (win_x + 3 * width // 4, win_y + height // 2)
+        # Release on pane B's body, from the same pmux ls grid as the press point.
+        cb, rb, xb, yb = grid[b][0], grid[b][1], grid[b][2], grid[b][3]
+        release = (win_x + int((xb + cb / 2) * cell_w), win_y + int((yb + rb / 2) * cell_h))
         print(f"window={wid} size={width}x{height} pane_a={a} pane_b={b} press={press} release={release}")
         xdo("mousemove", "--sync", str(press[0]), str(press[1]))
         at = xdo("getmouselocation", "--shell")

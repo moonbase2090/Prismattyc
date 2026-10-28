@@ -207,7 +207,7 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         group: ConfigGroup::FileWrites,
         doc: "Write render status, attach cache, and heartbeat files on a worker thread; startup only",
         range: "true|false",
-        value: ConfigValue::Bool(false),
+        value: ConfigValue::Bool(true),
     },
     ConfigKey {
         name: "link_click",
@@ -221,7 +221,7 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         group: ConfigGroup::Input,
         doc: "Hand pastes to the pane writer thread so large pastes never pause the window",
         range: "true | false",
-        value: ConfigValue::Bool(false),
+        value: ConfigValue::Bool(true),
     },
     ConfigKey {
         name: "install_agent_skills",
@@ -1219,7 +1219,8 @@ mod tests {
         );
         assert_eq!(parsed.render_timer(), crate::config::RenderTimer::Off);
         assert!(!parsed.render_timer_log_every_frame());
-        assert!(!parsed.async_file_writes());
+        assert!(parsed.async_file_writes());
+        assert!(parsed.async_paste());
         assert_eq!(parsed.install_agent_skills, Some(true));
         assert_eq!(parsed.tab_strip(), crate::config::TabStripMode::Auto);
         assert_eq!(parsed.link_click(), crate::link_click::Mode::Plain);

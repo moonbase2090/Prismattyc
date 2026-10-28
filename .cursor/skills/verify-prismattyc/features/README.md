@@ -4,7 +4,7 @@ Read this index before selecting proof. Each feature file names the user entry p
 
 - [Sessions and mail](sessions-mail.md): real shell output, mailbox claim/commit, and live process preservation.
 - [Saved spaces](spaces.md): create, save, open, rename, and delete saved definitions while sessions remain alive.
-- [Desktop UI](desktop.md): native rail deletion, session naming, restart rendering, and the complete settings editor.
+- [Desktop UI](desktop.md): native rail deletion, session naming, restart rendering, the complete settings editor, and macOS Dock restoration.
 - [Windows](windows.md): installer lifecycle, console newlines, and new-pane shell selection.
 
 Start each CLI feature with the skill's fresh private daemon. Desktop fixtures own separate windows and data. Check doctor before driving and after surprises. Do not share sockets, artifact paths, or build targets between concurrent writers.

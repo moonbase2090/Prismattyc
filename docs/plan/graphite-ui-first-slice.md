@@ -50,7 +50,7 @@ Each ticket is one reviewable PR. Trunk tickets are labelled `trunk`, and each n
 - **Proof:** test output.
 
 ### T4. Close #103 after T1 to T3 merge
-- **Class:** docs and tracking only. No PR. Close #103 with a link to the merged P8 PRs, and update PT-3's outcome. This is the last item the Graphite epic needs.
+- **Class:** docs and tracking only. No PR. Close #103 with a link to the merged P8 PRs, and record the outcome on the board. This is the last item the Graphite epic needs.
 
 ### Not proposed here
 - **T5 (graphite-tui snapshot tests):** the graphite repo has `graphite-tui` (#31 merged), and its tests cover the widgets. I did not verify whether plan rows T2 to T5 are complete, so I'm not proposing them. Check before scoping.

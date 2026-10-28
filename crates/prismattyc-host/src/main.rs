@@ -1982,6 +1982,49 @@ fn dump_present_path() -> Option<PathBuf> {
     Some(PathBuf::from(value))
 }
 
+/// `PRISMATTYC_STRIP_DUMP=<path>`: write the pane-handle rectangles the tab
+/// strip hit-test reports, as JSON, for the pane-swap driver. The rectangles
+/// come from the same `tab_strip_hit` the mouse path calls, so a press inside a
+/// rectangle is a press on that handle. Unset or empty means no dump.
+fn dump_strip_handles(host: &HostState, stride: usize, height: usize, path: &Path) {
+    const STRIP_ROWS: usize = 160;
+    let reserve = reserve_strip_end(host);
+    // (tab, pane, handle, [x0, y0, x1, y1]) per handle, grown over the scan.
+    let mut rects: Vec<(usize, u64, usize, [usize; 4])> = Vec::new();
+    for py in 0..height.min(STRIP_ROWS) {
+        for px in 0..stride {
+            let Some(mux::StripHit::Pane { tab, pane, handle }) =
+                host.mux.tab_strip_hit(px, py, stride, reserve)
+            else {
+                continue;
+            };
+            let key = (tab, pane.get(), handle);
+            match rects.iter_mut().find(|r| (r.0, r.1, r.2) == key) {
+                Some(rect) => {
+                    rect.3[0] = rect.3[0].min(px);
+                    rect.3[1] = rect.3[1].min(py);
+                    rect.3[2] = rect.3[2].max(px + 1);
+                    rect.3[3] = rect.3[3].max(py + 1);
+                }
+                None => rects.push((tab, pane.get(), handle, [px, py, px + 1, py + 1])),
+            }
+        }
+    }
+    let handles: Vec<_> = rects
+        .iter()
+        .map(|&(tab, pane, handle, [x0, y0, x1, y1])| {
+            serde_json::json!({
+                "tab": tab, "pane": pane, "handle": handle,
+                "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+            })
+        })
+        .collect();
+    if let Err(error) = std::fs::write(path, serde_json::json!({ "handles": handles }).to_string())
+    {
+        eprintln!("prismattyc-host: dump strip handles failed: {error}");
+    }
+}
+
 /// Write the CPU framebuffer that is about to present as an 8-bit RGBA PNG.
 /// Callers keep the side effect out of `rasterize_frame`.
 fn present_png_empty(width: u32, height: u32) -> bool {
@@ -2329,6 +2372,11 @@ impl PresentBackend {
                     height,
                     host.render_frame.full_repaint_reason,
                 );
+                if let Some(path) =
+                    std::env::var_os("PRISMATTYC_STRIP_DUMP").filter(|p| !p.is_empty())
+                {
+                    dump_strip_handles(host, width as usize, height as usize, Path::new(&path));
+                }
                 let present_started = Instant::now();
                 // The X11 present path expects premultiplied ARGB. Skip the
                 // pass on an opaque window so the default path pays nothing.

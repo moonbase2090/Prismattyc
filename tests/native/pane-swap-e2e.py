@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Drive the real prismattyc-host under Xvfb: split a tab in two, drag pane A onto pane B, assert the swap.
+"""Drive the real prismattyc-host under Xvfb: split a tab, drag pane A's handle onto pane B's handle, assert the swap.
 
-Fail-closed. Test-only; no product code. Apt deps (Ubuntu 24.04): xvfb openbox xdotool x11-utils ffmpeg python3 mesa.
+Fail-closed. Test-only; the host side is the PRISMATTYC_STRIP_DUMP hook, which
+writes the strip hit-test's own pane-handle rectangles. Apt deps (Ubuntu 24.04):
+xvfb openbox xdotool x11-utils python3 mesa.
 Run from the repo root after `cargo build --locked -p prismattyc-host -p prismattyc-mux`:
     python3 tests/native/pane-swap-e2e.py
 Split chord: SplitRight defaults to ctrl+shift+e (crates/prismattyc-host/src/keybind.rs default_chords).
 Socket: the host and pmux read PMUX_SOCKET first (crates/prismattyc-mux/src/config.rs).
 """
+import json
 import os
 import re
 import subprocess
@@ -22,12 +25,12 @@ PMUX = os.environ.get("PMUX", str(ROOT / "target/debug/pmux"))
 PMUXD = os.environ.get("PMUXD", str(ROOT / "target/debug/pmuxd"))
 
 
-def run(*args, env=None):
-    return subprocess.run(args, capture_output=True, text=True, env=env, check=False)
-
-
 class Failure(Exception):
     pass
+
+
+def run(*args, env=None):
+    return subprocess.run(args, capture_output=True, text=True, env=env, check=False)
 
 
 def xdo(*args):
@@ -38,7 +41,12 @@ def xdo(*args):
     return out.stdout
 
 
-def diagnostics(wid, env, host_log, dump):
+def mouse_location():
+    fields = dict(line.split("=", 1) for line in xdo("getmouselocation", "--shell").split())
+    return int(fields["X"]), int(fields["Y"])
+
+
+def diagnostics(wid, env, host_log, dump, daemon_log):
     lines = []
     if wid:
         for args in (("getwindowname", wid), ("getwindowgeometry", "--shell", wid), ("getwindowfocus",)):
@@ -47,25 +55,19 @@ def diagnostics(wid, env, host_log, dump):
     clients = run(PMUX, "clients", env=env)
     lines.append(f"pmux clients: rc={clients.returncode} {clients.stdout.strip()} {clients.stderr.strip()}")
     lines.append(f"PMUX_SOCKET={env.get('PMUX_SOCKET')} XDG_RUNTIME_DIR={env.get('XDG_RUNTIME_DIR')}")
-    lines.append(f"present_png={dump}")
-    try:
-        tail = host_log.read_text(errors="replace").splitlines()[-40:]
-        lines.append("host log (last 40 lines):")
-        lines.extend(tail)
-    except OSError as error:
-        lines.append(f"host log unreadable: {error}")
+    lines.append(f"present_png={dump} strip_dump={env.get('PRISMATTYC_STRIP_DUMP')}")
+    for label, path in (("host log", host_log), ("pmuxd log", daemon_log)):
+        try:
+            lines.append(f"{label} (last 40 lines):")
+            lines.extend(path.read_text(errors="replace").splitlines()[-40:])
+        except OSError as error:
+            lines.append(f"{label} unreadable: {error}")
     return "\n".join(lines)
 
 
 def pane_positions(env):
     out = run(PMUX, "ls", env=env).stdout
     return {int(m.group(1)): (int(m.group(2)), int(m.group(3))) for m in re.finditer(r"pane (\d+) .* at \((\d+),(\d+)\)", out)}
-
-
-def pane_grid(env):
-    out = run(PMUX, "ls", env=env).stdout
-    return {int(m.group(1)): tuple(int(v) for v in m.groups()[1:]) for m in re.finditer(
-        r"pane (\d+) — (\d+)x(\d+) at \((\d+),(\d+)\)", out)}
 
 
 def pane_sizes(env):
@@ -83,6 +85,36 @@ def wait(check, timeout):
     return None
 
 
+def handle_rects(strip_dump, tab):
+    """Handle rectangles for one tab, as the host's own strip hit-test reports them."""
+    handles = json.loads(strip_dump.read_text())["handles"]
+    return [h for h in handles if h["tab"] == tab]
+
+
+def center(rect):
+    return ((rect["x0"] + rect["x1"]) // 2, (rect["y0"] + rect["y1"]) // 2)
+
+
+def inside(point, rect):
+    return rect["x0"] <= point[0] < rect["x1"] and rect["y0"] <= point[1] < rect["y1"]
+
+
+def drag(start, end, win_xy):
+    """Press at `start`, move in steps past the drag threshold to `end`, release. Window-relative points."""
+    sx, sy = start[0] + win_xy[0], start[1] + win_xy[1]
+    ex, ey = end[0] + win_xy[0], end[1] + win_xy[1]
+    xdo("mousemove", "--sync", str(sx), str(sy))
+    if mouse_location() != (sx, sy):
+        raise Failure(f"press not on pane A handle: pointer at {mouse_location()}, wanted {(sx, sy)}")
+    xdo("mousedown", "1")
+    for step in range(1, 5):
+        xdo("mousemove", "--sync", str(sx + (ex - sx) * step // 4), str(sy + (ey - sy) * step // 4))
+        time.sleep(0.05)
+    xdo("mousemove", "--sync", str(ex), str(ey))
+    xdo("mouseup", "1")
+    time.sleep(0.5)
+
+
 def main():
     tmp = Path(tempfile.mkdtemp(prefix="pane-swap-"))
     runtime = tmp / "rt"
@@ -90,36 +122,32 @@ def main():
     config = tmp / "config.toml"
     config.write_text("splash = false\nstart_at_login = false\nautomatic_update_checks = false\n")
     dump = tmp / "present.png"
+    strip_dump = tmp / "strip.json"
     host_log = tmp / "host.log"
+    daemon_log_path = tmp / "pmuxd.log"
     env = dict(os.environ, DISPLAY=DISPLAY, XDG_RUNTIME_DIR=str(runtime), PMUX_SOCKET=str(runtime / "pmux.sock"),
-               PRISMATTYC_CONFIG=str(config), PRISMATTYC_DUMP_PRESENT=str(dump), WINIT_UNIX_BACKEND="x11")
-    # Start the daemon on the driver's socket first, so the host attaches to it.
+               PRISMATTYC_CONFIG=str(config), PRISMATTYC_DUMP_PRESENT=str(dump),
+               PRISMATTYC_STRIP_DUMP=str(strip_dump), WINIT_UNIX_BACKEND="x11")
     shell = tmp / "shell"
     shell.write_text("#!/bin/sh\nexec cat\n")
     shell.chmod(0o755)
-    daemon_log = (tmp / "pmuxd.log").open("w")
+    daemon_log = daemon_log_path.open("w")
     daemon = subprocess.Popen([PMUXD, "--socket", env["PMUX_SOCKET"], "--", str(shell)], env=env,
                               stdout=daemon_log, stderr=subprocess.STDOUT)
-    if not wait(lambda: Path(env["PMUX_SOCKET"]).exists(), 15):
-        daemon.terminate()
-        print("FAIL: daemon socket never appeared", (tmp / "pmuxd.log").read_text(errors="replace")[-2000:])
-        sys.exit(1)
-    with host_log.open("w") as log:
-        host = subprocess.Popen([HOST, "--no-splash"], env=env, stdout=log, stderr=subprocess.STDOUT)
+    host = None
+    host_out = host_log.open("w")
     wid = None
     try:
-        # A search with no match exits non-zero; treat that as "not yet", not as a failure, and retry.
+        if not wait(lambda: Path(env["PMUX_SOCKET"]).exists(), 15):
+            raise Failure("daemon socket never appeared")
+        host = subprocess.Popen([HOST, "--no-splash"], env=env, stdout=host_out, stderr=subprocess.STDOUT)
         wid = wait(lambda: (run("xdotool", "search", "--onlyvisible", "--pid", str(host.pid)).stdout.split() or [None])[-1], 20)
         if not wid:
             raise Failure("no host window")
         xdo("windowsize", "--sync", wid, "1000", "600")
-        # Wait for the host to attach and size its pane (not the default 80x24).
         if not wait(lambda: any(size != "80x24" for size in pane_sizes(env)), 15):
-            raise Failure(f"host did not size its pane (pane sizes={pane_sizes(env)}); host is not driving PMUX_SOCKET")
-        def has_attach_client():
-            text = run(PMUX, "clients", env=env).stdout.strip()
-            return bool(text) and "no attach clients" not in text
-        if not wait(has_attach_client, 15):
+            raise Failure(f"host did not size its pane (pane sizes={pane_sizes(env)})")
+        if not wait(lambda: "no attach clients" not in run(PMUX, "clients", env=env).stdout and run(PMUX, "clients", env=env).stdout.strip(), 15):
             raise Failure("host did not attach to the driver daemon: 'pmux clients' shows no attach client")
         if not wait(dump.exists, 15):
             raise Failure("no present dump")
@@ -127,67 +155,49 @@ def main():
         xdo("key", "--clearmodifiers", "ctrl+shift+e")
         before = wait(lambda: (lambda p: p if len(p) == 2 else None)(pane_positions(env)), 5)
         if not before:
-            xdo("key", "--window", wid, "ctrl+shift+e")  # fallback: keystroke aimed at the window
+            xdo("key", "--window", wid, "ctrl+shift+e")
             before = wait(lambda: (lambda p: p if len(p) == 2 else None)(pane_positions(env)), 10)
         if not before:
             raise Failure(f"no split: found={pane_positions(env)}")
-        geom = dict(line.split("=", 1) for line in xdo("getwindowgeometry", "--shell", wid).stdout.splitlines())
-        width, height, win_x, win_y = int(geom["WIDTH"]), int(geom["HEIGHT"]), int(geom["X"]), int(geom["Y"])
-        panes = sorted(before, key=lambda p: before[p])
-        a, b = panes[0], panes[1]
-        # Press: pane A's tab-strip handle (guessed; see the open press-point item).
-        grid = pane_grid(env)
-        cols = max(x + c for (c, _r, x, _y) in grid.values())
-        rows = max(y + r for (_c, r, _x, y) in grid.values())
-        cell_w, cell_h = width / cols, height / rows
-        ca, ra, xa, ya = grid[a][0], grid[a][1], grid[a][2], grid[a][3]
-        # Pane A's tab-strip handle: its top row, near its left edge (derived from pmux ls cell geometry).
-        press = (win_x + int(xa * cell_w + cell_w * 2), win_y + int(ya * cell_h + cell_h / 2))
-        print(f"grid cols={cols} rows={rows} cell={cell_w:.1f}x{cell_h:.1f} pane_a_cells=({xa},{ya}) press={press}")
-        pane_a_rect = (xa * cell_w, ya * cell_h, (xa + ca) * cell_w, (ya + ra) * cell_h)
-        if not (pane_a_rect[0] <= press[0] - win_x <= pane_a_rect[2] and pane_a_rect[1] <= press[1] - win_y <= pane_a_rect[3]):
-            raise Failure(f"press not on pane A handle: press={press} pane_a_rect={pane_a_rect}")
-        # Release on pane B's body, from the same pmux ls grid as the press point.
-        cb, rb, xb, yb = grid[b][0], grid[b][1], grid[b][2], grid[b][3]
-        release = (win_x + int((xb + cb / 2) * cell_w), win_y + int((yb + rb / 2) * cell_h))
-        print(f"window={wid} size={width}x{height} pane_a={a} pane_b={b} press={press} release={release}")
-        xdo("mousemove", "--sync", str(press[0]), str(press[1]))
-        at = xdo("getmouselocation", "--shell")
-        if f"X={press[0]}" not in at or f"Y={press[1]}" not in at:
-            raise Failure(f"press not on pane A handle: pointer did not reach press point ({at.split()})")
-        xdo("mousedown", "1")
-        for step in range(1, 5):
-            xdo("mousemove", "--sync", str(press[0] + (release[0] - press[0]) * step // 4),
-                str(press[1] + (release[1] - press[1]) * step // 4))
-            time.sleep(0.05)
-        xdo("mousemove", "--sync", str(release[0]), str(release[1]))
-        xdo("mouseup", "1")
-        time.sleep(0.5)
+        # Wait for a present after the split so the strip dump shows both panes' handles.
+        handles = wait(lambda: (lambda hs: hs if len({h["pane"] for h in hs}) == 2 else None)(
+            json.loads(strip_dump.read_text())["handles"] if strip_dump.exists() else []), 10)
+        if not handles:
+            raise Failure(f"strip dump shows no two-pane handles: {strip_dump.read_text() if strip_dump.exists() else 'missing'}")
+        geom = dict(line.split("=", 1) for line in xdo("getwindowgeometry", "--shell", wid).split())
+        win_xy = (int(geom["X"]), int(geom["Y"]))
+        ids = pane_positions(env)
+        ordered = sorted(ids, key=lambda p: ids[p])
+        a, b = ordered[0], ordered[1]
+        rect_a = next(h for h in handles if h["pane"] == a)
+        rect_b = next(h for h in handles if h["pane"] == b)
+        press = center(rect_a)
+        print(f"pane_a={a} pane_b={b} press={press} rect_a={rect_a} rect_b={rect_b} window_xy={win_xy}")
+        if not inside(press, rect_a) or any(inside(press, h) for h in handles if h is not rect_a):
+            raise Failure(f"press not on pane A handle: press={press} rect_a={rect_a}")
+        drag(press, center(rect_b), win_xy)
         after = pane_positions(env)
         print("before:", before, "after:", after)
         if after.get(a) != before.get(b) or after.get(b) != before.get(a):
             raise Failure(f"pane order did not swap: before={before} after={after}")
         print("PASS: panes swapped positions")
-        # Negative: drag back onto pane A's own body; nothing may change.
-        xdo("mousemove", "--sync", str(release[0]), str(release[1]))
-        xdo("mousedown", "1")
-        xdo("mousemove", "--sync", str(release[0] - 5), str(release[1]))
-        xdo("mousemove", "--sync", str(release[0]), str(release[1]))
-        xdo("mouseup", "1")
-        time.sleep(0.5)
+        # Negative control: press pane A's handle and release on A's own handle; nothing may change.
+        drag(press, press, win_xy)
         if pane_positions(env) != after:
             raise Failure(f"same-pane drop changed the order: after={after} now={pane_positions(env)}")
         print("PASS: same-pane drop left the order unchanged")
     except Failure as error:
         print("FAIL:", error)
-        print(diagnostics(wid, env, host_log, dump))
+        print(diagnostics(wid, env, host_log, dump, daemon_log_path))
         sys.exit(1)
     finally:
-        host.terminate()
-        host.wait(timeout=5)
+        if host:
+            host.terminate()
+            host.wait(timeout=5)
         daemon.terminate()
         daemon.wait(timeout=5)
         daemon_log.close()
+        host_out.close()
 
 
 if __name__ == "__main__":

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.3.47] - 2026-10-28
+
+### Added
+
+- Clicking the Dock icon restores a minimized window, including when another window remains visible.
+
+### Changed
+
+- Paste handling and render-status and attach-cache writes use worker threads by default to keep the window responsive.
+- Sidebar session labels stay stable when switching Spaces, and saved rows open the matching tab or pane.
+
 ## [0.3.46] - 2026-10-27
 
 ### Changed

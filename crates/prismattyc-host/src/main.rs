@@ -15078,6 +15078,7 @@ fn handle_pane_handle_press(host: &mut HostState, button: MouseButton) -> bool {
                 start_y: y,
                 active: false,
             });
+            drag_trace(|| format!("press pane={} tab={tab} x={x} y={y}", pane.get()));
         }
     } else {
         open_context_menu(host, ContextMenuTarget::Pane(pane));
@@ -15087,6 +15088,23 @@ fn handle_pane_handle_press(host: &mut HostState, button: MouseButton) -> bool {
     host.app_mouse_button = None;
     sync_chrome_hover(host);
     true
+}
+
+/// `PRISMATTYC_DRAG_TRACE=<path>`: append one line per pane-drag event (press,
+/// drag start, release and its resolved target, attach-tabs write) for the
+/// pane-swap driver. Unset or empty means no trace; no behaviour changes.
+pub(crate) fn drag_trace(line: impl FnOnce() -> String) {
+    let Some(path) = std::env::var_os("PRISMATTYC_DRAG_TRACE").filter(|p| !p.is_empty()) else {
+        return;
+    };
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{}", line());
+    }
 }
 
 fn handle_strip_drag_move(host: &mut HostState) -> bool {
@@ -15103,9 +15121,16 @@ fn handle_strip_drag_move(host: &mut HostState) -> bool {
     }
     let dx = x - drag.start_x;
     let dy = y - drag.start_y;
+    drag_trace(|| {
+        format!(
+            "motion x={x} y={y} past_threshold={}",
+            dx * dx + dy * dy >= 16.0
+        )
+    });
     if dx * dx + dy * dy < 16.0 {
         return true;
     }
+    drag_trace(|| "drag-start".to_owned());
     drag.active = true;
     host.dirty = true;
     true
@@ -15155,6 +15180,7 @@ fn finish_strip_drag(host: &mut HostState) -> bool {
             .map(|target| (pane, target)),
         StripDragKind::Tab(_) => None,
     };
+    drag_trace(|| format!("release x={x} y={y} hit={hit:?} swap={swap:?}"));
     let changed = if let Some((from, to)) = swap {
         host.mux.swap_panes(from, to).unwrap_or(false)
     } else {

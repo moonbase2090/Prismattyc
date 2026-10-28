@@ -92,6 +92,19 @@ def handles(dump):
         return []
 
 
+def stable_handles(dump, timeout):
+    """Two handles, read twice in a row with the same result, so the layout has settled before a press."""
+    deadline = time.monotonic() + timeout
+    previous = None
+    while time.monotonic() < deadline:
+        current = handles(dump)
+        if len(current) == 2 and current == previous:
+            return current
+        previous = current
+        time.sleep(0.5)
+    return None
+
+
 def inside(point, rect):
     return rect["x0"] <= point[0] < rect["x1"] and rect["y0"] <= point[1] < rect["y1"]
 
@@ -103,10 +116,12 @@ def drag(start, end, win_xy):
     if mouse_location() != (sx, sy):
         raise Failure(f"press not on pane A handle: pointer at {mouse_location()}, wanted {(sx, sy)}")
     xdo("mousedown", "1")
+    time.sleep(0.15)
     for step in range(1, 5):
         xdo("mousemove", "--sync", str(sx + (ex - sx) * step // 4), str(sy + (ey - sy) * step // 4))
-        time.sleep(0.05)
+        time.sleep(0.15)
     xdo("mousemove", "--sync", str(ex), str(ey))
+    time.sleep(0.15)
     xdo("mouseup", "1")
     time.sleep(0.5)
 
@@ -120,7 +135,8 @@ def main():
     dump = tmp / "strip.json"
     env = dict(os.environ, DISPLAY=DISPLAY, XDG_RUNTIME_DIR=str(runtime), PMUX_SOCKET=str(runtime / "pmux.sock"),
                PRISMATTYC_CONFIG=str(config), PRISMATTYC_DUMP_PRESENT=str(tmp / "present.png"),
-               PRISMATTYC_STRIP_DUMP=str(dump), WINIT_UNIX_BACKEND="x11",
+               PRISMATTYC_STRIP_DUMP=str(dump), PRISMATTYC_DRAG_TRACE=str(tmp / "drag.trace"),
+               WINIT_UNIX_BACKEND="x11",
                PATH=f"{BINS}{os.pathsep}{os.environ.get('PATH', '')}")
     shell = tmp / "shell"
     shell.write_text("#!/bin/sh\nexec cat\n")
@@ -151,7 +167,7 @@ def main():
         xdo("windowsize", "--sync", wid, "1000", "600")
         run("xdotool", "windowactivate", "--sync", wid)  # best effort; the window manager may not support it
         xdo("windowfocus", "--sync", wid)
-        two = wait(lambda: (lambda hs: hs if len(hs) == 2 else None)(handles(dump)), 20)
+        two = stable_handles(dump, 20)
         if not two:
             raise Failure(f"strip dump does not show two handles: {handles(dump)}")
         geom = dict(line.split("=", 1) for line in xdo("getwindowgeometry", "--shell", wid).split())
@@ -190,6 +206,8 @@ def main():
             print("\n".join(path.read_text(errors="replace").splitlines()[-40:]))
         print("ls:", run(PMUX, "ls", env=env).stdout)
         print("strip dump:", handles(dump))
+        trace = tmp / "drag.trace"
+        print("drag trace:\n" + (trace.read_text() if trace.exists() else "(no trace written)"))
         print("runtime dir:", sorted(p.name for p in runtime.iterdir()))
         sys.exit(1)
     finally:

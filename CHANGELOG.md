@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.3.48] - 2026-10-28
+
+### Added
+
+- `pmux new` supports `--cwd DIR` to choose a session's starting directory and `--help`/`-h` to show its usage.
+
+### Changed
+
+- Font coverage is indexed once per font path, reducing repeated file reads during fallback lookup.
+
 ## [0.3.47] - 2026-10-28
 
 ### Added

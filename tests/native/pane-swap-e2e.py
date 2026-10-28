@@ -61,8 +61,21 @@ def session_ids(env):
     return {m.group(1): int(m.group(2)) for m in re.finditer(r"^session (\S+) \(id (\d+)\)", out, re.M)}
 
 
+def leaves(node):
+    """Depth-first session ids of a split tree, the same order as the tab's sessions."""
+    if node["kind"] == "leaf":
+        return [node["session"]]
+    return leaves(node["first"]) + leaves(node["second"])
+
+
 def cache_sessions(path):
-    return json.loads(path.read_text())["tabs"][0]["sessions"]
+    """The tab's session order. The host writes `layout` (a split tree) and may omit the flat list."""
+    tab = json.loads(path.read_text())["tabs"][0]
+    if tab.get("sessions"):
+        return tab["sessions"]
+    if tab.get("layout"):
+        return leaves(tab["layout"])
+    raise KeyError("tab has neither sessions nor layout")
 
 
 def cache_sessions_or_none(path):
@@ -156,7 +169,9 @@ def main():
         if after is None:
             if not cache.exists():
                 raise Failure(f"attach-tabs cache is missing after the drag: {cache}")
-            raise Failure(f"attach-tabs cache is unchanged after the drag: before={before} now={cache.read_text()[:300]}")
+            if cache_sessions_or_none(cache) is None:
+                raise Failure(f"attach-tabs cache has no readable session order after the drag: {cache.read_text()[:600]}")
+            raise Failure(f"attach-tabs cache order is unchanged after the drag: before={before} now={cache_sessions(cache)}")
         if after != [before[1], before[0]]:
             raise Failure(f"order did not swap: before={before} after={after}")
         print("PASS: panes swapped order")

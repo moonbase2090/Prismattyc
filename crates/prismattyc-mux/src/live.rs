@@ -1556,13 +1556,12 @@ mod tests {
     // exit polling lands.
     #[cfg(unix)]
     #[test]
-    fn true_exiting_emits_notice_when_seated() {
+    fn exiting_child_preserves_output_and_records_one_exit_when_seated() {
         let mut env = BTreeMap::new();
         env.insert(HIVE_CELL_ENV.into(), "cell:1@1".into());
         let spawn = SpawnSpec {
-            // `/usr/bin/true` exists on both Linux and macOS; `/bin/true` is Linux-only.
-            program: "/usr/bin/true".into(),
-            argv: vec![],
+            program: "/bin/sh".into(),
+            argv: vec!["-c".into(), "printf EXIT_MARKER".into()],
             cwd: Some(PathBuf::from("/tmp")),
             env,
         };
@@ -1593,6 +1592,47 @@ mod tests {
             "expected one cell exit notice, got {notices:?}"
         );
         assert_eq!(notices[0].cell, "cell:1@1");
+
+        let pane = runtime
+            .panes
+            .get(&1)
+            .expect("exited pane remains available");
+        assert!(!pane.child_alive);
+        assert!(pane.content(1).lines[0].starts_with("EXIT_MARKER"));
+        let events = runtime.pane_log(1).expect("pane log").events();
+        let output_index = events
+            .iter()
+            .position(
+                |event| matches!(event, PaneEvent::Output { bytes } if bytes == b"EXIT_MARKER"),
+            )
+            .expect("child output is recorded");
+        let exit_indices = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| matches!(event, PaneEvent::Exited { .. }).then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(exit_indices.len(), 1, "exit events: {events:?}");
+        assert!(
+            output_index < exit_indices[0],
+            "output must precede exit: {events:?}"
+        );
+
+        let (later_notices, _) = runtime.drain();
+        assert!(
+            later_notices.is_empty(),
+            "duplicate exit notice: {later_notices:?}"
+        );
+        assert_eq!(
+            runtime
+                .pane_log(1)
+                .expect("pane log")
+                .events()
+                .iter()
+                .filter(|event| matches!(event, PaneEvent::Exited { .. }))
+                .count(),
+            1,
+            "a later drain must not append another exit event"
+        );
     }
 
     fn replay_log(pane: &LivePane) -> Emulator {

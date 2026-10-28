@@ -3262,7 +3262,7 @@ fn menu_row_text(text: &str, max_cells: usize) -> String {
     let is_version = |suffix: &str| {
         let core = suffix
             .trim_start_matches('v')
-            .split(|ch| ch == '-' || ch == '+')
+            .split(['-', '+'])
             .next()
             .unwrap_or_default();
         core.split('.').count() >= 2

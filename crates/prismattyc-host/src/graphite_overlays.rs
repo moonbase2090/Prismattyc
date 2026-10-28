@@ -161,7 +161,7 @@ fn menu_row_label(text: &str, max_px: f32, font_px: f32) -> String {
     let is_version = |suffix: &str| {
         let core = suffix
             .trim_start_matches('v')
-            .split(|ch| ch == '-' || ch == '+')
+            .split(['-', '+'])
             .next()
             .unwrap_or_default();
         core.split('.').count() >= 2

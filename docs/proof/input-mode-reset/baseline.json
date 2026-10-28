@@ -1,0 +1,13 @@
+{
+  "status": "FAIL",
+  "presenter": "interactive attach PTY; no native desktop",
+  "mouse_hex": "1b5b3c33353b353b354d",
+  "binary_version": "pmux 0.3.41 (a1be507fd1d3)",
+  "live_child_input_hex": "501b5b3c33353b353b354d4c495645",
+  "restored_mouse_tracking": true,
+  "restored_child_input_hex": "501b5b3c33353b353b354d4e4557",
+  "error": "restored child inherited application mouse",
+  "restarted_daemon_stopped": true,
+  "scratch_removed": true,
+  "initial_daemon_reaped": true
+}

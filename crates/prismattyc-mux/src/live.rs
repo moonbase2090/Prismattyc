@@ -316,6 +316,10 @@ impl LivePane {
             return None;
         }
         self.child_alive = false;
+        self.emulator.reset_input_reporting();
+        self.record(PaneEvent::Output {
+            bytes: prismattyc_emulator::RESET_INPUT_REPORTING.to_vec(),
+        });
         self.revision = self.revision.saturating_add(1);
         // Non-blocking: never wait on the child here — drain must not stall the mux loop.
         let (exit_code, signal) = match self.session.try_wait() {
@@ -1305,6 +1309,11 @@ impl LiveRuntime {
             pane.cell_w = cell_w;
             pane.cell_h = cell_h;
             pane.log = PaneLog::from_frames(rec.tail.clone(), DEFAULT_PANE_LOG_BYTES);
+            // The screen belongs to the old child; the newly spawned child owns input modes.
+            pane.emulator.reset_input_reporting();
+            pane.record(PaneEvent::Output {
+                bytes: prismattyc_emulator::RESET_INPUT_REPORTING.to_vec(),
+            });
             pane.revision = pane.revision.saturating_add(1);
             let size = pty_size_with_cell_pixels(cols, rows, cell_w, cell_h);
             let _ = pane.session.resize(size);
@@ -1854,6 +1863,89 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, PaneEvent::MailDepth { depth: 3 })));
+    }
+
+    const REPORTING_APP: &[u8] = b"saved output\r\n\x1b[?1000;1002;1003;1006;1004;2004;7700h";
+
+    fn assert_no_input_reporting(emulator: &Emulator) {
+        assert_eq!(
+            emulator.mouse_tracking(),
+            prismattyc_emulator::MouseTracking::Off
+        );
+        assert!(!emulator.mouse_sgr());
+        assert!(!emulator.mouse_wheel_only());
+        assert!(!emulator.focus_report());
+        assert!(!emulator.bracketed_paste());
+    }
+
+    #[test]
+    fn restored_child_does_not_inherit_previous_input_reporting() {
+        use crate::pane_log_persist::EmulatorStateCodec;
+        for snapshot in [true, false] {
+            let mut pane = spawn_test_pane(1, &sleep_spawn(BTreeMap::new()), None);
+            pane.apply_pty_chunk(PtyChunk {
+                bytes: REPORTING_APP.to_vec(),
+                _reservation: None,
+            });
+            let mut runtime = LiveRuntime {
+                panes: HashMap::from([(1, pane)]),
+                mux_socket: None,
+                watch: PaneLogWatch::new(),
+                pending_size_owner: None,
+            };
+            let keys = [(1, "work".into(), 0)];
+            let mut saved = runtime.export_persist(&keys, &EmulatorStateCodec);
+            assert_eq!(saved.len(), 1);
+            assert_eq!(
+                runtime.panes[&1].emulator.mouse_tracking(),
+                prismattyc_emulator::MouseTracking::Any
+            );
+            if !snapshot {
+                saved[0].snapshot = None;
+                saved[0].snapshot_seq = 0;
+            }
+            runtime
+                .panes
+                .insert(1, spawn_test_pane(1, &sleep_spawn(BTreeMap::new()), None));
+            runtime.restore_persist(&saved, &keys, &EmulatorStateCodec);
+            let pane = runtime.panes.get_mut(&1).unwrap();
+            assert!(pane.content(1).lines[0].starts_with("saved output"));
+            assert_no_input_reporting(&pane.emulator);
+            assert_eq!(pane.styled(1, None, None).child_mouse_tracking, Some(false));
+            assert_no_input_reporting(&replay_log(pane));
+            // A replacement app may opt in again; ordinary reads must keep it enabled.
+            pane.apply_pty_chunk(PtyChunk {
+                bytes: REPORTING_APP.to_vec(),
+                _reservation: None,
+            });
+            assert_eq!(pane.styled(1, None, None).child_mouse_tracking, Some(true));
+            assert!(pane.emulator.focus_report());
+            assert!(pane.emulator.bracketed_paste());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exited_child_stops_input_reporting_and_keeps_output() {
+        let spawn = SpawnSpec {
+            program: "/bin/sh".into(),
+            argv: vec![
+                "-c".into(),
+                r"printf '\033[?1000;1002;1003;1006;1004;2004;7700hEXIT_MARKER'".into(),
+            ],
+            cwd: None,
+            env: BTreeMap::new(),
+        };
+        let mut pane = spawn_test_pane(1, &spawn, None);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pane.child_alive && std::time::Instant::now() < deadline {
+            pane.drain(1);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!pane.child_alive, "child did not exit");
+        assert!(pane.content(1).lines[0].starts_with("EXIT_MARKER"));
+        assert_no_input_reporting(&pane.emulator);
+        assert_no_input_reporting(&replay_log(&pane));
     }
 
     #[test]

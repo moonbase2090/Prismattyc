@@ -76,6 +76,17 @@ proof at the exact head.
 
 ## Flag and rollout
 
+Rollout goes through a prerelease first:
+
+- The first shipped build is a Prismattyc prerelease candidate, tagged
+  `vX.Y.Z-rc.N` and marked as a prerelease. It never becomes the Latest
+  release.
+- `pmux update` skips prereleases unless the user passes `--pre`, so the RC
+  reaches only people who ask for it.
+- Promotion to a stable release happens only after the owner has tried the RC.
+- Tags and releases are signed and cut by the owner. Feature PRs carry no
+  version bump.
+
 - One feature flag gates discovery and the renderer together. Default off.
 - Turning the flag on by default is its own trunk PR with its own review.
 - No version bump in feature PRs.

@@ -27,6 +27,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use prismattyc_emulator::{Emulator, EmulatorStateV1};
 use prismattyc_mux::{
     classify_control_request_id, default_socket_path, next_stale_skip, ControlError,
     ControlErrorCode, ControlIdMatch, ControlRequest, ControlResponse, ControlResponseBody,
@@ -107,6 +108,13 @@ struct HostReservationPart {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) struct HostReservation(Vec<HostReservationPart>);
+
+impl HostReservation {
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        Self(Vec::new())
+    }
+}
 
 impl HostByteBudget {
     fn new(cap: usize) -> Self {
@@ -353,7 +361,7 @@ pub(crate) fn live_snapshot() -> Option<Snapshot> {
     live_snapshot_at(&socket)
 }
 
-fn live_snapshot_at(socket: &Path) -> Option<Snapshot> {
+pub(crate) fn live_snapshot_at(socket: &Path) -> Option<Snapshot> {
     let _timing = crate::pump_timing::PumpIoTimer::socket_round_trip();
     let mut client = Client::connect(socket, REQUEST_TIMEOUT).ok()?;
     match client.request(|request_id| ControlRequest::Snapshot {
@@ -363,6 +371,57 @@ fn live_snapshot_at(socket: &Path) -> Option<Snapshot> {
         Ok(ControlResponseData::Snapshot { snapshot }) => Some(snapshot),
         _ => None,
     }
+}
+
+pub(crate) fn walkthrough_mail_demo(socket: &Path) -> Result<String> {
+    let mut client = Client::connect(socket, REQUEST_TIMEOUT)?;
+    let client_id = client.client_id;
+    let agent = format!("walkthrough-{}", prismattyc_mux::new_space_id()?);
+    client.request(|request_id| ControlRequest::MailHello {
+        version: PROTOCOL_VERSION,
+        request_id,
+        client_id,
+        agent: agent.clone(),
+    })?;
+    let sent = client.request(|request_id| ControlRequest::MailSend {
+        version: PROTOCOL_VERSION,
+        request_id,
+        client_id,
+        to: agent.clone(),
+        summary: "Walkthrough letter".into(),
+        body: "Send, claim, then commit this demonstration letter.".into(),
+    })?;
+    let ControlResponseData::MailSent { id, .. } = sent else {
+        bail!("mail demonstration did not return a sent letter");
+    };
+    let claimed = client.request(|request_id| ControlRequest::MailClaim {
+        version: PROTOCOL_VERSION,
+        request_id,
+        client_id,
+    })?;
+    let ControlResponseData::MailLetters { letters } = claimed else {
+        bail!("mail demonstration did not return claimed letters");
+    };
+    anyhow::ensure!(
+        letters.iter().any(|letter| letter.id == id),
+        "demonstration letter was not claimed"
+    );
+    let committed = client.request(|request_id| ControlRequest::MailCommit {
+        version: PROTOCOL_VERSION,
+        request_id,
+        client_id,
+        ids: vec![id.clone()],
+    })?;
+    anyhow::ensure!(
+        matches!(
+            committed,
+            ControlResponseData::MailCommitted { committed: 1 }
+        ),
+        "demonstration letter was not committed"
+    );
+    Ok(format!(
+        "Sent, claimed, and committed {id} in a private demonstration mailbox."
+    ))
 }
 
 /// One NDJSON control connection with its own registered client identity.
@@ -535,6 +594,8 @@ impl Client {
         let mut expected_offset = 0u64;
         let mut expected_total = None;
         let mut expected_sequence = None;
+        let mut state_bytes = Vec::new();
+        let mut reservations = Vec::new();
         loop {
             if stop.load(Ordering::Relaxed) {
                 bail!("pane state transfer stopped");
@@ -570,20 +631,29 @@ impl Client {
             expected_total = Some(total_bytes);
             expected_sequence = Some(through_seq);
             expected_offset = next_offset;
-            events_tx
-                .send(LogMessage::RestoreChunk {
-                    through_seq,
-                    offset,
-                    total_bytes: total,
-                    data,
-                    done,
-                    reservation,
-                })
-                .map_err(|_| anyhow::anyhow!("pane state receiver closed"))?;
-            if let Some(wake) = wake {
-                wake();
-            }
+            state_bytes
+                .try_reserve(data.len())
+                .context("pane state could not fit in memory")?;
+            state_bytes.extend_from_slice(&data);
+            reservations.push(reservation);
             if done {
+                let restored = serde_json::from_slice::<EmulatorStateV1>(&state_bytes)
+                    .map_err(|error| error.to_string())
+                    .and_then(|state| {
+                        Emulator::import_state(state)
+                            .map(Box::new)
+                            .map_err(|error| error.to_string())
+                    });
+                events_tx
+                    .send(LogMessage::RestoreReady {
+                        through_seq,
+                        restored,
+                        reservations,
+                    })
+                    .map_err(|_| anyhow::anyhow!("pane state receiver closed"))?;
+                if let Some(wake) = wake {
+                    wake();
+                }
                 return Ok(through_seq);
             }
         }
@@ -787,22 +857,18 @@ pub(crate) struct PolicyCounters {
 }
 
 /// What the reader thread hands the host thread, in log order.
-#[derive(Debug)]
 pub(crate) enum LogMessage {
-    /// Bounded piece of the saved emulator state used to seed a fresh replica.
-    RestoreChunk {
+    /// Off-thread decoded saved state used to seed a fresh replica.
+    RestoreReady {
         through_seq: u64,
-        offset: u64,
-        total_bytes: usize,
-        data: Vec<u8>,
-        done: bool,
-        reservation: HostReservation,
+        restored: std::result::Result<Box<Emulator>, String>,
+        reservations: Vec<HostReservation>,
     },
     /// Discard an incomplete state transfer before falling back to log replay.
     RestoreReset,
     /// One subscribe response, with its byte reservation held until consumed.
     Batch {
-        snapshot: Option<Box<PaneStyled>>,
+        snapshot: Option<(u32, u32, Vec<u8>)>,
         events: Vec<PaneLogFrame>,
         /// Output at or before this sequence restores state without alerts.
         replay_through: u64,
@@ -815,6 +881,20 @@ pub(crate) enum LogMessage {
     Ended { reason: Option<String> },
     /// Writer `WritePane` failed. Pane stays read-only; toast the host.
     WriteFailed { reason: String },
+}
+
+impl std::fmt::Debug for LogMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let variant = match self {
+            Self::RestoreReady { .. } => "RestoreReady",
+            Self::RestoreReset => "RestoreReset",
+            Self::Batch { .. } => "Batch",
+            Self::Reset => "Reset",
+            Self::Ended { .. } => "Ended",
+            Self::WriteFailed { .. } => "WriteFailed",
+        };
+        f.write_str(variant)
+    }
 }
 
 /// Toast chip after [`LogMessage::WriteFailed`]. Not a BEL; not gated on
@@ -1268,7 +1348,13 @@ fn reader_loop(
             if gap || !events.is_empty() {
                 if events_tx
                     .send(LogMessage::Batch {
-                        snapshot: gap.then_some(snapshot).flatten().map(Box::new),
+                        snapshot: gap.then_some(snapshot).flatten().map(|styled| {
+                            (
+                                styled.content.cols,
+                                styled.content.rows,
+                                snapshot_to_ansi(&styled),
+                            )
+                        }),
                         events,
                         replay_through,
                         reservation,
@@ -2760,25 +2846,20 @@ mod tests {
         server.join().unwrap();
         drop(events_tx);
 
-        let mut refreshed_bytes = Vec::new();
-        let mut refreshed_offset = 0u64;
+        let mut restored = None;
         for event in events_rx {
-            if let LogMessage::RestoreChunk {
+            if let LogMessage::RestoreReady {
                 through_seq,
-                offset,
-                data,
+                restored: Ok(emulator),
                 ..
             } = event
             {
                 if through_seq == 10 {
-                    assert_eq!(offset, refreshed_offset);
-                    refreshed_offset += data.len() as u64;
-                    refreshed_bytes.extend_from_slice(&data);
+                    restored = Some(emulator.export_state().expect("export refreshed state"));
                 }
             }
         }
-        let restored: prismattyc_emulator::EmulatorStateV1 =
-            serde_json::from_slice(&refreshed_bytes).expect("refreshed pane state");
+        let restored = restored.expect("refreshed pane state");
         assert!(restored
             .screen
             .scrollback
@@ -2882,19 +2963,18 @@ mod tests {
         server.join().unwrap();
         drop(events_tx);
 
-        let mut refreshed_bytes = Vec::new();
+        let mut restored = None;
         for event in events_rx {
-            if let LogMessage::RestoreChunk {
+            if let LogMessage::RestoreReady {
                 through_seq: 10,
-                data,
+                restored: Ok(emulator),
                 ..
             } = event
             {
-                refreshed_bytes.extend_from_slice(&data);
+                restored = Some(emulator.export_state().expect("export restored state"));
             }
         }
-        let restored: prismattyc_emulator::EmulatorStateV1 =
-            serde_json::from_slice(&refreshed_bytes).expect("post-restart pane state");
+        let restored = restored.expect("post-restart pane state");
         assert!(restored
             .screen
             .scrollback
@@ -3045,25 +3125,20 @@ mod tests {
         server.join().unwrap();
         drop(events_tx);
 
-        let mut restored_bytes = Vec::new();
-        let mut restored_offset = 0u64;
+        let mut restored = None;
         for event in events_rx {
-            if let LogMessage::RestoreChunk {
+            if let LogMessage::RestoreReady {
                 through_seq,
-                offset,
-                data,
+                restored: Ok(emulator),
                 ..
             } = event
             {
                 if through_seq == 10 {
-                    assert_eq!(offset, restored_offset);
-                    restored_offset += data.len() as u64;
-                    restored_bytes.extend_from_slice(&data);
+                    restored = Some(emulator.export_state().expect("export reconnected state"));
                 }
             }
         }
-        let restored: prismattyc_emulator::EmulatorStateV1 =
-            serde_json::from_slice(&restored_bytes).expect("reconnected pane state");
+        let restored = restored.expect("reconnected pane state");
         assert!(restored
             .screen
             .scrollback
@@ -3589,6 +3664,96 @@ mod tests {
         drop(to_tx);
         writer.join().expect("writer thread");
         let _ = server.join();
+    }
+
+    #[test]
+    fn walkthrough_mail_commits_only_its_private_letter_and_checks_the_reply() {
+        use prismattyc_mux::mailbox::{AgentId, Store};
+        for reject_commit in [false, true] {
+            let socket = test_socket("tour-mail");
+            let _guard = UnlinkOnDrop(socket.clone());
+            let listener = prismattyc_mux::local_socket::UnixListener::bind(&socket).unwrap();
+            let server = thread::spawn(move || {
+                let mut store = Store::open_in_memory().unwrap();
+                let user = AgentId::new("existing-user").unwrap();
+                let (user_letter, _) = store
+                    .send("sender", &user, "Keep this", "Untouched")
+                    .unwrap();
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut identity = None;
+                let mut sent_id = None;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 {
+                        break;
+                    }
+                    let request: ControlRequest = serde_json::from_str(&line).unwrap();
+                    let (id, response) = match request {
+                        ControlRequest::RegisterClient { request_id, .. } => (
+                            request_id,
+                            ControlResponseData::ClientRegistered { client_id: 1 },
+                        ),
+                        ControlRequest::MailHello {
+                            request_id, agent, ..
+                        } => {
+                            assert!(agent.starts_with("walkthrough-"));
+                            identity = Some(AgentId::new(agent.clone()).unwrap());
+                            (request_id, ControlResponseData::MailSeated { agent })
+                        }
+                        ControlRequest::MailSend {
+                            request_id,
+                            to,
+                            summary,
+                            body,
+                            ..
+                        } => {
+                            let agent = identity.as_ref().unwrap();
+                            assert_eq!(to, agent.as_str());
+                            let (id, depth) =
+                                store.send(agent.as_str(), agent, &summary, &body).unwrap();
+                            sent_id = Some(id.clone());
+                            (request_id, ControlResponseData::MailSent { id, depth })
+                        }
+                        ControlRequest::MailClaim { request_id, .. } => {
+                            let letters = store.claim(identity.as_ref().unwrap()).unwrap();
+                            (request_id, ControlResponseData::MailLetters { letters })
+                        }
+                        ControlRequest::MailCommit {
+                            request_id, ids, ..
+                        } => {
+                            assert_eq!(ids, vec![sent_id.clone().unwrap()]);
+                            let committed = if reject_commit {
+                                0
+                            } else {
+                                store.commit(identity.as_ref().unwrap(), &ids).unwrap()
+                            };
+                            (request_id, ControlResponseData::MailCommitted { committed })
+                        }
+                        other => panic!("unexpected request: {other:?}"),
+                    };
+                    write_ok(&mut stream, id, response);
+                }
+                assert_eq!(store.depth(&user).unwrap(), (1, 0));
+                assert_eq!(store.claim(&user).unwrap()[0].id, user_letter);
+                assert_eq!(
+                    store.depth(identity.as_ref().unwrap()).unwrap(),
+                    if reject_commit { (0, 1) } else { (0, 0) }
+                );
+            });
+            let result = walkthrough_mail_demo(&socket);
+            if reject_commit {
+                assert!(result.unwrap_err().to_string().contains("not committed"));
+            } else {
+                assert!(result
+                    .unwrap()
+                    .contains("Sent, claimed, and committed msg:"));
+            }
+            server.join().unwrap();
+        }
     }
 
     struct UnlinkOnDrop(PathBuf);

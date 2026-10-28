@@ -20,6 +20,7 @@ pub mod executable;
 mod geometry;
 pub mod host_register;
 pub mod host_render_status;
+pub mod host_tabs;
 mod ids;
 mod image_paste;
 mod inject_submit;
@@ -81,8 +82,8 @@ pub use inject_submit::{
 pub use config::{
     load_mux_section, merge_mux_section, mux_unknown_key_warnings, prism_config_path,
     render_mux_section, resolve_attach_on_new, resolve_mux_target, resolve_remote_size,
-    resolve_space_open_runs_commands, write_config_atomic, MuxKeyKind, MuxKeySpec, MuxSection,
-    SpaceOpenRunsCommands, MUX_KEYS,
+    resolve_space_open_runs_commands, transact_config, write_config_atomic, write_file_atomic,
+    ConfigCommit, MuxKeyKind, MuxKeySpec, MuxSection, SpaceOpenRunsCommands, MUX_KEYS,
 };
 pub use domain::{ClientView, Domain, DomainError, Pane, Session, Window};
 pub use geometry::{

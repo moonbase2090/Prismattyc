@@ -172,6 +172,10 @@ pub fn pane_layout_from_tab(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttachTabRecord {
     pub title: String,
+    /// User-selected label that stays fixed while pane focus changes.
+    /// Missing on older files and on tabs that use follow-focus labels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_name: Option<String>,
     pub sessions: Vec<String>,
     /// Split tree for `sessions`. Absent for one pane or an older file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -279,6 +283,7 @@ fn tmp_path(path: &Path) -> PathBuf {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemappedTab<S> {
     pub title: String,
+    pub fixed_name: Option<String>,
     pub sessions: Vec<S>,
     pub layout: Option<TabLayoutNode>,
 }
@@ -298,6 +303,7 @@ pub fn remap_tabs<T, S>(
     for (i, tab) in tabs.into_iter().enumerate() {
         let Some(RemappedTab {
             title,
+            fixed_name,
             sessions,
             layout,
         }) = map(tab)
@@ -317,6 +323,7 @@ pub fn remap_tabs<T, S>(
         }
         out.push(RemappedTab {
             title,
+            fixed_name,
             sessions,
             layout,
         });
@@ -502,6 +509,7 @@ pub fn merge_add_cache(
             let layout = layout_for_sessions(layout, &sessions);
             tabs.push(AttachTabRecord {
                 title: tab.title.clone(),
+                fixed_name: tab.fixed_name.clone(),
                 sessions,
                 layout,
             });
@@ -572,6 +580,7 @@ pub fn plan_host_seat_cache(
     if file.tabs.is_empty() {
         file.tabs.push(AttachTabRecord {
             title: title.to_string(),
+            fixed_name: None,
             sessions: vec![session_id.to_string()],
             layout: None,
         });
@@ -605,6 +614,7 @@ pub fn keep_caller_session(file: &mut AttachTabsFile, caller_id: &str, caller_na
     }
     file.tabs.push(AttachTabRecord {
         title: caller_name.to_string(),
+        fixed_name: None,
         sessions: vec![caller_id.to_string()],
         layout: None,
     });
@@ -632,6 +642,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn older_attach_cache_defaults_fixed_tab_name_to_none() {
+        let file: AttachTabsFile =
+            serde_json::from_str(r#"{"tabs":[{"title":"main","sessions":["one"],"layout":null}]}"#)
+                .unwrap();
+        assert_eq!(file.tabs[0].fixed_name, None);
+    }
+
+    #[test]
     fn layout_path_sits_beside_the_socket() {
         let path = layout_path_from_socket(Path::new("/run/user/1000/prismattyc/pmux.sock"));
         assert_eq!(
@@ -649,6 +667,7 @@ mod tests {
                 title: "seats".into(),
                 sessions: vec!["2".into(), "3".into()],
                 layout: None,
+                fixed_name: None,
             }],
             ..Default::default()
         };
@@ -672,6 +691,7 @@ mod tests {
                     title: title.to_string(),
                     sessions: sessions.into_iter().map(str::to_string).collect(),
                     layout: None,
+                    fixed_name: None,
                 })
             }
         });
@@ -692,6 +712,7 @@ mod tests {
                 title: title.to_string(),
                 sessions,
                 layout: None,
+                fixed_name: None,
             })
         });
         assert_eq!(kept.len(), 2);
@@ -710,11 +731,13 @@ mod tests {
                     title: "work".into(),
                     sessions: vec!["1".into(), "3".into()],
                     layout: None,
+                    fixed_name: None,
                 },
                 AttachTabRecord {
                     title: "mail".into(),
                     sessions: vec!["2".into()],
                     layout: None,
+                    fixed_name: None,
                 },
             ],
             ..Default::default()
@@ -766,6 +789,7 @@ mod tests {
                 title: "a".into(),
                 sessions: vec!["2".into()],
                 layout: None,
+                fixed_name: None,
             }],
             ..Default::default()
         };
@@ -774,6 +798,7 @@ mod tests {
                 title: "b".into(),
                 sessions: vec!["3".into()],
                 layout: None,
+                fixed_name: None,
             }],
             active_tab: 0,
             focused_session: Some("3".into()),
@@ -883,6 +908,7 @@ mod tests {
                 title: "web".into(),
                 sessions: vec!["7".into()],
                 layout: None,
+                fixed_name: None,
             }],
             mode: AttachTabsMode::Switch,
             ..Default::default()
@@ -903,6 +929,7 @@ mod tests {
                 title: "beta".into(),
                 sessions: vec!["c".into(), "gone".into()],
                 layout: None,
+                fixed_name: None,
             }],
             space: Some("beta".into()),
             mode: AttachTabsMode::Switch,
@@ -914,11 +941,13 @@ mod tests {
                     title: "a".into(),
                     sessions: vec!["a".into()],
                     layout: None,
+                    fixed_name: None,
                 },
                 AttachTabRecord {
                     title: "b".into(),
                     sessions: vec!["b".into()],
                     layout: None,
+                    fixed_name: None,
                 },
             ],
             active_tab: 1,
@@ -939,6 +968,7 @@ mod tests {
                 title: "mixed".into(),
                 sessions: vec!["a".into(), "c".into()],
                 layout: None,
+                fixed_name: None,
             }],
             ..Default::default()
         };
@@ -947,6 +977,7 @@ mod tests {
                 title: "a".into(),
                 sessions: vec!["a".into()],
                 layout: None,
+                fixed_name: None,
             }],
             ..Default::default()
         };
@@ -963,11 +994,13 @@ mod tests {
                     title: "seats".into(),
                     sessions: vec!["3".into(), "2".into()],
                     layout: None,
+                    fixed_name: None,
                 },
                 AttachTabRecord {
                     title: "solo".into(),
                     sessions: vec!["2".into(), "9".into()],
                     layout: None,
+                    fixed_name: None,
                 },
             ],
             ..Default::default()
@@ -1009,6 +1042,7 @@ mod tests {
             title: "seats".into(),
             sessions: sessions.clone(),
             layout: layout_for_sessions(Some(captured), &sessions),
+            fixed_name: None,
         };
         let raw = serde_json::to_string(&tab).unwrap();
         assert!(

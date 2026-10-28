@@ -8,6 +8,8 @@
 //! pmux attach [SESSION]         attach (auto-starts a missing server)
 //! pmux attach --all             open prismattyc-host; sessions as panes in tabs
 //! pmux ls                       sessions -> windows -> panes
+//! pmux tab list [--json]         list host-local tabs and target tokens
+//! pmux tab name --view ID --tab ID [--clear|NAME]  set or clear a host-tab name
 //! pmux whoami                   this pane's session name, id, pane, agent
 //! pmux status-set TEXT          set this pane's attach status line
 //! pmux status-set --clear       clear this pane's attach status line
@@ -131,6 +133,9 @@ session
                                   session; never starts a server (remote).
     ls                            list sessions, windows, and panes
     whoami [--json]               this pane: session name, id, pane, agent
+    tab list [--json]             list host tabs and target tokens
+    tab name --view ID --tab ID [--clear|NAME]
+                                  set or clear a fixed host-tab label
     session name NAME [--session KEY]
                                   set session name and agent ID; preserve mail
     new [--attach|--no-attach] [--headless]
@@ -140,6 +145,7 @@ session
                                   (default: the session name).
     session-config <save|restore> FILE
                                   save or restore all session configurations
+                                  (default: derive a unique lowercase address).
     login <enable|disable|status|sync>
                                   start at login and restore workspace
     doctor [SESSION]              pane shell, login state, child pid, lease, attach state
@@ -192,6 +198,9 @@ tab
     attach --all                  open prismattyc-host; sessions as panes in
                                   tabs (skip leftover default). Linux needs
                                   WAYLAND_DISPLAY or DISPLAY.
+    tab list [--json]             list host tabs with view and tab tokens
+    tab name --view ID --tab ID [--clear|NAME]
+                                  set or clear a fixed host-tab label
 
 space
     space open [NAME] [--add|--new-window]
@@ -307,6 +316,7 @@ enum Verb {
     MailDoorbell,
     Space,
     Session,
+    Tab,
     Layout,
     Sync,
     New,
@@ -364,6 +374,7 @@ const VERBS: &[(&str, Verb)] = &[
     ("mail", Verb::Mail),
     ("space", Verb::Space),
     ("session", Verb::Session),
+    ("tab", Verb::Tab),
     ("layout", Verb::Layout),
     ("sync", Verb::Sync),
     ("new", Verb::New),
@@ -611,7 +622,7 @@ fn main() -> Result<()> {
         Verb::MailDoorbell => cmd_mail(&paths, parse_mail_args(cli_session, rest)?),
         Verb::Space => {
             reject_session_flag(cli_session.as_deref(), "space")?;
-            match cmd_space(&paths, rest) {
+            match cmd_space(&paths, rest, &file) {
                 Err(err) if err.is::<SpaceUsage>() => {
                     eprint!("{SPACE_USAGE}");
                     std::process::exit(2);
@@ -621,13 +632,17 @@ fn main() -> Result<()> {
         }
         Verb::Session => {
             reject_session_flag(cli_session.as_deref(), "session")?;
-            match cmd_session(&paths, rest) {
+            match cmd_session(&paths, rest, &file) {
                 Err(err) if err.is::<SessionUsage>() => {
                     eprint!("{SESSION_USAGE}");
                     std::process::exit(2);
                 }
                 other => other,
             }
+        }
+        Verb::Tab => {
+            reject_session_flag(cli_session.as_deref(), "tab")?;
+            cmd_tab(&paths, rest)
         }
         Verb::Layout => cmd_layout(&paths, cli_session, rest),
         Verb::Sync => cmd_sync(&paths, cli_session, rest),
@@ -686,25 +701,21 @@ and comments and appends missing [mux] keys.
         bail!("usage: pmux config init [--merge]");
     }
     let path = prism_config_path();
-    if merge {
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("read {} for --merge", path.display()))?;
-        let mut document = raw
-            .parse::<toml_edit::DocumentMut>()
-            .with_context(|| format!("parse {}", path.display()))?;
-        prismattyc_mux::merge_mux_section(&mut document);
-        prismattyc_mux::write_config_atomic(&path, &document.to_string())?;
-    } else if path.exists() {
-        bail!(
-            "{} already exists; pass --merge to add missing [mux] keys",
-            path.display()
-        );
-    } else {
-        prismattyc_mux::write_config_atomic(
-            &path,
-            &format!("{}\n", prismattyc_mux::render_mux_section()),
-        )?;
-    }
+    prismattyc_mux::transact_config(&path, |document| {
+        if merge {
+            anyhow::ensure!(path.exists(), "config must exist for --merge");
+            prismattyc_mux::merge_mux_section(document);
+        } else {
+            anyhow::ensure!(
+                !path.exists(),
+                "{} already exists; pass --merge to add missing [mux] keys",
+                path.display()
+            );
+            *document = format!("{}\n", prismattyc_mux::render_mux_section()).parse()?;
+        }
+        Ok(())
+    })?
+    .report();
     println!("{}", path.display());
     Ok(())
 }
@@ -731,7 +742,7 @@ _prismattyc_mux() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
   cmd="${COMP_WORDS[1]}"
-  local cmds="up start attach ls list whoami status-set send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session layout sync status stop restart versions session-config update completions config skills login"
+  local cmds="up start attach ls list whoami status-set send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session tab layout sync status stop restart versions session-config update completions config skills login"
   case "$prev" in
     --instance) return ;;
     --session) return ;;
@@ -769,6 +780,13 @@ _prismattyc_mux() {
         clear) COMPREPLY=( $(compgen -W "--all --keep" -- "$cur") ); return ;;
       esac
       ;;
+    tab)
+      case "$prev" in
+        tab) COMPREPLY=( $(compgen -W "list name" -- "$cur") ); return ;;
+        list) COMPREPLY=( $(compgen -W "--json" -- "$cur") ); return ;;
+        name) COMPREPLY=( $(compgen -W "--view --tab --clear" -- "$cur") ); return ;;
+      esac
+      ;;
     layout)
       case "$prev" in
         layout) COMPREPLY=( $(compgen -W "save apply ls rm" -- "$cur") ); return ;;
@@ -804,7 +822,7 @@ _arguments -C \
   '--session[Session name or id for stop]:name:' \
   '--socket[Absolute socket path]:path:_files' \
   '(-h --help)'{-h,--help}'[Help]' \
-  '1:command:(up start attach ls list whoami status-set send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session layout sync status stop restart versions session-config update completions config skills login)' \
+  '1:command:(up start attach ls list whoami status-set send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session tab layout sync status stop restart versions session-config update completions config skills login)' \
   '*::arg:->args'
 case $state in
   args)
@@ -835,6 +853,12 @@ case $state in
           name|rename) _arguments '--session[Session name or id]:session:' '1:name:' ;;
           reopen|suggest) _arguments '--space[Space name]:name:' ;;
           clear) _arguments '--all' '--keep[Keep this session]:name:' ;;
+        esac
+        ;;
+      tab) _values 'verb' list name
+        case $words[2] in
+          list) _arguments '--json' ;;
+          name) _arguments '--view[View token]:id:' '--tab[Tab token]:id:' '--clear' '1:name:' ;;
         esac
         ;;
       layout) _values 'verb' save apply ls rm
@@ -888,6 +912,12 @@ complete -c pmux -n '__fish_use_subcommand' -a 'attention' -d 'Send agent attent
 complete -c pmux -n '__fish_use_subcommand' -a 'mail' -d 'Arm mail attention and ring the doorbell'
 complete -c pmux -n '__fish_use_subcommand' -a 'space' -d 'Save, open, or list a workspace of sessions'
 complete -c pmux -n '__fish_use_subcommand' -a 'session' -d 'Stop live sessions'
+complete -c pmux -n '__fish_use_subcommand' -a 'tab' -d 'List or name host tabs'
+complete -c pmux -n '__fish_seen_subcommand_from tab' -a 'list name'
+complete -c pmux -n '__fish_seen_subcommand_from list' -l json
+complete -c pmux -n '__fish_seen_subcommand_from name' -l view -r
+complete -c pmux -n '__fish_seen_subcommand_from name' -l tab -r
+complete -c pmux -n '__fish_seen_subcommand_from name' -l clear
 complete -c pmux -n '__fish_use_subcommand' -a 'layout' -d 'Save, apply, or list mux layouts'
 complete -c pmux -n '__fish_use_subcommand' -a 'sync' -d 'Fan typed input across panes'
 complete -c pmux -n '__fish_use_subcommand' -a 'status' -d 'Socket status'
@@ -1691,6 +1721,7 @@ fn play_boss_verdict(client: &mut Client, socket: &Path) -> Result<BossVerdict> 
             .into_iter()
             .map(|tab| SavedSpaceTab {
                 title: tab.title,
+                fixed_name: tab.fixed_name,
                 sessions: tab.sessions,
                 layout: tab.layout,
             })
@@ -2079,14 +2110,20 @@ struct NewArgs {
     program: Vec<String>,
     attach: Option<bool>,
     agent_id: Option<String>,
+    derive_agent_id: bool,
     headless: bool,
 }
 
 /// `[--attach|--no-attach] [--agent NAME|--no-agent] NAME [-- PROGRAM...]`
 /// Mailbox binding rule: explicit `--agent` wins; `--no-agent` opts out;
 /// otherwise the session name is the mailbox address.
-fn resolve_agent_id(agent: Option<String>, saw_no_agent: bool, name: &str) -> Option<String> {
-    agent.or_else(|| (!saw_no_agent).then(|| name.to_string()))
+fn resolve_agent_id(agent: Option<String>, saw_no_agent: bool) -> (Option<String>, bool) {
+    match (agent, saw_no_agent) {
+        (Some(agent), false) => (Some(agent), false),
+        (None, false) => (None, true),
+        (None, true) => (None, false),
+        (Some(_), true) => unreachable!("parser rejects conflicting mailbox options"),
+    }
 }
 
 fn parse_new_args(rest: Vec<String>) -> Result<NewArgs> {
@@ -2122,12 +2159,13 @@ fn parse_new_args(rest: Vec<String>) -> Result<NewArgs> {
                 if headless && attach == Some(true) {
                     bail!("--headless cannot be combined with --attach");
                 }
-                let agent_id = resolve_agent_id(agent, saw_no_agent, &name);
+                let (agent_id, derive_agent_id) = resolve_agent_id(agent, saw_no_agent);
                 return Ok(NewArgs {
                     name,
                     program: program_from(iter.collect()),
                     attach,
                     agent_id,
+                    derive_agent_id,
                     headless,
                 });
             }
@@ -2140,12 +2178,13 @@ fn parse_new_args(rest: Vec<String>) -> Result<NewArgs> {
                 if headless && attach == Some(true) {
                     bail!("--headless cannot be combined with --attach");
                 }
-                let agent_id = resolve_agent_id(agent, saw_no_agent, &name);
+                let (agent_id, derive_agent_id) = resolve_agent_id(agent, saw_no_agent);
                 return Ok(NewArgs {
                     name,
                     program: program_from(program),
                     attach,
                     agent_id,
+                    derive_agent_id,
                     headless,
                 });
             }
@@ -2155,12 +2194,13 @@ fn parse_new_args(rest: Vec<String>) -> Result<NewArgs> {
     if headless && attach == Some(true) {
         bail!("--headless cannot be combined with --attach");
     }
-    let agent_id = resolve_agent_id(agent, saw_no_agent, &name);
+    let (agent_id, derive_agent_id) = resolve_agent_id(agent, saw_no_agent);
     Ok(NewArgs {
         name,
         program: program_from(Vec::new()),
         attach,
         agent_id,
+        derive_agent_id,
         headless,
     })
 }
@@ -2337,12 +2377,30 @@ fn exec_attach_session(paths: &Paths, session: &str, space: Option<&str>) -> Res
 
 fn cmd_new(paths: &Paths, rest: Vec<String>, file: &prismattyc_mux::MuxSection) -> Result<()> {
     let parsed = parse_new_args(rest)?;
+    prismattyc_mux::session_name::DisplayName::with_mixed_case_policy(
+        &parsed.name,
+        file.allow_mixed_case_session_names(),
+        None,
+    )
+    .map_err(anyhow::Error::msg)?;
     let want_attach = resolve_attach_on_new(parsed.attach, file)?;
     let mut client = Client::connect(&paths.socket)?;
     let _ = client.request(|request_id| ControlRequest::RegisterClient {
         version: PROTOCOL_VERSION,
         request_id,
     })?;
+    let store = space_commands::Store::lock(&mut client)?;
+    let (agent_id, derive_agent_id) = if parsed.derive_agent_id {
+        let occupied = space_commands::occupied_names(&mut client)?;
+        let agent = prismattyc_mux::session_name::unique_agent_id(
+            &prismattyc_mux::session_name::agent_id_from_label(&parsed.name),
+            |candidate| occupied.iter().any(|name| name == candidate),
+        )
+        .map_err(anyhow::Error::msg)?;
+        (Some(agent), false)
+    } else {
+        (parsed.agent_id, false)
+    };
     let spawn = SpawnSpec {
         program: parsed.program[0].clone(),
         argv: parsed.program[1..].to_vec(),
@@ -2356,9 +2414,11 @@ fn cmd_new(paths: &Paths, rest: Vec<String>, file: &prismattyc_mux::MuxSection) 
         spawn,
         cols: None,
         rows: None,
-        agent_id: parsed.agent_id,
+        agent_id,
+        derive_agent_id,
         headless: parsed.headless,
     })?;
+    drop(store);
     let ControlResponseData::Session {
         session_id,
         name,
@@ -2381,6 +2441,106 @@ fn cmd_new(paths: &Paths, rest: Vec<String>, file: &prismattyc_mux::MuxSection) 
         println!("  attach: pmux attach {name}");
     }
     Ok(())
+}
+
+fn cmd_tab(paths: &Paths, rest: Vec<String>) -> Result<()> {
+    match rest.first().map(String::as_str) {
+        Some("list") => {
+            let json = rest.iter().skip(1).any(|arg| arg == "--json");
+            ensure!(
+                rest.iter().skip(1).all(|arg| arg == "--json"),
+                "usage: pmux tab list [--json]"
+            );
+            let mut manifests = Vec::new();
+            for pid in prismattyc_mux::component_restart::live_components(&paths.socket, "host") {
+                if let Ok(manifest) = prismattyc_mux::host_tabs::read_manifest(&paths.socket, pid) {
+                    manifests.push(manifest);
+                }
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&manifests)?);
+            } else if manifests.is_empty() {
+                println!("no live host tabs");
+            } else {
+                for manifest in manifests {
+                    for view in manifest.views {
+                        for tab in view.tabs {
+                            println!(
+                                "view={} tab={} name={:?} fallback={:?}",
+                                view.token, tab.token, tab.fixed_name, tab.title
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        Some("name") => {
+            let mut view = None;
+            let mut tab = None;
+            let mut clear = false;
+            let mut name = None;
+            let mut args = rest.into_iter().skip(1);
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--view" => {
+                        view = Some(
+                            args.next()
+                                .context("--view requires a view token")?
+                                .parse::<u64>()?,
+                        )
+                    }
+                    "--tab" => {
+                        tab = Some(
+                            args.next()
+                                .context("--tab requires a tab token")?
+                                .parse::<u64>()?,
+                        )
+                    }
+                    "--clear" => clear = true,
+                    value if value.starts_with('-') => bail!("unknown tab-name option {value:?}"),
+                    value if name.is_none() => name = Some(value.to_string()),
+                    value => bail!("unexpected tab-name argument {value:?}"),
+                }
+            }
+            ensure!(
+                !(clear && name.is_some()),
+                "--clear cannot be combined with a name"
+            );
+            let (view, tab) = (
+                view.context("--view is required")?,
+                tab.context("--tab is required")?,
+            );
+            ensure!(clear || name.is_some(), "provide a name or --clear");
+            let mut matching = None;
+            for pid in prismattyc_mux::component_restart::live_components(&paths.socket, "host") {
+                let Ok(manifest) = prismattyc_mux::host_tabs::read_manifest(&paths.socket, pid)
+                else {
+                    continue;
+                };
+                if manifest.views.iter().any(|candidate| {
+                    candidate.token == view
+                        && candidate
+                            .tabs
+                            .iter()
+                            .any(|candidate| candidate.token == tab)
+                }) {
+                    ensure!(
+                        matching.is_none(),
+                        "target token is ambiguous; run pmux tab list again"
+                    );
+                    matching = Some(manifest);
+                }
+            }
+            let manifest = matching.context("tab target not found; run pmux tab list again")?;
+            prismattyc_mux::host_tabs::request(&paths.socket, &manifest, view, tab, name)?;
+            println!("tab name updated");
+            Ok(())
+        }
+        _ => {
+            bail!("usage: pmux tab list [--json] | pmux tab name --view ID --tab ID [--clear|NAME]")
+        }
+    }
 }
 
 fn cmd_ls(paths: &Paths) -> Result<()> {
@@ -4867,12 +5027,14 @@ fn parse_space_verb(rest: Vec<String>) -> Result<SpaceVerb, SpaceUsage> {
     }
 }
 
-fn cmd_space(paths: &Paths, rest: Vec<String>) -> Result<()> {
+fn cmd_space(paths: &Paths, rest: Vec<String>, file: &prismattyc_mux::MuxSection) -> Result<()> {
     let (paths, rest) = paths.with_view_argument(rest)?;
     let paths = &paths;
     match parse_space_verb(rest).map_err(anyhow::Error::from)? {
         SpaceVerb::Team(args) => space_commands::team(paths, args),
-        SpaceVerb::Create(args) => space_commands::create(paths, args),
+        SpaceVerb::Create(args) => {
+            space_commands::create(paths, args, file.allow_mixed_case_session_names())
+        }
         SpaceVerb::Move(args) => space_commands::move_work(paths, args),
         SpaceVerb::Rename(args) => space_commands::rename(paths, args),
         SpaceVerb::Help => {
@@ -4890,7 +5052,9 @@ fn cmd_space(paths: &Paths, rest: Vec<String>) -> Result<()> {
         SpaceVerb::Rm(args) => space_commands::delete_spaces(paths, args, false),
         SpaceVerb::Clear(args) => space_commands::delete_spaces(paths, args, true),
         SpaceVerb::Reset(args) => space_commands::reset::run(paths, args),
-        SpaceVerb::Add(args) => space_commands::add(paths, args),
+        SpaceVerb::Add(args) => {
+            space_commands::add(paths, args, file.allow_mixed_case_session_names())
+        }
         SpaceVerb::Remove(args) => space_commands::remove(paths, args),
     }
 }
@@ -5138,14 +5302,16 @@ fn parse_clear_keep(args: Vec<String>, usage: &'static str, allow_all: bool) -> 
     Ok(ClearOpts { all, keep })
 }
 
-fn cmd_session(paths: &Paths, rest: Vec<String>) -> Result<()> {
+fn cmd_session(paths: &Paths, rest: Vec<String>, file: &prismattyc_mux::MuxSection) -> Result<()> {
     match parse_session_verb(rest).map_err(anyhow::Error::from)? {
         SessionVerb::Help => {
             print!("{SESSION_USAGE}");
             Ok(())
         }
         SessionVerb::Reopen(args) => space_commands::reopen(paths, args),
-        SessionVerb::Name(args) => space_commands::name_session(paths, args),
+        SessionVerb::Name(args) => {
+            space_commands::name_session(paths, args, file.allow_mixed_case_session_names())
+        }
         SessionVerb::Suggest(args) => {
             let space = match args.as_slice() {
                 [] => "session",
@@ -5511,6 +5677,7 @@ fn tab_untabbed_sessions(space: &mut SavedSpace, saved_names: &[String]) {
         eprintln!("note: session {name} was not in the attach-tabs cache; saved it in its own tab");
         space.tabs.push(SavedSpaceTab {
             title: name.clone(),
+            fixed_name: None,
             sessions: vec![name],
             layout: None,
         });
@@ -5552,6 +5719,7 @@ fn apply_attach_records_to_space(
         let layout = attach_tabs::layout_for_sessions(layout, &sessions);
         Some(attach_tabs::RemappedTab {
             title: tab.title.clone(),
+            fixed_name: tab.fixed_name.clone(),
             sessions,
             layout,
         })
@@ -5560,6 +5728,7 @@ fn apply_attach_records_to_space(
         .into_iter()
         .map(|tab| SavedSpaceTab {
             title: tab.title,
+            fixed_name: tab.fixed_name,
             sessions: tab.sessions,
             layout: tab.layout,
         })
@@ -5588,6 +5757,7 @@ fn attach_file_from_space(space: &SavedSpace, snapshot: &Snapshot) -> attach_tab
             .iter()
             .map(|session| SavedSpaceTab {
                 title: session.name.clone(),
+                fixed_name: None,
                 sessions: vec![session.name.clone()],
                 layout: None,
             })
@@ -5623,6 +5793,7 @@ fn attach_file_from_space(space: &SavedSpace, snapshot: &Snapshot) -> attach_tab
         let layout = attach_tabs::layout_for_sessions(layout, &sessions);
         Some(attach_tabs::RemappedTab {
             title: tab.title.clone(),
+            fixed_name: tab.fixed_name.clone(),
             sessions,
             layout,
         })
@@ -5631,6 +5802,7 @@ fn attach_file_from_space(space: &SavedSpace, snapshot: &Snapshot) -> attach_tab
         .into_iter()
         .map(|tab| attach_tabs::AttachTabRecord {
             title: tab.title,
+            fixed_name: tab.fixed_name,
             sessions: tab.sessions,
             layout: tab.layout,
         })
@@ -6053,6 +6225,7 @@ fn apply_saved_layout(
                 cols: Some(u32::from(first.cols)),
                 rows: Some(u32::from(first.rows)),
                 agent_id: agent_id.clone(),
+                derive_agent_id: false,
                 headless: false,
             })?;
             let ControlResponseData::Session {
@@ -8342,6 +8515,22 @@ mod tests {
             verb_cli(Verb::Ls, &[])
         );
         assert_eq!(
+            parse_argv(argv(&[
+                "tab",
+                "name",
+                "--view",
+                "11",
+                "--tab",
+                "4",
+                "Release Work"
+            ]))
+            .unwrap(),
+            verb_cli(
+                Verb::Tab,
+                &["name", "--view", "11", "--tab", "4", "Release Work"]
+            )
+        );
+        assert_eq!(
             parse_argv(argv(&["tutorial", "play"])).unwrap(),
             verb_cli(Verb::Tutorial, &["play"])
         );
@@ -9450,6 +9639,7 @@ mod tests {
                 title: "seats".into(),
                 sessions: vec!["beta".into(), "alpha".into()],
                 layout: None,
+                fixed_name: None,
             }],
             active_tab: 0,
             focused_session: Some("alpha".into()),
@@ -9758,11 +9948,13 @@ mod tests {
                     title: "seats".into(),
                     sessions: vec!["3".into(), "2".into(), "4".into()],
                     layout: None,
+                    fixed_name: None,
                 },
                 attach_tabs::AttachTabRecord {
                     title: "other".into(),
                     sessions: vec!["9".into(), "77".into()],
                     layout: None,
+                    fixed_name: None,
                 },
             ],
             active_tab: 0,
@@ -9793,6 +9985,7 @@ mod tests {
                 title: "seats".into(),
                 sessions: vec!["fable-pc".into(), "grok-pc".into(), "kiro-pc".into()],
                 layout: None,
+                fixed_name: None,
             }],
             "tabs outside the space and unknown ids are dropped"
         );
@@ -9807,6 +10000,7 @@ mod tests {
                 title: "seats".into(),
                 sessions: vec!["12".into(), "14".into(), "13".into()],
                 layout: None,
+                fixed_name: None,
             }]
         );
         assert_eq!(restored.focused_session.as_deref(), Some("14"));
@@ -9853,11 +10047,13 @@ mod tests {
                     title: "beta".into(),
                     sessions: vec!["8".into()],
                     layout: None,
+                    fixed_name: None,
                 },
                 attach_tabs::AttachTabRecord {
                     title: "alpha".into(),
                     sessions: vec!["7".into()],
                     layout: None,
+                    fixed_name: None,
                 },
             ],
             "one tab per live space session; sessions outside the space are not pulled in"
@@ -10034,12 +10230,14 @@ mod tests {
         assert_eq!(parsed.name, "work");
         assert_eq!(parsed.program, vec!["/bin/sh"]);
         assert_eq!(parsed.attach, None);
-        assert_eq!(parsed.agent_id.as_deref(), Some("work"));
+        assert_eq!(parsed.agent_id, None);
+        assert!(parsed.derive_agent_id);
 
         let parsed = parse_new_args(vec!["--no-attach".into(), "work".into()]).unwrap();
         assert_eq!(parsed.name, "work");
         assert_eq!(parsed.attach, Some(false));
-        assert_eq!(parsed.agent_id.as_deref(), Some("work"));
+        assert_eq!(parsed.agent_id, None);
+        assert!(parsed.derive_agent_id);
 
         let parsed = parse_new_args(vec![
             "work".into(),
@@ -10052,21 +10250,25 @@ mod tests {
         assert_eq!(parsed.name, "work");
         assert_eq!(parsed.program, vec!["/bin/zsh", "-l"]);
         assert_eq!(parsed.attach, Some(true));
-        assert_eq!(parsed.agent_id.as_deref(), Some("work"));
+        assert_eq!(parsed.agent_id, None);
+        assert!(parsed.derive_agent_id);
 
         let parsed =
             parse_new_args(vec!["--agent".into(), "operator-a".into(), "work".into()]).unwrap();
         assert_eq!(parsed.name, "work");
         assert_eq!(parsed.agent_id.as_deref(), Some("operator-a"));
+        assert!(!parsed.derive_agent_id);
 
         let parsed = parse_new_args(vec!["--no-agent".into(), "work".into()]).unwrap();
         assert_eq!(parsed.name, "work");
         assert_eq!(parsed.agent_id, None);
+        assert!(!parsed.derive_agent_id);
 
         let parsed = parse_new_args(vec!["--headless".into(), "worker-bot".into()]).unwrap();
         assert_eq!(parsed.name, "worker-bot");
         assert!(parsed.headless);
-        assert_eq!(parsed.agent_id.as_deref(), Some("worker-bot"));
+        assert_eq!(parsed.agent_id, None);
+        assert!(parsed.derive_agent_id);
 
         assert!(parse_new_args(vec![
             "--headless".into(),

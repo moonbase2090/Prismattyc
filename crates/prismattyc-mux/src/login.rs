@@ -67,14 +67,19 @@ pub fn initialize_default(socket: &Path) -> Result<bool> {
 
 pub fn set_preference(enabled: bool) -> Result<()> {
     let path = crate::prism_config_path();
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error.into()),
-    };
-    let mut document = raw.parse::<toml_edit::DocumentMut>()?;
-    document["start_at_login"] = toml_edit::value(enabled);
-    crate::write_config_atomic(&path, &document.to_string())
+    crate::transact_config(&path, |document| {
+        let mut value = toml_edit::Value::from(enabled);
+        if let Some(old) = document
+            .get("start_at_login")
+            .and_then(toml_edit::Item::as_value)
+        {
+            *value.decor_mut() = old.decor().clone();
+        }
+        document["start_at_login"] = toml_edit::Item::Value(value);
+        Ok(())
+    })?
+    .report();
+    Ok(())
 }
 
 fn label(socket: &Path) -> String {
@@ -220,7 +225,7 @@ pub fn sync(socket: &Path, executable: &Path) -> Result<()> {
         let body = render_launch_agent(socket, executable)?;
         let changed = std::fs::read_to_string(&path).ok().as_deref() != Some(&body);
         if changed {
-            crate::write_config_atomic(&path, &body)?;
+            crate::write_file_atomic(&path, &body)?;
         }
         let domain = format!("gui/{}", unsafe { libc::getuid() });
         let loaded = Command::new("/bin/launchctl")
@@ -245,7 +250,7 @@ pub fn sync(socket: &Path, executable: &Path) -> Result<()> {
     {
         let body = render_systemd_unit(socket, executable)?;
         if std::fs::read_to_string(&path).ok().as_deref() != Some(&body) {
-            crate::write_config_atomic(&path, &body)?;
+            crate::write_file_atomic(&path, &body)?;
             checked(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
         }
         checked(
@@ -261,7 +266,7 @@ pub fn sync(socket: &Path, executable: &Path) -> Result<()> {
         let launch =
             windows_login_launch(Path::new(&system_root), executable, socket, &script_path)?;
         std::fs::create_dir_all(path.parent().context("Startup directory")?)?;
-        crate::config::write_config_atomic(&script_path, &launch.script)?;
+        crate::write_file_atomic(&script_path, &launch.script)?;
         let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
         let script = format!(
             "$s=(New-Object -ComObject WScript.Shell).CreateShortcut({});$s.TargetPath={};$s.Arguments={};$s.Save()",

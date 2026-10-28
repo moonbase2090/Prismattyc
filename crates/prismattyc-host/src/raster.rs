@@ -349,6 +349,7 @@ pub struct FontMetrics {
     /// used by rustybuzz and fontdue so shaped glyph IDs rasterize correctly.
     primary_bytes: Vec<u8>,
     primary_index: u32,
+    primary_name: String,
     /// CBDT color-emoji font bytes (e.g. Noto Color Emoji). Kept for `ttf_parser::Face`.
     emoji_fonts: Vec<Vec<u8>>,
     /// Ghostty-style lazy system faces (CJK, etc.). Not bundled.
@@ -364,6 +365,9 @@ pub struct FontMetrics {
 }
 
 impl FontMetrics {
+    pub(crate) fn primary_name(&self) -> &str {
+        &self.primary_name
+    }
     /// Test convenience: default chain only.
     #[cfg(test)]
     pub fn load(px: f32) -> anyhow::Result<Self> {
@@ -388,6 +392,7 @@ impl FontMetrics {
             lazy_fonts: Vec::new(),
             primary_bytes: BAKED_MONO.to_vec(),
             primary_index: 0,
+            primary_name: BAKED_MONO_NAME.to_string(),
             emoji_fonts: Vec::new(),
             cover_cache: RefCell::new(HashMap::new()),
             fallback_fonts: RefCell::new(HashMap::new()),
@@ -481,11 +486,21 @@ impl FontMetrics {
         if !emoji_names.is_empty() {
             eprintln!("prismattyc-host: color emoji: {}", emoji_names.join(", "));
         }
+        let primary_name = ttf_parser::Face::parse(&primary_bytes, 0)
+            .ok()
+            .and_then(|face| {
+                face.names()
+                    .into_iter()
+                    .filter(|name| name.name_id == ttf_parser::name_id::FAMILY)
+                    .find_map(|name| name.to_string())
+            })
+            .unwrap_or_else(|| names[0].clone());
         let mut metrics = Self {
             fonts,
             lazy_fonts,
             primary_bytes,
             primary_index: 0,
+            primary_name,
             emoji_fonts,
             cover_cache: RefCell::new(HashMap::new()),
             fallback_fonts: RefCell::new(HashMap::new()),
@@ -1028,7 +1043,14 @@ fn font_chain(primary_override: Option<&Path>, extra_fallbacks: &[PathBuf]) -> V
 }
 
 fn push_font(out: &mut Vec<FontSource>, seen: &mut std::collections::HashSet<PathBuf>, p: PathBuf) {
-    if p.is_file() && seen.insert(p.clone()) {
+    if let Some(font) = p.to_str().and_then(crate::bundled_fonts::find) {
+        if seen.insert(p) {
+            out.push(FontSource::Baked {
+                name: font.name,
+                bytes: font.bytes,
+            });
+        }
+    } else if p.is_file() && seen.insert(p.clone()) {
         out.push(FontSource::Path(p));
     }
 }
@@ -3439,7 +3461,7 @@ fn palette_filter_chips(
     let text_right = x
         .saturating_add(width)
         .saturating_sub(font.cell_w.saturating_mul(geom.inset_cells));
-    let hint_cells = text_cells("C-←/→ filter");
+    let hint_cells = text_cells("←/→ filter");
     let hint_x = text_right.saturating_sub(hint_cells.saturating_mul(font.cell_w));
     let mut chip_x = text_x.saturating_add(font.cell_w);
     for (index, label) in labels.iter().enumerate() {
@@ -3693,7 +3715,7 @@ pub fn rasterize_palette_with_hover(
     }
 
     if let Some((labels, selected_chip)) = frame.chips {
-        let hint = "C-←/→ filter";
+        let hint = "←/→ filter";
         let hint_cells = text_cells(hint);
         let hint_x = text_right.saturating_sub(hint_cells.saturating_mul(font.cell_w));
         for chip in &layout.filter_chips {
@@ -5043,15 +5065,16 @@ pub fn rasterize_tab_strip_with_theme(
             .notice
             .filter(|(tab, _, _)| *tab == i)
             .map(|(_, handle, text)| (handle, text));
-        let decided = title_row_decision(
-            title_row.mode,
-            tab.handles,
-            tab.title.as_str(),
-            tab.pane_title.as_deref(),
-            &tab.handle_titles,
+        let decided = title_row_decision(crate::title_row::TitleRowInput {
+            mode: title_row.mode,
+            handles: tab.handles,
+            tab_title: tab.title.as_str(),
+            fixed_name: tab.fixed_name.as_deref(),
+            pane_title: tab.pane_title.as_deref(),
+            handle_titles: &tab.handle_titles,
             hover_handle,
             notice,
-        );
+        });
         let label = match editing.and_then(|(idx, text, _)| (idx == i).then_some(text)) {
             Some(text) => text,
             None => zoomed_label(decided.label, tab.zoomed, tab.handles, &mut zoomed_title),
@@ -9016,6 +9039,7 @@ mod tests {
             return;
         };
         let tabs = [crate::mux::TabInfo {
+            window: None,
             title: "one".into(),
             selected: true,
             unseen: false,
@@ -9028,6 +9052,7 @@ mod tests {
             handle_active: Vec::new(),
             git_label: None,
             pane_title: None,
+            fixed_name: None,
         }];
         let width = font.cell_w * 40;
         let bar_h = font.cell_h;
@@ -9070,6 +9095,7 @@ mod tests {
             return;
         };
         let tabs = [crate::mux::TabInfo {
+            window: None,
             title: "one".into(),
             selected: false,
             unseen: false,
@@ -9082,6 +9108,7 @@ mod tests {
             handle_active: vec![false, false],
             git_label: None,
             pane_title: None,
+            fixed_name: None,
         }];
         let inset = 16;
         let width = font.cell_w * 40;
@@ -13214,6 +13241,7 @@ mod tests {
         let render = |zoomed: bool| {
             let tabs = [
                 crate::mux::TabInfo {
+                    window: None,
                     title: "main".into(),
                     selected: true,
                     unseen: false,
@@ -13226,8 +13254,10 @@ mod tests {
                     handle_active: Vec::new(),
                     git_label: None,
                     pane_title: None,
+                    fixed_name: None,
                 },
                 crate::mux::TabInfo {
+                    window: None,
                     title: "tab".into(),
                     selected: false,
                     unseen: false,
@@ -13240,6 +13270,7 @@ mod tests {
                     handle_active: Vec::new(),
                     git_label: None,
                     pane_title: None,
+                    fixed_name: None,
                 },
             ];
             let mut buffer = vec![sentinel; width * bar_h];
@@ -13283,6 +13314,7 @@ mod tests {
         let focus = focus_border_rgb(DEFAULT_FOCUS_BORDER_INDEX);
         let render = |zoomed: bool| {
             let tabs = [crate::mux::TabInfo {
+                window: None,
                 title: "main".into(),
                 selected: true,
                 unseen: false,
@@ -13295,6 +13327,7 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: Some("build".into()),
+                fixed_name: None,
             }];
             let mut buffer = vec![sentinel; width * bar_h];
             rasterize_tab_strip(&font, &tabs, &mut buffer, width, bar_h, focus, None, 0, 0);
@@ -13323,6 +13356,7 @@ mod tests {
         let width = 40 * font.cell_w;
         let bar_h = font.cell_h * 2;
         let tabs = vec![crate::mux::TabInfo {
+            window: None,
             title: "main".into(),
             selected: true,
             unseen: false,
@@ -13335,6 +13369,7 @@ mod tests {
             handle_active: vec![false, false],
             git_label: None,
             pane_title: None,
+            fixed_name: None,
         }];
         let paint = |hover: Option<crate::mux::StripHit>| {
             let mut buffer = vec![0u32; width * bar_h];
@@ -13395,6 +13430,7 @@ mod tests {
         // A single-pane tab paints its pane title in place of the tab title.
         let paint_solo = |pane_title: Option<&str>| {
             let solo = vec![crate::mux::TabInfo {
+                window: None,
                 title: "main".into(),
                 selected: true,
                 unseen: false,
@@ -13407,6 +13443,7 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: pane_title.map(str::to_string),
+                fixed_name: None,
             }];
             let mut buffer = vec![0u32; width * bar_h];
             rasterize_tab_strip_with_theme(
@@ -13499,6 +13536,7 @@ mod tests {
         let bar_h = font.cell_h * 2;
         let tab = |handle_active: Vec<bool>, active: bool| {
             vec![crate::mux::TabInfo {
+                window: None,
                 title: "main".into(),
                 selected: true,
                 unseen: false,
@@ -13511,6 +13549,7 @@ mod tests {
                 handle_active,
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             }]
         };
         let paint = |tabs: &[crate::mux::TabInfo], pulse: Option<f32>| {
@@ -13600,6 +13639,7 @@ mod tests {
         let sentinel = pack_rgb(DEFAULT_BG);
         let focus = focus_border_rgb(DEFAULT_FOCUS_BORDER_INDEX);
         let tabs = [crate::mux::TabInfo {
+            window: None,
             title: "main".into(),
             selected: true,
             unseen: false,
@@ -13612,6 +13652,7 @@ mod tests {
             handle_active: Vec::new(),
             git_label: None,
             pane_title: None,
+            fixed_name: None,
         }];
         let mut buffer = vec![sentinel; width * bar_h];
         rasterize_tab_strip_with_theme(
@@ -13651,6 +13692,7 @@ mod tests {
         let bar_h = font.cell_h * 2;
         let tabs = [
             crate::mux::TabInfo {
+                window: None,
                 title: "main".into(),
                 selected: true,
                 unseen: false,
@@ -13663,8 +13705,10 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             },
             crate::mux::TabInfo {
+                window: None,
                 title: "other".into(),
                 selected: false,
                 unseen: false,
@@ -13677,6 +13721,7 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             },
         ];
         for theme in crate::theme::builtins() {
@@ -13739,6 +13784,7 @@ mod tests {
         let width = 40 * font.cell_w;
         let bar_h = font.cell_h * 2;
         let tabs = [crate::mux::TabInfo {
+            window: None,
             title: "main".into(),
             selected: true,
             unseen: false,
@@ -13751,6 +13797,7 @@ mod tests {
             handle_active: Vec::new(),
             git_label: None,
             pane_title: None,
+            fixed_name: None,
         }];
         let mut buffer = vec![0u32; width * bar_h];
         rasterize_tab_strip_with_theme(
@@ -13853,6 +13900,7 @@ mod tests {
         let width = 40 * font.cell_w;
         let bar_h = font.cell_h;
         let tabs = [crate::mux::TabInfo {
+            window: None,
             title: "main".into(),
             selected: true,
             unseen: false,
@@ -13865,6 +13913,7 @@ mod tests {
             handle_active: Vec::new(),
             git_label: None,
             pane_title: None,
+            fixed_name: None,
         }];
         let mut buffer = vec![0u32; width * bar_h];
         rasterize_tab_strip_with_theme(
@@ -13970,6 +14019,7 @@ mod tests {
         let bar_h = font.cell_h * 2;
         let tabs = vec![
             crate::mux::TabInfo {
+                window: None,
                 title: "a".into(),
                 selected: true,
                 unseen: false,
@@ -13982,8 +14032,10 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             },
             crate::mux::TabInfo {
+                window: None,
                 title: "b".into(),
                 selected: false,
                 unseen: false,
@@ -13996,6 +14048,7 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             },
         ];
         let mut buffer = vec![0u32; width * bar_h];
@@ -14062,6 +14115,7 @@ mod tests {
             let width = 40 * font.cell_w;
             let bar_h = font.cell_h * 2;
             let tabs = [crate::mux::TabInfo {
+                window: None,
                 title: title.into(),
                 selected: true,
                 unseen: false,
@@ -14074,12 +14128,14 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             }];
             let mut titled = vec![0u32; width * bar_h];
             rasterize_tab_strip_with_theme(
                 default_theme(),
                 &font,
                 &[crate::mux::TabInfo {
+                    window: None,
                     handles: 0,
                     focused_handle: None,
                     handle_titles: Vec::new(),
@@ -14150,6 +14206,7 @@ mod tests {
         rasterize_tab_strip(
             &font,
             &[crate::mux::TabInfo {
+                window: None,
                 title: "main".into(),
                 selected: true,
                 unseen: false,
@@ -14162,6 +14219,7 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             }],
             &mut one,
             width,
@@ -14179,6 +14237,7 @@ mod tests {
         let focus = focus_border_rgb(DEFAULT_FOCUS_BORDER_INDEX);
         let tabs = [
             crate::mux::TabInfo {
+                window: None,
                 title: "main".into(),
                 selected: true,
                 unseen: false,
@@ -14191,8 +14250,10 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             },
             crate::mux::TabInfo {
+                window: None,
                 title: "tab".into(),
                 selected: false,
                 unseen: true,
@@ -14205,6 +14266,7 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             },
         ];
         let mut buffer = vec![sentinel; width * bar_h];
@@ -14301,6 +14363,7 @@ mod tests {
         let focus = focus_border_rgb(DEFAULT_FOCUS_BORDER_INDEX);
         let tabs = [
             crate::mux::TabInfo {
+                window: None,
                 title: "main".into(),
                 selected: true,
                 unseen: false,
@@ -14313,8 +14376,10 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             },
             crate::mux::TabInfo {
+                window: None,
                 title: "tab".into(),
                 selected: false,
                 unseen: false,
@@ -14327,6 +14392,7 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             },
         ];
         for pad in [0usize, 5, 40] {
@@ -14366,6 +14432,7 @@ mod tests {
         let gap = 6;
         let tabs = [
             crate::mux::TabInfo {
+                window: None,
                 title: "main".into(),
                 selected: true,
                 unseen: false,
@@ -14378,8 +14445,10 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             },
             crate::mux::TabInfo {
+                window: None,
                 title: "tab".into(),
                 selected: false,
                 unseen: false,
@@ -14392,6 +14461,7 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             },
         ];
         let mut buffer = vec![0u32; width * bar_h];
@@ -14470,6 +14540,7 @@ mod tests {
         let focus = focus_border_rgb(DEFAULT_FOCUS_BORDER_INDEX);
         let tabs = [
             crate::mux::TabInfo {
+                window: None,
                 title: "one".into(),
                 selected: true,
                 unseen: false,
@@ -14482,8 +14553,10 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             },
             crate::mux::TabInfo {
+                window: None,
                 title: "two".into(),
                 selected: false,
                 unseen: false,
@@ -14496,8 +14569,10 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             },
             crate::mux::TabInfo {
+                window: None,
                 title: "three".into(),
                 selected: false,
                 unseen: false,
@@ -14510,6 +14585,7 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             },
         ];
         for pad in [0usize, 5, 40] {
@@ -14565,6 +14641,7 @@ mod tests {
         let focus = focus_border_rgb(DEFAULT_FOCUS_BORDER_INDEX);
         let tabs = [
             crate::mux::TabInfo {
+                window: None,
                 title: "main".into(),
                 selected: false,
                 unseen: false,
@@ -14577,8 +14654,10 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             },
             crate::mux::TabInfo {
+                window: None,
                 title: "tab".into(),
                 selected: true,
                 unseen: false,
@@ -14591,6 +14670,7 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             },
         ];
         let mut buffer = vec![0u32; width * bar_h];
@@ -14635,6 +14715,7 @@ mod tests {
         let focus = focus_border_rgb(DEFAULT_FOCUS_BORDER_INDEX);
         let tabs: Vec<_> = (0..9)
             .map(|i| crate::mux::TabInfo {
+                window: None,
                 title: if i == 0 { "main".into() } else { "tab".into() },
                 selected: i == 8,
                 unseen: i > 0 && i < 8,
@@ -14647,6 +14728,7 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             })
             .collect();
         let mut buffer = vec![0u32; width * bar_h];
@@ -14709,6 +14791,7 @@ mod tests {
         let focus = focus_border_rgb(DEFAULT_FOCUS_BORDER_INDEX);
         let tabs = [
             crate::mux::TabInfo {
+                window: None,
                 title: "left".into(),
                 selected: false,
                 unseen: false,
@@ -14721,8 +14804,10 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             },
             crate::mux::TabInfo {
+                window: None,
                 title: "right".into(),
                 selected: true,
                 unseen: false,
@@ -14735,6 +14820,7 @@ mod tests {
                 handle_active: Vec::new(),
                 git_label: None,
                 pane_title: None,
+                fixed_name: None,
             },
         ];
         for pad in [0usize, 5, 40] {
@@ -15374,6 +15460,7 @@ mod tests {
                 &font,
                 &[
                     crate::mux::TabInfo {
+                        window: None,
                         title: format!("{ch} Claude"),
                         selected: true,
                         unseen: false,
@@ -15386,8 +15473,10 @@ mod tests {
                         handle_active: Vec::new(),
                         git_label: None,
                         pane_title: None,
+                        fixed_name: None,
                     },
                     crate::mux::TabInfo {
+                        window: None,
                         title: "other".into(),
                         selected: false,
                         unseen: false,
@@ -15400,6 +15489,7 @@ mod tests {
                         handle_active: Vec::new(),
                         git_label: None,
                         pane_title: None,
+                        fixed_name: None,
                     },
                 ],
                 &mut buffer,

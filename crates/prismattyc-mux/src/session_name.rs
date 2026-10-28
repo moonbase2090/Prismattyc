@@ -1,5 +1,48 @@
 //! Human-readable session names shared by the CLI and host naming popup.
 
+/// A case-preserving, validated session display name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayName(String);
+
+impl DisplayName {
+    pub fn new(raw: &str) -> Result<Self, &'static str> {
+        let name = raw.trim();
+        if name.is_empty() {
+            return Err("display name must not be empty");
+        }
+        if name.len() > 64 {
+            return Err("display name must be at most 64 bytes");
+        }
+        if name.chars().any(char::is_control) {
+            return Err("display name must not contain control characters");
+        }
+        Ok(Self(name.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Validate a user-entered session label under the configured policy.
+    /// An unchanged existing mixed-case label remains valid when the setting
+    /// is off, so disabling it does not prevent users from keeping old names.
+    pub fn with_mixed_case_policy(
+        raw: &str,
+        allow_mixed_case: bool,
+        existing: Option<&str>,
+    ) -> Result<Self, &'static str> {
+        let display = Self::new(raw)?;
+        if allow_mixed_case
+            || existing == Some(display.as_str())
+            || crate::mailbox::AgentId::new(display.as_str()).is_ok()
+        {
+            Ok(display)
+        } else {
+            Err("mixed-case session names are disabled; set [mux] allow_mixed_case_session_names = true")
+        }
+    }
+}
+
 /// Suggest the first unused address under a Space name.
 #[must_use]
 pub fn suggest(space: &str, occupied: &[String]) -> String {
@@ -82,6 +125,17 @@ pub fn unique_agent_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_names_preserve_case_and_trim_outer_space() {
+        assert_eq!(
+            DisplayName::new("  Graphite-Main ").unwrap().as_str(),
+            "Graphite-Main"
+        );
+        assert!(DisplayName::new("bad\nname").is_err());
+        assert!(DisplayName::new(&"x".repeat(65)).is_err());
+    }
+
     #[test]
     fn suggestions_are_mail_addresses_and_skip_existing_names() {
         assert_eq!(

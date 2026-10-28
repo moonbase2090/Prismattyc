@@ -181,40 +181,8 @@ impl WalkthroughLive {
         }
     }
 
-    /// Host action name for Show me, if this step can dispatch one.
-    pub(crate) fn show_me_action(&self) -> Option<&str> {
-        match self.current_step()?.show_me.as_ref()? {
-            ShowMe::HostAction { action } => Some(action.as_str()),
-            _ => None,
-        }
-    }
-
-    /// Stub fact for Show me when the step has no host action to dispatch.
-    /// Command and space adapters are PT-195..198; Show me still advances.
-    pub(crate) fn show_me_stub(&self) -> Option<Detected> {
-        let step = self.current_step()?;
-        if matches!(step.show_me, Some(ShowMe::HostAction { .. })) {
-            return None;
-        }
-        match &step.expect {
-            Expect::CommandEvent { command, result } => Some(Detected::CommandEvent {
-                command: command.clone(),
-                result: result.clone().unwrap_or_else(|| "ok".into()),
-            }),
-            Expect::SpaceEvent { event } => Some(Detected::SpaceEvent {
-                event: event.clone(),
-            }),
-            Expect::MuxEvent {
-                event,
-                to_window,
-                session,
-            } => Some(Detected::MuxEvent {
-                event: event.clone(),
-                to_window: to_window.clone(),
-                session: session.clone(),
-            }),
-            Expect::HostAction { .. } => None,
-        }
+    pub(crate) fn show_me(&self) -> Option<&ShowMe> {
+        self.current_step()?.show_me.as_ref()
     }
 
     /// Caption view when the overlay is visible.
@@ -467,7 +435,9 @@ mod tests {
         let mut live = WalkthroughLive::start(bundled_catalog().unwrap()).unwrap();
         let first = live.current_step().unwrap().id.clone();
         assert_eq!(first, "window.split-right");
-        assert_eq!(live.show_me_action(), Some("split_right"));
+        assert!(
+            matches!(live.show_me(), Some(ShowMe::HostAction { action }) if action == "split_right")
+        );
         live.dismiss_caption();
         assert!(live.view("Ctrl+Shift+\\").is_none());
         live.reveal_caption();
@@ -899,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn command_and_space_expect_match_and_show_me_stubs() {
+    fn command_and_space_expect_require_success() {
         let command = Expect::CommandEvent {
             command: "pmux_new".into(),
             result: Some("ok".into()),
@@ -939,8 +909,25 @@ mod tests {
         while live.current_step().map(|s| s.id.as_str()) != Some("seats.new") {
             assert!(live.skip(), "skip to seats.new");
         }
-        let stub = live.show_me_stub().expect("seats.new has a command stub");
-        assert_eq!(live.note(&stub), DetectOutcome::Advance);
+        assert!(
+            matches!(live.show_me(), Some(ShowMe::CommandEvent { command }) if command == "pmux_new")
+        );
+        assert_eq!(live.current_step().unwrap().id, "seats.new");
+        assert_eq!(
+            live.note(&Detected::CommandEvent {
+                command: "pmux_new".into(),
+                result: "err".into(),
+            }),
+            DetectOutcome::Fail
+        );
+        assert_eq!(live.current_step().unwrap().id, "seats.new");
+        assert_eq!(
+            live.note(&Detected::CommandEvent {
+                command: "pmux_new".into(),
+                result: "ok".into(),
+            }),
+            DetectOutcome::Advance
+        );
         assert_eq!(live.current_step().unwrap().id, "seats.attach-all");
     }
 

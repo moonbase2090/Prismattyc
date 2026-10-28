@@ -339,6 +339,7 @@ impl App {
                         super::ContextMenuTarget::RailSession(_) => "rail-session",
                         super::ContextMenuTarget::RailSessionSolo(_) => "rail-session-solo",
                         super::ContextMenuTarget::RailPane(_) => "rail-pane",
+                        super::ContextMenuTarget::RailTab(_) => "rail-tab",
                     }),
                 })),
                 "space_session_names": host.space_rail.live_pane_names,

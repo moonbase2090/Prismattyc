@@ -1,0 +1,8 @@
+{
+  "index": 12,
+  "step_id": "spaces.reopen",
+  "completed": ["window.split-right","window.focus-right","window.close-pane","tabs.new","tabs.rename","tabs.move-pane","tabs.drag","seats.new","seats.attach-all","seats.mail","spaces.save","spaces.open"],
+  "skipped": [],
+  "show_me": null,
+  "skip": {"x":1348,"y":1053,"w":108,"h":41}
+}

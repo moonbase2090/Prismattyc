@@ -12,7 +12,10 @@ mod attach_adopt;
 mod attach_log;
 mod attach_tabs;
 mod border_underlay;
+mod bundled_fonts;
 mod config;
+mod config_document;
+mod config_schema;
 mod config_template;
 mod daemon_startup;
 mod file_writer;
@@ -22,6 +25,7 @@ mod git_info;
 mod gpu;
 mod graphite;
 mod graphite_overlays;
+mod host_tab_requests;
 mod hyperlink;
 mod icon;
 mod instance;
@@ -85,6 +89,7 @@ mod render_window_tests;
 mod restore_prompt;
 mod rich;
 mod session_prompt;
+mod settings;
 mod sidebar;
 mod space_client;
 mod space_open;
@@ -103,6 +108,7 @@ mod theme;
 mod title_row;
 mod walkthrough;
 mod walkthrough_audio;
+mod walkthrough_demo;
 #[cfg(target_os = "linux")]
 mod wayland_shm;
 #[cfg(any(windows, test))]
@@ -689,7 +695,11 @@ impl Cli {
                 self.panes = panes;
             }
         }
-        self.light_cycle = matches!(file.focus_border_animation.as_deref(), Some("light-cycle"));
+        self.light_cycle = matches!(
+            file.focus_border_animation
+                .map(crate::config::FocusBorderAnimation::as_str),
+            Some("light-cycle")
+        );
         self.light_cycle_ms = file
             .focus_border_animation_ms
             .map_or(DEFAULT_LIGHT_CYCLE_MS, u128::from);
@@ -782,8 +792,11 @@ fn open_attach_session_tabs(
     let mux_bin = mux_bin.to_string_lossy();
     let mut pane_sessions = Vec::new();
     for (index, (title, members)) in grouped.groups.iter().enumerate() {
+        let fixed_name = grouped.fixed_names.get(index).and_then(Option::as_deref);
         let start = if index == 0 {
-            mux.rename_window(mux.active_window(), title)?;
+            let window = mux.active_window();
+            mux.rename_window(window, title)?;
+            mux.set_fixed_tab_name(window, fixed_name)?;
             let pane = mux.focused_id();
             mux.mark_attach_session(pane, members[0].session.clone(), members[0].title.clone());
             pane_sessions.push((pane, members[0].session.clone()));
@@ -792,6 +805,7 @@ fn open_attach_session_tabs(
             let first = &members[0];
             let window = mux.new_tab(&mux_bin, &attach_session_args(first))?;
             mux.rename_window(window, title)?;
+            mux.set_fixed_tab_name(window, fixed_name)?;
             let pane = mux.focused_id();
             mux.mark_attach_session(pane, first.session.clone(), first.title.clone());
             pane_sessions.push((pane, first.session.clone()));
@@ -1145,6 +1159,8 @@ struct HostState {
     sidebar_thumb_drag: Option<(f64, usize)>,
     /// Header (or strip) control that collapses the sidebar.
     sidebar_toggle: graphite::Rect,
+    /// Expand-all / collapse-all control in the Spaces column header.
+    sidebar_tree_fold: graphite::Rect,
     /// Collapsed-strip hit boxes from the last paint.
     sidebar_icons: sidebar_width::IconStrip,
     /// Grip drag. The struct owns the pending width between reflows.
@@ -1181,6 +1197,8 @@ struct HostState {
     /// Prismattyc theme switches between Dark and Light (#145).
     theme_overrides: Option<theme::ThemeOverrides>,
     theme_picker: Option<ThemePicker>,
+    settings: Option<settings::Panel>,
+    ui_wake: mux::Wake,
     /// Graphite transparency dialog (#112). Classic chrome leaves this empty.
     transparency: Option<transparency::Dialog>,
     palette: Option<Palette>,
@@ -1223,6 +1241,8 @@ struct HostState {
     e2e_second_dump_at: Option<Instant>,
     /// In-memory walkthrough (PT-193). XDG progress is PT-195.
     walkthrough: Option<walkthrough::WalkthroughLive>,
+    walkthrough_demo: Option<walkthrough_demo::Job>,
+    walkthrough_save_after_open: bool,
     /// Effective key table for labels (the dispatcher reads `App::keymap`).
     keymap: Arc<keybind::KeyMap>,
     /// Whether the experimental rich action is enabled for palette rows.
@@ -1708,6 +1728,7 @@ enum ContextMenuTarget {
     RailSession(PaneId),
     RailSessionSolo(PaneId),
     RailPane(PaneId),
+    RailTab(prismattyc_mux::WindowId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1798,7 +1819,8 @@ fn context_menu_choice(kind: ContextMenuKind, index: usize) -> ContextMenuChoice
         ContextMenuKind::RailSpace
         | ContextMenuKind::RailSession
         | ContextMenuKind::RailSessionSolo
-        | ContextMenuKind::RailPane => ContextMenuChoice::Noop,
+        | ContextMenuKind::RailPane
+        | ContextMenuKind::RailTab => ContextMenuChoice::Noop,
     }
 }
 
@@ -1817,7 +1839,8 @@ fn context_menu_action(target: ContextMenuTarget, index: usize) -> ContextMenuAc
         ContextMenuTarget::RailSpace(_)
         | ContextMenuTarget::RailSession(_)
         | ContextMenuTarget::RailSessionSolo(_)
-        | ContextMenuTarget::RailPane(_) => ContextMenuAction::Noop,
+        | ContextMenuTarget::RailPane(_)
+        | ContextMenuTarget::RailTab(_) => ContextMenuAction::Noop,
     }
 }
 
@@ -1872,6 +1895,7 @@ fn context_menu_kind(target: ContextMenuTarget) -> ContextMenuKind {
         ContextMenuTarget::RailSession(_) => ContextMenuKind::RailSession,
         ContextMenuTarget::RailSessionSolo(_) => ContextMenuKind::RailSessionSolo,
         ContextMenuTarget::RailPane(_) => ContextMenuKind::RailPane,
+        ContextMenuTarget::RailTab(_) => ContextMenuKind::RailTab,
     }
 }
 
@@ -3128,19 +3152,18 @@ impl App {
                 }
             }
         }
-        let Some(mut newest) = newest else { return };
-        if newest.async_file_writes() != self.file_config.async_file_writes() {
-            eprintln!("prismattyc-host: async_file_writes changes take effect after restart");
-            newest.async_file_writes = self.file_config.async_file_writes;
-        }
-        #[cfg(target_os = "macos")]
-        if newest.macos_present != self.file_config.macos_present {
-            eprintln!("prismattyc-host: macos_present changes take effect after restart");
-            newest.macos_present = self.file_config.macos_present.clone();
-        }
-        if newest == self.file_config {
+        let Some(newest) = newest else { return };
+        let Some(newest) = prepare_config_reload(
+            newest,
+            &self.file_config,
+            self.windows.values_mut().filter_map(|host| {
+                let panel = host.settings.as_mut()?;
+                host.dirty = true;
+                Some(panel)
+            }),
+        ) else {
             return;
-        }
+        };
         let prior = std::mem::replace(&mut self.file_config, newest);
         if self.file_config.start_at_login != prior.start_at_login {
             restore_prompt::sync_login_registration();
@@ -3171,7 +3194,7 @@ impl App {
         for host in self.windows.values_mut() {
             host.pending_full_repaint = Some(FullRepaintReason::Fallback);
         }
-        for warning in self.file_config.mux_unknown_key_warnings() {
+        for warning in self.file_config.unknown_key_warnings() {
             eprintln!("{}", config::host_warning_line(warning));
         }
         if self.file_config.keys != prior.keys
@@ -3197,6 +3220,21 @@ impl App {
         };
 
         for host in self.windows.values_mut() {
+            if self.file_config.bar_color != prior.bar_color {
+                host.bar_color = self.file_config.bar_color;
+                host.pending_full_repaint = Some(FullRepaintReason::Theme);
+                host.dirty = true;
+            }
+            if self.file_config.alt_screen_scrollback() != prior.alt_screen_scrollback() {
+                let retain =
+                    self.cli.alt_screen_scrollback || self.file_config.alt_screen_scrollback();
+                host.emulator.set_retain_alt_history(retain);
+                host.mux.set_alt_screen_scrollback(retain);
+                for parked in host.local_views.parked.values_mut() {
+                    parked.mux.set_alt_screen_scrollback(retain);
+                }
+                host.dirty = true;
+            }
             let selective_border_rings = self.file_config.selective_border_rings.unwrap_or(false);
             if host.selective_border_rings != selective_border_rings {
                 host.selective_border_rings = selective_border_rings;
@@ -3375,7 +3413,9 @@ impl App {
             }
             if self.file_config.focus_border_animation != prior.focus_border_animation {
                 host.light_cycle = matches!(
-                    self.file_config.focus_border_animation.as_deref(),
+                    self.file_config
+                        .focus_border_animation
+                        .map(crate::config::FocusBorderAnimation::as_str),
                     Some("light-cycle")
                 );
                 if !host.light_cycle {
@@ -3747,6 +3787,7 @@ impl App {
             timing.record_phase(pump_timing::Phase::PollHostAttachTabs, started.elapsed());
             let started = Instant::now();
             advance_space_opens(host);
+            poll_walkthrough_demo(host);
             timing.record_phase(pump_timing::Phase::AdvanceSpaceOpens, started.elapsed());
             let started = Instant::now();
             refresh_space_views(host);
@@ -4235,7 +4276,12 @@ impl App {
         } else {
             None
         };
-        if self.file_config.space_startup.as_deref() != Some("fresh") {
+        if self
+            .file_config
+            .space_startup
+            .map(crate::config::SpaceStartup::as_str)
+            != Some("fresh")
+        {
             if let Some(prompt) = restore_prompt.as_mut() {
                 if let Some(socket) =
                     host_mux_socket().filter(|s| prismattyc_mux::login::enabled(s).unwrap_or(false))
@@ -4442,6 +4488,8 @@ impl App {
                 theme,
                 theme_overrides: self.file_config.theme_overrides.clone(),
                 theme_picker: None,
+                settings: None,
+                ui_wake: self.wake.clone(),
                 transparency: None,
                 palette: None,
                 palette_layout: None,
@@ -4469,6 +4517,7 @@ impl App {
                 sidebar_scroll: 0,
                 sidebar_thumb_drag: None,
                 sidebar_toggle: graphite::Rect::new(0, 0, 0, 0),
+                sidebar_tree_fold: graphite::Rect::new(0, 0, 0, 0),
                 sidebar_icons: sidebar_width::icon_strip(0, 0, 0, 0, 1, 0, 0, 0),
                 sidebar_drag: None,
                 sidebar_drag_at: None,
@@ -4493,6 +4542,8 @@ impl App {
                 dump_present_seq: 0,
                 e2e_second_dump_at: None,
                 walkthrough,
+                walkthrough_demo: None,
+                walkthrough_save_after_open: false,
                 keymap: self.keymap.clone(),
                 experimental_rich: self.cli.experimental_rich,
                 focus_border: self.cli.focus_border,
@@ -4624,10 +4675,18 @@ impl App {
             let configured = host.theme.clone();
             apply_host_theme(host, configured);
             host.cache_writer = !config_editor && !complete_update;
-            host.local_views.fresh =
-                complete_update || self.file_config.space_startup.as_deref() == Some("fresh");
+            host.local_views.fresh = complete_update
+                || self
+                    .file_config
+                    .space_startup
+                    .map(crate::config::SpaceStartup::as_str)
+                    == Some("fresh");
             if host.restore_prompt.is_some() {
-                match self.file_config.space_startup.as_deref() {
+                match self
+                    .file_config
+                    .space_startup
+                    .map(crate::config::SpaceStartup::as_str)
+                {
                     Some("restore") => restore_prompt::finish(host, true),
                     Some("fresh") => restore_prompt::finish(host, false),
                     _ => {}
@@ -4922,15 +4981,16 @@ fn chrome_snapshot(host: &HostState, live: Option<a11y::LiveSnap>) -> a11y::Chro
                 (notice.tab == index && Instant::now() < notice.until)
                     .then_some((notice.handle, notice.title.as_str()))
             });
-            let title = title_row::title_row_decision(
-                host.pane_titles,
-                info.handles,
-                info.title.as_str(),
-                info.pane_title.as_deref(),
-                &info.handle_titles,
+            let title = title_row::title_row_decision(title_row::TitleRowInput {
+                mode: host.pane_titles,
+                handles: info.handles,
+                tab_title: info.title.as_str(),
+                fixed_name: info.fixed_name.as_deref(),
+                pane_title: info.pane_title.as_deref(),
+                handle_titles: &info.handle_titles,
                 hover_handle,
                 notice,
-            )
+            })
             .label
             .to_string();
             let title = info
@@ -4983,7 +5043,7 @@ fn chrome_snapshot(host: &HostState, live: Option<a11y::LiveSnap>) -> a11y::Chro
                 format!("{} {}", view.caption, view.line2)
             }
         }),
-        arrange: if sidebar_header_shown(host) {
+        arrange: if pane_header_shown(host) {
             graphite_core::SIDEBAR_ARRANGE
                 .iter()
                 .map(|name| name.to_string())
@@ -5012,12 +5072,33 @@ fn sidebar_column_px(geom: mux::HostGeom, stride: usize) -> (usize, usize) {
     }
 }
 
-fn sidebar_header_shown(host: &HostState) -> bool {
-    sidebar_mode(host)
+fn pane_header_shown(host: &HostState) -> bool {
+    sidebar_mode(host) || host.mux.geom().pane_header_px > 0
 }
 
 /// Focused pane viewport as one document (accessibility D-A4). Scrollback stays
 /// out of the live node.
+/// Refresh saved views before comparing the configuration the running host can apply.
+fn prepare_config_reload<'a>(
+    mut newest: config::ConfigFile,
+    running: &config::ConfigFile,
+    panels: impl Iterator<Item = &'a mut settings::Panel>,
+) -> Option<config::ConfigFile> {
+    for panel in panels {
+        panel.refresh();
+    }
+    if newest.async_file_writes() != running.async_file_writes() {
+        eprintln!("prismattyc-host: async_file_writes changes take effect after restart");
+        newest.async_file_writes = running.async_file_writes;
+    }
+    #[cfg(target_os = "macos")]
+    if newest.macos_present != running.macos_present {
+        eprintln!("prismattyc-host: macos_present changes take effect after restart");
+        newest.macos_present = running.macos_present.clone();
+    }
+    (newest != *running).then_some(newest)
+}
+
 fn focused_document(host: &HostState) -> a11y::DocumentSnap {
     let pane = host.mux.focused();
     let screen = pane.emulator.screen();
@@ -5078,6 +5159,16 @@ fn focused_document(host: &HostState) -> a11y::DocumentSnap {
 }
 
 fn chrome_overlay(host: &HostState) -> a11y::OverlayKind {
+    if let Some(panel) = host.settings.as_ref() {
+        let (header, rows) = panel.rows();
+        return a11y::OverlayKind::Palette {
+            rows: rows
+                .into_iter()
+                .map(|row| format!("{header}: {} {}", row.name, row.describe))
+                .collect(),
+            selected: panel.selected(),
+        };
+    }
     if host.space_panel.is_some() {
         if let Some((header, rows)) = space_panel::rows(host) {
             return a11y::OverlayKind::Palette {
@@ -5199,6 +5290,16 @@ fn dispatch_overlay_activate(
             }
         }
         apply_transparency_input(host, transparency::Input::Enter);
+        return Dispatch::Handled;
+    }
+    if let Some(panel) = host.settings.as_mut() {
+        panel.activate(index);
+        let selected = panel.selected();
+        if let Some(menu) = host.context_menu.as_mut() {
+            menu.selected = selected;
+        }
+        host.dirty = true;
+        host.window.request_redraw();
         return Dispatch::Handled;
     }
     if host.space_panel.is_some() {
@@ -6367,6 +6468,10 @@ fn push_graphite_activity_damage(
             geom.top_chrome_px,
         ));
     }
+    if geom.pane_header_px > 0 {
+        let span = pane_header_span(geom, width as usize);
+        frame_damage.push_rect(PixelRect::new(span.x, span.y, span.w, span.h));
+    }
     if host.spacing.layout == config::LayoutMode::Sidebar {
         let (x, width) = sidebar_column_px(geom, width as usize);
         if width > 0 {
@@ -6777,6 +6882,9 @@ fn rasterize_frame(
                 ),
             );
         }
+    }
+    if !sidebar_mode {
+        paint_pane_header(host, buffer, width as usize, geom);
     }
     for (pane_id, pane, rect) in host.mux.panes_and_rects() {
         let (slot_x, slot_y, slot_width, slot_height) = geom.pane_slot_px(rect);
@@ -7438,7 +7546,7 @@ fn rasterize_frame(
             button.x,
             button.y,
             button.w,
-            geom.top_chrome_px.saturating_sub(button.y),
+            geom.chrome_top().saturating_sub(button.y),
         );
         graphite::paint_tooltip(
             buffer,
@@ -7917,10 +8025,11 @@ fn rasterize_frame(
                 }]
             };
             // Settings pages are fixed size and scroll inside (Graphite rule).
-            let layout_mode = if host
-                .space_panel
-                .as_ref()
-                .is_some_and(space_panel::Panel::fixed_size)
+            let layout_mode = if host.settings.is_some()
+                || host
+                    .space_panel
+                    .as_ref()
+                    .is_some_and(space_panel::Panel::fixed_size)
             {
                 PaletteLayoutMode::FixedHeight
             } else {
@@ -7933,9 +8042,16 @@ fn rasterize_frame(
                 chips: None,
                 sections: &sections,
                 selected,
-                scroll: host.space_panel.as_ref().map_or(0, |panel| panel.scroll),
+                scroll: host.settings.as_ref().map_or_else(
+                    || host.space_panel.as_ref().map_or(0, |panel| panel.scroll),
+                    |panel| panel.scroll,
+                ),
                 detail: None,
-                footer: "Enter select · Esc close · ↑↓ move",
+                footer: if host.settings.is_some() {
+                    "↑/↓ rows · ←/→ section or value · Enter edit/reset · Escape back"
+                } else {
+                    "Enter select · Esc close · ↑↓ move"
+                },
             };
             paint_palette_overlay(
                 &host.font,
@@ -7953,6 +8069,9 @@ fn rasterize_frame(
         None
     };
     if let Some(layout) = painted_context {
+        if let Some(panel) = host.settings.as_mut() {
+            panel.scroll = layout.start;
+        }
         if let Some(panel) = host.space_panel.as_mut() {
             panel.scroll = layout.start;
         }
@@ -8143,7 +8262,7 @@ impl App {
             .saturating_sub(geom.chrome_right())
             .saturating_add(trailing_gap);
         geom.slack_x = right.saturating_sub(left) / 2;
-        let top = geom.window_pad + geom.chrome_top() + geom.pane_gap / 2;
+        let top = geom.window_pad + geom.pane_gap / 2;
         let bottom = (physical.height as usize)
             .saturating_sub(geom.window_pad + geom.chrome_top() + rows * host.font.cell_h)
             .saturating_sub(geom.chrome_bottom())
@@ -8498,16 +8617,16 @@ fn begin_tab_rename(host: &mut HostState, index: Option<usize>) {
     let Some(window) = host.mux.window_at_tab(index) else {
         return;
     };
-    if let Some((_, panes)) = host.mux.tab_panes().get(index) {
-        if panes.len() == 1 && session_prompt::rename(host, panes[0], keybind::Action::RenameTab) {
-            return;
-        }
-    }
     let title = host
         .mux
         .tab_infos()
         .get(index)
-        .map(|tab| tab.title.clone())
+        .map(|tab| {
+            tab.fixed_name
+                .clone()
+                .or_else(|| tab.pane_title.clone())
+                .unwrap_or_else(|| tab.title.clone())
+        })
         .unwrap_or_default();
     if rename_uses_strip(sidebar_mode(host), show_tab_strip(host)) {
         host.tab_rename = Some(TabRename {
@@ -8758,6 +8877,16 @@ fn attach_records_from_live(host: &HostState) -> attach_tabs::AttachTabsFile {
         .filter_map(|(pane, id)| Some((id.clone(), host.mux.attach_name_of(*pane)?.to_string())))
         .collect();
     file
+}
+
+/// Why a walkthrough tab move did nothing. Moving right fails on the last tab,
+/// and a newly created tab is the last one, so a second tab alone is not enough.
+fn move_tab_refusal_hint(tab_count: usize) -> &'static str {
+    if tab_count < 2 {
+        "Create another tab, then select the first tab and try again."
+    } else {
+        "Select a tab that has another tab to its right, then try again."
+    }
 }
 
 fn mark_layout_dirty(host: &mut HostState) {
@@ -9273,7 +9402,7 @@ fn commit_tab_rename(host: &mut HostState) {
         observe_host_action(host, keybind::Action::RenamePane, pane_ok);
         return;
     }
-    match host.mux.rename_window(edit.window, &edit.buffer) {
+    match host.mux.set_fixed_tab_name(edit.window, Some(&edit.buffer)) {
         Ok(_) => {
             mark_layout_dirty(host);
             host.window
@@ -9723,6 +9852,8 @@ fn open_space_from_host(host: &mut HostState, name: &str, mode: SpaceOpenMode) {
     if !host.space_opens.blocks_persist()
         && mode == SpaceOpenMode::Switch
         && host.space_rail.current.as_deref() == Some(name)
+        && !walkthrough_at(host, "spaces.open")
+        && !host.walkthrough_save_after_open
     {
         rail_toast(host, &format!(" {name} is the current space "));
         return;
@@ -9849,7 +9980,26 @@ fn report_space_open(host: &mut HostState, completed: space_open::Completion) {
     } else {
         rail_toast(host, &format!(" {label} "));
     }
+    if completed.mode == SpaceOpenMode::Switch
+        && completed.applied == Some(true)
+        && !report.is_error()
+    {
+        observe_walkthrough(
+            host,
+            walkthrough::Detected::SpaceEvent {
+                event: "opened".into(),
+            },
+        );
+    }
+    let save_selected = std::mem::take(&mut host.walkthrough_save_after_open)
+        && walkthrough_at(host, "spaces.save")
+        && completed.applied == Some(true)
+        && !report.is_error();
+    let name = report.name.clone();
     host.last_space_open = Some(report);
+    if save_selected {
+        save_space_from_host(host, &name);
+    }
 }
 
 /// Follow a renamed Space without adopting a new owner under its old name.
@@ -9975,6 +10125,7 @@ fn refresh_space_views_settled(host: &mut HostState) {
 }
 
 fn refresh_space_views(host: &mut HostState) {
+    settings::poll(host);
     space_panel::poll(host);
     drain_space_client(host);
     let now = Instant::now();
@@ -10497,6 +10648,12 @@ fn save_space_from_host_with(host: &mut HostState, name: &str, toast: bool) -> b
             host.space_polish.armed = false;
             if toast {
                 rail_toast(host, " Saved ");
+                observe_walkthrough(
+                    host,
+                    walkthrough::Detected::SpaceEvent {
+                        event: "saved".into(),
+                    },
+                );
             }
             true
         }
@@ -10589,6 +10746,7 @@ fn open_context_menu(host: &mut HostState, target: ContextMenuTarget) {
 }
 
 fn close_context_menu(host: &mut HostState) {
+    host.settings = None;
     host.space_panel = None;
     if host.context_menu.take().is_some() {
         host.context_menu_target = None;
@@ -10627,6 +10785,9 @@ fn pane_space_membership(session: &str, spaces: &[String]) -> String {
 }
 
 fn context_menu_rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
+    if let Some(panel) = host.settings.as_ref() {
+        return Some(panel.rows());
+    }
     if host.space_panel.is_some() {
         return space_panel::rows(host);
     }
@@ -10781,6 +10942,25 @@ fn context_menu_rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
                 .collect();
             (header, rows)
         }
+        ContextMenuTarget::RailTab(window) => {
+            let tab = host
+                .mux
+                .tab_infos()
+                .into_iter()
+                .find(|tab| tab.window == Some(window))?;
+            let header = tab.fixed_name.unwrap_or(tab.title);
+            let rows = [
+                ("Rename tab", "set a fixed name for this tab"),
+                ("Clear tab name", "return this tab to follow-focus naming"),
+                ("Session actions…", "open the session menu for this tab"),
+            ]
+            .into_iter()
+            .map(|(label, description)| {
+                PaletteRow::plain(label.to_string(), description.to_string(), String::new())
+            })
+            .collect();
+            (header, rows)
+        }
         ContextMenuTarget::RailSession(pane) => {
             let header = host
                 .mux
@@ -10930,20 +11110,6 @@ fn pane_for_sidebar_row(host: &HostState, row: &sidebar::TreeRow) -> Option<Pane
         .tab_panes()
         .get(tab)
         .and_then(|(_, panes)| panes.get(pane_index).copied())
-}
-
-fn sidebar_tab_pane_count(host: &HostState, row: &sidebar::TreeRow) -> usize {
-    let Some(tab) = row.tab else {
-        return 1;
-    };
-    if let Some((_, panes)) = host.mux.tab_panes().get(tab) {
-        return panes.len().max(1);
-    }
-    host.mux
-        .tab_infos()
-        .get(tab)
-        .map(|info| if info.handles == 0 { 1 } else { info.handles })
-        .unwrap_or(1)
 }
 
 fn close_space_from_host(host: &mut HostState, name: &str) {
@@ -11247,6 +11413,41 @@ fn activate_context_menu(
         ContextMenuTarget::RailPane(pane) => {
             if let Some(action) = rail_context_menu::pane_action(index) {
                 return apply_rail_pane_action(host, pane, action, program, child_args);
+            }
+            Dispatch::Handled
+        }
+        ContextMenuTarget::RailTab(window) => {
+            let tabs = host.mux.tab_infos();
+            if let Some((tab_index, _)) = tabs
+                .iter()
+                .enumerate()
+                .find(|(_, tab)| tab.window == Some(window))
+            {
+                match index {
+                    0 => begin_tab_rename(host, Some(tab_index)),
+                    1 => {
+                        if host.mux.set_fixed_tab_name(window, None).is_ok() {
+                            mark_layout_dirty(host);
+                            host.window
+                                .set_title(&window_title(&host.mux, show_tab_strip(host)));
+                        }
+                        host.dirty = true;
+                        host.window.request_redraw();
+                    }
+                    2 => {
+                        if let Some((_, panes)) = host.mux.tab_panes().get(tab_index) {
+                            if let Some(pane) = panes.first().copied() {
+                                let target = if panes.len() > 1 {
+                                    ContextMenuTarget::RailSession(pane)
+                                } else {
+                                    ContextMenuTarget::RailSessionSolo(pane)
+                                };
+                                open_context_menu(host, target);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
             Dispatch::Handled
         }
@@ -11589,6 +11790,12 @@ fn apply_palette_pointer(host: &mut HostState) {
             host.dirty = true;
         }
     }
+    let row = if let Some(panel) = host.settings.as_mut() {
+        panel.hover(row);
+        panel.selected()
+    } else {
+        row
+    };
     if let Some(menu) = host.context_menu.as_mut() {
         if menu.selected != row {
             menu.selected = row;
@@ -11955,6 +12162,9 @@ fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
     // Sidebar mode replaces the strip and the spaces rail. A right-docked
     // sidebar stores its width in `rail_px`, so the rail layout must not
     // win a hover in the gaps between icons.
+    if let Some(index) = arrange_hit_at(host, px, py) {
+        return Some(HoverTarget::Sidebar(graphite::SidebarHit::Arrange(index)));
+    }
     let sidebar = sidebar_mode(host);
     if sidebar {
         if let Some(hit) = sidebar_hit_at(host, px, py) {
@@ -12104,6 +12314,18 @@ fn sidebar_icon_tooltip(host: &HostState) -> Option<(graphite::Rect, String)> {
                 "Collapse sidebar".to_string()
             },
         )),
+        Some(HoverTarget::Sidebar(graphite::SidebarHit::TreeFold))
+            if !host.spacing.sidebar_collapsed =>
+        {
+            Some((
+                host.sidebar_tree_fold,
+                if sidebar_tree_fold_expands(host) {
+                    "Expand all Spaces".to_string()
+                } else {
+                    "Collapse all Spaces".to_string()
+                },
+            ))
+        }
         Some(HoverTarget::Sidebar(graphite::SidebarHit::Row(index)))
             if host.spacing.sidebar_collapsed =>
         {
@@ -12114,7 +12336,7 @@ fn sidebar_icon_tooltip(host: &HostState) -> Option<(graphite::Rect, String)> {
                 sidebar::RowKind::Tab => row
                     .tab
                     .and_then(|tab| space.tabs.get(tab))
-                    .map(|tab| tab.title.clone())
+                    .map(|tab| tab.fixed_name.clone().unwrap_or_else(|| tab.title.clone()))
                     .filter(|title| !title.is_empty())
                     .unwrap_or_else(|| "Tab".to_string()),
                 sidebar::RowKind::Pane => row
@@ -12723,6 +12945,8 @@ fn handle_rail_click(host: &mut HostState, button: MouseButton) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SidebarClick {
     ToggleCollapse(String),
+    /// Expand every Space group, or collapse every Space group.
+    ToggleTreeFold,
     SelectTab(usize),
     /// Session row or icon: select its tab, then focus that pane.
     /// `pane` is `None` for a tab icon, which keeps the tab's own focus.
@@ -12744,6 +12968,21 @@ enum SidebarClick {
     /// Focus the next pane that needs attention in the current Space.
     JumpNeedsYou,
     Ignore,
+}
+
+/// Names of Space groups currently shown in the sidebar tree.
+fn sidebar_space_names(host: &HostState) -> Vec<&str> {
+    host.sidebar_tree
+        .spaces
+        .iter()
+        .map(|space| space.name.as_str())
+        .collect()
+}
+
+/// True when the header fold control should expand every Space next.
+fn sidebar_tree_fold_expands(host: &HostState) -> bool {
+    let names = sidebar_space_names(host);
+    names.is_empty() || host.space_rail.any_collapsed(names)
 }
 
 /// Action behind each sidebar Arrange button, in `SIDEBAR_ARRANGE` order.
@@ -12780,7 +13019,7 @@ fn sidebar_click_decision(
                         .map(SidebarClick::SelectTab)
                         .unwrap_or(SidebarClick::Ignore)
                 } else if saved {
-                    SidebarClick::OpenSpace(name.to_string())
+                    open_saved_row(name, session_title)
                 } else {
                     SidebarClick::Ignore
                 }
@@ -12796,13 +13035,7 @@ fn sidebar_click_decision(
                         _ => SidebarClick::Ignore,
                     }
                 } else if saved {
-                    match session_title {
-                        Some(title) if !title.is_empty() => SidebarClick::OpenSession {
-                            space: name.to_string(),
-                            title: title.to_string(),
-                        },
-                        _ => SidebarClick::OpenSpace(name.to_string()),
-                    }
+                    open_saved_row(name, session_title)
                 } else {
                     SidebarClick::Ignore
                 }
@@ -12815,6 +13048,7 @@ fn sidebar_click_decision(
             .map(SidebarClick::Run)
             .unwrap_or(SidebarClick::Ignore),
         (SidebarHit::Toggle, _) => SidebarClick::ToggleStrip,
+        (SidebarHit::TreeFold, _) => SidebarClick::ToggleTreeFold,
         (SidebarHit::Thumb, _) => SidebarClick::StartThumbDrag,
         _ => SidebarClick::Ignore,
     }
@@ -12842,19 +13076,7 @@ fn icon_click_decision(
                     })
                     .unwrap_or(SidebarClick::Ignore),
             },
-            Some((clicked, name, false)) => {
-                if clicked.kind == sidebar::RowKind::Pane {
-                    match session_title {
-                        Some(title) if !title.is_empty() => SidebarClick::OpenSession {
-                            space: name.to_string(),
-                            title: title.to_string(),
-                        },
-                        _ => SidebarClick::OpenSpace(name.to_string()),
-                    }
-                } else {
-                    SidebarClick::OpenSpace(name.to_string())
-                }
-            }
+            Some((_, name, false)) => open_saved_row(name, session_title),
             None => SidebarClick::Ignore,
         },
         SidebarHit::Action(0) => SidebarClick::Run(keybind::Action::NewTab),
@@ -12865,18 +13087,34 @@ fn icon_click_decision(
             .unwrap_or(SidebarClick::Ignore),
         SidebarHit::Thumb => SidebarClick::StartThumbDrag,
         SidebarHit::NeedsYou(_) => SidebarClick::JumpNeedsYou,
+        SidebarHit::TreeFold => SidebarClick::Ignore,
         SidebarHit::Action(_) => SidebarClick::Ignore,
     }
 }
 
-/// Pane title for a session row, in the same order the tree paints.
-fn session_title_of(tree: &sidebar::SidebarTree, row: &sidebar::TreeRow) -> Option<String> {
-    if row.kind != sidebar::RowKind::Pane {
-        return None;
+/// A row in a space that is not current. Its session opens the space and
+/// then focuses that pane; without a title the space opens on its own focus.
+fn open_saved_row(space: &str, session_title: Option<&str>) -> SidebarClick {
+    match session_title {
+        Some(title) if !title.is_empty() => SidebarClick::OpenSession {
+            space: space.to_string(),
+            title: title.to_string(),
+        },
+        _ => SidebarClick::OpenSpace(space.to_string()),
     }
+}
+
+/// Session title for a row, in the same order the tree paints. A pane row
+/// names its own pane. A tab row names the tab's first session, since a
+/// single-session tab shows no pane row of its own.
+fn session_title_of(tree: &sidebar::SidebarTree, row: &sidebar::TreeRow) -> Option<String> {
     let space = tree.spaces.get(row.space)?;
     let tab = space.tabs.get(row.tab?)?;
-    Some(tab.panes.get(row.pane?)?.title.clone())
+    match row.kind {
+        sidebar::RowKind::Space => None,
+        sidebar::RowKind::Tab => Some(tab.panes.first()?.title.clone()),
+        sidebar::RowKind::Pane => Some(tab.panes.get(row.pane?)?.title.clone()),
+    }
 }
 
 /// Select the session's tab and focus that pane. `None` keeps the tab's
@@ -12939,13 +13177,19 @@ fn open_sidebar_context_menu(host: &mut HostState, row: &sidebar::TreeRow, space
             }
         }
         sidebar::RowKind::Tab => {
-            if let Some(pane) = pane_for_sidebar_row(host, row) {
-                let target = if sidebar::show_pane_rows(sidebar_tab_pane_count(host, row)) {
-                    ContextMenuTarget::RailSession(pane)
-                } else {
-                    ContextMenuTarget::RailSessionSolo(pane)
-                };
-                open_context_menu(host, target);
+            let current = host.space_rail.current.as_deref() == Some(space_name)
+                && host
+                    .sidebar_tree
+                    .spaces
+                    .get(row.space)
+                    .is_some_and(|space| space.name == space_name);
+            if current {
+                if let Some(window) = row
+                    .tab
+                    .and_then(|index| host.mux.tab_infos().get(index).and_then(|tab| tab.window))
+                {
+                    open_context_menu(host, ContextMenuTarget::RailTab(window));
+                }
             }
         }
         sidebar::RowKind::Pane => {
@@ -12984,6 +13228,13 @@ fn try_open_rail_context_menu(host: &mut HostState) -> bool {
 /// space selection, footer and header actions. Anything else is
 /// `NotHandled` so presses fall through to the pane handlers.
 fn handle_sidebar_click(host: &mut HostState, button: MouseButton) -> StripClickResult {
+    if button == MouseButton::Left {
+        if let Some(index) = pointer_cells(host).and_then(|(x, y)| arrange_hit_at(host, x, y)) {
+            return arrange_button_action(index)
+                .map(StripClickResult::Action)
+                .unwrap_or(StripClickResult::NotHandled);
+        }
+    }
     if !sidebar_mode(host) {
         return StripClickResult::NotHandled;
     }
@@ -13065,6 +13316,19 @@ fn handle_sidebar_click(host: &mut HostState, button: MouseButton) -> StripClick
             // Per-window collapse memory from PR1.
             let collapsed = host.space_rail.is_collapsed(&name);
             host.space_rail.set_collapsed(&name, !collapsed);
+            host.dirty = true;
+            StripClickResult::Handled
+        }
+        SidebarClick::ToggleTreeFold => {
+            let collapse = !sidebar_tree_fold_expands(host);
+            let names: Vec<String> = host
+                .sidebar_tree
+                .spaces
+                .iter()
+                .map(|space| space.name.clone())
+                .collect();
+            host.space_rail
+                .set_all_collapsed(names.iter().map(String::as_str), collapse);
             host.dirty = true;
             StripClickResult::Handled
         }
@@ -13260,7 +13524,7 @@ fn drag_toast_label(host: &HostState, stride: usize) -> Option<String> {
         .mux
         .tab_infos()
         .into_iter()
-        .map(|tab| tab.title)
+        .map(|tab| tab.fixed_name.unwrap_or(tab.title))
         .collect();
     let subject = match drag.kind {
         StripDragKind::Tab(index) => drag_toast_subject(&DragSubject::Tab(
@@ -13878,15 +14142,16 @@ fn graphite_tab_text(
         Some(mux::StripHit::Pane { tab, handle, .. }) if tab == index => Some(handle),
         _ => None,
     };
-    let decided = title_row::title_row_decision(
-        host.pane_titles,
-        tab.handles,
-        tab.title.as_str(),
-        tab.pane_title.as_deref(),
-        &tab.handle_titles,
+    let decided = title_row::title_row_decision(title_row::TitleRowInput {
+        mode: host.pane_titles,
+        handles: tab.handles,
+        tab_title: tab.title.as_str(),
+        fixed_name: tab.fixed_name.as_deref(),
+        pane_title: tab.pane_title.as_deref(),
+        handle_titles: &tab.handle_titles,
         hover_handle,
-        None,
-    );
+        notice: None,
+    });
     let meta = match (tab.handles > 1, tab.zoomed) {
         (true, true) => Some(format!("{} panes · zoomed", tab.handles)),
         (true, false) => Some(format!("{} panes", tab.handles)),
@@ -14034,15 +14299,10 @@ fn paint_graphite_sidebar(
             }
         }
     }
-    let (hover_row, hover_action, hover_arrange) = match host.hover_target {
-        Some(HoverTarget::Sidebar(graphite::SidebarHit::Row(row))) => (Some(row), None, None),
-        Some(HoverTarget::Sidebar(graphite::SidebarHit::Action(action))) => {
-            (None, Some(action), None)
-        }
-        Some(HoverTarget::Sidebar(graphite::SidebarHit::Arrange(button))) => {
-            (None, None, Some(button))
-        }
-        _ => (None, None, None),
+    let (hover_row, hover_action) = match host.hover_target {
+        Some(HoverTarget::Sidebar(graphite::SidebarHit::Row(row))) => (Some(row), None),
+        Some(HoverTarget::Sidebar(graphite::SidebarHit::Action(action))) => (None, Some(action)),
+        _ => (None, None),
     };
     let toggle_hovered = matches!(
         host.hover_target,
@@ -14080,7 +14340,12 @@ fn paint_graphite_sidebar(
                         selected_tabs.push(text.selected);
                     }
                     None => {
-                        labels.push(tab.map(|tab| tab.title.clone()).unwrap_or_default());
+                        labels.push(
+                            tab.map(|tab| {
+                                tab.fixed_name.clone().unwrap_or_else(|| tab.title.clone())
+                            })
+                            .unwrap_or_default(),
+                        );
                         dots.push(Some(graphite::Dot::Idle));
                         selected_tabs.push(false);
                     }
@@ -14209,6 +14474,7 @@ fn paint_graphite_sidebar(
         host.sidebar_list = px_box(strip.list);
         host.sidebar_thumb = None;
         host.sidebar_toggle = toggle;
+        host.sidebar_tree_fold = graphite::Rect::new(0, 0, 0, 0);
         host.sidebar_icons = strip;
         host.sidebar_needs_you_hits.clear();
     } else {
@@ -14253,6 +14519,12 @@ fn paint_graphite_sidebar(
             })
             .collect();
         let toggle = graphite::sidebar_toggle_rect(geom.chrome, column, layout.head, dock_right);
+        let tree_fold = graphite::sidebar_tree_fold_rect(geom.chrome, column, toggle, dock_right);
+        let tree_fold_expand = sidebar_tree_fold_expands(host);
+        let tree_fold_hovered = matches!(
+            host.hover_target,
+            Some(HoverTarget::Sidebar(graphite::SidebarHit::TreeFold))
+        );
         graphite::paint_sidebar(
             buffer,
             stride,
@@ -14275,6 +14547,9 @@ fn paint_graphite_sidebar(
                 dock_right,
                 toggle,
                 toggle_hovered,
+                tree_fold,
+                tree_fold_hovered,
+                tree_fold_expand,
                 row_seats: &paint_seats,
             },
         );
@@ -14286,17 +14561,32 @@ fn paint_graphite_sidebar(
         host.sidebar_list = layout.list;
         host.sidebar_thumb = layout.thumb;
         host.sidebar_toggle = toggle;
+        host.sidebar_tree_fold = tree_fold;
         host.sidebar_icons = sidebar_width::icon_strip(0, 0, 0, 0, 1, 0, 0, 0);
     }
-    let span = if dock_right {
-        graphite::Rect::new(0, 0, origin, geom.top_chrome_px)
+    paint_pane_header(host, buffer, stride, geom);
+    host.sidebar_row_count = visible.len();
+    host.sidebar_tree = tree;
+}
+
+fn pane_header_span(geom: mux::HostGeom, stride: usize) -> graphite::Rect {
+    let x = geom.chrome_left();
+    let width = stride.saturating_sub(x + geom.chrome_right());
+    let y = if geom.pane_header_px > 0 {
+        geom.tab_strip_y() + geom.top_chrome_px
     } else {
-        graphite::Rect::new(
-            column.right(),
-            0,
-            stride.saturating_sub(column.right()),
-            geom.top_chrome_px,
-        )
+        0
+    };
+    graphite::Rect::new(x, y, width, graphite::TABS_BAR_H.px(geom.chrome))
+}
+
+fn paint_pane_header(host: &mut HostState, buffer: &mut [u32], stride: usize, geom: mux::HostGeom) {
+    let span = pane_header_span(geom, stride);
+    let tok = graphite::bar_tokens(&host.theme, host.bar_color);
+    let tabs = host.mux.tab_infos();
+    let hover_arrange = match host.hover_target {
+        Some(HoverTarget::Sidebar(graphite::SidebarHit::Arrange(index))) => Some(index),
+        _ => None,
     };
     let header = graphite::sidebar_header_layout(geom.chrome, span);
     let crumb = host
@@ -14308,7 +14598,7 @@ fn paint_graphite_sidebar(
             let tab = tabs
                 .iter()
                 .find(|tab| tab.selected)
-                .map(|tab| tab.title.clone())
+                .map(|tab| tab.fixed_name.clone().unwrap_or_else(|| tab.title.clone()))
                 .unwrap_or_default();
             if tab.is_empty() {
                 space
@@ -14331,14 +14621,16 @@ fn paint_graphite_sidebar(
             alpha: graphite_bar_alpha(host),
         },
     );
-    // Each branch stored its own rows, actions, list, and thumb. The header
-    // buttons and the tree are shared.
     host.sidebar_arrange = header.buttons;
-    host.sidebar_row_count = visible.len();
-    host.sidebar_tree = tree;
 }
 
 /// Hit-test the stored sidebar paint, if this frame painted one.
+fn arrange_hit_at(host: &HostState, px: usize, py: usize) -> Option<usize> {
+    host.sidebar_arrange
+        .iter()
+        .position(|rect| rect.contains(px, py))
+}
+
 fn sidebar_hit_at(host: &HostState, px: usize, py: usize) -> Option<graphite::SidebarHit> {
     if host.spacing.sidebar_collapsed {
         if let Some(target) = sidebar_width::icon_hit(&host.sidebar_icons, px as i32, py as i32) {
@@ -14357,6 +14649,7 @@ fn sidebar_hit_at(host: &HostState, px: usize, py: usize) -> Option<graphite::Si
             actions: &host.sidebar_actions,
             arrange: &host.sidebar_arrange,
             thumb: host.sidebar_thumb,
+            tree_fold: host.sidebar_tree_fold,
             toggle: host.sidebar_toggle,
         },
         px,
@@ -15430,6 +15723,7 @@ fn apply_space_picker_verdict(
             true
         }
         SpacePickerVerdict::Close => {
+            host.walkthrough_save_after_open = false;
             host.move_target = None;
             host.terminal_targets = None;
             host.space_picker = None;
@@ -15988,6 +16282,7 @@ fn open_transparency(host: &mut HostState) -> bool {
     host.palette_layout = None;
     host.theme_picker = None;
     host.context_menu = None;
+    host.settings = None;
     host.context_menu_target = None;
     host.space_picker = None;
     host.move_target = None;
@@ -16531,6 +16826,11 @@ fn host_geom(
             font.cell_h.saturating_mul(if handle_row { 2 } else { 1 })
         } else {
             0
+        },
+        pane_header_px: if sidebar {
+            0
+        } else {
+            graphite::TABS_BAR_H.px(chrome)
         },
         scrollbar_gutter_px: mux::scrollbar_gutter_for(inner_pad),
         rail_side: if dock_right {
@@ -17391,7 +17691,18 @@ fn handle_mux_command(
                 host.dirty = true;
             }
             if !matches!(command, MuxCommand::RenameTab | MuxCommand::RenamePane) {
-                observe_host_action(host, action, true);
+                let ok = changed
+                    || !matches!(
+                        command,
+                        MuxCommand::MoveTab(_) | MuxCommand::MovePaneToTab(_)
+                    );
+                observe_host_action(host, action, ok);
+                if !ok && matches!(command, MuxCommand::MoveTab(_)) {
+                    let tab_count = host.mux.tab_infos().len();
+                    if let Some(live) = host.walkthrough.as_mut() {
+                        live.set_mismatch_hint(move_tab_refusal_hint(tab_count).into());
+                    }
+                }
             }
             false
         }
@@ -18518,6 +18829,106 @@ fn observe_host_action(host: &mut HostState, action: keybind::Action, ok: bool) 
     );
 }
 
+fn walkthrough_at(host: &HostState, id: &str) -> bool {
+    host.walkthrough
+        .as_ref()
+        .and_then(|live| live.current_step())
+        .is_some_and(|step| step.id == id)
+}
+
+fn poll_walkthrough_demo(host: &mut HostState) {
+    let Some(job) = host.walkthrough_demo.as_ref() else {
+        return;
+    };
+    let Some(result) = job.poll() else {
+        return;
+    };
+    let command = job.command;
+    host.walkthrough_demo = None;
+    match result {
+        Ok(message) => {
+            rail_toast(host, &message);
+            observe_walkthrough(
+                host,
+                walkthrough::Detected::CommandEvent {
+                    command: command.into(),
+                    result: "ok".into(),
+                },
+            );
+        }
+        Err(message) => {
+            rail_error_toast(host, &message);
+            if let Some(live) = host.walkthrough.as_mut() {
+                if matches!(live.show_me(), Some(prismattyc_mux::walkthrough::ShowMe::CommandEvent { command: current }) if current == command)
+                {
+                    live.set_mismatch_hint(message);
+                }
+            }
+        }
+    }
+    host.dirty = true;
+}
+
+fn run_walkthrough_demo(host: &mut HostState, program: &str, child_args: &[String]) {
+    use prismattyc_mux::walkthrough::ShowMe;
+    let demo = host
+        .walkthrough
+        .as_ref()
+        .and_then(|live| live.show_me().cloned());
+    match demo {
+        Some(ShowMe::HostAction { action }) => {
+            if let Some(action) = keybind::Action::from_name(&action) {
+                let _ = dispatch_strip_action(host, action, program, child_args);
+            }
+        }
+        Some(ShowMe::SpaceEvent { event }) if event == "saved" => {
+            if host.space_rail.current.is_some() {
+                apply_save_space_action(host);
+            } else {
+                host.walkthrough_save_after_open = true;
+                open_space_picker(host, Some(keybind::Action::OpenSpace));
+                if let Some(live) = host.walkthrough.as_mut() {
+                    live.set_mismatch_hint("Choose the Space to open and save.".into());
+                }
+            }
+        }
+        Some(ShowMe::SpaceEvent { event }) if event == "opened" => {
+            open_space_picker(host, Some(keybind::Action::OpenSpace));
+        }
+        Some(ShowMe::CommandEvent { command }) if command == "pmux_new" => {
+            session_prompt::direct(host, None, false);
+        }
+        Some(ShowMe::CommandEvent { command })
+            if matches!(command.as_str(), "attach_all" | "mail_commit") =>
+        {
+            if host.walkthrough_demo.is_some() {
+                return;
+            }
+            let result = host_mux_socket()
+                .context("daemon socket unavailable")
+                .and_then(|socket| walkthrough_demo::Job::start(&command, socket));
+            match result {
+                Ok(job) => {
+                    host.walkthrough_demo = Some(job);
+                    if let Some(live) = host.walkthrough.as_mut() {
+                        live.set_mismatch_hint("Running the demonstration…".into());
+                    }
+                }
+                Err(error) => {
+                    if let Some(live) = host.walkthrough.as_mut() {
+                        live.set_mismatch_hint(error.to_string());
+                    }
+                }
+            }
+        }
+        _ => {
+            if let Some(live) = host.walkthrough.as_mut() {
+                live.set_mismatch_hint("Complete this action to continue.".into());
+            }
+        }
+    }
+}
+
 fn handle_caption_click(
     host: &mut HostState,
     button: MouseButton,
@@ -18567,20 +18978,7 @@ fn handle_caption_click(
                     }
                 }
                 walkthrough::CaptionHit::ShowMe => {
-                    let action = host
-                        .walkthrough
-                        .as_ref()
-                        .and_then(walkthrough::WalkthroughLive::show_me_action)
-                        .and_then(keybind::Action::from_name);
-                    if let Some(action) = action {
-                        let _ = dispatch_action(host, action, program, child_args);
-                    } else if let Some(fact) = host
-                        .walkthrough
-                        .as_ref()
-                        .and_then(walkthrough::WalkthroughLive::show_me_stub)
-                    {
-                        observe_walkthrough(host, fact);
-                    }
+                    run_walkthrough_demo(host, program, child_args);
                 }
             }
             host.dirty = true;
@@ -20199,7 +20597,19 @@ impl ApplicationHandler<UserAction> for App {
                     host.last_app_mouse_cell = None;
                 }
                 WindowEvent::MouseWheel { delta, .. } => {
-                    if host.palette.is_some() {
+                    if let Some(panel) = host.settings.as_mut() {
+                        let rows = match delta {
+                            MouseScrollDelta::LineDelta(_, y) => (-*y * 3.0).round() as i32,
+                            MouseScrollDelta::PixelDelta(position) => {
+                                (-position.y / host.font.cell_h.max(1) as f64).round() as i32
+                            }
+                        };
+                        panel.scroll_rows(rows);
+                        if let Some(menu) = host.context_menu.as_mut() {
+                            menu.selected = panel.selected();
+                        }
+                        host.dirty = true;
+                    } else if host.palette.is_some() {
                         scroll_palette_with_wheel(host, delta);
                     } else if host.theme_picker.is_some() {
                         scroll_theme_picker_with_wheel(host, delta);
@@ -20340,6 +20750,14 @@ impl ApplicationHandler<UserAction> for App {
             }
             WindowEvent::RedrawRequested => unreachable!("handled above"),
             WindowEvent::Ime(ime) => {
+                if let Some(panel) = host.settings.as_mut() {
+                    if let Ime::Commit(text) = &ime {
+                        panel.paste(text);
+                    }
+                    host.dirty = true;
+                    host.window.request_redraw();
+                    return;
+                }
                 let route = ime_text_route(inline_editor(host), &ime, &mut host.preedit);
                 apply_ime_text_route(host, route);
                 host.dirty = true;
@@ -20406,6 +20824,9 @@ impl ApplicationHandler<UserAction> for App {
                     }
                     sync_chrome_hover(host);
                     host.window.request_redraw();
+                    return;
+                }
+                if settings::handle_key(host, &event) {
                     return;
                 }
                 if ime_blocks_host_keyboard(&host.preedit) {
@@ -20962,7 +21383,11 @@ impl ApplicationHandler<UserAction> for App {
                     // Sidebar mode routes presses through the tree instead
                     // of the (unpainted, possibly stale) tab strip.
                     let sidebar = sidebar_mode(host);
-                    let click = if sidebar {
+                    let click = if sidebar
+                        || pointer_cells(host)
+                            .and_then(|(x, y)| arrange_hit_at(host, x, y))
+                            .is_some()
+                    {
                         handle_sidebar_click(host, button)
                     } else {
                         handle_strip_click(host, button)
@@ -21530,6 +21955,7 @@ impl ApplicationHandler<UserAction> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        host_tab_requests::poll(self);
         let pump_io = pump_timing::PumpIoScope::begin();
         let mut persist_time = Duration::ZERO;
         for host in self.windows.values_mut() {
@@ -21549,6 +21975,7 @@ impl ApplicationHandler<UserAction> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        host_tab_requests::cleanup();
         for host in self.windows.values_mut() {
             persist_attach_layout_from_live(host);
         }
@@ -21595,7 +22022,7 @@ fn main() -> Result<()> {
         for warning in file_config.macos_override_warnings() {
             eprintln!("prismattyc-host: warning: {warning}");
         }
-        for warning in file_config.mux_unknown_key_warnings() {
+        for warning in file_config.unknown_key_warnings() {
             eprintln!("{}", config::host_warning_line(warning));
         }
         return Ok(());
@@ -21638,7 +22065,7 @@ fn main() -> Result<()> {
     for warning in file_config.macos_override_warnings() {
         eprintln!("prismattyc-host: warning: {warning}");
     }
-    for warning in file_config.mux_unknown_key_warnings() {
+    for warning in file_config.unknown_key_warnings() {
         eprintln!("{}", config::host_warning_line(warning));
     }
     cli.apply_config(&file_config);
@@ -26993,7 +27420,7 @@ session mail (id 15)
         assert_eq!(cli.light_cycle_ms, DEFAULT_LIGHT_CYCLE_MS);
         assert!(cli.light_cycle_head, "vehicle head defaults on");
         cli.apply_config(&config::ConfigFile {
-            focus_border_animation: Some("light-cycle".into()),
+            focus_border_animation: Some(crate::config::FocusBorderAnimation::LightCycle),
             focus_border_animation_ms: Some(600),
             focus_border_animation_head: Some(false),
             ..Default::default()
@@ -27003,7 +27430,7 @@ session mail (id 15)
         assert!(!cli.light_cycle_head);
         // Explicit "none" and a removed key both turn it back off.
         cli.apply_config(&config::ConfigFile {
-            focus_border_animation: Some("none".into()),
+            focus_border_animation: Some(crate::config::FocusBorderAnimation::None),
             ..Default::default()
         });
         assert!(!cli.light_cycle);
@@ -27083,6 +27510,63 @@ session mail (id 15)
 
     /// #104: classic geometry is independent of the Graphite fields, and
     /// Graphite adds its bar, title row, spacing, and spaces bar.
+    #[test]
+    fn pane_picker_reserves_space_in_every_window_layout() {
+        let font = FontMetrics::load(14.0).expect("test font");
+        for style in [config::ChromeStyle::Classic, config::ChromeStyle::Graphite] {
+            for layout in [config::LayoutMode::Bars, config::LayoutMode::Sidebar] {
+                for side in [
+                    space_rail::RailSide::Off,
+                    space_rail::RailSide::Top,
+                    space_rail::RailSide::Bottom,
+                    space_rail::RailSide::Left,
+                    space_rail::RailSide::Right,
+                ] {
+                    for collapsed in [false, true] {
+                        for tabs in [false, true] {
+                            let spacing = PaneSpacing {
+                                chrome_style: style,
+                                layout,
+                                space_rail: side,
+                                sidebar_collapsed: collapsed,
+                                ui_scale_milli: 1000,
+                                ..PaneSpacing::from(&config::ConfigFile::default())
+                            };
+                            let geom = host_geom(&font, false, tabs, false, spacing, 0);
+                            let span = pane_header_span(geom, 1200);
+                            assert_eq!(span.h, 44);
+                            assert_eq!((span.y + span.h), geom.chrome_top());
+                            assert_eq!(span.x, geom.chrome_left());
+                            assert_eq!(span.right(), 1200 - geom.chrome_right());
+                            if layout == config::LayoutMode::Bars {
+                                assert_eq!(geom.pane_header_px, 44);
+                                assert!(span.y >= geom.tab_strip_y() + geom.top_chrome_px);
+                            }
+                            let picker = graphite::sidebar_header_layout(geom.chrome, span);
+                            for (index, button) in picker.buttons.iter().enumerate() {
+                                assert!(button.w > 0 && button.h > 0);
+                                assert!(
+                                    button.y >= span.y
+                                        && (button.y + button.h) <= (span.y + span.h)
+                                );
+                                assert_eq!(
+                                    arrange_button_action(index),
+                                    Some(
+                                        [
+                                            keybind::Action::ArrangeSingle,
+                                            keybind::Action::ArrangeSplit,
+                                            keybind::Action::ArrangeGrid,
+                                        ][index]
+                                    )
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn classic_geometry_ignores_graphite_and_graphite_adds_its_chrome() {
         let Ok(font) = FontMetrics::load(14.0) else {
@@ -27276,7 +27760,7 @@ session mail (id 15)
             .saturating_sub(geom.chrome_right())
             .saturating_add(trailing_gap);
         geom.slack_x = right.saturating_sub(left) / 2;
-        let top = geom.window_pad + geom.chrome_top() + geom.pane_gap / 2;
+        let top = geom.window_pad + geom.pane_gap / 2;
         let bottom = (physical.height as usize)
             .saturating_sub(geom.window_pad + geom.chrome_top() + rows * font.cell_h)
             .saturating_sub(geom.chrome_bottom())
@@ -27292,7 +27776,7 @@ session mail (id 15)
         let (x, y, w, h) = geom.pane_slot_px(rect);
         let margin_left = x;
         let margin_right = (physical.width as usize).saturating_sub(x + w);
-        let margin_top = y;
+        let margin_top = y.saturating_sub(geom.chrome_top());
         let margin_bottom = (physical.height as usize).saturating_sub(y + h);
         assert!(
             margin_left.abs_diff(margin_right) <= 1,
@@ -27442,7 +27926,7 @@ session mail (id 15)
         let layout = space_rail::RailLayout::for_window(tabbed, 800, 600, &[]).unwrap();
         assert_eq!(layout.y, 0);
         assert_eq!(tabbed.tab_strip_y(), layout.h);
-        assert_eq!(tabbed.chrome_top(), tabbed.top_chrome_px + font.cell_h);
+        assert_eq!(tabbed.chrome_top(), tabbed.top_chrome_px + font.cell_h + 44);
     }
 
     #[test]
@@ -27723,6 +28207,78 @@ session mail (id 15)
     }
 
     #[test]
+    fn saved_tab_row_in_another_space_focuses_its_session() {
+        use graphite::SidebarHit;
+        let tabs = vec![prismattyc_mux::SavedSpaceTab {
+            title: "main".to_string(),
+            sessions: vec!["shell".to_string(), "logs".to_string()],
+            layout: None,
+            fixed_name: None,
+        }];
+        let extra = vec!["worker-a".to_string()];
+        let tree = sidebar::SidebarTree::build(&[sidebar::SpaceInput {
+            name: "mail",
+            current: false,
+            collapsed: false,
+            attention: 0,
+            tabs: sidebar::TabsSource::Saved {
+                tabs: &tabs,
+                extra_sessions: &extra,
+            },
+        }]);
+        let rows = sidebar::visible_rows(&tree);
+        // A session outside every saved tab is a single-session tab, so its
+        // only row is the tab row. The saved tab's pane rows sit under it.
+        let session_tab = rows
+            .iter()
+            .find(|row| row.kind == sidebar::RowKind::Tab && row.tab == Some(1))
+            .expect("the extra session paints a tab row");
+        let saved_tab = rows
+            .iter()
+            .find(|row| row.kind == sidebar::RowKind::Tab && row.tab == Some(0))
+            .expect("the saved tab paints a tab row");
+        let session_title = session_title_of(&tree, session_tab);
+        assert_eq!(session_title.as_deref(), Some("worker-a"));
+        assert_eq!(
+            session_title_of(&tree, saved_tab).as_deref(),
+            Some("shell"),
+            "a multi-session tab names its first session"
+        );
+        let open_session = SidebarClick::OpenSession {
+            space: "mail".to_string(),
+            title: "worker-a".to_string(),
+        };
+        assert_eq!(
+            sidebar_click_decision(
+                SidebarHit::Row(1),
+                Some((session_tab, "mail", false)),
+                true,
+                session_title.as_deref(),
+            ),
+            open_session,
+            "the sidebar opens the space, then focuses the clicked session"
+        );
+        assert_eq!(
+            icon_click_decision(
+                SidebarHit::Row(1),
+                Some((session_tab, "mail", false)),
+                session_title.as_deref(),
+            ),
+            open_session,
+            "the collapsed strip does the same"
+        );
+    }
+
+    #[test]
+    fn move_tab_refusal_hint_names_the_last_tab_boundary() {
+        assert!(move_tab_refusal_hint(1).contains("Create another tab"));
+        assert!(move_tab_refusal_hint(0).contains("select the first tab"));
+        let two = move_tab_refusal_hint(2);
+        assert!(!two.contains("Create another tab"), "{two}");
+        assert!(two.contains("another tab to its right"), "{two}");
+    }
+
+    #[test]
     fn sidebar_click_decision_routes_rows_and_buttons() {
         use graphite::SidebarHit;
         let row = |kind, tab| sidebar::TreeRow {
@@ -27872,6 +28428,10 @@ session mail (id 15)
             sidebar_click_decision(SidebarHit::Toggle, None, false, None),
             SidebarClick::ToggleStrip
         );
+        assert_eq!(
+            sidebar_click_decision(SidebarHit::TreeFold, None, false, None),
+            SidebarClick::ToggleTreeFold
+        );
     }
 
     #[test]
@@ -27985,6 +28545,7 @@ session mail (id 15)
                             attention: false,
                         },
                     ],
+                    fixed_name: None,
                 }],
             }],
         };
@@ -28007,6 +28568,7 @@ session mail (id 15)
                 actions: &layout.actions,
                 arrange: &[graphite::Rect::new(0, 0, 0, 0); 3],
                 thumb: layout.thumb,
+                tree_fold: graphite::Rect::new(0, 0, 0, 0),
                 toggle: graphite::Rect::new(0, 0, 0, 0),
             },
             slot.x + 8,
@@ -28048,6 +28610,7 @@ session mail (id 15)
             actions: &layout.actions,
             arrange: &header.buttons,
             thumb: layout.thumb,
+            tree_fold: graphite::Rect::new(0, 0, 0, 0),
             toggle,
         };
         let hit = |rect: graphite::Rect| {

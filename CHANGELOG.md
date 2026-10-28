@@ -2,6 +2,64 @@
 
 ## [Unreleased]
 
+## [0.3.46] - 2026-10-27
+
+### Changed
+
+- The host render thread bounds how much pane output it drains per pass, so a busy pane no longer holds up redraws of the rest of the window.
+
+## [0.3.45] - 2026-10-27
+
+### Added
+
+- Added `pmux tab list` and `pmux tab name` commands to set, clear, and list fixed tab names.
+- Mixed-case and spaced session labels can be enabled with `allow_mixed_case_session_names`; the setting defaults off.
+
+## [0.3.44] - 2026-10-26
+
+### Added
+
+- An opt-in complete settings editor, enabled with `settings_panel = true`, edits every config key from the palette.
+
+### Changed
+
+- The transport harness reports child and reader state when a test fails.
+
+## [0.3.43] - 2026-10-26
+
+### Added
+
+- The Spaces sidebar header has an expand-all and collapse-all control.
+
+### Fixed
+
+- Clicking a pane in an inactive Space focuses that session in that Space.
+- Walkthrough "Show me" steps wait for the demonstrated action to finish before they advance.
+
+## [0.3.42] - 2026-10-25
+
+### Added
+
+- pmuxd autosaves Space window layouts and preserves the saved layout when a restore is interrupted.
+- `pmux space reset` resets a saved Space after confirmation and keeps a backup of the previous layout.
+- A pane idle event fires once when a pane with output goes quiet, and re-arms when new output arrives.
+
+### Fixed
+
+- Spaces with windowless or stale saved entries now recover instead of failing to open.
+- The Single, Split, and Grid arrangement controls now appear in the pane header in every window layout, including tabs, the top Space rail, and hidden tabs.
+
+### Security
+
+- Updated tokio and clipboard-win to clear a tokio I/O-safety advisory and a yanked clipboard-win release.
+
+## [0.3.42-rc.1] - 2026-10-25
+
+This build is a prerelease. A tag such as `v0.3.42-rc.1` is published with
+`--prerelease --latest=false`. `pmux update` and the app menu do not offer it.
+Install the assets from the release, or opt in with `pmux update --pre`.
+The binaries report the base version, `0.3.42`.
+
 ## [0.3.41] - 2026-10-22
 
 ### Changed

@@ -53,9 +53,15 @@ impl TmuxServerGuard {
 
 impl Drop for TmuxServerGuard {
     fn drop(&mut self) {
-        let _ = Command::new("tmux")
+        let stopped = Command::new("tmux")
             .args(["-L", &self.0, "kill-server"])
             .output();
+        eprintln!(
+            "transport: tmux kill-server: {:?}",
+            stopped
+                .as_ref()
+                .map(|out| (out.status, String::from_utf8_lossy(&out.stderr)))
+        );
     }
 }
 
@@ -78,9 +84,15 @@ fn tmux_passthrough_on(label: &str) -> bool {
 
 fn wait_tmux_ready(label: &str, cfg: &std::path::Path, timeout: Duration) -> bool {
     let cfg = cfg.to_str().expect("utf8 tmux cfg");
-    let _ = Command::new("tmux")
+    let start = Command::new("tmux")
         .args(["-L", label, "-f", cfg, "start-server"])
         .output();
+    eprintln!(
+        "transport: tmux start-server: {:?}",
+        start
+            .as_ref()
+            .map(|out| (out.status, String::from_utf8_lossy(&out.stderr)))
+    );
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if Command::new("tmux")
@@ -122,37 +134,68 @@ fn run_prism_until(args: &[&str], timeout: Duration, ready: impl Fn(&str) -> boo
     // thread may block on its final read indefinitely, which is harmless: it
     // holds only a clone, the test process reaps it on exit, and every byte
     // painted before we stop is already in the shared buffer.
-    let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    #[derive(Default)]
+    struct Capture {
+        bytes: Vec<u8>,
+        reads: usize,
+        end: Option<String>,
+    }
+    let collected = std::sync::Arc::new(std::sync::Mutex::new(Capture::default()));
     let sink = std::sync::Arc::clone(&collected);
     std::thread::spawn(move || {
         let mut buf = [0_u8; 8192];
         loop {
             match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => sink.lock().unwrap().extend_from_slice(&buf[..n]),
-                // macOS reports a closed PTY master as EIO (os error 5).
-                Err(error) if error.raw_os_error() == Some(5) => break,
-                Err(_) => break,
+                Ok(0) => {
+                    sink.lock().unwrap().end = Some("eof".into());
+                    break;
+                }
+                Ok(n) => {
+                    let mut capture = sink.lock().unwrap();
+                    capture.bytes.extend_from_slice(&buf[..n]);
+                    capture.reads += 1;
+                }
+                Err(error) => {
+                    sink.lock().unwrap().end = Some(format!("read error: {error}"));
+                    break;
+                }
             }
         }
     });
 
-    let snapshot = || String::from_utf8_lossy(&collected.lock().unwrap()).into_owned();
-    let deadline = Instant::now() + timeout;
-    loop {
-        if ready(&snapshot()) || Instant::now() > deadline {
-            break;
+    let snapshot = || String::from_utf8_lossy(&collected.lock().unwrap().bytes).into_owned();
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let mut wait_error = None;
+    let reason = loop {
+        if ready(&snapshot()) {
+            break "ready";
         }
-        if child.try_wait().ok().flatten().is_some() {
-            // Child gone: give the drain thread a moment to flush the tail,
-            // then stop regardless of the lingering tmux server.
-            std::thread::sleep(Duration::from_millis(120));
-            break;
+        if Instant::now() > deadline {
+            break "deadline";
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                eprintln!("transport: prism exited before ready: {status:?}");
+                // Preserve the existing drain interval while diagnosing early exit.
+                std::thread::sleep(Duration::from_millis(120));
+                break "child-exited";
+            }
+            Ok(None) => {}
+            Err(error) => wait_error = Some(error.to_string()),
         }
         std::thread::sleep(Duration::from_millis(20));
+    };
+    let before_cleanup = child.try_wait();
+    let killed = child.kill();
+    let reaped = child.wait();
+    {
+        let capture = collected.lock().unwrap();
+        eprintln!(
+            "transport: stop={reason} elapsed={:?} limit={timeout:?} before_cleanup={before_cleanup:?} kill={killed:?} wait={reaped:?} poll_error={wait_error:?} bytes={} reads={} reader_end={:?}",
+            started.elapsed(), capture.bytes.len(), capture.reads, capture.end,
+        );
     }
-    let _ = child.kill();
-    let _ = child.wait();
     snapshot()
 }
 
@@ -203,6 +246,7 @@ fn t2_tmux_passthrough_off_is_classic_only_no_leak() {
         eprintln!("skip T2: tmux not on PATH");
         return;
     }
+    eprintln!("T2: {}", tmux_version());
     let (query, attach) = query_and_attach();
     let mut payload = b"T2START".to_vec();
     payload.extend_from_slice(&query);

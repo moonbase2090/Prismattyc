@@ -519,11 +519,13 @@ mod tests {
                 title: "a".into(),
                 sessions: vec!["a".into()],
                 layout: None,
+                fixed_name: None,
             },
             crate::layout_file::SavedSpaceTab {
                 title: "b".into(),
                 sessions: vec!["b".into()],
                 layout: None,
+                fixed_name: None,
             },
         ];
         file.active_tab = 1;

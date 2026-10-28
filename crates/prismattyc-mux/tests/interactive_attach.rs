@@ -1210,6 +1210,7 @@ fn attach_ctrl_backslash_n_switches_session_chrome() {
             cols: None,
             rows: None,
             agent_id: None,
+            derive_agent_id: false,
             headless: false,
         });
         match created {

@@ -1,0 +1,4 @@
+prismattyc-host: font <bundled JetBrainsMonoNerdFont-Regular.ttf> (+2 fallback)  cell 18x41  px=30
+prismattyc-host: font IBM Plex Mono (+3 fallback)  cell 18x40  px=30
+prismattyc-host: font Commit Mono (+3 fallback)  cell 18x34  px=30
+prismattyc-host: font <bundled JetBrainsMonoNerdFont-Regular.ttf> (+2 fallback)  cell 18x41  px=30

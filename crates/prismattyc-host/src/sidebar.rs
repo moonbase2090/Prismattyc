@@ -23,6 +23,7 @@ pub struct PaneNode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabNode {
     pub title: String,
+    pub fixed_name: Option<String>,
     pub selected: bool,
     pub unseen: bool,
     pub attention: bool,
@@ -105,6 +106,7 @@ impl TabNode {
         };
         TabNode {
             title: info.title.clone(),
+            fixed_name: info.fixed_name.clone(),
             selected: info.selected,
             unseen: info.unseen,
             attention: info.attention,
@@ -114,9 +116,10 @@ impl TabNode {
     }
 
     /// Saved tab from another space's file: structure only, no live state.
-    pub fn saved(title: &str, sessions: &[String]) -> Self {
+    pub fn saved(title: &str, fixed_name: Option<&str>, sessions: &[String]) -> Self {
         TabNode {
             title: title.to_string(),
+            fixed_name: fixed_name.map(str::to_string),
             selected: false,
             unseen: false,
             attention: false,
@@ -208,8 +211,8 @@ pub struct TreeRow {
 }
 
 /// Pane rows appear only when a session splits into multiple panes (#181).
-pub fn show_pane_rows(pane_count: usize) -> bool {
-    pane_count > 1
+pub fn show_pane_rows(pane_count: usize, fixed_name: Option<&str>) -> bool {
+    pane_count > 1 || (pane_count == 1 && fixed_name.is_some())
 }
 
 /// Rows in paint order: every space, then tabs and panes of expanded ones.
@@ -231,7 +234,7 @@ pub fn visible_rows(tree: &SidebarTree) -> Vec<TreeRow> {
                 tab: Some(tab_index),
                 pane: None,
             });
-            if show_pane_rows(tab.panes.len()) {
+            if show_pane_rows(tab.panes.len(), tab.fixed_name.as_deref()) {
                 for (pane_index, _) in tab.panes.iter().enumerate() {
                     rows.push(TreeRow {
                         depth: 2,
@@ -267,7 +270,7 @@ pub fn icon_rows(tree: &SidebarTree) -> Vec<TreeRow> {
                 tab: Some(tab_index),
                 pane: None,
             });
-            if show_pane_rows(tab.panes.len()) {
+            if show_pane_rows(tab.panes.len(), tab.fixed_name.as_deref()) {
                 for (pane_index, _) in tab.panes.iter().enumerate() {
                     rows.push(TreeRow {
                         depth: 2,
@@ -321,7 +324,9 @@ impl SidebarTree {
                 } => {
                     let mut nodes: Vec<TabNode> = tabs
                         .iter()
-                        .map(|tab| TabNode::saved(&tab.title, &tab.sessions))
+                        .map(|tab| {
+                            TabNode::saved(&tab.title, tab.fixed_name.as_deref(), &tab.sessions)
+                        })
                         .collect();
                     let known: Vec<&str> = tabs
                         .iter()
@@ -329,7 +334,11 @@ impl SidebarTree {
                         .collect();
                     for session in *extra_sessions {
                         if !known.contains(&session.as_str()) {
-                            nodes.push(TabNode::saved(session, std::slice::from_ref(session)));
+                            nodes.push(TabNode::saved(
+                                session,
+                                None,
+                                std::slice::from_ref(session),
+                            ));
                         }
                     }
                     nodes
@@ -358,6 +367,7 @@ mod tests {
         focused: Option<usize>,
     ) -> TabInfo {
         TabInfo {
+            window: None,
             title: title.to_string(),
             selected,
             unseen: false,
@@ -370,6 +380,7 @@ mod tests {
             handle_active: handles.iter().map(|(_, active)| *active).collect(),
             pane_title: None,
             git_label: None,
+            fixed_name: None,
         }
     }
 
@@ -429,6 +440,7 @@ mod tests {
             title: "main".to_string(),
             sessions: vec!["shell".to_string()],
             layout: None,
+            fixed_name: None,
         }];
         let tree = SidebarTree::build(&[
             SpaceInput {
@@ -486,6 +498,7 @@ mod tests {
             title: "grid".to_string(),
             sessions: vec!["build".to_string(), "review".to_string()],
             layout: None,
+            fixed_name: None,
         }];
         let tree = SidebarTree::build(&[SpaceInput {
             name: "lab",
@@ -579,6 +592,7 @@ mod tests {
                             attention: true,
                         },
                     ],
+                    fixed_name: None,
                 }],
             }],
         };
@@ -595,6 +609,7 @@ mod tests {
             title: "main".to_string(),
             sessions: vec!["shell".to_string(), "logs".to_string()],
             layout: None,
+            fixed_name: None,
         }];
         let extra = vec!["scratch".to_string()];
         let tree = SidebarTree::build(&[

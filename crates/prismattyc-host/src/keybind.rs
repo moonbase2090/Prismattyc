@@ -115,10 +115,10 @@ pub enum Action {
     OpenConfig,
     CommandPalette,
     /// Next command-palette filter chip (PT-92). Unbound by default;
-    /// Ctrl+Right inside the palette always works.
+    /// Right inside the palette always works.
     PaletteFilterNext,
     /// Previous command-palette filter chip (PT-92). Unbound by default;
-    /// Ctrl+Left inside the palette always works.
+    /// Left inside the palette always works.
     PaletteFilterPrev,
     ThemePicker,
     /// Palette picker over saved spaces (PT-89). Unbound by default.
@@ -1082,6 +1082,7 @@ fn parse_key(text: &str) -> Option<KeySpec> {
 /// One `[keys]` value: a chord string or an array of chord strings.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(untagged)]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub enum KeysValue {
     One(String),
     Many(Vec<String>),

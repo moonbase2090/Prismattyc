@@ -18,7 +18,7 @@ Preconditions: an actual Windows desktop or disposable test VM, an account dedic
 
 That account is a local Windows user created for the proof. It is not the user who owns the development session. A live proof installs Prismattyc, starts `pmuxd`, or opens the host, and those write the per-user PATH, the Run key, `%LOCALAPPDATA%\Programs\Prismattyc`, and the default socket. Issue #307 was proved in a new profile with no Prismattyc install: the MSI ran there, Prismattyc opened there, Create was used with no manual `pmux up`, and `pmux ls` ran in that profile. The owner's PATH, Run key, `%LOCALAPPDATA%`, and socket stay as they were, so an open pmux session keeps running. Issues #310 (Settings opens a config editor), #311 (a same-version reinstall must replace the executables), and #312 (a quiet install still surfaces a `pmuxd` start failure) are live proofs and will use the same account.
 
-The mux ConPTY fixture is `cargo test -p prismattyc-mux --lib`. It does not install Prismattyc, write the Run key, or use the default socket. It does start ConPTY guests in whichever account runs it. Its muse guest is the `ping.exe` that test copied and started. After that process exists, the test opens its handle, checks the volume serial and file index are this run's copy, and terminates that handle on drop. It does not call `taskkill /IM`. Whether this cargo test must also run as the proof account is follow-up #320 and does not block a merge.
+The mux ConPTY fixture is `cargo test -p prismattyc-mux --lib`. It may run in the development account because it does not install Prismattyc, write the Run key, or use the default socket. It does start ConPTY guests. Its muse guest is the `ping.exe` that test copied and started. After that process exists, the test opens its handle, checks the volume serial and file index are this run's copy, and terminates that handle on drop. It does not call `taskkill /IM`.
 
 - From the repository root in PowerShell, run `./scripts/release/build-windows.ps1 -Output build/verify-windows`. This may install the Rust toolchain and WiX and download dependencies. The output directory must be new. Record the revision and build output.
 - Run `./scripts/release/prove-windows-msi.ps1 -PackageDir build/verify-windows -ProofPath build/verify-evidence/msi.txt`. It creates an older package for upgrade proof and invokes the installer lifecycle test. Inspect the recorded install/upgrade/uninstall results, command resolution, and PATH effects. It is a real installation, not a dry-run. Check for residual installation and PATH entries if it fails; retain logs before restoring the test account.
@@ -32,3 +32,21 @@ The mux ConPTY fixture is `cargo test -p prismattyc-mux --lib`. It does not inst
 ## Gotchas
 
 The package proof's explicit PATH option does not alone prove an installer default; test a plain install and `ADDTOPATH=0` when those semantics change. Packaging/installer runs are not isolated by the Unix helper. macOS screenshots and chooser-unit tests are not Windows runtime proof. If the test desktop cannot be reached, report the missing connection and requested exact-tip checks to the coordinator; keep the PR's runtime proof marked outstanding.
+
+## Bundled font licenses
+
+The ZIP payload copies all font license text files from
+`crates/prismattyc-host/assets/fonts`. MSI authoring must list those same files
+as components. This includes `IBMPlexMono-LICENSE.txt` and
+`CommitMono-LICENSE-FONT.txt` for the optional bundled candidates. Check the
+actual installed or extracted package for those files and `NOTICE.txt`.
+
+The source authoring check is portable and does not run Windows:
+
+```sh
+PYTHONPATH=scripts/release python3 -m unittest \
+  windows_msi_test.WindowsMsiTests.test_installer_is_per_user_and_does_not_stop_processes
+```
+
+That assertion does not replace MSI build, installation, or native Windows
+runtime proof.

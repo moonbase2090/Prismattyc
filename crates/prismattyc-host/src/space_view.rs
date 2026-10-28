@@ -67,6 +67,7 @@ pub fn restore_layout(
                 .iter()
                 .map(|session| AttachTabRecord {
                     title: session.name.clone(),
+                    fixed_name: None,
                     sessions: vec![session.name.clone()],
                     layout: None,
                 })
@@ -77,6 +78,7 @@ pub fn restore_layout(
                 .iter()
                 .map(|tab| AttachTabRecord {
                     title: tab.title.clone(),
+                    fixed_name: tab.fixed_name.clone(),
                     sessions: tab.sessions.clone(),
                     layout: tab.layout.clone(),
                 })
@@ -328,6 +330,7 @@ pub fn owned_layout_with_local_tabs(
             });
             Some(AttachTabRecord {
                 title: tab.title.clone(),
+                fixed_name: tab.fixed_name.clone(),
                 sessions,
                 layout,
             })
@@ -338,6 +341,7 @@ pub fn owned_layout_with_local_tabs(
         if owned.contains_key(&id) && kept.insert(id.clone()) {
             tabs.push(AttachTabRecord {
                 title: session_title(space, session),
+                fixed_name: None,
                 sessions: vec![id],
                 layout: None,
             });
@@ -462,6 +466,7 @@ mod tests {
                     title: format!("tab-{id}"),
                     sessions: vec![(*id).into()],
                     layout: None,
+                    fixed_name: None,
                 })
                 .collect(),
             active_tab: 1,

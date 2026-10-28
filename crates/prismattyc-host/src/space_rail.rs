@@ -12,7 +12,10 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::mux::{effective_tab_end_pad, tab_close_left, HostGeom};
 
 /// Where the rail sits. `Off` reserves nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, schemars::JsonSchema)]
+#[schemars(rename_all = "lowercase")]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RailSide {
     #[default]
     Bottom,
@@ -20,6 +23,15 @@ pub enum RailSide {
     Top,
     Right,
     Off,
+}
+
+impl<'de> serde::Deserialize<'de> for RailSide {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::parse(&text).ok_or_else(|| {
+            serde::de::Error::custom("space_rail must be bottom, left, top, right, or off")
+        })
+    }
 }
 
 impl RailSide {
@@ -1028,6 +1040,23 @@ impl SpaceRail {
             self.collapsed_spaces.insert(name.to_string());
         } else {
             self.collapsed_spaces.remove(name);
+        }
+    }
+
+    /// True when any named space is collapsed in the sidebar tree.
+    pub fn any_collapsed<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> bool {
+        names.into_iter().any(|name| self.is_collapsed(name))
+    }
+
+    /// Collapse or expand every named space. Used by the sidebar header
+    /// expand-all / collapse-all control.
+    pub fn set_all_collapsed<'a>(
+        &mut self,
+        names: impl IntoIterator<Item = &'a str>,
+        collapsed: bool,
+    ) {
+        for name in names {
+            self.set_collapsed(name, collapsed);
         }
     }
 
@@ -2161,6 +2190,7 @@ mod tests {
                     title: (*title).into(),
                     sessions: members.iter().map(|m| (*m).to_string()).collect(),
                     layout: None,
+                    fixed_name: None,
                 })
                 .collect(),
             active_tab: 0,
@@ -2386,6 +2416,21 @@ mod tests {
         assert!(!rail.is_collapsed("lab"));
         // Unknown names are simply not collapsed.
         assert!(!rail.is_collapsed("mail"));
+    }
+
+    #[test]
+    fn set_all_collapsed_expands_or_collapses_every_named_space() {
+        let mut rail = SpaceRail::new(None);
+        let names = ["lab", "mail", "ops"];
+        assert!(!rail.any_collapsed(names));
+        rail.set_all_collapsed(names, true);
+        assert!(rail.any_collapsed(names));
+        assert!(names.iter().all(|name| rail.is_collapsed(name)));
+        rail.set_collapsed("mail", false);
+        assert!(rail.any_collapsed(names), "mixed state still reports any");
+        rail.set_all_collapsed(names, false);
+        assert!(!rail.any_collapsed(names));
+        assert!(names.iter().all(|name| !rail.is_collapsed(name)));
     }
 
     #[test]

@@ -473,11 +473,13 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
                 title: "one".into(),
                 sessions: vec!["missing-one".into()],
                 layout: None,
+                fixed_name: None,
             },
             attach_tabs::AttachTabRecord {
                 title: "two".into(),
                 sessions: vec!["missing-two".into()],
                 layout: None,
+                fixed_name: None,
             },
         ],
         active_tab: 1,
@@ -903,8 +905,12 @@ fn verify_background(host: &mut HostState) {
             host.window.inner_size().height
         )
     );
+    // The row under the pane header: the header bar paints over the
+    // background, the ground beside the panes does not.
+    let ground = (host.mux.geom().top_chrome_px + host.mux.geom().pane_header_px)
+        * host.window.inner_size().width as usize;
     assert_eq!(
-        image[host.mux.geom().top_chrome_px * host.window.inner_size().width as usize] & 0xffffff,
+        image[ground] & 0xffffff,
         0xff0000,
         "background image covers the outer window ground"
     );
@@ -917,7 +923,7 @@ fn verify_background(host: &mut HostState) {
     host.window_alpha = 127;
     let translucent = frame(host);
     assert_eq!(
-        translucent[host.mux.geom().top_chrome_px * host.window.inner_size().width as usize] >> 24,
+        translucent[ground] >> 24,
         127,
         "cached background must adopt the new alpha"
     );
@@ -1938,6 +1944,54 @@ fn verify_decision_handlers(host: &mut HostState) {
     );
     close_context_menu(host);
 
+    // Clear tab name from the tab-row menu: the fixed name must go, the layout
+    // must be marked for save, and the record written from live state must not
+    // carry the old name back.
+    let rail_window = host.mux.active_window();
+    host.mux
+        .set_fixed_tab_name(rail_window, Some("Graphite-Main"))
+        .unwrap();
+    host.layout_dirty = false;
+    host.context_menu_target = Some(ContextMenuTarget::RailTab(rail_window));
+    host.context_menu = Some(ContextMenu::new(ContextMenuKind::RailTab));
+    activate_context_menu(host, 1, "/bin/sh", &args);
+    assert!(
+        host.layout_dirty,
+        "clearing a tab name must mark the layout for save"
+    );
+    assert!(
+        host.mux
+            .tab_infos()
+            .iter()
+            .filter(|tab| tab.window == Some(rail_window))
+            .all(|tab| tab.fixed_name.is_none()),
+        "clearing a tab name must remove the live fixed name"
+    );
+    // Read back the live attach record for this window's tab. The projection
+    // is the one a save would write; disk I/O is not exercised here. The
+    // harness host has no attached session, so seed the focused pane first.
+    host.mux.mark_attach_session(
+        host.mux.focused_id(),
+        "proof-session".to_string(),
+        "Proof".to_string(),
+    );
+    let tab_index = host
+        .mux
+        .tab_infos()
+        .iter()
+        .position(|tab| tab.window == Some(rail_window))
+        .expect("the rail window has a tab");
+    let record = crate::local_views::records(host)
+        .tabs
+        .get(tab_index)
+        .cloned()
+        .expect("the attach record has an entry for the rail window's tab");
+    assert_eq!(
+        record.fixed_name, None,
+        "the attach record must not carry the cleared name back"
+    );
+    close_context_menu(host);
+
     host.tab_strip_mode = config::TabStripMode::Always;
     App::refit_geom(host, host.window.inner_size(), Some("decision test"));
     // Graphite hit-testing uses the bar stored by the last paint. Classic
@@ -2056,6 +2110,9 @@ pub(super) fn session_naming_in_private_window() {
     std::env::set_var("PMUX", bin.join("pmux"));
     let socket = host_mux_socket().unwrap();
     std::env::set_var("PMUX_SESSION_AGENTS", socket.with_extension("agents.json"));
+    let mut mux = toml_edit::Table::new();
+    mux.insert("allow_mixed_case_session_names", toml_edit::value(true));
+    config::save_preference(&config::config_path(), "mux", toml_edit::Item::Table(mux)).unwrap();
     let _daemon = ChildGuard(
         Command::new(bin.join("pmuxd"))
             .arg("--socket")

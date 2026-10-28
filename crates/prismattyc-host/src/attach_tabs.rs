@@ -30,9 +30,16 @@ pub fn records_from_live_tabs<I>(
     focused_session: Option<String>,
 ) -> AttachTabsFile
 where
-    I: IntoIterator<Item = (String, Vec<Option<String>>, Option<TabLayoutNode>)>,
+    I: IntoIterator<
+        Item = (
+            String,
+            Option<String>,
+            Vec<Option<String>>,
+            Option<TabLayoutNode>,
+        ),
+    >,
 {
-    let (kept, active_tab) = remap_tabs(tabs, selected, |(title, panes, layout)| {
+    let (kept, active_tab) = remap_tabs(tabs, selected, |(title, fixed_name, panes, layout)| {
         let sessions: Vec<String> = panes.into_iter().flatten().collect();
         if sessions.is_empty() {
             return None;
@@ -40,6 +47,7 @@ where
         let layout = layout_for_sessions(layout, &sessions);
         Some(RemappedTab {
             title,
+            fixed_name,
             sessions,
             layout,
         })
@@ -54,10 +62,12 @@ where
             .map(
                 |RemappedTab {
                      title,
+                     fixed_name,
                      sessions,
                      layout,
                  }| AttachTabRecord {
                     title,
+                    fixed_name,
                     sessions,
                     layout,
                 },
@@ -113,7 +123,16 @@ pub fn records_from_runtime(
                     .get(index)
                     .and_then(|window| runtime.window_layout(*window))
                     .and_then(|tree| tab_layout_from_panes(&tree, session_of));
-                (title, panes.into_iter().map(&session_of).collect(), layout)
+                let fixed_name = windows
+                    .get(index)
+                    .and_then(|window| runtime.fixed_tab_name(*window))
+                    .map(str::to_string);
+                (
+                    title,
+                    fixed_name,
+                    panes.into_iter().map(&session_of).collect(),
+                    layout,
+                )
             }),
         runtime.selected_tab_index(),
         runtime
@@ -148,6 +167,8 @@ fn one_tab_per_session(sessions: &[AttachTarget]) -> Vec<(String, Vec<AttachTarg
 /// Restored tab groups plus the remapped active tab / focused session.
 pub struct AttachGroups {
     pub groups: Vec<(String, Vec<AttachTarget>)>,
+    /// Fixed user labels aligned with `groups`.
+    pub fixed_names: Vec<Option<String>>,
     /// Parallel to `groups`. `None` keeps the historical left-to-right row.
     pub layouts: Vec<Option<TabLayoutNode>>,
     pub active_tab: usize,
@@ -163,6 +184,7 @@ pub fn group_attach_targets(
     let Some(layout) = layout else {
         return AttachGroups {
             groups: one_tab_per_session(sessions),
+            fixed_names: vec![None; sessions.len()],
             layouts: vec![None; sessions.len()],
             active_tab: 0,
             focused_session: None,
@@ -198,6 +220,7 @@ pub fn group_attach_targets(
         let tree = layout_for_sessions(tree, &ids);
         Some(RemappedTab {
             title,
+            fixed_name: tab.fixed_name.clone(),
             sessions: members,
             layout: tree,
         })
@@ -206,6 +229,8 @@ pub fn group_attach_targets(
         kept.iter()
             .any(|tab| tab.sessions.iter().any(|member| member.session == *id))
     });
+    let mut fixed_names: Vec<Option<String>> =
+        kept.iter().map(|tab| tab.fixed_name.clone()).collect();
     let mut layouts: Vec<Option<TabLayoutNode>> =
         kept.iter().map(|tab| tab.layout.clone()).collect();
     let mut groups: Vec<(String, Vec<AttachTarget>)> = kept
@@ -219,11 +244,13 @@ pub fn group_attach_targets(
             .cloned()
             .collect();
         let extra = one_tab_per_session(&leftover);
+        fixed_names.extend(std::iter::repeat_n(None, extra.len()));
         layouts.extend(std::iter::repeat_n(None, extra.len()));
         groups.extend(extra);
     }
     AttachGroups {
         groups,
+        fixed_names,
         layouts,
         active_tab,
         focused_session,
@@ -276,11 +303,13 @@ mod tests {
                     title: "WORK".into(),
                     sessions: vec!["2".into(), "gone".into()],
                     layout: None,
+                    fixed_name: Some("Release Work".into()),
                 },
                 AttachTabRecord {
                     title: "Agents".into(),
                     sessions: vec!["10".into()],
                     layout: None,
+                    fixed_name: None,
                 },
             ],
             ..Default::default()
@@ -289,10 +318,12 @@ mod tests {
         let groups = grouped.groups;
         assert_eq!(groups.len(), 3);
         assert_eq!(groups[0].0, "WORK");
+        assert_eq!(grouped.fixed_names[0].as_deref(), Some("Release Work"));
         assert_eq!(groups[0].1[0].session, "2");
         assert_eq!(groups[1].0, "Agents");
         assert_eq!(groups[1].1[0].session, "10");
         assert_eq!(groups[2].0, "new-xt");
+        assert_eq!(grouped.fixed_names[2], None);
         assert_eq!(groups[2].1[0].session, "99");
     }
 
@@ -305,16 +336,19 @@ mod tests {
                     title: "A".into(),
                     sessions: vec!["1".into()],
                     layout: None,
+                    fixed_name: None,
                 },
                 AttachTabRecord {
                     title: "B".into(),
                     sessions: vec!["2".into()],
                     layout: None,
+                    fixed_name: None,
                 },
                 AttachTabRecord {
                     title: "C".into(),
                     sessions: vec!["3".into()],
                     layout: None,
+                    fixed_name: None,
                 },
             ],
             active_tab: 2,
@@ -335,9 +369,9 @@ mod tests {
     fn records_from_live_tabs_keeps_nearest_when_selected_tab_is_local_shell() {
         let file = records_from_live_tabs(
             vec![
-                ("a".into(), vec![Some("2".into())], None),
-                ("scratch".into(), vec![None], None),
-                ("b".into(), vec![Some("3".into())], None),
+                ("a".into(), None, vec![Some("2".into())], None),
+                ("scratch".into(), None, vec![None], None),
+                ("b".into(), None, vec![Some("3".into())], None),
             ],
             1,
             None,
@@ -356,11 +390,13 @@ mod tests {
                     title: "a".into(),
                     sessions: vec!["1".into(), "2".into()],
                     layout: None,
+                    fixed_name: None,
                 },
                 AttachTabRecord {
                     title: "b".into(),
                     sessions: vec!["3".into()],
                     layout: None,
+                    fixed_name: None,
                 },
             ],
             active_tab: 1,
@@ -589,6 +625,7 @@ mod tests {
                 title: "WORK".into(),
                 sessions: vec!["2".into()],
                 layout: None,
+                fixed_name: None,
             }],
             ..Default::default()
         };

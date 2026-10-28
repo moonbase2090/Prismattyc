@@ -2103,6 +2103,14 @@ struct NewArgs {
     agent_id: Option<String>,
     derive_agent_id: bool,
     headless: bool,
+    cwd: Option<std::path::PathBuf>,
+}
+
+/// True when `--help` or `-h` appears before any `--` program separator.
+fn new_help_requested(rest: &[String]) -> bool {
+    rest.iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| arg == "--help" || arg == "-h")
 }
 
 /// `[--attach|--no-attach] [--agent NAME|--no-agent] NAME [-- PROGRAM...]`
@@ -2123,12 +2131,20 @@ fn parse_new_args(rest: Vec<String>) -> Result<NewArgs> {
     let mut saw_no_agent = false;
     let mut headless = false;
     let mut name: Option<String> = None;
+    let mut cwd: Option<std::path::PathBuf> = None;
     let mut iter = rest.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--attach" => attach = Some(true),
             "--no-attach" => attach = Some(false),
             "--headless" => headless = true,
+            "--cwd" => {
+                let value = iter.next().context("--cwd requires a directory")?;
+                if value.is_empty() || value.starts_with('-') {
+                    bail!("--cwd requires a directory");
+                }
+                cwd = Some(std::path::PathBuf::from(value));
+            }
             "--no-agent" => {
                 if agent.is_some() {
                     bail!("--agent and --no-agent cannot be combined");
@@ -2158,6 +2174,7 @@ fn parse_new_args(rest: Vec<String>) -> Result<NewArgs> {
                     agent_id,
                     derive_agent_id,
                     headless,
+                    cwd,
                 });
             }
             flag if flag.starts_with('-') => bail!("unknown new argument {flag:?}"),
@@ -2177,6 +2194,7 @@ fn parse_new_args(rest: Vec<String>) -> Result<NewArgs> {
                     agent_id,
                     derive_agent_id,
                     headless,
+                    cwd,
                 });
             }
         }
@@ -2193,6 +2211,7 @@ fn parse_new_args(rest: Vec<String>) -> Result<NewArgs> {
         agent_id,
         derive_agent_id,
         headless,
+        cwd,
     })
 }
 
@@ -2367,6 +2386,11 @@ fn exec_attach_session(paths: &Paths, session: &str, space: Option<&str>) -> Res
 }
 
 fn cmd_new(paths: &Paths, rest: Vec<String>, file: &prismattyc_mux::MuxSection) -> Result<()> {
+    if new_help_requested(&rest) {
+        println!("{NEW_USAGE}");
+        println!("  --cwd DIR   start the session in DIR (default: the current directory)");
+        return Ok(());
+    }
     let parsed = parse_new_args(rest)?;
     prismattyc_mux::session_name::DisplayName::with_mixed_case_policy(
         &parsed.name,
@@ -2395,7 +2419,7 @@ fn cmd_new(paths: &Paths, rest: Vec<String>, file: &prismattyc_mux::MuxSection) 
     let spawn = SpawnSpec {
         program: parsed.program[0].clone(),
         argv: parsed.program[1..].to_vec(),
-        cwd: std::env::current_dir().ok(),
+        cwd: parsed.cwd.clone().or_else(|| std::env::current_dir().ok()),
         env: Default::default(),
     };
     let created = client.request(|request_id| ControlRequest::CreateSession {
@@ -10213,6 +10237,35 @@ mod tests {
         assert!(local.contains(LocalModes::ISIG));
         assert!(!input.contains(InputModes::ICRNL));
         assert!(input.contains(InputModes::IXON));
+    }
+
+    #[test]
+    fn parse_new_args_accepts_cwd_and_detects_help() {
+        let parsed = parse_new_args(vec![
+            "--cwd".into(),
+            "/tmp/work".into(),
+            "work".into(),
+            "--".into(),
+            "/bin/sh".into(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.name, "work");
+        assert_eq!(parsed.cwd, Some(std::path::PathBuf::from("/tmp/work")));
+        assert_eq!(parsed.program, vec!["/bin/sh"]);
+
+        let parsed = parse_new_args(vec!["work".into()]).unwrap();
+        assert_eq!(parsed.cwd, None);
+
+        assert!(parse_new_args(vec!["--cwd".into()]).is_err());
+        assert!(parse_new_args(vec!["--cwd".into(), "-x".into(), "work".into()]).is_err());
+
+        assert!(new_help_requested(&["--help".into()]));
+        assert!(new_help_requested(&["-h".into(), "work".into()]));
+        assert!(!new_help_requested(&[
+            "work".into(),
+            "--".into(),
+            "--help".into()
+        ]));
     }
 
     #[test]

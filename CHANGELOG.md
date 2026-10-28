@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.3.46] - 2026-10-27
+
+### Changed
+
+- The host render thread bounds how much pane output it drains per pass, so a busy pane no longer holds up redraws of the rest of the window.
+
 ## [0.3.45] - 2026-10-27
 
 ### Added

@@ -146,6 +146,53 @@ fn move_palette_layout(
     }
 }
 
+fn palette_row_name_width(full_width: bool, natural_width: usize, available: usize) -> usize {
+    if full_width {
+        available
+    } else {
+        natural_width.min(available)
+    }
+}
+
+fn menu_row_label(text: &str, max_px: f32, font_px: f32) -> String {
+    if graphite::text_width(Face::Regular, font_px, text) <= max_px {
+        return text.to_owned();
+    }
+    let is_version = |suffix: &str| {
+        let core = suffix
+            .trim_start_matches('v')
+            .split(|ch| ch == '-' || ch == '+')
+            .next()
+            .unwrap_or_default();
+        core.split('.').count() >= 2
+            && core
+                .split('.')
+                .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+    };
+    let (prefix, separator, suffix) = if let Some((prefix, suffix)) = text.rsplit_once('/') {
+        (prefix, "…/", suffix)
+    } else if let Some((prefix, suffix)) = text.rsplit_once(' ') {
+        if is_version(suffix) {
+            (prefix, " … ", suffix)
+        } else {
+            return graphite::ellipsize(Face::Regular, font_px, text, max_px);
+        }
+    } else {
+        return graphite::ellipsize(Face::Regular, font_px, text, max_px);
+    };
+
+    let suffix_width = graphite::text_width(Face::Regular, font_px, separator)
+        + graphite::text_width(Face::Regular, font_px, suffix);
+    if suffix_width >= max_px {
+        return graphite::ellipsize(Face::Regular, font_px, text, max_px);
+    }
+    let mut head = graphite::ellipsize(Face::Regular, font_px, prefix, max_px - suffix_width);
+    if head.ends_with('…') {
+        head.pop();
+    }
+    format!("{head}{separator}{suffix}")
+}
+
 /// Paint the shared fixed-height palette geometry with Graphite tokens.
 ///
 /// `anchor`, when set, places the panel's top-left at that point instead of
@@ -180,6 +227,14 @@ pub(crate) fn palette(
     let text_right = right.saturating_sub(inset);
     let px = chrome.px(13.0).max(10) as f32;
     let small_px = chrome.px(11.0).max(9) as f32;
+    let natural_name_width = frame
+        .sections
+        .iter()
+        .flat_map(|section| section.rows)
+        .filter(|row| !row.full_width)
+        .map(|row| graphite::text_width(Face::Regular, px, &row.name).ceil() as usize)
+        .max()
+        .unwrap_or(chrome.px(190.0));
 
     draw_panel(
         buffer,
@@ -382,8 +437,10 @@ pub(crate) fn palette(
                     graphite::text_width(Face::Mono, small_px, &row.chord_label).ceil() as usize;
                 let chord_x = text_right.saturating_sub(chord_px);
                 let gap = chrome.px(14.0);
-                let name_w = chrome.px(190.0).min(chord_x.saturating_sub(text_x + gap));
-                let name = graphite::ellipsize(Face::Regular, px, &row.name, name_w as f32);
+                let available_name_w = chord_x.saturating_sub(text_x.saturating_add(gap));
+                let name_w =
+                    palette_row_name_width(row.full_width, natural_name_width, available_name_w);
+                let name = menu_row_label(&row.name, name_w as f32, px);
                 let description_x = text_x.saturating_add(name_w).saturating_add(gap);
                 let description_right = chord_x.saturating_sub(gap);
                 let description = if row.full_width {
@@ -1510,8 +1567,164 @@ mod tests {
         }
     }
 
+    fn write_palette_png(path: &std::path::Path, pixels: &[u32], width: usize, height: usize) {
+        let file = std::fs::File::create(path).expect("create palette screenshot");
+        let mut encoder = png::Encoder::new(file, width as u32, height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("write palette PNG header");
+        let rgba = pixels
+            .iter()
+            .flat_map(|pixel| {
+                [
+                    ((pixel >> 16) & 0xff) as u8,
+                    ((pixel >> 8) & 0xff) as u8,
+                    (pixel & 0xff) as u8,
+                    ((pixel >> 24) & 0xff) as u8,
+                ]
+            })
+            .collect::<Vec<_>>();
+        writer
+            .write_image_data(&rgba)
+            .expect("write palette PNG pixels");
+    }
+
     #[test]
-    fn palette_fixed_layout_does_not_follow_match_count_and_filter_hits_align() {
+    fn all_graphite_menu_surfaces_render_long_rows_without_ellipses() {
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let chrome = graphite_chrome();
+        let screenshot_dir = std::env::var_os("PT67_SCREENSHOT_DIR").map(std::path::PathBuf::from);
+        if let Some(dir) = &screenshot_dir {
+            std::fs::create_dir_all(dir).expect("create screenshot directory");
+        }
+        for (name, header, label) in [
+            (
+                "command-palette",
+                "MATCHES",
+                "Installed pmux: Prismattyc host package 0.3.48",
+            ),
+            (
+                "pane-context",
+                "PANE ACTIONS",
+                "Running host: Prismattyc app version 0.3.48",
+            ),
+            (
+                "space-picker",
+                "OPEN SPACE",
+                "Installed pmuxd: Prismattyc session daemon 0.3.48",
+            ),
+            (
+                "update-result",
+                "UPDATE AND RESTART RESULT",
+                "Running daemon: Prismattyc session daemon 0.3.48",
+            ),
+            (
+                "settings-popup",
+                "SPACES SETTINGS",
+                "Running host: Prismattyc desktop application version 0.3.48",
+            ),
+            (
+                "theme-picker",
+                "THEME",
+                "Installed pmux: Prismattyc host package 0.3.48",
+            ),
+            (
+                "save-space",
+                "NEW SPACE",
+                "Installed pmuxd: Prismattyc session daemon 0.3.48",
+            ),
+            (
+                "restore-prompt",
+                "RESTORE",
+                "Running daemon: Prismattyc session daemon 0.3.48",
+            ),
+            (
+                "space-context",
+                "SPACE ACTIONS",
+                "Running host: Prismattyc desktop application version 0.3.48",
+            ),
+        ] {
+            let width = 1600;
+            let height = 1000;
+            let render = |row_name: &str| {
+                let mut row = PaletteRow::plain(row_name.into(), String::new(), String::new());
+                row.full_width = true;
+                let rows = [row];
+                let sections = [crate::raster::PaletteSection {
+                    header,
+                    subtitle: "",
+                    rows: &rows,
+                }];
+                let frame = PaletteFrame {
+                    layout_mode: PaletteLayoutMode::ContentFit,
+                    query: None,
+                    query_focused: false,
+                    chips: None,
+                    sections: &sections,
+                    selected: 0,
+                    scroll: 0,
+                    detail: None,
+                    footer: "Enter choose · Esc close",
+                };
+                let mut buffer = vec![pack_argb(255, [40, 40, 40]); width * height];
+                let layout = palette(
+                    &font,
+                    &graphite::DARK,
+                    chrome,
+                    [98, 168, 255],
+                    &frame,
+                    OverlaySurface::default(),
+                    &mut buffer,
+                    width,
+                    height,
+                    None,
+                    None,
+                )
+                .expect("normal-width menu renders");
+                assert!(buffer
+                    .iter()
+                    .any(|pixel| *pixel != pack_argb(255, [40, 40, 40])));
+                (buffer, layout)
+            };
+            let before_label = graphite::ellipsize(Face::Regular, 13.0, label, 190.0);
+            assert!(
+                before_label.contains('…'),
+                "{name} must reproduce the legacy cap"
+            );
+            let (before, _) = render(&before_label);
+            let (after, layout) = render(label);
+            assert_eq!(
+                menu_row_label(label, layout.panel_w as f32, chrome.px(13.0) as f32),
+                label
+            );
+            if let Some(dir) = &screenshot_dir {
+                write_palette_png(
+                    &dir.join(format!("{name}-before.png")),
+                    &before,
+                    width,
+                    height,
+                );
+                write_palette_png(
+                    &dir.join(format!("{name}-after.png")),
+                    &after,
+                    width,
+                    height,
+                );
+            }
+        }
+        assert_eq!(palette_row_name_width(true, 190, 600), 600);
+        assert_eq!(palette_row_name_width(false, 240, 600), 240);
+        assert!(menu_row_label("Installed pmux: pmux 0.3.48", 150.0, 13.0).ends_with("0.3.48"));
+        assert!(
+            menu_row_label("Installed pmux: pmux 0.3.48-rc.1", 165.0, 13.0)
+                .ends_with("0.3.48-rc.1")
+        );
+    }
+
+    #[test]
+    fn palette_fixed_height_follows_longest_name_and_filter_hits_align() {
         let Ok(font) = FontMetrics::load(14.0) else {
             return;
         };
@@ -1585,20 +1798,9 @@ mod tests {
             None,
         )
         .expect("large palette fits");
-        assert_eq!(
-            (
-                small_layout.panel_x,
-                small_layout.panel_y,
-                small_layout.panel_w,
-                small_layout.panel_h
-            ),
-            (
-                many_layout.panel_x,
-                many_layout.panel_y,
-                many_layout.panel_w,
-                many_layout.panel_h
-            )
-        );
+        assert_eq!(small_layout.panel_y, many_layout.panel_y);
+        assert_eq!(small_layout.panel_h, many_layout.panel_h);
+        assert!(many_layout.panel_w > small_layout.panel_w);
         let chip = many_layout.filter_chips[1];
         assert_eq!(
             raster::palette_pointer_hit(

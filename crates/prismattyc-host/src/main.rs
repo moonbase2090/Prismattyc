@@ -1982,31 +1982,50 @@ fn dump_present_path() -> Option<PathBuf> {
     Some(PathBuf::from(value))
 }
 
-/// `PRISMATTYC_STRIP_DUMP=<path>`: write the pane-handle rectangles the tab
-/// strip hit-test reports, as JSON, for the pane-swap driver. The rectangles
-/// come from the same `tab_strip_hit` the mouse path calls, so a press inside a
-/// rectangle is a press on that handle. Unset or empty means no dump.
+/// `PRISMATTYC_STRIP_DUMP=<path>`: write the pane-handle rectangles, as JSON,
+/// for the pane-swap driver. On Graphite these are the per-pane header handles
+/// `pane_handle_hit` tests. Elsewhere they come from the strip scan with
+/// `tab_strip_hit`. Unset or empty means no dump.
 fn dump_strip_handles(host: &HostState, stride: usize, height: usize, path: &Path) {
     const STRIP_ROWS: usize = 160;
-    let reserve = reserve_strip_end(host);
-    // (tab, pane, handle, [x0, y0, x1, y1]) per handle, grown over the scan.
+    // (tab, pane, handle, [x0, y0, x1, y1]) per handle.
     let mut rects: Vec<(usize, u64, usize, [usize; 4])> = Vec::new();
-    for py in 0..height.min(STRIP_ROWS) {
-        for px in 0..stride {
-            let Some(mux::StripHit::Pane { tab, pane, handle }) =
-                host.mux.tab_strip_hit(px, py, stride, reserve)
-            else {
+    if host.mux.geom().chrome.graphite {
+        for (pane_id, pane, rect) in host.mux.panes_and_rects() {
+            let Some(zone) = pane_handle_zone(host, pane_id, pane, rect) else {
                 continue;
             };
-            let key = (tab, pane.get(), handle);
-            match rects.iter_mut().find(|r| (r.0, r.1, r.2) == key) {
-                Some(rect) => {
-                    rect.3[0] = rect.3[0].min(px);
-                    rect.3[1] = rect.3[1].min(py);
-                    rect.3[2] = rect.3[2].max(px + 1);
-                    rect.3[3] = rect.3[3].max(py + 1);
+            let tab = host
+                .mux
+                .pane_window(pane_id)
+                .and_then(|window| host.mux.window_ids().iter().position(|id| *id == window))
+                .unwrap_or(0);
+            rects.push((
+                tab,
+                pane_id.get(),
+                0,
+                [zone.x, zone.y, zone.x + zone.w, zone.y + zone.h],
+            ));
+        }
+    } else {
+        let reserve = reserve_strip_end(host);
+        for py in 0..height.min(STRIP_ROWS) {
+            for px in 0..stride {
+                let Some(mux::StripHit::Pane { tab, pane, handle }) =
+                    host.mux.tab_strip_hit(px, py, stride, reserve)
+                else {
+                    continue;
+                };
+                let key = (tab, pane.get(), handle);
+                match rects.iter_mut().find(|r| (r.0, r.1, r.2) == key) {
+                    Some(rect) => {
+                        rect.3[0] = rect.3[0].min(px);
+                        rect.3[1] = rect.3[1].min(py);
+                        rect.3[2] = rect.3[2].max(px + 1);
+                        rect.3[3] = rect.3[3].max(py + 1);
+                    }
+                    None => rects.push((tab, pane.get(), handle, [px, py, px + 1, py + 1])),
                 }
-                None => rects.push((tab, pane.get(), handle, [px, py, px + 1, py + 1])),
             }
         }
     }
@@ -12038,37 +12057,49 @@ fn pointer_hover_blocked(host: &HostState) -> bool {
 /// Pane-header handle (dot and name) under the pointer, graphite only
 /// (issue #109). Classic keeps today's header behavior.
 fn pane_handle_hit(host: &HostState, px: usize, py: usize) -> Option<PaneId> {
-    let geom = host.mux.geom();
-    if !geom.chrome.graphite {
+    if !host.mux.geom().chrome.graphite {
         return None;
     }
-    let focused = host.mux.focused_id();
-    let multi = host.mux.pane_count() > 1;
-    let now = Instant::now();
     host.mux
         .panes_and_rects()
         .find_map(|(pane_id, pane, rect)| {
-            let (slot_x, slot_y, slot_w, slot_h) = geom.pane_slot_px(rect);
-            let (name, _) = host.mux.pane_header_text(pane_id);
-            let attention = host.attention_badge && pane.attention.is_some();
-            let running = pane.is_active_at(now);
-            let focus_row = multi && pane_id == focused;
-            let status = graphite::PaneStatus::decide(
-                attention,
-                pane.mail_depth,
-                pane.unseen_output,
-                running,
-                focus_row,
-            );
-            let zone = graphite::pane_handle_rect(
-                geom.chrome,
-                graphite::Rect::new(slot_x, slot_y, slot_w, slot_h),
-                &name,
-                status,
-                focus_row,
-            )?;
+            let zone = pane_handle_zone(host, pane_id, pane, rect)?;
             zone.contains(px, py).then_some(pane_id)
         })
+}
+
+/// The Graphite pane-header handle rectangle for one pane, in window px.
+/// `pane_handle_hit` and the strip-handle dump both use it, so the dump is
+/// exactly the zone a press lands in.
+fn pane_handle_zone(
+    host: &HostState,
+    pane_id: PaneId,
+    pane: &mux::PaneRuntime,
+    rect: prismattyc_mux::CellRect,
+) -> Option<graphite::Rect> {
+    let geom = host.mux.geom();
+    let focused = host.mux.focused_id();
+    let multi = host.mux.pane_count() > 1;
+    let now = Instant::now();
+    let (slot_x, slot_y, slot_w, slot_h) = geom.pane_slot_px(rect);
+    let (name, _) = host.mux.pane_header_text(pane_id);
+    let attention = host.attention_badge && pane.attention.is_some();
+    let running = pane.is_active_at(now);
+    let focus_row = multi && pane_id == focused;
+    let status = graphite::PaneStatus::decide(
+        attention,
+        pane.mail_depth,
+        pane.unseen_output,
+        running,
+        focus_row,
+    );
+    graphite::pane_handle_rect(
+        geom.chrome,
+        graphite::Rect::new(slot_x, slot_y, slot_w, slot_h),
+        &name,
+        status,
+        focus_row,
+    )
 }
 
 fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {

@@ -91,6 +91,19 @@ def handle_rects(strip_dump, tab):
     return [h for h in handles if h["tab"] == tab]
 
 
+def pane_body_center(env, pane, window_size):
+    """A pane's body centre in window px, from its pmux ls cell rectangle and the window size."""
+    out = run(PMUX, "ls", env=env).stdout
+    grid = {int(m.group(1)): tuple(int(v) for v in m.groups()[1:]) for m in re.finditer(
+        r"pane (\d+) — (\d+)x(\d+) at \((\d+),(\d+)\)", out)}
+    cols = max(x + c for (c, _r, x, _y) in grid.values())
+    rows = max(y + r for (_c, r, _x, y) in grid.values())
+    width, height = window_size
+    cell_w, cell_h = width / cols, height / rows
+    c, r, x, y = grid[pane]
+    return (int((x + c / 2) * cell_w), int((y + r / 2) * cell_h))
+
+
 def center(rect):
     return ((rect["x0"] + rect["x1"]) // 2, (rect["y0"] + rect["y1"]) // 2)
 
@@ -177,14 +190,18 @@ def main():
         print(f"pane_a={a} pane_b={b} press={press} rect_a={rect_a} rect_b={rect_b} window_xy={win_xy}")
         if not inside(press, rect_a) or any(inside(press, h) for h in handles if h is not rect_a):
             raise Failure(f"press not on pane A handle: press={press} rect_a={rect_a}")
-        drag(press, center(rect_b), win_xy)
+        size = (int(geom["WIDTH"]), int(geom["HEIGHT"]))
+        release_b = pane_body_center(env, b, size)
+        print(f"release on pane B body from pmux ls: {release_b}")
+        drag(press, release_b, win_xy)
         after = pane_positions(env)
         print("before:", before, "after:", after)
         if after.get(a) != before.get(b) or after.get(b) != before.get(a):
             raise Failure(f"pane order did not swap: before={before} after={after}")
         print("PASS: panes swapped positions")
         # Negative control: press pane A's handle and release on A's own handle; nothing may change.
-        drag(press, press, win_xy)
+        release_a = pane_body_center(env, a, size)
+        drag(press, release_a, win_xy)
         if pane_positions(env) != after:
             raise Failure(f"same-pane drop changed the order: after={after} now={pane_positions(env)}")
         print("PASS: same-pane drop left the order unchanged")

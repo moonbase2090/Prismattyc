@@ -65,6 +65,13 @@ def cache_sessions(path):
     return json.loads(path.read_text())["tabs"][0]["sessions"]
 
 
+def cache_sessions_or_none(path):
+    try:
+        return cache_sessions(path)
+    except (OSError, ValueError, KeyError, IndexError):
+        return None
+
+
 def handles(dump):
     try:
         return json.loads(dump.read_text())["handles"]
@@ -145,7 +152,11 @@ def main():
         print(f"order={order} press={press} release_on_b_body={release_b} left={left} right={right} win={win_xy}")
         before = cache_sessions(cache)
         drag(press, release_b, win_xy)
-        after = wait(lambda: (lambda s: s if s != before else None)(cache_sessions(cache)), 5)
+        after = wait(lambda: (lambda s: s if s != before else None)(cache_sessions_or_none(cache)), 10)
+        if after is None:
+            if not cache.exists():
+                raise Failure(f"attach-tabs cache is missing after the drag: {cache}")
+            raise Failure(f"attach-tabs cache is unchanged after the drag: before={before} now={cache.read_text()[:300]}")
         if after != [before[1], before[0]]:
             raise Failure(f"order did not swap: before={before} after={after}")
         print("PASS: panes swapped order")
@@ -163,6 +174,8 @@ def main():
             print(f"{label} (last 40 lines):")
             print("\n".join(path.read_text(errors="replace").splitlines()[-40:]))
         print("ls:", run(PMUX, "ls", env=env).stdout)
+        print("strip dump:", handles(dump))
+        print("runtime dir:", sorted(p.name for p in runtime.iterdir()))
         sys.exit(1)
     finally:
         if attach and attach.poll() is None:

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.3.49] - 2026-10-28
+
+### Fixed
+
+- Menus, pickers and popups now size to their longest row within the available screen width, so labels are no longer cut off with an ellipsis when there is room. When space is tight, shortened rows keep version suffixes and path basenames.
+
 ## [0.3.48] - 2026-10-28
 
 ### Added

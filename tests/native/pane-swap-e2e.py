@@ -41,7 +41,7 @@ def diagnostics(wid, env, host_log, dump):
     lines = []
     if wid:
         for args in (("getwindowname", wid), ("getwindowgeometry", "--shell", wid), ("getwindowfocus",)):
-            out = xdo(*args)
+            out = run("xdotool", *args)
             lines.append(f"xdotool {' '.join(args)}: rc={out.returncode} {out.stdout.strip()} {out.stderr.strip()}")
     clients = run(PMUX, "clients", env=env)
     lines.append(f"pmux clients: rc={clients.returncode} {clients.stdout.strip()} {clients.stderr.strip()}")

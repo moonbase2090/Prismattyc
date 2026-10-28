@@ -1,0 +1,5 @@
+splash = false
+start_at_login = false
+automatic_update_checks = false
+install_agent_skills = false
+session_naming = "auto"

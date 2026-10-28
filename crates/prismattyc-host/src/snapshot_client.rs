@@ -924,6 +924,7 @@ mod tests {
                 title: "late".into(),
                 sessions: vec!["999".into()],
                 layout: None,
+                fixed_name: None,
             }],
             space: Some("a".into()),
             ..Default::default()
@@ -983,6 +984,7 @@ mod tests {
                 title: "late".into(),
                 sessions: vec!["999".into()],
                 layout: None,
+                fixed_name: None,
             }],
             space: Some("a".into()),
             ..Default::default()

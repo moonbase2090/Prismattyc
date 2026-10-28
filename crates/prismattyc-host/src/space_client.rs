@@ -476,6 +476,7 @@ mod tests {
                 title: "review-a".into(),
                 sessions: vec!["review-a-1".into()],
                 layout: None,
+                fixed_name: None,
             }],
             space: Some("review-a".into()),
             ..Default::default()
@@ -585,6 +586,7 @@ mod tests {
                 title: "review-a".into(),
                 sessions: vec!["review-a-1".into()],
                 layout: None,
+                fixed_name: None,
             }],
             space: Some("review-a".into()),
             ..Default::default()
@@ -622,6 +624,7 @@ mod tests {
                 title: "review-a".into(),
                 sessions: vec!["review-a-1".into()],
                 layout: None,
+                fixed_name: None,
             }],
             space: Some("review-a".into()),
             ..Default::default()

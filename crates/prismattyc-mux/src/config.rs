@@ -20,7 +20,9 @@ use crate::remote_size::RemoteSizePolicy;
 /// `[mux]` keys. The host stores this table so one config file can carry it.
 /// Keys this build does not know are ignored; see [`mux_unknown_key_warnings`].
 /// Unknown keys outside `[mux]` are still rejected by the host.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Deserialize, schemars::JsonSchema, serde::Serialize,
+)]
 pub struct MuxSection {
     /// Instance name used to derive `pmux.sock` / `pmux-<instance>.sock`.
     pub instance: Option<String>,
@@ -35,11 +37,22 @@ pub struct MuxSection {
     pub remote_size: Option<RemoteSizePolicy>,
     /// Pane program. Empty uses the platform default.
     pub shell: Option<String>,
+    /// Allow user-entered session labels to preserve mixed case and spaces.
+    /// Default false to keep session labels in the mailbox-address format.
+    pub allow_mixed_case_session_names: Option<bool>,
+}
+
+impl MuxSection {
+    /// Mixed-case session labels are opt-in.
+    pub fn allow_mixed_case_session_names(&self) -> bool {
+        self.allow_mixed_case_session_names.unwrap_or(false)
+    }
 }
 
 /// Who `pmux space open` types a saved pane `command` into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
+#[derive(schemars::JsonSchema, serde::Serialize)]
 pub enum SpaceOpenRunsCommands {
     /// Sessions that stored an agent id (default).
     #[default]
@@ -296,6 +309,12 @@ pub const MUX_KEYS: &[MuxKeySpec] = &[
         range: "program name or path",
         kind: MuxKeyKind::CommentedPath("pwsh.exe"),
     },
+    MuxKeySpec {
+        name: "allow_mixed_case_session_names",
+        doc: "Allow mixed-case and spaced session labels",
+        range: "true|false; default false",
+        kind: MuxKeyKind::Bool(false),
+    },
 ];
 
 /// Render the `[mux]` table with comments.
@@ -376,15 +395,161 @@ fn insert_commented_path(table: &mut toml_edit::Table, name: &str, path: &str) {
     }
 }
 
-/// Write `contents` to `path` via a sibling temp file, fsync, and rename.
+/// A completed replacement. A directory sync failure does not undo a rename.
+#[derive(Debug)]
+pub struct ConfigCommit<T> {
+    pub value: T,
+    pub changed: bool,
+    pub durability_warning: Option<String>,
+}
+
+impl<T> ConfigCommit<T> {
+    /// Legacy callers still report a durability warning without replaying an edit.
+    pub fn report(self) -> T {
+        if let Some(warning) = self.durability_warning {
+            eprintln!("prismattyc: config saved, but directory sync failed: {warning}");
+        }
+        self.value
+    }
+}
+
+/// Serialize a complete fresh-read edit across host processes. Locks a stable
+/// sibling file, since replacing the config changes its inode. Existing symlinks
+/// resolve to their target, preserving the user's link and one lock identity.
+pub fn transact_config<T>(
+    path: &Path,
+    edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<T>,
+) -> Result<ConfigCommit<T>> {
+    locked_config(path, |raw| {
+        let mut document = raw
+            .parse::<toml_edit::DocumentMut>()
+            .context("parse config before edit")?;
+        let value = edit(&mut document)?;
+        Ok((document.to_string(), value))
+    })
+}
+
+/// Deliberately replace the entire document (for an explicit template write).
+/// Read/modify/write callers use `transact_config` instead of a stale string.
 pub fn write_config_atomic(path: &Path, contents: &str) -> Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("create config directory {}", parent.display()))?;
+    locked_config(path, |_| Ok((contents.to_string(), ())))?.report();
+    Ok(())
+}
+
+/// Atomically replace a generated artifact without leaving a persistent sidecar.
+/// Service/startup directories consume their contents; config locks belong only
+/// to configuration transactions, not generated registration files.
+pub fn write_file_atomic(path: &Path, contents: &str) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).context("create artifact directory")?;
+    }
+    if let Some(warning) = replace_file(
+        path,
+        contents,
+        Replacement::Unconditional,
+        sync_config_directory,
+    )? {
+        eprintln!("prismattyc: file saved, but directory sync failed: {warning}");
+    }
+    Ok(())
+}
+
+enum Replacement<'a> {
+    Unconditional,
+    IfUnchanged(Option<&'a str>),
+}
+
+fn locked_config<T>(
+    path: &Path,
+    edit: impl FnOnce(&str) -> Result<(String, T)>,
+) -> Result<ConfigCommit<T>> {
+    locked_config_with_sync(path, edit, sync_config_directory)
+}
+
+fn sync_config_directory(parent: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(parent)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = parent;
+        Ok(())
+    }
+}
+
+fn locked_config_with_sync<T>(
+    path: &Path,
+    edit: impl FnOnce(&str) -> Result<(String, T)>,
+    sync_directory: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<ConfigCommit<T>> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent).context("create config directory")?;
+    let target = if std::fs::symlink_metadata(path).is_ok() {
+        std::fs::canonicalize(path).context("resolve config path")?
+    } else {
+        std::fs::canonicalize(parent)?.join(path.file_name().context("config filename")?)
+    };
+    let parent = target.parent().context("config parent")?;
+    let filename = target
+        .file_name()
+        .context("config filename")?
+        .to_string_lossy();
+    let lock_path = parent.join(format!(".{filename}.lock"));
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let lock = options.open(&lock_path).context("open config lock")?;
+    lock.lock().context("lock config")?;
+    let original = match std::fs::read_to_string(&target) {
+        Ok(raw) => Some(raw),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("read config under lock"),
+    };
+    let raw = original.as_deref().unwrap_or_default();
+    let (contents, value) = edit(raw)?;
+    if contents == raw && target.exists() {
+        return Ok(ConfigCommit {
+            value,
+            changed: false,
+            durability_warning: None,
+        });
+    }
+    let durability_warning = replace_file(
+        &target,
+        &contents,
+        Replacement::IfUnchanged(original.as_deref()),
+        sync_directory,
+    )?;
+    Ok(ConfigCommit {
+        value,
+        changed: true,
+        durability_warning,
+    })
+}
+
+fn replace_file(
+    path: &Path,
+    contents: &str,
+    condition: Replacement<'_>,
+    sync_directory: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<Option<String>> {
+    let target = path;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     let filename = path
         .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("config.toml");
+        .context("artifact filename")?
+        .to_string_lossy();
     let nonce = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
@@ -393,30 +558,42 @@ pub fn write_config_atomic(path: &Path, contents: &str) -> Result<()> {
         ".{filename}.prism-config-{}-{nonce}",
         std::process::id()
     ));
-    let result = (|| -> Result<()> {
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
+    let before = (|| -> Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
         #[cfg(unix)]
-        opts.mode(0o644);
-        let mut file = opts
+        options.mode(0o600);
+        let mut file = options
             .open(&temporary)
-            .with_context(|| format!("create {}", temporary.display()))?;
+            .context("create temporary config")?;
         file.write_all(contents.as_bytes())
-            .with_context(|| format!("write {}", temporary.display()))?;
-        file.sync_all()
-            .with_context(|| format!("sync {}", temporary.display()))?;
-        if let Ok(metadata) = std::fs::metadata(path) {
+            .context("write temporary config")?;
+        if let Ok(metadata) = std::fs::metadata(target) {
             std::fs::set_permissions(&temporary, metadata.permissions())
-                .with_context(|| format!("preserve permissions for {}", path.display()))?;
+                .context("preserve config permissions")?;
         }
-        std::fs::rename(&temporary, path)
-            .with_context(|| format!("replace {} with {}", path.display(), temporary.display()))?;
+        file.sync_all().context("sync temporary config")?;
+        // Cooperating writers are serialized. Detect external edits made before
+        // this check; an editor ignoring the advisory lock can still race rename.
+        if let Replacement::IfUnchanged(expected) = condition {
+            let current = match std::fs::read_to_string(target) {
+                Ok(raw) => Some(raw),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error).context("recheck config before replacement"),
+            };
+            anyhow::ensure!(
+                current.as_deref() == expected,
+                "config changed outside the settings editor; retry the edit"
+            );
+        }
+        std::fs::rename(&temporary, target).context("replace config")?;
         Ok(())
     })();
-    if result.is_err() {
+    if let Err(error) = before {
         let _ = std::fs::remove_file(&temporary);
+        return Err(error);
     }
-    result
+    Ok(sync_directory(parent).err().map(|error| error.to_string()))
 }
 
 fn first_name(candidates: [Option<String>; 3]) -> Option<String> {
@@ -531,6 +708,114 @@ mod tests {
     }
 
     #[test]
+    fn generated_artifact_replacement_leaves_only_the_requested_file() {
+        let path = temp_cfg("generated-artifact").with_file_name("pmux.service");
+        write_file_atomic(&path, "[Service]\nExecStart=/opt/pmux login run\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[Service]\nExecStart=/opt/pmux login run\n"
+        );
+        write_file_atomic(&path, "[Service]\nExecStart=/opt/new-pmux login run\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[Service]\nExecStart=/opt/new-pmux login run\n"
+        );
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("pmux.service")]);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn committed_write_reports_directory_sync_failure_without_replay() {
+        let path = temp_cfg("durability");
+        std::fs::write(&path, "entries = []\n").unwrap();
+        let calls = std::cell::Cell::new(0);
+        let result = locked_config_with_sync(
+            &path,
+            |raw| {
+                calls.set(calls.get() + 1);
+                let mut document: toml_edit::DocumentMut = raw.parse()?;
+                document["entries"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push("one addition");
+                Ok((document.to_string(), 17))
+            },
+            |_| Err(std::io::Error::other("injected directory sync failure")),
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(result.value, 17);
+        assert!(result.changed);
+        assert_eq!(
+            result.durability_warning.as_deref(),
+            Some("injected directory sync failure")
+        );
+        let saved: toml::Value = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(
+            saved["entries"].as_array().unwrap(),
+            &vec![toml::Value::String("one addition".into())]
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn external_removal_of_empty_file_is_a_conflict() {
+        let path = temp_cfg("external-removal");
+        std::fs::write(&path, "").unwrap();
+        let result = transact_config(&path, |document| {
+            std::fs::remove_file(&path)?;
+            document["font_px"] = toml_edit::value(18.0);
+            Ok(())
+        });
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("changed outside"));
+        assert!(!path.exists());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_retains_symlink_and_target_permissions() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let path = temp_cfg("symlink");
+        let target = path.with_file_name("target.toml");
+        std::fs::write(&target, "# existing\nfont_px = 15.0\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        symlink(&target, &path).unwrap();
+        transact_config(&path, |document| {
+            document["font_px"] = toml_edit::value(18.0);
+            Ok(())
+        })
+        .unwrap();
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "# existing\nfont_px = 18.0\n"
+        );
+        std::fs::remove_file(&target).unwrap();
+        assert!(transact_config(&path, |_| Ok(())).is_err());
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
     fn missing_file_is_defaults() {
         let path = temp_cfg("missing");
         assert_eq!(load_mux_section(&path).unwrap(), MuxSection::default());
@@ -616,6 +901,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                allow_mixed_case_session_names: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(Some("other".into()), None, &file).unwrap();
@@ -647,6 +933,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                allow_mixed_case_session_names: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(
@@ -669,6 +956,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                allow_mixed_case_session_names: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
@@ -687,6 +975,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                allow_mixed_case_session_names: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
@@ -704,6 +993,7 @@ mod tests {
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
+                allow_mixed_case_session_names: None,
                 shell: None,
             };
             assert!(resolve_mux_target(None, None, &file).is_err());

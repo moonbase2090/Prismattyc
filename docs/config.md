@@ -33,8 +33,11 @@ install; `PRISMATTYC_NO_AGENT_SKILLS=1` also opts out and wins over the config
 value. Automatic signed-release checks run on app launch and daily by default.
 Set the top-level `automatic_update_checks = false` or turn them off in the app
 menu to opt out. The app menu's manual check works regardless of this setting.
-`async_file_writes` enables the host's file-writer thread. It defaults to
-`false` and takes effect at startup, so restart the host after changing it.
+`async_file_writes` writes render status and attach-cache files on the host's
+file-writer thread. It defaults to `true` and takes effect at startup, so
+restart the host after changing it.
+`async_paste` hands pastes to the pane writer thread so back-pressure does not
+pause the window. It defaults to `true`.
 `snapshot_client` stays off unless the file sets it to true. The host reads
 that key at startup only; a later edit does not start or stop the cache.
 `macos_present` selects the macOS window presenter at startup. It defaults to
@@ -66,6 +69,8 @@ event-loop turn.
 # Edit in place. CLI flags and PRISMATTYC_* env vars still win.
 
 # -- appearance / theme --
+# Enable the complete settings panel; opt in from Space settings. true|false.
+settings_panel = false
 # Named theme: built-in slug, display name, sibling themes/ file, or absolute TOML path. Omit this key to follow the app default (prismattyc-dark). prismattyc follows the OS appearance. theme slug or absolute path.
 # theme = "prismattyc-dark"
 # Render timings and counters. off|osd|log|both.
@@ -105,13 +110,13 @@ hover_blend = 0.1
 
 # -- file writes --
 # Write render status, attach cache, and heartbeat files on a worker thread; startup only. true|false.
-async_file_writes = false
+async_file_writes = true
 
 # -- input --
 # Open links on plain clicks; Cmd/Ctrl-click always remains available. plain|modifier.
 link_click = "plain"
 # Hand pastes to the pane writer thread so large pastes never pause the window. true | false.
-async_paste = false
+async_paste = true
 
 # -- agent integration --
 # Install the pmux Agent Skill for detected agents once per app version. true|false.
@@ -178,6 +183,8 @@ restore_blank_terminals = false
 alt_screen_scrollback = false
 # Widest space chip in cells (chips fit their labels); 0 = 28. 0 or 6-40.
 space_rail_chip_cols = 0
+# Show live session names in saved Space chips. true|false.
+space_rail_pane_names = true
 
 # -- bells and attention --
 # Flash the window on BEL (~120ms invert). true|false.
@@ -284,6 +291,8 @@ space_open_runs_commands = "agents"
 remote_size = "latest"
 # Pane shell override. Unset on Windows preserves COMSPEC or cmd.exe. Set pwsh.exe or powershell.exe to opt in to PowerShell. Unset on Unix uses SHELL or /bin/sh. program name or path.
 # shell = "pwsh.exe"
+# Allow mixed-case and spaced session labels. true|false; default false.
+allow_mixed_case_session_names = false
 
 [keys]
 # Host actions. An entry replaces that action's default chords.
@@ -766,6 +775,47 @@ the current list is taller than the window. `Enter` atomically updates the
 `Escape` restores the exact pre-picker theme. Custom file themes remain valid
 config choices, but the picker lists the curated built-ins.
 
+### Complete settings editor
+
+Open `space_settings` from the command palette or choose **Spaces settings…**
+from a Space chip menu. Enable **Enable full settings (preview)** to opt into the
+complete editor. The `settings_panel` setting defaults to `false`. Disable
+or reset it in the complete editor to return to the existing settings menu.
+
+The top row selects a section with plain Left and Right arrows. Down enters
+that section's settings. Up and Down select rows; Up from the first setting
+returns to the section row. Left and Right adjust booleans, numbers, and
+choices. Enter opens an editor with Save, Reset / inherit, Reload from disk,
+and Cancel actions. In a text field, arrows move the caret and Escape cancels
+the text edit. Escape from the editor discards the draft. No Control modifier
+is needed for these navigation actions. In the command palette, plain Left
+and Right select filter chips.
+
+All accepted settings and keybinding actions have controls, including nested
+accessibility, mux, and theme settings. Lists support adding, editing,
+reordering, and removing entries. Keybinding fields capture the next chord;
+removing every chord and saving disables the action. Reset restores its
+inherited binding. Cursor and selection foreground/background colors save
+and reset together. ANSI colors save as a complete set of 16. Remote
+record deletion removes that record's extension fields too.
+
+Save validates the complete edit before replacing the configuration. It
+preserves unrelated settings, unknown fields, and comments. Concurrent edits
+to unrelated fields merge. A changed field in an open draft requires Reload
+from disk before saving it. A completed save with a directory-sync warning
+has already replaced the file; do not repeat an Add operation because of
+that warning. Live settings apply through the normal configuration watcher.
+Each control describes when startup, platform, or daemon settings take effect.
+
+The font picker offers the default chain, installed monospace fonts, custom
+paths, and two additional bundled candidates, IBM Plex Mono and Commit Mono.
+Their portable configuration identifiers are `bundled:ibm-plex-mono` and
+`bundled:commit-mono`. They can also appear in `font_fallback`. Both use the
+SIL Open Font License; their license texts ship with the application. The
+default font remains unchanged. Environment font overrides retain precedence,
+and the picker shows the primary face the host actually loaded. Selecting
+an unreadable path retains the normal fallback chain.
+
 Use the `open_config` palette action to open `config.toml` in `$VISUAL`, then
 `$EDITOR`, in a new terminal window. When neither is set, macOS and Linux use
 `nano` in that window, and Windows opens Notepad (`notepad.exe`) in its own
@@ -817,6 +867,7 @@ instance = "default"                 # $XDG_RUNTIME_DIR/prismattyc/pmux.sock
 # attach_on_new = false              # default true: `pmux new` attaches in a TTY
 # space_open_runs_commands = "agents"  # agents|all|none; `pmux space open --no-run` skips
 # remote_size = "latest"               # latest|host; TTY attach fits, detach restores host
+# allow_mixed_case_session_names = false  # default false; permit mixed-case or spaced session labels
 # shell = "pwsh.exe"                    # unset: COMSPEC or cmd.exe on Windows
 ```
 
@@ -1216,6 +1267,10 @@ The preference persists across launches. These direct actions override it:
 | `session_split_down` | Ctrl+Alt+Shift+B | Session split below |
 
 You can rebind these actions under `[keys]` or run them from the palette.
+Session labels use lowercase mailbox addresses by default. To allow mixed-case
+or spaced labels entered in the naming popup or with `pmux new`, set
+`allow_mixed_case_session_names = true` under `[mux]`. Existing saved Space
+labels continue to restore when this setting is off.
 Blank terminals belong to the Space view where you open them. Switching
 Spaces hides that view and keeps its shells running. Returning restores
 its tabs, split layout, and focus.

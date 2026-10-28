@@ -12,7 +12,10 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::mux::{effective_tab_end_pad, tab_close_left, HostGeom};
 
 /// Where the rail sits. `Off` reserves nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, schemars::JsonSchema)]
+#[schemars(rename_all = "lowercase")]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RailSide {
     #[default]
     Bottom,
@@ -20,6 +23,15 @@ pub enum RailSide {
     Top,
     Right,
     Off,
+}
+
+impl<'de> serde::Deserialize<'de> for RailSide {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::parse(&text).ok_or_else(|| {
+            serde::de::Error::custom("space_rail must be bottom, left, top, right, or off")
+        })
+    }
 }
 
 impl RailSide {
@@ -2178,6 +2190,7 @@ mod tests {
                     title: (*title).into(),
                     sessions: members.iter().map(|m| (*m).to_string()).collect(),
                     layout: None,
+                    fixed_name: None,
                 })
                 .collect(),
             active_tab: 0,

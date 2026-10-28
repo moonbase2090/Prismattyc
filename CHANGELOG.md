@@ -2,6 +2,61 @@
 
 ## [Unreleased]
 
+## [0.3.48] - 2026-10-28
+
+### Added
+
+- `pmux new` supports `--cwd DIR` to choose a session's starting directory and `--help`/`-h` to show its usage.
+
+### Changed
+
+- Font coverage is indexed once per font path, reducing repeated file reads during fallback lookup.
+
+## [0.3.47] - 2026-10-28
+
+### Added
+
+- Clicking the Dock icon restores a minimized window, including when another window remains visible.
+
+### Changed
+
+- Paste handling and render-status and attach-cache writes use worker threads by default to keep the window responsive.
+- Sidebar session labels stay stable when switching Spaces, and saved rows open the matching tab or pane.
+
+## [0.3.46] - 2026-10-27
+
+### Changed
+
+- The host render thread bounds how much pane output it drains per pass, so a busy pane no longer holds up redraws of the rest of the window.
+
+## [0.3.45] - 2026-10-27
+
+### Added
+
+- Added `pmux tab list` and `pmux tab name` commands to set, clear, and list fixed tab names.
+- Mixed-case and spaced session labels can be enabled with `allow_mixed_case_session_names`; the setting defaults off.
+
+## [0.3.44] - 2026-10-26
+
+### Added
+
+- An opt-in complete settings editor, enabled with `settings_panel = true`, edits every config key from the palette.
+
+### Changed
+
+- The transport harness reports child and reader state when a test fails.
+
+## [0.3.43] - 2026-10-26
+
+### Added
+
+- The Spaces sidebar header has an expand-all and collapse-all control.
+
+### Fixed
+
+- Clicking a pane in an inactive Space focuses that session in that Space.
+- Walkthrough "Show me" steps wait for the demonstrated action to finish before they advance.
+
 ## [0.3.42] - 2026-10-25
 
 ### Added

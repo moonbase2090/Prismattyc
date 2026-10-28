@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Recipe {
     tabs: Vec<(String, Node)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    fixed_names: Vec<Option<String>>,
     selected: usize,
     focused: u64,
 }
@@ -78,15 +80,21 @@ impl MuxRuntime {
                 }
             }
         }
+        let records: Vec<_> = self
+            .window_ids()
+            .iter()
+            .filter_map(|id| {
+                let win = self.domain.window(*id)?;
+                Some((
+                    (win.title.clone(), node(self, &win.layout)?),
+                    self.fixed_tab_name(*id).map(str::to_string),
+                ))
+            })
+            .collect();
+        let (tabs, fixed_names): (Vec<_>, Vec<_>) = records.into_iter().unzip();
         Some(Recipe {
-            tabs: self
-                .window_ids()
-                .iter()
-                .filter_map(|id| {
-                    let win = self.domain.window(*id)?;
-                    Some((win.title.clone(), node(self, &win.layout)?))
-                })
-                .collect(),
+            tabs,
+            fixed_names,
             selected: self.selected_tab_index(),
             focused: self.focused_id().get(),
         })
@@ -111,6 +119,7 @@ impl MuxRuntime {
         let mut used = std::collections::HashSet::new();
         let mut focused = None;
         let mut selected = None;
+        let mut fixed_tab_names = HashMap::new();
         // Stage new shells and geometry before replacing the live view.
         struct Builder<'a> {
             mux: &'a MuxRuntime,
@@ -228,6 +237,9 @@ impl MuxRuntime {
                 let (window, placeholder) = domain.create_window(session, title)?;
                 domain.set_layout(window, layout)?;
                 domain.free_pane(placeholder)?;
+                if let Some(name) = recipe.fixed_names.get(index).and_then(Option::as_ref) {
+                    fixed_tab_names.insert(window, name.clone());
+                }
                 if index == recipe.selected {
                     selected = Some(window);
                 }
@@ -269,6 +281,7 @@ impl MuxRuntime {
             );
         }
         self.domain = domain;
+        self.fixed_tab_names = fixed_tab_names;
         self.view = view;
         self.panes = panes;
         self.zoomed = None;

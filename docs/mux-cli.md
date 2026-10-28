@@ -62,6 +62,8 @@ pmux attach --read-only  # view only; never take the input lease
 pmux attach --all        # open prismattyc-host; sessions as panes in tabs
 pmux attach --session-id 3 --space-id SPACE  # only if SPACE still owns session 3; never starts a server (remote attach)
 pmux ls                  # sessions → windows (tabs) → panes (liveness, pids, leases)
+pmux tab list --json     # host-local tab names and target tokens
+pmux tab name --view 1 --tab 3 "Release Work"
 pmux whoami              # this pane: session name, opaque id, pane, agent
 pmux skills install
 pmux skills install --agent detected --check
@@ -137,19 +139,27 @@ number, such as `work-1`.
 3. Select **Create** or press Enter.
 
 The popup creates the session only after you accept. Press Escape to
-cancel. Use lowercase letters, numbers, and single hyphens. Names must
-have 2 to 64 characters. A name must not start or end with a hyphen.
-Prismattyc rejects names already used by a session or forwarding address.
+cancel. Session display names keep the case you enter and allow spaces.
+Names are trimmed and must be 1 to 64 bytes without control characters.
+Lookup and duplicate checks are exact and case-sensitive, so
+`Graphite-Main` and `graphite-main` are separate session names.
 
 The Space `+` popup first asks for the Space name. It then asks for the
 first session name. The default tab strip stays visible with one pane.
 `tab_strip = "multi"` shows the strip only with multiple tabs.
 
 Right-click a pane and select **Rename session** to change its visible
-name. Case, spaces, and other characters stay in that name. The mailbox
-address is the lowercase form, so `Hello World` is mailed as
-`hello-world`. Right-click a single-pane tab to open the same popup. A
-tab with multiple panes has a separate tab label.
+name. The mailbox address is derived separately in lowercase, so
+`Hello World` is mailed as `hello-world`. Right-click a tab and select
+**Rename tab** to set a fixed tab label without changing its pane names.
+The tab label stays in the sidebar and title bar while panes keep their
+own names. Choose **Clear tab name** to return to follow-focus naming.
+Named tabs with one pane show that pane as a child row in the sidebar.
+
+`pmux tab list --json` reports each live host view and tab token.
+Use those tokens with `pmux tab name --view VIEW --tab TAB NAME`; pass
+`--clear` instead of `NAME` to clear the label. The host rejects stale
+tokens; list again after a tab or host view changes.
 
 From inside an existing session, run:
 
@@ -977,8 +987,12 @@ values of that name are stripped.
 `PMUX_AGENT` lets any in-pane tool derive its mux identity from the seat.
 `pmux mail` resolves identity in this order: `--as`, the live pane's
 session binding, then `$PMUX_AGENT` outside a known pane.
-`pmux new NAME` binds `NAME` as the agent by default, so the variable is
-present on every agent seat. Pass `--no-agent` to opt out.
+`pmux new NAME` derives a valid, unique lowercase mailbox address from the
+display name by default, so `Graphite-Main` gets `graphite-main` when free.
+Pass `--agent NAME` to bind a specific lowercase mailbox address, or
+`--no-agent` to create the session without a mailbox. Case-sensitive
+display names can share a normalized base; later mailboxes receive a
+numeric suffix when needed.
 
 The server overwrites any caller-supplied pane and socket values. Split
 starts a new child with a new pane id. Move keeps the same process, so

@@ -12,7 +12,10 @@ mod attach_adopt;
 mod attach_log;
 mod attach_tabs;
 mod border_underlay;
+mod bundled_fonts;
 mod config;
+mod config_document;
+mod config_schema;
 mod config_template;
 mod daemon_startup;
 mod file_writer;
@@ -22,6 +25,7 @@ mod git_info;
 mod gpu;
 mod graphite;
 mod graphite_overlays;
+mod host_tab_requests;
 mod hyperlink;
 mod icon;
 mod instance;
@@ -84,6 +88,7 @@ mod render_window_tests;
 mod restore_prompt;
 mod rich;
 mod session_prompt;
+mod settings;
 mod sidebar;
 mod space_client;
 mod space_open;
@@ -689,7 +694,11 @@ impl Cli {
                 self.panes = panes;
             }
         }
-        self.light_cycle = matches!(file.focus_border_animation.as_deref(), Some("light-cycle"));
+        self.light_cycle = matches!(
+            file.focus_border_animation
+                .map(crate::config::FocusBorderAnimation::as_str),
+            Some("light-cycle")
+        );
         self.light_cycle_ms = file
             .focus_border_animation_ms
             .map_or(DEFAULT_LIGHT_CYCLE_MS, u128::from);
@@ -782,8 +791,11 @@ fn open_attach_session_tabs(
     let mux_bin = mux_bin.to_string_lossy();
     let mut pane_sessions = Vec::new();
     for (index, (title, members)) in grouped.groups.iter().enumerate() {
+        let fixed_name = grouped.fixed_names.get(index).and_then(Option::as_deref);
         let start = if index == 0 {
-            mux.rename_window(mux.active_window(), title)?;
+            let window = mux.active_window();
+            mux.rename_window(window, title)?;
+            mux.set_fixed_tab_name(window, fixed_name)?;
             let pane = mux.focused_id();
             mux.mark_attach_session(pane, members[0].session.clone(), members[0].title.clone());
             pane_sessions.push((pane, members[0].session.clone()));
@@ -792,6 +804,7 @@ fn open_attach_session_tabs(
             let first = &members[0];
             let window = mux.new_tab(&mux_bin, &attach_session_args(first))?;
             mux.rename_window(window, title)?;
+            mux.set_fixed_tab_name(window, fixed_name)?;
             let pane = mux.focused_id();
             mux.mark_attach_session(pane, first.session.clone(), first.title.clone());
             pane_sessions.push((pane, first.session.clone()));
@@ -1181,6 +1194,8 @@ struct HostState {
     /// Prismattyc theme switches between Dark and Light (#145).
     theme_overrides: Option<theme::ThemeOverrides>,
     theme_picker: Option<ThemePicker>,
+    settings: Option<settings::Panel>,
+    ui_wake: mux::Wake,
     /// Graphite transparency dialog (#112). Classic chrome leaves this empty.
     transparency: Option<transparency::Dialog>,
     palette: Option<Palette>,
@@ -1710,6 +1725,7 @@ enum ContextMenuTarget {
     RailSession(PaneId),
     RailSessionSolo(PaneId),
     RailPane(PaneId),
+    RailTab(prismattyc_mux::WindowId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1800,7 +1816,8 @@ fn context_menu_choice(kind: ContextMenuKind, index: usize) -> ContextMenuChoice
         ContextMenuKind::RailSpace
         | ContextMenuKind::RailSession
         | ContextMenuKind::RailSessionSolo
-        | ContextMenuKind::RailPane => ContextMenuChoice::Noop,
+        | ContextMenuKind::RailPane
+        | ContextMenuKind::RailTab => ContextMenuChoice::Noop,
     }
 }
 
@@ -1819,7 +1836,8 @@ fn context_menu_action(target: ContextMenuTarget, index: usize) -> ContextMenuAc
         ContextMenuTarget::RailSpace(_)
         | ContextMenuTarget::RailSession(_)
         | ContextMenuTarget::RailSessionSolo(_)
-        | ContextMenuTarget::RailPane(_) => ContextMenuAction::Noop,
+        | ContextMenuTarget::RailPane(_)
+        | ContextMenuTarget::RailTab(_) => ContextMenuAction::Noop,
     }
 }
 
@@ -1874,6 +1892,7 @@ fn context_menu_kind(target: ContextMenuTarget) -> ContextMenuKind {
         ContextMenuTarget::RailSession(_) => ContextMenuKind::RailSession,
         ContextMenuTarget::RailSessionSolo(_) => ContextMenuKind::RailSessionSolo,
         ContextMenuTarget::RailPane(_) => ContextMenuKind::RailPane,
+        ContextMenuTarget::RailTab(_) => ContextMenuKind::RailTab,
     }
 }
 
@@ -3122,19 +3141,18 @@ impl App {
                 }
             }
         }
-        let Some(mut newest) = newest else { return };
-        if newest.async_file_writes() != self.file_config.async_file_writes() {
-            eprintln!("prismattyc-host: async_file_writes changes take effect after restart");
-            newest.async_file_writes = self.file_config.async_file_writes;
-        }
-        #[cfg(target_os = "macos")]
-        if newest.macos_present != self.file_config.macos_present {
-            eprintln!("prismattyc-host: macos_present changes take effect after restart");
-            newest.macos_present = self.file_config.macos_present.clone();
-        }
-        if newest == self.file_config {
+        let Some(newest) = newest else { return };
+        let Some(newest) = prepare_config_reload(
+            newest,
+            &self.file_config,
+            self.windows.values_mut().filter_map(|host| {
+                let panel = host.settings.as_mut()?;
+                host.dirty = true;
+                Some(panel)
+            }),
+        ) else {
             return;
-        }
+        };
         let prior = std::mem::replace(&mut self.file_config, newest);
         if self.file_config.start_at_login != prior.start_at_login {
             restore_prompt::sync_login_registration();
@@ -3165,7 +3183,7 @@ impl App {
         for host in self.windows.values_mut() {
             host.pending_full_repaint = Some(FullRepaintReason::Fallback);
         }
-        for warning in self.file_config.mux_unknown_key_warnings() {
+        for warning in self.file_config.unknown_key_warnings() {
             eprintln!("{}", config::host_warning_line(warning));
         }
         if self.file_config.keys != prior.keys
@@ -3189,6 +3207,21 @@ impl App {
         };
 
         for host in self.windows.values_mut() {
+            if self.file_config.bar_color != prior.bar_color {
+                host.bar_color = self.file_config.bar_color;
+                host.pending_full_repaint = Some(FullRepaintReason::Theme);
+                host.dirty = true;
+            }
+            if self.file_config.alt_screen_scrollback() != prior.alt_screen_scrollback() {
+                let retain =
+                    self.cli.alt_screen_scrollback || self.file_config.alt_screen_scrollback();
+                host.emulator.set_retain_alt_history(retain);
+                host.mux.set_alt_screen_scrollback(retain);
+                for parked in host.local_views.parked.values_mut() {
+                    parked.mux.set_alt_screen_scrollback(retain);
+                }
+                host.dirty = true;
+            }
             let selective_border_rings = self.file_config.selective_border_rings.unwrap_or(false);
             if host.selective_border_rings != selective_border_rings {
                 host.selective_border_rings = selective_border_rings;
@@ -3367,7 +3400,9 @@ impl App {
             }
             if self.file_config.focus_border_animation != prior.focus_border_animation {
                 host.light_cycle = matches!(
-                    self.file_config.focus_border_animation.as_deref(),
+                    self.file_config
+                        .focus_border_animation
+                        .map(crate::config::FocusBorderAnimation::as_str),
                     Some("light-cycle")
                 );
                 if !host.light_cycle {
@@ -4217,7 +4252,12 @@ impl App {
             } else {
                 None
             };
-        if self.file_config.space_startup.as_deref() != Some("fresh") {
+        if self
+            .file_config
+            .space_startup
+            .map(crate::config::SpaceStartup::as_str)
+            != Some("fresh")
+        {
             if let Some(prompt) = restore_prompt.as_mut() {
                 if let Some(socket) =
                     host_mux_socket().filter(|s| prismattyc_mux::login::enabled(s).unwrap_or(false))
@@ -4416,6 +4456,8 @@ impl App {
                 theme,
                 theme_overrides: self.file_config.theme_overrides.clone(),
                 theme_picker: None,
+                settings: None,
+                ui_wake: self.wake.clone(),
                 transparency: None,
                 palette: None,
                 palette_layout: None,
@@ -4601,9 +4643,17 @@ impl App {
             let configured = host.theme.clone();
             apply_host_theme(host, configured);
             host.cache_writer = !config_editor;
-            host.local_views.fresh = self.file_config.space_startup.as_deref() == Some("fresh");
+            host.local_views.fresh = self
+                .file_config
+                .space_startup
+                .map(crate::config::SpaceStartup::as_str)
+                == Some("fresh");
             if host.restore_prompt.is_some() {
-                match self.file_config.space_startup.as_deref() {
+                match self
+                    .file_config
+                    .space_startup
+                    .map(crate::config::SpaceStartup::as_str)
+                {
                     Some("restore") => restore_prompt::finish(host, true),
                     Some("fresh") => restore_prompt::finish(host, false),
                     _ => {}
@@ -4898,15 +4948,16 @@ fn chrome_snapshot(host: &HostState, live: Option<a11y::LiveSnap>) -> a11y::Chro
                 (notice.tab == index && Instant::now() < notice.until)
                     .then_some((notice.handle, notice.title.as_str()))
             });
-            let title = title_row::title_row_decision(
-                host.pane_titles,
-                info.handles,
-                info.title.as_str(),
-                info.pane_title.as_deref(),
-                &info.handle_titles,
+            let title = title_row::title_row_decision(title_row::TitleRowInput {
+                mode: host.pane_titles,
+                handles: info.handles,
+                tab_title: info.title.as_str(),
+                fixed_name: info.fixed_name.as_deref(),
+                pane_title: info.pane_title.as_deref(),
+                handle_titles: &info.handle_titles,
                 hover_handle,
                 notice,
-            )
+            })
             .label
             .to_string();
             let title = info
@@ -4994,6 +5045,27 @@ fn pane_header_shown(host: &HostState) -> bool {
 
 /// Focused pane viewport as one document (accessibility D-A4). Scrollback stays
 /// out of the live node.
+/// Refresh saved views before comparing the configuration the running host can apply.
+fn prepare_config_reload<'a>(
+    mut newest: config::ConfigFile,
+    running: &config::ConfigFile,
+    panels: impl Iterator<Item = &'a mut settings::Panel>,
+) -> Option<config::ConfigFile> {
+    for panel in panels {
+        panel.refresh();
+    }
+    if newest.async_file_writes() != running.async_file_writes() {
+        eprintln!("prismattyc-host: async_file_writes changes take effect after restart");
+        newest.async_file_writes = running.async_file_writes;
+    }
+    #[cfg(target_os = "macos")]
+    if newest.macos_present != running.macos_present {
+        eprintln!("prismattyc-host: macos_present changes take effect after restart");
+        newest.macos_present = running.macos_present.clone();
+    }
+    (newest != *running).then_some(newest)
+}
+
 fn focused_document(host: &HostState) -> a11y::DocumentSnap {
     let pane = host.mux.focused();
     let screen = pane.emulator.screen();
@@ -5054,6 +5126,16 @@ fn focused_document(host: &HostState) -> a11y::DocumentSnap {
 }
 
 fn chrome_overlay(host: &HostState) -> a11y::OverlayKind {
+    if let Some(panel) = host.settings.as_ref() {
+        let (header, rows) = panel.rows();
+        return a11y::OverlayKind::Palette {
+            rows: rows
+                .into_iter()
+                .map(|row| format!("{header}: {} {}", row.name, row.describe))
+                .collect(),
+            selected: panel.selected(),
+        };
+    }
     if host.space_panel.is_some() {
         if let Some((header, rows)) = space_panel::rows(host) {
             return a11y::OverlayKind::Palette {
@@ -5175,6 +5257,16 @@ fn dispatch_overlay_activate(
             }
         }
         apply_transparency_input(host, transparency::Input::Enter);
+        return Dispatch::Handled;
+    }
+    if let Some(panel) = host.settings.as_mut() {
+        panel.activate(index);
+        let selected = panel.selected();
+        if let Some(menu) = host.context_menu.as_mut() {
+            menu.selected = selected;
+        }
+        host.dirty = true;
+        host.window.request_redraw();
         return Dispatch::Handled;
     }
     if host.space_panel.is_some() {
@@ -7900,10 +7992,11 @@ fn rasterize_frame(
                 }]
             };
             // Settings pages are fixed size and scroll inside (Graphite rule).
-            let layout_mode = if host
-                .space_panel
-                .as_ref()
-                .is_some_and(space_panel::Panel::fixed_size)
+            let layout_mode = if host.settings.is_some()
+                || host
+                    .space_panel
+                    .as_ref()
+                    .is_some_and(space_panel::Panel::fixed_size)
             {
                 PaletteLayoutMode::FixedHeight
             } else {
@@ -7916,9 +8009,16 @@ fn rasterize_frame(
                 chips: None,
                 sections: &sections,
                 selected,
-                scroll: host.space_panel.as_ref().map_or(0, |panel| panel.scroll),
+                scroll: host.settings.as_ref().map_or_else(
+                    || host.space_panel.as_ref().map_or(0, |panel| panel.scroll),
+                    |panel| panel.scroll,
+                ),
                 detail: None,
-                footer: "Enter select · Esc close · ↑↓ move",
+                footer: if host.settings.is_some() {
+                    "↑/↓ rows · ←/→ section or value · Enter edit/reset · Escape back"
+                } else {
+                    "Enter select · Esc close · ↑↓ move"
+                },
             };
             paint_palette_overlay(
                 &host.font,
@@ -7936,6 +8036,9 @@ fn rasterize_frame(
         None
     };
     if let Some(layout) = painted_context {
+        if let Some(panel) = host.settings.as_mut() {
+            panel.scroll = layout.start;
+        }
         if let Some(panel) = host.space_panel.as_mut() {
             panel.scroll = layout.start;
         }
@@ -8481,16 +8584,16 @@ fn begin_tab_rename(host: &mut HostState, index: Option<usize>) {
     let Some(window) = host.mux.window_at_tab(index) else {
         return;
     };
-    if let Some((_, panes)) = host.mux.tab_panes().get(index) {
-        if panes.len() == 1 && session_prompt::rename(host, panes[0], keybind::Action::RenameTab) {
-            return;
-        }
-    }
     let title = host
         .mux
         .tab_infos()
         .get(index)
-        .map(|tab| tab.title.clone())
+        .map(|tab| {
+            tab.fixed_name
+                .clone()
+                .or_else(|| tab.pane_title.clone())
+                .unwrap_or_else(|| tab.title.clone())
+        })
         .unwrap_or_default();
     if rename_uses_strip(sidebar_mode(host), show_tab_strip(host)) {
         host.tab_rename = Some(TabRename {
@@ -9266,7 +9369,7 @@ fn commit_tab_rename(host: &mut HostState) {
         observe_host_action(host, keybind::Action::RenamePane, pane_ok);
         return;
     }
-    match host.mux.rename_window(edit.window, &edit.buffer) {
+    match host.mux.set_fixed_tab_name(edit.window, Some(&edit.buffer)) {
         Ok(_) => {
             mark_layout_dirty(host);
             host.window
@@ -9989,6 +10092,7 @@ fn refresh_space_views_settled(host: &mut HostState) {
 }
 
 fn refresh_space_views(host: &mut HostState) {
+    settings::poll(host);
     space_panel::poll(host);
     drain_space_client(host);
     let now = Instant::now();
@@ -10029,18 +10133,8 @@ fn refresh_space_views(host: &mut HostState) {
         .attach_pane_sessions
         .iter()
         .filter_map(|(pane, id)| {
-            let session = snapshot.sessions.iter().find(|s| s.id.to_string() == *id)?;
             let recorded = host.mux.attach_name_of(*pane);
-            // A restarted daemon recycles numeric ids. The pane's recorded
-            // name is the session; do not adopt whoever now sits at the old id.
-            if recorded.is_some_and(|name| {
-                snapshot
-                    .sessions
-                    .iter()
-                    .any(|live| live.name == name && live.id.to_string() != *id)
-            }) {
-                return None;
-            }
+            let session = space_view::bound_session(&snapshot, id, recorded)?;
             (recorded != Some(session.name.as_str()))
                 .then(|| (*pane, id.clone(), session.name.clone()))
         })
@@ -10609,6 +10703,7 @@ fn open_context_menu(host: &mut HostState, target: ContextMenuTarget) {
 }
 
 fn close_context_menu(host: &mut HostState) {
+    host.settings = None;
     host.space_panel = None;
     if host.context_menu.take().is_some() {
         host.context_menu_target = None;
@@ -10647,6 +10742,9 @@ fn pane_space_membership(session: &str, spaces: &[String]) -> String {
 }
 
 fn context_menu_rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
+    if let Some(panel) = host.settings.as_ref() {
+        return Some(panel.rows());
+    }
     if host.space_panel.is_some() {
         return space_panel::rows(host);
     }
@@ -10801,6 +10899,25 @@ fn context_menu_rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
                 .collect();
             (header, rows)
         }
+        ContextMenuTarget::RailTab(window) => {
+            let tab = host
+                .mux
+                .tab_infos()
+                .into_iter()
+                .find(|tab| tab.window == Some(window))?;
+            let header = tab.fixed_name.unwrap_or(tab.title);
+            let rows = [
+                ("Rename tab", "set a fixed name for this tab"),
+                ("Clear tab name", "return this tab to follow-focus naming"),
+                ("Session actions…", "open the session menu for this tab"),
+            ]
+            .into_iter()
+            .map(|(label, description)| {
+                PaletteRow::plain(label.to_string(), description.to_string(), String::new())
+            })
+            .collect();
+            (header, rows)
+        }
         ContextMenuTarget::RailSession(pane) => {
             let header = host
                 .mux
@@ -10950,20 +11067,6 @@ fn pane_for_sidebar_row(host: &HostState, row: &sidebar::TreeRow) -> Option<Pane
         .tab_panes()
         .get(tab)
         .and_then(|(_, panes)| panes.get(pane_index).copied())
-}
-
-fn sidebar_tab_pane_count(host: &HostState, row: &sidebar::TreeRow) -> usize {
-    let Some(tab) = row.tab else {
-        return 1;
-    };
-    if let Some((_, panes)) = host.mux.tab_panes().get(tab) {
-        return panes.len().max(1);
-    }
-    host.mux
-        .tab_infos()
-        .get(tab)
-        .map(|info| if info.handles == 0 { 1 } else { info.handles })
-        .unwrap_or(1)
 }
 
 fn close_space_from_host(host: &mut HostState, name: &str) {
@@ -11267,6 +11370,41 @@ fn activate_context_menu(
         ContextMenuTarget::RailPane(pane) => {
             if let Some(action) = rail_context_menu::pane_action(index) {
                 return apply_rail_pane_action(host, pane, action, program, child_args);
+            }
+            Dispatch::Handled
+        }
+        ContextMenuTarget::RailTab(window) => {
+            let tabs = host.mux.tab_infos();
+            if let Some((tab_index, _)) = tabs
+                .iter()
+                .enumerate()
+                .find(|(_, tab)| tab.window == Some(window))
+            {
+                match index {
+                    0 => begin_tab_rename(host, Some(tab_index)),
+                    1 => {
+                        if host.mux.set_fixed_tab_name(window, None).is_ok() {
+                            mark_layout_dirty(host);
+                            host.window
+                                .set_title(&window_title(&host.mux, show_tab_strip(host)));
+                        }
+                        host.dirty = true;
+                        host.window.request_redraw();
+                    }
+                    2 => {
+                        if let Some((_, panes)) = host.mux.tab_panes().get(tab_index) {
+                            if let Some(pane) = panes.first().copied() {
+                                let target = if panes.len() > 1 {
+                                    ContextMenuTarget::RailSession(pane)
+                                } else {
+                                    ContextMenuTarget::RailSessionSolo(pane)
+                                };
+                                open_context_menu(host, target);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
             Dispatch::Handled
         }
@@ -11609,6 +11747,12 @@ fn apply_palette_pointer(host: &mut HostState) {
             host.dirty = true;
         }
     }
+    let row = if let Some(panel) = host.settings.as_mut() {
+        panel.hover(row);
+        panel.selected()
+    } else {
+        row
+    };
     if let Some(menu) = host.context_menu.as_mut() {
         if menu.selected != row {
             menu.selected = row;
@@ -12772,6 +12916,7 @@ enum SidebarClick {
     OpenSession {
         space: String,
         title: String,
+        tab: Option<usize>,
     },
     OpenSpace(String),
     BeginNewSpace,
@@ -12832,7 +12977,7 @@ fn sidebar_click_decision(
                         .map(SidebarClick::SelectTab)
                         .unwrap_or(SidebarClick::Ignore)
                 } else if saved {
-                    SidebarClick::OpenSpace(name.to_string())
+                    open_saved_row(name, session_title, clicked.tab)
                 } else {
                     SidebarClick::Ignore
                 }
@@ -12848,13 +12993,7 @@ fn sidebar_click_decision(
                         _ => SidebarClick::Ignore,
                     }
                 } else if saved {
-                    match session_title {
-                        Some(title) if !title.is_empty() => SidebarClick::OpenSession {
-                            space: name.to_string(),
-                            title: title.to_string(),
-                        },
-                        _ => SidebarClick::OpenSpace(name.to_string()),
-                    }
+                    open_saved_row(name, session_title, clicked.tab)
                 } else {
                     SidebarClick::Ignore
                 }
@@ -12896,14 +13035,8 @@ fn icon_click_decision(
                     .unwrap_or(SidebarClick::Ignore),
             },
             Some((clicked, name, false)) => {
-                if clicked.kind == sidebar::RowKind::Pane {
-                    match session_title {
-                        Some(title) if !title.is_empty() => SidebarClick::OpenSession {
-                            space: name.to_string(),
-                            title: title.to_string(),
-                        },
-                        _ => SidebarClick::OpenSpace(name.to_string()),
-                    }
+                if matches!(clicked.kind, sidebar::RowKind::Tab | sidebar::RowKind::Pane) {
+                    open_saved_row(name, session_title, clicked.tab)
                 } else {
                     SidebarClick::OpenSpace(name.to_string())
                 }
@@ -12923,14 +13056,29 @@ fn icon_click_decision(
     }
 }
 
+/// A row in a space that is not current. Its session opens the space and
+/// then focuses that pane; without a title the space opens on its own focus.
+fn open_saved_row(space: &str, session_title: Option<&str>, tab: Option<usize>) -> SidebarClick {
+    match session_title {
+        Some(title) if !title.is_empty() => SidebarClick::OpenSession {
+            space: space.to_string(),
+            title: title.to_string(),
+            tab,
+        },
+        _ => SidebarClick::OpenSpace(space.to_string()),
+    }
+}
+
 /// Pane title for a session row, in the same order the tree paints.
 fn session_title_of(tree: &sidebar::SidebarTree, row: &sidebar::TreeRow) -> Option<String> {
-    if row.kind != sidebar::RowKind::Pane {
-        return None;
-    }
     let space = tree.spaces.get(row.space)?;
     let tab = space.tabs.get(row.tab?)?;
-    Some(tab.panes.get(row.pane?)?.title.clone())
+    let pane = match row.kind {
+        sidebar::RowKind::Pane => row.pane?,
+        sidebar::RowKind::Tab => 0,
+        sidebar::RowKind::Space => return None,
+    };
+    Some(tab.panes.get(pane)?.title.clone())
 }
 
 /// Select the session's tab and focus that pane. `None` keeps the tab's
@@ -12993,13 +13141,19 @@ fn open_sidebar_context_menu(host: &mut HostState, row: &sidebar::TreeRow, space
             }
         }
         sidebar::RowKind::Tab => {
-            if let Some(pane) = pane_for_sidebar_row(host, row) {
-                let target = if sidebar::show_pane_rows(sidebar_tab_pane_count(host, row)) {
-                    ContextMenuTarget::RailSession(pane)
-                } else {
-                    ContextMenuTarget::RailSessionSolo(pane)
-                };
-                open_context_menu(host, target);
+            let current = host.space_rail.current.as_deref() == Some(space_name)
+                && host
+                    .sidebar_tree
+                    .spaces
+                    .get(row.space)
+                    .is_some_and(|space| space.name == space_name);
+            if current {
+                if let Some(window) = row
+                    .tab
+                    .and_then(|index| host.mux.tab_infos().get(index).and_then(|tab| tab.window))
+                {
+                    open_context_menu(host, ContextMenuTarget::RailTab(window));
+                }
             }
         }
         sidebar::RowKind::Pane => {
@@ -13157,10 +13311,11 @@ fn handle_sidebar_click(host: &mut HostState, button: MouseButton) -> StripClick
             sidebar_resize::toggle(host);
             StripClickResult::Handled
         }
-        SidebarClick::OpenSession { space, title } => {
+        SidebarClick::OpenSession { space, title, tab } => {
             host.pending_session_focus = Some(sidebar::PendingSession {
                 space: space.clone(),
                 title,
+                tab,
             });
             apply_rail_verdict(host, space_rail::RailVerdict::Open(space));
             host.dirty = true;
@@ -13334,7 +13489,7 @@ fn drag_toast_label(host: &HostState, stride: usize) -> Option<String> {
         .mux
         .tab_infos()
         .into_iter()
-        .map(|tab| tab.title)
+        .map(|tab| tab.fixed_name.unwrap_or(tab.title))
         .collect();
     let subject = match drag.kind {
         StripDragKind::Tab(index) => drag_toast_subject(&DragSubject::Tab(
@@ -13952,15 +14107,16 @@ fn graphite_tab_text(
         Some(mux::StripHit::Pane { tab, handle, .. }) if tab == index => Some(handle),
         _ => None,
     };
-    let decided = title_row::title_row_decision(
-        host.pane_titles,
-        tab.handles,
-        tab.title.as_str(),
-        tab.pane_title.as_deref(),
-        &tab.handle_titles,
+    let decided = title_row::title_row_decision(title_row::TitleRowInput {
+        mode: host.pane_titles,
+        handles: tab.handles,
+        tab_title: tab.title.as_str(),
+        fixed_name: tab.fixed_name.as_deref(),
+        pane_title: tab.pane_title.as_deref(),
+        handle_titles: &tab.handle_titles,
         hover_handle,
-        None,
-    );
+        notice: None,
+    });
     let meta = match (tab.handles > 1, tab.zoomed) {
         (true, true) => Some(format!("{} panes · zoomed", tab.handles)),
         (true, false) => Some(format!("{} panes", tab.handles)),
@@ -13991,24 +14147,56 @@ fn graphite_sidebar_tree(
         .current
         .clone()
         .or_else(|| host.mux.space_id.clone());
-    let live: Vec<sidebar::LiveTab> = tabs
+    let observed = host
+        .snapshot_client
+        .as_ref()
+        .and_then(|client| client.fresh_observed());
+    let snapshot = observed.as_ref().map(|(_, snapshot)| snapshot);
+    let names: Vec<Vec<String>> = host
+        .mux
+        .tab_panes()
+        .iter()
+        .map(|(_, panes)| {
+            panes
+                .iter()
+                .filter_map(|pane| {
+                    let recorded = host.mux.attach_name_of(*pane)?;
+                    Some(space_view::bound_session_name(
+                        recorded,
+                        host.mux.attach_session_of(*pane),
+                        host.mux.space_id.as_deref(),
+                        host.attach_bound_at.get(pane).copied(),
+                        observed.as_ref(),
+                    ))
+                })
+                .collect()
+        })
+        .collect();
+    let mut live_infos = tabs.to_vec();
+    for (index, info) in live_infos.iter_mut().enumerate() {
+        if names.get(index).is_none_or(Vec::is_empty) {
+            // Local shells keep their existing title-row policy.
+            info.title = graphite_tab_text(host, index, &tabs[index], None).label;
+        }
+    }
+    let live: Vec<sidebar::LiveTab> = live_infos
         .iter()
         .enumerate()
         .map(|(index, info)| sidebar::LiveTab {
             info,
+            session_names: names.get(index).map(Vec::as_slice).unwrap_or(&[]),
             mail: mail.get(index).map(Vec::as_slice).unwrap_or(&[]),
             attention: attention.get(index).map(Vec::as_slice).unwrap_or(&[]),
         })
         .collect();
-    // Saved spaces stay alive for the build below; the tree copies titles.
-    let mut saved: Vec<(String, prismattyc_mux::SavedSpace, Vec<String>)> = Vec::new();
+    let mut saved = Vec::new();
     for name in &host.space_rail.names {
         if Some(name) == current.as_ref() {
             continue;
         }
         if let Ok(space) = load_space(&spaces_dir(), name) {
-            let order = prismattyc_mux::space_sessions_in_tab_order(&space);
-            saved.push((name.clone(), space, order));
+            let (tabs, order) = sidebar::saved_tabs(&space, snapshot);
+            saved.push((name.clone(), tabs, order));
         }
     }
     let mut inputs: Vec<sidebar::SpaceInput> = Vec::new();
@@ -14031,14 +14219,14 @@ fn graphite_sidebar_tree(
                 attention,
                 tabs: sidebar::TabsSource::Live(&live),
             });
-        } else if let Some((_, space, order)) = saved.iter().find(|(saved, _, _)| saved == name) {
+        } else if let Some((_, tabs, order)) = saved.iter().find(|(saved, _, _)| saved == name) {
             inputs.push(sidebar::SpaceInput {
                 name: name.as_str(),
                 current: false,
                 collapsed,
                 attention,
                 tabs: sidebar::TabsSource::Saved {
-                    tabs: &space.tabs,
+                    tabs,
                     extra_sessions: order,
                 },
             });
@@ -14144,7 +14332,7 @@ fn paint_graphite_sidebar(
                 };
                 match decided {
                     Some(text) => {
-                        labels.push(text.label);
+                        labels.push(tab.map(|tab| tab.title.clone()).unwrap_or_default());
                         dots.push(Some(text.dot));
                         selected_tabs.push(text.selected);
                     }
@@ -14402,7 +14590,7 @@ fn paint_pane_header(host: &mut HostState, buffer: &mut [u32], stride: usize, ge
             let tab = tabs
                 .iter()
                 .find(|tab| tab.selected)
-                .map(|tab| tab.title.clone())
+                .map(|tab| tab.fixed_name.clone().unwrap_or_else(|| tab.title.clone()))
                 .unwrap_or_default();
             if tab.is_empty() {
                 space
@@ -16100,6 +16288,7 @@ fn open_transparency(host: &mut HostState) -> bool {
     host.palette_layout = None;
     host.theme_picker = None;
     host.context_menu = None;
+    host.settings = None;
     host.context_menu_target = None;
     host.space_picker = None;
     host.move_target = None;
@@ -20356,7 +20545,19 @@ impl ApplicationHandler<UserAction> for App {
                     host.last_app_mouse_cell = None;
                 }
                 WindowEvent::MouseWheel { delta, .. } => {
-                    if host.palette.is_some() {
+                    if let Some(panel) = host.settings.as_mut() {
+                        let rows = match delta {
+                            MouseScrollDelta::LineDelta(_, y) => (-*y * 3.0).round() as i32,
+                            MouseScrollDelta::PixelDelta(position) => {
+                                (-position.y / host.font.cell_h.max(1) as f64).round() as i32
+                            }
+                        };
+                        panel.scroll_rows(rows);
+                        if let Some(menu) = host.context_menu.as_mut() {
+                            menu.selected = panel.selected();
+                        }
+                        host.dirty = true;
+                    } else if host.palette.is_some() {
                         scroll_palette_with_wheel(host, delta);
                     } else if host.theme_picker.is_some() {
                         scroll_theme_picker_with_wheel(host, delta);
@@ -20497,6 +20698,14 @@ impl ApplicationHandler<UserAction> for App {
             }
             WindowEvent::RedrawRequested => unreachable!("handled above"),
             WindowEvent::Ime(ime) => {
+                if let Some(panel) = host.settings.as_mut() {
+                    if let Ime::Commit(text) = &ime {
+                        panel.paste(text);
+                    }
+                    host.dirty = true;
+                    host.window.request_redraw();
+                    return;
+                }
                 let route = ime_text_route(inline_editor(host), &ime, &mut host.preedit);
                 apply_ime_text_route(host, route);
                 host.dirty = true;
@@ -20563,6 +20772,9 @@ impl ApplicationHandler<UserAction> for App {
                     }
                     sync_chrome_hover(host);
                     host.window.request_redraw();
+                    return;
+                }
+                if settings::handle_key(host, &event) {
                     return;
                 }
                 if ime_blocks_host_keyboard(&host.preedit) {
@@ -21644,6 +21856,7 @@ impl ApplicationHandler<UserAction> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        host_tab_requests::poll(self);
         let pump_io = pump_timing::PumpIoScope::begin();
         let mut persist_time = Duration::ZERO;
         for host in self.windows.values_mut() {
@@ -21663,6 +21876,7 @@ impl ApplicationHandler<UserAction> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        host_tab_requests::cleanup();
         for host in self.windows.values_mut() {
             persist_attach_layout_from_live(host);
         }
@@ -21709,7 +21923,7 @@ fn main() -> Result<()> {
         for warning in file_config.macos_override_warnings() {
             eprintln!("prismattyc-host: warning: {warning}");
         }
-        for warning in file_config.mux_unknown_key_warnings() {
+        for warning in file_config.unknown_key_warnings() {
             eprintln!("{}", config::host_warning_line(warning));
         }
         return Ok(());
@@ -21752,7 +21966,7 @@ fn main() -> Result<()> {
     for warning in file_config.macos_override_warnings() {
         eprintln!("prismattyc-host: warning: {warning}");
     }
-    for warning in file_config.mux_unknown_key_warnings() {
+    for warning in file_config.unknown_key_warnings() {
         eprintln!("{}", config::host_warning_line(warning));
     }
     cli.apply_config(&file_config);
@@ -27101,7 +27315,7 @@ session mail (id 15)
         assert_eq!(cli.light_cycle_ms, DEFAULT_LIGHT_CYCLE_MS);
         assert!(cli.light_cycle_head, "vehicle head defaults on");
         cli.apply_config(&config::ConfigFile {
-            focus_border_animation: Some("light-cycle".into()),
+            focus_border_animation: Some(crate::config::FocusBorderAnimation::LightCycle),
             focus_border_animation_ms: Some(600),
             focus_border_animation_head: Some(false),
             ..Default::default()
@@ -27111,7 +27325,7 @@ session mail (id 15)
         assert!(!cli.light_cycle_head);
         // Explicit "none" and a removed key both turn it back off.
         cli.apply_config(&config::ConfigFile {
-            focus_border_animation: Some("none".into()),
+            focus_border_animation: Some(crate::config::FocusBorderAnimation::None),
             ..Default::default()
         });
         assert!(!cli.light_cycle);
@@ -27888,6 +28102,70 @@ session mail (id 15)
     }
 
     #[test]
+    fn saved_tab_row_in_another_space_focuses_its_session() {
+        use graphite::SidebarHit;
+        let tabs = vec![prismattyc_mux::SavedSpaceTab {
+            title: "main".to_string(),
+            sessions: vec!["shell".to_string(), "logs".to_string()],
+            layout: None,
+            fixed_name: None,
+        }];
+        let extra = vec!["worker-a".to_string()];
+        let tree = sidebar::SidebarTree::build(&[sidebar::SpaceInput {
+            name: "mail",
+            current: false,
+            collapsed: false,
+            attention: 0,
+            tabs: sidebar::TabsSource::Saved {
+                tabs: &tabs,
+                extra_sessions: &extra,
+            },
+        }]);
+        let rows = sidebar::visible_rows(&tree);
+        // A session outside every saved tab is a single-session tab, so its
+        // only row is the tab row. The saved tab's pane rows sit under it.
+        let session_tab = rows
+            .iter()
+            .find(|row| row.kind == sidebar::RowKind::Tab && row.tab == Some(1))
+            .expect("the extra session paints a tab row");
+        let saved_tab = rows
+            .iter()
+            .find(|row| row.kind == sidebar::RowKind::Tab && row.tab == Some(0))
+            .expect("the saved tab paints a tab row");
+        let session_title = session_title_of(&tree, session_tab);
+        assert_eq!(session_title.as_deref(), Some("worker-a"));
+        assert_eq!(
+            session_title_of(&tree, saved_tab).as_deref(),
+            Some("shell"),
+            "a multi-session tab names its first session"
+        );
+        let open_session = SidebarClick::OpenSession {
+            space: "mail".to_string(),
+            title: "worker-a".to_string(),
+            tab: Some(1),
+        };
+        assert_eq!(
+            sidebar_click_decision(
+                SidebarHit::Row(1),
+                Some((session_tab, "mail", false)),
+                true,
+                session_title.as_deref(),
+            ),
+            open_session,
+            "the sidebar opens the space, then focuses the clicked session"
+        );
+        assert_eq!(
+            icon_click_decision(
+                SidebarHit::Row(1),
+                Some((session_tab, "mail", false)),
+                session_title.as_deref(),
+            ),
+            open_session,
+            "the collapsed strip does the same"
+        );
+    }
+
+    #[test]
     fn move_tab_refusal_hint_names_the_last_tab_boundary() {
         assert!(move_tab_refusal_hint(1).contains("Create another tab"));
         assert!(move_tab_refusal_hint(0).contains("select the first tab"));
@@ -27956,6 +28234,7 @@ session mail (id 15)
             SidebarClick::OpenSession {
                 space: "mail".to_string(),
                 title: "composer-2".to_string(),
+                tab: Some(1),
             },
             "a session in another space opens that space, then focuses the pane"
         );
@@ -28053,6 +28332,117 @@ session mail (id 15)
     }
 
     #[test]
+    fn sidebar_recycled_session_id_keeps_click_target_on_recorded_session() {
+        let observed = (
+            SystemTime::UNIX_EPOCH,
+            prismattyc_mux::Snapshot {
+                sequence: 1,
+                sessions: vec![
+                    prismattyc_mux::SessionSnapshot {
+                        id: 7,
+                        name: "stranger".into(),
+                        agent_id: None,
+                        space_id: Some("owner-a".into()),
+                        windows: vec![],
+                    },
+                    prismattyc_mux::SessionSnapshot {
+                        id: 9,
+                        name: "agent-1".into(),
+                        agent_id: None,
+                        space_id: Some("owner-a".into()),
+                        windows: vec![],
+                    },
+                ],
+            },
+        );
+        let name = space_view::bound_session_name(
+            "agent-1",
+            Some("7"),
+            Some("owner-a"),
+            None,
+            Some(&observed),
+        );
+        assert_eq!(name, "agent-1");
+        let pending = sidebar::PendingSession {
+            space: "space-a".into(),
+            title: name,
+            tab: Some(0),
+        };
+        assert_eq!(
+            sidebar::pending_session_slot(
+                &pending,
+                Some("space-a"),
+                &[vec!["stranger"], vec!["agent-1"]]
+            ),
+            Some((1, 0))
+        );
+    }
+
+    #[test]
+    fn sidebar_custom_label_click_keeps_session_and_window_identity() {
+        let tabs: Vec<_> = ["main", "Review"]
+            .into_iter()
+            .map(|title| prismattyc_mux::SavedSpaceTab {
+                title: title.into(),
+                sessions: vec!["agent-2".into()],
+                layout: None,
+                fixed_name: None,
+            })
+            .collect();
+        let tree = sidebar::SidebarTree::build(&[sidebar::SpaceInput {
+            name: "space-b",
+            current: false,
+            collapsed: false,
+            attention: 0,
+            tabs: sidebar::TabsSource::Saved {
+                tabs: &tabs,
+                extra_sessions: &[],
+            },
+        }]);
+        let row = sidebar::visible_rows(&tree)
+            .into_iter()
+            .find(|row| row.tab == Some(1))
+            .unwrap();
+        assert_eq!(tree.spaces[0].tabs[1].title, "Review · agent-2");
+        let title = session_title_of(&tree, &row).unwrap();
+        assert_eq!(title, "agent-2");
+        assert_eq!(
+            sidebar_click_decision(
+                graphite::SidebarHit::Row(2),
+                Some((&row, "space-b", false)),
+                true,
+                Some(&title)
+            ),
+            SidebarClick::OpenSession {
+                space: "space-b".into(),
+                title: "agent-2".into(),
+                tab: Some(1)
+            }
+        );
+        let pending = sidebar::PendingSession {
+            space: "space-b".into(),
+            title,
+            tab: row.tab,
+        };
+        assert_eq!(
+            sidebar::pending_session_slot(
+                &pending,
+                Some("space-a"),
+                &[vec!["agent-2"], vec!["agent-2"]]
+            ),
+            None
+        );
+        assert_eq!(
+            sidebar::pending_session_slot(
+                &pending,
+                Some("space-b"),
+                &[vec!["agent-2"], vec!["agent-2"]]
+            ),
+            Some((1, 0))
+        );
+    }
+
+    #[test]
     fn icon_click_decision_opens_spaces_and_focuses_sessions() {
         use graphite::SidebarHit;
         let row = |kind, tab, pane| sidebar::TreeRow {
@@ -28107,6 +28497,7 @@ session mail (id 15)
             SidebarClick::OpenSession {
                 space: "mail".to_string(),
                 title: "composer-2".to_string(),
+                tab: Some(1),
             },
             "a titled session icon focuses that pane after the space opens"
         );
@@ -28163,6 +28554,7 @@ session mail (id 15)
                             attention: false,
                         },
                     ],
+                    fixed_name: None,
                 }],
             }],
         };

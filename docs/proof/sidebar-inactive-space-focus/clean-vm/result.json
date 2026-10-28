@@ -1,0 +1,19 @@
+{
+  "tested_revision": "aafbd25002f163c6f50b6230714b9e41ade38aea",
+  "executable": "prismattyc-host 0.3.41 (aafbd25002f1)",
+  "os": "macOS 26.6.2 arm64, fresh clean guest, no Prismattyc installed",
+  "proof_kind": "host-built binaries copied into the guest; guest desktop driven only by a pointer click over the VM's VNC server; presented app window cropped",
+  "binary_sha256": {
+    "pmux": "796389cead909320904f9db053c9c962a41e0e233298466819ccf3eac7632e65",
+    "pmuxd": "731180fd4c529d83b0bc2e91beaf2bc274e21dbde1684909c02323b90fbc8cf5",
+    "prismattyc-host": "dabb4cc4ad814fe628773efd7b9f85f6e4f7424abab1ccd1a38d7759d5b5fb91"
+  },
+  "setup": "sidebar layout; Space lab (session lab-1) current; Space mail with sessions mail-1 and target, not current",
+  "observed": [
+    "before: header shows lab / lab-1, mail group lists mail-1 then target",
+    "one click on the target row in the inactive mail Space: header shows mail / target, the target row is selected and the pane shown is target, not the first mail session"
+  ],
+  "not_shown": [
+    "split and grid arrangements, the collapsed icon strip, Linux and Windows runtime"
+  ]
+}

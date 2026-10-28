@@ -30,8 +30,15 @@ class Failure(Exception):
     pass
 
 
+COMMAND_TIMEOUT = 20
+
+
 def run(*args, env=None):
-    return subprocess.run(args, capture_output=True, text=True, env=env, check=False)
+    """Run a command with a hard timeout. A hang returns rc=124 instead of blocking the driver."""
+    try:
+        return subprocess.run(args, capture_output=True, text=True, env=env, check=False, timeout=COMMAND_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(args, 124, "", f"timed out after {COMMAND_TIMEOUT}s")
 
 
 def xdo(*args):

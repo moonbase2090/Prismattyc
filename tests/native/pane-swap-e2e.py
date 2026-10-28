@@ -19,6 +19,7 @@ DISPLAY = os.environ.get("DISPLAY", ":99")
 ROOT = Path(__file__).resolve().parents[2]
 HOST = os.environ.get("PRISMATTYC_HOST", str(ROOT / "target/debug/prismattyc-host"))
 PMUX = os.environ.get("PMUX", str(ROOT / "target/debug/pmux"))
+PMUXD = os.environ.get("PMUXD", str(ROOT / "target/debug/pmuxd"))
 
 
 def run(*args, env=None):
@@ -92,6 +93,17 @@ def main():
     host_log = tmp / "host.log"
     env = dict(os.environ, DISPLAY=DISPLAY, XDG_RUNTIME_DIR=str(runtime), PMUX_SOCKET=str(runtime / "pmux.sock"),
                PRISMATTYC_CONFIG=str(config), PRISMATTYC_DUMP_PRESENT=str(dump), WINIT_UNIX_BACKEND="x11")
+    # Start the daemon on the driver's socket first, so the host attaches to it.
+    shell = tmp / "shell"
+    shell.write_text("#!/bin/sh\nexec cat\n")
+    shell.chmod(0o755)
+    daemon_log = (tmp / "pmuxd.log").open("w")
+    daemon = subprocess.Popen([PMUXD, "--socket", env["PMUX_SOCKET"], "--", str(shell)], env=env,
+                              stdout=daemon_log, stderr=subprocess.STDOUT)
+    if not wait(lambda: Path(env["PMUX_SOCKET"]).exists(), 15):
+        daemon.terminate()
+        print("FAIL: daemon socket never appeared", (tmp / "pmuxd.log").read_text(errors="replace")[-2000:])
+        sys.exit(1)
     with host_log.open("w") as log:
         host = subprocess.Popen([HOST, "--no-splash"], env=env, stdout=log, stderr=subprocess.STDOUT)
     wid = None
@@ -104,6 +116,8 @@ def main():
         # Wait for the host to attach and size its pane (not the default 80x24).
         if not wait(lambda: any(size != "80x24" for size in pane_sizes(env)), 15):
             raise Failure(f"host did not size its pane (pane sizes={pane_sizes(env)}); host is not driving PMUX_SOCKET")
+        if not wait(lambda: "no attach clients" not in run(PMUX, "clients", env=env).stdout, 15):
+            raise Failure("host did not attach to the driver daemon: 'pmux clients' shows no attach client")
         if not wait(dump.exists, 15):
             raise Failure("no present dump")
         xdo("windowfocus", "--sync", wid)
@@ -166,6 +180,9 @@ def main():
     finally:
         host.terminate()
         host.wait(timeout=5)
+        daemon.terminate()
+        daemon.wait(timeout=5)
+        daemon_log.close()
 
 
 if __name__ == "__main__":

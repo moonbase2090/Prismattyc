@@ -106,3 +106,52 @@ must be answered before slice 3:
 - Real alpha and sub-cell rendering in native mode (roadmap PR 55).
 - The ratatui compatibility crate.
 - Any change to the classic ANSI path.
+
+## No-regression gate
+
+The native path has to be a measured improvement or equal everywhere. It is
+never accepted on a regression. This section is defined before any code.
+
+### 1. Baselines on current main
+
+Record these on `origin/main` with the crossterm path, before the first code
+PR, and keep the numbers in the plan PR:
+
+- Render bench: `tests/native/render-bench.sh` through
+  `tests/native/docker/run.sh render-bench`. The per-frame `cells_max`,
+  `cells_mean` and `blit_sum` values for all eight experiments, with the Foot
+  wall-clock reference at the same font size.
+- Checkpoint latency: `tests/performance/checkpoint-latency.py` against a
+  frozen release `pmuxd`, at 26 panes for 20 seconds, with and without
+  persistence. Maximum pause, count above 50 ms, p50, p99.
+- Output throughput: the Linux probe in `tests/performance`, with the frozen
+  host binaries and Foot.
+- Frame time p50 and p99, input-to-paint latency, CPU and resident memory
+  for the same scenarios. The input-to-paint probe is the render bench plus a
+  key-injected frame timestamp.
+
+### 2. CI gate
+
+A CI job runs the same scenarios on the baseline and on the candidate, with
+the native flag off and on. It fails when any of these exceeds noise:
+
+- p99 frame time more than 3% worse than the baseline.
+- Input-to-paint p99 more than 3% worse.
+- Any correctness diff.
+- Checkpoint maximum pause or the count above 50 ms worse than the baseline.
+
+Each PR posts its before and after table in the PR body.
+
+### 3. Golden output comparison
+
+Every pmux screen gets a golden capture from real output, taken with the
+crossterm path and again with the native path. Captures are compared pixel for
+pixel where the renderer is equal, and reviewed by the owner where it is not.
+No synthetic or re-rendered transcripts are used as goldens.
+
+### 4. Flag policy
+
+- The flag stays off by default until every scenario is equal or better and
+  the owner has seen the comparison.
+- Turning it on by default is its own trunk PR, with the comparison attached.
+- A regression found after that point turns the flag back off in a hotfix PR.

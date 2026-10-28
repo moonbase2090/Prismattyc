@@ -165,7 +165,7 @@ pane_padding_px = 5
 space_rail = "bottom"
 # Enable drag and Shift+arrow reordering for saved spaces. true | false.
 space_reorder = false
-# Keep one pmuxd snapshot connection for periodic polls. Startup only. true | false.
+# Keep one pmuxd snapshot connection for periodic polls. Startup only; defaults on. true | false.
 snapshot_client = true
 # Restore and re-stroke only border rings that change. true | false.
 selective_border_rings = false

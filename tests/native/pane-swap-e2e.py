@@ -56,7 +56,7 @@ def main():
     runtime = tmp / "rt"
     runtime.mkdir()
     config = tmp / "config.toml"
-    config.write_text("splash = false\nstart_at_login = false\nautomatic_update_checks = false\npanes = 2\n")
+    config.write_text("splash = false\nstart_at_login = false\nautomatic_update_checks = false\n")
     dump = tmp / "present.png"
     env = dict(
         os.environ,
@@ -75,6 +75,8 @@ def main():
         geom = dict(line.split("=", 1) for line in run("xdotool", "getwindowgeometry", "--shell", wid).stdout.splitlines())
         width, height = int(geom["WIDTH"]), int(geom["HEIGHT"])
         win_x, win_y = int(geom["X"]), int(geom["Y"])
+        run("xdotool", "windowfocus", "--sync", wid)
+        run("xdotool", "key", "--clearmodifiers", "ctrl+shift+e")
         deadline = time.monotonic() + 15.0
         before = pane_positions(env)
         while len(before) != 2 and time.monotonic() < deadline:
@@ -110,6 +112,16 @@ def main():
         if after.get(a) != before.get(b) or after.get(b) != before.get(a):
             fail("pane order did not swap", before=before, after=after, present_png=str(dump))
         print("PASS: panes swapped positions")
+        # Negative case: drop back onto pane A's own body; nothing may change.
+        run("xdotool", "mousemove", "--sync", str(release[0]), str(release[1]))
+        run("xdotool", "mousedown", "1")
+        run("xdotool", "mousemove", "--sync", str(release[0] - 5), str(release[1]))
+        run("xdotool", "mousemove", "--sync", str(release[0]), str(release[1]))
+        run("xdotool", "mouseup", "1")
+        time.sleep(0.5)
+        if pane_positions(env) != after:
+            fail("drop on the same pane changed the order", after=after, now=pane_positions(env))
+        print("PASS: same-pane drop left the order unchanged")
     finally:
         host.terminate()
         host.wait(timeout=5)

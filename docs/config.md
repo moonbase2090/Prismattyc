@@ -38,7 +38,7 @@ file-writer thread. It defaults to `true` and takes effect at startup, so
 restart the host after changing it.
 `async_paste` hands pastes to the pane writer thread so back-pressure does not
 pause the window. It defaults to `true`.
-`snapshot_client` stays off unless the file sets it to true. The host reads
+`snapshot_client` is on by default; set it to false to turn the snapshot connection off. The host reads
 that key at startup only; a later edit does not start or stop the cache.
 `macos_present` selects the macOS window presenter at startup. It defaults to
 `"tiles"`; `"iosurface"` enables the three-buffer IOSurface path. Unknown
@@ -166,7 +166,7 @@ space_rail = "bottom"
 # Enable drag and Shift+arrow reordering for saved spaces. true | false.
 space_reorder = false
 # Keep one pmuxd snapshot connection for periodic polls. Startup only. true | false.
-snapshot_client = false
+snapshot_client = true
 # Restore and re-stroke only border rings that change. true | false.
 selective_border_rings = false
 # Save changed Space arrangements after a short idle. true | false.

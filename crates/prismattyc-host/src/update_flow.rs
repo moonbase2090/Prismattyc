@@ -217,33 +217,43 @@ fn require_same_sessions(plan: &Plan, pmux: &Path) -> Result<()> {
 fn install(plan: Plan, save: bool) -> Result<Resume> {
     let pmux = find_mux_bin();
     require_same_sessions(&plan, &pmux)?;
-    let backup = if save {
-        let directory = prismattyc_mux::spaces_dir()
-            .parent()
-            .context("configuration data directory")?
-            .join("session-configurations");
-        prismattyc_mux::private_fs::create_dir(&directory)?;
-        let file = directory.join(format!(
-            "update-{}-{}.json",
-            std::process::id(),
-            prismattyc_mux::host_render_status::unix_ms()
-        ));
-        run(&pmux, &["session-config", "save", &file.to_string_lossy()])?;
-        Some(file)
-    } else {
-        None
-    };
-    let result = complete_install(&plan, &pmux);
+    let directory = prismattyc_mux::spaces_dir()
+        .parent()
+        .context("configuration data directory")?
+        .join("session-configurations");
+    prismattyc_mux::private_fs::create_dir(&directory)?;
+    let file = directory.join(format!(
+        "update-{}-{}.json",
+        std::process::id(),
+        prismattyc_mux::host_render_status::unix_ms()
+    ));
+    run(&pmux, &["session-config", "save", &file.to_string_lossy()])?;
+    let backup = save.then_some(file.clone());
+    let result = complete_install(&plan, &pmux, &file, !save);
     match result {
         Ok(notice) => Ok(Resume { notice, backup }),
-        Err(error) => Err(error).with_context(|| match backup {
-            Some(path) => format!("Session configuration remains saved at {}", path.display()),
-            None => "No session configuration was requested".into(),
-        }),
+        Err(error) => {
+            if !save {
+                let _ = std::fs::remove_file(&file);
+            }
+            let context = backup.map_or_else(
+                || {
+                    "No restore backup was requested; the temporary session snapshot was discarded"
+                        .into()
+                },
+                |path| format!("Session configuration remains saved at {}", path.display()),
+            );
+            Err(error).context(context)
+        }
     }
 }
 
-fn complete_install(plan: &Plan, pmux: &Path) -> Result<String> {
+fn complete_install(
+    plan: &Plan,
+    pmux: &Path,
+    consent: &Path,
+    delete_consent: bool,
+) -> Result<String> {
     if plan.update_available {
         let report: Value = serde_json::from_str(&run(pmux, &["update", "--json"])?)?;
         anyhow::ensure!(
@@ -260,17 +270,21 @@ fn complete_install(plan: &Plan, pmux: &Path) -> Result<String> {
     let installed_versions: Value = serde_json::from_str(&run(&installed, &["versions"])?)?;
     verify_installed_versions(&installed_versions, &plan.available)?;
     require_same_sessions(plan, &installed)?;
-    run(
-        &installed,
-        &[
-            "restart",
-            "--daemon",
-            "--stop-sessions",
-            "--worker",
-            "--json",
-        ],
-    )
-    .context("The files are installed, but the daemon restart failed")?;
+    let consent = consent.to_string_lossy();
+    let mut restart = vec![
+        "restart".to_string(),
+        "--daemon".to_string(),
+        "--stop-sessions".to_string(),
+        "--consented-config".to_string(),
+        consent.into_owned(),
+    ];
+    if delete_consent {
+        restart.push("--delete-consented-config".to_string());
+    }
+    restart.extend(["--worker".to_string(), "--json".to_string()]);
+    let restart_args = restart.iter().map(String::as_str).collect::<Vec<_>>();
+    run(&installed, &restart_args)
+        .context("The files are installed, but the daemon restart failed")?;
     let mcp = run(&installed, &["restart", "--mcp", "--json"])
         .context("The daemon restarted, but the MCP restart failed")?;
     let mut versions: Value = serde_json::from_str(&run(&installed, &["versions"])?)?;

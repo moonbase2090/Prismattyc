@@ -342,6 +342,13 @@ fn write_one(pending: PendingJob) -> Completion {
         WriteJob::AttachTabs { path, file } => {
             let result =
                 prismattyc_mux::attach_tabs::save(&path, &file).map_err(|error| error.to_string());
+            crate::drag_trace(|| {
+                let sessions = file.tabs.first().map(|tab| tab.sessions.clone());
+                format!(
+                    "attach-tabs write ok={} sessions={sessions:?}",
+                    result.is_ok()
+                )
+            });
             let stamp = result.is_ok().then(|| file_stamp(&path)).flatten();
             (result, stamp)
         }

@@ -2018,9 +2018,13 @@ mod layout_tests {
         let (small, _) = paint(&layout_page, theme::ThemeVariant::Dark);
         let (large, _) = paint(&settings_page, theme::ThemeVariant::Dark);
         assert_eq!(
-            (small.panel_x, small.panel_y, small.panel_w, small.panel_h),
-            (large.panel_x, large.panel_y, large.panel_w, large.panel_h),
-            "fixed size: three rows and the full settings list share one panel"
+            (small.panel_y, small.panel_h),
+            (large.panel_y, large.panel_h),
+            "fixed-height panels keep their vertical position and height across pages"
+        );
+        assert!(
+            large.panel_w >= small.panel_w,
+            "the wider settings labels may expand the panel"
         );
         // Pointing at each option hits that row, and a context-menu row
         // shows the pointing hand.

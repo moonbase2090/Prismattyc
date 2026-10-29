@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- The Spaces title remains visible beside the expand/collapse-all control when the sidebar is docked on either side.
 - Palette panels no longer count the horizontal row inset twice when sizing to their content.
 
 ## [0.3.52] - 2026-10-28

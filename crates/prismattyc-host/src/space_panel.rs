@@ -638,6 +638,55 @@ pub(super) fn update_page(
     host.window.request_redraw();
 }
 
+fn action_label(panel: &Panel, index: Option<usize>) -> Option<String> {
+    let row = panel.rows.get(index?)?;
+    (!matches!(row.choice, Choice::None)).then(|| row.label.clone())
+}
+
+fn action_index(panel: &Panel, label: Option<&str>) -> Option<usize> {
+    let label = label?;
+    panel
+        .rows
+        .iter()
+        .position(|row| row.label == label && !matches!(row.choice, Choice::None))
+}
+
+fn update_columns(
+    panel: &mut Panel,
+    columns: usize,
+    selected: Option<usize>,
+    confirm: Option<usize>,
+) -> (Option<usize>, Option<usize>) {
+    let selected_action = action_label(panel, selected);
+    let confirmed_action = action_label(panel, confirm);
+    if panel.columns != columns {
+        panel.columns = columns;
+        if panel.input.is_none() && panel.pending.is_none() {
+            panel.rebuild();
+        }
+    }
+    let last = panel.rows.len().saturating_sub(1);
+    (
+        action_index(panel, selected_action.as_deref())
+            .or_else(|| selected.map(|index| index.min(last))),
+        action_index(panel, confirmed_action.as_deref())
+            .or_else(|| confirm.map(|index| index.min(last))),
+    )
+}
+
+/// Rewrap the open Space panel after a physical window resize, even when the
+/// terminal grid itself keeps the same number of cells.
+pub(super) fn resize(host: &mut HostState, physical_width: u32) {
+    let columns = (physical_width as usize / host.font.cell_w.max(1)).saturating_sub(10);
+    let (Some(panel), Some(menu)) = (host.space_panel.as_mut(), host.context_menu.as_mut()) else {
+        return;
+    };
+    let (selected, confirm) = update_columns(panel, columns, Some(menu.selected), menu.confirm);
+    menu.selected = selected.unwrap_or(0);
+    menu.confirm = confirm;
+    host.dirty = true;
+}
+
 pub(super) fn maintenance(host: &mut HostState) {
     settings(host);
     let panel = host.space_panel.as_mut().unwrap();
@@ -2068,6 +2117,54 @@ mod layout_tests {
             let (_, buffer) = paint(panel, variant);
             write_present_png(&dir.join(name), &buffer, width as u32, height as u32).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+
+    #[test]
+    fn result_text_rewraps_at_new_width_and_keeps_the_back_action_selected() {
+        let mut panel = Panel {
+            space: "demo".into(),
+            maintenance: true,
+            owner: None,
+            details: None,
+            page: Page::Text(
+                "Installed host: 0.3.45\nRunning daemon: 0.3.44 with a long explanation about the active version"
+                    .into(),
+            ),
+            rows: vec![],
+            input: None,
+            submitted: None,
+            pending: None,
+            update_action: None,
+            scroll: 0,
+            columns: 80,
+            chrome_layout: None,
+        };
+        panel.rebuild();
+        let selected = panel
+            .rows
+            .iter()
+            .position(|row| matches!(row.choice, Choice::Maintenance))
+            .expect("back action exists");
+        assert!(panel
+            .rows
+            .iter()
+            .any(|row| space_rail::name_cells(&row.label) > 24));
+
+        let (selected, confirm) = update_columns(&mut panel, 24, Some(selected), Some(selected));
+
+        let selected = selected.expect("selection remains present");
+        assert!(matches!(panel.rows[selected].choice, Choice::Maintenance));
+        assert_eq!(confirm, Some(selected));
+        assert!(panel
+            .rows
+            .iter()
+            .filter(|row| matches!(row.choice, Choice::None))
+            .all(|row| space_rail::name_cells(&row.label) <= 24));
     }
 }
 

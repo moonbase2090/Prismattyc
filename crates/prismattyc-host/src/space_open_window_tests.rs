@@ -1422,10 +1422,38 @@ fn reopen_space_after_restart(
             "restart did not reuse session ids: stale={stale_ids:?} live={live:?}"
         );
     }
-    let host = app.windows.get_mut(&window).unwrap();
-    let path = host.attach_layout_path.clone().unwrap();
-    test_support::wait_for_attach_write(host);
-    let cache = attach_tabs::load(&path).expect("attach cache");
+    let path = app
+        .windows
+        .get(&window)
+        .unwrap()
+        .attach_layout_path
+        .clone()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let cache = loop {
+        pump_host(app, window);
+        let host = app.windows.get_mut(&window).unwrap();
+        test_support::wait_for_attach_write(host);
+        let cache = attach_tabs::load(&path);
+        let keys: Vec<String> = cache
+            .as_ref()
+            .into_iter()
+            .flat_map(|cache| cache.tabs.iter())
+            .flat_map(|tab| tab.sessions.iter().cloned())
+            .collect();
+        if live.iter().all(|session| {
+            let id = session.id.to_string();
+            keys.iter().any(|key| key == &id || key == &session.name)
+        }) {
+            break cache.expect("attach cache");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "attach cache did not include all reopened sessions: keys={keys:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let host = app.windows.get(&window).unwrap();
     let keys: Vec<String> = cache
         .tabs
         .iter()

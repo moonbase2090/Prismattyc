@@ -119,6 +119,13 @@ native input for each of these steps under both classic and Graphite chrome:
    routing. Separately check live changes after watcher reload and controls
    labeled for the next startup or daemon start.
 
+For a long result in the Space panel (for example, Update source results),
+resize the host narrower and wider while the result is open. Confirm the text
+rewraps to the available panel width, the action row remains visible and
+selected, and Graphite chrome does not ellipsize full-width result rows. A
+terminal-grid resize alone is insufficient coverage: change the physical
+window width while keeping the terminal cell count constant as well.
+
 No host or VM input is permitted without the coordinator's desktop allocation.
 A missing allocation, display, Accessibility permission, or relevant OS is an
 unmet prerequisite. Report it separately from passing non-window probes.

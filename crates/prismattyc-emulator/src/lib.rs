@@ -2160,6 +2160,53 @@ impl PtySession {
     where
         S: AsRef<OsStr>,
     {
+        Self::spawn_config_with_fds(program, arguments, cwd, environment, size, Vec::new())
+    }
+
+    /// Like [`PtySession::spawn_config`], and also maps each `(fd, target)` into the child.
+    ///
+    /// The child sees the owned `fd` as `target`, after fork and before exec, and no
+    /// other child inherits it. Targets must be unique and at least 3. Each source is
+    /// set close-on-exec in the parent and closed when this call returns. A validation
+    /// or spawn failure returns an error before any child is started.
+    #[cfg(unix)]
+    pub fn spawn_config_with_fds<S>(
+        program: &str,
+        arguments: &[S],
+        cwd: Option<&Path>,
+        environment: &BTreeMap<String, String>,
+        size: PtySize,
+        child_fds: Vec<(std::os::fd::OwnedFd, std::os::fd::RawFd)>,
+    ) -> Result<Self>
+    where
+        S: AsRef<OsStr>,
+    {
+        use std::os::fd::AsRawFd;
+
+        let mut targets = std::collections::BTreeSet::new();
+        for (_, target) in &child_fds {
+            if *target < 3 {
+                return Err(anyhow!("child fd target {target} must be 3 or higher"));
+            }
+            if !targets.insert(*target) {
+                return Err(anyhow!("child fd target {target} is mapped more than once"));
+            }
+        }
+        for (fd, target) in &child_fds {
+            if fd.as_raw_fd() != *target && targets.contains(&fd.as_raw_fd()) {
+                return Err(anyhow!(
+                    "child fd source {} is also a child target; map it elsewhere first",
+                    fd.as_raw_fd()
+                ));
+            }
+        }
+        for (fd, _) in &child_fds {
+            // SAFETY: fd is an open, owned descriptor; F_SETFD only changes its flags.
+            if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+        }
+
         let pair = native_pty_system().openpty(size)?;
         let mut command = CommandBuilder::new(program);
         for argument in arguments {
@@ -2181,6 +2228,9 @@ impl PtySession {
         // ADR-0017 req 4: cells must not inherit the operator control socket path.
         command.env_remove("HIVE_SOCKET");
         apply_child_term_env(&mut command);
+        for (fd, target) in &child_fds {
+            command.child_fd(fd.as_raw_fd(), *target);
+        }
         let child = pair.slave.spawn_command(command)?;
         drop(pair.slave);
         let reader = pair.master.try_clone_reader()?;
@@ -4314,5 +4364,102 @@ mod tests {
             assert_eq!(history_row_text(&emulator, 0), "line-078", "{cols}x{rows}");
             assert_eq!(history_row_text(&emulator, 76), "line-002", "{cols}x{rows}");
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod child_fd_tests {
+    use super::*;
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    fn wait_for_file(path: &Path) -> String {
+        for _ in 0..500 {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                if !text.is_empty() {
+                    return text;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("child did not write {}", path.display());
+    }
+
+    #[test]
+    fn mapped_fd_is_seen_only_by_its_child_during_a_concurrent_spawn() {
+        let dir = std::env::temp_dir().join(format!("pty-childfd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut fds = [0i32; 2];
+        // SAFETY: pipe fills two fresh descriptors on success; checked below.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: both descriptors were just returned by pipe and are owned here.
+        let read_end = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let write_end = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        drop(write_end);
+        // The parent keeps its own copy open across the concurrent spawn below.
+        let held = read_end.try_clone().unwrap();
+
+        let script = |name: &str| {
+            format!(
+                "if [ -e /dev/fd/3 ]; then echo mapped > {d}/{name}; else echo missing > {d}/{name}; fi",
+                d = dir.display()
+            )
+        };
+        let env = BTreeMap::new();
+        let size = portable_pty::PtySize::default();
+        let mut mapped = PtySession::spawn_config_with_fds(
+            "/bin/sh",
+            &["-c".to_string(), script("mapped")],
+            None,
+            &env,
+            size,
+            vec![(read_end, 3)],
+        )
+        .unwrap();
+        let mut plain = PtySession::spawn_config(
+            "/bin/sh",
+            &["-c".to_string(), script("plain")],
+            None,
+            &env,
+            size,
+        )
+        .unwrap();
+
+        assert_eq!(wait_for_file(&dir.join("mapped")), "mapped\n");
+        assert_eq!(wait_for_file(&dir.join("plain")), "missing\n");
+        mapped.wait().unwrap();
+        plain.wait().unwrap();
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn duplicate_or_low_targets_are_rejected_before_spawn() {
+        let mut fds = [0i32; 2];
+        // SAFETY: as above.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: as above.
+        let a = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        // SAFETY: as above.
+        let b = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        let env = BTreeMap::new();
+        let size = portable_pty::PtySize::default();
+        let low = PtySession::spawn_config_with_fds(
+            "/bin/sh",
+            &["-c".to_string(), "true".to_string()],
+            None,
+            &env,
+            size,
+            vec![(a, 2)],
+        );
+        assert!(low.is_err());
+        let dup = PtySession::spawn_config_with_fds(
+            "/bin/sh",
+            &["-c".to_string(), "true".to_string()],
+            None,
+            &env,
+            size,
+            vec![(b.try_clone().unwrap(), 4), (b, 4)],
+        );
+        assert!(dup.is_err());
     }
 }

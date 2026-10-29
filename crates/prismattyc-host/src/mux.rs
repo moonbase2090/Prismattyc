@@ -14,11 +14,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use portable_pty::PtySize;
 use prismattyc_core::{Cursor, GridDamage, Selection};
-use prismattyc_emulator::{CursorShape, Emulator, EmulatorStateV1, PlacedImage, PtySession};
+use prismattyc_emulator::{CursorShape, Emulator, PlacedImage, PtySession};
 use prismattyc_mux::{
     apply_arrangement, even_horizontal_row, even_two_row_grid, even_vertical_column,
     layout_to_rects, Arrangement, Axis, CellRect, ClientView, Domain, PaneId, PaneLayout,
-    SessionId, SizeOwner, WindowId, DEFAULT_MIN_COLS, DEFAULT_MIN_ROWS, MAX_PANE_STATE_BYTES,
+    SessionId, SizeOwner, WindowId, DEFAULT_MIN_COLS, DEFAULT_MIN_ROWS,
 };
 use prismattyc_protocol::{InputModifiers, PointerPhase, ViewerId};
 
@@ -405,6 +405,22 @@ pub(crate) fn pane_title_from_osc(text: &str) -> Option<String> {
         return None;
     }
     Some(text.to_string())
+}
+
+/// The pane a same-tab pane drag reorders with when it ends on another
+/// pane's handle in that tab. Drops onto other tabs, the empty end, or the
+/// dragged pane's own handle are not swaps.
+pub(crate) fn pane_drop_swap_target(
+    from_tab: usize,
+    pane: PaneId,
+    hit: Option<StripHit>,
+) -> Option<PaneId> {
+    match hit {
+        Some(StripHit::Pane {
+            tab, pane: target, ..
+        }) if tab == from_tab && target != pane => Some(target),
+        _ => None,
+    }
 }
 
 /// Hit in the tab strip (PT-69).
@@ -905,9 +921,8 @@ pub(crate) struct PaneRuntime {
     from_pty_rx: Option<mpsc::Receiver<std::io::Result<Vec<u8>>>>,
     /// Set on a log-backed attach pane. Mutually exclusive with `session`.
     log: Option<attach_log::LogPane>,
-    /// Serialized state being applied from the log-backed attach handshake.
-    restore_state_bytes: Vec<u8>,
-    restore_state_total: Option<usize>,
+    pending_log_batch: Option<PendingLogBatch>,
+    /// Last ordered state snapshot accepted from the attach reader.
     restore_state_seq: Option<u64>,
     /// Exit text from a log `Exited` event, for the PT-68 placeholder.
     log_exit_reason: Option<String>,
@@ -982,6 +997,17 @@ pub(crate) struct PaneRuntime {
     /// Kitty-graphics producers emit tiny bitmaps.
     cell_w: usize,
     cell_h: usize,
+}
+
+struct PendingLogBatch {
+    snapshot_ansi: Option<Vec<u8>>,
+    snapshot_offset: usize,
+    events: std::collections::VecDeque<prismattyc_mux::PaneLogFrame>,
+    event_offset: usize,
+    replay_through: u64,
+    reservation: attach_log::HostReservation,
+    counters: attach_log::PolicyCounters,
+    event_count: usize,
 }
 
 impl PaneRuntime {
@@ -1514,8 +1540,6 @@ impl PaneRuntime {
         );
         self.log = Some(log);
         self.rich = RichSession::default();
-        self.restore_state_bytes = Vec::new();
-        self.restore_state_total = None;
         self.restore_state_seq = None;
         self.log_exit_reason = None;
         self.log_write_notice = None;
@@ -1570,8 +1594,7 @@ impl PaneRuntime {
             session,
             from_pty_rx,
             log,
-            restore_state_bytes: Vec::new(),
-            restore_state_total: None,
+            pending_log_batch: None,
             restore_state_seq: None,
             log_exit_reason: None,
             log_write_notice: None,
@@ -1836,6 +1859,7 @@ impl PaneRuntime {
 
     fn mark_child_exited(&mut self) {
         self.child_alive = false;
+        self.emulator.reset_input_reporting();
         if self.exit_status.is_none() {
             self.exit_status = self
                 .session
@@ -1939,7 +1963,7 @@ impl PaneRuntime {
                 .and_then(|session| session.try_wait().ok().flatten())
             {
                 self.exit_status = Some(status);
-                self.child_alive = false;
+                self.mark_child_exited();
                 dirty = true;
             }
         }
@@ -1957,148 +1981,104 @@ impl PaneRuntime {
                 more = true;
                 break;
             }
-            let Some(log) = self.log.as_ref() else {
-                break;
-            };
-            match log.try_recv() {
-                Ok(LogMessage::RestoreChunk {
-                    through_seq,
-                    offset,
-                    total_bytes,
-                    data,
-                    done,
-                    reservation,
-                }) => {
-                    if total_bytes > MAX_PANE_STATE_BYTES {
-                        eprintln!("prismattyc-host: pane state exceeded its transfer limit");
-                        self.reset_restore_state();
-                    } else {
-                        if offset == 0 {
-                            self.restore_state_bytes = Vec::new();
-                            self.restore_state_total = Some(total_bytes);
-                            self.restore_state_seq = Some(through_seq);
-                        }
-                        let expected_offset =
-                            u64::try_from(self.restore_state_bytes.len()).unwrap_or(u64::MAX);
-                        let next_len = self.restore_state_bytes.len().saturating_add(data.len());
-                        let valid = self.restore_state_total == Some(total_bytes)
-                            && self.restore_state_seq == Some(through_seq)
-                            && offset == expected_offset
-                            && next_len <= total_bytes
-                            && done == (next_len == total_bytes);
-                        if !valid {
-                            eprintln!("prismattyc-host: invalid pane state transfer sequence");
-                            self.reset_restore_state();
-                        } else if self.restore_state_bytes.try_reserve(data.len()).is_err() {
-                            eprintln!("prismattyc-host: pane state could not fit in memory");
-                            self.reset_restore_state();
-                        } else {
-                            self.restore_state_bytes.extend_from_slice(&data);
-                            if done {
-                                let state_bytes = std::mem::take(&mut self.restore_state_bytes);
-                                self.restore_state_total = None;
-                                self.restore_state_seq = None;
-                                let restored =
-                                    match serde_json::from_slice::<EmulatorStateV1>(&state_bytes) {
-                                        Ok(state) => Emulator::import_state(state)
-                                            .map_err(|error| error.to_string()),
-                                        Err(error) => Err(error.to_string()),
-                                    };
-                                match restored {
-                                    Ok(mut emulator) => {
-                                        emulator.set_retain_alt_history(self.alt_screen_scrollback);
-                                        self.emulator = emulator;
-                                        self.view_scroll = self
-                                            .view_scroll
-                                            .min(self.emulator.screen().max_view_scroll());
-                                        self.selection.clear();
-                                        self.keyboard_select_mode = false;
-                                        self.scroll_new_output = false;
-                                    }
-                                    Err(error) => eprintln!(
-                                        "prismattyc-host: pane state could not be restored: {error}"
-                                    ),
+            if self.pending_log_batch.is_some() {
+                self.apply_pending_log_unit();
+            } else {
+                let Some(log) = self.log.as_ref() else {
+                    break;
+                };
+                match log.try_recv() {
+                    Ok(LogMessage::RestoreReady {
+                        through_seq,
+                        restored,
+                        reservations,
+                    }) => {
+                        // The reader publishes this only after assembling and decoding
+                        // the complete transfer, before it resumes ordered log replay.
+                        let is_current = self
+                            .restore_state_seq
+                            .is_none_or(|current| through_seq >= current);
+                        if is_current {
+                            match restored {
+                                Ok(mut emulator) => {
+                                    emulator.set_retain_alt_history(self.alt_screen_scrollback);
+                                    self.emulator = *emulator;
+                                    self.restore_state_seq = Some(through_seq);
+                                    self.view_scroll = self
+                                        .view_scroll
+                                        .min(self.emulator.screen().max_view_scroll());
+                                    self.selection.clear();
+                                    self.keyboard_select_mode = false;
+                                    self.scroll_new_output = false;
                                 }
+                                Err(error) => eprintln!(
+                                    "prismattyc-host: pane state could not be restored: {error}"
+                                ),
                             }
                         }
+                        drop(reservations);
                     }
-                    drop(reservation);
-                }
-                Ok(LogMessage::RestoreReset) => self.reset_restore_state(),
-                Ok(LogMessage::Batch {
-                    snapshot,
-                    events,
-                    replay_through,
-                    reservation,
-                    counters,
-                }) => {
-                    // Ring overrun: repaint from the server snapshot, then
-                    // keep tailing. Prior replica scrollback survives.
-                    if let Some(styled) = snapshot {
-                        let cols = usize::try_from(styled.content.cols)
-                            .unwrap_or(self.cols)
-                            .max(1);
-                        let rows = usize::try_from(styled.content.rows)
-                            .unwrap_or(self.rows)
-                            .max(1);
-                        if self.emulator.screen().columns() != cols
-                            || self.emulator.screen().rows() != rows
-                        {
-                            self.emulator.resize(cols, rows);
-                        }
-                        let bytes = attach_log::snapshot_to_ansi(&styled);
-                        self.feed_replica(&bytes);
+                    Ok(LogMessage::RestoreReset) => self.restore_state_seq = None,
+                    Ok(LogMessage::Batch {
+                        snapshot,
+                        events,
+                        replay_through,
+                        reservation,
+                        counters,
+                    }) => {
+                        let snapshot_ansi = snapshot.map(|(cols, rows, bytes)| {
+                            let cols = usize::try_from(cols).unwrap_or(self.cols).max(1);
+                            let rows = usize::try_from(rows).unwrap_or(self.rows).max(1);
+                            if self.emulator.screen().columns() != cols
+                                || self.emulator.screen().rows() != rows
+                            {
+                                self.emulator.resize(cols, rows);
+                            }
+                            bytes
+                        });
+                        let event_count = events.len();
+                        self.pending_log_batch = Some(PendingLogBatch {
+                            snapshot_ansi,
+                            snapshot_offset: 0,
+                            events: events.into(),
+                            event_offset: 0,
+                            replay_through,
+                            reservation,
+                            counters,
+                            event_count,
+                        });
                     }
-                    let event_count = events.len();
-                    for frame in events {
-                        let replay = frame.seq <= replay_through;
-                        self.apply_log_event(frame.event);
-                        if replay {
-                            // Restore terminal state, but do not sound old BEL
-                            // or attention signals when a Space is reopened.
-                            let _ = self.emulator.take_pending_bell();
-                            let _ = self.emulator.take_pending_attention();
-                        }
+                    Ok(LogMessage::Reset) => {
+                        // StaleSequence: the retained log was rebuilt. Drop replica
+                        // history so a replay from seq 1 does not stack into it.
+                        let mut emulator = if self.experimental_rich {
+                            Emulator::new_experimental(self.cols, self.rows, MAX_SCROLLBACK)
+                        } else {
+                            Emulator::new(self.cols, self.rows, MAX_SCROLLBACK)
+                        };
+                        emulator.set_retain_alt_history(self.alt_screen_scrollback);
+                        emulator.set_cell_pixels(self.cell_w as u32, self.cell_h as u32);
+                        self.emulator = emulator;
+                        self.restore_state_seq = None;
+                        self.selection.clear();
+                        self.keyboard_select_mode = false;
+                        self.view_scroll = 0;
                     }
-                    self.policy_superseded_frames = self
-                        .policy_superseded_frames
-                        .saturating_add(counters.superseded_frames);
-                    self.policy_superseded_bytes = self
-                        .policy_superseded_bytes
-                        .saturating_add(counters.superseded_bytes);
-                    self.policy_batches = self.policy_batches.saturating_add(1);
-                    self.policy_frames = self.policy_frames.saturating_add(event_count);
-                    drop(reservation);
+                    Ok(LogMessage::Ended { reason }) => {
+                        self.log_exit_reason = self.log_exit_reason.take().or(reason);
+                        self.child_alive = false;
+                        return (true, content_changed, false);
+                    }
+                    Ok(LogMessage::WriteFailed { reason }) => {
+                        eprintln!("prismattyc-host: attach write failed: {reason}");
+                        self.log_write_notice = Some(attach_log::WRITE_FAILED_TOAST.to_string());
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.child_alive = false;
+                        return (true, content_changed, false);
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
                 }
-                Ok(LogMessage::Reset) => {
-                    // StaleSequence: the retained log was rebuilt. Drop replica
-                    // history so a replay from seq 1 does not stack into it.
-                    let mut emulator = if self.experimental_rich {
-                        Emulator::new_experimental(self.cols, self.rows, MAX_SCROLLBACK)
-                    } else {
-                        Emulator::new(self.cols, self.rows, MAX_SCROLLBACK)
-                    };
-                    emulator.set_retain_alt_history(self.alt_screen_scrollback);
-                    emulator.set_cell_pixels(self.cell_w as u32, self.cell_h as u32);
-                    self.emulator = emulator;
-                    self.selection.clear();
-                    self.keyboard_select_mode = false;
-                    self.view_scroll = 0;
-                }
-                Ok(LogMessage::Ended { reason }) => {
-                    self.log_exit_reason = self.log_exit_reason.take().or(reason);
-                    self.child_alive = false;
-                    return (true, content_changed, false);
-                }
-                Ok(LogMessage::WriteFailed { reason }) => {
-                    eprintln!("prismattyc-host: attach write failed: {reason}");
-                    self.log_write_notice = Some(attach_log::WRITE_FAILED_TOAST.to_string());
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.child_alive = false;
-                    return (true, content_changed, false);
-                }
-                Err(mpsc::TryRecvError::Empty) => break,
             }
             self.view_scroll = self
                 .view_scroll
@@ -2128,10 +2108,62 @@ impl PaneRuntime {
         (dirty, content_changed, more)
     }
 
-    fn reset_restore_state(&mut self) {
-        self.restore_state_bytes = Vec::new();
-        self.restore_state_total = None;
-        self.restore_state_seq = None;
+    /// Apply at most one 8 KiB piece of snapshot or output data, or one
+    /// metadata event. The receiver's byte reservation stays with the batch
+    /// until every piece has been consumed.
+    fn apply_pending_log_unit(&mut self) {
+        const LOG_OUTPUT_QUANTUM: usize = 8 * 1024;
+        let Some(mut batch) = self.pending_log_batch.take() else {
+            return;
+        };
+        if let Some(snapshot) = batch.snapshot_ansi.as_ref() {
+            let end = batch
+                .snapshot_offset
+                .saturating_add(LOG_OUTPUT_QUANTUM)
+                .min(snapshot.len());
+            self.feed_replica(&snapshot[batch.snapshot_offset..end]);
+            batch.snapshot_offset = end;
+            if end == snapshot.len() {
+                batch.snapshot_ansi = None;
+            }
+        } else if let Some(frame) = batch.events.front() {
+            let replay = frame.seq <= batch.replay_through;
+            match &frame.event {
+                prismattyc_mux::PaneEvent::Output { bytes } if !bytes.is_empty() => {
+                    let end = batch
+                        .event_offset
+                        .saturating_add(LOG_OUTPUT_QUANTUM)
+                        .min(bytes.len());
+                    self.feed_replica(&bytes[batch.event_offset..end]);
+                    batch.event_offset = end;
+                    if end == bytes.len() {
+                        batch.events.pop_front();
+                        batch.event_offset = 0;
+                    }
+                }
+                _ => {
+                    let frame = batch.events.pop_front().expect("front event exists");
+                    self.apply_log_event(frame.event);
+                }
+            }
+            if replay {
+                let _ = self.emulator.take_pending_bell();
+                let _ = self.emulator.take_pending_attention();
+            }
+        }
+        if batch.snapshot_ansi.is_none() && batch.events.is_empty() {
+            self.policy_superseded_frames = self
+                .policy_superseded_frames
+                .saturating_add(batch.counters.superseded_frames);
+            self.policy_superseded_bytes = self
+                .policy_superseded_bytes
+                .saturating_add(batch.counters.superseded_bytes);
+            self.policy_batches = self.policy_batches.saturating_add(1);
+            self.policy_frames = self.policy_frames.saturating_add(batch.event_count);
+            drop(batch.reservation);
+        } else {
+            self.pending_log_batch = Some(batch);
+        }
     }
 
     fn apply_log_event(&mut self, event: prismattyc_mux::PaneEvent) {
@@ -2170,7 +2202,7 @@ impl PaneRuntime {
                     (Some(code), None) => format!("exited {code}"),
                     (None, None) => "exited".into(),
                 });
-                self.child_alive = false;
+                self.mark_child_exited();
             }
             // Title, Cwd, Status and Attention are all derivable from the
             // Output bytes the replica already applied. Re-applying them
@@ -2480,6 +2512,7 @@ pub(crate) struct MuxRuntime {
     pending_bells: Vec<PaneId>,
     /// Last pane visited by a budgeted drain; each turn starts after it.
     drain_cursor: Option<u64>,
+    hidden_drain_cursor: Option<u64>,
     /// Panes that emitted attention since the last [`Self::take_pending_attentions`].
     pending_attentions: Vec<(PaneId, String)>,
     /// Log-backed writer-death toasts since the last [`Self::take_pending_toasts`].
@@ -2615,6 +2648,7 @@ impl MuxRuntime {
             async_connect,
             pending_bells: Vec::new(),
             drain_cursor: None,
+            hidden_drain_cursor: None,
             pending_attentions: Vec::new(),
             pending_toasts: Vec::new(),
             exited_attach_sessions: Vec::new(),
@@ -4062,66 +4096,104 @@ impl MuxRuntime {
     }
 
     fn drain_all_pass(&mut self, deadline: Option<Instant>) -> (bool, bool) {
-        let mut pane_ids: Vec<_> = self.panes.keys().copied().collect();
-        if deadline.is_some() {
-            pane_ids.sort_by_key(|pane| pane.get());
-            let start = self
-                .drain_cursor
-                .and_then(|cursor| pane_ids.iter().position(|pane| pane.get() > cursor))
-                .unwrap_or(0);
-            pane_ids.rotate_left(start);
-        }
         let focused = self.focused_id();
+        let mut pane_ids: Vec<_> = self.panes.keys().copied().collect();
+        pane_ids.sort_by_key(|pane| pane.get());
+        let mut visible_ids: Vec<_> = self
+            .tab_panes()
+            .get(self.selected_tab_index())
+            .map(|(_, panes)| panes.clone())
+            .unwrap_or_default();
+        visible_ids.retain(|pane| self.panes.contains_key(pane));
+        if !visible_ids.contains(&focused) && self.panes.contains_key(&focused) {
+            visible_ids.insert(0, focused);
+        }
+        visible_ids.retain(|pane| *pane != focused);
+        visible_ids.insert(0, focused);
+        let mut hidden_ids: Vec<_> = pane_ids
+            .into_iter()
+            .filter(|pane| !visible_ids.contains(pane))
+            .collect();
+        let rotate_after_cursor = |ids: &mut Vec<PaneId>, cursor: Option<u64>| {
+            if let Some(cursor) = cursor {
+                let start = ids.iter().position(|pane| pane.get() > cursor).unwrap_or(0);
+                ids.rotate_left(start);
+            }
+        };
+        if deadline.is_some() {
+            rotate_after_cursor(&mut visible_ids, self.drain_cursor);
+            // Focus always heads the visible tier, with its remaining panes
+            // rotating independently from hidden panes.
+            if let Some(index) = visible_ids.iter().position(|pane| *pane == focused) {
+                visible_ids.remove(index);
+            }
+            visible_ids.insert(0, focused);
+            rotate_after_cursor(&mut hidden_ids, self.hidden_drain_cursor);
+        }
+        let visible_set: HashSet<_> = visible_ids.iter().copied().collect();
+        let foreground_deadline = deadline.map(|deadline| {
+            let now = Instant::now();
+            now + deadline.saturating_duration_since(now) / 2
+        });
         let now = Instant::now();
         let mut dirty = false;
         let mut more = false;
         let mut bells = Vec::new();
         let mut attentions = Vec::new();
         let mut toasts = Vec::new();
-        for pane in pane_ids {
-            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                more = true;
-                break;
-            }
-            if let Some(runtime) = self.panes.get_mut(&pane) {
-                // Inactive tabs keep draining so unseen badges accumulate.
-                let (pane_dirty, content_changed, pane_more) = runtime.drain_until(deadline);
-                if deadline.is_some() {
-                    self.drain_cursor = Some(pane.get());
+        let mut drain_tier = |pane_ids: Vec<PaneId>, tier_deadline: Option<Instant>| {
+            for pane in pane_ids {
+                if tier_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                    more = true;
+                    break;
                 }
-                let bell = runtime.emulator.take_pending_bell();
-                if bell {
-                    bells.push(pane);
-                }
-                if let Some(message) = runtime.emulator.take_pending_attention() {
-                    runtime.attention = Some(message.clone());
-                    attentions.push((pane, message));
-                    dirty = true;
-                }
-                if let Some(text) = runtime.emulator.take_pending_title() {
-                    let title = pane_title_from_osc(&text);
-                    if accept_osc_title(runtime.title_pinned, &runtime.title, &title) {
-                        runtime.title = title;
+                if let Some(runtime) = self.panes.get_mut(&pane) {
+                    // Inactive tabs keep draining so unseen badges accumulate.
+                    let (pane_dirty, content_changed, pane_more) =
+                        runtime.drain_until(tier_deadline);
+                    if tier_deadline.is_some() {
+                        if visible_set.contains(&pane) {
+                            self.drain_cursor = Some(pane.get());
+                        } else {
+                            self.hidden_drain_cursor = Some(pane.get());
+                        }
+                    }
+                    let bell = runtime.emulator.take_pending_bell();
+                    if bell {
+                        bells.push(pane);
+                    }
+                    if let Some(message) = runtime.emulator.take_pending_attention() {
+                        runtime.attention = Some(message.clone());
+                        attentions.push((pane, message));
                         dirty = true;
                     }
+                    if let Some(text) = runtime.emulator.take_pending_title() {
+                        let title = pane_title_from_osc(&text);
+                        if accept_osc_title(runtime.title_pinned, &runtime.title, &title) {
+                            runtime.title = title;
+                            dirty = true;
+                        }
+                    }
+                    if let Some(label) = runtime.log_write_notice.take() {
+                        toasts.push((pane, label));
+                    }
+                    let prior_unseen = runtime.unseen_output;
+                    apply_unseen_v2(
+                        &mut runtime.unseen_output,
+                        &mut runtime.last_output_at,
+                        &mut runtime.finish_watch,
+                        now,
+                        pane == focused,
+                        content_changed,
+                        bell,
+                    );
+                    dirty |= pane_dirty || runtime.unseen_output != prior_unseen;
+                    more |= pane_more;
                 }
-                if let Some(label) = runtime.log_write_notice.take() {
-                    toasts.push((pane, label));
-                }
-                let prior_unseen = runtime.unseen_output;
-                apply_unseen_v2(
-                    &mut runtime.unseen_output,
-                    &mut runtime.last_output_at,
-                    &mut runtime.finish_watch,
-                    now,
-                    pane == focused,
-                    content_changed,
-                    bell,
-                );
-                dirty |= pane_dirty || runtime.unseen_output != prior_unseen;
-                more |= pane_more;
             }
-        }
+        };
+        drain_tier(visible_ids, foreground_deadline);
+        drain_tier(hidden_ids, deadline);
         self.pending_bells.extend(bells);
         self.pending_attentions.extend(attentions);
         self.pending_toasts.extend(toasts);
@@ -4928,6 +5000,30 @@ impl MuxRuntime {
         self.replace_layout(next)
     }
 
+    /// The pane in the active window whose full slot, chrome included,
+    /// contains the pixel. Used by a pane-header drag released over another
+    /// pane's body.
+    pub(crate) fn pane_at_px(&self, x: usize, y: usize) -> Option<PaneId> {
+        self.rects.iter().find_map(|(pane, rect)| {
+            let (sx, sy, sw, sh) = self.geom.pane_slot_px(*rect);
+            (x >= sx && x < sx + sw && y >= sy && y < sy + sh).then_some(*pane)
+        })
+    }
+
+    /// Exchange two panes of the active window; focus stays where it was.
+    /// Used by a same-tab pane drag that ends on another pane's handle.
+    pub(crate) fn swap_panes(&mut self, a: PaneId, b: PaneId) -> Result<bool> {
+        self.unzoom()?;
+        let window = self.active_window();
+        let Some(layout) = self.domain.window(window).map(|win| win.layout.clone()) else {
+            return Ok(false);
+        };
+        let Some(next) = layout.swap_leaves(a, b) else {
+            return Ok(false);
+        };
+        self.replace_layout(next)
+    }
+
     /// Rotate every pane of the active window one slot (+1 forward, -1
     /// back); focus stays with the same pane (PT-125).
     pub(crate) fn rotate_panes(&mut self, delta: i32) -> Result<bool> {
@@ -5614,6 +5710,47 @@ mod tests {
     }
 
     #[test]
+    fn oversized_log_output_resumes_in_bounded_units_and_holds_batch() {
+        let mut runtime = MuxRuntime::spawn("sh", &[], 80, 24).expect("test mux runtime");
+        let pane = runtime.focused_mut();
+        let mut bytes = vec![b'A'; 100_000];
+        bytes.extend_from_slice(b"\nLOG_BATCH_FINAL_MARKER\n");
+        pane.pending_log_batch = Some(PendingLogBatch {
+            snapshot_ansi: None,
+            snapshot_offset: 0,
+            events: vec![prismattyc_mux::PaneLogFrame {
+                seq: 1,
+                event: prismattyc_mux::PaneEvent::Output { bytes },
+            }]
+            .into(),
+            event_offset: 0,
+            replay_through: 0,
+            reservation: attach_log::HostReservation::empty(),
+            counters: attach_log::PolicyCounters::default(),
+            event_count: 1,
+        });
+
+        let (dirty, _, more) = pane.drain_log(Some(Instant::now() + Duration::from_secs(1)));
+        assert!(dirty);
+        assert!(more, "the first drain stops at its bounded work-unit cap");
+        assert!(
+            pane.pending_log_batch.is_some(),
+            "batch stays owned between turns"
+        );
+        assert_eq!(pane.policy_batches, 0, "counters wait for batch completion");
+
+        let (_, _, more) = pane.drain_log(Some(Instant::now() + Duration::from_secs(1)));
+        assert!(!more);
+        assert!(pane.pending_log_batch.is_none());
+        assert_eq!(pane.policy_batches, 1);
+        let rendered: String = visible_text(pane)
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        assert!(rendered.contains("LOG_BATCH_FINAL_MARKER"));
+    }
+
+    #[test]
     #[cfg(unix)]
     fn expired_pty_drain_deadline_yields_and_next_turn_delivers_output() {
         let args = vec![
@@ -5674,9 +5811,9 @@ mod tests {
         let mut runtime = MuxRuntime::spawn("/bin/sh", &args, 80, 24).unwrap();
         let busy_pane = runtime.focused_id();
         let bell_args = vec!["-c".to_string(), "printf '\\007'; exec sleep 2".to_string()];
-        let bell_pane = runtime
-            .split_focused("/bin/sh", &bell_args, Axis::Horizontal, 0.5)
-            .unwrap();
+        runtime.new_tab("/bin/sh", &bell_args).unwrap();
+        let bell_pane = runtime.focused_id();
+        runtime.select_tab(0).unwrap();
         assert!(runtime.focus(busy_pane));
         assert_ne!(runtime.focused_id(), bell_pane);
 
@@ -7254,18 +7391,67 @@ mod tests {
         assert!(runtime.all_children_exited());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn exited_local_child_stops_input_reporting_and_keeps_output() {
+        let mut runtime = MuxRuntime::spawn(
+            "/bin/sh",
+            &[
+                "-c".into(),
+                r"printf '\033[?1000;1002;1003;1006;1004;2004;7700hEXIT_MARKER'".into(),
+            ],
+            80,
+            24,
+        )
+        .unwrap();
+        let pane = runtime.focused_id();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runtime.panes[&pane].child_alive && Instant::now() < deadline {
+            runtime.panes.get_mut(&pane).unwrap().drain();
+            thread::sleep(Duration::from_millis(5));
+        }
+        let child = &runtime.panes[&pane];
+        assert!(!child.child_alive, "child did not exit");
+        let mut text = String::new();
+        for cell in child.emulator.screen().view_row(0).unwrap() {
+            cell.write_grapheme_into(&mut text);
+        }
+        assert!(text.starts_with("EXIT_MARKER"));
+        assert_eq!(
+            child.emulator.mouse_tracking(),
+            prismattyc_emulator::MouseTracking::Off
+        );
+        assert!(!child.emulator.mouse_sgr());
+        assert!(!child.emulator.mouse_wheel_only());
+        assert!(!child.emulator.focus_report());
+        assert!(!child.emulator.bracketed_paste());
+    }
+
     #[test]
     fn placeholder_reopen_respawns_child() {
         let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
         let pane = runtime.focused_id();
         runtime.mark_attach_session(pane, "9".into(), "work".into());
-        runtime.panes.get_mut(&pane).unwrap().child_alive = false;
+        let child = runtime.panes.get_mut(&pane).unwrap();
+        let _ = child
+            .emulator
+            .feed(b"old app\x1b[?1003;1006;1004;2004;7700h");
+        child.child_alive = false;
         assert!(runtime.drain_all().0);
         assert!(runtime.is_placeholder(pane));
         assert!(runtime.respawn_attach(pane, "/bin/sh", &[]).unwrap());
         assert!(!runtime.is_placeholder(pane));
         assert!(runtime.panes[&pane].child_alive);
         assert_eq!(runtime.attach_session_of(pane), Some("9"));
+        let emulator = &runtime.panes[&pane].emulator;
+        assert_eq!(
+            emulator.mouse_tracking(),
+            prismattyc_emulator::MouseTracking::Off
+        );
+        assert!(!emulator.mouse_sgr());
+        assert!(!emulator.mouse_wheel_only());
+        assert!(!emulator.focus_report());
+        assert!(!emulator.bracketed_paste());
     }
 
     #[test]
@@ -9374,6 +9560,162 @@ mod tests {
         runtime.toggle_zoom().unwrap();
         assert!(runtime.swap_focused(1).unwrap());
         assert!(runtime.zoomed_pane().is_none());
+    }
+
+    #[test]
+    fn swap_panes_exchanges_two_panes_in_the_same_window() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let a = runtime.focused_id();
+        let b = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let c = runtime
+            .split_focused("/bin/sh", &[], Axis::Vertical, 0.5)
+            .unwrap();
+        let order = |r: &MuxRuntime| r.domain.window(r.active_window()).unwrap().layout.panes();
+        assert_eq!(order(&runtime), vec![a, b, c]);
+        // A pane dropped on another pane's handle swaps with it; focus stays.
+        runtime.focus(b);
+        assert!(runtime.swap_panes(a, c).unwrap());
+        assert_eq!(order(&runtime), vec![c, b, a]);
+        assert_eq!(runtime.focused_id(), b);
+        assert!(!runtime.swap_panes(a, a).unwrap(), "same pane is a no-op");
+    }
+
+    #[test]
+    fn pane_at_px_finds_the_pane_whose_slot_holds_the_pointer() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let a = runtime.focused_id();
+        let b = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let geom = HostGeom {
+            cell_w: 10,
+            cell_h: 20,
+            window_pad: 5,
+            slack_x: 0,
+            slack_y: 0,
+            pane_gap: 5,
+            rail_gap: 5,
+            inner_pad: 5,
+            top_chrome_px: 0,
+            pane_header_px: 0,
+            scrollbar_gutter_px: 8,
+            rail_side: RailSide::Off,
+            rail_px: 0,
+            rail_chip_cols: 0,
+            sidebar_px: 0,
+            chrome: ChromeGeom::CLASSIC,
+        };
+        runtime.set_geom(geom).unwrap();
+        let rects: HashMap<PaneId, CellRect> = runtime.rects().collect();
+        let centre = |pane| {
+            let (x, y, w, h) = geom.pane_slot_px(rects[&pane]);
+            (x + w / 2, y + h / 2)
+        };
+        let (ax, ay) = centre(a);
+        let (bx, by) = centre(b);
+        assert_eq!(runtime.pane_at_px(ax, ay), Some(a));
+        assert_eq!(runtime.pane_at_px(bx, by), Some(b));
+        assert_eq!(runtime.pane_at_px(0, 0), None, "outside every slot");
+    }
+
+    #[test]
+    fn pane_drag_press_then_release_swaps_the_two_panes_in_order() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let a = runtime.focused_id();
+        let b = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let geom = HostGeom {
+            cell_w: 10,
+            cell_h: 20,
+            window_pad: 5,
+            slack_x: 0,
+            slack_y: 0,
+            pane_gap: 5,
+            rail_gap: 5,
+            inner_pad: 5,
+            top_chrome_px: 0,
+            pane_header_px: 0,
+            scrollbar_gutter_px: 8,
+            rail_side: RailSide::Off,
+            rail_px: 0,
+            rail_chip_cols: 0,
+            sidebar_px: 0,
+            chrome: ChromeGeom::CLASSIC,
+        };
+        runtime.set_geom(geom).unwrap();
+        let slot_of = |runtime: &MuxRuntime, pane| {
+            let rect: HashMap<PaneId, CellRect> = runtime.rects().collect();
+            let (x, y, w, h) = geom.pane_slot_px(rect[&pane]);
+            (x + w / 2, y + h / 2)
+        };
+        let order_before = runtime.rects().collect::<HashMap<_, _>>();
+        // Press on a's slot, release on b's slot: the drop is the same-tab
+        // pane under the pointer, so the drop resolves to b and swaps.
+        let press = slot_of(&runtime, a);
+        let release = slot_of(&runtime, b);
+        assert_eq!(runtime.pane_at_px(press.0, press.1), Some(a));
+        assert_eq!(runtime.pane_at_px(release.0, release.1), Some(b));
+        let target = runtime
+            .pane_at_px(release.0, release.1)
+            .filter(|target| *target != a)
+            .expect("release lands on another pane");
+        assert!(runtime.swap_panes(a, target).unwrap());
+        let order_after = runtime.rects().collect::<HashMap<_, _>>();
+        assert_eq!(order_after[&a], order_before[&b], "a takes b's slot");
+        assert_eq!(order_after[&b], order_before[&a], "b takes a's slot");
+    }
+
+    #[test]
+    fn pane_drag_handle_release_on_another_pane_swaps_in_the_same_tab() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let a = runtime.focused_id();
+        let b = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        // Strip-handle release: the hit names pane b in tab 0, so the drop
+        // target is b and only the same-tab swap applies.
+        let hit = Some(StripHit::Pane {
+            tab: 0,
+            pane: b,
+            handle: 0,
+        });
+        let target = pane_drop_swap_target(0, a, hit).expect("same-tab drop");
+        assert_eq!(target, b);
+        let before = runtime.rects().collect::<HashMap<_, _>>();
+        assert!(runtime.swap_panes(a, target).unwrap());
+        let after = runtime.rects().collect::<HashMap<_, _>>();
+        assert_eq!(after[&a], before[&b]);
+        assert_eq!(after[&b], before[&a]);
+    }
+
+    #[test]
+    fn pane_drop_swaps_only_with_another_pane_in_the_same_tab() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let pane = runtime.focused_id();
+        let other = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let handle = |tab, pane| {
+            Some(StripHit::Pane {
+                tab,
+                pane,
+                handle: 0,
+            })
+        };
+        assert_eq!(
+            pane_drop_swap_target(0, pane, handle(0, other)),
+            Some(other)
+        );
+        assert_eq!(pane_drop_swap_target(0, pane, handle(0, pane)), None);
+        assert_eq!(pane_drop_swap_target(0, pane, handle(1, other)), None);
+        assert_eq!(
+            pane_drop_swap_target(0, pane, Some(StripHit::EmptyEnd)),
+            None
+        );
+        assert_eq!(pane_drop_swap_target(0, pane, None), None);
     }
 
     #[test]

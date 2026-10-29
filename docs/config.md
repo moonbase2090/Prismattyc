@@ -33,8 +33,11 @@ install; `PRISMATTYC_NO_AGENT_SKILLS=1` also opts out and wins over the config
 value. Automatic signed-release checks run on app launch and daily by default.
 Set the top-level `automatic_update_checks = false` or turn them off in the app
 menu to opt out. The app menu's manual check works regardless of this setting.
-`async_file_writes` enables the host's file-writer thread. It defaults to
-`false` and takes effect at startup, so restart the host after changing it.
+`async_file_writes` writes render status and attach-cache files on the host's
+file-writer thread. It defaults to `true` and takes effect at startup, so
+restart the host after changing it.
+`async_paste` hands pastes to the pane writer thread so back-pressure does not
+pause the window. It defaults to `true`.
 `snapshot_client` stays off unless the file sets it to true. The host reads
 that key at startup only; a later edit does not start or stop the cache.
 `macos_present` selects the macOS window presenter at startup. It defaults to
@@ -107,13 +110,13 @@ hover_blend = 0.1
 
 # -- file writes --
 # Write render status, attach cache, and heartbeat files on a worker thread; startup only. true|false.
-async_file_writes = false
+async_file_writes = true
 
 # -- input --
 # Open links on plain clicks; Cmd/Ctrl-click always remains available. plain|modifier.
 link_click = "plain"
 # Hand pastes to the pane writer thread so large pastes never pause the window. true | false.
-async_paste = false
+async_paste = true
 
 # -- agent integration --
 # Install the pmux Agent Skill for detected agents once per app version. true|false.

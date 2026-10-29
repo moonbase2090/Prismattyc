@@ -6,10 +6,47 @@ enabled, which is the default. Turn it off in the app menu or set
 `automatic_update_checks = false` in `config.toml`. Manual checks remain
 available either way.
 When a release is available, Prismattyc shows its version and release notes.
-Choosing **Install and Relaunch** verifies and installs it, restarts the host,
-and reconnects saved pmux views. **Roll Back Last Update…** restores the
-previous verified app. The command-line update path remains available on all
-platforms.
+Choose **Review Update** to review the sessions that will stop. The same
+flow is available from **Update and restart** in the command palette on
+all platforms. **Roll Back Last Update…** restores the previous verified app.
+The command-line update path remains available on all platforms.
+
+## Update and restart all components
+
+Choose **Update and restart all components** in the update panel. The panel
+checks the latest release and lists the running sessions. Continuing stops
+all programs in those sessions and restarts the app, including local terminals.
+Save unsaved work in your programs before continuing.
+
+Choose one of these actions:
+
+- **Save and continue** saves session names, working directories, foreground
+  commands, agent bindings, pane layouts, and Space ownership before updating.
+- **Continue without saving** updates and restarts without saving a session configuration.
+- **Cancel** leaves the sessions and running components alone.
+
+The updater downloads and verifies the release before stopping sessions.
+It installs the release, restarts the daemon and supervised MCP adapters,
+and relaunches the app. The result panel reports versions and failures in
+full-width text. A missing MCP server is reported as having nothing to restart.
+
+If you saved a configuration, the relaunched app offers **Restore sessions**
+or **Keep configuration for later**. Restoration recreates missing sessions
+in their saved directories and relaunches their commands. It leaves existing
+sessions alone, so retrying does not replay a command into a running session.
+Session configuration does not save terminal output or unsaved program state.
+The configuration file stays available after restoration.
+
+To save or restore a configuration from the command line:
+
+```bash
+pmux session-config save session-configuration.json
+pmux session-config restore session-configuration.json
+```
+
+Save requires a new filename. Restore runs saved commands, so use a file you
+trust. If an update or restart fails, the result names the failure and the
+saved configuration location. A failed installation leaves sessions running.
 
 ## Check and install a release
 
@@ -66,13 +103,10 @@ it restores the installed app. After a successful update, it keeps the
 previous app bundle for rollback. Releases from v0.2.21 onward publish the
 universal zip and `SHA256SUMS-macos`.
 
-The app menu starts `pmux update` in the background. After install, it asks
-the host to restart through the existing safe component-restart path. Live
-pmux sessions stay up. The daemon restarts on the new build when it has no
-sessions; with active sessions, the restart is deferred to avoid stopping
-them. A host that owns local terminals or a view that cannot be restored also
-defers its restart. Close those terminals and reopen the app to use the
-installed build.
+The app menu and maintenance panel share the complete update flow above.
+The separate `pmux update` command installs files without stopping sessions.
+Use `pmux restart` for a safe restart that leaves active session owners running,
+or the complete update flow when you are ready to stop and restore sessions.
 
 The bundle that gets replaced is the `Prismattyc.app` that contains the
 running command. Otherwise the updater uses `/Applications/Prismattyc.app`
@@ -96,9 +130,9 @@ pmux update --rollback
 
 On Linux and Windows, update and rollback change installed binaries.
 On macOS, update and rollback replace the app bundle. A running host keeps
-its current code until it restarts. The in-app updater requests that safe
-restart after installation. A daemon with active sessions keeps its current
-version until a later safe restart.
+its current code until it restarts. The in-app complete update flow asks for permission to stop sessions and
+restart the daemon. The separate safe restart command leaves a daemon with
+active sessions on its current version.
 `pmux versions` reports both.
 MCP reports the adapter version separately from its long-lived supervisor.
 Restart updated hosts before upgrading a daemon from a pre-reflow version.
@@ -138,8 +172,8 @@ pmux restart --daemon --stop-sessions
 
 This command terminates running programs in every session. It starts a
 detached helper so the restart can finish even when the calling pane closes.
-The command reports the helper PID and log path. The UI does not select
-this destructive option automatically.
+The command reports the helper PID and log path. The complete update flow selects this option only after you confirm the
+listed sessions may be stopped.
 
 ## Build from development source
 

@@ -310,7 +310,7 @@ pub struct ConfigFile {
     /// Enable dragging and keyboard reordering of saved spaces. Default false.
     pub space_reorder: Option<bool>,
     /// Keep one pmuxd snapshot connection for periodic polls.
-    /// Default false. Startup only: a reload does not start or stop the client.
+    /// Default true. Startup only: a reload does not start or stop the client.
     pub snapshot_client: Option<bool>,
     /// Partial frames restore and re-stroke only border rings that change.
     /// Default false. Hot-reloaded.

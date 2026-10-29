@@ -1983,6 +1983,68 @@ fn dump_present_path() -> Option<PathBuf> {
     Some(PathBuf::from(value))
 }
 
+/// `PRISMATTYC_STRIP_DUMP=<path>`: write the pane-handle rectangles, as JSON,
+/// for the pane-swap driver. On Graphite these are the per-pane header handles
+/// `pane_handle_hit` tests. Elsewhere they come from the strip scan with
+/// `tab_strip_hit`. Unset or empty means no dump.
+fn dump_strip_handles(host: &HostState, stride: usize, height: usize, path: &Path) {
+    const STRIP_ROWS: usize = 160;
+    // (tab, pane, handle, [x0, y0, x1, y1]) per handle.
+    let mut rects: Vec<(usize, u64, usize, [usize; 4])> = Vec::new();
+    if host.mux.geom().chrome.graphite {
+        for (pane_id, pane, rect) in host.mux.panes_and_rects() {
+            let Some(zone) = pane_handle_zone(host, pane_id, pane, rect) else {
+                continue;
+            };
+            let tab = host
+                .mux
+                .pane_window(pane_id)
+                .and_then(|window| host.mux.window_ids().iter().position(|id| *id == window))
+                .unwrap_or(0);
+            rects.push((
+                tab,
+                pane_id.get(),
+                0,
+                [zone.x, zone.y, zone.x + zone.w, zone.y + zone.h],
+            ));
+        }
+    } else {
+        let reserve = reserve_strip_end(host);
+        for py in 0..height.min(STRIP_ROWS) {
+            for px in 0..stride {
+                let Some(mux::StripHit::Pane { tab, pane, handle }) =
+                    host.mux.tab_strip_hit(px, py, stride, reserve)
+                else {
+                    continue;
+                };
+                let key = (tab, pane.get(), handle);
+                match rects.iter_mut().find(|r| (r.0, r.1, r.2) == key) {
+                    Some(rect) => {
+                        rect.3[0] = rect.3[0].min(px);
+                        rect.3[1] = rect.3[1].min(py);
+                        rect.3[2] = rect.3[2].max(px + 1);
+                        rect.3[3] = rect.3[3].max(py + 1);
+                    }
+                    None => rects.push((tab, pane.get(), handle, [px, py, px + 1, py + 1])),
+                }
+            }
+        }
+    }
+    let handles: Vec<_> = rects
+        .iter()
+        .map(|&(tab, pane, handle, [x0, y0, x1, y1])| {
+            serde_json::json!({
+                "tab": tab, "pane": pane, "handle": handle,
+                "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+            })
+        })
+        .collect();
+    if let Err(error) = std::fs::write(path, serde_json::json!({ "handles": handles }).to_string())
+    {
+        eprintln!("prismattyc-host: dump strip handles failed: {error}");
+    }
+}
+
 /// Write the CPU framebuffer that is about to present as an 8-bit RGBA PNG.
 /// Callers keep the side effect out of `rasterize_frame`.
 fn present_png_empty(width: u32, height: u32) -> bool {
@@ -2329,6 +2391,11 @@ impl PresentBackend {
                     height,
                     host.render_frame.full_repaint_reason,
                 );
+                if let Some(path) =
+                    std::env::var_os("PRISMATTYC_STRIP_DUMP").filter(|p| !p.is_empty())
+                {
+                    dump_strip_handles(host, width as usize, height as usize, Path::new(&path));
+                }
                 let present_started = Instant::now();
                 // The X11 present path expects premultiplied ARGB. Skip the
                 // pass on an opaque window so the default path pays nothing.
@@ -12008,37 +12075,49 @@ fn pointer_hover_blocked(host: &HostState) -> bool {
 /// Pane-header handle (dot and name) under the pointer, graphite only
 /// (issue #109). Classic keeps today's header behavior.
 fn pane_handle_hit(host: &HostState, px: usize, py: usize) -> Option<PaneId> {
-    let geom = host.mux.geom();
-    if !geom.chrome.graphite {
+    if !host.mux.geom().chrome.graphite {
         return None;
     }
-    let focused = host.mux.focused_id();
-    let multi = host.mux.pane_count() > 1;
-    let now = Instant::now();
     host.mux
         .panes_and_rects()
         .find_map(|(pane_id, pane, rect)| {
-            let (slot_x, slot_y, slot_w, slot_h) = geom.pane_slot_px(rect);
-            let (name, _) = host.mux.pane_header_text(pane_id);
-            let attention = host.attention_badge && pane.attention.is_some();
-            let running = pane.is_active_at(now);
-            let focus_row = multi && pane_id == focused;
-            let status = graphite::PaneStatus::decide(
-                attention,
-                pane.mail_depth,
-                pane.unseen_output,
-                running,
-                focus_row,
-            );
-            let zone = graphite::pane_handle_rect(
-                geom.chrome,
-                graphite::Rect::new(slot_x, slot_y, slot_w, slot_h),
-                &name,
-                status,
-                focus_row,
-            )?;
+            let zone = pane_handle_zone(host, pane_id, pane, rect)?;
             zone.contains(px, py).then_some(pane_id)
         })
+}
+
+/// The Graphite pane-header handle rectangle for one pane, in window px.
+/// `pane_handle_hit` and the strip-handle dump both use it, so the dump is
+/// exactly the zone a press lands in.
+fn pane_handle_zone(
+    host: &HostState,
+    pane_id: PaneId,
+    pane: &mux::PaneRuntime,
+    rect: prismattyc_mux::CellRect,
+) -> Option<graphite::Rect> {
+    let geom = host.mux.geom();
+    let focused = host.mux.focused_id();
+    let multi = host.mux.pane_count() > 1;
+    let now = Instant::now();
+    let (slot_x, slot_y, slot_w, slot_h) = geom.pane_slot_px(rect);
+    let (name, _) = host.mux.pane_header_text(pane_id);
+    let attention = host.attention_badge && pane.attention.is_some();
+    let running = pane.is_active_at(now);
+    let focus_row = multi && pane_id == focused;
+    let status = graphite::PaneStatus::decide(
+        attention,
+        pane.mail_depth,
+        pane.unseen_output,
+        running,
+        focus_row,
+    );
+    graphite::pane_handle_rect(
+        geom.chrome,
+        graphite::Rect::new(slot_x, slot_y, slot_w, slot_h),
+        &name,
+        status,
+        focus_row,
+    )
 }
 
 fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
@@ -15017,6 +15096,7 @@ fn handle_pane_handle_press(host: &mut HostState, button: MouseButton) -> bool {
                 start_y: y,
                 active: false,
             });
+            drag_trace(|| format!("press pane={} tab={tab} x={x} y={y}", pane.get()));
         }
     } else {
         open_context_menu(host, ContextMenuTarget::Pane(pane));
@@ -15026,6 +15106,23 @@ fn handle_pane_handle_press(host: &mut HostState, button: MouseButton) -> bool {
     host.app_mouse_button = None;
     sync_chrome_hover(host);
     true
+}
+
+/// `PRISMATTYC_DRAG_TRACE=<path>`: append one line per pane-drag event (press,
+/// drag start, release and its resolved target, attach-tabs write) for the
+/// pane-swap driver. Unset or empty means no trace; no behaviour changes.
+pub(crate) fn drag_trace(line: impl FnOnce() -> String) {
+    let Some(path) = std::env::var_os("PRISMATTYC_DRAG_TRACE").filter(|p| !p.is_empty()) else {
+        return;
+    };
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{}", line());
+    }
 }
 
 fn handle_strip_drag_move(host: &mut HostState) -> bool {
@@ -15042,9 +15139,16 @@ fn handle_strip_drag_move(host: &mut HostState) -> bool {
     }
     let dx = x - drag.start_x;
     let dy = y - drag.start_y;
+    drag_trace(|| {
+        format!(
+            "motion x={x} y={y} past_threshold={}",
+            dx * dx + dy * dy >= 16.0
+        )
+    });
     if dx * dx + dy * dy < 16.0 {
         return true;
     }
+    drag_trace(|| "drag-start".to_owned());
     drag.active = true;
     host.dirty = true;
     true
@@ -15084,24 +15188,39 @@ fn finish_strip_drag(host: &mut HostState) -> bool {
     }
     let stride = host.window.inner_size().width as usize;
     let hit = host.mux.tab_strip_hit(x as usize, y as usize, stride, true);
-    let changed = match (drag.kind, hit) {
-        (StripDragKind::Tab(from), Some(mux::StripHit::Tab { index: to, .. })) => {
-            host.mux.reorder_tab(from, to).unwrap_or(false)
+    let swap = match drag.kind {
+        StripDragKind::Pane { tab, pane } => mux::pane_drop_swap_target(tab, pane, hit)
+            .or_else(|| {
+                host.mux
+                    .pane_at_px(x as usize, y as usize)
+                    .filter(|target| *target != pane)
+            })
+            .map(|target| (pane, target)),
+        StripDragKind::Tab(_) => None,
+    };
+    drag_trace(|| format!("release x={x} y={y} hit={hit:?} swap={swap:?}"));
+    let changed = if let Some((from, to)) = swap {
+        host.mux.swap_panes(from, to).unwrap_or(false)
+    } else {
+        match (drag.kind, hit) {
+            (StripDragKind::Tab(from), Some(mux::StripHit::Tab { index: to, .. })) => {
+                host.mux.reorder_tab(from, to).unwrap_or(false)
+            }
+            (StripDragKind::Tab(from), Some(mux::StripHit::EmptyEnd | mux::StripHit::NewTab)) => {
+                let last = host.mux.tab_count().saturating_sub(1);
+                host.mux.reorder_tab(from, last).unwrap_or(false)
+            }
+            (StripDragKind::Pane { pane, .. }, Some(mux::StripHit::Tab { index, .. })) => host
+                .mux
+                .window_at_tab(index)
+                .map(|dest| host.mux.move_pane_to_window(pane, dest).unwrap_or(false))
+                .unwrap_or(false),
+            (
+                StripDragKind::Pane { pane, .. },
+                Some(mux::StripHit::EmptyEnd | mux::StripHit::NewTab),
+            ) => host.mux.move_pane_to_new_tab(pane).unwrap_or(false),
+            _ => false,
         }
-        (StripDragKind::Tab(from), Some(mux::StripHit::EmptyEnd | mux::StripHit::NewTab)) => {
-            let last = host.mux.tab_count().saturating_sub(1);
-            host.mux.reorder_tab(from, last).unwrap_or(false)
-        }
-        (StripDragKind::Pane { pane, .. }, Some(mux::StripHit::Tab { index, .. })) => host
-            .mux
-            .window_at_tab(index)
-            .map(|dest| host.mux.move_pane_to_window(pane, dest).unwrap_or(false))
-            .unwrap_or(false),
-        (
-            StripDragKind::Pane { pane, .. },
-            Some(mux::StripHit::EmptyEnd | mux::StripHit::NewTab),
-        ) => host.mux.move_pane_to_new_tab(pane).unwrap_or(false),
-        _ => false,
     };
     if changed {
         mark_layout_dirty(host);
@@ -20501,6 +20620,12 @@ impl ApplicationHandler<UserAction> for App {
             return;
         };
 
+        if matches!(
+            &event,
+            WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. }
+        ) {
+            drag_trace(|| format!("{event:?} at_px={:?}", host.pointer_px));
+        }
         if session_prompt::handle_pointer(host, &event) {
             return;
         }

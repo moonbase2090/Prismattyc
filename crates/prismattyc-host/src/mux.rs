@@ -407,6 +407,22 @@ pub(crate) fn pane_title_from_osc(text: &str) -> Option<String> {
     Some(text.to_string())
 }
 
+/// The pane a same-tab pane drag reorders with when it ends on another
+/// pane's handle in that tab. Drops onto other tabs, the empty end, or the
+/// dragged pane's own handle are not swaps.
+pub(crate) fn pane_drop_swap_target(
+    from_tab: usize,
+    pane: PaneId,
+    hit: Option<StripHit>,
+) -> Option<PaneId> {
+    match hit {
+        Some(StripHit::Pane {
+            tab, pane: target, ..
+        }) if tab == from_tab && target != pane => Some(target),
+        _ => None,
+    }
+}
+
 /// Hit in the tab strip (PT-69).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StripHit {
@@ -4984,6 +5000,30 @@ impl MuxRuntime {
         self.replace_layout(next)
     }
 
+    /// The pane in the active window whose full slot, chrome included,
+    /// contains the pixel. Used by a pane-header drag released over another
+    /// pane's body.
+    pub(crate) fn pane_at_px(&self, x: usize, y: usize) -> Option<PaneId> {
+        self.rects.iter().find_map(|(pane, rect)| {
+            let (sx, sy, sw, sh) = self.geom.pane_slot_px(*rect);
+            (x >= sx && x < sx + sw && y >= sy && y < sy + sh).then_some(*pane)
+        })
+    }
+
+    /// Exchange two panes of the active window; focus stays where it was.
+    /// Used by a same-tab pane drag that ends on another pane's handle.
+    pub(crate) fn swap_panes(&mut self, a: PaneId, b: PaneId) -> Result<bool> {
+        self.unzoom()?;
+        let window = self.active_window();
+        let Some(layout) = self.domain.window(window).map(|win| win.layout.clone()) else {
+            return Ok(false);
+        };
+        let Some(next) = layout.swap_leaves(a, b) else {
+            return Ok(false);
+        };
+        self.replace_layout(next)
+    }
+
     /// Rotate every pane of the active window one slot (+1 forward, -1
     /// back); focus stays with the same pane (PT-125).
     pub(crate) fn rotate_panes(&mut self, delta: i32) -> Result<bool> {
@@ -9520,6 +9560,162 @@ mod tests {
         runtime.toggle_zoom().unwrap();
         assert!(runtime.swap_focused(1).unwrap());
         assert!(runtime.zoomed_pane().is_none());
+    }
+
+    #[test]
+    fn swap_panes_exchanges_two_panes_in_the_same_window() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let a = runtime.focused_id();
+        let b = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let c = runtime
+            .split_focused("/bin/sh", &[], Axis::Vertical, 0.5)
+            .unwrap();
+        let order = |r: &MuxRuntime| r.domain.window(r.active_window()).unwrap().layout.panes();
+        assert_eq!(order(&runtime), vec![a, b, c]);
+        // A pane dropped on another pane's handle swaps with it; focus stays.
+        runtime.focus(b);
+        assert!(runtime.swap_panes(a, c).unwrap());
+        assert_eq!(order(&runtime), vec![c, b, a]);
+        assert_eq!(runtime.focused_id(), b);
+        assert!(!runtime.swap_panes(a, a).unwrap(), "same pane is a no-op");
+    }
+
+    #[test]
+    fn pane_at_px_finds_the_pane_whose_slot_holds_the_pointer() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let a = runtime.focused_id();
+        let b = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let geom = HostGeom {
+            cell_w: 10,
+            cell_h: 20,
+            window_pad: 5,
+            slack_x: 0,
+            slack_y: 0,
+            pane_gap: 5,
+            rail_gap: 5,
+            inner_pad: 5,
+            top_chrome_px: 0,
+            pane_header_px: 0,
+            scrollbar_gutter_px: 8,
+            rail_side: RailSide::Off,
+            rail_px: 0,
+            rail_chip_cols: 0,
+            sidebar_px: 0,
+            chrome: ChromeGeom::CLASSIC,
+        };
+        runtime.set_geom(geom).unwrap();
+        let rects: HashMap<PaneId, CellRect> = runtime.rects().collect();
+        let centre = |pane| {
+            let (x, y, w, h) = geom.pane_slot_px(rects[&pane]);
+            (x + w / 2, y + h / 2)
+        };
+        let (ax, ay) = centre(a);
+        let (bx, by) = centre(b);
+        assert_eq!(runtime.pane_at_px(ax, ay), Some(a));
+        assert_eq!(runtime.pane_at_px(bx, by), Some(b));
+        assert_eq!(runtime.pane_at_px(0, 0), None, "outside every slot");
+    }
+
+    #[test]
+    fn pane_drag_press_then_release_swaps_the_two_panes_in_order() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let a = runtime.focused_id();
+        let b = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let geom = HostGeom {
+            cell_w: 10,
+            cell_h: 20,
+            window_pad: 5,
+            slack_x: 0,
+            slack_y: 0,
+            pane_gap: 5,
+            rail_gap: 5,
+            inner_pad: 5,
+            top_chrome_px: 0,
+            pane_header_px: 0,
+            scrollbar_gutter_px: 8,
+            rail_side: RailSide::Off,
+            rail_px: 0,
+            rail_chip_cols: 0,
+            sidebar_px: 0,
+            chrome: ChromeGeom::CLASSIC,
+        };
+        runtime.set_geom(geom).unwrap();
+        let slot_of = |runtime: &MuxRuntime, pane| {
+            let rect: HashMap<PaneId, CellRect> = runtime.rects().collect();
+            let (x, y, w, h) = geom.pane_slot_px(rect[&pane]);
+            (x + w / 2, y + h / 2)
+        };
+        let order_before = runtime.rects().collect::<HashMap<_, _>>();
+        // Press on a's slot, release on b's slot: the drop is the same-tab
+        // pane under the pointer, so the drop resolves to b and swaps.
+        let press = slot_of(&runtime, a);
+        let release = slot_of(&runtime, b);
+        assert_eq!(runtime.pane_at_px(press.0, press.1), Some(a));
+        assert_eq!(runtime.pane_at_px(release.0, release.1), Some(b));
+        let target = runtime
+            .pane_at_px(release.0, release.1)
+            .filter(|target| *target != a)
+            .expect("release lands on another pane");
+        assert!(runtime.swap_panes(a, target).unwrap());
+        let order_after = runtime.rects().collect::<HashMap<_, _>>();
+        assert_eq!(order_after[&a], order_before[&b], "a takes b's slot");
+        assert_eq!(order_after[&b], order_before[&a], "b takes a's slot");
+    }
+
+    #[test]
+    fn pane_drag_handle_release_on_another_pane_swaps_in_the_same_tab() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let a = runtime.focused_id();
+        let b = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        // Strip-handle release: the hit names pane b in tab 0, so the drop
+        // target is b and only the same-tab swap applies.
+        let hit = Some(StripHit::Pane {
+            tab: 0,
+            pane: b,
+            handle: 0,
+        });
+        let target = pane_drop_swap_target(0, a, hit).expect("same-tab drop");
+        assert_eq!(target, b);
+        let before = runtime.rects().collect::<HashMap<_, _>>();
+        assert!(runtime.swap_panes(a, target).unwrap());
+        let after = runtime.rects().collect::<HashMap<_, _>>();
+        assert_eq!(after[&a], before[&b]);
+        assert_eq!(after[&b], before[&a]);
+    }
+
+    #[test]
+    fn pane_drop_swaps_only_with_another_pane_in_the_same_tab() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let pane = runtime.focused_id();
+        let other = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let handle = |tab, pane| {
+            Some(StripHit::Pane {
+                tab,
+                pane,
+                handle: 0,
+            })
+        };
+        assert_eq!(
+            pane_drop_swap_target(0, pane, handle(0, other)),
+            Some(other)
+        );
+        assert_eq!(pane_drop_swap_target(0, pane, handle(0, pane)), None);
+        assert_eq!(pane_drop_swap_target(0, pane, handle(1, other)), None);
+        assert_eq!(
+            pane_drop_swap_target(0, pane, Some(StripHit::EmptyEnd)),
+            None
+        );
+        assert_eq!(pane_drop_swap_target(0, pane, None), None);
     }
 
     #[test]

@@ -11,11 +11,14 @@ struct Options {
     plan: bool,
     stop_sessions: bool,
     worker: bool,
+    consent_config: Option<PathBuf>,
+    delete_consent_config: bool,
 }
 fn parse(args: &[String]) -> Result<Options> {
     let mut opts = Options::default();
     let mut all = false;
-    for arg in args {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--host" => opts.host = true,
             "--daemon" | "--mux" => opts.daemon = true,
@@ -24,6 +27,12 @@ fn parse(args: &[String]) -> Result<Options> {
             "--plan" => opts.plan = true,
             "--stop-sessions" => opts.stop_sessions = true,
             "--worker" => opts.worker = true,
+            "--consented-config" => {
+                opts.consent_config = Some(PathBuf::from(
+                    args.next().context("--consented-config requires a file")?,
+                ));
+            }
+            "--delete-consented-config" => opts.delete_consent_config = true,
             "--json" => {}
             other => bail!("unknown restart option {other:?}; use pmux restart --help"),
         }
@@ -36,6 +45,14 @@ fn parse(args: &[String]) -> Result<Options> {
     anyhow::ensure!(
         !opts.stop_sessions || opts.daemon,
         "--stop-sessions requires a daemon restart"
+    );
+    anyhow::ensure!(
+        opts.consent_config.is_none() || opts.stop_sessions,
+        "--consented-config requires --stop-sessions"
+    );
+    anyhow::ensure!(
+        !opts.delete_consent_config || opts.consent_config.is_some(),
+        "--delete-consented-config requires --consented-config"
     );
     Ok(opts)
 }
@@ -53,6 +70,10 @@ fn stop_idle(paths: &Paths) -> Result<()> {
     else {
         bail!("could not register restart coordinator");
     };
+    shutdown_idle(paths, &mut client, client_id)
+}
+
+fn shutdown_idle(paths: &Paths, client: &mut Client, client_id: u64) -> Result<()> {
     let reply = client
         .request(|request_id| ControlRequest::ShutdownIdle {
             version: PROTOCOL_VERSION,
@@ -79,7 +100,7 @@ fn stop_idle(paths: &Paths) -> Result<()> {
 
 pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("pmux restart [--all|--host|--daemon|--mcp] [--plan] [--json]\n\nRestart cooperative components. Default: all safe components.\nHost: restore windows and reconnect mux sessions; defer if blank terminals exist.\nMCP: restart supervised adapters without replaying pending operations.\nDaemon: restart only when no sessions exist. --stop-sessions explicitly permits\nstopping every session; the restart then runs from a detached helper.\nUse --plan to inspect the impact before changing anything.");
+        println!("pmux restart [--all|--host|--daemon|--mcp] [--plan] [--json]\n\nRestart cooperative components. Default: all safe components.\nHost: restore windows and reconnect mux sessions; defer if blank terminals exist.\nMCP: restart supervised adapters without replaying pending operations.\nDaemon: restart only when no sessions exist. --stop-sessions explicitly permits\nstopping every session; the restart then runs from a detached helper.\n--consented-config FILE limits an update restart to the unchanged saved session list.\nUse --plan to inspect the impact before changing anything.");
         return Ok(());
     }
     let opts = parse(&args)?;
@@ -128,25 +149,48 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
             // Run lifecycle verbs as children so their progress cannot corrupt JSON.
             let executable = prismattyc_mux::release_update::installed_binary("pmux")
                 .unwrap_or(std::env::current_exe()?);
-            let verbs: &[&str] = if opts.stop_sessions {
-                &["stop", "up"]
-            } else {
-                stop_idle(paths)?;
-                &["up"]
-            };
-            for verb in verbs {
-                let mut command = Command::new(&executable);
-                command
-                    .arg("--socket")
-                    .arg(&paths.socket)
-                    .arg(verb)
-                    .stdout(Stdio::null());
-                if let Some(server) = prismattyc_mux::release_update::installed_binary("pmuxd") {
-                    command.env("PMUX_SERVER", server);
+            if let Some(file) = &opts.consent_config {
+                let (mut client, client_id, session_ids) =
+                    session_config::check_for_restart(paths, file)
+                        .context("session consent check failed; no sessions were stopped")?;
+                if opts.delete_consent_config {
+                    std::fs::remove_file(file)?;
                 }
-                anyhow::ensure!(command.status()?.success(), "daemon {verb} failed");
+                for session_id in session_ids {
+                    super::destroy_session(&mut client, session_id).with_context(|| {
+                        format!("consented session {session_id} could not be stopped")
+                    })?;
+                }
+                shutdown_idle(paths, &mut client, client_id)?;
+                let mut up = Command::new(&executable);
+                up.arg("--socket")
+                    .arg(&paths.socket)
+                    .arg("up")
+                    .stdout(Stdio::null());
+                anyhow::ensure!(up.status()?.success(), "daemon up failed");
+                results.push(json!({"component":"daemon","status":"restarted"}));
+            } else {
+                let verbs: &[&str] = if opts.stop_sessions {
+                    &["stop", "up"]
+                } else {
+                    stop_idle(paths)?;
+                    &["up"]
+                };
+                for verb in verbs {
+                    let mut command = Command::new(&executable);
+                    command
+                        .arg("--socket")
+                        .arg(&paths.socket)
+                        .arg(verb)
+                        .stdout(Stdio::null());
+                    if let Some(server) = prismattyc_mux::release_update::installed_binary("pmuxd")
+                    {
+                        command.env("PMUX_SERVER", server);
+                    }
+                    anyhow::ensure!(command.status()?.success(), "daemon {verb} failed");
+                }
+                results.push(json!({"component":"daemon","status":"restarted"}));
             }
-            results.push(json!({"component":"daemon","status":"restarted"}));
         } else {
             results.push(json!({"component":"daemon","status":"deferred","detail":"sessions are running; use --stop-sessions only when ready to end them","sessions":sessions}));
         }

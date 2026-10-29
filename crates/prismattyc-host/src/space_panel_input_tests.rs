@@ -914,6 +914,7 @@ fn panel(space: &str, owner: Option<String>, choice: Option<Choice>) -> Panel {
         input: None,
         submitted: None,
         pending: None,
+        update_action: None,
         scroll: 0,
         columns: 80,
         chrome_layout: Some(config::LayoutMode::Bars),

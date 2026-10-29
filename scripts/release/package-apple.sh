@@ -90,7 +90,7 @@ cp "$ROOT/crates/prismattyc-host/assets/fonts/"*.txt "$RESOURCES/"
 cp "$ROOT/scripts/install-prismattyc-terminfo.sh" "$RESOURCES/"
 python3 "$ROOT/scripts/package-terminfo.py" --out "$RESOURCES/terminfo"
 
-for name in prismattyc-host pmux pmuxd pmux-attach; do
+for name in prismattyc-host pmux pmuxd pmux-attach pmux-mcp prismattyc; do
   arm64="$BIN_ROOT/aarch64-apple-darwin/release/$name"
   x86_64="$BIN_ROOT/x86_64-apple-darwin/release/$name"
   [[ -x "$arm64" ]] || { echo "missing executable: $arm64" >&2; exit 1; }
@@ -191,7 +191,7 @@ is_macho() {
 }
 
 echo 'Signing Prismattyc helper binaries'
-for name in pmux pmuxd pmux-attach prismattyc-host; do
+for name in pmux pmuxd pmux-attach pmux-mcp prismattyc prismattyc-host; do
   binary="$MACOS/$name"
   is_macho "$binary" || { echo "not a Mach-O helper: $binary" >&2; exit 1; }
   sign_code "$binary"

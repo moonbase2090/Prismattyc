@@ -3254,6 +3254,77 @@ fn text_cells(text: &str) -> usize {
         .sum()
 }
 
+fn menu_row_text(text: &str, max_cells: usize) -> String {
+    if text_cells(text) <= max_cells {
+        return text.to_owned();
+    }
+
+    let is_version = |suffix: &str| {
+        let core = suffix
+            .trim_start_matches('v')
+            .split(['-', '+'])
+            .next()
+            .unwrap_or_default();
+        core.split('.').count() >= 2
+            && core
+                .split('.')
+                .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+    };
+    let (prefix, separator, suffix) = if let Some((prefix, suffix)) = text.rsplit_once('/') {
+        (prefix, "…/", suffix)
+    } else if let Some((prefix, suffix)) = text.rsplit_once(' ') {
+        if is_version(suffix) {
+            (prefix, " … ", suffix)
+        } else {
+            return ellipsized(text, max_cells);
+        }
+    } else {
+        return ellipsized(text, max_cells);
+    };
+
+    let preserved = text_cells(separator) + text_cells(suffix);
+    if preserved > max_cells {
+        return ellipsized(text, max_cells);
+    }
+    let head = ellipsized(prefix, max_cells - preserved);
+    let head = head.strip_suffix('…').unwrap_or(&head);
+    format!("{head}{separator}{suffix}")
+}
+
+fn palette_content_width(frame: &PaletteFrame<'_>, inset_cells: usize) -> usize {
+    let rows = frame
+        .sections
+        .iter()
+        .flat_map(|section| section.rows)
+        .map(|row| {
+            let mut cells = text_cells(&row.name);
+            if !row.full_width {
+                if !row.describe.is_empty() {
+                    cells = cells.saturating_add(2 + text_cells(&row.describe));
+                }
+                if !row.chord_label.is_empty() {
+                    cells = cells.saturating_add(2 + text_cells(&row.chord_label));
+                }
+            }
+            cells.saturating_add(inset_cells.saturating_mul(2))
+        })
+        .max()
+        .unwrap_or(0);
+    let headers = frame
+        .sections
+        .iter()
+        .map(|section| text_cells(section.header) + text_cells(section.subtitle) + 2)
+        .max()
+        .unwrap_or(0);
+    let query = frame.query.map_or(0, |query| text_cells(query) + 10);
+    let footer = text_cells(frame.footer);
+    rows.max(headers)
+        .max(query)
+        .max(footer)
+        .max(20)
+        .saturating_add(inset_cells.saturating_mul(2))
+}
+
 /// Cut `text` to `max_cells`, ending in `…` when anything was removed.
 pub fn ellipsized(text: &str, max_cells: usize) -> String {
     if text_cells(text) <= max_cells {
@@ -3338,7 +3409,11 @@ pub fn palette_layout(
         return None;
     }
     let (window_cols, window_rows) = palette_window(font, stride_px, buffer_height_px)?;
-    let geom = palette_geom(window_cols, window_rows, font.cell_h);
+    let mut geom = palette_geom(window_cols, window_rows, font.cell_h);
+    if !geom.compact {
+        let screen_width = window_cols.saturating_sub(4).max(20);
+        geom.width_cells = palette_content_width(frame, geom.inset_cells).min(screen_width);
+    }
     if geom.width_cells < 20 {
         return None;
     }
@@ -3643,6 +3718,29 @@ pub fn rasterize_palette_with_hover(
     let inner_cells = geom
         .width_cells
         .saturating_sub(geom.inset_cells.saturating_mul(2));
+    let regular_rows = frame
+        .sections
+        .iter()
+        .flat_map(|section| section.rows)
+        .filter(|row| !row.full_width)
+        .collect::<Vec<_>>();
+    let regular_name_cells = regular_rows
+        .iter()
+        .map(|row| text_cells(&row.name))
+        .max()
+        .unwrap_or(geom.name_cells)
+        .min(
+            inner_cells
+                .saturating_sub(geom.name_x + geom.chord_gap_cells.saturating_mul(2) + 1)
+                .saturating_sub(
+                    regular_rows
+                        .iter()
+                        .map(|row| text_cells(&row.chord_label))
+                        .max()
+                        .unwrap_or(0),
+                )
+                .max(1),
+        );
     let (lines, _) = palette_collect_lines(frame);
     let start = layout.start;
     let shown = layout.shown;
@@ -3837,18 +3935,20 @@ pub fn rasterize_palette_with_hover(
                 let (name_c, desc_c, desc_max, chord_c) = palette_row_columns(
                     inner_cells,
                     chord_cells,
-                    geom.name_cells,
+                    if row.full_width {
+                        0
+                    } else {
+                        regular_name_cells
+                    },
                     geom.name_x,
                     geom.chord_gap_cells,
                 );
-                let name = ellipsized(
-                    &row.name,
-                    if row.full_width {
-                        inner_cells.saturating_sub(name_c)
-                    } else {
-                        geom.name_cells
-                    },
-                );
+                let name_cells = if row.full_width {
+                    inner_cells.saturating_sub(name_c)
+                } else {
+                    regular_name_cells
+                };
+                let name = menu_row_text(&row.name, name_cells);
                 draw_theme_text(
                     buffer,
                     stride_px,
@@ -12026,9 +12126,99 @@ mod tests {
         assert_eq!(ellipsized("abcdef", 4), "abc…");
         assert_eq!(ellipsized("abcd", 4), "abcd");
         assert_eq!(ellipsized("abcd", 0), "");
+        assert_eq!(
+            menu_row_text("Installed pmux: pmux 0.3.48", 40),
+            "Installed pmux: pmux 0.3.48"
+        );
+        assert!(menu_row_text("Installed pmux: pmux 0.3.48", 23).ends_with("0.3.48"));
+        assert_eq!(
+            menu_row_text("/var/tmp/really-long-directory/config.toml", 18),
+            "/var…/config.toml"
+        );
         let wrapped = wrap_lines("one two three four five", 9, 2);
         assert_eq!(wrapped, vec!["one two", "three fo…"]);
         assert_eq!(wrap_lines("short", 9, 2), vec!["short"]);
+    }
+
+    fn assert_full_width_menu_row_fits(header: &str, label: &str) {
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let theme = default_theme();
+        let mut row = crate::palette::PaletteRow::plain(label.into(), String::new(), String::new());
+        row.full_width = true;
+        let rows = [row];
+        let sections = [PaletteSection {
+            header,
+            subtitle: "",
+            rows: &rows,
+        }];
+        let frame = PaletteFrame {
+            layout_mode: PaletteLayoutMode::ContentFit,
+            query: None,
+            query_focused: false,
+            chips: None,
+            sections: &sections,
+            selected: 0,
+            scroll: 0,
+            detail: None,
+            footer: "Enter choose · Esc close",
+        };
+        let width = 160 * font.cell_w;
+        let height = 48 * font.cell_h;
+        let layout = palette_layout(&font, &frame, width, height).expect("menu fits");
+        assert!(
+            layout.geom.width_cells < PALETTE_MAX_CELLS,
+            "{header} should fit to its content"
+        );
+        let available = layout
+            .geom
+            .width_cells
+            .saturating_sub(layout.geom.inset_cells * 2);
+        assert_eq!(menu_row_text(label, available), label, "{header}");
+        let mut buffer = vec![pack_rgb(theme.default_bg); width * height];
+        rasterize_palette(
+            &font,
+            &frame,
+            theme,
+            OverlaySurface::default(),
+            &mut buffer,
+            width,
+            height,
+            FOCUS_BORDER_PALETTE[0].1,
+        )
+        .expect("normal-width palette renders");
+        assert!(buffer
+            .iter()
+            .any(|pixel| *pixel != pack_rgb(theme.default_bg)));
+    }
+
+    #[test]
+    fn command_palette_rows_render_without_ellipses_at_normal_width() {
+        assert_full_width_menu_row_fits("MATCHES", "Installed pmux: pmux 0.3.48");
+    }
+
+    #[test]
+    fn context_menu_rows_render_without_ellipses_at_normal_width() {
+        assert_full_width_menu_row_fits("PANE ACTIONS", "Running host (PID 75480): 0.3.48");
+    }
+
+    #[test]
+    fn picker_rows_render_without_ellipses_at_normal_width() {
+        assert_full_width_menu_row_fits("OPEN SPACE", "Installed pmuxd: pmuxd 0.3.48");
+    }
+
+    #[test]
+    fn update_result_rows_render_without_ellipses_at_normal_width() {
+        assert_full_width_menu_row_fits(
+            "UPDATE AND RESTART RESULT",
+            "Running daemon: pmuxd 0.3.48",
+        );
+    }
+
+    #[test]
+    fn settings_popup_rows_render_without_ellipses_at_normal_width() {
+        assert_full_width_menu_row_fits("SPACES SETTINGS", "Running host (PID 75480): 0.3.48");
     }
 
     #[test]

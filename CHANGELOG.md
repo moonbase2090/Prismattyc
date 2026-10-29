@@ -6,6 +6,26 @@
 
 - The Spaces title remains visible beside the expand/collapse-all control when the sidebar is docked on either side.
 
+## [0.3.52] - 2026-10-28
+
+### Added
+
+- Standard macOS menus expose application actions and configured shortcuts, and a native dialog saves session configurations.
+
+### Changed
+
+- Session configuration restore now preserves names, working directories, and commands without replaying command text.
+
+## [0.3.52-rc.1]
+
+### Added
+
+- Standard macOS menus expose application actions and configured shortcuts, and a native dialog saves session configurations.
+
+### Changed
+
+- Session configuration restore now preserves names, working directories, and commands without replaying command text.
+
 ## [0.3.51] - 2026-10-28
 
 ### Added

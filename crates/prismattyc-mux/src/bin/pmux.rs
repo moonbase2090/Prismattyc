@@ -142,9 +142,10 @@ session
         [--agent NAME|--no-agent] NAME [--] [PROGRAM...]
                                   create a named session; attach in a TTY
                                   unless --no-attach. --agent binds a mailbox
-                                  (default: derive a unique lowercase address).
+                                  (default: the session name).
     session-config <save|check|restore> FILE
-                                  save or restore all session configurations
+                                  save, check or restore session configurations
+                                  (default: derive a unique lowercase address).
     login <enable|disable|status|sync>
                                   start at login and restore workspace
     doctor [SESSION]              pane shell, login state, child pid, lease, attach state

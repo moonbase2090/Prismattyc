@@ -120,6 +120,8 @@ def host_origin(env, trace, guess):
     """The root point of the host's (0,0): move the pointer to a known root point and subtract the
     window point the host logs for it."""
     target = (guess[0] + 200, guess[1] + 200)
+    # Clear the trace first, so only the position logged for this move can be read.
+    trace.write_text("")
     xdo("mousemove", "--sync", str(target[0]), str(target[1]))
     time.sleep(0.5)
     text = trace.read_text() if trace.exists() else ""

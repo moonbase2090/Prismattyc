@@ -510,7 +510,7 @@ impl ConfigFile {
             .unwrap_or(DEFAULT_PTY_DRAIN_BUDGET_MS)
     }
 
-    /// Long-lived snapshot cache. Missing means off.
+    /// Long-lived snapshot cache. Missing means on; set false to opt out.
     pub fn snapshot_client_enabled(&self) -> bool {
         self.snapshot_client.unwrap_or(true)
     }

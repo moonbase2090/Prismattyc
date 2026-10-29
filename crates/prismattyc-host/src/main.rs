@@ -1110,7 +1110,7 @@ struct HostState {
     font_features: Vec<String>,
     render_timer: config::RenderTimer,
     render_timer_log_every_frame: bool,
-    /// Periodic pmuxd snapshot cache. `None` when `snapshot_client` is off.
+    /// Periodic pmuxd snapshot cache. `None` when disabled by configuration.
     snapshot_client: Option<Arc<snapshot_client::SnapshotClient>>,
     render_frame: RenderFrame,
     render_window: RenderWindow,
@@ -3050,7 +3050,7 @@ struct App {
     _config_watcher: Option<config::ConfigWatch>,
     /// Coalesced wake from PTY reader threads and the config watcher.
     wake: mux::Wake,
-    /// Process-wide snapshot cache. `None` when `snapshot_client` is off.
+    /// Process-wide snapshot cache. `None` when disabled by configuration.
     /// Startup only: config reload does not start or stop it.
     snapshot_client: Option<Arc<snapshot_client::SnapshotClient>>,
     /// `[[remote]]` destinations and their catalogs (issue #24).

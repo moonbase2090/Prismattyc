@@ -5,8 +5,8 @@
 //! `Events` on a short cadence and snapshots again only when the sequence
 //! moves. [`SnapshotClient::fresh`] clones the cache and never connects, so a
 //! stopped pmuxd cannot spend the 2 s control timeout on the main thread.
-//! The client is off unless `snapshot_client` is set; one-shot callers keep
-//! [`crate::attach_log::live_snapshot`].
+//! The client is on by default and can be disabled with `snapshot_client = false`;
+//! one-shot callers keep [`crate::attach_log::live_snapshot`].
 
 use std::collections::HashMap;
 use std::path::PathBuf;

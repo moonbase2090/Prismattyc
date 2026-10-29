@@ -371,34 +371,6 @@ fn login_sync_registers_a_user_unit() {
 }
 
 #[test]
-fn login_preference_keeps_comments_and_unrelated_config() {
-    let root = temp_root("login-preservation");
-    let socket = socket_path(&root);
-    let config = root.join("config/prismattyc.toml");
-    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-    std::fs::write(
-        &config,
-        "# login explanation\nstart_at_login = false # inline explanation\nfuture_root = { count = 7 }\n",
-    )
-    .unwrap();
-    let isolated = [("PRISMATTYC_NO_LOGIN_SERVICE", "1")];
-    ok(&pmux(&socket, &root, &isolated, &["login", "enable"]));
-    let enabled = std::fs::read_to_string(&config).unwrap();
-    let values: toml::Value = enabled.parse().unwrap();
-    assert_eq!(values["start_at_login"], toml::Value::Boolean(true));
-    assert_eq!(values["future_root"]["count"], toml::Value::Integer(7));
-    assert!(enabled.contains("# login explanation"));
-    assert!(enabled.contains("# inline explanation"));
-    ok(&pmux(&socket, &root, &isolated, &["login", "disable"]));
-    let disabled = std::fs::read_to_string(&config).unwrap();
-    let values: toml::Value = disabled.parse().unwrap();
-    assert_eq!(values["start_at_login"], toml::Value::Boolean(false));
-    assert_eq!(values["future_root"]["count"], toml::Value::Integer(7));
-    assert!(disabled.contains("# inline explanation"));
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn session_configuration_restores_names_directories_and_commands_without_replay() {
     let root = temp_root("session-configuration");
     let socket = socket_path(&root);
@@ -472,6 +444,35 @@ fn session_configuration_restores_names_directories_and_commands_without_replay(
         "restored"
     );
     drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn login_preference_keeps_comments_and_unrelated_config() {
+    let root = temp_root("login-preservation");
+    let socket = socket_path(&root);
+    let config = root.join("config/prismattyc.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config,
+        "# login explanation\nstart_at_login = false # inline explanation\nfuture_root = { count = 7 }\n",
+    )
+    .unwrap();
+    let isolated = [("PRISMATTYC_NO_LOGIN_SERVICE", "1")];
+    ok(&pmux(&socket, &root, &isolated, &["login", "enable"]));
+    let enabled = std::fs::read_to_string(&config).unwrap();
+    let values: toml::Value = enabled.parse().unwrap();
+    assert_eq!(values["start_at_login"], toml::Value::Boolean(true));
+    assert_eq!(values["future_root"]["count"], toml::Value::Integer(7));
+    assert!(enabled.contains("# login explanation"));
+    assert!(enabled.contains("# inline explanation"));
+    ok(&pmux(&socket, &root, &isolated, &["login", "disable"]));
+    let disabled = std::fs::read_to_string(&config).unwrap();
+    let values: toml::Value = disabled.parse().unwrap();
+    assert_eq!(values["start_at_login"], toml::Value::Boolean(false));
+    assert_eq!(values["future_root"]["count"], toml::Value::Integer(7));
+    assert!(disabled.contains("# inline explanation"));
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

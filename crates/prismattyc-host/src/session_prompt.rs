@@ -39,7 +39,7 @@ pub(super) struct Prompt {
     target: Target,
     action: Option<keybind::Action>,
     pub(super) buffer: String,
-    selected: bool,
+    pub(super) selected: bool,
     button: usize,
     anchor: PaneId,
     space: Option<String>,

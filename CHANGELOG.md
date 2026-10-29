@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Standard macOS menus expose application actions and configured shortcuts, and a native dialog saves session configurations.
+
+### Changed
+
+- Session configuration restore now preserves names, working directories, and commands without replaying command text.
+
 ## [0.3.51] - 2026-10-28
 
 ### Added

@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 struct Configuration {
     version: u32,
     space: SavedSpace,
+    #[serde(default)]
+    session_ids: Vec<u64>,
     owners: Vec<(String, Option<String>)>,
     #[serde(default)]
     view: Option<attach_tabs::AttachTabsFile>,
@@ -14,15 +16,15 @@ struct Configuration {
 
 pub(super) fn run(paths: &Paths, args: Vec<String>) -> Result<()> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("pmux session-config save FILE\npmux session-config restore FILE\n\nSave all running sessions, directories, commands and layouts.\nRestore recreates missing sessions and relaunches their saved commands.\nExisting sessions are left untouched. Restore only a file you trust.");
+        println!("pmux session-config save FILE\npmux session-config check FILE\npmux session-config restore FILE\n\nSave all running sessions, directories, commands and layouts.\nCheck verifies that the live sessions still match a saved configuration.\nRestore recreates missing sessions and relaunches their saved commands.\nExisting sessions are left untouched. Restore only a file you trust.");
         return Ok(());
     }
     let [verb, file] = args.as_slice() else {
-        bail!("use pmux session-config save|restore FILE");
+        bail!("use pmux session-config save|check|restore FILE");
     };
     ensure!(
-        matches!(verb.as_str(), "save" | "restore"),
-        "use save or restore"
+        matches!(verb.as_str(), "save" | "check" | "restore"),
+        "use save, check, or restore"
     );
     let mut client = Client::connect(&paths.socket)?;
     let ControlResponseData::ClientRegistered { client_id } =
@@ -33,10 +35,11 @@ pub(super) fn run(paths: &Paths, args: Vec<String>) -> Result<()> {
     else {
         bail!("could not register session configuration client");
     };
-    if verb == "save" {
-        save(&mut client, paths, Path::new(file))
-    } else {
-        restore(&mut client, client_id, paths, Path::new(file))
+    match verb.as_str() {
+        "save" => save(&mut client, paths, Path::new(file)),
+        "check" => check(&mut client, Path::new(file)),
+        "restore" => restore(&mut client, client_id, paths, Path::new(file)),
+        _ => unreachable!(),
     }
 }
 
@@ -45,6 +48,7 @@ fn save(client: &mut Client, paths: &Paths, file: &Path) -> Result<()> {
     let sessions = snapshot.sessions.iter().collect::<Vec<_>>();
     let config = Configuration {
         version: 1,
+        session_ids: sessions.iter().map(|session| session.id).collect(),
         view: attach_tabs::load(&paths.space_view_path()),
         space: from_sessions(&sessions),
         owners: sessions
@@ -67,6 +71,58 @@ fn save(client: &mut Client, paths: &Paths, file: &Path) -> Result<()> {
     output.sync_all()?;
     println!("Saved {} sessions to {}.", sessions.len(), file.display());
     Ok(())
+}
+
+fn check(client: &mut Client, file: &Path) -> Result<()> {
+    checked_session_ids(client, file)?;
+    println!("Session configuration is unchanged.");
+    Ok(())
+}
+
+pub(super) fn check_for_restart(paths: &Paths, file: &Path) -> Result<(Client, u64, Vec<u64>)> {
+    let mut client = Client::connect(&paths.socket)?;
+    let ControlResponseData::ClientRegistered { client_id } =
+        client.request(|request_id| ControlRequest::RegisterClient {
+            version: PROTOCOL_VERSION,
+            request_id,
+        })?
+    else {
+        bail!("could not register session configuration client");
+    };
+    let ids = checked_session_ids(&mut client, file)?;
+    Ok((client, client_id, ids))
+}
+
+fn checked_session_ids(client: &mut Client, file: &Path) -> Result<Vec<u64>> {
+    let config: Configuration =
+        serde_json::from_slice(&std::fs::read(file)?).context("read session configuration")?;
+    ensure!(
+        config.version == 1,
+        "unsupported session configuration version"
+    );
+    ensure!(
+        config.session_ids.len() == config.space.sessions.len(),
+        "session configuration has no complete consented session list"
+    );
+    let session_ids = config.session_ids.clone();
+    let expected = session_ids
+        .iter()
+        .copied()
+        .zip(config.space.sessions)
+        .collect::<Vec<_>>();
+    let snapshot = take_snapshot(client)?;
+    let sessions = snapshot.sessions.iter().collect::<Vec<_>>();
+    let current = from_sessions(&sessions).sessions;
+    let current = sessions
+        .iter()
+        .map(|session| session.id)
+        .zip(current)
+        .collect::<Vec<_>>();
+    ensure!(
+        expected == current,
+        "The running sessions changed since the configuration was saved. No sessions were stopped."
+    );
+    Ok(session_ids)
 }
 
 fn restore(client: &mut Client, client_id: u64, paths: &Paths, file: &Path) -> Result<()> {

@@ -473,3 +473,171 @@ fn session_configuration_restores_names_directories_and_commands_without_replay(
     );
     drop(server);
 }
+
+#[test]
+fn session_configuration_check_rejects_in_place_layout_changes() {
+    let root = temp_root("cfg-in");
+    let socket = socket_path(&root);
+    let server = start_server(&socket, &root);
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &[
+            "new",
+            "--no-attach",
+            "work",
+            "/bin/sh",
+            "-c",
+            "exec sleep 999",
+        ],
+    ));
+    let file = root.join("configuration.json");
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "save", file.to_str().unwrap()],
+    ));
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "check", file.to_str().unwrap()],
+    ));
+
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["rename-pane", "--session", "work", "renamed"],
+    ));
+    let changed = pmux(
+        &socket,
+        &root,
+        &[],
+        &[
+            "restart",
+            "--daemon",
+            "--stop-sessions",
+            "--consented-config",
+            file.to_str().unwrap(),
+            "--worker",
+            "--json",
+        ],
+    );
+    fail(&changed, "session consent check failed");
+    let sessions = ok(&pmux(&socket, &root, &[], &["restart", "--plan", "--json"]));
+    assert!(sessions.contains("\"work\""), "{sessions}");
+    drop(server);
+}
+
+#[test]
+fn session_configuration_check_rejects_new_sessions_before_restart() {
+    let root = temp_root("cfg-new");
+    let socket = socket_path(&root);
+    let server = start_server(&socket, &root);
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &[
+            "new",
+            "--no-attach",
+            "work",
+            "/bin/sh",
+            "-c",
+            "exec sleep 999",
+        ],
+    ));
+    let file = root.join("configuration.json");
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "save", file.to_str().unwrap()],
+    ));
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &[
+            "new",
+            "--no-attach",
+            "later",
+            "/bin/sh",
+            "-c",
+            "exec sleep 999",
+        ],
+    ));
+
+    let changed = pmux(
+        &socket,
+        &root,
+        &[],
+        &[
+            "restart",
+            "--daemon",
+            "--stop-sessions",
+            "--consented-config",
+            file.to_str().unwrap(),
+            "--worker",
+            "--json",
+        ],
+    );
+    fail(&changed, "session consent check failed");
+    let sessions = ok(&pmux(&socket, &root, &[], &["restart", "--plan", "--json"]));
+    assert!(sessions.contains("\"work\""), "{sessions}");
+    assert!(sessions.contains("\"later\""), "{sessions}");
+    drop(server);
+}
+
+#[test]
+fn session_configuration_restart_stops_only_consented_sessions() {
+    let root = temp_root("cfg-stop");
+    let socket = socket_path(&root);
+    let server = start_server(&socket, &root);
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &[
+            "new",
+            "--no-attach",
+            "work",
+            "/bin/sh",
+            "-c",
+            "exec sleep 999",
+        ],
+    ));
+    let file = root.join("configuration.json");
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "save", file.to_str().unwrap()],
+    ));
+
+    let restarted = ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &[
+            "restart",
+            "--daemon",
+            "--stop-sessions",
+            "--consented-config",
+            file.to_str().unwrap(),
+            "--worker",
+            "--json",
+        ],
+    ));
+    assert!(
+        restarted.contains("\"status\":\"restarted\""),
+        "{restarted}"
+    );
+    let sessions = ok(&pmux(&socket, &root, &[], &["restart", "--plan", "--json"]));
+    assert!(!sessions.contains("\"work\""), "{sessions}");
+    ok(&pmux(&socket, &root, &[], &["stop"]));
+    drop(server);
+}

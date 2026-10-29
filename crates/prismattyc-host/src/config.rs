@@ -520,7 +520,7 @@ impl ConfigFile {
     }
 
     pub fn async_file_writes(&self) -> bool {
-        self.async_file_writes.unwrap_or(false)
+        self.async_file_writes.unwrap_or(true)
     }
 
     pub fn tab_strip(&self) -> TabStripMode {
@@ -632,7 +632,7 @@ impl ConfigFile {
     }
 
     pub fn async_paste(&self) -> bool {
-        self.async_paste.unwrap_or(false)
+        self.async_paste.unwrap_or(true)
     }
 
     pub fn os_notify_bell(&self) -> bool {
@@ -1170,12 +1170,12 @@ mod tests {
     }
 
     #[test]
-    fn async_paste_is_off_unless_set() {
-        assert!(!ConfigFile::default().async_paste());
+    fn async_paste_is_on_unless_disabled() {
+        assert!(ConfigFile::default().async_paste());
         let dir = temp_dir("async-paste");
         let path = dir.join("config.toml");
-        std::fs::write(&path, "async_paste = true\n").unwrap();
-        assert!(load(&path).unwrap().async_paste());
+        std::fs::write(&path, "async_paste = false\n").unwrap();
+        assert!(!load(&path).unwrap().async_paste());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1222,7 +1222,7 @@ mod tests {
         assert_eq!(load(&path).unwrap(), ConfigFile::default());
         assert!(ConfigFile::default().install_agent_skills.unwrap_or(true));
         assert!(!ConfigFile::default().space_reorder.unwrap_or(false));
-        assert!(!ConfigFile::default().async_file_writes());
+        assert!(ConfigFile::default().async_file_writes());
         assert!(!ConfigFile::default().snapshot_client_enabled());
         assert!(!ConfigFile::default()
             .selective_border_rings
@@ -1231,8 +1231,8 @@ mod tests {
         std::fs::write(&path, "space_reorder = true\n").unwrap();
         assert!(load(&path).unwrap().space_reorder.unwrap_or(false));
 
-        std::fs::write(&path, "async_file_writes = true\n").unwrap();
-        assert!(load(&path).unwrap().async_file_writes());
+        std::fs::write(&path, "async_file_writes = false\n").unwrap();
+        assert!(!load(&path).unwrap().async_file_writes());
         std::fs::write(&path, "snapshot_client = true\n").unwrap();
         assert!(load(&path).unwrap().snapshot_client_enabled());
         std::fs::write(&path, "snapshot_client = false\n").unwrap();

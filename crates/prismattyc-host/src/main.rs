@@ -72,6 +72,7 @@ mod terminal_switcher;
 #[cfg(test)]
 mod test_support;
 mod transparency;
+mod update_flow;
 #[cfg(any(target_os = "macos", test))]
 mod update_notes;
 // cargo-mutants 27.1 does not recognize nested cfg(all(test, ...)).
@@ -1982,6 +1983,68 @@ fn dump_present_path() -> Option<PathBuf> {
     Some(PathBuf::from(value))
 }
 
+/// `PRISMATTYC_STRIP_DUMP=<path>`: write the pane-handle rectangles, as JSON,
+/// for the pane-swap driver. On Graphite these are the per-pane header handles
+/// `pane_handle_hit` tests. Elsewhere they come from the strip scan with
+/// `tab_strip_hit`. Unset or empty means no dump.
+fn dump_strip_handles(host: &HostState, stride: usize, height: usize, path: &Path) {
+    const STRIP_ROWS: usize = 160;
+    // (tab, pane, handle, [x0, y0, x1, y1]) per handle.
+    let mut rects: Vec<(usize, u64, usize, [usize; 4])> = Vec::new();
+    if host.mux.geom().chrome.graphite {
+        for (pane_id, pane, rect) in host.mux.panes_and_rects() {
+            let Some(zone) = pane_handle_zone(host, pane_id, pane, rect) else {
+                continue;
+            };
+            let tab = host
+                .mux
+                .pane_window(pane_id)
+                .and_then(|window| host.mux.window_ids().iter().position(|id| *id == window))
+                .unwrap_or(0);
+            rects.push((
+                tab,
+                pane_id.get(),
+                0,
+                [zone.x, zone.y, zone.x + zone.w, zone.y + zone.h],
+            ));
+        }
+    } else {
+        let reserve = reserve_strip_end(host);
+        for py in 0..height.min(STRIP_ROWS) {
+            for px in 0..stride {
+                let Some(mux::StripHit::Pane { tab, pane, handle }) =
+                    host.mux.tab_strip_hit(px, py, stride, reserve)
+                else {
+                    continue;
+                };
+                let key = (tab, pane.get(), handle);
+                match rects.iter_mut().find(|r| (r.0, r.1, r.2) == key) {
+                    Some(rect) => {
+                        rect.3[0] = rect.3[0].min(px);
+                        rect.3[1] = rect.3[1].min(py);
+                        rect.3[2] = rect.3[2].max(px + 1);
+                        rect.3[3] = rect.3[3].max(py + 1);
+                    }
+                    None => rects.push((tab, pane.get(), handle, [px, py, px + 1, py + 1])),
+                }
+            }
+        }
+    }
+    let handles: Vec<_> = rects
+        .iter()
+        .map(|&(tab, pane, handle, [x0, y0, x1, y1])| {
+            serde_json::json!({
+                "tab": tab, "pane": pane, "handle": handle,
+                "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+            })
+        })
+        .collect();
+    if let Err(error) = std::fs::write(path, serde_json::json!({ "handles": handles }).to_string())
+    {
+        eprintln!("prismattyc-host: dump strip handles failed: {error}");
+    }
+}
+
 /// Write the CPU framebuffer that is about to present as an 8-bit RGBA PNG.
 /// Callers keep the side effect out of `rasterize_frame`.
 fn present_png_empty(width: u32, height: u32) -> bool {
@@ -2045,14 +2108,13 @@ fn maybe_dump_present(
         eprintln!("prismattyc-host: dump present png failed: {error}");
     }
     let sidecar = path.with_extension("json");
-    let body = format!(
-        "{{\"width\":{},\"height\":{},\"full\":{},\"full_repaint_reason\":{},\"seq\":{}}}\n",
-        width,
-        height,
-        full_reason.is_some(),
-        full_reason.map_or("null".into(), |r| format!("\"{}\"", r.as_str())),
-        *seq,
-    );
+    let body = serde_json::json!({
+        "width": width, "height": height, "full": full_reason.is_some(),
+        "full_repaint_reason": full_reason.map(FullRepaintReason::as_str),
+        "seq": *seq, "host_pid": std::process::id(),
+        "host_instance": render_diagnostics::instance_id(),
+    })
+    .to_string();
     if let Err(error) = std::fs::write(&sidecar, body) {
         eprintln!("prismattyc-host: dump present sidecar failed: {error}");
     }
@@ -2329,6 +2391,11 @@ impl PresentBackend {
                     height,
                     host.render_frame.full_repaint_reason,
                 );
+                if let Some(path) =
+                    std::env::var_os("PRISMATTYC_STRIP_DUMP").filter(|p| !p.is_empty())
+                {
+                    dump_strip_handles(host, width as usize, height as usize, Path::new(&path));
+                }
                 let present_started = Instant::now();
                 // The X11 present path expects premultiplied ARGB. Skip the
                 // pass on an opaque window so the default path pays nothing.
@@ -2900,6 +2967,7 @@ enum UpdateCheckOrigin {
 
 #[derive(Debug)]
 enum UserAction {
+    FullUpdate(update_flow::Event),
     Wake,
     // Constructed only by the macOS menu/Dock action target; on other
     // platforms ⌘N calls `open_window` directly, so the variant is matched
@@ -2999,6 +3067,7 @@ struct App {
     pump_timing: pump_timing::PumpTiming,
     last_component_poll: Option<Instant>,
     restart_view: Option<PathBuf>,
+    full_update: update_flow::Flow,
     #[cfg(target_os = "macos")]
     automatic_update_checks: bool,
     /// Captured once at startup; changing the config requires a restart.
@@ -3089,6 +3158,7 @@ impl App {
             pump_timing: pump_timing::PumpTiming::default(),
             last_component_poll: None,
             restart_view: None,
+            full_update: update_flow::Flow::default(),
             #[cfg(target_os = "macos")]
             automatic_update_checks,
             #[cfg(target_os = "macos")]
@@ -3830,6 +3900,14 @@ impl App {
         self.wake_pending.store(false, Ordering::Relaxed);
         self.poll_file_writer();
         let phase_started = Instant::now();
+        let actions = self
+            .windows
+            .values_mut()
+            .filter_map(space_panel::take_update_action)
+            .collect::<Vec<_>>();
+        for action in actions {
+            update_flow::action(self, action);
+        }
         restart::poll(self);
         self.pump_timing
             .record_phase(pump_timing::Phase::RestartPoll, phase_started.elapsed());
@@ -4137,8 +4215,9 @@ impl App {
         // Claim ownership before reading the shared layout. A second host
         // must not use the registered host's grouping cache for startup.
         let first_window = self.windows.is_empty();
+        let complete_update = std::env::var_os("PRISMATTYC_COMPLETE_UPDATE").is_some();
         self.register_host_pid();
-        let mut attach_sessions = if config_editor {
+        let mut attach_sessions = if config_editor || complete_update {
             Vec::new()
         } else {
             startup_attach_targets(
@@ -4229,29 +4308,31 @@ impl App {
         let prior_cache_stamp = attach_layout_path
             .as_ref()
             .and_then(|path| cache_stamp(path));
-        let mut restore_prompt =
-            if startup.cache_writer && startup.attach == StartupAttachPlan::Bare {
-                attach_layout_path
-                    .as_ref()
-                    .and_then(|path| attach_tabs::load(path))
-                    .or_else(|| {
-                        host_mux_socket().and_then(|socket| {
-                            prismattyc_mux::workspace::load(&socket)
-                                .ok()
-                                .flatten()
-                                .or_else(|| {
-                                    prismattyc_mux::workspace::Workspace::from_saved_spaces(&socket)
-                                        .ok()
-                                        .flatten()
-                                })
-                                .and_then(|saved| saved.view)
-                        })
+        let mut restore_prompt = if !complete_update
+            && startup.cache_writer
+            && startup.attach == StartupAttachPlan::Bare
+        {
+            attach_layout_path
+                .as_ref()
+                .and_then(|path| attach_tabs::load(path))
+                .or_else(|| {
+                    host_mux_socket().and_then(|socket| {
+                        prismattyc_mux::workspace::load(&socket)
+                            .ok()
+                            .flatten()
+                            .or_else(|| {
+                                prismattyc_mux::workspace::Workspace::from_saved_spaces(&socket)
+                                    .ok()
+                                    .flatten()
+                            })
+                            .and_then(|saved| saved.view)
                     })
-                    .filter(|layout| restore_prompt::cache_matches_space(layout, &spaces_dir()))
-                    .and_then(restore_prompt::RestorePrompt::new)
-            } else {
-                None
-            };
+                })
+                .filter(|layout| restore_prompt::cache_matches_space(layout, &spaces_dir()))
+                .and_then(restore_prompt::RestorePrompt::new)
+        } else {
+            None
+        };
         if self
             .file_config
             .space_startup
@@ -4271,7 +4352,9 @@ impl App {
         let startup_cache_stamp = restore_prompt.as_ref().and(prior_cache_stamp);
         let grouped = attach_tabs::group_attach_targets(&attach_sessions, stored_layout.as_ref());
         let attach_groups = &grouped.groups;
-        let (boot_program, boot_args) = if let Some(command) = editor_command {
+        let (boot_program, boot_args) = if complete_update {
+            (mux::EMPTY_SPACE_PROGRAM.to_string(), Vec::new())
+        } else if let Some(command) = editor_command {
             (command.program, command.args)
         } else if startup_space.is_some() && attach_sessions.is_empty() {
             (mux::EMPTY_SPACE_PROGRAM.to_string(), Vec::new())
@@ -4300,6 +4383,7 @@ impl App {
         let show_splash = restore_prompt.is_none()
             && startup_space.is_none()
             && !config_editor
+            && !complete_update
             && first_window
             && splash::should_show(
                 self.cli.no_splash,
@@ -4642,12 +4726,13 @@ impl App {
         if let Some(host) = self.windows.get_mut(&id) {
             let configured = host.theme.clone();
             apply_host_theme(host, configured);
-            host.cache_writer = !config_editor;
-            host.local_views.fresh = self
-                .file_config
-                .space_startup
-                .map(crate::config::SpaceStartup::as_str)
-                == Some("fresh");
+            host.cache_writer = !config_editor && !complete_update;
+            host.local_views.fresh = complete_update
+                || self
+                    .file_config
+                    .space_startup
+                    .map(crate::config::SpaceStartup::as_str)
+                    == Some("fresh");
             if host.restore_prompt.is_some() {
                 match self
                     .file_config
@@ -10133,18 +10218,8 @@ fn refresh_space_views(host: &mut HostState) {
         .attach_pane_sessions
         .iter()
         .filter_map(|(pane, id)| {
-            let session = snapshot.sessions.iter().find(|s| s.id.to_string() == *id)?;
             let recorded = host.mux.attach_name_of(*pane);
-            // A restarted daemon recycles numeric ids. The pane's recorded
-            // name is the session; do not adopt whoever now sits at the old id.
-            if recorded.is_some_and(|name| {
-                snapshot
-                    .sessions
-                    .iter()
-                    .any(|live| live.name == name && live.id.to_string() != *id)
-            }) {
-                return None;
-            }
+            let session = space_view::bound_session(&snapshot, id, recorded)?;
             (recorded != Some(session.name.as_str()))
                 .then(|| (*pane, id.clone(), session.name.clone()))
         })
@@ -12000,37 +12075,49 @@ fn pointer_hover_blocked(host: &HostState) -> bool {
 /// Pane-header handle (dot and name) under the pointer, graphite only
 /// (issue #109). Classic keeps today's header behavior.
 fn pane_handle_hit(host: &HostState, px: usize, py: usize) -> Option<PaneId> {
-    let geom = host.mux.geom();
-    if !geom.chrome.graphite {
+    if !host.mux.geom().chrome.graphite {
         return None;
     }
-    let focused = host.mux.focused_id();
-    let multi = host.mux.pane_count() > 1;
-    let now = Instant::now();
     host.mux
         .panes_and_rects()
         .find_map(|(pane_id, pane, rect)| {
-            let (slot_x, slot_y, slot_w, slot_h) = geom.pane_slot_px(rect);
-            let (name, _) = host.mux.pane_header_text(pane_id);
-            let attention = host.attention_badge && pane.attention.is_some();
-            let running = pane.is_active_at(now);
-            let focus_row = multi && pane_id == focused;
-            let status = graphite::PaneStatus::decide(
-                attention,
-                pane.mail_depth,
-                pane.unseen_output,
-                running,
-                focus_row,
-            );
-            let zone = graphite::pane_handle_rect(
-                geom.chrome,
-                graphite::Rect::new(slot_x, slot_y, slot_w, slot_h),
-                &name,
-                status,
-                focus_row,
-            )?;
+            let zone = pane_handle_zone(host, pane_id, pane, rect)?;
             zone.contains(px, py).then_some(pane_id)
         })
+}
+
+/// The Graphite pane-header handle rectangle for one pane, in window px.
+/// `pane_handle_hit` and the strip-handle dump both use it, so the dump is
+/// exactly the zone a press lands in.
+fn pane_handle_zone(
+    host: &HostState,
+    pane_id: PaneId,
+    pane: &mux::PaneRuntime,
+    rect: prismattyc_mux::CellRect,
+) -> Option<graphite::Rect> {
+    let geom = host.mux.geom();
+    let focused = host.mux.focused_id();
+    let multi = host.mux.pane_count() > 1;
+    let now = Instant::now();
+    let (slot_x, slot_y, slot_w, slot_h) = geom.pane_slot_px(rect);
+    let (name, _) = host.mux.pane_header_text(pane_id);
+    let attention = host.attention_badge && pane.attention.is_some();
+    let running = pane.is_active_at(now);
+    let focus_row = multi && pane_id == focused;
+    let status = graphite::PaneStatus::decide(
+        attention,
+        pane.mail_depth,
+        pane.unseen_output,
+        running,
+        focus_row,
+    );
+    graphite::pane_handle_rect(
+        geom.chrome,
+        graphite::Rect::new(slot_x, slot_y, slot_w, slot_h),
+        &name,
+        status,
+        focus_row,
+    )
 }
 
 fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
@@ -12303,7 +12390,7 @@ fn sidebar_icon_tooltip(host: &HostState) -> Option<(graphite::Rect, String)> {
                 sidebar::RowKind::Tab => row
                     .tab
                     .and_then(|tab| space.tabs.get(tab))
-                    .map(|tab| tab.fixed_name.clone().unwrap_or_else(|| tab.title.clone()))
+                    .map(|tab| tab.title.clone())
                     .filter(|title| !title.is_empty())
                     .unwrap_or_else(|| "Tab".to_string()),
                 sidebar::RowKind::Pane => row
@@ -12926,6 +13013,7 @@ enum SidebarClick {
     OpenSession {
         space: String,
         title: String,
+        tab: Option<usize>,
     },
     OpenSpace(String),
     BeginNewSpace,
@@ -12986,7 +13074,7 @@ fn sidebar_click_decision(
                         .map(SidebarClick::SelectTab)
                         .unwrap_or(SidebarClick::Ignore)
                 } else if saved {
-                    open_saved_row(name, session_title)
+                    open_saved_row(name, session_title, clicked.tab)
                 } else {
                     SidebarClick::Ignore
                 }
@@ -13002,7 +13090,7 @@ fn sidebar_click_decision(
                         _ => SidebarClick::Ignore,
                     }
                 } else if saved {
-                    open_saved_row(name, session_title)
+                    open_saved_row(name, session_title, clicked.tab)
                 } else {
                     SidebarClick::Ignore
                 }
@@ -13043,7 +13131,13 @@ fn icon_click_decision(
                     })
                     .unwrap_or(SidebarClick::Ignore),
             },
-            Some((_, name, false)) => open_saved_row(name, session_title),
+            Some((clicked, name, false)) => {
+                if matches!(clicked.kind, sidebar::RowKind::Tab | sidebar::RowKind::Pane) {
+                    open_saved_row(name, session_title, clicked.tab)
+                } else {
+                    SidebarClick::OpenSpace(name.to_string())
+                }
+            }
             None => SidebarClick::Ignore,
         },
         SidebarHit::Action(0) => SidebarClick::Run(keybind::Action::NewTab),
@@ -13061,27 +13155,27 @@ fn icon_click_decision(
 
 /// A row in a space that is not current. Its session opens the space and
 /// then focuses that pane; without a title the space opens on its own focus.
-fn open_saved_row(space: &str, session_title: Option<&str>) -> SidebarClick {
+fn open_saved_row(space: &str, session_title: Option<&str>, tab: Option<usize>) -> SidebarClick {
     match session_title {
         Some(title) if !title.is_empty() => SidebarClick::OpenSession {
             space: space.to_string(),
             title: title.to_string(),
+            tab,
         },
         _ => SidebarClick::OpenSpace(space.to_string()),
     }
 }
 
-/// Session title for a row, in the same order the tree paints. A pane row
-/// names its own pane. A tab row names the tab's first session, since a
-/// single-session tab shows no pane row of its own.
+/// Pane title for a session row, in the same order the tree paints.
 fn session_title_of(tree: &sidebar::SidebarTree, row: &sidebar::TreeRow) -> Option<String> {
     let space = tree.spaces.get(row.space)?;
     let tab = space.tabs.get(row.tab?)?;
-    match row.kind {
-        sidebar::RowKind::Space => None,
-        sidebar::RowKind::Tab => Some(tab.panes.first()?.title.clone()),
-        sidebar::RowKind::Pane => Some(tab.panes.get(row.pane?)?.title.clone()),
-    }
+    let pane = match row.kind {
+        sidebar::RowKind::Pane => row.pane?,
+        sidebar::RowKind::Tab => 0,
+        sidebar::RowKind::Space => return None,
+    };
+    Some(tab.panes.get(pane)?.title.clone())
 }
 
 /// Select the session's tab and focus that pane. `None` keeps the tab's
@@ -13314,10 +13408,11 @@ fn handle_sidebar_click(host: &mut HostState, button: MouseButton) -> StripClick
             sidebar_resize::toggle(host);
             StripClickResult::Handled
         }
-        SidebarClick::OpenSession { space, title } => {
+        SidebarClick::OpenSession { space, title, tab } => {
             host.pending_session_focus = Some(sidebar::PendingSession {
                 space: space.clone(),
                 title,
+                tab,
             });
             apply_rail_verdict(host, space_rail::RailVerdict::Open(space));
             host.dirty = true;
@@ -14149,24 +14244,56 @@ fn graphite_sidebar_tree(
         .current
         .clone()
         .or_else(|| host.mux.space_id.clone());
-    let live: Vec<sidebar::LiveTab> = tabs
+    let observed = host
+        .snapshot_client
+        .as_ref()
+        .and_then(|client| client.fresh_observed());
+    let snapshot = observed.as_ref().map(|(_, snapshot)| snapshot);
+    let names: Vec<Vec<String>> = host
+        .mux
+        .tab_panes()
+        .iter()
+        .map(|(_, panes)| {
+            panes
+                .iter()
+                .filter_map(|pane| {
+                    let recorded = host.mux.attach_name_of(*pane)?;
+                    Some(space_view::bound_session_name(
+                        recorded,
+                        host.mux.attach_session_of(*pane),
+                        host.mux.space_id.as_deref(),
+                        host.attach_bound_at.get(pane).copied(),
+                        observed.as_ref(),
+                    ))
+                })
+                .collect()
+        })
+        .collect();
+    let mut live_infos = tabs.to_vec();
+    for (index, info) in live_infos.iter_mut().enumerate() {
+        if names.get(index).is_none_or(Vec::is_empty) {
+            // Local shells keep their existing title-row policy.
+            info.title = graphite_tab_text(host, index, &tabs[index], None).label;
+        }
+    }
+    let live: Vec<sidebar::LiveTab> = live_infos
         .iter()
         .enumerate()
         .map(|(index, info)| sidebar::LiveTab {
             info,
+            session_names: names.get(index).map(Vec::as_slice).unwrap_or(&[]),
             mail: mail.get(index).map(Vec::as_slice).unwrap_or(&[]),
             attention: attention.get(index).map(Vec::as_slice).unwrap_or(&[]),
         })
         .collect();
-    // Saved spaces stay alive for the build below; the tree copies titles.
-    let mut saved: Vec<(String, prismattyc_mux::SavedSpace, Vec<String>)> = Vec::new();
+    let mut saved = Vec::new();
     for name in &host.space_rail.names {
         if Some(name) == current.as_ref() {
             continue;
         }
         if let Ok(space) = load_space(&spaces_dir(), name) {
-            let order = prismattyc_mux::space_sessions_in_tab_order(&space);
-            saved.push((name.clone(), space, order));
+            let (tabs, order) = sidebar::saved_tabs(&space, snapshot);
+            saved.push((name.clone(), tabs, order));
         }
     }
     let mut inputs: Vec<sidebar::SpaceInput> = Vec::new();
@@ -14189,14 +14316,14 @@ fn graphite_sidebar_tree(
                 attention,
                 tabs: sidebar::TabsSource::Live(&live),
             });
-        } else if let Some((_, space, order)) = saved.iter().find(|(saved, _, _)| saved == name) {
+        } else if let Some((_, tabs, order)) = saved.iter().find(|(saved, _, _)| saved == name) {
             inputs.push(sidebar::SpaceInput {
                 name: name.as_str(),
                 current: false,
                 collapsed,
                 attention,
                 tabs: sidebar::TabsSource::Saved {
-                    tabs: &space.tabs,
+                    tabs,
                     extra_sessions: order,
                 },
             });
@@ -14302,17 +14429,12 @@ fn paint_graphite_sidebar(
                 };
                 match decided {
                     Some(text) => {
-                        labels.push(text.label);
+                        labels.push(tab.map(|tab| tab.title.clone()).unwrap_or_default());
                         dots.push(Some(text.dot));
                         selected_tabs.push(text.selected);
                     }
                     None => {
-                        labels.push(
-                            tab.map(|tab| {
-                                tab.fixed_name.clone().unwrap_or_else(|| tab.title.clone())
-                            })
-                            .unwrap_or_default(),
-                        );
+                        labels.push(tab.map(|tab| tab.title.clone()).unwrap_or_default());
                         dots.push(Some(graphite::Dot::Idle));
                         selected_tabs.push(false);
                     }
@@ -14975,6 +15097,7 @@ fn handle_pane_handle_press(host: &mut HostState, button: MouseButton) -> bool {
                 start_y: y,
                 active: false,
             });
+            drag_trace(|| format!("press pane={} tab={tab} x={x} y={y}", pane.get()));
         }
     } else {
         open_context_menu(host, ContextMenuTarget::Pane(pane));
@@ -14984,6 +15107,23 @@ fn handle_pane_handle_press(host: &mut HostState, button: MouseButton) -> bool {
     host.app_mouse_button = None;
     sync_chrome_hover(host);
     true
+}
+
+/// `PRISMATTYC_DRAG_TRACE=<path>`: append one line per pane-drag event (press,
+/// drag start, release and its resolved target, attach-tabs write) for the
+/// pane-swap driver. Unset or empty means no trace; no behaviour changes.
+pub(crate) fn drag_trace(line: impl FnOnce() -> String) {
+    let Some(path) = std::env::var_os("PRISMATTYC_DRAG_TRACE").filter(|p| !p.is_empty()) else {
+        return;
+    };
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{}", line());
+    }
 }
 
 fn handle_strip_drag_move(host: &mut HostState) -> bool {
@@ -15000,9 +15140,16 @@ fn handle_strip_drag_move(host: &mut HostState) -> bool {
     }
     let dx = x - drag.start_x;
     let dy = y - drag.start_y;
+    drag_trace(|| {
+        format!(
+            "motion x={x} y={y} past_threshold={}",
+            dx * dx + dy * dy >= 16.0
+        )
+    });
     if dx * dx + dy * dy < 16.0 {
         return true;
     }
+    drag_trace(|| "drag-start".to_owned());
     drag.active = true;
     host.dirty = true;
     true
@@ -15042,24 +15189,39 @@ fn finish_strip_drag(host: &mut HostState) -> bool {
     }
     let stride = host.window.inner_size().width as usize;
     let hit = host.mux.tab_strip_hit(x as usize, y as usize, stride, true);
-    let changed = match (drag.kind, hit) {
-        (StripDragKind::Tab(from), Some(mux::StripHit::Tab { index: to, .. })) => {
-            host.mux.reorder_tab(from, to).unwrap_or(false)
+    let swap = match drag.kind {
+        StripDragKind::Pane { tab, pane } => mux::pane_drop_swap_target(tab, pane, hit)
+            .or_else(|| {
+                host.mux
+                    .pane_at_px(x as usize, y as usize)
+                    .filter(|target| *target != pane)
+            })
+            .map(|target| (pane, target)),
+        StripDragKind::Tab(_) => None,
+    };
+    drag_trace(|| format!("release x={x} y={y} hit={hit:?} swap={swap:?}"));
+    let changed = if let Some((from, to)) = swap {
+        host.mux.swap_panes(from, to).unwrap_or(false)
+    } else {
+        match (drag.kind, hit) {
+            (StripDragKind::Tab(from), Some(mux::StripHit::Tab { index: to, .. })) => {
+                host.mux.reorder_tab(from, to).unwrap_or(false)
+            }
+            (StripDragKind::Tab(from), Some(mux::StripHit::EmptyEnd | mux::StripHit::NewTab)) => {
+                let last = host.mux.tab_count().saturating_sub(1);
+                host.mux.reorder_tab(from, last).unwrap_or(false)
+            }
+            (StripDragKind::Pane { pane, .. }, Some(mux::StripHit::Tab { index, .. })) => host
+                .mux
+                .window_at_tab(index)
+                .map(|dest| host.mux.move_pane_to_window(pane, dest).unwrap_or(false))
+                .unwrap_or(false),
+            (
+                StripDragKind::Pane { pane, .. },
+                Some(mux::StripHit::EmptyEnd | mux::StripHit::NewTab),
+            ) => host.mux.move_pane_to_new_tab(pane).unwrap_or(false),
+            _ => false,
         }
-        (StripDragKind::Tab(from), Some(mux::StripHit::EmptyEnd | mux::StripHit::NewTab)) => {
-            let last = host.mux.tab_count().saturating_sub(1);
-            host.mux.reorder_tab(from, last).unwrap_or(false)
-        }
-        (StripDragKind::Pane { pane, .. }, Some(mux::StripHit::Tab { index, .. })) => host
-            .mux
-            .window_at_tab(index)
-            .map(|dest| host.mux.move_pane_to_window(pane, dest).unwrap_or(false))
-            .unwrap_or(false),
-        (
-            StripDragKind::Pane { pane, .. },
-            Some(mux::StripHit::EmptyEnd | mux::StripHit::NewTab),
-        ) => host.mux.move_pane_to_new_tab(pane).unwrap_or(false),
-        _ => false,
     };
     if changed {
         mark_layout_dirty(host);
@@ -20412,6 +20574,7 @@ impl ApplicationHandler<UserAction> for App {
             self.exit_code = 1;
             event_loop.exit();
         }
+        update_flow::resume(self);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -20458,6 +20621,12 @@ impl ApplicationHandler<UserAction> for App {
             return;
         };
 
+        if matches!(
+            &event,
+            WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. }
+        ) {
+            drag_trace(|| format!("{event:?} at_px={:?}", host.pointer_px));
+        }
         if session_prompt::handle_pointer(host, &event) {
             return;
         }
@@ -21653,7 +21822,7 @@ impl ApplicationHandler<UserAction> for App {
                             .set_title(&window_title(&host.mux, show_tab_strip(host)));
                         host.dirty = true;
                     }
-                    if host.context_menu.is_some() {
+                    if host.context_menu.is_some() && !space_panel::keeps_on_focus_loss(host) {
                         close_context_menu(host);
                     }
                     host.left_button_down = false;
@@ -21769,7 +21938,7 @@ impl ApplicationHandler<UserAction> for App {
                         if (!automatic || self.automatic_update_checks)
                             && macos_menu::prompt_update(&check.available, &check.release_notes)
                         {
-                            macos_update::start_install(self.event_proxy.clone(), false);
+                            update_flow::action(self, update_flow::Action::Start);
                         }
                     }
                     Ok(check) if !automatic => macos_menu::show_update_message(
@@ -21813,6 +21982,7 @@ impl ApplicationHandler<UserAction> for App {
             },
             #[cfg(windows)]
             UserAction::FocusExisting => self.focus_existing_window(),
+            UserAction::FullUpdate(event) => update_flow::event(self, event),
             UserAction::AccessKit(event) => self.handle_accesskit(event_loop, event),
         }
     }
@@ -28104,6 +28274,7 @@ session mail (id 15)
         let open_session = SidebarClick::OpenSession {
             space: "mail".to_string(),
             title: "worker-a".to_string(),
+            tab: Some(1),
         };
         assert_eq!(
             sidebar_click_decision(
@@ -28195,6 +28366,7 @@ session mail (id 15)
             SidebarClick::OpenSession {
                 space: "mail".to_string(),
                 title: "composer-2".to_string(),
+                tab: Some(1),
             },
             "a session in another space opens that space, then focuses the pane"
         );
@@ -28292,6 +28464,117 @@ session mail (id 15)
     }
 
     #[test]
+    fn sidebar_recycled_session_id_keeps_click_target_on_recorded_session() {
+        let observed = (
+            SystemTime::UNIX_EPOCH,
+            prismattyc_mux::Snapshot {
+                sequence: 1,
+                sessions: vec![
+                    prismattyc_mux::SessionSnapshot {
+                        id: 7,
+                        name: "stranger".into(),
+                        agent_id: None,
+                        space_id: Some("owner-a".into()),
+                        windows: vec![],
+                    },
+                    prismattyc_mux::SessionSnapshot {
+                        id: 9,
+                        name: "agent-1".into(),
+                        agent_id: None,
+                        space_id: Some("owner-a".into()),
+                        windows: vec![],
+                    },
+                ],
+            },
+        );
+        let name = space_view::bound_session_name(
+            "agent-1",
+            Some("7"),
+            Some("owner-a"),
+            None,
+            Some(&observed),
+        );
+        assert_eq!(name, "agent-1");
+        let pending = sidebar::PendingSession {
+            space: "space-a".into(),
+            title: name,
+            tab: Some(0),
+        };
+        assert_eq!(
+            sidebar::pending_session_slot(
+                &pending,
+                Some("space-a"),
+                &[vec!["stranger"], vec!["agent-1"]]
+            ),
+            Some((1, 0))
+        );
+    }
+
+    #[test]
+    fn sidebar_custom_label_click_keeps_session_and_window_identity() {
+        let tabs: Vec<_> = ["main", "Review"]
+            .into_iter()
+            .map(|title| prismattyc_mux::SavedSpaceTab {
+                title: title.into(),
+                sessions: vec!["agent-2".into()],
+                layout: None,
+                fixed_name: None,
+            })
+            .collect();
+        let tree = sidebar::SidebarTree::build(&[sidebar::SpaceInput {
+            name: "space-b",
+            current: false,
+            collapsed: false,
+            attention: 0,
+            tabs: sidebar::TabsSource::Saved {
+                tabs: &tabs,
+                extra_sessions: &[],
+            },
+        }]);
+        let row = sidebar::visible_rows(&tree)
+            .into_iter()
+            .find(|row| row.tab == Some(1))
+            .unwrap();
+        assert_eq!(tree.spaces[0].tabs[1].title, "Review · agent-2");
+        let title = session_title_of(&tree, &row).unwrap();
+        assert_eq!(title, "agent-2");
+        assert_eq!(
+            sidebar_click_decision(
+                graphite::SidebarHit::Row(2),
+                Some((&row, "space-b", false)),
+                true,
+                Some(&title)
+            ),
+            SidebarClick::OpenSession {
+                space: "space-b".into(),
+                title: "agent-2".into(),
+                tab: Some(1)
+            }
+        );
+        let pending = sidebar::PendingSession {
+            space: "space-b".into(),
+            title,
+            tab: row.tab,
+        };
+        assert_eq!(
+            sidebar::pending_session_slot(
+                &pending,
+                Some("space-a"),
+                &[vec!["agent-2"], vec!["agent-2"]]
+            ),
+            None
+        );
+        assert_eq!(
+            sidebar::pending_session_slot(
+                &pending,
+                Some("space-b"),
+                &[vec!["agent-2"], vec!["agent-2"]]
+            ),
+            Some((1, 0))
+        );
+    }
+
+    #[test]
     fn icon_click_decision_opens_spaces_and_focuses_sessions() {
         use graphite::SidebarHit;
         let row = |kind, tab, pane| sidebar::TreeRow {
@@ -28346,6 +28629,7 @@ session mail (id 15)
             SidebarClick::OpenSession {
                 space: "mail".to_string(),
                 title: "composer-2".to_string(),
+                tab: Some(1),
             },
             "a titled session icon focuses that pane after the space opens"
         );

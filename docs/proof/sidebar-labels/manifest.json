@@ -1,0 +1,36 @@
+{
+  "tested_application_head": "9935200760b9fd29d432519d80aca399627e1861",
+  "status": "PARTIAL",
+  "os": "macOS 26.6.2 (25G83)",
+  "presenter": "Core Animation tiles",
+  "build_location": "HOST",
+  "guest_compilation": false,
+  "fixture_archive_sha256": "e1a1b586d8889ff8f0972478843957793cc1a110a3af362af5380b778130e76f",
+  "guest_evidence_archive_sha256": "675104d4341bd863cf2afe7789cdeac053b4f780b27d1b0601b1db10971fd5b7",
+  "prepare": "PREPARED_NOT_NATIVE_PASS",
+  "visibility_gate": "PARTIAL: bottom agent-6 row clipped in initial VNC OS capture",
+  "native_input_events": 0,
+  "native_click_assertions_run": false,
+  "os_crop": {
+    "file": "initial-sidebar-partial.png",
+    "sha256": "6dccadacb7f48153380f30284438a1b689e8ddf28b627a3f9e74bf8a3a279b99",
+    "original_pixel_rectangle": [
+      315,
+      235,
+      1275,
+      719
+    ],
+    "processing": "Exact RGB crop. No resizing, retouching or generated pixels. PNG metadata omitted."
+  },
+  "cleanup": {
+    "status": "CLEANUP_PASS",
+    "host_absent": true,
+    "daemon_absent": true,
+    "all_seven_session_children_absent": true,
+    "host_archive_hash_and_readability_verified_before_vm_delete": true,
+    "vm_stopped_and_deleted": true,
+    "vnc_absent": true,
+    "watchdog_absent": true,
+    "post_delete_inventory_zero_running": true
+  }
+}

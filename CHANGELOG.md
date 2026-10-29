@@ -2,6 +2,52 @@
 
 ## [Unreleased]
 
+## [0.3.50] - 2026-10-28
+
+### Changed
+
+- Complete updates now offer to save sessions, continue without saving, or cancel before anything stops. After the installed components restart, the app offers to restore the saved sessions and view, including directories, foreground commands, layout and agent bindings.
+- An update restart checks the saved session configuration again right before it stops anything, stops only the saved sessions, and refuses to go ahead if the layout changed or a new session was started in the meantime, so no session is lost.
+- Updates reject incomplete or mixed installations instead of reporting success.
+
+### Fixed
+
+- Mouse, focus and paste reporting modes are cleared when a pane's program is replaced or exits, so a restarted shell no longer receives escape-sequence junk from mouse movement.
+- Pane titles skip characters the chrome font has no glyph for, so status symbols no longer draw as missing-glyph boxes.
+
+## [0.3.49] - 2026-10-28
+
+### Fixed
+
+- Menus, pickers and popups now size to their longest row within the available screen width, so labels are no longer cut off with an ellipsis when there is room. When space is tight, shortened rows keep version suffixes and path basenames.
+
+## [0.3.48] - 2026-10-28
+
+### Added
+
+- `pmux new` supports `--cwd DIR` to choose a session's starting directory and `--help`/`-h` to show its usage.
+
+### Changed
+
+- Font coverage is indexed once per font path, reducing repeated file reads during fallback lookup.
+
+## [0.3.47] - 2026-10-28
+
+### Added
+
+- Clicking the Dock icon restores a minimized window, including when another window remains visible.
+
+### Changed
+
+- Paste handling and render-status and attach-cache writes use worker threads by default to keep the window responsive.
+- Sidebar session labels stay stable when switching Spaces, and saved rows open the matching tab or pane.
+
+## [0.3.46] - 2026-10-27
+
+### Changed
+
+- The host render thread bounds how much pane output it drains per pass, so a busy pane no longer holds up redraws of the rest of the window.
+
 ## [0.3.45] - 2026-10-27
 
 ### Added

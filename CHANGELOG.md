@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Palette panels no longer count the horizontal row inset twice when sizing to their content.
+
 ## [0.3.52] - 2026-10-28
 
 ### Added

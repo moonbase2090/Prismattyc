@@ -2474,7 +2474,11 @@ pub(crate) fn paint_sidebar(buffer: &mut [u32], stride: usize, paint: &SidebarPa
     let pad = paint.chrome.px(12.0);
     let fold = paint.tree_fold;
     let title_right = if fold.w > 0 {
-        fold.x.min(paint.toggle.x).min(column.right())
+        if paint.dock_right {
+            fold.x.min(column.right())
+        } else {
+            fold.x.min(paint.toggle.x).min(column.right())
+        }
     } else if paint.dock_right {
         column.right()
     } else {
@@ -4030,6 +4034,58 @@ mod sidebar_render_tests {
         let marker = layout.rows[1];
         let spot = buffer[(marker.y + marker.h / 2) * w + marker.x + 3];
         assert_eq!(spot, pack_argb(0xff, accent), "selected marker in accent");
+    }
+
+    #[test]
+    fn right_docked_sidebar_keeps_spaces_title_before_fold_control() {
+        let chrome = chrome();
+        let (w, h) = (1024usize, 600usize);
+        let column = Rect::new(700, 0, 256, h);
+        let layout = sidebar_layout(chrome, column, 0, 0);
+        let toggle = sidebar_toggle_rect(chrome, column, layout.head, true);
+        let fold = sidebar_tree_fold_rect(chrome, column, toggle, true, "Spaces");
+        assert!(fold.w > 0);
+        let title_start = toggle.right() + chrome.px(12.0);
+        assert!(
+            title_start < fold.x,
+            "title has room before the fold control"
+        );
+
+        let ground = pack_argb(0xff, DARK.status_bar);
+        let mut buffer = vec![pack_argb(0xff, DARK.ground); w * h];
+        paint_sidebar(
+            &mut buffer,
+            w,
+            &SidebarPaint {
+                chrome,
+                tok: &DARK,
+                accent: rgb(0x5aa2ff),
+                layout: &layout,
+                title: "Spaces",
+                rows: &[],
+                actions: ["", "", ""],
+                commands_hint: "",
+                action_hovered: None,
+                alpha: 0xff,
+                grip_hot: false,
+                dock_right: true,
+                toggle,
+                toggle_hovered: false,
+                tree_fold: fold,
+                tree_fold_hovered: false,
+                tree_fold_expand: false,
+                row_seats: &[],
+            },
+        );
+
+        let title_pixels = (layout.head.y..layout.head.y + layout.head.h)
+            .flat_map(|y| (title_start..fold.x).map(move |x| (x, y)))
+            .filter(|(x, y)| buffer[y * w + x] != ground)
+            .count();
+        assert!(
+            title_pixels > 0,
+            "Spaces title pixels appear before the fold control"
+        );
     }
 
     /// The focused session row carries the same accent marker as its tab.

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The Spaces title remains visible beside the expand/collapse-all control when the sidebar is docked on either side.
+
 ## [0.3.51] - 2026-10-28
 
 ### Added

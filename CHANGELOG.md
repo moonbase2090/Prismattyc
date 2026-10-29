@@ -10,6 +10,12 @@
 
 - Session configuration restore now preserves names, working directories, and commands without replaying command text.
 
+## [0.3.51] - 2026-10-28
+
+### Added
+
+- Panes in the same tab can be reordered by dragging a pane's handle onto another pane. Dropping a pane on itself leaves the order unchanged.
+
 ## [0.3.50] - 2026-10-28
 
 ### Changed

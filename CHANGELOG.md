@@ -9,6 +9,7 @@
 ### Changed
 
 - Session configuration restore now preserves names, working directories, and commands without replaying command text.
+- The host keeps one pmuxd snapshot connection for periodic polls by default; set `snapshot_client = false` to opt out.
 
 ## [0.3.51] - 2026-10-28
 

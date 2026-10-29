@@ -636,6 +636,7 @@ pub(super) fn update_page(
     }
     host.dirty = true;
     host.window.request_redraw();
+}
 
 fn action_label(panel: &Panel, index: Option<usize>) -> Option<String> {
     let row = panel.rows.get(index?)?;
@@ -683,7 +684,8 @@ pub(super) fn resize(host: &mut HostState, physical_width: u32) {
     let (selected, confirm) = update_columns(panel, columns, Some(menu.selected), menu.confirm);
     menu.selected = selected.unwrap_or(0);
     menu.confirm = confirm;
-    host.dirty = true;}
+    host.dirty = true;
+}
 
 pub(super) fn maintenance(host: &mut HostState) {
     settings(host);

@@ -324,7 +324,10 @@ fn private_child_removes_env(name: &str) -> bool {
         || (name.starts_with("PRISMATTYC_")
             && !matches!(
                 name,
-                "PRISMATTYC_TEST_TIME_SCALE" | "PRISMATTYC_TEST_BORDER_BENCH"
+                "PRISMATTYC_TEST_TIME_SCALE"
+                    | "PRISMATTYC_TEST_BORDER_BENCH"
+                    | "PRISMATTYC_PROOF_SOURCE_SHA"
+                    | "PRISMATTYC_PT68_PROOF_DIR"
             ))
 }
 

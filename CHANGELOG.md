@@ -5,6 +5,7 @@
 ### Fixed
 
 - The Spaces title remains visible beside the expand/collapse-all control when the sidebar is docked on either side.
+- Palette panels no longer count the horizontal row inset twice when sizing to their content.
 
 ## [0.3.52] - 2026-10-28
 
@@ -25,6 +26,7 @@
 ### Changed
 
 - Session configuration restore now preserves names, working directories, and commands without replaying command text.
+- The host keeps one pmuxd snapshot connection for periodic polls by default; set `snapshot_client = false` to opt out.
 
 ## [0.3.51] - 2026-10-28
 

@@ -310,7 +310,7 @@ pub struct ConfigFile {
     /// Enable dragging and keyboard reordering of saved spaces. Default false.
     pub space_reorder: Option<bool>,
     /// Keep one pmuxd snapshot connection for periodic polls.
-    /// Default false. Startup only: a reload does not start or stop the client.
+    /// Default true. Startup only: a reload does not start or stop the client.
     pub snapshot_client: Option<bool>,
     /// Partial frames restore and re-stroke only border rings that change.
     /// Default false. Hot-reloaded.
@@ -510,9 +510,9 @@ impl ConfigFile {
             .unwrap_or(DEFAULT_PTY_DRAIN_BUDGET_MS)
     }
 
-    /// Long-lived snapshot cache. Missing means off.
+    /// Long-lived snapshot cache. Missing means on; set false to opt out.
     pub fn snapshot_client_enabled(&self) -> bool {
-        self.snapshot_client.unwrap_or(false)
+        self.snapshot_client.unwrap_or(true)
     }
 
     pub fn render_timer_log_every_frame(&self) -> bool {
@@ -1223,7 +1223,7 @@ mod tests {
         assert!(ConfigFile::default().install_agent_skills.unwrap_or(true));
         assert!(!ConfigFile::default().space_reorder.unwrap_or(false));
         assert!(ConfigFile::default().async_file_writes());
-        assert!(!ConfigFile::default().snapshot_client_enabled());
+        assert!(ConfigFile::default().snapshot_client_enabled());
         assert!(!ConfigFile::default()
             .selective_border_rings
             .unwrap_or(false));

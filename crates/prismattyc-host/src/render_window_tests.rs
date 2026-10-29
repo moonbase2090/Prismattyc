@@ -316,6 +316,11 @@ fn window_child_command(scratch: &Scratch, number: u32, test_name: &str) -> Comm
         .process_group(0)
         .stdout(std::fs::File::create(scratch.0.join("test.stdout")).unwrap())
         .stderr(std::fs::File::create(scratch.0.join("test.stderr")).unwrap());
+    for name in ["PRISMATTYC_PROOF_SOURCE_SHA", "PRISMATTYC_PT68_PROOF_DIR"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
     command
 }
 
@@ -324,7 +329,10 @@ fn private_child_removes_env(name: &str) -> bool {
         || (name.starts_with("PRISMATTYC_")
             && !matches!(
                 name,
-                "PRISMATTYC_TEST_TIME_SCALE" | "PRISMATTYC_TEST_BORDER_BENCH"
+                "PRISMATTYC_TEST_TIME_SCALE"
+                    | "PRISMATTYC_TEST_BORDER_BENCH"
+                    | "PRISMATTYC_PROOF_SOURCE_SHA"
+                    | "PRISMATTYC_PT68_PROOF_DIR"
             ))
 }
 

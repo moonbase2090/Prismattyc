@@ -65,6 +65,7 @@ fn isolated_space_windows_create_move_and_render() {
     let cli = Cli::parse(["--no-splash", "/bin/cat"].into_iter().map(String::from)).unwrap();
     let file_config = config::ConfigFile {
         async_file_writes: Some(true),
+        snapshot_client: Some(false),
         ..config::ConfigFile::default()
     };
     let app = App::new(cli, file_config, None, event_loop.create_proxy()).unwrap();
@@ -1159,6 +1160,7 @@ fn launch_reopen_child(test_name: &str, recycle_ids: bool) {
     let config = config::ConfigFile {
         space_startup: Some(crate::config::SpaceStartup::Fresh),
         space_autosave: Some(false),
+        snapshot_client: Some(false),
         ..config::ConfigFile::default()
     };
     let app = App::new(cli, config, None, event_loop.create_proxy()).unwrap();
@@ -1555,6 +1557,7 @@ fn space_reopen_after_daemon_restart_reused_ids_reconnect_each_view() {
     let config = config::ConfigFile {
         space_startup: Some(crate::config::SpaceStartup::Fresh),
         space_autosave: Some(false),
+        snapshot_client: Some(false),
         ..config::ConfigFile::default()
     };
     let app = App::new(cli, config, None, event_loop.create_proxy()).unwrap();

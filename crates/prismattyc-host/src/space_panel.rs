@@ -638,6 +638,55 @@ pub(super) fn update_page(
     host.window.request_redraw();
 }
 
+fn action_label(panel: &Panel, index: Option<usize>) -> Option<String> {
+    let row = panel.rows.get(index?)?;
+    (!matches!(row.choice, Choice::None)).then(|| row.label.clone())
+}
+
+fn action_index(panel: &Panel, label: Option<&str>) -> Option<usize> {
+    let label = label?;
+    panel
+        .rows
+        .iter()
+        .position(|row| row.label == label && !matches!(row.choice, Choice::None))
+}
+
+fn update_columns(
+    panel: &mut Panel,
+    columns: usize,
+    selected: Option<usize>,
+    confirm: Option<usize>,
+) -> (Option<usize>, Option<usize>) {
+    let selected_action = action_label(panel, selected);
+    let confirmed_action = action_label(panel, confirm);
+    if panel.columns != columns {
+        panel.columns = columns;
+        if panel.input.is_none() && panel.pending.is_none() {
+            panel.rebuild();
+        }
+    }
+    let last = panel.rows.len().saturating_sub(1);
+    (
+        action_index(panel, selected_action.as_deref())
+            .or_else(|| selected.map(|index| index.min(last))),
+        action_index(panel, confirmed_action.as_deref())
+            .or_else(|| confirm.map(|index| index.min(last))),
+    )
+}
+
+/// Rewrap the open Space panel after a physical window resize, even when the
+/// terminal grid itself keeps the same number of cells.
+pub(super) fn resize(host: &mut HostState, physical_width: u32) {
+    let columns = (physical_width as usize / host.font.cell_w.max(1)).saturating_sub(10);
+    let (Some(panel), Some(menu)) = (host.space_panel.as_mut(), host.context_menu.as_mut()) else {
+        return;
+    };
+    let (selected, confirm) = update_columns(panel, columns, Some(menu.selected), menu.confirm);
+    menu.selected = selected.unwrap_or(0);
+    menu.confirm = confirm;
+    host.dirty = true;
+}
+
 pub(super) fn maintenance(host: &mut HostState) {
     settings(host);
     let panel = host.space_panel.as_mut().unwrap();
@@ -1958,8 +2007,8 @@ mod layout_tests {
     }
 
     /// The panel goes through the same Graphite palette painter as the app.
-    /// Its size does not depend on the page or the row count, and every
-    /// option row is a pointer target (the hand cursor).
+    /// Its vertical size is fixed across pages, while wider labels can widen
+    /// it; every option row is a pointer target (the hand cursor).
     #[test]
     fn layout_panel_paints_at_the_settings_size_with_pointer_rows() {
         let Ok(font) = FontMetrics::load(14.0) else {
@@ -2071,9 +2120,262 @@ mod layout_tests {
     }
 }
 
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+
+    #[test]
+    fn result_text_rewraps_at_new_width_and_keeps_the_back_action_selected() {
+        let mut panel = Panel {
+            space: "demo".into(),
+            maintenance: true,
+            owner: None,
+            details: None,
+            page: Page::Text(
+                "Installed host: 0.3.45\nRunning daemon: 0.3.44 with a long explanation about the active version"
+                    .into(),
+            ),
+            rows: vec![],
+            input: None,
+            submitted: None,
+            pending: None,
+            update_action: None,
+            scroll: 0,
+            columns: 80,
+            chrome_layout: None,
+        };
+        panel.rebuild();
+        let selected = panel
+            .rows
+            .iter()
+            .position(|row| matches!(row.choice, Choice::Maintenance))
+            .expect("back action exists");
+        assert!(panel
+            .rows
+            .iter()
+            .any(|row| space_rail::name_cells(&row.label) > 24));
+
+        let (selected, confirm) = update_columns(&mut panel, 24, Some(selected), Some(selected));
+
+        let selected = selected.expect("selection remains present");
+        assert!(matches!(panel.rows[selected].choice, Choice::Maintenance));
+        assert_eq!(confirm, Some(selected));
+        assert!(panel
+            .rows
+            .iter()
+            .filter(|row| matches!(row.choice, Choice::None))
+            .all(|row| space_rail::name_cells(&row.label) <= 24));
+    }
+}
+
 // cargo-mutants 27.1 does not recognize nested cfg(all(test, ...)).
 // Keep cfg(test) separate so mutation targets exclude the test fixture.
 #[cfg(test)]
 #[cfg(target_os = "linux")]
 #[path = "space_panel_input_tests.rs"]
 mod input_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod pt68_palette_width_tests {
+    use super::*;
+    use winit::platform::x11::EventLoopBuilderExtX11;
+
+    const TEST_NAME: &str =
+        "space_panel::pt68_palette_width_tests::palette_width_counts_horizontal_inset_once";
+    const WIDTH: u32 = 1000;
+    const HEIGHT: u32 = 700;
+
+    fn cells(text: &str) -> usize {
+        text.chars()
+            .map(|ch| prismattyc_core::char_display_width(ch).max(1))
+            .sum()
+    }
+
+    fn row_cells(row: &PaletteRow) -> usize {
+        let mut width = cells(&row.name);
+        if !row.full_width {
+            if !row.describe.is_empty() {
+                width = width.saturating_add(2 + cells(&row.describe));
+            }
+            if !row.chord_label.is_empty() {
+                width = width.saturating_add(2 + cells(&row.chord_label));
+            }
+        }
+        width
+    }
+
+    #[test]
+    fn palette_width_counts_horizontal_inset_once() {
+        if std::env::var_os("PRISMATTYC_RENDER_TEST_CHILD").is_none() {
+            render_window_tests::run_in_private_display(TEST_NAME);
+            return;
+        }
+        let event_loop = EventLoop::<UserAction>::with_user_event()
+            .with_x11()
+            .with_any_thread(true)
+            .build()
+            .unwrap();
+        let cli = Cli::parse(["--no-splash", "/bin/cat"].into_iter().map(String::from)).unwrap();
+        let config = config::ConfigFile {
+            chrome_style: Some(config::ChromeStyle::Graphite),
+            ..config::ConfigFile::default()
+        };
+        let app = App::new(cli, config, None, event_loop.create_proxy()).unwrap();
+        let proof_out = std::env::var_os("PRISMATTYC_PT68_PROOF_DIR").map(PathBuf::from);
+        let source_sha = std::env::var("PRISMATTYC_PROOF_SOURCE_SHA").ok();
+        if proof_out.is_some() {
+            assert!(
+                source_sha.is_some(),
+                "proof output requires an exact source SHA"
+            );
+        }
+        let mut proof = Proof {
+            app,
+            proof_out,
+            source_sha,
+            window: None,
+            done: false,
+        };
+        event_loop.run_app(&mut proof).unwrap();
+        assert!(proof.done, "palette width proof did not finish");
+        std::fs::write(
+            std::env::var_os("PRISMATTYC_RENDER_TEST_RESULT").unwrap(),
+            b"complete",
+        )
+        .unwrap();
+    }
+
+    struct Proof {
+        app: App,
+        proof_out: Option<PathBuf>,
+        source_sha: Option<String>,
+        window: Option<WindowId>,
+        done: bool,
+    }
+
+    impl ApplicationHandler<UserAction> for Proof {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            let id = self.app.open_window(event_loop, false).unwrap();
+            self.window = Some(id);
+            let _ = self
+                .app
+                .windows
+                .get(&id)
+                .unwrap()
+                .window
+                .request_inner_size(PhysicalSize::new(WIDTH, HEIGHT));
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_secs(5),
+            ));
+        }
+
+        fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+            let resized = match &event {
+                WindowEvent::Resized(size) => Some(*size),
+                _ => None,
+            };
+            self.app.window_event(event_loop, id, event);
+            let Some(size) = resized.filter(|size| size.width == WIDTH && size.height == HEIGHT)
+            else {
+                return;
+            };
+            let host = self.app.windows.get_mut(&id).unwrap();
+            let mut palette = Palette::default();
+            palette.query = "preset_single".into();
+            palette.show_graphite = true;
+            let view = palette.view(&host.keymap, host.experimental_rich);
+            let rows: Vec<_> = view.recent.iter().chain(&view.matches).collect();
+            assert!(!rows.is_empty(), "palette query returns rows");
+            let (selected, longest, longest_width) = rows
+                .iter()
+                .enumerate()
+                .map(|(index, row)| (index, row, row_cells(row)))
+                .max_by_key(|(_, _, width)| *width)
+                .unwrap();
+            let longest_name = longest.name.clone();
+            palette.selected = selected;
+            let query = palette.query.clone();
+            host.palette = Some(palette);
+            host.dirty = true;
+            App::paint(host).unwrap();
+
+            let layout = host.palette_layout.as_ref().expect("palette was painted");
+            let panel_width_cells = layout.geom.width_cells;
+            let panel_width_px = layout.panel_w;
+            let inset_cells = layout.geom.inset_cells;
+            let visible_rows: Vec<String> = layout
+                .rows
+                .iter()
+                .filter_map(|row| {
+                    view.row(row.global)
+                        .map(|palette_row| palette_row.name.clone())
+                })
+                .collect();
+            assert!(
+                visible_rows.contains(&longest_name),
+                "longest row is visible"
+            );
+
+            let sections = [
+                PaletteSection {
+                    header: "RECENT",
+                    subtitle: "",
+                    rows: &view.recent,
+                },
+                PaletteSection {
+                    header: "MATCHES",
+                    subtitle: &query,
+                    rows: &view.matches,
+                },
+            ];
+            let header_width = sections
+                .iter()
+                .map(|section| cells(section.header) + cells(section.subtitle) + 2)
+                .max()
+                .unwrap();
+            let footer_width = cells("Enter run · Esc close · ↑↓/wheel move · C-←/→ filter");
+            let content_width = longest_width
+                .max(header_width)
+                .max(cells(&query) + 10)
+                .max(footer_width)
+                .max(20);
+            let screen_width = (size.width as usize / host.font.cell_w)
+                .saturating_sub(4)
+                .max(20);
+            assert!(content_width + inset_cells * 2 < screen_width);
+            let expected_width_cells = content_width + inset_cells * 2;
+            assert_eq!(panel_width_cells, expected_width_cells);
+
+            if let Some(out) = &self.proof_out {
+                std::fs::create_dir_all(out).unwrap();
+                let mut pixels = vec![0; size.width as usize * size.height as usize];
+                rasterize_frame(host, &mut pixels, size.width, size.height, false);
+                write_present_png(&out.join("palette.png"), &pixels, size.width, size.height)
+                    .unwrap();
+                let result = serde_json::json!({
+                    "fixture_result": "PASS",
+                    "source_sha": self.source_sha,
+                    "physical_window_width_px": size.width,
+                    "physical_window_height_px": size.height,
+                    "terminal_columns": host.mux.cols(),
+                    "panel_width_px": panel_width_px,
+                    "panel_width_cells": panel_width_cells,
+                    "horizontal_inset_cells": inset_cells,
+                    "longest_visible_row": longest_name,
+                    "longest_row_content_cells": longest_width,
+                    "expected_panel_width_cells": expected_width_cells,
+                    "visible_rows": visible_rows,
+                    "selected_row": selected,
+                    "frame": "palette.png",
+                });
+                std::fs::write(
+                    out.join("FIXTURE_RESULT"),
+                    serde_json::to_vec_pretty(&result).unwrap(),
+                )
+                .unwrap();
+            }
+            self.done = true;
+            event_loop.exit();
+        }
+    }
+}

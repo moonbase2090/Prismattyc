@@ -146,9 +146,6 @@ session
     session-config <save|check|restore> FILE
                                   save, check or restore session configurations
                                   (default: derive a unique lowercase address).
-    session-config <save|restore> FILE
-    session-config <save|check|restore> FILE
-                                  save or restore all session configurations
     login <enable|disable|status|sync>
                                   start at login and restore workspace
     doctor [SESSION]              pane shell, login state, child pid, lease, attach state
@@ -925,7 +922,6 @@ complete -c pmux -n '__fish_use_subcommand' -a 'layout' -d 'Save, apply, or list
 complete -c pmux -n '__fish_use_subcommand' -a 'sync' -d 'Fan typed input across panes'
 complete -c pmux -n '__fish_use_subcommand' -a 'status' -d 'Socket status'
 complete -c pmux -n '__fish_use_subcommand' -a 'stop' -d 'Stop server or named session'
-complete -c pmux -n '__fish_use_subcommand' -a 'session-config' -d 'Save, check or restore session configurations'
 complete -c pmux -n '__fish_use_subcommand' -a 'session-config' -d 'Save, check or restore session configurations'
 complete -c pmux -n '__fish_use_subcommand' -a 'restart' -d 'Restart safe components'
 complete -c pmux -n '__fish_use_subcommand' -a 'versions' -d 'Show installed and running versions'

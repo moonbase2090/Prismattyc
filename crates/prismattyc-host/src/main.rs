@@ -20601,6 +20601,12 @@ impl ApplicationHandler<UserAction> for App {
             return;
         };
 
+        if matches!(
+            &event,
+            WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. }
+        ) {
+            drag_trace(|| format!("{event:?} at_px={:?}", host.pointer_px));
+        }
         if session_prompt::handle_pointer(host, &event) {
             return;
         }

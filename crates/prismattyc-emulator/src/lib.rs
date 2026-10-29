@@ -2133,6 +2133,13 @@ fn percent_decode_path(input: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// Descriptors mapped into a child: owned parent descriptor and child target number.
+/// Off unix there are no descriptor mappings, so the list can only be empty.
+#[cfg(unix)]
+pub type ChildFdList = Vec<(std::os::fd::OwnedFd, std::os::fd::RawFd)>;
+#[cfg(not(unix))]
+pub type ChildFdList = Vec<(std::convert::Infallible, i32)>;
+
 impl PtySession {
     pub fn spawn<I, S>(program: &str, arguments: I, size: PtySize) -> Result<Self>
     where
@@ -2169,42 +2176,48 @@ impl PtySession {
     /// other child inherits it. Targets must be unique and at least 3. Each source is
     /// set close-on-exec in the parent and closed when this call returns. A validation
     /// or spawn failure returns an error before any child is started.
-    #[cfg(unix)]
     pub fn spawn_config_with_fds<S>(
         program: &str,
         arguments: &[S],
         cwd: Option<&Path>,
         environment: &BTreeMap<String, String>,
         size: PtySize,
-        child_fds: Vec<(std::os::fd::OwnedFd, std::os::fd::RawFd)>,
+        child_fds: ChildFdList,
     ) -> Result<Self>
     where
         S: AsRef<OsStr>,
     {
-        use std::os::fd::AsRawFd;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
 
-        let mut targets = std::collections::BTreeSet::new();
-        for (_, target) in &child_fds {
-            if *target < 3 {
-                return Err(anyhow!("child fd target {target} must be 3 or higher"));
+            let mut targets = std::collections::BTreeSet::new();
+            for (_, target) in &child_fds {
+                if *target < 3 {
+                    return Err(anyhow!("child fd target {target} must be 3 or higher"));
+                }
+                if !targets.insert(*target) {
+                    return Err(anyhow!("child fd target {target} is mapped more than once"));
+                }
             }
-            if !targets.insert(*target) {
-                return Err(anyhow!("child fd target {target} is mapped more than once"));
+            for (fd, target) in &child_fds {
+                if fd.as_raw_fd() != *target && targets.contains(&fd.as_raw_fd()) {
+                    return Err(anyhow!(
+                        "child fd source {} is also a child target; map it elsewhere first",
+                        fd.as_raw_fd()
+                    ));
+                }
+            }
+            for (fd, _) in &child_fds {
+                // SAFETY: fd is an open, owned descriptor; F_SETFD only changes its flags.
+                if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
             }
         }
-        for (fd, target) in &child_fds {
-            if fd.as_raw_fd() != *target && targets.contains(&fd.as_raw_fd()) {
-                return Err(anyhow!(
-                    "child fd source {} is also a child target; map it elsewhere first",
-                    fd.as_raw_fd()
-                ));
-            }
-        }
-        for (fd, _) in &child_fds {
-            // SAFETY: fd is an open, owned descriptor; F_SETFD only changes its flags.
-            if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
-                return Err(std::io::Error::last_os_error().into());
-            }
+        #[cfg(not(unix))]
+        if !child_fds.is_empty() {
+            return Err(anyhow!("child fd mappings are only supported on unix"));
         }
 
         let pair = native_pty_system().openpty(size)?;
@@ -2228,8 +2241,12 @@ impl PtySession {
         // ADR-0017 req 4: cells must not inherit the operator control socket path.
         command.env_remove("HIVE_SOCKET");
         apply_child_term_env(&mut command);
-        for (fd, target) in &child_fds {
-            command.child_fd(fd.as_raw_fd(), *target);
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            for (fd, target) in &child_fds {
+                command.child_fd(fd.as_raw_fd(), *target);
+            }
         }
         let child = pair.slave.spawn_command(command)?;
         drop(pair.slave);

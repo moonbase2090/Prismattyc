@@ -2137,6 +2137,7 @@ mod resize_tests {
             input: None,
             submitted: None,
             pending: None,
+            update_action: None,
             scroll: 0,
             columns: 80,
             chrome_layout: None,

@@ -1958,8 +1958,8 @@ mod layout_tests {
     }
 
     /// The panel goes through the same Graphite palette painter as the app.
-    /// Its size does not depend on the page or the row count, and every
-    /// option row is a pointer target (the hand cursor).
+    /// Its vertical size is fixed across pages, while wider labels can widen
+    /// it; every option row is a pointer target (the hand cursor).
     #[test]
     fn layout_panel_paints_at_the_settings_size_with_pointer_rows() {
         let Ok(font) = FontMetrics::load(14.0) else {

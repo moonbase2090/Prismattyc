@@ -3306,7 +3306,7 @@ fn palette_content_width(frame: &PaletteFrame<'_>, inset_cells: usize) -> usize 
                     cells = cells.saturating_add(2 + text_cells(&row.chord_label));
                 }
             }
-            cells.saturating_add(inset_cells.saturating_mul(2))
+            cells
         })
         .max()
         .unwrap_or(0);

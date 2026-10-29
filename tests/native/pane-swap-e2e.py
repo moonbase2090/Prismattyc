@@ -116,6 +116,20 @@ def inside(point, rect):
     return rect["x0"] <= point[0] < rect["x1"] and rect["y0"] <= point[1] < rect["y1"]
 
 
+def host_origin(env, trace, guess):
+    """The root point of the host's (0,0): move the pointer to a known root point and subtract the
+    window point the host logs for it."""
+    target = (guess[0] + 200, guess[1] + 200)
+    xdo("mousemove", "--sync", str(target[0]), str(target[1]))
+    time.sleep(0.5)
+    text = trace.read_text() if trace.exists() else ""
+    found = re.findall(r"position: PhysicalPosition \{ x: ([\d.]+), y: ([\d.]+) \}", text)
+    if not found:
+        raise Failure(f"calibration: the host logged no cursor position for root point {target}")
+    hx, hy = found[-1]
+    return (target[0] - round(float(hx)), target[1] - round(float(hy)))
+
+
 def drag(start, end, win_xy):
     sx, sy = start[0] + win_xy[0], start[1] + win_xy[1]
     ex, ey = end[0] + win_xy[0], end[1] + win_xy[1]
@@ -178,7 +192,10 @@ def main():
         if not two:
             raise Failure(f"strip dump does not show two handles: {handles(dump)}")
         geom = dict(line.split("=", 1) for line in xdo("getwindowgeometry", "--shell", wid).split())
-        win_xy = (int(geom["X"]), int(geom["Y"]))
+        # The origin the host draws from, not xdotool's frame origin: openbox's title bar makes
+        # the two differ by about 20px. Read the window point the host reports for a known root point.
+        win_xy = host_origin(env, tmp / "drag.trace", (int(geom["X"]), int(geom["Y"])))
+        print(f"window origin (host-calibrated)={win_xy} xdotool_geometry_origin=({geom['X']},{geom['Y']})")
         width, height = int(geom["WIDTH"]), int(geom["HEIGHT"])
         left, right = sorted(two, key=lambda h: h["x0"])
         press = ((left["x0"] + left["x1"]) // 2, (left["y0"] + left["y1"]) // 2)

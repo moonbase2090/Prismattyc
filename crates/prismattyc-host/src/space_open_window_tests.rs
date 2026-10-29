@@ -1422,6 +1422,7 @@ fn reopen_space_after_restart(
     }
     let host = app.windows.get_mut(&window).unwrap();
     let path = host.attach_layout_path.clone().unwrap();
+    test_support::wait_for_attach_write(host);
     let cache = attach_tabs::load(&path).expect("attach cache");
     let keys: Vec<String> = cache
         .tabs

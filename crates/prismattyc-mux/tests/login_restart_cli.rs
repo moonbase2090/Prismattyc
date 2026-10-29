@@ -397,3 +397,79 @@ fn login_preference_keeps_comments_and_unrelated_config() {
     assert!(disabled.contains("# inline explanation"));
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn session_configuration_restores_names_directories_and_commands_without_replay() {
+    let root = temp_root("session-configuration");
+    let socket = socket_path(&root);
+    let server = start_server(&socket, &root);
+    let cwd = root.join("project");
+    std::fs::create_dir(&cwd).unwrap();
+    let cwd = cwd.canonicalize().unwrap();
+    let mut create = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    clear_command_env(&mut create);
+    apply_isolation(&mut create, &root);
+    ok(&create
+        .current_dir(&cwd)
+        .arg("--socket")
+        .arg(&socket)
+        .args(["new", "--no-attach", "work"])
+        .output()
+        .unwrap());
+    let file = root.join("configuration.json");
+    let launch = "printf restored >> launches".to_string();
+    ok(&pmux(
+        &socket,
+        &root,
+        &[(
+            prismattyc_mux::procinfo::TEST_FOREGROUND_COMMAND_ENV,
+            &launch,
+        )],
+        &["session-config", "save", file.to_str().unwrap()],
+    ));
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let work = saved["space"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "work")
+        .unwrap();
+    assert_eq!(work["windows"][0]["root"]["cwd"], cwd.to_str().unwrap());
+    assert_eq!(work["windows"][0]["root"]["command"], launch);
+    fail(
+        &pmux(
+            &socket,
+            &root,
+            &[],
+            &["session-config", "save", file.to_str().unwrap()],
+        ),
+        "choose a new filename",
+    );
+    ok(&pmux(&socket, &root, &[], &["stop", "work"]));
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "restore", file.to_str().unwrap()],
+    ));
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !cwd.join("launches").exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("launches")).unwrap(),
+        "restored"
+    );
+    let repeated = ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "restore", file.to_str().unwrap()],
+    ));
+    assert!(repeated.contains("Restored 0 sessions."), "{repeated}");
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("launches")).unwrap(),
+        "restored"
+    );
+    drop(server);
+}

@@ -72,6 +72,7 @@ mod terminal_switcher;
 #[cfg(test)]
 mod test_support;
 mod transparency;
+mod update_flow;
 #[cfg(any(target_os = "macos", test))]
 mod update_notes;
 // cargo-mutants 27.1 does not recognize nested cfg(all(test, ...)).
@@ -2045,14 +2046,13 @@ fn maybe_dump_present(
         eprintln!("prismattyc-host: dump present png failed: {error}");
     }
     let sidecar = path.with_extension("json");
-    let body = format!(
-        "{{\"width\":{},\"height\":{},\"full\":{},\"full_repaint_reason\":{},\"seq\":{}}}\n",
-        width,
-        height,
-        full_reason.is_some(),
-        full_reason.map_or("null".into(), |r| format!("\"{}\"", r.as_str())),
-        *seq,
-    );
+    let body = serde_json::json!({
+        "width": width, "height": height, "full": full_reason.is_some(),
+        "full_repaint_reason": full_reason.map(FullRepaintReason::as_str),
+        "seq": *seq, "host_pid": std::process::id(),
+        "host_instance": render_diagnostics::instance_id(),
+    })
+    .to_string();
     if let Err(error) = std::fs::write(&sidecar, body) {
         eprintln!("prismattyc-host: dump present sidecar failed: {error}");
     }
@@ -2900,6 +2900,7 @@ enum UpdateCheckOrigin {
 
 #[derive(Debug)]
 enum UserAction {
+    FullUpdate(update_flow::Event),
     Wake,
     // Constructed only by the macOS menu/Dock action target; on other
     // platforms ⌘N calls `open_window` directly, so the variant is matched
@@ -2999,6 +3000,7 @@ struct App {
     pump_timing: pump_timing::PumpTiming,
     last_component_poll: Option<Instant>,
     restart_view: Option<PathBuf>,
+    full_update: update_flow::Flow,
     #[cfg(target_os = "macos")]
     automatic_update_checks: bool,
     /// Captured once at startup; changing the config requires a restart.
@@ -3089,6 +3091,7 @@ impl App {
             pump_timing: pump_timing::PumpTiming::default(),
             last_component_poll: None,
             restart_view: None,
+            full_update: update_flow::Flow::default(),
             #[cfg(target_os = "macos")]
             automatic_update_checks,
             #[cfg(target_os = "macos")]
@@ -3830,6 +3833,14 @@ impl App {
         self.wake_pending.store(false, Ordering::Relaxed);
         self.poll_file_writer();
         let phase_started = Instant::now();
+        let actions = self
+            .windows
+            .values_mut()
+            .filter_map(space_panel::take_update_action)
+            .collect::<Vec<_>>();
+        for action in actions {
+            update_flow::action(self, action);
+        }
         restart::poll(self);
         self.pump_timing
             .record_phase(pump_timing::Phase::RestartPoll, phase_started.elapsed());
@@ -4137,8 +4148,9 @@ impl App {
         // Claim ownership before reading the shared layout. A second host
         // must not use the registered host's grouping cache for startup.
         let first_window = self.windows.is_empty();
+        let complete_update = std::env::var_os("PRISMATTYC_COMPLETE_UPDATE").is_some();
         self.register_host_pid();
-        let mut attach_sessions = if config_editor {
+        let mut attach_sessions = if config_editor || complete_update {
             Vec::new()
         } else {
             startup_attach_targets(
@@ -4229,29 +4241,31 @@ impl App {
         let prior_cache_stamp = attach_layout_path
             .as_ref()
             .and_then(|path| cache_stamp(path));
-        let mut restore_prompt =
-            if startup.cache_writer && startup.attach == StartupAttachPlan::Bare {
-                attach_layout_path
-                    .as_ref()
-                    .and_then(|path| attach_tabs::load(path))
-                    .or_else(|| {
-                        host_mux_socket().and_then(|socket| {
-                            prismattyc_mux::workspace::load(&socket)
-                                .ok()
-                                .flatten()
-                                .or_else(|| {
-                                    prismattyc_mux::workspace::Workspace::from_saved_spaces(&socket)
-                                        .ok()
-                                        .flatten()
-                                })
-                                .and_then(|saved| saved.view)
-                        })
+        let mut restore_prompt = if !complete_update
+            && startup.cache_writer
+            && startup.attach == StartupAttachPlan::Bare
+        {
+            attach_layout_path
+                .as_ref()
+                .and_then(|path| attach_tabs::load(path))
+                .or_else(|| {
+                    host_mux_socket().and_then(|socket| {
+                        prismattyc_mux::workspace::load(&socket)
+                            .ok()
+                            .flatten()
+                            .or_else(|| {
+                                prismattyc_mux::workspace::Workspace::from_saved_spaces(&socket)
+                                    .ok()
+                                    .flatten()
+                            })
+                            .and_then(|saved| saved.view)
                     })
-                    .filter(|layout| restore_prompt::cache_matches_space(layout, &spaces_dir()))
-                    .and_then(restore_prompt::RestorePrompt::new)
-            } else {
-                None
-            };
+                })
+                .filter(|layout| restore_prompt::cache_matches_space(layout, &spaces_dir()))
+                .and_then(restore_prompt::RestorePrompt::new)
+        } else {
+            None
+        };
         if self
             .file_config
             .space_startup
@@ -4271,7 +4285,9 @@ impl App {
         let startup_cache_stamp = restore_prompt.as_ref().and(prior_cache_stamp);
         let grouped = attach_tabs::group_attach_targets(&attach_sessions, stored_layout.as_ref());
         let attach_groups = &grouped.groups;
-        let (boot_program, boot_args) = if let Some(command) = editor_command {
+        let (boot_program, boot_args) = if complete_update {
+            (mux::EMPTY_SPACE_PROGRAM.to_string(), Vec::new())
+        } else if let Some(command) = editor_command {
             (command.program, command.args)
         } else if startup_space.is_some() && attach_sessions.is_empty() {
             (mux::EMPTY_SPACE_PROGRAM.to_string(), Vec::new())
@@ -4300,6 +4316,7 @@ impl App {
         let show_splash = restore_prompt.is_none()
             && startup_space.is_none()
             && !config_editor
+            && !complete_update
             && first_window
             && splash::should_show(
                 self.cli.no_splash,
@@ -4642,12 +4659,13 @@ impl App {
         if let Some(host) = self.windows.get_mut(&id) {
             let configured = host.theme.clone();
             apply_host_theme(host, configured);
-            host.cache_writer = !config_editor;
-            host.local_views.fresh = self
-                .file_config
-                .space_startup
-                .map(crate::config::SpaceStartup::as_str)
-                == Some("fresh");
+            host.cache_writer = !config_editor && !complete_update;
+            host.local_views.fresh = complete_update
+                || self
+                    .file_config
+                    .space_startup
+                    .map(crate::config::SpaceStartup::as_str)
+                    == Some("fresh");
             if host.restore_prompt.is_some() {
                 match self
                     .file_config
@@ -20436,6 +20454,7 @@ impl ApplicationHandler<UserAction> for App {
             self.exit_code = 1;
             event_loop.exit();
         }
+        update_flow::resume(self);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -21677,7 +21696,7 @@ impl ApplicationHandler<UserAction> for App {
                             .set_title(&window_title(&host.mux, show_tab_strip(host)));
                         host.dirty = true;
                     }
-                    if host.context_menu.is_some() {
+                    if host.context_menu.is_some() && !space_panel::keeps_on_focus_loss(host) {
                         close_context_menu(host);
                     }
                     host.left_button_down = false;
@@ -21793,7 +21812,7 @@ impl ApplicationHandler<UserAction> for App {
                         if (!automatic || self.automatic_update_checks)
                             && macos_menu::prompt_update(&check.available, &check.release_notes)
                         {
-                            macos_update::start_install(self.event_proxy.clone(), false);
+                            update_flow::action(self, update_flow::Action::Start);
                         }
                     }
                     Ok(check) if !automatic => macos_menu::show_update_message(
@@ -21837,6 +21856,7 @@ impl ApplicationHandler<UserAction> for App {
             },
             #[cfg(windows)]
             UserAction::FocusExisting => self.focus_existing_window(),
+            UserAction::FullUpdate(event) => update_flow::event(self, event),
             UserAction::AccessKit(event) => self.handle_accesskit(event_loop, event),
         }
     }

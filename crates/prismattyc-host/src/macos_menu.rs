@@ -233,7 +233,7 @@ pub fn prompt_update(version: &str, release_notes: &str) -> bool {
         notes
     };
     alert.setInformativeText(&NSString::from_str(&notes));
-    alert.addButtonWithTitle(&NSString::from_str("Install and Relaunch"));
+    alert.addButtonWithTitle(&NSString::from_str("Review Update"));
     alert.addButtonWithTitle(&NSString::from_str("Later"));
     alert.runModal() == NSAlertFirstButtonReturn
 }

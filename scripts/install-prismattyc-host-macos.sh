@@ -100,16 +100,10 @@ if [[ ! -f "$ICNS" ]]; then
   exit 1
 fi
 
-# ---- Binary: cargo-installed copy if present, else a release build ---------
-CARGO_BIN="${CARGO_HOME:-$HOME/.cargo}/bin/prismattyc-host"
-if [[ -x "$CARGO_BIN" ]]; then
-  BIN="$CARGO_BIN"
-  echo "using $BIN"
-else
-  echo "building prismattyc-host (release)..."
-  ( cd "$ROOT" && cargo build --release --locked -p prismattyc-host )
-  BIN="$ROOT/target/release/prismattyc-host"
-fi
+# Build every bundled component from the same checkout.
+echo "building Prismattyc components (release)..."
+( cd "$ROOT" && CARGO_TARGET_DIR="$ROOT/target" cargo build --release --locked --workspace --bins )
+BIN="$ROOT/target/release/prismattyc-host"
 if [[ ! -x "$BIN" ]]; then
   echo "error: host binary not found at $BIN" >&2
   exit 1
@@ -143,7 +137,7 @@ refresh_bundle_binaries() {
   [[ -d "$dest/Contents/MacOS" ]] || return 0
   [[ -f "$dest/Contents/MacOS/prismattyc-host" ]] || return 0
   local name source_bin tmp
-  for name in prismattyc-host pmux pmuxd pmux-attach; do
+  for name in prismattyc-host pmux pmuxd pmux-attach pmux-mcp prismattyc; do
     source_bin="$DEST_APP/Contents/MacOS/$name"
     [[ -x "$source_bin" ]] || {
       echo "warning: cannot refresh $dest; missing $source_bin" >&2
@@ -180,9 +174,7 @@ cp "$ROOT/crates/prismattyc-host/themes/OMARCHY-LICENSE.txt" "$APP/Contents/Reso
 # Finder and Dock launches do not provide the shell PATH. Build and bundle
 # the mux front door and its helper binaries from this checkout so host-only
 # updates cannot package stale executables from Cargo bin or ambient PATH.
-echo "building prismattyc-mux helpers (release)..."
-( cd "$ROOT" && CARGO_TARGET_DIR="$ROOT/target" cargo build --release --locked -p prismattyc-mux --bins )
-for name in pmux pmuxd pmux-attach; do
+for name in pmux pmuxd pmux-attach pmux-mcp prismattyc; do
   source_bin="$ROOT/target/release/$name"
   [[ -x "$source_bin" ]] || {
     echo "error: mux helper build did not produce $source_bin" >&2

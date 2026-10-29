@@ -100,6 +100,8 @@ const UP_WAIT: Duration = Duration::from_secs(30);
 mod lifecycle;
 #[path = "pmux/pane_write.rs"]
 mod pane_write;
+#[path = "pmux/session_config.rs"]
+mod session_config;
 #[path = "pmux/skills.rs"]
 mod skills;
 #[path = "pmux/spaces.rs"]
@@ -141,6 +143,8 @@ session
                                   create a named session; attach in a TTY
                                   unless --no-attach. --agent binds a mailbox
                                   (default: derive a unique lowercase address).
+    session-config <save|restore> FILE
+                                  save or restore all session configurations
     login <enable|disable|status|sync>
                                   start at login and restore workspace
     doctor [SESSION]              pane shell, login state, child pid, lease, attach state
@@ -319,6 +323,7 @@ enum Verb {
     Stop,
     Restart,
     Versions,
+    SessionConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,6 +381,7 @@ const VERBS: &[(&str, Verb)] = &[
     ("stop", Verb::Stop),
     ("restart", Verb::Restart),
     ("versions", Verb::Versions),
+    ("session-config", Verb::SessionConfig),
 ];
 
 const MAILBOX_LEADERS: &[&str] = &[
@@ -653,6 +659,7 @@ fn main() -> Result<()> {
             lifecycle::restart(&paths, rest)
         }
         Verb::Versions => lifecycle::versions(&paths),
+        Verb::SessionConfig => session_config::run(&paths, rest),
         Verb::Tutorial
         | Verb::Skills
         | Verb::Completions
@@ -734,7 +741,7 @@ _prismattyc_mux() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
   cmd="${COMP_WORDS[1]}"
-  local cmds="up start attach ls list whoami status-set send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session tab layout sync status stop restart versions update completions config skills login"
+  local cmds="up start attach ls list whoami status-set send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session tab layout sync status stop restart versions session-config update completions config skills login"
   case "$prev" in
     --instance) return ;;
     --session) return ;;
@@ -814,7 +821,7 @@ _arguments -C \
   '--session[Session name or id for stop]:name:' \
   '--socket[Absolute socket path]:path:_files' \
   '(-h --help)'{-h,--help}'[Help]' \
-  '1:command:(up start attach ls list whoami status-set send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session tab layout sync status stop restart versions update completions config skills login)' \
+  '1:command:(up start attach ls list whoami status-set send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session tab layout sync status stop restart versions session-config update completions config skills login)' \
   '*::arg:->args'
 case $state in
   args)
@@ -914,6 +921,7 @@ complete -c pmux -n '__fish_use_subcommand' -a 'layout' -d 'Save, apply, or list
 complete -c pmux -n '__fish_use_subcommand' -a 'sync' -d 'Fan typed input across panes'
 complete -c pmux -n '__fish_use_subcommand' -a 'status' -d 'Socket status'
 complete -c pmux -n '__fish_use_subcommand' -a 'stop' -d 'Stop server or named session'
+complete -c pmux -n '__fish_use_subcommand' -a 'session-config' -d 'Save or restore session configurations'
 complete -c pmux -n '__fish_use_subcommand' -a 'restart' -d 'Restart safe components'
 complete -c pmux -n '__fish_use_subcommand' -a 'versions' -d 'Show installed and running versions'
 complete -c pmux -n '__fish_use_subcommand' -a 'update' -d 'Pull main and reinstall binaries'

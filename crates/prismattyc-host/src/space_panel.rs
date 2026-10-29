@@ -2077,3 +2077,208 @@ mod layout_tests {
 #[cfg(target_os = "linux")]
 #[path = "space_panel_input_tests.rs"]
 mod input_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod pt68_palette_width_tests {
+    use super::*;
+    use winit::platform::x11::EventLoopBuilderExtX11;
+
+    const TEST_NAME: &str =
+        "space_panel::pt68_palette_width_tests::palette_width_counts_horizontal_inset_once";
+    const WIDTH: u32 = 1000;
+    const HEIGHT: u32 = 700;
+
+    fn cells(text: &str) -> usize {
+        text.chars()
+            .map(|ch| prismattyc_core::char_display_width(ch).max(1))
+            .sum()
+    }
+
+    fn row_cells(row: &PaletteRow) -> usize {
+        let mut width = cells(&row.name);
+        if !row.full_width {
+            if !row.describe.is_empty() {
+                width = width.saturating_add(2 + cells(&row.describe));
+            }
+            if !row.chord_label.is_empty() {
+                width = width.saturating_add(2 + cells(&row.chord_label));
+            }
+        }
+        width
+    }
+
+    #[test]
+    fn palette_width_counts_horizontal_inset_once() {
+        if std::env::var_os("PRISMATTYC_RENDER_TEST_CHILD").is_none() {
+            render_window_tests::run_in_private_display(TEST_NAME);
+            return;
+        }
+        let event_loop = EventLoop::<UserAction>::with_user_event()
+            .with_x11()
+            .with_any_thread(true)
+            .build()
+            .unwrap();
+        let cli = Cli::parse(["--no-splash", "/bin/cat"].into_iter().map(String::from)).unwrap();
+        let config = config::ConfigFile {
+            chrome_style: Some(config::ChromeStyle::Graphite),
+            ..config::ConfigFile::default()
+        };
+        let app = App::new(cli, config, None, event_loop.create_proxy()).unwrap();
+        let proof_out = std::env::var_os("PRISMATTYC_PT68_PROOF_DIR").map(PathBuf::from);
+        let source_sha = std::env::var("PRISMATTYC_PROOF_SOURCE_SHA").ok();
+        if proof_out.is_some() {
+            assert!(
+                source_sha.is_some(),
+                "proof output requires an exact source SHA"
+            );
+        }
+        let mut proof = Proof {
+            app,
+            proof_out,
+            source_sha,
+            window: None,
+            done: false,
+        };
+        event_loop.run_app(&mut proof).unwrap();
+        assert!(proof.done, "palette width proof did not finish");
+        std::fs::write(
+            std::env::var_os("PRISMATTYC_RENDER_TEST_RESULT").unwrap(),
+            b"complete",
+        )
+        .unwrap();
+    }
+
+    struct Proof {
+        app: App,
+        proof_out: Option<PathBuf>,
+        source_sha: Option<String>,
+        window: Option<WindowId>,
+        done: bool,
+    }
+
+    impl ApplicationHandler<UserAction> for Proof {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            let id = self.app.open_window(event_loop, false).unwrap();
+            self.window = Some(id);
+            let _ = self
+                .app
+                .windows
+                .get(&id)
+                .unwrap()
+                .window
+                .request_inner_size(PhysicalSize::new(WIDTH, HEIGHT));
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_secs(5),
+            ));
+        }
+
+        fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+            let resized = match &event {
+                WindowEvent::Resized(size) => Some(*size),
+                _ => None,
+            };
+            self.app.window_event(event_loop, id, event);
+            let Some(size) = resized.filter(|size| size.width == WIDTH && size.height == HEIGHT)
+            else {
+                return;
+            };
+            let host = self.app.windows.get_mut(&id).unwrap();
+            let mut palette = Palette::default();
+            palette.query = "preset_single".into();
+            palette.show_graphite = true;
+            let view = palette.view(&host.keymap, host.experimental_rich);
+            let rows: Vec<_> = view.recent.iter().chain(&view.matches).collect();
+            assert!(!rows.is_empty(), "palette query returns rows");
+            let (selected, longest, longest_width) = rows
+                .iter()
+                .enumerate()
+                .map(|(index, row)| (index, row, row_cells(row)))
+                .max_by_key(|(_, _, width)| *width)
+                .unwrap();
+            let longest_name = longest.name.clone();
+            palette.selected = selected;
+            let query = palette.query.clone();
+            host.palette = Some(palette);
+            host.dirty = true;
+            App::paint(host).unwrap();
+
+            let layout = host.palette_layout.as_ref().expect("palette was painted");
+            let panel_width_cells = layout.geom.width_cells;
+            let panel_width_px = layout.panel_w;
+            let inset_cells = layout.geom.inset_cells;
+            let visible_rows: Vec<String> = layout
+                .rows
+                .iter()
+                .filter_map(|row| {
+                    view.row(row.global)
+                        .map(|palette_row| palette_row.name.clone())
+                })
+                .collect();
+            assert!(
+                visible_rows.contains(&longest_name),
+                "longest row is visible"
+            );
+
+            let sections = [
+                PaletteSection {
+                    header: "RECENT",
+                    subtitle: "",
+                    rows: &view.recent,
+                },
+                PaletteSection {
+                    header: "MATCHES",
+                    subtitle: &query,
+                    rows: &view.matches,
+                },
+            ];
+            let header_width = sections
+                .iter()
+                .map(|section| cells(section.header) + cells(section.subtitle) + 2)
+                .max()
+                .unwrap();
+            let footer_width = cells("Enter run · Esc close · ↑↓/wheel move · C-←/→ filter");
+            let content_width = longest_width
+                .max(header_width)
+                .max(cells(&query) + 10)
+                .max(footer_width)
+                .max(20);
+            let screen_width = (size.width as usize / host.font.cell_w)
+                .saturating_sub(4)
+                .max(20);
+            assert!(content_width + inset_cells * 2 < screen_width);
+            let expected_width_cells = content_width + inset_cells * 2;
+            assert_eq!(panel_width_cells, expected_width_cells);
+
+            if let Some(out) = &self.proof_out {
+                std::fs::create_dir_all(out).unwrap();
+                let mut pixels = vec![0; size.width as usize * size.height as usize];
+                rasterize_frame(host, &mut pixels, size.width, size.height, false);
+                write_present_png(&out.join("palette.png"), &pixels, size.width, size.height)
+                    .unwrap();
+                let result = serde_json::json!({
+                    "fixture_result": "PASS",
+                    "source_sha": self.source_sha,
+                    "physical_window_width_px": size.width,
+                    "physical_window_height_px": size.height,
+                    "terminal_columns": host.mux.cols(),
+                    "panel_width_px": panel_width_px,
+                    "panel_width_cells": panel_width_cells,
+                    "horizontal_inset_cells": inset_cells,
+                    "longest_visible_row": longest_name,
+                    "longest_row_content_cells": longest_width,
+                    "expected_panel_width_cells": expected_width_cells,
+                    "visible_rows": visible_rows,
+                    "selected_row": selected,
+                    "frame": "palette.png",
+                });
+                std::fs::write(
+                    out.join("FIXTURE_RESULT"),
+                    serde_json::to_vec_pretty(&result).unwrap(),
+                )
+                .unwrap();
+            }
+            self.done = true;
+            event_loop.exit();
+        }
+    }
+}

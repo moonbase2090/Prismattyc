@@ -7405,9 +7405,20 @@ mod tests {
         )
         .unwrap();
         let pane = runtime.focused_id();
+        // The exit can be marked before the last output chunk is applied, so wait for both the
+        // marker on screen and the exit, not for the exit alone.
         let deadline = Instant::now() + Duration::from_secs(5);
-        while runtime.panes[&pane].child_alive && Instant::now() < deadline {
-            runtime.panes.get_mut(&pane).unwrap().drain();
+        loop {
+            let child = runtime.panes.get_mut(&pane).unwrap();
+            child.drain();
+            let mut row = String::new();
+            for cell in child.emulator.screen().view_row(0).unwrap() {
+                cell.write_grapheme_into(&mut row);
+            }
+            if (!child.child_alive && row.starts_with("EXIT_MARKER")) || Instant::now() >= deadline
+            {
+                break;
+            }
             thread::sleep(Duration::from_millis(5));
         }
         let child = &runtime.panes[&pane];

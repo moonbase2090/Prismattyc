@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.3.50] - 2026-10-28
+
+### Changed
+
+- Complete updates now offer to save sessions, continue without saving, or cancel before anything stops. After the installed components restart, the app offers to restore the saved sessions and view, including directories, foreground commands, layout and agent bindings.
+- An update restart checks the saved session configuration again right before it stops anything, stops only the saved sessions, and refuses to go ahead if the layout changed or a new session was started in the meantime, so no session is lost.
+- Updates reject incomplete or mixed installations instead of reporting success.
+
+### Fixed
+
+- Mouse, focus and paste reporting modes are cleared when a pane's program is replaced or exits, so a restarted shell no longer receives escape-sequence junk from mouse movement.
+- Pane titles skip characters the chrome font has no glyph for, so status symbols no longer draw as missing-glyph boxes.
+
 ## [0.3.49] - 2026-10-28
 
 ### Fixed

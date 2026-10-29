@@ -2827,7 +2827,8 @@ fn paint_sidebar_grip(
     }
 }
 
-/// Double-chevron control: down means expand all, right means collapse all.
+/// Double-chevron control: collapsed shows right chevrons (the action expands all);
+/// expanded shows down chevrons (the action collapses all).
 fn paint_sidebar_tree_fold(
     buffer: &mut [u32],
     stride: usize,

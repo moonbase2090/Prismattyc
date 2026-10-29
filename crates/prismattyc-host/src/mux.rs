@@ -7410,13 +7410,25 @@ mod tests {
             runtime.panes.get_mut(&pane).unwrap().drain();
             thread::sleep(Duration::from_millis(5));
         }
-        let child = &runtime.panes[&pane];
-        assert!(!child.child_alive, "child did not exit");
+        assert!(!runtime.panes[&pane].child_alive, "child did not exit");
+        let output_deadline = Instant::now() + Duration::from_secs(1);
         let mut text = String::new();
-        for cell in child.emulator.screen().view_row(0).unwrap() {
-            cell.write_grapheme_into(&mut text);
+        loop {
+            text.clear();
+            for cell in runtime.panes[&pane].emulator.screen().view_row(0).unwrap() {
+                cell.write_grapheme_into(&mut text);
+            }
+            if text.starts_with("EXIT_MARKER") || Instant::now() >= output_deadline {
+                break;
+            }
+            runtime.panes.get_mut(&pane).unwrap().drain();
+            thread::sleep(Duration::from_millis(5));
         }
-        assert!(text.starts_with("EXIT_MARKER"));
+        let child = &runtime.panes[&pane];
+        assert!(
+            text.starts_with("EXIT_MARKER"),
+            "final PTY output: {text:?}"
+        );
         assert_eq!(
             child.emulator.mouse_tracking(),
             prismattyc_emulator::MouseTracking::Off

@@ -4387,7 +4387,7 @@ mod tests {
 #[cfg(all(test, unix))]
 mod child_fd_tests {
     use super::*;
-    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     fn wait_for_file(path: &Path) -> String {
         for _ in 0..500 {
@@ -4414,10 +4414,19 @@ mod child_fd_tests {
         drop(write_end);
         // The parent keeps its own copy open across the concurrent spawn below.
         let held = read_end.try_clone().unwrap();
+        // The source number is what a leaked inheritance would expose, so the
+        // concurrent child checks it too, not only the target number.
+        let source_num = read_end.as_raw_fd();
+        // SAFETY: held is open; F_GETFD only reads its flags.
+        let held_flags = unsafe { libc::fcntl(held.as_raw_fd(), libc::F_GETFD) };
+        assert!(
+            held_flags & libc::FD_CLOEXEC != 0,
+            "parent copy must be close-on-exec"
+        );
 
         let script = |name: &str| {
             format!(
-                "if [ -e /dev/fd/3 ]; then echo mapped > {d}/{name}; else echo missing > {d}/{name}; fi",
+                "if [ -e /dev/fd/3 ] || [ -e /dev/fd/{source_num} ]; then echo mapped > {d}/{name}; else echo missing > {d}/{name}; fi",
                 d = dir.display()
             )
         };

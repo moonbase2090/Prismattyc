@@ -4491,6 +4491,79 @@ mod child_fd_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The concurrent handoff: the mapped spawn and an unmapped spawn fork at the same
+    /// time while the parent still holds the source and a second close-on-exec
+    /// descriptor for the same open file. The mapped child must see its target; the
+    /// unmapped child must see neither the target nor the retained descriptor number.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn concurrent_unmapped_spawn_does_not_inherit_the_mapped_source() {
+        let dir = std::env::temp_dir().join(format!("pty-childfd-conc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (created, write_end) = cloexec_pipe();
+        drop(write_end);
+        // Move the source to a number distinct from the child target 3.
+        // SAFETY: F_DUPFD_CLOEXEC returns a new close-on-exec descriptor >= 10 for an open fd.
+        let moved = unsafe { libc::fcntl(created.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10) };
+        assert!(
+            moved >= 10,
+            "could not move the source above the target range"
+        );
+        // SAFETY: moved is a fresh descriptor owned by this test.
+        let source = unsafe { OwnedFd::from_raw_fd(moved) };
+        drop(created);
+        // A second close-on-exec descriptor for the same open file, kept by the parent.
+        let retained = source.try_clone().unwrap();
+        let retained_num = retained.as_raw_fd();
+        assert!(fd_is_cloexec(retained_num));
+        assert_ne!(source.as_raw_fd(), 3);
+
+        let mapped_script = format!(
+            "if [ -e /dev/fd/3 ]; then echo target > {d}/mapped; else echo missing > {d}/mapped; fi",
+            d = dir.display()
+        );
+        let plain_script = format!(
+            "if [ -e /dev/fd/3 ] || [ -e /dev/fd/{retained_num} ]; then echo leaked > {d}/plain; else echo clean > {d}/plain; fi",
+            d = dir.display()
+        );
+        let env = BTreeMap::new();
+        let size = portable_pty::PtySize::default();
+        let barrier = std::sync::Barrier::new(2);
+        let (mut mapped, mut plain) = std::thread::scope(|scope| {
+            let mapped_thread = scope.spawn(|| {
+                barrier.wait();
+                PtySession::spawn_config_with_fds(
+                    "/bin/sh",
+                    &["-c".to_string(), mapped_script],
+                    None,
+                    &env,
+                    size,
+                    vec![(source, 3)],
+                )
+                .unwrap()
+            });
+            let plain_thread = scope.spawn(|| {
+                barrier.wait();
+                PtySession::spawn_config(
+                    "/bin/sh",
+                    &["-c".to_string(), plain_script],
+                    None,
+                    &env,
+                    size,
+                )
+                .unwrap()
+            });
+            (mapped_thread.join().unwrap(), plain_thread.join().unwrap())
+        });
+
+        assert_eq!(wait_for_file(&dir.join("mapped")), "target\n");
+        assert_eq!(wait_for_file(&dir.join("plain")), "clean\n");
+        mapped.wait().unwrap();
+        plain.wait().unwrap();
+        drop(retained);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn inheritable_source_is_refused_before_any_child_starts() {
         let mut fds = [0i32; 2];

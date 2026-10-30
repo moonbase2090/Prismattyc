@@ -2133,6 +2133,13 @@ fn percent_decode_path(input: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// Descriptors mapped into a child: owned parent descriptor and child target number.
+/// Off unix there are no descriptor mappings, so the list can only be empty.
+#[cfg(unix)]
+pub type ChildFdList = Vec<(std::os::fd::OwnedFd, std::os::fd::RawFd)>;
+#[cfg(not(unix))]
+pub type ChildFdList = Vec<(std::convert::Infallible, i32)>;
+
 impl PtySession {
     pub fn spawn<I, S>(program: &str, arguments: I, size: PtySize) -> Result<Self>
     where
@@ -2160,6 +2167,69 @@ impl PtySession {
     where
         S: AsRef<OsStr>,
     {
+        Self::spawn_config_with_fds(program, arguments, cwd, environment, size, Vec::new())
+    }
+
+    /// Like [`PtySession::spawn_config`], and also maps each `(fd, target)` into the child.
+    ///
+    /// The child sees the owned `fd` as `target`, after fork and before exec, and no
+    /// other child inherits it. Targets must be unique and at least 3. Each source must
+    /// already be close-on-exec: the call does not set the flag, because a fork in the
+    /// window before it could inherit the descriptor. Sources are closed when this call
+    /// returns. A validation or spawn failure returns an error before any child starts.
+    pub fn spawn_config_with_fds<S>(
+        program: &str,
+        arguments: &[S],
+        cwd: Option<&Path>,
+        environment: &BTreeMap<String, String>,
+        size: PtySize,
+        child_fds: ChildFdList,
+    ) -> Result<Self>
+    where
+        S: AsRef<OsStr>,
+    {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+
+            let mut targets = std::collections::BTreeSet::new();
+            for (_, target) in &child_fds {
+                if *target < 3 {
+                    return Err(anyhow!("child fd target {target} must be 3 or higher"));
+                }
+                if !targets.insert(*target) {
+                    return Err(anyhow!("child fd target {target} is mapped more than once"));
+                }
+            }
+            for (fd, target) in &child_fds {
+                if fd.as_raw_fd() != *target && targets.contains(&fd.as_raw_fd()) {
+                    return Err(anyhow!(
+                        "child fd source {} is also a child target; map it elsewhere first",
+                        fd.as_raw_fd()
+                    ));
+                }
+            }
+            for (fd, _) in &child_fds {
+                // SAFETY: fd is an open, owned descriptor; F_GETFD only reads its flags.
+                let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+                if flags == -1 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                // Refuse a source that another thread could fork while it is inheritable.
+                // The caller must create it close-on-exec in one step (pipe2 with O_CLOEXEC).
+                if flags & libc::FD_CLOEXEC == 0 {
+                    return Err(anyhow!(
+                        "child fd source {} must be created close-on-exec",
+                        fd.as_raw_fd()
+                    ));
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        if !child_fds.is_empty() {
+            return Err(anyhow!("child fd mappings are only supported on unix"));
+        }
+
         let pair = native_pty_system().openpty(size)?;
         let mut command = CommandBuilder::new(program);
         for argument in arguments {
@@ -2181,6 +2251,13 @@ impl PtySession {
         // ADR-0017 req 4: cells must not inherit the operator control socket path.
         command.env_remove("HIVE_SOCKET");
         apply_child_term_env(&mut command);
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            for (fd, target) in &child_fds {
+                command.child_fd(fd.as_raw_fd(), *target);
+            }
+        }
         let child = pair.slave.spawn_command(command)?;
         drop(pair.slave);
         let reader = pair.master.try_clone_reader()?;
@@ -4314,5 +4391,226 @@ mod tests {
             assert_eq!(history_row_text(&emulator, 0), "line-078", "{cols}x{rows}");
             assert_eq!(history_row_text(&emulator, 76), "line-002", "{cols}x{rows}");
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod child_fd_tests {
+    use super::*;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    fn wait_for_file(path: &Path) -> String {
+        for _ in 0..500 {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                if !text.is_empty() {
+                    return text;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("child did not write {}", path.display());
+    }
+
+    fn fd_is_cloexec(fd: i32) -> bool {
+        // SAFETY: F_GETFD only reads the descriptor's flags.
+        unsafe { libc::fcntl(fd, libc::F_GETFD) & libc::FD_CLOEXEC != 0 }
+    }
+
+    /// A pipe whose descriptors are close-on-exec from the moment they exist.
+    /// Linux creates them atomically. Other unix targets mark them straight after
+    /// pipe, a window the API's check refuses to hide.
+    fn cloexec_pipe() -> (OwnedFd, OwnedFd) {
+        let mut fds = [0i32; 2];
+        #[cfg(target_os = "linux")]
+        // SAFETY: pipe2 fills two fresh descriptors on success; checked below.
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        #[cfg(not(target_os = "linux"))]
+        {
+            // SAFETY: pipe fills two fresh descriptors on success; checked below.
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+            for fd in fds {
+                // SAFETY: fd was just returned by pipe; F_SETFD only changes its flags.
+                assert_eq!(
+                    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                    0
+                );
+            }
+        }
+        // SAFETY: both descriptors were just returned by pipe and are owned here.
+        unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
+    }
+
+    #[test]
+    fn mapped_fd_is_seen_only_by_its_child_during_a_concurrent_spawn() {
+        let dir = std::env::temp_dir().join(format!("pty-childfd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (read_end, write_end) = cloexec_pipe();
+        drop(write_end);
+        // The source is checked itself, before the API takes it.
+        assert!(
+            fd_is_cloexec(read_end.as_raw_fd()),
+            "source must be created close-on-exec"
+        );
+        // The parent keeps its own copy open across the concurrent spawn below.
+        let held = read_end.try_clone().unwrap();
+        // A leaked inheritance would expose the source number, so the unmapped child
+        // checks it as well as the target number.
+        let source_num = read_end.as_raw_fd();
+
+        let script = |name: &str| {
+            format!(
+                "if [ -e /dev/fd/3 ] || [ -e /dev/fd/{source_num} ]; then echo mapped > {d}/{name}; else echo missing > {d}/{name}; fi",
+                d = dir.display()
+            )
+        };
+        let env = BTreeMap::new();
+        let size = portable_pty::PtySize::default();
+        let mut mapped = PtySession::spawn_config_with_fds(
+            "/bin/sh",
+            &["-c".to_string(), script("mapped")],
+            None,
+            &env,
+            size,
+            vec![(read_end, 3)],
+        )
+        .unwrap();
+        let mut plain = PtySession::spawn_config(
+            "/bin/sh",
+            &["-c".to_string(), script("plain")],
+            None,
+            &env,
+            size,
+        )
+        .unwrap();
+
+        assert_eq!(wait_for_file(&dir.join("mapped")), "mapped\n");
+        assert_eq!(wait_for_file(&dir.join("plain")), "missing\n");
+        mapped.wait().unwrap();
+        plain.wait().unwrap();
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The concurrent handoff: the mapped spawn and an unmapped spawn fork at the same
+    /// time while the parent still holds the source and a second close-on-exec
+    /// descriptor for the same open file. The mapped child must see its target; the
+    /// unmapped child must see neither the target nor the retained descriptor number.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn concurrent_unmapped_spawn_does_not_inherit_the_mapped_source() {
+        let dir = std::env::temp_dir().join(format!("pty-childfd-conc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (created, write_end) = cloexec_pipe();
+        drop(write_end);
+        // Move the source to a number distinct from the child target 3.
+        // SAFETY: F_DUPFD_CLOEXEC returns a new close-on-exec descriptor >= 10 for an open fd.
+        let moved = unsafe { libc::fcntl(created.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10) };
+        assert!(
+            moved >= 10,
+            "could not move the source above the target range"
+        );
+        // SAFETY: moved is a fresh descriptor owned by this test.
+        let source = unsafe { OwnedFd::from_raw_fd(moved) };
+        drop(created);
+        // A second close-on-exec descriptor for the same open file, kept by the parent.
+        let retained = source.try_clone().unwrap();
+        let retained_num = retained.as_raw_fd();
+        assert!(fd_is_cloexec(retained_num));
+        assert_ne!(source.as_raw_fd(), 3);
+
+        let mapped_script = format!(
+            "if [ -e /dev/fd/3 ]; then echo target > {d}/mapped; else echo missing > {d}/mapped; fi",
+            d = dir.display()
+        );
+        let plain_script = format!(
+            "if [ -e /dev/fd/3 ] || [ -e /dev/fd/{retained_num} ]; then echo leaked > {d}/plain; else echo clean > {d}/plain; fi",
+            d = dir.display()
+        );
+        let env = BTreeMap::new();
+        let size = portable_pty::PtySize::default();
+        let barrier = std::sync::Barrier::new(2);
+        let (mut mapped, mut plain) = std::thread::scope(|scope| {
+            let mapped_thread = scope.spawn(|| {
+                barrier.wait();
+                PtySession::spawn_config_with_fds(
+                    "/bin/sh",
+                    &["-c".to_string(), mapped_script],
+                    None,
+                    &env,
+                    size,
+                    vec![(source, 3)],
+                )
+                .unwrap()
+            });
+            let plain_thread = scope.spawn(|| {
+                barrier.wait();
+                PtySession::spawn_config(
+                    "/bin/sh",
+                    &["-c".to_string(), plain_script],
+                    None,
+                    &env,
+                    size,
+                )
+                .unwrap()
+            });
+            (mapped_thread.join().unwrap(), plain_thread.join().unwrap())
+        });
+
+        assert_eq!(wait_for_file(&dir.join("mapped")), "target\n");
+        assert_eq!(wait_for_file(&dir.join("plain")), "clean\n");
+        mapped.wait().unwrap();
+        plain.wait().unwrap();
+        drop(retained);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inheritable_source_is_refused_before_any_child_starts() {
+        let mut fds = [0i32; 2];
+        // SAFETY: pipe fills two fresh descriptors on success; checked below.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: both descriptors were just returned by pipe and are owned here.
+        let source = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        // SAFETY: as above.
+        drop(unsafe { OwnedFd::from_raw_fd(fds[1]) });
+        assert!(
+            !fd_is_cloexec(source.as_raw_fd()),
+            "a plain pipe starts inheritable"
+        );
+        let env = BTreeMap::new();
+        let result = PtySession::spawn_config_with_fds(
+            "/bin/sh",
+            &["-c".to_string(), "true".to_string()],
+            None,
+            &env,
+            portable_pty::PtySize::default(),
+            vec![(source, 3)],
+        );
+        assert!(result.is_err(), "an inheritable source must be refused");
+    }
+
+    #[test]
+    fn duplicate_or_low_targets_are_rejected_before_spawn() {
+        let (a, b) = cloexec_pipe();
+        let env = BTreeMap::new();
+        let size = portable_pty::PtySize::default();
+        let low = PtySession::spawn_config_with_fds(
+            "/bin/sh",
+            &["-c".to_string(), "true".to_string()],
+            None,
+            &env,
+            size,
+            vec![(a, 2)],
+        );
+        assert!(low.is_err());
+        let dup = PtySession::spawn_config_with_fds(
+            "/bin/sh",
+            &["-c".to_string(), "true".to_string()],
+            None,
+            &env,
+            size,
+            vec![(b.try_clone().unwrap(), 4), (b, 4)],
+        );
+        assert!(dup.is_err());
     }
 }

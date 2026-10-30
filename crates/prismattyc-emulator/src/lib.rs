@@ -2173,9 +2173,10 @@ impl PtySession {
     /// Like [`PtySession::spawn_config`], and also maps each `(fd, target)` into the child.
     ///
     /// The child sees the owned `fd` as `target`, after fork and before exec, and no
-    /// other child inherits it. Targets must be unique and at least 3. Each source is
-    /// set close-on-exec in the parent and closed when this call returns. A validation
-    /// or spawn failure returns an error before any child is started.
+    /// other child inherits it. Targets must be unique and at least 3. Each source must
+    /// already be close-on-exec: the call does not set the flag, because a fork in the
+    /// window before it could inherit the descriptor. Sources are closed when this call
+    /// returns. A validation or spawn failure returns an error before any child starts.
     pub fn spawn_config_with_fds<S>(
         program: &str,
         arguments: &[S],
@@ -2209,9 +2210,18 @@ impl PtySession {
                 }
             }
             for (fd, _) in &child_fds {
-                // SAFETY: fd is an open, owned descriptor; F_SETFD only changes its flags.
-                if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+                // SAFETY: fd is an open, owned descriptor; F_GETFD only reads its flags.
+                let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+                if flags == -1 {
                     return Err(std::io::Error::last_os_error().into());
+                }
+                // Refuse a source that another thread could fork while it is inheritable.
+                // The caller must create it close-on-exec in one step (pipe2 with O_CLOEXEC).
+                if flags & libc::FD_CLOEXEC == 0 {
+                    return Err(anyhow!(
+                        "child fd source {} must be created close-on-exec",
+                        fd.as_raw_fd()
+                    ));
                 }
             }
         }
@@ -4401,28 +4411,51 @@ mod child_fd_tests {
         panic!("child did not write {}", path.display());
     }
 
+    fn fd_is_cloexec(fd: i32) -> bool {
+        // SAFETY: F_GETFD only reads the descriptor's flags.
+        unsafe { libc::fcntl(fd, libc::F_GETFD) & libc::FD_CLOEXEC != 0 }
+    }
+
+    /// A pipe whose descriptors are close-on-exec from the moment they exist.
+    /// Linux creates them atomically. Other unix targets mark them straight after
+    /// pipe, a window the API's check refuses to hide.
+    fn cloexec_pipe() -> (OwnedFd, OwnedFd) {
+        let mut fds = [0i32; 2];
+        #[cfg(target_os = "linux")]
+        // SAFETY: pipe2 fills two fresh descriptors on success; checked below.
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        #[cfg(not(target_os = "linux"))]
+        {
+            // SAFETY: pipe fills two fresh descriptors on success; checked below.
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+            for fd in fds {
+                // SAFETY: fd was just returned by pipe; F_SETFD only changes its flags.
+                assert_eq!(
+                    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                    0
+                );
+            }
+        }
+        // SAFETY: both descriptors were just returned by pipe and are owned here.
+        unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
+    }
+
     #[test]
     fn mapped_fd_is_seen_only_by_its_child_during_a_concurrent_spawn() {
         let dir = std::env::temp_dir().join(format!("pty-childfd-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut fds = [0i32; 2];
-        // SAFETY: pipe fills two fresh descriptors on success; checked below.
-        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-        // SAFETY: both descriptors were just returned by pipe and are owned here.
-        let read_end = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-        let write_end = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        let (read_end, write_end) = cloexec_pipe();
         drop(write_end);
+        // The source is checked itself, before the API takes it.
+        assert!(
+            fd_is_cloexec(read_end.as_raw_fd()),
+            "source must be created close-on-exec"
+        );
         // The parent keeps its own copy open across the concurrent spawn below.
         let held = read_end.try_clone().unwrap();
-        // The source number is what a leaked inheritance would expose, so the
-        // concurrent child checks it too, not only the target number.
+        // A leaked inheritance would expose the source number, so the unmapped child
+        // checks it as well as the target number.
         let source_num = read_end.as_raw_fd();
-        // SAFETY: held is open; F_GETFD only reads its flags.
-        let held_flags = unsafe { libc::fcntl(held.as_raw_fd(), libc::F_GETFD) };
-        assert!(
-            held_flags & libc::FD_CLOEXEC != 0,
-            "parent copy must be close-on-exec"
-        );
 
         let script = |name: &str| {
             format!(
@@ -4459,14 +4492,33 @@ mod child_fd_tests {
     }
 
     #[test]
-    fn duplicate_or_low_targets_are_rejected_before_spawn() {
+    fn inheritable_source_is_refused_before_any_child_starts() {
         let mut fds = [0i32; 2];
-        // SAFETY: as above.
+        // SAFETY: pipe fills two fresh descriptors on success; checked below.
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: both descriptors were just returned by pipe and are owned here.
+        let source = unsafe { OwnedFd::from_raw_fd(fds[0]) };
         // SAFETY: as above.
-        let a = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-        // SAFETY: as above.
-        let b = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        drop(unsafe { OwnedFd::from_raw_fd(fds[1]) });
+        assert!(
+            !fd_is_cloexec(source.as_raw_fd()),
+            "a plain pipe starts inheritable"
+        );
+        let env = BTreeMap::new();
+        let result = PtySession::spawn_config_with_fds(
+            "/bin/sh",
+            &["-c".to_string(), "true".to_string()],
+            None,
+            &env,
+            portable_pty::PtySize::default(),
+            vec![(source, 3)],
+        );
+        assert!(result.is_err(), "an inheritable source must be refused");
+    }
+
+    #[test]
+    fn duplicate_or_low_targets_are_rejected_before_spawn() {
+        let (a, b) = cloexec_pipe();
         let env = BTreeMap::new();
         let size = portable_pty::PtySize::default();
         let low = PtySession::spawn_config_with_fds(

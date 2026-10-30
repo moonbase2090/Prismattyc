@@ -1245,6 +1245,8 @@ struct HostState {
     walkthrough_save_after_open: bool,
     /// Effective key table for labels (the dispatcher reads `App::keymap`).
     keymap: Arc<keybind::KeyMap>,
+    /// `smart_ctrl_c`: plain Ctrl+C copies a selection. Off by default.
+    smart_ctrl_c: bool,
     /// Whether the experimental rich action is enabled for palette rows.
     experimental_rich: bool,
     /// Brand spectrum index for the focused-pane border (thin, 1px).
@@ -3260,6 +3262,7 @@ impl App {
         // resume.
         for host in self.windows.values_mut() {
             host.pending_full_repaint = Some(FullRepaintReason::Fallback);
+            host.smart_ctrl_c = self.file_config.smart_ctrl_c();
         }
         for warning in self.file_config.unknown_key_warnings() {
             eprintln!("{}", config::host_warning_line(warning));
@@ -4612,6 +4615,7 @@ impl App {
                 walkthrough_demo: None,
                 walkthrough_save_after_open: false,
                 keymap: self.keymap.clone(),
+                smart_ctrl_c: self.file_config.smart_ctrl_c(),
                 experimental_rich: self.cli.experimental_rich,
                 focus_border: self.cli.focus_border,
                 bar_color: self.file_config.bar_color,
@@ -16065,7 +16069,8 @@ fn find_key_while_open(host: &mut HostState, logical: &Key) -> bool {
         host.dirty = true;
         return true;
     }
-    if is_copy_chord(logical, host.modifiers, host.selection.range().is_some()) {
+    if host.smart_ctrl_c && is_copy_chord(logical, host.modifiers, host.selection.range().is_some())
+    {
         let _ = copy_selection_native(host);
         return true;
     }
@@ -19704,7 +19709,8 @@ fn handle_selection_key(host: &mut HostState, logical: &Key) -> bool {
     // Fixed copy fallback (text selection D-H4): plain Ctrl+C with a multi-cell
     // selection. The Ctrl+Shift+C chord is the `copy` table action and is
     // dispatched before this point, so only the unshifted form is checked.
-    if !host.modifiers.shift_key()
+    if host.smart_ctrl_c
+        && !host.modifiers.shift_key()
         && is_copy_chord(
             logical,
             host.modifiers,

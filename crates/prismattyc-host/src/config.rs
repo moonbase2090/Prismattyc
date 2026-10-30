@@ -406,6 +406,9 @@ pub struct ConfigFile {
     /// Add standard macOS Command-key bindings before applying `[keys]`.
     /// Defaults off so these new shortcuts can be enabled explicitly.
     pub macos_shortcuts: Option<bool>,
+    /// Plain Ctrl+C copies a multi-cell selection instead of sending the
+    /// interrupt. Defaults off: Ctrl+C must stay a reliable interrupt.
+    pub smart_ctrl_c: Option<bool>,
     /// `[a11y]` (accessibility). Defaults on when the table is absent.
     #[serde(default)]
     pub a11y: Option<A11ySection>,
@@ -467,6 +470,10 @@ impl ConfigFile {
 
     pub fn macos_shortcuts(&self) -> bool {
         self.macos_shortcuts.unwrap_or(false)
+    }
+
+    pub fn smart_ctrl_c(&self) -> bool {
+        self.smart_ctrl_c.unwrap_or(false)
     }
 
     /// Human-readable warnings for explicit `[keys]` entries that suppress
@@ -1213,6 +1220,17 @@ mod tests {
         assert_eq!(loaded.pty_drain_budget_ms, Some(16));
         assert_eq!(loaded.pty_drain_budget_ms(), 16);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `smart_ctrl_c` is opt-in: Ctrl+C stays an interrupt unless enabled.
+    #[test]
+    fn smart_ctrl_c_is_off_unless_enabled() {
+        let dir = temp_dir("smart-ctrl-c");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        assert!(!load(&path).unwrap().smart_ctrl_c());
+        std::fs::write(&path, "smart_ctrl_c = true\n").unwrap();
+        assert!(load(&path).unwrap().smart_ctrl_c());
     }
 
     #[test]

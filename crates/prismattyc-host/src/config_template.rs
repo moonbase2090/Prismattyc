@@ -308,6 +308,13 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
         value: ConfigValue::Bool(false),
     },
     ConfigKey {
+        name: "smart_ctrl_c",
+        group: ConfigGroup::Keys,
+        doc: "Plain Ctrl+C copies a selection instead of sending the interrupt; off keeps Ctrl+C a reliable interrupt",
+        range: "true|false",
+        value: ConfigValue::Bool(false),
+    },
+    ConfigKey {
         name: "panes",
         group: ConfigGroup::Layout,
         doc: "Initial pane count; startup only",

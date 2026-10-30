@@ -1575,8 +1575,6 @@ fn key_label(chord: &Chord) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// Issue #395: with `macos_shortcuts = true`, Command+C and Command+V on a
     /// macOS platform must resolve to copy and paste, not fall through to text.
     #[test]

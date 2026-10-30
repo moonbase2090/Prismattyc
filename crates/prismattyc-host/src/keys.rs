@@ -83,6 +83,13 @@ pub fn encode_key_event_with_modes(
         }
     }
 
+    // Command (Super) plus a character is an app chord, never terminal input.
+    // When no host action claimed it, dropping it beats typing the letter
+    // (issue #395: Cmd+C / Cmd+V inserted a literal c / v).
+    if super_key && matches!(logical, Key::Character(_)) {
+        return None;
+    }
+
     // 2) Logical character (letters, digits, punctuation).
     if let Key::Character(s) = logical {
         return encode_character_str(s.as_str(), ctrl, alt, mod_param);
@@ -90,7 +97,7 @@ pub fn encode_key_event_with_modes(
 
     // 3) Composed / IME / some compositors only fill `text`.
     if let Some(t) = text {
-        if !t.is_empty() {
+        if !t.is_empty() && !super_key {
             return encode_text_fallback(t, ctrl, alt, mod_param);
         }
     }
@@ -573,6 +580,29 @@ mod tests {
             },
         )
         .expect("Enter is encoded")
+    }
+
+    /// Issue #395: an unbound Command+letter must not reach the pane as text.
+    #[test]
+    fn command_plus_character_is_not_sent_as_text() {
+        let c = Key::Character("c".into());
+        let modes = KeyModes {
+            kitty_flags: 0,
+            modify_other_keys: 0,
+            cursor_keys_app: false,
+            mac_line_edit: true,
+            mac_word_jump: true,
+        };
+        for text in [Some("c"), None] {
+            let bytes = encode_key_event_with_modes(
+                &c,
+                PhysicalKey::Code(winit::keyboard::KeyCode::KeyC),
+                text,
+                mods_super(),
+                modes,
+            );
+            assert_eq!(bytes, None, "Command+c typed text {text:?}");
+        }
     }
 
     fn mods_super() -> ModifiersState {

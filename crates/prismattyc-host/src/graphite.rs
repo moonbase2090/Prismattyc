@@ -2827,7 +2827,8 @@ fn paint_sidebar_grip(
     }
 }
 
-/// Double-chevron control: down means expand all, right means collapse all.
+/// Double-chevron control: collapsed shows right chevrons (the action expands all);
+/// expanded shows down chevrons (the action collapses all).
 fn paint_sidebar_tree_fold(
     buffer: &mut [u32],
     stride: usize,
@@ -2850,12 +2851,13 @@ fn paint_sidebar_tree_fold(
     let cx = slot.x as f32 + slot.w as f32 / 2.0;
     let cy = slot.center_y();
     if expand {
-        // Two stacked down-chevrons.
-        chevron_down(buffer, stride, cx, cy - s(3.0), size, w, ink);
-        chevron_down(buffer, stride, cx, cy + s(3.0), size, w, ink);
-    } else {
+        // Collapsed Spaces: two right-pointing chevrons, the action expands them.
         chevron_right(buffer, stride, slot.x as f32 + s(3.0), cy, size, w, ink);
         chevron_right(buffer, stride, slot.x as f32 + s(7.0), cy, size, w, ink);
+    } else {
+        // Expanded Spaces: two stacked down-pointing chevrons, the action collapses them.
+        chevron_down(buffer, stride, cx, cy - s(3.0), size, w, ink);
+        chevron_down(buffer, stride, cx, cy + s(3.0), size, w, ink);
     }
 }
 

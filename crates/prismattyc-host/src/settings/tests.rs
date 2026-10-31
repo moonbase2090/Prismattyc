@@ -510,6 +510,12 @@ fn enter_toggles_boolean_and_shift_enter_opens_its_editor() {
         toml::from_str(&std::fs::read_to_string(&fixture.panel.path).unwrap()).unwrap();
     assert_eq!(saved["async_paste"].as_bool(), Some(true));
 
+    fixture.press(NamedKey::Enter);
+    fixture.settle();
+    let saved: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&fixture.panel.path).unwrap()).unwrap();
+    assert_eq!(saved["async_paste"].as_bool(), Some(false));
+
     fixture.press_with_modifiers(NamedKey::Enter, ModifiersState::SHIFT);
     assert!(matches!(fixture.panel.focus, Focus::Editing(_)));
 }

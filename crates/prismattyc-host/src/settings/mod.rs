@@ -398,7 +398,7 @@ impl Panel {
                             if mods.shift_key() || !self.controls[index].kind.cycles_on_enter() {
                                 self.edit(index)
                             } else {
-                                self.step(index, true);
+                                self.cycle(index);
                             }
                         }
                     }
@@ -416,6 +416,21 @@ impl Panel {
             }
         }
         false
+    }
+
+    /// Enter on a discrete row: a boolean flips; other kinds step forward.
+    fn cycle(&mut self, index: usize) {
+        let control = &self.controls[index];
+        let forward = match &control.kind {
+            Kind::Bool => !self
+                .configured(control)
+                .as_ref()
+                .or(control.default.as_ref())
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(false),
+            _ => true,
+        };
+        self.step(index, forward);
     }
 
     fn step(&mut self, index: usize, right: bool) {

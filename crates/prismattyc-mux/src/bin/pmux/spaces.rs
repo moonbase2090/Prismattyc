@@ -1335,6 +1335,13 @@ pub(super) fn rename(paths: &Paths, args: Vec<String>) -> Result<()> {
             to: space.id,
         },
     )?;
+    let view = prismattyc_mux::attach_tabs::layout_path_from_socket(&paths.socket);
+    if let Some(mut file) = prismattyc_mux::attach_tabs::load(&view) {
+        if file.space.as_deref() == Some(old.as_str()) {
+            file.space = Some(new.clone());
+            prismattyc_mux::attach_tabs::save(&view, &file)?;
+        }
+    }
     println!("renamed {old} to {new}");
     Ok(())
 }

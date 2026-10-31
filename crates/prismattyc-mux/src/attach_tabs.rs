@@ -251,6 +251,17 @@ pub fn layout_path_from_socket(socket: &Path) -> PathBuf {
     }
 }
 
+/// Append one failed-save line to the pmux log beside the attach-tabs file,
+/// so a save failure is visible after the window is gone. Best effort: a
+/// log that cannot be written must not hide the save error it reports.
+pub fn log_save_failure(path: &Path, error: &dyn std::fmt::Display) {
+    use std::io::Write;
+    let log = path.with_extension("log");
+    if let Ok(mut file) = crate::private_fs::append(&log) {
+        let _ = writeln!(file, "attach tab layout save failed: {error}");
+    }
+}
+
 pub fn load(path: &Path) -> Option<AttachTabsFile> {
     let bytes = fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
@@ -847,6 +858,20 @@ mod tests {
             space_open_report(AttachTabsMode::Switch, None, "web", 0, 2, 1),
             "switched to web: opened 2 sessions in 1 tab"
         );
+    }
+
+    #[test]
+    fn save_failures_are_appended_to_the_log_beside_the_attach_file() {
+        let dir = std::env::temp_dir().join(format!("pmux-savefail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let attach = dir.join("pmux.attach-tabs.json");
+        log_save_failure(&attach, &"disk full");
+        let text = std::fs::read_to_string(dir.join("pmux.attach-tabs.log")).unwrap();
+        assert!(
+            text.contains("attach tab layout save failed: disk full"),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

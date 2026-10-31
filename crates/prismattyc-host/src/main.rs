@@ -3789,6 +3789,7 @@ impl App {
                     let Some(host) = host else {
                         if let Err(error) = completion.result {
                             eprintln!("prismattyc-host: could not save attach tab layout: {error}");
+                            prismattyc_mux::attach_tabs::log_save_failure(&path, &error);
                         }
                         continue;
                     };
@@ -3808,6 +3809,7 @@ impl App {
                                 eprintln!(
                                     "prismattyc-host: could not save attach tab layout: {error}"
                                 );
+                                prismattyc_mux::attach_tabs::log_save_failure(&path, &error);
                                 if host.attach_write_retry_used {
                                     host.attach_write_retry_used = false;
                                     host.force_attach_write = true;
@@ -3831,6 +3833,7 @@ impl App {
                         }
                     } else if let Err(error) = completion.result {
                         eprintln!("prismattyc-host: could not save attach tab layout: {error}");
+                        prismattyc_mux::attach_tabs::log_save_failure(&path, &error);
                     }
                 }
                 file_writer::CompletionKind::RenderStatus => {

@@ -75,6 +75,28 @@ opens a blank pane on a pmuxd that has the feed on; a `type` step runs
 `pmux-activity-monitor` there, and a `spawn` step can start
 `demo-feed.py --attach mac={socket}` to publish into that pmuxd.
 
+## Connector: pmux activity and pmux-mcp
+
+`pmux activity` and the `pmux_activity_*` tools in `pmux-mcp` read the same feed
+through `prismattyc_mux::activity_query`. See
+[the connector note](../../../../docs/activity-connector.md). Build and drive:
+
+```sh
+cargo build -p prismattyc-mux --bins --example activity-emit -p pmux-mcp --locked
+cargo test -p prismattyc-mux --lib activity_query --locked
+cargo test -p prismattyc-mux --bin pmux activity --locked
+cargo test -p pmux-mcp --locked
+python3 scripts/verify-activity-connector.py --bins target/debug --out /tmp/activity-connector-new
+```
+
+The driver starts its own feed-on and feed-off daemons on private sockets and
+publishes synthetic runtime events. It checks every `pmux activity` command, the
+cursor and reset rules, `tail` start and stop bounds, each JSON error code and
+exit status, and the three MCP tools over stdio. Require `status: PASS` and
+`scratch_removed: true` in `result.json`, and keep `tail.jsonl`. The activity
+monitor's JSON modes share the query module, so also run `verify-activity.py`
+above after changing it.
+
 ## Boundaries
 
 The native transport and driver support Unix and Windows. Require an actual

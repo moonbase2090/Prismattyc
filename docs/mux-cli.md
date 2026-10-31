@@ -74,6 +74,8 @@ pmux new work --no-attach  # create only; print the attach hint
 pmux doctor              # pane shell, child pid, lease, VIEWER vs NESTED attach
 pmux doctor work         # same, one session
 pmux render-status --json # live host render guards, frame age, and pane state
+pmux activity seats       # experimental activity feed as JSON; see docs/activity-connector.md
+pmux activity poll --cursor EPOCH:SEQ  # one page after a cursor, with next_cursor
 pmux kick work           # SIGTERM nested attach, else viewers; session stays
 pmux clients [work] [--json]  # attach clients: pid, viewer/nested, session, pane
 pmux detach --other [work]    # SIGTERM every attach but your own; sessions stay
@@ -1253,7 +1255,9 @@ pmux space template create review-team another-project --launch --no-attach
 `pmux-mcp` exposes `pmux_space_details`, `pmux_space_result`,
 `pmux_space_role`, `pmux_space_link`, `pmux_space_attention`, and
 `pmux_template_save`, `pmux_template_list`, `pmux_template_preview`,
-`pmux_template_create`. These tools use the same CLI operations and socket.
+`pmux_template_create`, and the read-only activity tools
+`pmux_activity_seats`, `pmux_activity_recent` and `pmux_activity_poll`. These
+tools use the same CLI operations and socket.
 Template creation through MCP prepares the team without switching a desktop
 view. Its `launch` parameter defaults to false.
 

@@ -151,6 +151,8 @@ font_features = ["calt", "liga"]
 # -- keys --
 # Enable additional standard macOS Command-key shortcuts; Cmd+Q and Cmd+N are already available. true|false.
 macos_shortcuts = false
+# Plain Ctrl+C copies a selection instead of sending the interrupt; off keeps Ctrl+C a reliable interrupt. true|false.
+smart_ctrl_c = false
 
 # -- layout --
 # Initial pane count; startup only. 1-8.

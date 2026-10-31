@@ -294,6 +294,7 @@ pub(super) fn catalog() -> Vec<Control> {
         row(Section::Appearance, "window_blur", Kind::Bool),
         row(Section::Appearance, "hover_blend", float(0.0, 0.3, 0.01)),
         row(Section::Input, "macos_shortcuts", Kind::Bool),
+        row(Section::Input, "smart_ctrl_c", Kind::Bool),
         row(Section::Accessibility, "a11y.os_tree", Kind::Bool),
         row(Section::Accessibility, "a11y.announce", Kind::Bool),
         row(Section::Spaces, "spaces.autosave", Kind::Bool),

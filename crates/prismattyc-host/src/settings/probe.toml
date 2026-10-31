@@ -71,6 +71,7 @@ chrome_opacity = 0.5
 window_blur = true
 hover_blend = 0.125
 macos_shortcuts = true
+smart_ctrl_c = true
 
 [a11y]
 os_tree = true

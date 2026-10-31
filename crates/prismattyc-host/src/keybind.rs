@@ -1575,6 +1575,24 @@ fn key_label(chord: &Chord) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Issue #395: with `macos_shortcuts = true`, Command+C and Command+V on a
+    /// macOS platform must resolve to copy and paste, not fall through to text.
+    #[test]
+    fn command_c_and_command_v_resolve_with_macos_shortcuts_enabled() {
+        let keymap = KeyMap::from_config_with_platform(None, true, true).unwrap();
+        let super_only = ModifiersState::SUPER;
+        let c = Key::Character("c".into());
+        let v = Key::Character("v".into());
+        assert_eq!(
+            keymap.action(&c, PhysicalKey::Code(KeyCode::KeyC), super_only),
+            Some(Action::Copy)
+        );
+        assert_eq!(
+            keymap.action(&v, PhysicalKey::Code(KeyCode::KeyV), super_only),
+            Some(Action::Paste)
+        );
+    }
+
     use super::*;
 
     fn mods(ctrl: bool, shift: bool, alt: bool, sup: bool) -> ModifiersState {

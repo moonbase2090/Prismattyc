@@ -89,6 +89,29 @@ struct SpaceName {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ActivityRecentArgs {
+    /// Seat (agent id) whose retained events to return.
+    seat: String,
+    /// Keep only the newest N events (1-256). Default: all retained.
+    #[serde(default)]
+    limit: Option<u16>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ActivityPollArgs {
+    /// `next_cursor` from the previous poll (EPOCH:SEQ). Omit to start at the
+    /// oldest retained event.
+    #[serde(default)]
+    cursor: Option<String>,
+    /// Return only this seat's events. The cursor still advances past others.
+    #[serde(default)]
+    seat: Option<String>,
+    /// Page size, 1-256. Default 256.
+    #[serde(default)]
+    limit: Option<u16>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SpaceRoleArgs {
     name: String,
     session: String,
@@ -127,18 +150,22 @@ struct TemplateCreateArgs {
     launch: bool,
 }
 
+/// The `pmux` next to this binary, else the one on PATH.
+fn pmux_program() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| {
+            p.parent()
+                .map(|p| p.join(prismattyc_mux::platform::executable_name("pmux")))
+        })
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from("pmux"))
+}
+
 #[tool_router]
 impl PmuxMcp {
     async fn space_command(&self, args: Vec<String>) -> Result<CallToolResult, McpError> {
-        let pmux = std::env::current_exe()
-            .ok()
-            .and_then(|p| {
-                p.parent()
-                    .map(|p| p.join(prismattyc_mux::platform::executable_name("pmux")))
-            })
-            .filter(|p| p.is_file())
-            .unwrap_or_else(|| PathBuf::from("pmux"));
-        let mut command = tokio::process::Command::new(pmux);
+        let mut command = tokio::process::Command::new(pmux_program());
         command
             .arg("--socket")
             .arg(&self.socket)
@@ -151,6 +178,77 @@ impl PmuxMcp {
             Ok(Err(error)) => Ok(CallToolResult::error(vec![ContentBlock::text(error.to_string())])),
             Err(_) => Ok(CallToolResult::error(vec![ContentBlock::text("Space operation timed out. Inspect its sessions before retrying; work may have started.")])),
         }
+    }
+
+    /// Run `pmux activity` against this server's socket. `pmux activity`
+    /// prints JSON on stdout for results and errors alike; a nonzero exit
+    /// marks the result as an error with that JSON as its text.
+    async fn activity_command(&self, args: Vec<String>) -> Result<CallToolResult, McpError> {
+        let mut command = tokio::process::Command::new(pmux_program());
+        command
+            .arg("--socket")
+            .arg(&self.socket)
+            .arg("activity")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        match tokio::time::timeout(std::time::Duration::from_secs(10), command.output()).await {
+            Ok(Ok(output)) => {
+                let text = vec![ContentBlock::text(String::from_utf8_lossy(&output.stdout))];
+                Ok(if output.status.success() {
+                    CallToolResult::success(text)
+                } else {
+                    CallToolResult::error(text)
+                })
+            }
+            Ok(Err(error)) => Ok(CallToolResult::error(vec![ContentBlock::text(
+                error.to_string(),
+            )])),
+            Err(_) => Ok(CallToolResult::error(vec![ContentBlock::text(
+                "Activity query timed out.",
+            )])),
+        }
+    }
+
+    #[tool(
+        description = "List seats seen in this host's retained activity feed with each seat's latest event kind and time. Seeing a seat does not mean its process is alive. Read-only; needs pmuxd started with --experimental-activity."
+    )]
+    async fn pmux_activity_seats(&self) -> Result<CallToolResult, McpError> {
+        self.activity_command(vec!["seats".into()]).await
+    }
+
+    #[tool(
+        description = "Return one seat's retained activity events (metadata only: kind, source, time), oldest first. Read-only."
+    )]
+    async fn pmux_activity_recent(
+        &self,
+        Parameters(args): Parameters<ActivityRecentArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut argv = vec!["recent".into(), args.seat];
+        if let Some(limit) = args.limit {
+            argv.extend(["--limit".into(), limit.to_string()]);
+        }
+        self.activity_command(argv).await
+    }
+
+    #[tool(
+        description = "Read one bounded page of activity after a cursor and return it with next_cursor. Call again with next_cursor to follow the feed. A non-null page.reset means continuity was lost: discard cached seat state. Read-only."
+    )]
+    async fn pmux_activity_poll(
+        &self,
+        Parameters(args): Parameters<ActivityPollArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut argv = vec!["poll".into()];
+        if let Some(cursor) = args.cursor {
+            argv.extend(["--cursor".into(), cursor]);
+        }
+        if let Some(seat) = args.seat {
+            argv.extend(["--seat".into(), seat]);
+        }
+        if let Some(limit) = args.limit {
+            argv.extend(["--limit".into(), limit.to_string()]);
+        }
+        self.activity_command(argv).await
     }
 
     #[tool(
@@ -597,13 +695,16 @@ mod tests {
             "pmux_template_list",
             "pmux_template_preview",
             "pmux_template_create",
+            "pmux_activity_seats",
+            "pmux_activity_recent",
+            "pmux_activity_poll",
         ] {
             assert!(
                 names.iter().any(|n| n == want),
                 "missing {want} in {names:?}"
             );
         }
-        assert_eq!(names.len(), 18, "unexpected tool count: {names:?}");
+        assert_eq!(names.len(), 21, "unexpected tool count: {names:?}");
     }
 
     #[test]

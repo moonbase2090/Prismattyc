@@ -65,6 +65,34 @@ fails if the change is reverted. `PASTE_E2E_TEXT_GAP_MS` and
 `PASTE_E2E_IMAGE_GAP_MS` override the bounds. Results are stored in
 `build/paste-e2e/`.
 
+### Command chords and Ctrl+C (#395)
+
+On Linux, check that Super+C and Super+V type nothing into a shell pane, Vim
+or Neovim, and that Ctrl+C still interrupts a running command:
+
+```bash
+tests/native/cmd-letter-linux.sh --bins target/debug --backend x11 --out build/cmd-letter-x11
+tests/native/cmd-letter-linux.sh --bins target/debug --backend wayland --out build/cmd-letter-wayland
+```
+
+X11 needs `DISPLAY` with a window manager and `xdotool`. Wayland needs `wtype`
+and uses `WAYLAND_DISPLAY`, or starts headless sway when it is unset. Weston
+has no virtual keyboard, so `wtype` cannot type there. Before the fix, the
+shell, Vim and Neovim all receive `XcvY`. After it, they receive `XY`.
+
+On Windows, run this from an interactive desktop session, not over SSH:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tests\native\cmd-letter-windows.ps1 -Bins target\debug -Out build\cmd-letter-windows
+```
+
+It checks that plain typing reaches the pane, and that Ctrl+C interrupts a
+running command in a shell pane, with a multi-cell selection, and under an
+agent-named foreground process (a copy of `ping.exe` named `claude.exe`).
+Windows reserves most Win+letter chords, so they are not checked. Both
+scripts exit 0 only when every check passes and write `result.txt` to the
+output directory.
+
 ### Pixel-alpha performance acceptance
 
 Run the conversion benchmark on a native host:

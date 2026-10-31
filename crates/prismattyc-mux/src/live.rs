@@ -5,6 +5,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
+#[cfg(windows)]
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use prismattyc_emulator::{
@@ -31,6 +33,10 @@ const FROM_PTY_CAP: usize = 64;
 const TO_CHILD_CAP: usize = 32;
 const MAX_DRAIN_PER_PANE: usize = 16;
 const MAX_SCROLLBACK: usize = 10_000;
+#[cfg(windows)]
+const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+#[cfg(windows)]
+const EXIT_OUTPUT_QUIET: Duration = Duration::from_millis(50);
 
 struct PtyChunk {
     bytes: Vec<u8>,
@@ -138,6 +144,19 @@ pub struct CellExitNotice {
     pub signal: Option<String>,
 }
 
+enum ChildExitState {
+    Running {
+        #[cfg(windows)]
+        next_poll: Instant,
+    },
+    #[cfg(windows)]
+    Draining {
+        status: portable_pty::ExitStatus,
+        quiet_since: Option<Instant>,
+    },
+    Exited,
+}
+
 struct LivePane {
     emulator: Emulator,
     session: PtySession,
@@ -152,13 +171,11 @@ struct LivePane {
     cell_w: u32,
     cell_h: u32,
     revision: u64,
-    child_alive: bool,
+    exit: ChildExitState,
     /// `HIVE_CELL` from `SpawnSpec.env` at spawn, if present. Absent ⇒ not a Hive seat.
     hive_cell: Option<String>,
     /// PID captured at spawn (and kept for the exit notice). Diagnostic only.
     child_pid: Option<u32>,
-    /// True once a [`CellExitNotice`] has been produced for this pane's death edge.
-    exit_notified: bool,
     controller_id: Option<u64>,
     /// Ordered PTY/side-channel log. Seq is a real index, not `revision`.
     log: PaneLog,
@@ -292,10 +309,12 @@ impl LivePane {
             cell_w,
             cell_h,
             revision: 0,
-            child_alive: true,
+            exit: ChildExitState::Running {
+                #[cfg(windows)]
+                next_poll: Instant::now() + EXIT_POLL_INTERVAL,
+            },
             hive_cell,
             child_pid,
-            exit_notified: false,
             controller_id: None,
             log: PaneLog::new(DEFAULT_PANE_LOG_BYTES),
             logged_cwd: None,
@@ -309,32 +328,36 @@ impl LivePane {
         self.watch.note();
     }
 
+    fn child_alive(&self) -> bool {
+        !matches!(self.exit, ChildExitState::Exited)
+    }
+
     /// Flip `child_alive` true→false and, if this pane is a Hive seat, produce at most
     /// one [`CellExitNotice`]. Subsequent calls are no-ops (idempotent on the edge).
     fn observe_death(&mut self, pane_id: u64) -> Option<CellExitNotice> {
-        if !self.child_alive {
+        if !self.child_alive() {
             return None;
         }
-        self.child_alive = false;
+        let status = match std::mem::replace(&mut self.exit, ChildExitState::Exited) {
+            ChildExitState::Running { .. } => self.session.try_wait().ok().flatten(),
+            #[cfg(windows)]
+            ChildExitState::Draining { status, .. } => Some(status),
+            ChildExitState::Exited => unreachable!("exited pane returned as alive"),
+        };
         self.emulator.reset_input_reporting();
         self.record(PaneEvent::Output {
             bytes: prismattyc_emulator::RESET_INPUT_REPORTING.to_vec(),
         });
         self.revision = self.revision.saturating_add(1);
         // Non-blocking: never wait on the child here — drain must not stall the mux loop.
-        let (exit_code, signal) = match self.session.try_wait() {
-            Ok(Some(status)) => (Some(status.exit_code()), status.signal().map(str::to_owned)),
-            _ => (None, None),
-        };
+        let (exit_code, signal) = status.as_ref().map_or((None, None), |status| {
+            (Some(status.exit_code()), status.signal().map(str::to_owned))
+        });
         self.record(PaneEvent::Exited {
             code: exit_code,
             signal: signal.clone(),
         });
-        if self.exit_notified {
-            return None;
-        }
         let cell = self.hive_cell.clone()?;
-        self.exit_notified = true;
         Some(CellExitNotice {
             pane_id,
             cell,
@@ -512,7 +535,7 @@ impl LivePane {
     /// Drain PTY output. Returns a cell-exit notice if this tick observed the
     /// liveness edge for a Hive-seated pane, plus bytes and attention drained.
     fn drain(&mut self, pane_id: u64) -> (Option<CellExitNotice>, usize, Option<String>) {
-        if !self.child_alive {
+        if !self.child_alive() {
             return (None, 0, None);
         }
         let mut died = false;
@@ -537,7 +560,45 @@ impl LivePane {
                 Err(mpsc::TryRecvError::Empty) => break,
             }
         }
-        let notice = if died {
+        #[cfg(windows)]
+        let exit_ready = {
+            // ConPTY can leave the output pipe open after cmd.exe or
+            // PowerShell exits, so also poll the child handle after consuming
+            // all output currently available.
+            let now = Instant::now();
+            if !died {
+                if let ChildExitState::Running { next_poll } = &mut self.exit {
+                    if now >= *next_poll {
+                        *next_poll = now + EXIT_POLL_INTERVAL;
+                        if let Some(status) = self.session.try_wait().ok().flatten() {
+                            self.exit = ChildExitState::Draining {
+                                status,
+                                quiet_since: None,
+                            };
+                        }
+                    }
+                }
+            }
+            if died {
+                true
+            } else {
+                match &mut self.exit {
+                    ChildExitState::Draining { quiet_since, .. } if nbytes > 0 => {
+                        *quiet_since = None;
+                        false
+                    }
+                    ChildExitState::Draining { quiet_since, .. } => {
+                        let quiet_since = quiet_since.get_or_insert(now);
+                        now.duration_since(*quiet_since) >= EXIT_OUTPUT_QUIET
+                    }
+                    ChildExitState::Running { .. } => false,
+                    ChildExitState::Exited => unreachable!("exited pane reached drain"),
+                }
+            }
+        };
+        #[cfg(not(windows))]
+        let exit_ready = died;
+        let notice = if exit_ready {
             self.observe_death(pane_id)
         } else {
             None
@@ -567,7 +628,7 @@ impl LivePane {
             cursor_col: cursor.column as u32,
             cursor_visible: self.emulator.cursor_visible(),
             alt_active: screen.alt_active(),
-            child_alive: self.child_alive,
+            child_alive: self.child_alive(),
             child_pid: self.session.process_id(),
             lines,
             cursor_shape: Some(CursorShapeWire::from_emulator(self.emulator.cursor_shape())),
@@ -655,7 +716,7 @@ impl LivePane {
                 cursor_col: 0,
                 cursor_visible: false,
                 alt_active: screen.alt_active(),
-                child_alive: self.child_alive,
+                child_alive: self.child_alive(),
                 child_pid: self.session.process_id(),
                 lines,
                 cursor_shape: Some(CursorShapeWire::from_emulator(self.emulator.cursor_shape())),
@@ -824,7 +885,7 @@ impl LiveRuntime {
     pub(crate) fn child_pid(&self, pane_id: u64) -> Option<u32> {
         self.panes
             .get(&pane_id)
-            .filter(|pane| pane.child_alive)
+            .filter(|pane| pane.child_alive())
             .and_then(|pane| pane.child_pid)
     }
 
@@ -1121,19 +1182,19 @@ impl LiveRuntime {
         let mut activity = Vec::new();
         for (&pane_id, runtime) in self.panes.iter_mut() {
             let before_revision = runtime.revision;
-            let before_alive = runtime.child_alive;
+            let before_alive = runtime.child_alive();
             let (notice, nbytes, attention) = runtime.drain(pane_id);
             if let Some(notice) = notice {
                 notices.push(notice);
             }
             if runtime.revision != before_revision
-                || runtime.child_alive != before_alive
+                || runtime.child_alive() != before_alive
                 || attention.is_some()
             {
                 activity.push(OutputActivityTick {
                     pane_id,
                     revision: runtime.revision,
-                    child_alive: runtime.child_alive,
+                    child_alive: runtime.child_alive(),
                     attention,
                     nbytes,
                 });
@@ -1413,6 +1474,27 @@ mod tests {
         }
     }
 
+    fn exiting_spawn(env: BTreeMap<String, String>) -> SpawnSpec {
+        #[cfg(unix)]
+        {
+            SpawnSpec {
+                program: "/bin/sh".into(),
+                argv: vec!["-c".into(), "printf EXIT_MARKER".into()],
+                cwd: Some(PathBuf::from("/tmp")),
+                env,
+            }
+        }
+        #[cfg(windows)]
+        {
+            SpawnSpec {
+                program: windows_system("cmd.exe"),
+                argv: vec!["/d".into(), "/c".into(), "echo EXIT_MARKER".into()],
+                cwd: Some(std::env::temp_dir()),
+                env,
+            }
+        }
+    }
+
     fn spawn_test_pane(pane_id: u64, spawn: &SpawnSpec, mux_socket: Option<&Path>) -> LivePane {
         LivePane::spawn(
             pane_id,
@@ -1528,8 +1610,7 @@ mod tests {
         let pane = spawn_test_pane(7, &sleep_spawn(env), None);
         assert_eq!(pane.hive_cell.as_deref(), Some("cell:1@1"));
         assert!(pane.child_pid.is_some(), "spawn should expose a child pid");
-        assert!(pane.child_alive);
-        assert!(!pane.exit_notified);
+        assert!(pane.child_alive());
     }
 
     #[test]
@@ -1544,7 +1625,7 @@ mod tests {
             notice.is_none(),
             "non-seated pane must not emit cell_exited"
         );
-        assert!(!pane.child_alive);
+        assert!(!pane.child_alive());
     }
 
     #[test]
@@ -1560,20 +1641,11 @@ mod tests {
         assert!(pane.observe_death(9).is_none());
     }
 
-    // ConPTY keeps the output pipe open after the client exits, so `drain`
-    // does not see the death edge. This notice is covered again when Windows
-    // exit polling lands.
-    #[cfg(unix)]
     #[test]
     fn exiting_child_preserves_output_and_records_one_exit_when_seated() {
         let mut env = BTreeMap::new();
         env.insert(HIVE_CELL_ENV.into(), "cell:1@1".into());
-        let spawn = SpawnSpec {
-            program: "/bin/sh".into(),
-            argv: vec!["-c".into(), "printf EXIT_MARKER".into()],
-            cwd: Some(PathBuf::from("/tmp")),
-            env,
-        };
+        let spawn = exiting_spawn(env);
         let mut runtime = LiveRuntime::spawn(
             &[PaneGeometry {
                 pane_id: 1,
@@ -1601,19 +1673,23 @@ mod tests {
             "expected one cell exit notice, got {notices:?}"
         );
         assert_eq!(notices[0].cell, "cell:1@1");
+        assert_eq!(notices[0].exit_code, Some(0));
+        assert_eq!(notices[0].signal, None);
 
         let pane = runtime
             .panes
             .get(&1)
             .expect("exited pane remains available");
-        assert!(!pane.child_alive);
+        assert!(!pane.child_alive());
         assert!(pane.content(1).lines[0].starts_with("EXIT_MARKER"));
         let events = runtime.pane_log(1).expect("pane log").events();
         let output_index = events
             .iter()
-            .position(
-                |event| matches!(event, PaneEvent::Output { bytes } if bytes == b"EXIT_MARKER"),
-            )
+            .position(|event| {
+                matches!(event, PaneEvent::Output { bytes } if bytes
+                    .windows(b"EXIT_MARKER".len())
+                    .any(|window| window == b"EXIT_MARKER"))
+            })
             .expect("child output is recorded");
         let exit_indices = events
             .iter()
@@ -1938,11 +2014,11 @@ mod tests {
         };
         let mut pane = spawn_test_pane(1, &spawn, None);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while pane.child_alive && std::time::Instant::now() < deadline {
+        while pane.child_alive() && std::time::Instant::now() < deadline {
             pane.drain(1);
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        assert!(!pane.child_alive, "child did not exit");
+        assert!(!pane.child_alive(), "child did not exit");
         assert!(pane.content(1).lines[0].starts_with("EXIT_MARKER"));
         assert_no_input_reporting(&pane.emulator);
         assert_no_input_reporting(&replay_log(&pane));

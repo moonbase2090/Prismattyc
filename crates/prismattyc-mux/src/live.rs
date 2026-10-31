@@ -7,6 +7,11 @@ use std::sync::mpsc;
 use std::thread;
 #[cfg(windows)]
 use std::time::{Duration, Instant};
+#[cfg(windows)]
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use prismattyc_emulator::{
@@ -49,6 +54,54 @@ impl PtyChunk {
             bytes: Vec::new(),
             _reservation: None,
         }
+    }
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct ReaderPublication {
+    // A blocking ConPTY read cannot count as pending because the pipe may stay
+    // open forever after child exit. Track the completed-read-to-send window.
+    pending: AtomicBool,
+    #[cfg(test)]
+    delay_ms: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(windows)]
+impl ReaderPublication {
+    fn begin(&self) -> ReaderPublicationGuard<'_> {
+        self.pending.store(true, Ordering::Release);
+        let guard = ReaderPublicationGuard(self);
+        #[cfg(test)]
+        {
+            let delay_ms = self.delay_ms.load(Ordering::Acquire);
+            if delay_ms > 0 {
+                thread::sleep(Duration::from_millis(delay_ms));
+            }
+        }
+        guard
+    }
+
+    fn is_pending(&self) -> bool {
+        self.pending.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn set_delay(&self, delay: Duration) {
+        self.delay_ms.store(
+            u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+            Ordering::Release,
+        );
+    }
+}
+
+#[cfg(windows)]
+struct ReaderPublicationGuard<'a>(&'a ReaderPublication);
+
+#[cfg(windows)]
+impl Drop for ReaderPublicationGuard<'_> {
+    fn drop(&mut self) {
+        self.0.pending.store(false, Ordering::Release);
     }
 }
 
@@ -161,6 +214,8 @@ struct LivePane {
     emulator: Emulator,
     session: PtySession,
     from_pty_rx: mpsc::Receiver<std::io::Result<PtyChunk>>,
+    #[cfg(windows)]
+    reader_publication: Arc<ReaderPublication>,
     to_child_tx: mpsc::SyncSender<Vec<u8>>,
     rich: Option<RichSession>,
     cols: usize,
@@ -247,6 +302,10 @@ impl LivePane {
             mpsc::sync_channel::<std::io::Result<PtyChunk>>(FROM_PTY_CAP);
         let output_budget = ByteBudget::new(PTY_OUTPUT_BUDGET_BYTES);
         let reader_budget = output_budget.clone();
+        #[cfg(windows)]
+        let reader_publication = Arc::new(ReaderPublication::default());
+        #[cfg(windows)]
+        let reader_publication_thread = Arc::clone(&reader_publication);
         thread::Builder::new()
             .name(format!("prism-server-pane-{pane_id}-read"))
             .spawn(move || {
@@ -258,6 +317,8 @@ impl LivePane {
                             break;
                         }
                         Ok(count) => {
+                            #[cfg(windows)]
+                            let _publication = reader_publication_thread.begin();
                             let Some((bytes, reservation)) = reader_budget
                                 .admit(PANE_FRAME_OVERHEAD.saturating_add(count), || {
                                     buffer[..count].to_vec()
@@ -301,6 +362,8 @@ impl LivePane {
             emulator,
             session,
             from_pty_rx,
+            #[cfg(windows)]
+            reader_publication,
             to_child_tx,
             rich: experimental_rich.then(RichSession::default),
             cols,
@@ -583,7 +646,9 @@ impl LivePane {
                 true
             } else {
                 match &mut self.exit {
-                    ChildExitState::Draining { quiet_since, .. } if nbytes > 0 => {
+                    ChildExitState::Draining { quiet_since, .. }
+                        if nbytes > 0 || self.reader_publication.is_pending() =>
+                    {
                         *quiet_since = None;
                         false
                     }
@@ -905,6 +970,15 @@ impl LiveRuntime {
         tx.try_send(vec![b'x']).expect("seed backpressure slot");
         runtime.to_child_tx = tx;
         std::mem::forget(rx);
+    }
+
+    #[cfg(all(test, windows))]
+    fn set_reader_publish_delay_for_test(&self, pane_id: u64, delay: Duration) {
+        self.panes
+            .get(&pane_id)
+            .expect("pane for reader publication delay")
+            .reader_publication
+            .set_delay(delay);
     }
 
     pub(crate) fn write(&self, pane_id: u64, data: Vec<u8>) -> Result<(), LiveWriteError> {
@@ -1495,6 +1569,21 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    fn input_gated_exiting_spawn(env: BTreeMap<String, String>) -> SpawnSpec {
+        SpawnSpec {
+            program: windows_system("cmd.exe"),
+            argv: vec![
+                "/d".into(),
+                "/q".into(),
+                "/c".into(),
+                "set /p READY=& echo EXIT_MARKER".into(),
+            ],
+            cwd: Some(std::env::temp_dir()),
+            env,
+        }
+    }
+
     fn spawn_test_pane(pane_id: u64, spawn: &SpawnSpec, mux_socket: Option<&Path>) -> LivePane {
         LivePane::spawn(
             pane_id,
@@ -1717,6 +1806,71 @@ mod tests {
                 .count(),
             1,
             "a later drain must not append another exit event"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exiting_child_waits_for_inflight_reader_publication() {
+        let mut env = BTreeMap::new();
+        env.insert(HIVE_CELL_ENV.into(), "cell:1@1".into());
+        let mut runtime = LiveRuntime::spawn(
+            &[PaneGeometry {
+                pane_id: 1,
+                col: 0,
+                row: 0,
+                cols: 80,
+                rows: 24,
+            }],
+            &std::collections::HashMap::from([(1u64, input_gated_exiting_spawn(env))]),
+            None,
+        )
+        .expect("spawn");
+        runtime.set_reader_publish_delay_for_test(1, Duration::from_millis(150));
+        runtime
+            .write(1, b"ready\r".to_vec())
+            .expect("release child");
+
+        let mut notices = Vec::new();
+        for _ in 0..400 {
+            let (tick, _) = runtime.drain();
+            notices.extend(tick);
+            if !notices.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        assert_eq!(notices.len(), 1, "exit notices: {notices:?}");
+        assert_eq!(notices[0].exit_code, Some(0));
+        let pane = runtime
+            .panes
+            .get(&1)
+            .expect("exited pane remains available");
+        assert!(
+            pane.content(1)
+                .lines
+                .iter()
+                .any(|line| line.contains("EXIT_MARKER")),
+            "delayed child output was lost: {:?}",
+            pane.content(1).lines
+        );
+        let events = runtime.pane_log(1).expect("pane log").events();
+        let output_index = events
+            .iter()
+            .position(|event| {
+                matches!(event, PaneEvent::Output { bytes } if bytes
+                    .windows(b"EXIT_MARKER".len())
+                    .any(|window| window == b"EXIT_MARKER"))
+            })
+            .expect("delayed child output is recorded");
+        let exit_index = events
+            .iter()
+            .position(|event| matches!(event, PaneEvent::Exited { .. }))
+            .expect("exit event is recorded");
+        assert!(
+            output_index < exit_index,
+            "delayed output must precede exit: {events:?}"
         );
     }
 

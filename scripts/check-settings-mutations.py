@@ -46,7 +46,7 @@ def main():
         ('missing-choice', host + 'settings/controls.rs',
          r'(Kind::Choice\(values\))',
          'Kind::Choice(values.into_iter().filter(|value| value != "light-cycle").collect())',
-         'settings::tests::plain_arrows_reach_every_finite_choice'),
+         'settings::tests::enter_cycles_every_finite_choice_and_persists_immediately'),
         ('new-unmapped-field', host + 'config.rs',
          r'(pub settings_panel: Option<bool>,)',
          r'\1\n    pub coverage_probe: Option<bool>,',

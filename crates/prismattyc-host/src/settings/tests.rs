@@ -23,9 +23,10 @@ impl Fixture {
         Self { dir, panel }
     }
     fn press(&mut self, key: NamedKey) {
-        assert!(!self
-            .panel
-            .key(&Key::Named(key), ModifiersState::empty(), false));
+        self.press_with_modifiers(key, ModifiersState::empty());
+    }
+    fn press_with_modifiers(&mut self, key: NamedKey, modifiers: ModifiersState) {
+        assert!(!self.panel.key(&Key::Named(key), modifiers, false));
     }
     fn settle(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -95,7 +96,12 @@ impl Fixture {
                 for _ in current..row {
                     self.press(NamedKey::ArrowDown);
                 }
-                self.press(NamedKey::Enter);
+                let control = &self.panel.controls[self.panel.indices()[row]];
+                if control.kind.cycles_on_enter() {
+                    self.press_with_modifiers(NamedKey::Enter, ModifiersState::SHIFT);
+                } else {
+                    self.press(NamedKey::Enter);
+                }
                 assert!(matches!(self.panel.focus, Focus::Editing(_)));
                 return;
             }
@@ -159,7 +165,12 @@ fn schema_matches_controls_reached_through_real_rows_and_editors() {
             let root_rows = fixture.panel.rows().1;
             assert_eq!(fixture.panel.selected(), row + 1);
             assert!(!root_rows[row + 1].name.is_empty());
-            fixture.press(NamedKey::Enter);
+            let control = &fixture.panel.controls[fixture.panel.indices()[row]];
+            if control.kind.cycles_on_enter() {
+                fixture.press_with_modifiers(NamedKey::Enter, ModifiersState::SHIFT);
+            } else {
+                fixture.press(NamedKey::Enter);
+            }
             let needs_entry = matches!(&fixture.panel.focus,Focus::Editing(Editor{draft:Draft::Binding(values),..})if values.is_empty());
             if needs_entry {
                 fixture.editor_row(|command| matches!(command, Command::Add));
@@ -436,7 +447,7 @@ fn every_binding_captures_saves_disables_and_resets() {
 }
 
 #[test]
-fn plain_arrows_reach_every_finite_choice() {
+fn enter_cycles_every_finite_choice_and_persists_immediately() {
     let cases: &[(&str, &[&str])] = &[
         ("tab_strip", &["auto", "always", "multi"]),
         ("link_click", &["plain", "modifier"]),
@@ -460,7 +471,7 @@ fn plain_arrows_reach_every_finite_choice() {
         fixture.press(NamedKey::Escape);
         let mut actual = BTreeSet::new();
         for _ in 0..expected.len() {
-            fixture.press(NamedKey::ArrowRight);
+            fixture.press(NamedKey::Enter);
             fixture.settle();
             let loaded = serde_json::to_value(config::load(&fixture.panel.path).unwrap()).unwrap();
             let path: Vec<_> = key.split('.').map(str::to_owned).collect();
@@ -485,6 +496,51 @@ fn plain_arrows_reach_every_finite_choice() {
         .map(|control| control.key())
         .collect();
     assert_eq!(covered, controls);
+}
+
+#[test]
+fn enter_toggles_boolean_and_shift_enter_opens_its_editor() {
+    let mut fixture = Fixture::new("async_paste = false\n");
+    fixture.open_key("async_paste");
+    fixture.press(NamedKey::Escape);
+    fixture.press(NamedKey::Enter);
+    fixture.settle();
+
+    let saved: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&fixture.panel.path).unwrap()).unwrap();
+    assert_eq!(saved["async_paste"].as_bool(), Some(true));
+
+    fixture.press(NamedKey::Enter);
+    fixture.settle();
+    let saved: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&fixture.panel.path).unwrap()).unwrap();
+    assert_eq!(saved["async_paste"].as_bool(), Some(false));
+
+    fixture.press_with_modifiers(NamedKey::Enter, ModifiersState::SHIFT);
+    assert!(matches!(fixture.panel.focus, Focus::Editing(_)));
+}
+
+#[test]
+fn enter_cycles_border_color_and_arrows_still_reverse_choices() {
+    let mut fixture = Fixture::new("focus_border = \"blue\"\nspace_startup = \"ask\"\n");
+    fixture.open_key("focus_border");
+    fixture.press(NamedKey::Escape);
+    fixture.press(NamedKey::Enter);
+    fixture.settle();
+
+    let saved: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&fixture.panel.path).unwrap()).unwrap();
+    assert_eq!(saved["focus_border"].as_str(), Some("indigo"));
+
+    fixture.open_key("space_startup");
+    fixture.press(NamedKey::Escape);
+    fixture.press(NamedKey::ArrowRight);
+    fixture.settle();
+    fixture.press(NamedKey::ArrowLeft);
+    fixture.settle();
+    let saved: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&fixture.panel.path).unwrap()).unwrap();
+    assert_eq!(saved["space_startup"].as_str(), Some("ask"));
 }
 
 #[test]

@@ -102,10 +102,12 @@ native input for each of these steps under both classic and Graphite chrome:
 
 1. Begin without `settings_panel`, open the existing page, enable the preview,
    and capture the complete editor.
-2. Use plain Left/Right on the section row, Down into rows, Up back to the
-   section row, and Left/Right to change a choice. Enter a text field and verify
-   arrows move its caret. Bind these keys to conflicting terminal actions in
-   the fixture and verify the modal consumes them without PTY input.
+2. Use plain Left/Right on the section row, Down into rows, and Up back to the
+   section row. On a boolean or finite-choice setting, verify Enter cycles
+   forward, Left/Right cycle in both directions, and Shift+Enter opens the
+   detailed editor. On a numeric or text setting, verify Enter opens the editor
+   and arrows move the text caret. Bind these keys to conflicting terminal
+   actions in the fixture and verify the modal consumes them without PTY input.
 3. Enter `font_px = 18.5`, save, and inspect both the durable file and a later
    successful frame. Reset and verify the key disappears. Exercise compound
    colors, ordered lists, bindings, and destination changes through visible

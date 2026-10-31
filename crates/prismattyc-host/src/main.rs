@@ -17755,14 +17755,19 @@ fn handle_mux_command(
     }
     let plan = mux_command_plan(&command);
     if let MuxCommandPlan::FocusBorder(forward) = plan {
-        host.focus_border = if forward {
-            cycle_focus_border(host.focus_border)
-        } else {
-            cycle_focus_border_back(host.focus_border)
-        };
-        let name = focus_border_name(host.focus_border);
-        host.window
-            .set_title(&format!("Prismattyc — focus border: {name}"));
+        match persist_focus_border_cycle(&config::config_path(), host.focus_border, forward) {
+            Ok(next) => {
+                host.focus_border = next;
+                let name = focus_border_name(host.focus_border);
+                host.window
+                    .set_title(&format!("Prismattyc — focus border: {name}"));
+            }
+            Err(error) => {
+                let message = format!("focus border save failed: {error:#}");
+                eprintln!("prismattyc-host: {message}");
+                host.config_error = Some(message);
+            }
+        }
         host.dirty = true;
         return false;
     }
@@ -17862,6 +17867,20 @@ fn handle_mux_command(
             false
         }
     }
+}
+
+fn persist_focus_border_cycle(path: &Path, current: usize, forward: bool) -> Result<usize> {
+    let next = if forward {
+        cycle_focus_border(current)
+    } else {
+        cycle_focus_border_back(current)
+    };
+    config::save_preference(
+        path,
+        "focus_border",
+        toml_edit::value(focus_border_name(next)),
+    )?;
+    Ok(next)
 }
 
 fn selection_claims_ctrl_c(selection: &Selection) -> bool {
@@ -27346,6 +27365,46 @@ session mail (id 15)
             ..Default::default()
         });
         assert_eq!(bad.focus_border, DEFAULT_FOCUS_BORDER_INDEX);
+    }
+
+    #[test]
+    fn focus_border_cycle_persists_for_next_launch() {
+        let dir = std::env::temp_dir().join(format!(
+            "prismattyc-focus-border-cycle-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "# keep this comment\nfocus_border = \"blue\"\n").unwrap();
+
+        let next = persist_focus_border_cycle(
+            &path,
+            parse_focus_border("blue").expect("blue focus border"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(focus_border_name(next), "indigo");
+
+        let saved = config::load(&path).expect("saved config loads");
+        assert_eq!(saved.focus_border.as_deref(), Some("indigo"));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("# keep this comment"),
+            "saving the focus color preserves unrelated config text"
+        );
+
+        let mut relaunched =
+            Cli::parse(["--", "/bin/sh"].into_iter().map(str::to_owned)).expect("parse");
+        pinned_env_guard(&mut relaunched);
+        relaunched.apply_config(&saved);
+        assert_eq!(focus_border_name(relaunched.focus_border), "indigo");
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -2,10 +2,23 @@
 
 ## [Unreleased]
 
+## [0.3.53] - 2026-10-31
+
+### Changed
+
+- The sidebar fold control sits beside the Spaces title, and tree rows show a right chevron when collapsed and a down chevron when expanded.
+- Discrete settings cycle through their values with Enter.
+- One pmuxd snapshot connection is kept on by default.
+
 ### Fixed
 
 - The Spaces title remains visible beside the expand/collapse-all control when the sidebar is docked on either side.
 - Palette panels no longer count the horizontal row inset twice when sizing to their content.
+- Command+letter shortcuts no longer reach the pane as typed text.
+- Focus color changes persist across restarts.
+- The attached view's Space name follows a rename.
+- Space panel result text stays visible after a resize.
+- Spawned child processes receive only their own file descriptors (vendored portable-pty).
 
 ## [0.3.52] - 2026-10-28
 

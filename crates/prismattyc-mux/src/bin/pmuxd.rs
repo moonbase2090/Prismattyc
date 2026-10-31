@@ -33,6 +33,7 @@ struct Cli {
     cols: u32,
     rows: u32,
     experimental_rich: bool,
+    experimental_activity: bool,
     restore_workspace: bool,
     program: String,
     argv: Vec<String>,
@@ -51,6 +52,7 @@ impl Cli {
                 .as_str(),
             "1" | "true" | "on" | "yes"
         );
+        let mut experimental_activity = false;
         let mut program = None;
         let mut restore_workspace = false;
         let mut argv = Vec::new();
@@ -85,6 +87,7 @@ impl Cli {
                 "--experimental-rich" if program.is_none() => {
                     experimental_rich = true;
                 }
+                "--experimental-activity" if program.is_none() => experimental_activity = true,
                 "--restore-workspace" if program.is_none() => restore_workspace = true,
                 _ if program.is_none() => program = Some(arg),
                 _ => argv.push(arg),
@@ -99,6 +102,7 @@ impl Cli {
             cols,
             rows,
             experimental_rich,
+            experimental_activity,
             restore_workspace,
             program: program.unwrap_or_else(prismattyc_mux::platform::default_shell),
             argv,
@@ -121,8 +125,11 @@ fn print_help() {
 pmuxd — long-lived local Prismattyc mux server
 
 USAGE:
-    pmuxd [--socket PATH] [--cols N] [--rows N] [--experimental-rich] [--restore-workspace] [PROGRAM [ARGS...]]
+    pmuxd [--socket PATH] [--cols N] [--rows N] [--experimental-rich] [--experimental-activity] [--restore-workspace] [PROGRAM [ARGS...]]
     pmuxd --socket /absolute/path.sock -- /bin/bash -l
+
+The activity feed is off by default; --experimental-activity enables bounded,
+process-local activity history for explicit publishers and observers.
 
 The server owns PTYs, emulators, topology, leases, and authoritative geometry.
 Clients attach over a same-user 0600 Unix socket. Exiting a client does not
@@ -203,6 +210,9 @@ fn main() -> Result<()> {
         plane
             .set_pane_log_path(path)
             .context("start pane-log checkpoint worker")?;
+    }
+    if cli.experimental_activity {
+        plane.enable_activity()?;
     }
     let server = ControlServer::bind(&cli.socket, plane)
         .with_context(|| format!("bind {}", cli.socket.display()))?;

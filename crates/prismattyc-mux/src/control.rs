@@ -460,6 +460,17 @@ fn dirty_input_still_open(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlRequest {
+    PublishActivity {
+        version: u16,
+        request_id: u64,
+        event: crate::activity::ActivityInput,
+    },
+    ReadActivity {
+        version: u16,
+        request_id: u64,
+        cursor: Option<crate::activity::ActivityCursor>,
+        limit: usize,
+    },
     ServerInfo {
         version: u16,
         request_id: u64,
@@ -989,7 +1000,17 @@ pub enum ControlRequest {
 impl ControlRequest {
     fn header(&self) -> (u16, u64) {
         match self {
-            Self::ServerInfo {
+            Self::PublishActivity {
+                version,
+                request_id,
+                ..
+            }
+            | Self::ReadActivity {
+                version,
+                request_id,
+                ..
+            }
+            | Self::ServerInfo {
                 version,
                 request_id,
             }
@@ -1319,7 +1340,9 @@ impl ControlRequest {
             | Self::Close { client_id, .. }
             | Self::MovePane { client_id, .. }
             | Self::Resize { client_id, .. } => *client_id,
-            Self::ServerInfo { .. }
+            Self::PublishActivity { .. }
+            | Self::ReadActivity { .. }
+            | Self::ServerInfo { .. }
             | Self::Ping { .. }
             | Self::Snapshot { .. }
             | Self::Events { .. }
@@ -1434,6 +1457,12 @@ pub struct MailPeer {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ControlResponseData {
+    ActivityPublished {
+        ack: crate::activity::ActivityAck,
+    },
+    Activity {
+        page: crate::activity::ActivityPage,
+    },
     ServerInfo {
         package_version: String,
         pid: u32,
@@ -1631,6 +1660,13 @@ impl ControlResponse {
             body: ControlResponseBody::Error { error },
         }
     }
+}
+
+fn activity_disabled() -> ControlError {
+    ControlError::new(
+        ControlErrorCode::InvalidRequest,
+        "activity feed is disabled",
+    )
 }
 
 /// Stable error vocabulary for clients and test harnesses.
@@ -2295,6 +2331,7 @@ struct SessionAgentBinding {
 /// `new_live` additionally binds one server-owned PTY/emulator per pane. The
 /// windowed client remains a compositor, never the process-lifetime owner.
 pub struct ControlPlane {
+    activity: Option<crate::activity::ActivityFeed>,
     shutdown_pending: bool,
     domain: Domain,
     active_clients: HashSet<ClientId>,
@@ -2442,6 +2479,7 @@ impl ControlPlane {
             })
             .collect();
         Ok(Self {
+            activity: None,
             shutdown_pending: false,
             domain,
             active_clients: HashSet::new(),
@@ -2498,6 +2536,17 @@ impl ControlPlane {
             pane_log_captured: std::collections::HashMap::new(),
             pane_log_capture: None,
         })
+    }
+
+    /// Enable the process-local activity feed. Repeated calls preserve its epoch.
+    pub fn enable_activity(&mut self) -> Result<(), ControlError> {
+        if self.activity.is_none() {
+            self.activity = Some(
+                crate::activity::ActivityFeed::new()
+                    .map_err(|message| ControlError::new(ControlErrorCode::Internal, message))?,
+            );
+        }
+        Ok(())
     }
 
     /// `[mux] remote_size` policy. Default is [`RemoteSizePolicy::Latest`].
@@ -4140,6 +4189,20 @@ impl ControlPlane {
         request: ControlRequest,
     ) -> Result<ControlResponseData, ControlError> {
         match request {
+            ControlRequest::PublishActivity { event, .. } => {
+                let feed = self.activity.as_mut().ok_or_else(activity_disabled)?;
+                let ack = feed.publish(event).map_err(|message| {
+                    ControlError::new(ControlErrorCode::InvalidRequest, message)
+                })?;
+                Ok(ControlResponseData::ActivityPublished { ack })
+            }
+            ControlRequest::ReadActivity { cursor, limit, .. } => {
+                let feed = self.activity.as_ref().ok_or_else(activity_disabled)?;
+                let page = feed.read(cursor, limit).map_err(|message| {
+                    ControlError::new(ControlErrorCode::InvalidRequest, message)
+                })?;
+                Ok(ControlResponseData::Activity { page })
+            }
             ControlRequest::ServerInfo { .. } => Ok(ControlResponseData::ServerInfo {
                 package_version: env!("CARGO_PKG_VERSION").into(),
                 pid: std::process::id(),
@@ -17362,5 +17425,114 @@ function Read-Exact([int]$Count) {
             !plane.write_ledger.contains_key(&pane),
             "a rejected write must not dirty input"
         );
+    }
+
+    fn activity_input() -> crate::activity::ActivityInput {
+        crate::activity::ActivityInput {
+            schema_version: 1,
+            seat: crate::mailbox::AgentId::new("worker-a").unwrap(),
+            run_id: "run-1".into(),
+            event_id: "event-1".into(),
+            source: crate::activity::ActivitySource::Notify,
+            kind: crate::activity::ActivityKind::TurnFinished,
+        }
+    }
+
+    #[test]
+    fn activity_is_default_off_and_never_changes_topology_sequence() {
+        let (mut plane, _, _) = fixture(8);
+        let disabled = plane.handle(ControlRequest::PublishActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 1,
+            event: activity_input(),
+        });
+        assert_eq!(error_code(&disabled), ControlErrorCode::InvalidRequest);
+        assert_eq!(plane.sequence(), 0);
+        let disabled = plane.handle(ControlRequest::ReadActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 2,
+            cursor: None,
+            limit: 1,
+        });
+        assert_eq!(error_code(&disabled), ControlErrorCode::InvalidRequest);
+        plane.enable_activity().unwrap();
+        let accepted = plane.handle(ControlRequest::PublishActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 3,
+            event: activity_input(),
+        });
+        let ControlResponseBody::Ok {
+            response: ControlResponseData::ActivityPublished { ack },
+        } = accepted.body
+        else {
+            panic!("expected activity ack")
+        };
+        assert_eq!(ack.cursor.sequence, 1);
+        let mut invalid = activity_input();
+        invalid.schema_version = 2;
+        let rejected = plane.handle(ControlRequest::PublishActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 4,
+            event: invalid,
+        });
+        assert_eq!(error_code(&rejected), ControlErrorCode::InvalidRequest);
+        assert_eq!(plane.sequence(), 0);
+        assert!(plane.events_after(0, None).unwrap().events.is_empty());
+        plane.enable_activity().unwrap();
+        assert_eq!(
+            plane
+                .activity
+                .as_ref()
+                .unwrap()
+                .read(None, 1)
+                .unwrap()
+                .epoch,
+            ack.cursor.epoch
+        );
+    }
+
+    #[test]
+    fn activity_native_socket_serves_unregistered_headless_publisher_and_reader() {
+        use crate::activity::{exchange, ActivityReset};
+        let (mut plane, _, _) = fixture(8);
+        plane.enable_activity().unwrap();
+        let path = socket_path();
+        let server = ControlServer::bind(&path, plane).unwrap();
+        let reply = exchange(
+            &path,
+            ControlRequest::PublishActivity {
+                version: PROTOCOL_VERSION,
+                request_id: 1,
+                event: activity_input(),
+            },
+        )
+        .unwrap();
+        let ControlResponseData::ActivityPublished { ack } = reply else {
+            panic!("expected ack")
+        };
+        assert_eq!(ack.cursor.sequence, 1);
+        let reply = exchange(
+            &path,
+            ControlRequest::ReadActivity {
+                version: PROTOCOL_VERSION,
+                request_id: 1,
+                cursor: Some(crate::activity::ActivityCursor {
+                    epoch: "previous-boot".into(),
+                    sequence: 99,
+                }),
+                limit: 1,
+            },
+        )
+        .unwrap();
+        let ControlResponseData::Activity { page } = reply else {
+            panic!("expected page")
+        };
+        assert_eq!(page.reset, Some(ActivityReset::Restarted));
+        assert_eq!(page.records[0].event.seat.as_str(), "worker-a");
+        assert_eq!(
+            page.records[0].event.kind,
+            crate::activity::ActivityKind::TurnFinished
+        );
+        assert_eq!(server.plane().lock().unwrap().sequence(), 0);
     }
 }

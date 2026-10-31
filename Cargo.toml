@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["third_party/portable-pty"]
+exclude = ["third_party/portable-pty", "tools/activity-monitor"]
 members = [
     "crates/prismattyc",
     "crates/prismattyc-core",

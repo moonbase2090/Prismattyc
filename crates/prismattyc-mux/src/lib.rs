@@ -6,6 +6,7 @@
 //! Focus and active-tab selection remain **per-client** ([`ClientView`]); the
 //! server runtime owns PTYs/emulators without becoming a second compositor.
 
+pub mod activity;
 pub mod attach_focus;
 mod attach_scan;
 pub mod attach_tabs;

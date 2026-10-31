@@ -25,6 +25,12 @@ uname -sm > "$verify_evidence/platform.txt"
 
 Use an installed compatible compiler and SDK on macOS. If the active linker rejects SDK `.tbd` targets, select a matching Xcode/Command Line Tools installation or an already-installed compatible `SDKROOT`; preserve that choice in the build log. Do not prescribe an SDK path that does not exist on the test machine. On Linux, install the native dependencies in `scripts/install-render-test-deps.sh` before driving X11 windows.
 
+For the optional activity prototype, follow [agent activity](features/activity.md).
+Its standalone viewer has a separate manifest and lockfile. Build its adapter
+with `cargo build -p prismattyc-mux --example activity-emit --locked`, then run
+`python3 scripts/verify-activity.py` with the binaries and output paths in that
+feature recipe. The helper owns a private daemon and a live terminal viewer.
+
 For short-lived CLI drives, the helper below starts a fresh private `pmuxd` for each feature and waits for its Unix socket. It clears inherited mux/application variables and isolates HOME, configuration, data, state, and runtime paths. A disposable shell wrapper bypasses login startup files, so they cannot reset the isolated HOME or prompt. It owns teardown. Run the two drives serially:
 
 ```sh

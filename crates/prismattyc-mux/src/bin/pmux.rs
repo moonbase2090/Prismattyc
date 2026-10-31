@@ -96,6 +96,8 @@ use prismattyc_mux::{
 const STOP_GRACE: Duration = Duration::from_secs(2);
 const UP_WAIT: Duration = Duration::from_secs(30);
 
+#[path = "pmux/activity.rs"]
+mod activity;
 #[path = "pmux/activity_emit.rs"]
 mod activity_emit;
 #[path = "pmux/lifecycle.rs"]
@@ -161,6 +163,9 @@ session
     activity-emit --seat ID --install-hooks FILE
                                   install seat-scoped runtime hooks explicitly
     mail <verb> ...               mailbox (pmux mail --help)
+    activity <seats|recent|poll|tail> ...
+                                  read the experimental activity feed as JSON
+                                  (pmux activity --help)
     attention SESSION [MESSAGE]   raise attention
                                   (default: needs your attention)
     status-set TEXT [--pane ID]   set this pane's attach chrome status
@@ -318,6 +323,7 @@ enum Verb {
     Clients,
     Detach,
     Attention,
+    Activity,
     Mail,
     Mailbox,
     MailDoorbell,
@@ -379,6 +385,7 @@ const VERBS: &[(&str, Verb)] = &[
     ("clients", Verb::Clients),
     ("detach", Verb::Detach),
     ("attention", Verb::Attention),
+    ("activity", Verb::Activity),
     ("mail", Verb::Mail),
     ("space", Verb::Space),
     ("session", Verb::Session),
@@ -673,6 +680,10 @@ fn main() -> Result<()> {
         }
         Verb::Versions => lifecycle::versions(&paths),
         Verb::SessionConfig => session_config::run(&paths, rest),
+        Verb::Activity => {
+            reject_session_flag(cli_session.as_deref(), "activity")?;
+            activity::run(&paths, rest)
+        }
         Verb::Tutorial
         | Verb::Skills
         | Verb::Completions
@@ -754,7 +765,7 @@ _prismattyc_mux() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
   cmd="${COMP_WORDS[1]}"
-  local cmds="up start attach ls list whoami status-set activity-emit send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session tab layout sync status stop restart versions session-config update completions config skills login"
+  local cmds="up start attach ls list whoami status-set activity-emit send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick activity attention mail space session tab layout sync status stop restart versions session-config update completions config skills login"
   case "$prev" in
     --instance) return ;;
     --session) return ;;
@@ -834,7 +845,7 @@ _arguments -C \
   '--session[Session name or id for stop]:name:' \
   '--socket[Absolute socket path]:path:_files' \
   '(-h --help)'{-h,--help}'[Help]' \
-  '1:command:(up start attach ls list whoami status-set activity-emit send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session tab layout sync status stop restart versions session-config update completions config skills login)' \
+  '1:command:(up start attach ls list whoami status-set activity-emit send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick activity attention mail space session tab layout sync status stop restart versions session-config update completions config skills login)' \
   '*::arg:->args'
 case $state in
   args)

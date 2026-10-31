@@ -2,6 +2,7 @@
 //! Opt-in, process-local activity history and a bounded one-shot client.
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -10,7 +11,8 @@ use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ControlRequest, ControlResponse, ControlResponseBody, ControlResponseData, PROTOCOL_VERSION,
+    ControlErrorCode, ControlRequest, ControlResponse, ControlResponseBody, ControlResponseData,
+    PROTOCOL_VERSION,
 };
 
 const CAPACITY: usize = 512;
@@ -100,6 +102,20 @@ pub struct ActivityAck {
     pub cursor: ActivityCursor,
     pub duplicate: bool,
 }
+
+/// A daemon rejection that retains its machine-readable code without message text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActivityRejected {
+    pub code: ControlErrorCode,
+}
+
+impl fmt::Display for ActivityRejected {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "activity request rejected ({:?})", self.code)
+    }
+}
+
+impl std::error::Error for ActivityRejected {}
 
 pub(crate) struct ActivityFeed {
     epoch: String,
@@ -305,9 +321,7 @@ pub fn exchange(socket: &Path, request: ControlRequest) -> Result<ControlRespons
         {
             Ok(response)
         }
-        ControlResponseBody::Error { error } => {
-            bail!("activity request rejected ({:?})", error.code)
-        }
+        ControlResponseBody::Error { error } => Err(ActivityRejected { code: error.code }.into()),
         _ => bail!("unexpected activity response kind"),
     }
 }
@@ -509,5 +523,15 @@ mod tests {
         let mut input = serde_json::to_value(event(1)).unwrap();
         input["command"] = serde_json::json!("private-secret-marker");
         assert!(serde_json::from_value::<ActivityInput>(input).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activity_rejection_omits_server_message_text() {
+        let frame = b"{\"version\":1,\"request_id\":7,\"status\":\"error\",\"error\":{\"code\":\"activity_disabled\",\"message\":\"private-secret-marker\"}}\n";
+        assert_eq!(
+            fake_activity_reply(frame.to_vec()),
+            "activity request rejected (ActivityDisabled)"
+        );
     }
 }

@@ -28,6 +28,12 @@ and Windows. The daemon rejects both requests until started with
 `--experimental-activity`. The viewer and adapter are development tools, with no
 automatic installation or hook configuration changes.
 
+A disabled feed returns the control error code `activity_disabled`, distinct
+from `invalid_request`. The Rust client retains rejection codes in
+`activity::ActivityRejected`, available through `anyhow::Error::downcast_ref`.
+It omits daemon message text. A connector can map this code to `feed_disabled`
+without parsing diagnostics or mistaking a malformed request for a missing capability.
+
 Each host has its own pmuxd, socket, activity history, and random boot epoch.
 The prototype reads one endpoint. Two hosts with the same seat name remain
 independent. A future combined viewer needs explicit endpoint aliases, separate

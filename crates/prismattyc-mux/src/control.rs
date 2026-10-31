@@ -1664,7 +1664,7 @@ impl ControlResponse {
 
 fn activity_disabled() -> ControlError {
     ControlError::new(
-        ControlErrorCode::InvalidRequest,
+        ControlErrorCode::ActivityDisabled,
         "activity feed is disabled",
     )
 }
@@ -1676,6 +1676,8 @@ pub enum ControlErrorCode {
     InvalidJson,
     FrameTooLarge,
     InvalidRequest,
+    /// The optional activity feed is not enabled on this daemon.
+    ActivityDisabled,
     IncompatibleVersion,
     StaleRequestId,
     StaleId,
@@ -17446,7 +17448,7 @@ function Read-Exact([int]$Count) {
             request_id: 1,
             event: activity_input(),
         });
-        assert_eq!(error_code(&disabled), ControlErrorCode::InvalidRequest);
+        assert_eq!(error_code(&disabled), ControlErrorCode::ActivityDisabled);
         assert_eq!(plane.sequence(), 0);
         let disabled = plane.handle(ControlRequest::ReadActivity {
             version: PROTOCOL_VERSION,
@@ -17454,7 +17456,7 @@ function Read-Exact([int]$Count) {
             cursor: None,
             limit: 1,
         });
-        assert_eq!(error_code(&disabled), ControlErrorCode::InvalidRequest);
+        assert_eq!(error_code(&disabled), ControlErrorCode::ActivityDisabled);
         plane.enable_activity().unwrap();
         let accepted = plane.handle(ControlRequest::PublishActivity {
             version: PROTOCOL_VERSION,
@@ -17493,11 +17495,25 @@ function Read-Exact([int]$Count) {
 
     #[test]
     fn activity_native_socket_serves_unregistered_headless_publisher_and_reader() {
-        use crate::activity::{exchange, ActivityReset};
-        let (mut plane, _, _) = fixture(8);
-        plane.enable_activity().unwrap();
+        use crate::activity::{exchange, ActivityRejected, ActivityReset};
+        let (plane, _, _) = fixture(8);
         let path = socket_path();
         let server = ControlServer::bind(&path, plane).unwrap();
+        let rejected = exchange(
+            &path,
+            ControlRequest::ReadActivity {
+                version: PROTOCOL_VERSION,
+                request_id: 1,
+                cursor: None,
+                limit: 1,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            rejected.downcast_ref::<ActivityRejected>().map(|e| e.code),
+            Some(ControlErrorCode::ActivityDisabled)
+        );
+        server.plane().lock().unwrap().enable_activity().unwrap();
         let reply = exchange(
             &path,
             ControlRequest::PublishActivity {

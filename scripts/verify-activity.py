@@ -120,8 +120,9 @@ def main():
 
     try:
         start(False)
-        assert request('publish_activity', event=event(0))['status'] == 'error'
-        assert request('read_activity', cursor=None, limit=10)['status'] == 'error'
+        for reply in [request('publish_activity', event=event(0)),
+                      request('read_activity', cursor=None, limit=10)]:
+            assert reply['status'] == 'error' and reply['error']['code'] == 'activity_disabled'
         checks.append('disabled by default')
         stop()
         start(True)

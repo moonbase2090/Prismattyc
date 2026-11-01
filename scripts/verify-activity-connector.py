@@ -28,6 +28,26 @@ def exe(path: Path) -> Path:
     return path.with_name(path.name + ".exe") if WINDOWS else path
 
 
+# pmuxd on Windows requires an owner-only, inheritable DACL on the socket's
+# parent directory; chmod does not set one.
+OWNER_ONLY_DACL = """$ErrorActionPreference='Stop';
+$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User;
+$acl=New-Object Security.AccessControl.DirectorySecurity;
+$acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false);
+$rule=New-Object Security.AccessControl.FileSystemAccessRule($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow');
+$acl.AddAccessRule($rule);
+Set-Acl -LiteralPath $env:ACTIVITY_CONNECTOR_SCRATCH -AclObject $acl;
+"""
+
+
+def make_private(directory: Path) -> None:
+    directory.chmod(0o700)
+    if WINDOWS:
+        subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", OWNER_ONLY_DACL],
+                       env=dict(os.environ, ACTIVITY_CONNECTOR_SCRATCH=str(directory)),
+                       capture_output=True, timeout=30, check=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bins", required=True, type=Path)
@@ -43,7 +63,7 @@ def main() -> int:
 
     # A short private directory: Unix socket paths are limited to ~104 bytes.
     scratch = Path(tempfile.mkdtemp(prefix="pmux-act-"))
-    scratch.chmod(0o700)
+    make_private(scratch)
     env = dict(os.environ, HOME=str(scratch), XDG_RUNTIME_DIR=str(scratch), XDG_CONFIG_HOME=str(scratch / "config"))
     if WINDOWS:
         env.update(USERPROFILE=str(scratch), LOCALAPPDATA=str(scratch), APPDATA=str(scratch))

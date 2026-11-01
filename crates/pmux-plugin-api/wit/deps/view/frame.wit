@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: MIT
+
+package pmux:view@1.0.0;
+
+interface frame {
+    record rgb { r: u8, g: u8, b: u8 }
+    variant color { default, indexed(u8), rgb(rgb) }
+    record attributes {
+        bold: bool, dim: bool, italic: bool, blink: bool,
+        reverse: bool, hidden: bool, strike: bool, overline: bool,
+    }
+    enum underline { none, single, double, curly, dotted, dashed }
+    record cell {
+        text: string,
+        width: u8,
+        foreground: color,
+        background: color,
+        attributes: attributes,
+        underline: underline,
+    }
+    record tile {
+        x: u16,
+        y: u16,
+        columns: u16,
+        rows: u16,
+        pixel-width: u32,
+        pixel-height: u32,
+        rgba: list<u8>,
+    }
+    record position { column: u16, row: u16 }
+    record pixel-size { width: u16, height: u16 }
+    record viewport { columns: u16, rows: u16, pixels: option<pixel-size> }
+    record content {
+        columns: u16,
+        rows: u16,
+        cells: list<cell>,
+        tiles: list<tile>,
+        cursor: option<position>,
+    }
+    enum named-key {
+        escape, enter, tab, back-tab, backspace, delete, insert,
+        up, down, left, right, home, end, page-up, page-down,
+    }
+    variant key-code { character(char), named(named-key), function(u8) }
+    record key { code: key-code, modifiers: u8 }
+    record clock { wall-ms: u64, monotonic-ms: u64 }
+    variant event { key(key), resize(viewport), tick(clock), close }
+}

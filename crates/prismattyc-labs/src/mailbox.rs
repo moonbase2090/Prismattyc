@@ -21,7 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent_id::AgentId;
+use prismattyc_core::AgentId;
 
 /// One letter on the wire (same fields as `prismattyc-mux::mailbox::Letter`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,5 +1,7 @@
-//! Shared classic-terminal screen model for Prismattyc.
+//! Shared terminal, identity and activity values for Prismattyc.
 
+pub mod activity;
+mod agent_id;
 mod cell_grid;
 #[cfg(test)]
 mod cluster_tests;
@@ -16,6 +18,7 @@ mod version;
 
 pub mod splash;
 
+pub use agent_id::{AgentId, AgentIdError};
 pub use damage::{GridDamage, ScrollDamage};
 pub use test_time::{parse_test_time_scale, test_time_budget, test_time_scale};
 pub use version::{bin_version, git_hash, git_suffix, package_version, release_label};

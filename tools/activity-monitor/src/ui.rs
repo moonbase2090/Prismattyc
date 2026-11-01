@@ -7,8 +7,8 @@ use lunatui_core::{Attrs, Color, Rect, Style};
 use lunatui_term::{Event, KeyCode, KeyEvent, KeyKind};
 use lunatui_theme::{Theme, Token, Variant};
 use lunatui_widgets::{RenderCx, Sparkline, SparklineBar, Widget};
-use prismattyc_mux::activity::{ActivityKind, ActivityRecord};
-use prismattyc_mux::mailbox::AgentId;
+use prismattyc_core::activity::{ActivityKind, ActivityRecord};
+use prismattyc_core::AgentId;
 
 use crate::model::{self, Host, Link, Seat, SeatState};
 

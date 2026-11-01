@@ -1,0 +1,21 @@
+[package]
+name = "pmux-plugin-api"
+description = "Versioned component contracts for contained pmux plug-ins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+host = ["dep:wasmtime"]
+guest = ["dep:wit-bindgen"]
+
+[dependencies]
+serde.workspace = true
+wasmtime = { version = "=36.0.20", default-features = false, features = ["std", "runtime", "component-model"], optional = true }
+wit-bindgen = { version = "=0.46.0", optional = true }
+
+[build-dependencies]
+wit-parser = "=0.239.0"

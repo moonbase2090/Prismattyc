@@ -11,6 +11,7 @@ members = [
     "crates/prismattyc-render",
     "crates/prismattyc-rich-client",
     "crates/pmux-mcp",
+    "crates/pmux-plugin-api",
     "crates/prismattyc-winres",
     "crates/prismattyc-cmd-forwarder",
 ]

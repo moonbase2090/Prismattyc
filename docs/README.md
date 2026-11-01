@@ -31,6 +31,7 @@ Start with the [README](../README.md) for installation and basic use.
 | [Architecture](architecture.md) | Components, process ownership, and data flow. |
 | [Terminal input](input.md) | Selection, mouse input, wide text, and keyboard encoding. |
 | [Control protocol](control-plane.md) | Local mux socket messages and ownership. |
+| [Plug-in system proposal](pmux-plugin-system.md) | Proposed versioned packages, capabilities, permissions and consumer migration. |
 | [Rich surface protocol](rich-surface.md) | Optional surface geometry, limits, and revisions. |
 
 ## Build and test

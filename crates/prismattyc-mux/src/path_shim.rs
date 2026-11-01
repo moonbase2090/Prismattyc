@@ -82,8 +82,17 @@ pub(crate) fn ensure_app_bundle(bundle: &Path) -> Result<()> {
             &path_entries,
             |directory| system_bin_allowed && dir_is_writable(directory),
         ) {
-            // pmux already reported PATH problems for the same directories.
-            Ok(_) => {}
+            // pmux already said when the link directory is not on PATH; an
+            // earlier monitor on PATH is still worth a warning.
+            Ok(report) => {
+                for warning in report
+                    .warnings
+                    .into_iter()
+                    .filter(|warning| !warning.contains("that directory is not on PATH"))
+                {
+                    eprintln!("pmux: warning: {warning}");
+                }
+            }
             Err(error) => eprintln!("pmux: warning: {error:#}"),
         }
     }

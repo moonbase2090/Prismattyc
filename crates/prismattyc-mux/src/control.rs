@@ -16778,7 +16778,8 @@ function Read-Exact([int]$Count) {
         let quiet_window = Duration::from_millis(MAIL_INJECT_EPOCH_WAIT_MS + 100);
         let mut last_rev = plane.pane_revision(pane);
         let mut stable_since = Instant::now();
-        while stable_since.elapsed() < quiet_window && Instant::now() < deadline {
+        let quiet_deadline = Instant::now() + Duration::from_secs(3);
+        while stable_since.elapsed() < quiet_window && Instant::now() < quiet_deadline {
             thread::sleep(Duration::from_millis(MAIL_INJECT_EPOCH_SLICE_MS));
             plane.drain_for_test();
             let rev = plane.pane_revision(pane);
@@ -16787,6 +16788,10 @@ function Read-Exact([int]$Count) {
                 stable_since = Instant::now();
             }
         }
+        assert!(
+            stable_since.elapsed() >= quiet_window,
+            "spawn did not become quiet"
+        );
         quiet_unattended(plane, pane);
     }
 
@@ -16849,9 +16854,18 @@ function Read-Exact([int]$Count) {
         }
         assert!(saw_woke, "child should consume the exact inject payload");
         quiet_unattended(&mut plane, pane);
+        let revision = plane.pane_revision(pane).unwrap();
+        let record = plane.mail_inject.get_mut(&pane).unwrap();
+        record.hide_revision = revision;
+        record.hide_until_ms = now_unix_ms().saturating_add(5_000);
         let (again, n2) = mail_inject(inject_mail(&mut plane, client, pane, 4));
         assert_eq!(again, MailInjectOutcome::DeferredHide);
         assert_eq!(n2, 0);
+        assert_eq!(plane.mail_inject_writes(pane), 1);
+        plane.mail_inject.get_mut(&pane).unwrap().hide_until_ms = 0;
+        let (exhausted, n3) = mail_inject(inject_mail(&mut plane, client, pane, 5));
+        assert_eq!(exhausted, MailInjectOutcome::SkippedExhausted);
+        assert_eq!(n3, 0);
         assert_eq!(plane.mail_inject_writes(pane), 1);
     }
 

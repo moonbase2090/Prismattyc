@@ -40,9 +40,17 @@ pub struct MuxSection {
     /// Allow user-entered session labels to preserve mixed case and spaces.
     /// Default false to keep session labels in the mailbox-address format.
     pub allow_mixed_case_session_names: Option<bool>,
+    /// Start pmuxd with the metadata-only activity feed on. Default false.
+    /// Read when pmuxd starts; a running daemon keeps its current state.
+    pub experimental_activity: Option<bool>,
 }
 
 impl MuxSection {
+    /// The activity feed is opt-in. `pmuxd --experimental-activity` also turns it on.
+    pub fn experimental_activity(&self) -> bool {
+        self.experimental_activity.unwrap_or(false)
+    }
+
     /// Mixed-case session labels are opt-in.
     pub fn allow_mixed_case_session_names(&self) -> bool {
         self.allow_mixed_case_session_names.unwrap_or(false)
@@ -312,6 +320,12 @@ pub const MUX_KEYS: &[MuxKeySpec] = &[
     MuxKeySpec {
         name: "allow_mixed_case_session_names",
         doc: "Allow mixed-case and spaced session labels",
+        range: "true|false; default false",
+        kind: MuxKeyKind::Bool(false),
+    },
+    MuxKeySpec {
+        name: "experimental_activity",
+        doc: "Start pmuxd with the metadata-only activity feed for pmux-activity-monitor; read when pmuxd starts",
         range: "true|false; default false",
         kind: MuxKeyKind::Bool(false),
     },
@@ -903,6 +917,7 @@ mod tests {
                 space_open_runs_commands: None,
                 remote_size: None,
                 allow_mixed_case_session_names: None,
+                experimental_activity: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(Some("other".into()), None, &file).unwrap();
@@ -935,6 +950,7 @@ mod tests {
                 space_open_runs_commands: None,
                 remote_size: None,
                 allow_mixed_case_session_names: None,
+                experimental_activity: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(
@@ -958,6 +974,7 @@ mod tests {
                 space_open_runs_commands: None,
                 remote_size: None,
                 allow_mixed_case_session_names: None,
+                experimental_activity: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
@@ -977,6 +994,7 @@ mod tests {
                 space_open_runs_commands: None,
                 remote_size: None,
                 allow_mixed_case_session_names: None,
+                experimental_activity: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
@@ -995,6 +1013,7 @@ mod tests {
                 space_open_runs_commands: None,
                 remote_size: None,
                 allow_mixed_case_session_names: None,
+                experimental_activity: None,
                 shell: None,
             };
             assert!(resolve_mux_target(None, None, &file).is_err());

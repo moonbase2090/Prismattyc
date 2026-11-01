@@ -958,11 +958,11 @@ pub fn hint(hosts: &[Host]) -> Option<(&'static str, &'static str)> {
     match host.link {
         Link::Disabled => Some((
             "Activity feed is disabled for this daemon.",
-            "App-managed enablement is not available yet. To try the feed, start a separate pmuxd with --experimental-activity on its own socket and pass that socket with --socket.",
+            "Turn it on with experimental_activity = true under [mux] in the Prismattyc config. pmuxd reads it when it starts, so it applies after the next pmuxd start.",
         )),
         Link::Unsupported => Some((
             "This pmuxd has no activity feed.",
-            "It is older than the feed. Update Prismattyc for a pmuxd that has one; the feed is still off by default and app-managed enablement is not available yet.",
+            "It is older than the feed. Update Prismattyc for a pmuxd that has one, then set experimental_activity = true under [mux]; the feed is off by default.",
         )),
         Link::Retrying { .. } => Some((
             "Can't reach pmuxd.",
@@ -1965,14 +1965,14 @@ mod tests {
             title > 4 && title < 14,
             "roughly centered: line {title}\n{text}"
         );
-        assert!(text.contains("App-managed enablement is not available yet."));
-        assert!(text.contains("--experimental-activity") && text.contains("--socket"));
+        assert!(text.contains("experimental_activity = true under [mux]"));
+        assert!(!text.contains("not available yet"), "{text}");
         assert!(lines[1].trim_start().starts_with("mac  feed off"));
         // At a small size it still wraps inside the pane.
         let (small, ..) = draw(&mut monitor, 30, 12);
         assert!(small.contains("Activity feed is disabled"));
         assert!(small.lines().all(|l| l.trim_end().chars().count() <= 30));
-        assert!(small.contains("--experimental-activity"), "{small}");
+        assert!(small.contains("experimental_activity"), "{small}");
         Ok(())
     }
 

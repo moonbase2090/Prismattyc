@@ -2,38 +2,48 @@
 //! Opt-in, metadata-only activity adapter. Never prints hook-control output.
 
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use prismattyc_mux::activity::{self, ActivityInput, ActivityKind, ActivitySource};
+use prismattyc_mux::activity::{
+    self, ActivityInput, ActivityKind, ActivityRejected, ActivitySource,
+};
 use prismattyc_mux::mailbox::AgentId;
-use prismattyc_mux::{ControlRequest, ControlResponseData, PROTOCOL_VERSION};
+use prismattyc_mux::{ControlErrorCode, ControlRequest, ControlResponseData, PROTOCOL_VERSION};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const MAX_INPUT: usize = 1024 * 1024;
+pub(super) const MANAGED_MARKER: &str = "--managed-hook=pmux-activity-v1";
+
+#[path = "activity_install.rs"]
+mod install;
 
 enum Mode {
     Hook,
     Notify(String),
     Event(String),
+    Install { file: PathBuf, remove: bool },
 }
 
 struct Cli {
     socket: PathBuf,
     seat: AgentId,
     mode: Mode,
+    schema_version: bool,
+    failure_hook: bool,
 }
 
-fn parse() -> Result<Cli> {
-    let mut args = std::env::args().skip(1);
-    let mut socket = None;
+fn parse(socket: &Path, mut args: impl Iterator<Item = String>) -> Result<Cli> {
     let mut seat = None;
     let mut mode = None;
+    let mut schema_version = false;
+    let mut failure_hook = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--socket" => socket = Some(PathBuf::from(args.next().context("missing socket")?)),
-            "--seat" => seat = Some(AgentId::new(args.next().context("missing seat")?)?),
+            "--seat" if seat.is_none() => {
+                seat = Some(AgentId::new(args.next().context("missing seat")?)?);
+            }
             "--hook" if mode.is_none() => mode = Some(Mode::Hook),
             "--notify" if mode.is_none() => {
                 mode = Some(Mode::Notify(args.next().context("missing notification")?));
@@ -41,17 +51,36 @@ fn parse() -> Result<Cli> {
             "--event" if mode.is_none() => {
                 mode = Some(Mode::Event(args.next().context("missing event")?));
             }
+            "--install-hooks" | "--remove-hooks" if mode.is_none() => {
+                mode = Some(Mode::Install {
+                    file: PathBuf::from(args.next().context("missing hook file")?),
+                    remove: arg == "--remove-hooks",
+                });
+            }
+            "--schema-version" if !schema_version => {
+                if args.next().as_deref() != Some("1") {
+                    bail!("hook settings schema must be 1");
+                }
+                schema_version = true;
+            }
+            "--failure-hook" if !failure_hook => failure_hook = true,
+            MANAGED_MARKER => {}
             "--help" | "-h" => {
-                println!("activity-emit --socket PATH --seat ID --hook|--notify JSON|--event JSON");
+                println!("pmux [--socket PATH] activity-emit --seat ID --hook|--notify JSON|--event JSON\npmux [--socket PATH] activity-emit --seat ID --install-hooks FILE [--schema-version 1] [--failure-hook]\npmux [--socket PATH] activity-emit --seat ID --remove-hooks FILE");
                 std::process::exit(0);
             }
             _ => bail!("unknown or repeated activity adapter option"),
         }
     }
+    if (schema_version || failure_hook) && !matches!(mode, Some(Mode::Install { .. })) {
+        bail!("hook settings options require an install or removal operation");
+    }
     Ok(Cli {
-        socket: socket.context("--socket is required")?,
+        socket: socket.to_path_buf(),
         seat: seat.context("--seat is required")?,
         mode: mode.context("an input mode is required")?,
+        schema_version,
+        failure_hook,
     })
 }
 
@@ -79,13 +108,15 @@ fn hook_kind(name: &str, tool: Option<&str>, failed: bool) -> Option<ActivityKin
         "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => {
             let start = name == "PreToolUse";
             match tool {
-                Some("Bash" | "exec_command" | "shell_command") => Some(if start {
-                    CommandStarted
-                } else if failed {
-                    CommandFailed
-                } else {
-                    CommandFinished
-                }),
+                Some("Bash" | "PowerShell" | "shell" | "exec_command" | "shell_command") => {
+                    Some(if start {
+                        CommandStarted
+                    } else if failed {
+                        CommandFailed
+                    } else {
+                        CommandFinished
+                    })
+                }
                 Some("apply_patch" | "Edit" | "Write") => Some(if start {
                     EditStarted
                 } else if failed {
@@ -162,10 +193,18 @@ fn normalize(seat: AgentId, input: &Value, notify: bool) -> Result<Option<Activi
 fn publish(cli: &Cli) -> Result<()> {
     let event = match &cli.mode {
         Mode::Hook => {
-            let mut bytes = Vec::new();
-            io::stdin()
-                .take((MAX_INPUT + 1) as u64)
-                .read_to_end(&mut bytes)?;
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let result = io::stdin()
+                    .take((MAX_INPUT + 1) as u64)
+                    .read_to_end(&mut bytes)
+                    .map(|_| bytes);
+                let _ = sender.send(result);
+            });
+            let bytes = receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .context("hook input deadline exceeded")??;
             if bytes.len() > MAX_INPUT {
                 bail!("activity input exceeds limit");
             }
@@ -188,6 +227,9 @@ fn publish(cli: &Cli) -> Result<()> {
             event.seat = cli.seat.clone();
             Some(event)
         }
+        Mode::Install { file, remove } => {
+            return install::run(cli, file, *remove);
+        }
     };
     let Some(event) = event else { return Ok(()) };
     match activity::exchange(
@@ -203,11 +245,16 @@ fn publish(cli: &Cli) -> Result<()> {
     }
 }
 
-fn main() -> Result<()> {
-    let cli = parse()?;
-    let result = publish(&cli);
-    if matches!(cli.mode, Mode::Hook | Mode::Notify(_)) {
-        if result.is_err() {
+pub(super) fn run(socket: &Path, args: Vec<String>) -> Result<()> {
+    let observing = args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--hook" | "--notify"));
+    let result = parse(socket, args.into_iter()).and_then(|cli| publish(&cli));
+    if observing {
+        if result.as_ref().is_err_and(|error| {
+            error.downcast_ref::<ActivityRejected>().map(|e| e.code)
+                != Some(ControlErrorCode::ActivityDisabled)
+        }) {
             // Observation must not reject a tool or disclose its input.
             eprintln!("activity observation unavailable");
         }

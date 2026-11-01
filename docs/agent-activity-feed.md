@@ -1,11 +1,11 @@
 # Local agent activity feed
 
-This spike observes headless seats through an opt-in pmuxd feed and a standalone
+The experimental feed observes headless seats through an opt-in pmuxd feed and a standalone
 Lunatui terminal viewer. A seat needs an explicit logical identity and a local
 socket. It does not need a Prismattyc Space or terminal pane.
 
-The prototype answers whether a small local feed can connect harness events to
-a live monitor. It is not an audit log or a durable task history.
+The feed connects lifecycle events to a live monitor. Its bounded, in-memory
+history is not a durable audit log.
 
 ## Ownership and transport
 
@@ -25,8 +25,8 @@ so a busy producer cannot evict geometry or controller-lease events.
 
 The two new requests reuse the existing same-user local control socket on Unix
 and Windows. The daemon rejects both requests until started with
-`--experimental-activity`. The viewer and adapter are development tools, with no
-automatic installation or hook configuration changes.
+`--experimental-activity`. The native `pmux activity-emit` command installs hooks only into an explicitly
+selected file. Starting the daemon or viewer never changes hook configuration.
 
 A disabled feed returns the control error code `activity_disabled`, distinct
 from `invalid_request`. The Rust client retains rejection codes in
@@ -70,7 +70,7 @@ any client with same-user socket access can assert a seat.
 Kinds cover session and turn start/end, tool/command/edit start/end/failure,
 explicit test start/pass/failure, working/waiting/stopped state, and mail
 sent/received metadata. `*_finished` means an operation ended. It does not assert
-success. Test and mail events require an explicit producer; the spike does not
+success. Test and mail events require an explicit producer; the feed does not
 infer them from arbitrary command text or instrument the mailbox automatically.
 
 The daemon adds `sequence` and `received_at_ms` to each record. A publish reply
@@ -93,7 +93,7 @@ records. A cursor at `oldest_sequence - 1` is valid. An older cursor reports
 `ahead_of_feed`. Reset pages return retained history successfully and leave
 topology snapshot state intact. A restart loses the activity ring.
 
-## Harness adapters
+## Lifecycle adapters
 
 The adapter consumes only documented hook or notification fields. It never reads
 transcripts, authentication files, or terminal output to reconstruct tool calls.
@@ -110,29 +110,27 @@ edit activity, and other tools to generic tool activity. Hosted tools can lack
 these hooks. Hook definitions require trust review; availability must be checked
 against the installed runtime rather than inferred from notification support.
 
-The [alternate hook reference](https://code.claude.com/docs/en/hooks) also documents
-stdin lifecycle hooks, including `PostToolUseFailure`. The same metadata adapter
-can normalize that event to an explicit failure. Support for both input formats
-does not establish end-to-end validation on both runtimes. The proof procedure
-below records which real producer was exercised.
+The [alternate lifecycle reference](https://code.claude.com/docs/en/hooks) and
+[additional lifecycle reference](https://meta-models.github.io/muse-code-sdk/next/guides/extend/hooks/)
+document the same stdin command structure. Both support `PostToolUseFailure`.
+Install that optional event with `--failure-hook` only for runtimes that support
+it. The default installation uses SessionStart, SessionEnd, UserPromptSubmit,
+PreToolUse, PostToolUse, and Stop.
 
-For a runtime without a verified hook API, emit explicit `runtime` events through
-`--event`. A process wrapper can report session start/end and exit failure, but
-cannot claim tool, edit, or test visibility. Discovery of that runtime's public
-event interface remains a prerequisite for its full adapter.
+Hooks and notifications return success when observation fails and never write
+hook-control output to stdout. A disabled feed is a silent no-op. Other failures
+produce a fixed diagnostic without upstream input or daemon message text. Hook
+stdin is limited to 1 MiB and a two-second wait. Connect, write, and read share a
+separate two-second deadline. Installed handlers have a five-second timeout.
+There is no spool or automatic retry. Correlated events have stable retry
+identities; lifecycle events without correlation receive new identities.
 
-Hooks and notifications wait only for bounded local socket operations. Publishing
-failure prints a fixed diagnostic to stderr and returns success, so observation
-cannot reject a tool. Nothing is written to stdout. This best-effort spike has
-no spool or automatic retry. Lifecycle events without correlation receive new
-event identities; correlated tool and notification events have stable identities.
-
-## Run the prototype
+## Run the feed
 
 Build the daemon and adapter from the repository root:
 
 ```sh
-cargo build -p prismattyc-mux --bins --example activity-emit --locked
+cargo build -p prismattyc-mux --bins --locked
 cargo build --manifest-path tools/activity-monitor/Cargo.toml --locked
 ```
 
@@ -151,12 +149,35 @@ Start the viewer in another terminal:
 tools/activity-monitor/target/debug/pmux-activity-monitor --socket /tmp/activity-demo/feed.sock
 ```
 
-Configure a reviewed lifecycle command to run the absolute adapter path with
-`--socket PATH --seat worker-a --hook`. Configure a notification argv to end with
-`--socket PATH --seat worker-a --notify`; the runtime appends its JSON argument.
-Keep installation at the user/runtime configuration boundary. On Windows, use
-absolute executable paths and a reviewed Windows command override where the
-harness provides one. No configuration in this spike alters an existing seat.
+Install a per-seat hook profile using absolute paths:
+
+```sh
+target/debug/pmux --socket /tmp/activity-demo/feed.sock activity-emit \
+  --seat worker-a --install-hooks /absolute/path/worker-a-hooks.json
+```
+
+Load that file through the runtime's documented settings or managed-hook option.
+Use `--schema-version 1` when its loader requires that field. Runtime hooks can
+run with a stripped environment, so the generated command embeds the explicit
+socket and seat. A shared global file with one fixed seat would misattribute
+other sessions. Use a separate profile for each seat.
+
+Installation merges JSON settings under a file lock and commits atomically.
+It preserves unrelated settings, handlers, and managed-hook pointers. Repeating
+an identical installation leaves the file unchanged. Invalid JSON fails without
+replacement. Remove only the adapter's marked handlers with:
+
+```sh
+target/debug/pmux --socket /tmp/activity-demo/feed.sock activity-emit \
+  --seat worker-a --remove-hooks /absolute/path/worker-a-hooks.json
+```
+
+For a manually configured lifecycle command, use the absolute `pmux` executable
+followed by `--socket PATH activity-emit --seat worker-a --hook`. For turn
+notifications, replace `--hook` with `--notify`; the runtime appends its JSON
+argument. Explicit producers use `--event JSON` with the normalized schema.
+On Windows, use absolute paths to `pmux.exe` and a private socket. The installer
+rejects paths containing command expansion characters it cannot quote safely.
 
 The viewer polls every 250 ms on a background thread. A bounded channel separates
 network reads from rendering, and the cache keeps at most 128 seats. Timer frames
@@ -191,7 +212,7 @@ successful work from an idle connection.
 
 The bot runs its command on the machine owning that daemon. It supplies an
 explicit endpoint and a neutral host label in its own result aggregation.
-Shell access provides the existing local-user trust boundary. The spike adds
+Shell access provides the existing local-user trust boundary. The feed adds
 no network listener or credentials, and the connector does not publish events,
 consume mail, or send terminal input.
 
@@ -201,7 +222,7 @@ result and an explicit cursor/reset. Prefer polling tools over an indefinitely
 open tool call. The server needs an operator-configured endpoint allowlist,
 page/rate limits, and host labels. It must not accept arbitrary socket paths
 from tool arguments. MCP packaging and access policy are design work only in
-this spike. The existing Shell connector supplies the usable integration now.
+this version. The existing Shell connector supplies the usable integration now.
 
 ## Reproduce the proof
 
@@ -212,11 +233,16 @@ python3 scripts/verify-activity.py \
   --out /tmp/activity-proof-new
 ```
 
-This Unix driver creates isolated configuration and a private daemon, opens a
-real terminal viewer, and emits a hook event after the first frame. It requires
+This portable driver creates isolated configuration and a private daemon, opens a
+real PTY or ConPTY terminal viewer, and emits a hook event after the first frame. It requires
 the new seat to appear without keyboard input. It also checks default-off
 rejection, metadata omission, retry conflict, pagination, retention boundaries,
-restart epochs, and unchanged topology. It retains a rendered grid, live terminal
+restart epochs, unchanged topology, bounded stdin, and hook install/remove
+preservation. A reviewed `--producer-command FILE` can invoke an installed
+runtime with `{hooks}` and `{project}` placeholders. The driver runs it before
+and after removal, proving that an independent existing handler still runs and
+that adapter publication stops after removal. Record the actual runtime and
+version separately; synthetic events alone do not establish runtime integration. It retains a rendered grid, live terminal
 text, and a JSON result, then reaps its direct child processes and removes scratch state.
 
 To exercise a real producer, pass `--producer-command FILE`. The file is a vetted

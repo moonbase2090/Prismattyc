@@ -260,24 +260,31 @@ pub fn exchange(socket: &Path, request: ControlRequest) -> Result<ControlRespons
     if version != PROTOCOL_VERSION || request_id == 0 {
         bail!("invalid activity request header");
     }
-    let bytes =
+    let mut bytes =
         serde_json::to_vec(&request).map_err(|_| anyhow!("cannot encode activity request"))?;
     if bytes.len() > 8192 {
         bail!("activity request exceeds 8192 bytes");
     }
+    bytes.push(b'\n');
+    let deadline = Instant::now() + CLIENT_TIMEOUT;
     let mut stream = crate::local_socket::connect_timeout(socket, CLIENT_TIMEOUT)
         .map_err(|_| anyhow!("cannot connect to activity daemon"))?;
-    stream
-        .set_read_timeout(Some(CLIENT_TIMEOUT))
-        .map_err(|_| anyhow!("cannot set activity read deadline"))?;
-    stream
-        .set_write_timeout(Some(CLIENT_TIMEOUT))
-        .map_err(|_| anyhow!("cannot set activity write deadline"))?;
-    stream
-        .write_all(&bytes)
-        .and_then(|_| stream.write_all(b"\n"))
-        .map_err(|_| anyhow!("cannot publish activity request"))?;
-    let deadline = Instant::now() + CLIENT_TIMEOUT;
+    let mut written = 0;
+    while written < bytes.len() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            bail!("activity request deadline exceeded");
+        }
+        stream
+            .set_write_timeout(Some(remaining))
+            .map_err(|_| anyhow!("cannot set activity write deadline"))?;
+        match stream.write(&bytes[written..]) {
+            Ok(0) => bail!("activity request connection closed"),
+            Ok(count) => written += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => bail!("cannot publish activity request"),
+        }
+    }
     let mut frame = Vec::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());

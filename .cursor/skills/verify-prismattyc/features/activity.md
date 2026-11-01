@@ -9,7 +9,7 @@ See [the design note](../../../../docs/agent-activity-feed.md) for schema and li
 Build the daemon, adapter, and standalone viewer from the same checkout:
 
 ```sh
-cargo build -p prismattyc-mux --bins --example activity-emit --locked
+cargo build -p prismattyc-mux --bins --locked
 cargo build --manifest-path tools/activity-monitor/Cargo.toml --locked
 python3 scripts/verify-activity.py \
   --bins target/debug \
@@ -17,7 +17,7 @@ python3 scripts/verify-activity.py \
   --out /tmp/activity-proof-new
 ```
 
-The driver needs Unix, Python 3, a PTY, and a new output directory. It owns its
+The driver needs Python 3, native binaries, a PTY or Windows ConPTY, and a new output directory. On Windows, use `python` and the monitor executable with its `.exe` suffix. It owns its
 daemon and viewer and uses isolated HOME, XDG paths, configuration, and socket.
 It checks the owned daemon process and pings its private socket before driving.
 Never use the operator's daemon for this proof.
@@ -36,14 +36,17 @@ failure, and use a fresh output directory when rerunning.
 
 For actual harness proof, add `--producer-command FILE`, a reviewed JSON argv
 array. `{socket}`, `{emitter}`, and `{seat}` expand to the driver's private
-endpoint, built adapter, and neutral seat. The producer must exit successfully
-and publish a `hooks` or `notify` event to the feed. Do not put credentials in
+endpoint, built adapter, and neutral seat. `{hooks}` and `{project}` name a temporary hook profile and workspace. The
+producer must load the supplied profile, exit successfully, and publish a
+`hooks` or `notify` event to the feed. An independent counter handler must run
+both before and after adapter removal. Require `producer_hooks_preserved` in
+the result. Add `--producer-failure-hook` only for runtimes supporting that event. Do not put credentials in
 the command file or commit local paths. Record which installed runtime/version
 was exercised separately from the portable synthetic hook fixture.
 
 ## Boundaries
 
-The native transport has Unix and Windows implementations. The PTY driver only
-verifies Unix. Windows needs a separate runtime drive, and clean-VM proof remains
-subject to repository policy. No live verification is implied for a runtime
-whose upstream hook interface is unconfirmed.
+The native transport and driver support Unix and Windows. Require an actual
+Windows runtime drive to claim Windows proof. Cross-compilation is insufficient.
+Runtime lifecycle proof does not establish every tool event or hosted-tool
+coverage. The feed must remain off by default.

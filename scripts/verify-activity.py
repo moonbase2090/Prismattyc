@@ -5,12 +5,14 @@ import argparse
 import json
 import os
 from pathlib import Path
+import queue
 import shlex
-import select
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 
 
@@ -20,22 +22,29 @@ def main():
     parser.add_argument('--monitor', required=True, type=Path)
     parser.add_argument('--out', required=True, type=Path)
     parser.add_argument('--producer-command', type=Path,
-                        help='Optional vetted JSON argv with {socket}, {emitter}, {seat} placeholders')
+                        help='Vetted JSON argv with {socket}, {emitter}, {seat}, {hooks}, {project}')
     parser.add_argument('--producer-source', choices=['hooks', 'notify'])
+    parser.add_argument('--producer-failure-hook', action='store_true')
     args = parser.parse_args()
     bins, monitor, out = args.bins.resolve(), args.monitor.resolve(), args.out.resolve()
     out.mkdir(parents=True, mode=0o700, exist_ok=False)
-    scratch = Path(tempfile.mkdtemp(prefix='pa-', dir='/tmp'))
-    emitter = bins / 'examples/activity-emit'
+    scratch = Path(tempfile.mkdtemp(prefix='pa-'))
+    windows = os.name == 'nt'
+    suffix = '.exe' if windows else ''
+    emitter = bins / ('pmux' + suffix)
+    shell = os.environ.get('COMSPEC', 'cmd.exe') if windows else '/bin/sh'
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(('PMUX', 'PRISMATTYC_', 'XDG_', 'HIVE_'))}
     for directory in ['home', 'config', 'data', 'state', 'runtime']:
         (scratch / directory).mkdir(mode=0o700)
-    env.update(HOME=str(scratch / 'home'), SHELL='/bin/sh', PS1='verify> ',
+    env.update(HOME=str(scratch / 'home'), SHELL=shell, PS1='verify> ',
                TERM='xterm-256color', XDG_RUNTIME_DIR=str(scratch / 'runtime'),
                XDG_CONFIG_HOME=str(scratch / 'config'), XDG_DATA_HOME=str(scratch / 'data'),
                XDG_STATE_HOME=str(scratch / 'state'),
                PRISMATTYC_CONFIG=str(scratch / 'config.toml'), PRISMATTYC_NO_AGENT_SKILLS='1')
+    if windows:
+        env.update(USERPROFILE=str(scratch / 'home'), APPDATA=str(scratch / 'config'),
+                   LOCALAPPDATA=str(scratch / 'data'))
     (scratch / 'config.toml').write_text('install_agent_skills = false\n')
     endpoint = scratch / 'runtime/feed.sock'
     daemon = tail = None
@@ -81,10 +90,26 @@ def main():
 
     def cli(*arguments):
         cli_env = dict(env, PMUX_SOCKET=str(endpoint))
-        completed = subprocess.run([str(bins / 'pmux'), *map(str, arguments)],
+        completed = subprocess.run([str(emitter), *map(str, arguments)],
                                    env=cli_env, cwd=scratch, capture_output=True,
                                    text=True, timeout=5, check=True)
         return completed.stdout
+
+    def emit(seat, *arguments, **options):
+        return subprocess.run([str(emitter), '--socket', str(endpoint), 'activity-emit',
+                               '--seat', seat, *map(str, arguments)],
+                              capture_output=True, text=True, env=env, timeout=8, **options)
+
+    def installed_hooks(file, seat, failure=False):
+        arguments = ['--install-hooks', file]
+        if failure:
+            arguments.append('--failure-hook')
+        first = emit(seat, *arguments)
+        first.check_returncode()
+        before = file.read_bytes()
+        second = emit(seat, *arguments)
+        second.check_returncode()
+        assert second.stdout.strip() == 'unchanged' and file.read_bytes() == before
 
     def screen():
         return cli('save-buffer', monitor_pane, '-')
@@ -95,10 +120,12 @@ def main():
 
     def start(enabled):
         nonlocal daemon
-        command = [str(bins / 'pmuxd'), '--socket', str(endpoint), '--cols', '120', '--rows', '24']
+        command = [str(bins / ('pmuxd' + suffix)), '--socket', str(endpoint), '--cols', '120', '--rows', '24']
         if enabled:
             command.append('--experimental-activity')
-        command += ['--', '/bin/sh']
+        command += ['--', shell]
+        if windows:
+            command += ['/Q', '/D']
         with (out / 'daemon.log').open('ab') as log:
             daemon = subprocess.Popen(command, cwd=scratch, env=env, stdout=log, stderr=log)
             direct_processes.append(daemon)
@@ -123,21 +150,23 @@ def main():
         for reply in [request('publish_activity', event=event(0)),
                       request('read_activity', cursor=None, limit=10)]:
             assert reply['status'] == 'error' and reply['error']['code'] == 'activity_disabled'
+        ignored = emit('worker-off', '--hook', input=json.dumps({
+            'hook_event_name': 'SessionStart', 'session_id': 'disabled-session'}))
+        assert ignored.returncode == 0 and ignored.stdout == '' and ignored.stderr == ''
         checks.append('disabled by default')
         stop()
         start(True)
         snapshot = request('snapshot')['response']['snapshot']
         monitor_pane = snapshot['sessions'][0]['windows'][0]['panes'][0]['id']
-        command = shlex.join([str(monitor), '--socket', str(endpoint)])
+        argv = [str(monitor), '--socket', str(endpoint)]
+        command = subprocess.list2cmdline(argv) if windows else shlex.join(argv)
         cli('send', monitor_pane, command, '--enter')
         wait(lambda: 'Activity monitor' in screen())
         before = request('snapshot')['response']['snapshot']
         hook = {'hook_event_name': 'PreToolUse', 'session_id': 'demo-session',
                 'tool_use_id': 'demo-call', 'tool_name': 'Bash',
                 'tool_input': {'command': 'do-not-retain-this-command'}}
-        emitted = subprocess.run([str(emitter), '--socket', str(endpoint), '--seat',
-                                  'worker-live', '--hook'], input=json.dumps(hook),
-                                 capture_output=True, text=True, env=env, timeout=5)
+        emitted = emit('worker-live', '--hook', input=json.dumps(hook))
         assert emitted.returncode == 0 and not emitted.stdout and not emitted.stderr
         live = wait(lambda: (text if 'worker-live' in (text := screen()) else None))
         assert 'command_started' in live
@@ -147,24 +176,76 @@ def main():
         assert 'do-not-retain' not in json.dumps(read())
         checks.append('adapter omits command arguments')
 
+        unfinished = subprocess.Popen([str(emitter), '--socket', str(endpoint), 'activity-emit',
+                                       '--seat', 'worker-timeout', '--hook'],
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, env=env)
+        direct_processes.append(unfinished)
+        unfinished.wait(timeout=5)
+        unfinished.stdin.close()
+        assert unfinished.returncode == 0 and unfinished.stdout.read() == b''
+        assert unfinished.stderr.read().strip() == b'activity observation unavailable'
+        checks.append('unfinished hook input times out without rejecting the observed action')
+
+        settings = scratch / 'installer.json'
+        settings.write_text(json.dumps({'hooks': {'SessionStart': [
+            {'hooks': [{'type': 'command', 'command': 'echo preserve-existing'}]}]}}))
+        installed_hooks(settings, 'worker-installed')
+        entry = json.loads(settings.read_text())['hooks']['SessionStart']
+        assert len(entry) == 2 and entry[0]['hooks'][0]['command'] == 'echo preserve-existing'
+        dispatched = subprocess.run(entry[1]['hooks'][0]['command'], shell=True, env=env,
+                                    input=json.dumps({'hook_event_name': 'SessionStart',
+                                                      'session_id': 'installed-session'}),
+                                    capture_output=True, text=True, timeout=8, check=True)
+        assert dispatched.stdout == '' and dispatched.stderr == ''
+        assert any(r['event']['seat'] == 'worker-installed' for r in read()['records'])
+        removed = emit('worker-installed', '--remove-hooks', settings)
+        removed.check_returncode()
+        assert json.loads(settings.read_text())['hooks']['SessionStart'] == [
+            {'hooks': [{'type': 'command', 'command': 'echo preserve-existing'}]}]
+        settings.write_text('{invalid')
+        rejected = emit('worker-installed', '--install-hooks', settings)
+        assert rejected.returncode != 0 and settings.read_text() == '{invalid'
+        checks.append('installed hook command works; repeated install/removal preserves other handlers')
+
         if args.producer_command:
-            substitutions = {'socket': str(endpoint), 'emitter': str(emitter), 'seat': 'worker-runner'}
+            hook_file = scratch / 'hooks.json'
+            counter = scratch / 'startup-count'
+            counter_script = scratch / 'count.py'
+            counter_script.write_text('from pathlib import Path\np=Path(' + repr(str(counter)) +
+                                      ')\np.write_text(str(int(p.read_text())+1) if p.exists() else "1")\n')
+            counter_args = [sys.executable, str(counter_script)]
+            counter_command = subprocess.list2cmdline(counter_args) if windows else shlex.join(counter_args)
+            hook_file.write_text(json.dumps({'hooks': {'SessionStart': [
+                {'hooks': [{'type': 'command', 'command': counter_command, 'timeout': 5}]}]}}))
+            installed_hooks(hook_file, 'worker-runner', args.producer_failure_hook)
+            substitutions = {'socket': str(endpoint), 'emitter': str(emitter), 'seat': 'worker-runner',
+                             'hooks': str(hook_file), 'project': str(scratch)}
             command = json.loads(args.producer_command.read_text())
             for key, value in substitutions.items():
                 command = [part.replace('{' + key + '}', value) for part in command]
             # Use ambient runner credentials, with a private socket and working directory.
             runner_env = {k: v for k, v in os.environ.items()
                           if not k.startswith(('PMUX', 'PRISMATTYC_', 'HIVE_'))}
+            watermark = read()['current_sequence']
             completed = subprocess.run(command, env=runner_env, cwd=scratch,
                                        capture_output=True, timeout=120)
             assert completed.returncode == 0, 'external producer failed'
             observed = wait(lambda: [r for r in read()['records']
-                                    if r['event']['seat'] == 'worker-runner'])
+                                    if r['sequence'] > watermark and r['event']['seat'] == 'worker-runner'])
             sources = sorted({r['event']['source'] for r in observed})
             assert any(source in ('notify', 'hooks') for source in sources)
             if args.producer_source:
                 assert args.producer_source in sources
             result['producer_sources'] = sources
+            assert counter.read_text() == '1', 'preexisting startup hook did not run exactly once'
+            emit('worker-runner', '--remove-hooks', hook_file).check_returncode()
+            after_first = read()['current_sequence']
+            completed = subprocess.run(command, env=runner_env, cwd=scratch,
+                                       capture_output=True, timeout=120)
+            assert completed.returncode == 0 and counter.read_text() == '2'
+            assert read()['current_sequence'] == after_first, 'removed activity hooks still emitted events'
+            result['producer_hooks_preserved'] = True
             checks.append('real external producer emitted an observed event')
 
         # Keyboard input to the viewer begins only after the live assertion.
@@ -202,10 +283,24 @@ def main():
                                 stderr=subprocess.PIPE)
         direct_processes.append(tail)
         tail_bytes = bytearray()
+        tail_lines = queue.Queue(maxsize=64)
+
+        def read_tail():
+            for line in iter(tail.stdout.readline, b''):
+                try:
+                    tail_lines.put(line, timeout=1)
+                except queue.Full:
+                    break
+
+        reader = threading.Thread(target=read_tail, daemon=True)
+        reader.start()
 
         def tail_observed():
-            if select.select([tail.stdout], [], [], .1)[0]:
-                tail_bytes.extend(os.read(tail.stdout.fileno(), 65536))
+            while True:
+                try:
+                    tail_bytes.extend(tail_lines.get_nowait())
+                except queue.Empty:
+                    break
             for line in tail_bytes.splitlines():
                 try:
                     value = json.loads(line)
@@ -222,7 +317,8 @@ def main():
         wait(tail_observed)
         tail.terminate()
         tail.wait(timeout=5)
-        assert tail.returncode == 0
+        reader.join(timeout=2)
+        assert tail.returncode == (1 if windows else 0)
         (out / 'connector-tail.jsonl').write_bytes(tail_bytes)
         checks.append('filtered JSON tail streams new events and exits on signal')
         page = read(limit=1)
@@ -270,6 +366,14 @@ def main():
             except (OSError, subprocess.SubprocessError):
                 pass
         stop()
+        for child in direct_processes:
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
         result['direct_processes_reaped'] = all(p.poll() is not None for p in direct_processes)
         shutil.rmtree(scratch)
         result['scratch_removed'] = not scratch.exists()

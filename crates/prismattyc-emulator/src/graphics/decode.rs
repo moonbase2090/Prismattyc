@@ -2,6 +2,8 @@
 //! allocating pixel buffers (decompression-bomb defense), then normalizes to
 //! 8-bit RGBA.
 
+use std::io::Read;
+
 #[derive(Debug, Clone)]
 pub(crate) struct DecodedImage {
     pub width: u32,
@@ -21,6 +23,75 @@ pub(crate) enum DecodeError {
     TooLarge,
     Format,
     Corrupt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RawFormat {
+    Rgb,
+    Rgba,
+}
+
+pub(crate) fn decode_raw_bounded(
+    bytes: &[u8],
+    format: RawFormat,
+    width: u32,
+    height: u32,
+    zlib: bool,
+    max: MaxDims,
+) -> Result<DecodedImage, DecodeError> {
+    if width == 0 || height == 0 || width > max.w || height > max.h {
+        return Err(DecodeError::TooLarge);
+    }
+    let pixels = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or(DecodeError::TooLarge)?;
+    let rgba_len = pixels.checked_mul(4).ok_or(DecodeError::TooLarge)?;
+    if rgba_len > max.bytes {
+        return Err(DecodeError::TooLarge);
+    }
+    let channels = match format {
+        RawFormat::Rgb => 3,
+        RawFormat::Rgba => 4,
+    };
+    let source_len = pixels.checked_mul(channels).ok_or(DecodeError::TooLarge)?;
+    let source = if zlib {
+        inflate_exact(bytes, source_len)?
+    } else {
+        if bytes.len() != source_len {
+            return Err(DecodeError::Corrupt);
+        }
+        bytes.to_vec()
+    };
+    let rgba = match format {
+        RawFormat::Rgba => source,
+        RawFormat::Rgb => {
+            let mut rgba = Vec::with_capacity(rgba_len);
+            for pixel in source.as_chunks::<3>().0 {
+                rgba.extend_from_slice(pixel);
+                rgba.push(0xff);
+            }
+            rgba
+        }
+    };
+    Ok(DecodedImage {
+        width,
+        height,
+        rgba,
+    })
+}
+
+fn inflate_exact(bytes: &[u8], expected: usize) -> Result<Vec<u8>, DecodeError> {
+    let limit = expected.checked_add(1).ok_or(DecodeError::TooLarge)?;
+    let decoder = flate2::read::ZlibDecoder::new(bytes);
+    let mut bounded = decoder.take(limit as u64);
+    let mut output = Vec::with_capacity(expected);
+    bounded
+        .read_to_end(&mut output)
+        .map_err(|_| DecodeError::Corrupt)?;
+    if output.len() != expected {
+        return Err(DecodeError::Corrupt);
+    }
+    Ok(output)
 }
 
 pub(crate) fn decode_png_bounded(bytes: &[u8], max: MaxDims) -> Result<DecodedImage, DecodeError> {
@@ -121,6 +192,7 @@ fn map_png_err(err: png::DecodingError) -> DecodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn png_channel_normalization_preserves_color_and_alpha_and_rejects_short_pixels() {
@@ -206,6 +278,46 @@ mod tests {
         assert!(matches!(
             decode_png_bounded(b"not a png", dims(2048, 1024)),
             Err(DecodeError::Format) | Err(DecodeError::Corrupt)
+        ));
+    }
+
+    #[test]
+    fn decodes_raw_rgb_and_rgba_to_rgba() {
+        let max = dims(2, 1);
+        let rgb =
+            decode_raw_bounded(&[1, 2, 3, 4, 5, 6], RawFormat::Rgb, 2, 1, false, max).unwrap();
+        assert_eq!(rgb.rgba, [1, 2, 3, 255, 4, 5, 6, 255]);
+
+        let rgba = decode_raw_bounded(&[1, 2, 3, 4], RawFormat::Rgba, 1, 1, false, max).unwrap();
+        assert_eq!(rgba.rgba, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn decodes_bounded_zlib_raw_pixels() {
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&[9, 8, 7, 6]).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let image =
+            decode_raw_bounded(&compressed, RawFormat::Rgba, 1, 1, true, dims(1, 1)).unwrap();
+        assert_eq!(image.rgba, [9, 8, 7, 6]);
+    }
+
+    #[test]
+    fn raw_decode_rejects_missing_pixels_and_expansion_past_dimensions() {
+        let max = dims(1, 1);
+        assert!(matches!(
+            decode_raw_bounded(&[1, 2, 3], RawFormat::Rgba, 1, 1, false, max),
+            Err(DecodeError::Corrupt)
+        ));
+
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&[1, 2, 3, 4, 5]).unwrap();
+        let compressed = encoder.finish().unwrap();
+        assert!(matches!(
+            decode_raw_bounded(&compressed, RawFormat::Rgba, 1, 1, true, max),
+            Err(DecodeError::Corrupt)
         ));
     }
 }

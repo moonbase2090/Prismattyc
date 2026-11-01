@@ -4307,6 +4307,23 @@ mod tests {
     }
 
     #[test]
+    fn feed_renders_lunatui_raw_rgba_upload_and_placement() {
+        let mut emulator = Emulator::new(80, 24, 0);
+        let stream = b"\x1b_Ga=t,i=7,f=32,s=1,v=1,q=2;AQIDBA==\x1b\\\
+                       \x1b[3;4H\x1b_Ga=p,i=7,p=1,c=10,r=4,z=-1,C=1,q=2\x1b\\";
+        let _ = emulator.feed(stream);
+
+        let stored = emulator.image_by_id(7).expect("Lunatui raw upload");
+        assert_eq!(&*stored.rgba, &[1, 2, 3, 4]);
+        let placed = emulator.images().first().expect("Lunatui placement");
+        assert_eq!(placed.id, 7);
+        assert_eq!(placed.placement_id, 1);
+        assert_eq!(placed.z, -1);
+        assert_eq!((placed.cols, placed.rows), (10, 4));
+        assert_eq!((placed.anchor_abs_line, placed.anchor_col), (2, 3));
+    }
+
+    #[test]
     fn feed_unicode_virtual_placement_and_placeholder_cells() {
         const RED_1X1_PNG_B64: &str =
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR42mP4z8AAAAMBAQD3A0FDAAAAAElFTkSuQmCC";

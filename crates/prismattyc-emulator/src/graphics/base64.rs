@@ -62,7 +62,7 @@ pub(crate) fn decode(input: &[u8]) -> Result<Vec<u8>, Base64Error> {
 
 /// Encode bytes as standard base64 (test helper only; the decoder above is
 /// the production path).
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) fn base64_encode_for_test(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);

@@ -10,14 +10,16 @@ use prismattyc_core::Screen;
 use prismattyc_protocol::GraphicsApc;
 use serde::{Deserialize, Serialize};
 
-use command::{Action, Transport};
-use decode::{decode_png_bounded, MaxDims};
+use command::{Action, Compression, Transport};
+use decode::{decode_png_bounded, decode_raw_bounded, DecodeError, MaxDims, RawFormat};
 
 const MAX_W: u32 = 2048;
 const MAX_H: u32 = 1024;
 const MAX_FRAME_BYTES: usize = 8 << 20; // 8 MiB
 const MAX_RETAINED_BYTES: usize = 16 << 20; // 16 MiB per generation
 const PNG_FORMAT: u16 = 100;
+const RGB_FORMAT: u16 = 24;
+const RGBA_FORMAT: u16 = 32;
 /// Nominal cell size (px) used when no viewer font is available (mux-server
 /// spawn, XTWINOPS before `set_cell_pixels`, Kitty grid footprint when the
 /// child omits `c=`/`r=`). The windowed host overwrites these from FontMetrics.
@@ -363,12 +365,12 @@ impl GraphicsState {
                 if auto_image_number && !cmd.continuation {
                     cmd.id = self.allocate_id();
                 }
-                if cmd.format != PNG_FORMAT && self.pending.is_none() {
-                    // First chunk of a non-PNG image: reject.
-                    if !cmd.more {
-                        trace_ignored(&apc.control, "unsupported image format");
-                        return;
-                    }
+                if !matches!(cmd.format, RGB_FORMAT | RGBA_FORMAT | PNG_FORMAT)
+                    && self.pending.is_none()
+                    && !cmd.more
+                {
+                    trace_ignored(&apc.control, "unsupported image format");
+                    return;
                 }
                 let completed = if cmd.more || self.pending.is_some() {
                     self.accumulate(&cmd, &apc.control, &apc.payload, screen)
@@ -397,8 +399,10 @@ impl GraphicsState {
             Action::Put => {
                 if cmd.unicode_placement {
                     self.upsert_virtual(&cmd);
+                } else if let Some(raster) = self.raster_for_command(&cmd) {
+                    self.place_raster(&cmd, &raster, screen);
                 } else {
-                    trace_ignored(&apc.control, "put without a unicode placement");
+                    trace_ignored(&apc.control, "put references an unknown image");
                 }
             }
             Action::Delete => self.delete(&cmd, screen, &apc.control),
@@ -423,8 +427,10 @@ impl GraphicsState {
         }
         // Start a new reassembly on a first chunk (carries the real control).
         if self.pending.is_none() {
-            if cmd.transport != Transport::Direct || cmd.format != PNG_FORMAT {
-                trace_ignored(control, "chunked upload is not inline PNG");
+            if cmd.transport != Transport::Direct
+                || !matches!(cmd.format, RGB_FORMAT | RGBA_FORMAT | PNG_FORMAT)
+            {
+                trace_ignored(control, "unsupported chunked upload");
                 return Some((*cmd, false));
             }
             self.pending = Some(Pending {
@@ -467,7 +473,7 @@ impl GraphicsState {
             h: MAX_H,
             bytes: MAX_FRAME_BYTES,
         };
-        let Ok(img) = decode_png_bounded(&raw, max) else {
+        let Ok(img) = decode_image(cmd, &raw, max) else {
             return false;
         };
         self.store(cmd, img, screen)
@@ -496,7 +502,7 @@ impl GraphicsState {
             h: MAX_H,
             bytes: MAX_FRAME_BYTES,
         };
-        let Ok(img) = decode_png_bounded(&raw, max) else {
+        let Ok(img) = decode_image(cmd, &raw, max) else {
             return false;
         };
         self.store(cmd, img, screen)
@@ -530,28 +536,66 @@ impl GraphicsState {
         if !cmd.place {
             return true;
         }
+        self.place_raster(cmd, &raster, screen);
+        true
+    }
+
+    fn raster_for_command(&self, cmd: &command::GraphicsCommand) -> Option<StoredImage> {
+        if cmd.id != 0 {
+            self.registry
+                .iter()
+                .find(|image| image.id == cmd.id)
+                .cloned()
+        } else {
+            let number = cmd.image_number?;
+            self.registry
+                .iter()
+                .rev()
+                .find(|image| image.image_number == Some(number))
+                .cloned()
+        }
+    }
+
+    fn place_raster(
+        &mut self,
+        cmd: &command::GraphicsCommand,
+        raster: &StoredImage,
+        screen: &Screen,
+    ) {
+        let screen_cols = screen.columns() as u16;
+        let screen_rows = screen.rows() as u16;
+        let cols = if cmd.cols > 0 {
+            cmd.cols.min(screen_cols.max(1))
+        } else {
+            (raster.width.div_ceil(NOMINAL_CELL_W_PX) as u16).clamp(1, screen_cols.max(1))
+        };
+        let rows = if cmd.rows > 0 {
+            cmd.rows.min(screen_rows.max(1))
+        } else {
+            (raster.height.div_ceil(NOMINAL_CELL_H_PX) as u16).clamp(1, screen_rows.max(1))
+        };
         let cursor = screen.cursor();
         let anchor_abs_line = screen.scrolled_lines() + cursor.row as u64;
         if let Some(slot) = self
             .images
             .iter_mut()
-            .find(|p| p.id == cmd.id && cmd.id != 0)
+            .find(|placed| placed.id == raster.id && placed.placement_id == cmd.placement_id)
         {
             slot.rgba = Arc::clone(&raster.rgba);
             slot.width = raster.width;
             slot.height = raster.height;
-            slot.image_number = cmd.image_number;
+            slot.image_number = raster.image_number;
             slot.placement_id = cmd.placement_id;
             slot.z = cmd.z.unwrap_or(0);
             slot.cols = cols;
             slot.rows = rows;
             slot.anchor_abs_line = anchor_abs_line;
             slot.anchor_col = cursor.column as u16;
-            return true;
+            return;
         }
         self.images.push(PlacedImage {
-            id: cmd.id,
-            image_number: cmd.image_number,
+            id: raster.id,
+            image_number: raster.image_number,
             placement_id: cmd.placement_id,
             z: cmd.z.unwrap_or(0),
             rgba: Arc::clone(&raster.rgba),
@@ -562,7 +606,6 @@ impl GraphicsState {
             anchor_abs_line,
             anchor_col: cursor.column as u16,
         });
-        true
     }
 
     fn upsert_raster(
@@ -782,11 +825,40 @@ impl GraphicsState {
     }
 }
 
+fn decode_image(
+    cmd: &command::GraphicsCommand,
+    bytes: &[u8],
+    max: MaxDims,
+) -> Result<decode::DecodedImage, DecodeError> {
+    match (cmd.format, cmd.compression) {
+        (PNG_FORMAT, Compression::None) => decode_png_bounded(bytes, max),
+        (RGB_FORMAT | RGBA_FORMAT, Compression::None | Compression::Zlib) => {
+            let width = cmd.pixel_width.ok_or(DecodeError::Format)?;
+            let height = cmd.pixel_height.ok_or(DecodeError::Format)?;
+            let format = if cmd.format == RGB_FORMAT {
+                RawFormat::Rgb
+            } else {
+                RawFormat::Rgba
+            };
+            decode_raw_bounded(
+                bytes,
+                format,
+                width,
+                height,
+                cmd.compression == Compression::Zlib,
+                max,
+            )
+        }
+        _ => Err(DecodeError::Format),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use prismattyc_core::Screen;
     use prismattyc_protocol::GraphicsApc;
+    use std::io::Write;
 
     const RED_1X1_PNG_B64: &str =
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR42mP4z8AAAAMBAQD3A0FDAAAAAElFTkSuQmCC";
@@ -884,6 +956,93 @@ mod tests {
         assert_eq!(img.id, 5);
         assert_eq!((img.width, img.height), (1, 1));
         assert_eq!(img.rgba.len(), 4);
+    }
+
+    #[test]
+    fn lunatui_raw_rgba_transmit_preserves_pixels() {
+        let mut g = GraphicsState::new();
+        let screen = Screen::new(80, 24, 0);
+        let mut replies = Vec::new();
+        g.handle(
+            &apc("a=t,i=7,f=32,s=1,v=1,q=2", "AQIDBA=="),
+            &screen,
+            &mut replies,
+        );
+
+        let image = g.image_by_id(7).expect("raw RGBA image");
+        assert_eq!((image.width, image.height), (1, 1));
+        assert_eq!(&*image.rgba, &[1, 2, 3, 4]);
+        assert!(g.images().is_empty(), "a=t must not place at the cursor");
+        assert!(replies.is_empty(), "q=2 suppresses replies");
+    }
+
+    #[test]
+    fn raw_rgb_transmit_adds_opaque_alpha() {
+        let mut g = GraphicsState::new();
+        let screen = Screen::new(80, 24, 0);
+        let mut replies = Vec::new();
+        g.handle(
+            &apc("a=t,i=8,f=24,s=2,v=1,q=2", "ChQeKDI8"),
+            &screen,
+            &mut replies,
+        );
+
+        let image = g.image_by_id(8).expect("raw RGB image");
+        assert_eq!(&*image.rgba, &[10, 20, 30, 255, 40, 50, 60, 255]);
+    }
+
+    #[test]
+    fn zlib_raw_rgba_transmit_decodes_pixels() {
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&[9, 8, 7, 6]).unwrap();
+        let payload = base64::base64_encode_for_test(&encoder.finish().unwrap());
+        let mut g = GraphicsState::new();
+        let screen = Screen::new(80, 24, 0);
+        let mut replies = Vec::new();
+        g.handle(
+            &apc("a=t,i=9,f=32,s=1,v=1,o=z,q=2", &payload),
+            &screen,
+            &mut replies,
+        );
+
+        let image = g.image_by_id(9).expect("zlib raw RGBA image");
+        assert_eq!(&*image.rgba, &[9, 8, 7, 6]);
+    }
+
+    #[test]
+    fn chunked_raw_rgba_uses_first_chunk_dimensions() {
+        let payload = base64::base64_encode_for_test(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let (first, last) = payload.split_at(4);
+        let mut g = GraphicsState::new();
+        let screen = Screen::new(80, 24, 0);
+        let mut replies = Vec::new();
+        g.handle(
+            &apc("a=t,i=10,f=32,s=2,v=1,q=2,m=1", first),
+            &screen,
+            &mut replies,
+        );
+        assert!(g.image_by_id(10).is_none());
+        g.handle(&apc("m=0", last), &screen, &mut replies);
+
+        let image = g.image_by_id(10).expect("chunked raw RGBA image");
+        assert_eq!(&*image.rgba, &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn raw_transmit_rejects_missing_dimensions_bad_length_and_unknown_compression() {
+        let controls = [
+            "a=t,i=11,f=32,v=1,q=2",
+            "a=t,i=11,f=32,s=1,v=1,q=2",
+            "a=t,i=11,f=32,s=1,v=1,o=x,q=2",
+        ];
+        let payloads = ["AQIDBA==", "AQID", "AQIDBA=="];
+        for (control, payload) in controls.into_iter().zip(payloads) {
+            let mut g = GraphicsState::new();
+            let screen = Screen::new(80, 24, 0);
+            g.handle(&apc(control, payload), &screen, &mut Vec::new());
+            assert!(g.image_by_id(11).is_none(), "accepted {control}");
+        }
     }
 
     #[test]
@@ -1224,14 +1383,17 @@ mod tests {
     }
 
     #[test]
-    fn put_without_unicode_is_ignored() {
+    fn put_places_existing_image_at_cursor() {
         let mut g = GraphicsState::new();
         let screen = Screen::new(80, 24, 0);
         let mut r = Vec::new();
         g.handle(&apc("a=t,t=d,f=100,i=4", RED_1X1_PNG_B64), &screen, &mut r);
-        g.handle(&apc("a=p,i=4,c=2,r=1", ""), &screen, &mut r);
+        g.handle(&apc("a=p,i=4,p=2,c=2,r=1,z=-1,C=1", ""), &screen, &mut r);
         assert!(g.virtual_placement(4, 0).is_none());
-        assert!(g.images().is_empty());
+        assert_eq!(g.images().len(), 1);
+        assert_eq!(g.images()[0].placement_id, 2);
+        assert_eq!(g.images()[0].z, -1);
+        assert_eq!((g.images()[0].cols, g.images()[0].rows), (2, 1));
         assert!(g.image_by_id(4).is_some());
     }
 

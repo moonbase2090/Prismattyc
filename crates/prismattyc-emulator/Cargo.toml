@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+flate2 = "1"
 libc = "0.2"
 portable-pty.workspace = true
 png = "0.17"

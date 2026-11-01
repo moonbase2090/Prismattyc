@@ -19,6 +19,7 @@ pub(super) enum Section {
     Colors,
     Remote,
     Mux,
+    Plugins,
     Keybindings,
     Advanced,
 }
@@ -35,6 +36,7 @@ impl Section {
         Self::Colors,
         Self::Remote,
         Self::Mux,
+        Self::Plugins,
         Self::Keybindings,
         Self::Advanced,
     ];
@@ -51,6 +53,7 @@ impl Section {
             Self::Colors => "Theme colors",
             Self::Remote => "Remote destinations",
             Self::Mux => "Multiplexer",
+            Self::Plugins => "Plug-ins",
             Self::Keybindings => "Keybindings",
             Self::Advanced => "Advanced",
         }

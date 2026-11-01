@@ -12,6 +12,7 @@ enum Choice {
     Command(Vec<String>),
     None,
     Settings,
+    Plugins,
     Preference(String, String),
     Layout(config::LayoutMode),
     Messages,
@@ -292,6 +293,11 @@ impl Panel {
                     "Enable full settings (preview)",
                     "Configure all preferences with arrow keys",
                     Choice::Preference("settings_panel".into(), "true".into()),
+                );
+                self.row(
+                    "Plug-ins",
+                    "Install verified packages and manage activity access",
+                    Choice::Plugins,
                 );
                 for side in ["bottom", "left", "top", "right"] {
                     self.row(
@@ -1080,6 +1086,7 @@ pub(super) fn activate(host: &mut HostState, index: usize) {
             panel.page = Page::Settings;
             panel.rebuild();
         }
+        Choice::Plugins => crate::settings::open_plugins(host),
         Choice::Messages => show_messages(host),
         Choice::Preference(key, value) => {
             let saved = if key == "spaces.autosave" {

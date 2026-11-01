@@ -3,6 +3,7 @@
 
 mod controls;
 mod fonts;
+mod plugins;
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
@@ -88,6 +89,7 @@ pub(super) enum InputResult {
 }
 
 pub(super) struct Panel {
+    plugins: plugins::Page,
     path: PathBuf,
     wake: crate::mux::Wake,
     document: toml_edit::DocumentMut,
@@ -115,6 +117,7 @@ impl Panel {
             Err(error) => return Err(error).context("read settings"),
         };
         Ok(Self {
+            plugins: plugins::Page::new(),
             path: path.to_path_buf(),
             wake: std::sync::Arc::new(|| {}),
             document: raw.parse()?,
@@ -144,6 +147,14 @@ impl Panel {
             .collect()
     }
 
+    fn row_count(&self) -> usize {
+        if Section::ALL[self.section] == Section::Plugins {
+            self.plugins.rows().len()
+        } else {
+            self.indices().len()
+        }
+    }
+
     fn configured(&self, control: &Control) -> Option<toml::Value> {
         crate::config_document::value_at(&self.values, &control.paths[0]).cloned()
     }
@@ -160,6 +171,15 @@ impl Panel {
     }
 
     fn root_rows(&self) -> Vec<PaletteRow> {
+        if Section::ALL[self.section] == Section::Plugins {
+            let mut rows = vec![PaletteRow::plain(
+                "Plug-ins".into(),
+                self.plugins.notice().into(),
+                String::new(),
+            )];
+            rows.extend(self.plugins.rows());
+            return rows;
+        }
         let mut rows = vec![PaletteRow::plain(
             Section::ALL[self.section].label().into(),
             if self.notice.is_empty() {
@@ -258,7 +278,7 @@ impl Panel {
                 editor.cursor = EditorFocus::Row(index.min(editor_len.saturating_sub(1)))
             }
             _ => {
-                let row = (index.saturating_sub(1)).min(self.indices().len().saturating_sub(1));
+                let row = (index.saturating_sub(1)).min(self.row_count().saturating_sub(1));
                 self.focus = if index == 0 {
                     Focus::Sections
                 } else {
@@ -365,11 +385,38 @@ impl Panel {
                 }
                 Key::Named(NamedKey::ArrowDown | NamedKey::Enter) => {
                     self.focus = Focus::Rows(
-                        self.remembered[self.section].min(self.indices().len().saturating_sub(1)),
+                        self.remembered[self.section].min(self.row_count().saturating_sub(1)),
                     )
                 }
                 _ => {}
             },
+            Focus::Rows(mut row) if Section::ALL[self.section] == Section::Plugins => {
+                row = row.min(self.row_count().saturating_sub(1));
+                self.focus = Focus::Rows(row);
+                match key {
+                    Key::Named(NamedKey::Escape) => self.focus = Focus::Sections,
+                    Key::Named(NamedKey::ArrowUp) => {
+                        self.focus = if row == 0 {
+                            Focus::Sections
+                        } else {
+                            Focus::Rows(row - 1)
+                        }
+                    }
+                    Key::Named(NamedKey::ArrowDown) => {
+                        self.focus = Focus::Rows((row + 1).min(self.row_count().saturating_sub(1)))
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        if self.plugins.activate(row) {
+                            self.focus = Focus::Rows(0);
+                            self.scroll = 0;
+                        }
+                    }
+                    _ => {}
+                }
+                if let Focus::Rows(row) = self.focus {
+                    self.remembered[self.section] = row;
+                }
+            }
             Focus::Rows(mut row) => {
                 let indices = self.indices();
                 row = row.min(indices.len().saturating_sub(1));
@@ -414,6 +461,9 @@ impl Panel {
                     self.focus = Focus::Editing(editor);
                 }
             }
+        }
+        if Section::ALL[self.section] == Section::Plugins {
+            self.plugins.enter();
         }
         false
     }
@@ -625,7 +675,7 @@ impl Panel {
     /// Receipts settle on completion; no exact watcher-revision equality wait.
     /// The watcher may legitimately coalesce several saves into a later snapshot.
     pub fn poll(&mut self) -> (bool, bool) {
-        let mut changed = false;
+        let mut changed = self.plugins.poll();
         let editing_text = matches!(
             self.focus,
             Focus::Editing(Editor {
@@ -1436,6 +1486,9 @@ pub(super) fn open(host: &mut crate::HostState) {
         }
     };
     panel.wake = host.ui_wake.clone();
+    panel
+        .plugins
+        .bind(crate::host_mux_socket(), host.ui_wake.clone());
     panel.effective_font = host.font.primary_name().to_string();
     host.palette = None;
     host.theme_picker = None;
@@ -1457,6 +1510,21 @@ pub(super) fn open(host: &mut crate::HostState) {
     host.window.set_title("Prismattyc — settings");
     host.dirty = true;
     host.window.request_redraw();
+}
+
+pub(super) fn open_plugins(host: &mut crate::HostState) {
+    open(host);
+    if let Some(panel) = host.settings.as_mut() {
+        panel.section = Section::ALL
+            .iter()
+            .position(|section| *section == Section::Plugins)
+            .expect("plug-in section");
+        panel.focus = Focus::Rows(0);
+        panel.plugins.enter();
+        if let Some(menu) = host.context_menu.as_mut() {
+            menu.selected = panel.selected();
+        }
+    }
 }
 
 pub(super) fn handle_key(host: &mut crate::HostState, event: &winit::event::KeyEvent) -> bool {

@@ -70,10 +70,12 @@ commit `87367051b21e89b4c367555fbc8d477396dc33e4`. At that baseline:
 | [Daemon startup and control](control-plane.md) | App, CLI and login start the same authoritative daemon. Existing socket clients have same-user trust and broad control operations. |
 | [Updates and restart](update-and-restart.md) | Installed and running code can differ; live sessions must not be stopped implicitly. |
 
-The separate `0.3.54` monitor/configuration release proceeds independently.
-Its final setting name, live-apply behavior, package paths and launcher behavior
-must be recorded from its merged source before implementation. This proposal
-does not claim those details have shipped or require that release to wait.
+The separate `0.3.54` monitor/configuration delivery proceeds independently.
+Its [configuration and packaging PR](https://github.com/moonbase2090/Prismattyc/pull/408)
+at `470073f5e64e2f86d2411dc1c4c7406deb245e53` establishes the migration contract
+below. That PR is unmerged at the time of this update, and its release version
+bump is separate. Confirm the final merged source before implementation;
+neither this proposal nor the plug-in port gates that delivery.
 
 The new work is a reusable package, API, permission and lifecycle contract.
 Activity metadata is its first data capability. Installation and invocation
@@ -437,26 +439,39 @@ deadline is terminated and reaped. See
 
 ## App-managed activity collection
 
-The app's default-off Activity feed preference is the durable collection
-choice. App startup, `pmux up`, login supervision and restart must resolve the
-same setting. A plug-in may report disabled collection but cannot change it.
-Hooks are not installed by enabling a reader.
+Preserve the shared configuration key from the independent delivery:
 
-For a compatible live daemon, propose a trusted administrative reconcile
-operation that applies the saved preference without stopping sessions. On
-repeated enable it preserves the current epoch. On disable it rejects reads
-and publication and clears retained history; reenable creates a fresh epoch.
-These are proposed semantics requiring reconciliation with the final
-`0.3.54` source, not claims about that release. Do not introduce a second config
-key or silently reinterpret its existing preference.
+```toml
+[mux]
+experimental_activity = false
+```
 
-The app/CLI reports `restart_required` when a version/capability probe establishes
-that the running daemon cannot reconcile the preference. An older daemon cannot
-be expected to return this new status itself. Transport failure, malformed
-requests and `activity_disabled` alone do not establish restart requirements.
-The app shows the pending state and uses the existing safe restart flow. It
-never stops live sessions merely to enable the monitor. Startup-flag plumbing
-alone is insufficient because current `pmux up` returns early for a live daemon.
+The default is false; true opts into metadata collection. pmuxd reads this
+setting once during startup. The existing `--experimental-activity` flag also
+works; either a true key or the flag enables the feed. An unreadable config
+retains the default-off setting, while an explicit flag can still enable it.
+The settings editor lists the key under Mux with the timing "Next daemon start;
+no automatic restart".
+
+Reading inside pmuxd covers app-managed startup, `pmux up`, login restore and
+restart without another feed daemon. Changing the key does not alter or restart
+a running daemon. Plug-in v1 preserves that behavior and adds no live feed
+reconfiguration request. The current `pmux up` returns early for a live daemon;
+calling it again does not apply a changed key.
+
+Settings and the plug-in view must distinguish the saved preference from the
+running feed state. Saving true while the feed is off leaves it off until the
+next daemon start. Saving false while it is on does not immediately stop reads,
+publication or retained history; an explicit startup flag can also keep it on
+at the next start. The feed remains process-local, so a daemon restart discards
+its old history and creates a fresh epoch if collection starts enabled.
+
+A plug-in may report `feed_disabled` and explain the setting's startup timing,
+but cannot change it or restart pmuxd. The native monitor's disabled hint names
+the key and supplies no restart command. Enabling a reader installs no hooks.
+Do not introduce a second key, promise immediate disable/erasure, or stop live
+sessions to apply this setting. Future live reconfiguration requires a separate
+design decision.
 
 ## Cross-platform distribution
 
@@ -464,6 +479,21 @@ The same standard component package runs on supported Mac, Windows and Linux
 hosts. The native manager, worker mode and presenter ship with the corresponding
 core binaries through existing [release packaging](release-process.md).
 Plug-in versions do not share the app version or MSI ProductVersion.
+
+The native monitor delivery being migrated has these packaging contracts:
+
+| Platform | Existing delivery contract to retain at cutover |
+| --- | --- |
+| macOS | `Prismattyc.app/Contents/MacOS/pmux-activity-monitor`, with a PATH link beside the pmux link. The independent `.pmux-activity-monitor-prismattyc-shim.json` ownership record controls link removal during uninstall. |
+| Linux | A separate monitor release asset and tarball `bin/` executable, installed with its man page by `install.sh`. The current per-binary `pmux update` does not fetch it. |
+| Windows | ZIP/MSI `bin/pmux-activity-monitor.exe`, plus a `cmd/` forwarder on the MSI PATH. |
+
+Its `--version` reports the Prismattyc release. Keep that launcher contract;
+`pmux plugin inspect` separately reports the selected plug-in package version.
+The monitor is deliberately outside `release_update::BINARIES` because older
+installation/rollback paths require all binaries in that fixed list. Account
+for updater-only installations during the later migration; do not add a new
+mandatory core binary merely to install a plug-in package.
 
 Installed plug-ins live under the platform user data directory in a private
 `prismattyc/plugins` store. They remain outside the signed macOS app bundle,
@@ -498,9 +528,10 @@ be compiled for WASI unchanged. The pinned terminal library has an unsupported
 third-target session stub. Reuse pure model/layout/query code only where an
 actual component compile/render spike proves it works.
 
-1. Let the independent `0.3.54` delivery finish. Capture its exact config,
-   launch and packaging contracts. Resolve any feed hot-change/erasure
-   difference before implementation.
+1. Let the independent `0.3.54` delivery finish and confirm its final source
+   against the recorded configuration, startup-only application and packaging
+   contracts. Preserve the existing key and flag precedence without a new
+   live-change or erasure operation.
 2. Prove the generic runtime and version/grant lifecycle with a small fixture
    component unrelated to activity. Prove host-rendered cells/images on all
    packaged targets before committing to the monitor port.
@@ -529,7 +560,10 @@ actual component compile/render spike proves it works.
    direct socket/query engine from distributed consumers in that delivery.
    A missing/disabled package produces installation/enable guidance, never a
    sibling/PATH or standalone bypass. Keep the usable shipped monitor until
-   replacement parity is proven.
+   replacement parity is proven. Preserve owned PATH-link removal, MSI
+   forwarders, man-page installation and launcher `--version`. Prove migration
+   for Linux per-binary-updater users so a stale native monitor cannot become
+   an unintended unmanaged path.
 
 No implementation step above is part of this documentation change. The held
 connector stays held until the owner agrees to the plug-in interface.
@@ -558,8 +592,6 @@ Owner review should decide whether to accept:
 - Host-rendered cell/RGBA views and the resulting monitor adaptation cost.
 - Official-source packages first, explicit grants and updates, and no additional
   catalog/local-import policy until separately reviewed.
-- The proposed live feed-disable/erasure semantics after comparison with the
-  independently shipped configuration contract.
 
 The first authorized implementation unit, after approval, should test runtime
 compatibility, signed worker launch and rendering portability. It may reject
@@ -580,9 +612,11 @@ The eventual implementation needs real packaged behavior proof:
   interrupted upgrade leave saved disabled state authoritative and unrelated
   sessions usable. Calls are never replayed. Two daemon instances retain
   independent grants and selections.
-- App-managed collection works at app/login/CLI startup and for live compatible
-  daemons. Older daemons report pending restart without session loss. Turning
-  the feed off stops reads/publication under the approved semantics.
+- App-managed collection honors the key and explicit flag at app/login/CLI
+  startup, including default-off and unreadable-config cases. Saving true or
+  false leaves a running daemon unchanged and causes no automatic
+  restart. Display the actual state and next-start timing without promising
+  immediate collection shutdown or history erasure.
 - Both first packages preserve actual monitor cell/pixel/input/resize/snapshot
   behavior and connector cursor/reset/watermark/router behavior on the shipped
   Mac, Windows and Linux matrix. Core/plugin upgrade and rollback are exercised

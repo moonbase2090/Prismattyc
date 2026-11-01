@@ -177,6 +177,60 @@ def foreground(f):
     return {"case": "foreground", "command": "resumed", "policy_change": "honored", "result": "PASS"}
 
 
+def stable_replay_command(f):
+    tools = f.root / "agent-bin"
+    tools.mkdir()
+    old_binary = tools / "fixture-agent-1.2.3"
+    new_binary = tools / "fixture-agent-2.0.0"
+    stable_binary = tools / "fixture-agent"
+    shutil.copy2("/bin/sleep", old_binary)
+    stable_binary.symlink_to(old_binary.name)
+    f.env["PATH"] = str(tools) + ":" + f.env["PATH"]
+
+    daemon = f.daemon()
+    f.cli("new", "--no-attach", "--agent", "worker", "stable-replay", "--", "/bin/sh", "-i")
+    pane = next(s for s in f.snapshot() if s["name"] == "stable-replay")["windows"][0]["panes"][0]["id"]
+    f.cli("send", pane, f"{old_binary} 117", "--enter")
+
+    def foreground_command_checkpoint():
+        files = list((f.root / "data/prismattyc/workspaces").glob("*/workspace.json"))
+        if not files:
+            return None
+        saved = json.loads(files[0].read_text())
+        session = next(s for s in saved["sessions"] if s["name"] == "stable-replay")
+        command = session["windows"][0]["panes"][0].get("resume_command", "")
+        return (files[0], command) if "117" in command else None
+
+    checkpoint, captured_command = wait_for(foreground_command_checkpoint,
+                                            "foreground command checkpoint")
+    assert captured_command == "fixture-agent 117", captured_command
+    saved = json.loads(checkpoint.read_text())
+    session = next(s for s in saved["sessions"] if s["name"] == "stable-replay")
+    assert session["windows"][0]["panes"][0]["resume_command"] == "fixture-agent 117"
+
+    f.kill(daemon)
+    shutil.copy2("/bin/sleep", new_binary)
+    stable_binary.unlink()
+    stable_binary.symlink_to(new_binary.name)
+    old_binary.unlink()
+    f.daemon()
+
+    def updated_binary_running():
+        current = next(s for s in f.snapshot() if s["name"] == "stable-replay")["windows"][0]["panes"][0]
+        root = current["child_pid"]
+        processes = subprocess.check_output(["ps", "-axo", "pid=,ppid=,command="], text=True)
+        children = [line.strip().split(None, 2) for line in processes.splitlines()]
+        descendants = {root}
+        for _ in range(8):
+            descendants.update(int(pid) for pid, parent, _ in children if int(parent) in descendants)
+        return any(int(pid) in descendants and "fixture-agent 117" in command
+                   for pid, _, command in children)
+
+    wait_for(updated_binary_running, "stable command replayed through updated symlink")
+    return {"case": "stable-replay", "saved_command": "fixture-agent 117",
+            "updated_binary": "resumed", "result": "PASS"}
+
+
 def topology(sessions):
     return [(s["id"], s["name"], s.get("agent_id"), s.get("space_id"),
              [(w["id"], w["title"], w["layout"], [p["id"] for p in w["panes"]]) for w in s["windows"]])
@@ -361,18 +415,19 @@ def service(f):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bins", type=Path, required=True)
-    parser.add_argument("--case", choices=["single-instance", "concurrent", "foreground", "reboot", "supervisor", "new-install", "migration", "corrupt", "service", "all"], default="all")
+    parser.add_argument("--case", choices=["single-instance", "concurrent", "foreground", "stable-replay", "reboot", "supervisor", "new-install", "migration", "corrupt", "service", "all"], default="all")
     parser.add_argument("--host", action="store_true")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--capture", type=Path)
     args = parser.parse_args()
     bins = args.bins.resolve()
-    for name in ([args.case] if args.case != "all" else ["single-instance", "concurrent", "foreground", "reboot", "supervisor", "new-install", "migration", "corrupt"]):
+    for name in ([args.case] if args.case != "all" else ["single-instance", "concurrent", "foreground", "stable-replay", "reboot", "supervisor", "new-install", "migration", "corrupt"]):
         with tempfile.TemporaryDirectory(prefix="plogin-", dir="/tmp") as directory:
             fixture = Fixture(bins, Path(directory).resolve())
             try:
                 result = {"single-instance": lambda: single_instance(fixture),
                           "concurrent": lambda: concurrent_up(fixture), "foreground": lambda: foreground(fixture),
+                          "stable-replay": lambda: stable_replay_command(fixture),
                           "reboot": lambda: reboot(fixture, args.host, args.capture),
                           "supervisor": lambda: supervisor(fixture), "new-install": lambda: new_install(fixture),
                           "migration": lambda: migration(fixture, args.host),

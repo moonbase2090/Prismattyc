@@ -5,6 +5,8 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::ffi::OsStr;
+#[cfg(not(windows))]
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// Whether `/proc/<pid>` (Linux) or `kill(pid, 0)` says the pid exists.
@@ -168,10 +170,10 @@ fn foreground_command_impl(root: u32) -> Option<String> {
             // look like a child here.
             let args = cmdline_strings(root)?;
             if !is_shell_argv(&args) {
-                return Some(shell_join(&args));
+                return Some(unix_replay_command(root, args));
             }
             let child = first_non_shell_descendant(root)?;
-            cmdline_strings(child).map(|args| shell_join(&args))
+            cmdline_strings(child).map(|args| unix_replay_command(child, args))
         }
         TtyForeground::Unknown => None,
     }
@@ -280,7 +282,7 @@ fn command_in_foreground_pgid(root: u32, tpgid: u32) -> Option<String> {
         .copied()
         .find(|pid| *pid == tpgid)
         .unwrap_or(non_shell[0]);
-    cmdline_strings(pick).map(|args| shell_join(&args))
+    cmdline_strings(pick).map(|args| unix_replay_command(pick, args))
 }
 
 #[cfg(not(windows))]
@@ -309,6 +311,115 @@ fn cmdline_strings(pid: u32) -> Option<Vec<String>> {
             .map(|arg| String::from_utf8_lossy(&arg).into_owned())
             .collect(),
     )
+}
+
+#[cfg(not(windows))]
+fn unix_replay_command(pid: u32, mut args: Vec<String>) -> String {
+    if let Some(program) = args
+        .first()
+        .and_then(|program| stable_program_name(pid, program))
+    {
+        args[0] = program;
+    }
+    shell_join(&args)
+}
+
+#[cfg(not(windows))]
+fn stable_program_name(pid: u32, program: &str) -> Option<String> {
+    let program_path = Path::new(program);
+    if !program_path.is_absolute() {
+        return None;
+    }
+    let versioned_name = program_path.file_name()?.to_str()?;
+    let target = program_path.canonicalize().ok()?;
+    let process_path = process_path(pid)?;
+
+    for alias in version_alias_candidates(versioned_name) {
+        for directory in std::env::split_paths(&process_path) {
+            let directory = if directory.as_os_str().is_empty() {
+                let Some(cwd) = cwd_of(pid) else {
+                    continue;
+                };
+                cwd
+            } else {
+                directory
+            };
+            let candidate = directory.join(&alias);
+            let Ok(metadata) = candidate.metadata() else {
+                continue;
+            };
+            if !is_executable(&metadata) {
+                continue;
+            }
+
+            // The first executable with this name is what the shell will run.
+            // Only trust a real symlink to the process we inspected; do not
+            // reinterpret hard links or multi-call binary aliases.
+            return candidate
+                .symlink_metadata()
+                .ok()
+                .is_some_and(|metadata| metadata.file_type().is_symlink())
+                .then(|| candidate.canonicalize().ok())
+                .flatten()
+                .filter(|resolved| *resolved == target)
+                .map(|_| alias);
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn is_executable(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn is_executable(_metadata: &std::fs::Metadata) -> bool {
+    true
+}
+
+#[cfg(not(windows))]
+fn version_alias_candidates(versioned_name: &str) -> Vec<String> {
+    versioned_name
+        .char_indices()
+        .filter_map(|(index, separator)| {
+            if !matches!(separator, '-' | '_' | '.' | '@') {
+                return None;
+            }
+            let suffix = &versioned_name[index + separator.len_utf8()..];
+            let version = suffix.strip_prefix('v').unwrap_or(suffix);
+            version
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_digit)
+                .then(|| versioned_name[..index].to_string())
+        })
+        .filter(|alias| !alias.is_empty())
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn process_path(pid: u32) -> Option<OsString> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let raw = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    let path = raw
+        .split(|byte| *byte == 0)
+        .find_map(|entry| entry.strip_prefix(b"PATH="))?;
+    Some(OsString::from_vec(path.to_vec()))
+}
+
+#[cfg(target_os = "macos")]
+fn process_path(pid: u32) -> Option<OsString> {
+    use std::os::unix::ffi::OsStringExt;
+
+    macos::path(pid).map(OsString::from_vec)
+}
+
+#[cfg(all(not(windows), not(any(target_os = "linux", target_os = "macos"))))]
+fn process_path(_pid: u32) -> Option<OsString> {
+    None
 }
 
 fn is_shell_argv(args: &[String]) -> bool {
@@ -582,6 +693,14 @@ mod macos {
     use std::ptr;
 
     pub(super) fn procargs(pid: u32) -> Option<Vec<Vec<u8>>> {
+        procargs_and_path(pid).map(|(args, _)| args)
+    }
+
+    pub(super) fn path(pid: u32) -> Option<Vec<u8>> {
+        procargs_and_path(pid).and_then(|(_, path)| path)
+    }
+
+    fn procargs_and_path(pid: u32) -> Option<(Vec<Vec<u8>>, Option<Vec<u8>>)> {
         let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as i32];
         let mut size = 0usize;
         unsafe {
@@ -639,7 +758,24 @@ mod macos {
                 break;
             }
         }
-        (!args.is_empty()).then_some(args)
+        if args.is_empty() {
+            return None;
+        }
+        let mut path = None;
+        while i < buf.len() {
+            while i < buf.len() && buf[i] == 0 {
+                i += 1;
+            }
+            let start = i;
+            while i < buf.len() && buf[i] != 0 {
+                i += 1;
+            }
+            if let Some(value) = buf[start..i].strip_prefix(b"PATH=") {
+                path = Some(value.to_vec());
+                break;
+            }
+        }
+        Some((args, path))
     }
 
     /// `libproc.h` `PROC_ALL_PIDS`. libc 0.2 does not export this selector.
@@ -813,6 +949,17 @@ mod tests {
         );
         assert_eq!(shell_join(&["sleep".into(), "30".into()]), "sleep 30");
         assert_eq!(shell_join(&["echo".into(), "a b".into()]), "echo 'a b'");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn version_aliases_only_strip_numeric_version_suffixes() {
+        assert_eq!(
+            version_alias_candidates("agent-cli-1.2.3"),
+            ["agent-cli", "agent-cli-1", "agent-cli-1.2"]
+        );
+        assert_eq!(version_alias_candidates("fixture_v2"), ["fixture"]);
+        assert!(version_alias_candidates("busybox-sh").is_empty());
     }
 
     #[cfg(unix)]

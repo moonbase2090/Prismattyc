@@ -6,7 +6,7 @@
 
 ### Added
 
-- An opt-in activity feed: set `experimental_activity = true` under `[mux]` and pmuxd serves seat activity metadata from its next start. It is off by default and carries no command text, paths, prompts, tool output or mail bodies.
+- An opt-in activity feed: set `experimental_activity = true` under `[mux]`, in the settings panel or the config file, and the running pmuxd starts serving seat activity metadata within a second, with no restart. Setting it back to `false` stops the feed and discards its history. It is off by default and carries no command text, paths, prompts, tool output or mail bodies.
 - `pmux-activity-monitor` ships in the macOS app, the Linux tarball and the Windows ZIP and MSI, and is on PATH. It shows each seat's state and recent activity across one or more hosts, fits the pane it runs in, and explains what to do when the feed is off.
 - Kitty graphics raw RGB and RGBA uploads render, as well as PNG, so pixel widgets such as the monitor's activity lanes draw as images.
 

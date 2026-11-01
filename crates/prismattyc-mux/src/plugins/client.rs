@@ -23,7 +23,19 @@ pub struct Client {
     failed: bool,
 }
 
+/// Shuts down an owned frontend connection without waiting for a blocked RPC.
+pub struct ConnectionCloser(UnixStream);
+
+impl ConnectionCloser {
+    pub fn close(&self) {
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
+}
+
 impl Client {
+    pub fn close_handle(&self) -> Result<ConnectionCloser> {
+        Ok(ConnectionCloser(self.writer.try_clone()?))
+    }
     pub fn connect(socket: &Path) -> Result<Self> {
         let stream = connect_timeout(socket, Duration::from_secs(2))
             .context("connect to pmuxd; plug-in changes require a running daemon")?;
@@ -111,4 +123,50 @@ pub fn decode_frame(encoded: &str, viewport: &frame::Viewport) -> Result<Validat
     let (content, rest) = postcard::take_from_bytes(&bytes)?;
     ensure!(rest.is_empty(), "trailing typed frame bytes");
     Ok(ValidatedFrame::new(content, viewport)?)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn a_frontend_can_cancel_an_rpc_without_waiting_for_the_daemon_reply() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "pc-{}",
+            &super::super::package::nonce().unwrap()[..16]
+        ));
+        super::super::package::private_directory(&root).unwrap();
+        let socket = root.join("daemon.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut request = String::new();
+            stream.read_line(&mut request).unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&request).unwrap()["operation"]
+                    ["operation"],
+                "list"
+            );
+            let mut byte = [0];
+            assert_eq!(stream.read(&mut byte).unwrap(), 0);
+        });
+        let mut client = Client::connect(&socket).unwrap();
+        let closer = client.close_handle().unwrap();
+        let (send, receive) = mpsc::channel();
+        let request = std::thread::spawn(move || {
+            send.send(client.request(Request::List).is_err()).unwrap();
+        });
+        assert!(matches!(
+            receive.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        closer.close();
+        assert!(receive.recv_timeout(Duration::from_secs(2)).unwrap());
+        request.join().unwrap();
+        server.join().unwrap();
+        drop(closer);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

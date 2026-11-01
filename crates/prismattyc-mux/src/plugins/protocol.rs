@@ -16,6 +16,8 @@ pub enum Request {
     Endpoints,
     Inspect {
         id: String,
+        #[serde(default)]
+        version: Option<String>,
     },
     Admin {
         retry_id: String,
@@ -164,6 +166,7 @@ pub struct Status {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Observed {
+    DaemonUnavailable,
     Stopped,
     Starting,
     Running,

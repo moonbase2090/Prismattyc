@@ -225,6 +225,43 @@ struct Manager {
     active_remotes: Arc<AtomicUsize>,
 }
 
+fn load_journal(path: &Path) -> Result<Journal> {
+    let journal: Journal = if path.try_exists()? {
+        serde_json::from_slice(&read_private(&path, 1024 * 1024)?)?
+    } else {
+        Journal::default()
+    };
+    ensure!(
+        journal.version == 1 && journal.selections.len() <= 256 && journal.completed.len() <= 128,
+        "unsupported or oversized plug-in journal"
+    );
+    ensure!(
+        journal.endpoints.len() <= 31,
+        "too many configured activity endpoints"
+    );
+    for (label, endpoint) in &journal.endpoints {
+        endpoint.validate()?;
+        ensure!(
+            label == &endpoint.label,
+            "endpoint label does not match its key"
+        );
+    }
+    for (id, desired) in &journal.selections {
+        super::manifest::validate_plugin_id(id)?;
+        if let Some(selected) = desired.selected() {
+            ensure!(
+                selected.id == *id && valid_digest(&selected.digest),
+                "invalid saved plug-in selection"
+            );
+            Version::parse(&selected.version)?;
+        }
+        if let Desired::Enabled { grants, .. } = desired {
+            validate_grants(grants, &journal.endpoints)?;
+        }
+    }
+    Ok(journal)
+}
+
 impl Manager {
     fn new(socket: &Path, plane: Weak<Mutex<ControlPlane>>) -> Result<Self> {
         let path = socket.with_extension("plugins.json");
@@ -238,49 +275,21 @@ impl Manager {
         )?;
         crate::platform::try_lock_exclusive(&writer)
             .context("another manager owns this plug-in journal")?;
-        let journal: Journal = if path.try_exists()? {
-            serde_json::from_slice(&read_private(&path, 1024 * 1024)?)?
-        } else {
-            Journal::default()
-        };
-        ensure!(
-            journal.version == 1
-                && journal.selections.len() <= 256
-                && journal.completed.len() <= 128,
-            "unsupported or oversized plug-in journal"
-        );
-        let mut slots = BTreeMap::new();
-        ensure!(
-            journal.endpoints.len() <= 31,
-            "too many configured activity endpoints"
-        );
-        for (label, endpoint) in &journal.endpoints {
-            endpoint.validate()?;
-            ensure!(
-                label == &endpoint.label,
-                "endpoint label does not match its key"
-            );
-        }
-        for (id, desired) in &journal.selections {
-            super::manifest::validate_plugin_id(id)?;
-            if let Some(selected) = desired.selected() {
-                ensure!(
-                    selected.id == *id && valid_digest(&selected.digest),
-                    "invalid saved plug-in selection"
-                );
-                Version::parse(&selected.version)?;
-            }
-            if let Desired::Enabled { grants, .. } = desired {
-                validate_grants(grants, &journal.endpoints)?;
-            }
-            slots.insert(id.clone(), Slot::new()?);
-        }
+        let journal = load_journal(&path)?;
+        let slots = journal
+            .selections
+            .keys()
+            .map(|id| Ok((id.clone(), Slot::new()?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let store = Store::new(Store::default_root()?)?;
+        let catalog = Catalog::bundled()?;
+        store.check_catalog(&catalog.list())?;
         Ok(Self {
             _writer: writer,
             executable: std::env::current_exe()?.canonicalize()?,
             journal: path,
-            store: Store::new(Store::default_root()?)?,
-            catalog: Mutex::new(Arc::new(Catalog::bundled()?)),
+            store,
+            catalog: Mutex::new(Arc::new(catalog)),
             administration: Mutex::new(()),
             state: Mutex::new(State {
                 journal,
@@ -316,6 +325,7 @@ impl Manager {
             Request::Discover { refresh } => {
                 if refresh {
                     let catalog = Arc::new(Catalog::refreshed()?);
+                    self.store.check_catalog(&catalog.list())?;
                     *self.catalog.lock().unwrap() = catalog;
                 }
                 Ok(Reply::Catalog {
@@ -335,17 +345,9 @@ impl Manager {
                         .collect(),
                 })
             }
-            Request::Inspect { id } => {
+            Request::Inspect { id, version } => {
                 let current = status(&self.state.lock().unwrap(), &id);
-                let manifest = current
-                    .selected
-                    .as_ref()
-                    .map(|selected| self.store.load(selected).map(|package| package.manifest))
-                    .transpose()?;
-                Ok(Reply::Inspection {
-                    state: current,
-                    manifest,
-                })
+                inspection(&self.store, current, version.as_deref())
             }
             Request::Admin { retry_id, action } => self.admin(retry_id, action),
             Request::Invoke {
@@ -649,6 +651,90 @@ fn validate_grants(
     Ok(())
 }
 
+fn inspection(store: &Store, current: Status, version: Option<&str>) -> Result<Reply> {
+    super::manifest::validate_plugin_id(&current.id)?;
+    let selected = if let Some(version) = version {
+        Version::parse(version)?;
+        Some(
+            store
+                .list()?
+                .into_iter()
+                .find(|package| package.id == current.id && package.version == version)
+                .context("requested version is not installed")?,
+        )
+    } else {
+        current.selected.clone()
+    };
+    let manifest = selected
+        .as_ref()
+        .map(|selected| store.load(selected).map(|package| package.manifest))
+        .transpose()?;
+    Ok(Reply::Inspection {
+        state: current,
+        manifest,
+    })
+}
+
+/// Verified read-only metadata. This path cannot acquire the journal writer,
+/// create storage, fetch packages, change permissions or start a worker.
+pub fn inspect_offline(socket: &Path, request: Request) -> Result<Reply> {
+    ensure!(
+        matches!(
+            request,
+            Request::Discover { refresh: false }
+                | Request::List
+                | Request::Inspect { .. }
+                | Request::Endpoints
+        ),
+        "plug-in mutations and refresh require a running daemon"
+    );
+    if matches!(request, Request::Discover { .. }) {
+        let catalog = Catalog::bundled()?;
+        Store::new(Store::default_root()?)?.check_catalog(&catalog.list())?;
+        return Ok(Reply::Catalog {
+            packages: catalog.list(),
+        });
+    }
+    let journal = load_journal(&socket.with_extension("plugins.json"))?;
+    let state = State {
+        journal,
+        slots: BTreeMap::new(),
+        workers: BTreeMap::new(),
+        views: BTreeMap::new(),
+        exports: BTreeMap::new(),
+    };
+    let store = Store::new(Store::default_root()?)?;
+    let saved = |id: &str| -> Result<Status> {
+        let mut current = status(&state, id);
+        if current.enabled {
+            current.observed = Observed::DaemonUnavailable;
+        }
+        if let Some(selected) = &current.selected {
+            if store.load(selected)?.manifest.compatibility().is_err() {
+                current.observed = Observed::Incompatible;
+                current.failure = Some("selected package is incompatible with this core".into());
+            }
+        }
+        Ok(current)
+    };
+    match request {
+        Request::List => Ok(Reply::List {
+            installed: store.list()?,
+            states: state
+                .journal
+                .selections
+                .keys()
+                .map(|id| saved(id))
+                .collect::<Result<_>>()?,
+        }),
+        Request::Inspect { id, version } => inspection(&store, saved(&id)?, version.as_deref()),
+        Request::Endpoints => Ok(Reply::Endpoints {
+            endpoints: state.journal.endpoints.into_values().collect(),
+        }),
+        _ => unreachable!("read-only request checked above"),
+    }
+}
+
 fn status(state: &State, id: &str) -> Status {
     let desired = state.journal.selections.get(id);
     let slot = state.slots.get(id);
@@ -867,6 +953,12 @@ impl Manager {
     ) -> Result<String> {
         let id = selection.installed.id.clone();
         let identity = nonce()?;
+        let prepared_context =
+            context(&selection.package.manifest, &selection.grants, role.clone())?;
+        let activity_available = prepared_context
+            .capabilities
+            .iter()
+            .any(|capability| capability.name == "pmux:activity/read" && capability.available);
         let requested = requested.map(|endpoints| -> Result<BTreeMap<String, (usize, String)>> {
             ensure!(!endpoints.is_empty() && endpoints.len() <= 32, "views require 1 to 32 endpoints");
             let mut labels = BTreeSet::new();
@@ -891,16 +983,17 @@ impl Manager {
                 .endpoints
                 .values()
                 .filter(|endpoint| {
-                    selection
-                        .grants
-                        .contains(&format!("activity.read:{}", endpoint.label))
+                    activity_available
+                        && selection
+                            .grants
+                            .contains(&format!("activity.read:{}", endpoint.label))
                 })
                 .cloned()
                 .collect::<Vec<_>>()
         };
         let mut endpoints = BTreeMap::new();
-        if let Some((index, label)) =
-            display("local", 0).filter(|_| selection.grants.contains("activity.read:local"))
+        if let Some((index, label)) = display("local", 0)
+            .filter(|_| activity_available && selection.grants.contains("activity.read:local"))
         {
             endpoints.insert(number()?, (index, label, Access::Local));
         }
@@ -1006,11 +1099,10 @@ impl Manager {
             pending
         };
         let prepared = (|| {
-            let context = context(&selection.package.manifest, &selection.grants, role)?;
             pending
                 .prepare(
                     selection.package.component.clone(),
-                    context,
+                    prepared_context,
                     selection.package.assets.clone(),
                     selection.package.schemas.clone(),
                 )?

@@ -19,6 +19,7 @@ use rmcp::{
 };
 use serde::Deserialize;
 
+mod framing;
 mod mail;
 mod plugins;
 mod supervisor;
@@ -650,7 +651,13 @@ async fn main() -> ExitCode {
             .map(|agent| PmuxMcp::new(agent, socket.clone())),
         plugins: plugins::Plugins::new(socket, config.plugins),
     };
-    match server.serve(rmcp::transport::stdio()).await {
+    match server
+        .serve((
+            framing::BoundedLines::new(tokio::io::stdin(), framing::INPUT_BYTES),
+            tokio::io::stdout(),
+        ))
+        .await
+    {
         Ok(running) => match running.waiting().await {
             Ok(_) => ExitCode::SUCCESS,
             Err(e) => {

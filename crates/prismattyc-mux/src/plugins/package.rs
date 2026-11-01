@@ -186,6 +186,7 @@ impl Store {
         )?;
         crate::platform::try_lock_exclusive(&lock)
             .context("plug-in store is busy; retry installation")?;
+        self.check_catalog(std::slice::from_ref(&entry.entry))?;
         let selected = Installed {
             id: entry.entry.id.clone(),
             version: entry.entry.version.clone(),
@@ -300,7 +301,27 @@ impl Store {
         }
         installed
             .sort_by(|a, b| (&a.id, &a.version, &a.digest).cmp(&(&b.id, &b.version, &b.digest)));
+        ensure!(
+            installed
+                .windows(2)
+                .all(|pair| pair[0].id != pair[1].id || pair[0].version != pair[1].version),
+            "installed plug-in version has conflicting digests"
+        );
         Ok(installed)
+    }
+
+    pub(super) fn check_catalog(&self, entries: &[CatalogEntry]) -> Result<()> {
+        let installed = self.list()?;
+        for entry in entries {
+            entry.validate()?;
+            ensure!(
+                !installed.iter().any(|package| package.id == entry.id
+                    && package.version == entry.version
+                    && package.digest != entry.sha256),
+                "catalog changes the immutable digest of an installed plug-in version"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -365,6 +386,88 @@ pub(super) fn read_private(path: &Path, cap: usize) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn receipt(store: &Store, contents: BTreeMap<String, Vec<u8>>) -> CatalogEntry {
+        use std::io::Write;
+        private_directory(&store.root).unwrap();
+        let bytes = pack(contents).unwrap();
+        let entry = CatalogEntry {
+            id: "org.moonbase.example".into(),
+            version: "1.0.0".into(),
+            sha256: digest(&bytes),
+            bytes: bytes.len() as u64,
+        };
+        let objects = store.root.join("objects");
+        private_directory(&objects).unwrap();
+        let object = objects.join(&entry.sha256);
+        private_directory(&object).unwrap();
+        let mut archive = crate::private_fs::open(
+            &object.join("package.pmux-plugin"),
+            OpenOptions::new().write(true).create_new(true),
+        )
+        .unwrap();
+        archive.write_all(&bytes).unwrap();
+        let receipt = Receipt {
+            version: 1,
+            entry: entry.clone(),
+            provenance: Provenance::CoreBundle {
+                core: "1.0.0".into(),
+                revision: "a".repeat(40),
+            },
+        };
+        crate::config::write_file_atomic(
+            &object.join("receipt.json"),
+            &serde_json::to_string(&receipt).unwrap(),
+        )
+        .unwrap();
+        entry
+    }
+
+    #[test]
+    fn later_catalogs_cannot_change_an_installed_version_identity() {
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("pmux-package-{}", nonce().unwrap()));
+        let store = Store::new(root.clone()).unwrap();
+        let original = receipt(&store, files());
+        assert_eq!(store.list().unwrap().len(), 1);
+        store
+            .check_catalog(std::slice::from_ref(&original))
+            .unwrap();
+        let changed = CatalogEntry {
+            sha256: "b".repeat(64),
+            ..original.clone()
+        };
+        assert!(store.check_catalog(&[changed]).is_err());
+        let new_version = CatalogEntry {
+            version: "1.0.1".into(),
+            sha256: "b".repeat(64),
+            ..original
+        };
+        store.check_catalog(&[new_version]).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_ambiguous_existing_store_never_silently_selects_one_digest() {
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("pmux-package-{}", nonce().unwrap()));
+        let store = Store::new(root.clone()).unwrap();
+        let original = receipt(&store, files());
+        let mut changed = files();
+        changed.insert(
+            "LICENSE".into(),
+            b"Different archive for the same public version".to_vec(),
+        );
+        let conflict = receipt(&store, changed);
+        assert_ne!(original.sha256, conflict.sha256);
+        assert!(store.list().is_err());
+        assert!(store.check_catalog(&[original]).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn files() -> BTreeMap<String, Vec<u8>> {
         BTreeMap::from([

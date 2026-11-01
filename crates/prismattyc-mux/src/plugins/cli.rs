@@ -9,10 +9,31 @@ use super::{AdminAction, Client, Reply, Request};
 
 pub fn run(socket: &Path, args: Vec<String>) -> Result<()> {
     if args.is_empty() || matches!(args[0].as_str(), "--help" | "-h") {
-        println!("pmux plugin discover [--refresh]\npmux plugin list\npmux plugin inspect ID\npmux plugin install ID [--version VERSION]\npmux plugin enable ID [--version VERSION] [--allow activity.read:local]\npmux plugin disable ID\npmux plugin invoke ID CONTRIBUTION [JSON]\npmux plugin run ID [VIEW] [--snapshot [--cols N] [--rows N]] [--endpoint LABEL[=DISPLAY_LABEL]] [--theme auto|dark|light] [--no-motion] [--no-pixels]\n\nInstallation leaves packages disabled. Changes use the running daemon and never restart sessions. Plug-in updates are explicit; MCP exports require a separate operator allowlist.");
+        println!("pmux plugin discover [--refresh]\npmux plugin list\npmux plugin inspect ID [--version VERSION]\npmux plugin install ID [--version VERSION]\npmux plugin enable ID [--version VERSION] [--allow activity.read:LABEL]\npmux plugin disable ID\npmux plugin invoke ID CONTRIBUTION [JSON]\npmux plugin run ID [VIEW] [--snapshot [--cols N] [--rows N]] [--endpoint LABEL[=DISPLAY_LABEL]] [--theme auto|dark|light] [--no-motion] [--no-pixels]\npmux plugin endpoint list\npmux plugin endpoint add LABEL (--socket PATH | --command-query JSON_ARGV | --command-tail JSON_ARGV)\npmux plugin endpoint remove LABEL\n\nThe local scope is activity.read:local; named scopes require registered endpoints. Installation leaves packages disabled. Verified cached metadata is available offline; changes and refresh require the daemon. Changes preserve sessions. Plug-in updates are explicit; MCP exports require a separate operator allowlist.");
         return Ok(());
     }
-    let mut client = Client::connect(socket)?;
+    let read = read_request(&args)?;
+    let mut client = match Client::connect(socket) {
+        Ok(client) => client,
+        Err(error) => {
+            if let Some(request) = read {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&super::inspect_offline(socket, request)?)?
+                );
+                return Ok(());
+            }
+            return Err(error);
+        }
+    };
+    if let Some(request) = read {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&client.request(request)?)?
+        );
+        return Ok(());
+    }
+
     if args[0] == "run" {
         return view(client, &args[1..]);
     }
@@ -28,6 +49,38 @@ pub fn run(socket: &Path, args: Vec<String>) -> Result<()> {
     let reply = client.request(request)?;
     println!("{}", serde_json::to_string_pretty(&reply)?);
     Ok(())
+}
+
+fn read_request(args: &[String]) -> Result<Option<Request>> {
+    match args[0].as_str() {
+        "discover" => {
+            ensure!(
+                args.len() == 1 || (args.len() == 2 && args[1] == "--refresh"),
+                "usage: pmux plugin discover [--refresh]"
+            );
+            Ok(Some(Request::Discover {
+                refresh: args.len() == 2,
+            }))
+        }
+        "list" => {
+            ensure!(args.len() == 1, "usage: pmux plugin list");
+            Ok(Some(Request::List))
+        }
+        "inspect" => {
+            ensure!(
+                args.len() == 2 || (args.len() == 4 && args[2] == "--version"),
+                "usage: pmux plugin inspect ID [--version VERSION]"
+            );
+            Ok(Some(Request::Inspect {
+                id: args[1].clone(),
+                version: args.get(3).cloned(),
+            }))
+        }
+        "endpoint" if args.get(1).map(String::as_str) == Some("list") => {
+            endpoint(&args[1..]).map(Some)
+        }
+        _ => Ok(None),
+    }
 }
 
 fn view(mut client: Client, args: &[String]) -> Result<()> {
@@ -162,23 +215,6 @@ fn parse(client: &mut Client, args: &[String]) -> Result<Request> {
             .context("plug-in command requires an ID")
     };
     match args[0].as_str() {
-        "discover" => {
-            ensure!(
-                args.len() == 1 || (args.len() == 2 && args[1] == "--refresh"),
-                "usage: pmux plugin discover [--refresh]"
-            );
-            Ok(Request::Discover {
-                refresh: args.len() == 2,
-            })
-        }
-        "list" => {
-            ensure!(args.len() == 1, "usage: pmux plugin list");
-            Ok(Request::List)
-        }
-        "inspect" => {
-            ensure!(args.len() == 2, "usage: pmux plugin inspect ID");
-            Ok(Request::Inspect { id: id()? })
-        }
         "disable" => {
             ensure!(args.len() == 2, "usage: pmux plugin disable ID");
             admin(AdminAction::Disable { id: id()? })
@@ -240,7 +276,7 @@ fn parse(client: &mut Client, args: &[String]) -> Result<Request> {
     }
 }
 
-fn admin(action: AdminAction) -> Result<Request> {
+pub fn admin(action: AdminAction) -> Result<Request> {
     Ok(Request::Admin {
         retry_id: super::package::nonce()?,
         action,

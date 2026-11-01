@@ -267,6 +267,7 @@ fn query(client: &mut Client, contribution: &str, mut arguments: Value) -> Resul
 fn tail(mut client: Client, socket: &std::path::Path, seat: Option<&AgentId>) -> Result<()> {
     let Reply::Inspection { state, .. } = client.request(Request::Inspect {
         id: "org.moonbase.activity-connector".into(),
+        version: None,
     })?
     else {
         bail!("unexpected connector status");

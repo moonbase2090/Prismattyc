@@ -13,6 +13,7 @@ use std::io;
 use std::process::Stdio;
 use std::time::Duration;
 
+use crate::framing::{BoundedLines, INPUT_BYTES, OUTPUT_BYTES};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Lines, Stdout};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -22,7 +23,7 @@ const RESTART_ATTEMPTS: usize = 5;
 struct ChildSession {
     process: Child,
     stdin: ChildStdin,
-    stdout: Lines<BufReader<ChildStdout>>,
+    stdout: Lines<BufReader<BoundedLines<ChildStdout>>>,
 }
 
 #[derive(Default)]
@@ -86,7 +87,7 @@ impl ProtocolState {
 pub async fn run(arguments: &[String]) -> io::Result<()> {
     let mut executable = std::env::current_exe()?;
     let mut child_version = env!("CARGO_PKG_VERSION").to_string();
-    let mut host_input = BufReader::new(tokio::io::stdin()).lines();
+    let mut host_input = BufReader::new(BoundedLines::new(tokio::io::stdin(), INPUT_BYTES)).lines();
     let mut host_output = tokio::io::stdout();
     let mut state = ProtocolState::default();
     let mut child = spawn_child(&executable, arguments)?;
@@ -252,7 +253,7 @@ fn spawn_child(executable: &std::path::Path, arguments: &[String]) -> io::Result
     Ok(ChildSession {
         process,
         stdin,
-        stdout: BufReader::new(stdout).lines(),
+        stdout: BufReader::new(BoundedLines::new(stdout, OUTPUT_BYTES)).lines(),
     })
 }
 

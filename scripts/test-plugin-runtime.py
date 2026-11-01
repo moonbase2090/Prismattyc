@@ -23,6 +23,27 @@ REPO = Path(__file__).resolve().parent.parent
 PLUGIN = "org.moonbase.runtime-fixture"
 
 
+def mcp_rejects_unterminated_input(binary, arguments, env, log_path):
+    with log_path.open("wb") as error_log:
+        process = subprocess.Popen([str(binary), *arguments], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=error_log, env=env)
+        try:
+            try:
+                process.stdin.write(b"{" + b" " * (4 * 1024 * 1024))
+                process.stdin.flush()
+            except BrokenPipeError:
+                pass
+            # Keep stdin open: an uncapped read_until would wait forever here.
+            assert process.wait(timeout=10) != 0
+        finally:
+            try:
+                process.stdin.close()
+            except BrokenPipeError:
+                pass
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+
+
 def build(args, scratch):
     target = args.target_dir.resolve()
     env = os.environ.copy()
@@ -441,6 +462,8 @@ else:
         mcp_proof(["--activity-only"], True)
         mcp_proof(["--activity-only","--supervise"], True)
         mcp_proof(["--as","fixture-agent"], False)
+        for arguments in [["--activity-only"],["--activity-only","--supervise"]]:
+            mcp_rejects_unterminated_input(bins / f"pmux-mcp{suffix}",arguments,env,scratch / "mcp-oversize.log")
         exports = connection.plugin("exports", allowlist=[PLUGIN])["response"]["reply"]["tools"]
         assert sorted(export["name"] for export in exports) == ["fixture_counter", "fixture_grow", "fixture_loop", "fixture_poll"]
         handle = next(export["handle"] for export in exports if export["name"] == "fixture_counter")
@@ -452,6 +475,8 @@ else:
         cli("install", PLUGIN, "--version", "1.0.1")
         cli("enable", PLUGIN, "--version", "1.0.1", "--allow", "activity.read:local", succeeds=False)
         assert cli("inspect", PLUGIN)["state"]["selected"]["version"] == "1.0.0"
+        candidate = cli("inspect", PLUGIN, "--version", "1.0.1")
+        assert candidate["manifest"]["version"] == "1.0.1" and candidate["state"]["selected"]["version"] == "1.0.0"
         assert tool("counter") == {"counter": 4}
         cli("enable", PLUGIN, "--allow", "activity.read:local")
         assert cli("inspect", PLUGIN)["state"]["selected"]["version"] == "1.0.0"
@@ -479,10 +504,20 @@ else:
         daemon.kill()
         daemon.wait(timeout=10)
         wait_gone(crash_pid)
+        journal = endpoint.with_suffix(".plugins.json")
+        before = journal.read_bytes()
+        offline = cli("list")
+        assert next(state for state in offline["states"] if state["id"] == connector)["observed"] == "daemon_unavailable"
+        assert len(cli("discover")["packages"]) == 4
+        assert cli("inspect", PLUGIN, "--version", "1.0.1")["manifest"]["version"] == "1.0.1"
+        assert any(endpoint["label"] == "crash-tail" for endpoint in cli("endpoint", "list")["endpoints"])
+        cli("disable", connector, succeeds=False)
+        cli("install", monitor, succeeds=False)
+        assert journal.read_bytes() == before
         daemon, connection = start()
         assert not cli("inspect", PLUGIN)["state"]["enabled"]
         cli("invoke", PLUGIN, "counter", succeeds=False)
-        print("PASS install stays disabled; explicit grants; typed calls; real monitor cells and RGBA lanes; live terminal input/resize/restore; persistent worker across live off/on epochs; unchanged daemon; default-empty exports; connection-bound handles; schema rejection; failed readiness keeps old selection; durable disable after restart")
+        print("PASS install stays disabled; explicit grants; actual Wasm monitor cells/RGBA and connector queries; live terminal input/resize/restore and hot feed epochs; direct/supervised identity-free MCP and default-empty exports; connection-bound handles; schema rejection; failed readiness preserves selection; remote300-event catch-up/socket/tail and thin launcher; endpoint removal and parent-death helper cleanup; exact-version and read-only offline inspection; durable disable after restart")
     finally:
         for item in connections:
             item.close()

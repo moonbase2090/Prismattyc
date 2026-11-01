@@ -18,9 +18,10 @@ mod wire;
 mod worker;
 
 pub use catalog::CatalogEntry;
-pub use cli::run as run_cli;
-pub use client::{decode_frame, Client};
+pub use cli::{admin as admin_request, run as run_cli};
+pub use client::{decode_frame, Client, ConnectionCloser};
 pub use endpoint::{Endpoint, EndpointSource};
+pub use manager::inspect_offline;
 pub(crate) use manager::Service;
 pub use manifest::{Contribution, Manifest};
 pub use package::{pack, Installed};

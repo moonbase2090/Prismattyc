@@ -134,7 +134,10 @@ def exercise(bins, scratch, feature="all", expected_catalog=None):
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if process.poll() is not None:
-                raise RuntimeError("isolated daemon exited; inspect its proof log")
+                log.flush()
+                detail = (scratch / "daemon.log").read_text(errors="replace")[-16384:]
+                detail = detail.replace(str(runtime), "<runtime>").replace(str(scratch), "<proof>")
+                raise RuntimeError("isolated daemon exited:\n" + detail)
             try:
                 if endpoint.with_suffix(".pid").read_text().strip() != str(process.pid):
                     time.sleep(0.02)

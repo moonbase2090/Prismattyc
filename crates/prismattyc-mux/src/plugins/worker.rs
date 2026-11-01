@@ -378,41 +378,6 @@ pub(super) fn run() -> Result<()> {
     result
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    #[ignore = "subprocess target for watchdog_terminates_a_blocked_native_child"]
-    fn blocked_native_child() {
-        std::thread::sleep(Duration::from_secs(2));
-    }
-
-    #[test]
-    fn watchdog_terminates_a_blocked_native_child() {
-        let child = Command::new(std::env::current_exe().unwrap())
-            .args(["tests::blocked_native_child", "--ignored"])
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let child = Arc::new(OwnedChild {
-            child: Mutex::new(child),
-            cancelled: AtomicBool::new(false),
-        });
-        let start = Instant::now();
-        let watchdog = Watchdog::start(child.clone(), Duration::from_millis(50)).unwrap();
-        while !child.cancelled.load(Ordering::Acquire) {
-            assert!(start.elapsed() < Duration::from_secs(1));
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        drop(watchdog);
-        assert!(!child.child.lock().unwrap().wait().unwrap().success());
-    }
-}
-
 fn run_requests(receiver: Arc<Mutex<mpsc::Receiver<Request>>>) -> Result<()> {
     let receive = || {
         receiver
@@ -485,5 +450,40 @@ fn run_requests(receiver: Arc<Mutex<mpsc::Receiver<Request>>>) -> Result<()> {
             }
             _ => bail!("unexpected worker command"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "subprocess target for watchdog_terminates_a_blocked_native_child"]
+    fn blocked_native_child() {
+        std::thread::sleep(Duration::from_secs(2));
+    }
+
+    #[test]
+    fn watchdog_terminates_a_blocked_native_child() {
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args(["tests::blocked_native_child", "--ignored"])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let child = Arc::new(OwnedChild {
+            child: Mutex::new(child),
+            cancelled: AtomicBool::new(false),
+        });
+        let start = Instant::now();
+        let watchdog = Watchdog::start(child.clone(), Duration::from_millis(50)).unwrap();
+        while !child.cancelled.load(Ordering::Acquire) {
+            assert!(start.elapsed() < Duration::from_secs(1));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(watchdog);
+        assert!(!child.child.lock().unwrap().wait().unwrap().success());
     }
 }

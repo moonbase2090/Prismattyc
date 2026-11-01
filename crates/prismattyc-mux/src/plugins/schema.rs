@@ -53,7 +53,7 @@ fn compile(text: &str) -> Result<Validator> {
         "command schema exceeds its byte budget"
     );
     let schema: Value = serde_json::from_str(text)?;
-    Ok(jsonschema::options()
+    jsonschema::options()
         .with_draft(Draft::Draft202012)
         .with_pattern_options(
             PatternOptions::regex()
@@ -62,7 +62,7 @@ fn compile(text: &str) -> Result<Validator> {
         )
         .with_retriever(DenyRetriever)
         .build(&schema)
-        .context("invalid or unsupported command schema")?)
+        .context("invalid or unsupported command schema")
 }
 
 #[cfg(test)]

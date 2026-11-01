@@ -183,7 +183,7 @@ impl ActiveComponent {
         {
             if let frame::Event::Resize(viewport) = &message.event {
                 validate_viewport(viewport)?;
-                view.viewport = viewport.clone();
+                view.viewport = *viewport;
             }
         }
         reset_budget(&mut self.0.store)?;

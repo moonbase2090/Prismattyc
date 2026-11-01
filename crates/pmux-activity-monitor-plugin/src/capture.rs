@@ -93,7 +93,7 @@ pub(crate) fn render(
         .saturating_mul(32 + 128)
         .saturating_add(256);
     let mut capture = Capture {
-        pixels: viewport.pixels.clone(),
+        pixels: viewport.pixels,
         background: monitor.palette.ground,
         remaining: (byte_limit as usize)
             .min(MAX_FRAME_BYTES)

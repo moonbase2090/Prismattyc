@@ -173,7 +173,7 @@ fn view(mut client: Client, args: &[String]) -> Result<()> {
         preferences,
         id,
         contribution,
-        viewport: viewport.clone(),
+        viewport,
         endpoints,
     })?
     else {

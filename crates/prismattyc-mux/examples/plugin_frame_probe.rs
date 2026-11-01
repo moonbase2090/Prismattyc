@@ -22,7 +22,7 @@ fn main() -> Result<()> {
         endpoints: None,
         id: "org.moonbase.activity-monitor".into(),
         contribution: "main".into(),
-        viewport: viewport.clone(),
+        viewport,
         preferences: frame::Preferences {
             motion: false,
             snapshot: true,

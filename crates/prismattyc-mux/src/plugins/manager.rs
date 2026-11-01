@@ -227,7 +227,7 @@ struct Manager {
 
 fn load_journal(path: &Path) -> Result<Journal> {
     let journal: Journal = if path.try_exists()? {
-        serde_json::from_slice(&read_private(&path, 1024 * 1024)?)?
+        serde_json::from_slice(&read_private(path, 1024 * 1024)?)?
     } else {
         Journal::default()
     };
@@ -1327,7 +1327,7 @@ impl Manager {
                 .filter(|view| view.connection == connection)
                 .context("unknown view handle for this connection")?;
             if let frame::Event::Resize(viewport) = &event {
-                view.reference.viewport = viewport.clone();
+                view.reference.viewport = *viewport;
             }
             view.clone()
         };

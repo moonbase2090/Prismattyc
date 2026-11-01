@@ -100,6 +100,7 @@ pub enum AdminAction {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum Reply {
     Endpoints {
         endpoints: Vec<Endpoint>,

@@ -429,7 +429,7 @@ impl Frontend {
         let epoch = Instant::now();
         let mut keys = std::collections::VecDeque::new();
         loop {
-            let viewport = self::viewport(self.viewport.pixels.clone());
+            let viewport = self::viewport(self.viewport.pixels);
             if viewport != self.viewport {
                 self.viewport = viewport;
                 self.resize = true;
@@ -437,7 +437,7 @@ impl Frontend {
             if self.resize {
                 self.resize = false;
                 if matches!(
-                    self.event(frame::Event::Resize(self.viewport.clone()), session)?,
+                    self.event(frame::Event::Resize(self.viewport), session)?,
                     Flow::Closed
                 ) {
                     break;
@@ -513,7 +513,7 @@ pub(super) fn run(
         endpoints,
         id,
         contribution,
-        viewport: viewport.clone(),
+        viewport,
         preferences,
     })?
     else {

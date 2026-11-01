@@ -28,6 +28,51 @@ env:
   MUTANTS_MEMORY: "8g"
 
 jobs:
+  plugin-artifacts:
+    name: Build plug-ins once
+    if: github.actor != 'nektos/act'
+    uses: ./.github/workflows/plugin-artifacts.yml
+    with:
+      mode: candidate
+
+  plugin-runtime:
+    name: Contained plug-ins (${{ matrix.os }})
+    needs: plugin-artifacts
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the native Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.90.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Download the same guest bytes on every OS
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ${{ needs.plugin-artifacts.outputs.artifact-name }}
+          path: target/native-plugin-bundle
+
+      - name: Install Linux native adapter dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --yes --no-install-recommends pkg-config libfontconfig1-dev libfreetype6-dev
+
+      - name: Exercise production archives through native adapters
+        run: python scripts/test-plugin-runtime.py --bundle target/native-plugin-bundle --feature production
+
   format:
     name: Format
     runs-on: ubuntu-24.04
@@ -197,6 +242,7 @@ jobs:
           fi
           rustup toolchain install 1.90.0 --profile minimal
           rustup default 1.90.0
+          rustup target add wasm32-unknown-unknown --toolchain 1.90.0
 
       - name: Install tmux
         run: |
@@ -252,6 +298,7 @@ jobs:
           fi
           rustup toolchain install 1.90.0 --profile minimal
           rustup default 1.90.0
+          rustup target add wasm32-unknown-unknown --toolchain 1.90.0
 
       - name: Install tmux
         run: |
@@ -1002,6 +1049,7 @@ jobs:
           fi
           rustup toolchain install 1.90.0 --profile minimal
           rustup default 1.90.0
+          rustup target add wasm32-unknown-unknown --toolchain 1.90.0
           rustup component add llvm-tools-preview
 
       - name: Install real-window test display
@@ -1116,6 +1164,7 @@ jobs:
           fi
           rustup toolchain install 1.90.0 --profile minimal
           rustup default 1.90.0
+          rustup target add wasm32-unknown-unknown --toolchain 1.90.0
           rustup component add llvm-tools-preview
 
       - name: Install real-window test display
@@ -1227,6 +1276,7 @@ jobs:
           fi
           rustup toolchain install 1.90.0 --profile minimal
           rustup default 1.90.0
+          rustup target add wasm32-unknown-unknown --toolchain 1.90.0
 
       - name: Install tmux
         run: |

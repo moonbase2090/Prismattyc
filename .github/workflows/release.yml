@@ -15,6 +15,11 @@ on:
         default: true
         required: false
         type: boolean
+      plugin_candidate:
+        description: Use an unpublished shared plug-in artifact for dry-run platform proof only
+        default: false
+        required: false
+        type: boolean
 
 permissions:
   contents: read
@@ -39,6 +44,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
           RELEASE_DRY_RUN: ${{ inputs.dry_run }}
+          PLUGIN_CANDIDATE: ${{ inputs.plugin_candidate }}
         run: |
           python3 - <<'PY'
           import os
@@ -47,6 +53,8 @@ jobs:
           from release_version import parse_release_version
 
           tag = os.environ['RELEASE_TAG']
+          if os.environ.get('PLUGIN_CANDIDATE') == 'true' and os.environ.get('RELEASE_DRY_RUN') != 'true':
+              raise SystemExit('unpublished plug-in candidates require dry_run=true')
           if not tag.startswith('v'):
               raise SystemExit('release tag must start with v')
           try:
@@ -66,9 +74,16 @@ jobs:
           print(f'Validated {tag}; binaries may report {base_version} for a prerelease.')
           PY
 
+  plugin-artifacts:
+    name: Prepare shared plug-in artifact
+    needs: validate
+    uses: ./.github/workflows/plugin-artifacts.yml
+    with:
+      mode: ${{ inputs.plugin_candidate && inputs.dry_run && 'candidate' || 'pinned' }}
+
   apple:
     name: Apple universal app
-    needs: validate
+    needs: [validate, plugin-artifacts]
     runs-on: macos-26
     timeout-minutes: 120
     steps:
@@ -88,6 +103,25 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
+
+      - name: Download the shared plug-in bytes
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ${{ needs.plugin-artifacts.outputs.artifact-name }}
+          path: target/native-plugin-bundle
+
+      - name: Verify native build bundle
+        shell: bash
+        env:
+          PLUGIN_CANDIDATE: ${{ inputs.plugin_candidate && inputs.dry_run }}
+        run: |
+          python - <<'PYTHON'
+          import os, subprocess, sys
+          mode = '--candidate' if os.environ.get('PLUGIN_CANDIDATE') == 'true' else '--bundle'
+          directory = subprocess.check_output([sys.executable, 'scripts/release/prepare-plugin-bundle.py', mode, 'target/native-plugin-bundle'], text=True).strip()
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'PRISMATTYC_PLUGIN_BUNDLE_DIR={directory}\n')
+          PYTHON
 
       - name: Install dmgbuild
         run: python3 -m pip install --disable-pip-version-check 'dmgbuild==1.6.7'
@@ -144,7 +178,7 @@ jobs:
 
   linux-x86_64:
     name: Linux x86_64
-    needs: validate
+    needs: [validate, plugin-artifacts]
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
@@ -156,6 +190,30 @@ jobs:
         with:
           toolchain: 1.90.0
           targets: x86_64-unknown-linux-gnu
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Download the shared plug-in bytes
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ${{ needs.plugin-artifacts.outputs.artifact-name }}
+          path: target/native-plugin-bundle
+
+      - name: Verify native build bundle
+        shell: bash
+        env:
+          PLUGIN_CANDIDATE: ${{ inputs.plugin_candidate && inputs.dry_run }}
+        run: |
+          python - <<'PYTHON'
+          import os, subprocess, sys
+          mode = '--candidate' if os.environ.get('PLUGIN_CANDIDATE') == 'true' else '--bundle'
+          directory = subprocess.check_output([sys.executable, 'scripts/release/prepare-plugin-bundle.py', mode, 'target/native-plugin-bundle'], text=True).strip()
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'PRISMATTYC_PLUGIN_BUNDLE_DIR={directory}\n')
+          PYTHON
 
       - name: Install cargo-zigbuild and Zig
         run: scripts/release/setup-zigbuild.sh
@@ -195,7 +253,7 @@ jobs:
 
   linux-arm64:
     name: Linux ARM64
-    needs: validate
+    needs: [validate, plugin-artifacts]
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 90
     steps:
@@ -207,6 +265,30 @@ jobs:
         with:
           toolchain: 1.90.0
           targets: aarch64-unknown-linux-gnu
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Download the shared plug-in bytes
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ${{ needs.plugin-artifacts.outputs.artifact-name }}
+          path: target/native-plugin-bundle
+
+      - name: Verify native build bundle
+        shell: bash
+        env:
+          PLUGIN_CANDIDATE: ${{ inputs.plugin_candidate && inputs.dry_run }}
+        run: |
+          python - <<'PYTHON'
+          import os, subprocess, sys
+          mode = '--candidate' if os.environ.get('PLUGIN_CANDIDATE') == 'true' else '--bundle'
+          directory = subprocess.check_output([sys.executable, 'scripts/release/prepare-plugin-bundle.py', mode, 'target/native-plugin-bundle'], text=True).strip()
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'PRISMATTYC_PLUGIN_BUNDLE_DIR={directory}\n')
+          PYTHON
 
       - name: Install cargo-zigbuild and Zig
         run: scripts/release/setup-zigbuild.sh
@@ -246,7 +328,7 @@ jobs:
 
   windows:
     name: Windows x64
-    needs: validate
+    needs: [validate, plugin-artifacts]
     runs-on: windows-2022
     timeout-minutes: 90
     permissions:
@@ -260,6 +342,30 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
+
+      - name: Install native verifier Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.90.0
+
+      - name: Download the shared plug-in bytes
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ${{ needs.plugin-artifacts.outputs.artifact-name }}
+          path: target/native-plugin-bundle
+
+      - name: Verify native build bundle
+        shell: bash
+        env:
+          PLUGIN_CANDIDATE: ${{ inputs.plugin_candidate && inputs.dry_run }}
+        run: |
+          python - <<'PYTHON'
+          import os, subprocess, sys
+          mode = '--candidate' if os.environ.get('PLUGIN_CANDIDATE') == 'true' else '--bundle'
+          directory = subprocess.check_output([sys.executable, 'scripts/release/prepare-plugin-bundle.py', mode, 'target/native-plugin-bundle'], text=True).strip()
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'PRISMATTYC_PLUGIN_BUNDLE_DIR={directory}\n')
+          PYTHON
 
       - name: Decide whether Artifact Signing is configured
         id: signing
@@ -423,6 +529,7 @@ jobs:
       ${{
         needs.apple.outputs.signed == 'true' &&
         !(github.event_name == 'workflow_dispatch' && inputs.dry_run) &&
+        !inputs.plugin_candidate &&
         (github.event_name != 'workflow_dispatch' || github.ref_type == 'tag')
       }}
     runs-on: ubuntu-24.04

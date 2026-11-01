@@ -8,6 +8,7 @@ Neither mode compiles guests, installs packages, grants access, or publishes.
 """
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,9 +21,10 @@ REPO = Path(__file__).resolve().parents[2]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--pin", type=Path, default=REPO / "plugins/bundle-pin.json")
     sources = parser.add_mutually_exclusive_group()
-    sources.add_argument("--pin", type=Path, default=REPO / "plugins/bundle-pin.json")
     sources.add_argument("--candidate", type=Path, help="explicit unpublished artifact for private proof")
+    sources.add_argument("--bundle", type=Path, help="downloaded official bundle to verify against --pin without network")
     parser.add_argument("--cache", type=Path, default=REPO / "target/plugin-bundles")
     parser.add_argument("--target-dir", type=Path, default=REPO / "target/plugin-artifacts")
     parser.add_argument("--helper", type=Path, help="already built native plugin_bundle verifier")
@@ -51,18 +53,20 @@ def main():
         return json.loads(subprocess.check_output([str(helper), *map(str, arguments)], cwd=REPO, env=env))
 
     candidate_flag = ["--candidate"] if args.candidate else []
-    if args.candidate:
-        source = args.candidate.resolve()
-        if tool("verify", source, "--candidate") != expected:
-            parser.error("candidate changed while reading its pin")
+    source = args.candidate or args.bundle
+    if source:
+        source = source.resolve()
+        if tool("verify", source, *candidate_flag) != expected:
+            parser.error("bundle differs from its reviewed pin")
     digest = expected["catalog_sha256"]
     if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
         parser.error("invalid bundle catalog digest")
-    directory = args.cache.resolve() / digest
+    key = hashlib.sha256(json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    directory = args.cache.resolve() / key
     if directory.exists():
         if tool("verify", directory, *candidate_flag) != expected:
             parser.error("cached bundle has another pin")
-    elif args.candidate:
+    elif source:
         directory.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix=".bundle-copy-", dir=directory.parent) as temporary:
             staging = Path(temporary) / "bundle"
@@ -72,8 +76,8 @@ def main():
             names.extend(f"{entry['sha256']}.pmux-plugin" for entry in catalog["packages"])
             for name in names:
                 shutil.copyfile(source / name, staging / name)
-            if tool("verify", staging, "--candidate") != expected:
-                parser.error("candidate changed during copy")
+            if tool("verify", staging, *candidate_flag) != expected:
+                parser.error("bundle changed during copy")
             os.rename(staging, directory)
     else:
         if tool("fetch", pin_path.resolve(), directory) != expected:

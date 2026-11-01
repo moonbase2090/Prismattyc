@@ -35,7 +35,7 @@ cargo +1.90.0 build --release --locked --manifest-path tools/activity-monitor/Ca
 ```
 
 Candidate preparation is explicit. It copies only pinned files, verifies the
-result again, and caches it by catalog digest. This does not install or enable
+result again, and caches it by the full reviewed pin. This does not install or enable
 plug-ins, grant access, or start their workers.
 
 ## Retain existing versions

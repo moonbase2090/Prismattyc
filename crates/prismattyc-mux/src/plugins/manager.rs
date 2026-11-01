@@ -1391,6 +1391,17 @@ impl Manager {
         let mut selections = Vec::new();
         let mut bytes = 0usize;
         for id in allowlist.into_iter().collect::<BTreeSet<_>>() {
+            super::manifest::validate_plugin_id(&id)?;
+            {
+                let state = self.state.lock().unwrap();
+                if !matches!(
+                    state.journal.selections.get(&id),
+                    Some(Desired::Enabled { .. })
+                ) || state.slots.get(&id).is_some_and(|slot| slot.incompatible)
+                {
+                    continue;
+                }
+            }
             let selection = self.selection(&id)?;
             for contribution in &selection.package.manifest.contributions {
                 if let Contribution::Command {
@@ -1641,6 +1652,37 @@ mod tests {
         assert_ne!(state.slots["org.moonbase.example"].generation, generation);
         drop(state);
         drop(restarted);
+        std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn disabled_and_uninstalled_plugins_have_no_mcp_exports() {
+        let socket = socket();
+        let manager = Manager::new(&socket, Weak::new()).unwrap();
+        manager
+            .admin(
+                "a".repeat(32),
+                AdminAction::Disable {
+                    id: "org.moonbase.example".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            manager
+                .exports(
+                    "connection",
+                    vec![
+                        "org.moonbase.example".into(),
+                        "org.moonbase.uninstalled".into()
+                    ]
+                )
+                .unwrap(),
+            Reply::Exports { tools: Vec::new() }
+        );
+        assert!(manager
+            .exports("connection", vec!["invalid id".into()])
+            .is_err());
+        drop(manager);
         std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
     }
 

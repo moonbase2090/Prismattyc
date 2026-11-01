@@ -55,22 +55,28 @@ def build(args, scratch):
         profile = ["--release"] if args.release else []
         subprocess.run([*cargo, command[0], *profile, *command[1:]], cwd=REPO, env={**env, **overrides}, check=True)
 
-    guest_env = {key: value for key, value in env.items() if key not in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS")}
-    subprocess.run([*cargo, "build", "-p", "pmux-plugin-fixture", "-p", "pmux-activity-monitor-plugin", "-p", "pmux-activity-connector-plugin", "--release", "--target", "wasm32-unknown-unknown", "--locked"], cwd=REPO, env=guest_env, check=True)
-    module = target / "wasm32-unknown-unknown/release/pmux_plugin_fixture.wasm"
-    good = REPO / "crates/pmux-plugin-fixture/package"
-    bad = scratch / "bad-readiness"
-    shutil.copytree(good, bad)
-    manifest = (bad / "plugin.toml").read_text().replace('version = "1.0.0"', 'version = "1.0.1"')
-    manifest = manifest.replace('notices = ["LICENSE"]', 'notices = ["LICENSE"]\nassets = ["fixture-fail-ready"]')
-    (bad / "plugin.toml").write_text(manifest)
-    (bad / "fixture-fail-ready").write_text("reject readiness")
-    bundle = scratch / "bundle"
-    monitor = REPO / "crates/pmux-activity-monitor-plugin/package"
-    monitor_module = target / "wasm32-unknown-unknown/release/pmux_activity_monitor_plugin.wasm"
-    connector = REPO / "crates/pmux-activity-connector-plugin/package"
-    connector_module = target / "wasm32-unknown-unknown/release/pmux_activity_connector_plugin.wasm"
-    run("run", "-p", "prismattyc-mux", "--example", "package_plugin", "--locked", "--", str(bundle), str(good), str(module), str(bad), str(module), str(monitor), str(monitor_module), str(connector), str(connector_module))
+    if args.bundle:
+        bundle = args.bundle.resolve()
+        run("build", "-p", "prismattyc-mux", "--example", "plugin_bundle", "--locked")
+        helper = target / ("release" if args.release else "debug") / "examples" / ("plugin_bundle.exe" if os.name == "nt" else "plugin_bundle")
+        subprocess.run([str(helper), "verify", str(bundle), "--candidate"], cwd=REPO, env=env, check=True)
+    else:
+        guest_env = {key: value for key, value in env.items() if key not in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS")}
+        subprocess.run([*cargo, "build", "-p", "pmux-plugin-fixture", "-p", "pmux-activity-monitor-plugin", "-p", "pmux-activity-connector-plugin", "--release", "--target", "wasm32-unknown-unknown", "--locked"], cwd=REPO, env=guest_env, check=True)
+        module = target / "wasm32-unknown-unknown/release/pmux_plugin_fixture.wasm"
+        good = REPO / "crates/pmux-plugin-fixture/package"
+        bad = scratch / "bad-readiness"
+        shutil.copytree(good, bad)
+        manifest = (bad / "plugin.toml").read_text().replace('version = "1.0.0"', 'version = "1.0.1"')
+        manifest = manifest.replace('notices = ["LICENSE"]', 'notices = ["LICENSE"]\nassets = ["fixture-fail-ready"]')
+        (bad / "plugin.toml").write_text(manifest)
+        (bad / "fixture-fail-ready").write_text("reject readiness")
+        bundle = scratch / "bundle"
+        monitor = REPO / "crates/pmux-activity-monitor-plugin/package"
+        monitor_module = target / "wasm32-unknown-unknown/release/pmux_activity_monitor_plugin.wasm"
+        connector = REPO / "crates/pmux-activity-connector-plugin/package"
+        connector_module = target / "wasm32-unknown-unknown/release/pmux_activity_connector_plugin.wasm"
+        run("run", "-p", "prismattyc-mux", "--example", "package_plugin", "--locked", "--", str(bundle), str(good), str(module), str(bad), str(module), str(monitor), str(monitor_module), str(connector), str(connector_module))
     run("build", "-p", "prismattyc-mux", "--example", "plugin_frame_probe", "--locked")
     run("build", "-p", "prismattyc-mux", "--bin", "pmux", "--bin", "pmuxd", "--locked", PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
     run("build", "-p", "pmux-mcp", "--locked", PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
@@ -103,7 +109,7 @@ class Connection:
         return self.request("plugin", plugin_api="1.0.0", operation={"operation": operation, **fields})
 
 
-def exercise(bins, scratch, feature="all"):
+def exercise(bins, scratch, feature="all", expected_catalog=None):
     # Short socket paths also work with macOS's sockaddr_un limit.
     runtime = Path(tempfile.mkdtemp(prefix="pmux-plug-")).resolve()
     config = runtime / "config.toml"
@@ -441,12 +447,66 @@ else:
         for item in imported:
             cli("endpoint","remove",item["label"])
 
+    def monitor_frame_proof():
+        text = cli("run", monitor, "main", "--snapshot", "--cols", "100", "--rows", "24", text=True)
+        assert "fixture-seat" in text and "test_failed" in text
+        probe = subprocess.run([str(bins / f"examples/plugin_frame_probe{suffix}"), str(endpoint)], env=env, capture_output=True, text=True, timeout=45)
+        assert probe.returncode == 0, probe.stderr
+        frame = json.loads(probe.stdout)
+        assert frame["cells"] == 2400 and "fixture-seat" in frame["text"]
+        # The 12-column seat name leaves a 53-cell lane at 8 pixels per cell.
+        assert frame["rasters"] == [{"width":424,"height":16,"bytes":27136}] * 2, frame["rasters"]
+        assert frame["failure_pixels"] > 0
+
     try:
         setting(False)
         daemon, connection = start()
         pid = daemon.pid
         baseline = connection.request("snapshot")["response"]["snapshot"]["sessions"]
         monitor = "org.moonbase.activity-monitor"
+        if feature == "production":
+            assert expected_catalog is not None
+            assert {entry["id"] for entry in expected_catalog} == {monitor, "org.moonbase.activity-connector"}
+            assert sorted(cli("discover")["packages"], key=lambda entry: (entry["id"],entry["version"])) == sorted(expected_catalog, key=lambda entry: (entry["id"],entry["version"]))
+            assert cli("list")["installed"] == []
+            for entry in expected_catalog:
+                package = cli("install",entry["id"],"--version",entry["version"])["package"]
+                assert package["digest"] == entry["sha256"]
+            connector = "org.moonbase.activity-connector"
+            cli("run",monitor,"--snapshot",succeeds=False)
+            cli("invoke",connector,"seats",succeeds=False)
+            assert connection.plugin("exports",allowlist=[connector])["response"]["reply"]["tools"] == []
+            for entry in expected_catalog:
+                cli("enable",entry["id"],"--version",entry["version"],"--allow","activity.read:local")
+            epoch = feed(True)
+            event = {"schema_version":1,"seat":"fixture-seat","run_id":"artifact-proof","event_id":"failed-test","source":"hooks","kind":"test_failed"}
+            assert connection.request("publish_activity",event=event)["status"] == "ok"
+            monitor_frame_proof()
+            reply = cli("invoke",connector,"seats")
+            assert not reply["is_error"] and json.loads(reply["json"])["seats"][0]["seat"] == "fixture-seat"
+            mcp_proof(["--activity-only"],True)
+            mcp_proof(["--activity-only","--supervise"],True)
+            exports = connection.plugin("exports",allowlist=[connector])["response"]["reply"]["tools"]
+            assert len(exports) == 4
+            cli("disable",connector)
+            assert connection.plugin("exports",allowlist=[connector])["response"]["reply"]["tools"] == []
+            assert connection.plugin("call_export",handle=exports[0]["handle"],arguments="{}")["status"] == "error"
+            cli("enable",connector,"--version","1.0.0","--allow","activity.read:local")
+            feed(False)
+            reply = cli("invoke",connector,"poll")
+            assert reply["is_error"] and json.loads(reply["json"])["error"]["code"] == "feed_disabled"
+            assert feed(True) != epoch and daemon.pid == pid
+            reply = cli("invoke",connector,"poll")
+            assert not reply["is_error"] and json.loads(reply["json"])["page"]["records"] == []
+            assert connection.request("publish_activity",event={**event,"event_id":"after-reenable"})["status"] == "ok"
+            assert connection.request("snapshot")["response"]["snapshot"]["sessions"] == baseline
+            terminal_view()
+            stop(daemon)
+            assert sorted(cli("discover")["packages"],key=lambda entry: (entry["id"],entry["version"])) == sorted(expected_catalog,key=lambda entry: (entry["id"],entry["version"]))
+            saved = cli("list")
+            assert len(saved["installed"]) == 2 and all(state["enabled"] and state["observed"] == "daemon_unavailable" for state in saved["states"])
+            print("PASS exact production catalog/archive digests; empty store; installation stays disabled; explicit grants; real monitor cells/RGBA; connector/direct+supervised MCP; live terminal and hot feed without daemon restart; offline verified metadata; guests were not rebuilt")
+            return
         if feature != "all":
             feed(True)
             cli("install",monitor)
@@ -483,15 +543,7 @@ else:
         cli("enable", monitor, "--allow", "activity.read:local")
         failed = {**event, "event_id": "event-2", "kind": "test_failed"}
         assert connection.request("publish_activity", event=failed)["status"] == "ok"
-        text = cli("run", monitor, "main", "--snapshot", "--cols", "100", "--rows", "24", text=True)
-        assert "fixture-seat" in text and "test_failed" in text
-        probe = subprocess.run([str(bins / f"examples/plugin_frame_probe{suffix}"), str(endpoint)], env=env, capture_output=True, text=True, timeout=45)
-        assert probe.returncode == 0, probe.stderr
-        frame = json.loads(probe.stdout)
-        assert frame["cells"] == 2400 and "fixture-seat" in frame["text"]
-        # The 12-column seat name leaves a 53-cell lane at 8 pixels per cell.
-        assert frame["rasters"] == [{"width":424,"height":16,"bytes":27136}] * 2, frame["rasters"]
-        assert frame["failure_pixels"] > 0
+        monitor_frame_proof()
         assert connection.plugin("exports", allowlist=[])["response"]["reply"]["tools"] == []
         connector = "org.moonbase.activity-connector"
         cli("install", connector)
@@ -597,15 +649,19 @@ else:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-dir", type=Path, default=REPO / "target/plugin-proof")
+    parser.add_argument("--bundle", type=Path, help="reuse a verified production artifact without compiling guests")
     parser.add_argument("--toolchain", default="1.90.0")
     parser.add_argument("--release", action="store_true", dest="release", default=True, help="exercise optimized native binaries as shipped (default)")
     parser.add_argument("--debug", action="store_false", dest="release", help="use slower debug native binaries for local diagnostics")
-    parser.add_argument("--feature", choices=["all","endpoint-pressure","legacy-import"], default="all")
+    parser.add_argument("--feature", choices=["all","endpoint-pressure","legacy-import","production"], default="all")
     args = parser.parse_args()
+    if bool(args.bundle) != (args.feature == "production"):
+        parser.error("--bundle and --feature production must be supplied together")
     with tempfile.TemporaryDirectory(prefix="pmux-plugin-build-") as work:
         scratch = Path(work)
         bins = build(args, scratch)
-        exercise(bins, scratch,args.feature)
+        expected = json.loads((args.bundle / "pmux-plugins.json").read_bytes())["packages"] if args.bundle else None
+        exercise(bins, scratch, args.feature, expected)
 
 
 if __name__ == "__main__":

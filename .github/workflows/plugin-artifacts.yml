@@ -1,0 +1,89 @@
+name: Plug-in artifacts
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        type: string
+        default: candidate
+    outputs:
+      artifact-name:
+        value: ${{ jobs.bundle.outputs.artifact-name }}
+      catalog-sha256:
+        value: ${{ jobs.bundle.outputs.catalog-sha256 }}
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Build an unpublished candidate, or fetch the reviewed official pin
+        type: choice
+        options: [candidate, pinned]
+        default: candidate
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      artifact-name: pmux-plugin-bundle
+      catalog-sha256: ${{ steps.identity.outputs.sha256 }}
+    steps:
+      - name: Check out frozen source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust and the guest target
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.90.0
+          targets: wasm32-unknown-unknown
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Install native artifact helper dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --yes --no-install-recommends pkg-config libfontconfig1-dev libfreetype6-dev
+
+      - name: Build or fetch one target-neutral bundle
+        env:
+          BUNDLE_MODE: ${{ inputs.mode || 'candidate' }}
+        run: |
+          case "$BUNDLE_MODE" in
+            candidate)
+              if [ -f plugins/bundle-pin.json ]; then
+                previous="$(python3 scripts/release/prepare-plugin-bundle.py)"
+                python3 scripts/release/build-plugin-release.py --previous "$previous" --output target/native-plugin-bundle
+              else
+                python3 scripts/release/build-plugin-release.py --bootstrap --output target/native-plugin-bundle
+              fi
+              ;;
+            pinned)
+              prepared="$(python3 scripts/release/prepare-plugin-bundle.py)"
+              cp -R "$prepared" target/native-plugin-bundle
+              ;;
+            *) echo 'unsupported plug-in artifact mode' >&2; exit 2 ;;
+          esac
+
+      - name: Record exact artifact identity
+        id: identity
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          pin = json.loads(Path('target/native-plugin-bundle/bundle-pin.json').read_bytes())
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f"sha256={pin['catalog_sha256']}\n")
+          PY
+
+      - name: Upload the exact verified files for every native consumer
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: pmux-plugin-bundle
+          path: target/native-plugin-bundle/*
+          if-no-files-found: error
+          retention-days: 7

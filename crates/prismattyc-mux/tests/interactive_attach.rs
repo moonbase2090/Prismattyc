@@ -5,7 +5,7 @@
 use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader, Read, Write},
-    os::unix::net::UnixStream,
+    os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
@@ -1316,23 +1316,85 @@ fn snapshot_window_size(client: &mut TestClient) -> (u32, u32) {
     }
 }
 
-/// PT-288: killing pmuxd mid-Resize must log Err, not treat the op as success.
-#[test]
-fn resize_after_pmuxd_dies_logs_request_error() {
-    let socket = socket_path();
-    let mut server = start_server(&socket);
-    for _ in 0..50 {
-        if attach_json(&socket).contains("READY") {
-            break;
+/// Close the transport at a Resize request, before the real daemon receives it.
+struct ResizeFaultProxy {
+    socket: PathBuf,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ResizeFaultProxy {
+    fn start(upstream: PathBuf) -> Self {
+        let socket = socket_path();
+        let listener = UnixListener::bind(&socket).expect("bind resize fault proxy");
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stopped);
+        let worker = std::thread::spawn(move || {
+            for client in listener.incoming() {
+                if worker_stop.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                let client = client.expect("accept proxy client");
+                let mut server = UnixStream::connect(&upstream).expect("connect real daemon");
+                std::thread::spawn(move || {
+                    let mut replies = server.try_clone().expect("clone daemon stream");
+                    let mut output = client.try_clone().expect("clone client stream");
+                    std::thread::spawn(move || {
+                        let _ = std::io::copy(&mut replies, &mut output);
+                    });
+                    let mut reader = BufReader::new(client);
+                    let mut frame = Vec::new();
+                    while reader.read_until(b'\n', &mut frame).unwrap_or(0) > 0 {
+                        if matches!(
+                            serde_json::from_slice::<ControlRequest>(&frame),
+                            Ok(ControlRequest::Resize {
+                                cols: 40,
+                                rows: 12,
+                                ..
+                            })
+                        ) {
+                            let _ = reader.get_ref().shutdown(std::net::Shutdown::Both);
+                            break;
+                        }
+                        if server.write_all(&frame).is_err() {
+                            break;
+                        }
+                        frame.clear();
+                    }
+                    let _ = server.shutdown(std::net::Shutdown::Both);
+                });
+            }
+        });
+        Self {
+            socket,
+            stopped,
+            worker: Some(worker),
         }
-        std::thread::sleep(Duration::from_millis(20));
     }
-    let (pair, mut child, transcript) = spawn_attach_pty(&socket, 24, 80);
+}
+
+impl Drop for ResizeFaultProxy {
+    fn drop(&mut self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+        let _ = UnixStream::connect(&self.socket);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        let _ = std::fs::remove_file(&self.socket);
+    }
+}
+
+/// A failed Resize must log Err with pane/session identity, not report success.
+#[test]
+fn resize_transport_failure_logs_request_error() {
+    let socket = socket_path();
+    let _server = start_server(&socket);
+    wait_attach_json(&socket, &["READY"]);
+    let proxy = ResizeFaultProxy::start(socket);
+    let (pair, mut child, transcript) = spawn_attach_pty(&proxy.socket, 24, 80);
     drop(pair.slave);
     wait_transcript(&transcript, "READY", Duration::from_secs(5));
-
-    let _ = server.child.kill();
-    let _ = server.child.wait();
 
     pair.master
         .resize(PtySize {

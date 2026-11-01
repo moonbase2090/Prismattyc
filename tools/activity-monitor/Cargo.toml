@@ -1,0 +1,24 @@
+[package]
+name = "pmux-activity-monitor"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1.0"
+ctrlc = { version = "3.5", features = ["termination"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+prismattyc-mux = { path = "../../crates/prismattyc-mux" }
+lunatui-core = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898" }
+lunatui-runtime = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898", default-features = false, features = ["app"] }
+lunatui-term = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898" }
+lunatui-theme = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898" }
+lunatui-widgets = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898", default-features = false }
+
+[patch.crates-io]
+portable-pty = { path = "../../third_party/portable-pty" }

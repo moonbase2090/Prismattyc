@@ -420,7 +420,7 @@ pub fn transact_config<T>(
     path: &Path,
     edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<T>,
 ) -> Result<ConfigCommit<T>> {
-    locked_config(path, |raw| {
+    transact_file(path, |raw| {
         let mut document = raw
             .parse::<toml_edit::DocumentMut>()
             .context("parse config before edit")?;
@@ -432,7 +432,7 @@ pub fn transact_config<T>(
 /// Deliberately replace the entire document (for an explicit template write).
 /// Read/modify/write callers use `transact_config` instead of a stale string.
 pub fn write_config_atomic(path: &Path, contents: &str) -> Result<()> {
-    locked_config(path, |_| Ok((contents.to_string(), ())))?.report();
+    transact_file(path, |_| Ok((contents.to_string(), ())))?.report();
     Ok(())
 }
 
@@ -462,7 +462,8 @@ enum Replacement<'a> {
     IfUnchanged(Option<&'a str>),
 }
 
-fn locked_config<T>(
+/// Edit a text file under its advisory lock and detect external writes before replacement.
+pub fn transact_file<T>(
     path: &Path,
     edit: impl FnOnce(&str) -> Result<(String, T)>,
 ) -> Result<ConfigCommit<T>> {

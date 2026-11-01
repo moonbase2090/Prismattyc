@@ -5777,13 +5777,18 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn budgeted_drain_uses_remaining_time_for_more_than_one_chunk_batch() {
-        let args = vec![
-            "-c".to_string(),
-            "exec /usr/bin/python3 -c 'import sys, time; sys.stdout.write(\"x\" * 70000 + \"\\nDRAIN_BATCH_FINAL_MARKER\\n\"); sys.stdout.flush(); time.sleep(2)'".to_string(),
-        ];
-        let mut runtime = MuxRuntime::spawn("/bin/sh", &args, 80, 24).unwrap();
+        let mut runtime = MuxRuntime::spawn(EMPTY_SPACE_PROGRAM, &[], 80, 24).unwrap();
         let pane = runtime.focused_id();
-        thread::sleep(Duration::from_millis(100));
+        let (sender, receiver) = mpsc::sync_channel(16);
+        let mut bytes = vec![b'x'; 70_000];
+        bytes.extend_from_slice(b"\r\nDRAIN_BATCH_FINAL_MARKER\r\n");
+        for chunk in bytes.chunks(8192) {
+            sender.send(Ok(chunk.to_vec())).unwrap();
+        }
+        let focused = runtime.panes.get_mut(&pane).unwrap();
+        focused.from_pty_rx = Some(receiver);
+        focused.child_alive = true;
+        focused.placeholder = None;
 
         let (dirty, more) = runtime.drain_all_until(Instant::now() + Duration::from_secs(2));
 
@@ -5799,6 +5804,11 @@ mod tests {
             !more,
             "the buffered PTY output must drain before the deadline"
         );
+        assert!(
+            runtime.panes[&pane].child_alive,
+            "the queue must stay connected"
+        );
+        drop(sender);
     }
 
     #[test]

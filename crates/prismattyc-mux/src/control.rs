@@ -460,6 +460,17 @@ fn dirty_input_still_open(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlRequest {
+    PublishActivity {
+        version: u16,
+        request_id: u64,
+        event: crate::activity::ActivityInput,
+    },
+    ReadActivity {
+        version: u16,
+        request_id: u64,
+        cursor: Option<crate::activity::ActivityCursor>,
+        limit: usize,
+    },
     ServerInfo {
         version: u16,
         request_id: u64,
@@ -989,7 +1000,17 @@ pub enum ControlRequest {
 impl ControlRequest {
     fn header(&self) -> (u16, u64) {
         match self {
-            Self::ServerInfo {
+            Self::PublishActivity {
+                version,
+                request_id,
+                ..
+            }
+            | Self::ReadActivity {
+                version,
+                request_id,
+                ..
+            }
+            | Self::ServerInfo {
                 version,
                 request_id,
             }
@@ -1319,7 +1340,9 @@ impl ControlRequest {
             | Self::Close { client_id, .. }
             | Self::MovePane { client_id, .. }
             | Self::Resize { client_id, .. } => *client_id,
-            Self::ServerInfo { .. }
+            Self::PublishActivity { .. }
+            | Self::ReadActivity { .. }
+            | Self::ServerInfo { .. }
             | Self::Ping { .. }
             | Self::Snapshot { .. }
             | Self::Events { .. }
@@ -1434,6 +1457,12 @@ pub struct MailPeer {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ControlResponseData {
+    ActivityPublished {
+        ack: crate::activity::ActivityAck,
+    },
+    Activity {
+        page: crate::activity::ActivityPage,
+    },
     ServerInfo {
         package_version: String,
         pid: u32,
@@ -1633,6 +1662,13 @@ impl ControlResponse {
     }
 }
 
+fn activity_disabled() -> ControlError {
+    ControlError::new(
+        ControlErrorCode::ActivityDisabled,
+        "activity feed is disabled",
+    )
+}
+
 /// Stable error vocabulary for clients and test harnesses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1640,6 +1676,8 @@ pub enum ControlErrorCode {
     InvalidJson,
     FrameTooLarge,
     InvalidRequest,
+    /// The optional activity feed is not enabled on this daemon.
+    ActivityDisabled,
     IncompatibleVersion,
     StaleRequestId,
     StaleId,
@@ -2295,6 +2333,7 @@ struct SessionAgentBinding {
 /// `new_live` additionally binds one server-owned PTY/emulator per pane. The
 /// windowed client remains a compositor, never the process-lifetime owner.
 pub struct ControlPlane {
+    activity: Option<crate::activity::ActivityFeed>,
     shutdown_pending: bool,
     domain: Domain,
     active_clients: HashSet<ClientId>,
@@ -2442,6 +2481,7 @@ impl ControlPlane {
             })
             .collect();
         Ok(Self {
+            activity: None,
             shutdown_pending: false,
             domain,
             active_clients: HashSet::new(),
@@ -2498,6 +2538,17 @@ impl ControlPlane {
             pane_log_captured: std::collections::HashMap::new(),
             pane_log_capture: None,
         })
+    }
+
+    /// Enable the process-local activity feed. Repeated calls preserve its epoch.
+    pub fn enable_activity(&mut self) -> Result<(), ControlError> {
+        if self.activity.is_none() {
+            self.activity = Some(
+                crate::activity::ActivityFeed::new()
+                    .map_err(|message| ControlError::new(ControlErrorCode::Internal, message))?,
+            );
+        }
+        Ok(())
     }
 
     /// `[mux] remote_size` policy. Default is [`RemoteSizePolicy::Latest`].
@@ -4140,6 +4191,20 @@ impl ControlPlane {
         request: ControlRequest,
     ) -> Result<ControlResponseData, ControlError> {
         match request {
+            ControlRequest::PublishActivity { event, .. } => {
+                let feed = self.activity.as_mut().ok_or_else(activity_disabled)?;
+                let ack = feed.publish(event).map_err(|message| {
+                    ControlError::new(ControlErrorCode::InvalidRequest, message)
+                })?;
+                Ok(ControlResponseData::ActivityPublished { ack })
+            }
+            ControlRequest::ReadActivity { cursor, limit, .. } => {
+                let feed = self.activity.as_ref().ok_or_else(activity_disabled)?;
+                let page = feed.read(cursor, limit).map_err(|message| {
+                    ControlError::new(ControlErrorCode::InvalidRequest, message)
+                })?;
+                Ok(ControlResponseData::Activity { page })
+            }
             ControlRequest::ServerInfo { .. } => Ok(ControlResponseData::ServerInfo {
                 package_version: env!("CARGO_PKG_VERSION").into(),
                 pid: std::process::id(),
@@ -8880,6 +8945,8 @@ function Read-Exact([int]$Count) {
 
     #[cfg(windows)]
     fn ps_echo_loop(label: &str) -> String {
+        // ConPTY can deliver Enter as CR. Accept both terminal line endings,
+        // and avoid emitting another echo for the LF in a CRLF pair.
         ps_with_preamble(&format!(
             "Write-Text \"{label}`n\"\n\
              $stdin = [Console]::OpenStandardInput()\n\
@@ -8888,11 +8955,12 @@ function Read-Exact([int]$Count) {
              while ($true) {{\n\
                $n = $stdin.Read($one, 0, 1)\n\
                if ($n -le 0) {{ break }}\n\
-               if ($one[0] -eq 10) {{\n\
+               if (($one[0] -eq 10) -or ($one[0] -eq 13)) {{\n\
+                 if ($line.Count -eq 0) {{ continue }}\n\
                  $text = [System.Text.Encoding]::UTF8.GetString($line.ToArray())\n\
                  Write-Text (\"ECHO:\" + $text + \"`n\")\n\
                  $line.Clear()\n\
-               }} elseif ($one[0] -ne 13) {{\n\
+               }} else {{\n\
                  [void]$line.Add($one[0])\n\
                }}\n\
              }}\n"
@@ -12511,6 +12579,7 @@ function Read-Exact([int]$Count) {
         needle: &str,
     ) -> PaneContent {
         let deadline = Instant::now() + Duration::from_secs(3);
+        let mut last = None;
         while Instant::now() < deadline {
             let content = pane_content(request(
                 stream,
@@ -12525,9 +12594,10 @@ function Read-Exact([int]$Count) {
             if content.lines.join("\n").contains(needle) {
                 return content;
             }
+            last = Some(content);
             thread::sleep(Duration::from_millis(10));
         }
-        panic!("pane {pane_id} never contained {needle:?}");
+        panic!("pane {pane_id} never contained {needle:?}; last content: {last:?}");
     }
 
     fn env_report_spawn() -> SpawnSpec {
@@ -13181,21 +13251,23 @@ function Read-Exact([int]$Count) {
             .body,
             ControlResponseBody::Ok { .. }
         ));
+        let mut request_id = 4;
+        let _ = wait_for_pane_text(&mut stream, &mut request_id, client, pane, "ACT");
         assert!(matches!(
             request(
                 &mut stream,
                 &ControlRequest::WritePane {
                     version: PROTOCOL_VERSION,
-                    request_id: 4,
+                    request_id,
                     client_id: client,
                     pane_id: pane,
-                    data: "one\n".into(),
+                    data: "one\r".into(),
                 },
             )
             .body,
             ControlResponseBody::Ok { .. }
         ));
-        let mut request_id = 5;
+        request_id += 1;
         let _ = wait_for_pane_text(&mut stream, &mut request_id, client, pane, "ECHO:one");
         let (seq1, rev1, alive1) = wait_for_output_activity(&mut stream, &mut request_id, pane);
         assert!(alive1);
@@ -13209,7 +13281,7 @@ function Read-Exact([int]$Count) {
                     request_id,
                     client_id: client,
                     pane_id: pane,
-                    data: "two\n".into(),
+                    data: "two\r".into(),
                 },
             )
             .body,
@@ -16713,7 +16785,8 @@ function Read-Exact([int]$Count) {
         let quiet_window = Duration::from_millis(MAIL_INJECT_EPOCH_WAIT_MS + 100);
         let mut last_rev = plane.pane_revision(pane);
         let mut stable_since = Instant::now();
-        while stable_since.elapsed() < quiet_window && Instant::now() < deadline {
+        let quiet_deadline = Instant::now() + Duration::from_secs(3);
+        while stable_since.elapsed() < quiet_window && Instant::now() < quiet_deadline {
             thread::sleep(Duration::from_millis(MAIL_INJECT_EPOCH_SLICE_MS));
             plane.drain_for_test();
             let rev = plane.pane_revision(pane);
@@ -16722,6 +16795,10 @@ function Read-Exact([int]$Count) {
                 stable_since = Instant::now();
             }
         }
+        assert!(
+            stable_since.elapsed() >= quiet_window,
+            "spawn did not become quiet"
+        );
         quiet_unattended(plane, pane);
     }
 
@@ -16784,9 +16861,18 @@ function Read-Exact([int]$Count) {
         }
         assert!(saw_woke, "child should consume the exact inject payload");
         quiet_unattended(&mut plane, pane);
+        let revision = plane.pane_revision(pane).unwrap();
+        let record = plane.mail_inject.get_mut(&pane).unwrap();
+        record.hide_revision = revision;
+        record.hide_until_ms = now_unix_ms().saturating_add(5_000);
         let (again, n2) = mail_inject(inject_mail(&mut plane, client, pane, 4));
         assert_eq!(again, MailInjectOutcome::DeferredHide);
         assert_eq!(n2, 0);
+        assert_eq!(plane.mail_inject_writes(pane), 1);
+        plane.mail_inject.get_mut(&pane).unwrap().hide_until_ms = 0;
+        let (exhausted, n3) = mail_inject(inject_mail(&mut plane, client, pane, 5));
+        assert_eq!(exhausted, MailInjectOutcome::SkippedExhausted);
+        assert_eq!(n3, 0);
         assert_eq!(plane.mail_inject_writes(pane), 1);
     }
 
@@ -17362,5 +17448,128 @@ function Read-Exact([int]$Count) {
             !plane.write_ledger.contains_key(&pane),
             "a rejected write must not dirty input"
         );
+    }
+
+    fn activity_input() -> crate::activity::ActivityInput {
+        crate::activity::ActivityInput {
+            schema_version: 1,
+            seat: crate::mailbox::AgentId::new("worker-a").unwrap(),
+            run_id: "run-1".into(),
+            event_id: "event-1".into(),
+            source: crate::activity::ActivitySource::Notify,
+            kind: crate::activity::ActivityKind::TurnFinished,
+        }
+    }
+
+    #[test]
+    fn activity_is_default_off_and_never_changes_topology_sequence() {
+        let (mut plane, _, _) = fixture(8);
+        let disabled = plane.handle(ControlRequest::PublishActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 1,
+            event: activity_input(),
+        });
+        assert_eq!(error_code(&disabled), ControlErrorCode::ActivityDisabled);
+        assert_eq!(plane.sequence(), 0);
+        let disabled = plane.handle(ControlRequest::ReadActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 2,
+            cursor: None,
+            limit: 1,
+        });
+        assert_eq!(error_code(&disabled), ControlErrorCode::ActivityDisabled);
+        plane.enable_activity().unwrap();
+        let accepted = plane.handle(ControlRequest::PublishActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 3,
+            event: activity_input(),
+        });
+        let ControlResponseBody::Ok {
+            response: ControlResponseData::ActivityPublished { ack },
+        } = accepted.body
+        else {
+            panic!("expected activity ack")
+        };
+        assert_eq!(ack.cursor.sequence, 1);
+        let mut invalid = activity_input();
+        invalid.schema_version = 2;
+        let rejected = plane.handle(ControlRequest::PublishActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 4,
+            event: invalid,
+        });
+        assert_eq!(error_code(&rejected), ControlErrorCode::InvalidRequest);
+        assert_eq!(plane.sequence(), 0);
+        assert!(plane.events_after(0, None).unwrap().events.is_empty());
+        plane.enable_activity().unwrap();
+        assert_eq!(
+            plane
+                .activity
+                .as_ref()
+                .unwrap()
+                .read(None, 1)
+                .unwrap()
+                .epoch,
+            ack.cursor.epoch
+        );
+    }
+
+    #[test]
+    fn activity_native_socket_serves_unregistered_headless_publisher_and_reader() {
+        use crate::activity::{exchange, ActivityRejected, ActivityReset};
+        let (plane, _, _) = fixture(8);
+        let path = socket_path();
+        let server = ControlServer::bind(&path, plane).unwrap();
+        let rejected = exchange(
+            &path,
+            ControlRequest::ReadActivity {
+                version: PROTOCOL_VERSION,
+                request_id: 1,
+                cursor: None,
+                limit: 1,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            rejected.downcast_ref::<ActivityRejected>().map(|e| e.code),
+            Some(ControlErrorCode::ActivityDisabled)
+        );
+        server.plane().lock().unwrap().enable_activity().unwrap();
+        let reply = exchange(
+            &path,
+            ControlRequest::PublishActivity {
+                version: PROTOCOL_VERSION,
+                request_id: 1,
+                event: activity_input(),
+            },
+        )
+        .unwrap();
+        let ControlResponseData::ActivityPublished { ack } = reply else {
+            panic!("expected ack")
+        };
+        assert_eq!(ack.cursor.sequence, 1);
+        let reply = exchange(
+            &path,
+            ControlRequest::ReadActivity {
+                version: PROTOCOL_VERSION,
+                request_id: 1,
+                cursor: Some(crate::activity::ActivityCursor {
+                    epoch: "previous-boot".into(),
+                    sequence: 99,
+                }),
+                limit: 1,
+            },
+        )
+        .unwrap();
+        let ControlResponseData::Activity { page } = reply else {
+            panic!("expected page")
+        };
+        assert_eq!(page.reset, Some(ActivityReset::Restarted));
+        assert_eq!(page.records[0].event.seat.as_str(), "worker-a");
+        assert_eq!(
+            page.records[0].event.kind,
+            crate::activity::ActivityKind::TurnFinished
+        );
+        assert_eq!(server.plane().lock().unwrap().sequence(), 0);
     }
 }

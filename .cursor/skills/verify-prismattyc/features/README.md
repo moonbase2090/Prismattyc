@@ -1,11 +1,12 @@
 # Prismattyc verification map
 
-Read this index before selecting proof. Each feature file names the user entry points, prerequisites, observable results, and limitations. This initial map covers four feature groups; it is not a claim that every application action has a recipe.
+Read this index before selecting proof. Each feature file names the user entry points, prerequisites, observable results, and limitations. This map covers five feature groups; it is not a claim that every application action has a recipe.
 
 - [Sessions and mail](sessions-mail.md): real shell output, mailbox claim/commit, and live process preservation.
 - [Saved spaces](spaces.md): create, save, open, rename, and delete saved definitions while sessions remain alive.
 - [Desktop UI](desktop.md): native rail deletion, session naming, restart rendering, the complete settings editor, complete updates with session restoration, and macOS Dock restoration.
 - [Windows](windows.md): installer lifecycle, console newlines, and new-pane shell selection.
+- [Agent activity](activity.md): opt-in headless activity ingestion, bounded replay, and a live Lunatui monitor.
 
 Start each CLI feature with the skill's fresh private daemon. Desktop fixtures own separate windows and data. Check doctor before driving and after surprises. Do not share sockets, artifact paths, or build targets between concurrent writers.
 

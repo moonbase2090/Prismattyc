@@ -80,6 +80,7 @@ jobs:
             ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\pmuxd.exe
             ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\pmux-attach.exe
             ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\pmux-mcp.exe
+            ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\pmux-activity-monitor.exe
             ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\prismattyc.exe
             ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\prismattyc-host.exe
             ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\prismattyc-cmd-forwarder.exe
@@ -150,7 +151,7 @@ jobs:
           if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
           Expand-Archive -LiteralPath $zip.FullName -DestinationPath $extract -Force
           $forwarders = @(Get-ChildItem -Path $extract -Recurse -Filter *.exe | Where-Object { $_.Directory.Name -eq 'cmd' })
-          if ($forwarders.Count -ne 5) { throw "Expected 5 signed cmd forwarders, found $($forwarders.Count)." }
+          if ($forwarders.Count -ne 6) { throw "Expected 6 signed cmd forwarders, found $($forwarders.Count)." }
           if (@($forwarders | Where-Object { $_.Name -eq 'prismattyc-host.exe' }).Count -ne 0) {
             throw 'prismattyc-host.exe must not be placed in cmd'
           }

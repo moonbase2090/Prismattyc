@@ -25,7 +25,8 @@ const USAGE: &str = "usage: pmux-activity-monitor [--socket PATH] [--host LABEL=
   (with no --socket or --host, reads this machine's pmuxd, found the way pmux finds it)
                              [--theme auto|dark|light] [--no-pixels] [--no-motion]
                              [--snapshot [--size COLSxROWS]]
-       pmux-activity-monitor --socket PATH (--json | --seats | --recent SEAT | --tail [--seat SEAT])";
+       pmux-activity-monitor --socket PATH (--json | --seats | --recent SEAT | --tail [--seat SEAT])
+       pmux-activity-monitor --version";
 
 enum Mode {
     Live,
@@ -165,6 +166,11 @@ fn options_with(
             Some("--no-motion") => motion = false,
             Some("--help" | "-h") => {
                 println!("{USAGE}");
+                return Ok(None);
+            }
+            // Release packaging checks that every shipped binary reports the release.
+            Some("--version" | "-V") => {
+                println!("{}", prismattyc_core::bin_version("pmux-activity-monitor"));
                 return Ok(None);
             }
             _ => bail!(USAGE),
@@ -516,7 +522,20 @@ mod tests {
     fn help_prints_usage_instead_of_running() -> Result<()> {
         assert!(options_from(["--help"].iter().map(std::ffi::OsString::from))?.is_none());
         assert!(options_from(["-h"].iter().map(std::ffi::OsString::from))?.is_none());
+        assert!(options_from(["--version"].iter().map(std::ffi::OsString::from))?.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn version_names_the_binary_and_the_prismattyc_release() {
+        let line = prismattyc_core::bin_version("pmux-activity-monitor");
+        assert!(
+            line.starts_with(&format!(
+                "pmux-activity-monitor {}",
+                prismattyc_core::package_version()
+            )),
+            "{line}"
+        );
     }
 
     #[test]

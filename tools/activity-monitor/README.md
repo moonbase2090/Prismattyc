@@ -1,6 +1,21 @@
-# Activity monitor prototype
+# Activity monitor
 
 This opt-in terminal viewer reads the experimental activity feed from one or more daemons. It shows every seat's state and recent activity, including seats with no terminal pane.
+
+### Use it from a release
+
+Release builds ship `pmux-activity-monitor` next to `pmux`. The macOS app links it onto PATH beside its `pmux` link, the Windows MSI puts it in the same `cmd` directory as `pmux.exe`, and the Linux tarball's `install.sh` installs it with the other binaries. The feed is off by default. Turn it on in the Prismattyc config file:
+
+```toml
+[mux]
+experimental_activity = true
+```
+
+pmuxd reads the key when it starts, so the app-managed daemon serves the feed after its next start. Changing the key never restarts a running daemon. Then run `pmux-activity-monitor` in any pane.
+
+A Linux installation that `pmux update` manages does not fetch the monitor yet; copy `bin/pmux-activity-monitor` from the release tarball next to `pmux`.
+
+### Build from source
 
 Build the daemon from the repository root and this standalone tool with its own lockfile:
 

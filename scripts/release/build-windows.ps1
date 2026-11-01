@@ -26,6 +26,9 @@ try {
         $env:RUSTFLAGS = "$previousRustFlags -C target-feature=+crt-static".Trim()
         cargo +1.90.0 build --locked --release --target $Target --workspace --bins
         if ($LASTEXITCODE -ne 0) { throw 'Windows build failed.' }
+        # The activity monitor keeps its own lockfile; build it into the same target tree.
+        cargo +1.90.0 build --locked --release --target $Target --manifest-path tools/activity-monitor/Cargo.toml --target-dir $targetRoot
+        if ($LASTEXITCODE -ne 0) { throw 'Activity monitor build failed.' }
     }
     if ($SkipPackage) {
         Write-Host "Windows binaries staged in $binDir"

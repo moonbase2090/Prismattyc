@@ -13,3 +13,10 @@ esac
 CARGO_ZIGBUILD_ZIG_PATH=zig cargo zigbuild \
   --release --locked --workspace --bins \
   --target "$target.2.28"
+# The activity monitor keeps its own lockfile outside the workspace. A shared
+# target directory puts it beside the other release binaries.
+CARGO_ZIGBUILD_ZIG_PATH=zig cargo zigbuild \
+  --release --locked \
+  --manifest-path tools/activity-monitor/Cargo.toml \
+  --target-dir target \
+  --target "$target.2.28"

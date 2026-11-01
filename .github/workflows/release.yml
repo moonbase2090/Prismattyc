@@ -99,6 +99,11 @@ jobs:
         run: |
           cargo build --release --locked --workspace --bins --target aarch64-apple-darwin
           cargo build --release --locked --workspace --bins --target x86_64-apple-darwin
+          # The activity monitor has its own lockfile; build it into the same target tree.
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked --manifest-path tools/activity-monitor/Cargo.toml \
+              --target-dir target --target "$target"
+          done
           # Record the SDK the arm64 host was linked against for the logs.
           otool -l target/aarch64-apple-darwin/release/prismattyc-host |
             awk '/LC_BUILD_VERSION/{p=1} p&&/sdk/{print; exit}'
@@ -313,6 +318,7 @@ jobs:
             ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\pmuxd.exe
             ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\pmux-attach.exe
             ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\pmux-mcp.exe
+            ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\pmux-activity-monitor.exe
             ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\prismattyc.exe
             ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\prismattyc-host.exe
             ${{ github.workspace }}\target\x86_64-pc-windows-msvc\release\prismattyc-cmd-forwarder.exe
@@ -389,7 +395,7 @@ jobs:
           if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
           Expand-Archive -LiteralPath $zip.FullName -DestinationPath $extract -Force
           $forwarders = @(Get-ChildItem -Path $extract -Recurse -Filter *.exe | Where-Object { $_.Directory.Name -eq 'cmd' })
-          if ($forwarders.Count -ne 5) { throw "Expected 5 signed cmd forwarders, found $($forwarders.Count)." }
+          if ($forwarders.Count -ne 6) { throw "Expected 6 signed cmd forwarders, found $($forwarders.Count)." }
           if (@($forwarders | Where-Object { $_.Name -eq 'prismattyc-host.exe' }).Count -ne 0) {
             throw 'prismattyc-host.exe must not be placed in cmd'
           }

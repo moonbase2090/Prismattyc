@@ -929,6 +929,7 @@ dependencies = [
  "lunatui-term",
  "lunatui-theme",
  "lunatui-widgets",
+ "prismattyc-core",
  "prismattyc-mux",
  "serde",
  "serde_json",

@@ -37,15 +37,17 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-/// The six shipped executables. Kept in sync with
-/// [`crate::release_update`]'s `BINARIES`.
-pub const BINARIES: [&str; 6] = [
+/// The shipped executables: [`crate::release_update`]'s `BINARIES` plus
+/// `pmux-activity-monitor`, which release packages carry but the per-binary
+/// updater does not manage yet.
+pub const BINARIES: [&str; 7] = [
     "prismattyc",
     "prismattyc-host",
     "pmux",
     "pmuxd",
     "pmux-attach",
     "pmux-mcp",
+    "pmux-activity-monitor",
 ];
 
 /// Which OS an inventory item applies to. An item only lands in the plan when
@@ -395,7 +397,8 @@ pub fn inventory(dirs: &Dirs) -> Vec<Item> {
             // On macOS, `pmux` may be an app-managed symlink or an independent
             // Cargo install. Only the symlink with its ownership record is
             // removed; never delete an arbitrary `pmux` at this path.
-            if os == Os::Macos && bin == "pmux" {
+            // `pmux-activity-monitor` is linked the same way (see path_shim).
+            if os == Os::Macos && matches!(bin, "pmux" | "pmux-activity-monitor") {
                 continue;
             }
             let name = crate::platform::executable_name(bin);
@@ -531,6 +534,7 @@ pub fn inventory(dirs: &Dirs) -> Vec<Item> {
             "pmuxd",
             "pmux-attach",
             "pmux-mcp",
+            "pmux-activity-monitor",
             "pmux-pane-write",
         ] {
             push(

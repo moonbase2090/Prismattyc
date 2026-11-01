@@ -90,7 +90,7 @@ class WindowsMsiTests(unittest.TestCase):
         )
         self.assertIn('Name="PATH" Value="[CMDFOLDER]" Action="set" Part="first" System="no"', source)
         self.assertNotIn("ProgramFiles", source)
-        for name in ("pmux", "pmuxd", "pmux-attach", "pmux-mcp", "prismattyc", "prismattyc-host"):
+        for name in ("pmux", "pmuxd", "pmux-attach", "pmux-mcp", "prismattyc", "prismattyc-host", "pmux-activity-monitor"):
             self.assertIn(f"{name}.exe", source)
         for path in (ROOT / "crates/prismattyc-host/assets/fonts").glob("*.txt"):
             self.assertIn(path.name, source)
@@ -163,7 +163,7 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertNotIn("prismattyc-host.cmd", source)
         cmd_group = source.split('Id="CmdShims"', 1)[1].split("</ComponentGroup>", 1)[0]
         self.assertNotIn("prismattyc-host", cmd_group)
-        names = ("prismattyc", "pmux", "pmuxd", "pmux-attach", "pmux-mcp")
+        names = ("prismattyc", "pmux", "pmuxd", "pmux-attach", "pmux-mcp", "pmux-activity-monitor")
         for name in names:
             self.assertIn(f'Source="$(var.Payload)\\cmd\\{name}.exe"', cmd_group)
             self.assertIn(f'Name="{name}.cmd" On="both"', cmd_group)
@@ -211,7 +211,7 @@ class WindowsMsiTests(unittest.TestCase):
             text = (ROOT / workflow).read_text(encoding="utf-8")
             self.assertIn("prismattyc-cmd-forwarder.exe", text)
             self.assertIn("Directory.Name -eq 'cmd'", text)
-            self.assertIn("Expected 5 signed cmd forwarders", text)
+            self.assertIn("Expected 6 signed cmd forwarders", text)
         self.assertNotIn("scripts/release/cmd", packager)
         self.assertNotIn("*.cmd", packager)
         self.assertNotIn("add bin to your user PATH", packager)

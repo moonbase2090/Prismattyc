@@ -10,7 +10,7 @@ import tarfile
 import tempfile
 from release_version import parse_release_version, reports_release_version
 
-BINARIES = ('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host')
+BINARIES = ('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host', 'pmux-activity-monitor')
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--version', required=True)
 p.add_argument('--target', required=True, choices=('x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'x86_64-apple-darwin', 'aarch64-apple-darwin'))

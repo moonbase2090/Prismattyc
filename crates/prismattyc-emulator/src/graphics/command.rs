@@ -60,11 +60,21 @@ pub(crate) enum Transport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Compression {
+    None,
+    Zlib,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GraphicsCommand {
     pub action: Action,
     pub delete_mode: Option<DeleteMode>,
     pub format: u16,
     pub transport: Transport,
+    pub compression: Compression,
+    pub pixel_width: Option<u32>,
+    pub pixel_height: Option<u32>,
     pub more: bool,
     pub id: u32,
     pub id_present: bool,
@@ -92,6 +102,9 @@ pub(crate) fn parse(control: &str) -> GraphicsCommand {
         delete_mode: None,
         format: 32,
         transport: Transport::Direct,
+        compression: Compression::None,
+        pixel_width: None,
+        pixel_height: None,
         more: false,
         id: 0,
         id_present: false,
@@ -141,6 +154,14 @@ pub(crate) fn parse(control: &str) -> GraphicsCommand {
                 };
             }
             "f" => cmd.format = val.parse().unwrap_or(cmd.format),
+            "s" => cmd.pixel_width = val.parse().ok(),
+            "v" => cmd.pixel_height = val.parse().ok(),
+            "o" => {
+                cmd.compression = match val {
+                    "z" => Compression::Zlib,
+                    _ => Compression::Other,
+                };
+            }
             "m" => cmd.more = val == "1",
             "i" => {
                 cmd.id_present = true;
@@ -175,10 +196,13 @@ mod tests {
 
     #[test]
     fn parses_transmit_display() {
-        let c = parse("a=T,t=d,f=100,q=2");
+        let c = parse("a=T,t=d,f=100,s=320,v=96,o=z,q=2");
         assert_eq!(c.action, Action::Transmit);
         assert_eq!(c.transport, Transport::Direct);
         assert_eq!(c.format, 100);
+        assert_eq!(c.pixel_width, Some(320));
+        assert_eq!(c.pixel_height, Some(96));
+        assert_eq!(c.compression, Compression::Zlib);
         assert_eq!(c.quiet, 2);
         assert!(!c.more);
     }
@@ -236,6 +260,7 @@ mod tests {
         let c = parse("a=T,zz=99");
         assert_eq!(c.format, 32);
         assert_eq!(c.transport, Transport::Direct);
+        assert_eq!(c.compression, Compression::None);
         assert_eq!(c.action, Action::Transmit);
     }
 

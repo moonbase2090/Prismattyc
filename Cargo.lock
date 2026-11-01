@@ -2695,6 +2695,7 @@ name = "prismattyc-emulator"
 version = "0.3.53"
 dependencies = [
  "anyhow",
+ "flate2",
  "libc",
  "png 0.17.16",
  "portable-pty",

@@ -19,7 +19,8 @@ pmux activity tail [--cursor EPOCH:SEQ | --from-oldest] [--seat SEAT]
                    [--max-events N] [--max-seconds N] [--host-label LABEL]
 pmux activity monitor [ARGS...]
 
-Read the activity feed of this host's pmuxd (started with --experimental-activity).
+Read the activity feed of this host's pmuxd. Turn the feed on with
+experimental_activity = true under [mux]; pmuxd applies it live.
 Every result, including errors, is JSON on stdout: one object, or one per
 line for tail.
 

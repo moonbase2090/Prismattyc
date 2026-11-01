@@ -10,7 +10,9 @@ terminal input. Both are experimental, like the feed itself.
 
 ## Prerequisites
 
-The host's pmuxd must run with `--experimental-activity`, and something must
+The host's pmuxd must have the feed on: set `experimental_activity = true` under
+`[mux]` in the settings panel or the config file, and the running pmuxd applies
+it within a second (`pmuxd --experimental-activity` also works). Something must
 publish events, such as the harness adapters in the feed note. Each host has its
 own daemon, socket, history, and boot epoch. `pmux activity` uses the same
 socket selection as every other `pmux` command: `--socket`, `--instance`, or
@@ -68,7 +70,7 @@ Errors are JSON on stdout as well, so a caller only parses one stream:
 
 | Code | Meaning | Exit |
 | --- | --- | --- |
-| `feed_disabled` | pmuxd runs without `--experimental-activity`. | 1 |
+| `feed_disabled` | The feed is off: `[mux] experimental_activity` is not `true` and pmuxd has no `--experimental-activity`. | 1 |
 | `daemon_unreachable` | No daemon answers on the selected socket. | 1 |
 | `feed_changed_retry` | The daemon restarted during a `seats` or `recent` read. Retry. | 1 |
 | `request_rejected` | The daemon rejected the request for another reason. | 1 |
@@ -195,7 +197,8 @@ A command endpoint can reach a Windows host over SSH:
   must name its full path.
 - Use key authentication and `BatchMode=yes`, so a password or host-key prompt
   fails at once instead of waiting out the timeout.
-- pmuxd on that host must run with `--experimental-activity`.
+- That host's config must set `experimental_activity = true` under `[mux]`, or
+  its pmuxd must run with `--experimental-activity`.
 
 The reverse works too: a client on Windows can run `pmux-mcp.exe` with a
 hosts file whose command endpoint reaches the Mac over SSH.

@@ -280,7 +280,7 @@ impl PmuxMcp {
     }
 
     #[tool(
-        description = "List seats seen in a host's retained activity feed with each seat's latest event kind and time. Seeing a seat does not mean its process is alive. Read-only; the host's pmuxd must run with --experimental-activity."
+        description = "List seats seen in a host's retained activity feed with each seat's latest event kind and time. Seeing a seat does not mean its process is alive. Read-only; the host's pmuxd needs the feed on ([mux] experimental_activity = true, applied live)."
     )]
     async fn pmux_activity_seats(
         &self,

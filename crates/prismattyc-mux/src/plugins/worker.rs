@@ -119,7 +119,10 @@ impl Process {
                 let response = wire::read(&mut pipes.input)?;
                 if matches!(&response, Response::Endpoints | Response::Poll { .. }) {
                     imports += 1;
-                    ensure!(imports <= 64, "plug-in host import budget exceeded");
+                    ensure!(
+                        imports <= pmux_plugin_api::MAX_HOST_IMPORTS_PER_CALL,
+                        "plug-in host import budget exceeded"
+                    );
                 }
                 let request = match response {
                     Response::Endpoints => Request::Endpoints(provider.endpoints()),
@@ -360,9 +363,16 @@ pub(super) fn run() -> Result<()> {
     let receiver = Arc::new(Mutex::new(receiver));
     let result = run_requests(receiver);
     if let Err(error) = &result {
+        let root = error.root_cause().to_string();
+        let context = error.to_string();
+        let message = if root == context {
+            root
+        } else {
+            format!("{root}: {context}")
+        };
         let _ = wire::write(
             &mut std::io::stdout().lock(),
-            &Response::Failed(wire::error_message(&error.to_string())),
+            &Response::Failed(wire::error_message(&message)),
         );
     }
     result

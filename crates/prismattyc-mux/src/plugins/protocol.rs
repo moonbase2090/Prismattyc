@@ -3,7 +3,7 @@
 use pmux_plugin_api::host::pmux::view::frame;
 use serde::{Deserialize, Serialize};
 
-use super::{CatalogEntry, Endpoint, EndpointSource, Installed, Manifest};
+use super::{CatalogEntry, Endpoint, EndpointDefinition, EndpointSource, Installed, Manifest};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -89,6 +89,9 @@ pub enum AdminAction {
     AddEndpoint {
         label: String,
         source: EndpointSource,
+    },
+    ImportEndpoints {
+        endpoints: Vec<EndpointDefinition>,
     },
     RemoveEndpoint {
         label: String,

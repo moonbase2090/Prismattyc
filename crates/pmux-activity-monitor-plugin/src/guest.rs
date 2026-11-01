@@ -18,6 +18,8 @@ use crate::{
     ui::Palette,
 };
 
+const POLL_INTERVAL_MS: u16 = 250;
+
 struct View {
     reference: lifecycle::ViewReference,
     monitor: Monitor,
@@ -27,6 +29,7 @@ struct View {
     readable: bool,
     clock: frame::Clock,
     first_tick: Option<u64>,
+    next_host: usize,
 }
 
 impl View {
@@ -60,15 +63,16 @@ impl View {
             readable,
             clock,
             first_tick: None,
+            next_host: 0,
         })
     }
 
     fn poll(&mut self, clock: &frame::Clock) {
         self.monitor.now_ms = clock.wall_ms;
         if !self.readable
-            || self
-                .last_poll
-                .is_some_and(|last| clock.monotonic_ms.saturating_sub(last) < 250)
+            || self.last_poll.is_some_and(|last| {
+                clock.monotonic_ms.saturating_sub(last) < u64::from(POLL_INTERVAL_MS)
+            })
         {
             return;
         }
@@ -88,6 +92,7 @@ impl View {
             .collect::<Vec<_>>()
             != self.handles
         {
+            self.next_host = 0;
             let selected = self.monitor.ui.selected.as_ref().and_then(|(index, seat)| {
                 self.handles
                     .get(*index)
@@ -113,15 +118,29 @@ impl View {
                     .map(|index| (index, seat))
             });
         }
-        for (handle, host) in self.handles.iter().zip(&mut self.monitor.hosts) {
+        let mut remaining = (pmux_plugin_api::MAX_ACTIVITY_READS_PER_SECOND
+            / (1000 / POLL_INTERVAL_MS))
+            .min(pmux_plugin_api::MAX_HOST_IMPORTS_PER_CALL - 1);
+        for _ in 0..self.handles.len() {
+            if remaining == 0 {
+                break;
+            }
+            let index = self.next_host;
+            self.next_host = (index + 1) % self.handles.len();
+            let handle = self.handles[index];
+            let host = &mut self.monitor.hosts[index];
             // Two pages cover the daemon's 512-entry ring. Further activity is
             // picked up on the next tick instead of monopolizing the worker.
             for _ in 0..2 {
+                if remaining == 0 {
+                    break;
+                }
+                remaining -= 1;
                 let cursor = host.epoch.as_ref().map(|epoch| read::Cursor {
                     epoch: epoch.clone(),
                     sequence: host.sequence,
                 });
-                match read::poll(*handle, cursor.as_ref(), 256).and_then(activity::page) {
+                match read::poll(handle, cursor.as_ref(), 256).and_then(activity::page) {
                     Ok(page) => {
                         let more = page.has_more;
                         host.apply(page, clock.monotonic_ms);
@@ -131,6 +150,7 @@ impl View {
                     }
                     Err(error) => {
                         match error {
+                            read::Error::RateLimited => {}
                             read::Error::Connecting => host.link = Link::Connecting,
                             read::Error::FeedDisabled => host.link = Link::Disabled,
                             read::Error::PermissionDenied | read::Error::Revoked => {
@@ -167,7 +187,7 @@ impl View {
                 .monitor
                 .hosts
                 .iter()
-                .any(|host| host.link == Link::Connecting)
+                .any(|host| host.link == Link::Connecting || host.more)
             && self
                 .clock
                 .monotonic_ms
@@ -195,7 +215,7 @@ impl View {
             next_tick_ms: if self.monitor.animating(self.clock.monotonic_ms) {
                 33
             } else {
-                250
+                POLL_INTERVAL_MS
             },
             id: self.reference.id,
             content,

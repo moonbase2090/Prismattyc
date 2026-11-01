@@ -7,6 +7,8 @@ pub const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_VIEW_CELLS: usize = 60_000;
 pub const MAX_TILES: usize = 32;
 pub const MAX_TILE_DIMENSION: u32 = 4096;
+pub const MAX_HOST_IMPORTS_PER_CALL: u16 = 64;
+pub const MAX_ACTIVITY_READS_PER_SECOND: u16 = 64;
 
 pub mod modifiers {
     pub const SHIFT: u8 = 1;

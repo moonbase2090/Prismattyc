@@ -52,7 +52,8 @@ def build(args, scratch):
     cargo = ["cargo", f"+{args.toolchain}"]
 
     def run(*command, **overrides):
-        subprocess.run([*cargo, *command], cwd=REPO, env={**env, **overrides}, check=True)
+        profile = ["--release"] if args.release else []
+        subprocess.run([*cargo, command[0], *profile, *command[1:]], cwd=REPO, env={**env, **overrides}, check=True)
 
     guest_env = {key: value for key, value in env.items() if key not in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS")}
     subprocess.run([*cargo, "build", "-p", "pmux-plugin-fixture", "-p", "pmux-activity-monitor-plugin", "-p", "pmux-activity-connector-plugin", "--release", "--target", "wasm32-unknown-unknown", "--locked"], cwd=REPO, env=guest_env, check=True)
@@ -74,7 +75,7 @@ def build(args, scratch):
     run("build", "-p", "prismattyc-mux", "--bin", "pmux", "--bin", "pmuxd", "--locked", PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
     run("build", "-p", "pmux-mcp", "--locked", PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
     run("build", "--manifest-path", "tools/activity-monitor/Cargo.toml", "--locked", PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
-    return target / "debug"
+    return target / ("release" if args.release else "debug")
 
 
 class Connection:
@@ -102,7 +103,7 @@ class Connection:
         return self.request("plugin", plugin_api="1.0.0", operation={"operation": operation, **fields})
 
 
-def exercise(bins, scratch):
+def exercise(bins, scratch, feature="all"):
     # Short socket paths also work with macOS's sockaddr_un limit.
     runtime = Path(tempfile.mkdtemp(prefix="pmux-plug-")).resolve()
     config = runtime / "config.toml"
@@ -388,11 +389,75 @@ else:
         while alive() and time.monotonic() < deadline: time.sleep(0.05)
         assert not alive(), f"owned endpoint helper {pid} survived cancellation"
 
+    def endpoint_pressure():
+        labels = [f"source-{index:02}" for index in range(31)]
+        for index in range(512):
+            event = {"schema_version":1,"seat":"quota-seat","run_id":"run-quota","event_id":f"quota-{index}","source":"hooks","kind":"waiting"}
+            assert connection.request("publish_activity",event=event)["status"] == "ok"
+        for label in labels:
+            cli("endpoint","add",label,"--socket",str(endpoint))
+        grants = ["--allow","activity.read:local"]
+        for label in labels:
+            grants.extend(["--allow",f"activity.read:{label}"])
+        cli("enable",monitor,*grants)
+        text = cli("run",monitor,"--snapshot","--cols","100","--rows","60",text=True)
+        assert "32 waiting" in text and "quota-seat" in text, text
+        for label in labels:
+            cli("endpoint","remove",label)
+
+    def legacy_import():
+        marker = scratch / "unexpected-helper-start"
+        hosts = scratch / "legacy-hosts.toml"
+        long_label = "c" * 64
+        query = [sys.executable,"-c",f"from pathlib import Path; Path({str(marker)!r}).touch()"]
+        hosts.write_text('min_interval_ms = 1000\n[[host]]\nlabel = "local"\nsocket = "default"\n'
+            + f'[[host]]\nlabel = "{long_label}"\ncommand = {json.dumps(query)}\n')
+        arguments = ["--host",f"legacy-socket={endpoint}","--host-cmd","a-24-character-host-label",json.dumps(query),"--activity-hosts",str(hosts)]
+        journal = endpoint.with_suffix(".plugins.json")
+        before = journal.read_bytes()
+        preview = cli("endpoint","import",*arguments)
+        assert preview["applied"] is False and len(preview["proposed_endpoints"]) == 3
+        assert journal.read_bytes() == before and not marker.exists()
+        imported = cli("endpoint","import",*arguments,"--apply")["endpoints"]
+        assert [item["source"]["transport"] for item in imported] == ["socket","command_tail","command_query"]
+        assert cli("endpoint","import",*arguments,"--apply")["endpoints"] == imported
+        assert not marker.exists()
+        assert cli("inspect",monitor)["state"]["grants"] == ["activity.read:local"]
+        before = journal.read_bytes()
+        cli("endpoint","import","--apply","--host",f"must-not-appear={endpoint}","--host","legacy-socket=/tmp/conflicting.sock",succeeds=False)
+        assert journal.read_bytes() == before
+        assert all(item["label"] != "must-not-appear" for item in cli("endpoint","list")["endpoints"])
+        for item in imported:
+            cli("endpoint","remove",item["label"])
+        # Count alone cannot bound the durable retry cache. Several successful
+        # imports must remain possible when each cached reply is substantial.
+        large_argv = json.dumps(["not-executed", *(["x" * 3500] * 3)])
+        large = [f'[[host]]\nlabel = "large-{index}"\ncommand = {large_argv}\n' for index in range(20)]
+        hosts.write_text("".join(large))
+        imported = cli("endpoint","import","--activity-hosts",str(hosts),"--apply")["endpoints"]
+        for _ in range(6):
+            assert cli("endpoint","import","--activity-hosts",str(hosts),"--apply")["endpoints"] == imported
+            assert journal.stat().st_size <= 1024 * 1024
+        for item in imported:
+            cli("endpoint","remove",item["label"])
+
     try:
         setting(False)
         daemon, connection = start()
         pid = daemon.pid
         baseline = connection.request("snapshot")["response"]["snapshot"]["sessions"]
+        monitor = "org.moonbase.activity-monitor"
+        if feature != "all":
+            feed(True)
+            cli("install",monitor)
+            cli("enable",monitor,"--allow","activity.read:local")
+            if feature == "endpoint-pressure":
+                endpoint_pressure()
+                print("PASS32 endpoints with512 retained events each")
+            else:
+                legacy_import()
+                print("PASS atomic legacy import, stable identities, byte-bounded retry cache, and no helper launch")
+            return
         assert len(cli("discover")["packages"]) == 4
         assert cli("list")["installed"] == []
         cli("invoke", PLUGIN, "poll", succeeds=False)
@@ -484,6 +549,8 @@ else:
         assert daemon.poll() is None and daemon.pid == pid
         assert connection.request("snapshot")["response"]["snapshot"]["sessions"] == baseline
         tail_argv, tail_pid = remote_proof()
+        legacy_import()
+        endpoint_pressure()
         assert connection.request("publish_activity", event={**event,"event_id":"before-live-view"})["status"] == "ok"
         terminal_view()
         assert daemon.poll() is None and daemon.pid == pid
@@ -517,7 +584,7 @@ else:
         daemon, connection = start()
         assert not cli("inspect", PLUGIN)["state"]["enabled"]
         cli("invoke", PLUGIN, "counter", succeeds=False)
-        print("PASS install stays disabled; explicit grants; actual Wasm monitor cells/RGBA and connector queries; live terminal input/resize/restore and hot feed epochs; direct/supervised identity-free MCP and default-empty exports; connection-bound handles; schema rejection; failed readiness preserves selection; remote300-event catch-up/socket/tail and thin launcher; endpoint removal and parent-death helper cleanup; exact-version and read-only offline inspection; durable disable after restart")
+        print("PASS install stays disabled; explicit grants; actual Wasm monitor cells/RGBA and connector queries; live terminal input/resize/restore and hot feed epochs; direct/supervised identity-free MCP and default-empty exports; connection-bound handles; schema rejection; failed readiness preserves selection; remote300-event catch-up/socket/tail and thin launcher; endpoint removal and parent-death helper cleanup; exact-version and read-only offline inspection; atomic legacy endpoint import without grants/helper launch;32-endpoint512-event catch-up; durable disable after restart")
     finally:
         for item in connections:
             item.close()
@@ -531,11 +598,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-dir", type=Path, default=REPO / "target/plugin-proof")
     parser.add_argument("--toolchain", default="1.90.0")
+    parser.add_argument("--release", action="store_true", dest="release", default=True, help="exercise optimized native binaries as shipped (default)")
+    parser.add_argument("--debug", action="store_false", dest="release", help="use slower debug native binaries for local diagnostics")
+    parser.add_argument("--feature", choices=["all","endpoint-pressure","legacy-import"], default="all")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="pmux-plugin-build-") as work:
         scratch = Path(work)
         bins = build(args, scratch)
-        exercise(bins, scratch)
+        exercise(bins, scratch,args.feature)
 
 
 if __name__ == "__main__":

@@ -119,6 +119,8 @@ impl Runtime {
                 provider,
                 assets,
                 started: Instant::now(),
+                imports: BTreeMap::new(),
+                calls: 0,
             },
         );
         store.limiter(|state| &mut state.limits);
@@ -185,10 +187,22 @@ impl ActiveComponent {
             }
         }
         reset_budget(&mut self.0.store)?;
-        let reply = self
-            .0
-            .plugin
-            .call_handle(&mut self.0.store, &event)?
+        self.0.store.data_mut().imports.clear();
+        self.0.store.data_mut().calls = 0;
+        let started = Instant::now();
+        let result = self.0.plugin.call_handle(&mut self.0.store, &event);
+        let reply = result.map_err(|error| {
+            let imports = &self.0.store.data().imports;
+            let host = imports.values().map(|value| value.2).sum::<Duration>();
+            let calls = imports.values().map(|value| value.0).sum::<u16>();
+            let records = imports.values().map(|value| value.1).sum::<usize>();
+            error.context(format!(
+                "component call: wall={}ms provider={}ms calls={calls} records={records} endpoints={}",
+                started.elapsed().as_millis(),
+                host.as_millis(),
+                imports.keys().filter(|endpoint| **endpoint != 0).count(),
+            ))
+        })?
             .map_err(|_| anyhow::anyhow!("component returned an invocation error"))?;
         match (&event, reply) {
             (lifecycle::Message::Tool(request), lifecycle::Reply::Tool(response))
@@ -267,6 +281,8 @@ struct HostState {
     provider: Box<dyn ActivityProvider>,
     assets: BTreeMap<String, Vec<u8>>,
     started: Instant,
+    imports: BTreeMap<u64, (u16, usize, Duration)>,
+    calls: u16,
 }
 
 impl frame::Host for HostState {}
@@ -274,20 +290,29 @@ impl pmux_plugin_api::host::pmux::tool::call::Host for HostState {}
 impl lifecycle::Host for HostState {}
 
 impl HostState {
-    fn admit_read(&self) -> Result<(), read::Error> {
+    fn admit_read(&mut self) -> Result<(), read::Error> {
         match self.phase {
             Phase::Prepared => Err(read::Error::NotActivated),
             Phase::Revoked => Err(read::Error::Revoked),
             Phase::Active if !self.activity => Err(read::Error::PermissionDenied),
             Phase::Active => Ok(()),
+        }?;
+        if self.calls >= pmux_plugin_api::MAX_HOST_IMPORTS_PER_CALL {
+            return Err(read::Error::RateLimited);
         }
+        self.calls += 1;
+        Ok(())
     }
 }
 
 impl read::Host for HostState {
     fn endpoints(&mut self) -> Result<Vec<read::Endpoint>, read::Error> {
         self.admit_read()?;
-        let endpoints = self.provider.endpoints()?;
+        let started = Instant::now();
+        let result = self.provider.endpoints();
+        self.imports.entry(0).or_default().0 += 1;
+        self.imports.entry(0).or_default().2 += started.elapsed();
+        let endpoints = result?;
         if endpoints.len() > 32
             || endpoints.iter().any(|endpoint| {
                 endpoint.label.is_empty()
@@ -321,7 +346,13 @@ impl read::Host for HostState {
             epoch: cursor.epoch,
             sequence: cursor.sequence,
         });
-        let page = self.provider.poll(endpoint, after, limit)?;
+        let started = Instant::now();
+        let result = self.provider.poll(endpoint, after, limit);
+        let metric = self.imports.entry(endpoint).or_default();
+        metric.0 += 1;
+        metric.1 += result.as_ref().map_or(0, |page| page.records.len());
+        metric.2 += started.elapsed();
+        let page = result?;
         if page.records.len() > usize::from(limit)
             || page
                 .records

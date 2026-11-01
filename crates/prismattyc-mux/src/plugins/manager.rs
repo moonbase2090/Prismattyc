@@ -450,7 +450,15 @@ impl Manager {
         }
         let mut desired = None;
         let mut endpoint_change = None;
+        let mut imported = Vec::new();
         let reply = match action {
+            AdminAction::ImportEndpoints { endpoints } => {
+                let existing = self.state.lock().unwrap().journal.endpoints.clone();
+                imported = super::endpoint_import::plan(&existing, endpoints)?;
+                Reply::Endpoints {
+                    endpoints: imported.clone(),
+                }
+            }
             AdminAction::AddEndpoint { label, source } => {
                 let endpoint = Endpoint {
                     id: nonce()?,
@@ -576,6 +584,11 @@ impl Manager {
                 .is_some_and(|(id, desired)| journal.selections.get(id) != Some(desired));
             let new_slot = changed.then(Slot::new).transpose()?;
             let mut endpoint_slots = BTreeMap::new();
+            for endpoint in &imported {
+                journal
+                    .endpoints
+                    .insert(endpoint.label.clone(), endpoint.clone());
+            }
             if let Some((label, endpoint)) = &endpoint_change {
                 if let Some(endpoint) = endpoint {
                     journal.endpoints.insert(label.clone(), endpoint.clone());
@@ -606,11 +619,17 @@ impl Manager {
             while journal.completed.len() > 128 {
                 journal.completed.pop_front();
             }
-            let bytes = serde_json::to_string(&journal)?;
-            ensure!(
-                bytes.len() <= 1024 * 1024,
-                "plug-in journal exceeds its byte budget"
-            );
+            let bytes = loop {
+                let bytes = serde_json::to_string(&journal)?;
+                if bytes.len() <= 1024 * 1024 {
+                    break bytes;
+                }
+                ensure!(
+                    journal.completed.len() > 1,
+                    "plug-in journal exceeds its byte budget"
+                );
+                journal.completed.pop_front();
+            };
             private_directory(
                 self.journal
                     .parent()
@@ -1543,7 +1562,7 @@ impl ActivityProvider for Provider {
             worker.rate_window = now;
             worker.reads = 0;
         }
-        if worker.reads >= 64 {
+        if worker.reads >= pmux_plugin_api::MAX_ACTIVITY_READS_PER_SECOND {
             return Err(read::Error::RateLimited);
         }
         worker.reads += 1;

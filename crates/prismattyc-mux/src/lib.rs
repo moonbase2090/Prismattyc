@@ -127,4 +127,5 @@ pub mod local_socket;
 #[cfg(any(target_os = "macos", all(test, unix)))]
 pub(crate) mod path_shim;
 pub mod platform;
+pub mod plugins;
 pub mod private_fs;

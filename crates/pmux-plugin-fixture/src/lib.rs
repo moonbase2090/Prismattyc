@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: MIT
 //! Real Wasm guest used by runtime tests; it is not a distributed plug-in.
 
+#[cfg(not(target_arch = "wasm32"))]
+mod build;
+#[cfg(not(target_arch = "wasm32"))]
+pub use build::{component, module};
+
 #[cfg(target_arch = "wasm32")]
 #[no_mangle]
 pub extern "C" fn fixture_start() {

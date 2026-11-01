@@ -2860,8 +2860,10 @@ dependencies = [
 name = "pmux-plugin-fixture"
 version = "0.3.53"
 dependencies = [
+ "anyhow",
  "pmux-plugin-api",
  "serde_json",
+ "wit-component",
 ]
 
 [[package]]
@@ -2870,6 +2872,7 @@ version = "0.3.53"
 dependencies = [
  "anyhow",
  "pmux-plugin-api",
+ "pmux-plugin-fixture",
  "prismattyc-core",
  "serde",
  "serde_json",
@@ -3111,8 +3114,12 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
  "mutants",
+ "pmux-plugin-api",
+ "pmux-plugin-fixture",
+ "pmux-plugin-runtime",
  "png 0.17.16",
  "portable-pty",
+ "postcard",
  "prismattyc-core",
  "prismattyc-emulator",
  "prismattyc-protocol",

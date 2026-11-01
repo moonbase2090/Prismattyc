@@ -16,6 +16,7 @@ serde_json = "1.0"
 wasmtime = { version = "=36.0.20", default-features = false, features = ["std", "runtime", "component-model", "cranelift", "pulley"] }
 
 [dev-dependencies]
+pmux-plugin-fixture = { path = "../pmux-plugin-fixture" }
 wit-component = "=0.239.0"
 wasm-encoder = "=0.239.0"
 wasmparser = "=0.239.0"

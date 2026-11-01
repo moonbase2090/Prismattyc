@@ -210,6 +210,140 @@ mod tests {
         assert_eq!(wanted(false, Err(&broken)), None);
     }
 
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "pmux-actcfg-{tag}-{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn config(&self) -> PathBuf {
+            self.0.join("config.toml")
+        }
+
+        fn write(&self, text: &str) {
+            std::fs::write(self.config(), text).unwrap();
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn plane() -> Arc<Mutex<ControlPlane>> {
+        let domain = crate::domain::Domain::bootstrap("test").unwrap();
+        let window = domain.sessions().next().unwrap().windows[0];
+        let plane = ControlPlane::new(
+            domain,
+            [crate::control::WindowBounds {
+                window_id: window.get(),
+                cols: 80,
+                rows: 24,
+            }],
+            Some(8),
+        )
+        .unwrap();
+        Arc::new(Mutex::new(plane))
+    }
+
+    fn on(plane: &Arc<Mutex<ControlPlane>>) -> bool {
+        plane.lock().unwrap().activity_enabled()
+    }
+
+    #[test]
+    fn apply_turns_the_feed_on_and_off_from_the_key() {
+        let tmp = Scratch::new("apply");
+        let plane = plane();
+        tmp.write("[mux]\nexperimental_activity = true\n");
+        assert_eq!(apply(&plane, &tmp.config(), false), Ok(()));
+        assert!(on(&plane));
+        // Already on: nothing to do, still applied.
+        assert_eq!(apply(&plane, &tmp.config(), false), Ok(()));
+        assert!(on(&plane));
+        tmp.write("[mux]\nexperimental_activity = false\n");
+        assert_eq!(apply(&plane, &tmp.config(), false), Ok(()));
+        assert!(!on(&plane));
+        tmp.write("[mux]\n");
+        assert_eq!(apply(&plane, &tmp.config(), false), Ok(()));
+        assert!(!on(&plane), "an absent key is the default, off");
+    }
+
+    #[test]
+    fn apply_keeps_the_state_for_a_missing_empty_or_invalid_file() {
+        let tmp = Scratch::new("keep");
+        let plane = plane();
+        plane.lock().unwrap().enable_activity().unwrap();
+        assert_eq!(apply(&plane, &tmp.config(), false), Err(Pending::NoValue));
+        tmp.write("  \n");
+        assert_eq!(apply(&plane, &tmp.config(), false), Err(Pending::NoValue));
+        tmp.write("[mux\nexperimental_activity = false\n");
+        assert!(matches!(
+            apply(&plane, &tmp.config(), false),
+            Err(Pending::Failed(why)) if why.contains("parse")
+        ));
+        assert!(on(&plane), "the feed stays on through all three");
+    }
+
+    #[test]
+    fn apply_reports_an_unreadable_path() {
+        let tmp = Scratch::new("dir");
+        // A directory where the file should be cannot be read as text.
+        std::fs::create_dir_all(tmp.config()).unwrap();
+        let plane = plane();
+        assert!(matches!(
+            apply(&plane, &tmp.config(), false),
+            Err(Pending::Failed(why)) if why.starts_with("read ")
+        ));
+        assert!(!on(&plane));
+    }
+
+    #[test]
+    fn apply_with_the_flag_turns_the_feed_on_even_when_the_key_is_false() {
+        let tmp = Scratch::new("flag");
+        let plane = plane();
+        tmp.write("[mux]\nexperimental_activity = false\n");
+        assert_eq!(apply(&plane, &tmp.config(), true), Ok(()));
+        assert!(on(&plane));
+    }
+
+    #[test]
+    fn the_watcher_applies_a_repaired_file_after_a_broken_one() {
+        let tmp = Scratch::new("retry");
+        let plane = plane();
+        tmp.write("[mux\nbroken");
+        let seen = Fingerprint(None);
+        let watcher = Watcher::start(
+            Arc::clone(&plane),
+            tmp.config(),
+            false,
+            seen,
+            Duration::from_millis(20),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!on(&plane));
+        tmp.write("[mux]\nexperimental_activity = true\n");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !on(&plane) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "watcher never applied the repaired file"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(watcher);
+    }
+
     #[test]
     fn a_fingerprint_changes_with_length_and_presence() {
         let dir = std::env::temp_dir().join(format!("pmux-actcfg-fp-{}", std::process::id()));

@@ -100,11 +100,21 @@ When a seat changes state in a live update, its row fades from a tint of the new
 
 On a terminal that accepts raw RGBA Kitty graphics uploads, lanes render through Lunatui's pixel sparkline as one raster per lane, with eight times the vertical resolution and no gaps between columns. The cell rendering is drawn first and replaced only when the raster is accepted, so a terminal without pixel support, a multiplexer or `--no-pixels` gets the same lanes in block characters. `p` switches between the two at runtime.
 
-Prismattyc decodes Kitty graphics but accepts only PNG uploads (`f=100`), and Lunatui 0.1.18 uploads raw RGBA (`f=32`). Inside Prismattyc the cleared cells would never be replaced, so the monitor keeps cell lanes when the terminal identifies as Prismattyc. Pixel lanes in Prismattyc need either PNG uploads from Lunatui or RGBA support in the emulator.
+Prismattyc releases before raw-upload support decode Kitty graphics but drop raw RGBA uploads (`f=32`), which Lunatui 0.1.18 sends, and they answer every graphics query with OK. A query cannot tell the two apart, so inside Prismattyc the monitor makes one real 1x1 raw upload with an image number, followed by a device-attributes request. A Prismattyc that keeps the image answers OK first and gets pixel lanes; an older one answers only the attributes and keeps cell lanes. The probe image is deleted again, and keys typed during the probe are kept.
 
 ## Launch
 
-The `pmux activity` commands, added separately, include `pmux activity monitor [ARGS]`. It runs `pmux-activity-monitor` from beside `pmux` (or from `PATH`), passes pmux's resolved socket as `--socket`, and passes every other argument through. In a new Prismattyc pane, that command is all it takes. A pane preset would need a host configuration change for one command, so the subcommand is the simpler choice. `--snapshot --size COLSxROWS` renders one frame as text for scripts and tests.
+With no `--socket` or `--host`, the monitor reads the pmuxd that `pmux` would use: `PMUX_INSTANCE` and `PMUX_SOCKET` (every pmux pane exports it), then the `[mux]` config, then pmux's default path. In a blank Prismattyc pane, `pmux-activity-monitor` is the whole command. The `pmux activity` commands, added separately, include `pmux activity monitor [ARGS]`, which does the same with pmux's resolved socket. `--snapshot --size COLSxROWS` renders one frame as text for scripts and tests.
+
+When the only host has nothing to show, the pane explains why instead of showing an empty list:
+
+| Situation | What the pane says |
+| --- | --- |
+| The feed is off (the default) | Activity feed is disabled for this daemon. App-managed enablement is not available yet; the developer path is a separate pmuxd started with `--experimental-activity`, passed with `--socket`. |
+| The pmuxd predates the feed | This pmuxd has no activity feed, and updating Prismattyc does not turn it on by itself. |
+| No pmuxd answers | Can't reach pmuxd; start Prismattyc or run `pmux up`. |
+
+The monitor never offers to enable the feed or restart pmuxd, because the app-managed daemon cannot be started with the feed on yet. It keeps polling, so the view fills in as soon as a feed answers.
 
 ## Runtime
 

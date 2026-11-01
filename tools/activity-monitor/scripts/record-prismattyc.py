@@ -9,6 +9,9 @@ Prismattyc drew, including Kitty graphics it decoded), not an OS screenshot.
 
 The monitor runs as the session's program and the split pane runs cat, so no shell prompt
 appears. Steps in --plan (JSON list, times in seconds after the host window opens):
+  {"at": 0, "spawn": ["demo-feed.py", "--attach", "mac={socket}", ...]}
+                                         run a helper in the background ({socket} is the pmuxd)
+  {"at": 1, "type": "pmux-activity-monitor"}   type a command and Enter (with --shell)
   {"at": 2, "keys": "j"}                 send keys ("\\r" Enter, "\\t" Tab, "\\u001b" Esc)
   {"at": 5, "split": "h"}                split the monitor's pane, a blank pane beside it (h) or below (v)
   {"at": 8, "unsplit": true}             move the most recent split pane out to its own tab
@@ -37,6 +40,11 @@ def main():
     parser.add_argument('--plan', required=True, type=Path)
     parser.add_argument('--out', required=True, type=Path)
     parser.add_argument('--font-px', type=float, default=15.0)
+    parser.add_argument('--activity', action='store_true',
+                        help='start the private pmuxd with --experimental-activity')
+    parser.add_argument('--shell', action='store_true',
+                        help='open a blank shell pane (prompt "$ ") instead of running the command; '
+                             'use a "type" step to run it')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     assert sys.platform == 'darwin', 'run on macOS in a logged-in desktop session'
@@ -123,13 +131,18 @@ def main():
         index += 1
 
     splits = []
+    spawned = []
     try:
         log = (out / 'daemon.log').open('w')
-        daemon = subprocess.Popen([str(bins / 'pmuxd'), '--socket', env['PMUX_SOCKET'], '--', '/bin/bash',
-                                   '--noprofile', '--norc'], env=env, stdout=log, stderr=log)
+        flags = ['--experimental-activity'] if args.activity else []
+        daemon = subprocess.Popen([str(bins / 'pmuxd'), '--socket', env['PMUX_SOCKET'], *flags, '--',
+                                   '/bin/bash', '--noprofile', '--norc'], env=env, stdout=log, stderr=log)
         wait(lambda: Path(env['PMUX_SOCKET']).exists(), 'private daemon')
-        # The monitor is the pane's own program, so no shell prompt (host or user name) is drawn.
-        cli('new', '--no-attach', '--no-agent', 'agents', '--', *command)
+        # Either the monitor is the pane's own program, or a shell whose prompt names no host
+        # or user. Both keep identifying details out of the frames.
+        program = (['/bin/sh', '-c', 'PS1="$ " exec /bin/bash --noprofile --norc'] if args.shell
+                   else command)
+        cli('new', '--no-attach', '--no-agent', 'agents', '--', *program)
         monitor = session('agents')
         pane = monitor['windows'][0]['panes'][0]['id']
         host_log = (out / 'host.log').open('w')
@@ -144,6 +157,12 @@ def main():
             now = time.monotonic() - began
             if pending[0]['at'] <= now:
                 step = pending.pop(0)
+                if 'type' in step:
+                    cli('send', pane, step['type'], '--literal', '--enter', '--force')
+                if 'spawn' in step:
+                    argv = [part.replace('{socket}', env['PMUX_SOCKET']) for part in step['spawn']]
+                    spawned.append(subprocess.Popen(argv, env=env, stdout=subprocess.DEVNULL,
+                                                    stderr=(out / 'spawned.log').open('a')))
                 if 'keys' in step:
                     # The monitor redraws continuously, so pane-write sees it as busy.
                     cli('send', pane, step['keys'], '--literal', '--force')
@@ -171,7 +190,7 @@ def main():
         (out / 'result.json').write_text(json.dumps({'status': 'DONE', 'frames': index,
                                                       'host_pid': host.pid}, indent=2))
     finally:
-        for process in (host, daemon):
+        for process in (*spawned, host, daemon):
             if process and process.poll() is None:
                 process.terminate()
                 try:

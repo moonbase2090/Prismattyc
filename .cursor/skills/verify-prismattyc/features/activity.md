@@ -61,12 +61,17 @@ viewer, because GIF encoders can leave faint artifacts.
 `cargo test --manifest-path tools/activity-monitor/Cargo.toml --locked`
 renders every tier through Lunatui and checks text, colors and keys. The
 recorded cast shows the cell path only. `record-demo.py --kitty` exercises the
-pixel path, and `extract-rasters.py` saves the rasters it uploaded. Prismattyc
-panes keep cell lanes, because its emulator accepts only PNG uploads.
+pixel path, and `extract-rasters.py` saves the rasters it uploaded. Inside
+Prismattyc the monitor probes with one real raw upload; only a Prismattyc that
+answers it gets pixel lanes, so prove pixel lanes with host frames from a build
+that shows raw uploads.
 `record-prismattyc.py` keeps a real Prismattyc host's presented frames and
 splits the monitor's pane through the control protocol. It needs an unlocked
 macOS desktop with an awake display. A clean Tart guest works, because it logs
-in automatically: run it over SSH in the guest.
+in automatically: run it over SSH in the guest. With `--shell --activity`, it
+opens a blank pane on a pmuxd that has the feed on; a `type` step runs
+`pmux-activity-monitor` there, and a `spawn` step can start
+`demo-feed.py --attach mac={socket}` to publish into that pmuxd.
 
 ## Boundaries
 

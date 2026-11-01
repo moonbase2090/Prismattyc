@@ -15,7 +15,7 @@ Start a private daemon with `--experimental-activity` and a separate socket. The
 tools/activity-monitor/target/debug/pmux-activity-monitor --socket /tmp/activity-demo/control.sock
 ```
 
-The `pmux activity` commands, added separately, include `pmux activity monitor`. It runs this binary from beside `pmux` with pmux's socket and passes other arguments through, so a blank Prismattyc pane needs only that command.
+With no `--socket` or `--host`, the monitor reads the pmuxd that `pmux` would use, so in a blank Prismattyc pane `pmux-activity-monitor` is the whole command. When the feed is off, the daemon predates it, or no daemon answers, the pane says which and what can be done. The `pmux activity` commands, added separately, include `pmux activity monitor`. It runs this binary from beside `pmux` with pmux's socket and passes other arguments through, so a blank Prismattyc pane needs only that command.
 
 The live view fits the pane and follows it through splits and resizes. It groups seats by host, colors each seat by state (working, waiting, failed, stopped), marks rows stale after 30 seconds or while their host is unreachable, and draws a five-minute lane of activity for each seat. Enter opens a seat's timeline. `?` lists the keys and `q` quits. [The UI design](../../docs/activity-monitor-ui.md) covers the layout tiers, colors, states and keys.
 
@@ -34,7 +34,7 @@ pmux-activity-monitor --socket /tmp/activity-demo/control.sock \
 
 ### Display options
 
-`--theme auto|dark|light` picks the Prismattyc Graphite palette; `auto` follows the background color the terminal reports. `--no-motion` turns off the fade when a seat changes state live (replayed history never fades). `--no-pixels` keeps lanes in block characters. Where the terminal accepts raw RGBA Kitty uploads, lanes render as rasters through Lunatui's pixel sparkline. Prismattyc's emulator currently shows only PNG uploads, so inside Prismattyc lanes stay in cells.
+`--theme auto|dark|light` picks the Prismattyc Graphite palette; `auto` follows the background color the terminal reports. `--no-motion` turns off the fade when a seat changes state live (replayed history never fades). `--no-pixels` keeps lanes in block characters. Where the terminal accepts raw RGBA Kitty uploads, lanes render as rasters through Lunatui's pixel sparkline. Inside Prismattyc the monitor first makes one real raw upload: a Prismattyc that keeps it gets pixel lanes, and older releases, which drop raw uploads, keep cells.
 
 The monitor keeps at most 128 seats per host and 256 events per seat, and evicts the seat with the oldest event when full. A daemon restart or retention gap clears that host's cached seats before the retained history replays.
 

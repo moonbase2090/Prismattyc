@@ -8945,11 +8945,10 @@ mod tests {
     }
 
     fn spawn_fake_attach(dir: &Path, sock: &Path) -> ReapChild {
-        use prismattyc_mux::platform::Exec;
         let ready = dir.join("attach-ready");
         let fixture_source =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/detach-process.rs");
-        let fixture_bin = dir.join("pmux-attach-fixture");
+        let fixture_bin = dir.join(format!("pmux-attach{}", std::env::consts::EXE_SUFFIX));
         let compiled = Command::new("rustc")
             .arg("--edition=2021")
             .arg(&fixture_source)
@@ -8964,7 +8963,6 @@ mod tests {
         );
         let mut child = ReapChild::new(
             Command::new(&fixture_bin)
-                .arg0("pmux-attach")
                 .arg("--socket")
                 .arg(sock)
                 .env("PMUX_DETACH_FIXTURE_READY", &ready)
@@ -10249,15 +10247,18 @@ mod tests {
                 "key={key:?} mux={mux_wait} boss={boss} daemon={have_daemon}"
             );
         }
-        use rustix::termios::{InputModes, LocalModes};
-        let local = LocalModes::ICANON | LocalModes::ECHO | LocalModes::ISIG;
-        let input = InputModes::ICRNL | InputModes::IXON;
-        let (local, input) = play_cbreak_modes(local, input);
-        assert!(!local.contains(LocalModes::ICANON));
-        assert!(!local.contains(LocalModes::ECHO));
-        assert!(local.contains(LocalModes::ISIG));
-        assert!(!input.contains(InputModes::ICRNL));
-        assert!(input.contains(InputModes::IXON));
+        #[cfg(unix)]
+        {
+            use rustix::termios::{InputModes, LocalModes};
+            let local = LocalModes::ICANON | LocalModes::ECHO | LocalModes::ISIG;
+            let input = InputModes::ICRNL | InputModes::IXON;
+            let (local, input) = play_cbreak_modes(local, input);
+            assert!(!local.contains(LocalModes::ICANON));
+            assert!(!local.contains(LocalModes::ECHO));
+            assert!(local.contains(LocalModes::ISIG));
+            assert!(!input.contains(InputModes::ICRNL));
+            assert!(input.contains(InputModes::IXON));
+        }
     }
 
     #[test]

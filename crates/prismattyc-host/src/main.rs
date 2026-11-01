@@ -22185,6 +22185,9 @@ impl App {
 }
 
 fn main() -> Result<()> {
+    if prismattyc_mux::plugins::print_bundled_identity()? {
+        return Ok(());
+    }
     #[cfg(windows)]
     let restart_resume = restart::receive()?;
     #[cfg(windows)]

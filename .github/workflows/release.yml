@@ -131,6 +131,7 @@ jobs:
           # Keep the product runnable on macOS 11+ even when linking a current SDK.
           MACOSX_DEPLOYMENT_TARGET: '11.0'
         run: |
+          export CARGO_ENCODED_RUSTFLAGS="$(python3 scripts/release/plugin_bundle_provenance.py flags)"
           cargo build --release --locked --workspace --bins --target aarch64-apple-darwin
           cargo build --release --locked --workspace --bins --target x86_64-apple-darwin
           # The activity monitor has its own lockfile; build it into the same target tree.

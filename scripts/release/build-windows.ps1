@@ -11,10 +11,14 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $previousRustFlags = $env:RUSTFLAGS
+$previousPluginBundle = $env:PRISMATTYC_PLUGIN_BUNDLE_DIR
+$previousEncodedRustFlags = $env:CARGO_ENCODED_RUSTFLAGS
 Push-Location $repoRoot
 try {
     if (-not $IsWindows -and $env:OS -ne 'Windows_NT') { throw 'Run this script on native Windows.' }
     if ($SkipBuild -and $SkipPackage) { throw 'Choose a build, a package, or both.' }
+    $env:PRISMATTYC_PLUGIN_BUNDLE_DIR = python scripts/release/plugin_bundle_provenance.py prepare
+    if ($LASTEXITCODE -ne 0) { throw 'Plug-in bundle preparation failed.' }
     $targetRoot = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { 'target' }
     $binDir = Join-Path $targetRoot "$Target/release"
     if (-not $SkipBuild) {
@@ -23,7 +27,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain installation failed.' }
         rustup target add --toolchain 1.90.0 $Target
         if ($LASTEXITCODE -ne 0) { throw 'Rust target installation failed.' }
-        $env:RUSTFLAGS = "$previousRustFlags -C target-feature=+crt-static".Trim()
+        $env:CARGO_ENCODED_RUSTFLAGS = python scripts/release/plugin_bundle_provenance.py flags --target $Target --crt-static
+        if ($LASTEXITCODE -ne 0) { throw 'Native build flags failed.' }
         cargo +1.90.0 build --locked --release --target $Target --workspace --bins
         if ($LASTEXITCODE -ne 0) { throw 'Windows build failed.' }
         # The activity monitor keeps its own lockfile; build it into the same target tree.
@@ -62,5 +67,7 @@ try {
     Write-Host "Windows package: $((Resolve-Path $Output).Path)"
 } finally {
     $env:RUSTFLAGS = $previousRustFlags
+    $env:CARGO_ENCODED_RUSTFLAGS = $previousEncodedRustFlags
+    $env:PRISMATTYC_PLUGIN_BUNDLE_DIR = $previousPluginBundle
     Pop-Location
 }

@@ -64,7 +64,8 @@ done
 mkdir -p "$prefix/share/applications" "$prefix/share/icons/hicolor/scalable/apps" "$prefix/share/man/man1"
 install -m 644 share/prismattyc.svg "$prefix/share/icons/hicolor/scalable/apps/prismattyc.svg"
 install -m 644 share/man/*.1 "$prefix/share/man/man1/"
-mkdir -p "$prefix/share/licenses/prismattyc"
+mkdir -p "$prefix/share/licenses/prismattyc" "$prefix/share/prismattyc"
+install -m 644 share/plugin-bundle.json "$prefix/share/prismattyc/plugin-bundle.json"
 install -m 644 share/licenses/*.txt "$prefix/share/licenses/prismattyc/"
 # Quote Exec according to the Desktop Entry specification.
 exec_path="${prefix//\\/\\\\}/bin/prismattyc-host"

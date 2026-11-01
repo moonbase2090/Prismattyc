@@ -47,3 +47,18 @@ pub use remote::{run_worker as run_endpoint_worker, INTERNAL_ENDPOINT_ARG};
 pub fn run_internal_worker() -> anyhow::Result<()> {
     worker::run()
 }
+
+/// Report the physical executable's embedded resources before managed forwarding.
+/// This read-only build check never connects to or starts a daemon.
+pub fn print_bundled_identity() -> anyhow::Result<bool> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() != Some(std::ffi::OsStr::new("--plugin-bundle")) {
+        return Ok(false);
+    }
+    anyhow::ensure!(args.next().is_none(), "usage: --plugin-bundle");
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&catalog::bundled_identity()?)?
+    );
+    Ok(true)
+}

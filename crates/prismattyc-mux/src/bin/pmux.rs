@@ -470,6 +470,9 @@ fn parse_argv(args: impl IntoIterator<Item = String>) -> Result<Cli> {
 }
 
 fn main() -> Result<()> {
+    if prismattyc_mux::plugins::print_bundled_identity()? {
+        return Ok(());
+    }
     let _vt = prismattyc_mux::platform::enable_console_vt();
     prismattyc_mux::release_update::forward_installed("pmux")?;
     // Execute stays in `main` rather than a new `run`. Extracting `run`

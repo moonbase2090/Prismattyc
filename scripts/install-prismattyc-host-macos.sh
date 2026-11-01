@@ -84,25 +84,18 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
-# Prefer a committed icns when iconutil is missing so `prismattyc update` still
-# copies the host binary. Do not exit 0 here — that used to skip the app.
-if [[ -f "$ICNS" ]]; then
-  if command -v iconutil >/dev/null 2>&1; then
-    build_icns
-  else
-    echo "iconutil missing; reusing $ICNS" >&2
-  fi
-else
-  build_icns
-fi
+# Reuse the committed icon. Icon-only regeneration has no install side effects.
 if [[ ! -f "$ICNS" ]]; then
-  echo "error: $ICNS missing; cannot assemble Prismattyc.app" >&2
-  exit 1
+  build_icns
 fi
 
 # Build every bundled component from the same checkout.
 echo "building Prismattyc components (release)..."
-( cd "$ROOT" && CARGO_TARGET_DIR="$ROOT/target" cargo build --release --locked --workspace --bins )
+export PRISMATTYC_PLUGIN_BUNDLE_DIR="$(python3 "$ROOT/scripts/release/plugin_bundle_provenance.py" prepare)"
+export CARGO_ENCODED_RUSTFLAGS="$(python3 "$ROOT/scripts/release/plugin_bundle_provenance.py" flags)"
+( cd "$ROOT" && CARGO_TARGET_DIR="$ROOT/target" cargo +1.90.0 build --release --locked --workspace --bins )
+( cd "$ROOT" && cargo +1.90.0 build --release --locked --manifest-path tools/activity-monitor/Cargo.toml --target-dir "$ROOT/target" )
+python3 "$ROOT/scripts/release/plugin_bundle_provenance.py" verify --bins "$ROOT/target/release" --out "$WORK/plugin-bundle.json"
 BIN="$ROOT/target/release/prismattyc-host"
 if [[ ! -x "$BIN" ]]; then
   echo "error: host binary not found at $BIN" >&2
@@ -137,7 +130,7 @@ refresh_bundle_binaries() {
   [[ -d "$dest/Contents/MacOS" ]] || return 0
   [[ -f "$dest/Contents/MacOS/prismattyc-host" ]] || return 0
   local name source_bin tmp
-  for name in prismattyc-host pmux pmuxd pmux-attach pmux-mcp prismattyc; do
+  for name in prismattyc-host pmux pmuxd pmux-attach pmux-mcp prismattyc pmux-activity-monitor; do
     source_bin="$DEST_APP/Contents/MacOS/$name"
     [[ -x "$source_bin" ]] || {
       echo "warning: cannot refresh $dest; missing $source_bin" >&2
@@ -153,6 +146,7 @@ refresh_bundle_binaries() {
   for notice in "$DEST_APP/Contents/Resources/"*.txt; do
     cp "$notice" "$dest/Contents/Resources/"
   done
+  cp "$DEST_APP/Contents/Resources/plugin-bundle.json" "$dest/Contents/Resources/plugin-bundle.json"
   python3 "$ROOT/scripts/package-terminfo.py" --out "$dest/Contents/Resources/terminfo"
   cp "$ROOT/scripts/install-prismattyc-terminfo.sh" "$dest/Contents/Resources/install-prismattyc-terminfo.sh"
   sign_bundle "$dest"
@@ -164,6 +158,7 @@ APP="$WORK/$APP_NAME.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/prismattyc-host"
 cp "$ICNS" "$APP/Contents/Resources/prismattyc.icns"
+cp "$WORK/plugin-bundle.json" "$APP/Contents/Resources/plugin-bundle.json"
 python3 "$ROOT/scripts/package-terminfo.py" --out "$APP/Contents/Resources/terminfo"
 cp "$ROOT/scripts/install-prismattyc-terminfo.sh" "$APP/Contents/Resources/install-prismattyc-terminfo.sh"
 cp "$ROOT/LICENSE" "$APP/Contents/Resources/MIT.txt"
@@ -174,7 +169,7 @@ cp "$ROOT/crates/prismattyc-host/themes/OMARCHY-LICENSE.txt" "$APP/Contents/Reso
 # Finder and Dock launches do not provide the shell PATH. Build and bundle
 # the mux front door and its helper binaries from this checkout so host-only
 # updates cannot package stale executables from Cargo bin or ambient PATH.
-for name in pmux pmuxd pmux-attach pmux-mcp prismattyc; do
+for name in pmux pmuxd pmux-attach pmux-mcp prismattyc pmux-activity-monitor; do
   source_bin="$ROOT/target/release/$name"
   [[ -x "$source_bin" ]] || {
     echo "error: mux helper build did not produce $source_bin" >&2

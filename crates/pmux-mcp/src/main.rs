@@ -612,6 +612,15 @@ fn parse_config() -> Result<Config, String> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    match prismattyc_mux::plugins::print_bundled_identity() {
+        Ok(true) => return ExitCode::SUCCESS,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("pmux-mcp: {error:#}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     if let Err(error) = prismattyc_mux::release_update::forward_installed("pmux-mcp") {
         eprintln!("pmux-mcp: {error:#}");
         return ExitCode::FAILURE;

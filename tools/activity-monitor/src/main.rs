@@ -326,6 +326,9 @@ fn tail(mut client: Client, socket: &std::path::Path, seat: Option<&AgentId>) ->
 }
 
 fn main() -> Result<()> {
+    if prismattyc_mux::plugins::print_bundled_identity()? {
+        return Ok(());
+    }
     let Some(options) = options_from(env::args_os().skip(1))? else {
         return Ok(());
     };

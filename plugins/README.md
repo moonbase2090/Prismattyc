@@ -85,3 +85,21 @@ A verified cache works offline. A different pin requires its own verified
 bundle. Until the first official catalog has been published and reviewed,
 this repository deliberately has no official pin. Use explicit candidates
 for private proof and CI; do not invent an unpublished official tag.
+
+## Check packaged consumers
+
+Native build scripts prepare the reviewed pin, or reuse an explicit
+`PRISMATTYC_PLUGIN_BUNDLE_DIR` for private candidate builds. The local macOS app
+builder and installer include all seven executables, including the thin monitor
+launcher. Packaging verifies the five plug-in consumers before it writes output:
+
+```sh
+python3 scripts/release/plugin_bundle_provenance.py verify --bins target/release
+```
+
+Each consumer's standalone `--plugin-bundle` command reports its physical
+executable's embedded catalog, pin, build receipt, package digests, and core
+revision. It does not follow updater forwarding, connect to the daemon, or run a
+guest. Packaging rejects a mismatched helper even when its core version matches.
+The app resources, Linux installation, and Windows package carry
+`plugin-bundle.json` with that identity and the original build receipt.

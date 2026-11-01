@@ -14,6 +14,19 @@ const CATALOG_TAG_PREFIX: &str = "pmux-plugins-v";
 const CATALOG_ASSET: &str = "pmux-plugins.json";
 include!(concat!(env!("OUT_DIR"), "/plugin_catalog.rs"));
 
+pub(super) fn bundled_identity() -> Result<serde_json::Value> {
+    let catalog = Catalog::bundled()?;
+    Ok(serde_json::json!({
+        "version": 1,
+        "core_version": env!("CARGO_PKG_VERSION"),
+        "core_revision": prismattyc_core::git_hash(),
+        "catalog_sha256": digest(BUNDLED_INDEX),
+        "pin_sha256": BUNDLED_PIN.map(digest),
+        "receipt_sha256": BUNDLED_RECEIPT.map(digest),
+        "packages": catalog.list(),
+    }))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogEntry {

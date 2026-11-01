@@ -1719,13 +1719,15 @@ mod layout_tests {
         assert!(
             matches!(&graphite.rows[2].choice,Choice::Preference(key,value)if key=="settings_panel"&&value=="true")
         );
-        assert!(graphite.rows[3].label.starts_with("Rail: "));
+        assert_eq!(graphite.rows[3].label, "Plug-ins");
+        assert!(graphite.rows[4].label.starts_with("Rail: "));
         let classic = panel(Page::Settings, None);
         assert_eq!(classic.rows[0].label, "Enable full settings (preview)");
         assert!(
             matches!(&classic.rows[0].choice,Choice::Preference(key,value)if key=="settings_panel"&&value=="true")
         );
-        assert!(classic.rows[1].label.starts_with("Rail: "));
+        assert_eq!(classic.rows[1].label, "Plug-ins");
+        assert!(classic.rows[2].label.starts_with("Rail: "));
         assert!(!classic
             .rows
             .iter()

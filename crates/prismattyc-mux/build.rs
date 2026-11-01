@@ -27,8 +27,28 @@ fn main() {
             generated.push_str(&format!("({sha:?}, include_bytes!({path:?})),\n"));
         }
         generated.push_str("];\n");
+        let pin = bundle.join("bundle-pin.json");
+        let receipt = bundle.join("plugin-build-receipt.json");
+        assert_eq!(
+            pin.is_file(),
+            receipt.is_file(),
+            "bundle provenance is incomplete"
+        );
+        for (name, path) in [("BUNDLED_PIN", pin), ("BUNDLED_RECEIPT", receipt)] {
+            println!("cargo:rerun-if-changed={}", path.display());
+            if path.is_file() {
+                generated.push_str(&format!(
+                    "const {name}: Option<&[u8]> = Some(include_bytes!({path:?}));\n"
+                ));
+            } else {
+                generated.push_str(&format!("const {name}: Option<&[u8]> = None;\n"));
+            }
+        }
     } else {
         generated.push_str("const BUNDLED_INDEX: &[u8] = br#\"{\"version\":1,\"packages\":[]}\"#;\nconst BUNDLED_PACKAGES: &[(&str, &[u8])] = &[];\n");
+    }
+    if std::env::var_os("PRISMATTYC_PLUGIN_BUNDLE_DIR").is_none() {
+        generated.push_str("const BUNDLED_PIN: Option<&[u8]> = None;\nconst BUNDLED_RECEIPT: Option<&[u8]> = None;\n");
     }
     std::fs::write(output.join("plugin_catalog.rs"), generated)
         .expect("write core plug-in resources");

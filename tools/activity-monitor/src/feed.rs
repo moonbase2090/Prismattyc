@@ -18,6 +18,8 @@ use serde_json::Value;
 pub const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const RESTART_MIN: Duration = Duration::from_secs(1);
 const RESTART_MAX: Duration = Duration::from_secs(30);
+/// How long dropping the feed waits for its readers to finish.
+const STOP_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug)]
 pub enum Source {
@@ -266,8 +268,17 @@ impl Drop for Feed {
                 stop(child);
             }
         }
+        // A reader whose pipe is still held open elsewhere (a process that left the group, or a
+        // descriptor inherited by another host's command during a concurrent spawn) never
+        // sees end of file. Wait briefly, then let it go so quitting stays prompt.
+        let deadline = Instant::now() + STOP_WAIT;
         for worker in self.workers.drain(..) {
-            let _ = worker.join();
+            while !worker.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if worker.is_finished() {
+                let _ = worker.join();
+            }
         }
     }
 }
@@ -475,6 +486,30 @@ mod tests {
             // Runs start at about 0 s, 1 s and 3 s: backoff doubles from one second. A loaded
             // machine can push the third run past the window; faster restarts give four or more.
             assert!((2..=3).contains(&exits), "{exits} restarts in 3.5 s");
+        }
+
+        #[test]
+        fn dropping_the_feed_does_not_wait_for_a_pipe_held_outside_the_process_group() {
+            // The grandchild starts its own session, so stopping the group leaves it holding stdout.
+            let script =
+                "use POSIX qw(setsid); if (fork() == 0) { setsid(); sleep 20; exit 0 } sleep 20";
+            let feed = Feed::start(vec![Source::Command(vec![
+                "/usr/bin/perl".into(),
+                "-e".into(),
+                script.into(),
+            ])]);
+            thread::sleep(Duration::from_millis(300));
+            let dropped = Instant::now();
+            drop(feed);
+            let waited = dropped.elapsed();
+            assert!(
+                waited >= Duration::from_millis(900),
+                "readers get a moment to finish: {waited:?}"
+            );
+            assert!(
+                waited < Duration::from_secs(3),
+                "drop waited for the escaped child: {waited:?}"
+            );
         }
 
         #[test]

@@ -34,7 +34,7 @@ pmux-activity-monitor --socket /tmp/activity-demo/control.sock \
 
 ### Display options
 
-`--theme auto|dark|light` picks the Prismattyc Graphite palette; `auto` follows the background color the terminal reports. `--no-motion` turns off the fade when a seat changes state. `--no-pixels` keeps lanes in block characters. Where the terminal accepts raw RGBA Kitty uploads, lanes render as rasters through Lunatui's pixel sparkline. Prismattyc's emulator currently shows only PNG uploads, so inside Prismattyc lanes stay in cells.
+`--theme auto|dark|light` picks the Prismattyc Graphite palette; `auto` follows the background color the terminal reports. `--no-motion` turns off the fade when a seat changes state live (replayed history never fades). `--no-pixels` keeps lanes in block characters. Where the terminal accepts raw RGBA Kitty uploads, lanes render as rasters through Lunatui's pixel sparkline. Prismattyc's emulator currently shows only PNG uploads, so inside Prismattyc lanes stay in cells.
 
 The monitor keeps at most 128 seats per host and 256 events per seat, and evicts the seat with the oldest event when full. A daemon restart or retention gap clears that host's cached seats before the retained history replays.
 

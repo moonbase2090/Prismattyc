@@ -96,7 +96,7 @@ Sorting by name is the default, so rows don't jump while you read them.
 
 ## Motion and pixels
 
-When a seat changes state, its row fades from a tint of the new state color to the normal background over 900 milliseconds. This is the only animation the monitor starts on its own, and `--no-motion` turns it off.
+When a seat changes state in a live update, its row fades from a tint of the new state color to the normal background over 900 milliseconds. History replayed on connect, after a feed reset or while catching up does not fade, so the first frame is not covered in tints. This is the only animation the monitor starts on its own, and `--no-motion` turns it off.
 
 On a terminal that accepts raw RGBA Kitty graphics uploads, lanes render through Lunatui's pixel sparkline as one raster per lane, with eight times the vertical resolution and no gaps between columns. The cell rendering is drawn first and replaced only when the raster is accepted, so a terminal without pixel support, a multiplexer or `--no-pixels` gets the same lanes in block characters. `p` switches between the two at runtime.
 
@@ -108,7 +108,7 @@ The `pmux activity` commands, added separately, include `pmux activity monitor [
 
 ## Runtime
 
-Lunatui 0.1.18's `run` uses a fixed grid size, so the monitor drives the Lunatui session, encoder and pixel layer from its own small loop. That loop reads the pane size on every frame, clears and repaints in full after a resize, waits for input with a short timeout, and draws at 30 frames per second only while a fade is running. Otherwise it draws only when something changed or once per second for ages. It uses `TIOCGWINSZ` on Unix and the console buffer size on Windows. Windows runtime behavior has not been verified yet.
+Lunatui 0.1.18's `run` uses a fixed grid size, so the monitor drives the Lunatui session, encoder and pixel layer from its own small loop. That loop reads the pane size on every frame, clears and repaints in full after a resize, waits for input with a short timeout, and draws at 30 frames per second only while a fade is running. Otherwise it draws only when something changed or once per second for ages. It uses `TIOCGWINSZ` on Unix and the console buffer size on Windows. Windows runtime behavior has not been verified yet. On quit, the monitor stops each host command with its process group, then gives the feed readers one shared one-second deadline to finish before it exits without them.
 
 ## Recordings
 

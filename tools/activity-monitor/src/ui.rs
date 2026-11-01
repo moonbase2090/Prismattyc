@@ -958,7 +958,7 @@ pub fn hint(hosts: &[Host]) -> Option<(&'static str, &'static str)> {
     match host.link {
         Link::Disabled => Some((
             "Activity feed is disabled for this daemon.",
-            "Turn it on with experimental_activity = true under [mux] in the Prismattyc config. pmuxd reads it when it starts, so it applies after the next pmuxd start.",
+            "Turn it on with experimental_activity = true under [mux] in the Prismattyc config or the settings panel. The running pmuxd picks it up within a second, and this view connects by itself.",
         )),
         Link::Unsupported => Some((
             "This pmuxd has no activity feed.",

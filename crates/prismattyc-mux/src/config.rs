@@ -40,8 +40,8 @@ pub struct MuxSection {
     /// Allow user-entered session labels to preserve mixed case and spaces.
     /// Default false to keep session labels in the mailbox-address format.
     pub allow_mixed_case_session_names: Option<bool>,
-    /// Start pmuxd with the metadata-only activity feed on. Default false.
-    /// Read when pmuxd starts; a running daemon keeps its current state.
+    /// Serve the metadata-only activity feed. Default false. pmuxd watches the
+    /// config and starts or stops the feed live, without a restart.
     pub experimental_activity: Option<bool>,
 }
 
@@ -325,7 +325,7 @@ pub const MUX_KEYS: &[MuxKeySpec] = &[
     },
     MuxKeySpec {
         name: "experimental_activity",
-        doc: "Start pmuxd with the metadata-only activity feed for pmux-activity-monitor; read when pmuxd starts",
+        doc: "Serve the metadata-only activity feed for pmux-activity-monitor; pmuxd applies changes live, without a restart",
         range: "true|false; default false",
         kind: MuxKeyKind::Bool(false),
     },

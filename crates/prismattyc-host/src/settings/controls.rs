@@ -171,9 +171,8 @@ fn timing(key: &str) -> &'static str {
         "mux.attach_on_new" => "Next pmux new",
         "mux.allow_mixed_case_session_names" => "Next session name",
         "mux.space_open_runs_commands" => "Next Space open",
-        "mux.remote_size" | "mux.experimental_activity" => {
-            "Next daemon start; no automatic restart"
-        }
+        "mux.remote_size" => "Next daemon start; no automatic restart",
+        "mux.experimental_activity" => "Live: pmuxd applies it within a second; no restart",
         "mux.shell" => "Next shell selection",
         "window_opacity" | "chrome_opacity" => {
             "Live with alpha support; opaque non-macOS windows may need restart"

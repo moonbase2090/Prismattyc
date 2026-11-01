@@ -7,6 +7,7 @@
 //! server runtime owns PTYs/emulators without becoming a second compositor.
 
 pub mod activity;
+pub mod activity_config;
 pub mod attach_focus;
 mod attach_scan;
 pub mod attach_tabs;

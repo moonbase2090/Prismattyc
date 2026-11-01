@@ -11,7 +11,7 @@ Release builds ship `pmux-activity-monitor` next to `pmux`. The macOS app links 
 experimental_activity = true
 ```
 
-pmuxd reads the key when it starts, so the app-managed daemon serves the feed after its next start. Changing the key never restarts a running daemon. Then run `pmux-activity-monitor` in any pane.
+The running pmuxd picks up the change within a second, with no restart, and sessions are untouched; setting it back to `false` stops the feed the same way. The settings panel lists it under Mux. Then run `pmux-activity-monitor` in any pane.
 
 A Linux installation that `pmux update` manages does not fetch the monitor yet; copy `bin/pmux-activity-monitor` from the release tarball next to `pmux`.
 

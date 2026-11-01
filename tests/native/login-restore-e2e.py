@@ -15,7 +15,6 @@ import shutil
 import signal
 import socket
 import subprocess
-import sys
 import tempfile
 import time
 
@@ -189,23 +188,40 @@ def descendant_commands(f, session_name):
     return [command for pid, _, command in children if int(pid) in descendants]
 
 
+def build_sleeper(path):
+    source = path.with_suffix(".c")
+    source.write_text(
+        "#include <stdlib.h>\n"
+        "#include <unistd.h>\n"
+        "int main(int argc, char **argv) {\n"
+        "    sleep(argc > 1 ? (unsigned int)atoi(argv[1]) : 60);\n"
+        "    return 0;\n"
+        "}\n"
+    )
+    try:
+        subprocess.run(["cc", "-o", str(path), str(source)], check=True)
+    finally:
+        source.unlink(missing_ok=True)
+
+
 def stable_replay_command(f):
     tools = f.root / "agent-bin"
     tools.mkdir()
     old_binary = tools / "fixture-agent-1.2.3"
     new_binary = tools / "fixture-agent-2.0.0"
     stable_binary = tools / "fixture-agent"
-    old_binary.symlink_to(Path(sys.executable).resolve())
+    build_sleeper(old_binary)
+    build_sleeper(new_binary)
     stable_binary.symlink_to(old_binary.name)
     f.env["PATH"] = str(tools) + ":" + f.env["PATH"]
-    expected_command = "fixture-agent -c 'import time; time.sleep(117)'"
+    expected_command = "fixture-agent 117"
 
     daemon = f.daemon()
     f.cli("new", "--no-attach", "--agent", "worker", "stable-replay", "--", "/bin/sh", "-i")
     pane = next(s for s in f.snapshot() if s["name"] == "stable-replay")["windows"][0]["panes"][0]["id"]
-    f.cli("send", pane, f"{old_binary} -c 'import time; time.sleep(117)'", "--enter")
+    f.cli("send", pane, f"{old_binary} 117", "--enter")
     try:
-        wait_for(lambda: any("fixture-agent-1.2.3 -c" in command and "sleep(117)" in command
+        wait_for(lambda: any("fixture-agent-1.2.3 117" in command
                              for command in descendant_commands(f, "stable-replay")),
                  "versioned foreground command running")
     except AssertionError as error:
@@ -220,7 +236,7 @@ def stable_replay_command(f):
         saved = json.loads(files[0].read_text())
         session = next(s for s in saved["sessions"] if s["name"] == "stable-replay")
         command = session["windows"][0]["panes"][0].get("resume_command", "")
-        return (files[0], command) if "sleep(117)" in command else None
+        return (files[0], command) if command == expected_command else None
 
     try:
         checkpoint, captured_command = wait_for(foreground_command_checkpoint,
@@ -235,14 +251,13 @@ def stable_replay_command(f):
     assert session["windows"][0]["panes"][0]["resume_command"] == expected_command
 
     f.kill(daemon)
-    new_binary.symlink_to(Path(sys.executable).resolve())
     stable_binary.unlink()
     stable_binary.symlink_to(new_binary.name)
     old_binary.unlink()
     f.daemon()
 
     def updated_binary_running():
-        return any("fixture-agent -c" in command and "sleep(117)" in command
+        return any("fixture-agent 117" in command
                    for command in descendant_commands(f, "stable-replay"))
 
     wait_for(updated_binary_running, "stable command replayed through updated symlink")

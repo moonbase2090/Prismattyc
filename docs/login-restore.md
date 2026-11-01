@@ -73,6 +73,9 @@ agent sessions by default, all sessions with `"all"`, or no foreground replay
 with `"none"`. The policy is checked again at restore time. Explicit launch
 arguments remain the pane's launch specification. In-memory application
 state, shell variables, and terminal scrollback are not process checkpoints.
+When capture replaces a versioned executable path with a stable alias, it
+accepts only an executable symlink found on the process's `PATH`. Restore
+resolves that saved alias against the restored shell's `PATH`.
 An abrupt crash can lose changes since the last checkpoint.
 
 An already running older daemon continues undisturbed. It begins writing

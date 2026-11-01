@@ -352,6 +352,8 @@ fn stable_program_name(pid: u32, program: &str) -> Option<String> {
                 continue;
             }
 
+            // Try the shortest alias first. Once the shell can resolve that
+            // name, a mismatch fails closed instead of trying a longer alias.
             // The first executable with this name is what the shell will run.
             // Only trust a real symlink to the process we inspected; do not
             // reinterpret hard links or multi-call binary aliases.
@@ -884,6 +886,50 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
+    #[cfg(unix)]
+    fn procinfo_test_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "prismattyc-procinfo-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).expect("create procinfo test directory");
+        path
+    }
+
+    #[cfg(unix)]
+    fn stable_program_name_with_path(program: &Path, path: Option<&OsStr>) -> Option<String> {
+        let mut command = std::process::Command::new("/bin/sleep");
+        command
+            .arg("30")
+            .env_remove("PATH")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
+        let mut child = command.spawn().expect("spawn controlled-PATH process");
+        assert_eq!(child.try_wait().unwrap(), None, "controlled process exited");
+        let expected_path = path.map(OsStr::to_os_string);
+        let mut observed_path = process_path(child.id());
+        for _ in 0..50 {
+            if observed_path == expected_path {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            observed_path = process_path(child.id());
+        }
+        let result = stable_program_name(child.id(), program.to_str().expect("UTF-8 test path"));
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(observed_path, expected_path, "controlled PATH not observed");
+        result
+    }
+
     #[test]
     fn self_pid_is_alive() {
         let me = std::process::id();
@@ -960,6 +1006,71 @@ mod tests {
         );
         assert_eq!(version_alias_candidates("fixture_v2"), ["fixture"]);
         assert!(version_alias_candidates("busybox-sh").is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_program_name_rejects_a_shadowing_executable() {
+        use std::os::unix::fs::symlink;
+
+        let root = procinfo_test_dir("shadow");
+        let shadow = root.join("shadow");
+        let valid = root.join("valid");
+        std::fs::create_dir_all(&shadow).unwrap();
+        std::fs::create_dir_all(&valid).unwrap();
+        let versioned = root.join("fixture-agent-1.2.3");
+        std::fs::copy("/bin/sleep", &versioned).unwrap();
+        symlink("/bin/echo", shadow.join("fixture-agent")).unwrap();
+        symlink(&versioned, valid.join("fixture-agent")).unwrap();
+        let path = std::env::join_paths([&shadow, &valid]).unwrap();
+
+        let stable = stable_program_name_with_path(&versioned, Some(&path));
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(stable, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_program_name_rejects_a_hard_link_alias() {
+        let root = procinfo_test_dir("hard-link");
+        let versioned = root.join("fixture-agent-1.2.3");
+        std::fs::copy("/bin/sleep", &versioned).unwrap();
+        std::fs::hard_link(&versioned, root.join("fixture-agent")).unwrap();
+
+        let stable = stable_program_name_with_path(&versioned, Some(root.as_os_str()));
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(stable, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_program_name_rejects_a_non_executable_alias() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = procinfo_test_dir("non-executable");
+        let versioned = root.join("fixture-agent-1.2.3");
+        std::fs::copy("/bin/sleep", &versioned).unwrap();
+        std::fs::set_permissions(&versioned, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&versioned, root.join("fixture-agent")).unwrap();
+
+        let stable = stable_program_name_with_path(&versioned, Some(root.as_os_str()));
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(stable, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_program_name_rejects_a_process_without_path() {
+        use std::os::unix::fs::symlink;
+
+        let root = procinfo_test_dir("missing-path");
+        let versioned = root.join("fixture-agent-1.2.3");
+        std::fs::copy("/bin/sleep", &versioned).unwrap();
+        symlink(&versioned, root.join("fixture-agent")).unwrap();
+
+        let stable = stable_program_name_with_path(&versioned, None);
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(stable, None);
     }
 
     #[cfg(unix)]

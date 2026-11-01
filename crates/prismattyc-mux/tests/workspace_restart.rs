@@ -44,10 +44,7 @@ fn foreground_replay_keeps_the_shell_and_respects_policy_changes() {
 #[test]
 fn foreground_replay_survives_a_versioned_binary_update() {
     let proof = run("stable-replay");
-    assert_eq!(
-        proof["saved_command"],
-        "fixture-agent -c 'import time; time.sleep(117)'"
-    );
+    assert_eq!(proof["saved_command"], "fixture-agent 117");
     assert_eq!(proof["updated_binary"], "resumed");
 }
 

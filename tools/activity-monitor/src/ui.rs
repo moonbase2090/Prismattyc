@@ -599,7 +599,7 @@ pub fn render(
         (Screen::Timeline, Some((host, id))) => {
             draw_timeline(&mut paint, body, &hosts[*host], id, ui, clock, true);
         }
-        _ if tier == Tier::Wide => {
+        _ if tier == Tier::Wide && hint(hosts).is_none() => {
             let list_width = (area.width * 52 / 100).clamp(56, 96);
             let list = Rect::new(body.x, body.y, list_width, body.height);
             draw_list(&mut paint, list, hosts, &rows, ui, clock, Tier::Medium);
@@ -628,6 +628,7 @@ pub fn render(
                 }
             }
         }
+        _ if hint(hosts).is_some() => draw_hint(&mut paint, body, hosts, clock.wall_ms),
         _ => draw_list(&mut paint, body, hosts, &rows, ui, clock, tier),
     }
     if footer {
@@ -944,6 +945,72 @@ fn draw_host_row(
                 Some(hairline),
             );
         }
+    }
+}
+
+/// What a lone host with nothing to show should tell the person, if anything.
+pub fn hint(hosts: &[Host]) -> Option<(&'static str, &'static str)> {
+    let [host] = hosts else { return None };
+    if !host.seats.is_empty() {
+        return None;
+    }
+    match host.link {
+        Link::Disabled => Some((
+            "Activity feed is disabled for this daemon.",
+            "App-managed enablement is not available yet. To try the feed, start a separate pmuxd with --experimental-activity on its own socket and pass that socket with --socket.",
+        )),
+        Link::Retrying { .. } => Some((
+            "Can't reach pmuxd.",
+            "Start Prismattyc, or run pmux up in another pane. This view connects by itself.",
+        )),
+        Link::Connecting | Link::Connected => None,
+    }
+}
+
+/// Splits text into lines of at most `width` characters at spaces.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+fn draw_hint(paint: &mut Painter<'_, '_>, area: Rect, hosts: &[Host], now: u64) {
+    let Some((title, body)) = hint(hosts) else {
+        return;
+    };
+    let palette = *paint.palette;
+    let left = area.x + if area.width >= 40 { 3 } else { 1 };
+    let width = usize::from(area.x + area.width - left)
+        .saturating_sub(1)
+        .clamp(1, 72);
+    let lines = wrap(body, width);
+    let height = 2 + lines.len() as u16;
+    let top = area.y + area.height.saturating_sub(height) / 2;
+    let limit = area.x + area.width;
+    let host = &hosts[0];
+    let label = format!("{}  {}", host.label, link_text(host, now).0);
+    if top > area.y {
+        paint.text(area.x + 1, area.y, limit, &label, fg(palette.muted));
+    }
+    paint.text(left, top, limit, title, bold(fg(palette.strong)));
+    for (index, line) in lines.iter().enumerate() {
+        let y = top + 2 + index as u16;
+        if y >= area.y + area.height {
+            break;
+        }
+        paint.text(left, y, limit, line, fg(palette.muted));
     }
 }
 
@@ -1866,6 +1933,72 @@ mod tests {
         assert_eq!(light.failed, Color::Rgb(0xc2, 0x39, 0x2b));
         assert_eq!(Palette::DARK.working, Color::Rgb(0x4c, 0xc9, 0x8a));
         assert!(!light.dark && Palette::DARK.dark);
+    }
+
+    #[test]
+    fn a_lone_host_with_the_feed_off_says_it_cannot_be_enabled_here_yet() -> Result<()> {
+        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, None);
+        monitor.fixed_now = Some(NOW);
+        monitor.hosts[0].link = Link::Disabled;
+        let (text, ..) = draw(&mut monitor, 80, 24);
+        let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+        let title = lines
+            .iter()
+            .position(|l| l.trim() == "Activity feed is disabled for this daemon.")
+            .unwrap();
+        assert!(
+            title > 4 && title < 14,
+            "roughly centered: line {title}\n{text}"
+        );
+        assert!(text.contains("App-managed enablement is not available yet."));
+        assert!(text.contains("--experimental-activity") && text.contains("--socket"));
+        assert!(lines[1].trim_start().starts_with("mac  feed off"));
+        // At a small size it still wraps inside the pane.
+        let (small, ..) = draw(&mut monitor, 30, 12);
+        assert!(small.contains("Activity feed is disabled"));
+        assert!(small.lines().all(|l| l.trim_end().chars().count() <= 30));
+        assert!(small.contains("--experimental-activity"), "{small}");
+        Ok(())
+    }
+
+    #[test]
+    fn an_unreachable_lone_host_says_how_to_start_pmuxd() -> Result<()> {
+        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, None);
+        monitor.fixed_now = Some(NOW);
+        monitor.hosts[0].disconnect(NOW - 5_000);
+        let (text, ..) = draw(&mut monitor, 120, 30);
+        assert!(text.contains("Can't reach pmuxd."), "{text}");
+        assert!(text.contains("run pmux up"));
+        assert!(text.contains("mac  retrying for 5s"));
+        assert!(!text.contains("Select a seat"), "the wide split is skipped");
+        Ok(())
+    }
+
+    #[test]
+    fn hints_are_only_for_a_lone_host_with_nothing_to_show() -> Result<()> {
+        let mut two = Monitor::new(vec!["mac".into(), "windows".into()], Palette::DARK, None);
+        two.hosts[0].link = Link::Disabled;
+        two.hosts[1].link = Link::Disabled;
+        assert_eq!(hint(&two.hosts), None);
+        let mut monitor = fleet()?;
+        monitor.hosts.truncate(1);
+        monitor.hosts[0].link = Link::Disabled;
+        assert_eq!(hint(&monitor.hosts), None, "cached seats stay visible");
+        let fresh = Monitor::new(vec!["mac".into()], Palette::DARK, None);
+        assert_eq!(hint(&fresh.hosts), None, "connecting is not a problem yet");
+        Ok(())
+    }
+
+    #[test]
+    fn wrapping_keeps_words_whole_and_lines_short() {
+        assert_eq!(
+            wrap("one two three four", 9),
+            vec!["one two", "three", "four"]
+        );
+        assert_eq!(
+            wrap("--experimental-activity now", 10),
+            vec!["--experimental-activity", "now"]
+        );
     }
 
     #[test]

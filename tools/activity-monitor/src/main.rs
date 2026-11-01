@@ -22,6 +22,7 @@ use ui::Palette;
 const SNAPSHOT_SIZE: (u16, u16) = (120, 24);
 const SNAPSHOT_WAIT: Duration = Duration::from_secs(3);
 const USAGE: &str = "usage: pmux-activity-monitor [--socket PATH] [--host LABEL=PATH]... [--host-cmd LABEL JSON_ARGV]...
+  (with no --socket or --host, reads this machine's pmuxd, found the way pmux finds it)
                              [--theme auto|dark|light] [--no-pixels] [--no-motion]
                              [--snapshot [--size COLSxROWS]]
        pmux-activity-monitor --socket PATH (--json | --seats | --recent SEAT | --tail [--seat SEAT])";
@@ -92,7 +93,26 @@ fn parse_argv(raw: &str) -> Result<Vec<String>> {
     Ok(argv)
 }
 
+/// The socket `pmux` itself would use: `PMUX_INSTANCE` and `PMUX_SOCKET`, then the `[mux]`
+/// section of the Prismattyc config, then pmux's default path.
+fn local_socket() -> Result<PathBuf> {
+    let file =
+        prismattyc_mux::load_mux_section(&prismattyc_mux::prism_config_path()).unwrap_or_default();
+    let (instance, socket) = prismattyc_mux::resolve_mux_target(None, None, &file)?;
+    match socket {
+        Some(path) => Ok(path),
+        None => Ok(prismattyc_mux::default_socket_path(&instance)?),
+    }
+}
+
 fn options_from(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Option<Options>> {
+    options_with(args, local_socket)
+}
+
+fn options_with(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+    local: impl FnOnce() -> Result<PathBuf>,
+) -> Result<Option<Options>> {
     let mut args = args.into_iter();
     let mut socket = None;
     let mut hosts: Vec<(String, Source)> = Vec::new();
@@ -155,18 +175,19 @@ fn options_from(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Op
         (mode, None) => mode.unwrap_or(Mode::Live),
         _ => bail!("--seat requires --tail"),
     };
+    // With no host named, read this machine's own pmuxd, as `pmux` would.
+    if socket.is_none() && hosts.is_empty() {
+        socket = Some(local()?);
+    }
     let query = matches!(
         mode,
         Mode::Json | Mode::Seats | Mode::Recent(_) | Mode::Tail(_)
     );
-    if query && (!hosts.is_empty() || socket.is_none()) {
-        bail!("--json, --seats, --recent and --tail read one feed: pass --socket and no --host");
+    if query && !hosts.is_empty() {
+        bail!("--json, --seats, --recent and --tail read one feed: use --socket, not --host");
     }
     if size.is_some() && !matches!(mode, Mode::Snapshot) {
         bail!("--size applies to --snapshot; the live view follows the terminal");
-    }
-    if socket.is_none() && hosts.is_empty() {
-        bail!(USAGE);
     }
     let mut labels: Vec<&str> = hosts.iter().map(|(label, _)| label.as_str()).collect();
     if socket.is_some() {
@@ -345,9 +366,47 @@ mod tests {
         }))?)
     }
 
+    const LOCAL: &str = "/run/test/pmux.sock";
+
     fn parse(args: &[&str]) -> Result<Options> {
-        options_from(args.iter().map(std::ffi::OsString::from))?
-            .ok_or_else(|| anyhow::anyhow!("help"))
+        options_with(args.iter().map(std::ffi::OsString::from), || {
+            Ok(PathBuf::from(LOCAL))
+        })?
+        .ok_or_else(|| anyhow::anyhow!("help"))
+    }
+
+    #[test]
+    fn with_no_host_named_the_monitor_reads_the_local_pmuxd() -> Result<()> {
+        let local = Some(std::path::Path::new(LOCAL));
+        let plain = parse(&[])?;
+        assert_eq!(plain.socket.as_deref(), local);
+        assert!(matches!(plain.mode, Mode::Live));
+        assert_eq!(parse(&["--seats"])?.socket.as_deref(), local);
+        // A named host replaces the default; --socket overrides it.
+        assert!(parse(&["--host", "lab=/tmp/b"])?.socket.is_none());
+        assert_eq!(
+            parse(&["--socket", "/tmp/a"])?.socket.as_deref(),
+            Some(std::path::Path::new("/tmp/a"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_local_socket_is_pmux_socket_when_a_pane_sets_it() -> Result<()> {
+        // Every pmux pane exports PMUX_SOCKET for its own daemon; pmux uses it unless an
+        // instance is named. Outside a pane the default is an absolute socket path.
+        let path = local_socket()?;
+        match (
+            std::env::var_os("PMUX_SOCKET"),
+            std::env::var_os("PMUX_INSTANCE"),
+        ) {
+            (Some(env), None) if !env.is_empty() => assert_eq!(path, PathBuf::from(env)),
+            _ => {
+                assert!(path.is_absolute(), "{}", path.display());
+                assert_eq!(path.extension().and_then(|e| e.to_str()), Some("sock"));
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -407,6 +466,10 @@ mod tests {
         assert!(parse(&["--socket", "/tmp/a", "--seats"]).is_ok());
         assert!(parse(&["--socket", "/tmp/a", "--host", "b=/tmp/b", "--seats"]).is_err());
         assert!(parse(&["--host", "b=/tmp/b", "--tail"]).is_err());
+        assert!(
+            parse(&["--tail"]).is_ok(),
+            "query modes default to the local pmuxd"
+        );
         assert!(parse(&["--socket", "/tmp/a", "--seat", "worker-a"]).is_err());
     }
 

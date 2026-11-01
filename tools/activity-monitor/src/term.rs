@@ -44,7 +44,12 @@ pub fn probe(pixels: bool) -> Probe {
 
         if let Ok(tty) = OpenOptions::new().read(true).write(true).open("/dev/tty") {
             if let Ok(reply) = probe_fd(tty.as_fd(), &ProbeEnv::from_process()) {
-                let mode = pixel_mode(pixels, &reply.caps);
+                let mut pending_input = reply.pending_input;
+                let mode = pixel_mode(pixels, &reply.caps, || {
+                    let (shown, typed) = raw_upload_shown(&tty);
+                    pending_input.extend(typed);
+                    shown
+                });
                 let layer = if mode.is_pixels() {
                     PixelLayer::from_caps(&reply.caps)
                 } else {
@@ -54,7 +59,7 @@ pub fn probe(pixels: bool) -> Probe {
                     layer,
                     pixels: mode.is_pixels(),
                     background_dark: reply.caps.background_dark,
-                    pending_input: reply.pending_input,
+                    pending_input,
                 };
             }
         }
@@ -70,14 +75,132 @@ pub fn probe(pixels: bool) -> Probe {
 
 /// Chooses true pixels only where the uploads will be shown.
 ///
-/// Lunatui 0.1.18 uploads raw RGBA (`f=32`), and Prismattyc's emulator accepts only PNG
-/// uploads, so inside Prismattyc the lanes would be erased and never replaced. Cells there.
-pub fn pixel_mode(requested: bool, caps: &lunatui_term::Caps) -> PixelMode {
-    if !requested || caps.identity.prismattyc_native {
+/// Lunatui 0.1.18 uploads raw RGBA (`f=32`). Prismattyc answers every graphics query with OK,
+/// but releases before raw-upload support drop raw uploads, which would leave lanes erased and
+/// blank. So inside Prismattyc pixels need `raw_upload_shown`, a real upload that is answered.
+pub fn pixel_mode(
+    requested: bool,
+    caps: &lunatui_term::Caps,
+    raw_upload_shown: impl FnOnce() -> bool,
+) -> PixelMode {
+    let mode = if requested {
+        PixelMode::from_caps(caps)
+    } else {
+        PixelMode::Cells
+    };
+    if mode.is_pixels() && caps.identity.prismattyc_native && !raw_upload_shown() {
         PixelMode::Cells
     } else {
-        PixelMode::from_caps(caps)
+        mode
     }
+}
+
+/// Kitty image number used for the raw-upload probe.
+const PROBE_IMAGE: u32 = 4_242;
+
+/// Uploads one 1x1 raw RGBA image with an image number, then asks for device attributes.
+/// A terminal that keeps the image answers `OK` before the attributes. The image is deleted
+/// again. Returns whether it was answered, and any other input read meanwhile.
+#[cfg(unix)]
+fn raw_upload_shown(tty: &std::fs::File) -> (bool, Vec<u8>) {
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+
+    let fd = tty.as_raw_fd();
+    // SAFETY: tcgetattr fills the zeroed termios for this open terminal descriptor.
+    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(fd, &mut saved) } != 0 {
+        return (false, Vec::new());
+    }
+    let mut raw = saved;
+    // SAFETY: cfmakeraw only edits the struct; tcsetattr applies it to the same descriptor.
+    unsafe {
+        libc::cfmakeraw(&mut raw);
+        libc::tcsetattr(fd, libc::TCSANOW, &raw);
+    }
+    let mut out = tty;
+    let query = format!("\x1b_Ga=t,I={PROBE_IMAGE},f=32,s=1,v=1;AAAAAA==\x1b\\\x1b[c");
+    let mut read = Vec::new();
+    if out
+        .write_all(query.as_bytes())
+        .and_then(|()| out.flush())
+        .is_ok()
+    {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let mut buffer = [0u8; 512];
+        while Instant::now() < deadline && !scan_raw_probe(&read).answered {
+            let mut poll = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd for an open descriptor, with a bounded timeout.
+            if unsafe { libc::poll(&mut poll, 1, 50) } > 0 {
+                match (&*tty).read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => read.extend_from_slice(&buffer[..count]),
+                }
+            }
+        }
+    }
+    let scan = scan_raw_probe(&read);
+    if let Some(id) = scan.image_id {
+        let _ = out.write_all(format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\").as_bytes());
+    }
+    // SAFETY: restores the attributes saved above on the same descriptor.
+    unsafe {
+        libc::tcsetattr(fd, libc::TCSANOW, &saved);
+    }
+    (scan.image_id.is_some(), scan.rest)
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RawProbe {
+    /// The terminal's id for the probe image, when it answered OK.
+    image_id: Option<u32>,
+    /// Device attributes arrived, so no later OK is coming.
+    answered: bool,
+    /// Bytes that belong to neither reply, such as keys typed during the probe.
+    rest: Vec<u8>,
+}
+
+fn scan_raw_probe(bytes: &[u8]) -> RawProbe {
+    let mut probe = RawProbe::default();
+    let mut index = 0;
+    while index < bytes.len() {
+        let tail = &bytes[index..];
+        if tail.starts_with(b"\x1b_G") {
+            if let Some(end) = find(tail, b"\x1b\\") {
+                let body = String::from_utf8_lossy(&tail[3..end]);
+                let (control, message) = body.split_once(';').unwrap_or((&body, ""));
+                let number = format!("I={PROBE_IMAGE}");
+                if control.split(',').any(|field| field == number) && message == "OK" {
+                    probe.image_id = control
+                        .split(',')
+                        .find_map(|field| field.strip_prefix("i="))
+                        .and_then(|id| id.parse().ok());
+                }
+                index += end + 2;
+                continue;
+            }
+        }
+        if tail.starts_with(b"\x1b[?") {
+            if let Some(end) = tail.iter().position(|b| *b == b'c') {
+                probe.answered = true;
+                index += end + 1;
+                continue;
+            }
+        }
+        probe.rest.push(bytes[index]);
+        index += 1;
+    }
+    probe
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 /// The pane size in cells, or `None` when it cannot be read.
@@ -311,15 +434,61 @@ mod tests {
     }
 
     #[test]
-    fn kitty_terminals_get_pixels_unless_turned_off() {
-        assert_eq!(pixel_mode(true, &kitty("kitty")), PixelMode::Kitty);
-        assert_eq!(pixel_mode(false, &kitty("kitty")), PixelMode::Cells);
+    fn kitty_terminals_get_pixels_unless_turned_off_without_a_raw_probe() {
+        let never = || -> bool { panic!("only Prismattyc needs the raw-upload probe") };
+        assert_eq!(pixel_mode(true, &kitty("kitty"), never), PixelMode::Kitty);
+        assert_eq!(pixel_mode(false, &kitty("kitty"), never), PixelMode::Cells);
     }
 
     #[test]
-    fn prismattyc_keeps_cells_because_it_shows_only_png_uploads() {
+    fn prismattyc_gets_pixels_only_when_a_raw_upload_is_answered() {
         let caps = kitty("prismattyc");
         assert!(caps.identity.prismattyc_native);
-        assert_eq!(pixel_mode(true, &caps), PixelMode::Cells);
+        assert_eq!(pixel_mode(true, &caps, || true), PixelMode::Kitty);
+        assert_eq!(pixel_mode(true, &caps, || false), PixelMode::Cells);
+        assert_eq!(pixel_mode(false, &caps, || true), PixelMode::Cells);
+    }
+
+    #[test]
+    fn a_terminal_without_graphics_is_never_probed() {
+        let env = ProbeEnv {
+            term_program: "prismattyc".to_owned(),
+            ..ProbeEnv::default()
+        };
+        let caps = Caps::from_env(&env);
+        assert_eq!(
+            pixel_mode(true, &caps, || panic!("probed")),
+            PixelMode::Cells
+        );
+    }
+
+    #[test]
+    fn an_ok_for_the_probe_image_before_device_attributes_means_raw_uploads_are_shown() {
+        let probe = scan_raw_probe(b"\x1b_Gi=7,I=4242;OK\x1b\\\x1b[?62;22c");
+        assert_eq!(probe.image_id, Some(7));
+        assert!(probe.answered);
+        assert!(probe.rest.is_empty());
+    }
+
+    #[test]
+    fn device_attributes_alone_mean_the_upload_was_dropped() {
+        let probe = scan_raw_probe(b"\x1b[?62;22c");
+        assert_eq!(probe.image_id, None);
+        assert!(probe.answered);
+    }
+
+    #[test]
+    fn errors_and_other_images_do_not_count_and_typed_keys_are_kept() {
+        let probe =
+            scan_raw_probe(b"j\x1b_Gi=7,I=4242;ENODATA:bad\x1b\\\x1b_Gi=8,I=1;OK\x1b\\k\x1b[?62c");
+        assert_eq!(probe.image_id, None);
+        assert!(probe.answered);
+        assert_eq!(probe.rest, b"jk");
+        let pending = scan_raw_probe(b"\x1b_Gi=7,I=4242;OK\x1b\\");
+        assert_eq!(pending.image_id, Some(7));
+        assert!(
+            !pending.answered,
+            "keep reading until the attributes arrive"
+        );
     }
 }

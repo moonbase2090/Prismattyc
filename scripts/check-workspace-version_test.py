@@ -122,6 +122,45 @@ class VersionCheckTests(unittest.TestCase):
         finally:
             shutil.rmtree(repo, ignore_errors=True)
 
+    def test_workspace_exclude_before_members_is_read(self) -> None:
+        # Cargo.toml lists exclude = [...] ahead of members. Its brackets must
+        # not hide the members list, and excluded paths are not members.
+        repo = fresh_repo()
+        try:
+            git(repo, "checkout", "-qb", "feature/work")
+            manifest = repo / "Cargo.toml"
+            manifest.write_text(
+                manifest.read_text().replace(
+                    "[workspace]\n",
+                    '[workspace]\nexclude = ["third_party/x", "tools/y"]\n',
+                    1,
+                )
+            )
+            commit_all(repo, "exclude before members")
+            code, output = run_check(repo, branch="feature/work")
+            self.assertEqual(code, 0, f"exclude before members must pass\n{output}")
+            self.assertIn("agreement: pass (Cargo.lock alpha", output)
+            self.assertIn("agreement: pass (Cargo.lock pmux-mcp", output)
+            self.assertNotIn("third_party/x", output)
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+
+    def test_missing_members_list_is_reported(self) -> None:
+        repo = fresh_repo()
+        try:
+            git(repo, "checkout", "-qb", "feature/work")
+            manifest = repo / "Cargo.toml"
+            text = manifest.read_text()
+            start = text.index("members = [")
+            end = text.index("]", start) + 1
+            manifest.write_text(text[:start] + text[end:])
+            commit_all(repo, "drop members")
+            code, output = run_check(repo, branch="feature/work")
+            self.assertEqual(code, 1, output)
+            self.assertIn("agreement: FAIL (Cargo.toml has no [workspace] members list)", output)
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+
     def test_feature_branch_behind_bumped_base_passes(self) -> None:
         repo = fresh_repo()
         try:

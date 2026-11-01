@@ -251,7 +251,7 @@ Besides the `pmux activity` codes, a tool result can carry:
 cargo test -p prismattyc-mux --lib activity_query
 cargo test -p prismattyc-mux --bin pmux activity
 cargo test -p pmux-mcp
-cargo build -p prismattyc-mux --bins --example activity-emit -p pmux-mcp
+cargo build -p prismattyc-mux --bins -p pmux-mcp
 python3 scripts/verify-activity-connector.py --bins target/debug --out NEW_DIR
 ```
 

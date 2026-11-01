@@ -3,7 +3,7 @@
 """Drive `pmux activity` and the pmux-mcp activity tools against private daemons.
 
 Starts two pmuxd with --experimental-activity and one without, each on a private
-socket, publishes synthetic runtime events with the activity-emit example, and
+socket, publishes synthetic runtime events with `pmux activity-emit`, and
 checks every connector command and error path, then pmux-mcp in full and
 activity-only modes, including a hosts file with a command endpoint. Written
 for Unix and Windows. Writes OUT/result.json.
@@ -31,12 +31,10 @@ def exe(path: Path) -> Path:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bins", required=True, type=Path)
-    parser.add_argument("--emitter", type=Path, help="default: BINS/examples/activity-emit")
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
     bins = args.bins.resolve()
-    emitter = (args.emitter or exe(bins / "examples" / "activity-emit")).resolve()
-    for tool in (exe(bins / "pmux"), exe(bins / "pmuxd"), exe(bins / "pmux-mcp"), emitter):
+    for tool in (exe(bins / "pmux"), exe(bins / "pmuxd"), exe(bins / "pmux-mcp")):
         if not tool.is_file():
             parser.error(f"missing {tool}")
     if args.out.exists():
@@ -70,8 +68,8 @@ def main() -> int:
     def emit(seat, event_id, kind, socket=on):
         event = {"schema_version": 1, "seat": seat, "run_id": "run-1", "event_id": event_id,
                  "source": "runtime", "kind": kind}
-        subprocess.run([str(emitter), "--socket", str(socket), "--seat", seat, "--event", json.dumps(event)],
-                       env=env, check=True)
+        subprocess.run([str(exe(bins / "pmux")), "--socket", str(socket), "activity-emit", "--seat", seat,
+                        "--event", json.dumps(event)], env=env, check=True)
 
     def pa(socket, *words):
         done = subprocess.run([str(exe(bins / "pmux")), "--socket", str(socket), "activity", *words],

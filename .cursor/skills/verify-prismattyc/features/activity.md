@@ -82,7 +82,7 @@ through `prismattyc_mux::activity_query`. See
 [the connector note](../../../../docs/activity-connector.md). Build and drive:
 
 ```sh
-cargo build -p prismattyc-mux --bins --example activity-emit -p pmux-mcp --locked
+cargo build -p prismattyc-mux --bins -p pmux-mcp --locked
 cargo test -p prismattyc-mux --lib activity_query --locked
 cargo test -p prismattyc-mux --bin pmux activity --locked
 cargo test -p pmux-mcp --locked

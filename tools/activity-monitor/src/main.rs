@@ -534,8 +534,10 @@ mod tests {
         ])?;
         let started = Instant::now();
         let text = snapshot(&options)?;
+        // A caught-up host ends the wait before the snapshot deadline, and stopping the
+        // command does not wait for its sleeping child.
         assert!(
-            started.elapsed() < Duration::from_secs(2),
+            started.elapsed() < SNAPSHOT_WAIT,
             "a caught-up host ends the wait"
         );
         assert!(text.contains("remote  connected"), "{text}");

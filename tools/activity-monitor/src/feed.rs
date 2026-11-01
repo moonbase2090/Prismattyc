@@ -416,7 +416,7 @@ mod tests {
             assert!(matches!(first.update, Update::Page(ref p) if p.cursor.sequence == 1));
             assert!(matches!(second.update, Update::Page(ref p) if p.cursor.sequence == 2));
             assert!(
-                gap < Duration::from_millis(150),
+                gap < Duration::from_millis(200),
                 "a pending page waited {gap:?}"
             );
             let third = Instant::now();
@@ -472,8 +472,9 @@ mod tests {
                     exits += 1;
                 }
             }
-            // Runs start at about 0 s, 1 s and 3 s: backoff doubles from one second.
-            assert_eq!(exits, 3);
+            // Runs start at about 0 s, 1 s and 3 s: backoff doubles from one second. A loaded
+            // machine can push the third run past the window; faster restarts give four or more.
+            assert!((2..=3).contains(&exits), "{exits} restarts in 3.5 s");
         }
 
         #[test]

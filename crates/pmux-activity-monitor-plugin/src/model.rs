@@ -112,6 +112,7 @@ pub enum Link {
     Disabled,
     /// The daemon answered but predates the activity feed.
     Unsupported,
+    PermissionDenied,
 }
 
 pub struct Host {

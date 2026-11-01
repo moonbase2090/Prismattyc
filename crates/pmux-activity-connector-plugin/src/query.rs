@@ -1,35 +1,33 @@
 // SPDX-License-Identifier: MIT
+//! Bounded pure queries over caller-supplied metadata pages.
 
-use std::collections::BTreeMap;
-use std::io::{self, Write};
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread;
-
-use anyhow::{bail, Result};
-use prismattyc_mux::activity::{
-    ActivityCursor, ActivityKind, ActivityPage, ActivityRecord, ActivitySource,
+use anyhow::{anyhow, bail};
+use prismattyc_core::{
+    activity::{ActivityCursor, ActivityKind, ActivityPage, ActivityRecord, ActivitySource},
+    AgentId,
 };
-use prismattyc_mux::mailbox::AgentId;
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
-use super::{read_page, POLL_INTERVAL};
-
+pub const QUERY_SCHEMA_VERSION: u16 = 1;
 const MAX_RETAINED: usize = 512;
 const MAX_QUERY_PAGES: usize = 2;
 
-struct Retained {
-    epoch: String,
-    oldest_sequence: u64,
-    cursor: ActivityCursor,
-    records: Vec<ActivityRecord>,
+/// Retained history drained up to the watermark seen on the first page.
+pub struct Retained {
+    pub epoch: String,
+    pub oldest_sequence: u64,
+    pub cursor: ActivityCursor,
+    pub records: Vec<ActivityRecord>,
 }
 
-fn retained(
-    mut read: impl FnMut(Option<ActivityCursor>) -> Result<ActivityPage>,
-) -> Result<Retained> {
+/// Drain retained history in at most two pages, stopping at the first page's
+/// `current_sequence` so a busy producer cannot keep the query running. Fails
+/// rather than mixing histories when the daemon resets between pages.
+pub fn retained(
+    mut read: impl FnMut(Option<ActivityCursor>) -> anyhow::Result<ActivityPage>,
+) -> anyhow::Result<Retained> {
     let mut page = read(None)?;
     let epoch = page.epoch.clone();
     let oldest_sequence = page.oldest_sequence;
@@ -87,7 +85,7 @@ struct ObservedSeat<'a> {
 
 fn base(history: &Retained) -> Value {
     json!({
-        "schema_version": 1,
+        "schema_version": QUERY_SCHEMA_VERSION,
         "retained_history_only": true,
         "epoch": history.epoch,
         "oldest_sequence": history.oldest_sequence,
@@ -96,7 +94,9 @@ fn base(history: &Retained) -> Value {
     })
 }
 
-fn observed_seats(history: &Retained) -> Value {
+/// Seats seen in retained history. Seeing a seat does not mean its process
+/// is alive.
+pub fn observed_seats(history: &Retained) -> Value {
     let mut seats = BTreeMap::new();
     for record in &history.records {
         let entry = seats.entry(&record.event.seat).or_insert(ObservedSeat {
@@ -119,94 +119,100 @@ fn observed_seats(history: &Retained) -> Value {
     result
 }
 
-pub(super) fn seats(socket: &Path) -> Result<Value> {
-    let history = retained(|cursor| read_page(socket, cursor)).map_err(|_| {
-        anyhow::anyhow!("cannot read a consistent retained activity history; retry")
-    })?;
-    Ok(observed_seats(&history))
-}
-
-fn recent_events(history: &Retained, seat: &AgentId) -> Value {
+/// Retained events for one seat, oldest first, keeping at most the newest
+/// `limit` when one is given.
+pub fn recent_events(history: &Retained, seat: &AgentId, limit: Option<usize>) -> Value {
     let records = history
         .records
         .iter()
         .filter(|record| &record.event.seat == seat)
         .collect::<Vec<_>>();
+    let skip = limit.map_or(0, |limit| records.len().saturating_sub(limit));
     let mut result = base(history);
     result["seat"] = json!(seat);
-    result["records"] = json!(records);
+    result["truncated"] = json!(skip > 0);
+    result["records"] = json!(records[skip..]);
     result
 }
 
-pub(super) fn recent(socket: &Path, seat: &AgentId) -> Result<Value> {
-    let history = retained(|cursor| read_page(socket, cursor)).map_err(|_| {
-        anyhow::anyhow!("cannot read a consistent retained activity history; retry")
-    })?;
-    Ok(recent_events(&history, seat))
-}
-
-fn filtered_page(mut page: ActivityPage, seat: Option<&AgentId>) -> ActivityPage {
+/// Drop other seats' records. The cursor still covers them, so the next read
+/// does not see them again.
+pub fn filtered_page(mut page: ActivityPage, seat: Option<&AgentId>) -> ActivityPage {
     if let Some(seat) = seat {
         page.records.retain(|record| &record.event.seat == seat);
     }
     page
 }
 
-fn line(out: &mut impl Write, value: &Value) -> io::Result<()> {
-    serde_json::to_writer(&mut *out, value)?;
-    out.write_all(b"\n")?;
-    out.flush()
+/// Parse an `EPOCH:SEQUENCE` cursor, as printed by `poll` and `tail`.
+pub fn parse_cursor(text: &str) -> anyhow::Result<ActivityCursor> {
+    let (epoch, sequence) = text
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow!("cursor must be EPOCH:SEQUENCE"))?;
+    if epoch.is_empty() || epoch.len() > 64 || !epoch.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("cursor epoch must be 1 to 64 hex digits");
+    }
+    let sequence = sequence
+        .parse()
+        .map_err(|_| anyhow!("cursor sequence must be a non-negative integer"))?;
+    Ok(ActivityCursor {
+        epoch: epoch.to_owned(),
+        sequence,
+    })
 }
 
-pub(super) fn tail(socket: &Path, seat: Option<&AgentId>) -> Result<()> {
-    let stopped = Arc::new(AtomicBool::new(false));
-    let signal_stop = Arc::clone(&stopped);
-    ctrlc::set_handler(move || signal_stop.store(true, Ordering::Relaxed))?;
-    let mut cursor = None;
-    let mut disconnected = false;
-    let mut out = io::stdout().lock();
-    while !stopped.load(Ordering::Relaxed) {
-        let message = match read_page(socket, cursor.clone()) {
-            Ok(page) => {
-                let changed =
-                    cursor.as_ref() != Some(&page.cursor) || page.reset.is_some() || disconnected;
-                cursor = Some(page.cursor.clone());
-                disconnected = false;
-                changed.then(|| {
-                    json!({
-                        "type": "activity",
-                        "seat_filter": seat,
-                        "page": filtered_page(page, seat)
-                    })
-                })
-            }
-            Err(_) if !disconnected => {
-                disconnected = true;
-                Some(json!({"type": "disconnected", "retrying": true, "cursor": cursor}))
-            }
-            Err(_) => None,
-        };
-        if let Some(message) = message {
-            if let Err(error) = line(&mut out, &message) {
-                if error.kind() == io::ErrorKind::BrokenPipe || stopped.load(Ordering::Relaxed) {
-                    return Ok(());
-                }
-                return Err(error.into());
-            }
-        }
-        thread::sleep(POLL_INTERVAL);
-    }
-    Ok(())
+/// `EPOCH:SEQUENCE` form of a cursor.
+pub fn format_cursor(cursor: &ActivityCursor) -> String {
+    format!("{}:{}", cursor.epoch, cursor.sequence)
+}
+
+/// One stateless page: what a caller holding only a cursor string needs to
+/// continue. A `reset` means continuity was lost and cached state is stale.
+pub fn poll_result(page: ActivityPage, seat: Option<&AgentId>) -> Value {
+    let next = format_cursor(&page.cursor);
+    json!({
+        "schema_version": QUERY_SCHEMA_VERSION,
+        "seat_filter": seat,
+        "next_cursor": next,
+        "page": filtered_page(page, seat)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{page, record};
+    use anyhow::Result;
+    use prismattyc_core::activity::ActivityReset;
+    fn record(seat: &str, sequence: u64, kind: &str) -> Result<ActivityRecord> {
+        Ok(serde_json::from_value(json!({
+            "sequence": sequence,
+            "received_at_ms": 1000,
+            "event": {
+                "schema_version": 1,
+                "seat": seat,
+                "run_id": "run-1",
+                "event_id": format!("event-{sequence}"),
+                "source": "runtime",
+                "kind": kind
+            }
+        }))?)
+    }
 
-    #[test]
-    fn seat_summary_counts_events_and_uses_the_latest_kind() -> Result<()> {
-        let history = retained(|_| {
+    fn page(records: Vec<ActivityRecord>, reset: Option<&str>) -> Result<ActivityPage> {
+        let sequence = records.last().map_or(0, |record| record.sequence);
+        Ok(serde_json::from_value(json!({
+            "epoch": "e0",
+            "oldest_sequence": 1,
+            "current_sequence": sequence,
+            "records": records,
+            "cursor": {"epoch": "e0", "sequence": sequence},
+            "has_more": false,
+            "reset": reset
+        }))?)
+    }
+
+    fn three() -> Result<Retained> {
+        retained(|_| {
             page(
                 vec![
                     record("worker-a", 1, "working")?,
@@ -215,8 +221,12 @@ mod tests {
                 ],
                 None,
             )
-        })?;
-        let result = observed_seats(&history);
+        })
+    }
+
+    #[test]
+    fn seat_summary_counts_events_and_uses_the_latest_kind() -> Result<()> {
+        let result = observed_seats(&three()?);
         assert_eq!(result["retained_history_only"], true);
         assert_eq!(result["seats"].as_array().map(Vec::len), Some(2));
         assert_eq!(result["seats"][0]["seat"], "worker-a");
@@ -228,21 +238,21 @@ mod tests {
 
     #[test]
     fn recent_events_excludes_other_seats_and_preserves_the_feed_cursor() -> Result<()> {
-        let history = retained(|_| {
-            page(
-                vec![
-                    record("worker-a", 1, "working")?,
-                    record("worker-b", 2, "waiting")?,
-                    record("worker-a", 3, "stopped")?,
-                ],
-                None,
-            )
-        })?;
-        let result = recent_events(&history, &AgentId::new("worker-a")?);
+        let result = recent_events(&three()?, &AgentId::new("worker-a")?, None);
         assert_eq!(result["records"].as_array().map(Vec::len), Some(2));
         assert_eq!(result["records"][0]["sequence"], 1);
         assert_eq!(result["records"][1]["sequence"], 3);
+        assert_eq!(result["truncated"], false);
         assert_eq!(result["cursor"]["sequence"], 3);
+        Ok(())
+    }
+
+    #[test]
+    fn recent_limit_keeps_the_newest_events_and_says_so() -> Result<()> {
+        let result = recent_events(&three()?, &AgentId::new("worker-a")?, Some(1));
+        assert_eq!(result["records"].as_array().map(Vec::len), Some(1));
+        assert_eq!(result["records"][0]["sequence"], 3);
+        assert_eq!(result["truncated"], true);
         Ok(())
     }
 
@@ -285,21 +295,16 @@ mod tests {
                 next.current_sequence = 2;
                 next.has_more = true;
             } else {
-                next.reset = Some(prismattyc_mux::activity::ActivityReset::Restarted);
+                next.reset = Some(ActivityReset::Restarted);
             }
             Ok(next)
         });
-        assert!(result.is_err());
+        let error = result.err().expect("reset must fail the query");
+        assert_eq!(
+            error.to_string(),
+            "activity feed changed during the bounded query; retry"
+        );
         assert_eq!(calls, 2);
-        Ok(())
-    }
-
-    #[test]
-    fn a_filtered_empty_tail_page_still_advances_the_cursor() -> Result<()> {
-        let page = page(vec![record("worker-b", 7, "waiting")?], None)?;
-        let filtered = filtered_page(page, Some(&AgentId::new("worker-a")?));
-        assert!(filtered.records.is_empty());
-        assert_eq!(filtered.cursor.sequence, 7);
         Ok(())
     }
 
@@ -315,6 +320,27 @@ mod tests {
         });
         assert_eq!(calls, 2);
         assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_filtered_empty_page_still_advances_the_cursor() -> Result<()> {
+        let page = page(vec![record("worker-b", 7, "waiting")?], None)?;
+        let result = poll_result(page, Some(&AgentId::new("worker-a")?));
+        assert_eq!(result["page"]["records"].as_array().map(Vec::len), Some(0));
+        assert_eq!(result["next_cursor"], "e0:7");
+        Ok(())
+    }
+
+    #[test]
+    fn cursors_round_trip_and_reject_malformed_text() -> Result<()> {
+        let cursor = parse_cursor("0a1b:42")?;
+        assert_eq!(cursor.epoch, "0a1b");
+        assert_eq!(cursor.sequence, 42);
+        assert_eq!(format_cursor(&cursor), "0a1b:42");
+        for bad in ["42", ":1", "e0:", "e0:-1", "zz:1", "e0:1.5"] {
+            assert!(parse_cursor(bad).is_err(), "{bad} should be rejected");
+        }
         Ok(())
     }
 }

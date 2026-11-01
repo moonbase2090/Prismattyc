@@ -463,6 +463,7 @@ pub enum ControlRequest {
     Plugin {
         version: u16,
         request_id: u64,
+        plugin_api: String,
         operation: crate::plugins::Request,
     },
     PublishActivity {
@@ -8057,7 +8058,12 @@ fn handle_client_loop(
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             ControlResponse::error(request_id, guard.snapshot_required_error())
-        } else if let ControlRequest::Plugin { operation, .. } = request {
+        } else if let ControlRequest::Plugin {
+            operation,
+            plugin_api,
+            ..
+        } = request
+        {
             state.last_request_id = request_id.max(state.last_request_id);
             if request_id == 0 || version != PROTOCOL_VERSION {
                 ControlResponse::error(
@@ -8065,6 +8071,14 @@ fn handle_client_loop(
                     ControlError::new(
                         ControlErrorCode::InvalidRequest,
                         "invalid plug-in request header",
+                    ),
+                )
+            } else if plugin_api != pmux_plugin_api::API_VERSION {
+                ControlResponse::error(
+                    request_id,
+                    ControlError::new(
+                        ControlErrorCode::IncompatibleVersion,
+                        "frontend and daemon have incompatible plug-in APIs; update Prismattyc",
                     ),
                 )
             } else {
@@ -8080,7 +8094,10 @@ fn handle_client_loop(
                     }
                     Err(error) => ControlResponse::error(
                         request_id,
-                        ControlError::new(ControlErrorCode::InvalidRequest, error.to_string()),
+                        ControlError::new(
+                            ControlErrorCode::InvalidRequest,
+                            crate::plugins::error_message(&error.to_string()),
+                        ),
                     ),
                 }
             }

@@ -14,6 +14,7 @@ from pathlib import Path
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -33,7 +34,7 @@ def build(args, scratch):
         subprocess.run([*cargo, *command], cwd=REPO, env={**env, **overrides}, check=True)
 
     guest_env = {key: value for key, value in env.items() if key not in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS")}
-    subprocess.run([*cargo, "build", "-p", "pmux-plugin-fixture", "--release", "--target", "wasm32-unknown-unknown", "--locked"], cwd=REPO, env=guest_env, check=True)
+    subprocess.run([*cargo, "build", "-p", "pmux-plugin-fixture", "-p", "pmux-activity-monitor-plugin", "-p", "pmux-activity-connector-plugin", "--release", "--target", "wasm32-unknown-unknown", "--locked"], cwd=REPO, env=guest_env, check=True)
     module = target / "wasm32-unknown-unknown/release/pmux_plugin_fixture.wasm"
     good = REPO / "crates/pmux-plugin-fixture/package"
     bad = scratch / "bad-readiness"
@@ -43,8 +44,15 @@ def build(args, scratch):
     (bad / "plugin.toml").write_text(manifest)
     (bad / "fixture-fail-ready").write_text("reject readiness")
     bundle = scratch / "bundle"
-    run("run", "-p", "prismattyc-mux", "--example", "package_plugin", "--locked", "--", str(bundle), str(good), str(module), str(bad), str(module))
+    monitor = REPO / "crates/pmux-activity-monitor-plugin/package"
+    monitor_module = target / "wasm32-unknown-unknown/release/pmux_activity_monitor_plugin.wasm"
+    connector = REPO / "crates/pmux-activity-connector-plugin/package"
+    connector_module = target / "wasm32-unknown-unknown/release/pmux_activity_connector_plugin.wasm"
+    run("run", "-p", "prismattyc-mux", "--example", "package_plugin", "--locked", "--", str(bundle), str(good), str(module), str(bad), str(module), str(monitor), str(monitor_module), str(connector), str(connector_module))
+    run("build", "-p", "prismattyc-mux", "--example", "plugin_frame_probe", "--locked")
     run("build", "-p", "prismattyc-mux", "--bin", "pmux", "--bin", "pmuxd", "--locked", PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
+    run("build", "-p", "pmux-mcp", "--locked", PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
+    run("build", "--manifest-path", "tools/activity-monitor/Cargo.toml", "--locked", PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
     return target / "debug"
 
 
@@ -70,7 +78,7 @@ class Connection:
         return reply
 
     def plugin(self, operation, **fields):
-        return self.request("plugin", operation={"operation": operation, **fields})
+        return self.request("plugin", plugin_api="1.0.0", operation={"operation": operation, **fields})
 
 
 def exercise(bins, scratch):
@@ -132,6 +140,140 @@ def exercise(bins, scratch):
         assert result["result"] == "tool"
         return json.loads(result["json"])
 
+    def core(*args):
+        result = subprocess.run([str(pmux), "--socket", str(endpoint), *args], env=env, capture_output=True, text=True, timeout=45)
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    def mcp_proof(arguments, activity_only):
+        import queue
+        import threading
+        messages = queue.Queue(maxsize=16)
+        error_log = (scratch / "mcp-stderr.log").open("wb")
+        process = subprocess.Popen([str(bins / f"pmux-mcp{suffix}"), *arguments], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=error_log, env={**env,"PMUX_SOCKET":str(endpoint),"PMUX_AGENT":"INVALID AMBIENT ID"})
+
+        def receive():
+            try:
+                while True:
+                    line = process.stdout.readline(4 * 1024 * 1024 + 1)
+                    if not line:
+                        break
+                    assert line.endswith(b"\n") and len(line) <= 4 * 1024 * 1024
+                    messages.put(json.loads(line), timeout=10)
+            except Exception as error:
+                messages.put(error, timeout=10)
+
+        reader = threading.Thread(target=receive, daemon=True)
+        reader.start()
+        def request(identity, method, params):
+            process.stdin.write((json.dumps({"jsonrpc":"2.0","id":identity,"method":method,"params":params})+"\n").encode())
+            process.stdin.flush()
+            while True:
+                response = messages.get(timeout=30)
+                assert isinstance(response, dict), response
+                if response.get("id") == identity:
+                    assert "result" in response, response
+                    return response["result"]
+        try:
+            request(1,"initialize",{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"plugin-proof","version":"1"}})
+            process.stdin.write(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
+            process.stdin.flush()
+            tools = request(2,"tools/list",{})["tools"]
+            names = sorted(tool["name"] for tool in tools)
+            if activity_only:
+                assert names == ["pmux_activity_hosts","pmux_activity_poll","pmux_activity_recent","pmux_activity_seats"], names
+                assert all("outputSchema" in tool for tool in tools)
+                result = request(3,"tools/call",{"name":"pmux_activity_hosts","arguments":{}})
+                assert not result.get("isError", False), result
+                assert json.loads(result["content"][0]["text"])["hosts"] == [{"label":"local","endpoint":"local"}]
+                result = request(4,"tools/call",{"name":"pmux_activity_seats","arguments":{}})
+                assert not result.get("isError", False), result
+                assert json.loads(result["content"][0]["text"])["retained_history_only"] is True
+                result = request(5,"tools/call",{"name":"pmux_activity_poll","arguments":{}})
+                assert result["isError"] and json.loads(result["content"][0]["text"])["error"]["code"] == "rate_limited", result
+            else:
+                assert "pmux_inbox" in names and not any(name.startswith("pmux_activity_") for name in names)
+        finally:
+            process.stdin.close()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            reader.join(timeout=2)
+            error_log.close()
+        assert process.returncode == 0, (scratch / "mcp-stderr.log").read_text()
+
+
+    def terminal_view():
+        command = [str(pmux), "--socket", str(endpoint), "plugin", "run", "org.moonbase.activity-monitor", "--no-pixels"]
+        driver = runtime / "terminal-driver.py"
+        modes = runtime / "terminal-modes.json"
+        driver.write_text('''import ctypes, json, os, subprocess, sys
+from pathlib import Path
+def modes():
+    if os.name == "nt":
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.GetStdHandle.argtypes = [wintypes.DWORD]
+        kernel.GetStdHandle.restype = wintypes.HANDLE
+        kernel.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        result = []
+        for stream in [-10, -11]:
+            value = wintypes.DWORD()
+            if not kernel.GetConsoleMode(kernel.GetStdHandle(stream), ctypes.byref(value)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            result.append(value.value)
+        return repr(result)
+    import termios
+    attributes = termios.tcgetattr(0)
+    if sys.platform == "darwin":
+        # XNU sets this queue-state bit whenever it restores ICANON.
+        # https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/tty.c
+        attributes[3] &= ~termios.PENDIN
+    return repr(attributes)
+before = modes()
+result = subprocess.run(sys.argv[2:])
+after = modes()
+Path(sys.argv[1]).write_text(json.dumps({"before":before,"after":after,"exit":result.returncode}))
+print("view-restored" if before == after and result.returncode == 0 else "view-mode-leaked", flush=True)
+sys.stdin.readline()
+''')
+        command = [sys.executable, str(driver), str(modes), *command]
+        core("new", "--no-attach", "--no-agent", "plugin-view-proof", "--", *command)
+        session = next(session for session in connection.request("snapshot")["response"]["snapshot"]["sessions"] if session["name"] == "plugin-view-proof")
+        window = session["windows"][0]
+        pane = window["panes"][0]["id"]
+
+        def screen(needle):
+            deadline = time.monotonic() + 10
+            last = ""
+            while time.monotonic() < deadline:
+                last = core("save-buffer", str(pane), "-")
+                if needle in last:
+                    return last
+                time.sleep(0.05)
+            raise AssertionError(f"live view did not show {needle!r}: {last!r}")
+
+        screen("fixture-seat")
+        feed(False)
+        screen("feed off")
+        feed(True)
+        screen("connected")
+        assert connection.request("publish_activity", event={"schema_version":1,"seat":"fixture-seat","run_id":"run-live","event_id":"live-1","source":"hooks","kind":"waiting"})["status"] == "ok"
+        screen("fixture-seat")
+        core("send", str(pane), "?", "--literal", "--force")
+        screen("Keys")
+        core("send", str(pane), "x", "--literal", "--force")
+        assert connection.request("resize", window_id=window["id"], cols=42, rows=12)["status"] == "ok"
+        screen("fixture-seat")
+        core("send", str(pane), "q", "--literal", "--force")
+        try:
+            restored = screen("view-restored")
+        except AssertionError:
+            raise AssertionError(modes.read_text() if modes.exists() else "terminal driver did not return") from None
+        assert "view-mode-leaked" not in restored
+
     def feed(on):
         setting(on)
         deadline = time.monotonic() + 4
@@ -144,12 +286,93 @@ def exercise(bins, scratch):
             time.sleep(0.05)
         raise AssertionError("feed setting did not apply live")
 
+    def remote_proof():
+        fixture = runtime / "endpoint-fixture.py"
+        fixture.write_text('''import json, os, sys, time
+from pathlib import Path
+mode, marker = sys.argv[1:3]
+if mode == "tail":
+    Path(marker).write_text(str(os.getpid()))
+    after, count, epoch = 0, 2, "def2"
+else:
+    with Path(marker).open("a") as output:
+        output.write(json.dumps(sys.argv[3:])+"\\n")
+    args = sys.argv[3:]
+    assert args[:6] == ["activity","poll","--limit","256","--host-label","remote-query"]
+    after = int(args[7].split(":")[1]) if len(args) == 8 else 0
+    count, epoch = 300, "abc1"
+end = min(after+256, count)
+records = [{"sequence":n,"received_at_ms":1000+n,"event":{"schema_version":1,"seat":"remote-seat","run_id":"run-remote","event_id":f"event-{n}","source":"hooks","kind":"test_failed"}} for n in range(after+1,end+1)]
+page = {"epoch":epoch,"oldest_sequence":1,"current_sequence":count,"records":records,"cursor":{"epoch":epoch,"sequence":end},"has_more":end<count,"reset":None}
+if mode == "tail":
+    print(json.dumps({"type":"activity","page":page}), flush=True)
+    while True: time.sleep(1)
+else:
+    print(json.dumps({"schema_version":1,"host":"remote-query","page":page},indent=2),flush=True)
+''')
+        query_log = runtime / "query-arguments.jsonl"
+        pid_file = runtime / "tail-helper.pid"
+        query_argv = [sys.executable,str(fixture),"query",str(query_log)]
+        tail_argv = [sys.executable,str(fixture),"tail",str(pid_file)]
+        cli("endpoint","add","remote-query","--command-query",json.dumps(query_argv))
+        cli("endpoint","add","remote-tail","--command-tail",json.dumps(tail_argv))
+        cli("endpoint","add","other-socket","--socket",str(endpoint))
+        cli("enable",connector,"--allow","activity.read:local","--allow","activity.read:remote-query","--allow","activity.read:remote-tail","--allow","activity.read:other-socket")
+        cli("enable",monitor,"--allow","activity.read:local","--allow","activity.read:remote-query","--allow","activity.read:remote-tail","--allow","activity.read:other-socket")
+        deadline = time.monotonic()+15
+        while True:
+            reply = cli("invoke",connector,"seats",json.dumps({"host":"remote-query"}))
+            value = json.loads(reply["json"])
+            if not reply["is_error"]: break
+            assert time.monotonic() < deadline, value
+            time.sleep(0.25)
+        assert value["seats"][0]["retained_events"] == 300 and value["cursor"] == {"epoch":"abc1","sequence":300}, value
+        text = cli("run",monitor,"--snapshot","--cols","100","--rows","24","--endpoint","remote-tail",text=True)
+        assert "remote-tail" in text and "remote-seat" in text and "test_failed" in text, text
+        launcher = bins / f"pmux-activity-monitor{suffix}"
+        result = subprocess.run([str(launcher),"--socket",str(endpoint),"--host-cmd","remote-tail",json.dumps(tail_argv),"--snapshot","--size","100x24"],env=env,capture_output=True,text=True,timeout=45)
+        assert result.returncode == 0 and "remote-seat" in result.stdout, (result.stdout,result.stderr)
+        result = subprocess.run([str(launcher),"--socket",str(endpoint),"--host",f"other-socket={endpoint}","--snapshot"],env=env,capture_output=True,text=True,timeout=45)
+        assert result.returncode == 0 and "other-socket" in result.stdout, (result.stdout,result.stderr)
+        result = subprocess.run([str(launcher),"--socket",str(endpoint),"--seats"],env=env,capture_output=True,text=True,timeout=45)
+        assert result.returncode == 0 and json.loads(result.stdout)["retained_history_only"] is True, result.stderr
+        arguments = [json.loads(line) for line in query_log.read_text().splitlines()]
+        assert arguments and all(args == ["activity","poll","--limit","256","--host-label","remote-query"] or args == ["activity","poll","--limit","256","--host-label","remote-query","--cursor","abc1:256"] or args == ["activity","poll","--limit","256","--host-label","remote-query","--cursor","abc1:300"] for args in arguments), arguments
+        cli("endpoint","remove","remote-tail")
+        assert "activity.read:remote-tail" not in cli("inspect",connector)["state"]["grants"]
+        wait_gone(int(pid_file.read_text()))
+        cli("endpoint","remove","remote-query")
+        cli("endpoint","remove","other-socket")
+        return tail_argv, pid_file
+
+    def wait_gone(pid):
+        def alive():
+            if os.name == "nt":
+                import ctypes
+                from ctypes import wintypes
+                kernel = ctypes.WinDLL("kernel32",use_last_error=True)
+                kernel.OpenProcess.argtypes = [wintypes.DWORD,wintypes.BOOL,wintypes.DWORD]
+                kernel.OpenProcess.restype = wintypes.HANDLE
+                handle = kernel.OpenProcess(0x1000,False,pid)
+                if not handle: return False
+                code = wintypes.DWORD()
+                kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE,ctypes.POINTER(wintypes.DWORD)]
+                kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+                active = kernel.GetExitCodeProcess(handle,ctypes.byref(code)) and code.value == 259
+                kernel.CloseHandle(handle)
+                return active
+            try: os.kill(pid,0); return True
+            except ProcessLookupError: return False
+        deadline = time.monotonic()+5
+        while alive() and time.monotonic() < deadline: time.sleep(0.05)
+        assert not alive(), f"owned endpoint helper {pid} survived cancellation"
+
     try:
         setting(False)
         daemon, connection = start()
         pid = daemon.pid
         baseline = connection.request("snapshot")["response"]["snapshot"]["sessions"]
-        assert len(cli("discover")["packages"]) == 2
+        assert len(cli("discover")["packages"]) == 4
         assert cli("list")["installed"] == []
         cli("invoke", PLUGIN, "poll", succeeds=False)
         installed = cli("install", PLUGIN, "--version", "1.0.0")["package"]
@@ -169,7 +392,55 @@ def exercise(bins, scratch):
         assert tool("poll") == {"epoch": second_epoch, "sequence": 0, "seat": None}
         assert tool("counter") == {"counter": 2}
         assert cli("run", PLUGIN, "main", "--snapshot", "--cols", "3", "--rows", "1", text=True) == "F  \n"
+        monitor = "org.moonbase.activity-monitor"
+        cli("install", monitor)
+        cli("enable", monitor, "--allow", "activity.read:local")
+        failed = {**event, "event_id": "event-2", "kind": "test_failed"}
+        assert connection.request("publish_activity", event=failed)["status"] == "ok"
+        text = cli("run", monitor, "main", "--snapshot", "--cols", "100", "--rows", "24", text=True)
+        assert "fixture-seat" in text and "test_failed" in text
+        probe = subprocess.run([str(bins / f"examples/plugin_frame_probe{suffix}"), str(endpoint)], env=env, capture_output=True, text=True, timeout=45)
+        assert probe.returncode == 0, probe.stderr
+        frame = json.loads(probe.stdout)
+        assert frame["cells"] == 2400 and "fixture-seat" in frame["text"]
+        # The 12-column seat name leaves a 53-cell lane at 8 pixels per cell.
+        assert frame["rasters"] == [{"width":424,"height":16,"bytes":27136}] * 2, frame["rasters"]
+        assert frame["failure_pixels"] > 0
         assert connection.plugin("exports", allowlist=[])["response"]["reply"]["tools"] == []
+        connector = "org.moonbase.activity-connector"
+        cli("install", connector)
+        cli("enable", connector, "--allow", "activity.read:local")
+        connector_exports = connection.plugin("exports", allowlist=[connector])["response"]["reply"]["tools"]
+        assert sorted(export["name"] for export in connector_exports) == ["pmux_activity_hosts", "pmux_activity_poll", "pmux_activity_recent", "pmux_activity_seats"]
+
+        def query(name, arguments=None):
+            handle = next(export["handle"] for export in connector_exports if export["name"] == f"pmux_activity_{name}")
+            response = connection.plugin("call_export", handle=handle, arguments=json.dumps(arguments or {}))
+            assert response["status"] == "ok", response
+            reply = response["response"]["reply"]
+            return json.loads(reply["json"]), reply["is_error"]
+
+        assert query("hosts") == ({"schema_version":1,"min_interval_ms":1000,"hosts":[{"label":"local","endpoint":"local"}]}, False)
+        summary, is_error = query("seats")
+        assert not is_error and summary["seats"][0]["seat"] == "fixture-seat"
+        assert summary["seats"][0]["last_kind"] == "test_failed"
+        limited, is_error = query("poll")
+        assert is_error and limited["error"]["code"] == "rate_limited" and limited["error"]["retry_after_ms"] == 1000
+        time.sleep(1.01)
+        recent, is_error = query("recent", {"seat":"fixture-seat","limit":1})
+        assert not is_error and recent["records"][0]["event"]["kind"] == "test_failed"
+        time.sleep(1.01)
+        filtered, is_error = query("poll", {"seat":"other-seat"})
+        assert not is_error and filtered["page"]["records"] == []
+        assert filtered["next_cursor"] == f"{second_epoch}:1"
+        feed(False)
+        time.sleep(1.01)
+        disabled, is_error = query("poll")
+        assert is_error and disabled["error"]["code"] == "feed_disabled"
+        feed(True)
+        mcp_proof(["--activity-only"], True)
+        mcp_proof(["--activity-only","--supervise"], True)
+        mcp_proof(["--as","fixture-agent"], False)
         exports = connection.plugin("exports", allowlist=[PLUGIN])["response"]["reply"]["tools"]
         assert sorted(export["name"] for export in exports) == ["fixture_counter", "fixture_grow", "fixture_loop", "fixture_poll"]
         handle = next(export["handle"] for export in exports if export["name"] == "fixture_counter")
@@ -182,19 +453,36 @@ def exercise(bins, scratch):
         cli("enable", PLUGIN, "--version", "1.0.1", "--allow", "activity.read:local", succeeds=False)
         assert cli("inspect", PLUGIN)["state"]["selected"]["version"] == "1.0.0"
         assert tool("counter") == {"counter": 4}
+        cli("enable", PLUGIN, "--allow", "activity.read:local")
+        assert cli("inspect", PLUGIN)["state"]["selected"]["version"] == "1.0.0"
+        assert tool("counter") == {"counter": 5}
         assert daemon.poll() is None and daemon.pid == pid
         assert connection.request("snapshot")["response"]["snapshot"]["sessions"] == baseline
+        tail_argv, tail_pid = remote_proof()
+        assert connection.request("publish_activity", event={**event,"event_id":"before-live-view"})["status"] == "ok"
+        terminal_view()
+        assert daemon.poll() is None and daemon.pid == pid
         cli("disable", PLUGIN)
         assert connection.plugin("call_export", handle=handle, arguments="{}")["status"] == "error"
         cli("invoke", PLUGIN, "counter", succeeds=False)
+        cli("endpoint","add","crash-tail","--command-tail",json.dumps(tail_argv))
+        cli("enable",connector,"--allow","activity.read:local","--allow","activity.read:crash-tail")
+        prior_tail = tail_pid.read_text()
+        cli("invoke",connector,"hosts")
+        deadline = time.monotonic()+5
+        while tail_pid.read_text() == prior_tail and time.monotonic() < deadline: time.sleep(0.05)
+        assert tail_pid.read_text() != prior_tail
+        crash_pid = int(tail_pid.read_text())
         for item in connections:
             item.close()
         connections.clear()
-        stop(daemon)
+        daemon.kill()
+        daemon.wait(timeout=10)
+        wait_gone(crash_pid)
         daemon, connection = start()
         assert not cli("inspect", PLUGIN)["state"]["enabled"]
         cli("invoke", PLUGIN, "counter", succeeds=False)
-        print("PASS install stays disabled; explicit grants; typed calls and frames; persistent tool worker; live off/on epochs; unchanged sessions and daemon; default-empty MCP exports; connection-bound handles; schema rejection; failed readiness preserves old selection; durable disable after restart")
+        print("PASS install stays disabled; explicit grants; typed calls; real monitor cells and RGBA lanes; live terminal input/resize/restore; persistent worker across live off/on epochs; unchanged daemon; default-empty exports; connection-bound handles; schema rejection; failed readiness keeps old selection; durable disable after restart")
     finally:
         for item in connections:
             item.close()

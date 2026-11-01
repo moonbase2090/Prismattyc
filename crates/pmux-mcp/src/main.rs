@@ -20,15 +20,16 @@ use rmcp::{
 use serde::Deserialize;
 
 mod mail;
+mod plugins;
 mod supervisor;
 
 use mail::{format_data, mux_socket, MailOp};
 
 const USAGE: &str = "pmux-mcp — MCP stdio adapter over the pmux Mail* socket
 
-usage: pmux-mcp [-V|--version] [-h|--help] [--as <agent>] [--supervise]
+usage: pmux-mcp [-V|--version] [-h|--help] [--as <agent>] [--plugin ID]... [--supervise]\n       pmux-mcp --activity-only [--supervise]
 
-identity: --as <agent>, else $PMUX_AGENT. No default.
+identity: --as <agent>, else $PMUX_AGENT. No default.\n--activity-only exports the selected activity connector without mailbox identity.\n--plugin ID adds explicitly allowed plug-in tools; the default allowlist is empty.
 Each tool call reconnects: MailHello, one op, drop. Watch is not a tool here.
 
 -V, --version  print version and exit
@@ -38,8 +39,83 @@ inner adapter if it exits. Configure MCP hosts to launch this mode when
 they do not respawn failed stdio servers themselves.";
 
 struct Config {
-    agent: AgentId,
+    agent: Option<AgentId>,
+    plugins: Vec<String>,
+    activity_only: bool,
     supervise: bool,
+}
+
+struct Adapter {
+    mail: Option<PmuxMcp>,
+    plugins: plugins::Plugins,
+}
+
+impl ServerHandler for Adapter {
+    fn get_info(&self) -> ServerInfo {
+        self.mail.as_ref().map(ServerHandler::get_info).unwrap_or_else(|| {
+            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+                .with_instructions("Read-only activity tools from the operator-selected daemon plug-in. No mailbox identity is configured.")
+        })
+    }
+
+    async fn list_tools(
+        &self,
+        request: Option<rmcp::model::PaginatedRequestParams>,
+        _: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, McpError> {
+        if request.is_some_and(|request| request.cursor.is_some()) {
+            return Err(McpError::invalid_params(
+                "tools/list has no continuation cursor",
+                None,
+            ));
+        }
+        let mut tools = self
+            .mail
+            .as_ref()
+            .map(|mail| mail.tool_router.list_all())
+            .unwrap_or_default();
+        for tool in self.plugins.list().await? {
+            if tools.iter().any(|existing| existing.name == tool.name) {
+                return Err(McpError::internal_error(
+                    "plug-in tool conflicts with a native tool",
+                    None,
+                ));
+            }
+            tools.push(tool);
+        }
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(rmcp::model::ListToolsResult {
+            tools,
+            ..Default::default()
+        })
+    }
+
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, McpError> {
+        if let Some(mail) = self
+            .mail
+            .as_ref()
+            .filter(|mail| mail.tool_router.get(&request.name).is_some())
+        {
+            return mail
+                .tool_router
+                .call(rmcp::handler::server::tool::ToolCallContext::new(
+                    mail, request, context,
+                ))
+                .await;
+        }
+        Ok(self
+            .plugins
+            .call(
+                request.name.into_owned(),
+                request.arguments.unwrap_or_default(),
+            )
+            .await?
+            .into())
+    }
 }
 
 /// MCP stdio server. One agent identity for the process lifetime.
@@ -472,6 +548,8 @@ fn parse_config() -> Result<Config, String> {
     let mut args = env::args().skip(1).peekable();
     let mut agent: Option<String> = None;
     let mut supervise = false;
+    let mut plugins = Vec::new();
+    let mut activity_only = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--as" => {
@@ -481,6 +559,8 @@ fn parse_config() -> Result<Config, String> {
                 agent = Some(name);
             }
             "--supervise" => supervise = true,
+            "--plugin" => plugins.push(args.next().ok_or("--plugin needs a plug-in ID")?),
+            "--activity-only" => activity_only = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -491,6 +571,20 @@ fn parse_config() -> Result<Config, String> {
             }
             other => return Err(format!("unknown argument: {other}\n\n{USAGE}")),
         }
+    }
+    if activity_only {
+        if agent.is_some() || !plugins.is_empty() {
+            return Err("--activity-only cannot be combined with --as or --plugin".into());
+        }
+        return Ok(Config {
+            agent: None,
+            plugins: vec!["org.moonbase.activity-connector".into()],
+            activity_only,
+            supervise,
+        });
+    }
+    if plugins.len() > 16 {
+        return Err("at most 16 plug-ins may be exported".into());
     }
     let name = match agent {
         Some(name) => name,
@@ -507,7 +601,12 @@ fn parse_config() -> Result<Config, String> {
         }
     };
     let agent = AgentId::new(name).map_err(|e| e.to_string())?;
-    Ok(Config { agent, supervise })
+    Ok(Config {
+        agent: Some(agent),
+        plugins,
+        activity_only,
+        supervise,
+    })
 }
 
 #[tokio::main]
@@ -524,7 +623,19 @@ async fn main() -> ExitCode {
         }
     };
     if config.supervise {
-        return match supervisor::run(&config.agent).await {
+        let mut arguments = Vec::new();
+        if config.activity_only {
+            arguments.push("--activity-only".into());
+        }
+        if let Some(agent) = &config.agent {
+            arguments.extend(["--as".into(), agent.to_string()]);
+        }
+        for plugin in &config.plugins {
+            if !config.activity_only {
+                arguments.extend(["--plugin".into(), plugin.clone()]);
+            }
+        }
+        return match supervisor::run(&arguments).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("pmux-mcp supervisor: {e}");
@@ -532,7 +643,13 @@ async fn main() -> ExitCode {
             }
         };
     }
-    let server = PmuxMcp::new(config.agent, mux_socket());
+    let socket = mux_socket();
+    let server = Adapter {
+        mail: config
+            .agent
+            .map(|agent| PmuxMcp::new(agent, socket.clone())),
+        plugins: plugins::Plugins::new(socket, config.plugins),
+    };
     match server.serve(rmcp::transport::stdio()).await {
         Ok(running) => match running.waiting().await {
             Ok(_) => ExitCode::SUCCESS,

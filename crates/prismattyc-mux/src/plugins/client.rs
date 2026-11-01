@@ -45,6 +45,7 @@ impl Client {
             ControlRequest::Plugin {
                 version: PROTOCOL_VERSION,
                 request_id: id,
+                plugin_api: pmux_plugin_api::API_VERSION.into(),
                 operation,
             },
             id,
@@ -84,6 +85,11 @@ impl Client {
             "truncated or oversized plug-in response"
         );
         let response: ControlResponse = serde_json::from_slice(&bytes)?;
+        if response.request_id == 0
+            && matches!(&response.body, ControlResponseBody::Error { error } if error.code == crate::ControlErrorCode::InvalidJson)
+        {
+            bail!("pmuxd has no compatible plug-in API; update Prismattyc");
+        }
         ensure!(
             response.version == PROTOCOL_VERSION && response.request_id == expected_id,
             "mismatched plug-in response header"

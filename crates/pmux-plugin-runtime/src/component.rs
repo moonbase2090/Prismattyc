@@ -152,6 +152,10 @@ impl PreparedComponent {
 
 impl ActiveComponent {
     pub fn handle(&mut self, event: lifecycle::Message) -> Result<lifecycle::Reply> {
+        ensure!(
+            matches!(self.0.store.data().phase, Phase::Active),
+            "component view has closed"
+        );
         if let lifecycle::Message::Tool(request) = &event {
             ensure!(
                 request.id != 0
@@ -206,15 +210,24 @@ impl ActiveComponent {
                 };
                 let content = ValidatedFrame::new(result.content, &view.viewport)?;
                 ensure!(
+                    (33..=1000).contains(&result.next_tick_ms),
+                    "component frame refresh interval exceeds its bounds"
+                );
+                ensure!(
                     content.byte_bound() <= self.0.context.limits.frame_bytes as usize,
                     "component frame exceeds its byte budget"
                 );
                 Ok(lifecycle::Reply::Frame(lifecycle::ViewFrame {
+                    next_tick_ms: result.next_tick_ms,
                     id: result.id,
                     content: content.into_content(),
                 }))
             }
             (lifecycle::Message::View(_), lifecycle::Reply::Idle) => Ok(lifecycle::Reply::Idle),
+            (lifecycle::Message::View(_), lifecycle::Reply::Closed) => {
+                self.0.store.data_mut().phase = Phase::Revoked;
+                Ok(lifecycle::Reply::Closed)
+            }
             _ => bail!("component reply does not match its invocation"),
         }
     }
@@ -281,6 +294,7 @@ impl read::Host for HostState {
                     || endpoint.label.len() > 64
                     || !endpoint.label.is_ascii()
                     || endpoint.label.chars().any(char::is_control)
+                    || !(250..=60_000).contains(&endpoint.min_interval_ms)
             })
         {
             return Err(read::Error::InvalidRequest);
@@ -601,6 +615,8 @@ mod tests {
             Ok(vec![read::Endpoint {
                 handle: 7,
                 label: "local".into(),
+                kind: read::EndpointKind::Local,
+                min_interval_ms: 250,
             }])
         }
 
@@ -803,6 +819,7 @@ mod tests {
         let runtime = Runtime::new().unwrap();
         let (provider, _, _) = provider();
         let role = lifecycle::Role::View(lifecycle::ViewReference {
+            preferences: frame::Preferences::default(),
             id: 7,
             contribution: "main".into(),
             viewport: frame::Viewport {

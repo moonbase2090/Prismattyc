@@ -362,7 +362,7 @@ pub(super) fn run() -> Result<()> {
     if let Err(error) = &result {
         let _ = wire::write(
             &mut std::io::stdout().lock(),
-            &Response::Failed(error.to_string().chars().take(512).collect()),
+            &Response::Failed(wire::error_message(&error.to_string())),
         );
     }
     result

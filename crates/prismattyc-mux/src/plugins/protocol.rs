@@ -3,7 +3,7 @@
 use pmux_plugin_api::host::pmux::view::frame;
 use serde::{Deserialize, Serialize};
 
-use super::{CatalogEntry, Installed, Manifest};
+use super::{CatalogEntry, Endpoint, EndpointSource, Installed, Manifest};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -13,6 +13,7 @@ pub enum Request {
         refresh: bool,
     },
     List,
+    Endpoints,
     Inspect {
         id: String,
     },
@@ -24,11 +25,17 @@ pub enum Request {
         id: String,
         contribution: String,
         arguments: String,
+        #[serde(default = "default_read_interval")]
+        min_interval_ms: u32,
     },
     OpenView {
         id: String,
         contribution: String,
         viewport: frame::Viewport,
+        #[serde(default)]
+        preferences: frame::Preferences,
+        #[serde(default)]
+        endpoints: Option<Vec<ViewEndpoint>>,
     },
     ViewEvent {
         handle: String,
@@ -43,7 +50,24 @@ pub enum Request {
     CallExport {
         handle: String,
         arguments: String,
+        #[serde(default = "default_export_interval")]
+        min_interval_ms: u32,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewEndpoint {
+    pub endpoint: String,
+    pub label: String,
+}
+
+pub fn default_read_interval() -> u32 {
+    250
+}
+
+pub fn default_export_interval() -> u32 {
+    1000
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,11 +84,28 @@ pub enum AdminAction {
     Disable {
         id: String,
     },
+    AddEndpoint {
+        label: String,
+        source: EndpointSource,
+    },
+    RemoveEndpoint {
+        label: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Reply {
+    Endpoints {
+        endpoints: Vec<Endpoint>,
+    },
+    EndpointChanged {
+        label: String,
+        endpoint: Option<Endpoint>,
+    },
+    Retry {
+        reason: RetryReason,
+    },
     Catalog {
         packages: Vec<CatalogEntry>,
     },
@@ -89,15 +130,25 @@ pub enum Reply {
     ViewOpened {
         handle: String,
     },
+    ViewClosed {
+        handle: String,
+    },
     /// Base64 of the compact typed frame, not terminal escape sequences.
     Frame {
         handle: String,
         content: String,
+        next_tick_ms: u16,
     },
     Idle,
     Exports {
         tools: Vec<ToolExport>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryReason {
+    FeedChanged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

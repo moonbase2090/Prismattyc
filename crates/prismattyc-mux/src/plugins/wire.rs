@@ -10,6 +10,18 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 const MAX_MESSAGE_BYTES: usize = 24 * 1024 * 1024;
 
+pub(crate) fn error_message(message: &str) -> String {
+    let mut output = String::new();
+    for character in message.chars().take(1024) {
+        if character.is_control() {
+            output.extend(character.escape_default());
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct BuildIdentity {
     core: String,
@@ -111,6 +123,14 @@ pub(super) fn read<T: DeserializeOwned>(input: &mut impl Read) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiler_and_manifest_errors_cannot_emit_terminal_controls() {
+        assert_eq!(
+            error_message("invalid \x1b]52;c;data\x07\npattern"),
+            "invalid \\u{1b}]52;c;data\\u{7}\\npattern"
+        );
+    }
 
     #[test]
     fn private_framing_rejects_oversized_truncated_and_trailing_messages() {

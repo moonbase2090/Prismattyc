@@ -18,6 +18,7 @@ fn main() -> Result<()> {
     let output = PathBuf::from(&args[0]);
     std::fs::create_dir_all(&output)?;
     let mut catalog = Vec::new();
+    let runtime = pmux_plugin_runtime::Runtime::new()?;
     for pair in args[1..].chunks_exact(2) {
         let source = Path::new(&pair[0]);
         let manifest = Manifest::parse(&std::fs::read(source.join("plugin.toml"))?)?;
@@ -27,6 +28,7 @@ fn main() -> Result<()> {
             .module(&module)?
             .validate(true)
             .encode()?;
+        runtime.validate_component(&component)?;
         let mut files = BTreeMap::new();
         for name in manifest.files() {
             let bytes = if name == manifest.component {

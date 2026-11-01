@@ -7,12 +7,10 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::host::pmux::view::frame::{Content, Viewport};
 
-pub const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
-pub const MAX_VIEW_CELLS: usize = 60_000;
+use crate::{MAX_FRAME_BYTES, MAX_TILES, MAX_TILE_DIMENSION, MAX_VIEW_CELLS};
 const MAX_COLUMNS: u16 = 500;
 const MAX_ROWS: u16 = 200;
 const MAX_CLUSTER_BYTES: usize = 128;
-const MAX_TILES: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameError {
@@ -135,6 +133,8 @@ impl ValidatedFrame {
                 .ok_or(FrameError::ImagesUnavailable)?;
             if tile.columns == 0
                 || tile.rows == 0
+                || tile.pixel_width > MAX_TILE_DIMENSION
+                || tile.pixel_height > MAX_TILE_DIMENSION
                 || u32::from(tile.x) + u32::from(tile.columns) > u32::from(content.columns)
                 || u32::from(tile.y) + u32::from(tile.rows) > u32::from(content.rows)
                 || tile.pixel_width != u32::from(tile.columns) * u32::from(pixels.width)

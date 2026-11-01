@@ -2118,9 +2118,9 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "libc"
-version = "0.2.189"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libloading"
@@ -2205,6 +2205,79 @@ name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+
+[[package]]
+name = "lunatui-core"
+version = "0.1.18"
+source = "git+https://github.com/moonbase2090/lunatui?rev=d847e749eb773f7d48edd7d9e429bcc9cbe9e898#d847e749eb773f7d48edd7d9e429bcc9cbe9e898"
+dependencies = [
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "lunatui-image"
+version = "0.1.18"
+source = "git+https://github.com/moonbase2090/lunatui?rev=d847e749eb773f7d48edd7d9e429bcc9cbe9e898#d847e749eb773f7d48edd7d9e429bcc9cbe9e898"
+dependencies = [
+ "lunatui-core",
+]
+
+[[package]]
+name = "lunatui-layout"
+version = "0.1.18"
+source = "git+https://github.com/moonbase2090/lunatui?rev=d847e749eb773f7d48edd7d9e429bcc9cbe9e898#d847e749eb773f7d48edd7d9e429bcc9cbe9e898"
+dependencies = [
+ "lunatui-core",
+ "num-bigint",
+ "num-traits",
+]
+
+[[package]]
+name = "lunatui-term"
+version = "0.1.18"
+source = "git+https://github.com/moonbase2090/lunatui?rev=d847e749eb773f7d48edd7d9e429bcc9cbe9e898#d847e749eb773f7d48edd7d9e429bcc9cbe9e898"
+dependencies = [
+ "crossterm",
+ "libc",
+ "lunatui-core",
+ "lunatui-image",
+ "png 0.18.1",
+ "rustix 1.1.4",
+]
+
+[[package]]
+name = "lunatui-text"
+version = "0.1.18"
+source = "git+https://github.com/moonbase2090/lunatui?rev=d847e749eb773f7d48edd7d9e429bcc9cbe9e898#d847e749eb773f7d48edd7d9e429bcc9cbe9e898"
+dependencies = [
+ "lunatui-core",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "lunatui-theme"
+version = "0.1.18"
+source = "git+https://github.com/moonbase2090/lunatui?rev=d847e749eb773f7d48edd7d9e429bcc9cbe9e898#d847e749eb773f7d48edd7d9e429bcc9cbe9e898"
+dependencies = [
+ "lunatui-core",
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
+]
+
+[[package]]
+name = "lunatui-widgets"
+version = "0.1.18"
+source = "git+https://github.com/moonbase2090/lunatui?rev=d847e749eb773f7d48edd7d9e429bcc9cbe9e898#d847e749eb773f7d48edd7d9e429bcc9cbe9e898"
+dependencies = [
+ "lunatui-core",
+ "lunatui-image",
+ "lunatui-layout",
+ "lunatui-text",
+ "lunatui-theme",
+ "tiny-skia 0.12.0",
+ "unicode-segmentation",
+]
 
 [[package]]
 name = "mach2"
@@ -3045,6 +3118,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "pmux-activity-connector-plugin"
+version = "0.3.53"
+dependencies = [
+ "anyhow",
+ "pmux-plugin-api",
+ "prismattyc-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pmux-activity-monitor-plugin"
+version = "0.3.53"
+dependencies = [
+ "anyhow",
+ "lunatui-core",
+ "lunatui-image",
+ "lunatui-term",
+ "lunatui-theme",
+ "lunatui-widgets",
+ "pmux-plugin-api",
+ "prismattyc-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pmux-mcp"
 version = "0.3.54"
 dependencies = [
@@ -3062,6 +3162,7 @@ dependencies = [
 name = "pmux-plugin-api"
 version = "0.3.53"
 dependencies = [
+ "prismattyc-core",
  "serde",
  "unicode-segmentation",
  "unicode-width",
@@ -3329,6 +3430,9 @@ dependencies = [
  "getrandom 0.3.4",
  "jsonschema",
  "libc",
+ "lunatui-core",
+ "lunatui-image",
+ "lunatui-term",
  "mutants",
  "pmux-plugin-api",
  "pmux-plugin-fixture",
@@ -3786,7 +3890,7 @@ dependencies = [
  "log",
  "memmap2",
  "smithay-client-toolkit",
- "tiny-skia",
+ "tiny-skia 0.11.4",
 ]
 
 [[package]]
@@ -4292,7 +4396,21 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "log",
- "tiny-skia-path",
+ "tiny-skia-path 0.11.4",
+]
+
+[[package]]
+name = "tiny-skia"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47ffee5eaaf5527f630fb0e356b90ebdec84d5d18d937c5e440350f88c5a91ea"
+dependencies = [
+ "arrayref",
+ "arrayvec",
+ "bytemuck",
+ "cfg-if",
+ "log",
+ "tiny-skia-path 0.12.0",
 ]
 
 [[package]]
@@ -4300,6 +4418,17 @@ name = "tiny-skia-path"
 version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c9e7fc0c2e86a30b117d0462aa261b72b7a99b7ebd7deb3a14ceda95c5bdc93"
+dependencies = [
+ "arrayref",
+ "bytemuck",
+ "strict-num",
+]
+
+[[package]]
+name = "tiny-skia-path"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edca365c3faccca67d06593c5980fa6c57687de727a03131735bb85f01fdeeb9"
 dependencies = [
  "arrayref",
  "bytemuck",

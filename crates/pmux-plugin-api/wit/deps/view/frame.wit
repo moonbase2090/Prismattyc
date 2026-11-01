@@ -30,6 +30,13 @@ interface frame {
     record position { column: u16, row: u16 }
     record pixel-size { width: u16, height: u16 }
     record viewport { columns: u16, rows: u16, pixels: option<pixel-size> }
+    enum palette { auto, dark, light }
+    record preferences {
+        snapshot: bool,
+        motion: bool,
+        palette: palette,
+        dark-background: option<bool>,
+    }
     record content {
         columns: u16,
         rows: u16,
@@ -42,6 +49,8 @@ interface frame {
         up, down, left, right, home, end, page-up, page-down,
     }
     variant key-code { character(char), named(named-key), function(u8) }
+    /// Modifier bits: shift=1, alt=2, control=4, super=8, hyper=16,
+    /// meta=32, caps-lock=64, num-lock=128. No terminal wire offset.
     record key { code: key-code, modifiers: u8 }
     record clock { wall-ms: u64, monotonic-ms: u64 }
     variant event { key(key), resize(viewport), tick(clock), close }

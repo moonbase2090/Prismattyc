@@ -39,9 +39,10 @@ interface read {
     enum error {
         not-activated, permission-denied, revoked, feed-disabled,
         unknown-endpoint, unreachable, rate-limited, invalid-request,
-        incompatible-schema, interrupted,
+        incompatible-schema, interrupted, connecting,
     }
-    record endpoint { handle: u64, label: string }
+    enum endpoint-kind { local, socket, command }
+    record endpoint { handle: u64, label: string, kind: endpoint-kind, min-interval-ms: u32 }
     endpoints: func() -> result<list<endpoint>, error>;
     poll: func(endpoint: u64, after: option<cursor>, limit: u16) -> result<page, error>;
 }

@@ -9,7 +9,7 @@ interface host {
 }
 
 interface lifecycle {
-    use pmux:view/frame@1.0.0.{viewport, event, content};
+    use pmux:view/frame@1.0.0.{viewport, preferences, event, content};
     use pmux:tool/call@1.0.0.{request, response};
     record capability { name: string, version: string, available: bool }
     record limits {
@@ -17,7 +17,7 @@ interface lifecycle {
         result-bytes: u32,
         frame-bytes: u32,
     }
-    record view-reference { id: u64, contribution: string, viewport: viewport }
+    record view-reference { id: u64, contribution: string, viewport: viewport, preferences: preferences }
     variant role { tool-service, view(view-reference) }
     record context {
         api-version: string,
@@ -26,9 +26,9 @@ interface lifecycle {
         role: role,
     }
     record view-event { id: u64, event: event }
-    record view-frame { id: u64, content: content }
+    record view-frame { id: u64, content: content, next-tick-ms: u16 }
     variant message { start(context), tool(request), view(view-event), stop }
-    variant reply { ready(string), tool(response), frame(view-frame), idle }
+    variant reply { ready(string), tool(response), frame(view-frame), idle, closed }
 }
 
 world plugin {

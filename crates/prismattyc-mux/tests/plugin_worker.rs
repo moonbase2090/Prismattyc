@@ -77,6 +77,8 @@ impl ActivityProvider for Disabled {
         Ok(vec![read::Endpoint {
             handle: 3,
             label: "local".into(),
+            kind: read::EndpointKind::Local,
+            min_interval_ms: 250,
         }])
     }
     fn poll(

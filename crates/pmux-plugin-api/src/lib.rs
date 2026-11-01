@@ -3,12 +3,29 @@
 
 pub const API_NAME: &str = env!("PMUX_PLUGIN_API_NAME");
 pub const API_VERSION: &str = env!("PMUX_PLUGIN_API_VERSION");
+pub const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_VIEW_CELLS: usize = 60_000;
+pub const MAX_TILES: usize = 32;
+pub const MAX_TILE_DIMENSION: u32 = 4096;
+
+pub mod modifiers {
+    pub const SHIFT: u8 = 1;
+    pub const ALT: u8 = 2;
+    pub const CONTROL: u8 = 4;
+    pub const SUPER: u8 = 8;
+    pub const HYPER: u8 = 16;
+    pub const META: u8 = 32;
+    pub const CAPS_LOCK: u8 = 64;
+    pub const NUM_LOCK: u8 = 128;
+}
+#[cfg(feature = "guest")]
+pub mod activity;
 include!(concat!(env!("OUT_DIR"), "/contracts.rs"));
 
 #[cfg(feature = "host")]
 mod frame;
 #[cfg(feature = "host")]
-pub use frame::{validate_viewport, FrameError, ValidatedFrame, MAX_FRAME_BYTES, MAX_VIEW_CELLS};
+pub use frame::{validate_viewport, FrameError, ValidatedFrame};
 
 #[cfg(feature = "host")]
 pub mod host {
@@ -18,6 +35,17 @@ pub mod host {
         ownership: Owning,
         additional_derives: [serde::Serialize, serde::Deserialize, PartialEq],
     });
+
+    impl Default for pmux::view::frame::Preferences {
+        fn default() -> Self {
+            Self {
+                snapshot: false,
+                motion: true,
+                palette: pmux::view::frame::Palette::Auto,
+                dark_background: None,
+            }
+        }
+    }
 }
 
 #[cfg(feature = "guest")]

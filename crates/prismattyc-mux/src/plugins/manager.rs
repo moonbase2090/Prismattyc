@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -16,10 +16,12 @@ use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 
 use super::catalog::Catalog;
+use super::endpoint::Endpoint;
 use super::package::{
     digest, nonce, private_directory, read_private, valid_digest, Package, Store,
 };
 use super::protocol::{AdminAction, Observed, Reply, Request, Status, ToolExport};
+use super::remote::Remote;
 use super::worker::{ActiveWorker, Cancellation, PendingWorker};
 use super::{Contribution, Installed, Manifest};
 use crate::ControlPlane;
@@ -76,16 +78,15 @@ impl Service {
         self.stopped.store(true, Ordering::Release);
         if let Some(manager) = self.manager.get() {
             manager.stopped.store(true, Ordering::Release);
-            let cancellations = manager
-                .state
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .workers
-                .values()
-                .map(|worker| worker.cancel.clone())
-                .collect::<Vec<_>>();
-            for cancel in cancellations {
-                cancel.cancel();
+            let workers = std::mem::take(
+                &mut manager
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .workers,
+            );
+            for worker in workers.into_values() {
+                worker.cancel.cancel();
             }
         }
     }
@@ -126,6 +127,8 @@ struct Journal {
     version: u16,
     selections: BTreeMap<String, Desired>,
     completed: VecDeque<Completed>,
+    #[serde(default)]
+    endpoints: BTreeMap<String, Endpoint>,
 }
 
 impl Default for Journal {
@@ -134,6 +137,7 @@ impl Default for Journal {
             version: 1,
             selections: BTreeMap::new(),
             completed: VecDeque::new(),
+            endpoints: BTreeMap::new(),
         }
     }
 }
@@ -171,9 +175,19 @@ struct Worker {
     generation: String,
     cancel: Cancellation,
     phase: Phase,
-    local_handle: Option<u64>,
+    endpoints: BTreeMap<u64, (usize, String, Access)>,
     rate_window: Instant,
     reads: u16,
+    last_reads: BTreeMap<(String, u64), Instant>,
+}
+
+#[derive(Clone)]
+enum Access {
+    Local,
+    Remote {
+        endpoint: Endpoint,
+        reader: Arc<Remote>,
+    },
 }
 
 #[derive(Clone)]
@@ -207,6 +221,8 @@ struct Manager {
     state: Mutex<State>,
     plane: Weak<Mutex<ControlPlane>>,
     stopped: AtomicBool,
+    remotes: Mutex<BTreeMap<String, Weak<Remote>>>,
+    active_remotes: Arc<AtomicUsize>,
 }
 
 impl Manager {
@@ -234,6 +250,17 @@ impl Manager {
             "unsupported or oversized plug-in journal"
         );
         let mut slots = BTreeMap::new();
+        ensure!(
+            journal.endpoints.len() <= 31,
+            "too many configured activity endpoints"
+        );
+        for (label, endpoint) in &journal.endpoints {
+            endpoint.validate()?;
+            ensure!(
+                label == &endpoint.label,
+                "endpoint label does not match its key"
+            );
+        }
         for (id, desired) in &journal.selections {
             super::manifest::validate_plugin_id(id)?;
             if let Some(selected) = desired.selected() {
@@ -244,7 +271,7 @@ impl Manager {
                 Version::parse(&selected.version)?;
             }
             if let Desired::Enabled { grants, .. } = desired {
-                validate_grants(grants)?;
+                validate_grants(grants, &journal.endpoints)?;
             }
             slots.insert(id.clone(), Slot::new()?);
         }
@@ -264,6 +291,8 @@ impl Manager {
             }),
             plane,
             stopped: AtomicBool::new(false),
+            remotes: Mutex::new(BTreeMap::new()),
+            active_remotes: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -273,6 +302,17 @@ impl Manager {
             "plug-in manager is stopping"
         );
         match request {
+            Request::Endpoints => Ok(Reply::Endpoints {
+                endpoints: self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .journal
+                    .endpoints
+                    .values()
+                    .cloned()
+                    .collect(),
+            }),
             Request::Discover { refresh } => {
                 if refresh {
                     let catalog = Arc::new(Catalog::refreshed()?);
@@ -312,9 +352,12 @@ impl Manager {
                 id,
                 contribution,
                 arguments,
+                min_interval_ms,
             } => {
                 let worker = self.tool(&id, &contribution)?;
                 self.invoke(
+                    connection,
+                    min_interval_ms,
                     &worker,
                     lifecycle::Message::Tool(call::Request {
                         id: number()?,
@@ -327,14 +370,27 @@ impl Manager {
                 id,
                 contribution,
                 viewport,
-            } => self.open_view(connection, &id, contribution, viewport),
+                preferences,
+                endpoints,
+            } => self.open_view(
+                connection,
+                &id,
+                contribution,
+                viewport,
+                preferences,
+                endpoints,
+            ),
             Request::ViewEvent { handle, event } => self.view_event(connection, &handle, event),
             Request::CloseView { handle } => {
                 self.close_view(connection, &handle)?;
                 Ok(Reply::Idle)
             }
             Request::Exports { allowlist } => self.exports(connection, allowlist),
-            Request::CallExport { handle, arguments } => {
+            Request::CallExport {
+                handle,
+                arguments,
+                min_interval_ms,
+            } => {
                 let (plugin, contribution) = {
                     let state = self.state.lock().unwrap();
                     let export = state
@@ -352,6 +408,8 @@ impl Manager {
                 };
                 let worker = self.tool(&plugin, &contribution)?;
                 self.invoke(
+                    connection,
+                    min_interval_ms,
                     &worker,
                     lifecycle::Message::Tool(call::Request {
                         id: number()?,
@@ -389,7 +447,43 @@ impl Manager {
             return Ok(completed.reply.clone());
         }
         let mut desired = None;
+        let mut endpoint_change = None;
         let reply = match action {
+            AdminAction::AddEndpoint { label, source } => {
+                let endpoint = Endpoint {
+                    id: nonce()?,
+                    label: label.clone(),
+                    source,
+                };
+                endpoint.validate()?;
+                let state = self.state.lock().unwrap();
+                ensure!(!state.journal.endpoints.contains_key(&label), "endpoint label already exists; remove it and approve new grants before replacing its transport");
+                ensure!(
+                    state.journal.endpoints.len() < 31,
+                    "too many configured endpoints"
+                );
+                endpoint_change = Some((label.clone(), Some(endpoint.clone())));
+                Reply::EndpointChanged {
+                    label,
+                    endpoint: Some(endpoint),
+                }
+            }
+            AdminAction::RemoveEndpoint { label } => {
+                ensure!(
+                    self.state
+                        .lock()
+                        .unwrap()
+                        .journal
+                        .endpoints
+                        .contains_key(&label),
+                    "unknown configured endpoint"
+                );
+                endpoint_change = Some((label.clone(), None));
+                Reply::EndpointChanged {
+                    label,
+                    endpoint: None,
+                }
+            }
             AdminAction::Install { id, version } => {
                 let catalog = self.catalog.lock().unwrap().clone();
                 let package = self
@@ -399,7 +493,7 @@ impl Manager {
             }
             AdminAction::Enable { package, grants } => {
                 let grants = grants.into_iter().collect::<BTreeSet<_>>();
-                validate_grants(&grants)?;
+                validate_grants(&grants, &self.state.lock().unwrap().journal.endpoints)?;
                 let next = Desired::Enabled {
                     selected: package.clone(),
                     grants: grants.clone(),
@@ -479,6 +573,22 @@ impl Manager {
                 .as_ref()
                 .is_some_and(|(id, desired)| journal.selections.get(id) != Some(desired));
             let new_slot = changed.then(Slot::new).transpose()?;
+            let mut endpoint_slots = BTreeMap::new();
+            if let Some((label, endpoint)) = &endpoint_change {
+                if let Some(endpoint) = endpoint {
+                    journal.endpoints.insert(label.clone(), endpoint.clone());
+                } else {
+                    journal.endpoints.remove(label);
+                    let scope = format!("activity.read:{label}");
+                    for (id, selection) in &mut journal.selections {
+                        if let Desired::Enabled { grants, .. } = selection {
+                            if grants.remove(&scope) {
+                                endpoint_slots.insert(id.clone(), Slot::new()?);
+                            }
+                        }
+                    }
+                }
+            }
             if let Some((id, desired)) = &desired {
                 journal.selections.insert(id.clone(), desired.clone());
             }
@@ -506,13 +616,17 @@ impl Manager {
             )?;
             crate::config::write_file_atomic(&self.journal, &bytes)?;
             state.journal = journal;
+            let mut cancellations = Vec::new();
+            for (id, slot) in endpoint_slots {
+                state.slots.insert(id.clone(), slot);
+                cancellations.extend(revoke(&mut state, &id));
+            }
             if changed {
                 let (id, _) = desired.as_ref().unwrap();
                 state.slots.insert(id.clone(), new_slot.unwrap());
-                revoke(&mut state, id)
-            } else {
-                Vec::new()
+                cancellations.extend(revoke(&mut state, id));
             }
+            cancellations
         };
         for cancel in cancellations {
             cancel.cancel();
@@ -521,9 +635,15 @@ impl Manager {
     }
 }
 
-fn validate_grants(grants: &BTreeSet<String>) -> Result<()> {
+fn validate_grants(
+    grants: &BTreeSet<String>,
+    endpoints: &BTreeMap<String, Endpoint>,
+) -> Result<()> {
     ensure!(
-        grants.iter().all(|grant| grant == "activity.read:local"),
+        grants.iter().all(|grant| grant == "activity.read:local"
+            || grant
+                .strip_prefix("activity.read:")
+                .is_some_and(|label| endpoints.contains_key(label))),
         "unknown or unconfigured plug-in permission scope"
     );
     Ok(())
@@ -600,6 +720,11 @@ fn readiness_role(manifest: &Manifest) -> Result<lifecycle::Role> {
         .context("plug-in has no contributions")?
         .id();
     Ok(lifecycle::Role::View(lifecycle::ViewReference {
+        preferences: frame::Preferences {
+            snapshot: true,
+            motion: false,
+            ..Default::default()
+        },
         id: number()?,
         contribution: id.into(),
         viewport: frame::Viewport {
@@ -623,7 +748,10 @@ fn context(
             .or_else(|| manifest.optional.get(*name));
         if let Some(range) = range {
             let available = VersionReq::parse(range)?.matches(&Version::parse(version)?)
-                && (*name != "pmux:activity/read" || grants.contains("activity.read:local"));
+                && (*name != "pmux:activity/read"
+                    || grants
+                        .iter()
+                        .any(|grant| grant.starts_with("activity.read:")));
             capabilities.push(lifecycle::Capability {
                 name: (*name).into(),
                 version: (*version).into(),
@@ -727,7 +855,7 @@ impl Manager {
                 return Ok(worker.clone());
             }
         }
-        self.start(selection, lifecycle::Role::ToolService, None)
+        self.start(selection, lifecycle::Role::ToolService, None, None)
     }
 
     fn start(
@@ -735,9 +863,70 @@ impl Manager {
         selection: Selection,
         role: lifecycle::Role,
         view: Option<(String, String)>,
+        requested: Option<Vec<super::ViewEndpoint>>,
     ) -> Result<String> {
         let id = selection.installed.id.clone();
         let identity = nonce()?;
+        let requested = requested.map(|endpoints| -> Result<BTreeMap<String, (usize, String)>> {
+            ensure!(!endpoints.is_empty() && endpoints.len() <= 32, "views require 1 to 32 endpoints");
+            let mut labels = BTreeSet::new();
+            let mut sources = BTreeMap::new();
+            for (index, endpoint) in endpoints.into_iter().enumerate() {
+                super::endpoint::validate_label(&endpoint.label)?;
+                ensure!(selection.grants.contains(&format!("activity.read:{}", endpoint.endpoint)), "endpoint permission is not approved; enable with --allow activity.read:LABEL first");
+                ensure!(labels.insert(endpoint.label.clone()) && sources.insert(endpoint.endpoint, (index, endpoint.label)).is_none(), "view endpoint labels and sources must be unique");
+            }
+            Ok(sources)
+        }).transpose()?;
+        let display = |label: &str, index: usize| -> Option<(usize, String)> {
+            requested.as_ref().map_or_else(
+                || Some((index, label.into())),
+                |labels| labels.get(label).cloned(),
+            )
+        };
+        let definitions = {
+            let state = self.state.lock().unwrap();
+            state
+                .journal
+                .endpoints
+                .values()
+                .filter(|endpoint| {
+                    selection
+                        .grants
+                        .contains(&format!("activity.read:{}", endpoint.label))
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let mut endpoints = BTreeMap::new();
+        if let Some((index, label)) =
+            display("local", 0).filter(|_| selection.grants.contains("activity.read:local"))
+        {
+            endpoints.insert(number()?, (index, label, Access::Local));
+        }
+        for (index, endpoint) in definitions.into_iter().enumerate() {
+            let Some((index, label)) = display(&endpoint.label, index + 1) else {
+                continue;
+            };
+            let reader = {
+                let mut remotes = self.remotes.lock().unwrap();
+                remotes.retain(|_, remote| remote.strong_count() > 0);
+                if let Some(reader) = remotes.get(&endpoint.id).and_then(Weak::upgrade) {
+                    reader
+                } else {
+                    let reader = Remote::start(endpoint.clone(), self.active_remotes.clone())?;
+                    remotes.insert(endpoint.id.clone(), Arc::downgrade(&reader));
+                    reader
+                }
+            };
+            let handle = loop {
+                let handle = number()?;
+                if !endpoints.contains_key(&handle) {
+                    break handle;
+                }
+            };
+            endpoints.insert(handle, (index, label, Access::Remote { endpoint, reader }));
+        }
         let pending = {
             let mut state = self.state.lock().unwrap();
             ensure!(
@@ -785,11 +974,6 @@ impl Manager {
                 );
             }
             let pending = PendingWorker::spawn(&self.executable)?;
-            let local_handle = selection
-                .grants
-                .contains("activity.read:local")
-                .then(number)
-                .transpose()?;
             state.workers.insert(
                 identity.clone(),
                 Worker {
@@ -798,9 +982,10 @@ impl Manager {
                     generation: selection.generation.clone(),
                     cancel: pending.cancellation(),
                     phase: Phase::Starting,
-                    local_handle,
+                    endpoints,
                     rate_window: Instant::now(),
                     reads: 0,
+                    last_reads: BTreeMap::new(),
                 },
             );
             if let Some((connection, handle)) = &view {
@@ -857,7 +1042,17 @@ impl Manager {
         }
     }
 
-    fn invoke(self: &Arc<Self>, identity: &str, event: lifecycle::Message) -> Result<Reply> {
+    fn invoke(
+        self: &Arc<Self>,
+        connection: &str,
+        min_interval_ms: u32,
+        identity: &str,
+        event: lifecycle::Message,
+    ) -> Result<Reply> {
+        ensure!(
+            (250..=60_000).contains(&min_interval_ms),
+            "read interval must be 250 to 60000 milliseconds"
+        );
         if let lifecycle::Message::Tool(request) = &event {
             ensure!(
                 request.arguments.len() <= 1024 * 1024,
@@ -876,6 +1071,10 @@ impl Manager {
             manager: self.clone(),
             worker: identity.into(),
             epochs: BTreeSet::new(),
+            remote_epochs: BTreeMap::new(),
+            connection: connection.into(),
+            min_interval_ms,
+            read: BTreeSet::new(),
         };
         let response = process.invoke(event, &mut provider);
         if let Err(error) = response {
@@ -892,20 +1091,31 @@ impl Manager {
         }
         // Recheck permission/generation and the local feed epoch after the child
         // reply, before admitting any result or frame to the frontend.
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         ensure!(
             !self.stopped.load(Ordering::Acquire),
             "plug-in manager is stopping"
         );
         admitted(&state, identity)?;
+        if provider
+            .remote_epochs
+            .values()
+            .any(|(reader, epoch)| reader.epoch().as_deref() != Some(epoch))
+        {
+            return Ok(Reply::Retry {
+                reason: super::RetryReason::FeedChanged,
+            });
+        }
         if !provider.epochs.is_empty() {
             let plane = self.plane.upgrade().context("daemon is stopping")?;
             let epoch = plane.lock().unwrap().plugin_activity_epoch();
-            ensure!(
-                provider.epochs.len() == 1
-                    && epoch.is_some_and(|epoch| provider.epochs.contains(&epoch)),
-                "activity feed changed before reply delivery; retry"
-            );
+            if provider.epochs.len() != 1
+                || !epoch.is_some_and(|epoch| provider.epochs.contains(&epoch))
+            {
+                return Ok(Reply::Retry {
+                    reason: super::RetryReason::FeedChanged,
+                });
+            }
         }
         match response.unwrap() {
             lifecycle::Reply::Tool(response) => Ok(Reply::Tool {
@@ -925,11 +1135,26 @@ impl Manager {
                     "encoded frame exceeds its byte budget"
                 );
                 Ok(Reply::Frame {
+                    next_tick_ms: frame.next_tick_ms,
                     handle: handle.clone(),
                     content: base64::engine::general_purpose::STANDARD.encode(bytes),
                 })
             }
             lifecycle::Reply::Idle => Ok(Reply::Idle),
+            lifecycle::Reply::Closed => {
+                let handle = state
+                    .views
+                    .iter()
+                    .find(|(_, view)| view.worker == identity)
+                    .map(|(handle, _)| handle.clone())
+                    .context("view was revoked")?;
+                let cancel = remove_worker(&mut state, identity);
+                drop(state);
+                if let Some(cancel) = cancel {
+                    cancel.cancel();
+                }
+                Ok(Reply::ViewClosed { handle })
+            }
             _ => bail!("unexpected plug-in invocation reply"),
         }
     }
@@ -940,6 +1165,8 @@ impl Manager {
         id: &str,
         contribution: String,
         viewport: frame::Viewport,
+        preferences: frame::Preferences,
+        endpoints: Option<Vec<super::ViewEndpoint>>,
     ) -> Result<Reply> {
         validate_viewport(&viewport)?;
         let selection = self.selection(id)?;
@@ -954,6 +1181,7 @@ impl Manager {
         );
         let handle = nonce()?;
         let reference = lifecycle::ViewReference {
+            preferences,
             id: number()?,
             contribution,
             viewport,
@@ -962,6 +1190,7 @@ impl Manager {
             selection,
             lifecycle::Role::View(reference),
             Some((connection.into(), handle.clone())),
+            endpoints,
         )?;
         Ok(Reply::ViewOpened { handle })
     }
@@ -992,6 +1221,8 @@ impl Manager {
             view.clone()
         };
         self.invoke(
+            connection,
+            super::protocol::default_read_interval(),
             &view.worker,
             lifecycle::Message::View(lifecycle::ViewEvent {
                 id: view.reference.id,
@@ -1021,6 +1252,11 @@ impl Manager {
         let cancellations = {
             let mut state = self.state.lock().unwrap();
             state.exports.retain(|(owner, _), _| owner != connection);
+            for worker in state.workers.values_mut() {
+                worker
+                    .last_reads
+                    .retain(|(owner, _), _| owner != connection);
+            }
             let identities = state
                 .views
                 .values()
@@ -1133,6 +1369,10 @@ struct Provider {
     manager: Arc<Manager>,
     worker: String,
     epochs: BTreeSet<String>,
+    remote_epochs: BTreeMap<u64, (Arc<Remote>, String)>,
+    connection: String,
+    min_interval_ms: u32,
+    read: BTreeSet<u64>,
 }
 
 impl ActivityProvider for Provider {
@@ -1146,14 +1386,24 @@ impl ActivityProvider for Provider {
             .lock()
             .map_err(|_| read::Error::Revoked)?;
         let worker = admitted(&state, &self.worker).map_err(|_| read::Error::Revoked)?;
-        Ok(worker
-            .local_handle
-            .map(|handle| read::Endpoint {
-                handle,
-                label: "local".into(),
-            })
+        let mut handles = worker.endpoints.iter().collect::<Vec<_>>();
+        handles.sort_by_key(|(_, (index, _, _))| *index);
+        let endpoints = handles
             .into_iter()
-            .collect())
+            .map(|(handle, (_, label, access))| read::Endpoint {
+                handle: *handle,
+                label: label.clone(),
+                kind: match access {
+                    Access::Local => read::EndpointKind::Local,
+                    Access::Remote { endpoint, .. } => match endpoint.source {
+                        super::EndpointSource::Socket { .. } => read::EndpointKind::Socket,
+                        _ => read::EndpointKind::Command,
+                    },
+                },
+                min_interval_ms: self.min_interval_ms,
+            })
+            .collect::<Vec<_>>();
+        Ok(endpoints)
     }
 
     fn poll(
@@ -1171,9 +1421,11 @@ impl ActivityProvider for Provider {
             .lock()
             .map_err(|_| read::Error::Revoked)?;
         let worker = admitted(&state, &self.worker).map_err(|_| read::Error::Revoked)?;
-        if worker.local_handle != Some(endpoint) {
-            return Err(read::Error::UnknownEndpoint);
-        }
+        let (_, _, access) = worker
+            .endpoints
+            .get(&endpoint)
+            .cloned()
+            .ok_or(read::Error::UnknownEndpoint)?;
         if !(1..=256).contains(&limit) {
             return Err(read::Error::InvalidRequest);
         }
@@ -1182,6 +1434,19 @@ impl ActivityProvider for Provider {
             .get_mut(&self.worker)
             .ok_or(read::Error::Revoked)?;
         let now = Instant::now();
+        if !self.read.contains(&endpoint) {
+            let key = (self.connection.clone(), endpoint);
+            if worker.last_reads.get(&key).is_some_and(|last| {
+                now.duration_since(*last) < Duration::from_millis(u64::from(self.min_interval_ms))
+            }) {
+                return Err(read::Error::RateLimited);
+            }
+            if !worker.last_reads.contains_key(&key) && worker.last_reads.len() >= 4096 {
+                return Err(read::Error::RateLimited);
+            }
+            worker.last_reads.insert(key, now);
+            self.read.insert(endpoint);
+        }
         if now.duration_since(worker.rate_window) >= Duration::from_secs(1) {
             worker.rate_window = now;
             worker.reads = 0;
@@ -1190,6 +1455,18 @@ impl ActivityProvider for Provider {
             return Err(read::Error::RateLimited);
         }
         worker.reads += 1;
+        if let Access::Remote { reader, .. } = access {
+            drop(state);
+            let page = reader.page(after, limit)?;
+            if let Some((_, previous)) = self.remote_epochs.get(&endpoint) {
+                if previous != &page.epoch {
+                    return Err(read::Error::Interrupted);
+                }
+            }
+            self.remote_epochs
+                .insert(endpoint, (reader, page.epoch.clone()));
+            return Ok(page);
+        }
         let plane = self.manager.plane.upgrade().ok_or(read::Error::Revoked)?;
         let page = plane
             .lock()
@@ -1291,7 +1568,11 @@ mod tests {
 
     #[test]
     fn unconfigured_scope_strings_never_grant_native_authority() {
-        assert!(validate_grants(&BTreeSet::from(["activity.read:local".into()])).is_ok());
+        assert!(validate_grants(
+            &BTreeSet::from(["activity.read:local".into()]),
+            &BTreeMap::new()
+        )
+        .is_ok());
         for scope in [
             "activity.write:local",
             "pty.read:local",
@@ -1299,7 +1580,7 @@ mod tests {
             "activity.read:*",
             "activity.read:endpoint:unknown",
         ] {
-            assert!(validate_grants(&BTreeSet::from([scope.into()])).is_err());
+            assert!(validate_grants(&BTreeSet::from([scope.into()]), &BTreeMap::new()).is_err());
         }
     }
 }

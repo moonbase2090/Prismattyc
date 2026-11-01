@@ -93,6 +93,9 @@ mod guest {
                     }
                 }
                 lifecycle::Message::View(event) => VIEW.with(|state| {
+                    if matches!(event.event, frame::Event::Close) {
+                        return Ok(lifecycle::Reply::Closed);
+                    }
                     let mut state = state.borrow_mut();
                     let view = state.as_mut().ok_or("view was not prepared")?;
                     if let frame::Event::Resize(viewport) = &event.event {
@@ -114,6 +117,7 @@ mod guest {
                         .into();
                     }
                     Ok(lifecycle::Reply::Frame(lifecycle::ViewFrame {
+                        next_tick_ms: 1000,
                         id: event.id,
                         content: frame::Content {
                             columns: view.viewport.columns,

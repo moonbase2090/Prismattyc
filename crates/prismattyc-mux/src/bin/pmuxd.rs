@@ -161,6 +161,9 @@ fn main() -> Result<()> {
     if internal.as_deref() == Some(prismattyc_mux::plugins::INTERNAL_WORKER_ARG) {
         return prismattyc_mux::plugins::run_internal_worker();
     }
+    if internal.as_deref() == Some(prismattyc_mux::plugins::INTERNAL_ENDPOINT_ARG) {
+        return prismattyc_mux::plugins::run_endpoint_worker();
+    }
     if internal.as_deref() == Some(prismattyc_mux::supervisor::INTERNAL_SEND_ARG) {
         return prismattyc_mux::supervisor::run_internal_send().map_err(anyhow::Error::msg);
     }

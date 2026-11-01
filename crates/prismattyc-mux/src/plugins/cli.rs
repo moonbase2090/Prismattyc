@@ -9,12 +9,20 @@ use super::{AdminAction, Client, Reply, Request};
 
 pub fn run(socket: &Path, args: Vec<String>) -> Result<()> {
     if args.is_empty() || matches!(args[0].as_str(), "--help" | "-h") {
-        println!("pmux plugin discover [--refresh]\npmux plugin list\npmux plugin inspect ID\npmux plugin install ID [--version VERSION]\npmux plugin enable ID [--version VERSION] [--allow activity.read:local]\npmux plugin disable ID\npmux plugin invoke ID CONTRIBUTION [JSON]\npmux plugin run ID [VIEW] --snapshot [--cols N] [--rows N]\n\nInstallation leaves packages disabled. Changes use the running daemon and never restart sessions. Plug-in updates are explicit; MCP exports require a separate operator allowlist.");
+        println!("pmux plugin discover [--refresh]\npmux plugin list\npmux plugin inspect ID\npmux plugin install ID [--version VERSION]\npmux plugin enable ID [--version VERSION] [--allow activity.read:local]\npmux plugin disable ID\npmux plugin invoke ID CONTRIBUTION [JSON]\npmux plugin run ID [VIEW] [--snapshot [--cols N] [--rows N]] [--endpoint LABEL[=DISPLAY_LABEL]] [--theme auto|dark|light] [--no-motion] [--no-pixels]\n\nInstallation leaves packages disabled. Changes use the running daemon and never restart sessions. Plug-in updates are explicit; MCP exports require a separate operator allowlist.");
         return Ok(());
     }
     let mut client = Client::connect(socket)?;
     if args[0] == "run" {
-        return snapshot(&mut client, &args[1..]);
+        return view(client, &args[1..]);
+    }
+    if args[0] == "endpoint" {
+        let request = endpoint(&args[1..])?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&client.request(request)?)?
+        );
+        return Ok(());
     }
     let request = parse(&mut client, &args)?;
     let reply = client.request(request)?;
@@ -22,54 +30,105 @@ pub fn run(socket: &Path, args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn snapshot(client: &mut Client, args: &[String]) -> Result<()> {
+fn view(mut client: Client, args: &[String]) -> Result<()> {
     let id = args.first().context("run requires a plug-in ID")?.clone();
     let mut contribution = None;
     let mut columns = 80;
     let mut rows = 24;
     let mut snapshot = false;
+    let mut pixels = true;
+    let mut preferences = frame::Preferences::default();
+    let mut sized = false;
+    let mut endpoints = Vec::new();
     let mut args = args[1..].iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--snapshot" if !snapshot => snapshot = true,
-            "--cols" => columns = args.next().context("--cols requires a size")?.parse()?,
-            "--rows" => rows = args.next().context("--rows requires a size")?.parse()?,
+            "--cols" => {
+                columns = args.next().context("--cols requires a size")?.parse()?;
+                sized = true;
+            }
+            "--rows" => {
+                rows = args.next().context("--rows requires a size")?.parse()?;
+                sized = true;
+            }
+            "--no-motion" => preferences.motion = false,
+            "--no-pixels" => pixels = false,
+            "--endpoint" => {
+                let value = args.next().context("--endpoint requires LABEL[=DISPLAY_LABEL]")?;
+                let (endpoint, label) = value.split_once('=').unwrap_or((value, value));
+                endpoints.push(super::ViewEndpoint { endpoint:endpoint.into(), label:label.into() });
+            }
+            "--theme" => {
+                preferences.palette = match args.next().map(String::as_str) {
+                    Some("auto") => frame::Palette::Auto,
+                    Some("dark") => frame::Palette::Dark,
+                    Some("light") => frame::Palette::Light,
+                    _ => bail!("--theme requires auto, dark or light"),
+                }
+            }
             value if !value.starts_with('-') && contribution.is_none() => {
                 contribution = Some(value.to_string())
             }
-            _ => bail!("usage: pmux plugin run ID [VIEW] --snapshot [--cols N] [--rows N]"),
+            _ => bail!("usage: pmux plugin run ID [VIEW] [--snapshot [--cols N] [--rows N]] [--endpoint LABEL[=DISPLAY_LABEL]] [--theme auto|dark|light] [--no-motion] [--no-pixels]"),
         }
     }
-    ensure!(snapshot, "pass --snapshot to render a text frame");
+    let contribution = contribution.unwrap_or_else(|| "main".into());
+    let endpoints = (!endpoints.is_empty()).then_some(endpoints);
+    if !snapshot {
+        ensure!(
+            !sized,
+            "--cols and --rows apply to --snapshot; live views follow the terminal"
+        );
+        return super::presenter::run(client, id, contribution, preferences, pixels, endpoints);
+    }
+    preferences.snapshot = true;
+    preferences.motion = false;
     let viewport = frame::Viewport {
         columns,
         rows,
         pixels: None,
     };
     let Reply::ViewOpened { handle } = client.request(Request::OpenView {
+        preferences,
         id,
-        contribution: contribution.unwrap_or_else(|| "main".into()),
+        contribution,
         viewport: viewport.clone(),
+        endpoints,
     })?
     else {
         bail!("unexpected view-open reply");
     };
-    let reply = client.request(Request::ViewEvent {
-        handle: handle.clone(),
-        event: frame::Event::Tick(frame::Clock {
-            wall_ms: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_millis()
-                .try_into()?,
-            monotonic_ms: 0,
-        }),
-    });
+    let started = std::time::Instant::now();
+    let reply = (|| -> Result<Reply> {
+        loop {
+            let reply = client.request(Request::ViewEvent {
+                handle: handle.clone(),
+                event: frame::Event::Tick(frame::Clock {
+                    wall_ms: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)?
+                        .as_millis()
+                        .try_into()?,
+                    monotonic_ms: started.elapsed().as_millis().try_into()?,
+                }),
+            })?;
+            match reply {
+                Reply::Idle | Reply::Retry { .. }
+                    if started.elapsed() < std::time::Duration::from_secs(4) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(50))
+                }
+                reply => return Ok(reply),
+            }
+        }
+    })();
     let _ = client.request(Request::CloseView {
         handle: handle.clone(),
     });
     let Reply::Frame {
         handle: frame_handle,
         content,
+        ..
     } = reply?
     else {
         bail!("view did not produce a snapshot frame");
@@ -77,6 +136,23 @@ fn snapshot(client: &mut Client, args: &[String]) -> Result<()> {
     ensure!(frame_handle == handle, "frame belongs to another view");
     print!("{}", super::decode_frame(&content, &viewport)?.text());
     Ok(())
+}
+
+fn endpoint(args: &[String]) -> Result<Request> {
+    match args.first().map(String::as_str) {
+        Some("list") if args.len() == 1 => Ok(Request::Endpoints),
+        Some("remove") if args.len() == 2 => admin(AdminAction::RemoveEndpoint { label:args[1].clone() }),
+        Some("add") if args.len() == 4 => {
+            let source = match args[2].as_str() {
+                "--socket" => super::EndpointSource::Socket { path:args[3].clone().into() },
+                "--command-query" => super::EndpointSource::CommandQuery { argv:serde_json::from_str(&args[3]).context("command requires a JSON argv array")? },
+                "--command-tail" => super::EndpointSource::CommandTail { argv:serde_json::from_str(&args[3]).context("command requires a JSON argv array")? },
+                _ => bail!("endpoint add requires --socket, --command-query or --command-tail"),
+            };
+            admin(AdminAction::AddEndpoint { label:args[1].clone(), source })
+        }
+        _ => bail!("usage: pmux plugin endpoint list | add LABEL (--socket PATH | --command-query JSON_ARGV | --command-tail JSON_ARGV) | remove LABEL"),
+    }
 }
 
 fn parse(client: &mut Client, args: &[String]) -> Result<Request> {
@@ -117,19 +193,32 @@ fn parse(client: &mut Client, args: &[String]) -> Result<Request> {
                 );
                 admin(AdminAction::Install { id, version })
             } else {
-                let Reply::List { installed, .. } = client.request(Request::List)? else {
+                let Reply::List { installed, states } = client.request(Request::List)? else {
                     bail!("unexpected installed package reply");
                 };
-                let package = installed
-                    .into_iter()
-                    .filter(|package| {
-                        package.id == id
-                            && version
-                                .as_ref()
-                                .is_none_or(|version| package.version == *version)
+                let selected = version
+                    .is_none()
+                    .then(|| {
+                        states
+                            .into_iter()
+                            .find(|state| state.id == id)
+                            .and_then(|state| state.selected)
                     })
-                    .max_by_key(|package| {
-                        semver::Version::parse(&package.version).expect("validated package version")
+                    .flatten();
+                let package = selected
+                    .or_else(|| {
+                        installed
+                            .into_iter()
+                            .filter(|package| {
+                                package.id == id
+                                    && version
+                                        .as_ref()
+                                        .is_none_or(|version| package.version == *version)
+                            })
+                            .max_by_key(|package| {
+                                semver::Version::parse(&package.version)
+                                    .expect("validated package version")
+                            })
                     })
                     .context("plug-in version is not installed; install it first")?;
                 admin(AdminAction::Enable { package, grants })
@@ -144,6 +233,7 @@ fn parse(client: &mut Client, args: &[String]) -> Result<Request> {
                 id: id()?,
                 contribution: args[2].clone(),
                 arguments: args.get(3).cloned().unwrap_or_else(|| "{}".into()),
+                min_interval_ms: super::protocol::default_read_interval(),
             })
         }
         _ => bail!("unknown plug-in command; use pmux plugin --help"),

@@ -146,6 +146,19 @@ def main():
             endpoint.unlink(missing_ok=True)
 
     try:
+        if windows:
+            # The daemon requires an owner-only, inheritable socket-parent DACL.
+            prepare = """$ErrorActionPreference='Stop';
+$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User;
+$acl=New-Object Security.AccessControl.DirectorySecurity;
+$acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false);
+$rule=New-Object Security.AccessControl.FileSystemAccessRule($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow');
+$acl.AddAccessRule($rule);
+Set-Acl -LiteralPath $env:ACTIVITY_PROOF_RUNTIME -AclObject $acl;
+"""
+            subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', prepare],
+                           env=dict(env, ACTIVITY_PROOF_RUNTIME=str(endpoint.parent)),
+                           capture_output=True, timeout=15, check=True)
         start(False)
         for reply in [request('publish_activity', event=event(0)),
                       request('read_activity', cursor=None, limit=10)]:

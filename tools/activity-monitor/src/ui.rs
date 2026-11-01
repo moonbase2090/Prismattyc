@@ -1945,6 +1945,14 @@ mod tests {
         let turn = text.find("turn_started").unwrap();
         assert!(started < edit && edit < rule && rule < turn, "{text}");
         let row = line_of(&text, "command_started");
+        let (_, grid, _) = draw(&mut monitor, 100, 24);
+        let y = text.lines().position(|line| line == row).unwrap() as u16;
+        let gap_x = column_of(row, "+5.0s");
+        assert_eq!(
+            grid.get(gap_x, y).unwrap().style().fg,
+            Color::Rgb(0x7d, 0x85, 0x94),
+            "gaps are quieter than muted text"
+        );
         assert!(
             row.contains("4s")
                 && row.contains("+5.0s")
@@ -2084,6 +2092,10 @@ mod tests {
         };
         press(&mut monitor, KeyCode::Char('s'));
         let (recent, ..) = draw(&mut monitor, 80, 24);
+        assert!(
+            recent.lines().next().unwrap().contains("most recent"),
+            "{recent}"
+        );
         let at = order(&recent);
         assert!(at[2] < at[1] && at[1] < at[0], "most recent first");
         // Make name order differ from state order: builder works, worker-a fails.
@@ -2106,6 +2118,10 @@ mod tests {
         );
         press(&mut monitor, KeyCode::Char('s'));
         let (state, ..) = draw(&mut monitor, 80, 24);
+        assert!(
+            state.lines().next().unwrap().contains("by state"),
+            "{state}"
+        );
         let at = order(&state);
         assert!(
             at[2] < at[1] && at[1] < at[0],

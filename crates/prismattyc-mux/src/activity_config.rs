@@ -30,7 +30,10 @@ pub const POLL: Duration = Duration::from_millis(500);
 /// On Unix the change time and inode catch an edit that restores the old
 /// modification time and length, and an atomic replace.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Fingerprint(Option<(Option<SystemTime>, u64, (i64, i64, u64))>);
+pub struct Fingerprint(Option<Stamp>);
+
+/// Modification time, length, and the Unix change time and inode (zero elsewhere).
+type Stamp = (Option<SystemTime>, u64, (i64, i64, u64));
 
 impl Fingerprint {
     pub fn of(path: &Path) -> Self {

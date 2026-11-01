@@ -13246,12 +13246,14 @@ function Read-Exact([int]$Count) {
             .body,
             ControlResponseBody::Ok { .. }
         ));
+        let mut request_id = 4;
+        let _ = wait_for_pane_text(&mut stream, &mut request_id, client, pane, "ACT");
         assert!(matches!(
             request(
                 &mut stream,
                 &ControlRequest::WritePane {
                     version: PROTOCOL_VERSION,
-                    request_id: 4,
+                    request_id,
                     client_id: client,
                     pane_id: pane,
                     data: "one\n".into(),
@@ -13260,7 +13262,7 @@ function Read-Exact([int]$Count) {
             .body,
             ControlResponseBody::Ok { .. }
         ));
-        let mut request_id = 5;
+        request_id += 1;
         let _ = wait_for_pane_text(&mut stream, &mut request_id, client, pane, "ECHO:one");
         let (seq1, rev1, alive1) = wait_for_output_activity(&mut stream, &mut request_id, pane);
         assert!(alive1);

@@ -117,16 +117,22 @@ pub fn load_mux_section(path: &Path) -> Result<MuxSection> {
         }
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
+    parse_mux_section(&raw, path)
+}
+
+/// Parse the `[mux]` table from config text already read from `path`.
+/// Empty text is defaults. Unknown `[mux]` keys warn and are ignored.
+pub fn parse_mux_section(raw: &str, path: &Path) -> Result<MuxSection> {
     if raw.trim().is_empty() {
         return Ok(MuxSection::default());
     }
     for warning in
-        mux_unknown_key_warnings(&raw).with_context(|| format!("parse {}", path.display()))?
+        mux_unknown_key_warnings(raw).with_context(|| format!("parse {}", path.display()))?
     {
         eprintln!("prismattyc: warning: {warning}");
     }
     let parsed: FileWithMux =
-        toml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
+        toml::from_str(raw).with_context(|| format!("parse {}", path.display()))?;
     Ok(parsed.mux.unwrap_or_default())
 }
 

@@ -256,3 +256,54 @@ fn the_flag_keeps_the_feed_on_when_the_key_turns_off_live() {
     std::thread::sleep(Duration::from_secs(2));
     assert_eq!(feed_epoch(&fixture.socket), Some(epoch));
 }
+
+#[test]
+fn removing_or_emptying_the_config_keeps_a_running_feed() {
+    // A save in progress can leave the file missing or empty for a moment.
+    // Only an explicit false turns the feed off.
+    let fixture = start(Some("[mux]\nexperimental_activity = true\n"), false);
+    let epoch = feed_epoch(&fixture.socket).expect("feed on");
+    let path = config_path(&fixture.dir);
+    std::fs::write(&path, "").unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        feed_epoch(&fixture.socket),
+        Some(epoch.clone()),
+        "empty file"
+    );
+    std::fs::remove_file(&path).unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(feed_epoch(&fixture.socket), Some(epoch), "missing file");
+    assert_eq!(flip(&fixture, false), None);
+}
+
+#[test]
+fn an_edit_that_keeps_the_modification_time_and_length_still_applies() {
+    let on = "[mux]\nexperimental_activity = true \n";
+    let off = "[mux]\nexperimental_activity = false\n";
+    assert_eq!(on.len(), off.len());
+    let fixture = start(Some(on), false);
+    assert!(feed_epoch(&fixture.socket).is_some());
+    let path = config_path(&fixture.dir);
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    std::fs::write(&path, off).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        modified
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while feed_epoch(&fixture.socket).is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "metadata-preserving edit was missed"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

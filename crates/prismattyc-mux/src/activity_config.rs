@@ -1,12 +1,16 @@
 //! Live `[mux] experimental_activity`: pmuxd watches the config file and
 //! starts or stops the activity feed without a restart.
 //!
-//! The watcher polls the file's modification time and length. On a change it
-//! re-reads `[mux]` and applies `flag || experimental_activity`. Turning the
-//! feed off drops its ring, so readers and publishers get `activity_disabled`;
-//! turning it on starts a fresh feed with a new boot epoch. Sessions, panes and
-//! mail are never touched. A config that cannot be read or parsed keeps the
-//! current state, so a half-written save never flips the feed.
+//! The watcher polls the file's metadata (modification time and length, plus
+//! change time and inode on Unix). On a change it re-reads `[mux]` and applies
+//! `flag || experimental_activity`. Turning the feed off drops its ring, so
+//! readers and publishers get `activity_disabled`; turning it on starts a fresh
+//! feed with a new boot epoch. Sessions, panes and mail are never touched.
+//!
+//! Only a readable file with an explicit value changes the feed. A missing,
+//! empty, unreadable or invalid file keeps the current state, as the host's own
+//! config watcher does for a save in progress, and is retried on the next poll
+//! until it reads cleanly.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -16,24 +20,46 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 
-use crate::config::{load_mux_section, MuxSection};
+use crate::config::{parse_mux_section, MuxSection};
 use crate::control::ControlPlane;
 
 /// How often pmuxd checks the config file.
 pub const POLL: Duration = Duration::from_millis(500);
 
 /// What a config file looked like at one check. `None` means it was missing.
+/// On Unix the change time and inode catch an edit that restores the old
+/// modification time and length, and an atomic replace.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Fingerprint(Option<(SystemTime, u64)>);
+pub struct Fingerprint(Option<(Option<SystemTime>, u64, (i64, i64, u64))>);
 
 impl Fingerprint {
     pub fn of(path: &Path) -> Self {
         Self(
             std::fs::metadata(path)
                 .ok()
-                .and_then(|meta| Some((meta.modified().ok()?, meta.len()))),
+                .map(|meta| (meta.modified().ok(), meta.len(), change_stamp(&meta))),
         )
     }
+}
+
+#[cfg(unix)]
+fn change_stamp(meta: &std::fs::Metadata) -> (i64, i64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    (meta.ctime(), meta.ctime_nsec(), meta.ino())
+}
+
+#[cfg(not(unix))]
+fn change_stamp(_meta: &std::fs::Metadata) -> (i64, i64, u64) {
+    (0, 0, 0)
+}
+
+/// Why a config check left the feed as it was.
+#[derive(Debug, PartialEq, Eq)]
+enum Pending {
+    /// Missing or empty: likely a save in progress. Not logged.
+    NoValue,
+    /// Unreadable, invalid, or the feed failed to start. Logged once per file state.
+    Failed(String),
 }
 
 /// The feed state a config read asks for. `None` keeps the current state.
@@ -65,11 +91,25 @@ impl Watcher {
             .name("pmux-activity-config".into())
             .spawn(move || {
                 let mut seen = seen;
+                let mut reported: Option<Fingerprint> = None;
                 loop {
                     let now = Fingerprint::of(&config);
                     if now != seen {
-                        seen = now;
-                        apply(&plane, &config, flag);
+                        // `seen` advances only once the file applied, so a
+                        // failure is retried on the next poll.
+                        match apply(&plane, &config, flag) {
+                            Ok(()) => {
+                                seen = now;
+                                reported = None;
+                            }
+                            Err(Pending::NoValue) => {}
+                            Err(Pending::Failed(why)) => {
+                                if reported.as_ref() != Some(&now) {
+                                    eprintln!("pmuxd: activity feed unchanged: {why}");
+                                    reported = Some(now);
+                                }
+                            }
+                        }
                     }
                     if !matches!(
                         receiver.recv_timeout(poll),
@@ -95,29 +135,44 @@ impl Drop for Watcher {
     }
 }
 
-fn apply(plane: &Arc<Mutex<ControlPlane>>, config: &Path, flag: bool) {
-    let file = load_mux_section(config);
-    let Some(on) = wanted(flag, file.as_ref()) else {
-        if let Err(error) = &file {
-            eprintln!("pmuxd: activity feed unchanged; config not applied: {error:#}");
+/// Read the config and bring the feed to the state it asks for.
+fn apply(plane: &Arc<Mutex<ControlPlane>>, config: &Path, flag: bool) -> Result<(), Pending> {
+    let raw = match std::fs::read_to_string(config) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(Pending::NoValue),
+        Err(error) => {
+            return Err(Pending::Failed(format!(
+                "read {}: {error}",
+                config.display()
+            )))
         }
-        return;
+    };
+    if raw.trim().is_empty() {
+        return Err(Pending::NoValue);
+    }
+    let file = parse_mux_section(&raw, config);
+    let Some(on) = wanted(flag, file.as_ref()) else {
+        let why = file
+            .err()
+            .map_or_else(String::new, |error| format!("{error:#}"));
+        return Err(Pending::Failed(why));
     };
     let mut plane = plane
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if on == plane.activity_enabled() {
-        return;
+        return Ok(());
     }
     if on {
-        match plane.enable_activity() {
-            Ok(()) => eprintln!("pmuxd: activity feed on ([mux] experimental_activity)"),
-            Err(error) => eprintln!("pmuxd: activity feed could not start: {}", error.message),
-        }
+        plane
+            .enable_activity()
+            .map_err(|error| Pending::Failed(format!("feed could not start: {}", error.message)))?;
+        eprintln!("pmuxd: activity feed on ([mux] experimental_activity)");
     } else {
         plane.disable_activity();
         eprintln!("pmuxd: activity feed off ([mux] experimental_activity)");
     }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -32,7 +32,7 @@ user sessions continue running.
 The app offers the same install, permission and enable operations in Settings.
 Installing or enabling the monitor does not turn on activity collection.
 When collection is off, the view reports `feed_disabled` and links to the
-app's Activity feed setting. The app starts and configures its ordinary
+app's Mux > Experimental activity setting. The app starts and configures its ordinary
 daemon; the user does not launch a separate feed daemon.
 
 The connector is another package using the same installation and capability
@@ -72,7 +72,7 @@ commit `87367051b21e89b4c367555fbc8d477396dc33e4`. At that baseline:
 
 The separate `0.3.54` monitor/configuration delivery proceeds independently.
 Its [configuration and packaging PR](https://github.com/moonbase2090/Prismattyc/pull/408)
-at `470073f5e64e2f86d2411dc1c4c7406deb245e53` establishes the migration contract
+at `4d2fbfd159d28720036974fa0d4b37f07a5b9068` establishes the migration contract
 below. That PR is unmerged at the time of this update, and its release version
 bump is separate. Confirm the final merged source before implementation;
 neither this proposal nor the plug-in port gates that delivery.
@@ -447,31 +447,32 @@ experimental_activity = false
 ```
 
 The default is false; true opts into metadata collection. pmuxd reads this
-setting once during startup. The existing `--experimental-activity` flag also
-works; either a true key or the flag enables the feed. An unreadable config
-retains the default-off setting, while an explicit flag can still enable it.
-The settings editor lists the key under Mux with the timing "Next daemon start;
-no automatic restart".
+setting during startup and watches the config for live changes. The existing
+`--experimental-activity` flag also works; the effective state is flag OR key.
+An unreadable startup config retains the default-off setting unless the flag
+is set. A later unreadable or invalid config preserves the running state.
+The settings editor calls the key Experimental activity under Mux, with the
+timing "Live: pmuxd applies it within a second; no restart".
 
-Reading inside pmuxd covers app-managed startup, `pmux up`, login restore and
-restart without another feed daemon. Changing the key does not alter or restart
-a running daemon. Plug-in v1 preserves that behavior and adds no live feed
-reconfiguration request. The current `pmux up` returns early for a live daemon;
-calling it again does not apply a changed key.
+The daemon-owned watcher polls modification time and size every 500 ms. It
+reads/parses outside the control-plane mutex and applies a valid changed value
+under that mutex. This covers app-managed startup, `pmux up`, login restore,
+restart and file edits without another feed daemon or a GUI-only writer.
+Neither the setting nor the watcher restarts pmuxd or changes sessions, panes
+or mail.
+
+Turning the effective state on creates a fresh feed and epoch. Repeated true
+values preserve an already-enabled feed. Turning it off drops the ring;
+subsequent reads and publication return `activity_disabled`. Turning it on
+again cannot replay discarded records. An explicit startup flag keeps the
+effective state on even when the key is false.
 
 Settings and the plug-in view must distinguish the saved preference from the
-running feed state. Saving true while the feed is off leaves it off until the
-next daemon start. Saving false while it is on does not immediately stop reads,
-publication or retained history; an explicit startup flag can also keep it on
-at the next start. The feed remains process-local, so a daemon restart discards
-its old history and creates a fresh epoch if collection starts enabled.
-
-A plug-in may report `feed_disabled` and explain the setting's startup timing,
-but cannot change it or restart pmuxd. The native monitor's disabled hint names
-the key and supplies no restart command. Enabling a reader installs no hooks.
-Do not introduce a second key, promise immediate disable/erasure, or stop live
-sessions to apply this setting. Future live reconfiguration requires a separate
-design decision.
+actual feed state while a change is pending or cannot be read. A plug-in may
+report `feed_disabled` and explain the setting, but cannot change it or restart
+pmuxd. The native monitor's disabled hint names the key and supplies no restart
+command. Enabling a reader installs no hooks. Preserve this one daemon-owned
+reload path rather than adding a second setting writer or restart mechanism.
 
 ## Cross-platform distribution
 
@@ -529,9 +530,9 @@ third-target session stub. Reuse pure model/layout/query code only where an
 actual component compile/render spike proves it works.
 
 1. Let the independent `0.3.54` delivery finish and confirm its final source
-   against the recorded configuration, startup-only application and packaging
-   contracts. Preserve the existing key and flag precedence without a new
-   live-change or erasure operation.
+   against the recorded configuration, live application and packaging
+   contracts. Reuse its daemon-owned watcher, flag/key precedence, fresh epoch
+   on enable and ring drop on disable. Do not restart the daemon to toggle it.
 2. Prove the generic runtime and version/grant lifecycle with a small fixture
    component unrelated to activity. Prove host-rendered cells/images on all
    packaged targets before committing to the monitor port.
@@ -613,10 +614,9 @@ The eventual implementation needs real packaged behavior proof:
   sessions usable. Calls are never replayed. Two daemon instances retain
   independent grants and selections.
 - App-managed collection honors the key and explicit flag at app/login/CLI
-  startup, including default-off and unreadable-config cases. Saving true or
-  false leaves a running daemon unchanged and causes no automatic
-  restart. Display the actual state and next-start timing without promising
-  immediate collection shutdown or history erasure.
+  startup and applies valid edits live without restarting the daemon. Prove a
+  fresh epoch on enable, ring drop and `activity_disabled` on disable, unchanged
+  state after unreadable config, and preservation of sessions, panes and mail.
 - Both first packages preserve actual monitor cell/pixel/input/resize/snapshot
   behavior and connector cursor/reset/watermark/router behavior on the shipped
   Mac, Windows and Linux matrix. Core/plugin upgrade and rollback are exercised

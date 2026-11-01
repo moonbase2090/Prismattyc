@@ -144,6 +144,9 @@ impl Host {
     /// Applies one page. `local_ms` is the viewer's monotonic clock, used only for motion.
     pub fn apply(&mut self, page: ActivityPage, local_ms: u64) {
         let new_epoch = self.epoch.as_deref() != Some(page.epoch.as_str());
+        // Replayed history (a new lifetime, a reset, or a catch-up page) is not live change,
+        // so it does not fade. Only pages that follow a caught-up page do.
+        let live = !new_epoch && page.reset.is_none() && !self.more;
         if let Some(reset) = page.reset.as_ref() {
             self.seats.clear();
             self.evicted = 0;
@@ -166,12 +169,13 @@ impl Host {
                 continue;
             }
             self.sequence = record.sequence;
-            self.insert(record, local_ms);
+            self.insert(record, live.then_some(local_ms));
         }
         self.sequence = self.sequence.max(page.cursor.sequence);
     }
 
-    fn insert(&mut self, record: ActivityRecord, local_ms: u64) {
+    /// `fade_at` is the viewer time for a fade, or `None` for replayed history.
+    fn insert(&mut self, record: ActivityRecord, fade_at: Option<u64>) {
         let seat_id = record.event.seat.clone();
         if !self.seats.contains_key(&seat_id) && self.seats.len() == MAX_SEATS {
             let oldest = self
@@ -194,7 +198,7 @@ impl Host {
         if state != seat.state {
             // The first state of a newly seen seat is not a transition worth a fade.
             if seat.state != SeatState::Unknown {
-                seat.changed_at = Some(local_ms);
+                seat.changed_at = fade_at.or(seat.changed_at);
             }
             seat.state = state;
             seat.state_since_ms = record.received_at_ms;
@@ -436,6 +440,49 @@ pub(crate) mod tests {
             70,
         );
         assert_eq!(seat(&host, "sa").changed_at, Some(70));
+        Ok(())
+    }
+
+    #[test]
+    fn replayed_history_does_not_fade_but_later_live_pages_do() -> Result<()> {
+        let mut host = Host::new("mac");
+        // The first page of a lifetime is retained history, even when it holds a change.
+        let mut first = page_in(
+            "e",
+            vec![
+                record_at("sa", 1, "working", 1_000)?,
+                record_at("sa", 2, "waiting", 2_000)?,
+            ],
+            None,
+        )?;
+        first.has_more = true;
+        host.apply(first, 10);
+        assert_eq!(seat(&host, "sa").changed_at, None);
+        // A catch-up page after has_more is still history.
+        host.apply(
+            page_in("e", vec![record_at("sa", 3, "working", 3_000)?], None)?,
+            20,
+        );
+        assert_eq!(seat(&host, "sa").changed_at, None);
+        // Once caught up, a change is live.
+        host.apply(
+            page_in("e", vec![record_at("sa", 4, "stopped", 4_000)?], None)?,
+            30,
+        );
+        assert_eq!(seat(&host, "sa").changed_at, Some(30));
+        // A restart replays the new lifetime's history without fading.
+        host.apply(
+            page_in(
+                "e2",
+                vec![
+                    record_at("sb", 1, "working", 5_000)?,
+                    record_at("sb", 2, "tool_failed", 6_000)?,
+                ],
+                Some("restarted"),
+            )?,
+            40,
+        );
+        assert_eq!(seat(&host, "sb").changed_at, None);
         Ok(())
     }
 

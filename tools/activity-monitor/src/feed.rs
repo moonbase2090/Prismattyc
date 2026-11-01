@@ -170,8 +170,8 @@ fn run_command(
         let mut disabled = false;
         if let Ok(mut child) = spawned {
             let stdout = child.stdout.take();
-            if let Ok(mut slots) = children.lock() {
-                slots[host] = Some(child);
+            if !register(children, host, child, stopped) {
+                return;
             }
             if let Some(stdout) = stdout {
                 for line in BufReader::new(stdout).lines() {
@@ -204,6 +204,28 @@ fn run_command(
         }
         pause(backoff, stopped);
         backoff = (backoff * 2).min(RESTART_MAX);
+    }
+}
+
+/// Stores a running command so shutdown can stop it. Returns false, after stopping it, when
+/// shutdown has already begun. The check holds the slot lock: `Feed::drop` sets the flag
+/// before it takes the lock, so a command is either stopped here or found there.
+fn register(
+    children: &Mutex<Vec<Option<Child>>>,
+    host: usize,
+    mut child: Child,
+    stopped: &AtomicBool,
+) -> bool {
+    match children.lock() {
+        Ok(mut slots) if !stopped.load(Ordering::SeqCst) => {
+            slots[host] = Some(child);
+            true
+        }
+        _ => {
+            stop(&mut child);
+            let _ = child.wait();
+            false
+        }
     }
 }
 
@@ -261,7 +283,8 @@ fn deliver(
 
 impl Drop for Feed {
     fn drop(&mut self) {
-        self.stopped.store(true, Ordering::Relaxed);
+        // Set before taking the slot lock; `register` relies on this order.
+        self.stopped.store(true, Ordering::SeqCst);
         // Killing the children closes their stdout, which unblocks the line readers.
         if let Ok(mut slots) = self.children.lock() {
             for child in slots.iter_mut().filter_map(Option::as_mut) {
@@ -486,6 +509,39 @@ mod tests {
             // Runs start at about 0 s, 1 s and 3 s: backoff doubles from one second. A loaded
             // machine can push the third run past the window; faster restarts give four or more.
             assert!((2..=3).contains(&exits), "{exits} restarts in 3.5 s");
+        }
+
+        fn alive(pid: u32) -> bool {
+            // SAFETY: signal 0 only checks that the process exists.
+            unsafe { libc::kill(pid as i32, 0) == 0 }
+        }
+
+        fn sleeper() -> Child {
+            let mut command = Command::new("/bin/sleep");
+            command.arg("30");
+            std::os::unix::process::CommandExt::process_group(&mut command, 0);
+            command.spawn().expect("spawn sleep")
+        }
+
+        #[test]
+        fn a_command_spawned_after_shutdown_began_is_stopped_not_registered() {
+            let children = Mutex::new(vec![None]);
+            let child = sleeper();
+            let pid = child.id();
+            assert!(!register(&children, 0, child, &AtomicBool::new(true)));
+            assert!(children.lock().unwrap()[0].is_none());
+            assert!(!alive(pid), "the late command is still running");
+        }
+
+        #[test]
+        fn a_command_spawned_before_shutdown_is_registered_for_drop_to_stop() {
+            let children = Mutex::new(vec![None]);
+            let child = sleeper();
+            let pid = child.id();
+            assert!(register(&children, 0, child, &AtomicBool::new(false)));
+            assert!(alive(pid));
+            reap(&children, 0);
+            assert!(!alive(pid), "reap stops the registered command");
         }
 
         #[test]

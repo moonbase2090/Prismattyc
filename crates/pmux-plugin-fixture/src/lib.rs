@@ -16,7 +16,7 @@ pub extern "C" fn fixture_start() {
 
 #[cfg(target_arch = "wasm32")]
 mod guest {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     use pmux_plugin_api::guest::pmux::{
         activity::read, plugin::lifecycle, tool::call, view::frame,
@@ -24,6 +24,7 @@ mod guest {
 
     thread_local! {
         static VIEW: RefCell<Option<lifecycle::ViewReference>> = const { RefCell::new(None) };
+        static COUNTER: Cell<u32> = const { Cell::new(0) };
     }
 
     struct Fixture;
@@ -35,12 +36,25 @@ mod guest {
                     if !matches!(read::endpoints(), Err(read::Error::NotActivated)) {
                         return Err("preparation admitted data access".into());
                     }
+                    if pmux_plugin_api::guest::pmux::plugin::host::asset("fixture-fail-ready")
+                        .is_ok()
+                    {
+                        return Err("fixture rejected readiness".into());
+                    }
                     if let lifecycle::Role::View(view) = context.role {
                         VIEW.with(|state| *state.borrow_mut() = Some(view));
                     }
                     Ok(lifecycle::Reply::Ready(context.api_version))
                 }
                 lifecycle::Message::Tool(request) => {
+                    if request.contribution == "counter" {
+                        let value = COUNTER.with(|counter| {
+                            let next = counter.get() + 1;
+                            counter.set(next);
+                            next
+                        });
+                        return response(request.id, serde_json::json!({"counter":value}), false);
+                    }
                     if request.contribution == "loop" {
                         loop {
                             core::hint::spin_loop();

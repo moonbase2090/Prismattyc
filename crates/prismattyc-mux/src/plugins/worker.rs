@@ -14,7 +14,8 @@ use pmux_plugin_api::host::pmux::{activity::read, plugin::lifecycle};
 use pmux_plugin_runtime::{ActivityProvider, Runtime};
 use prismattyc_core::activity::{ActivityCursor, ActivityPage};
 
-use super::wire::{self, Bootstrap, BuildIdentity, Operation, Request, Response};
+use super::schema::Schemas;
+use super::wire::{self, Bootstrap, BuildIdentity, CommandSchema, Operation, Request, Response};
 
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(30);
 const INVOKE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -54,6 +55,16 @@ struct Process {
 
 pub(super) struct PreparedWorker(Process);
 pub(super) struct ActiveWorker(Process);
+pub(super) struct PendingWorker(Process);
+
+#[derive(Clone)]
+pub(super) struct Cancellation(Arc<OwnedChild>);
+
+impl Cancellation {
+    pub(super) fn cancel(&self) {
+        self.0.cancel();
+    }
+}
 
 impl Process {
     fn spawn(executable: &Path) -> Result<Self> {
@@ -99,12 +110,17 @@ impl Process {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("worker channel failed"))?;
             wire::write(&mut pipes.output, &request)?;
+            let mut imports = 0u16;
             loop {
                 ensure!(
                     Instant::now() < deadline && !self.child.cancelled.load(Ordering::Acquire),
                     "plug-in worker deadline exceeded or revoked"
                 );
                 let response = wire::read(&mut pipes.input)?;
+                if matches!(&response, Response::Endpoints | Response::Poll { .. }) {
+                    imports += 1;
+                    ensure!(imports <= 64, "plug-in host import budget exceeded");
+                }
                 let request = match response {
                     Response::Endpoints => Request::Endpoints(provider.endpoints()),
                     Response::Poll {
@@ -134,13 +150,17 @@ impl Process {
     }
 }
 
-pub(super) fn validate(executable: &Path, component: Vec<u8>) -> Result<()> {
+pub(super) fn validate(
+    executable: &Path,
+    component: Vec<u8>,
+    schemas: BTreeMap<String, CommandSchema>,
+) -> Result<()> {
     let process = Process::spawn(executable)?;
     let result = process.exchange(
         Request::Bootstrap(Bootstrap {
             build: BuildIdentity::current(),
             component,
-            operation: Operation::Validate,
+            operation: Operation::Validate { schemas },
         }),
         PREPARE_TIMEOUT,
         &mut Denied,
@@ -154,29 +174,6 @@ pub(super) fn validate(executable: &Path, component: Vec<u8>) -> Result<()> {
 }
 
 impl PreparedWorker {
-    pub(super) fn spawn(
-        executable: &Path,
-        component: Vec<u8>,
-        context: lifecycle::Context,
-        assets: BTreeMap<String, Vec<u8>>,
-    ) -> Result<Self> {
-        let process = Process::spawn(executable)?;
-        let response = process.exchange(
-            Request::Bootstrap(Bootstrap {
-                build: BuildIdentity::current(),
-                component,
-                operation: Operation::Prepare { context, assets },
-            }),
-            PREPARE_TIMEOUT,
-            &mut Denied,
-        )?;
-        ensure!(
-            matches!(response, Response::Prepared),
-            "unexpected worker readiness reply"
-        );
-        Ok(Self(process))
-    }
-
     pub(super) fn activate(self) -> Result<ActiveWorker> {
         let response = self
             .0
@@ -189,7 +186,45 @@ impl PreparedWorker {
     }
 }
 
+impl PendingWorker {
+    pub(super) fn spawn(executable: &Path) -> Result<Self> {
+        Ok(Self(Process::spawn(executable)?))
+    }
+    pub(super) fn cancellation(&self) -> Cancellation {
+        Cancellation(self.0.child.clone())
+    }
+    pub(super) fn prepare(
+        self,
+        component: Vec<u8>,
+        context: lifecycle::Context,
+        assets: BTreeMap<String, Vec<u8>>,
+        schemas: BTreeMap<String, CommandSchema>,
+    ) -> Result<PreparedWorker> {
+        let response = self.0.exchange(
+            Request::Bootstrap(Bootstrap {
+                build: BuildIdentity::current(),
+                component,
+                operation: Operation::Prepare {
+                    context,
+                    assets,
+                    schemas,
+                },
+            }),
+            PREPARE_TIMEOUT,
+            &mut Denied,
+        )?;
+        ensure!(
+            matches!(response, Response::Prepared),
+            "unexpected worker readiness reply"
+        );
+        Ok(PreparedWorker(self.0))
+    }
+}
+
 impl ActiveWorker {
+    pub(super) fn failed(&self) -> bool {
+        self.0.child.cancelled.load(Ordering::Acquire)
+    }
     pub(super) fn invoke(
         &self,
         event: lifecycle::Message,
@@ -200,6 +235,7 @@ impl ActiveWorker {
             .exchange(Request::Invoke(event), INVOKE_TIMEOUT, provider)?
         {
             Response::Reply(reply) => Ok(reply),
+            Response::Rejected => bail!("command arguments do not match their schema"),
             _ => bail!("unexpected worker invocation reply"),
         }
     }
@@ -345,11 +381,7 @@ mod tests {
     #[test]
     fn watchdog_terminates_a_blocked_native_child() {
         let child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "plugins::worker::tests::blocked_native_child",
-                "--ignored",
-            ])
+            .args(["tests::blocked_native_child", "--ignored"])
             .env_clear()
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -387,10 +419,18 @@ fn run_requests(receiver: Arc<Mutex<mpsc::Receiver<Request>>>) -> Result<()> {
         "worker core/API/backend identity mismatch"
     );
     let runtime = Runtime::new()?;
-    let Operation::Prepare { context, assets } = bootstrap.operation else {
-        runtime.validate_component(&bootstrap.component)?;
-        wire::write(&mut std::io::stdout().lock(), &Response::Validated)?;
-        return Ok(());
+    let (context, assets, schemas) = match bootstrap.operation {
+        Operation::Validate { schemas } => {
+            Schemas::compile(schemas)?;
+            runtime.validate_component(&bootstrap.component)?;
+            wire::write(&mut std::io::stdout().lock(), &Response::Validated)?;
+            return Ok(());
+        }
+        Operation::Prepare {
+            context,
+            assets,
+            schemas,
+        } => (context, assets, Schemas::compile(schemas)?),
     };
     let prepared = runtime.prepare(
         &bootstrap.component,
@@ -410,7 +450,22 @@ fn run_requests(receiver: Arc<Mutex<mpsc::Receiver<Request>>>) -> Result<()> {
     loop {
         match receive()? {
             Request::Invoke(event) => {
+                let contribution = if let lifecycle::Message::Tool(request) = &event {
+                    if schemas
+                        .input(&request.contribution, &request.arguments)
+                        .is_err()
+                    {
+                        wire::write(&mut std::io::stdout().lock(), &Response::Rejected)?;
+                        continue;
+                    }
+                    Some(request.contribution.clone())
+                } else {
+                    None
+                };
                 let reply = active.handle(event)?;
+                if let (Some(id), lifecycle::Reply::Tool(response)) = (contribution, &reply) {
+                    schemas.output(&id, &response.json)?;
+                }
                 wire::write(&mut std::io::stdout().lock(), &Response::Reply(reply))?;
             }
             Request::Stop => {

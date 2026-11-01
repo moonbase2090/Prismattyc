@@ -45,6 +45,9 @@ pub(crate) struct ActivityFeed {
 }
 
 impl ActivityFeed {
+    pub(crate) fn epoch(&self) -> &str {
+        &self.epoch
+    }
     pub(crate) fn new() -> Result<Self, &'static str> {
         let mut bytes = [0u8; 16];
         getrandom::fill(&mut bytes).map_err(|_| "cannot create activity epoch")?;

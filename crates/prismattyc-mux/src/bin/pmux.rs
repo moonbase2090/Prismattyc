@@ -148,6 +148,8 @@ session
     session-config <save|check|restore> FILE
                                   save, check or restore session configurations
                                   (default: derive a unique lowercase address).
+    plugin <discover|list|inspect|install|enable|disable|invoke>
+                                  manage opt-in contained plug-ins
     login <enable|disable|status|sync>
                                   start at login and restore workspace
     doctor [SESSION]              pane shell, login state, child pid, lease, attach state
@@ -304,6 +306,7 @@ enum Verb {
     Whoami,
     StatusSet,
     ActivityEmit,
+    Plugin,
     Send,
     PaneWrite,
     SaveBuffer,
@@ -365,6 +368,7 @@ const VERBS: &[(&str, Verb)] = &[
     ("whoami", Verb::Whoami),
     ("status-set", Verb::StatusSet),
     ("activity-emit", Verb::ActivityEmit),
+    ("plugin", Verb::Plugin),
     ("send", Verb::Send),
     ("pane-write", Verb::PaneWrite),
     ("save-buffer", Verb::SaveBuffer),
@@ -545,6 +549,10 @@ fn main() -> Result<()> {
     // without changing PMUX_SOCKET's caller-identity semantics.
     std::env::set_var("PRISMATTYC_SPACES_SOCKET", &paths.socket);
     match verb {
+        Verb::Plugin => {
+            reject_session_flag(cli_session.as_deref(), "plugin")?;
+            prismattyc_mux::plugins::run_cli(&paths.socket, rest)
+        }
         Verb::Login => {
             reject_session_flag(cli_session.as_deref(), "login")?;
             cmd_login(&paths, &rest)

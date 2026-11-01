@@ -16,7 +16,7 @@ pub mod host {
         path: "wit",
         world: "plugin",
         ownership: Owning,
-        additional_derives: [serde::Serialize, serde::Deserialize],
+        additional_derives: [serde::Serialize, serde::Deserialize, PartialEq],
     });
 }
 
@@ -26,7 +26,7 @@ pub mod guest {
         path: "wit",
         world: "plugin",
         ownership: Owning,
-        additional_derives: [serde::Serialize, serde::Deserialize],
+        additional_derives: [serde::Serialize, serde::Deserialize, PartialEq],
         generate_all,
         pub_export_macro: true,
         export_macro_name: "export_plugin",

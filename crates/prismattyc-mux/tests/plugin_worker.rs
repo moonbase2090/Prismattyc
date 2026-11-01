@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 //! Exercise the private parent protocol against the actual pmuxd executable.
 
+#[path = "../src/plugins/schema.rs"]
+mod schema;
 #[path = "../src/plugins/wire.rs"]
 mod wire;
 #[allow(dead_code)] // The child executes the entry point in the built pmuxd.
@@ -20,6 +22,21 @@ use prismattyc_core::activity::{ActivityCursor, ActivityPage};
 
 fn executable() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_pmuxd"))
+}
+
+fn schemas() -> BTreeMap<String, wire::CommandSchema> {
+    ["poll", "loop", "grow"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.into(),
+                wire::CommandSchema {
+                    input: r#"{"type":"object","additionalProperties":false}"#.into(),
+                    output: r#"{"type":"object"}"#.into(),
+                },
+            )
+        })
+        .collect()
 }
 
 fn context() -> lifecycle::Context {
@@ -74,16 +91,23 @@ impl ActivityProvider for Disabled {
 
 #[test]
 fn a_real_daemon_worker_validates_prepares_and_brokers_typed_reads() {
-    worker::validate(executable(), pmux_plugin_fixture::component().to_vec()).unwrap();
-    let worker = worker::PreparedWorker::spawn(
+    worker::validate(
         executable(),
         pmux_plugin_fixture::component().to_vec(),
-        context(),
-        BTreeMap::new(),
+        schemas(),
     )
-    .unwrap()
-    .activate()
     .unwrap();
+    let worker = worker::PendingWorker::spawn(executable())
+        .unwrap()
+        .prepare(
+            pmux_plugin_fixture::component().to_vec(),
+            context(),
+            BTreeMap::new(),
+            schemas(),
+        )
+        .unwrap()
+        .activate()
+        .unwrap();
     let lifecycle::Reply::Tool(reply) = worker.invoke(request("poll"), &mut Disabled).unwrap()
     else {
         panic!("expected tool response");
@@ -104,15 +128,17 @@ fn a_real_daemon_worker_validates_prepares_and_brokers_typed_reads() {
 
 #[test]
 fn an_infinite_guest_does_not_stall_the_daemon_process() {
-    let worker = worker::PreparedWorker::spawn(
-        executable(),
-        pmux_plugin_fixture::component().to_vec(),
-        context(),
-        BTreeMap::new(),
-    )
-    .unwrap()
-    .activate()
-    .unwrap();
+    let worker = worker::PendingWorker::spawn(executable())
+        .unwrap()
+        .prepare(
+            pmux_plugin_fixture::component().to_vec(),
+            context(),
+            BTreeMap::new(),
+            schemas(),
+        )
+        .unwrap()
+        .activate()
+        .unwrap();
     let start = Instant::now();
     assert!(worker.invoke(request("loop"), &mut Disabled).is_err());
     assert!(start.elapsed() < Duration::from_secs(5));
@@ -142,15 +168,17 @@ impl ActivityProvider for PendingRead {
 #[test]
 fn revocation_does_not_wait_for_a_pending_host_import_or_publish_its_reply() {
     let worker = Arc::new(
-        worker::PreparedWorker::spawn(
-            executable(),
-            pmux_plugin_fixture::component().to_vec(),
-            context(),
-            BTreeMap::new(),
-        )
-        .unwrap()
-        .activate()
-        .unwrap(),
+        worker::PendingWorker::spawn(executable())
+            .unwrap()
+            .prepare(
+                pmux_plugin_fixture::component().to_vec(),
+                context(),
+                BTreeMap::new(),
+                schemas(),
+            )
+            .unwrap()
+            .activate()
+            .unwrap(),
     );
     let (entered, receive) = mpsc::channel();
     let (release, wait) = mpsc::channel();

@@ -38,11 +38,20 @@ pub(super) struct Bootstrap {
 
 #[derive(Serialize, Deserialize)]
 pub(super) enum Operation {
-    Validate,
+    Validate {
+        schemas: BTreeMap<String, CommandSchema>,
+    },
     Prepare {
         context: lifecycle::Context,
         assets: BTreeMap<String, Vec<u8>>,
+        schemas: BTreeMap<String, CommandSchema>,
     },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct CommandSchema {
+    pub input: String,
+    pub output: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -69,6 +78,7 @@ pub(super) enum Response {
         limit: u16,
     },
     Failed(String),
+    Rejected,
 }
 
 pub(super) fn write<T: Serialize>(output: &mut impl Write, value: &T) -> Result<()> {

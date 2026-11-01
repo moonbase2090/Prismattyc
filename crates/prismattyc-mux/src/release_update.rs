@@ -615,7 +615,7 @@ fn listed_releases() -> Result<Vec<Release>> {
     serde_json::from_slice(&bytes).context("parse release list")
 }
 
-fn fetch_release_json(url: &str) -> Result<Vec<u8>> {
+pub(crate) fn fetch_release_json(url: &str) -> Result<Vec<u8>> {
     let mut child = curl()
         .args([
             "--header",
@@ -628,6 +628,16 @@ fn fetch_release_json(url: &str) -> Result<Vec<u8>> {
         .spawn()
         .context("start HTTPS download (curl is required)")?;
     read_capped_child_stdout(&mut child, 4_194_304)
+}
+
+pub(crate) fn download_bounded(url: &str, cap: usize) -> Result<Vec<u8>> {
+    let mut child = curl()
+        .args(["--max-filesize", &cap.to_string()])
+        .arg(url)
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("start bounded HTTPS download")?;
+    read_capped_child_stdout(&mut child, cap)
 }
 
 /// Read up to `cap` bytes from a spawned child's stdout, killing it on

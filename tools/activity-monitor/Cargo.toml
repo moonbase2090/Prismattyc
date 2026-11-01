@@ -15,10 +15,16 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 prismattyc-mux = { path = "../../crates/prismattyc-mux" }
 lunatui-core = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898" }
-lunatui-runtime = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898", default-features = false, features = ["app"] }
-lunatui-term = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898" }
+lunatui-image = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898" }
+lunatui-term = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898", features = ["pixel-layer"] }
 lunatui-theme = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898" }
-lunatui-widgets = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898", default-features = false }
+lunatui-widgets = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898", default-features = false, features = ["pixel-sparkline"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.190"
+
+[target.'cfg(windows)'.dependencies]
+crossterm = "0.29.0"
 
 [patch.crates-io]
 portable-pty = { path = "../../third_party/portable-pty" }

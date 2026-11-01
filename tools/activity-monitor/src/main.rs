@@ -1,32 +1,30 @@
 // SPDX-License-Identifier: MIT
 
-use std::collections::BTreeMap;
 use std::env;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
-use lunatui_core::{ClusterTable, Grid, Rect, Style};
-use lunatui_runtime::{is_quit, render_once, run, App, ControlFlow, RunOptions};
-use lunatui_term::Event;
-use lunatui_theme::{Theme, Token, Variant};
-use lunatui_widgets::{Block, Paragraph, RenderCx, Widget};
-use prismattyc_mux::activity::{exchange, ActivityCursor, ActivityPage, ActivityRecord};
 use prismattyc_mux::mailbox::AgentId;
-use prismattyc_mux::{ControlRequest, ControlResponseData, PROTOCOL_VERSION};
 
+mod app;
+mod feed;
+mod model;
 mod query;
+mod term;
+mod ui;
 
-const WIDTH: u16 = 120;
-const HEIGHT: u16 = 24;
-const MAX_SEATS: usize = 128;
-const STALE_MS: u64 = 30_000;
-const POLL_INTERVAL: Duration = Duration::from_millis(250);
-const USAGE: &str = "usage: pmux-activity-monitor --socket PATH [--snapshot | --json | --seats | --recent SEAT | --tail [--seat SEAT]]";
+use app::Monitor;
+use feed::{read_page, Feed, Source, Update, POLL_INTERVAL};
+use ui::Palette;
+
+const SNAPSHOT_SIZE: (u16, u16) = (120, 24);
+const SNAPSHOT_WAIT: Duration = Duration::from_secs(3);
+const USAGE: &str = "usage: pmux-activity-monitor [--socket PATH] [--host LABEL=PATH]... [--host-cmd LABEL JSON_ARGV]...
+                             [--theme auto|dark|light] [--no-pixels] [--no-motion]
+                             [--snapshot [--size COLSxROWS]]
+       pmux-activity-monitor --socket PATH (--json | --seats | --recent SEAT | --tail [--seat SEAT])";
 
 enum Mode {
     Live,
@@ -37,22 +35,94 @@ enum Mode {
     Tail(Option<AgentId>),
 }
 
-struct Options {
-    socket: PathBuf,
-    mode: Mode,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThemeChoice {
+    Auto,
+    Dark,
+    Light,
 }
 
-fn options() -> Result<Option<Options>> {
-    let mut args = env::args_os().skip(1);
+struct Options {
+    socket: Option<PathBuf>,
+    hosts: Vec<(String, Source)>,
+    mode: Mode,
+    size: Option<(u16, u16)>,
+    theme: ThemeChoice,
+    pixels: bool,
+    motion: bool,
+}
+
+/// A neutral label for the machine this monitor runs on.
+fn local_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "mac"
+    } else if cfg!(windows) {
+        "windows"
+    } else {
+        "linux"
+    }
+}
+
+fn parse_label(raw: &str) -> Result<String> {
+    let valid = !raw.is_empty()
+        && raw.len() <= 24
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+    if !valid {
+        bail!("a host label is 1 to 24 letters, digits, '-', '_' or '.'");
+    }
+    Ok(raw.to_owned())
+}
+
+fn parse_size(raw: &str) -> Result<(u16, u16)> {
+    let parsed = raw
+        .split_once('x')
+        .and_then(|(w, h)| Some((w.parse::<u16>().ok()?, h.parse::<u16>().ok()?)))
+        .filter(|(w, h)| (1..=1000).contains(w) && (1..=1000).contains(h));
+    parsed.ok_or_else(|| anyhow::anyhow!("--size takes COLSxROWS, for example 80x24"))
+}
+
+fn parse_argv(raw: &str) -> Result<Vec<String>> {
+    let argv: Vec<String> = serde_json::from_str(raw)
+        .map_err(|_| anyhow::anyhow!("--host-cmd takes a JSON array of strings, for example '[\"ssh\",\"windows-host\",\"pmux\",\"activity\",\"tail\"]'"))?;
+    if argv.first().is_none_or(|program| program.is_empty()) {
+        bail!("--host-cmd needs a program as the first array element");
+    }
+    Ok(argv)
+}
+
+fn options_from(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Option<Options>> {
+    let mut args = args.into_iter();
     let mut socket = None;
+    let mut hosts: Vec<(String, Source)> = Vec::new();
     let mut mode = None;
     let mut seat = None;
+    let mut size = None;
+    let mut theme = ThemeChoice::Auto;
+    let mut pixels = true;
+    let mut motion = true;
+    let next = |args: &mut dyn Iterator<Item = std::ffi::OsString>| -> Result<String> {
+        args.next()
+            .and_then(|value| value.into_string().ok())
+            .ok_or_else(|| anyhow::anyhow!(USAGE))
+    };
     while let Some(arg) = args.next() {
         match arg.to_str() {
-            Some("--socket") if socket.is_none() => {
-                socket = Some(PathBuf::from(
-                    args.next().ok_or_else(|| anyhow::anyhow!(USAGE))?,
-                ));
+            Some("--socket") if socket.is_none() => socket = Some(PathBuf::from(next(&mut args)?)),
+            Some("--host") => {
+                let raw = next(&mut args)?;
+                let (label, path) = raw
+                    .split_once('=')
+                    .ok_or_else(|| anyhow::anyhow!("--host takes LABEL=PATH"))?;
+                if path.is_empty() {
+                    bail!("--host takes LABEL=PATH");
+                }
+                hosts.push((parse_label(label)?, Source::Socket(PathBuf::from(path))));
+            }
+            Some("--host-cmd") => {
+                let label = parse_label(&next(&mut args)?)?;
+                hosts.push((label, Source::Command(parse_argv(&next(&mut args)?)?)));
             }
             Some("--snapshot") if mode.is_none() => mode = Some(Mode::Snapshot),
             Some("--json") if mode.is_none() => mode = Some(Mode::Json),
@@ -62,6 +132,17 @@ fn options() -> Result<Option<Options>> {
             }
             Some("--tail") if mode.is_none() => mode = Some(Mode::Tail(None)),
             Some("--seat") if seat.is_none() => seat = Some(parse_seat(args.next())?),
+            Some("--size") if size.is_none() => size = Some(parse_size(&next(&mut args)?)?),
+            Some("--theme") => {
+                theme = match next(&mut args)?.as_str() {
+                    "auto" => ThemeChoice::Auto,
+                    "dark" => ThemeChoice::Dark,
+                    "light" => ThemeChoice::Light,
+                    _ => bail!("--theme takes auto, dark or light"),
+                };
+            }
+            Some("--no-pixels") => pixels = false,
+            Some("--no-motion") => motion = false,
             Some("--help" | "-h") => {
                 println!("{USAGE}");
                 return Ok(None);
@@ -74,9 +155,36 @@ fn options() -> Result<Option<Options>> {
         (mode, None) => mode.unwrap_or(Mode::Live),
         _ => bail!("--seat requires --tail"),
     };
-    Ok(Some(Options {
-        socket: socket.ok_or_else(|| anyhow::anyhow!(USAGE))?,
+    let query = matches!(
         mode,
+        Mode::Json | Mode::Seats | Mode::Recent(_) | Mode::Tail(_)
+    );
+    if query && (!hosts.is_empty() || socket.is_none()) {
+        bail!("--json, --seats, --recent and --tail read one feed: pass --socket and no --host");
+    }
+    if size.is_some() && !matches!(mode, Mode::Snapshot) {
+        bail!("--size applies to --snapshot; the live view follows the terminal");
+    }
+    if socket.is_none() && hosts.is_empty() {
+        bail!(USAGE);
+    }
+    let mut labels: Vec<&str> = hosts.iter().map(|(label, _)| label.as_str()).collect();
+    if socket.is_some() {
+        labels.push(local_label());
+    }
+    let mut sorted = labels.clone();
+    sorted.sort_unstable();
+    if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+        bail!("each host needs its own label");
+    }
+    Ok(Some(Options {
+        socket,
+        hosts,
+        mode,
+        size,
+        theme,
+        pixels,
+        motion,
     }))
 }
 
@@ -87,286 +195,118 @@ fn parse_seat(raw: Option<std::ffi::OsString>) -> Result<AgentId> {
     AgentId::new(raw).map_err(|_| anyhow::anyhow!("a valid seat identifier is required"))
 }
 
-fn read_page(socket: &Path, cursor: Option<ActivityCursor>) -> Result<ActivityPage> {
-    match exchange(
-        socket,
-        ControlRequest::ReadActivity {
-            version: PROTOCOL_VERSION,
-            request_id: 1,
-            cursor,
-            limit: 256,
-        },
-    )? {
-        ControlResponseData::Activity { page } => Ok(page),
-        _ => bail!("unexpected activity response"),
+fn palette(choice: ThemeChoice, background_dark: Option<bool>) -> Palette {
+    match (choice, background_dark) {
+        (ThemeChoice::Light, _) | (ThemeChoice::Auto, Some(false)) => Palette::LIGHT,
+        _ => Palette::DARK,
     }
 }
 
-enum Update {
-    Page(ActivityPage),
-    Disconnected,
+/// Hosts in display order: the local socket first, then each --host in the order given.
+fn sources(options: &Options) -> (Vec<String>, Vec<Source>) {
+    let mut labels = Vec::new();
+    let mut sources = Vec::new();
+    if let Some(socket) = &options.socket {
+        labels.push(local_label().to_owned());
+        sources.push(Source::Socket(socket.clone()));
+    }
+    for (label, source) in &options.hosts {
+        labels.push(label.clone());
+        sources.push(source.clone());
+    }
+    (labels, sources)
 }
 
-struct Feed {
-    updates: mpsc::Receiver<Update>,
-    stopped: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
-}
-
-impl Feed {
-    fn start(socket: PathBuf) -> Self {
-        let (sender, updates) = mpsc::sync_channel(4);
-        let stopped = Arc::new(AtomicBool::new(false));
-        let worker_stop = Arc::clone(&stopped);
-        let worker = thread::spawn(move || {
-            let mut cursor = None;
-            while !worker_stop.load(Ordering::Relaxed) {
-                let (update, next, has_more) = match read_page(&socket, cursor.clone()) {
-                    Ok(page) => {
-                        let next = page.cursor.clone();
-                        let has_more = page.has_more;
-                        (Update::Page(page), Some(next), has_more)
-                    }
-                    Err(_) => (Update::Disconnected, None, false),
-                };
-                if !deliver(&sender, update, &worker_stop) {
-                    break;
-                }
-                if let Some(next) = next {
-                    cursor = Some(next);
-                }
-                if !has_more {
-                    thread::sleep(POLL_INTERVAL);
-                }
+/// Waits until every host has caught up or failed, then renders one frame as text.
+fn snapshot(options: &Options) -> Result<String> {
+    let (labels, sources) = sources(options);
+    let count = labels.len();
+    let mut monitor = Monitor::new(
+        labels,
+        palette(options.theme, None),
+        Some(Feed::start(sources)),
+    );
+    let mut settled = vec![false; count];
+    let mut reachable = vec![false; count];
+    let deadline = Instant::now() + SNAPSHOT_WAIT;
+    while settled.iter().any(|done| !done) && Instant::now() < deadline {
+        let Some(feed) = monitor.feed.as_ref() else {
+            break;
+        };
+        let Ok(update) = feed.updates.recv_timeout(Duration::from_millis(50)) else {
+            continue;
+        };
+        let host = update.host;
+        match &update.update {
+            Update::Page(page) => {
+                reachable[host] = true;
+                settled[host] |= !page.has_more;
             }
-        });
-        Self {
-            updates,
-            stopped,
-            worker: Some(worker),
-        }
-    }
-}
-
-fn deliver(sender: &mpsc::SyncSender<Update>, mut update: Update, stopped: &AtomicBool) -> bool {
-    while !stopped.load(Ordering::Relaxed) {
-        match sender.try_send(update) {
-            Ok(()) => return true,
-            Err(mpsc::TrySendError::Full(pending)) => {
-                update = pending;
-                thread::sleep(Duration::from_millis(20));
+            Update::Disabled => {
+                reachable[host] = true;
+                settled[host] = true;
             }
-            Err(mpsc::TrySendError::Disconnected(_)) => return false,
+            Update::Disconnected => settled[host] = true,
+        }
+        let wall = app::now_ms();
+        let target = &mut monitor.hosts[host];
+        match update.update {
+            Update::Page(page) => target.apply(page, 0),
+            Update::Disconnected => target.disconnect(wall),
+            Update::Disabled => target.link = model::Link::Disabled,
         }
     }
-    false
-}
-
-impl Drop for Feed {
-    fn drop(&mut self) {
-        self.stopped.store(true, Ordering::Relaxed);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+    // Stop the readers before rendering so the frame shows a fixed state.
+    monitor.feed = None;
+    if !reachable.iter().any(|ok| *ok) {
+        bail!("activity feed unavailable");
     }
-}
-
-#[derive(Default)]
-struct ViewState {
-    seats: BTreeMap<AgentId, ActivityRecord>,
-    connected: bool,
-    sequence: u64,
-    reset: String,
-    more: bool,
-    evicted: u64,
-}
-
-impl ViewState {
-    fn apply(&mut self, page: ActivityPage) {
-        if let Some(reset) = page.reset.as_ref() {
-            self.seats.clear();
-            self.evicted = 0;
-            self.reset = label(reset);
-        }
-        self.connected = true;
-        self.sequence = page.cursor.sequence;
-        self.more = page.has_more;
-        for record in page.records {
-            if !self.seats.contains_key(&record.event.seat) && self.seats.len() == MAX_SEATS {
-                let oldest = self
-                    .seats
-                    .iter()
-                    .min_by_key(|(_, event)| event.sequence)
-                    .map(|(seat, _)| seat.clone());
-                if let Some(oldest) = oldest {
-                    self.seats.remove(&oldest);
-                    self.evicted += 1;
-                }
-            }
-            self.seats.insert(record.event.seat.clone(), record);
-        }
-    }
-
-    fn lines(&self, now: u64, rows: usize) -> String {
-        let mut lines = vec![format!(
-            "{} | seats {} / {MAX_SEATS} | cursor {} | {}",
-            if self.connected {
-                "connected"
-            } else {
-                "disconnected (retrying)"
-            },
-            self.seats.len(),
-            self.sequence,
-            if self.more {
-                "history catch-up pending"
-            } else {
-                "caught up"
-            }
-        )];
-        if !self.connected {
-            lines.push("Cached activity may be stale. Waiting for the local feed.".to_owned());
-        }
-        if !self.reset.is_empty() {
-            lines.push(format!(
-                "Feed reset: {}. Cache cleared before replay.",
-                self.reset
-            ));
-        }
-        if self.evicted > 0 {
-            lines.push(format!(
-                "{} older seat entries evicted from this view.",
-                self.evicted
-            ));
-        }
-        lines.push(
-            "SEAT                           SOURCE    ACTIVITY                AGE        STATE"
-                .to_owned(),
-        );
-        if self.seats.is_empty() {
-            lines.push("No activity received.".to_owned());
-        }
-        let available = rows.saturating_sub(lines.len() + 1);
-        for record in self.seats.values().take(available) {
-            let age = now.saturating_sub(record.received_at_ms);
-            lines.push(format!(
-                "{:<30} {:<9} {:<23} {:>6}s    {}",
-                record.event.seat.as_str(),
-                label(&record.event.source),
-                label(&record.event.kind),
-                age / 1000,
-                if age >= STALE_MS || !self.connected {
-                    "stale"
-                } else {
-                    "recent"
-                }
-            ));
-        }
-        if self.seats.len() > available {
-            lines.push(format!(
-                "{} additional seats outside this viewport.",
-                self.seats.len() - available
-            ));
-        }
-        lines.join("\n")
-    }
-}
-
-fn label(value: &impl serde::Serialize) -> String {
-    serde_json::to_value(value)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or_else(|| "unknown".to_owned())
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or(0)
-}
-
-struct Monitor {
-    state: ViewState,
-    feed: Option<Feed>,
-}
-
-impl App for Monitor {
-    fn update(&mut self, event: &Event) -> ControlFlow {
-        if is_quit(event) {
-            ControlFlow::Break
-        } else {
-            ControlFlow::Continue
-        }
-    }
-
-    fn needs_animation_frames(&self) -> bool {
-        self.feed.is_some()
-    }
-
-    fn render(&mut self, grid: &mut Grid, area: Rect, clusters: &mut ClusterTable) {
-        if let Some(feed) = self.feed.as_ref() {
-            while let Ok(update) = feed.updates.try_recv() {
-                match update {
-                    Update::Page(page) => self.state.apply(page),
-                    Update::Disconnected => self.state.connected = false,
-                }
-            }
-        }
-        let theme = Theme::builtin(Variant::Dark);
-        let mut cx = RenderCx::new(grid, clusters, &theme);
-        let style = Style::new()
-            .fg(cx.token(Token::TextPrimary))
-            .bg(cx.token(Token::Surface0));
-        let block = Block::bordered()
-            .title(" Activity monitor | q quit ")
-            .style(style);
-        block.render(area, &mut cx);
-        let inner = block.inner(area);
-        Paragraph::new(self.state.lines(now_ms(), usize::from(inner.height)))
-            .style(style)
-            .render(inner, &mut cx);
-    }
+    monitor.ui.motion = false;
+    let (width, height) = options.size.unwrap_or(SNAPSHOT_SIZE);
+    let (grid, clusters) = monitor.frame(width, height, 0);
+    Ok(grid.display_text(&clusters))
 }
 
 fn main() -> Result<()> {
-    let Some(options) = options()? else {
+    let Some(options) = options_from(env::args_os().skip(1))? else {
         return Ok(());
     };
-    match options.mode {
-        Mode::Live => run(
-            Monitor {
-                state: ViewState::default(),
-                feed: Some(Feed::start(options.socket)),
-            },
-            RunOptions::new(WIDTH, HEIGHT).pixels(false),
-        )?,
-        Mode::Snapshot | Mode::Json => {
-            let page = read_page(&options.socket, None)
+    match &options.mode {
+        Mode::Live => {
+            let probe = term::probe(options.pixels);
+            let (labels, sources) = sources(&options);
+            let mut monitor = Monitor::new(
+                labels,
+                palette(options.theme, probe.background_dark),
+                Some(Feed::start(sources)),
+            );
+            monitor.ui.motion = options.motion;
+            term::run(monitor, probe)?;
+        }
+        Mode::Snapshot => io::stdout().write_all(snapshot(&options)?.as_bytes())?,
+        Mode::Json => {
+            let socket = options.socket.as_deref().unwrap_or_else(|| unreachable!());
+            let page = feed::read_page(socket, None)
                 .map_err(|_| anyhow::anyhow!("activity feed unavailable"))?;
-            if matches!(options.mode, Mode::Json) {
-                serde_json::to_writer_pretty(io::stdout().lock(), &page)?;
-                println!();
-            } else {
-                let mut monitor = Monitor {
-                    state: ViewState::default(),
-                    feed: None,
-                };
-                monitor.state.apply(page);
-                let (grid, clusters) = render_once(&mut monitor, WIDTH, HEIGHT);
-                io::stdout().write_all(grid.display_text(&clusters).as_bytes())?;
-            }
+            serde_json::to_writer_pretty(io::stdout().lock(), &page)?;
+            println!();
         }
         Mode::Seats => {
-            let observed = query::seats(&options.socket)?;
+            let socket = options.socket.as_deref().unwrap_or_else(|| unreachable!());
+            let observed = query::seats(socket)?;
             serde_json::to_writer_pretty(io::stdout().lock(), &observed)?;
             println!();
         }
         Mode::Recent(seat) => {
-            let recent = query::recent(&options.socket, &seat)?;
+            let socket = options.socket.as_deref().unwrap_or_else(|| unreachable!());
+            let recent = query::recent(socket, seat)?;
             serde_json::to_writer_pretty(io::stdout().lock(), &recent)?;
             println!();
         }
-        Mode::Tail(seat) => query::tail(&options.socket, seat.as_ref())?,
+        Mode::Tail(seat) => {
+            let socket = options.socket.as_deref().unwrap_or_else(|| unreachable!());
+            query::tail(socket, seat.as_ref())?;
+        }
     }
     Ok(())
 }
@@ -374,6 +314,7 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prismattyc_mux::activity::{ActivityPage, ActivityRecord};
     use serde_json::json;
 
     pub(super) fn record(seat: &str, sequence: u64, kind: &str) -> Result<ActivityRecord> {
@@ -404,94 +345,222 @@ mod tests {
         }))?)
     }
 
+    fn parse(args: &[&str]) -> Result<Options> {
+        options_from(args.iter().map(std::ffi::OsString::from))?
+            .ok_or_else(|| anyhow::anyhow!("help"))
+    }
+
     #[test]
-    fn latest_event_replaces_the_previous_activity_for_a_seat() -> Result<()> {
-        let mut state = ViewState::default();
-        state.apply(page(vec![record("worker-a", 1, "working")?], None)?);
-        state.apply(page(vec![record("worker-a", 2, "waiting")?], None)?);
-        assert_eq!(state.seats.len(), 1);
-        assert_eq!(
-            label(&state.seats[&AgentId::new("worker-a")?].event.kind),
-            "waiting"
+    fn hosts_keep_the_local_socket_first_then_the_order_given() -> Result<()> {
+        let options = parse(&[
+            "--host-cmd",
+            "remote",
+            r#"["ssh","windows-host","pmux","activity","tail"]"#,
+            "--socket",
+            "/tmp/a.sock",
+            "--host",
+            "lab=/tmp/b.sock",
+        ])?;
+        let (labels, sources) = sources(&options);
+        assert_eq!(labels, vec![local_label(), "remote", "lab"]);
+        assert!(
+            matches!(&sources[0], Source::Socket(path) if path == std::path::Path::new("/tmp/a.sock"))
         );
-        assert_eq!(state.sequence, 2);
-        Ok(())
-    }
-
-    #[test]
-    fn restart_replay_removes_seats_from_the_previous_daemon() -> Result<()> {
-        let mut state = ViewState::default();
-        state.apply(page(vec![record("worker-a", 10, "working")?], None)?);
-        state.apply(page(
-            vec![record("worker-b", 1, "waiting")?],
-            Some("restarted"),
-        )?);
-        assert_eq!(
-            state.seats.keys().map(AgentId::as_str).collect::<Vec<_>>(),
-            vec!["worker-b"]
+        assert!(
+            matches!(&sources[1], Source::Command(argv) if argv == &["ssh", "windows-host", "pmux", "activity", "tail"])
         );
-        assert_eq!(state.sequence, 1);
-        assert!(state.lines(1000, 22).contains("Feed reset: restarted"));
+        assert!(
+            matches!(&sources[2], Source::Socket(path) if path == std::path::Path::new("/tmp/b.sock"))
+        );
         Ok(())
     }
 
     #[test]
-    fn retention_gap_discards_activity_that_cannot_be_replayed() -> Result<()> {
-        let mut state = ViewState::default();
-        state.apply(page(vec![record("worker-a", 1, "working")?], None)?);
-        state.apply(page(Vec::new(), Some("retention_gap"))?);
-        assert!(state.seats.is_empty());
-        assert!(state.lines(1000, 22).contains("No activity received."));
+    fn host_commands_must_be_a_json_argv_with_a_program() {
+        for bad in [
+            "ssh windows pmux activity tail",
+            "[]",
+            r#"[""]"#,
+            r#"{"a":1}"#,
+        ] {
+            assert!(parse(&["--host-cmd", "remote", bad]).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn labels_are_validated_and_must_be_distinct() {
+        assert!(parse(&["--host", "=/tmp/a"]).is_err());
+        assert!(parse(&["--host", "bad label=/tmp/a"]).is_err());
+        assert!(parse(&["--host", "a=/tmp/a", "--host", "a=/tmp/b"]).is_err());
+        assert!(parse(&[
+            "--socket",
+            "/tmp/x",
+            "--host",
+            &format!("{}=/tmp/b", local_label())
+        ])
+        .is_err());
+        assert!(parse(&["--host", "a=/tmp/a", "--host", "b=/tmp/b"]).is_ok());
+    }
+
+    #[test]
+    fn query_modes_read_exactly_one_socket() {
+        assert!(parse(&["--socket", "/tmp/a", "--seats"]).is_ok());
+        assert!(parse(&["--socket", "/tmp/a", "--host", "b=/tmp/b", "--seats"]).is_err());
+        assert!(parse(&["--host", "b=/tmp/b", "--tail"]).is_err());
+        assert!(parse(&["--socket", "/tmp/a", "--seat", "worker-a"]).is_err());
+    }
+
+    #[test]
+    fn size_parses_only_for_snapshots() -> Result<()> {
+        assert_eq!(
+            parse(&["--socket", "/a", "--snapshot", "--size", "40x12"])?.size,
+            Some((40, 12))
+        );
+        assert!(parse(&["--socket", "/a", "--size", "40x12"]).is_err());
+        assert!(parse(&["--socket", "/a", "--snapshot", "--size", "40by12"]).is_err());
+        assert!(parse(&["--socket", "/a", "--snapshot", "--size", "0x12"]).is_err());
         Ok(())
     }
 
     #[test]
-    fn one_hundred_twenty_ninth_seat_evicts_the_oldest_activity() -> Result<()> {
-        let records = (0..129)
-            .map(|index| record(&format!("worker-{index:03}"), index + 1, "working"))
-            .collect::<Result<Vec<_>>>()?;
-        let mut state = ViewState::default();
-        state.apply(page(records, None)?);
-        assert_eq!(state.seats.len(), 128);
-        assert!(!state.seats.contains_key(&AgentId::new("worker-000")?));
-        assert!(state.seats.contains_key(&AgentId::new("worker-128")?));
-        assert_eq!(state.evicted, 1);
+    fn display_flags_parse_and_default_on() -> Result<()> {
+        let plain = parse(&["--socket", "/a"])?;
+        assert!(plain.pixels && plain.motion && plain.theme == ThemeChoice::Auto);
+        assert!(matches!(plain.mode, Mode::Live));
+        let set = parse(&[
+            "--socket",
+            "/a",
+            "--no-pixels",
+            "--no-motion",
+            "--theme",
+            "light",
+        ])?;
+        assert!(!set.pixels && !set.motion && set.theme == ThemeChoice::Light);
+        assert_eq!(
+            parse(&["--socket", "/a", "--theme", "dark"])?.theme,
+            ThemeChoice::Dark
+        );
+        assert_eq!(
+            parse(&["--socket", "/a", "--theme", "light", "--theme", "auto"])?.theme,
+            ThemeChoice::Auto
+        );
+        assert!(parse(&["--socket", "/a", "--theme", "sepia"]).is_err());
         Ok(())
     }
 
     #[test]
-    fn elapsed_receive_time_marks_a_seat_stale_without_another_event() -> Result<()> {
-        let mut state = ViewState::default();
-        state.apply(page(vec![record("worker-a", 1, "working")?], None)?);
-        assert!(state.lines(30_999, 22).contains("recent"));
-        assert!(state.lines(31_000, 22).contains("stale"));
+    fn help_prints_usage_instead_of_running() -> Result<()> {
+        assert!(options_from(["--help"].iter().map(std::ffi::OsString::from))?.is_none());
+        assert!(options_from(["-h"].iter().map(std::ffi::OsString::from))?.is_none());
         Ok(())
     }
 
     #[test]
-    fn disconnect_is_visible_and_a_successful_page_restores_connected_state() -> Result<()> {
-        let mut state = ViewState::default();
-        assert!(state.lines(1000, 22).contains("disconnected (retrying)"));
-        state.apply(page(vec![record("worker-a", 1, "working")?], None)?);
-        assert!(state.lines(1000, 22).starts_with("connected |"));
+    fn each_mode_and_singular_option_is_accepted_once() -> Result<()> {
+        assert!(matches!(
+            parse(&["--socket", "/a", "--snapshot"])?.mode,
+            Mode::Snapshot
+        ));
+        assert!(matches!(
+            parse(&["--socket", "/a", "--json"])?.mode,
+            Mode::Json
+        ));
+        assert!(matches!(
+            parse(&["--socket", "/a", "--seats"])?.mode,
+            Mode::Seats
+        ));
+        assert!(
+            matches!(parse(&["--socket", "/a", "--recent", "worker-a"])?.mode, Mode::Recent(ref s) if s.as_str() == "worker-a")
+        );
+        assert!(
+            matches!(parse(&["--socket", "/a", "--tail", "--seat", "worker-a"])?.mode, Mode::Tail(Some(ref s)) if s.as_str() == "worker-a")
+        );
+        assert!(matches!(
+            parse(&["--socket", "/a", "--seat", "worker-a", "--tail"])?.mode,
+            Mode::Tail(Some(_))
+        ));
+        for twice in [
+            &["--socket", "/a", "--socket", "/b"][..],
+            &["--socket", "/a", "--json", "--json"],
+            &["--socket", "/a", "--seats", "--json"],
+            &["--socket", "/a", "--snapshot", "--tail"],
+            &["--socket", "/a", "--recent", "worker-a", "--seats"],
+            &[
+                "--socket", "/a", "--tail", "--seat", "worker-a", "--seat", "worker-b",
+            ],
+            &[
+                "--socket",
+                "/a",
+                "--snapshot",
+                "--size",
+                "10x10",
+                "--size",
+                "20x20",
+            ],
+        ] {
+            assert!(parse(twice).is_err(), "{twice:?}");
+        }
         Ok(())
     }
 
     #[test]
-    fn snapshot_paints_the_seat_and_event_through_the_terminal_grid() -> Result<()> {
-        let mut monitor = Monitor {
-            state: ViewState::default(),
-            feed: None,
+    fn this_machine_is_labelled_by_its_platform() {
+        let expected = if cfg!(target_os = "macos") {
+            "mac"
+        } else if cfg!(windows) {
+            "windows"
+        } else {
+            "linux"
         };
-        monitor
-            .state
-            .apply(page(vec![record("worker-a", 1, "tool_started")?], None)?);
-        let (grid, clusters) = render_once(&mut monitor, WIDTH, HEIGHT);
-        let text = grid.display_text(&clusters);
-        assert!(text.contains("Activity monitor | q quit"));
-        assert!(text.contains("worker-a"));
-        assert!(text.contains("tool_started"));
-        assert!(text.contains("connected | seats 1 / 128 | cursor 1"));
+        assert_eq!(local_label(), expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_snapshot_waits_for_each_host_and_renders_its_seats() -> Result<()> {
+        let line = json!({
+            "type": "activity", "seat_filter": null,
+            "page": page(vec![record("worker-a", 1, "command_started")?], None)?
+        });
+        let argv =
+            json!(["/bin/sh", "-c", format!("printf '%s\\n' '{line}'; sleep 5")]).to_string();
+        let options = parse(&[
+            "--host-cmd",
+            "remote",
+            &argv,
+            "--snapshot",
+            "--size",
+            "80x10",
+        ])?;
+        let started = Instant::now();
+        let text = snapshot(&options)?;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "a caught-up host ends the wait"
+        );
+        assert!(text.contains("remote  connected"), "{text}");
+        assert!(
+            text.contains("worker-a") && text.contains("command_started"),
+            "{text}"
+        );
+        assert_eq!(text.lines().count(), 10);
+        Ok(())
+    }
+
+    #[test]
+    fn theme_follows_the_terminal_background_unless_chosen() {
+        assert_eq!(palette(ThemeChoice::Auto, Some(false)), Palette::LIGHT);
+        assert_eq!(palette(ThemeChoice::Auto, Some(true)), Palette::DARK);
+        assert_eq!(palette(ThemeChoice::Auto, None), Palette::DARK);
+        assert_eq!(palette(ThemeChoice::Dark, Some(false)), Palette::DARK);
+        assert_eq!(palette(ThemeChoice::Light, Some(true)), Palette::LIGHT);
+    }
+
+    #[test]
+    fn a_snapshot_of_an_unreachable_feed_fails() -> Result<()> {
+        let options = parse(&["--socket", "/nonexistent/feed.sock", "--snapshot"])?;
+        let error = snapshot(&options).err().map(|error| error.to_string());
+        assert_eq!(error.as_deref(), Some("activity feed unavailable"));
         Ok(())
     }
 }

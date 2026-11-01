@@ -146,3 +146,33 @@ python3 tests/native/macos-restart-e2e.py --bins target/debug --out build/macos-
 Native framebuffer captures and desktop screenshots prove different paths.
 Read each fixture's output to see which path it checked. See [test requirements](../../docs/testing-policy.md)
 for release validation and [accessibility](../../docs/accessibility.md) for AT-SPI checks.
+
+### Plug-in Settings on macOS
+
+Use an allocated, unlocked macOS VM with Accessibility and Screen Recording
+permission for the process that launches the fixture. Build the host, CLI,
+daemon, and MCP helper from the same revision with a verified production plug-in
+bundle. Run the fixture inside that VM:
+
+```bash
+python3 tests/native/macos-plugin-settings-e2e.py \
+  --bins /tmp/plugin-proof-bins --out /tmp/plugin-settings-proof \
+  --revision FULL_SOURCE_COMMIT
+```
+
+The fixture opens Plug-ins through legacy Settings in classic and Graphite.
+It installs the monitor disabled, reviews its exact version and local activity
+grant, enables it, disables it, and reopens the page. A private socket proxy
+withholds List replies to check native close, cancellation, and reopening while
+the daemon remains available. CLI queries verify state after native actions.
+The fixture compares the displayed pane's text and every session, window, pane,
+and child PID, retains owned-window screenshots and fresh raster records, and
+reaps its host and daemon. Keep the output outside the source tree.
+
+For a prerequisite check without launching the application:
+
+```bash
+python3 tests/native/macos-plugin-settings-e2e.py \
+  --bins /tmp/plugin-proof-bins --out /tmp/plugin-settings-doctor \
+  --revision FULL_SOURCE_COMMIT --check-desktop-only
+```

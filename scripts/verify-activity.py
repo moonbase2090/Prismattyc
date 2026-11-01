@@ -16,6 +16,41 @@ import threading
 import time
 
 
+def control_socket(path):
+    stream = socket.socket(getattr(socket, 'AF_UNIX', 1), socket.SOCK_STREAM)
+    try:
+        stream.settimeout(3)
+        if os.name != 'nt' or hasattr(socket, 'AF_UNIX'):
+            stream.connect(str(path))
+        else:
+            # Windows Python can create the Winsock socket but lacks its path codec.
+            import ctypes
+            import select
+            import struct
+            encoded = os.fsencode(path)
+            assert len(encoded) < 108, 'private socket path exceeds the native limit'
+            address = struct.pack('H', 1) + encoded + b'\0'
+            storage = ctypes.create_string_buffer(address, len(address))
+            winsock = ctypes.WinDLL('Ws2_32.dll')
+            winsock.connect.argtypes = [ctypes.c_size_t, ctypes.c_void_p, ctypes.c_int]
+            winsock.connect.restype = ctypes.c_int
+            winsock.WSAGetLastError.restype = ctypes.c_int
+            if winsock.connect(stream.fileno(), storage, len(address)) != 0:
+                error = winsock.WSAGetLastError()
+                if error not in (10035, 10036, 10037):
+                    raise OSError(error, 'native local connection failed')
+                _, writable, failed = select.select([], [stream], [stream], 3)
+                if not writable and not failed:
+                    raise TimeoutError('native local connection timed out')
+                error = stream.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                if error:
+                    raise OSError(error, 'native local connection failed')
+        return stream
+    except BaseException:
+        stream.close()
+        raise
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bins', required=True, type=Path)
@@ -66,9 +101,7 @@ def main():
 
     def request(kind, **fields):
         wire = {'type': kind, 'version': 1, 'request_id': 1, **fields}
-        with socket.socket(socket.AF_UNIX) as stream:
-            stream.settimeout(3)
-            stream.connect(str(endpoint))
+        with control_socket(endpoint) as stream:
             stream.sendall(json.dumps(wire).encode() + b'\n')
             response = json.loads(stream.makefile('rb').readline(4 * 1024 * 1024))
         assert response['version'] == 1 and response['request_id'] == 1

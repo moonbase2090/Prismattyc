@@ -36,8 +36,10 @@ WORKSPACE_VERSION_RE = re.compile(
     r"\[workspace\.package\][^\[]*?^version\s*=\s*\"([^\"]+)\"",
     re.M | re.S,
 )
+# Other [workspace] keys, such as exclude = [...], may come before members;
+# only a line that starts a new table ends the search.
 MEMBERS_RE = re.compile(
-    r"\[workspace\][^\[]*?^members\s*=\s*\[(.*?)\]", re.M | re.S
+    r"^\[workspace\][ \t]*\n(?:(?!^\[).)*?^members\s*=\s*\[(.*?)\]", re.M | re.S
 )
 PACKAGE_NAME_RE = re.compile(
     r"\[package\][^\[]*?^name\s*=\s*\"([^\"]+)\"", re.M | re.S
@@ -90,7 +92,7 @@ def member_names(root: Path) -> tuple[list[str], list[str]]:
     problems: list[str] = []
     names: list[str] = []
     try:
-        members = MEMBERS_RE.search((root / "Cargo.toml").read_text())[0]
+        members = MEMBERS_RE.search((root / "Cargo.toml").read_text())[1]
     except (OSError, TypeError):
         return names, ["Cargo.toml has no [workspace] members list"]
     for path in re.findall(r'"([^"]+)"', members):
@@ -216,6 +218,7 @@ def main() -> int:
     names, problems = member_names(root)
     for problem in problems:
         failures.append(problem)
+        print(f"agreement: FAIL ({problem})")
     try:
         lock_text = (root / "Cargo.lock").read_text()
     except OSError:

@@ -33,6 +33,8 @@ pub enum Update {
     Page(ActivityPage),
     Disconnected,
     Disabled,
+    /// The daemon answered but predates the activity feed.
+    Unsupported,
 }
 
 pub struct HostUpdate {
@@ -78,6 +80,48 @@ pub fn parse_tail_line(line: &str) -> Option<Update> {
         "disconnected" => Some(Update::Disconnected),
         _ => None,
     }
+}
+
+/// Tells a daemon that predates the activity feed from one that cannot be reached.
+///
+/// Such a daemon rejects the unknown request type as invalid JSON. A current daemon never
+/// answers this well-formed request that way, so that code alone identifies the old one.
+fn classify_failure(socket: &Path) -> Update {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let reply = (|| -> Option<Value> {
+            let mut stream = UnixStream::connect(socket).ok()?;
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .ok()?;
+            stream
+                .set_write_timeout(Some(Duration::from_millis(500)))
+                .ok()?;
+            let request = serde_json::json!({
+                "type": "read_activity", "version": PROTOCOL_VERSION, "request_id": 1,
+                "cursor": null, "limit": 1
+            });
+            writeln!(stream, "{request}").ok()?;
+            let mut line = String::new();
+            BufReader::new(stream).read_line(&mut line).ok()?;
+            serde_json::from_str(&line).ok()
+        })();
+        if is_unsupported_reply(reply.as_ref()) {
+            return Update::Unsupported;
+        }
+    }
+    let _ = socket;
+    Update::Disconnected
+}
+
+fn is_unsupported_reply(reply: Option<&Value>) -> bool {
+    reply.is_some_and(|reply| {
+        reply.get("status").and_then(Value::as_str) == Some("error")
+            && reply.pointer("/error/code").and_then(Value::as_str) == Some("invalid_json")
+    })
 }
 
 pub struct Feed {
@@ -132,7 +176,7 @@ fn poll_socket(
                 (Update::Page(page), Some(next), has_more)
             }
             Err(error) if is_disabled(&error) => (Update::Disabled, None, false),
-            Err(_) => (Update::Disconnected, None, false),
+            Err(_) => (classify_failure(socket), None, false),
         };
         if !deliver(sender, HostUpdate { host, update }, stopped) {
             break;
@@ -336,6 +380,17 @@ mod tests {
     }
 
     #[test]
+    fn only_an_invalid_json_error_marks_an_old_daemon() {
+        let old = serde_json::json!({"status": "error", "error": {"code": "invalid_json"}});
+        let other = serde_json::json!({"status": "error", "error": {"code": "invalid_request"}});
+        let ok = serde_json::json!({"status": "ok", "error": {"code": "invalid_json"}});
+        assert!(is_unsupported_reply(Some(&old)));
+        assert!(!is_unsupported_reply(Some(&other)));
+        assert!(!is_unsupported_reply(Some(&ok)));
+        assert!(!is_unsupported_reply(None));
+    }
+
+    #[test]
     fn end_lines_and_noise_are_ignored() {
         assert!(parse_tail_line(r#"{"type":"end","reason":"max_events"}"#).is_none());
         assert!(parse_tail_line("not json").is_none());
@@ -476,6 +531,23 @@ mod tests {
                 .recv_timeout(Duration::from_secs(5))
                 .expect("update");
             assert!(matches!(update.update, Update::Disabled));
+        }
+
+        #[test]
+        fn a_daemon_that_predates_the_feed_is_reported_as_unsupported() {
+            // What a pmuxd from before the feed answers: the request type is unknown JSON.
+            let old: ControlResponseBody = serde_json::from_value(serde_json::json!({
+                "status": "error",
+                "error": {"code": "invalid_json", "message": "unknown variant"}
+            }))
+            .expect("body");
+            let (path, _) = fake_daemon(vec![old]);
+            let feed = Feed::start(vec![Source::Socket(path)]);
+            let update = feed
+                .updates
+                .recv_timeout(Duration::from_secs(5))
+                .expect("update");
+            assert!(matches!(update.update, Update::Unsupported));
         }
 
         #[test]

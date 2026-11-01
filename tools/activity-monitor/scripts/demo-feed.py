@@ -41,14 +41,25 @@ def opaque(*parts):
 
 
 class Daemon:
-    def __init__(self, bins, scratch, label, env):
+    def __init__(self, bins, scratch, label, env, socket_path=None):
         self.bins, self.label, self.env = bins, label, env
         self.root = scratch / label
         self.root.mkdir(mode=0o700)
-        self.socket = self.root / 'feed.sock'
+        # An attached daemon belongs to someone else: publish only, never start or stop it.
+        self.attached = socket_path is not None
+        self.socket = Path(socket_path) if self.attached else self.root / 'feed.sock'
         self.process = None
 
     def start(self):
+        if self.attached:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                try:
+                    self.request('ping')
+                    return
+                except OSError:
+                    time.sleep(0.1)
+            raise SystemExit(f'{self.label} daemon at --attach did not answer')
         log = (self.root / 'daemon.log').open('ab')
         self.process = subprocess.Popen(
             [str(self.bins / 'pmuxd'), '--socket', str(self.socket), '--cols', '80', '--rows', '24',
@@ -66,6 +77,8 @@ class Daemon:
         raise SystemExit(f'{self.label} daemon did not answer')
 
     def stop(self):
+        if self.attached:
+            return
         if self.process and self.process.poll() is None:
             self.process.terminate()
             try:
@@ -76,7 +89,7 @@ class Daemon:
         self.process = None
 
     def alive(self):
-        return self.process is not None and self.process.poll() is None
+        return self.attached or (self.process is not None and self.process.poll() is None)
 
     def request(self, kind, **fields):
         wire = {'type': kind, 'version': 1, 'request_id': 1, **fields}
@@ -175,6 +188,9 @@ def main():
     parser.add_argument('--bins', required=True, type=Path)
     parser.add_argument('--sockets', required=True, type=Path)
     parser.add_argument('--host', action='append', default=[], choices=sorted(SEATS))
+    parser.add_argument('--attach', action='append', default=[], metavar='LABEL=SOCKET',
+                        help="publish that host's seats into an existing daemon started with "
+                             '--experimental-activity, without starting or stopping it')
     parser.add_argument('--seconds', type=float, default=0, help='0 runs until interrupted')
     parser.add_argument('--seed', type=int, default=2090)
     parser.add_argument('--outage', action='append', default=[],
@@ -192,7 +208,11 @@ def main():
                XDG_DATA_HOME=str(scratch / 'data'), XDG_STATE_HOME=str(scratch / 'state'),
                PRISMATTYC_CONFIG=str(scratch / 'config.toml'), PRISMATTYC_NO_AGENT_SKILLS='1')
     (scratch / 'config.toml').write_text('install_agent_skills = false\n')
-    daemons = {label: Daemon(args.bins.resolve(), scratch, label, env) for label in hosts}
+    attached = dict(spec.split('=', 1) for spec in args.attach)
+    if attached:
+        hosts = [label for label in hosts if label in attached] if args.host else list(attached)
+    daemons = {label: Daemon(args.bins.resolve(), scratch, label, env, attached.get(label))
+               for label in hosts}
     outages = []
     for spec in args.outage:
         label, at, length = spec.split(':')

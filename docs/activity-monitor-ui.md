@@ -96,24 +96,36 @@ Sorting by name is the default, so rows don't jump while you read them.
 
 ## Motion and pixels
 
-When a seat changes state, its row fades from a tint of the new state color to the normal background over 900 milliseconds. This is the only animation the monitor starts on its own, and `--no-motion` turns it off.
+When a seat changes state in a live update, its row fades from a tint of the new state color to the normal background over 900 milliseconds. History replayed on connect, after a feed reset or while catching up does not fade, so the first frame is not covered in tints. This is the only animation the monitor starts on its own, and `--no-motion` turns it off.
 
 On a terminal that accepts raw RGBA Kitty graphics uploads, lanes render through Lunatui's pixel sparkline as one raster per lane, with eight times the vertical resolution and no gaps between columns. The cell rendering is drawn first and replaced only when the raster is accepted, so a terminal without pixel support, a multiplexer or `--no-pixels` gets the same lanes in block characters. `p` switches between the two at runtime.
 
-Prismattyc decodes Kitty graphics but accepts only PNG uploads (`f=100`), and Lunatui 0.1.18 uploads raw RGBA (`f=32`). Inside Prismattyc the cleared cells would never be replaced, so the monitor keeps cell lanes when the terminal identifies as Prismattyc. Pixel lanes in Prismattyc need either PNG uploads from Lunatui or RGBA support in the emulator.
+Prismattyc releases before raw-upload support decode Kitty graphics but drop raw RGBA uploads (`f=32`), which Lunatui 0.1.18 sends, and they answer every graphics query with OK. A query cannot tell the two apart, so inside Prismattyc the monitor makes one real 1x1 raw upload with an image number, followed by a device-attributes request. A Prismattyc that keeps the image answers OK first and gets pixel lanes; an older one answers only the attributes and keeps cell lanes. The probe image is deleted again, and keys typed during the probe are kept.
 
 ## Launch
 
-The `pmux activity` commands, added separately, include `pmux activity monitor [ARGS]`. It runs `pmux-activity-monitor` from beside `pmux` (or from `PATH`), passes pmux's resolved socket as `--socket`, and passes every other argument through. In a new Prismattyc pane, that command is all it takes. A pane preset would need a host configuration change for one command, so the subcommand is the simpler choice. `--snapshot --size COLSxROWS` renders one frame as text for scripts and tests.
+With no `--socket` or `--host`, the monitor reads the pmuxd that `pmux` would use: `PMUX_INSTANCE` and `PMUX_SOCKET` (every pmux pane exports it), then the `[mux]` config, then pmux's default path. In a blank Prismattyc pane, `pmux-activity-monitor` is the whole command. The `pmux activity` commands, added separately, include `pmux activity monitor [ARGS]`, which does the same with pmux's resolved socket. `--snapshot --size COLSxROWS` renders one frame as text for scripts and tests.
+
+When the only host has nothing to show, the pane explains why instead of showing an empty list:
+
+| Situation | What the pane says |
+| --- | --- |
+| The feed is off (the default) | Activity feed is disabled for this daemon. App-managed enablement is not available yet; the developer path is a separate pmuxd started with `--experimental-activity`, passed with `--socket`. |
+| The pmuxd predates the feed | This pmuxd has no activity feed, and updating Prismattyc does not turn it on by itself. |
+| No pmuxd answers | Can't reach pmuxd; start Prismattyc or run `pmux up`. |
+
+The monitor never offers to enable the feed or restart pmuxd, because the app-managed daemon cannot be started with the feed on yet. It keeps polling, so the view fills in as soon as a feed answers.
 
 ## Runtime
 
-Lunatui 0.1.18's `run` uses a fixed grid size, so the monitor drives the Lunatui session, encoder and pixel layer from its own small loop. That loop reads the pane size on every frame, clears and repaints in full after a resize, waits for input with a short timeout, and draws at 30 frames per second only while a fade is running. Otherwise it draws only when something changed or once per second for ages. It uses `TIOCGWINSZ` on Unix and the console buffer size on Windows. Windows runtime behavior has not been verified yet.
+Lunatui 0.1.18's `run` uses a fixed grid size, so the monitor drives the Lunatui session, encoder and pixel layer from its own small loop. That loop reads the pane size on every frame, clears and repaints in full after a resize, waits for input with a short timeout, and draws at 30 frames per second only while a fade is running. Otherwise it draws only when something changed or once per second for ages. It uses `TIOCGWINSZ` on Unix and the console buffer size on Windows. Windows runtime behavior has not been verified yet. On quit, the monitor stops each host command with its process group, then gives the feed readers one shared one-second deadline to finish before it exits without them.
 
 ## Recordings
 
 [activity-monitor.gif](media/activity-monitor/activity-monitor.gif) is real monitor output. Two private daemons labelled `mac` and `windows` ran on one Mac with the scripted demo feed, and `windows` was read through `--host-cmd`. The monitor ran unmodified in a pseudo-terminal, `record-demo.py` sent the keys and resizes, and `agg` rendered the cast. The scenes are the wide overview, moving the selection, the full timeline, the needs-attention filter, Tab to `windows`, a stopped and restarted `windows` daemon, resizes to 100x30, 64x20, 34x14 and 22x3, the keys panel, and the light theme. The shrinking scenes keep the 150x36 canvas, so a small pane appears in the top-left corner.
 
-[prismattyc-window.gif](media/activity-monitor/prismattyc-window.gif) shows the monitor in a real Prismattyc pane, taken from the host's own presented frames (`PRISMATTYC_DUMP_PRESENT`, timed as presented) in a clean macOS 26.6.2 VM. `record-prismattyc.py` drove it: a drill-in, then a split of the monitor's pane through the control protocol, where the monitor drops to the narrow tier beside the new shell, then the split moving back out. Lanes stay in cells there, as described under Motion and pixels.
+[prismattyc-window.gif](media/activity-monitor/prismattyc-window.gif) shows the monitor in a real Prismattyc pane, taken from the host's own presented frames (`PRISMATTYC_DUMP_PRESENT`, timed as presented) in a clean macOS 26.6.2 VM. `record-prismattyc.py` drove it: a drill-in, then a split of the monitor's pane through the control protocol, where the monitor drops to the narrow tier beside the new shell, then the split moving back out. That Prismattyc build predates raw-upload support, so its lanes are cells.
+
+[prismattyc-launch.gif](media/activity-monitor/prismattyc-launch.gif) is the one-command launch, also from a clean VM's Prismattyc host frames. It opens a blank pane with a `$` prompt and types `pmux-activity-monitor`. On a pmuxd with the feed off (the default), the pane explains that the feed is disabled. On a pmuxd started with `--experimental-activity`, with the demo feed publishing into it, the monitor fills the pane, drills in, and follows a live split. That pmuxd and host were built from this branch merged with the raw-upload support in Prismattyc #404, before #404 landed, and they draw the lanes as pixels. [prismattyc-lanes-cells-and-pixels.png](media/activity-monitor/prismattyc-lanes-cells-and-pixels.png) crops the lanes and footer from both builds: without raw-upload support the probe falls back to cells and the footer has no `p pixels`; with it the lanes are rasters.
 
 [pixel-lane-rasters.png](media/activity-monitor/pixel-lane-rasters.png) stacks nine lane rasters exactly as the monitor uploaded them when the probe reported Kitty graphics (`record-demo.py --kitty`, then `extract-rasters.py`), padded and scaled 2x. It shows the pixel path's output, not a terminal displaying it.

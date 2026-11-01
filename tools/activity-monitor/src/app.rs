@@ -60,6 +60,7 @@ impl Monitor {
                 Update::Page(page) => host.apply(page, mono_ms),
                 Update::Disconnected => host.disconnect(wall),
                 Update::Disabled => host.link = crate::model::Link::Disabled,
+                Update::Unsupported => host.link = crate::model::Link::Unsupported,
             }
         }
         any

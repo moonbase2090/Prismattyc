@@ -110,6 +110,8 @@ pub enum Link {
     },
     /// The daemon answered but the feed is off.
     Disabled,
+    /// The daemon answered but predates the activity feed.
+    Unsupported,
 }
 
 pub struct Host {

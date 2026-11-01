@@ -19,6 +19,7 @@ use rmcp::{
 };
 use serde::Deserialize;
 
+mod activity;
 mod mail;
 mod supervisor;
 
@@ -27,8 +28,14 @@ use mail::{format_data, mux_socket, MailOp};
 const USAGE: &str = "pmux-mcp — MCP stdio adapter over the pmux Mail* socket
 
 usage: pmux-mcp [-V|--version] [-h|--help] [--as <agent>] [--supervise]
+                [--activity-hosts FILE]
+       pmux-mcp --activity-only [--activity-hosts FILE] [--supervise]
 
 identity: --as <agent>, else $PMUX_AGENT. No default.
+--activity-only serves only the read-only pmux_activity_* tools and needs no
+identity: no mail, Space or pane tools are offered.
+--activity-hosts FILE lists the hosts the activity tools may read (TOML; see
+docs/activity-connector.md). Default: this machine's socket, labeled local.
 Each tool call reconnects: MailHello, one op, drop. Watch is not a tool here.
 
 -V, --version  print version and exit
@@ -38,16 +45,21 @@ inner adapter if it exits. Configure MCP hosts to launch this mode when
 they do not respawn failed stdio servers themselves.";
 
 struct Config {
-    agent: AgentId,
+    /// `None` only with `--activity-only`.
+    agent: Option<AgentId>,
     supervise: bool,
+    activity_hosts: Option<PathBuf>,
+    /// Arguments that recreate this configuration in a supervised child.
+    child_args: Vec<String>,
 }
 
-/// MCP stdio server. One agent identity for the process lifetime.
+/// MCP stdio server. One agent identity for the process lifetime, or none in
+/// activity-only mode, which serves only the read-only activity tools.
 #[derive(Clone)]
 struct PmuxMcp {
-    agent: AgentId,
+    agent: Option<AgentId>,
     socket: PathBuf,
-    #[allow(dead_code)]
+    activity: std::sync::Arc<activity::Hosts>,
     tool_router: rmcp::handler::server::router::tool::ToolRouter<Self>,
 }
 
@@ -86,29 +98,6 @@ struct BroadcastArgs {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SpaceName {
     name: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ActivityRecentArgs {
-    /// Seat (agent id) whose retained events to return.
-    seat: String,
-    /// Keep only the newest N events (1-256). Default: all retained.
-    #[serde(default)]
-    limit: Option<u16>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ActivityPollArgs {
-    /// `next_cursor` from the previous poll (EPOCH:SEQ). Omit to start at the
-    /// oldest retained event.
-    #[serde(default)]
-    cursor: Option<String>,
-    /// Return only this seat's events. The cursor still advances past others.
-    #[serde(default)]
-    seat: Option<String>,
-    /// Page size, 1-256. Default 256.
-    #[serde(default)]
-    limit: Option<u16>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -162,6 +151,174 @@ fn pmux_program() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("pmux"))
 }
 
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+struct ActivityHostArgs {
+    /// Host label from pmux_activity_hosts. Optional when one host is configured.
+    #[serde(default)]
+    host: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ActivityRecentArgs {
+    /// Seat (agent id) whose retained events to return.
+    seat: String,
+    /// Keep only the newest N events (1-256). Default: all retained.
+    #[serde(default)]
+    limit: Option<u16>,
+    /// Host label from pmux_activity_hosts. Optional when one host is configured.
+    #[serde(default)]
+    host: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ActivityPollArgs {
+    /// `next_cursor` from the previous poll on the same host (EPOCH:SEQ).
+    /// Omit to start at the oldest retained event.
+    #[serde(default)]
+    cursor: Option<String>,
+    /// Return only this seat's events. The cursor still advances past others.
+    #[serde(default)]
+    seat: Option<String>,
+    /// Page size, 1-256. Default 256.
+    #[serde(default)]
+    limit: Option<u16>,
+    /// Host label from pmux_activity_hosts. Optional when one host is configured.
+    #[serde(default)]
+    host: Option<String>,
+}
+
+fn activity_result(value: &serde_json::Value, ok: bool) -> CallToolResult {
+    let text = vec![ContentBlock::text(value.to_string())];
+    if ok {
+        CallToolResult::success(text)
+    } else {
+        CallToolResult::error(text)
+    }
+}
+
+/// Check tool-supplied values here, before they reach a command line. A
+/// command endpoint hands its arguments to a remote shell, so only seats,
+/// cursors and limits in their validated forms may pass.
+fn activity_args(
+    verb: &str,
+    seat: Option<String>,
+    cursor: Option<String>,
+    limit: Option<u16>,
+) -> Result<Vec<String>, activity::ActivityError> {
+    let invalid = |message: String| activity::ActivityError {
+        code: "invalid_argument",
+        message,
+        host: None,
+        retry_after_ms: None,
+    };
+    let mut argv = vec![verb.to_owned()];
+    if let Some(seat) = seat {
+        let seat = AgentId::new(seat).map_err(|e| invalid(format!("seat: {e}")))?;
+        if verb == "recent" {
+            argv.push(seat.to_string());
+        } else {
+            argv.extend(["--seat".into(), seat.to_string()]);
+        }
+    }
+    if let Some(cursor) = cursor {
+        let cursor = prismattyc_mux::activity_query::parse_cursor(&cursor)
+            .map_err(|e| invalid(e.to_string()))?;
+        argv.extend([
+            "--cursor".into(),
+            prismattyc_mux::activity_query::format_cursor(&cursor),
+        ]);
+    }
+    if let Some(limit) = limit {
+        if !(1..=256).contains(&limit) {
+            return Err(invalid("limit must be 1 to 256".into()));
+        }
+        argv.extend(["--limit".into(), limit.to_string()]);
+    }
+    Ok(argv)
+}
+
+#[tool_router(router = activity_router)]
+impl PmuxMcp {
+    /// Validate, pick the host, apply its rate limit, and run the query.
+    async fn activity_query(
+        &self,
+        host: Option<String>,
+        args: Result<Vec<String>, activity::ActivityError>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = match args {
+            Ok(args) => args,
+            Err(error) => return Ok(activity_result(&error.to_json(), false)),
+        };
+        let selected = match self.activity.select(host.as_deref()) {
+            Ok(selected) => selected,
+            Err(error) => return Ok(activity_result(&error.to_json(), false)),
+        };
+        if let Err(error) = self
+            .activity
+            .admit(&selected.label, std::time::Instant::now())
+        {
+            return Ok(activity_result(&error.to_json(), false));
+        }
+        match activity::run(&pmux_program(), selected, &args).await {
+            Ok((ok, text)) => {
+                let content = vec![ContentBlock::text(text)];
+                Ok(if ok {
+                    CallToolResult::success(content)
+                } else {
+                    CallToolResult::error(content)
+                })
+            }
+            Err(error) => Ok(activity_result(&error.to_json(), false)),
+        }
+    }
+
+    #[tool(
+        description = "List the hosts this server can read activity from: each label and whether it is local or reached by a command. Pass a label as host to the other pmux_activity_* tools."
+    )]
+    async fn pmux_activity_hosts(&self) -> Result<CallToolResult, McpError> {
+        Ok(activity_result(&self.activity.summary(), true))
+    }
+
+    #[tool(
+        description = "List seats seen in a host's retained activity feed with each seat's latest event kind and time. Seeing a seat does not mean its process is alive. Read-only; the host's pmuxd must run with --experimental-activity."
+    )]
+    async fn pmux_activity_seats(
+        &self,
+        Parameters(args): Parameters<ActivityHostArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.activity_query(args.host, activity_args("seats", None, None, None))
+            .await
+    }
+
+    #[tool(
+        description = "Return one seat's retained activity events on a host (metadata only: kind, source, time), oldest first. Read-only."
+    )]
+    async fn pmux_activity_recent(
+        &self,
+        Parameters(args): Parameters<ActivityRecentArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.activity_query(
+            args.host,
+            activity_args("recent", Some(args.seat), None, args.limit),
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Read one bounded page of a host's activity after a cursor and return it with next_cursor. Call again with next_cursor to follow the feed; keep one cursor per host. A non-null page.reset means continuity was lost: discard cached seat state. Read-only."
+    )]
+    async fn pmux_activity_poll(
+        &self,
+        Parameters(args): Parameters<ActivityPollArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.activity_query(
+            args.host,
+            activity_args("poll", args.seat, args.cursor, args.limit),
+        )
+        .await
+    }
+}
+
 #[tool_router]
 impl PmuxMcp {
     async fn space_command(&self, args: Vec<String>) -> Result<CallToolResult, McpError> {
@@ -178,77 +335,6 @@ impl PmuxMcp {
             Ok(Err(error)) => Ok(CallToolResult::error(vec![ContentBlock::text(error.to_string())])),
             Err(_) => Ok(CallToolResult::error(vec![ContentBlock::text("Space operation timed out. Inspect its sessions before retrying; work may have started.")])),
         }
-    }
-
-    /// Run `pmux activity` against this server's socket. `pmux activity`
-    /// prints JSON on stdout for results and errors alike; a nonzero exit
-    /// marks the result as an error with that JSON as its text.
-    async fn activity_command(&self, args: Vec<String>) -> Result<CallToolResult, McpError> {
-        let mut command = tokio::process::Command::new(pmux_program());
-        command
-            .arg("--socket")
-            .arg(&self.socket)
-            .arg("activity")
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(true);
-        match tokio::time::timeout(std::time::Duration::from_secs(10), command.output()).await {
-            Ok(Ok(output)) => {
-                let text = vec![ContentBlock::text(String::from_utf8_lossy(&output.stdout))];
-                Ok(if output.status.success() {
-                    CallToolResult::success(text)
-                } else {
-                    CallToolResult::error(text)
-                })
-            }
-            Ok(Err(error)) => Ok(CallToolResult::error(vec![ContentBlock::text(
-                error.to_string(),
-            )])),
-            Err(_) => Ok(CallToolResult::error(vec![ContentBlock::text(
-                "Activity query timed out.",
-            )])),
-        }
-    }
-
-    #[tool(
-        description = "List seats seen in this host's retained activity feed with each seat's latest event kind and time. Seeing a seat does not mean its process is alive. Read-only; needs pmuxd started with --experimental-activity."
-    )]
-    async fn pmux_activity_seats(&self) -> Result<CallToolResult, McpError> {
-        self.activity_command(vec!["seats".into()]).await
-    }
-
-    #[tool(
-        description = "Return one seat's retained activity events (metadata only: kind, source, time), oldest first. Read-only."
-    )]
-    async fn pmux_activity_recent(
-        &self,
-        Parameters(args): Parameters<ActivityRecentArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let mut argv = vec!["recent".into(), args.seat];
-        if let Some(limit) = args.limit {
-            argv.extend(["--limit".into(), limit.to_string()]);
-        }
-        self.activity_command(argv).await
-    }
-
-    #[tool(
-        description = "Read one bounded page of activity after a cursor and return it with next_cursor. Call again with next_cursor to follow the feed. A non-null page.reset means continuity was lost: discard cached seat state. Read-only."
-    )]
-    async fn pmux_activity_poll(
-        &self,
-        Parameters(args): Parameters<ActivityPollArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let mut argv = vec!["poll".into()];
-        if let Some(cursor) = args.cursor {
-            argv.extend(["--cursor".into(), cursor]);
-        }
-        if let Some(seat) = args.seat {
-            argv.extend(["--seat".into(), seat]);
-        }
-        if let Some(limit) = args.limit {
-            argv.extend(["--limit".into(), limit.to_string()]);
-        }
-        self.activity_command(argv).await
     }
 
     #[tool(
@@ -401,16 +487,36 @@ impl PmuxMcp {
         }
         self.space_command(command).await
     }
-    fn new(agent: AgentId, socket: PathBuf) -> Self {
+    /// Full server: mail, Space and activity tools for `agent`.
+    fn new(agent: AgentId, socket: PathBuf, activity: activity::Hosts) -> Self {
+        let mut tool_router = Self::tool_router();
+        tool_router.merge(Self::activity_router());
         Self {
-            agent,
+            agent: Some(agent),
             socket,
-            tool_router: Self::tool_router(),
+            activity: std::sync::Arc::new(activity),
+            tool_router,
         }
     }
 
+    /// Read-only server: only the activity tools, no agent identity.
+    fn activity_only(socket: PathBuf, activity: activity::Hosts) -> Self {
+        Self {
+            agent: None,
+            socket,
+            activity: std::sync::Arc::new(activity),
+            tool_router: Self::activity_router(),
+        }
+    }
+
+    fn agent(&self) -> Result<&AgentId, McpError> {
+        self.agent
+            .as_ref()
+            .ok_or_else(|| McpError::invalid_request("this server runs with --activity-only", None))
+    }
+
     async fn run_op(&self, op: MailOp) -> Result<CallToolResult, McpError> {
-        let agent = self.agent.clone();
+        let agent = self.agent()?.clone();
         let socket = self.socket.clone();
         match tokio::task::spawn_blocking(move || mail::exchange(&socket, &agent, op)).await {
             Ok(Ok(data)) => Ok(CallToolResult::success(vec![ContentBlock::text(
@@ -451,7 +557,7 @@ impl PmuxMcp {
             Err(_) => String::new(),
         };
 
-        let tutorial = render_tutorial(&self.agent, presence.trim(), inbox.trim());
+        let tutorial = render_tutorial(self.agent()?, presence.trim(), inbox.trim());
 
         Ok(CallToolResult::success(vec![ContentBlock::text(tutorial)]))
     }
@@ -546,10 +652,20 @@ fn render_tutorial(agent: &AgentId, presence: &str, inbox: &str) -> String {
     )
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for PmuxMcp {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+        let info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
+        let Some(agent) = &self.agent else {
+            return info.with_instructions(
+                "Read-only pmux activity feed. Call pmux_activity_hosts for host labels, \
+                 pmux_activity_seats for an overview, then pmux_activity_poll with each \
+                 host's next_cursor to follow it. Keep one cursor per host; a page.reset \
+                 means continuity was lost. Results are metadata only. Calls to one host \
+                 are rate-limited; on rate_limited, wait retry_after_ms.",
+            );
+        };
+        info.with_instructions(
             format!(
                 "You are {agent}. pmux mail is the in-mux agent mailbox. \
                  Call pmux_tutorial first for mail, direct pane input, and Space workflows. \
@@ -560,7 +676,7 @@ impl ServerHandler for PmuxMcp {
                  pmux_broadcast (fan-out to all). \
                  send.to is an agent id (operator-id) or alias, never a seat (0@1) or cell: prefix. \
                  Direct terminal input uses the pmux pane-write CLI; pmux_send stores mail. Each mail tool call reconnects to pmuxd — this is normal.",
-                agent = self.agent
+                agent = agent
             ),
         )
     }
@@ -570,6 +686,8 @@ fn parse_config() -> Result<Config, String> {
     let mut args = env::args().skip(1).peekable();
     let mut agent: Option<String> = None;
     let mut supervise = false;
+    let mut activity_only = false;
+    let mut activity_hosts = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--as" => {
@@ -579,6 +697,13 @@ fn parse_config() -> Result<Config, String> {
                 agent = Some(name);
             }
             "--supervise" => supervise = true,
+            "--activity-only" => activity_only = true,
+            "--activity-hosts" => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| "--activity-hosts needs a file".to_string())?;
+                activity_hosts = Some(PathBuf::from(path));
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -589,6 +714,22 @@ fn parse_config() -> Result<Config, String> {
             }
             other => return Err(format!("unknown argument: {other}\n\n{USAGE}")),
         }
+    }
+    let mut child_args = Vec::new();
+    if let Some(path) = &activity_hosts {
+        child_args.extend(["--activity-hosts".into(), path.display().to_string()]);
+    }
+    if activity_only {
+        if agent.is_some() {
+            return Err(format!("--activity-only takes no --as identity\n\n{USAGE}"));
+        }
+        child_args.push("--activity-only".into());
+        return Ok(Config {
+            agent: None,
+            supervise,
+            activity_hosts,
+            child_args,
+        });
     }
     let name = match agent {
         Some(name) => name,
@@ -605,7 +746,13 @@ fn parse_config() -> Result<Config, String> {
         }
     };
     let agent = AgentId::new(name).map_err(|e| e.to_string())?;
-    Ok(Config { agent, supervise })
+    child_args.extend(["--as".into(), agent.to_string()]);
+    Ok(Config {
+        agent: Some(agent),
+        supervise,
+        activity_hosts,
+        child_args,
+    })
 }
 
 #[tokio::main]
@@ -622,7 +769,7 @@ async fn main() -> ExitCode {
         }
     };
     if config.supervise {
-        return match supervisor::run(&config.agent).await {
+        return match supervisor::run(&config.child_args).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("pmux-mcp supervisor: {e}");
@@ -630,7 +777,21 @@ async fn main() -> ExitCode {
             }
         };
     }
-    let server = PmuxMcp::new(config.agent, mux_socket());
+    let socket = mux_socket();
+    let hosts = match &config.activity_hosts {
+        Some(path) => match activity::Hosts::load(path) {
+            Ok(hosts) => hosts,
+            Err(e) => {
+                eprintln!("pmux-mcp: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => activity::Hosts::local(socket.clone()),
+    };
+    let server = match config.agent {
+        Some(agent) => PmuxMcp::new(agent, socket, hosts),
+        None => PmuxMcp::activity_only(socket, hosts),
+    };
     match server.serve(rmcp::transport::stdio()).await {
         Ok(running) => match running.waiting().await {
             Ok(_) => ExitCode::SUCCESS,
@@ -654,10 +815,8 @@ mod tests {
     fn test_mcp() -> PmuxMcp {
         let agent = AgentId::new("mutant-kill-agent").expect("agent id");
         // Nonexistent socket: tools that reach pmux must not look like success.
-        PmuxMcp::new(
-            agent,
-            PathBuf::from("/tmp/pmux-mcp-mutant-kill-missing.sock"),
-        )
+        let socket = PathBuf::from("/tmp/pmux-mcp-mutant-kill-missing.sock");
+        PmuxMcp::new(agent, socket.clone(), activity::Hosts::local(socket))
     }
 
     fn tool_text(result: &CallToolResult) -> String {
@@ -670,8 +829,67 @@ mod tests {
     }
 
     #[test]
+    fn activity_only_serves_just_the_read_only_activity_tools() {
+        let socket = PathBuf::from("/tmp/pmux-mcp-activity-only-missing.sock");
+        let server = PmuxMcp::activity_only(socket.clone(), activity::Hosts::local(socket));
+        let mut names: Vec<_> = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "pmux_activity_hosts",
+                "pmux_activity_poll",
+                "pmux_activity_recent",
+                "pmux_activity_seats"
+            ]
+        );
+        assert!(server.agent.is_none());
+    }
+
+    #[test]
+    fn activity_arguments_are_validated_before_any_command_line() {
+        let ok = activity_args(
+            "poll",
+            Some("worker-a".into()),
+            Some("ab:3".into()),
+            Some(5),
+        )
+        .expect("valid arguments");
+        assert_eq!(
+            ok,
+            ["poll", "--seat", "worker-a", "--cursor", "ab:3", "--limit", "5"]
+        );
+        let recent = activity_args("recent", Some("worker-a".into()), None, None).expect("valid");
+        assert_eq!(recent, ["recent", "worker-a"]);
+        for (seat, cursor, limit) in [
+            (Some("a;rm -rf ~"), None, None),
+            (Some("a b"), None, None),
+            (Some("$(id)"), None, None),
+            (None, Some("ab:1;id"), None),
+            (None, Some("`id`:1"), None),
+            (None, None, Some(0)),
+            (None, None, Some(257)),
+        ] {
+            let result = activity_args(
+                "poll",
+                seat.map(str::to_owned),
+                cursor.map(str::to_owned),
+                limit,
+            );
+            let error = result.expect_err("must be rejected before reaching a shell");
+            assert_eq!(error.code, "invalid_argument");
+        }
+    }
+
+    #[test]
     fn tools_cover_the_mailbox_verbs() {
-        let names: Vec<_> = PmuxMcp::tool_router()
+        let names: Vec<_> = test_mcp()
+            .tool_router
             .list_all()
             .into_iter()
             .map(|t| t.name.to_string())
@@ -695,6 +913,7 @@ mod tests {
             "pmux_template_list",
             "pmux_template_preview",
             "pmux_template_create",
+            "pmux_activity_hosts",
             "pmux_activity_seats",
             "pmux_activity_recent",
             "pmux_activity_poll",
@@ -704,7 +923,7 @@ mod tests {
                 "missing {want} in {names:?}"
             );
         }
-        assert_eq!(names.len(), 21, "unexpected tool count: {names:?}");
+        assert_eq!(names.len(), 22, "unexpected tool count: {names:?}");
     }
 
     #[test]

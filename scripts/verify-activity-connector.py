@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: MIT
 """Drive `pmux activity` and the pmux-mcp activity tools against private daemons.
 
-Starts one pmuxd with --experimental-activity and one without, each on a private
+Starts two pmuxd with --experimental-activity and one without, each on a private
 socket, publishes synthetic runtime events with the activity-emit example, and
-checks every connector command and error path. Writes OUT/result.json.
+checks every connector command and error path, then pmux-mcp in full and
+activity-only modes, including a hosts file with a command endpoint. Runs on
+Unix and Windows. Writes OUT/result.json.
 
     python3 scripts/verify-activity-connector.py --bins target/debug --out DIR
 """
@@ -18,6 +20,13 @@ import threading
 import time
 from pathlib import Path
 
+WINDOWS = os.name == "nt"
+SHELL = os.environ.get("COMSPEC", "cmd.exe") if WINDOWS else "/bin/sh"
+
+
+def exe(path: Path) -> Path:
+    return path.with_name(path.name + ".exe") if WINDOWS else path
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -26,8 +35,8 @@ def main() -> int:
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
     bins = args.bins.resolve()
-    emitter = (args.emitter or bins / "examples" / "activity-emit").resolve()
-    for tool in (bins / "pmux", bins / "pmuxd", bins / "pmux-mcp", emitter):
+    emitter = (args.emitter or exe(bins / "examples" / "activity-emit")).resolve()
+    for tool in (exe(bins / "pmux"), exe(bins / "pmuxd"), exe(bins / "pmux-mcp"), emitter):
         if not tool.is_file():
             parser.error(f"missing {tool}")
     if args.out.exists():
@@ -38,14 +47,18 @@ def main() -> int:
     scratch = Path(tempfile.mkdtemp(prefix="pmux-act-"))
     scratch.chmod(0o700)
     env = dict(os.environ, HOME=str(scratch), XDG_RUNTIME_DIR=str(scratch), XDG_CONFIG_HOME=str(scratch / "config"))
+    if WINDOWS:
+        env.update(USERPROFILE=str(scratch), LOCALAPPDATA=str(scratch), APPDATA=str(scratch))
     env.pop("PMUX_SOCKET", None)
-    on, off = scratch / "on.sock", scratch / "off.sock"
-    daemons = [
-        subprocess.Popen([str(bins / "pmuxd"), "--experimental-activity", "--socket", str(on), "--", "/bin/sh"],
-                         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
-        subprocess.Popen([str(bins / "pmuxd"), "--socket", str(off), "--", "/bin/sh"],
-                         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
-    ]
+    env.pop("PMUX_AGENT", None)
+    on, on2, off = scratch / "on.sock", scratch / "on2.sock", scratch / "off.sock"
+
+    def daemon(socket, feed):
+        flags = ["--experimental-activity"] if feed else []
+        return subprocess.Popen([str(exe(bins / "pmuxd")), *flags, "--socket", str(socket), "--", SHELL],
+                                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    daemons = [daemon(on, True), daemon(on2, True), daemon(off, False)]
     checks, failures = [], []
 
     def check(label, ok, detail=None):
@@ -54,21 +67,21 @@ def main() -> int:
         if not ok:
             failures.append(label)
 
-    def emit(seat, event_id, kind):
+    def emit(seat, event_id, kind, socket=on):
         event = {"schema_version": 1, "seat": seat, "run_id": "run-1", "event_id": event_id,
                  "source": "runtime", "kind": kind}
-        subprocess.run([str(emitter), "--socket", str(on), "--seat", seat, "--event", json.dumps(event)],
+        subprocess.run([str(emitter), "--socket", str(socket), "--seat", seat, "--event", json.dumps(event)],
                        env=env, check=True)
 
     def pa(socket, *words):
-        done = subprocess.run([str(bins / "pmux"), "--socket", str(socket), "activity", *words],
+        done = subprocess.run([str(exe(bins / "pmux")), "--socket", str(socket), "activity", *words],
                               env=env, capture_output=True, text=True, timeout=30)
         lines = [json.loads(line) for line in done.stdout.splitlines() if line.strip()]
         return done.returncode, lines
 
     try:
         for _ in range(100):
-            if on.exists() and off.exists():
+            if on.exists() and on2.exists() and off.exists():
                 break
             time.sleep(0.05)
 
@@ -141,7 +154,9 @@ def main() -> int:
             check(label, code == want_code and error.get("code") == want and time.monotonic() - started < 5,
                   {"exit": code, "error": error})
 
-        check_mcp(bins, env, on, off, check)
+        check_mcp(bins, env, scratch, on, off, check)
+        emit("win-worker", "w1", "turn_started", socket=on2)
+        check_multi_host(bins, env, scratch, on, on2, check)
     finally:
         for daemon in daemons:
             daemon.terminate()
@@ -162,10 +177,12 @@ def main() -> int:
 class Mcp:
     """Minimal MCP stdio client for pmux-mcp."""
 
-    def __init__(self, bins, env, socket):
-        env = dict(env, PMUX_SOCKET=str(socket), PMUX_AGENT="activity-check")
-        self.proc = subprocess.Popen([str(bins / "pmux-mcp")], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.DEVNULL, text=True, env=env)
+    def __init__(self, bins, env, socket, args=(), agent="activity-check"):
+        env = dict(env, PMUX_SOCKET=str(socket))
+        if agent:
+            env["PMUX_AGENT"] = agent
+        self.proc = subprocess.Popen([str(exe(bins / "pmux-mcp")), *args], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env)
         self.next_id = 1
         self.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
                                     "clientInfo": {"name": "verify-activity-connector", "version": "1"}})
@@ -196,12 +213,26 @@ class Mcp:
         self.proc.wait(timeout=5)
 
 
-def check_mcp(bins, env, on, off, check):
-    mcp = Mcp(bins, env, on)
+def hosts_file(scratch, name, text):
+    path = scratch / name
+    path.write_text(text)
+    return ["--activity-hosts", str(path)]
+
+
+def toml_str(value):
+    return json.dumps(str(value))
+
+
+def check_mcp(bins, env, scratch, on, off, check):
+    # Interval 0: these checks call one host back to back.
+    unlimited = hosts_file(scratch, "local.toml",
+                           f"min_interval_ms = 0\n[[host]]\nlabel = \"local\"\nsocket = {toml_str(on)}\n")
+    mcp = Mcp(bins, env, on, unlimited)
     tools = sorted(t["name"] for t in mcp.request("tools/list", {})["result"]["tools"]
                    if t["name"].startswith("pmux_activity_"))
-    check("mcp: three read-only activity tools",
-          tools == ["pmux_activity_poll", "pmux_activity_recent", "pmux_activity_seats"], tools)
+    check("mcp: four read-only activity tools",
+          tools == ["pmux_activity_hosts", "pmux_activity_poll", "pmux_activity_recent", "pmux_activity_seats"],
+          tools)
     error, seats = mcp.tool("pmux_activity_seats")
     check("mcp: seats", not error and [s["seat"] for s in seats["seats"]] == ["worker-a", "worker-b"])
     error, recent = mcp.tool("pmux_activity_recent", {"seat": "worker-b", "limit": 1})
@@ -212,11 +243,66 @@ def check_mcp(bins, env, on, off, check):
           and [r["sequence"] for r in second["page"]["records"]] == [4, 6, 8])
     error, bad = mcp.tool("pmux_activity_poll", {"cursor": "not-a-cursor"})
     check("mcp: bad cursor is an error result", error and bad["error"]["code"] == "invalid_argument")
+    error, bad = mcp.tool("pmux_activity_recent", {"seat": "a;id"})
+    check("mcp: shell metacharacters in a seat are refused", error and bad["error"]["code"] == "invalid_argument")
     mcp.close()
     disabled = Mcp(bins, env, off)
     error, result = disabled.tool("pmux_activity_seats")
     check("mcp: disabled feed is an error result", error and result["error"]["code"] == "feed_disabled")
     disabled.close()
+
+
+def check_multi_host(bins, env, scratch, on, on2, check):
+    # "win" stands in for a remote host: a command endpoint that runs another
+    # pmux, as `ssh -T host pmux` would. "down" is an endpoint that fails.
+    pmux = str(exe(bins / "pmux"))
+    missing = str(exe(scratch / "no-such-pmux"))
+    hosts = hosts_file(scratch, "hosts.toml", f"""min_interval_ms = 300
+[[host]]
+label = "mac"
+socket = {toml_str(on)}
+[[host]]
+label = "win"
+command = [{toml_str(pmux)}, "--socket", {toml_str(on2)}]
+[[host]]
+label = "down"
+command = [{toml_str(missing)}]
+""")
+    for label, extra in [("activity-only", []), ("activity-only under --supervise", ["--supervise"])]:
+        mcp = Mcp(bins, env, on, ["--activity-only", *hosts, *extra], agent=None)
+        names = sorted(t["name"] for t in mcp.request("tools/list", {})["result"]["tools"])
+        check(f"{label}: only the four activity tools, no identity",
+              names == ["pmux_activity_hosts", "pmux_activity_poll", "pmux_activity_recent",
+                        "pmux_activity_seats"], names)
+        mcp.close()
+    mcp = Mcp(bins, env, on, ["--activity-only", *hosts], agent=None)
+    _, listed = mcp.tool("pmux_activity_hosts")
+    check("hosts lists labels and endpoint kinds, not paths",
+          [(h["label"], h["endpoint"]) for h in listed["hosts"]]
+          == [("mac", "local"), ("win", "command"), ("down", "command")]
+          and str(on2) not in json.dumps(listed), listed["hosts"])
+    error, result = mcp.tool("pmux_activity_seats")
+    check("several hosts: host is required", error and result["error"]["code"] == "host_required")
+    error, result = mcp.tool("pmux_activity_seats", {"host": "nope"})
+    check("unknown host is refused", error and result["error"]["code"] == "unknown_host")
+    error, mac = mcp.tool("pmux_activity_seats", {"host": "mac"})
+    error2, win = mcp.tool("pmux_activity_seats", {"host": "win"})
+    check("each host returns its own seats, labeled", not error and not error2
+          and mac["host"] == "mac" and win["host"] == "win"
+          and [s["seat"] for s in win["seats"]] == ["win-worker"]
+          and "win-worker" not in [s["seat"] for s in mac["seats"]],
+          {"mac": [s["seat"] for s in mac.get("seats", [])], "win": [s["seat"] for s in win.get("seats", [])]})
+    error, limited = mcp.tool("pmux_activity_seats", {"host": "mac"})
+    retry = limited.get("error", {}).get("retry_after_ms", 0)
+    check("a second call to one host within the interval is rate_limited",
+          error and limited["error"]["code"] == "rate_limited" and 0 < retry <= 301, limited.get("error"))
+    time.sleep(retry / 1000 + 0.05)
+    error, again = mcp.tool("pmux_activity_poll", {"host": "mac", "limit": 1})
+    check("after retry_after_ms the host answers again", not error and again["host"] == "mac")
+    error, down = mcp.tool("pmux_activity_seats", {"host": "down"})
+    check("a failing endpoint is host_unreachable", error and down["error"]["code"] == "host_unreachable"
+          and down["host"] == "down", down.get("error", {}).get("code"))
+    mcp.close()
 
 
 if __name__ == "__main__":

@@ -8945,6 +8945,8 @@ function Read-Exact([int]$Count) {
 
     #[cfg(windows)]
     fn ps_echo_loop(label: &str) -> String {
+        // ConPTY can deliver Enter as CR. Accept both terminal line endings,
+        // and avoid emitting another echo for the LF in a CRLF pair.
         ps_with_preamble(&format!(
             "Write-Text \"{label}`n\"\n\
              $stdin = [Console]::OpenStandardInput()\n\
@@ -8953,11 +8955,12 @@ function Read-Exact([int]$Count) {
              while ($true) {{\n\
                $n = $stdin.Read($one, 0, 1)\n\
                if ($n -le 0) {{ break }}\n\
-               if ($one[0] -eq 10) {{\n\
+               if (($one[0] -eq 10) -or ($one[0] -eq 13)) {{\n\
+                 if ($line.Count -eq 0) {{ continue }}\n\
                  $text = [System.Text.Encoding]::UTF8.GetString($line.ToArray())\n\
                  Write-Text (\"ECHO:\" + $text + \"`n\")\n\
                  $line.Clear()\n\
-               }} elseif ($one[0] -ne 13) {{\n\
+               }} else {{\n\
                  [void]$line.Add($one[0])\n\
                }}\n\
              }}\n"

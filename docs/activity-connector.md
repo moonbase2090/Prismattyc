@@ -24,7 +24,12 @@ pmux activity recent SEAT [--limit N]
 pmux activity poll [--cursor EPOCH:SEQ] [--seat SEAT] [--limit N]
 pmux activity tail [--cursor EPOCH:SEQ | --from-oldest] [--seat SEAT] \
                    [--max-events N] [--max-seconds N]
+pmux activity monitor [ARGS...]
 ```
+
+`pmux activity monitor` opens the live activity monitor (`pmux-activity-monitor`,
+from next to `pmux` or else `PATH`) with `--socket` set to the socket this
+`pmux` resolved. Other arguments go to the monitor unchanged.
 
 Every command takes `--host-label LABEL`, which adds a `host` field to each JSON
 object. The label is the caller's name for the host, so results from several

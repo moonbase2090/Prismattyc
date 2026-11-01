@@ -17,6 +17,7 @@ pmux activity recent SEAT [--limit N] [--host-label LABEL]
 pmux activity poll [--cursor EPOCH:SEQ] [--seat SEAT] [--limit N] [--host-label LABEL]
 pmux activity tail [--cursor EPOCH:SEQ | --from-oldest] [--seat SEAT]
                    [--max-events N] [--max-seconds N] [--host-label LABEL]
+pmux activity monitor [ARGS...]
 
 Read the activity feed of this host's pmuxd (started with --experimental-activity).
 Every result, including errors, is JSON on stdout: one object, or one per
@@ -32,6 +33,9 @@ line for tail.
            then prints {\"type\":\"end\"} with next_cursor. With neither
            limit, runs until interrupted.
 
+  monitor  open the live activity monitor (pmux-activity-monitor) on this
+           host's socket; ARGS go to the monitor unchanged
+
 --host-label adds a \"host\" field so results from several hosts stay apart.
 A \"reset\" in a page means continuity was lost: discard cached seat state.
 Exit status: 0 on success, 1 on a feed error, 2 on a usage error.";
@@ -41,6 +45,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 #[derive(Debug, PartialEq, Eq)]
 enum Query {
     Help,
+    /// Run the activity monitor; arguments pass through untouched.
+    Monitor(Vec<String>),
     Seats,
     Recent {
         seat: AgentId,
@@ -98,6 +104,12 @@ fn parse(args: &[String]) -> Result<Request> {
     if matches!(verb.as_str(), "-h" | "--help" | "help") {
         return Ok(Request {
             query: Query::Help,
+            host: None,
+        });
+    }
+    if verb == "monitor" {
+        return Ok(Request {
+            query: Query::Monitor(rest.to_vec()),
             host: None,
         });
     }
@@ -238,7 +250,7 @@ fn error_json(code: &str, message: &str, host: Option<&str>) -> Value {
 fn query(socket: &Path, query: Query, host: Option<&str>) -> Result<()> {
     let mut out = std::io::stdout().lock();
     let result = match query {
-        Query::Help => unreachable!("help is handled before the query"),
+        Query::Help | Query::Monitor(_) => unreachable!("handled before the query"),
         Query::Seats => {
             activity_query::read_retained(socket).map(|h| activity_query::observed_seats(&h))
         }
@@ -297,6 +309,41 @@ fn fail(
     std::process::exit(1);
 }
 
+/// The monitor next to this `pmux`, else the one on PATH.
+fn monitor_program() -> PathBuf {
+    let name = prismattyc_mux::platform::executable_name("pmux-activity-monitor");
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(&name)))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
+fn monitor_command(socket: &Path, args: Vec<String>) -> std::process::Command {
+    let mut command = std::process::Command::new(monitor_program());
+    command.arg("--socket").arg(socket).args(args);
+    command
+}
+
+/// Hand the terminal to the monitor. On Unix it replaces this process; on
+/// Windows it runs as a child and its exit status becomes ours.
+fn monitor(socket: &Path, args: Vec<String>) -> Result<()> {
+    let mut command = monitor_command(socket, args);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let error = command.exec();
+        bail!("cannot run pmux-activity-monitor: {error}");
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command
+            .status()
+            .map_err(|error| anyhow!("cannot run pmux-activity-monitor: {error}"))?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
 pub(super) fn run(paths: &Paths, args: Vec<String>) -> Result<()> {
     let request = match parse(&args) {
         Ok(request) => request,
@@ -313,6 +360,9 @@ pub(super) fn run(paths: &Paths, args: Vec<String>) -> Result<()> {
     if request.query == Query::Help {
         println!("{USAGE}");
         return Ok(());
+    }
+    if let Query::Monitor(args) = request.query {
+        return monitor(&paths.socket, args);
     }
     query(&paths.socket, request.query, request.host.as_deref())
 }
@@ -401,6 +451,37 @@ mod tests {
         assert_eq!(cursor.sequence, 9);
         assert!(parse(&args(&["tail", "--cursor", "ab:9", "--from-oldest"])).is_err());
         assert!(parse(&args(&["poll", "--from-oldest"])).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn activity_monitor_forwards_every_argument_after_the_socket() -> Result<()> {
+        let words = [
+            "monitor",
+            "--host",
+            "win=/s.sock",
+            "--host-cmd",
+            "win",
+            "[\"ssh\",\"win\",\"pmux\"]",
+            "--seats",
+            "--help",
+        ];
+        let request = parse(&args(&words))?;
+        assert_eq!(request.query, Query::Monitor(args(&words[1..])));
+        let Query::Monitor(forwarded) = request.query else {
+            bail!("expected monitor");
+        };
+        let command = monitor_command(Path::new("/run/pmux.sock"), forwarded);
+        let argv: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(&argv[..2], ["--socket", "/run/pmux.sock"]);
+        assert_eq!(&argv[2..], &words[1..]);
+        assert!(command
+            .get_program()
+            .to_string_lossy()
+            .contains("pmux-activity-monitor"));
         Ok(())
     }
 

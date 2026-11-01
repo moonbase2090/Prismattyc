@@ -136,6 +136,30 @@ impl Catalog {
             .max_by(|(a, _), (b, _)| a.cmp(b))
             .map(|(_, release)| release)
             .context("no published immutable official plug-in catalog is available")?;
+        let (_, published) = Self::published(release)?;
+        let mut catalog = Self::bundled()?;
+        for entry in published.0.into_values() {
+            catalog.insert(entry)?;
+        }
+        Ok(catalog)
+    }
+
+    pub(super) fn at_tag(tag: &str) -> Result<(Vec<u8>, Self, Release)> {
+        catalog_version(tag).context("invalid official catalog tag")?;
+        let release: Release = serde_json::from_slice(&fetch_release_json(&format!(
+            "https://api.github.com/repos/{REPOSITORY}/releases/tags/{tag}"
+        ))?)?;
+        ensure!(release.tag_name == tag, "official catalog tag mismatch");
+        let (bytes, catalog) = Self::published(&release)?;
+        Ok((bytes, catalog, release))
+    }
+
+    fn published(release: &Release) -> Result<(Vec<u8>, Self)> {
+        ensure!(
+            !release.draft && release.immutable && release.prerelease,
+            "official plug-in catalogs must be published immutable prereleases"
+        );
+        catalog_version(&release.tag_name).context("invalid official catalog tag")?;
         let asset = release
             .assets
             .iter()
@@ -153,7 +177,7 @@ impl Catalog {
                 && asset.digest.as_deref() == Some(format!("sha256:{}", digest(&bytes)).as_str()),
             "catalog size or digest mismatch"
         );
-        let mut catalog = Self::bundled()?;
+        let mut catalog = Self(BTreeMap::new());
         for entry in parse(&bytes)? {
             let name = format!("{}.pmux-plugin", entry.sha256);
             let asset = release
@@ -176,7 +200,7 @@ impl Catalog {
                 source: Source::Official(url),
             })?;
         }
-        Ok(catalog)
+        Ok((bytes, catalog))
     }
 
     pub(super) fn list(&self) -> Vec<CatalogEntry> {
@@ -203,7 +227,7 @@ impl Catalog {
     }
 }
 
-fn parse(bytes: &[u8]) -> Result<Vec<CatalogEntry>> {
+pub(super) fn parse(bytes: &[u8]) -> Result<Vec<CatalogEntry>> {
     ensure!(bytes.len() <= 512 * 1024, "catalog exceeds its byte budget");
     let document: Document = serde_json::from_slice(bytes)?;
     ensure!(
@@ -221,12 +245,12 @@ fn parse(bytes: &[u8]) -> Result<Vec<CatalogEntry>> {
     Ok(document.packages)
 }
 
-fn catalog_version(tag: &str) -> Option<Version> {
+pub(super) fn catalog_version(tag: &str) -> Option<Version> {
     let version = Version::parse(tag.strip_prefix(CATALOG_TAG_PREFIX)?).ok()?;
     (version.pre.is_empty() && version.build.is_empty()).then_some(version)
 }
 
-fn asset_url(tag: &str, name: &str) -> String {
+pub(super) fn asset_url(tag: &str, name: &str) -> String {
     format!("https://github.com/{REPOSITORY}/releases/download/{tag}/{name}")
 }
 

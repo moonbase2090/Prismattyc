@@ -31,7 +31,7 @@ pub(super) struct Package {
 }
 
 impl Package {
-    fn parse(bytes: &[u8]) -> Result<Self> {
+    pub(super) fn parse(bytes: &[u8]) -> Result<Self> {
         ensure!(
             bytes.len() <= MAX_PACKAGE_BYTES,
             "plug-in package exceeds its byte budget"

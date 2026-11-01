@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Daemon-owned plug-in packages, selections and private worker processes.
 
+mod bundle;
 mod catalog;
 mod cli;
 mod client;
@@ -18,6 +19,10 @@ mod schema;
 mod wire;
 mod worker;
 
+pub use bundle::{
+    fetch_bundle, pin_candidate_bundle, verify_bundle, BuildReceipt, BundlePin, BundleSource,
+    PackageBuild,
+};
 pub use catalog::CatalogEntry;
 pub use cli::{admin as admin_request, run as run_cli};
 pub use client::{decode_frame, Client, ConnectionCloser};

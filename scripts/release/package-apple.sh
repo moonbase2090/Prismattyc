@@ -191,7 +191,9 @@ is_macho() {
 }
 
 echo 'Signing Prismattyc helper binaries'
-for name in pmux pmuxd pmux-attach pmux-mcp prismattyc prismattyc-host pmux-activity-monitor; do
+# prismattyc-host is the bundle's main executable. codesign checks every other
+# executable in Contents/MacOS when it signs the main one, so the host goes last.
+for name in pmux pmuxd pmux-attach pmux-mcp prismattyc pmux-activity-monitor prismattyc-host; do
   binary="$MACOS/$name"
   is_macho "$binary" || { echo "not a Mach-O helper: $binary" >&2; exit 1; }
   sign_code "$binary"

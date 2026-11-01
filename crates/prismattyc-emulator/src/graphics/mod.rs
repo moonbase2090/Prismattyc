@@ -615,25 +615,24 @@ impl GraphicsState {
     ) -> Option<StoredImage> {
         let id = cmd.id;
         let frame = img.rgba.len();
-        if frame > MAX_FRAME_BYTES {
+        if frame > MAX_FRAME_BYTES || frame > MAX_RETAINED_BYTES {
             return None;
         }
-        if let Some(slot) = self.registry.iter_mut().find(|p| p.id == id && id != 0) {
-            self.retained_bytes = self.retained_bytes.saturating_sub(slot.rgba.len());
-            slot.rgba = Arc::from(img.rgba.into_boxed_slice());
-            slot.width = img.width;
-            slot.height = img.height;
-            slot.image_number = cmd.image_number;
-            self.retained_bytes += frame;
-            return Some(slot.clone());
+        if id != 0 {
+            if let Some(index) = self.registry.iter().position(|image| image.id == id) {
+                let replaced = self.registry.remove(index);
+                self.retained_bytes = self.retained_bytes.saturating_sub(replaced.rgba.len());
+            }
         }
-        while self.retained_bytes + frame > MAX_RETAINED_BYTES && !self.registry.is_empty() {
+        while self.retained_bytes.saturating_add(frame) > MAX_RETAINED_BYTES
+            && !self.registry.is_empty()
+        {
             let dropped = self.registry.remove(0);
             self.retained_bytes = self.retained_bytes.saturating_sub(dropped.rgba.len());
             self.images.retain(|p| p.id != dropped.id);
             self.virtuals.retain(|v| v.image_id != dropped.id);
         }
-        if self.retained_bytes + frame > MAX_RETAINED_BYTES {
+        if self.retained_bytes.saturating_add(frame) > MAX_RETAINED_BYTES {
             return None;
         }
         let stored = StoredImage {

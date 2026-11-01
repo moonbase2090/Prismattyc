@@ -4323,6 +4323,49 @@ mod tests {
         assert_eq!((placed.anchor_abs_line, placed.anchor_col), (2, 3));
     }
 
+    fn feed_raw_rgba_image(emulator: &mut Emulator, id: u32, width: u32, height: u32, value: u8) {
+        let len = usize::try_from(width)
+            .unwrap()
+            .checked_mul(usize::try_from(height).unwrap())
+            .and_then(|pixels| pixels.checked_mul(4))
+            .unwrap();
+        let rgba = vec![value; len];
+        let payload = graphics::base64::base64_encode_for_test(&rgba);
+        let mut sequence = format!("\x1b_Ga=t,i={id},f=32,s={width},v={height},q=2;").into_bytes();
+        sequence.extend_from_slice(payload.as_bytes());
+        sequence.extend_from_slice(b"\x1b\\");
+        let _ = emulator.feed(&sequence);
+    }
+
+    #[test]
+    fn raw_rgba_replacement_evicts_oldest_raster_to_stay_within_retained_cap() {
+        let mut emulator = Emulator::new(80, 24, 0);
+        for id in 1..=5 {
+            feed_raw_rgba_image(&mut emulator, id, 1000, 750, id as u8);
+        }
+        feed_raw_rgba_image(&mut emulator, 6, 500, 500, 6);
+        {
+            let state = emulator.export_state().unwrap();
+            assert_eq!(state.graphics.retained_bytes, 16_000_000);
+            assert_eq!(state.graphics.registry.len(), 6);
+        }
+
+        feed_raw_rgba_image(&mut emulator, 6, 1249, 750, 7);
+
+        let state = emulator.export_state().unwrap();
+        let ids: Vec<u32> = state
+            .graphics
+            .registry
+            .iter()
+            .map(|image| image.id)
+            .collect();
+        assert_eq!(ids, vec![2, 3, 4, 5, 6]);
+        assert_eq!(state.graphics.retained_bytes, 15_747_000);
+        let replacement = state.graphics.registry.last().unwrap();
+        assert_eq!((replacement.width, replacement.height), (1249, 750));
+        assert_eq!(replacement.rgba.first(), Some(&7));
+    }
+
     #[test]
     fn feed_unicode_virtual_placement_and_placeholder_cells() {
         const RED_1X1_PNG_B64: &str =

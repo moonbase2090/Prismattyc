@@ -92,13 +92,13 @@ def main():
         cli_env = dict(env, PMUX_SOCKET=str(endpoint))
         completed = subprocess.run([str(emitter), *map(str, arguments)],
                                    env=cli_env, cwd=scratch, capture_output=True,
-                                   text=True, timeout=5, check=True)
+                                   text=True, encoding='utf-8', timeout=5, check=True)
         return completed.stdout
 
     def emit(seat, *arguments, **options):
         return subprocess.run([str(emitter), '--socket', str(endpoint), 'activity-emit',
                                '--seat', seat, *map(str, arguments)],
-                              capture_output=True, text=True, env=env, timeout=8, **options)
+                              capture_output=True, text=True, encoding='utf-8', env=env, timeout=8, **options)
 
     def installed_hooks(file, seat, failure=False):
         arguments = ['--install-hooks', file]
@@ -160,7 +160,7 @@ def main():
         monitor_pane = snapshot['sessions'][0]['windows'][0]['panes'][0]['id']
         argv = [str(monitor), '--socket', str(endpoint)]
         command = subprocess.list2cmdline(argv) if windows else shlex.join(argv)
-        cli('send', monitor_pane, command, '--enter')
+        cli('send', monitor_pane, command, '--literal', '--enter')
         wait(lambda: 'Activity monitor' in screen())
         before = request('snapshot')['response']['snapshot']
         hook = {'hook_event_name': 'PreToolUse', 'session_id': 'demo-session',
@@ -170,7 +170,7 @@ def main():
         assert emitted.returncode == 0 and not emitted.stdout and not emitted.stderr
         live = wait(lambda: (text if 'worker-live' in (text := screen()) else None))
         assert 'command_started' in live
-        (out / 'live-terminal.txt').write_text(live)
+        (out / 'live-terminal.txt').write_text(live, encoding='utf-8')
         checks.append('live viewer changes after hook event without keyboard input')
         assert read()['records'][0]['event']['kind'] == 'command_started'
         assert 'do-not-retain' not in json.dumps(read())
@@ -196,7 +196,7 @@ def main():
         dispatched = subprocess.run(entry[1]['hooks'][0]['command'], shell=True, env=env,
                                     input=json.dumps({'hook_event_name': 'SessionStart',
                                                       'session_id': 'installed-session'}),
-                                    capture_output=True, text=True, timeout=8, check=True)
+                                    capture_output=True, text=True, encoding='utf-8', timeout=8, check=True)
         assert dispatched.stdout == '' and dispatched.stderr == ''
         assert any(r['event']['seat'] == 'worker-installed' for r in read()['records'])
         removed = emit('worker-installed', '--remove-hooks', settings)
@@ -254,9 +254,9 @@ def main():
         result['viewer_exit_observed'] = True
         checks.append('viewer exits and restores terminal')
         snap = subprocess.run([str(monitor), '--socket', str(endpoint), '--snapshot'],
-                              capture_output=True, text=True, env=env, timeout=5, check=True)
+                              capture_output=True, text=True, encoding='utf-8', env=env, timeout=5, check=True)
         assert 'worker-live' in snap.stdout and 'command_started' in snap.stdout
-        (out / 'viewer.txt').write_text(snap.stdout)
+        (out / 'viewer.txt').write_text(snap.stdout, encoding='utf-8')
 
         ack = publish(event(1))
         duplicate = publish(event(1))
@@ -266,12 +266,12 @@ def main():
         checks.append('bounded retry dedup and conflicting retry rejection')
         publish(event(2, 'worker-b'))
         listed = subprocess.run([str(monitor), '--socket', str(endpoint), '--seats'],
-                                capture_output=True, text=True, env=env, timeout=5, check=True)
+                                capture_output=True, text=True, encoding='utf-8', env=env, timeout=5, check=True)
         seats = json.loads(listed.stdout)
         assert seats['retained_history_only'] is True
         assert {'worker-live', 'worker-a', 'worker-b'} <= {s['seat'] for s in seats['seats']}
         recent = subprocess.run([str(monitor), '--socket', str(endpoint), '--recent', 'worker-b'],
-                                capture_output=True, text=True, env=env, timeout=5, check=True)
+                                capture_output=True, text=True, encoding='utf-8', env=env, timeout=5, check=True)
         records = json.loads(recent.stdout)['records']
         assert len(records) == 1 and records[0]['event']['event_id'] == 'event-2'
         (out / 'connector-seats.json').write_text(listed.stdout)

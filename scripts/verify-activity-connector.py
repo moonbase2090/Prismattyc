@@ -5,8 +5,8 @@
 Starts two pmuxd with --experimental-activity and one without, each on a private
 socket, publishes synthetic runtime events with the activity-emit example, and
 checks every connector command and error path, then pmux-mcp in full and
-activity-only modes, including a hosts file with a command endpoint. Runs on
-Unix and Windows. Writes OUT/result.json.
+activity-only modes, including a hosts file with a command endpoint. Written
+for Unix and Windows. Writes OUT/result.json.
 
     python3 scripts/verify-activity-connector.py --bins target/debug --out DIR
 """

@@ -92,7 +92,9 @@ python3 scripts/verify-activity-connector.py --bins target/debug --out /tmp/acti
 The driver starts its own feed-on and feed-off daemons on private sockets and
 publishes synthetic runtime events. It checks every `pmux activity` command, the
 cursor and reset rules, `tail` start and stop bounds, each JSON error code and
-exit status, and the three MCP tools over stdio. Require `status: PASS` and
+exit status, and the MCP tools over stdio in full and `--activity-only` mode,
+including a two-host hosts file with a command endpoint, rate limiting and an
+unreachable endpoint. On Windows, run it with the `.exe` binaries in `--bins`. Require `status: PASS` and
 `scratch_removed: true` in `result.json`, and keep `tail.jsonl`. The activity
 monitor's JSON modes share the query module, so also run `verify-activity.py`
 above after changing it.

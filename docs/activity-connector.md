@@ -99,46 +99,146 @@ until it is interrupted.
 
 ## Several hosts
 
-Each host is queried separately, through a shell on that host. There is no
-remote listener and no merge of feeds. The caller labels each result with
-`--host-label` and keeps separate cursors. Sequence numbers and epochs from
-different hosts have no common order. The same seat name on two hosts is two
-seats.
+Each host has its own daemon and feed. There is no remote listener and no merge
+of feeds. Sequence numbers and epochs from different hosts have no common
+order, and the same seat name on two hosts is two seats. Keep one cursor per
+host.
 
-The connector uses the cross-platform local socket client, so the same command
-is expected to work against a Windows pmuxd. This spike has not run it on
-Windows.
+From a shell, run `pmux activity` on each host, for example over SSH, and label
+the results:
 
-## MCP option
+```sh
+pmux activity seats --host-label build-mac
+ssh -T build-win pmux activity seats --host-label build-win
+```
 
-`pmux-mcp` adds three read-only tools: `pmux_activity_seats`,
-`pmux_activity_recent` (`seat`, optional `limit`) and `pmux_activity_poll`
-(optional `cursor`, `seat`, `limit`). Each runs `pmux activity` against the
-socket the server was started with (`PMUX_SOCKET`, else the default), with a
-10-second timeout. Tool results carry the same JSON. A nonzero exit becomes an
-MCP error result that keeps the JSON error code.
+An MCP client can use one `pmux-mcp` with a hosts file instead (see below).
 
-Design choices:
+## MCP server
 
-- **No socket in tool arguments.** The operator picks the endpoint when
-  configuring the server. A tool call cannot point the server at another socket.
-- **Polling, not streaming.** There is no tail tool. A call that stays open
-  holds the client and has no natural end. `pmux_activity_poll` returns one
-  bounded page and a cursor, so the client controls cadence and stays
-  stateless between calls.
-- **One host per server.** An MCP client that watches several hosts runs one
-  server per host. A shell-reachable host can run `pmux-mcp` over SSH.
+`pmux-mcp` serves the same reads as MCP tools:
 
-Before this is more than a prototype:
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `pmux_activity_hosts` | none | Configured host labels and their endpoint kind (`local` or `command`). Socket paths and commands are not shown. |
+| `pmux_activity_seats` | `host` | The `seats` result for that host. |
+| `pmux_activity_recent` | `seat`, `limit`, `host` | The `recent` result. |
+| `pmux_activity_poll` | `cursor`, `seat`, `limit`, `host` | The `poll` result. Pass `next_cursor` back on the next call. |
 
-| Work | Estimate |
+`host` may be left out when only one host is configured. Results are the JSON
+from `pmux activity` with the host label added. A failed call is an MCP error
+result whose text is the same JSON error object.
+
+There is no tail tool. A tool call that stays open holds the client and has
+no natural end. `pmux_activity_poll` returns one bounded page and a cursor, so
+the client controls the cadence.
+
+### Read-only mode
+
+```sh
+pmux-mcp --activity-only [--activity-hosts FILE]
+```
+
+`--activity-only` serves only the four tools above. It needs no agent
+identity, and it offers no mail, Space or pane tools, so an observer cannot
+send, claim or type anything. Without `--activity-only`, `pmux-mcp` keeps its
+usual identity and tools and adds the activity tools. `--supervise` restarts
+the server in the same mode if it exits.
+
+### Hosts file
+
+Without `--activity-hosts`, the server reads one host, `local`: the pmuxd
+named by `PMUX_SOCKET`, or the default socket. A hosts file names every host
+the tools may read:
+
+```toml
+# Minimum time between two calls to the same host. Default 1000.
+min_interval_ms = 1000
+
+[[host]]
+label = "build-mac"
+socket = "default"            # this user's default pmuxd
+
+[[host]]
+label = "build-win"
+command = ["ssh", "-T", "-o", "BatchMode=yes", "build-win", "pmux"]
+```
+
+Each `[[host]]` has a `label` (letters, digits, `-`, `_` or `.`, up to 64) and
+exactly one of:
+
+- `socket`: an absolute path to a local pmuxd socket, or `"default"`.
+- `command`: an argument list that runs `pmux` on that host. The server
+  appends `activity`, the query, and `--host-label LABEL`.
+
+The file is operator configuration. Tool arguments only choose among its
+labels. They never supply a path or a command. The server checks seats,
+cursors and limits before it builds a command line, because a command endpoint
+hands its arguments to a remote shell. A file may list up to 32 hosts.
+
+Calls to one host are spaced by `min_interval_ms`. A call that comes too soon
+fails with `rate_limited` and `retry_after_ms`. Hosts are limited separately.
+A socket query times out after 10 seconds, a command query after 20.
+
+### Reaching a Windows host
+
+A command endpoint can reach a Windows host over SSH:
+
+- The Windows host runs the OpenSSH server, and the SSH user is the user that
+  runs pmuxd there. Each Windows user has their own pmuxd and socket.
+- `pmux.exe` must be on that user's `PATH` in an SSH session, or the command
+  must name its full path.
+- Use key authentication and `BatchMode=yes`, so a password or host-key prompt
+  fails at once instead of waiting out the timeout.
+- pmuxd on that host must run with `--experimental-activity`.
+
+The reverse works too: a client on Windows can run `pmux-mcp.exe` with a
+hosts file whose command endpoint reaches the Mac over SSH.
+
+### Client configuration
+
+Configure the MCP client to start the server as a stdio command. On macOS or
+Linux:
+
+```json
+{
+  "command": "pmux-mcp",
+  "args": ["--activity-only", "--activity-hosts", "/path/to/activity-hosts.toml"]
+}
+```
+
+On Windows:
+
+```json
+{
+  "command": "C:\\path\\to\\pmux-mcp.exe",
+  "args": ["--activity-only", "--activity-hosts", "C:\\path\\to\\activity-hosts.toml"]
+}
+```
+
+The surrounding keys depend on the client. Add `--supervise` for clients that
+do not restart a stdio server that exits.
+
+### Errors added by the server
+
+Besides the `pmux activity` codes, a tool result can carry:
+
+| Code | Meaning |
 | --- | --- |
-| Endpoint allowlist: named hosts mapped to sockets in config, with the label added by the server | 0.5 day |
-| Per-call page and rate limits, and a minimum poll interval | 0.5 day |
-| Client setup notes for local and SSH-launched servers, and a client proof | 0.5 to 1 day |
+| `host_required` | Several hosts are configured and the call named none. |
+| `unknown_host` | The label is not in the hosts file. |
+| `rate_limited` | The previous call to this host was too recent. Wait `retry_after_ms`. |
+| `host_unreachable` | The endpoint returned no JSON: SSH failed, `pmux` is missing or too old, or no answer arrived before the timeout. |
 
-That is 1.5 to 2 days on top of the feed's v1, in line with the feed note's
-estimate for MCP packaging.
+### Limits
+
+- Windows: the connector and the server use the cross-platform local socket
+  client and process handling, and the verification driver is written to run
+  on Windows. It has not yet run there.
+- Rate limits apply per server process. Two servers for the same host are
+  limited separately.
+- `daemon_unreachable` and `feed_changed_retry` are matched from fixed client
+  error text. `feed_disabled` comes from a typed rejection.
 
 ## Verification
 
@@ -146,7 +246,12 @@ estimate for MCP packaging.
 cargo test -p prismattyc-mux --lib activity_query
 cargo test -p prismattyc-mux --bin pmux activity
 cargo test -p pmux-mcp
+cargo build -p prismattyc-mux --bins --example activity-emit -p pmux-mcp
+python3 scripts/verify-activity-connector.py --bins target/debug --out NEW_DIR
 ```
 
-The feed's `scripts/verify-activity.py` exercises the activity monitor's JSON
-modes, which now use the same `activity_query` module as `pmux activity`.
+The driver starts private daemons and checks every `pmux activity` command and
+error, the MCP tools in both modes, a two-host hosts file with a command
+endpoint, rate limiting, and an unreachable endpoint. It is written for Unix
+and Windows; so far it has run on macOS. The feed's `scripts/verify-activity.py` exercises the activity
+monitor's JSON modes, which use the same `activity_query` module.

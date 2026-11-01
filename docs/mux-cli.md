@@ -1256,8 +1256,11 @@ pmux space template create review-team another-project --launch --no-attach
 `pmux_space_role`, `pmux_space_link`, `pmux_space_attention`, and
 `pmux_template_save`, `pmux_template_list`, `pmux_template_preview`,
 `pmux_template_create`, and the read-only activity tools
-`pmux_activity_seats`, `pmux_activity_recent` and `pmux_activity_poll`. These
-tools use the same CLI operations and socket.
+`pmux_activity_hosts`, `pmux_activity_seats`, `pmux_activity_recent` and
+`pmux_activity_poll`. These tools use the same CLI operations and socket.
+`pmux-mcp --activity-only` serves only the activity tools and needs no identity;
+`--activity-hosts FILE` lets them read several hosts. See
+[the connector note](activity-connector.md).
 Template creation through MCP prepares the team without switching a desktop
 view. Its `launch` parameter defaults to false.
 

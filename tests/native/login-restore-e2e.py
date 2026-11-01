@@ -183,7 +183,7 @@ def stable_replay_command(f):
     old_binary = tools / "fixture-agent-1.2.3"
     new_binary = tools / "fixture-agent-2.0.0"
     stable_binary = tools / "fixture-agent"
-    shutil.copy2("/bin/sleep", old_binary)
+    old_binary.symlink_to("/bin/sleep")
     stable_binary.symlink_to(old_binary.name)
     f.env["PATH"] = str(tools) + ":" + f.env["PATH"]
 
@@ -209,7 +209,7 @@ def stable_replay_command(f):
     assert session["windows"][0]["panes"][0]["resume_command"] == "fixture-agent 117"
 
     f.kill(daemon)
-    shutil.copy2("/bin/sleep", new_binary)
+    new_binary.symlink_to("/bin/sleep")
     stable_binary.unlink()
     stable_binary.symlink_to(new_binary.name)
     old_binary.unlink()

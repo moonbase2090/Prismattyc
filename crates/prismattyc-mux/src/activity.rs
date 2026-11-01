@@ -349,6 +349,54 @@ mod tests {
     }
 
     #[test]
+    fn activity_client_rejects_wrong_requests_headers_and_oversized_payloads() {
+        let socket = Path::new("unused-activity-test.sock");
+        assert_eq!(
+            exchange(
+                socket,
+                ControlRequest::Ping {
+                    version: 1,
+                    request_id: 1
+                }
+            )
+            .unwrap_err()
+            .to_string(),
+            "expected an activity request"
+        );
+        for (version, request_id) in [(2, 1), (1, 0)] {
+            assert_eq!(
+                exchange(
+                    socket,
+                    ControlRequest::ReadActivity {
+                        version,
+                        request_id,
+                        cursor: None,
+                        limit: 1,
+                    }
+                )
+                .unwrap_err()
+                .to_string(),
+                "invalid activity request header"
+            );
+        }
+        let mut oversized = event(1);
+        oversized.run_id = "x".repeat(8192);
+        assert_eq!(
+            exchange(
+                socket,
+                ControlRequest::PublishActivity {
+                    version: 1,
+                    request_id: 1,
+                    event: oversized,
+                }
+            )
+            .unwrap_err()
+            .to_string(),
+            "activity request exceeds 8192 bytes"
+        );
+    }
+
+    #[test]
     fn activity_pages_resume_without_skipping_and_empty_poll_keeps_cursor() {
         let mut feed = ActivityFeed::new().unwrap();
         for id in 1..=3 {

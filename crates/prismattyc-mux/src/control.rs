@@ -12579,6 +12579,7 @@ function Read-Exact([int]$Count) {
         needle: &str,
     ) -> PaneContent {
         let deadline = Instant::now() + Duration::from_secs(3);
+        let mut last = None;
         while Instant::now() < deadline {
             let content = pane_content(request(
                 stream,
@@ -12593,9 +12594,10 @@ function Read-Exact([int]$Count) {
             if content.lines.join("\n").contains(needle) {
                 return content;
             }
+            last = Some(content);
             thread::sleep(Duration::from_millis(10));
         }
-        panic!("pane {pane_id} never contained {needle:?}");
+        panic!("pane {pane_id} never contained {needle:?}; last content: {last:?}");
     }
 
     fn env_report_spawn() -> SpawnSpec {

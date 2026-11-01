@@ -67,6 +67,10 @@
         <File Source="$(var.Payload)\bin\pmux-mcp.exe" />
         <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="pmux-mcp" Type="integer" Value="1" KeyPath="yes" />
       </Component>
+      <Component Id="BinPmuxActivityMonitor" Guid="89f7d348-0007-5d1a-b680-4f42c74fe477">
+        <File Source="$(var.Payload)\bin\pmux-activity-monitor.exe" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="pmux-activity-monitor" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
       <Component Id="BinPrismattyc" Guid="457834c4-2029-5583-ba76-3d28a39f83c7">
         <File Source="$(var.Payload)\bin\prismattyc.exe" />
         <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="prismattyc" Type="integer" Value="1" KeyPath="yes" />
@@ -115,6 +119,11 @@
         <File Source="$(var.Payload)\cmd\pmux-mcp.exe" />
         <RemoveFile Id="RemoveOldCmdPmuxMcp" Name="pmux-mcp.cmd" On="both" />
         <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="cmd-pmux-mcp" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="CmdPmuxActivityMonitor" Guid="4c380097-9d3a-534a-b262-e822f4811337">
+        <File Source="$(var.Payload)\cmd\pmux-activity-monitor.exe" />
+        <RemoveFile Id="RemoveOldCmdPmuxActivityMonitor" Name="pmux-activity-monitor.cmd" On="both" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="cmd-pmux-activity-monitor" Type="integer" Value="1" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 

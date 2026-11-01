@@ -24,8 +24,18 @@ changes a session, or consumes mailbox messages. Activity has a separate sequenc
 so a busy producer cannot evict geometry or controller-lease events.
 
 The two new requests reuse the existing same-user local control socket on Unix
-and Windows. The daemon rejects both requests until started with
-`--experimental-activity`. The native `pmux activity-emit` command installs hooks only into an explicitly
+and Windows. The daemon rejects both requests unless it was started with
+`--experimental-activity` or with `experimental_activity = true` under `[mux]`
+in the Prismattyc config file. pmuxd watches the config file (twice a second,
+by modification time and size, plus change time and inode on Unix) and applies
+that key live: turning it on starts
+a fresh feed with a new boot epoch, and turning it off drops the ring, so
+requests return `activity_disabled`. pmuxd is never restarted, and sessions,
+panes and mail are untouched. Only a readable file with an explicit value
+changes the feed: a missing, empty, unreadable or invalid config (for example,
+mid-save) leaves the feed as it is and is retried until it reads cleanly, so
+deleting the file does not stop the feed; set the key to `false`. `--experimental-activity` keeps the feed on for that daemon's
+life whatever the key says. The native `pmux activity-emit` command installs hooks only into an explicitly
 selected file. Starting the daemon or viewer never changes hook configuration.
 
 A disabled feed returns the control error code `activity_disabled`, distinct

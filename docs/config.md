@@ -295,6 +295,8 @@ remote_size = "latest"
 # shell = "pwsh.exe"
 # Allow mixed-case and spaced session labels. true|false; default false.
 allow_mixed_case_session_names = false
+# Serve the metadata-only activity feed for pmux-activity-monitor; pmuxd applies changes live, without a restart. true|false; default false.
+experimental_activity = false
 
 [keys]
 # Host actions. An entry replaces that action's default chords.
@@ -870,6 +872,7 @@ instance = "default"                 # $XDG_RUNTIME_DIR/prismattyc/pmux.sock
 # space_open_runs_commands = "agents"  # agents|all|none; `pmux space open --no-run` skips
 # remote_size = "latest"               # latest|host; TTY attach fits, detach restores host
 # allow_mixed_case_session_names = false  # default false; permit mixed-case or spaced session labels
+# experimental_activity = false          # default false; live: pmuxd starts or stops the activity feed, no restart
 # shell = "pwsh.exe"                    # unset: COMSPEC or cmd.exe on Windows
 ```
 

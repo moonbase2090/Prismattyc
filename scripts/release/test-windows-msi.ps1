@@ -181,7 +181,7 @@ function Get-HklmPrismattycIcons {
 function Assert-Installed {
     param([string]$VersionText, [string]$ProductVersion, [bool]$PathExpected)
     $install = Get-PrismattycInstall
-    foreach ($name in @('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host')) {
+    foreach ($name in @('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host', 'pmux-activity-monitor')) {
         $path = Join-Path $install.Bin "$name.exe"
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing $path" }
     }
@@ -189,7 +189,7 @@ function Assert-Installed {
         $path = Join-Path $install.Root $name
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing $path" }
     }
-    foreach ($name in @('prismattyc', 'pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp')) {
+    foreach ($name in @('prismattyc', 'pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'pmux-activity-monitor')) {
         $forwarder = Join-Path $install.Cmd "$name.exe"
         if (-not (Test-Path -LiteralPath $forwarder -PathType Leaf)) { throw "Missing $forwarder" }
         $oldShim = Join-Path $install.Cmd "$name.cmd"
@@ -361,7 +361,7 @@ function Get-MsiProductVersion {
     return $value
 }
 
-$PayloadExecutables = @('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host')
+$PayloadExecutables = @('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host', 'pmux-activity-monitor')
 
 function Get-MsiPayloadHashes {
     # An administrative install extracts the package's files without installing it.

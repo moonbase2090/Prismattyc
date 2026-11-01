@@ -2551,6 +2551,17 @@ impl ControlPlane {
         Ok(())
     }
 
+    /// Stop the activity feed and drop its ring. Later publishes and reads
+    /// get `activity_disabled`; sessions and mail are untouched.
+    pub fn disable_activity(&mut self) {
+        self.activity = None;
+    }
+
+    /// Whether the activity feed is on.
+    pub fn activity_enabled(&self) -> bool {
+        self.activity.is_some()
+    }
+
     /// `[mux] remote_size` policy. Default is [`RemoteSizePolicy::Latest`].
     pub fn set_remote_size(&mut self, policy: RemoteSizePolicy) {
         self.remote_size = policy;

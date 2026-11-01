@@ -40,7 +40,7 @@ version="$(cat VERSION)"
 mkdir -p "$prefix"
 exec 9>"$prefix/.prismattyc-install.lock"
 flock -n 9 || { echo 'Another Prismattyc installation is running.' >&2; exit 1; }
-for name in pmux pmuxd pmux-attach pmux-mcp prismattyc prismattyc-host; do
+for name in pmux pmuxd pmux-attach pmux-mcp prismattyc prismattyc-host pmux-activity-monitor; do
   ./bin/"$name" --version >/dev/null
   if [[ -e "$prefix/bin/$name" || -L "$prefix/bin/$name" ]]; then
     [[ -f "$prefix/bin/$name" && ! -L "$prefix/bin/$name" ]] &&
@@ -56,7 +56,7 @@ trap 'rm -rf -- "$stage"' EXIT
 install -m 755 bin/* "$stage/"
 # Hard links publish complete files without replacing a concurrent writer.
 # Real executables in bin also let pmux update find its installation directory.
-for name in pmux pmuxd pmux-attach pmux-mcp prismattyc prismattyc-host; do
+for name in pmux pmuxd pmux-attach pmux-mcp prismattyc prismattyc-host pmux-activity-monitor; do
   if [[ ! -e "$prefix/bin/$name" ]]; then
     ln "$stage/$name" "$prefix/bin/$name"
   fi

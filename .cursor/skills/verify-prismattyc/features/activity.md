@@ -1,7 +1,9 @@
 # Agent activity
 
 The experimental feed observes headless seats without creating panes. It has a
-separate daemon-owned ring and an off-by-default `--experimental-activity` flag.
+separate daemon-owned ring. It is off by default; `--experimental-activity` or
+`[mux] experimental_activity = true` turns it on, live: pmuxd watches the
+config and starts or stops the feed without a restart.
 See [the design note](../../../../docs/agent-activity-feed.md) for schema and limits.
 
 ## Build and drive
@@ -79,3 +81,21 @@ The native transport and driver support Unix and Windows. Require an actual
 Windows runtime drive to claim Windows proof. Cross-compilation is insufficient.
 Runtime lifecycle proof does not establish every tool event or hosted-tool
 coverage. The feed must remain off by default.
+
+## Config key and release packaging
+
+`cargo test -p prismattyc-mux --test activity_config --locked` starts real
+pmuxd processes with a private `PRISMATTYC_CONFIG`. It checks the feed is off
+by default and with `false`, on with `true` and with the flag, and that on a
+live daemon flipping the key off, on, off and on again starts and stops the
+feed (a fresh boot epoch each time) with the same sessions and panes. A broken
+config, or the flag, keeps a running feed on.
+
+For a packaged build, use a clean VM: install the release artifact, start the
+app (or `pmux up`), and run `pmux-activity-monitor --json` from PATH; it reports
+the feed disabled. Without restarting anything, set `experimental_activity =
+true` under `[mux]` (settings panel or config file) and run it again: it must
+print a page. Set it back to `false`: `--json` reports the feed disabled again.
+List sessions and read the mailbox before and after to show that the session,
+its pane and its letters survive with the same pmuxd PID. Never point this at an
+operator's daemon.

@@ -128,8 +128,11 @@ USAGE:
     pmuxd [--socket PATH] [--cols N] [--rows N] [--experimental-rich] [--experimental-activity] [--restore-workspace] [PROGRAM [ARGS...]]
     pmuxd --socket /absolute/path.sock -- /bin/bash -l
 
-The activity feed is off by default; --experimental-activity enables bounded,
-process-local activity history for explicit publishers and observers.
+The activity feed is off by default; --experimental-activity, or
+experimental_activity = true under [mux] in the Prismattyc config file, enables
+bounded, process-local activity history for explicit publishers and observers.
+pmuxd watches the config file and starts or stops the feed live when the key
+changes, without a restart; the flag keeps it on for this daemon's life.
 
 The server owns PTYs, emulators, topology, leases, and authoritative geometry.
 Clients attach over a same-user 0600 Unix socket. Exiting a client does not
@@ -196,9 +199,15 @@ fn main() -> Result<()> {
             prismattyc_mux::attach_tabs::save(&path, view)?;
         }
     }
-    let remote_size = load_mux_section(&prism_config_path())
-        .ok()
-        .and_then(|file| resolve_remote_size(None, &file).ok())
+    // An unreadable config keeps every [mux] default, as before. The
+    // fingerprint comes first so an edit during startup still reaches the
+    // activity watcher.
+    let config_path = prism_config_path();
+    let config_seen = prismattyc_mux::activity_config::Fingerprint::of(&config_path);
+    let mux_file = load_mux_section(&config_path).ok();
+    let remote_size = mux_file
+        .as_ref()
+        .and_then(|file| resolve_remote_size(None, file).ok())
         .unwrap_or_default();
     plane.set_remote_size(remote_size);
     // The mailbox already persists independently of the daemon workspace.
@@ -211,7 +220,7 @@ fn main() -> Result<()> {
             .set_pane_log_path(path)
             .context("start pane-log checkpoint worker")?;
     }
-    if cli.experimental_activity {
+    if activity_enabled(&cli, mux_file.as_ref()) {
         plane.enable_activity()?;
     }
     let server = ControlServer::bind(&cli.socket, plane)
@@ -236,9 +245,18 @@ fn main() -> Result<()> {
         prismattyc_mux::workspace::Checkpointer::start(server.plane(), cli.socket.clone())?;
     let space_autosave =
         prismattyc_mux::space_autosave::Worker::start(server.plane(), cli.socket.clone())?;
+    // [mux] experimental_activity applies live: no restart, sessions untouched.
+    let activity_config = prismattyc_mux::activity_config::Watcher::start(
+        server.plane(),
+        config_path,
+        cli.experimental_activity,
+        config_seen,
+        prismattyc_mux::activity_config::POLL,
+    )?;
     println!("{}", server.path().display());
     server.wait_shutdown();
     prismattyc_mux::private_fs::write(&stopped_path, b"intentional shutdown\n")?;
+    drop(activity_config);
     drop(space_autosave);
     drop(checkpoint);
     drop(server);
@@ -264,6 +282,12 @@ fn ensure_default_space(socket: &std::path::Path, adopt: Option<&str>) {
 
 /// Name of the session a daemon starts with when nothing is restored.
 const BOOTSTRAP_SESSION: &str = "default";
+
+/// The flag or `[mux] experimental_activity = true` turns the feed on at
+/// start. After that, the activity config watcher applies edits live.
+fn activity_enabled(cli: &Cli, file: Option<&prismattyc_mux::MuxSection>) -> bool {
+    cli.experimental_activity || file.is_some_and(|file| file.experimental_activity())
+}
 
 fn bootstrap_plane(cli: &Cli) -> Result<ControlPlane> {
     let domain = Domain::bootstrap(BOOTSTRAP_SESSION)?;

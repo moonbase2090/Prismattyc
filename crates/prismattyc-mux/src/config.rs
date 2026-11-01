@@ -40,9 +40,17 @@ pub struct MuxSection {
     /// Allow user-entered session labels to preserve mixed case and spaces.
     /// Default false to keep session labels in the mailbox-address format.
     pub allow_mixed_case_session_names: Option<bool>,
+    /// Serve the metadata-only activity feed. Default false. pmuxd watches the
+    /// config and starts or stops the feed live, without a restart.
+    pub experimental_activity: Option<bool>,
 }
 
 impl MuxSection {
+    /// The activity feed is opt-in. `pmuxd --experimental-activity` also turns it on.
+    pub fn experimental_activity(&self) -> bool {
+        self.experimental_activity.unwrap_or(false)
+    }
+
     /// Mixed-case session labels are opt-in.
     pub fn allow_mixed_case_session_names(&self) -> bool {
         self.allow_mixed_case_session_names.unwrap_or(false)
@@ -109,16 +117,22 @@ pub fn load_mux_section(path: &Path) -> Result<MuxSection> {
         }
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
+    parse_mux_section(&raw, path)
+}
+
+/// Parse the `[mux]` table from config text already read from `path`.
+/// Empty text is defaults. Unknown `[mux]` keys warn and are ignored.
+pub fn parse_mux_section(raw: &str, path: &Path) -> Result<MuxSection> {
     if raw.trim().is_empty() {
         return Ok(MuxSection::default());
     }
     for warning in
-        mux_unknown_key_warnings(&raw).with_context(|| format!("parse {}", path.display()))?
+        mux_unknown_key_warnings(raw).with_context(|| format!("parse {}", path.display()))?
     {
         eprintln!("prismattyc: warning: {warning}");
     }
     let parsed: FileWithMux =
-        toml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
+        toml::from_str(raw).with_context(|| format!("parse {}", path.display()))?;
     Ok(parsed.mux.unwrap_or_default())
 }
 
@@ -312,6 +326,12 @@ pub const MUX_KEYS: &[MuxKeySpec] = &[
     MuxKeySpec {
         name: "allow_mixed_case_session_names",
         doc: "Allow mixed-case and spaced session labels",
+        range: "true|false; default false",
+        kind: MuxKeyKind::Bool(false),
+    },
+    MuxKeySpec {
+        name: "experimental_activity",
+        doc: "Serve the metadata-only activity feed for pmux-activity-monitor; pmuxd applies changes live, without a restart",
         range: "true|false; default false",
         kind: MuxKeyKind::Bool(false),
     },
@@ -903,6 +923,7 @@ mod tests {
                 space_open_runs_commands: None,
                 remote_size: None,
                 allow_mixed_case_session_names: None,
+                experimental_activity: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(Some("other".into()), None, &file).unwrap();
@@ -935,6 +956,7 @@ mod tests {
                 space_open_runs_commands: None,
                 remote_size: None,
                 allow_mixed_case_session_names: None,
+                experimental_activity: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(
@@ -958,6 +980,7 @@ mod tests {
                 space_open_runs_commands: None,
                 remote_size: None,
                 allow_mixed_case_session_names: None,
+                experimental_activity: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
@@ -977,6 +1000,7 @@ mod tests {
                 space_open_runs_commands: None,
                 remote_size: None,
                 allow_mixed_case_session_names: None,
+                experimental_activity: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
@@ -995,6 +1019,7 @@ mod tests {
                 space_open_runs_commands: None,
                 remote_size: None,
                 allow_mixed_case_session_names: None,
+                experimental_activity: None,
                 shell: None,
             };
             assert!(resolve_mux_target(None, None, &file).is_err());

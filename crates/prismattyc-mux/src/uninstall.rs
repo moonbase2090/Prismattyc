@@ -37,15 +37,17 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-/// The six shipped executables. Kept in sync with
-/// [`crate::release_update`]'s `BINARIES`.
-pub const BINARIES: [&str; 6] = [
+/// The shipped executables: [`crate::release_update`]'s `BINARIES` plus
+/// `pmux-activity-monitor`, which release packages carry but the per-binary
+/// updater does not manage yet.
+pub const BINARIES: [&str; 7] = [
     "prismattyc",
     "prismattyc-host",
     "pmux",
     "pmuxd",
     "pmux-attach",
     "pmux-mcp",
+    "pmux-activity-monitor",
 ];
 
 /// Which OS an inventory item applies to. An item only lands in the plan when
@@ -395,7 +397,8 @@ pub fn inventory(dirs: &Dirs) -> Vec<Item> {
             // On macOS, `pmux` may be an app-managed symlink or an independent
             // Cargo install. Only the symlink with its ownership record is
             // removed; never delete an arbitrary `pmux` at this path.
-            if os == Os::Macos && bin == "pmux" {
+            // `pmux-activity-monitor` is linked the same way (see path_shim).
+            if os == Os::Macos && matches!(bin, "pmux" | "pmux-activity-monitor") {
                 continue;
             }
             let name = crate::platform::executable_name(bin);
@@ -531,6 +534,7 @@ pub fn inventory(dirs: &Dirs) -> Vec<Item> {
             "pmuxd",
             "pmux-attach",
             "pmux-mcp",
+            "pmux-activity-monitor",
             "pmux-pane-write",
         ] {
             push(
@@ -969,13 +973,15 @@ fn removal_plan(dirs: &Dirs) -> Vec<Item> {
             candidates.sort();
             candidates.dedup();
             for directory in candidates {
-                let link = directory.join("pmux");
-                if crate::path_shim::is_managed_link_or_absent(&link) {
-                    items.push(Item {
-                        path: link,
-                        category: Category::Binaries,
-                        what: "app-managed pmux PATH link".to_string(),
-                    });
+                for name in crate::path_shim::LINKED {
+                    let link = directory.join(name);
+                    if crate::path_shim::is_managed_link_or_absent(&link) {
+                        items.push(Item {
+                            path: link,
+                            category: Category::Binaries,
+                            what: format!("app-managed {name} PATH link"),
+                        });
+                    }
                 }
             }
         }
@@ -989,14 +995,14 @@ fn removal_plan(dirs: &Dirs) -> Vec<Item> {
 }
 
 fn remove_item(item: &Item) -> Outcome {
-    if item.what == "app-managed pmux PATH link" {
+    if item.what.starts_with("app-managed ") && item.what.ends_with(" PATH link") {
         #[cfg(any(target_os = "macos", all(test, unix)))]
         {
             return match crate::path_shim::remove_owned_link(&item.path) {
                 Ok(crate::path_shim::RemoveOutcome::Removed) => Outcome::Removed,
                 Ok(crate::path_shim::RemoveOutcome::Absent) => Outcome::Absent,
                 Ok(crate::path_shim::RemoveOutcome::Preserved) => Outcome::Failed {
-                    why: "the pmux path changed after the plan was printed; it was left untouched"
+                    why: "the PATH link changed after the plan was printed; it was left untouched"
                         .to_string(),
                     fix: format!("inspect {} and rerun uninstall", item.path.display()),
                 },
@@ -1131,6 +1137,44 @@ mod tests {
         assert!(!mac
             .iter()
             .any(|i| i.path.ends_with("prismattyc-host.desktop")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn macos_plan_removes_the_owned_monitor_path_link() {
+        let tmp = Scratch::new("monitor-shim-plan");
+        let dirs = fake_dirs(tmp.path(), Os::Macos);
+        let target = tmp
+            .path()
+            .join("Applications/Prismattyc.app/Contents/MacOS/pmux-activity-monitor");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"bundled monitor").unwrap();
+        let link = tmp.path().join("home/.local/bin/pmux-activity-monitor");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let marker = link
+            .parent()
+            .unwrap()
+            .join(".pmux-activity-monitor-prismattyc-shim.json");
+        std::fs::write(
+            &marker,
+            serde_json::to_vec(&serde_json::json!({"version": 1, "target": target})).unwrap(),
+        )
+        .unwrap();
+
+        let items = removal_plan(&dirs);
+        let shim = items
+            .iter()
+            .find(|item| item.what == "app-managed pmux-activity-monitor PATH link")
+            .expect("owned monitor link belongs in the plan");
+        assert_eq!(shim.path, link);
+        assert!(!items
+            .iter()
+            .any(|item| item.what == "app-managed pmux PATH link"));
+        assert!(matches!(remove_item(shim), Outcome::Removed));
+        assert!(!link.exists());
+        assert!(!marker.exists());
+        assert!(target.exists());
     }
 
     #[cfg(unix)]

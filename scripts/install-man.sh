@@ -53,7 +53,7 @@ pick_dir() {
 
 DEST_DIR="${PMUX_MAN_DIR:-$(pick_dir)}"
 mkdir -p "$DEST_DIR"
-for name in prismattyc prismattyc-host pmux pmuxd pmux-attach pmux-mcp; do
+for name in prismattyc prismattyc-host pmux pmuxd pmux-attach pmux-mcp pmux-activity-monitor; do
   if [[ -n "${PRISMATTYC_BINS:-}" ]]; then
     binary="$PRISMATTYC_BINS/$name"
   else

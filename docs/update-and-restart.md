@@ -239,8 +239,9 @@ follows your environment overrides.
 
 | Category | Paths |
 | --- | --- |
-| Binaries / launchers | `pmuxd`, `pmux-attach`, `pmux-mcp`, `prismattyc`, and `prismattyc-host` in `~/.local/bin` and `$CARGO_HOME/bin` (default `~/.cargo/bin`). Linux and Windows also remove `pmux` from those directories. |
+| Binaries / launchers | `pmuxd`, `pmux-attach`, `pmux-mcp`, `prismattyc`, and `prismattyc-host` in `~/.local/bin` and `$CARGO_HOME/bin` (default `~/.cargo/bin`). Linux and Windows also remove `pmux` and `pmux-activity-monitor` from those directories. |
 | App-managed `pmux` link (macOS) | `~/.local/bin/pmux` and `/usr/local/bin/pmux` only when each is a symlink to the app's bundled executable with a matching `.pmux-prismattyc-shim.json` record. Other `pmux` files and links, including `~/.cargo/bin/pmux`, are left alone. |
+| App-managed `pmux-activity-monitor` link (macOS) | The same directories, only when the link points at the app's bundled monitor with a matching `.pmux-activity-monitor-prismattyc-shim.json` record. |
 | App bundle (macOS) | `~/Applications/Prismattyc.app`, `/Applications/Prismattyc.app` |
 | Install tree (Windows) | `%LOCALAPPDATA%\Programs\Prismattyc`, `%LOCALAPPDATA%\Prismattyc\run` |
 | Self-update store | `$XDG_DATA_HOME/prismattyc/updates` (versions, `current`/`previous`/`legacy` links, `installation.json`, `update.lock`) |

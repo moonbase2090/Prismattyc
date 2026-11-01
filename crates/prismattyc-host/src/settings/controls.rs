@@ -172,6 +172,7 @@ fn timing(key: &str) -> &'static str {
         "mux.allow_mixed_case_session_names" => "Next session name",
         "mux.space_open_runs_commands" => "Next Space open",
         "mux.remote_size" => "Next daemon start; no automatic restart",
+        "mux.experimental_activity" => "Live: pmuxd applies it within a second; no restart",
         "mux.shell" => "Next shell selection",
         "window_opacity" | "chrome_opacity" => {
             "Live with alpha support; opaque non-macOS windows may need restart"
@@ -346,6 +347,7 @@ pub(super) fn catalog() -> Vec<Control> {
         ),
         row(Section::Mux, "mux.remote_size", choice("mux.remote_size")),
         row(Section::Mux, "mux.shell", Kind::Text),
+        row(Section::Mux, "mux.experimental_activity", Kind::Bool),
     ];
     for row in &mut rows {
         if matches!(row.kind, Kind::Pair) {

@@ -12,8 +12,8 @@ import tempfile
 import zipfile
 from release_version import parse_release_version, reports_release_version
 
-BINARIES = ('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host')
-CMD_FORWARDERS = ('prismattyc', 'pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp')
+BINARIES = ('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host', 'pmux-activity-monitor')
+CMD_FORWARDERS = ('prismattyc', 'pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'pmux-activity-monitor')
 
 
 def digest(path):
@@ -131,8 +131,9 @@ def main():
             'Extract the complete archive into a user-owned directory when you are not using the MSI.\n'
             'Launch bin\\prismattyc-host.exe for a window. Do not add bin to PATH.\n'
             'The cmd directory contains prismattyc.exe, pmux.exe, pmuxd.exe,\n'
-            'pmux-attach.exe, and pmux-mcp.exe. Each one starts the executable\n'
-            'of the same name in bin. There is no prismattyc-host.exe in cmd.\n'
+            'pmux-attach.exe, pmux-mcp.exe, and pmux-activity-monitor.exe. Each\n'
+            'one starts the executable of the same name in bin. There is no\n'
+            'prismattyc-host.exe in cmd.\n'
             'The MSI prepends the cmd directory to the user PATH and starts pmuxd.\n'
             'Pass ADDTOPATH=0 to leave PATH unchanged. Uninstall removes that\n'
             'PATH entry and the logon registration for pmuxd.\n'

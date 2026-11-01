@@ -4,7 +4,7 @@ set -euo pipefail
 bin_dir="${1:?Usage: smoke-linux-al2023.sh BIN_DIR}"
 bin_dir="$(cd "$bin_dir" && pwd)"
 
-for name in pmux pmuxd pmux-attach pmux-mcp prismattyc prismattyc-host; do
+for name in pmux pmuxd pmux-attach pmux-mcp prismattyc prismattyc-host pmux-activity-monitor; do
   if [[ ! -x "$bin_dir/$name" ]]; then
     printf 'missing executable: %s/%s\n' "$bin_dir" "$name" >&2
     exit 1
@@ -19,7 +19,7 @@ set -euo pipefail
 
 dnf --assumeyes install binutils
 
-for name in pmux pmuxd pmux-attach pmux-mcp prismattyc prismattyc-host; do
+for name in pmux pmuxd pmux-attach pmux-mcp prismattyc prismattyc-host pmux-activity-monitor; do
   binary="/release/$name"
   max_version="$(objdump -T "$binary" \
     | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
@@ -38,4 +38,5 @@ printf '\nAmazon Linux 2023 smoke commands (%s)\n' "$(uname -m)"
 /release/prismattyc --version
 /release/pmux --version
 /release/pmuxd --version
+/release/pmux-activity-monitor --version
 AL2023

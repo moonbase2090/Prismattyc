@@ -110,7 +110,7 @@ When the only host has nothing to show, the pane explains why instead of showing
 
 | Situation | What the pane says |
 | --- | --- |
-| The feed is off (the default) | Activity feed is disabled for this daemon. App-managed enablement is not available yet; the developer path is a separate pmuxd started with `--experimental-activity`, passed with `--socket`. |
+| The feed is off (the default) | Activity feed is disabled for this daemon. Turn it on with `experimental_activity = true` under `[mux]` in the Prismattyc config or the settings panel; the running pmuxd picks it up within a second, and the view connects by itself. |
 | The pmuxd predates the feed | This pmuxd has no activity feed, and updating Prismattyc does not turn it on by itself. |
 | No pmuxd answers | Can't reach pmuxd; start Prismattyc or run `pmux up`. |
 

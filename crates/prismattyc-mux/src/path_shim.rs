@@ -1,4 +1,5 @@
-//! Installs and removes the app-bundled `pmux` PATH link on macOS.
+//! Installs and removes the app-bundled `pmux` and `pmux-activity-monitor`
+//! PATH links on macOS. Each link has its own ownership record beside it.
 
 use std::fs;
 use std::io::{self, Write};
@@ -9,6 +10,11 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 const PMUX: &str = "pmux";
+/// The activity monitor ships beside `pmux` in the bundle (PT-99).
+pub(crate) const ACTIVITY_MONITOR: &str = "pmux-activity-monitor";
+/// Executables the app links onto PATH. `pmux` is required; the rest are best effort.
+pub(crate) const LINKED: [&str; 2] = [PMUX, ACTIVITY_MONITOR];
+/// The `pmux` record keeps its original name so existing installs stay owned.
 const MARKER: &str = ".pmux-prismattyc-shim.json";
 const MARKER_VERSION: u8 = 1;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -65,6 +71,31 @@ pub(crate) fn ensure_app_bundle(bundle: &Path) -> Result<()> {
     for warning in report.warnings {
         eprintln!("pmux: warning: {warning}");
     }
+    // The monitor link never blocks pmux: an older bundle has no monitor, and
+    // a conflict only warns.
+    let monitor = bundle.join("Contents/MacOS").join(ACTIVITY_MONITOR);
+    if is_executable(&monitor) {
+        match ensure_link_with(
+            &monitor,
+            &system_bin,
+            &local_bin,
+            &path_entries,
+            |directory| system_bin_allowed && dir_is_writable(directory),
+        ) {
+            // pmux already said when the link directory is not on PATH; an
+            // earlier monitor on PATH is still worth a warning.
+            Ok(report) => {
+                for warning in report
+                    .warnings
+                    .into_iter()
+                    .filter(|warning| !warning.contains("that directory is not on PATH"))
+                {
+                    eprintln!("pmux: warning: {warning}");
+                }
+            }
+            Err(error) => eprintln!("pmux: warning: {error:#}"),
+        }
+    }
     Ok(())
 }
 
@@ -91,15 +122,16 @@ fn ensure_link_with(
     path_entries: &[PathBuf],
     system_writable: impl Fn(&Path) -> bool,
 ) -> Result<InstallReport> {
-    anyhow::ensure!(target.is_absolute(), "app pmux path must be absolute");
+    anyhow::ensure!(target.is_absolute(), "app executable path must be absolute");
     anyhow::ensure!(
-        is_app_pmux(target),
-        "app pmux path must be inside Prismattyc.app"
+        is_app_binary(target),
+        "app executable path must be a linked executable inside Prismattyc.app"
     );
     anyhow::ensure!(
         is_executable(target),
-        "app pmux is missing or not executable"
+        "app executable is missing or not executable"
     );
+    let name = target.file_name().context("app executable name")?;
 
     let use_system_bin = system_writable(system_bin) && system_bin.is_dir();
     let mut candidate_dirs = Vec::new();
@@ -126,7 +158,7 @@ fn ensure_link_with(
             continue;
         }
 
-        let link = directory.join(PMUX);
+        let link = directory.join(name);
         if managed_or_missing_link(&link) {
             if fs::read_link(&link).is_ok_and(|existing| existing == target) {
                 let mut warnings = path_warnings(&link, path_entries);
@@ -163,7 +195,11 @@ fn ensure_link_with(
                     );
                     return Ok(InstallReport { link, warnings });
                 }
-                conflicts.push(format!("{} already points to another pmux", link.display()));
+                conflicts.push(format!(
+                    "{} already points to another {}",
+                    link.display(),
+                    name.to_string_lossy()
+                ));
                 continue;
             }
             Ok(_) => {
@@ -227,8 +263,9 @@ fn ensure_link_with(
         return Ok(InstallReport { link, warnings });
     }
 
+    let name = name.to_string_lossy();
     bail!(
-        "could not add the app-bundled pmux to PATH. {} If the existing command is an older Cargo install, run `cargo uninstall pmux`; otherwise remove or move the conflicting pmux, then try again.",
+        "could not add the app-bundled {name} to PATH. {} If the existing command is an older Cargo install, run `cargo uninstall {name}`; otherwise remove or move the conflicting {name}, then try again.",
         conflicts.join("; ")
     )
 }
@@ -239,8 +276,11 @@ fn cleanup_other_owned_links(
     local_bin: &Path,
     warnings: &mut Vec<String>,
 ) {
+    let Some(name) = installed_link.file_name() else {
+        return;
+    };
     for directory in system_bin.into_iter().chain([local_bin]) {
-        let old_link = directory.join(PMUX);
+        let old_link = directory.join(name);
         if same_path(&old_link, installed_link) || !managed_or_missing_link(&old_link) {
             continue;
         }
@@ -265,11 +305,12 @@ fn path_warnings(link: &Path, path_entries: &[PathBuf]) -> Vec<String> {
         ));
     }
 
+    let name = link.file_name().unwrap_or(PMUX.as_ref());
     let earlier = path_entries
         .iter()
         .enumerate()
         .find_map(|(index, directory)| {
-            let executable = directory.join(PMUX);
+            let executable = directory.join(name);
             is_executable(&executable).then_some((index, executable))
         });
     if let Some((index, executable)) = earlier {
@@ -279,10 +320,11 @@ fn path_warnings(link: &Path, path_entries: &[PathBuf]) -> Vec<String> {
             .is_some_and(|(first, app)| first == app);
         if !resolves_to_app && directory_index.is_none_or(|shim_index| index < shim_index) {
             warnings.push(format!(
-                "{} appears earlier on PATH than {} and will run first. If it is an older Cargo install, run `cargo uninstall pmux`; otherwise remove that earlier pmux or move {} earlier on PATH, then open a new terminal.",
+                "{} appears earlier on PATH than {} and will run first. If it is an older Cargo install, run `cargo uninstall {name}`; otherwise remove that earlier {name} or move {} earlier on PATH, then open a new terminal.",
                 executable.display(),
                 link.display(),
-                link.parent().unwrap_or(Path::new(".")).display()
+                link.parent().unwrap_or(Path::new(".")).display(),
+                name = name.to_string_lossy()
             ));
         }
     }
@@ -298,7 +340,10 @@ fn managed_or_missing_link(link: &Path) -> bool {
     let Ok(Some(record)) = read_record(&marker) else {
         return false;
     };
-    if !is_app_pmux(&record.target) || !record.target.is_absolute() {
+    if !is_app_binary(&record.target)
+        || !record.target.is_absolute()
+        || record.target.file_name() != link.file_name()
+    {
         return false;
     }
     match fs::symlink_metadata(link) {
@@ -316,8 +361,10 @@ pub(crate) fn remove_owned_link(link: &Path) -> Result<RemoveOutcome> {
         return Ok(RemoveOutcome::Preserved);
     };
     anyhow::ensure!(
-        record.version == MARKER_VERSION && is_app_pmux(&record.target),
-        "invalid Prismattyc pmux ownership record"
+        record.version == MARKER_VERSION
+            && is_app_binary(&record.target)
+            && record.target.file_name() == link.file_name(),
+        "invalid Prismattyc PATH link ownership record"
     );
 
     match fs::symlink_metadata(link) {
@@ -331,7 +378,7 @@ pub(crate) fn remove_owned_link(link: &Path) -> Result<RemoveOutcome> {
                 return Ok(RemoveOutcome::Preserved);
             }
             fs::remove_file(link)
-                .with_context(|| format!("remove owned pmux link {}", link.display()))?;
+                .with_context(|| format!("remove owned PATH link {}", link.display()))?;
             remove_marker(&marker).with_context(|| format!("remove {}", marker.display()))?;
             Ok(RemoveOutcome::Removed)
         }
@@ -369,7 +416,10 @@ fn write_record(marker: &Path, target: &Path) -> Result<()> {
     let parent = marker.parent().context("pmux shim marker parent")?;
     let temp = loop {
         let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-        let candidate = parent.join(format!("{MARKER}.tmp-{}-{id}", std::process::id()));
+        let marker_name = marker
+            .file_name()
+            .map_or_else(|| MARKER.into(), |name| name.to_string_lossy());
+        let candidate = parent.join(format!("{marker_name}.tmp-{}-{id}", std::process::id()));
         match open_private_new(&candidate) {
             Ok(file) => break (candidate, file),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -422,11 +472,19 @@ fn remove_marker(marker: &Path) -> io::Result<()> {
     }
 }
 
+/// `pmux` keeps `.pmux-prismattyc-shim.json`; another linked executable uses
+/// `.<name>-prismattyc-shim.json` in the same directory.
 fn marker_path(link: &Path) -> PathBuf {
-    link.parent().unwrap_or(Path::new(".")).join(MARKER)
+    let directory = link.parent().unwrap_or(Path::new("."));
+    match link.file_name().and_then(|name| name.to_str()) {
+        Some(name) if name != PMUX && LINKED.contains(&name) => {
+            directory.join(format!(".{name}-prismattyc-shim.json"))
+        }
+        _ => directory.join(MARKER),
+    }
 }
 
-fn is_app_pmux(path: &Path) -> bool {
+fn is_app_binary(path: &Path) -> bool {
     let Some(macos) = path.parent() else {
         return false;
     };
@@ -436,7 +494,9 @@ fn is_app_pmux(path: &Path) -> bool {
     let Some(bundle) = contents.parent() else {
         return false;
     };
-    path.file_name().is_some_and(|name| name == PMUX)
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| LINKED.contains(&name))
         && macos.file_name().is_some_and(|name| name == "MacOS")
         && contents.file_name().is_some_and(|name| name == "Contents")
         && bundle
@@ -727,6 +787,82 @@ mod tests {
         assert!(!report.link.exists());
         assert!(!marker_path(&report.link).exists());
         assert!(target.exists());
+    }
+
+    fn app_monitor(root: &Path) -> PathBuf {
+        let app = root
+            .join("Prismattyc.app/Contents/MacOS")
+            .join(ACTIVITY_MONITOR);
+        fs::create_dir_all(app.parent().unwrap()).unwrap();
+        fs::write(&app, b"monitor").unwrap();
+        fs::set_permissions(&app, fs::Permissions::from_mode(0o755)).unwrap();
+        app
+    }
+
+    #[test]
+    fn monitor_link_sits_beside_pmux_with_its_own_record() {
+        let tmp = Scratch::new();
+        let pmux = app_binary(tmp.path());
+        let monitor = app_monitor(tmp.path());
+        let system = tmp.path().join("usr-local-bin");
+        let local = tmp.path().join("home/.local/bin");
+        let entries = [local.clone()];
+        let first = ensure_link_with(&pmux, &system, &local, &entries, |_| false).unwrap();
+        let second = ensure_link_with(&monitor, &system, &local, &entries, |_| false).unwrap();
+
+        assert_eq!(first.link, local.join(PMUX));
+        assert_eq!(second.link, local.join(ACTIVITY_MONITOR));
+        assert_eq!(fs::read_link(&second.link).unwrap(), monitor);
+        assert_eq!(marker_path(&first.link), local.join(MARKER));
+        assert_eq!(
+            marker_path(&second.link),
+            local.join(".pmux-activity-monitor-prismattyc-shim.json")
+        );
+        assert!(marker_path(&second.link).is_file());
+        assert!(second.warnings.is_empty(), "{:?}", second.warnings);
+
+        // Removing one link leaves the other link and its record in place.
+        assert_eq!(
+            remove_owned_link(&second.link).unwrap(),
+            RemoveOutcome::Removed
+        );
+        assert!(!second.link.exists());
+        assert!(fs::read_link(&first.link).is_ok_and(|target| target == pmux));
+        assert!(is_managed_link_or_absent(&first.link));
+        assert!(monitor.exists());
+    }
+
+    #[test]
+    fn a_pmux_record_does_not_own_a_monitor_link() {
+        let tmp = Scratch::new();
+        let pmux = app_binary(tmp.path());
+        let local = tmp.path().join("home/.local/bin");
+        let report =
+            ensure_link_with(&pmux, &tmp.path().join("none"), &local, &[], |_| false).unwrap();
+        let monitor_link = local.join(ACTIVITY_MONITOR);
+        create_symlink(&pmux, &monitor_link).unwrap();
+
+        assert!(!is_managed_link_or_absent(&monitor_link));
+        assert_eq!(
+            remove_owned_link(&monitor_link).unwrap(),
+            RemoveOutcome::Preserved
+        );
+        assert!(fs::symlink_metadata(&monitor_link).is_ok());
+        assert!(is_managed_link_or_absent(&report.link));
+    }
+
+    #[test]
+    fn only_linked_bundle_executables_are_accepted() {
+        let tmp = Scratch::new();
+        let other = tmp.path().join("Prismattyc.app/Contents/MacOS/pmuxd");
+        fs::create_dir_all(other.parent().unwrap()).unwrap();
+        fs::write(&other, b"daemon").unwrap();
+        fs::set_permissions(&other, fs::Permissions::from_mode(0o755)).unwrap();
+        let local = tmp.path().join("home/.local/bin");
+        assert!(
+            ensure_link_with(&other, &tmp.path().join("none"), &local, &[], |_| false).is_err()
+        );
+        assert!(!local.join("pmuxd").exists());
     }
 
     #[test]

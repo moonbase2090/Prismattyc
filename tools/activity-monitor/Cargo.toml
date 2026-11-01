@@ -13,6 +13,7 @@ anyhow = "1.0"
 ctrlc = { version = "3.5", features = ["termination"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+prismattyc-core = { path = "../../crates/prismattyc-core" }
 prismattyc-mux = { path = "../../crates/prismattyc-mux" }
 lunatui-core = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898" }
 lunatui-image = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898" }

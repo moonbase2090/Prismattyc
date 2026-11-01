@@ -1,8 +1,9 @@
 //! Start `../bin/<this file's stem>.exe` and exit with its status.
 //!
 //! The cmd directory holds copies of this program under the names
-//! `prismattyc.exe`, `pmux.exe`, `pmuxd.exe`, `pmux-attach.exe`, and
-//! `pmux-mcp.exe`. The copy's file name chooses the real program. Standard
+//! `prismattyc.exe`, `pmux.exe`, `pmuxd.exe`, `pmux-attach.exe`,
+//! `pmux-mcp.exe`, and `pmux-activity-monitor.exe`. The copy's file name
+//! chooses the real program. Standard
 //! streams are inherited. This process does not run `cmd.exe`.
 
 use std::path::{Path, PathBuf};

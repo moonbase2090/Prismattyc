@@ -17,10 +17,13 @@ interface lifecycle {
         result-bytes: u32,
         frame-bytes: u32,
     }
+    record view-reference { id: u64, contribution: string, viewport: viewport }
+    variant role { tool-service, view(view-reference) }
     record context {
         api-version: string,
         capabilities: list<capability>,
         limits: limits,
+        role: role,
     }
     record view-event { id: u64, event: event }
     record view-frame { id: u64, content: content }

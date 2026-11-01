@@ -56,12 +56,7 @@ impl ActivityFeed {
     }
 
     pub(crate) fn publish(&mut self, event: ActivityInput) -> Result<ActivityAck, &'static str> {
-        if event.schema_version != 1 {
-            return Err("unsupported activity schema");
-        }
-        if !valid_identifier(&event.run_id) || !valid_identifier(&event.event_id) {
-            return Err("activity identifiers must be 1..128 ASCII identifier characters");
-        }
+        event.validate_metadata()?;
         if let Some(prior) = self.retained.iter().find(|r| {
             r.event.seat == event.seat
                 && r.event.run_id == event.run_id
@@ -153,13 +148,6 @@ impl ActivityFeed {
             sequence,
         }
     }
-}
-
-fn valid_identifier(text: &str) -> bool {
-    (1..=128).contains(&text.len())
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-_:.".contains(&b))
 }
 
 /// Exchange one activity request over the existing local control socket.

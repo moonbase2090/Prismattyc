@@ -4,5 +4,5 @@ package pmux:tool@1.0.0;
 
 interface call {
     record request { id: u64, contribution: string, arguments: string }
-    record response { id: u64, json: string }
+    record response { id: u64, json: string, is-error: bool }
 }

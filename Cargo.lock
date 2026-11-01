@@ -2849,9 +2849,34 @@ name = "pmux-plugin-api"
 version = "0.3.53"
 dependencies = [
  "serde",
+ "unicode-segmentation",
+ "unicode-width",
  "wasmtime",
  "wit-bindgen 0.46.0",
  "wit-parser 0.239.0",
+]
+
+[[package]]
+name = "pmux-plugin-fixture"
+version = "0.3.53"
+dependencies = [
+ "pmux-plugin-api",
+ "serde_json",
+]
+
+[[package]]
+name = "pmux-plugin-runtime"
+version = "0.3.53"
+dependencies = [
+ "anyhow",
+ "pmux-plugin-api",
+ "prismattyc-core",
+ "serde",
+ "serde_json",
+ "wasm-encoder 0.239.0",
+ "wasmparser 0.239.0",
+ "wasmtime",
+ "wit-component",
 ]
 
 [[package]]
@@ -4448,6 +4473,7 @@ dependencies = [
  "hashbrown 0.15.5",
  "indexmap",
  "semver",
+ "serde",
 ]
 
 [[package]]
@@ -4650,6 +4676,7 @@ checksum = "6da6131cb87700e06ffb7a83cc933658f521176f04d6d73511f1ee60db58c515"
 dependencies = [
  "anyhow",
  "cfg-if",
+ "cranelift-codegen",
  "log",
  "object",
 ]

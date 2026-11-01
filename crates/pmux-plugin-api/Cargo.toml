@@ -9,13 +9,15 @@ publish.workspace = true
 
 [features]
 default = []
-host = ["dep:wasmtime"]
+host = ["dep:wasmtime", "dep:unicode-segmentation", "dep:unicode-width"]
 guest = ["dep:wit-bindgen"]
 
 [dependencies]
 serde.workspace = true
 wasmtime = { version = "=36.0.20", default-features = false, features = ["std", "runtime", "component-model"], optional = true }
 wit-bindgen = { version = "=0.46.0", optional = true }
+unicode-segmentation = { version = "1.12", optional = true }
+unicode-width = { workspace = true, optional = true }
 
 [build-dependencies]
 wit-parser = "=0.239.0"

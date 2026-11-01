@@ -14,6 +14,25 @@ pub struct ActivityInput {
     pub kind: ActivityKind,
 }
 
+impl ActivityInput {
+    pub fn validate_metadata(&self) -> Result<(), &'static str> {
+        if self.schema_version != 1 {
+            return Err("unsupported activity schema");
+        }
+        if !valid_identifier(&self.run_id) || !valid_identifier(&self.event_id) {
+            return Err("activity identifiers must be 1..128 ASCII identifier characters");
+        }
+        Ok(())
+    }
+}
+
+fn valid_identifier(text: &str) -> bool {
+    (1..=128).contains(&text.len())
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_:.".contains(&byte))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivitySource {

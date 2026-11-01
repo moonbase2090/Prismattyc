@@ -1,0 +1,21 @@
+[package]
+name = "pmux-plugin-runtime"
+description = "Contained pmux component workers and lifecycle management"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+pmux-plugin-api = { path = "../pmux-plugin-api", features = ["host"] }
+prismattyc-core = { path = "../prismattyc-core" }
+serde.workspace = true
+serde_json = "1.0"
+wasmtime = { version = "=36.0.20", default-features = false, features = ["std", "runtime", "component-model", "cranelift", "pulley"] }
+
+[dev-dependencies]
+wit-component = "=0.239.0"
+wasm-encoder = "=0.239.0"
+wasmparser = "=0.239.0"

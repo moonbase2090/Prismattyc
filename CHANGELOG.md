@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.3.54] - 2026-11-01
+
+### Added
+
+- An opt-in activity feed: set `experimental_activity = true` under `[mux]` and pmuxd serves seat activity metadata from its next start. It is off by default and carries no command text, paths, prompts, tool output or mail bodies.
+- `pmux-activity-monitor` ships in the macOS app, the Linux tarball and the Windows ZIP and MSI, and is on PATH. It shows each seat's state and recent activity across one or more hosts, fits the pane it runs in, and explains what to do when the feed is off.
+
+### Fixed
+
+- Windows panes again detect when their program exits, keep the last output, and clean up the session.
+
+### Known issues
+
+- On Linux, `pmux update` does not fetch `pmux-activity-monitor` yet. Copy it from the release tarball's `bin` directory next to `pmux`.
+
 ## [0.3.53] - 2026-10-31
 
 ### Changed

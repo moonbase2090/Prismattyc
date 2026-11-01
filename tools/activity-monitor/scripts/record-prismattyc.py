@@ -3,14 +3,15 @@
 """Run the monitor in a real Prismattyc pane and keep the host's presented frames.
 
 macOS only, in a logged-in desktop session. The script starts a private pmuxd and a private
-prismattyc-host with PRISMATTYC_DUMP_PRESENT, types the monitor command into a pane, and copies
+prismattyc-host with PRISMATTYC_DUMP_PRESENT, runs the monitor as a session's program, and copies
 every presented frame to OUT/frames with its time. Frames are the host framebuffer (what
 Prismattyc drew, including Kitty graphics it decoded), not an OS screenshot.
 
-Steps in --plan (JSON list, times in seconds after the monitor starts):
-  {"at": 2, "keys": "j"}                 pane-write keys ("\\r" Enter, "\\t" Tab, "\\u001b" Esc)
-  {"at": 5, "split": "h"}                join a new shell pane beside the monitor (h or v)
-  {"at": 8, "unsplit": true}             move the most recent split pane out again
+The monitor runs as the session's program and the split pane runs cat, so no shell prompt
+appears. Steps in --plan (JSON list, times in seconds after the host window opens):
+  {"at": 2, "keys": "j"}                 send keys ("\\r" Enter, "\\t" Tab, "\\u001b" Esc)
+  {"at": 5, "split": "h"}                split the monitor's pane, a blank pane beside it (h) or below (v)
+  {"at": 8, "unsplit": true}             move the most recent split pane out to its own tab
   {"at": 9, "signal": [PID, "USR1"]}     signal another process (for example, the demo feed)
   {"at": 12, "end": true}
 
@@ -20,7 +21,6 @@ Steps in --plan (JSON list, times in seconds after the monitor starts):
 import argparse
 import json
 import os
-import shlex
 import shutil
 import signal
 import socket
@@ -72,6 +72,13 @@ def main():
             raise SystemExit(f'pmux {argv} failed: {done.stderr}')
         return done.stdout
 
+    def request(body):
+        with socket.socket(socket.AF_UNIX) as stream:
+            stream.settimeout(5)
+            stream.connect(env['PMUX_SOCKET'])
+            stream.sendall((json.dumps({'version': 1, 'request_id': 1, **body}) + '\n').encode())
+            return json.loads(stream.makefile().readline())
+
     def snapshot():
         with socket.socket(socket.AF_UNIX) as stream:
             stream.settimeout(5)
@@ -121,7 +128,8 @@ def main():
         daemon = subprocess.Popen([str(bins / 'pmuxd'), '--socket', env['PMUX_SOCKET'], '--', '/bin/bash',
                                    '--noprofile', '--norc'], env=env, stdout=log, stderr=log)
         wait(lambda: Path(env['PMUX_SOCKET']).exists(), 'private daemon')
-        cli('space', 'create', 'agents', '--no-attach')
+        # The monitor is the pane's own program, so no shell prompt (host or user name) is drawn.
+        cli('new', '--no-attach', '--no-agent', 'agents', '--', *command)
         monitor = session('agents')
         pane = monitor['windows'][0]['panes'][0]['id']
         host_log = (out / 'host.log').open('w')
@@ -130,7 +138,6 @@ def main():
         wait(lambda: json.loads(cli('render-status', '--json', check=False) or '{}').get('host_pid') == host.pid,
              'host render status')
         time.sleep(1.5)
-        cli('pane-write', pane, '--text', 'clear; exec ' + shlex.join(command), '--submit', 'enter')
         began = time.monotonic()
         pending = list(plan)
         while pending:
@@ -141,12 +148,16 @@ def main():
                     # The monitor redraws continuously, so pane-write sees it as busy.
                     cli('send', pane, step['keys'], '--literal', '--force')
                 if 'split' in step:
-                    name = f'shell{len(splits) + 1}'
-                    cli('new', '--no-attach', '--no-agent', name)
-                    extra = session(name)['windows'][0]['panes'][0]['id']
-                    tab = session('agents')['windows'][0]['id']
-                    cli('join-pane', extra, '--to', tab, '-' + step['split'])
-                    splits.append(extra)
+                    # Split the monitor's pane the way a pane split in the host does.
+                    window = session('agents')['windows'][0]
+                    before = {p['id'] for p in window['panes']}
+                    reply = request({'type': 'split', 'window_id': window['id'], 'target_pane_id': pane,
+                                     'axis': 'horizontal' if step['split'] == 'h' else 'vertical',
+                                     'ratio': 0.5, 'spawn': {'program': '/bin/cat', 'argv': [],
+                                                             'cwd': None, 'env': {}}})
+                    commands.write(json.dumps({'request': 'split', 'reply': reply}) + '\n')
+                    after = {p['id'] for p in session('agents')['windows'][0]['panes']}
+                    splits.extend(sorted(after - before))
                 if step.get('unsplit') and splits:
                     cli('break-pane', splits.pop())
                 if 'signal' in step:

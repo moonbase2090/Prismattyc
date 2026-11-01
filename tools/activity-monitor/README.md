@@ -53,7 +53,7 @@ The Lunatui crates use the v0.1.18 release commit `d847e749eb773f7d48edd7d9e429b
 
 ### Recording the UI
 
-`scripts/demo-feed.py` starts private daemons for `mac` and `windows` and publishes scripted metadata events. `SIGUSR1` stops the last host's daemon and `SIGUSR2` starts it again. `scripts/record-demo.py` runs the unmodified monitor in a pseudo-terminal, sends keys and pane resizes from a JSON plan, and writes an asciicast of exactly what the monitor printed. Render it with `agg`. `--kitty` answers the capability probe as a Kitty-graphics terminal so the pixel path runs, and `scripts/extract-rasters.py` saves each raster the monitor uploaded. `scripts/record-prismattyc.py` runs the monitor in a real Prismattyc pane and keeps the host's presented frames; it needs an unlocked macOS desktop.
+`scripts/demo-feed.py` starts private daemons for `mac` and `windows` and publishes scripted metadata events. `SIGUSR1` stops the last host's daemon and `SIGUSR2` starts it again. `scripts/record-demo.py` runs the unmodified monitor in a pseudo-terminal, sends keys and pane resizes from a JSON plan, and writes an asciicast of exactly what the monitor printed. Render it with `agg`. `--kitty` answers the capability probe as a Kitty-graphics terminal so the pixel path runs, and `scripts/extract-rasters.py` saves each raster the monitor uploaded. `scripts/record-prismattyc.py` runs the monitor in a real Prismattyc pane, splits that pane through the control protocol, and keeps the host's presented frames. It needs an unlocked macOS desktop with an awake display, such as a clean Tart VM.
 
 ## JSON connector modes
 

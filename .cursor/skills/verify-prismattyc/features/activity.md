@@ -63,8 +63,10 @@ renders every tier through Lunatui and checks text, colors and keys. The
 recorded cast shows the cell path only. `record-demo.py --kitty` exercises the
 pixel path, and `extract-rasters.py` saves the rasters it uploaded. Prismattyc
 panes keep cell lanes, because its emulator accepts only PNG uploads.
-`record-prismattyc.py` keeps a real Prismattyc host's presented frames but
-needs an unlocked macOS desktop with an awake display.
+`record-prismattyc.py` keeps a real Prismattyc host's presented frames and
+splits the monitor's pane through the control protocol. It needs an unlocked
+macOS desktop with an awake display. A clean Tart guest works, because it logs
+in automatically: run it over SSH in the guest.
 
 ## Boundaries
 

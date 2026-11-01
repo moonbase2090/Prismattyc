@@ -7,11 +7,8 @@ use std::sync::mpsc;
 use std::thread;
 #[cfg(windows)]
 use std::time::{Duration, Instant};
-#[cfg(windows)]
-use std::{
-    sync::atomic::{AtomicBool, Ordering},
-    sync::Arc,
-};
+#[cfg(all(test, windows))]
+use std::{sync::atomic::AtomicU64, sync::Arc};
 
 use anyhow::{Context, Result};
 use prismattyc_emulator::{
@@ -54,54 +51,6 @@ impl PtyChunk {
             bytes: Vec::new(),
             _reservation: None,
         }
-    }
-}
-
-#[cfg(windows)]
-#[derive(Default)]
-struct ReaderPublication {
-    // A blocking ConPTY read cannot count as pending because the pipe may stay
-    // open forever after child exit. Track the completed-read-to-send window.
-    pending: AtomicBool,
-    #[cfg(test)]
-    delay_ms: std::sync::atomic::AtomicU64,
-}
-
-#[cfg(windows)]
-impl ReaderPublication {
-    fn begin(&self) -> ReaderPublicationGuard<'_> {
-        self.pending.store(true, Ordering::Release);
-        let guard = ReaderPublicationGuard(self);
-        #[cfg(test)]
-        {
-            let delay_ms = self.delay_ms.load(Ordering::Acquire);
-            if delay_ms > 0 {
-                thread::sleep(Duration::from_millis(delay_ms));
-            }
-        }
-        guard
-    }
-
-    fn is_pending(&self) -> bool {
-        self.pending.load(Ordering::Acquire)
-    }
-
-    #[cfg(test)]
-    fn set_delay(&self, delay: Duration) {
-        self.delay_ms.store(
-            u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-            Ordering::Release,
-        );
-    }
-}
-
-#[cfg(windows)]
-struct ReaderPublicationGuard<'a>(&'a ReaderPublication);
-
-#[cfg(windows)]
-impl Drop for ReaderPublicationGuard<'_> {
-    fn drop(&mut self) {
-        self.0.pending.store(false, Ordering::Release);
     }
 }
 
@@ -206,6 +155,7 @@ enum ChildExitState {
     Draining {
         status: portable_pty::ExitStatus,
         quiet_since: Option<Instant>,
+        cancelling_reader: bool,
     },
     Exited,
 }
@@ -215,7 +165,9 @@ struct LivePane {
     session: PtySession,
     from_pty_rx: mpsc::Receiver<std::io::Result<PtyChunk>>,
     #[cfg(windows)]
-    reader_publication: Arc<ReaderPublication>,
+    reader_thread: thread::JoinHandle<()>,
+    #[cfg(all(test, windows))]
+    reader_publish_delay_ms: Arc<AtomicU64>,
     to_child_tx: mpsc::SyncSender<Vec<u8>>,
     rich: Option<RichSession>,
     cols: usize,
@@ -302,11 +254,11 @@ impl LivePane {
             mpsc::sync_channel::<std::io::Result<PtyChunk>>(FROM_PTY_CAP);
         let output_budget = ByteBudget::new(PTY_OUTPUT_BUDGET_BYTES);
         let reader_budget = output_budget.clone();
-        #[cfg(windows)]
-        let reader_publication = Arc::new(ReaderPublication::default());
-        #[cfg(windows)]
-        let reader_publication_thread = Arc::clone(&reader_publication);
-        thread::Builder::new()
+        #[cfg(all(test, windows))]
+        let reader_publish_delay_ms = Arc::new(AtomicU64::new(0));
+        #[cfg(all(test, windows))]
+        let reader_publish_delay_thread = Arc::clone(&reader_publish_delay_ms);
+        let reader_thread = thread::Builder::new()
             .name(format!("prism-server-pane-{pane_id}-read"))
             .spawn(move || {
                 let mut buffer = vec![0u8; 8192];
@@ -317,8 +269,14 @@ impl LivePane {
                             break;
                         }
                         Ok(count) => {
-                            #[cfg(windows)]
-                            let _publication = reader_publication_thread.begin();
+                            #[cfg(all(test, windows))]
+                            {
+                                use std::sync::atomic::Ordering;
+                                let delay_ms = reader_publish_delay_thread.load(Ordering::Acquire);
+                                if delay_ms > 0 {
+                                    thread::sleep(Duration::from_millis(delay_ms));
+                                }
+                            }
                             let Some((bytes, reservation)) = reader_budget
                                 .admit(PANE_FRAME_OVERHEAD.saturating_add(count), || {
                                     buffer[..count].to_vec()
@@ -347,6 +305,8 @@ impl LivePane {
                     }
                 }
             })?;
+        #[cfg(not(windows))]
+        drop(reader_thread);
 
         // server panes retain alt-screen history so attach scroll
         // mode can page through TUI output. Classic hosts never opt in.
@@ -363,7 +323,9 @@ impl LivePane {
             session,
             from_pty_rx,
             #[cfg(windows)]
-            reader_publication,
+            reader_thread,
+            #[cfg(all(test, windows))]
+            reader_publish_delay_ms,
             to_child_tx,
             rich: experimental_rich.then(RichSession::default),
             cols,
@@ -393,6 +355,16 @@ impl LivePane {
 
     fn child_alive(&self) -> bool {
         !matches!(self.exit, ChildExitState::Exited)
+    }
+
+    #[cfg(windows)]
+    fn cancel_reader_io(&self) {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::IO::CancelSynchronousIo;
+
+        // ERROR_NOT_FOUND is expected if the read already completed. The next
+        // drain tick retries after the reader publishes and blocks again.
+        let _ = unsafe { CancelSynchronousIo(self.reader_thread.as_raw_handle()) };
     }
 
     /// Flip `child_alive` true→false and, if this pane is a Hive seat, produce at most
@@ -637,29 +609,46 @@ impl LivePane {
                             self.exit = ChildExitState::Draining {
                                 status,
                                 quiet_since: None,
+                                cancelling_reader: false,
                             };
                         }
                     }
                 }
             }
-            if died {
-                true
-            } else {
+            let mut cancel_reader = false;
+            if !died {
                 match &mut self.exit {
-                    ChildExitState::Draining { quiet_since, .. }
-                        if nbytes > 0 || self.reader_publication.is_pending() =>
-                    {
-                        *quiet_since = None;
-                        false
-                    }
-                    ChildExitState::Draining { quiet_since, .. } => {
+                    ChildExitState::Draining {
+                        cancelling_reader: true,
+                        ..
+                    } => cancel_reader = true,
+                    ChildExitState::Draining {
+                        quiet_since,
+                        cancelling_reader: false,
+                        ..
+                    } if nbytes > 0 => *quiet_since = None,
+                    ChildExitState::Draining {
+                        quiet_since,
+                        cancelling_reader,
+                        ..
+                    } => {
                         let quiet_since = quiet_since.get_or_insert(now);
-                        now.duration_since(*quiet_since) >= EXIT_OUTPUT_QUIET
+                        if now.duration_since(*quiet_since) >= EXIT_OUTPUT_QUIET {
+                            *cancelling_reader = true;
+                            cancel_reader = true;
+                        }
                     }
-                    ChildExitState::Running { .. } => false,
+                    ChildExitState::Running { .. } => {}
                     ChildExitState::Exited => unreachable!("exited pane reached drain"),
                 }
             }
+            if cancel_reader {
+                self.cancel_reader_io();
+            }
+            // Once cancellation starts, the reader publishes any completed
+            // read before its sender disconnects. FIFO channel order makes
+            // `died` the producer-completion edge.
+            died
         };
         #[cfg(not(windows))]
         let exit_ready = died;
@@ -974,11 +963,16 @@ impl LiveRuntime {
 
     #[cfg(all(test, windows))]
     fn set_reader_publish_delay_for_test(&self, pane_id: u64, delay: Duration) {
+        use std::sync::atomic::Ordering;
+
         self.panes
             .get(&pane_id)
             .expect("pane for reader publication delay")
-            .reader_publication
-            .set_delay(delay);
+            .reader_publish_delay_ms
+            .store(
+                u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                Ordering::Release,
+            );
     }
 
     pub(crate) fn write(&self, pane_id: u64, data: Vec<u8>) -> Result<(), LiveWriteError> {

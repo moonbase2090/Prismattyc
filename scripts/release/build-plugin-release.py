@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -35,6 +36,17 @@ def json_file(path):
 
 def write_json(path, value):
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def public_artifact_gate(directory):
+    with tempfile.TemporaryDirectory(prefix="plugin-public-text-") as empty:
+        command = ["bash", str(REPO / "scripts/check-release-text.sh"), "--root", empty]
+        for path in sorted(directory.iterdir()):
+            if path.suffix == ".pmux-plugin":
+                command.extend(["--artifact", str(path)])
+            elif path.name in ("pmux-plugins.json", "bundle-pin.json", "plugin-build-receipt.json"):
+                command.extend(["--extra", str(path)])
+        subprocess.run(command, cwd=REPO, check=True)
 
 
 def main():
@@ -97,6 +109,7 @@ def main():
             record = records.get((manifest["id"], manifest["version"]))
             if record is None or record["source_sha256"] != fingerprint:
                 parser.error("existing candidate differs from selected sources")
+        public_artifact_gate(output)
         print(f"Reused complete candidate {pin['catalog_sha256']}")
         return
 
@@ -126,6 +139,11 @@ def main():
                 fresh.append((crate, source, manifest, fingerprint))
         if fresh:
             guest_env = {key: value for key, value in env.items() if key not in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS")}
+            flags = shlex.split(guest_env.pop("CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS", ""))
+            cargo_home = Path(guest_env.get("CARGO_HOME", Path.home() / ".cargo")).resolve()
+            for path, replacement in ((REPO, "/workspace"), (target, "/build-target"), (cargo_home, "/cargo-home")):
+                flags.extend(["--remap-path-prefix", f"{path}={replacement}"])
+            guest_env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(flags)
             command = [*cargo, "build", "--release", "--locked", "--target", "wasm32-unknown-unknown"]
             for crate, _, _, _ in fresh:
                 command.extend(["-p", crate])
@@ -148,6 +166,7 @@ def main():
         write_json(staging / "plugin-build-receipt.json", {"version": 1, "source_commit": commit, "packages": ordered})
         pin = tool("candidate", staging, commit)
         tool("verify", staging, "--candidate")
+        public_artifact_gate(staging)
         os.rename(staging, output)
         print(f"Built unpublished candidate {pin['catalog_sha256']} with {len(ordered)} retained versions")
 

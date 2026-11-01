@@ -694,6 +694,8 @@ mod macos {
     use super::*;
     use std::ptr;
 
+    type ProcArgsAndPath = (Vec<Vec<u8>>, Option<Vec<u8>>);
+
     pub(super) fn procargs(pid: u32) -> Option<Vec<Vec<u8>>> {
         procargs_and_path(pid).map(|(args, _)| args)
     }
@@ -702,7 +704,7 @@ mod macos {
         procargs_and_path(pid).and_then(|(_, path)| path)
     }
 
-    fn procargs_and_path(pid: u32) -> Option<(Vec<Vec<u8>>, Option<Vec<u8>>)> {
+    fn procargs_and_path(pid: u32) -> Option<ProcArgsAndPath> {
         let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as i32];
         let mut size = 0usize;
         unsafe {
@@ -901,8 +903,35 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn build_test_sleeper(path: &Path) {
+        let source = path.with_extension("c");
+        std::fs::write(
+            &source,
+            b"#include <stdlib.h>\n#include <unistd.h>\nint main(int argc, char **argv) { sleep(argc > 1 ? (unsigned int)atoi(argv[1]) : 30); return 0; }\n",
+        )
+        .expect("write controlled-PATH sleeper source");
+        let output = std::process::Command::new("cc")
+            .arg("-o")
+            .arg(path)
+            .arg(&source)
+            .output()
+            .expect("compile controlled-PATH sleeper");
+        let _ = std::fs::remove_file(source);
+        assert!(
+            output.status.success(),
+            "compile controlled-PATH sleeper: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
     fn stable_program_name_with_path(program: &Path, path: Option<&OsStr>) -> Option<String> {
-        let mut command = std::process::Command::new("/bin/sleep");
+        let sleeper = program
+            .parent()
+            .expect("versioned program parent")
+            .join("controlled-path-sleeper");
+        build_test_sleeper(&sleeper);
+        let mut command = std::process::Command::new(sleeper);
         command
             .arg("30")
             .env_remove("PATH")

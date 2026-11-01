@@ -90,6 +90,6 @@ with the flag. For a packaged build, use a clean VM: install the release
 artifact, write `[mux]\nexperimental_activity = true` to that VM's config, start
 the app (or `pmux up`), and run `pmux-activity-monitor --json` from PATH. It must
 print a page, not `activity_disabled`. Then remove the key, restart pmuxd in that
-VM, and check that `--json` reports the feed disabled. Run `pmux --version` and
-`pmux mail inbox` before and after to show that an existing session and mail
-still work. Never point this at an operator's daemon.
+VM, and check that `--json` reports the feed disabled. List sessions and read
+the mailbox before and after the restart to show that an existing session and
+its letters survive. Never point this at an operator's daemon.

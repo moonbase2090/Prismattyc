@@ -35,7 +35,7 @@ It omits daemon message text. A connector can map this code to `feed_disabled`
 without parsing diagnostics or mistaking a malformed request for a missing capability.
 
 Each host has its own pmuxd, socket, activity history, and random boot epoch.
-The prototype reads one endpoint. Two hosts with the same seat name remain
+The viewer reads one endpoint. Two hosts with the same seat name remain
 independent. A future combined viewer needs explicit endpoint aliases, separate
 cursors, and separate connection status. Sequence numbers from different daemons
 have no global ordering. Remote transport and access policy need separate work.
@@ -252,20 +252,22 @@ an actual hook or notification event from that seat. Review the producer command
 before running it. Runner authentication uses its normal environment. The proof
 does not save raw producer output or configuration.
 
-Shared transport code provides a Windows implementation path. This Unix proof
-does not establish Windows runtime behavior. A Windows run, clean VM proof, and
-the remaining adapter installations are still required before a production v1.
+Require a native Windows drive before claiming Windows runtime support.
+A macOS drive or cross-compilation alone is insufficient. The Windows driver
+prepares a private socket-directory ACL and connects through Winsock when Python
+lacks an AF_UNIX path codec. Record platform, source revision, build commands,
+exits, the rendered terminal, and the result JSON with each proof.
 
-## Design choice and v1 estimate
+## Design choice and original planning estimate
 
 Two designs were compared. The native ring keeps one state owner and two
 operations. A durable sidecar journal still needs daemon routing, plus another
-process, queue, file recovery, retention, and shutdown policy. The ring is the
-better one-day spike. The viewer retains the sidecar design's background reader,
+process, queue, file recovery, retention, and shutdown policy. The spike selected the ring. The viewer retains the sidecar design's background reader,
 bounded cache, explicit resets, and live-terminal verification.
 
-A local v1 with bounded, process-local retention is an estimated 6 to 9
-engineering days after the spike:
+The original spike estimated 6 to 9 engineering days for a local v1 with
+bounded, process-local retention. This planning range included the separately
+owned connector and viewer work:
 
 | Work | Engineering days |
 | --- | --- |
@@ -274,7 +276,7 @@ engineering days after the spike:
 | Viewer navigation, JSON connector, reconnect and stale state | 1 to 2 |
 | Mail/status producers, Windows packaging and failure proof | 2 to 3 |
 
-This is a planning range, not a measurement. It assumes a confirmed event
+The estimate is a planning range, not a measurement. It assumes a confirmed event
 interface for each runtime. Durable history adds a journal/recovery design.
 Remote aggregation adds roughly 2 to 4 days after transport and access policy
 are agreed. A packaged read-only MCP connector adds roughly 1 to 2 days for

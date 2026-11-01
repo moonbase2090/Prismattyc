@@ -13261,7 +13261,7 @@ function Read-Exact([int]$Count) {
                     request_id,
                     client_id: client,
                     pane_id: pane,
-                    data: "one\n".into(),
+                    data: "one\r".into(),
                 },
             )
             .body,
@@ -13281,7 +13281,7 @@ function Read-Exact([int]$Count) {
                     request_id,
                     client_id: client,
                     pane_id: pane,
-                    data: "two\n".into(),
+                    data: "two\r".into(),
                 },
             )
             .body,

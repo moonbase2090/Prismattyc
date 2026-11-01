@@ -574,6 +574,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lunatui-image"
+version = "0.1.18"
+source = "git+https://github.com/moonbase2090/lunatui?rev=d847e749eb773f7d48edd7d9e429bcc9cbe9e898#d847e749eb773f7d48edd7d9e429bcc9cbe9e898"
+dependencies = [
+ "lunatui-core",
+]
+
+[[package]]
 name = "lunatui-layout"
 version = "0.1.18"
 source = "git+https://github.com/moonbase2090/lunatui?rev=d847e749eb773f7d48edd7d9e429bcc9cbe9e898#d847e749eb773f7d48edd7d9e429bcc9cbe9e898"
@@ -584,15 +592,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lunatui-runtime"
-version = "0.1.18"
-source = "git+https://github.com/moonbase2090/lunatui?rev=d847e749eb773f7d48edd7d9e429bcc9cbe9e898#d847e749eb773f7d48edd7d9e429bcc9cbe9e898"
-dependencies = [
- "lunatui-core",
- "lunatui-term",
-]
-
-[[package]]
 name = "lunatui-term"
 version = "0.1.18"
 source = "git+https://github.com/moonbase2090/lunatui?rev=d847e749eb773f7d48edd7d9e429bcc9cbe9e898#d847e749eb773f7d48edd7d9e429bcc9cbe9e898"
@@ -600,6 +599,8 @@ dependencies = [
  "crossterm",
  "libc",
  "lunatui-core",
+ "lunatui-image",
+ "png 0.18.1",
  "rustix",
 ]
 
@@ -629,6 +630,7 @@ version = "0.1.18"
 source = "git+https://github.com/moonbase2090/lunatui?rev=d847e749eb773f7d48edd7d9e429bcc9cbe9e898#d847e749eb773f7d48edd7d9e429bcc9cbe9e898"
 dependencies = [
  "lunatui-core",
+ "lunatui-image",
  "lunatui-layout",
  "lunatui-text",
  "lunatui-theme",
@@ -919,9 +921,11 @@ name = "pmux-activity-monitor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "crossterm",
  "ctrlc",
+ "libc",
  "lunatui-core",
- "lunatui-runtime",
+ "lunatui-image",
  "lunatui-term",
  "lunatui-theme",
  "lunatui-widgets",

@@ -1,6 +1,6 @@
 # Activity monitor prototype
 
-This opt-in terminal viewer reads the experimental activity feed from one local daemon. It shows the latest event per seat, including seats with no terminal pane.
+This opt-in terminal viewer reads the experimental activity feed from one or more daemons. It shows every seat's state and recent activity, including seats with no terminal pane.
 
 Build the daemon from the repository root and this standalone tool with its own lockfile:
 
@@ -15,22 +15,45 @@ Start a private daemon with `--experimental-activity` and a separate socket. The
 tools/activity-monitor/target/debug/pmux-activity-monitor --socket /tmp/activity-demo/control.sock
 ```
 
-Press `q` to exit. The monitor polls every 250 milliseconds, reconnects after errors, and labels cached activity as stale after 30 seconds. A daemon restart or retention gap clears the cached seats before the retained history replays. The daemon's sequence orders events. Receive timestamps determine displayed age.
+The `pmux activity` commands, added separately, include `pmux activity monitor`. It runs this binary from beside `pmux` with pmux's socket and passes other arguments through, so a blank Prismattyc pane needs only that command.
 
-The live view uses a fixed 120-column by 24-row terminal grid. It keeps at most 128 seats, evicts the seat with the oldest event when full, and reports seats outside the visible rows. It displays identifiers, event kinds, and counters. It does not display command arguments, tool output, file contents, prompts, or message bodies.
+The live view fits the pane and follows it through splits and resizes. It groups seats by host, colors each seat by state (working, waiting, failed, stopped), marks rows stale after 30 seconds or while their host is unreachable, and draws a five-minute lane of activity for each seat. Enter opens a seat's timeline. `?` lists the keys and `q` quits. [The UI design](../../docs/activity-monitor-ui.md) covers the layout tiers, colors, states and keys.
+
+The monitor shows identifiers, event kinds, sources, sequences and timing. It does not display command arguments, tool output, file contents, prompts or message bodies, and the feed does not carry them.
+
+### More than one host
+
+Each host has its own daemon, so each gets its own cursor and connection state. `--socket` is this machine, labelled `mac`, `linux` or `windows`. Add more with `--host LABEL=SOCKET`, or read another machine through a command that prints `tail` JSON lines:
+
+```sh
+pmux-activity-monitor --socket /tmp/activity-demo/control.sock \
+  --host-cmd windows '["ssh","windows-host","pmux","activity","tail","--from-oldest"]'
+```
+
+`--host-cmd` takes a JSON argv and runs it without a shell. Its stderr is discarded so remote diagnostics cannot corrupt the screen. A command that exits is restarted with backoff, and replayed records are applied once.
+
+### Display options
+
+`--theme auto|dark|light` picks the Prismattyc Graphite palette; `auto` follows the background color the terminal reports. `--no-motion` turns off the fade when a seat changes state. `--no-pixels` keeps lanes in block characters. Where the terminal accepts raw RGBA Kitty uploads, lanes render as rasters through Lunatui's pixel sparkline. Prismattyc's emulator currently shows only PNG uploads, so inside Prismattyc lanes stay in cells.
+
+The monitor keeps at most 128 seats per host and 256 events per seat, and evicts the seat with the oldest event when full. A daemon restart or retention gap clears that host's cached seats before the retained history replays.
 
 For a single bounded read, use one of these modes:
 
 ```sh
-tools/activity-monitor/target/debug/pmux-activity-monitor --socket /tmp/activity-demo/control.sock --snapshot
+tools/activity-monitor/target/debug/pmux-activity-monitor --socket /tmp/activity-demo/control.sock --snapshot --size 80x24
 tools/activity-monitor/target/debug/pmux-activity-monitor --socket /tmp/activity-demo/control.sock --json
 ```
 
-`--snapshot` renders a 120-column by 24-row text frame through Lunatui. `--json` prints one page from the daemon, including its cursor and reset reason. Both read at most 256 events and exit. If retained history exceeds one page, the snapshot says that catch-up is pending. Use live mode to drain subsequent pages.
+`--snapshot` waits up to three seconds for every host to catch up, then renders one frame as text at `--size` (120 by 24 by default). It fails when no host is reachable. `--json` prints one page from the daemon, including its cursor and reset reason.
 
-The viewer has a bounded background channel. Network requests never block rendering, and queued pages retain their cursor until the UI can receive them. Live mode requests timer frames so new events appear without keyboard input. Lunatui handles terminal setup and restoration on Unix and Windows. Windows runtime verification remains separate from the source-level backend support.
+Lunatui's own run loop has a fixed grid size, so the monitor drives the Lunatui session, encoder and pixel layer from its own loop. Network requests and commands run on background threads, and pages wait in a bounded channel with their cursor until the UI takes them. Lunatui handles terminal setup and restoration on Unix and Windows. Windows runtime behavior of the live view has not been verified.
 
-The five direct Lunatui crates use the v0.1.18 release commit `d847e749eb773f7d48edd7d9e429bcc9cbe9e898`. The default image and pixel widget features are disabled.
+The Lunatui crates use the v0.1.18 release commit `d847e749eb773f7d48edd7d9e429bcc9cbe9e898`.
+
+### Recording the UI
+
+`scripts/demo-feed.py` starts private daemons for `mac` and `windows` and publishes scripted metadata events. `SIGUSR1` stops the last host's daemon and `SIGUSR2` starts it again. `scripts/record-demo.py` runs the unmodified monitor in a pseudo-terminal, sends keys and pane resizes from a JSON plan, and writes an asciicast of exactly what the monitor printed. Render it with `agg`. `--kitty` answers the capability probe as a Kitty-graphics terminal so the pixel path runs, and `scripts/extract-rasters.py` saves each raster the monitor uploaded. `scripts/record-prismattyc.py` runs the monitor in a real Prismattyc pane, splits that pane through the control protocol, and keeps the host's presented frames. It needs an unlocked macOS desktop with an awake display, such as a clean Tart VM.
 
 ## JSON connector modes
 

@@ -44,6 +44,30 @@ the result. Add `--producer-failure-hook` only for runtimes supporting that even
 the command file or commit local paths. Record which installed runtime/version
 was exercised separately from the portable synthetic hook fixture.
 
+## Viewer UI
+
+For changes to the viewer's layout, keys or rendering, also record the real
+viewer. Start `tools/activity-monitor/scripts/demo-feed.py --bins target/debug
+--sockets FILE` and let it run for a few minutes so lanes have history. Then
+drive the monitor with `tools/activity-monitor/scripts/record-demo.py --plan
+PLAN --out CAST -- MONITOR --host mac=... --host-cmd windows '[...]'`, render
+the cast with `agg`, and inspect the frames. A plan resizes the pseudo-terminal
+the way a pane split does, sends keys, and can signal the demo feed to stop and
+restart the last host's daemon. Cover each layout tier the change touches
+(at least 150x36, 100x30, 64x20, 34x14 and 22x3), the timeline, and an outage.
+When frames look wrong, replay the cast in a VT emulator before blaming the
+viewer, because GIF encoders can leave faint artifacts.
+
+`cargo test --manifest-path tools/activity-monitor/Cargo.toml --locked`
+renders every tier through Lunatui and checks text, colors and keys. The
+recorded cast shows the cell path only. `record-demo.py --kitty` exercises the
+pixel path, and `extract-rasters.py` saves the rasters it uploaded. Prismattyc
+panes keep cell lanes, because its emulator accepts only PNG uploads.
+`record-prismattyc.py` keeps a real Prismattyc host's presented frames and
+splits the monitor's pane through the control protocol. It needs an unlocked
+macOS desktop with an awake display. A clean Tart guest works, because it logs
+in automatically: run it over SSH in the guest.
+
 ## Boundaries
 
 The native transport and driver support Unix and Windows. Require an actual

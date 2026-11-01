@@ -632,7 +632,7 @@ pub fn render(
         _ => draw_list(&mut paint, body, hosts, &rows, ui, clock, tier),
     }
     if footer {
-        draw_footer(&mut paint, area, ui, pixels_available);
+        draw_footer(&mut paint, area, ui, hosts, pixels_available);
     }
     if ui.help {
         draw_help(&mut paint, area);
@@ -714,6 +714,7 @@ fn link_text(host: &Host, now: u64) -> (String, bool) {
             true,
         ),
         Link::Disabled => ("feed off".to_owned(), true),
+        Link::Unsupported => ("no activity feed".to_owned(), true),
     }
 }
 
@@ -959,6 +960,10 @@ pub fn hint(hosts: &[Host]) -> Option<(&'static str, &'static str)> {
             "Activity feed is disabled for this daemon.",
             "App-managed enablement is not available yet. To try the feed, start a separate pmuxd with --experimental-activity on its own socket and pass that socket with --socket.",
         )),
+        Link::Unsupported => Some((
+            "This pmuxd has no activity feed.",
+            "It is older than the feed. Update Prismattyc for a pmuxd that has one; the feed is still off by default and app-managed enablement is not available yet.",
+        )),
         Link::Retrying { .. } => Some((
             "Can't reach pmuxd.",
             "Start Prismattyc, or run pmux up in another pane. This view connects by itself.",
@@ -1017,7 +1022,8 @@ fn draw_hint(paint: &mut Painter<'_, '_>, area: Rect, hosts: &[Host], now: u64) 
 fn draw_note(paint: &mut Painter<'_, '_>, area: Rect, y: u16, host: &Host, filter: Filter) {
     let text = match (&host.link, host.seats.is_empty()) {
         (Link::Connecting, _) => "Connecting to the activity feed.",
-        (Link::Disabled, _) => "Start pmuxd with --experimental-activity.",
+        (Link::Disabled, _) => "Activity feed is disabled for this daemon.",
+        (Link::Unsupported, _) => "This pmuxd is older than the activity feed.",
         (Link::Retrying { .. }, true) => "Can't reach this host's feed. Retrying.",
         (_, true) => "No activity yet. Seats appear when their hooks publish.",
         (_, false) if filter != Filter::All => "No seats match this filter. Press f to change it.",
@@ -1368,10 +1374,18 @@ impl Palette {
     }
 }
 
-fn draw_footer(paint: &mut Painter<'_, '_>, area: Rect, ui: &Ui, pixels_available: bool) {
+fn draw_footer(
+    paint: &mut Painter<'_, '_>,
+    area: Rect,
+    ui: &Ui,
+    hosts: &[Host],
+    pixels_available: bool,
+) {
     let y = area.y + area.height - 1;
     let limit = area.x + area.width;
+    let idle = hint(hosts).is_some();
     let hints: &[(&str, &str)] = match ui.screen {
+        _ if idle => &[("q", "quit")],
         Screen::List => &[
             ("↑↓", "move"),
             ("⏎", "timeline"),
@@ -1404,6 +1418,7 @@ fn draw_footer(paint: &mut Painter<'_, '_>, area: Rect, ui: &Ui, pixels_availabl
         keep.push(index);
     }
     let order: &[usize] = match ui.screen {
+        _ if idle => &[0],
         Screen::List => &[0, 1, 3, 4, 6, 7, 5, 2],
         Screen::Timeline => &[0, 1, 3, 2],
     };
@@ -1962,6 +1977,21 @@ mod tests {
     }
 
     #[test]
+    fn a_lone_host_that_predates_the_feed_says_so() -> Result<()> {
+        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, None);
+        monitor.fixed_now = Some(NOW);
+        monitor.hosts[0].link = Link::Unsupported;
+        let (text, ..) = draw(&mut monitor, 80, 24);
+        assert!(text.contains("This pmuxd has no activity feed."), "{text}");
+        assert!(text.contains("older than the feed"));
+        assert!(text.contains("mac  no activity feed"));
+        let footer = text.lines().last().unwrap_or_default().trim();
+        assert_eq!(footer, "q quit", "nothing to move through yet");
+        assert!(!text.contains("Can't reach"));
+        Ok(())
+    }
+
+    #[test]
     fn an_unreachable_lone_host_says_how_to_start_pmuxd() -> Result<()> {
         let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, None);
         monitor.fixed_now = Some(NOW);
@@ -2330,7 +2360,7 @@ mod tests {
         let (text, ..) = draw(&mut monitor, 80, 24);
         assert!(text.contains("No activity yet. Seats appear when their hooks publish."));
         assert!(line_of(&text, "windows").contains("feed off"));
-        assert!(text.contains("Start pmuxd with --experimental-activity."));
+        assert!(text.contains("Activity feed is disabled for this daemon."));
         Ok(())
     }
 

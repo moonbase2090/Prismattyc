@@ -263,7 +263,7 @@ fn snapshot(options: &Options) -> Result<String> {
                 reachable[host] = true;
                 settled[host] |= !page.has_more;
             }
-            Update::Disabled => {
+            Update::Disabled | Update::Unsupported => {
                 reachable[host] = true;
                 settled[host] = true;
             }
@@ -275,6 +275,7 @@ fn snapshot(options: &Options) -> Result<String> {
             Update::Page(page) => target.apply(page, 0),
             Update::Disconnected => target.disconnect(wall),
             Update::Disabled => target.link = model::Link::Disabled,
+            Update::Unsupported => target.link = model::Link::Unsupported,
         }
     }
     // Stop the readers before rendering so the frame shows a fixed state.

@@ -94,7 +94,6 @@ static HOST_TERMINAL_OWNED: AtomicBool = AtomicBool::new(false);
 static SIGNAL_REQUESTED_EXIT: AtomicBool = AtomicBool::new(false);
 
 fn main() -> Result<()> {
-    let vt_ready = prismattyc_mux::platform::enable_console_vt();
     prismattyc_mux::release_update::forward_installed("prismattyc")?;
     let argv: Vec<String> = env::args().collect();
     if argv.get(1).map(String::as_str) == Some("update") {
@@ -104,6 +103,7 @@ fn main() -> Result<()> {
         return prismattyc_mux::run_uninstall(argv.iter().skip(2));
     }
     let cli = Cli::parse(env::args_os().skip(1))?;
+    let vt = prismattyc_mux::platform::enter_console_vt();
     let stdout_is_terminal = io::stdout().is_terminal();
     if splash::should_print_plain(
         cli.explicit_program,
@@ -116,7 +116,7 @@ fn main() -> Result<()> {
     let color = splash::color_enabled(
         env::var_os("NO_COLOR").is_some(),
         stdout_is_terminal,
-        vt_ready,
+        vt.stdout_ready(),
     );
     if splash::should_show(cli.explicit_program, cli.no_splash)
         && splash::run(prismattyc_core::package_version(), color)? == splash::Outcome::Quit

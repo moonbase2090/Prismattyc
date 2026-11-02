@@ -322,6 +322,17 @@ def modes():
         attributes[3] &= ~termios.PENDIN
     return repr(attributes)
 before = modes()
+for arguments, expected_exit in [(["--help"], 0), (["tutorial", "--help"], 0),
+                                 (["uninstall", "--help"], 0), (["mail", "--help"], 0),
+                                 (["space", "invalid-console-proof-verb"], 2),
+                                 (["session", "invalid-console-proof-verb"], 2)]:
+    check = subprocess.run([*sys.argv[2:5], *arguments], capture_output=True)
+    observed = modes()
+    if check.returncode != expected_exit or observed != before:
+        record = {"arguments":arguments,"before":before,"after":observed,
+                  "exit":check.returncode,"expected_exit":expected_exit}
+        Path(sys.argv[1]).write_text(json.dumps(record))
+        raise AssertionError(record)
 result = subprocess.run(sys.argv[2:])
 after = modes()
 Path(sys.argv[1]).write_text(json.dumps({"before":before,"after":after,"exit":result.returncode}))

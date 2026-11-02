@@ -12,11 +12,12 @@ import json
 import os
 from pathlib import Path
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
 import time
+
+from native_control import control_socket
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -136,9 +137,8 @@ def build(args, scratch):
 
 class Connection:
     def __init__(self, path):
-        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.socket = control_socket(path)
         self.socket.settimeout(45)
-        self.socket.connect(str(path))
         self.reader = self.socket.makefile("rb")
         self.sequence = 0
 
@@ -185,8 +185,10 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
         os.replace(temporary, config)
 
     def start():
+        nonlocal daemon
         program = ["cmd.exe", "/d", "/c", "pause > nul"] if os.name == "nt" else ["/bin/sh", "-c", "read -r line"]
         process = subprocess.Popen([str(pmuxd), "--socket", str(endpoint), "--", *program], env=env, stdout=log, stderr=log)
+        daemon = process
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if process.poll() is not None:

@@ -65,12 +65,17 @@ jobs:
           import importlib.util
           from pathlib import Path
           import tempfile
+          import socket
+          import sys
+          sys.path.insert(0, str(Path("scripts").resolve()))
           spec = importlib.util.spec_from_file_location('plugin_proof', 'scripts/test-plugin-runtime.py')
           module = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(module)
           with tempfile.TemporaryDirectory(prefix='plugin-acl-preflight-') as directory:
               module.private_windows_directory(Path(directory))
-          print('PASS native Windows fixture directory permissions and cleanup')
+          stream = socket.socket(getattr(socket, 'AF_UNIX', 1), socket.SOCK_STREAM)
+          stream.close()
+          print('PASS native Windows fixture permissions, Winsock family, and cleanup')
 
       - name: Download the same guest bytes on every OS
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0

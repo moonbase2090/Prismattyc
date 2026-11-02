@@ -19890,10 +19890,10 @@ fn queue_font_load(host: &mut HostState, selection: FontSelection, scale_factor:
 }
 
 fn install_font_completion(host: &mut HostState, id: u64, result: anyhow::Result<FontMetrics>) {
-    if !host
+    if host
         .pending_font_load
         .as_ref()
-        .is_some_and(|pending| pending.id == id)
+        .is_none_or(|pending| pending.id != id)
     {
         return;
     }

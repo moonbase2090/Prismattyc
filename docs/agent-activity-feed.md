@@ -64,7 +64,8 @@ The contained monitor and connector receive this metadata through the existing
 includes current sessions even when they have no retained events and reports
 `retained_history_only: false` when session metadata is available. Such seats
 have zero retained events and sequence zero until an event arrives. Older
-endpoints can omit `sessions` and continue to serve history-only views.
+endpoints can omit `sessions` and continue to serve history-only views. A response
+with `sessions: null` also means that current-session metadata is unavailable.
 
 ## Event schema and replay
 

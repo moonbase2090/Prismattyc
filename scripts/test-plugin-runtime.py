@@ -463,7 +463,7 @@ sys.stdin.readline()
             time.sleep(0.05)
         raise AssertionError("feed setting did not apply live")
 
-    def remote_proof():
+    def remote_proof(query_only=False):
         fixture = runtime / "endpoint-fixture.py"
         fixture.write_text('''import json, os, sys, time
 from pathlib import Path
@@ -504,6 +504,11 @@ else:
             assert time.monotonic() < deadline, value
             time.sleep(0.25)
         assert value["seats"][0]["retained_events"] == 300 and value["cursor"] == {"epoch":"abc1","sequence":300}, value
+        assert value["retained_history_only"] is True, value
+        if query_only:
+            (scratch / "remote-query-result.json").write_text(json.dumps(value, indent=2) + "\n")
+            print("PASS legacy remote query retains all 300 events and its source cursor without current-session metadata", flush=True)
+            return
         text = cli("run",monitor,"--snapshot","--cols","100","--rows","24","--endpoint","remote-tail",text=True)
         assert "remote-tail" in text and "remote-seat" in text and "test_failed" in text, text
         launcher = bins / f"pmux-activity-monitor{suffix}"
@@ -683,6 +688,10 @@ else:
             cli("enable",monitor,"--allow","activity.read:local")
             if feature == "discovery":
                 discovery_proof(connection)
+            elif feature == "remote-query":
+                connector = "org.moonbase.activity-connector"
+                cli("install", connector)
+                remote_proof(query_only=True)
             elif feature == "endpoint-pressure":
                 endpoint_pressure()
                 print("PASS32 endpoints with512 retained events each")
@@ -828,10 +837,10 @@ def main():
     parser.add_argument("--toolchain", default="1.90.0")
     parser.add_argument("--release", action="store_true", dest="release", default=True, help="exercise optimized native binaries as shipped (default)")
     parser.add_argument("--debug", action="store_false", dest="release", help="use slower debug native binaries for local diagnostics")
-    parser.add_argument("--feature", choices=["all","endpoint-pressure","legacy-import","production","discovery"], default="all")
+    parser.add_argument("--feature", choices=["all","endpoint-pressure","legacy-import","production","discovery","remote-query"], default="all")
     args = parser.parse_args()
-    if bool(args.bundle) != (args.feature == "production"):
-        parser.error("--bundle and --feature production must be supplied together")
+    if bool(args.bundle) != (args.feature in ("production", "remote-query")):
+        parser.error("--bundle is required with --feature production or remote-query")
     if args.bins and (args.feature != "production" or not args.frame_probe):
         parser.error("--bins requires --bundle, --feature production, and --frame-probe")
     if args.frame_probe and not args.bins:

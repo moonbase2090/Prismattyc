@@ -84,6 +84,21 @@ legacy endpoint import, no grant or helper execution during import, bounded
 catch-up, endpoint removal, helper cleanup, failed readiness, and durable disable.
 Do not use fixture guest bytes for production packaging.
 
+To isolate compatibility with a legacy remote page that omits session metadata,
+reuse the verified production bundle:
+
+```sh
+python3 scripts/test-plugin-runtime.py --feature remote-query \
+  --bundle "$verify_bundle" --target-dir "$verify_target" \
+  --out "$verify_evidence/legacy-remote-query"
+```
+
+Require exit 0, the legacy remote query PASS line, and
+`remote-query-result.json` with 300 retained events, cursor `abc1:300`, and
+`retained_history_only: true`. This mode proves the connector query path through
+the native worker protocol. Use the full fixture mode above for remote views,
+tail streams, endpoint removal, and helper cleanup.
+
 For manual review, `pmux plugin endpoint import` previews legacy definitions.
 Repeat with `--apply` only after reviewing them. `endpoint add` registers a
 transport. `plugin enable ID --version VERSION --allow activity.read:LABEL`

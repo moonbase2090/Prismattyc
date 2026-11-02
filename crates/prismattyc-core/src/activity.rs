@@ -98,7 +98,8 @@ pub struct ActivityPage {
     pub has_more: bool,
     pub reset: Option<ActivityReset>,
     /// Current daemon sessions, independent of retained history. Older sources omit it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // Worker messages use postcard: an absent value still needs its positional None tag.
+    #[serde(default)]
     pub sessions: Option<ActivitySessions>,
 }
 

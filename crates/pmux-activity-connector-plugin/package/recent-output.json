@@ -209,7 +209,10 @@
           ]
         },
         "sessions": {
-          "type": "object",
+          "type": [
+            "object",
+            "null"
+          ],
           "required": [
             "observed_at_ms",
             "seats"

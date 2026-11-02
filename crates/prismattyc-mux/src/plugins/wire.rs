@@ -125,6 +125,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_activity_page_crosses_worker_wire_without_session_metadata() {
+        let page: ActivityPage = serde_json::from_value(serde_json::json!({
+            "epoch":"abc1", "oldest_sequence":1, "current_sequence":1,
+            "records":[{"sequence":1,"received_at_ms":1000,"event":{
+                "schema_version":1,"seat":"legacy-seat","run_id":"legacy-run",
+                "event_id":"event-1","source":"hooks","kind":"waiting"
+            }}],
+            "cursor":{"epoch":"abc1","sequence":1},"has_more":false,"reset":null
+        }))
+        .unwrap();
+        let mut bytes = Vec::new();
+        write(&mut bytes, &Request::Page(Ok(page))).unwrap();
+        let Request::Page(Ok(page)) = read::<Request>(&mut std::io::Cursor::new(bytes)).unwrap()
+        else {
+            panic!("expected an activity page");
+        };
+        assert_eq!(page.epoch, "abc1");
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].event.seat.as_str(), "legacy-seat");
+        assert_eq!(page.cursor.sequence, 1);
+        assert!(page.sessions.is_none());
+    }
+
+    #[test]
     fn compiler_and_manifest_errors_cannot_emit_terminal_controls() {
         assert_eq!(
             error_message("invalid \x1b]52;c;data\x07\npattern"),

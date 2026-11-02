@@ -296,7 +296,7 @@ mod tests {
             (
                 json!({
                     "schema_version":1,"host":"local","seat_filter":"other-seat","next_cursor":"a0:7",
-                    "page":{"epoch":"a0","oldest_sequence":1,"current_sequence":7,"records":[],"cursor":{"epoch":"a0","sequence":7},"has_more":false,"reset":null}
+                    "page":{"epoch":"a0","oldest_sequence":1,"current_sequence":7,"records":[],"cursor":{"epoch":"a0","sequence":7},"has_more":false,"reset":null,"sessions":null}
                 }),
                 false
             )

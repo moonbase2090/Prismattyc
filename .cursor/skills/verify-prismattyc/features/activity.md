@@ -38,6 +38,34 @@ coverage. Actual provider hook proof additionally requires a reviewed installed
 provider runtime, its hook profile, and available authentication. Synthetic hook
 events establish feed behavior only. Record unavailable provider prerequisites.
 
+## Discover current sessions independently of history
+
+Run the discovery fixture in a clean private proof environment:
+
+```sh
+python3 scripts/test-plugin-runtime.py --feature discovery \
+  --target-dir "$verify_target" --out "$verify_evidence/discovery" --debug
+```
+
+This mode builds candidate guests and matched native binaries. It requires
+Rust 1.90 and its `wasm32-unknown-unknown` target. It does not prove official
+bundle provenance or provider-hook behavior. Omit `--debug` to exercise optimized
+native binaries.
+
+Require exit 0, the discovery PASS line, and `discovery-result.json`. Inspect the
+initial, restarted, and live text frames plus the metadata JSON. The fixture
+requires current sessions with no hooks or events, an unchanged event cursor,
+a 520-event retention gap, fresh monitor views that still list quiet seats,
+and periodic discovery and removal in a live terminal. The current-session
+snapshot stays inside the existing activity-only grant. It never creates
+history records or advances the activity cursor.
+
+`--out` must name a new directory. It preserves its bundle, daemon log, and
+proof artifacts after the private runtime is cleaned up. Failed drives retain
+the artifacts written before failure. A debug worker can spend longer than
+15 seconds compiling its first live view; the fixture allows 45 seconds for
+that view to appear.
+
 ## Review grants and remote endpoints
 
 Use only a fresh private daemon with the same verified bundle. The production

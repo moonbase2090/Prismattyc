@@ -118,9 +118,10 @@ impl View {
                     .map(|index| (index, seat))
             });
         }
-        let mut remaining = (pmux_plugin_api::MAX_ACTIVITY_READS_PER_SECOND
+        let read_budget = (pmux_plugin_api::MAX_ACTIVITY_READS_PER_SECOND
             / (1000 / POLL_INTERVAL_MS))
-            .min(pmux_plugin_api::MAX_HOST_IMPORTS_PER_CALL - 1);
+            .saturating_sub(1);
+        let mut remaining = read_budget.min(pmux_plugin_api::MAX_HOST_IMPORTS_PER_CALL - 1) / 2;
         for _ in 0..self.handles.len() {
             if remaining == 0 {
                 break;
@@ -140,7 +141,7 @@ impl View {
                     epoch: epoch.clone(),
                     sequence: host.sequence,
                 });
-                match read::poll(handle, cursor.as_ref(), 256).and_then(activity::page) {
+                match activity::poll(handle, cursor.as_ref(), 256) {
                     Ok(page) => {
                         let more = page.has_more;
                         host.apply(page, clock.monotonic_ms);

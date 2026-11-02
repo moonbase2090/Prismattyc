@@ -8,6 +8,7 @@ operator's running daemon. Run on each supported OS before release.
 """
 
 import argparse
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -233,6 +234,80 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
         result = subprocess.run([str(pmux), "--socket", str(endpoint), *args], env=env, capture_output=True, text=True, encoding="utf-8", timeout=45)
         assert result.returncode == 0, result.stderr
         return result.stdout
+
+    def discovery_proof(connection):
+        connector = "org.moonbase.activity-connector"
+        monitor = "org.moonbase.activity-monitor"
+        for plugin in [connector, monitor]:
+            cli("install", plugin)
+            cli("enable", plugin, "--allow", "activity.read:local")
+
+        def create(name):
+            program = "cmd.exe" if os.name == "nt" else "/bin/sh"
+            argv = ["/d", "/c", "pause > nul"] if os.name == "nt" else ["-c", "read -r line"]
+            reply = connection.request("create_session", name=name,
+                spawn={"program":program,"argv":argv,"cwd":None,"env":{}},
+                agent_id=name, headless=False)
+            assert reply["status"] == "ok", reply
+            return reply["response"]["session_id"]
+
+        def seats():
+            reply = cli("invoke", connector, "seats")
+            assert not reply["is_error"], reply
+            return {seat["seat"]:seat for seat in json.loads(reply["json"])["seats"]}
+
+        quiet = create("quiet-seat")
+        create("unhooked-seat")
+        initial = connection.request("read_activity", cursor=None, limit=256)["response"]["page"]
+        assert initial["records"] == [] and initial["cursor"]["sequence"] == 0, initial
+        assert {seat["seat"] for seat in initial["sessions"]["seats"]} == {"quiet-seat", "unhooked-seat"}
+        observed = seats()
+        assert {"quiet-seat", "unhooked-seat"} <= observed.keys(), observed
+        assert observed["quiet-seat"]["retained_events"] == 0
+        first_frame = cli("run", monitor, "--snapshot", "--cols", "100", "--rows", "30", text=True)
+        assert "quiet-seat" in first_frame and "unhooked-seat" in first_frame, first_frame
+        (scratch / "discovery-initial.json").write_text(json.dumps(initial, indent=2) + "\n")
+        (scratch / "discovery-initial-frame.txt").write_text(first_frame)
+        for sequence in range(520):
+            reply = connection.request("publish_activity", event={"schema_version":1,
+                "seat":"busy-seat", "run_id":"busy-run", "event_id":f"event-{sequence}",
+                "source":"hooks", "kind":"working"})
+            assert reply["status"] == "ok", reply
+        page = connection.request("read_activity", cursor=initial["cursor"], limit=256)["response"]["page"]
+        assert page["reset"] == "retention_gap" and len(page["records"]) == 256, page
+        assert all(record["event"]["seat"] == "busy-seat" for record in page["records"])
+        assert {"quiet-seat", "unhooked-seat"} <= seats().keys()
+        restarted = cli("run", monitor, "--snapshot", "--cols", "100", "--rows", "30", text=True)
+        assert "quiet-seat" in restarted and "unhooked-seat" in restarted, restarted
+        (scratch / "discovery-retention-gap.json").write_text(json.dumps(page, indent=2) + "\n")
+        (scratch / "discovery-restarted-frame.txt").write_text(restarted)
+        core("new", "--no-attach", "--no-agent", "discovery-view", "--",
+            str(pmux), "--socket", str(endpoint), "plugin", "run", monitor, "--no-pixels")
+        view = next(session for session in connection.request("snapshot")["response"]["snapshot"]["sessions"] if session["name"] == "discovery-view")
+        pane = view["windows"][0]["panes"][0]["id"]
+
+        def screen(needle):
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                output = core("save-buffer", str(pane), "-")
+                if needle in output:
+                    return output
+                time.sleep(0.1)
+            raise AssertionError(f"live discovery view did not show {needle}: {output}")
+
+        screen("quiet-seat")
+        create("later-seat")
+        screen("later-seat")
+        reply = connection.request("destroy_session", session_id=quiet)
+        assert reply["status"] == "ok", reply
+        assert "quiet-seat" not in seats()
+        time.sleep(2)
+        assert "quiet-seat" not in core("save-buffer", str(pane), "-")
+        final_screen = core("save-buffer", str(pane), "-")
+        assert "later-seat" in final_screen
+        (scratch / "discovery-live-frame.txt").write_text(final_screen)
+        (scratch / "discovery-result.json").write_text(json.dumps({"status":"PASS", "checks":["zero events", "520-event retention gap", "fresh monitor", "live discovery", "session removal"]}, indent=2) + "\n")
+        print("PASS session discovery without hooks or events; unchanged cursor; 520-event retention gap; fresh monitor views retain quiet seats; live periodic discovery and session removal; existing activity-only grants", flush=True)
 
     def mcp_proof(arguments, activity_only):
         import queue
@@ -601,7 +676,9 @@ else:
             feed(True)
             cli("install",monitor)
             cli("enable",monitor,"--allow","activity.read:local")
-            if feature == "endpoint-pressure":
+            if feature == "discovery":
+                discovery_proof(connection)
+            elif feature == "endpoint-pressure":
                 endpoint_pressure()
                 print("PASS32 endpoints with512 retained events each")
             else:
@@ -738,6 +815,7 @@ else:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--out", type=Path, help="retain proof artifacts in a new directory")
     parser.add_argument("--target-dir", type=Path, default=REPO / "target/plugin-proof")
     parser.add_argument("--bundle", type=Path, help="reuse a verified production artifact without compiling guests")
     parser.add_argument("--bins", type=Path, help="drive existing packaged production executables after verifying their physical bundle identities; build nothing")
@@ -745,7 +823,7 @@ def main():
     parser.add_argument("--toolchain", default="1.90.0")
     parser.add_argument("--release", action="store_true", dest="release", default=True, help="exercise optimized native binaries as shipped (default)")
     parser.add_argument("--debug", action="store_false", dest="release", help="use slower debug native binaries for local diagnostics")
-    parser.add_argument("--feature", choices=["all","endpoint-pressure","legacy-import","production"], default="all")
+    parser.add_argument("--feature", choices=["all","endpoint-pressure","legacy-import","production","discovery"], default="all")
     args = parser.parse_args()
     if bool(args.bundle) != (args.feature == "production"):
         parser.error("--bundle and --feature production must be supplied together")
@@ -753,7 +831,10 @@ def main():
         parser.error("--bins requires --bundle, --feature production, and --frame-probe")
     if args.frame_probe and not args.bins:
         parser.error("--frame-probe requires --bins")
-    with tempfile.TemporaryDirectory(prefix="pmux-plugin-build-") as work:
+    if args.out:
+        args.out = args.out.resolve()
+        args.out.mkdir(parents=True, exist_ok=False)
+    with (nullcontext(str(args.out)) if args.out else tempfile.TemporaryDirectory(prefix="pmux-plugin-build-")) as work:
         scratch = Path(work)
         if args.bins:
             sys.path.insert(0, str(REPO / "scripts/release"))

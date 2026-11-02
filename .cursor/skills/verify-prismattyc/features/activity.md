@@ -122,6 +122,21 @@ it is not a timed kill test. macOS repairs through verified app replacement.
 ## Verify packaged feed toggles
 
 Inside a clean VM, install the package and verify its physical provenance.
+Run the same production checks directly against that installation:
+
+```sh
+python3 scripts/test-plugin-runtime.py --bundle "$verify_bundle" \
+  --bins "$installed_bins" --frame-probe "$verify_frame_probe" --feature production \
+  > "$verify_evidence/packaged-activity.log" 2>&1
+```
+
+Set `installed_bins` to the package's installed executable directory. Build the
+native `plugin_frame_probe` example separately from the frozen source and set
+`verify_frame_probe` to its path. This test instrument reads the daemon's frames;
+it is not part of the installed product. `--bins` verifies all five packaged
+consumers against the source revision and bundle before driving them. It builds
+nothing. Require both identity and runtime PASS lines and exit 0.
+
 Install both plug-ins disabled, inspect their exact versions/digests, and enable
 them with only the local activity grant. `pmux-activity-monitor --json` must then
 report the feed disabled. Without restarting the daemon, toggle collection on,

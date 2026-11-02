@@ -109,7 +109,7 @@ class Connection:
         return self.request("plugin", plugin_api="1.0.0", operation={"operation": operation, **fields})
 
 
-def exercise(bins, scratch, feature="all", expected_catalog=None):
+def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=None):
     # Short socket paths also work with macOS's sockaddr_un limit.
     runtime = Path(tempfile.mkdtemp(prefix="pmux-plug-")).resolve()
     if os.name == "nt":
@@ -466,7 +466,8 @@ else:
     def monitor_frame_proof():
         text = cli("run", monitor, "main", "--snapshot", "--cols", "100", "--rows", "24", text=True)
         assert "fixture-seat" in text and "test_failed" in text
-        probe = subprocess.run([str(bins / f"examples/plugin_frame_probe{suffix}"), str(endpoint)], env=env, capture_output=True, text=True, timeout=45)
+        probe_binary = frame_probe or bins / f"examples/plugin_frame_probe{suffix}"
+        probe = subprocess.run([str(probe_binary), str(endpoint)], env=env, capture_output=True, text=True, timeout=45)
         assert probe.returncode == 0, probe.stderr
         frame = json.loads(probe.stdout)
         assert frame["cells"] == 2400 and "fixture-seat" in frame["text"]
@@ -666,6 +667,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-dir", type=Path, default=REPO / "target/plugin-proof")
     parser.add_argument("--bundle", type=Path, help="reuse a verified production artifact without compiling guests")
+    parser.add_argument("--bins", type=Path, help="drive existing packaged production executables after verifying their physical bundle identities; build nothing")
+    parser.add_argument("--frame-probe", type=Path, help="separately built native plugin_frame_probe helper, required with --bins")
     parser.add_argument("--toolchain", default="1.90.0")
     parser.add_argument("--release", action="store_true", dest="release", default=True, help="exercise optimized native binaries as shipped (default)")
     parser.add_argument("--debug", action="store_false", dest="release", help="use slower debug native binaries for local diagnostics")
@@ -673,11 +676,22 @@ def main():
     args = parser.parse_args()
     if bool(args.bundle) != (args.feature == "production"):
         parser.error("--bundle and --feature production must be supplied together")
+    if args.bins and (args.feature != "production" or not args.frame_probe):
+        parser.error("--bins requires --bundle, --feature production, and --frame-probe")
+    if args.frame_probe and not args.bins:
+        parser.error("--frame-probe requires --bins")
     with tempfile.TemporaryDirectory(prefix="pmux-plugin-build-") as work:
         scratch = Path(work)
-        bins = build(args, scratch)
+        if args.bins:
+            sys.path.insert(0, str(REPO / "scripts/release"))
+            from plugin_bundle_provenance import verify_binaries
+            bins = args.bins.resolve()
+            identity = verify_binaries(bins, args.bundle)["identity"]
+            print("PASS existing packaged consumers match source and bundle: " + json.dumps(identity), flush=True)
+        else:
+            bins = build(args, scratch)
         expected = json.loads((args.bundle / "pmux-plugins.json").read_bytes())["packages"] if args.bundle else None
-        exercise(bins, scratch, args.feature, expected)
+        exercise(bins, scratch, args.feature, expected, args.frame_probe.resolve() if args.frame_probe else None)
 
 
 if __name__ == "__main__":

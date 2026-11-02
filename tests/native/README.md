@@ -59,6 +59,12 @@ Windows also checks a sharing failure. Prepared-state recovery uses the actual
 receipt and backup, without claiming a timed process-kill test. A missing
 symlink privilege produces a partial result and exit code 2.
 
+To drive the contained runtime directly from an installed package, build the
+`plugin_frame_probe` example separately, then pass `--bins INSTALLED_BIN_DIR`
+and `--frame-probe PATH` to `scripts/test-plugin-runtime.py` together with
+`--bundle VERIFIED_BUNDLE --feature production`. This mode verifies physical
+consumer provenance and builds nothing before starting its private daemon.
+
 Check Space rail transparency and opacity hot reload:
 
 ```bash

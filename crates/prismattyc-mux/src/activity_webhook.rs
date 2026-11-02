@@ -934,15 +934,19 @@ mod tests {
 
     #[test]
     fn webhook_configuration_rejects_inline_and_incomplete_secrets() {
-        let mut section = MuxSection::default();
-        section.activity_webhook_secret = Some("private".into());
+        let section = MuxSection {
+            activity_webhook_secret: Some("private".into()),
+            ..MuxSection::default()
+        };
         let error = WebhookConfig::from_mux(&section).err().unwrap();
         assert_eq!(
             error.to_string(),
             "inline webhook secrets are not supported; configure a secret file"
         );
-        section.activity_webhook_secret = None;
-        section.activity_webhook_url = Some("https://example.invalid/hook?token=private".into());
+        let section = MuxSection {
+            activity_webhook_url: Some("https://example.invalid/hook?token=private".into()),
+            ..MuxSection::default()
+        };
         assert!(WebhookConfig::from_mux(&section).is_err());
     }
 

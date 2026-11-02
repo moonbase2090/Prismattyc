@@ -5,6 +5,8 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::ffi::OsStr;
+#[cfg(not(windows))]
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// Whether `/proc/<pid>` (Linux) or `kill(pid, 0)` says the pid exists.
@@ -168,10 +170,10 @@ fn foreground_command_impl(root: u32) -> Option<String> {
             // look like a child here.
             let args = cmdline_strings(root)?;
             if !is_shell_argv(&args) {
-                return Some(shell_join(&args));
+                return Some(unix_replay_command(root, args));
             }
             let child = first_non_shell_descendant(root)?;
-            cmdline_strings(child).map(|args| shell_join(&args))
+            cmdline_strings(child).map(|args| unix_replay_command(child, args))
         }
         TtyForeground::Unknown => None,
     }
@@ -280,7 +282,7 @@ fn command_in_foreground_pgid(root: u32, tpgid: u32) -> Option<String> {
         .copied()
         .find(|pid| *pid == tpgid)
         .unwrap_or(non_shell[0]);
-    cmdline_strings(pick).map(|args| shell_join(&args))
+    cmdline_strings(pick).map(|args| unix_replay_command(pick, args))
 }
 
 #[cfg(not(windows))]
@@ -309,6 +311,117 @@ fn cmdline_strings(pid: u32) -> Option<Vec<String>> {
             .map(|arg| String::from_utf8_lossy(&arg).into_owned())
             .collect(),
     )
+}
+
+#[cfg(not(windows))]
+fn unix_replay_command(pid: u32, mut args: Vec<String>) -> String {
+    if let Some(program) = args
+        .first()
+        .and_then(|program| stable_program_name(pid, program))
+    {
+        args[0] = program;
+    }
+    shell_join(&args)
+}
+
+#[cfg(not(windows))]
+fn stable_program_name(pid: u32, program: &str) -> Option<String> {
+    let program_path = Path::new(program);
+    if !program_path.is_absolute() {
+        return None;
+    }
+    let versioned_name = program_path.file_name()?.to_str()?;
+    let target = program_path.canonicalize().ok()?;
+    let process_path = process_path(pid)?;
+
+    for alias in version_alias_candidates(versioned_name) {
+        for directory in std::env::split_paths(&process_path) {
+            let directory = if directory.as_os_str().is_empty() {
+                let Some(cwd) = cwd_of(pid) else {
+                    continue;
+                };
+                cwd
+            } else {
+                directory
+            };
+            let candidate = directory.join(&alias);
+            let Ok(metadata) = candidate.metadata() else {
+                continue;
+            };
+            if !is_executable(&metadata) {
+                continue;
+            }
+
+            // Try the shortest alias first. Once the shell can resolve that
+            // name, a mismatch fails closed instead of trying a longer alias.
+            // The first executable with this name is what the shell will run.
+            // Only trust a real symlink to the process we inspected; do not
+            // reinterpret hard links or multi-call binary aliases.
+            return candidate
+                .symlink_metadata()
+                .ok()
+                .is_some_and(|metadata| metadata.file_type().is_symlink())
+                .then(|| candidate.canonicalize().ok())
+                .flatten()
+                .filter(|resolved| *resolved == target)
+                .map(|_| alias);
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn is_executable(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn is_executable(_metadata: &std::fs::Metadata) -> bool {
+    true
+}
+
+#[cfg(not(windows))]
+fn version_alias_candidates(versioned_name: &str) -> Vec<String> {
+    versioned_name
+        .char_indices()
+        .filter_map(|(index, separator)| {
+            if !matches!(separator, '-' | '_' | '.' | '@') {
+                return None;
+            }
+            let suffix = &versioned_name[index + separator.len_utf8()..];
+            let version = suffix.strip_prefix('v').unwrap_or(suffix);
+            version
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_digit)
+                .then(|| versioned_name[..index].to_string())
+        })
+        .filter(|alias| !alias.is_empty())
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn process_path(pid: u32) -> Option<OsString> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let raw = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    let path = raw
+        .split(|byte| *byte == 0)
+        .find_map(|entry| entry.strip_prefix(b"PATH="))?;
+    Some(OsString::from_vec(path.to_vec()))
+}
+
+#[cfg(target_os = "macos")]
+fn process_path(pid: u32) -> Option<OsString> {
+    use std::os::unix::ffi::OsStringExt;
+
+    macos::path(pid).map(OsString::from_vec)
+}
+
+#[cfg(all(not(windows), not(any(target_os = "linux", target_os = "macos"))))]
+fn process_path(_pid: u32) -> Option<OsString> {
+    None
 }
 
 fn is_shell_argv(args: &[String]) -> bool {
@@ -581,7 +694,17 @@ mod macos {
     use super::*;
     use std::ptr;
 
+    type ProcArgsAndPath = (Vec<Vec<u8>>, Option<Vec<u8>>);
+
     pub(super) fn procargs(pid: u32) -> Option<Vec<Vec<u8>>> {
+        procargs_and_path(pid).map(|(args, _)| args)
+    }
+
+    pub(super) fn path(pid: u32) -> Option<Vec<u8>> {
+        procargs_and_path(pid).and_then(|(_, path)| path)
+    }
+
+    fn procargs_and_path(pid: u32) -> Option<ProcArgsAndPath> {
         let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as i32];
         let mut size = 0usize;
         unsafe {
@@ -639,7 +762,24 @@ mod macos {
                 break;
             }
         }
-        (!args.is_empty()).then_some(args)
+        if args.is_empty() {
+            return None;
+        }
+        let mut path = None;
+        while i < buf.len() {
+            while i < buf.len() && buf[i] == 0 {
+                i += 1;
+            }
+            let start = i;
+            while i < buf.len() && buf[i] != 0 {
+                i += 1;
+            }
+            if let Some(value) = buf[start..i].strip_prefix(b"PATH=") {
+                path = Some(value.to_vec());
+                break;
+            }
+        }
+        Some((args, path))
     }
 
     /// `libproc.h` `PROC_ALL_PIDS`. libc 0.2 does not export this selector.
@@ -748,6 +888,77 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
+    #[cfg(unix)]
+    fn procinfo_test_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "prismattyc-procinfo-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).expect("create procinfo test directory");
+        path
+    }
+
+    #[cfg(unix)]
+    fn build_test_sleeper(path: &Path) {
+        let source = path.with_extension("c");
+        std::fs::write(
+            &source,
+            b"#include <stdlib.h>\n#include <unistd.h>\nint main(int argc, char **argv) { sleep(argc > 1 ? (unsigned int)atoi(argv[1]) : 30); return 0; }\n",
+        )
+        .expect("write controlled-PATH sleeper source");
+        let output = std::process::Command::new("cc")
+            .arg("-o")
+            .arg(path)
+            .arg(&source)
+            .output()
+            .expect("compile controlled-PATH sleeper");
+        let _ = std::fs::remove_file(source);
+        assert!(
+            output.status.success(),
+            "compile controlled-PATH sleeper: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    fn stable_program_name_with_path(program: &Path, path: Option<&OsStr>) -> Option<String> {
+        let sleeper = program
+            .parent()
+            .expect("versioned program parent")
+            .join("controlled-path-sleeper");
+        build_test_sleeper(&sleeper);
+        let mut command = std::process::Command::new(sleeper);
+        command
+            .arg("30")
+            .env_remove("PATH")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
+        let mut child = command.spawn().expect("spawn controlled-PATH process");
+        assert_eq!(child.try_wait().unwrap(), None, "controlled process exited");
+        let expected_path = path.map(OsStr::to_os_string);
+        let mut observed_path = process_path(child.id());
+        for _ in 0..50 {
+            if observed_path == expected_path {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            observed_path = process_path(child.id());
+        }
+        let result = stable_program_name(child.id(), program.to_str().expect("UTF-8 test path"));
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(observed_path, expected_path, "controlled PATH not observed");
+        result
+    }
+
     #[test]
     fn self_pid_is_alive() {
         let me = std::process::id();
@@ -813,6 +1024,82 @@ mod tests {
         );
         assert_eq!(shell_join(&["sleep".into(), "30".into()]), "sleep 30");
         assert_eq!(shell_join(&["echo".into(), "a b".into()]), "echo 'a b'");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn version_aliases_only_strip_numeric_version_suffixes() {
+        assert_eq!(
+            version_alias_candidates("agent-cli-1.2.3"),
+            ["agent-cli", "agent-cli-1", "agent-cli-1.2"]
+        );
+        assert_eq!(version_alias_candidates("fixture_v2"), ["fixture"]);
+        assert!(version_alias_candidates("busybox-sh").is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_program_name_rejects_a_shadowing_executable() {
+        use std::os::unix::fs::symlink;
+
+        let root = procinfo_test_dir("shadow");
+        let shadow = root.join("shadow");
+        let valid = root.join("valid");
+        std::fs::create_dir_all(&shadow).unwrap();
+        std::fs::create_dir_all(&valid).unwrap();
+        let versioned = root.join("fixture-agent-1.2.3");
+        std::fs::copy("/bin/sleep", &versioned).unwrap();
+        symlink("/bin/echo", shadow.join("fixture-agent")).unwrap();
+        symlink(&versioned, valid.join("fixture-agent")).unwrap();
+        let path = std::env::join_paths([&shadow, &valid]).unwrap();
+
+        let stable = stable_program_name_with_path(&versioned, Some(&path));
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(stable, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_program_name_rejects_a_hard_link_alias() {
+        let root = procinfo_test_dir("hard-link");
+        let versioned = root.join("fixture-agent-1.2.3");
+        std::fs::copy("/bin/sleep", &versioned).unwrap();
+        std::fs::hard_link(&versioned, root.join("fixture-agent")).unwrap();
+
+        let stable = stable_program_name_with_path(&versioned, Some(root.as_os_str()));
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(stable, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_program_name_rejects_a_non_executable_alias() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = procinfo_test_dir("non-executable");
+        let versioned = root.join("fixture-agent-1.2.3");
+        std::fs::copy("/bin/sleep", &versioned).unwrap();
+        std::fs::set_permissions(&versioned, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&versioned, root.join("fixture-agent")).unwrap();
+
+        let stable = stable_program_name_with_path(&versioned, Some(root.as_os_str()));
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(stable, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_program_name_rejects_a_process_without_path() {
+        use std::os::unix::fs::symlink;
+
+        let root = procinfo_test_dir("missing-path");
+        let versioned = root.join("fixture-agent-1.2.3");
+        std::fs::copy("/bin/sleep", &versioned).unwrap();
+        symlink(&versioned, root.join("fixture-agent")).unwrap();
+
+        let stable = stable_program_name_with_path(&versioned, None);
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(stable, None);
     }
 
     #[cfg(unix)]

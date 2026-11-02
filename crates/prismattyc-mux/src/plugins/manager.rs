@@ -889,7 +889,7 @@ impl Manager {
             let state = self.state.lock().unwrap();
             let Some(Desired::Enabled { selected, grants }) = state.journal.selections.get(id)
             else {
-                bail!("plug-in is disabled; install and explicitly enable it first");
+                bail!("plug-in {id} is not enabled; inspect its installation and grants with pmux plugin list");
             };
             let slot = state
                 .slots

@@ -137,7 +137,7 @@ identities; lifecycle events without correlation receive new identities.
 
 ## Run the feed
 
-Build the daemon and adapter from the repository root:
+First prepare a verified production bundle and build matched consumers as described in [Build from source](../tools/activity-monitor/README.md#build-from-source). A source build without that bundle has an empty catalog. For feed ingestion only, build the daemon and adapter from the repository root:
 
 ```sh
 cargo build -p prismattyc-mux --bins --locked
@@ -153,10 +153,21 @@ target/debug/pmuxd --experimental-activity --socket /tmp/activity-demo/feed.sock
 The parent directory must exist and be private to the user. Do not replace a
 running daemon or point verification at an operator socket.
 
+Before opening the contained viewer, install and approve its exact package on this private daemon. Collection enablement does not grant plug-in access:
+
+```sh
+target/debug/pmux --socket /tmp/activity-demo/feed.sock plugin install org.moonbase.activity-monitor --version 1.0.0
+target/debug/pmux --socket /tmp/activity-demo/feed.sock plugin enable org.moonbase.activity-monitor --version 1.0.0 --allow activity.read:local
+target/debug/pmux --socket /tmp/activity-demo/feed.sock plugin install org.moonbase.activity-connector --version 1.0.0
+target/debug/pmux --socket /tmp/activity-demo/feed.sock plugin enable org.moonbase.activity-connector --version 1.0.0 --allow activity.read:local
+```
+
+Installation leaves both packages disabled. The connector serves JSON query modes and explicit native MCP exports. Settings > Plug-ins offers the same version and permission review. Existing 0.3.54 collection settings do not silently approve either package after upgrade.
+
 Start the viewer in another terminal:
 
 ```sh
-tools/activity-monitor/target/debug/pmux-activity-monitor --socket /tmp/activity-demo/feed.sock
+target/debug/pmux-activity-monitor --socket /tmp/activity-demo/feed.sock
 ```
 
 Install a per-seat hook profile using absolute paths:
@@ -207,9 +218,9 @@ A bot with Shell access to a host can query the same private socket without
 opening a terminal UI. The monitor's connector modes emit JSON:
 
 ```sh
-tools/activity-monitor/target/debug/pmux-activity-monitor --socket /tmp/activity-demo/feed.sock --seats
-tools/activity-monitor/target/debug/pmux-activity-monitor --socket /tmp/activity-demo/feed.sock --recent worker-a
-tools/activity-monitor/target/debug/pmux-activity-monitor --socket /tmp/activity-demo/feed.sock --tail --seat worker-a
+target/debug/pmux-activity-monitor --socket /tmp/activity-demo/feed.sock --seats
+target/debug/pmux-activity-monitor --socket /tmp/activity-demo/feed.sock --recent worker-a
+target/debug/pmux-activity-monitor --socket /tmp/activity-demo/feed.sock --tail --seat worker-a
 ```
 
 `--seats` lists seats observed in retained events. It does not assert that a
@@ -239,7 +250,7 @@ this version. The existing Shell connector supplies the usable integration now.
 ```sh
 python3 scripts/verify-activity.py \
   --bins target/debug \
-  --monitor tools/activity-monitor/target/debug/pmux-activity-monitor \
+  --monitor target/debug/pmux-activity-monitor \
   --out /tmp/activity-proof-new
 ```
 

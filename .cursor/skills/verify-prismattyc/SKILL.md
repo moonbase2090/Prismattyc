@@ -49,6 +49,17 @@ Each `--out` must be new. A successful drive prints `"status": "PASS"`. For desk
 
 ## CI and test portability
 
+Full workspace tests build real version-matched component fixtures. Install the
+Wasm standard library for the test toolchain first:
+
+```sh
+rustup target add wasm32-unknown-unknown --toolchain 1.90.0
+```
+
+A native-only toolchain otherwise reports missing `core` from fixture builds.
+Using prebuilt production guests does not require rebuilding them for native
+package runtime proof.
+
 For changes to process-detection fixtures or Linux test runners, follow the
 [session and mail portability checks](features/sessions-mail.md#linux-test-portability).
 The Ubuntu 26.04 preview job in `.github/workflows/ci.yml` is advisory

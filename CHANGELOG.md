@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Versioned contained plug-ins for activity views and queries, with exact package selection, endpoint grants, native Settings management, and cancellable workers. Guest packages are shared across native builds and versioned independently from the core.
+- A verified monitor-launcher repair command on Linux and Windows that preserves the six-executable core update and rollback transaction.
+
+### Changed
+
+- After upgrading from the standalone 0.3.54 monitor, install and explicitly enable `org.moonbase.activity-monitor` for live/snapshot views and `org.moonbase.activity-connector` for JSON queries. Approve `activity.read:local` separately from the existing collection setting. Settings > Plug-ins and `pmux plugin` provide these actions; collection opt-in does not grant access automatically. Source builds need a verified plug-in bundle.
+
 ## [0.3.54] - 2026-11-01
 
 ### Added

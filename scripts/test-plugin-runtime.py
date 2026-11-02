@@ -163,7 +163,11 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
     # Short socket paths also work with macOS's sockaddr_un limit.
     runtime = Path(tempfile.mkdtemp(prefix="pmux-plug-")).resolve()
     if os.name == "nt":
-        private_windows_directory(runtime)
+        try:
+            private_windows_directory(runtime)
+        except BaseException:
+            shutil.rmtree(runtime)
+            raise
     config = runtime / "config.toml"
     endpoint = runtime / "daemon.sock"
     env = {key: value for key, value in os.environ.items() if not key.startswith(("HIVE_", "PMUX_", "PRISMATTYC_"))}
@@ -525,10 +529,27 @@ else:
             assert {entry["id"] for entry in expected_catalog} == {monitor, "org.moonbase.activity-connector"}
             assert sorted(cli("discover")["packages"], key=lambda entry: (entry["id"],entry["version"])) == sorted(expected_catalog, key=lambda entry: (entry["id"],entry["version"]))
             assert cli("list")["installed"] == []
+            launcher = bins / f"pmux-activity-monitor{suffix}"
+
+            def onboarding(arguments, plugin, installed):
+                result = subprocess.run([str(launcher), "--socket", str(endpoint), *arguments], env=env, capture_output=True, text=True, timeout=10)
+                assert result.returncode != 0
+                assert plugin in result.stderr, result.stderr
+                assert (f"pmux plugin install {plugin}" in result.stderr) == (not installed), result.stderr
+                assert f"pmux plugin enable {plugin} --allow activity.read:local" in result.stderr, result.stderr
+                assert ("installed but not enabled" if installed else "not installed") in result.stderr, result.stderr
+
+            feed(True)
+            for arguments in ([], ["--snapshot"], ["--json"], ["--seats"], ["--recent", "fixture-seat"], ["--tail"]):
+                plugin = monitor if arguments in ([], ["--snapshot"]) else "org.moonbase.activity-connector"
+                onboarding(arguments, plugin, False)
+            assert cli("list")["installed"] == [], "Collection opt-in must not silently install or grant plug-ins"
+            feed(False)
             for entry in expected_catalog:
                 package = cli("install",entry["id"],"--version",entry["version"])["package"]
                 assert package["digest"] == entry["sha256"]
             connector = "org.moonbase.activity-connector"
+            onboarding(["--seats"], connector, True)
             cli("run",monitor,"--snapshot",succeeds=False)
             cli("invoke",connector,"seats",succeeds=False)
             assert connection.plugin("exports",allowlist=[connector])["response"]["reply"]["tools"] == []

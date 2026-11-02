@@ -29,6 +29,8 @@ impl Source {
 }
 
 const SNAPSHOT_SIZE: (u16, u16) = (120, 24);
+const MONITOR: &str = "org.moonbase.activity-monitor";
+const CONNECTOR: &str = "org.moonbase.activity-connector";
 const USAGE: &str = "usage: pmux-activity-monitor [--socket PATH] [--host LABEL=PATH]... [--host-cmd LABEL JSON_ARGV]...
   (with no --socket or --host, reads this machine's pmuxd, found the way pmux finds it)
                              [--theme auto|dark|light] [--no-pixels] [--no-motion]
@@ -264,15 +266,41 @@ fn query(client: &mut Client, contribution: &str, mut arguments: Value) -> Resul
     }
 }
 
-fn tail(mut client: Client, socket: &std::path::Path, seat: Option<&AgentId>) -> Result<()> {
-    let Reply::Inspection { state, .. } = client.request(Request::Inspect {
-        id: "org.moonbase.activity-connector".into(),
-        version: None,
-    })?
-    else {
-        bail!("unexpected connector status");
+fn require_enabled(client: &mut Client, id: &str) -> Result<()> {
+    let Reply::List { installed, states } = client.request(Request::List)? else {
+        bail!("unexpected plug-in status");
     };
-    ensure!(state.enabled, "activity connector is disabled; install and enable org.moonbase.activity-connector with --allow activity.read:local");
+    if states.iter().any(|state| state.id == id && state.enabled) {
+        return Ok(());
+    }
+    let installed = installed.iter().any(|package| package.id == id);
+    let state = if installed {
+        "installed but not enabled"
+    } else {
+        "not installed"
+    };
+    let catalog = if !installed {
+        let Reply::Catalog { packages } = client.request(Request::Discover { refresh: false })?
+        else {
+            bail!("unexpected plug-in catalog");
+        };
+        if packages.iter().any(|package| package.id == id) {
+            ""
+        } else {
+            "\nThis daemon has no trusted package for it. Use a matched release, or prepare a verified PRISMATTYC_PLUGIN_BUNDLE_DIR and rebuild the source binaries first."
+        }
+    } else {
+        ""
+    };
+    let install = if installed {
+        String::new()
+    } else {
+        format!("\nOn this daemon, run: pmux plugin install {id}")
+    };
+    bail!("Plug-in {id} is {state}.{catalog}{install}\nApprove local read access: pmux plugin enable {id} --allow activity.read:local\nUse the same --socket target if one was supplied, or manage the package in Settings > Plug-ins. Activity collection does not enable plug-in access.");
+}
+
+fn tail(mut client: Client, socket: &std::path::Path, seat: Option<&AgentId>) -> Result<()> {
     let stopped = Arc::new(AtomicBool::new(false));
     let signal = stopped.clone();
     ctrlc::set_handler(move || signal.store(true, Ordering::Release))?;
@@ -338,6 +366,14 @@ fn main() -> Result<()> {
         .map(Ok)
         .unwrap_or_else(local_socket)?;
     let mut client = Client::connect(&socket)?;
+    require_enabled(
+        &mut client,
+        if matches!(options.mode, Mode::Live | Mode::Snapshot) {
+            MONITOR
+        } else {
+            CONNECTOR
+        },
+    )?;
     match &options.mode {
         Mode::Live | Mode::Snapshot => {
             let mut args = vec!["run".into(), "org.moonbase.activity-monitor".into()];

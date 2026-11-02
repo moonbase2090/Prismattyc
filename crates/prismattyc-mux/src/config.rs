@@ -331,7 +331,7 @@ pub const MUX_KEYS: &[MuxKeySpec] = &[
     },
     MuxKeySpec {
         name: "experimental_activity",
-        doc: "Serve the metadata-only activity feed for pmux-activity-monitor; pmuxd applies changes live, without a restart",
+        doc: "Collect activity metadata live, without a restart. Enable monitor and query access separately in Settings > Plug-ins",
         range: "true|false; default false",
         kind: MuxKeyKind::Bool(false),
     },

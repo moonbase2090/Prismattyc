@@ -23,7 +23,7 @@ def prepare():
         source = Path(explicit).resolve()
         pin = json.loads((source / 'bundle-pin.json').read_bytes())
         command.extend(['--candidate' if pin['source']['kind'] == 'candidate' else '--bundle', str(source)])
-    return subprocess.check_output(command, cwd=REPO, text=True).strip()
+    return subprocess.check_output(command, cwd=REPO, text=True, encoding="utf-8").strip()
 
 
 def bundle_path(bundle=None):
@@ -57,7 +57,7 @@ def expected_identity(bundle):
 def verify_binaries(bins, bundle=None):
     bundle = bundle_path(bundle)
     expected = expected_identity(bundle)
-    revision = subprocess.check_output(['git', 'rev-parse', '--short=12', 'HEAD'], cwd=REPO, text=True).strip()
+    revision = subprocess.check_output(['git', 'rev-parse', '--short=12', 'HEAD'], cwd=REPO, text=True, encoding="utf-8").strip()
     suffix = '.exe' if os.name == 'nt' else ''
     matched = None
     # Empty update/config homes keep older launchers from forwarding to another executable.
@@ -66,10 +66,10 @@ def verify_binaries(bins, bundle=None):
         probe_env.update(HOME=temporary, USERPROFILE=temporary, APPDATA=temporary, LOCALAPPDATA=temporary,
             XDG_DATA_HOME=temporary, XDG_CONFIG_HOME=temporary, XDG_STATE_HOME=temporary, XDG_RUNTIME_DIR=temporary)
         for name in CONSUMERS:
-            label = subprocess.check_output([str(Path(bins).resolve() / (name + suffix)), '--version'], text=True, timeout=10, env=probe_env)
+            label = subprocess.check_output([str(Path(bins).resolve() / (name + suffix)), '--version'], text=True, encoding="utf-8", timeout=10, env=probe_env)
             if not label.startswith(name + ' '):
                 raise ValueError(f'{name}: executable reports another binary role')
-            data = subprocess.check_output([str(Path(bins).resolve() / (name + suffix)), '--plugin-bundle'], text=True, timeout=10, env=probe_env)
+            data = subprocess.check_output([str(Path(bins).resolve() / (name + suffix)), '--plugin-bundle'], text=True, encoding="utf-8", timeout=10, env=probe_env)
             identity = json.loads(data)
             if identity.get('core_revision') != revision:
                 raise ValueError(f'{name}: executable source revision differs from this checkout')
@@ -96,7 +96,7 @@ def native_build_flags(target=None, crt_static=False):
         if selected is None:
             target = target or os.environ.get('CARGO_BUILD_TARGET')
             if target is None and any(key.startswith('CARGO_TARGET_') and key.endswith('_RUSTFLAGS') for key in os.environ):
-                compiler = subprocess.check_output(['rustc', '+1.90.0', '-vV'], text=True)
+                compiler = subprocess.check_output(['rustc', '+1.90.0', '-vV'], text=True, encoding="utf-8")
                 target = next(line.removeprefix('host: ') for line in compiler.splitlines() if line.startswith('host: '))
             selected = os.environ.get('CARGO_TARGET_' + target.upper().replace('-', '_') + '_RUSTFLAGS', '') if target else ''
         flags = selected.split()

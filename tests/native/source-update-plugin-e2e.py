@@ -24,7 +24,7 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
     host = next(line.removeprefix('host: ') for line in subprocess.check_output(
-        ['rustc', '+1.90.0', '-vV'], text=True).splitlines() if line.startswith('host: '))
+        ['rustc', '+1.90.0', '-vV'], text=True, encoding="utf-8").splitlines() if line.startswith('host: '))
     args.out.mkdir(parents=True, exist_ok=False)
     results = {'status': 'FAIL', 'scope': 'source-update orchestration; actual bundle verifier; Git/Cargo shims'}
     records = []
@@ -59,7 +59,7 @@ if name=='git' and sys.argv[1:2]==['rev-parse']:print('1111111111111111111111111
                 SOURCE_PROOF_CALLS=str(log), CARGO_TARGET_DIR=str(repo / 'target'),
                 RUSTUP_HOME=os.environ.get('RUSTUP_HOME', str(Path.home() / '.rustup')))
             env['CARGO_TARGET_' + host.upper().replace('-', '_') + '_RUSTFLAGS'] = '--cfg source_update_target_flags'
-            proc = subprocess.run([str(args.pmux.resolve()), 'update', '--source', '--mux'], env=env, capture_output=True, text=True, timeout=60)
+            proc = subprocess.run([str(args.pmux.resolve()), 'update', '--source', '--mux'], env=env, capture_output=True, text=True, encoding="utf-8", timeout=60)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             installs = [call for call in calls if call['program'] == 'cargo' and call['args'][:1] == ['install']]
             records.append({'case': 'verified bundle', 'exit': proc.returncode, 'stderr': proc.stderr, 'calls': calls})
@@ -79,7 +79,7 @@ if name=='git' and sys.argv[1:2]==['rev-parse']:print('1111111111111111111111111
                 ('encoded flags', {'RUSTFLAGS': '--cfg source_update_global_flags', 'CARGO_ENCODED_RUSTFLAGS': '--cfg\x1fsource_update_encoded_flags'}, 'source_update_encoded_flags'),
             ]:
                 log.unlink()
-                proc = subprocess.run([str(args.pmux.resolve()), 'update', '--source', '--mux'], env={**env, **extra}, capture_output=True, text=True, timeout=60)
+                proc = subprocess.run([str(args.pmux.resolve()), 'update', '--source', '--mux'], env={**env, **extra}, capture_output=True, text=True, encoding="utf-8", timeout=60)
                 calls = [json.loads(line) for line in log.read_text().splitlines()]
                 records.append({'case': label, 'exit': proc.returncode, 'stderr': proc.stderr, 'calls': calls})
                 assert proc.returncode == 0, proc.stderr
@@ -91,7 +91,7 @@ if name=='git' and sys.argv[1:2]==['rev-parse']:print('1111111111111111111111111
             shutil.copytree(args.bundle, corrupt)
             next(corrupt.glob('*.pmux-plugin')).write_bytes(b'corrupt')
             log.unlink()
-            proc = subprocess.run([str(args.pmux.resolve()), 'update', '--source', '--mux'], env={**env, 'PRISMATTYC_PLUGIN_BUNDLE_DIR': str(corrupt)}, capture_output=True, text=True, timeout=60)
+            proc = subprocess.run([str(args.pmux.resolve()), 'update', '--source', '--mux'], env={**env, 'PRISMATTYC_PLUGIN_BUNDLE_DIR': str(corrupt)}, capture_output=True, text=True, encoding="utf-8", timeout=60)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             records.append({'case': 'corrupt archive', 'exit': proc.returncode, 'stderr': proc.stderr, 'calls': calls})
             assert proc.returncode != 0

@@ -218,7 +218,7 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
             process.wait()
 
     def cli(*args, succeeds=True, text=False):
-        result = subprocess.run([str(pmux), "--socket", str(endpoint), "plugin", *args], env=env, capture_output=True, text=True, timeout=45)
+        result = subprocess.run([str(pmux), "--socket", str(endpoint), "plugin", *args], env=env, capture_output=True, text=True, encoding="utf-8", timeout=45)
         assert (result.returncode == 0) == succeeds, result.stderr
         if not succeeds:
             return result.stderr
@@ -230,7 +230,7 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
         return json.loads(result["json"])
 
     def core(*args):
-        result = subprocess.run([str(pmux), "--socket", str(endpoint), *args], env=env, capture_output=True, text=True, timeout=45)
+        result = subprocess.run([str(pmux), "--socket", str(endpoint), *args], env=env, capture_output=True, text=True, encoding="utf-8", timeout=45)
         assert result.returncode == 0, result.stderr
         return result.stdout
 
@@ -419,11 +419,11 @@ else:
         text = cli("run",monitor,"--snapshot","--cols","100","--rows","24","--endpoint","remote-tail",text=True)
         assert "remote-tail" in text and "remote-seat" in text and "test_failed" in text, text
         launcher = bins / f"pmux-activity-monitor{suffix}"
-        result = subprocess.run([str(launcher),"--socket",str(endpoint),"--host-cmd","remote-tail",json.dumps(tail_argv),"--snapshot","--size","100x24"],env=env,capture_output=True,text=True,timeout=45)
+        result = subprocess.run([str(launcher),"--socket",str(endpoint),"--host-cmd","remote-tail",json.dumps(tail_argv),"--snapshot","--size","100x24"],env=env,capture_output=True,text=True, encoding="utf-8",timeout=45)
         assert result.returncode == 0 and "remote-seat" in result.stdout, (result.stdout,result.stderr)
-        result = subprocess.run([str(launcher),"--socket",str(endpoint),"--host",f"other-socket={endpoint}","--snapshot"],env=env,capture_output=True,text=True,timeout=45)
+        result = subprocess.run([str(launcher),"--socket",str(endpoint),"--host",f"other-socket={endpoint}","--snapshot"],env=env,capture_output=True,text=True, encoding="utf-8",timeout=45)
         assert result.returncode == 0 and "other-socket" in result.stdout, (result.stdout,result.stderr)
-        result = subprocess.run([str(launcher),"--socket",str(endpoint),"--seats"],env=env,capture_output=True,text=True,timeout=45)
+        result = subprocess.run([str(launcher),"--socket",str(endpoint),"--seats"],env=env,capture_output=True,text=True, encoding="utf-8",timeout=45)
         assert result.returncode == 0 and json.loads(result.stdout)["retained_history_only"] is True, result.stderr
         arguments = [json.loads(line) for line in query_log.read_text().splitlines()]
         assert arguments and all(args == ["activity","poll","--limit","256","--host-label","remote-query"] or args == ["activity","poll","--limit","256","--host-label","remote-query","--cursor","abc1:256"] or args == ["activity","poll","--limit","256","--host-label","remote-query","--cursor","abc1:300"] for args in arguments), arguments
@@ -512,7 +512,7 @@ else:
         text = cli("run", monitor, "main", "--snapshot", "--cols", "100", "--rows", "24", text=True)
         assert "fixture-seat" in text and "test_failed" in text
         probe_binary = frame_probe or bins / f"examples/plugin_frame_probe{suffix}"
-        probe = subprocess.run([str(probe_binary), str(endpoint)], env=env, capture_output=True, text=True, timeout=45)
+        probe = subprocess.run([str(probe_binary), str(endpoint)], env=env, capture_output=True, text=True, encoding="utf-8", timeout=45)
         assert probe.returncode == 0, probe.stderr
         frame = json.loads(probe.stdout)
         assert frame["cells"] == 2400 and "fixture-seat" in frame["text"]
@@ -534,7 +534,7 @@ else:
             launcher = bins / f"pmux-activity-monitor{suffix}"
 
             def onboarding(arguments, plugin, installed):
-                result = subprocess.run([str(launcher), "--socket", str(endpoint), *arguments], env=env, capture_output=True, text=True, timeout=10)
+                result = subprocess.run([str(launcher), "--socket", str(endpoint), *arguments], env=env, capture_output=True, text=True, encoding="utf-8", timeout=10)
                 assert result.returncode != 0
                 assert plugin in result.stderr, result.stderr
                 assert (f"pmux plugin install {plugin}" in result.stderr) == (not installed), result.stderr

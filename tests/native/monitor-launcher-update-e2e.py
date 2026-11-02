@@ -131,16 +131,16 @@ def main():
                 XDG_DATA_HOME=str(root / 'data'), XDG_CONFIG_HOME=str(root / 'config'), XDG_STATE_HOME=str(root / 'state'), XDG_RUNTIME_DIR=str(root / 'runtime'),
                 PMUX_SOCKET=str(root / 'runtime/no-daemon.sock'), PATH=str(tools) + os.pathsep + os.environ['PATH'],
                 MONITOR_PROOF_ROOT=str(root), MONITOR_PROOF_PYTHON=sys.executable, MONITOR_PROOF_MARKER=str(marker))
-            new_identity = json.loads(subprocess.check_output([str(args.bins / ('pmux' + suffix)), '--plugin-bundle'], env=env, text=True))
+            new_identity = json.loads(subprocess.check_output([str(args.bins / ('pmux' + suffix)), '--plugin-bundle'], env=env, text=True, encoding="utf-8"))
             assert new_identity['format'] == 'pmux-contained-plugin-consumer-v1'
             assert {p['id'] for p in new_identity['packages']} == {'org.moonbase.activity-monitor', 'org.moonbase.activity-connector'}
             assert new_identity['pin_sha256'] and new_identity['receipt_sha256']
-            assert json.loads(subprocess.check_output([str(args.bins / (MONITOR + suffix)), '--plugin-bundle'], env=env, text=True)) == new_identity
+            assert json.loads(subprocess.check_output([str(args.bins / (MONITOR + suffix)), '--plugin-bundle'], env=env, text=True, encoding="utf-8")) == new_identity
             new_version = new_identity['core_version']
-            old_label = subprocess.check_output([str(args.old_pmux), '--version'], env=env, text=True)
+            old_label = subprocess.check_output([str(args.old_pmux), '--version'], env=env, text=True, encoding="utf-8")
             old_version = re.search(r'\b\d+\.\d+\.\d+\b', old_label).group()
             assert tuple(map(int, old_version.split('.'))) < tuple(map(int, new_version.split('.')))
-            old_help = subprocess.check_output([str(args.old_pmux), 'update', '--help'], env=env, text=True)
+            old_help = subprocess.check_output([str(args.old_pmux), 'update', '--help'], env=env, text=True, encoding="utf-8")
             assert '--repair-monitor-launcher' not in old_help, 'The first process must actually predate auxiliary repair'
             env['MONITOR_PROOF_OLD_VERSION'] = old_version
             helper_source = root / 'fixture.rs'
@@ -205,7 +205,7 @@ else:sys.exit(22)
             executable = bins / ('pmux' + suffix)
 
             def cli(*arguments, success=True, program=executable):
-                process = subprocess.run([str(program), 'update', *arguments], env=env, text=True, capture_output=True, timeout=120)
+                process = subprocess.run([str(program), 'update', *arguments], env=env, text=True, encoding="utf-8", capture_output=True, timeout=120)
                 commands.append({'args': arguments, 'exit': process.returncode, 'stdout': process.stdout, 'stderr': process.stderr})
                 assert (process.returncode == 0) == success, commands[-1]
                 return process

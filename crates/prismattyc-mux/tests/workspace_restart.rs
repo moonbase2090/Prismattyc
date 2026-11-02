@@ -42,6 +42,13 @@ fn foreground_replay_keeps_the_shell_and_respects_policy_changes() {
 }
 
 #[test]
+fn foreground_replay_survives_a_versioned_binary_update() {
+    let proof = run("stable-replay");
+    assert_eq!(proof["saved_command"], "fixture-agent 117");
+    assert_eq!(proof["updated_binary"], "resumed");
+}
+
+#[test]
 fn reboot_restores_saved_sessions_and_mail() {
     let proof = run("reboot");
     assert_eq!(proof["sessions"], 3);

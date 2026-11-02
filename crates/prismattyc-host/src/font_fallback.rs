@@ -25,39 +25,55 @@ pub(crate) struct Resolved {
 /// Faces read from disk, by path and collection index. A fontdue `Font` does
 /// not depend on the pixel size, so zoom reuses it. `None` records a face that
 /// failed to load, so it is not read again.
-type LoadedFaces = Mutex<HashMap<(PathBuf, u32), Option<Arc<Font>>>>;
+type LoadedFaces = Mutex<HashMap<(PathBuf, u32), Arc<OnceLock<Option<Arc<Font>>>>>>;
 
 fn loaded_faces() -> &'static LoadedFaces {
     static FACES: OnceLock<LoadedFaces> = OnceLock::new();
     FACES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn cached_face(
+    cache: &LoadedFaces,
+    key: (PathBuf, u32),
+    load: impl FnOnce() -> Option<Arc<Font>>,
+) -> Option<Arc<Font>> {
+    let cell = {
+        let mut cache = cache.lock().ok()?;
+        Arc::clone(
+            cache
+                .entry(key)
+                .or_insert_with(|| Arc::new(OnceLock::new())),
+        )
+    };
+    // The per-face cell serializes same-font loads while keeping disk I/O out
+    // of the map lock, so unrelated faces can still load concurrently.
+    cell.get_or_init(load).clone()
+}
+
 /// Load `face`, or reuse the copy another window or font size loaded.
 fn load_face(face: &CoveringFace) -> Option<Arc<Font>> {
     let key = (face.path.clone(), face.index);
-    if let Some(font) = loaded_faces().lock().ok()?.get(&key) {
-        return font.clone();
-    }
-    // Read outside the lock so a slow read does not hold up other lookups.
-    let font = std::fs::read(&face.path).ok().and_then(|data| {
-        let settings = FontSettings {
-            collection_index: face.index,
-            ..FontSettings::default()
-        };
-        Font::from_bytes(data.as_slice(), settings)
-            .ok()
-            .map(Arc::new)
-    });
-    let mut faces = loaded_faces().lock().ok()?;
-    let font = faces.entry(key).or_insert(font).clone();
-    if font.is_some() {
-        eprintln!(
-            "prismattyc-host: system fallback {}#{}",
-            face.path.display(),
-            face.index
-        );
-    }
-    font
+    cached_face(loaded_faces(), key, || {
+        // Read outside the map lock so a slow read does not hold up unrelated
+        // faces. The per-face OnceLock prevents duplicate concurrent reads.
+        let font = std::fs::read(&face.path).ok().and_then(|data| {
+            let settings = FontSettings {
+                collection_index: face.index,
+                ..FontSettings::default()
+            };
+            Font::from_bytes(data.as_slice(), settings)
+                .ok()
+                .map(Arc::new)
+        });
+        if font.is_some() {
+            eprintln!(
+                "prismattyc-host: system fallback {}#{}",
+                face.path.display(),
+                face.index
+            );
+        }
+        font
+    })
 }
 
 /// Find and load the system face for `ch`. May read font files.
@@ -110,6 +126,8 @@ mod tests {
     use super::*;
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
+    use std::thread;
     use std::time::{Duration, Instant};
 
     fn fixture(name: &str) -> CoveringFace {
@@ -131,6 +149,42 @@ mod tests {
             "a second load must reuse the face"
         );
         assert_ne!(first.lookup_glyph_index('A'), 0);
+    }
+
+    #[test]
+    fn concurrent_face_lookups_load_once() {
+        let face = fixture("DejaVuSansMono.ttf");
+        let key = (face.path.clone(), face.index);
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let loads = Arc::new(AtomicUsize::new(0));
+        let start = Arc::new(Barrier::new(8));
+        let workers = (0..8)
+            .map(|_| {
+                let cache = Arc::clone(&cache);
+                let loads = Arc::clone(&loads);
+                let start = Arc::clone(&start);
+                let key = key.clone();
+                let path = face.path.clone();
+                thread::spawn(move || {
+                    start.wait();
+                    cached_face(cache.as_ref(), key, || {
+                        loads.fetch_add(1, Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(20));
+                        let bytes = std::fs::read(path).ok()?;
+                        Font::from_bytes(bytes.as_slice(), FontSettings::default())
+                            .ok()
+                            .map(Arc::new)
+                    })
+                    .expect("fixture font loads")
+                })
+            })
+            .collect::<Vec<_>>();
+        let faces = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("face load thread completes"))
+            .collect::<Vec<_>>();
+        assert_eq!(loads.load(Ordering::SeqCst), 1, "font file read once");
+        assert!(faces.iter().all(|font| Arc::ptr_eq(&faces[0], font)));
     }
 
     #[test]

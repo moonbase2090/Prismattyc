@@ -481,7 +481,7 @@ impl WebhookOwnership {
 }
 
 fn runtime_run_changed(prior: &str, current: &str) -> bool {
-    fn parts(run_id: &str) -> Option<(&str, &str, Option<&str>)> {
+    fn parts(run_id: &str) -> Option<(&str, &str, Option<&str>, Option<&str>)> {
         let mut fields = run_id.split('-');
         if fields.next()? != "session" {
             return None;
@@ -489,6 +489,7 @@ fn runtime_run_changed(prior: &str, current: &str) -> bool {
         let session_id = fields.next()?;
         let process_key = fields.next()?;
         let harness_key = fields.next()?;
+        let foreground_key = fields.next()?;
         if fields.next().is_some() {
             return None;
         }
@@ -496,20 +497,22 @@ fn runtime_run_changed(prior: &str, current: &str) -> bool {
             session_id,
             process_key,
             (harness_key != "none").then_some(harness_key),
+            (foreground_key != "none").then_some(foreground_key),
         ))
     }
 
     match (parts(prior), parts(current)) {
         (
-            Some((prior_session, prior_process, prior_harness)),
-            Some((current_session, current_process, current_harness)),
+            Some((prior_session, prior_process, prior_harness, prior_foreground)),
+            Some((current_session, current_process, current_harness, current_foreground)),
         ) => {
             prior_session != current_session
                 || prior_process != current_process
                 || match (prior_harness, current_harness) {
                     (Some(prior), Some(current)) => prior != current,
                     (Some(_), None) => true,
-                    (None, Some(_)) | (None, None) => false,
+                    (None, Some(_)) => false,
+                    (None, None) => prior_foreground != current_foreground,
                 }
         }
         _ => prior != current,
@@ -735,7 +738,7 @@ fn snapshot_run_identity(
             if let Some(pid) = identity_pid {
                 foreground_pids.insert(pane.id, pid);
             }
-            format!("{}:{child_pid:?}:{identity_pid:?}", pane.id)
+            format!("{}:{child_pid:?}", pane.id)
         })
         .collect::<Vec<_>>()
         .join(";");
@@ -759,8 +762,26 @@ fn snapshot_run_identity(
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     };
+    let mut foregrounds = foreground_pids
+        .iter()
+        .map(|(pane, pid)| format!("{pane}:{pid}"))
+        .collect::<Vec<_>>();
+    foregrounds.sort_unstable();
+    let foregrounds = foregrounds.join(";");
+    let foreground_digest = Sha256::digest(foregrounds.as_bytes());
+    let foreground_key = if foregrounds.is_empty() {
+        "none".to_owned()
+    } else {
+        foreground_digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
     (
-        format!("session-{}-{process_key}-{harness_key}", session.id),
+        format!(
+            "session-{}-{process_key}-{harness_key}-{foreground_key}",
+            session.id
+        ),
         harness_pids,
         foreground_pids,
     )
@@ -1074,19 +1095,19 @@ mod tests {
         assert!(!observe(
             &mut identity_ownership,
             ActivitySource::Runtime,
-            "session-7-process-none",
+            "session-7-process-none-shell",
             ActivityKind::Working
         ));
         assert!(!observe(
             &mut identity_ownership,
             ActivitySource::Runtime,
-            "session-7-process-harness",
+            "session-7-process-harness-agent",
             ActivityKind::Working
         ));
         assert!(observe(
             &mut identity_ownership,
             ActivitySource::Runtime,
-            "session-7-process-newharness",
+            "session-7-process-newharness-other",
             ActivityKind::Working
         ));
     }
@@ -1094,20 +1115,24 @@ mod tests {
     #[test]
     fn runtime_identity_enrichment_preserves_hook_ownership() {
         assert!(!runtime_run_changed(
-            "session-7-process-none",
-            "session-7-process-harness"
+            "session-7-process-none-shell",
+            "session-7-process-harness-agent"
         ));
         assert!(runtime_run_changed(
-            "session-7-process-harness",
-            "session-7-process-none"
+            "session-7-process-harness-agent",
+            "session-7-process-none-successor"
         ));
         assert!(runtime_run_changed(
-            "session-7-process-harness-a",
-            "session-7-process-harness-b"
+            "session-7-process-harness-a-foreground",
+            "session-7-process-harness-b-foreground"
         ));
         assert!(runtime_run_changed(
-            "session-7-process-none",
-            "session-8-process-none"
+            "session-7-process-none-foreground",
+            "session-8-process-none-foreground"
+        ));
+        assert!(runtime_run_changed(
+            "session-7-process-none-oldpid",
+            "session-7-process-none-newpid"
         ));
     }
 

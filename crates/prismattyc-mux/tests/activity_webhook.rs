@@ -166,9 +166,29 @@ fn configured_daemon_posts_activity_with_verifiable_signature() {
 }
 
 #[test]
-fn agent_sessions_are_added_to_activity_without_harness_hooks() {
+fn agent_sessions_are_projected_alongside_harness_hooks() {
     let daemon = start("[mux]\nexperimental_activity = true\n".into());
     std::thread::sleep(Duration::from_millis(400));
+    let hook_event = ActivityInput {
+        schema_version: 1,
+        seat: AgentId::new("worker-a").unwrap(),
+        run_id: "harness-run-1".into(),
+        event_id: "harness-event-1".into(),
+        source: ActivitySource::Hooks,
+        kind: ActivityKind::SessionStarted,
+    };
+    assert!(matches!(
+        activity::exchange(
+            &daemon.socket,
+            ControlRequest::PublishActivity {
+                version: PROTOCOL_VERSION,
+                request_id: 9,
+                event: hook_event,
+            },
+        )
+        .unwrap(),
+        ControlResponseData::ActivityPublished { .. }
+    ));
     let snapshot = control_request(
         &daemon.socket,
         ControlRequest::Snapshot {
@@ -231,11 +251,17 @@ fn agent_sessions_are_added_to_activity_without_harness_hooks() {
                 page.records.len(),
                 page.current_sequence
             );
-            if page.records.iter().any(|record| {
+            let has_runtime = page.records.iter().any(|record| {
                 record.event.seat.as_str() == "worker-a"
                     && record.event.source == ActivitySource::Runtime
                     && record.event.kind == ActivityKind::Waiting
-            }) {
+            });
+            let has_hook = page.records.iter().any(|record| {
+                record.event.seat.as_str() == "worker-a"
+                    && record.event.source == ActivitySource::Hooks
+                    && record.event.kind == ActivityKind::SessionStarted
+            });
+            if has_runtime && has_hook {
                 return;
             }
         }

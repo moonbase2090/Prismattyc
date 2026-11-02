@@ -211,6 +211,12 @@ The installer removes and replaces only handlers marked as pmux activity
 handlers; unrelated settings and hooks are retained. Review and approve the
 generated hooks using each harness's normal trust controls.
 
+Independently, `pmuxd` publishes pane-state transitions for every
+agent-bound session. It reports `stopped` when no pane child is running,
+`working` after recent pane output, and `waiting` after a minute without output.
+These runtime records coexist with harness hook events, so sessions remain
+visible when hooks are absent or a harness changes within a pane.
+
 Load a per-seat file through the runtime's documented settings or managed-hook
 option. Use `--schema-version 1` when its loader requires that field. In
 per-seat mode, the generated command embeds the explicit socket and seat.

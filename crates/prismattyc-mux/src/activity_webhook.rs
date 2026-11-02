@@ -388,22 +388,18 @@ fn snapshot_context(snapshot: crate::control::Snapshot) -> HashMap<String, Sessi
 struct ProjectedSession {
     run_id: String,
     state: ActivityKind,
-    hooked: bool,
 }
 
 fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
     let mut cursor: Option<ActivityCursor> = None;
     let mut request_id = 1u64;
     let mut event_id = 1u64;
-    let mut skip_retained_hook_history = true;
-    let mut hooked_seats = HashMap::<String, u64>::new();
     let mut projected = HashMap::<String, ProjectedSession>::new();
     loop {
         if stopped.recv_timeout(SNAPSHOT_INTERVAL).is_ok() {
             return;
         }
         let mut feed_available = false;
-        let cursor_sequence_before_poll = cursor.as_ref().map_or(0, |value| value.sequence);
         for _ in 0..2 {
             let request = ControlRequest::ReadActivity {
                 version: PROTOCOL_VERSION,
@@ -419,28 +415,15 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
             };
             feed_available = true;
             if page.reset.is_some() {
-                hooked_seats.clear();
                 projected.clear();
-                skip_retained_hook_history = true;
-            }
-            if !skip_retained_hook_history {
-                for record in &page.records {
-                    if record.event.source == ActivitySource::Hooks {
-                        hooked_seats.insert(record.event.seat.to_string(), record.sequence);
-                    }
-                }
             }
             let has_more = page.has_more;
             cursor = Some(page.cursor);
             if !has_more {
-                skip_retained_hook_history = false;
                 break;
             }
         }
         if !feed_available {
-            continue;
-        }
-        if skip_retained_hook_history {
             continue;
         }
         let Some(snapshot) = read_snapshot(socket, request_id) else {
@@ -463,27 +446,15 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
             let run_id = format!("session-{}", session.id);
             let state = snapshot_state(&session, now_ms);
             current.insert(seat.to_owned());
-            if projected
+            let changed = projected
                 .get(seat)
-                .is_some_and(|prior| prior.run_id != run_id)
-            {
-                if hooked_seats
-                    .get(seat)
-                    .is_some_and(|sequence| *sequence <= cursor_sequence_before_poll)
-                {
-                    hooked_seats.remove(seat);
-                }
-            }
-            let hooked = hooked_seats.contains_key(seat);
-            let changed = projected.get(seat).is_none_or(|prior| {
-                prior.run_id != run_id || prior.state != state || (prior.hooked && !hooked)
-            });
-            let published = if changed && (!hooked || state == ActivityKind::Stopped) {
+                .is_none_or(|prior| prior.run_id != run_id || prior.state != state);
+            let published = if changed {
                 publish_runtime(
                     socket,
                     &mut request_id,
                     &mut event_id,
-                    seat_id.clone(),
+                    seat_id,
                     run_id.clone(),
                     state,
                 )
@@ -491,14 +462,7 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
                 true
             };
             if published {
-                projected.insert(
-                    seat.to_owned(),
-                    ProjectedSession {
-                        run_id,
-                        state,
-                        hooked,
-                    },
-                );
+                projected.insert(seat.to_owned(), ProjectedSession { run_id, state });
             }
         }
         let absent = projected
@@ -528,7 +492,6 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
             }
             projected.remove(&seat);
         }
-        hooked_seats.retain(|seat, _| current.contains(seat));
     }
 }
 

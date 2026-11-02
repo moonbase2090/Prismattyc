@@ -18,6 +18,7 @@ pub use semantics::{
 #[cfg(test)]
 mod collection_codec_tests;
 mod graphics_apc;
+pub mod native_grid;
 pub use graphics_apc::{
     GraphicsApc, GraphicsApcCollector, GraphicsApcEvent, MAX_GRAPHICS_APC_BYTES,
 };

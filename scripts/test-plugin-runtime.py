@@ -23,6 +23,56 @@ REPO = Path(__file__).resolve().parent.parent
 PLUGIN = "org.moonbase.runtime-fixture"
 
 
+def private_windows_directory(path):
+    import ctypes as C
+    from ctypes import wintypes as W
+    kernel = C.WinDLL("kernel32", use_last_error=True)
+    security = C.WinDLL("advapi32", use_last_error=True)
+    kernel.GetCurrentProcess.restype = W.HANDLE
+    kernel.CloseHandle.argtypes = [W.HANDLE]
+    kernel.CloseHandle.restype = W.BOOL
+    kernel.LocalFree.argtypes = [C.c_void_p]
+    kernel.LocalFree.restype = C.c_void_p
+    security.OpenProcessToken.argtypes = [W.HANDLE, W.DWORD, C.POINTER(W.HANDLE)]
+    security.OpenProcessToken.restype = W.BOOL
+    security.GetTokenInformation.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD, C.POINTER(W.DWORD)]
+    security.GetTokenInformation.restype = W.BOOL
+    security.ConvertSidToStringSidW.argtypes = [C.c_void_p, C.POINTER(C.c_void_p)]
+    security.ConvertSidToStringSidW.restype = W.BOOL
+    security.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [W.LPCWSTR, W.DWORD, C.POINTER(C.c_void_p), C.c_void_p]
+    security.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = W.BOOL
+    security.SetFileSecurityW.argtypes = [W.LPCWSTR, W.DWORD, C.c_void_p]
+    security.SetFileSecurityW.restype = W.BOOL
+
+    def checked(value):
+        if not value:
+            raise C.WinError(C.get_last_error())
+
+    token = W.HANDLE()
+    sid_text = C.c_void_p()
+    descriptor = C.c_void_p()
+    checked(security.OpenProcessToken(kernel.GetCurrentProcess(), 8, C.byref(token)))
+    try:
+        size = W.DWORD()
+        security.GetTokenInformation(token, 1, None, 0, C.byref(size))
+        checked(size.value)
+        user = C.create_string_buffer(size.value)
+        checked(security.GetTokenInformation(token, 1, user, size, C.byref(size)))
+        # TOKEN_USER starts with SID_AND_ATTRIBUTES, whose first field is PSID.
+        sid = C.cast(user, C.POINTER(C.c_void_p)).contents.value
+        checked(security.ConvertSidToStringSidW(sid, C.byref(sid_text)))
+        owner = C.wstring_at(sid_text)
+        sddl = f"O:{owner}D:P(A;OICI;FA;;;{owner})"
+        checked(security.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, C.byref(descriptor), None))
+        checked(security.SetFileSecurityW(str(path), 0x80000005, descriptor))
+    finally:
+        if descriptor.value:
+            kernel.LocalFree(descriptor)
+        if sid_text.value:
+            kernel.LocalFree(sid_text)
+        kernel.CloseHandle(token)
+
+
 def mcp_rejects_unterminated_input(binary, arguments, env, log_path):
     with log_path.open("wb") as error_log:
         process = subprocess.Popen([str(binary), *arguments], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=error_log, env=env)
@@ -113,18 +163,7 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
     # Short socket paths also work with macOS's sockaddr_un limit.
     runtime = Path(tempfile.mkdtemp(prefix="pmux-plug-")).resolve()
     if os.name == "nt":
-        # Explicit --socket paths must already have a private inheritable DACL.
-        # Restrict only this fixture's newly allocated directory.
-        subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", r'''
-$ErrorActionPreference = 'Stop'
-$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$acl = New-Object System.Security.AccessControl.DirectorySecurity
-$acl.SetOwner($sid)
-$acl.SetAccessRuleProtection($true, $false)
-$rule = [System.Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-$acl.AddAccessRule($rule)
-Set-Acl -LiteralPath $env:PLUGIN_PROOF_RUNTIME -AclObject $acl
-'''], env={**os.environ, "PLUGIN_PROOF_RUNTIME": str(runtime)}, check=True)
+        private_windows_directory(runtime)
     config = runtime / "config.toml"
     endpoint = runtime / "daemon.sock"
     env = {key: value for key, value in os.environ.items() if not key.startswith(("HIVE_", "PMUX_", "PRISMATTYC_"))}

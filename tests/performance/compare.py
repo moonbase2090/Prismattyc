@@ -94,7 +94,11 @@ def run_case(options, label, binary, trial):
             records = [json.loads(line) for line in result.read_text().splitlines()] if result.exists() else []
             success = bool(records and records[-1]["phase"] == "done")
             success = success and compositor.poll() is None
-            success = success and records[0]["rows"] == 24 and records[0]["cols"] == 80
+            # Foot fills its 80 x 24 window. Prismattyc's tab strip takes one row of
+            # the same window, so its pane is 80 x 23. main() requires baseline and
+            # candidate to report the same geometry.
+            rows = (24,) if label == "foot" else (23, 24)
+            success = success and records[0]["rows"] in rows and records[0]["cols"] == 80
             row = dict(label=label, trial=trial, status="PASS" if success else "FAIL",
                        terminal_exit=terminal.poll(), compositor_exit=compositor.poll(),
                        records=records, peak_rss_kib=max((s["rss_kib"] for s in samples), default=0))
@@ -127,6 +131,7 @@ def main():
     options.output.mkdir(parents=True, exist_ok=False)
     (options.output / "environment.json").write_text(json.dumps(metadata, indent=2))
     summaries = []
+    geometries = {}
     for trial in range(options.trials):
         for label, binary in [*binaries.items(), ("foot", None)]:
             row = run_case(options, label, binary, trial)
@@ -135,6 +140,11 @@ def main():
             print(json.dumps(row), flush=True)
             if row["status"] != "PASS":
                 raise SystemExit(f"Failed {label} trial {trial}; evidence retained. No automatic retry.")
+            if label != "foot":
+                geometry = (row["records"][0]["cols"], row["records"][0]["rows"])
+                if geometries.setdefault("prismattyc", geometry) != geometry:
+                    raise SystemExit(f"{label} trial {trial} reported {geometry}, not "
+                                     f"{geometries['prismattyc']}; the comparison is not like for like.")
 
 
 if __name__ == "__main__":

@@ -252,7 +252,7 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
     let mut active = false;
     let mut pending = Debouncer::default();
     let mut queue = VecDeque::<Delivery>::new();
-    let mut hooked_runs = HashMap::<String, HashSet<String>>::new();
+    let mut ownership = WebhookOwnership::default();
     let mut session_context = HashMap::<String, SessionContext>::new();
     let mut next_snapshot = Instant::now();
     let mut request_id = 1u64;
@@ -263,26 +263,39 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
         let Some(config) = load_config(config_path) else {
             pending.by_seat.clear();
             queue.clear();
-            hooked_runs.clear();
+            ownership = WebhookOwnership::default();
             cursor = None;
             active = false;
             continue;
         };
         if !active {
-            let request = ControlRequest::ReadActivity {
-                version: PROTOCOL_VERSION,
-                request_id,
-                cursor: None,
-                limit: 1,
-            };
-            request_id = request_id.wrapping_add(1).max(1);
-            if let Ok(ControlResponseData::Activity { page }) =
-                crate::activity::exchange(socket, request)
-            {
-                cursor = Some(ActivityCursor {
-                    epoch: page.epoch,
-                    sequence: page.current_sequence,
-                });
+            let mut caught_up = false;
+            for _ in 0..2 {
+                let request = ControlRequest::ReadActivity {
+                    version: PROTOCOL_VERSION,
+                    request_id,
+                    cursor: cursor.clone(),
+                    limit: 256,
+                };
+                request_id = request_id.wrapping_add(1).max(1);
+                let Ok(ControlResponseData::Activity { page }) =
+                    crate::activity::exchange(socket, request)
+                else {
+                    break;
+                };
+                if page.reset.is_some() {
+                    ownership = WebhookOwnership::default();
+                }
+                for record in &page.records {
+                    let _ = ownership.observe(&record.event);
+                }
+                cursor = Some(page.cursor);
+                if !page.has_more {
+                    caught_up = true;
+                    break;
+                }
+            }
+            if caught_up {
                 active = true;
             }
             continue;
@@ -305,16 +318,10 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
             crate::activity::exchange(socket, request)
         {
             if page.reset.is_some() {
-                hooked_runs.clear();
+                ownership = WebhookOwnership::default();
             }
             for record in &page.records {
-                if !webhook_owns_record(
-                    &mut hooked_runs,
-                    &record.event.source,
-                    record.event.seat.as_str(),
-                    &record.event.run_id,
-                    record.event.kind,
-                ) {
+                if !ownership.observe(&record.event) {
                     continue;
                 }
                 if let Some((state, reason)) = state_for(record.event.kind) {
@@ -357,44 +364,70 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
     }
 }
 
-fn webhook_owns_record(
-    hooked_runs: &mut HashMap<String, HashSet<String>>,
-    source: &ActivitySource,
-    seat: &str,
-    run_id: &str,
-    kind: ActivityKind,
-) -> bool {
-    match source {
-        ActivitySource::Hooks => {
-            let runs = hooked_runs.entry(seat.to_owned()).or_default();
-            if matches!(kind, ActivityKind::SessionFinished | ActivityKind::Stopped) {
-                runs.remove(run_id);
-                if runs.is_empty() {
-                    hooked_runs.remove(seat);
-                }
-            } else {
-                if runs.len() >= MAX_HOOKED_RUNS_PER_SEAT && !runs.contains(run_id) {
-                    if let Some(evict) = runs.iter().next().cloned() {
-                        runs.remove(&evict);
+#[derive(Default)]
+struct WebhookOwnership {
+    hooked_runs: HashMap<String, HashSet<String>>,
+    runtime_state: HashMap<String, ActivityKind>,
+}
+
+impl WebhookOwnership {
+    fn observe(&mut self, event: &ActivityInput) -> bool {
+        let seat = event.seat.as_str();
+        match event.source {
+            ActivitySource::Hooks => {
+                let runs = self.hooked_runs.entry(seat.to_owned()).or_default();
+                if matches!(
+                    event.kind,
+                    ActivityKind::SessionFinished | ActivityKind::Stopped
+                ) {
+                    runs.remove(&event.run_id);
+                    if runs.is_empty() {
+                        self.hooked_runs.remove(seat);
+                    }
+                } else {
+                    if runs.len() >= MAX_HOOKED_RUNS_PER_SEAT && !runs.contains(&event.run_id) {
+                        if let Some(evict) = runs.iter().next().cloned() {
+                            runs.remove(&evict);
+                        }
+                    }
+                    runs.insert(event.run_id.clone());
+                    if self.hooked_runs.len() > MAX_HOOKED_SEATS {
+                        if let Some(evict) = self
+                            .hooked_runs
+                            .keys()
+                            .find(|key| key.as_str() != seat)
+                            .cloned()
+                        {
+                            self.hooked_runs.remove(&evict);
+                        }
                     }
                 }
-                runs.insert(run_id.to_owned());
-                if hooked_runs.len() > MAX_HOOKED_SEATS {
-                    if let Some(evict) =
-                        hooked_runs.keys().find(|key| key.as_str() != seat).cloned()
-                    {
-                        hooked_runs.remove(&evict);
-                    }
-                }
+                true
             }
-            true
+            ActivitySource::Runtime => {
+                let prior = self.runtime_state.insert(seat.to_owned(), event.kind);
+                if self.runtime_state.len() > MAX_HOOKED_SEATS {
+                    if let Some(evict) = self
+                        .runtime_state
+                        .keys()
+                        .find(|key| key.as_str() != seat)
+                        .cloned()
+                    {
+                        self.runtime_state.remove(&evict);
+                    }
+                }
+                if event.kind == ActivityKind::Stopped
+                    || (event.kind == ActivityKind::Working
+                        && prior.is_some_and(|kind| {
+                            matches!(kind, ActivityKind::Waiting | ActivityKind::Stopped)
+                        }))
+                {
+                    self.hooked_runs.remove(seat);
+                }
+                event.kind == ActivityKind::Stopped || !self.hooked_runs.contains_key(seat)
+            }
+            ActivitySource::Notify => true,
         }
-        ActivitySource::Runtime if kind == ActivityKind::Stopped => {
-            hooked_runs.remove(seat);
-            true
-        }
-        ActivitySource::Runtime => !hooked_runs.contains_key(seat),
-        ActivitySource::Notify => true,
     }
 }
 
@@ -451,6 +484,7 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
     let mut cursor: Option<ActivityCursor> = None;
     let mut request_id = 1u64;
     let mut event_id = 1u64;
+    let mut force_runtime = HashSet::<String>::new();
     let mut projected = HashMap::<String, ProjectedSession>::new();
     loop {
         if stopped.recv_timeout(SNAPSHOT_INTERVAL).is_ok() {
@@ -473,6 +507,17 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
             feed_available = true;
             if page.reset.is_some() {
                 projected.clear();
+                force_runtime.clear();
+            }
+            for record in &page.records {
+                if record.event.source == ActivitySource::Hooks
+                    && matches!(
+                        record.event.kind,
+                        ActivityKind::SessionFinished | ActivityKind::Stopped
+                    )
+                {
+                    force_runtime.insert(record.event.seat.to_string());
+                }
             }
             let has_more = page.has_more;
             cursor = Some(page.cursor);
@@ -505,7 +550,8 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
             current.insert(seat.to_owned());
             let changed = projected
                 .get(seat)
-                .is_none_or(|prior| prior.run_id != run_id || prior.state != state);
+                .is_none_or(|prior| prior.run_id != run_id || prior.state != state)
+                || force_runtime.contains(seat);
             let published = if changed {
                 publish_runtime(
                     socket,
@@ -519,6 +565,7 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
                 true
             };
             if published {
+                force_runtime.remove(seat);
                 projected.insert(seat.to_owned(), ProjectedSession { run_id, state });
             }
         }
@@ -548,7 +595,9 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
                 }
             }
             projected.remove(&seat);
+            force_runtime.remove(&seat);
         }
+        force_runtime.retain(|seat| current.contains(seat));
     }
 }
 
@@ -737,56 +786,84 @@ mod tests {
 
     #[test]
     fn hook_run_owns_webhook_status_until_it_finishes_or_runtime_stops() {
-        let mut hooked_runs = HashMap::new();
-        assert!(webhook_owns_record(
-            &mut hooked_runs,
-            &ActivitySource::Hooks,
-            "worker-a",
+        fn observe(
+            ownership: &mut WebhookOwnership,
+            source: ActivitySource,
+            run_id: &str,
+            kind: ActivityKind,
+        ) -> bool {
+            ownership.observe(&ActivityInput {
+                schema_version: 1,
+                seat: AgentId::new("worker-a").unwrap(),
+                run_id: run_id.into(),
+                event_id: "event-1".into(),
+                source,
+                kind,
+            })
+        }
+
+        let mut ownership = WebhookOwnership::default();
+        assert!(observe(
+            &mut ownership,
+            ActivitySource::Hooks,
             "run-a",
-            ActivityKind::CommandFailed,
+            ActivityKind::CommandFailed
         ));
-        assert!(!webhook_owns_record(
-            &mut hooked_runs,
-            &ActivitySource::Runtime,
-            "worker-a",
+        assert!(!observe(
+            &mut ownership,
+            ActivitySource::Runtime,
             "pane-run",
-            ActivityKind::Working,
+            ActivityKind::Working
         ));
-        assert!(webhook_owns_record(
-            &mut hooked_runs,
-            &ActivitySource::Hooks,
-            "worker-a",
+        assert!(observe(
+            &mut ownership,
+            ActivitySource::Hooks,
             "run-a",
-            ActivityKind::SessionFinished,
+            ActivityKind::SessionFinished
         ));
-        assert!(webhook_owns_record(
-            &mut hooked_runs,
-            &ActivitySource::Runtime,
-            "worker-a",
+        assert!(observe(
+            &mut ownership,
+            ActivitySource::Runtime,
             "pane-run",
-            ActivityKind::Waiting,
+            ActivityKind::Waiting
         ));
 
-        assert!(webhook_owns_record(
-            &mut hooked_runs,
-            &ActivitySource::Hooks,
-            "worker-a",
+        assert!(observe(
+            &mut ownership,
+            ActivitySource::Hooks,
             "run-b",
-            ActivityKind::TurnStarted,
+            ActivityKind::TurnStarted
         ));
-        assert!(webhook_owns_record(
-            &mut hooked_runs,
-            &ActivitySource::Runtime,
-            "worker-a",
+        assert!(!observe(
+            &mut ownership,
+            ActivitySource::Runtime,
             "pane-run",
-            ActivityKind::Stopped,
+            ActivityKind::Waiting
         ));
-        assert!(webhook_owns_record(
-            &mut hooked_runs,
-            &ActivitySource::Runtime,
-            "worker-a",
+        assert!(observe(
+            &mut ownership,
+            ActivitySource::Runtime,
             "pane-run",
-            ActivityKind::Waiting,
+            ActivityKind::Working
+        ));
+
+        assert!(observe(
+            &mut ownership,
+            ActivitySource::Hooks,
+            "run-c",
+            ActivityKind::TurnStarted
+        ));
+        assert!(observe(
+            &mut ownership,
+            ActivitySource::Runtime,
+            "pane-run",
+            ActivityKind::Stopped
+        ));
+        assert!(observe(
+            &mut ownership,
+            ActivitySource::Runtime,
+            "pane-run",
+            ActivityKind::Waiting
         ));
     }
 

@@ -278,7 +278,8 @@ them.
 Hook events take precedence in webhook status while their run is active, so
 pane-state inference does not replace a specific tool failure or stop event.
 A hook `SessionEnd` or pane `stopped` transition releases that precedence and
-lets runtime state report a later hookless run.
+lets runtime state report a later hookless run. A pane transition from `waiting`
+to `working` also releases it after a harness exits without its end hook.
 
 Python verification example:
 

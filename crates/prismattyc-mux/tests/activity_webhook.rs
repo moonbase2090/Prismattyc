@@ -240,6 +240,35 @@ fn webhook_keeps_hook_failure_ahead_of_runtime_until_the_run_ends() {
     let waiting = String::from_utf8_lossy(&receive_request(&listener)).to_string();
     assert!(waiting.contains("\"state\":\"waiting\""));
 
+    publish(
+        25,
+        ActivitySource::Hooks,
+        "harness-2",
+        "turn-started-2",
+        ActivityKind::TurnStarted,
+    );
+    publish(
+        26,
+        ActivitySource::Runtime,
+        "pane-1",
+        "waiting-2",
+        ActivityKind::Waiting,
+    );
+    std::thread::sleep(Duration::from_millis(1_000));
+    assert!(
+        listener.accept().is_err(),
+        "active hook status was overwritten"
+    );
+    publish(
+        27,
+        ActivitySource::Runtime,
+        "pane-1",
+        "working-2",
+        ActivityKind::Working,
+    );
+    let working = String::from_utf8_lossy(&receive_request(&listener)).to_string();
+    assert!(working.contains("\"state\":\"working\""));
+
     drop(daemon);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -311,7 +340,7 @@ fn agent_sessions_are_projected_alongside_harness_hooks() {
 
     let deadline = Instant::now() + Duration::from_secs(4);
     let mut last_response = String::new();
-    loop {
+    let observed_sequence = loop {
         let response = control_request(
             &daemon.socket,
             ControlRequest::ReadActivity {
@@ -341,12 +370,60 @@ fn agent_sessions_are_projected_alongside_harness_hooks() {
                     && record.event.kind == ActivityKind::SessionStarted
             });
             if has_runtime && has_hook {
-                return;
+                break page.current_sequence;
             }
         }
         assert!(
             Instant::now() < deadline,
             "agent session was not projected; last read: {last_response}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    let finished = ActivityInput {
+        schema_version: 1,
+        seat: AgentId::new("worker-a").unwrap(),
+        run_id: "harness-run-1".into(),
+        event_id: "harness-event-2".into(),
+        source: ActivitySource::Hooks,
+        kind: ActivityKind::SessionFinished,
+    };
+    activity::exchange(
+        &daemon.socket,
+        ControlRequest::PublishActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 14,
+            event: finished,
+        },
+    )
+    .unwrap();
+    let finish_deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let response = control_request(
+            &daemon.socket,
+            ControlRequest::ReadActivity {
+                version: PROTOCOL_VERSION,
+                request_id: 15,
+                cursor: None,
+                limit: 256,
+            },
+        );
+        if let ControlResponseBody::Ok {
+            response: ControlResponseData::Activity { page },
+        } = response.body
+        {
+            if page.records.iter().any(|record| {
+                record.sequence > observed_sequence
+                    && record.event.seat.as_str() == "worker-a"
+                    && record.event.source == ActivitySource::Runtime
+                    && record.event.kind == ActivityKind::Waiting
+            }) {
+                return;
+            }
+        }
+        assert!(
+            Instant::now() < finish_deadline,
+            "session end did not refresh the unchanged runtime waiting state"
         );
         std::thread::sleep(Duration::from_millis(100));
     }

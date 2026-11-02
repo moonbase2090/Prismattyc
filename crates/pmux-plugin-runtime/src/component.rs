@@ -536,6 +536,83 @@ fn convert_kind(kind: domain::ActivityKind) -> read::Kind {
     }
 }
 
+fn convert_sessions(sessions: Option<domain::ActivitySessions>) -> Option<read::SessionSnapshot> {
+    sessions.map(|snapshot| read::SessionSnapshot {
+        observed_at_ms: snapshot.observed_at_ms,
+        seats: snapshot
+            .seats
+            .into_iter()
+            .map(|session| read::Session {
+                seat: session.seat.to_string(),
+                session_id: session.session_id,
+                state: match session.state {
+                    domain::ActivitySessionState::Working => read::SessionState::Working,
+                    domain::ActivitySessionState::Waiting => read::SessionState::Waiting,
+                    domain::ActivitySessionState::Stopped => read::SessionState::Stopped,
+                },
+                last_output_at_ms: session.last_output_at_ms,
+            })
+            .collect(),
+    })
+}
+
+impl HostState {
+    fn activity_page(
+        &mut self,
+        endpoint: u64,
+        after: Option<read::Cursor>,
+        limit: u16,
+    ) -> Result<domain::ActivityPage, read::Error> {
+        self.admit_read()?;
+        if limit == 0
+            || limit > 256
+            || after.as_ref().is_some_and(|cursor| {
+                cursor.epoch.is_empty() || cursor.epoch.len() > 128 || !cursor.epoch.is_ascii()
+            })
+        {
+            return Err(read::Error::InvalidRequest);
+        }
+        let after = after.map(|cursor| domain::ActivityCursor {
+            epoch: cursor.epoch,
+            sequence: cursor.sequence,
+        });
+        let started = Instant::now();
+        let result = self.provider.poll(endpoint, after, limit);
+        let metric = self.imports.entry(endpoint).or_default();
+        metric.0 += 1;
+        metric.1 += result.as_ref().map_or(0, |page| page.records.len());
+        metric.2 += started.elapsed();
+        let page = result?;
+        if page.records.len() > usize::from(limit)
+            || page
+                .records
+                .iter()
+                .any(|record| record.event.schema_version != 1)
+        {
+            return Err(read::Error::IncompatibleSchema);
+        }
+        if page.epoch.is_empty()
+            || page.epoch.len() > 128
+            || page.epoch.chars().any(char::is_control)
+            || page.cursor.epoch != page.epoch
+            || page
+                .records
+                .iter()
+                .any(|record| record.event.validate_metadata().is_err())
+        {
+            return Err(read::Error::InvalidRequest);
+        }
+        if page
+            .sessions
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.seats.len() > 4096)
+        {
+            return Err(read::Error::InvalidRequest);
+        }
+        Ok(page)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -892,82 +969,5 @@ mod tests {
             Some(wasmtime::Trap::OutOfFuel | wasmtime::Trap::Interrupt)
         ));
         assert!(start.elapsed() < Duration::from_secs(5));
-    }
-}
-
-fn convert_sessions(sessions: Option<domain::ActivitySessions>) -> Option<read::SessionSnapshot> {
-    sessions.map(|snapshot| read::SessionSnapshot {
-        observed_at_ms: snapshot.observed_at_ms,
-        seats: snapshot
-            .seats
-            .into_iter()
-            .map(|session| read::Session {
-                seat: session.seat.to_string(),
-                session_id: session.session_id,
-                state: match session.state {
-                    domain::ActivitySessionState::Working => read::SessionState::Working,
-                    domain::ActivitySessionState::Waiting => read::SessionState::Waiting,
-                    domain::ActivitySessionState::Stopped => read::SessionState::Stopped,
-                },
-                last_output_at_ms: session.last_output_at_ms,
-            })
-            .collect(),
-    })
-}
-
-impl HostState {
-    fn activity_page(
-        &mut self,
-        endpoint: u64,
-        after: Option<read::Cursor>,
-        limit: u16,
-    ) -> Result<domain::ActivityPage, read::Error> {
-        self.admit_read()?;
-        if limit == 0
-            || limit > 256
-            || after.as_ref().is_some_and(|cursor| {
-                cursor.epoch.is_empty() || cursor.epoch.len() > 128 || !cursor.epoch.is_ascii()
-            })
-        {
-            return Err(read::Error::InvalidRequest);
-        }
-        let after = after.map(|cursor| domain::ActivityCursor {
-            epoch: cursor.epoch,
-            sequence: cursor.sequence,
-        });
-        let started = Instant::now();
-        let result = self.provider.poll(endpoint, after, limit);
-        let metric = self.imports.entry(endpoint).or_default();
-        metric.0 += 1;
-        metric.1 += result.as_ref().map_or(0, |page| page.records.len());
-        metric.2 += started.elapsed();
-        let page = result?;
-        if page.records.len() > usize::from(limit)
-            || page
-                .records
-                .iter()
-                .any(|record| record.event.schema_version != 1)
-        {
-            return Err(read::Error::IncompatibleSchema);
-        }
-        if page.epoch.is_empty()
-            || page.epoch.len() > 128
-            || page.epoch.chars().any(char::is_control)
-            || page.cursor.epoch != page.epoch
-            || page
-                .records
-                .iter()
-                .any(|record| record.event.validate_metadata().is_err())
-        {
-            return Err(read::Error::InvalidRequest);
-        }
-        if page
-            .sessions
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.seats.len() > 4096)
-        {
-            return Err(read::Error::InvalidRequest);
-        }
-        Ok(page)
     }
 }

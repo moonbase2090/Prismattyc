@@ -190,8 +190,8 @@ pub(super) fn run(cli: &Cli, file: Option<&PathBuf>, remove: bool) -> Result<()>
         })?;
         let kiro_file = home.join(".kiro/hooks/pmux-activity.json");
         let kiro_events = [
-            ("PromptSubmit", "UserPromptSubmit"),
-            ("AgentStop", "Stop"),
+            ("UserPromptSubmit", "UserPromptSubmit"),
+            ("Stop", "Stop"),
             ("SessionStart", "SessionStart"),
             ("SessionEnd", "SessionEnd"),
             ("PreToolUse", "PreToolUse"),
@@ -238,14 +238,17 @@ pub(super) fn run(cli: &Cli, file: Option<&PathBuf>, remove: bool) -> Result<()>
 }
 
 fn reconcile_cursor(mut document: Value, events: &[&str]) -> Result<Value> {
-    document
+    let object = document
         .as_object_mut()
         .context("Cursor hooks must be an object")?;
-    let hooks = document
-        .as_object_mut()
-        .unwrap()
-        .entry("hooks")
-        .or_insert(json!({}));
+    match object.get("version") {
+        None => {
+            object.insert("version".into(), json!(1));
+        }
+        Some(version) if version == &json!(1) => {}
+        _ => bail!("Cursor hooks use an unsupported version"),
+    }
+    let hooks = object.entry("hooks").or_insert(json!({}));
     hooks
         .as_object_mut()
         .context("Cursor hooks must be an object")?;
@@ -388,6 +391,7 @@ mod tests {
             {"command":"keep"}, {"command":managed("old")}
         ]}});
         let cursor = reconcile_cursor(cursor, &events).unwrap();
+        assert_eq!(cursor["version"], 1);
         let cursor = add_cursor_event(cursor, "sessionStart", &managed("new")).unwrap();
         assert_eq!(cursor["hooks"]["sessionStart"].as_array().unwrap().len(), 2);
         assert_eq!(cursor["hooks"]["sessionEnd"], json!([]));
@@ -397,9 +401,10 @@ mod tests {
             {"name":"pmux","trigger":"PromptSubmit","action":{"type":"command","command":managed("old")}}
         ]});
         let kiro = reconcile_kiro(kiro, &[]).unwrap();
-        let kiro = add_kiro_event(kiro, "PromptSubmit", &managed("new")).unwrap();
+        let kiro = add_kiro_event(kiro, "UserPromptSubmit", &managed("new")).unwrap();
         assert_eq!(kiro["hooks"].as_array().unwrap().len(), 2);
         assert_eq!(kiro["hooks"][0]["action"]["command"], "keep");
+        assert_eq!(kiro["hooks"][1]["trigger"], "UserPromptSubmit");
     }
 
     #[test]

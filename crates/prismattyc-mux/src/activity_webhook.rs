@@ -25,6 +25,7 @@ const DEBOUNCE: Duration = Duration::from_millis(750);
 const MAX_QUEUE: usize = 64;
 const MAX_ATTEMPTS: u8 = 6;
 const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
+const HOOK_FRESHNESS_MS: u64 = 60_000;
 
 #[derive(Clone)]
 pub struct WebhookConfig {
@@ -388,14 +389,14 @@ fn snapshot_context(snapshot: crate::control::Snapshot) -> HashMap<String, Sessi
 struct ProjectedSession {
     run_id: String,
     state: ActivityKind,
-    present: bool,
+    hooked: bool,
 }
 
 fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
     let mut cursor = None;
     let mut request_id = 1u64;
     let mut event_id = 1u64;
-    let mut hooked_seats = std::collections::HashSet::new();
+    let mut hooked_seats = HashMap::<String, u64>::new();
     let mut projected = HashMap::<String, ProjectedSession>::new();
     loop {
         if stopped.recv_timeout(SNAPSHOT_INTERVAL).is_ok() {
@@ -416,9 +417,13 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
                 break;
             };
             feed_available = true;
+            if page.reset.is_some() {
+                hooked_seats.clear();
+                projected.clear();
+            }
             for record in &page.records {
                 if record.event.source == ActivitySource::Hooks {
-                    hooked_seats.insert(record.event.seat.to_string());
+                    hooked_seats.insert(record.event.seat.to_string(), record.received_at_ms);
                 }
             }
             let has_more = page.has_more;
@@ -450,48 +455,76 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
             let run_id = format!("session-{}", session.id);
             let state = snapshot_state(&session, now_ms);
             current.insert(seat.to_owned());
+            let same_run = projected
+                .get(seat)
+                .is_some_and(|prior| prior.run_id == run_id);
+            let hooked = same_run
+                && hooked_seats
+                    .get(seat)
+                    .is_some_and(|at| now_ms.saturating_sub(*at) < HOOK_FRESHNESS_MS);
             let changed = projected.get(seat).is_none_or(|prior| {
-                prior.run_id != run_id || prior.state != state || !prior.present
+                prior.run_id != run_id || prior.state != state || (prior.hooked && !hooked)
             });
-            if changed && !hooked_seats.contains(seat) {
+            let published = if changed && !hooked {
                 publish_runtime(
                     socket,
                     &mut request_id,
                     &mut event_id,
-                    seat_id,
+                    seat_id.clone(),
                     run_id.clone(),
                     state,
+                )
+            } else {
+                true
+            };
+            if published {
+                projected.insert(
+                    seat.to_owned(),
+                    ProjectedSession {
+                        run_id,
+                        state,
+                        hooked,
+                    },
                 );
             }
-            projected.insert(
-                seat.to_owned(),
-                ProjectedSession {
-                    run_id,
-                    state,
-                    present: true,
-                },
-            );
         }
-        for (seat, prior) in projected.iter_mut() {
-            if prior.present && !current.contains(seat) {
-                if !hooked_seats.contains(seat) && prior.state != ActivityKind::Stopped {
-                    if let Ok(seat_id) = AgentId::new(seat.clone()) {
-                        publish_runtime(
-                            socket,
-                            &mut request_id,
-                            &mut event_id,
-                            seat_id,
-                            prior.run_id.clone(),
-                            ActivityKind::Stopped,
-                        );
-                    }
-                }
-                prior.state = ActivityKind::Stopped;
-                prior.present = false;
+        let absent = projected
+            .keys()
+            .filter(|seat| !current.contains(*seat))
+            .cloned()
+            .collect::<Vec<_>>();
+        for seat in absent {
+            let Some(prior) = projected.get(&seat).cloned() else {
+                continue;
+            };
+            let recently_hooked = prior.hooked
+                && hooked_seats
+                    .get(&seat)
+                    .is_some_and(|at| now_ms.saturating_sub(*at) < HOOK_FRESHNESS_MS);
+            if recently_hooked {
+                continue;
             }
+            if prior.state != ActivityKind::Stopped {
+                let Ok(seat_id) = AgentId::new(seat.clone()) else {
+                    projected.remove(&seat);
+                    continue;
+                };
+                if !publish_runtime(
+                    socket,
+                    &mut request_id,
+                    &mut event_id,
+                    seat_id,
+                    prior.run_id,
+                    ActivityKind::Stopped,
+                ) {
+                    continue;
+                }
+            }
+            projected.remove(&seat);
         }
-        hooked_seats.retain(|seat| current.contains(seat));
-        projected.retain(|_, prior| prior.present);
+        hooked_seats.retain(|seat, at| {
+            current.contains(seat) && now_ms.saturating_sub(*at) < HOOK_FRESHNESS_MS
+        });
     }
 }
 
@@ -524,7 +557,7 @@ fn publish_runtime(
     seat: AgentId,
     run_id: String,
     kind: ActivityKind,
-) {
+) -> bool {
     let request_id = *next_request_id;
     *next_request_id = (*next_request_id).wrapping_add(1).max(1);
     let request = ControlRequest::PublishActivity {
@@ -540,7 +573,10 @@ fn publish_runtime(
         },
     };
     *event_id = (*event_id).wrapping_add(1).max(1);
-    let _ = crate::activity::exchange(socket, request);
+    matches!(
+        crate::activity::exchange(socket, request),
+        Ok(ControlResponseData::ActivityPublished { .. })
+    )
 }
 
 fn state_for(kind: ActivityKind) -> Option<(&'static str, &'static str)> {

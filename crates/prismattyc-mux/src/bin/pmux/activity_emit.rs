@@ -281,12 +281,8 @@ fn publish(cli: &Cli) -> Result<()> {
                 bail!("activity input exceeds limit");
             }
             let mut input: Value = serde_json::from_slice(&bytes).context("invalid hook input")?;
-            if input.get("hook_event_name").is_none() {
-                if let (Some(event), Some(object)) =
-                    (cli.hook_event.as_ref(), input.as_object_mut())
-                {
-                    object.insert("hook_event_name".into(), Value::String(event.clone()));
-                }
+            if let (Some(event), Some(object)) = (cli.hook_event.as_ref(), input.as_object_mut()) {
+                object.insert("hook_event_name".into(), Value::String(event.clone()));
             }
             normalize(cli.seat.clone(), &input, false)?
         }

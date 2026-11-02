@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import sys
 import subprocess
+import tempfile
 
 REPO = Path(__file__).resolve().parents[2]
 CONSUMERS = ('pmux', 'pmuxd', 'pmux-mcp', 'prismattyc-host', 'pmux-activity-monitor')
@@ -45,6 +46,7 @@ def expected_identity(bundle):
         raise ValueError('packaging requires the real production plug-ins')
     return {
         'version': 1,
+        'format': 'pmux-contained-plugin-consumer-v1',
         'catalog_sha256': pin['catalog_sha256'],
         'pin_sha256': hashlib.sha256(pin_bytes).hexdigest(),
         'receipt_sha256': pin['receipt_sha256'],
@@ -58,18 +60,26 @@ def verify_binaries(bins, bundle=None):
     revision = subprocess.check_output(['git', 'rev-parse', '--short=12', 'HEAD'], cwd=REPO, text=True).strip()
     suffix = '.exe' if os.name == 'nt' else ''
     matched = None
-    for name in CONSUMERS:
-        data = subprocess.check_output([str(Path(bins).resolve() / (name + suffix)), '--plugin-bundle'], text=True, timeout=10)
-        identity = json.loads(data)
-        if identity.get('core_revision') != revision:
-            raise ValueError(f'{name}: executable source revision differs from this checkout')
-        actual = {key: identity.get(key) for key in expected}
-        actual['packages'] = sorted(actual['packages'], key=lambda entry: (entry['id'], entry['version']))
-        if actual != expected:
-            raise ValueError(f'{name}: embedded plug-in bundle differs from the prepared bundle')
-        if matched is not None and identity != matched:
-            raise ValueError(f'{name}: plug-in consumers were built with different identities')
-        matched = identity
+    # Empty update/config homes keep older launchers from forwarding to another executable.
+    with tempfile.TemporaryDirectory(prefix='plugin-binary-probe-') as temporary:
+        probe_env = {key:value for key,value in os.environ.items() if not key.startswith(('PMUX', 'PRISMATTYC_', 'XDG_'))}
+        probe_env.update(HOME=temporary, USERPROFILE=temporary, APPDATA=temporary, LOCALAPPDATA=temporary,
+            XDG_DATA_HOME=temporary, XDG_CONFIG_HOME=temporary, XDG_STATE_HOME=temporary, XDG_RUNTIME_DIR=temporary)
+        for name in CONSUMERS:
+            label = subprocess.check_output([str(Path(bins).resolve() / (name + suffix)), '--version'], text=True, timeout=10, env=probe_env)
+            if not label.startswith(name + ' '):
+                raise ValueError(f'{name}: executable reports another binary role')
+            data = subprocess.check_output([str(Path(bins).resolve() / (name + suffix)), '--plugin-bundle'], text=True, timeout=10, env=probe_env)
+            identity = json.loads(data)
+            if identity.get('core_revision') != revision:
+                raise ValueError(f'{name}: executable source revision differs from this checkout')
+            actual = {key: identity.get(key) for key in expected}
+            actual['packages'] = sorted(actual['packages'], key=lambda entry: (entry['id'], entry['version']))
+            if actual != expected:
+                raise ValueError(f'{name}: embedded plug-in bundle differs from the prepared bundle')
+            if matched is not None and identity != matched:
+                raise ValueError(f'{name}: plug-in consumers were built with different identities')
+            matched = identity
     return {
         'identity': matched,
         'pin': json.loads((bundle / 'bundle-pin.json').read_bytes()),
@@ -93,7 +103,9 @@ def native_build_flags(target=None, crt_static=False):
         (Path(os.environ.get('CARGO_TARGET_DIR', REPO / 'target')), '/build-target'),
     ]
     for source, replacement in roots:
-        flags.extend(['--remap-path-prefix', f'{source.resolve()}={replacement}'])
+        mapping = ['--remap-path-prefix', f'{source.resolve()}={replacement}']
+        if not any(flags[index:index + 2] == mapping for index in range(len(flags) - 1)):
+            flags.extend(mapping)
     return '\x1f'.join(flags)
 
 

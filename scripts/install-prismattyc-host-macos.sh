@@ -91,8 +91,10 @@ fi
 
 # Build every bundled component from the same checkout.
 echo "building Prismattyc components (release)..."
-export PRISMATTYC_PLUGIN_BUNDLE_DIR="$(python3 "$ROOT/scripts/release/plugin_bundle_provenance.py" prepare)"
-export CARGO_ENCODED_RUSTFLAGS="$(python3 "$ROOT/scripts/release/plugin_bundle_provenance.py" flags)"
+PRISMATTYC_PLUGIN_BUNDLE_DIR="$(python3 "$ROOT/scripts/release/plugin_bundle_provenance.py" prepare)"
+export PRISMATTYC_PLUGIN_BUNDLE_DIR
+CARGO_ENCODED_RUSTFLAGS="$(python3 "$ROOT/scripts/release/plugin_bundle_provenance.py" flags)"
+export CARGO_ENCODED_RUSTFLAGS
 ( cd "$ROOT" && CARGO_TARGET_DIR="$ROOT/target" cargo +1.90.0 build --release --locked --workspace --bins )
 ( cd "$ROOT" && cargo +1.90.0 build --release --locked --manifest-path tools/activity-monitor/Cargo.toml --target-dir "$ROOT/target" )
 python3 "$ROOT/scripts/release/plugin_bundle_provenance.py" verify --bins "$ROOT/target/release" --out "$WORK/plugin-bundle.json"

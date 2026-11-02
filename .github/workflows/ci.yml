@@ -73,6 +73,27 @@ jobs:
       - name: Exercise production archives through native adapters
         run: python scripts/test-plugin-runtime.py --bundle target/native-plugin-bundle --feature production
 
+      - name: Build the complete matched native installation
+        if: runner.os != 'macOS'
+        env:
+          PRISMATTYC_PLUGIN_BUNDLE_DIR: ${{ github.workspace }}/target/native-plugin-bundle
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/plugin-proof
+        run: cargo build --workspace --bins --release --locked
+
+      - name: Exercise older updater then contained launcher repair
+        if: runner.os != 'macOS'
+        run: python tests/native/monitor-launcher-update-e2e.py --bins target/plugin-proof/release --fetch-old-version 0.3.52 --out target/monitor-launcher-proof
+
+      - name: Retain launcher migration results
+        if: always() && runner.os != 'macOS'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: monitor-launcher-proof-${{ matrix.os }}
+          path: |
+            target/monitor-launcher-proof/commands.json
+            target/monitor-launcher-proof/result.json
+          if-no-files-found: warn
+
   format:
     name: Format
     runs-on: ubuntu-24.04
@@ -120,6 +141,7 @@ jobs:
         run: scripts/release/confirm-apple-sdk.sh
 
   linux-al2023:
+    needs: plugin-artifacts
     name: Linux AL2023 (${{ matrix.arch }})
     strategy:
       fail-fast: false
@@ -142,6 +164,19 @@ jobs:
         with:
           toolchain: 1.90.0
           targets: ${{ matrix.target }}
+
+      - name: Download the shared guest archives
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ${{ needs.plugin-artifacts.outputs.artifact-name }}
+          path: target/native-plugin-bundle
+
+      - name: Prepare the verified CI candidate
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --yes --no-install-recommends pkg-config libfontconfig1-dev libfreetype6-dev
+          directory="$(python3 scripts/release/prepare-plugin-bundle.py --candidate target/native-plugin-bundle --target-dir target)"
+          printf 'PRISMATTYC_PLUGIN_BUNDLE_DIR=%s\n' "$directory" >> "$GITHUB_ENV"
 
       - name: Install cargo-zigbuild and Zig
         run: scripts/release/setup-zigbuild.sh

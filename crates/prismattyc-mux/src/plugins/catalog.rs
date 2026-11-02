@@ -18,6 +18,7 @@ pub(super) fn bundled_identity() -> Result<serde_json::Value> {
     let catalog = Catalog::bundled()?;
     Ok(serde_json::json!({
         "version": 1,
+        "format": "pmux-contained-plugin-consumer-v1",
         "core_version": env!("CARGO_PKG_VERSION"),
         "core_revision": prismattyc_core::git_hash(),
         "catalog_sha256": digest(BUNDLED_INDEX),

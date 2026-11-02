@@ -9,8 +9,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 # Build all app-owned executables against one verified bundle.
-export PRISMATTYC_PLUGIN_BUNDLE_DIR="$(python3 scripts/release/plugin_bundle_provenance.py prepare)"
-export CARGO_ENCODED_RUSTFLAGS="$(python3 "$ROOT/scripts/release/plugin_bundle_provenance.py" flags)"
+PRISMATTYC_PLUGIN_BUNDLE_DIR="$(python3 scripts/release/plugin_bundle_provenance.py prepare)"
+export PRISMATTYC_PLUGIN_BUNDLE_DIR
+CARGO_ENCODED_RUSTFLAGS="$(python3 "$ROOT/scripts/release/plugin_bundle_provenance.py" flags)"
+export CARGO_ENCODED_RUSTFLAGS
 BUILD_TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
 export CARGO_TARGET_DIR="$BUILD_TARGET"
 cargo +1.90.0 build --workspace --bins --release --locked

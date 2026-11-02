@@ -12,7 +12,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  plugin-artifacts:
+    uses: ./.github/workflows/plugin-artifacts.yml
+    with:
+      mode: pinned
+
   package:
+    needs: plugin-artifacts
     runs-on: windows-2022
     timeout-minutes: 90
     permissions:
@@ -23,6 +29,16 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
+      - name: Download the reviewed guest archives
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ${{ needs.plugin-artifacts.outputs.artifact-name }}
+          path: target/native-plugin-bundle
+      - name: Select the bundle for native build verification
+        shell: pwsh
+        run: |
+          $directory = (Resolve-Path target/native-plugin-bundle).Path
+          "PRISMATTYC_PLUGIN_BUNDLE_DIR=$directory" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: MSI helper tests
         shell: pwsh
         run: python scripts/release/windows_msi_test.py

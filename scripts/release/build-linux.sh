@@ -10,8 +10,10 @@ case "$target" in
     ;;
 esac
 
-export PRISMATTYC_PLUGIN_BUNDLE_DIR="$(python3 scripts/release/plugin_bundle_provenance.py prepare)"
-export CARGO_ENCODED_RUSTFLAGS="$(python3 scripts/release/plugin_bundle_provenance.py flags --target "$target")"
+PRISMATTYC_PLUGIN_BUNDLE_DIR="$(python3 scripts/release/plugin_bundle_provenance.py prepare)"
+export PRISMATTYC_PLUGIN_BUNDLE_DIR
+CARGO_ENCODED_RUSTFLAGS="$(python3 scripts/release/plugin_bundle_provenance.py flags --target "$target")"
+export CARGO_ENCODED_RUSTFLAGS
 
 CARGO_ZIGBUILD_ZIG_PATH=zig cargo zigbuild \
   --release --locked --workspace --bins \

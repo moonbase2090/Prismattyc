@@ -34,6 +34,31 @@ PATH="$PWD/target/debug:$PATH" python3 tests/native/restart-spaces-e2e.py
 python3 tests/native/release-update-e2e.py --pmux target/debug/pmux --out build/update-check
 ```
 
+Check source updater bundle preparation with the actual CLI and bundle verifier:
+
+```bash
+python3 tests/native/source-update-plugin-e2e.py --help
+```
+
+This fixture replaces only external Git and Cargo installation commands.
+It requires the real production bundle, checks all three mux installation
+requests, and rejects a corrupt archive before any install request.
+
+On native Linux or Windows, check an older updater followed by launcher repair:
+
+```bash
+python3 tests/native/monitor-launcher-update-e2e.py --bins target/release --old-pmux /absolute/path/to/verified/old/pmux --out build/monitor-cutover
+```
+
+Build all seven new binaries with the same verified production bundle first.
+Verify the older official executable's origin, size, and digest before passing
+it to this fixture. The fixture uses actual native executables and a local
+HTTPS transport substitute. It checks the two-process update, exact-tag repair,
+ownership refusals, locks, digest and bundle validation, retry, and core rollback.
+Windows also checks a sharing failure. Prepared-state recovery uses the actual
+receipt and backup, without claiming a timed process-kill test. A missing
+symlink privilege produces a partial result and exit code 2.
+
 Check Space rail transparency and opacity hot reload:
 
 ```bash

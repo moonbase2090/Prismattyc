@@ -112,6 +112,19 @@ class Connection:
 def exercise(bins, scratch, feature="all", expected_catalog=None):
     # Short socket paths also work with macOS's sockaddr_un limit.
     runtime = Path(tempfile.mkdtemp(prefix="pmux-plug-")).resolve()
+    if os.name == "nt":
+        # Explicit --socket paths must already have a private inheritable DACL.
+        # Restrict only this fixture's newly allocated directory.
+        subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", r'''
+$ErrorActionPreference = 'Stop'
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$acl = New-Object System.Security.AccessControl.DirectorySecurity
+$acl.SetOwner($sid)
+$acl.SetAccessRuleProtection($true, $false)
+$rule = [System.Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+$acl.AddAccessRule($rule)
+Set-Acl -LiteralPath $env:PLUGIN_PROOF_RUNTIME -AclObject $acl
+'''], env={**os.environ, "PLUGIN_PROOF_RUNTIME": str(runtime)}, check=True)
     config = runtime / "config.toml"
     endpoint = runtime / "daemon.sock"
     env = {key: value for key, value in os.environ.items() if not key.startswith(("HIVE_", "PMUX_", "PRISMATTYC_"))}

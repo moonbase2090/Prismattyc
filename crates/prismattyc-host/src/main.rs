@@ -20,6 +20,8 @@ mod config_template;
 mod daemon_startup;
 mod file_writer;
 mod font_fallback;
+mod font_file;
+mod font_load;
 mod frame_damage;
 mod git_info;
 mod glyph_cache;
@@ -1103,6 +1105,8 @@ struct HostState {
     _clipboard_responder: Option<objc2::rc::Retained<objc2_app_kit::NSResponder>>,
     present: Option<PresentBackend>,
     font: FontMetrics,
+    font_loader: Option<font_load::Handle>,
+    pending_font_load: Option<PendingFontLoad>,
     font_base_px: f32,
     font_zoom_steps: i8,
     font_path: Option<PathBuf>,
@@ -1478,6 +1482,20 @@ struct HostState {
     last_handle_titles: Vec<Vec<String>>,
     /// Unfocused-pane title notice linger.
     title_notice: Option<LiveTitleNotice>,
+}
+
+#[derive(Clone)]
+struct FontSelection {
+    base_px: f32,
+    zoom_steps: i8,
+    path: Option<PathBuf>,
+    fallbacks: Vec<PathBuf>,
+}
+
+struct PendingFontLoad {
+    id: u64,
+    selection: FontSelection,
+    px: f32,
 }
 
 struct LiveTitleNotice {
@@ -3054,6 +3072,7 @@ struct App {
     _config_watcher: Option<config::ConfigWatch>,
     /// Coalesced wake from PTY reader threads and the config watcher.
     wake: mux::Wake,
+    font_loader: Option<font_load::Worker>,
     /// Process-wide snapshot cache. `None` when disabled by configuration.
     /// Startup only: config reload does not start or stop it.
     snapshot_client: Option<Arc<snapshot_client::SnapshotClient>>,
@@ -3121,6 +3140,10 @@ impl App {
                 (None, None)
             }
         };
+        let font_loader = font_load::Worker::spawn(wake.clone());
+        if font_loader.is_none() {
+            eprintln!("prismattyc-host: asynchronous font loading unavailable");
+        }
         let snapshot_client = snapshot_client::start_snapshot_client(
             file_config.snapshot_client_enabled(),
             wake.clone(),
@@ -3157,6 +3180,7 @@ impl App {
             startup_config_error,
             _config_watcher: watcher,
             wake,
+            font_loader,
             snapshot_client,
             remote,
             wake_pending,
@@ -3588,53 +3612,23 @@ impl App {
                 PaneSpacing::from(&self.file_config).at_scale(host.window.scale_factor());
             let spacing_changed = requested_spacing != host.spacing;
             let tab_strip_changed = self.file_config.tab_strip != prior.tab_strip;
-            let mut geometry_applied = false;
             let mut geometry_changed = false;
             if font_changed {
                 let scale = host.window.scale_factor() as f32;
-                let px = (self.file_config.font_px.unwrap_or(FONT_PX) * scale).max(10.0);
                 let fallbacks = self.file_config.font_fallback.clone().unwrap_or_default();
-                match FontMetrics::load_with(px, self.file_config.font.as_deref(), &fallbacks) {
-                    Ok(font) => {
-                        // Resize the PTY/emulator grid FIRST: if that fails, keep
-                        // the prior font so metrics and grid never desync.
-                        let geom = host_geom(
-                            &font,
-                            host.mux.active_pane_count() > 1,
-                            show_tab_strip(host),
-                            strip_handle_row(host),
-                            PaneSpacing {
-                                sidebar_clamp_window_px: host.window.inner_size().width,
-                                ..requested_spacing
-                            },
-                            host.space_rail.longest_name_cells(),
-                        );
-                        let (cols, rows) = size_to_cells(host.window.inner_size(), &font, geom);
-                        if host.mux.resize_with_geom(cols, rows, geom).is_err() {
-                            eprintln!(
-                            "prismattyc-host: grid resize for reloaded font failed; keeping prior font"
-                        );
-                        } else {
-                            host.font = font;
-                            host.font_base_px = self.file_config.font_px.unwrap_or(FONT_PX);
-                            host.font_zoom_steps = 0;
-                            host.font_path = self.file_config.font.clone();
-                            host.font_fallback = fallbacks;
-                            host.spacing = requested_spacing;
-                            host.left_button_down = false;
-                            host.cursor_cell = None;
-                            host.dirty = true;
-                            geometry_applied = true;
-                            geometry_changed = true;
-                        }
-                    }
-                    Err(error) => {
-                        eprintln!("prismattyc-host: config font reload failed: {error:#}")
-                    }
-                }
+                queue_font_load(
+                    host,
+                    FontSelection {
+                        base_px: self.file_config.font_px.unwrap_or(FONT_PX),
+                        zoom_steps: 0,
+                        path: self.file_config.font.clone(),
+                        fallbacks,
+                    },
+                    scale as f64,
+                );
             }
 
-            if (spacing_changed || tab_strip_changed) && !geometry_applied {
+            if spacing_changed || tab_strip_changed {
                 let geom = host_geom(
                     &host.font,
                     host.mux.active_pane_count() > 1,
@@ -3880,6 +3874,24 @@ impl App {
         }
     }
 
+    fn drain_font_loads(&mut self) {
+        let completions = self
+            .font_loader
+            .as_ref()
+            .map(font_load::Worker::drain)
+            .unwrap_or_default();
+        for completion in completions {
+            let Some(host) = self.windows.values_mut().find(|host| {
+                host.font_loader
+                    .as_ref()
+                    .is_some_and(|loader| loader.owner_id() == completion.owner)
+            }) else {
+                continue;
+            };
+            install_font_completion(host, completion.id, completion.result);
+        }
+    }
+
     fn finish_pump_timing(
         &mut self,
         started: Instant,
@@ -3932,6 +3944,7 @@ impl App {
             .record_phase(pump_timing::Phase::RestartPoll, phase_started.elapsed());
         let phase_started = Instant::now();
         self.poll_config_reload();
+        self.drain_font_loads();
         self.pump_timing
             .record_phase(pump_timing::Phase::ConfigReload, phase_started.elapsed());
         self.poll_attach_tabs();
@@ -4520,6 +4533,7 @@ impl App {
         #[cfg(target_os = "macos")]
         let clipboard_responder =
             macos_menu::install_clipboard_responder(&window, self.event_proxy.clone());
+        let font_loader = self.font_loader.as_ref().map(font_load::Worker::handle);
         self.windows.insert(
             id,
             HostState {
@@ -4528,6 +4542,8 @@ impl App {
                 _clipboard_responder: clipboard_responder,
                 present: Some(present),
                 font,
+                font_loader,
+                pending_font_load: None,
                 font_base_px: base_px,
                 font_zoom_steps: 0,
                 font_path: self.file_config.font.clone(),
@@ -8280,72 +8296,30 @@ impl App {
         Self::refit_geom(host, physical, None);
     }
 
-    /// PT-124: reload the font at a new compositor scale factor. No-op when
-    /// the effective pixel size is unchanged, so the startup
-    /// `ScaleFactorChanged` some compositors send costs nothing. Grid refit
-    /// is left to the `Resized` event winit sends right after.
+    /// PT-124: queue a font reload at a new compositor scale factor. The
+    /// current font remains active until the loaded metrics and grid can swap
+    /// together; the following `Resized` event still refits the current font.
     fn refit_font_for_scale(host: &mut HostState, scale_factor: f64) {
         // Graphite design sizes follow the window scale; classic ignores it.
         host.spacing = host.spacing.at_scale(scale_factor);
-        let px = scaled_font_px(
-            (host.font_base_px + f32::from(host.font_zoom_steps)).clamp(6.0, 72.0),
-            scale_factor,
-        );
-        if (px - host.font.px).abs() < 0.01 {
-            return;
-        }
-        match FontMetrics::load_with(px, host.font_path.as_deref(), &host.font_fallback) {
-            Ok(font) => {
-                eprintln!(
-                    "prismattyc-host: scale factor {scale_factor}: font {:.1}px -> {px:.1}px",
-                    host.font.px
-                );
-                host.font = font;
-                host.dirty = true;
-            }
-            Err(error) => {
-                eprintln!(
-                    "prismattyc-host: font reload for scale {scale_factor} failed: {error:#}"
-                );
-            }
-        }
+        let selection = host
+            .pending_font_load
+            .as_ref()
+            .map(|pending| pending.selection.clone())
+            .unwrap_or_else(|| FontSelection {
+                base_px: host.font_base_px,
+                zoom_steps: host.font_zoom_steps,
+                path: host.font_path.clone(),
+                fallbacks: host.font_fallback.clone(),
+            });
+        queue_font_load(host, selection, scale_factor);
     }
 
     /// Recompute cell grid + spacing from the active window's domain
     /// layout (not cached rects). Tab create/switch must go through here
     /// so a 1-pane tab does not permanently zero `pane_gap`.
     fn refit_geom(host: &mut HostState, physical: PhysicalSize<u32>, why: Option<&str>) {
-        let spacing = PaneSpacing {
-            sidebar_clamp_window_px: physical.width,
-            ..host.spacing
-        };
-        let geom = host_geom(
-            &host.font,
-            host.mux.active_pane_count() > 1,
-            show_tab_strip(host),
-            strip_handle_row(host),
-            spacing,
-            host.space_rail.longest_name_cells(),
-        );
-        let (cols, rows) = size_to_cells(physical, &host.font, geom);
-        // Centre the cell grid. `size_to_cells` floor-divides, so the pixels
-        // no column could fill would otherwise all sit on the right edge, and
-        // an odd `pane_gap` splits unevenly on top of that. Measure the real
-        // margins and give half the difference back to the leading edge.
-        let mut geom = geom;
-        let trailing_gap = geom.pane_gap - geom.pane_gap / 2;
-        let left = geom.window_pad + geom.chrome_left() + geom.pane_gap / 2;
-        let right = (physical.width as usize)
-            .saturating_sub(geom.window_pad + geom.chrome_left() + cols * host.font.cell_w)
-            .saturating_sub(geom.chrome_right())
-            .saturating_add(trailing_gap);
-        geom.slack_x = right.saturating_sub(left) / 2;
-        let top = geom.window_pad + geom.pane_gap / 2;
-        let bottom = (physical.height as usize)
-            .saturating_sub(geom.window_pad + geom.chrome_top() + rows * host.font.cell_h)
-            .saturating_sub(geom.chrome_bottom())
-            .saturating_add(trailing_gap);
-        geom.slack_y = bottom.saturating_sub(top) / 2;
+        let (geom, cols, rows) = geometry_for_font(host, &host.font, physical);
         if cols == host.mux.cols() && rows == host.mux.rows() && geom == host.mux.geom() {
             return;
         }
@@ -8662,6 +8636,41 @@ impl App {
         host.render_frame.timing.damage_us = damage_started.elapsed().as_micros() as u64;
         more
     }
+}
+
+fn geometry_for_font(
+    host: &HostState,
+    font: &FontMetrics,
+    physical: PhysicalSize<u32>,
+) -> (mux::HostGeom, usize, usize) {
+    let spacing = PaneSpacing {
+        sidebar_clamp_window_px: physical.width,
+        ..host.spacing
+    };
+    let mut geom = host_geom(
+        font,
+        host.mux.active_pane_count() > 1,
+        show_tab_strip(host),
+        strip_handle_row(host),
+        spacing,
+        host.space_rail.longest_name_cells(),
+    );
+    let (cols, rows) = size_to_cells(physical, font, geom);
+    // Centre the cell grid; floor division leaves any slack along the edges.
+    let trailing_gap = geom.pane_gap - geom.pane_gap / 2;
+    let left = geom.window_pad + geom.chrome_left() + geom.pane_gap / 2;
+    let right = (physical.width as usize)
+        .saturating_sub(geom.window_pad + geom.chrome_left() + cols * font.cell_w)
+        .saturating_sub(geom.chrome_right())
+        .saturating_add(trailing_gap);
+    geom.slack_x = right.saturating_sub(left) / 2;
+    let top = geom.window_pad + geom.pane_gap / 2;
+    let bottom = (physical.height as usize)
+        .saturating_sub(geom.window_pad + geom.chrome_top() + rows * font.cell_h)
+        .saturating_sub(geom.chrome_bottom())
+        .saturating_add(trailing_gap);
+    geom.slack_y = bottom.saturating_sub(top) / 2;
+    (geom, cols, rows)
 }
 
 fn sync_pane_title_notices(host: &mut HostState) {
@@ -19838,6 +19847,85 @@ fn scaled_font_px(base_px: f32, scale_factor: f64) -> f32 {
     (base_px * scale_factor as f32).max(10.0)
 }
 
+fn commit_font_selection(host: &mut HostState, selection: FontSelection) {
+    host.font_base_px = selection.base_px;
+    host.font_zoom_steps = selection.zoom_steps;
+    host.font_path = selection.path;
+    host.font_fallback = selection.fallbacks;
+}
+
+fn queue_font_load(host: &mut HostState, selection: FontSelection, scale_factor: f64) {
+    let px = scaled_font_px(
+        (selection.base_px + f32::from(selection.zoom_steps)).clamp(6.0, 72.0),
+        scale_factor,
+    );
+    let matches_installed = selection.path == host.font_path
+        && selection.fallbacks == host.font_fallback
+        && (px - host.font.px).abs() < 0.01;
+    if matches_installed {
+        host.pending_font_load = None;
+        commit_font_selection(host, selection);
+        return;
+    }
+    if host.pending_font_load.as_ref().is_some_and(|pending| {
+        pending.selection.path == selection.path
+            && pending.selection.fallbacks == selection.fallbacks
+            && pending.selection.base_px == selection.base_px
+            && pending.selection.zoom_steps == selection.zoom_steps
+            && (pending.px - px).abs() < 0.01
+    }) {
+        return;
+    }
+    host.pending_font_load = None;
+    let Some(id) = host
+        .font_loader
+        .as_ref()
+        .and_then(|loader| loader.request(px, selection.path.as_deref(), &selection.fallbacks))
+    else {
+        eprintln!("prismattyc-host: asynchronous font loading unavailable");
+        return;
+    };
+    host.pending_font_load = Some(PendingFontLoad { id, selection, px });
+    host.dirty = true;
+}
+
+fn install_font_completion(host: &mut HostState, id: u64, result: anyhow::Result<FontMetrics>) {
+    if !host
+        .pending_font_load
+        .as_ref()
+        .is_some_and(|pending| pending.id == id)
+    {
+        return;
+    }
+    let pending = host
+        .pending_font_load
+        .take()
+        .expect("validated pending font");
+    let mut font = match result {
+        Ok(font) => font,
+        Err(error) => {
+            eprintln!("prismattyc-host: asynchronous font load failed: {error:#}");
+            return;
+        }
+    };
+    // The worker enables async fallback with the same wake before delivery.
+    let size = host.window.inner_size();
+    let (geom, cols, rows) = geometry_for_font(host, &font, size);
+    if let Err(error) = host.mux.resize_with_geom(cols, rows, geom) {
+        eprintln!(
+            "prismattyc-host: grid resize for loaded font failed; keeping prior font: {error:#}"
+        );
+        return;
+    }
+    std::mem::swap(&mut host.font, &mut font);
+    commit_font_selection(host, pending.selection);
+    host.left_button_down = false;
+    host.cursor_cell = None;
+    host.pending_full_repaint = Some(FullRepaintReason::Resize);
+    host.dirty = true;
+    sync_chrome_hover(host);
+}
+
 fn size_to_cells(
     size: PhysicalSize<u32>,
     font: &FontMetrics,
@@ -20090,48 +20178,33 @@ fn apply_save_space_action(host: &mut HostState) {
 /// A zero delta restores the configured size. The mux grid is resized before
 /// committing the new metrics so drawing and child dimensions stay in sync.
 fn change_font_size(host: &mut HostState, delta: i8) {
+    let current = host
+        .pending_font_load
+        .as_ref()
+        .map(|pending| pending.selection.clone())
+        .unwrap_or_else(|| FontSelection {
+            base_px: host.font_base_px,
+            zoom_steps: host.font_zoom_steps,
+            path: host.font_path.clone(),
+            fallbacks: host.font_fallback.clone(),
+        });
     let steps = if delta == 0 {
         0
     } else {
-        host.font_zoom_steps.saturating_add(delta)
+        current.zoom_steps.saturating_add(delta)
     };
-    let target_base = (host.font_base_px + f32::from(steps)).clamp(6.0, 72.0);
-    let target_steps = (target_base - host.font_base_px).round() as i8;
-    let px = scaled_font_px(target_base, host.window.scale_factor());
-    if (px - host.font.px).abs() < 0.01 {
-        host.font_zoom_steps = target_steps;
-        return;
-    }
-    let font = match FontMetrics::load_with(px, host.font_path.as_deref(), &host.font_fallback) {
-        Ok(font) => font,
-        Err(error) => {
-            eprintln!("prismattyc-host: font size change failed: {error:#}");
-            return;
-        }
-    };
-    let geom = host_geom(
-        &font,
-        host.mux.active_pane_count() > 1,
-        show_tab_strip(host),
-        strip_handle_row(host),
-        PaneSpacing {
-            sidebar_clamp_window_px: host.window.inner_size().width,
-            ..host.spacing
+    let target_base = (current.base_px + f32::from(steps)).clamp(6.0, 72.0);
+    let target_steps = (target_base - current.base_px).round() as i8;
+    queue_font_load(
+        host,
+        FontSelection {
+            base_px: current.base_px,
+            zoom_steps: target_steps,
+            path: current.path,
+            fallbacks: current.fallbacks,
         },
-        host.space_rail.longest_name_cells(),
+        host.window.scale_factor(),
     );
-    let (cols, rows) = size_to_cells(host.window.inner_size(), &font, geom);
-    if let Err(error) = host.mux.resize_with_geom(cols, rows, geom) {
-        eprintln!("prismattyc-host: grid resize for font size failed: {error:#}");
-        return;
-    }
-    host.font = font;
-    host.font_zoom_steps = target_steps;
-    host.left_button_down = false;
-    host.cursor_cell = None;
-    host.pending_full_repaint = Some(FullRepaintReason::Resize);
-    host.dirty = true;
-    App::refit_geom(host, host.window.inner_size(), Some("font size"));
 }
 
 /// Switch the Graphite chrome between the tabs and spaces bars and the

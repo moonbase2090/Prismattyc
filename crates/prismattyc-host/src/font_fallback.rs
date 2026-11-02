@@ -56,14 +56,12 @@ fn load_face(face: &CoveringFace) -> Option<Arc<Font>> {
     cached_face(loaded_faces(), key, || {
         // Read outside the map lock so a slow read does not hold up unrelated
         // faces. The per-face OnceLock prevents duplicate concurrent reads.
-        let font = std::fs::read(&face.path).ok().and_then(|data| {
+        let font = crate::font_file::map(&face.path).ok().and_then(|data| {
             let settings = FontSettings {
                 collection_index: face.index,
                 ..FontSettings::default()
             };
-            Font::from_bytes(data.as_slice(), settings)
-                .ok()
-                .map(Arc::new)
+            Font::from_bytes(data.as_ref(), settings).ok().map(Arc::new)
         });
         if font.is_some() {
             eprintln!(
@@ -170,8 +168,8 @@ mod tests {
                     cached_face(cache.as_ref(), key, || {
                         loads.fetch_add(1, Ordering::SeqCst);
                         thread::sleep(Duration::from_millis(20));
-                        let bytes = std::fs::read(path).ok()?;
-                        Font::from_bytes(bytes.as_slice(), FontSettings::default())
+                        let bytes = crate::font_file::map(&path).ok()?;
+                        Font::from_bytes(bytes.as_ref(), FontSettings::default())
                             .ok()
                             .map(Arc::new)
                     })

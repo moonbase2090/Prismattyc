@@ -22,6 +22,7 @@ anyhow.workspace = true
 mutants = "0.0.3"
 getrandom = "0.3"
 fontdue = "0.9"
+memmap2 = "0.9"
 graphite-core = { git = "https://github.com/moonbase2090/graphite", rev = "2a59b055c72fe1a91379ffc0f071c85f5d81a284", features = ["motion"] }
 portable-pty.workspace = true
 prismattyc-core = { path = "../prismattyc-core" }
@@ -57,7 +58,6 @@ arboard = { version = "3.6", default-features = false, features = [
 # PT-118: native Wayland alpha present (wl_shm ARGB8888 on the winit
 # surface). Versions must stay in lockstep with winit's Wayland stack so the
 # guest backend wraps the same libwayland connection.
-memmap2 = "0.9"
 rustix = { version = "1.1", features = ["event", "fs"] }
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-client = "0.31"

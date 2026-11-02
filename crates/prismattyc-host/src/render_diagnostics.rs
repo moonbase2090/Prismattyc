@@ -312,6 +312,7 @@ impl App {
             let mut status = serde_json::json!({
                 "window_id": format!("{id:?}"),
                 "glyph_cache": glyph_cache,
+                "pending_fallback_count": host.font.pending_fallback_count(),
                 "focused": host.window_focused,
                 "occluded": host.window_occluded,
                 "pane_count": host.mux.pane_count(),

@@ -1,10 +1,8 @@
 //! Software cell-grid rasterizer for the windowed host.
 
-use std::borrow::Cow;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::Arc;
 
 use fontdue::{Font, FontSettings};
@@ -367,11 +365,11 @@ pub struct FontMetrics {
     lazy_fonts: Vec<LazyFont>,
     /// Raw bytes and collection index for the primary face. The same face is
     /// used by rustybuzz and fontdue so shaped glyph IDs rasterize correctly.
-    primary_bytes: Vec<u8>,
+    primary_bytes: FontBytes,
     primary_index: u32,
     primary_name: String,
     /// CBDT color-emoji font bytes (e.g. Noto Color Emoji). Kept for `ttf_parser::Face`.
-    emoji_fonts: Vec<Vec<u8>>,
+    emoji_fonts: Vec<FontBytes>,
     /// Ghostty-style lazy system faces (CJK, etc.), per character. Not bundled.
     fallback_faces: RefCell<HashMap<char, FallbackFace>>,
     /// Resolves system faces off the main thread once the host enables it.
@@ -381,9 +379,9 @@ pub struct FontMetrics {
     painted_pending: Cell<bool>,
     /// Rasterized cell glyphs, so repainting an unchanged glyph skips fontdue,
     /// the system-fallback lookup and color-emoji PNG decoding.
-    glyph_cache: RefCell<LruCache<GlyphKey, Rc<GlyphPaint>>>,
+    glyph_cache: RefCell<LruCache<GlyphKey, Arc<GlyphPaint>>>,
     /// Shaped emoji clusters; `None` records a cluster no emoji font shapes.
-    cluster_cache: RefCell<LruCache<Box<str>, Option<Rc<ColorGlyph>>>>,
+    cluster_cache: RefCell<LruCache<Box<str>, Option<Arc<ColorGlyph>>>>,
     pub px: f32,
     pub cell_w: usize,
     pub cell_h: usize,
@@ -419,7 +417,7 @@ impl FontMetrics {
         let mut metrics = Self {
             fonts: vec![font],
             lazy_fonts: Vec::new(),
-            primary_bytes: BAKED_MONO.to_vec(),
+            primary_bytes: FontBytes::Baked(BAKED_MONO),
             primary_index: 0,
             primary_name: BAKED_MONO_NAME.to_string(),
             emoji_fonts: Vec::new(),
@@ -459,7 +457,7 @@ impl FontMetrics {
             };
             match Font::from_bytes(data.as_ref(), FontSettings::default()) {
                 Ok(font) => {
-                    primary_bytes = Some(data.into_owned());
+                    primary_bytes = Some(data);
                     names.push(name);
                     fonts.push(font);
                     break;
@@ -470,7 +468,9 @@ impl FontMetrics {
         let Some(primary_bytes) = primary_bytes else {
             anyhow::bail!("no loadable fonts from candidates (bundled font failed to parse)");
         };
-        let lazy_fonts: Vec<_> = sources.map(LazyFont::new).collect();
+        let lazy_fonts: Vec<_> = sources
+            .map(|source| LazyFont::new(source.prepare()))
+            .collect();
         names.extend(lazy_fonts.iter().map(|font| font.source.name()));
         // Cell metrics from the primary mono face only.
         let primary = &fonts[0];
@@ -500,11 +500,11 @@ impl FontMetrics {
         let mut emoji_fonts = Vec::new();
         let mut emoji_names = Vec::new();
         for path in emoji_font_chain() {
-            match std::fs::read(&path) {
+            match crate::font_file::map(&path) {
                 Ok(data) => {
-                    if ttf_parser::Face::parse(&data, 0).is_ok() {
+                    if ttf_parser::Face::parse(data.as_ref(), 0).is_ok() {
                         emoji_names.push(path.display().to_string());
-                        emoji_fonts.push(data);
+                        emoji_fonts.push(FontBytes::Mapped(Arc::new(data)));
                     } else {
                         eprintln!(
                             "prismattyc-host: skip emoji font {}: parse failed",
@@ -518,7 +518,7 @@ impl FontMetrics {
         if !emoji_names.is_empty() {
             eprintln!("prismattyc-host: color emoji: {}", emoji_names.join(", "));
         }
-        let primary_name = ttf_parser::Face::parse(&primary_bytes, 0)
+        let primary_name = ttf_parser::Face::parse(primary_bytes.as_ref(), 0)
             .ok()
             .and_then(|face| {
                 face.names()
@@ -587,7 +587,7 @@ impl FontMetrics {
     }
 
     fn primary_face(&self) -> Option<rustybuzz::Face<'_>> {
-        rustybuzz::Face::from_slice(&self.primary_bytes, self.primary_index)
+        rustybuzz::Face::from_slice(self.primary_bytes.as_ref(), self.primary_index)
     }
 
     fn rasterize_primary_indexed(&self, glyph_id: usize, px: f32) -> (fontdue::Metrics, Vec<u8>) {
@@ -752,33 +752,43 @@ impl FontMetrics {
         paintable
     }
 
+    pub(crate) fn pending_fallback_count(&self) -> usize {
+        self.fallback_faces
+            .borrow()
+            .values()
+            .filter(|face| matches!(face, FallbackFace::Pending))
+            .count()
+    }
+
     /// [`Self::paint_char_fitting`] through the glyph cache. A blank painted
     /// while its fallback face is pending is not cached, so the repaint after
     /// the face arrives rasterizes it.
-    fn cached_glyph_fitting(&self, ch: char, max_w: i32, max_h: i32) -> Rc<GlyphPaint> {
+    fn cached_glyph_fitting(&self, ch: char, max_w: i32, max_h: i32) -> Arc<GlyphPaint> {
         let key = (ch, max_w, max_h);
         if let Some(paint) = self.glyph_cache.borrow_mut().get(&key) {
             return paint;
         }
         // Rasterize without holding the cache borrow.
         self.painted_pending.set(false);
-        let paint = Rc::new(self.paint_char_fitting(ch, max_w, max_h));
+        let paint = Arc::new(self.paint_char_fitting(ch, max_w, max_h));
         if !self.painted_pending.get() {
-            self.glyph_cache.borrow_mut().insert(key, Rc::clone(&paint));
+            self.glyph_cache
+                .borrow_mut()
+                .insert(key, Arc::clone(&paint));
         }
         paint
     }
 
     /// [`Self::paint_emoji_cluster`] through the cluster cache. Clusters that
     /// never need emoji shaping skip the cache so they cannot crowd it out.
-    fn cached_emoji_cluster(&self, cluster: &str) -> Option<Rc<ColorGlyph>> {
+    fn cached_emoji_cluster(&self, cluster: &str) -> Option<Arc<ColorGlyph>> {
         if !cluster_needs_emoji_shape(cluster) {
             return None;
         }
         if let Some(color) = self.cluster_cache.borrow_mut().get(cluster) {
             return color;
         }
-        let color = self.paint_emoji_cluster(cluster).map(Rc::new);
+        let color = self.paint_emoji_cluster(cluster).map(Arc::new);
         self.cluster_cache
             .borrow_mut()
             .insert(cluster.into(), color.clone());
@@ -813,7 +823,7 @@ impl FontMetrics {
             128,
         ];
         for data in &self.emoji_fonts {
-            let Ok(face) = ttf_parser::Face::parse(data, 0) else {
+            let Ok(face) = ttf_parser::Face::parse(data.as_ref(), 0) else {
                 continue;
             };
             let Some(gid) = face.glyph_index(ch) else {
@@ -857,7 +867,7 @@ impl FontMetrics {
         }
         for data in &self.emoji_fonts {
             for index in 0..4u32 {
-                let Some(face) = rustybuzz::Face::from_slice(data, index) else {
+                let Some(face) = rustybuzz::Face::from_slice(data.as_ref(), index) else {
                     break;
                 };
                 let mut buf = rustybuzz::UnicodeBuffer::new();
@@ -871,7 +881,7 @@ impl FontMetrics {
                 if gid == 0 {
                     continue;
                 }
-                if let Some(color) = self.rasterize_emoji_gid(data, index, gid) {
+                if let Some(color) = self.rasterize_emoji_gid(data.as_ref(), index, gid) {
                     return Some(color);
                 }
             }
@@ -962,6 +972,10 @@ const BAKED_SYMBOLS_NAME: &str = "<bundled NotoSansSymbols2-Regular.ttf>";
 /// A face to load: an on-disk path, or a font baked into the binary.
 enum FontSource {
     Path(PathBuf),
+    PreparedPath {
+        path: PathBuf,
+        bytes: Option<FontBytes>,
+    },
     Baked {
         name: &'static str,
         bytes: &'static [u8],
@@ -971,28 +985,59 @@ enum FontSource {
 impl FontSource {
     fn name(&self) -> String {
         match self {
-            Self::Path(path) => path.display().to_string(),
+            Self::Path(path) | Self::PreparedPath { path, .. } => path.display().to_string(),
             Self::Baked { name, .. } => (*name).to_string(),
         }
     }
 
-    fn read(&self) -> Option<Cow<'static, [u8]>> {
+    fn read(&self) -> Option<FontBytes> {
         match self {
-            Self::Path(path) => match std::fs::read(path) {
-                Ok(data) => Some(Cow::Owned(data)),
+            Self::Path(path) => match crate::font_file::map(path) {
+                Ok(data) => Some(FontBytes::Mapped(Arc::new(data))),
                 Err(error) => {
                     eprintln!("prismattyc-host: skip font {}: {error}", path.display());
                     None
                 }
             },
-            Self::Baked { bytes, .. } => Some(Cow::Borrowed(bytes)),
+            Self::PreparedPath { bytes, .. } => bytes.clone(),
+            Self::Baked { bytes, .. } => Some(FontBytes::Baked(bytes)),
+        }
+    }
+
+    fn prepare(self) -> Self {
+        match self {
+            Self::Path(path) => {
+                let bytes = crate::font_file::map(&path)
+                    .map(|data| FontBytes::Mapped(Arc::new(data)))
+                    .map_err(|error| {
+                        eprintln!("prismattyc-host: skip font {}: {error}", path.display());
+                    })
+                    .ok();
+                Self::PreparedPath { path, bytes }
+            }
+            source => source,
+        }
+    }
+}
+
+#[derive(Clone)]
+enum FontBytes {
+    Mapped(Arc<memmap2::Mmap>),
+    Baked(&'static [u8]),
+}
+
+impl AsRef<[u8]> for FontBytes {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Mapped(data) => data,
+            Self::Baked(data) => data,
         }
     }
 }
 
 struct LazyFont {
     source: FontSource,
-    bytes: OnceCell<Option<Cow<'static, [u8]>>>,
+    bytes: OnceCell<Option<FontBytes>>,
     font: OnceCell<Option<Font>>,
     coverage: RefCell<HashMap<char, bool>>,
 }
@@ -1014,7 +1059,7 @@ impl LazyFont {
         let bytes = self.bytes.get_or_init(|| self.source.read()).as_ref()?;
         // cmap lookup borrows the source. It does not expand every outline.
         let covered = *self.coverage.borrow_mut().entry(ch).or_insert_with(|| {
-            ttf_parser::Face::parse(bytes, 0)
+            ttf_parser::Face::parse(bytes.as_ref(), 0)
                 .ok()
                 .and_then(|face| face.glyph_index(ch))
                 .is_some_and(|gid| gid.0 != 0)
@@ -16614,8 +16659,8 @@ mod glyph_cache_tests {
         let h = font.cell_h as i32;
         let narrow = font.cached_glyph_fitting('M', w, h);
         let wide = font.cached_glyph_fitting('M', w * 2, h);
-        assert!(!Rc::ptr_eq(&narrow, &wide));
-        assert!(Rc::ptr_eq(&narrow, &font.cached_glyph_fitting('M', w, h)));
+        assert!(!Arc::ptr_eq(&narrow, &wide));
+        assert!(Arc::ptr_eq(&narrow, &font.cached_glyph_fitting('M', w, h)));
         assert_eq!(font.glyph_cache_stats().entries, 2);
     }
 
@@ -16639,7 +16684,7 @@ mod glyph_cache_tests {
         let stats = font.cluster_cache.borrow().stats();
         assert_eq!((stats.misses, stats.hits, stats.entries), (1, 1, 1));
         match (first, second) {
-            (Some(a), Some(b)) => assert!(Rc::ptr_eq(&a, &b)),
+            (Some(a), Some(b)) => assert!(Arc::ptr_eq(&a, &b)),
             (None, None) => {}
             _ => panic!("a cached cluster must not change between lookups"),
         }
@@ -16651,6 +16696,12 @@ mod async_fallback_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn font_metrics_can_move_between_loader_and_ui_threads() {
+        fn assert_send<T: Send>() {}
+        assert_send::<FontMetrics>();
+    }
 
     fn async_font() -> (FontMetrics, Arc<AtomicUsize>) {
         let mut font = FontMetrics::load(16.0).expect("font");
@@ -16673,7 +16724,7 @@ mod async_fallback_tests {
         font.drain_fallbacks()
     }
 
-    fn fitting(font: &FontMetrics, ch: char) -> Rc<GlyphPaint> {
+    fn fitting(font: &FontMetrics, ch: char) -> Arc<GlyphPaint> {
         font.cached_glyph_fitting(ch, font.cell_w as i32 * 2, font.cell_h as i32)
     }
 
@@ -16684,11 +16735,13 @@ mod async_fallback_tests {
         assert!(matches!(*fitting(&font, ch), GlyphPaint::Empty));
         // A second paint before the result neither asks again nor caches the blank.
         assert!(matches!(*fitting(&font, ch), GlyphPaint::Empty));
+        assert_eq!(font.pending_fallback_count(), 1);
         assert_eq!(font.glyph_cache_stats().entries, 0);
         assert!(
             drain_after_wakes(&font, &woke, 1),
             "test environment must provide a CJK face"
         );
+        assert_eq!(font.pending_fallback_count(), 0);
         assert!(matches!(*fitting(&font, ch), GlyphPaint::Coverage(_)));
         assert_eq!(font.glyph_cache_stats().entries, 1);
         // The face is ready now, so another CJK character in it asks again
@@ -16701,10 +16754,12 @@ mod async_fallback_tests {
         let (font, woke) = async_font();
         let ch = '\u{10ffff}';
         assert!(matches!(*fitting(&font, ch), GlyphPaint::Empty));
+        assert_eq!(font.pending_fallback_count(), 1);
         assert!(
             !drain_after_wakes(&font, &woke, 1),
             "no face means nothing new to paint"
         );
+        assert_eq!(font.pending_fallback_count(), 0);
         assert!(matches!(*fitting(&font, ch), GlyphPaint::Empty));
         assert_eq!(font.glyph_cache_stats().entries, 1);
         assert_eq!(woke.load(Ordering::SeqCst), 1, "resolved once");

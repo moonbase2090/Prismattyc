@@ -6,7 +6,7 @@ use hmac::{Hmac, Mac};
 use prismattyc_core::activity::{ActivityCursor, ActivityInput, ActivityKind, ActivitySource};
 use prismattyc_core::AgentId;
 use serde::Serialize;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -147,34 +147,54 @@ struct SessionContext {
 
 #[derive(Default)]
 struct Debouncer {
-    by_seat: HashMap<String, (Instant, Vec<u8>)>,
+    by_seat: HashMap<String, Debounced>,
+}
+
+struct Debounced {
+    due: Instant,
+    body: Vec<u8>,
+    terminal: bool,
 }
 
 impl Debouncer {
-    fn record(&mut self, now: Instant, seat: String, body: Vec<u8>) {
+    fn record(&mut self, now: Instant, seat: String, body: Vec<u8>, terminal: bool, runtime: bool) {
         if !self.by_seat.contains_key(&seat) && self.by_seat.len() == MAX_QUEUE {
             if let Some(oldest) = self
                 .by_seat
                 .iter()
-                .min_by_key(|(_, (due, _))| *due)
+                .min_by_key(|(_, item)| item.due)
                 .map(|(seat, _)| seat.clone())
             {
                 self.by_seat.remove(&oldest);
             }
         }
-        self.by_seat.insert(seat, (now + DEBOUNCE, body));
+        if self
+            .by_seat
+            .get(&seat)
+            .is_some_and(|item| item.terminal && runtime && !terminal)
+        {
+            return;
+        }
+        self.by_seat.insert(
+            seat,
+            Debounced {
+                due: now + DEBOUNCE,
+                body,
+                terminal,
+            },
+        );
     }
 
     fn take_ready(&mut self, now: Instant) -> Vec<Vec<u8>> {
         let ready = self
             .by_seat
             .iter()
-            .filter(|(_, (due, _))| *due <= now)
+            .filter(|(_, item)| item.due <= now)
             .map(|(seat, _)| seat.clone())
             .collect::<Vec<_>>();
         ready
             .into_iter()
-            .filter_map(|seat| self.by_seat.remove(&seat).map(|(_, body)| body))
+            .filter_map(|seat| self.by_seat.remove(&seat).map(|item| item.body))
             .collect()
     }
 }
@@ -336,7 +356,21 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
                         timestamp: &timestamp,
                     };
                     if let Ok(body) = encode_payload(&payload) {
-                        pending.record(Instant::now(), record.event.seat.to_string(), body);
+                        let terminal = match record.event.source {
+                            ActivitySource::Hooks => matches!(
+                                record.event.kind,
+                                ActivityKind::SessionFinished | ActivityKind::Stopped
+                            ),
+                            ActivitySource::Runtime => record.event.kind == ActivityKind::Stopped,
+                            ActivitySource::Notify => false,
+                        };
+                        pending.record(
+                            Instant::now(),
+                            record.event.seat.to_string(),
+                            body,
+                            terminal,
+                            record.event.source == ActivitySource::Runtime,
+                        );
                     }
                 }
             }
@@ -367,7 +401,7 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
 #[derive(Default)]
 struct WebhookOwnership {
     hooked_runs: HashMap<String, HashSet<String>>,
-    runtime_state: HashMap<String, ActivityKind>,
+    runtime_runs: HashMap<String, String>,
 }
 
 impl WebhookOwnership {
@@ -405,22 +439,21 @@ impl WebhookOwnership {
                 true
             }
             ActivitySource::Runtime => {
-                let prior = self.runtime_state.insert(seat.to_owned(), event.kind);
-                if self.runtime_state.len() > MAX_HOOKED_SEATS {
+                let prior_run = self
+                    .runtime_runs
+                    .insert(seat.to_owned(), event.run_id.clone());
+                if self.runtime_runs.len() > MAX_HOOKED_SEATS {
                     if let Some(evict) = self
-                        .runtime_state
+                        .runtime_runs
                         .keys()
                         .find(|key| key.as_str() != seat)
                         .cloned()
                     {
-                        self.runtime_state.remove(&evict);
+                        self.runtime_runs.remove(&evict);
                     }
                 }
                 if event.kind == ActivityKind::Stopped
-                    || (event.kind == ActivityKind::Working
-                        && prior.is_some_and(|kind| {
-                            matches!(kind, ActivityKind::Waiting | ActivityKind::Stopped)
-                        }))
+                    || prior_run.is_some_and(|prior| prior != event.run_id)
                 {
                     self.hooked_runs.remove(seat);
                 }
@@ -545,7 +578,7 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
             let Ok(seat_id) = AgentId::new(seat.to_owned()) else {
                 continue;
             };
-            let run_id = format!("session-{}", session.id);
+            let run_id = snapshot_run_id(&session);
             let state = snapshot_state(&session, now_ms);
             current.insert(seat.to_owned());
             let changed = projected
@@ -599,6 +632,22 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
         }
         force_runtime.retain(|seat| current.contains(seat));
     }
+}
+
+fn snapshot_run_id(session: &crate::control::SessionSnapshot) -> String {
+    let processes = session
+        .windows
+        .iter()
+        .flat_map(|window| window.panes.iter())
+        .map(|pane| format!("{}:{:?}", pane.id, pane.child_pid))
+        .collect::<Vec<_>>()
+        .join(";");
+    let digest = Sha256::digest(processes.as_bytes());
+    let process_key = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("session-{}-{process_key}", session.id)
 }
 
 fn snapshot_state(session: &crate::control::SessionSnapshot, now_ms: u64) -> ActivityKind {
@@ -769,11 +818,13 @@ mod tests {
     fn debounce_coalesces_each_seat_until_the_quiet_period_ends() {
         let now = Instant::now();
         let mut debounce = Debouncer::default();
-        debounce.record(now, "seat-a".into(), b"first".to_vec());
+        debounce.record(now, "seat-a".into(), b"first".to_vec(), false, false);
         debounce.record(
             now + Duration::from_millis(500),
             "seat-a".into(),
             b"latest".to_vec(),
+            false,
+            false,
         );
         assert!(debounce
             .take_ready(now + Duration::from_millis(700))
@@ -781,6 +832,24 @@ mod tests {
         assert_eq!(
             debounce.take_ready(now + Duration::from_millis(1_300)),
             vec![b"latest".to_vec()]
+        );
+    }
+
+    #[test]
+    fn terminal_hook_survives_runtime_coalescing() {
+        let now = Instant::now();
+        let mut debounce = Debouncer::default();
+        debounce.record(now, "seat-a".into(), b"stopped".to_vec(), true, false);
+        debounce.record(
+            now + Duration::from_millis(500),
+            "seat-a".into(),
+            b"waiting".to_vec(),
+            false,
+            true,
+        );
+        assert_eq!(
+            debounce.take_ready(now + Duration::from_millis(800)),
+            vec![b"stopped".to_vec()]
         );
     }
 
@@ -840,10 +909,16 @@ mod tests {
             "pane-run",
             ActivityKind::Waiting
         ));
-        assert!(observe(
+        assert!(!observe(
             &mut ownership,
             ActivitySource::Runtime,
             "pane-run",
+            ActivityKind::Working
+        ));
+        assert!(observe(
+            &mut ownership,
+            ActivitySource::Runtime,
+            "pane-run-new",
             ActivityKind::Working
         ));
 
@@ -856,13 +931,13 @@ mod tests {
         assert!(observe(
             &mut ownership,
             ActivitySource::Runtime,
-            "pane-run",
+            "pane-run-new",
             ActivityKind::Stopped
         ));
         assert!(observe(
             &mut ownership,
             ActivitySource::Runtime,
-            "pane-run",
+            "pane-run-new",
             ActivityKind::Waiting
         ));
     }

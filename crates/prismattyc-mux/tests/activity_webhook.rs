@@ -262,7 +262,7 @@ fn webhook_keeps_hook_failure_ahead_of_runtime_until_the_run_ends() {
     publish(
         27,
         ActivitySource::Runtime,
-        "pane-1",
+        "pane-2",
         "working-2",
         ActivityKind::Working,
     );

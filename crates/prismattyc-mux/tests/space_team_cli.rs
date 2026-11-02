@@ -624,11 +624,15 @@ fn template_launch_refuses_occupied_pane_without_replacing_work() {
     let marker = launch_template(&socket, &data);
     let occupied_pid = data.join("occupied.pid");
     let shell = data.join("occupied-shell");
+    // The pane must be occupied from its first instruction. A `#!/bin/sh`
+    // script is an idle shell to the foreground check until it reaches its
+    // `exec sleep`, so a launch checked in that window was not refused.
+    // A non-shell interpreter is foreground work immediately.
     std::fs::write(
         &shell,
         format!(
-            "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec sleep 60\n",
-            occupied_pid.display()
+            "#!/usr/bin/env python3\nimport os\nwith open({:?}, 'w') as f:\n    f.write(str(os.getpid()))\nos.execvp('sleep', ['sleep', '60'])\n",
+            occupied_pid.display().to_string()
         ),
     )
     .unwrap();
@@ -651,10 +655,26 @@ fn template_launch_refuses_occupied_pane_without_replacing_work() {
     assert_eq!(output.status.code(), Some(1), "{}", text(&output));
     assert!(text(&output).contains("already has foreground work; launch was not repeated"));
     assert!(!marker.exists(), "refused launch ran the saved command");
-    let pid: u32 = std::fs::read_to_string(occupied_pid)
-        .unwrap()
-        .parse()
-        .unwrap();
+    // The interpreter may still be starting when the refusal returns. Wait
+    // for it to record its PID and replace itself with the sleep.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let pid: u32 = loop {
+        if let Some(pid) = std::fs::read_to_string(&occupied_pid)
+            .ok()
+            .and_then(|raw| raw.parse().ok())
+        {
+            if prismattyc_mux::procinfo::live_foreground_command(pid)
+                .is_some_and(|command| command.contains("sleep 60"))
+            {
+                break pid;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "occupied pane never reached its sleep"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
     let snapshot = TeamClient::connect(&socket).unwrap().snapshot().unwrap();
     let current = &snapshot
         .sessions

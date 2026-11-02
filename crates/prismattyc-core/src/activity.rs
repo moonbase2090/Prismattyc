@@ -12,6 +12,8 @@ pub struct ActivityInput {
     pub event_id: String,
     pub source: ActivitySource,
     pub kind: ActivityKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub process_ids: Vec<u32>,
 }
 
 impl ActivityInput {
@@ -21,6 +23,9 @@ impl ActivityInput {
         }
         if !valid_identifier(&self.run_id) || !valid_identifier(&self.event_id) {
             return Err("activity identifiers must be 1..128 ASCII identifier characters");
+        }
+        if self.process_ids.len() > 256 || self.process_ids.contains(&0) {
+            return Err("invalid activity process metadata");
         }
         Ok(())
     }
@@ -169,6 +174,7 @@ mod tests {
                 event_id: "event-1".into(),
                 source: ActivitySource::Hooks,
                 kind: ActivityKind::TurnStarted,
+                process_ids: Vec::new(),
             },
         };
         assert_eq!(
@@ -194,5 +200,10 @@ mod tests {
         assert!(serde_json::from_str::<ActivityInput>(with_content).is_err());
         let invalid_seat = r#"{"schema_version":1,"seat":"INVALID","run_id":"r","event_id":"e","source":"hooks","kind":"waiting"}"#;
         assert!(serde_json::from_str::<ActivityInput>(invalid_seat).is_err());
+        let invalid_process = r#"{"schema_version":1,"seat":"fixture-seat","run_id":"r","event_id":"e","source":"hooks","kind":"waiting","process_ids":[0]}"#;
+        assert!(serde_json::from_str::<ActivityInput>(invalid_process)
+            .unwrap()
+            .validate_metadata()
+            .is_err());
     }
 }

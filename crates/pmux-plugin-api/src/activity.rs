@@ -21,6 +21,7 @@ pub fn page(page: read::Page) -> Result<domain::ActivityPage, read::Error> {
                     read::Source::Runtime => domain::ActivitySource::Runtime,
                 },
                 kind: kind(record.event.kind),
+                process_ids: Vec::new(),
             };
             event
                 .validate_metadata()

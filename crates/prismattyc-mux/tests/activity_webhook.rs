@@ -140,6 +140,7 @@ fn configured_daemon_posts_activity_with_verifiable_signature() {
         event_id: "event-1".into(),
         source: ActivitySource::Notify,
         kind: ActivityKind::Waiting,
+        process_ids: Vec::new(),
     };
     let response = activity::exchange(
         &daemon.socket,
@@ -192,6 +193,7 @@ fn webhook_keeps_hook_failure_ahead_of_runtime_until_the_run_ends() {
                     event_id: event_id.into(),
                     source,
                     kind,
+                    process_ids: Vec::new(),
                 },
             },
         )
@@ -284,6 +286,7 @@ fn agent_sessions_are_projected_alongside_harness_hooks() {
         event_id: "harness-event-1".into(),
         source: ActivitySource::Hooks,
         kind: ActivityKind::SessionStarted,
+        process_ids: Vec::new(),
     };
     assert!(matches!(
         activity::exchange(
@@ -387,6 +390,7 @@ fn agent_sessions_are_projected_alongside_harness_hooks() {
         event_id: "harness-event-2".into(),
         source: ActivitySource::Hooks,
         kind: ActivityKind::SessionFinished,
+        process_ids: Vec::new(),
     };
     activity::exchange(
         &daemon.socket,

@@ -417,6 +417,7 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
 #[derive(Default)]
 struct WebhookOwnership {
     hooked_runs: HashMap<String, HashSet<String>>,
+    hooked_processes: HashMap<String, HashMap<String, HashSet<u32>>>,
     runtime_runs: HashMap<String, String>,
 }
 
@@ -431,6 +432,12 @@ impl WebhookOwnership {
                     ActivityKind::SessionFinished | ActivityKind::Stopped
                 ) {
                     runs.remove(&event.run_id);
+                    if let Some(processes) = self.hooked_processes.get_mut(seat) {
+                        processes.remove(&event.run_id);
+                        if processes.is_empty() {
+                            self.hooked_processes.remove(seat);
+                        }
+                    }
                     if runs.is_empty() {
                         self.hooked_runs.remove(seat);
                     }
@@ -438,9 +445,23 @@ impl WebhookOwnership {
                     if runs.len() >= MAX_HOOKED_RUNS_PER_SEAT && !runs.contains(&event.run_id) {
                         if let Some(evict) = runs.iter().next().cloned() {
                             runs.remove(&evict);
+                            if let Some(processes) = self.hooked_processes.get_mut(seat) {
+                                processes.remove(&evict);
+                                if processes.is_empty() {
+                                    self.hooked_processes.remove(seat);
+                                }
+                            }
                         }
                     }
                     runs.insert(event.run_id.clone());
+                    if !event.process_ids.is_empty() {
+                        self.hooked_processes
+                            .entry(seat.to_owned())
+                            .or_default()
+                            .entry(event.run_id.clone())
+                            .or_default()
+                            .extend(event.process_ids.iter().copied());
+                    }
                     if self.hooked_runs.len() > MAX_HOOKED_SEATS {
                         if let Some(evict) = self
                             .hooked_runs
@@ -449,12 +470,24 @@ impl WebhookOwnership {
                             .cloned()
                         {
                             self.hooked_runs.remove(&evict);
+                            self.hooked_processes.remove(&evict);
                         }
                     }
                 }
                 true
             }
             ActivitySource::Runtime => {
+                let process_matches_hook = self
+                    .hooked_processes
+                    .get(seat)
+                    .into_iter()
+                    .flat_map(|runs| runs.values())
+                    .flatten()
+                    .any(|hook_pid| {
+                        event.process_ids.iter().any(|runtime_pid| {
+                            crate::procinfo::is_process_descendant(*hook_pid, *runtime_pid)
+                        })
+                    });
                 let prior_run = self
                     .runtime_runs
                     .insert(seat.to_owned(), event.run_id.clone());
@@ -473,11 +506,12 @@ impl WebhookOwnership {
                         runtime_run_changed(
                             &prior,
                             &event.run_id,
-                            self.hooked_runs.contains_key(seat),
+                            self.hooked_runs.contains_key(seat) && process_matches_hook,
                         )
                     })
                 {
                     self.hooked_runs.remove(seat);
+                    self.hooked_processes.remove(seat);
                 }
                 event.kind == ActivityKind::Stopped || !self.hooked_runs.contains_key(seat)
             }
@@ -660,6 +694,7 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
                     seat_id,
                     run_id.clone(),
                     state,
+                    sorted_process_ids(&foreground_pids),
                 )
             } else {
                 true
@@ -699,6 +734,7 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
                     seat_id,
                     prior.run_id,
                     ActivityKind::Stopped,
+                    sorted_process_ids(&prior.foreground_pids),
                 ) {
                     continue;
                 }
@@ -824,6 +860,7 @@ fn publish_runtime(
     seat: AgentId,
     run_id: String,
     kind: ActivityKind,
+    process_ids: Vec<u32>,
 ) -> bool {
     let request_id = *next_request_id;
     *next_request_id = (*next_request_id).wrapping_add(1).max(1);
@@ -837,6 +874,7 @@ fn publish_runtime(
             event_id: format!("runtime-{}", *event_id),
             source: ActivitySource::Runtime,
             kind,
+            process_ids,
         },
     };
     *event_id = (*event_id).wrapping_add(1).max(1);
@@ -844,6 +882,14 @@ fn publish_runtime(
         crate::activity::exchange(socket, request),
         Ok(ControlResponseData::ActivityPublished { .. })
     )
+}
+
+fn sorted_process_ids(pids: &HashMap<u64, u32>) -> Vec<u32> {
+    let mut pids = pids.values().copied().collect::<Vec<_>>();
+    pids.sort_unstable();
+    pids.dedup();
+    pids.truncate(256);
+    pids
 }
 
 fn state_for(kind: ActivityKind) -> Option<(&'static str, &'static str)> {
@@ -1020,6 +1066,7 @@ mod tests {
                 event_id: "event-1".into(),
                 source,
                 kind,
+                process_ids: Vec::new(),
             })
         }
 
@@ -1152,6 +1199,32 @@ mod tests {
             "session-7-process-none-newpid",
             true
         ));
+    }
+
+    #[test]
+    fn hook_process_lineage_preserves_ownership_until_replacement() {
+        let mut ownership = WebhookOwnership::default();
+        let hook_pid = std::process::id();
+        let event = |source, run_id: &str, process_ids| ActivityInput {
+            schema_version: 1,
+            seat: AgentId::new("worker-a").unwrap(),
+            run_id: run_id.into(),
+            event_id: "event-1".into(),
+            source,
+            kind: ActivityKind::CommandFailed,
+            process_ids,
+        };
+        assert!(ownership.observe(&event(ActivitySource::Hooks, "hook-run", vec![hook_pid])));
+        assert!(!ownership.observe(&event(
+            ActivitySource::Runtime,
+            "session-7-process-none-shell",
+            vec![hook_pid]
+        )));
+        assert!(ownership.observe(&event(
+            ActivitySource::Runtime,
+            "session-7-process-none-successor",
+            vec![u32::MAX - 1]
+        )));
     }
 
     #[test]

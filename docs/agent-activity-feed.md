@@ -85,6 +85,7 @@ The normalized event has these fields:
 | `event_id` | Retry identity within that seat and run, with the same identifier limit. |
 | `source` | `notify`, `hooks`, or `runtime`. |
 | `kind` | Closed activity enum in `activity.rs`. |
+| `process_ids` | Optional process-lineage metadata for correlating hook and runtime ownership. It is omitted when unavailable and is not included in webhook payloads. |
 
 Identifiers permit ASCII letters, digits, hyphens, underscores, periods, and
 colons. Seat identities follow the existing mailbox identity format.
@@ -93,6 +94,13 @@ responses, file paths, file contents, or mail bodies. Adapters hash upstream
 correlation identifiers before publication. Operators still choose neutral seat
 identities. This format is data minimization, not authenticated seat attribution:
 any client with same-user socket access can assert a seat.
+
+`process_ids` is a bounded list of process IDs: hook adapters report their
+nearest non-shell owner, and runtime projection reports the foreground or
+retained harness processes for the session's panes. The webhook worker uses this
+metadata to keep hook status while runtime activity remains in that process
+tree, then release it after a replacement. It does not expose process IDs in
+webhook payloads.
 
 Kinds cover session and turn start/end, tool/command/edit start/end/failure,
 explicit test start/pass/failure, working/waiting/stopped state, and mail

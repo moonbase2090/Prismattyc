@@ -43,6 +43,82 @@ pub fn is_process_descendant(parent: u32, child: u32) -> bool {
     }
 }
 
+/// Nearest non-shell process above the hook adapter in its pane process tree.
+#[must_use]
+pub fn activity_hook_owner_pid() -> Option<u32> {
+    let mut pid = std::process::id();
+    let mut owner = None;
+    let mut passed_shell = false;
+    for _ in 0..32 {
+        let parent = process_parent(pid)?;
+        let args = process_args(parent)?;
+        if is_hook_shell_argv(&args) {
+            if owner.is_some() {
+                return owner;
+            }
+            passed_shell = true;
+        } else if passed_shell {
+            return Some(parent);
+        } else {
+            owner = Some(parent);
+        }
+        pid = parent;
+    }
+    owner
+}
+
+fn is_hook_shell_argv(args: &[String]) -> bool {
+    if is_shell_argv(args) {
+        return true;
+    }
+    #[cfg(windows)]
+    return args
+        .first()
+        .map(|program| executable_name(program))
+        .is_some_and(|name| matches!(name.as_str(), "powershell" | "pwsh" | "cmd"));
+    #[cfg(not(windows))]
+    false
+}
+
+fn process_args(pid: u32) -> Option<Vec<String>> {
+    #[cfg(not(windows))]
+    {
+        cmdline_strings(pid)
+    }
+    #[cfg(windows)]
+    {
+        cmdline(pid).map(|args| {
+            args.into_iter()
+                .map(|arg| String::from_utf8_lossy(&arg).into_owned())
+                .collect()
+        })
+    }
+}
+
+fn process_parent(pid: u32) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        let raw = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let close = raw.rfind(')')?;
+        return raw
+            .get(close + 1..)?
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return macos::parent_pid(pid);
+    }
+    #[cfg(windows)]
+    {
+        return windows::parent_pid(pid);
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
 /// Working directory of `pid`, if the platform exposes it.
 #[must_use]
 pub fn cwd_of(pid: u32) -> Option<PathBuf> {
@@ -902,6 +978,21 @@ mod macos {
         Some((info.pbi_pgid, info.e_tpgid))
     }
 
+    pub(super) fn parent_pid(pid: u32) -> Option<u32> {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::pid_t,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                size,
+            )
+        };
+        (n >= size && info.pbi_ppid > 0).then_some(info.pbi_ppid)
+    }
+
     pub(super) fn cwd(pid: u32) -> Option<PathBuf> {
         // PROC_PIDVNODEPATHINFO fills a `proc_vnodepathinfo` (cdir + rdir). The
         // kernel requires the passed buffer size to equal the struct size
@@ -1630,6 +1721,11 @@ mod windows {
                         }
                         break;
                     }
+                }
+                pub(super) fn parent_pid(pid: u32) -> Option<u32> {
+                    process_tree()?
+                        .into_iter()
+                        .find_map(|(child, parent)| (child == pid).then_some(parent))
                 }
             }
             CloseHandle(snapshot);

@@ -41,6 +41,7 @@ jobs:
         run: |
           set -eu
           rustup toolchain install 1.90.0 --profile minimal --component llvm-tools --component clippy
+          rustup target add wasm32-unknown-unknown --toolchain 1.90.0
           rustup default 1.90.0
           cargo install cargo-llvm-cov --version 0.9.1 --locked
           cargo llvm-cov --version

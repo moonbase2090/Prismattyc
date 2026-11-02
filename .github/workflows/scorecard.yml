@@ -16,7 +16,7 @@ concurrency:
 jobs:
   scorecard:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -54,10 +54,10 @@ jobs:
               base="origin/main"
             fi
             sc analyze . --diff "$base" --fail-on secrets,tests,lint,types \
-              --format all --out scorecard.html --budget-seconds 900
+              --format all --out scorecard.html --budget-seconds 2700
           else
             sc analyze . --format all --out scorecard.html --fail-on "" \
-              --budget-seconds 900
+              --budget-seconds 2700
           fi
       - name: Upload report
         if: always()

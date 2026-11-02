@@ -38,6 +38,38 @@ coverage. Actual provider hook proof additionally requires a reviewed installed
 provider runtime, its hook profile, and available authentication. Synthetic hook
 events establish feed behavior only. Record unavailable provider prerequisites.
 
+## Edit hook settings with bounded reads
+
+The file-editing fixture runs independently of daemon collection and provider
+execution. Build `pmux` from this revision, then run:
+
+```sh
+python3 tests/native/hook-settings-e2e.py --pmux "$verify_bins/pmux" \
+  --out "$verify_evidence/hook-settings" --revision "$(git rev-parse HEAD)"
+```
+
+Require `status: PASS` in `result.json` and inspect `commands.json`. The fixture
+uses private profile/configuration paths and starts no daemon. It checks repeated
+installation and removal, unmanaged settings, exact 1 MiB acceptance, oversized
+refusal before UTF-8 decoding without changing the original bytes, and malformed
+input preservation. Unix also checks symlink and target-permission preservation;
+Windows omits that case. This drive proves file editing, not provider execution
+or contained-package provenance. It requires Python 3, a matching CLI binary,
+and a new output directory.
+
+Run the focused boundary and installer tests too:
+
+```sh
+cargo +1.90.0 test -p prismattyc-mux --lib --locked config::tests:: -- --test-threads=1
+cargo +1.90.0 test -p prismattyc-mux --bin pmux --locked activity_emit::install::tests:: -- --test-threads=1
+```
+
+The byte-consumption test must stop after the read limit plus one byte. The
+transaction tests cover oversized and small external edits during the
+compare-before-replace check, preserving external bytes and cleaning temporary
+replacements. Both reads use the hook installer's limit. Other configuration
+callers retain their existing unrestricted reads.
+
 ## Review grants and remote endpoints
 
 Use only a fresh private daemon with the same verified bundle. The production

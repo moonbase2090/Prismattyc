@@ -469,7 +469,7 @@ impl WebhookOwnership {
                     }
                 }
                 if event.kind == ActivityKind::Stopped
-                    || prior_run.is_some_and(|prior| prior != event.run_id)
+                    || prior_run.is_some_and(|prior| runtime_run_changed(&prior, &event.run_id))
                 {
                     self.hooked_runs.remove(seat);
                 }
@@ -477,6 +477,42 @@ impl WebhookOwnership {
             }
             ActivitySource::Notify => true,
         }
+    }
+}
+
+fn runtime_run_changed(prior: &str, current: &str) -> bool {
+    fn parts(run_id: &str) -> Option<(&str, &str, Option<&str>)> {
+        let mut fields = run_id.split('-');
+        if fields.next()? != "session" {
+            return None;
+        }
+        let session_id = fields.next()?;
+        let process_key = fields.next()?;
+        let harness_key = fields.next()?;
+        if fields.next().is_some() {
+            return None;
+        }
+        Some((
+            session_id,
+            process_key,
+            (harness_key != "none").then_some(harness_key),
+        ))
+    }
+
+    match (parts(prior), parts(current)) {
+        (
+            Some((prior_session, prior_process, prior_harness)),
+            Some((current_session, current_process, current_harness)),
+        ) => {
+            prior_session != current_session
+                || prior_process != current_process
+                || match (prior_harness, current_harness) {
+                    (Some(prior), Some(current)) => prior != current,
+                    (Some(_), None) => true,
+                    (None, Some(_)) | (None, None) => false,
+                }
+        }
+        _ => prior != current,
     }
 }
 
@@ -670,19 +706,25 @@ fn snapshot_run_identity(
         .windows
         .iter()
         .flat_map(|window| window.panes.iter())
-        .map(|pane| {
-            let detected = pane.child_pid.and_then(|root| {
-                (crate::procinfo::foreground_agent(root) != crate::InjectAgent::Unknown)
-                    .then(|| crate::procinfo::live_foreground_pid(root))
-                    .flatten()
+        .map(|pane| (pane, pane.child_pid))
+        .map(|(pane, child_pid)| {
+            let foreground_pid = child_pid.and_then(crate::procinfo::live_foreground_pid);
+            let recognized = child_pid.is_some_and(|root| {
+                crate::procinfo::foreground_agent(root) != crate::InjectAgent::Unknown
             });
-            let harness_pid = detected.or_else(|| {
-                previous.and_then(|previous| previous.harness_pids.get(&pane.id).copied())
-            });
+            let detected = recognized.then_some(foreground_pid).flatten();
+            let retained = previous
+                .and_then(|previous| previous.harness_pids.get(&pane.id).copied())
+                .filter(|prior| {
+                    foreground_pid.is_some_and(|foreground| {
+                        crate::procinfo::is_process_descendant(*prior, foreground)
+                    })
+                });
+            let harness_pid = detected.or(retained);
             if let Some(pid) = harness_pid {
                 harness_pids.insert(pane.id, pid);
             }
-            format!("{}:{:?}:{harness_pid:?}", pane.id, pane.child_pid)
+            format!("{}:{child_pid:?}", pane.id)
         })
         .collect::<Vec<_>>()
         .join(";");
@@ -691,8 +733,23 @@ fn snapshot_run_identity(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
+    let mut harnesses = harness_pids
+        .iter()
+        .map(|(pane, pid)| format!("{pane}:{pid}"))
+        .collect::<Vec<_>>();
+    harnesses.sort_unstable();
+    let harnesses = harnesses.join(";");
+    let harness_digest = Sha256::digest(harnesses.as_bytes());
+    let harness_key = if harnesses.is_empty() {
+        "none".to_owned()
+    } else {
+        harness_digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
     (
-        format!("session-{}-{process_key}", session.id),
+        format!("session-{}-{process_key}-{harness_key}", session.id),
         harness_pids,
     )
 }
@@ -993,6 +1050,52 @@ mod tests {
             ActivitySource::Runtime,
             "pane-run-new",
             ActivityKind::Waiting
+        ));
+
+        let mut identity_ownership = WebhookOwnership::default();
+        assert!(observe(
+            &mut identity_ownership,
+            ActivitySource::Hooks,
+            "run-d",
+            ActivityKind::TurnStarted
+        ));
+        assert!(!observe(
+            &mut identity_ownership,
+            ActivitySource::Runtime,
+            "session-7-process-none",
+            ActivityKind::Working
+        ));
+        assert!(!observe(
+            &mut identity_ownership,
+            ActivitySource::Runtime,
+            "session-7-process-harness",
+            ActivityKind::Working
+        ));
+        assert!(observe(
+            &mut identity_ownership,
+            ActivitySource::Runtime,
+            "session-7-process-newharness",
+            ActivityKind::Working
+        ));
+    }
+
+    #[test]
+    fn runtime_identity_enrichment_preserves_hook_ownership() {
+        assert!(!runtime_run_changed(
+            "session-7-process-none",
+            "session-7-process-harness"
+        ));
+        assert!(runtime_run_changed(
+            "session-7-process-harness",
+            "session-7-process-none"
+        ));
+        assert!(runtime_run_changed(
+            "session-7-process-harness-a",
+            "session-7-process-harness-b"
+        ));
+        assert!(runtime_run_changed(
+            "session-7-process-none",
+            "session-8-process-none"
         ));
     }
 

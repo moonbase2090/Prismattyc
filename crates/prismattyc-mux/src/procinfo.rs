@@ -27,6 +27,22 @@ pub fn children_of(pid: u32) -> Vec<u32> {
     children_of_impl(pid)
 }
 
+/// Whether `child` is `parent` or a descendant in the live process tree.
+#[must_use]
+pub fn is_process_descendant(parent: u32, child: u32) -> bool {
+    if parent == child {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        windows_pid_in_tree(parent, child)
+    }
+    #[cfg(not(windows))]
+    {
+        tree_pids(parent).contains(&child)
+    }
+}
+
 /// Working directory of `pid`, if the platform exposes it.
 #[must_use]
 pub fn cwd_of(pid: u32) -> Option<PathBuf> {

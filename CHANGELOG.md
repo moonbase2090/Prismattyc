@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.3.54] - 2026-11-01
+## [0.3.55] - 2026-11-01
 
 ### Added
 
@@ -17,6 +17,10 @@
 ### Known issues
 
 - On Linux, `pmux update` does not fetch `pmux-activity-monitor` yet. Copy it from the release tarball's `bin` directory next to `pmux`.
+
+## [0.3.54] - 2026-11-01 (not published)
+
+Tagged but never published, because macOS app signing failed in the release build. Its changes shipped in 0.3.55, listed above.
 
 ## [0.3.53] - 2026-10-31
 

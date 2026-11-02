@@ -982,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-core"
-version = "0.3.54"
+version = "0.3.55"
 dependencies = [
  "serde",
  "unicode-width",
@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-emulator"
-version = "0.3.54"
+version = "0.3.55"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1005,7 +1005,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-mux"
-version = "0.3.54"
+version = "0.3.55"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1036,11 +1036,11 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-protocol"
-version = "0.3.54"
+version = "0.3.55"
 
 [[package]]
 name = "prismattyc-render"
-version = "0.3.54"
+version = "0.3.55"
 dependencies = [
  "prismattyc-core",
  "prismattyc-protocol",
@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-winres"
-version = "0.3.54"
+version = "0.3.55"
 dependencies = [
  "winresource",
 ]

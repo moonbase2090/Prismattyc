@@ -160,6 +160,10 @@ fn main(){
             helper = root / ('transport-helper' + suffix)
             subprocess.run(['rustc', '+1.90.0', '--edition=2021', '-O', str(helper_source), '-o', str(helper)], check=True)
             shutil.copy2(helper, tools / ('curl' + suffix))
+            if os.name == 'nt':
+                # Rust searches the executable's directory before System32,
+                # then the inherited PATH. Scope the transport to our fixture.
+                shutil.copy2(helper, bins / 'curl.exe')
             (root / 'curl.py').write_text('''import json,os,pathlib,sys
 args=sys.argv[1:];root=pathlib.Path(os.environ['MONITOR_PROOF_ROOT']);url=args[-1]
 with (root/'requests.jsonl').open('a') as output:output.write(json.dumps(url)+'\\n')
@@ -206,7 +210,8 @@ else:sys.exit(22)
 
             def cli(*arguments, success=True, program=executable):
                 process = subprocess.run([str(program), 'update', *arguments], env=env, text=True, encoding="utf-8", capture_output=True, timeout=120)
-                commands.append({'args': arguments, 'exit': process.returncode, 'stdout': process.stdout, 'stderr': process.stderr})
+                commands.append({'args': arguments, 'exit': process.returncode, 'stdout': process.stdout, 'stderr': process.stderr,
+                                 'transport_requests': requests()})
                 assert (process.returncode == 0) == success, commands[-1]
                 return process
 
@@ -224,9 +229,16 @@ else:sys.exit(22)
                 return {'pointer': pointer, 'receipt': (active / 'receipt.json').read_bytes(), 'binaries': {name: digest(active / (name + suffix)) for name in CORE}}
 
             cli('--bin-dir', str(bins), program=executable)
+            expected_downloads = {item['browser_download_url'] for item in current_release['assets']
+                                  if item['name'] != monitor_asset['name']}
+            assert set(requests()) == expected_downloads | {f'https://api.github.com/repos/{REPOSITORY}/releases/latest'}, commands[-1]
             assert digest(destination) == old_hash and not auxiliary.exists()
             state_before = core_state()
-            assert state_before['binaries'] == {name: digest(args.bins / (name + suffix)) for name in CORE}
+            expected_binaries = {name: digest(args.bins / (name + suffix)) for name in CORE}
+            assert state_before['binaries'] == expected_binaries, {'actual':state_before['binaries'], 'expected':expected_binaries}
+            if os.name == 'nt':
+                active = store / json.loads((store / 'windows-current.json').read_bytes())['current']
+                shutil.copy2(helper, active / 'curl.exe')
             checks.append('actual older process updated exactly six core executables and left the legacy monitor unchanged')
             future = '.'.join([*new_version.split('.')[:2], str(int(new_version.split('.')[2]) + 10)])
             (root / 'latest.json').write_text(json.dumps(release(future, [])))

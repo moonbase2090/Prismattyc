@@ -106,7 +106,7 @@ jobs:
           stream.close()
           print('PASS native Windows fixture permissions, Winsock family, and cleanup')
 
-      - name: Prove Windows console modes restore before compiling the runtime
+      - name: Prove Windows console modes and transport selection before compiling
         if: runner.os == 'Windows'
         run: cargo run --locked --manifest-path scripts/windows-console-probe/Cargo.toml
 

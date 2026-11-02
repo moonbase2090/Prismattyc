@@ -4,7 +4,7 @@ mod console_vt;
 
 #[cfg(windows)]
 mod windows {
-    use std::{io, os::windows::process::CommandExt, process::Command};
+    use std::{fs, io, os::windows::process::CommandExt, path::PathBuf, process::Command};
     use windows_sys::Win32::{
         Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE},
         Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING},
@@ -124,7 +124,64 @@ mod windows {
         Ok(())
     }
 
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn curl_resolution() -> io::Result<()> {
+        let directory = Scratch(std::env::temp_dir().join(format!(
+            "pmux-curl-probe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        )));
+        fs::create_dir(&directory.0)?;
+        let tools = directory.0.join("tools");
+        fs::create_dir(&tools)?;
+        let executable = std::env::current_exe()?;
+        let caller = directory.0.join("caller.exe");
+        fs::copy(&executable, &caller)?;
+        fs::copy(&executable, tools.join("curl.exe"))?;
+        let path = std::env::join_paths(std::iter::once(tools).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )))
+        .unwrap();
+        let call = || {
+            Command::new(&caller)
+                .arg("--spawn-curl")
+                .env("PATH", &path)
+                .output()
+        };
+        let inherited_path = call()?;
+        assert!(inherited_path.status.success());
+        let fixture = b"pmux-private-curl-fixture\n";
+        let path_selected_fixture = inherited_path.stdout == fixture;
+        fs::copy(&executable, directory.0.join("curl.exe"))?;
+        let beside_executable = call()?;
+        assert!(beside_executable.status.success());
+        assert_eq!(beside_executable.stdout, fixture);
+        println!("PASS curl beside executable selected; inherited PATH selected fixture={path_selected_fixture}");
+        Ok(())
+    }
+
     pub fn run() -> io::Result<()> {
+        if std::env::current_exe()?
+            .file_stem()
+            .is_some_and(|name| name == "curl")
+        {
+            println!("pmux-private-curl-fixture");
+            return Ok(());
+        }
+        if std::env::args().any(|arg| arg == "--spawn-curl") {
+            let output = Command::new("curl").arg("--version").output()?;
+            use std::io::Write;
+            io::stdout().write_all(&output.stdout)?;
+            assert!(output.status.success());
+            return Ok(());
+        }
         if std::env::args().any(|arg| arg == "--isolated-console") {
             probe()?;
             println!(
@@ -140,6 +197,7 @@ mod windows {
         print!("{}", String::from_utf8_lossy(&output.stdout));
         eprint!("{}", String::from_utf8_lossy(&output.stderr));
         assert!(output.status.success(), "isolated console probe failed");
+        curl_resolution()?;
         Ok(())
     }
 }

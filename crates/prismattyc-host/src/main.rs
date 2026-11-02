@@ -19,6 +19,7 @@ mod config_schema;
 mod config_template;
 mod daemon_startup;
 mod file_writer;
+mod font_fallback;
 mod frame_damage;
 mod git_info;
 mod glyph_cache;
@@ -3859,6 +3860,7 @@ impl App {
             let started = Instant::now();
             poll_host_attach_tabs(host);
             timing.record_phase(pump_timing::Phase::PollHostAttachTabs, started.elapsed());
+            drain_font_fallbacks(host);
             let started = Instant::now();
             advance_space_opens(host);
             poll_walkthrough_demo(host);
@@ -10269,6 +10271,18 @@ fn refresh_space_views(host: &mut HostState) {
         owner,
         generation,
     });
+}
+
+/// Start the font's fallback worker on the first pump after a font is built,
+/// then apply faces it found. A character waiting on one was painted blank,
+/// so the next frame repaints in full.
+fn drain_font_fallbacks(host: &mut HostState) {
+    host.font.enable_async_fallback(&host.ui_wake);
+    if host.font.drain_fallbacks() {
+        host.pending_full_repaint
+            .get_or_insert(FullRepaintReason::Fallback);
+        host.dirty = true;
+    }
 }
 
 fn drain_space_client(host: &mut HostState) {

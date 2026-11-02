@@ -1,10 +1,11 @@
 //! Software cell-grid rasterizer for the windowed host.
 
 use std::borrow::Cow;
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use fontdue::{Font, FontSettings};
 use prismattyc_core::splash::{
@@ -322,6 +323,14 @@ const CLUSTER_CACHE_CAPACITY: usize = 256;
 /// Key for a fitted cell glyph: the character and the box it must fit.
 type GlyphKey = (char, i32, i32);
 
+/// The system fallback face for one character.
+enum FallbackFace {
+    /// The fallback worker is still looking. The character paints blank.
+    Pending,
+    /// `None` when no system face covers the character.
+    Ready(Option<Arc<Font>>),
+}
+
 /// Probe order from. A candidate is accepted only when its
 /// rasterized ink fits in one cell — existence is not enough.
 const CLOSE_GLYPH_CANDIDATES: [char; 4] = ['\u{F467}', '\u{2715}', '\u{00D7}', 'x'];
@@ -363,9 +372,13 @@ pub struct FontMetrics {
     primary_name: String,
     /// CBDT color-emoji font bytes (e.g. Noto Color Emoji). Kept for `ttf_parser::Face`.
     emoji_fonts: Vec<Vec<u8>>,
-    /// Ghostty-style lazy system faces (CJK, etc.). Not bundled.
-    cover_cache: RefCell<HashMap<char, Option<crate::system_fonts::CoveringFace>>>,
-    fallback_fonts: RefCell<HashMap<(PathBuf, u32), Font>>,
+    /// Ghostty-style lazy system faces (CJK, etc.), per character. Not bundled.
+    fallback_faces: RefCell<HashMap<char, FallbackFace>>,
+    /// Resolves system faces off the main thread once the host enables it.
+    /// Without it (tests, before the first pump) lookups run inline.
+    fallback_worker: Option<crate::font_fallback::Worker>,
+    /// Set when a paint met a pending fallback, so its blank is not cached.
+    painted_pending: Cell<bool>,
     /// Rasterized cell glyphs, so repainting an unchanged glyph skips fontdue,
     /// the system-fallback lookup and color-emoji PNG decoding.
     glyph_cache: RefCell<LruCache<GlyphKey, Rc<GlyphPaint>>>,
@@ -410,8 +423,9 @@ impl FontMetrics {
             primary_index: 0,
             primary_name: BAKED_MONO_NAME.to_string(),
             emoji_fonts: Vec::new(),
-            cover_cache: RefCell::new(HashMap::new()),
-            fallback_fonts: RefCell::new(HashMap::new()),
+            fallback_faces: RefCell::new(HashMap::new()),
+            fallback_worker: None,
+            painted_pending: Cell::new(false),
             glyph_cache: RefCell::new(LruCache::new(GLYPH_CACHE_CAPACITY)),
             cluster_cache: RefCell::new(LruCache::new(CLUSTER_CACHE_CAPACITY)),
             px,
@@ -520,8 +534,9 @@ impl FontMetrics {
             primary_index: 0,
             primary_name,
             emoji_fonts,
-            cover_cache: RefCell::new(HashMap::new()),
-            fallback_fonts: RefCell::new(HashMap::new()),
+            fallback_faces: RefCell::new(HashMap::new()),
+            fallback_worker: None,
+            painted_pending: Cell::new(false),
             glyph_cache: RefCell::new(LruCache::new(GLYPH_CACHE_CAPACITY)),
             cluster_cache: RefCell::new(LruCache::new(CLUSTER_CACHE_CAPACITY)),
             px,
@@ -635,33 +650,7 @@ impl FontMetrics {
         if ch.is_whitespace() {
             return None;
         }
-        let face = {
-            let mut cache = self.cover_cache.borrow_mut();
-            cache
-                .entry(ch)
-                .or_insert_with(|| crate::system_fonts::covering_face(ch))
-                .clone()
-        }?;
-        let mut loaded = self.fallback_fonts.borrow_mut();
-        let font = match loaded.get(&(face.path.clone(), face.index)) {
-            Some(font) => font,
-            None => {
-                let data = std::fs::read(&face.path).ok()?;
-                let settings = FontSettings {
-                    collection_index: face.index,
-                    ..FontSettings::default()
-                };
-                let font = Font::from_bytes(data.as_slice(), settings).ok()?;
-                eprintln!(
-                    "prismattyc-host: system fallback {}#{} (U+{:04X})",
-                    face.path.display(),
-                    face.index,
-                    ch as u32
-                );
-                loaded.insert((face.path.clone(), face.index), font);
-                loaded.get(&(face.path.clone(), face.index))?
-            }
-        };
+        let font = self.fallback_face(ch)?;
         let gid = font.lookup_glyph_index(ch);
         if gid == 0 {
             return None;
@@ -714,15 +703,69 @@ impl FontMetrics {
         last
     }
 
-    /// [`Self::paint_char_fitting`] through the glyph cache.
+    /// The system face for `ch`. With a fallback worker, a first lookup is
+    /// queued and returns `None` until [`Self::drain_fallbacks`] stores it.
+    fn fallback_face(&self, ch: char) -> Option<Arc<Font>> {
+        let mut faces = self.fallback_faces.borrow_mut();
+        match faces.get(&ch) {
+            Some(FallbackFace::Ready(font)) => return font.clone(),
+            Some(FallbackFace::Pending) => {
+                self.painted_pending.set(true);
+                return None;
+            }
+            None => {}
+        }
+        if self
+            .fallback_worker
+            .as_ref()
+            .is_some_and(|worker| worker.request(ch))
+        {
+            faces.insert(ch, FallbackFace::Pending);
+            self.painted_pending.set(true);
+            return None;
+        }
+        let font = crate::font_fallback::resolve(ch);
+        faces.insert(ch, FallbackFace::Ready(font.clone()));
+        font
+    }
+
+    /// Resolve system fallback faces on a background thread from now on.
+    /// `wake` runs when a face is ready. Does nothing if already enabled.
+    pub(crate) fn enable_async_fallback(&mut self, wake: &crate::mux::Wake) {
+        if self.fallback_worker.is_none() {
+            self.fallback_worker = crate::font_fallback::Worker::spawn(Arc::clone(wake));
+        }
+    }
+
+    /// Store faces the fallback worker found. True when a pending character
+    /// can now paint, so the caller should repaint.
+    pub(crate) fn drain_fallbacks(&self) -> bool {
+        let Some(worker) = &self.fallback_worker else {
+            return false;
+        };
+        let mut paintable = false;
+        let mut faces = self.fallback_faces.borrow_mut();
+        for resolved in worker.drain() {
+            paintable |= resolved.font.is_some();
+            faces.insert(resolved.ch, FallbackFace::Ready(resolved.font));
+        }
+        paintable
+    }
+
+    /// [`Self::paint_char_fitting`] through the glyph cache. A blank painted
+    /// while its fallback face is pending is not cached, so the repaint after
+    /// the face arrives rasterizes it.
     fn cached_glyph_fitting(&self, ch: char, max_w: i32, max_h: i32) -> Rc<GlyphPaint> {
         let key = (ch, max_w, max_h);
         if let Some(paint) = self.glyph_cache.borrow_mut().get(&key) {
             return paint;
         }
         // Rasterize without holding the cache borrow.
+        self.painted_pending.set(false);
         let paint = Rc::new(self.paint_char_fitting(ch, max_w, max_h));
-        self.glyph_cache.borrow_mut().insert(key, Rc::clone(&paint));
+        if !self.painted_pending.get() {
+            self.glyph_cache.borrow_mut().insert(key, Rc::clone(&paint));
+        }
         paint
     }
 
@@ -10753,7 +10796,7 @@ mod tests {
             font.lazy_fonts[2].bytes.get().is_none(),
             "later covering face must stay unused"
         );
-        assert!(font.fallback_fonts.borrow().is_empty());
+        assert!(font.fallback_faces.borrow().is_empty());
     }
 
     #[test]
@@ -10764,7 +10807,9 @@ mod tests {
             LazyFont::new(baked_source(BAKED_MONO_NAME, BAKED_MONO)),
             LazyFont::new(baked_source(BAKED_SYMBOLS_NAME, BAKED_SYMBOLS)),
         ];
-        font.cover_cache.borrow_mut().insert('\u{10ffff}', None);
+        font.fallback_faces
+            .borrow_mut()
+            .insert('\u{10ffff}', FallbackFace::Ready(None));
         assert!(matches!(font.paint_char('\u{10ffff}'), GlyphPaint::Empty));
         assert!(font.lazy_fonts.iter().all(|f| f.font.get().is_none()));
         for ch in ['\u{2800}', '\u{feff}'] {
@@ -10772,7 +10817,11 @@ mod tests {
         }
         assert!(font.lazy_fonts[0].font.get().unwrap().is_some());
         assert!(font.lazy_fonts[1].font.get().is_none());
-        assert!(font.fallback_fonts.borrow().is_empty());
+        assert_eq!(
+            font.fallback_faces.borrow().len(),
+            1,
+            "only the pinned miss"
+        );
     }
 
     #[test]
@@ -10810,21 +10859,19 @@ mod tests {
     }
 
     #[test]
-    fn system_outline_loads_nonblank_glyph_and_reuses_face() {
+    fn system_outline_paints_nonblank_glyph_from_the_fallback_face() {
         let mut font = FontMetrics::load_baked(16.0).expect("bundled font");
         let (expected, bitmap) = font.fonts[0].rasterize('H', font.px);
-        let face = crate::system_fonts::CoveringFace {
-            path: Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/fonts/JetBrainsMonoNerdFont-Regular.ttf"),
-            index: 0,
-        };
-        // Pin discovery to a shipped fixture. Exercise actual file loading and
-        // rasterization without requiring a particular installed system font.
+        // Pin discovery to the bundled face so no installed system font is
+        // needed. Loading from disk is covered in font_fallback.
+        let face =
+            Arc::new(Font::from_bytes(BAKED_MONO, FontSettings::default()).expect("bundled font"));
         for ch in ['H', '\u{2800}', '\u{10ffff}'] {
-            font.cover_cache.borrow_mut().insert(ch, Some(face.clone()));
+            font.fallback_faces
+                .borrow_mut()
+                .insert(ch, FallbackFace::Ready(Some(Arc::clone(&face))));
         }
         font.fonts.clear();
-        assert!(font.fallback_fonts.borrow().is_empty());
         for _ in 0..2 {
             let GlyphPaint::Coverage(glyph) = font.paint_char('H') else {
                 panic!("a missing primary glyph must use the system outline");
@@ -10836,12 +10883,10 @@ mod tests {
             assert_eq!((glyph.xmin, glyph.ymin), (expected.xmin, expected.ymin));
             assert_eq!(glyph.bitmap, bitmap);
             assert!(glyph.bitmap.iter().any(|&pixel| pixel != 0));
-            assert_eq!(font.fallback_fonts.borrow().len(), 1);
         }
         // A valid blank glyph and an absent glyph must not paint .notdef ink.
         assert!(font.paint_system_outline('\u{2800}', font.px).is_none());
         assert!(font.paint_system_outline('\u{10ffff}', font.px).is_none());
-        assert_eq!(font.fallback_fonts.borrow().len(), 1);
     }
 
     #[test]
@@ -10853,9 +10898,8 @@ mod tests {
                 GlyphPaint::Empty
             ));
             assert!(font.paint_system_outline(ch, font.px).is_none());
-            assert!(font.cover_cache.borrow().is_empty(), "U+{:04X}", ch as u32);
             assert!(
-                font.fallback_fonts.borrow().is_empty(),
+                font.fallback_faces.borrow().is_empty(),
                 "U+{:04X}",
                 ch as u32
             );
@@ -10877,9 +10921,8 @@ mod tests {
                 assert!(metrics.advance_width > 0.0);
             }
             assert!(matches!(font.paint_char(ch), GlyphPaint::Empty));
-            assert!(font.cover_cache.borrow().is_empty(), "U+{:04X}", ch as u32);
             assert!(
-                font.fallback_fonts.borrow().is_empty(),
+                font.fallback_faces.borrow().is_empty(),
                 "U+{:04X}",
                 ch as u32
             );
@@ -16600,5 +16643,91 @@ mod glyph_cache_tests {
             (None, None) => {}
             _ => panic!("a cached cluster must not change between lookups"),
         }
+    }
+}
+
+#[cfg(test)]
+mod async_fallback_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    fn async_font() -> (FontMetrics, Arc<AtomicUsize>) {
+        let mut font = FontMetrics::load(16.0).expect("font");
+        let woke = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&woke);
+        let wake: crate::mux::Wake = Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        font.enable_async_fallback(&wake);
+        (font, woke)
+    }
+
+    /// Wait for `count` wakes, then drain like the host pump does.
+    fn drain_after_wakes(font: &FontMetrics, woke: &AtomicUsize, count: usize) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while woke.load(Ordering::SeqCst) < count && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(woke.load(Ordering::SeqCst), count, "fallback worker wakes");
+        font.drain_fallbacks()
+    }
+
+    fn fitting(font: &FontMetrics, ch: char) -> Rc<GlyphPaint> {
+        font.cached_glyph_fitting(ch, font.cell_w as i32 * 2, font.cell_h as i32)
+    }
+
+    #[test]
+    fn a_pending_fallback_paints_blank_then_the_face_after_the_wake() {
+        let (font, woke) = async_font();
+        let ch = '中';
+        assert!(matches!(*fitting(&font, ch), GlyphPaint::Empty));
+        // A second paint before the result neither asks again nor caches the blank.
+        assert!(matches!(*fitting(&font, ch), GlyphPaint::Empty));
+        assert_eq!(font.glyph_cache_stats().entries, 0);
+        assert!(
+            drain_after_wakes(&font, &woke, 1),
+            "test environment must provide a CJK face"
+        );
+        assert!(matches!(*fitting(&font, ch), GlyphPaint::Coverage(_)));
+        assert_eq!(font.glyph_cache_stats().entries, 1);
+        // The face is ready now, so another CJK character in it asks again
+        // only for discovery, and still paints after its own wake.
+        assert!(!font.drain_fallbacks(), "nothing new arrived");
+    }
+
+    #[test]
+    fn an_uncovered_character_resolves_to_a_cached_blank() {
+        let (font, woke) = async_font();
+        let ch = '\u{10ffff}';
+        assert!(matches!(*fitting(&font, ch), GlyphPaint::Empty));
+        assert!(
+            !drain_after_wakes(&font, &woke, 1),
+            "no face means nothing new to paint"
+        );
+        assert!(matches!(*fitting(&font, ch), GlyphPaint::Empty));
+        assert_eq!(font.glyph_cache_stats().entries, 1);
+        assert_eq!(woke.load(Ordering::SeqCst), 1, "resolved once");
+    }
+
+    #[test]
+    fn a_new_font_reuses_faces_another_font_loaded() {
+        let (small, woke) = async_font();
+        fitting(&small, '中');
+        assert!(drain_after_wakes(&small, &woke, 1));
+        let Some(FallbackFace::Ready(Some(first))) =
+            small.fallback_faces.borrow_mut().remove(&'中')
+        else {
+            panic!("CJK face must be ready");
+        };
+        // Zoom builds a new FontMetrics; the face is not read again.
+        let (zoomed, woke) = async_font();
+        fitting(&zoomed, '中');
+        assert!(drain_after_wakes(&zoomed, &woke, 1));
+        let faces = zoomed.fallback_faces.borrow();
+        let Some(FallbackFace::Ready(Some(second))) = faces.get(&'中') else {
+            panic!("CJK face must be ready");
+        };
+        assert!(Arc::ptr_eq(&first, second));
     }
 }

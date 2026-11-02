@@ -13,6 +13,7 @@
 ### Fixed
 
 - Windows panes again detect when their program exits, keep the last output, and clean up the session.
+- Login restore keeps working after an agent harness updates itself. When a pane runs a versioned executable that a command on its `PATH` links to, capture saves that stable command, and restore runs it through the restored shell's `PATH`, so it starts the current version instead of a removed versioned path.
 
 ### Known issues
 

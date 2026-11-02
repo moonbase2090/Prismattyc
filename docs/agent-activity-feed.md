@@ -236,6 +236,47 @@ ordinary workspace builds do not acquire the viewer dependency.
 
 ## Bot access through Shell
 
+## Signed webhook delivery
+
+Webhook delivery is opt-in. Set both `[mux] activity_webhook_url` and
+`activity_webhook_secret_file`; the latter names a file containing at least 32
+bytes of key material. An inline `activity_webhook_secret` is rejected. The
+webhook setting enables the daemon activity feed. A newly enabled receiver starts
+from the current cursor, so it does not replay retained events from before opt-in.
+
+Each POST uses `Content-Type: application/json`,
+`X-Prismattyc-Timestamp` (Unix seconds), and
+`X-Prismattyc-Signature: sha256=<hex>`. The HMAC input is the timestamp, a dot,
+and the exact raw request body. Receivers should reject timestamps more than 300
+seconds from their clock, then compare signatures with a constant-time function.
+The bounded payload has `seat`, `state`, `reason`, `pane_id`, `space`, and
+`timestamp`. The reason is a safe generic activity label; no prompt text is
+included. Pane and Space are `null` when the activity record does not identify
+them.
+
+Python verification example:
+
+```python
+import hashlib
+import hmac
+import time
+
+def verify(raw_body: bytes, headers: dict[str, str], secret: bytes) -> bool:
+    timestamp = headers["X-Prismattyc-Timestamp"]
+    if abs(int(time.time()) - int(timestamp)) > 300:
+        return False
+    expected = "sha256=" + hmac.new(
+        secret, timestamp.encode() + b"." + raw_body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, headers["X-Prismattyc-Signature"])
+```
+
+The daemon coalesces updates per seat, holds at most 64 queued deliveries, and
+retries transient failures with exponential backoff before dropping a delivery
+after six attempts. Delivery runs on a background thread and does not block
+pmuxd's control path. Logs and errors omit webhook URLs, query strings, userinfo,
+secret contents, and receiver response bodies.
+
 A bot with Shell access to a host can query the same private socket without
 opening a terminal UI. The monitor's connector modes emit JSON:
 

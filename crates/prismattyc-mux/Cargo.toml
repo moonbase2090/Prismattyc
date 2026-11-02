@@ -12,6 +12,7 @@ anyhow.workspace = true
 mutants = "0.0.3"
 crossterm.workspace = true
 getrandom = "0.3"
+hmac = "0.12"
 png = "0.17"
 portable-pty.workspace = true
 prismattyc-core = { path = "../prismattyc-core" }
@@ -30,6 +31,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 semver = "1.0"
 sha2 = "0.10"
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+url = "2.5"
 toml = "0.8"
 toml_edit = "0.22"
 rusqlite = { version = "0.40", features = ["bundled"] }

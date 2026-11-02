@@ -297,6 +297,9 @@ remote_size = "latest"
 allow_mixed_case_session_names = false
 # Collect activity metadata live, without a restart. Enable monitor and query access separately in Settings > Plug-ins. true|false; default false.
 experimental_activity = false
+# Signed activity delivery is opt-in. Store the HMAC key in a private file.
+# activity_webhook_url = "https://bot.example.invalid/activity"
+# activity_webhook_secret_file = "~/.config/prismattyc/activity-webhook.key"
 
 [keys]
 # Host actions. An entry replaces that action's default chords.

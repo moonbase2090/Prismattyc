@@ -8,6 +8,7 @@
 
 pub mod activity;
 pub mod activity_config;
+pub mod activity_webhook;
 pub mod attach_focus;
 mod attach_scan;
 pub mod attach_tabs;

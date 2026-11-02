@@ -154,6 +154,7 @@ struct Debounced {
     due: Instant,
     body: Vec<u8>,
     terminal: bool,
+    after_terminal: Option<Vec<u8>>,
 }
 
 impl Debouncer {
@@ -168,12 +169,11 @@ impl Debouncer {
                 self.by_seat.remove(&oldest);
             }
         }
-        if self
-            .by_seat
-            .get(&seat)
-            .is_some_and(|item| item.terminal && runtime && !terminal)
-        {
-            return;
+        if let Some(item) = self.by_seat.get_mut(&seat) {
+            if item.terminal && runtime && !terminal {
+                item.after_terminal = Some(body);
+                return;
+            }
         }
         self.by_seat.insert(
             seat,
@@ -181,6 +181,7 @@ impl Debouncer {
                 due: now + DEBOUNCE,
                 body,
                 terminal,
+                after_terminal: None,
             },
         );
     }
@@ -194,7 +195,22 @@ impl Debouncer {
             .collect::<Vec<_>>();
         ready
             .into_iter()
-            .filter_map(|seat| self.by_seat.remove(&seat).map(|item| item.body))
+            .filter_map(|seat| {
+                self.by_seat.remove(&seat).map(|item| {
+                    if let Some(body) = item.after_terminal {
+                        self.by_seat.insert(
+                            seat,
+                            Debounced {
+                                due: now + DEBOUNCE,
+                                body,
+                                terminal: false,
+                                after_terminal: None,
+                            },
+                        );
+                    }
+                    item.body
+                })
+            })
             .collect()
     }
 }
@@ -509,8 +525,10 @@ fn snapshot_context(snapshot: crate::control::Snapshot) -> HashMap<String, Sessi
 
 #[derive(Clone)]
 struct ProjectedSession {
+    session_id: u64,
     run_id: String,
     state: ActivityKind,
+    harness_pids: HashMap<u64, u32>,
 }
 
 fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
@@ -578,7 +596,7 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
             let Ok(seat_id) = AgentId::new(seat.to_owned()) else {
                 continue;
             };
-            let run_id = snapshot_run_id(&session);
+            let (run_id, harness_pids) = snapshot_run_identity(&session, projected.get(seat));
             let state = snapshot_state(&session, now_ms);
             current.insert(seat.to_owned());
             let changed = projected
@@ -599,7 +617,15 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
             };
             if published {
                 force_runtime.remove(seat);
-                projected.insert(seat.to_owned(), ProjectedSession { run_id, state });
+                projected.insert(
+                    seat.to_owned(),
+                    ProjectedSession {
+                        session_id: session.id,
+                        run_id,
+                        state,
+                        harness_pids,
+                    },
+                );
             }
         }
         let absent = projected
@@ -634,12 +660,30 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
     }
 }
 
-fn snapshot_run_id(session: &crate::control::SessionSnapshot) -> String {
+fn snapshot_run_identity(
+    session: &crate::control::SessionSnapshot,
+    previous: Option<&ProjectedSession>,
+) -> (String, HashMap<u64, u32>) {
+    let previous = previous.filter(|previous| previous.session_id == session.id);
+    let mut harness_pids = HashMap::new();
     let processes = session
         .windows
         .iter()
         .flat_map(|window| window.panes.iter())
-        .map(|pane| format!("{}:{:?}", pane.id, pane.child_pid))
+        .map(|pane| {
+            let detected = pane.child_pid.and_then(|root| {
+                (crate::procinfo::foreground_agent(root) != crate::InjectAgent::Unknown)
+                    .then(|| crate::procinfo::live_foreground_pid(root))
+                    .flatten()
+            });
+            let harness_pid = detected.or_else(|| {
+                previous.and_then(|previous| previous.harness_pids.get(&pane.id).copied())
+            });
+            if let Some(pid) = harness_pid {
+                harness_pids.insert(pane.id, pid);
+            }
+            format!("{}:{:?}:{harness_pid:?}", pane.id, pane.child_pid)
+        })
         .collect::<Vec<_>>()
         .join(";");
     let digest = Sha256::digest(processes.as_bytes());
@@ -647,7 +691,10 @@ fn snapshot_run_id(session: &crate::control::SessionSnapshot) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    format!("session-{}-{process_key}", session.id)
+    (
+        format!("session-{}-{process_key}", session.id),
+        harness_pids,
+    )
 }
 
 fn snapshot_state(session: &crate::control::SessionSnapshot, now_ms: u64) -> ActivityKind {
@@ -850,6 +897,13 @@ mod tests {
         assert_eq!(
             debounce.take_ready(now + Duration::from_millis(800)),
             vec![b"stopped".to_vec()]
+        );
+        assert!(debounce
+            .take_ready(now + Duration::from_millis(1_500))
+            .is_empty());
+        assert_eq!(
+            debounce.take_ready(now + Duration::from_millis(1_600)),
+            vec![b"waiting".to_vec()]
         );
     }
 

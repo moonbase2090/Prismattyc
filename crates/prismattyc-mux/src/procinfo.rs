@@ -115,6 +115,20 @@ pub fn live_foreground_command(root: u32) -> Option<String> {
     foreground_command_impl(root)
 }
 
+/// Foreground process id for a live terminal child, when available.
+#[must_use]
+pub fn live_foreground_pid(root: u32) -> Option<u32> {
+    #[cfg(windows)]
+    {
+        match windows::foreground(root) {
+            windows::Foreground::Running { pid, .. } => Some(pid),
+            windows::Foreground::Unknown => None,
+        }
+    }
+    #[cfg(not(windows))]
+    foreground_pid_impl(root)
+}
+
 #[cfg(windows)]
 pub fn replay_command(args: &[String]) -> Option<String> {
     windows::command(args)
@@ -260,6 +274,28 @@ pub fn in_terminal_foreground(root: u32, pid: u32) -> Option<bool> {
 
 #[cfg(not(windows))]
 fn command_in_foreground_pgid(root: u32, tpgid: u32) -> Option<String> {
+    let pick = foreground_pid_in_pgid(root, tpgid)?;
+    cmdline_strings(pick).map(|args| unix_replay_command(pick, args))
+}
+
+#[cfg(not(windows))]
+fn foreground_pid_impl(root: u32) -> Option<u32> {
+    match classify_tty(root) {
+        TtyForeground::Pgid(tpgid) => foreground_pid_in_pgid(root, tpgid),
+        TtyForeground::NoTty => {
+            let args = cmdline_strings(root)?;
+            if !is_shell_argv(&args) {
+                Some(root)
+            } else {
+                first_non_shell_descendant(root)
+            }
+        }
+        TtyForeground::Unknown => None,
+    }
+}
+
+#[cfg(not(windows))]
+fn foreground_pid_in_pgid(root: u32, tpgid: u32) -> Option<u32> {
     let mut members = Vec::new();
     for pid in tree_pids(root) {
         if pgid_of(pid) == Some(tpgid) {
@@ -282,7 +318,7 @@ fn command_in_foreground_pgid(root: u32, tpgid: u32) -> Option<String> {
         .copied()
         .find(|pid| *pid == tpgid)
         .unwrap_or(non_shell[0]);
-    cmdline_strings(pick).map(|args| unix_replay_command(pick, args))
+    Some(pick)
 }
 
 #[cfg(not(windows))]

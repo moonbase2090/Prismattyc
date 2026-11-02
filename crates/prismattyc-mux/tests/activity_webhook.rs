@@ -4,8 +4,11 @@
 
 use prismattyc_core::activity::{ActivityInput, ActivityKind, ActivitySource};
 use prismattyc_core::AgentId;
-use prismattyc_mux::{activity, ControlRequest, ControlResponseData, PROTOCOL_VERSION};
-use std::io::{Read, Write};
+use prismattyc_mux::{
+    activity, ControlRequest, ControlResponse, ControlResponseBody, ControlResponseData,
+    PROTOCOL_VERSION,
+};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -30,8 +33,13 @@ impl Drop for Daemon {
 }
 
 fn start(config: String) -> Daemon {
-    let dir = std::env::temp_dir().join(format!("pmux-webhook-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "pmux-webhook-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let config_path = dir.join("config.toml");
     std::fs::write(&config_path, config).unwrap();
@@ -100,6 +108,16 @@ fn receive_request(listener: TcpListener) -> Vec<u8> {
     bytes
 }
 
+fn control_request(socket: &std::path::Path, request: ControlRequest) -> ControlResponse {
+    let mut stream = UnixStream::connect(socket).unwrap();
+    let mut frame = serde_json::to_vec(&request).unwrap();
+    frame.push(b'\n');
+    stream.write_all(&frame).unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    serde_json::from_str(&line).unwrap()
+}
+
 #[test]
 fn configured_daemon_posts_activity_with_verifiable_signature() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -145,4 +163,86 @@ fn configured_daemon_posts_activity_with_verifiable_signature() {
     assert!(!request.contains("01234567890123456789012345678901"));
     drop(daemon);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn agent_sessions_are_added_to_activity_without_harness_hooks() {
+    let daemon = start("[mux]\nexperimental_activity = true\n".into());
+    std::thread::sleep(Duration::from_millis(400));
+    let snapshot = control_request(
+        &daemon.socket,
+        ControlRequest::Snapshot {
+            version: PROTOCOL_VERSION,
+            request_id: 10,
+        },
+    );
+    let ControlResponseBody::Ok {
+        response: ControlResponseData::Snapshot { snapshot },
+    } = snapshot.body
+    else {
+        panic!("snapshot request failed");
+    };
+    let session_id = snapshot.sessions[0].id;
+    let renamed = control_request(
+        &daemon.socket,
+        ControlRequest::NameSession {
+            version: PROTOCOL_VERSION,
+            request_id: 11,
+            session_id,
+            name: "worker-a".into(),
+            agent_id: Some("worker-a".into()),
+        },
+    );
+    assert!(matches!(renamed.body, ControlResponseBody::Ok { .. }));
+
+    let after_rename = control_request(
+        &daemon.socket,
+        ControlRequest::Snapshot {
+            version: PROTOCOL_VERSION,
+            request_id: 13,
+        },
+    );
+    let ControlResponseBody::Ok {
+        response: ControlResponseData::Snapshot { snapshot },
+    } = after_rename.body
+    else {
+        panic!("post-rename snapshot request failed");
+    };
+    assert_eq!(snapshot.sessions[0].agent_id.as_deref(), Some("worker-a"));
+
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let mut last_response = String::new();
+    loop {
+        let response = control_request(
+            &daemon.socket,
+            ControlRequest::ReadActivity {
+                version: PROTOCOL_VERSION,
+                request_id: 12,
+                cursor: None,
+                limit: 256,
+            },
+        );
+        if let ControlResponseBody::Ok {
+            response: ControlResponseData::Activity { page },
+        } = response.body
+        {
+            last_response = format!(
+                "{} records, current {}",
+                page.records.len(),
+                page.current_sequence
+            );
+            if page.records.iter().any(|record| {
+                record.event.seat.as_str() == "worker-a"
+                    && record.event.source == ActivitySource::Runtime
+                    && record.event.kind == ActivityKind::Waiting
+            }) {
+                return;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "agent session was not projected; last read: {last_response}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }

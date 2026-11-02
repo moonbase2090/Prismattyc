@@ -3,7 +3,8 @@
 
 use anyhow::{bail, Context, Result};
 use hmac::{Hmac, Mac};
-use prismattyc_core::activity::{ActivityCursor, ActivityKind};
+use prismattyc_core::activity::{ActivityCursor, ActivityInput, ActivityKind, ActivitySource};
+use prismattyc_core::AgentId;
 use serde::Serialize;
 use sha2::Sha256;
 use std::collections::{HashMap, VecDeque};
@@ -23,6 +24,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const DEBOUNCE: Duration = Duration::from_millis(750);
 const MAX_QUEUE: usize = 64;
 const MAX_ATTEMPTS: u8 = 6;
+const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 pub struct WebhookConfig {
@@ -136,6 +138,12 @@ struct Delivery {
 }
 
 #[derive(Default)]
+struct SessionContext {
+    pane_id: Option<String>,
+    space: Option<String>,
+}
+
+#[derive(Default)]
 struct Debouncer {
     by_seat: HashMap<String, (Instant, Vec<u8>)>,
 }
@@ -187,28 +195,46 @@ fn enqueue(queue: &mut VecDeque<Delivery>, body: Vec<u8>, now: Instant) {
 /// Polls the daemon on an independent thread and delivers signed notifications.
 /// Network waits and retries never run on pmuxd's control thread.
 pub struct Worker {
-    stop: mpsc::Sender<()>,
-    thread: Option<JoinHandle<()>>,
+    stops: Vec<mpsc::Sender<()>>,
+    threads: Vec<JoinHandle<()>>,
 }
 
 impl Worker {
     pub fn start(socket: PathBuf, config_path: PathBuf) -> Result<Self> {
-        let (stop, stopped) = mpsc::channel();
-        let thread = std::thread::Builder::new()
+        let (webhook_stop, webhook_stopped) = mpsc::channel();
+        let webhook_thread = std::thread::Builder::new()
             .name("pmux-activity-webhook".into())
-            .spawn(move || run_worker(&socket, &config_path, stopped))
+            .spawn({
+                let socket = socket.clone();
+                let config_path = config_path.clone();
+                move || run_worker(&socket, &config_path, webhook_stopped)
+            })
             .context("start activity webhook worker")?;
+        let (projection_stop, projection_stopped) = mpsc::channel();
+        let projection_thread = match std::thread::Builder::new()
+            .name("pmux-activity-sessions".into())
+            .spawn(move || run_session_projection(&socket, projection_stopped))
+        {
+            Ok(thread) => thread,
+            Err(error) => {
+                let _ = webhook_stop.send(());
+                let _ = webhook_thread.join();
+                return Err(error).context("start activity session projection");
+            }
+        };
         Ok(Self {
-            stop,
-            thread: Some(thread),
+            stops: vec![webhook_stop, projection_stop],
+            threads: vec![webhook_thread, projection_thread],
         })
     }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        let _ = self.stop.send(());
-        if let Some(thread) = self.thread.take() {
+        for stop in &self.stops {
+            let _ = stop.send(());
+        }
+        for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
     }
@@ -224,6 +250,8 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
     let mut active = false;
     let mut pending = Debouncer::default();
     let mut queue = VecDeque::<Delivery>::new();
+    let mut session_context = HashMap::<String, SessionContext>::new();
+    let mut next_snapshot = Instant::now();
     let mut request_id = 1u64;
     loop {
         if stopped.recv_timeout(POLL_INTERVAL).is_ok() {
@@ -255,6 +283,13 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
             }
             continue;
         }
+        if Instant::now() >= next_snapshot {
+            if let Some(snapshot) = read_snapshot(socket, request_id) {
+                request_id = request_id.wrapping_add(1).max(1);
+                session_context = snapshot_context(snapshot);
+            }
+            next_snapshot = Instant::now() + SNAPSHOT_INTERVAL;
+        }
         let request = ControlRequest::ReadActivity {
             version: PROTOCOL_VERSION,
             request_id,
@@ -268,12 +303,13 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
             for record in &page.records {
                 if let Some((state, reason)) = state_for(record.event.kind) {
                     let timestamp = record.received_at_ms.to_string();
+                    let context = session_context.get(record.event.seat.as_str());
                     let payload = WebhookPayload {
                         seat: record.event.seat.as_str(),
                         state,
                         reason: Some(reason),
-                        pane_id: None,
-                        space: None,
+                        pane_id: context.and_then(|context| context.pane_id.as_deref()),
+                        space: context.and_then(|context| context.space.as_deref()),
                         timestamp: &timestamp,
                     };
                     if let Ok(body) = encode_payload(&payload) {
@@ -303,6 +339,208 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
             }
         }
     }
+}
+
+fn read_snapshot(socket: &Path, request_id: u64) -> Option<crate::control::Snapshot> {
+    match crate::activity::exchange(
+        socket,
+        ControlRequest::Snapshot {
+            version: PROTOCOL_VERSION,
+            request_id,
+        },
+    ) {
+        Ok(ControlResponseData::Snapshot { snapshot }) => Some(snapshot),
+        _ => None,
+    }
+}
+
+fn snapshot_context(snapshot: crate::control::Snapshot) -> HashMap<String, SessionContext> {
+    let mut context = HashMap::new();
+    for session in snapshot.sessions {
+        let Some(seat) = session.agent_id else {
+            continue;
+        };
+        if AgentId::new(seat.clone()).is_err() {
+            continue;
+        }
+        let panes = session
+            .windows
+            .iter()
+            .flat_map(|window| window.panes.iter())
+            .collect::<Vec<_>>();
+        let pane = panes
+            .iter()
+            .copied()
+            .max_by_key(|pane| pane.ledger.last_output_at_ms)
+            .or_else(|| panes.first().copied());
+        context.insert(
+            seat,
+            SessionContext {
+                pane_id: pane.map(|pane| pane.id.to_string()),
+                space: session.space_id,
+            },
+        );
+    }
+    context
+}
+
+#[derive(Clone)]
+struct ProjectedSession {
+    run_id: String,
+    state: ActivityKind,
+    present: bool,
+}
+
+fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
+    let mut cursor = None;
+    let mut request_id = 1u64;
+    let mut event_id = 1u64;
+    let mut hooked_seats = std::collections::HashSet::new();
+    let mut projected = HashMap::<String, ProjectedSession>::new();
+    loop {
+        if stopped.recv_timeout(SNAPSHOT_INTERVAL).is_ok() {
+            return;
+        }
+        let mut feed_available = false;
+        for _ in 0..2 {
+            let request = ControlRequest::ReadActivity {
+                version: PROTOCOL_VERSION,
+                request_id,
+                cursor: cursor.clone(),
+                limit: 256,
+            };
+            request_id = request_id.wrapping_add(1).max(1);
+            let Ok(ControlResponseData::Activity { page }) =
+                crate::activity::exchange(socket, request)
+            else {
+                break;
+            };
+            feed_available = true;
+            for record in &page.records {
+                if record.event.source == ActivitySource::Hooks {
+                    hooked_seats.insert(record.event.seat.to_string());
+                }
+            }
+            let has_more = page.has_more;
+            cursor = Some(page.cursor);
+            if !has_more {
+                break;
+            }
+        }
+        if !feed_available {
+            continue;
+        }
+        let Some(snapshot) = read_snapshot(socket, request_id) else {
+            request_id = request_id.wrapping_add(1).max(1);
+            continue;
+        };
+        request_id = request_id.wrapping_add(1).max(1);
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+            .unwrap_or(0);
+        let mut current = std::collections::HashSet::new();
+        for session in snapshot.sessions {
+            let Some(seat) = session.agent_id.as_deref() else {
+                continue;
+            };
+            let Ok(seat_id) = AgentId::new(seat.to_owned()) else {
+                continue;
+            };
+            let run_id = format!("session-{}", session.id);
+            let state = snapshot_state(&session, now_ms);
+            current.insert(seat.to_owned());
+            let changed = projected.get(seat).is_none_or(|prior| {
+                prior.run_id != run_id || prior.state != state || !prior.present
+            });
+            if changed && !hooked_seats.contains(seat) {
+                publish_runtime(
+                    socket,
+                    &mut request_id,
+                    &mut event_id,
+                    seat_id,
+                    run_id.clone(),
+                    state,
+                );
+            }
+            projected.insert(
+                seat.to_owned(),
+                ProjectedSession {
+                    run_id,
+                    state,
+                    present: true,
+                },
+            );
+        }
+        for (seat, prior) in projected.iter_mut() {
+            if prior.present && !current.contains(seat) {
+                if !hooked_seats.contains(seat) && prior.state != ActivityKind::Stopped {
+                    if let Ok(seat_id) = AgentId::new(seat.clone()) {
+                        publish_runtime(
+                            socket,
+                            &mut request_id,
+                            &mut event_id,
+                            seat_id,
+                            prior.run_id.clone(),
+                            ActivityKind::Stopped,
+                        );
+                    }
+                }
+                prior.state = ActivityKind::Stopped;
+                prior.present = false;
+            }
+        }
+        hooked_seats.retain(|seat| current.contains(seat));
+        projected.retain(|_, prior| prior.present);
+    }
+}
+
+fn snapshot_state(session: &crate::control::SessionSnapshot, now_ms: u64) -> ActivityKind {
+    let panes = session
+        .windows
+        .iter()
+        .flat_map(|window| window.panes.iter())
+        .collect::<Vec<_>>();
+    if panes.is_empty() || panes.iter().all(|pane| pane.child_pid.is_none()) {
+        return ActivityKind::Stopped;
+    }
+    if panes.iter().any(|pane| {
+        pane.child_pid.is_some()
+            && pane
+                .ledger
+                .last_output_at_ms
+                .is_some_and(|at| now_ms.saturating_sub(at) < 60_000)
+    }) {
+        ActivityKind::Working
+    } else {
+        ActivityKind::Waiting
+    }
+}
+
+fn publish_runtime(
+    socket: &Path,
+    next_request_id: &mut u64,
+    event_id: &mut u64,
+    seat: AgentId,
+    run_id: String,
+    kind: ActivityKind,
+) {
+    let request_id = *next_request_id;
+    *next_request_id = (*next_request_id).wrapping_add(1).max(1);
+    let request = ControlRequest::PublishActivity {
+        version: PROTOCOL_VERSION,
+        request_id,
+        event: ActivityInput {
+            schema_version: 1,
+            seat,
+            run_id,
+            event_id: format!("runtime-{}", *event_id),
+            source: ActivitySource::Runtime,
+            kind,
+        },
+    };
+    *event_id = (*event_id).wrapping_add(1).max(1);
+    let _ = crate::activity::exchange(socket, request);
 }
 
 fn state_for(kind: ActivityKind) -> Option<(&'static str, &'static str)> {

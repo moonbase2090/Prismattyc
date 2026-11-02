@@ -23,22 +23,28 @@ enum Mode {
     Hook,
     Notify(String),
     Event(String),
-    Install { file: PathBuf, remove: bool },
+    Install { file: Option<PathBuf>, remove: bool },
 }
 
 struct Cli {
     socket: PathBuf,
     seat: AgentId,
+    dynamic_seat: bool,
+    all_harnesses: bool,
+    hook_event: Option<String>,
     mode: Mode,
     schema_version: bool,
     failure_hook: bool,
 }
 
-fn parse(socket: &Path, mut args: impl Iterator<Item = String>) -> Result<Cli> {
+fn parse(socket: &Path, args: impl Iterator<Item = String>) -> Result<Cli> {
+    let mut args = args.peekable();
     let mut seat = None;
     let mut mode = None;
     let mut schema_version = false;
     let mut failure_hook = false;
+    let mut all_harnesses = false;
+    let mut hook_event = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--seat" if seat.is_none() => {
@@ -51,11 +57,25 @@ fn parse(socket: &Path, mut args: impl Iterator<Item = String>) -> Result<Cli> {
             "--event" if mode.is_none() => {
                 mode = Some(Mode::Event(args.next().context("missing event")?));
             }
-            "--install-hooks" | "--remove-hooks" if mode.is_none() => {
+            "--install-hooks" if mode.is_none() => {
                 mode = Some(Mode::Install {
-                    file: PathBuf::from(args.next().context("missing hook file")?),
-                    remove: arg == "--remove-hooks",
+                    file: args
+                        .peek()
+                        .filter(|next| !next.starts_with('-'))
+                        .cloned()
+                        .map(|_| PathBuf::from(args.next().expect("peeked path exists"))),
+                    remove: false,
                 });
+            }
+            "--remove-hooks" if mode.is_none() => {
+                mode = Some(Mode::Install {
+                    file: Some(PathBuf::from(args.next().context("missing hook file")?)),
+                    remove: true,
+                });
+            }
+            "--all-harnesses" if !all_harnesses => all_harnesses = true,
+            "--hook-event" if hook_event.is_none() => {
+                hook_event = Some(args.next().context("missing hook event")?);
             }
             "--schema-version" if !schema_version => {
                 if args.next().as_deref() != Some("1") {
@@ -66,7 +86,7 @@ fn parse(socket: &Path, mut args: impl Iterator<Item = String>) -> Result<Cli> {
             "--failure-hook" if !failure_hook => failure_hook = true,
             MANAGED_MARKER => {}
             "--help" | "-h" => {
-                println!("pmux [--socket PATH] activity-emit --seat ID --hook|--notify JSON|--event JSON\npmux [--socket PATH] activity-emit --seat ID --install-hooks FILE [--schema-version 1] [--failure-hook]\npmux [--socket PATH] activity-emit --seat ID --remove-hooks FILE");
+                println!("pmux [--socket PATH] activity-emit --seat ID --hook|--notify JSON|--event JSON\npmux [--socket PATH] activity-emit --seat ID --install-hooks FILE [--schema-version 1] [--failure-hook]\npmux [--socket PATH] activity-emit --install-hooks --all-harnesses\npmux [--socket PATH] activity-emit --seat ID --remove-hooks FILE");
                 std::process::exit(0);
             }
             _ => bail!("unknown or repeated activity adapter option"),
@@ -75,10 +95,41 @@ fn parse(socket: &Path, mut args: impl Iterator<Item = String>) -> Result<Cli> {
     if (schema_version || failure_hook) && !matches!(mode, Some(Mode::Install { .. })) {
         bail!("hook settings options require an install or removal operation");
     }
+    let mode = mode.context("an input mode is required")?;
+    if all_harnesses
+        && !matches!(
+            mode,
+            Mode::Install {
+                file: None,
+                remove: false
+            }
+        )
+    {
+        bail!("--all-harnesses requires --install-hooks without a file");
+    }
+    if matches!(mode, Mode::Install { file: None, .. }) && !all_harnesses {
+        bail!("--install-hooks requires a hook file or --all-harnesses");
+    }
+    if all_harnesses && seat.is_some() {
+        bail!("--all-harnesses uses PMUX_AGENT and does not accept --seat");
+    }
+    if hook_event.is_some() && !matches!(mode, Mode::Hook) {
+        bail!("--hook-event requires --hook");
+    }
+    let dynamic_seat = seat.is_none();
+    let seat = match seat {
+        Some(seat) => seat,
+        None => AgentId::new(
+            std::env::var("PMUX_AGENT").context("--seat is required (or set PMUX_AGENT)")?,
+        )?,
+    };
     Ok(Cli {
         socket: socket.to_path_buf(),
-        seat: seat.context("--seat is required")?,
-        mode: mode.context("an input mode is required")?,
+        seat,
+        dynamic_seat,
+        all_harnesses,
+        hook_event,
+        mode,
         schema_version,
         failure_hook,
     })
@@ -149,7 +200,21 @@ fn normalize(seat: AgentId, input: &Value, notify: bool) -> Result<Option<Activi
             format!("notify:{}", string(input, "turn-id")?),
         )
     } else {
-        let name = string(input, "hook_event_name")?;
+        let name = input
+            .get("hook_event_name")
+            .and_then(Value::as_str)
+            .or_else(|| input.get("event").and_then(Value::as_str))
+            .context("missing activity hook event")?;
+        let name = match name {
+            "sessionStart" => "SessionStart",
+            "sessionEnd" => "SessionEnd",
+            "beforeSubmitPrompt" | "PromptSubmit" => "UserPromptSubmit",
+            "preToolUse" => "PreToolUse",
+            "postToolUse" => "PostToolUse",
+            "stop" | "agentStop" => "Stop",
+            "AgentStop" => "Stop",
+            other => other,
+        };
         let failed = name == "PostToolUseFailure"
             || input
                 .pointer("/tool_response/exit_code")
@@ -175,7 +240,14 @@ fn normalize(seat: AgentId, input: &Value, notify: bool) -> Result<Option<Activi
         };
         (
             ActivitySource::Hooks,
-            string(input, "session_id")?,
+            input
+                .get("session_id")
+                .or_else(|| input.get("conversation_id"))
+                .or_else(|| input.get("thread_id"))
+                .or_else(|| input.get("sessionId"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .context("missing activity correlation identifier")?,
             kind,
             key,
         )
@@ -208,7 +280,14 @@ fn publish(cli: &Cli) -> Result<()> {
             if bytes.len() > MAX_INPUT {
                 bail!("activity input exceeds limit");
             }
-            let input: Value = serde_json::from_slice(&bytes).context("invalid hook input")?;
+            let mut input: Value = serde_json::from_slice(&bytes).context("invalid hook input")?;
+            if input.get("hook_event_name").is_none() {
+                if let (Some(event), Some(object)) =
+                    (cli.hook_event.as_ref(), input.as_object_mut())
+                {
+                    object.insert("hook_event_name".into(), Value::String(event.clone()));
+                }
+            }
             normalize(cli.seat.clone(), &input, false)?
         }
         Mode::Notify(raw) => {
@@ -228,7 +307,7 @@ fn publish(cli: &Cli) -> Result<()> {
             Some(event)
         }
         Mode::Install { file, remove } => {
-            return install::run(cli, file, *remove);
+            return install::run(cli, file.as_ref(), *remove);
         }
     };
     let Some(event) = event else { return Ok(()) };

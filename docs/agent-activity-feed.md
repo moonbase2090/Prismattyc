@@ -194,11 +194,26 @@ target/debug/pmux --socket /tmp/activity-demo/feed.sock activity-emit \
   --seat worker-a --install-hooks /absolute/path/worker-a-hooks.json
 ```
 
-Load that file through the runtime's documented settings or managed-hook option.
-Use `--schema-version 1` when its loader requires that field. Runtime hooks can
-run with a stripped environment, so the generated command embeds the explicit
-socket and seat. A shared global file with one fixed seat would misattribute
-other sessions. Use a separate profile for each seat.
+For a user-level install across Claude Code, Codex, Cursor, and Kiro, set the
+agent identity in the harness environment and run:
+
+```sh
+PMUX_AGENT=worker-a target/debug/pmux --socket /tmp/activity-demo/feed.sock \
+  activity-emit --install-hooks --all-harnesses
+```
+
+This writes Claude settings to `~/.claude/settings.json`, Codex hooks to
+`~/.codex/hooks.json`, Cursor hooks to `~/.cursor/hooks.json`, and a Kiro hook
+profile to `~/.kiro/hooks/pmux-activity.json`. The installed command reads
+`PMUX_AGENT` when the hook runs, so set it in the environment inherited by the
+harness too. Cursor and Kiro event names are translated to the activity schema.
+The installer removes and replaces only handlers marked as pmux activity
+handlers; unrelated settings and hooks are retained. Review and approve the
+generated hooks using each harness's normal trust controls.
+
+Load a per-seat file through the runtime's documented settings or managed-hook
+option. Use `--schema-version 1` when its loader requires that field. In
+per-seat mode, the generated command embeds the explicit socket and seat.
 
 Installation merges JSON settings under a file lock and commits atomically.
 It preserves unrelated settings, handlers, and managed-hook pointers. Repeating

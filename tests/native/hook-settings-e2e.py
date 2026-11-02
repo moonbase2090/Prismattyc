@@ -77,14 +77,14 @@ def main():
             assert len(json.loads(settings.read_text())["hooks"]["Stop"]) == 1
             checks.append("exactly 1 MiB of valid input is accepted")
 
-            oversized = b" " * 4_194_303 + b"\xff"
-            settings.write_bytes(oversized)
-            original_digest = hashlib.sha256(oversized).hexdigest()
-            for remove in (False, True):
-                completed = edit(settings, remove=remove)
-                assert completed.returncode != 0
-                assert "text file exceeds 1048576 byte read limit" in completed.stderr, completed.stderr
-                assert hashlib.sha256(settings.read_bytes()).hexdigest() == original_digest
+            for oversized in (b"{}" + b" " * 1_048_575, b" " * 4_194_303 + b"\xff"):
+                settings.write_bytes(oversized)
+                original_digest = hashlib.sha256(oversized).hexdigest()
+                for remove in (False, True):
+                    completed = edit(settings, remove=remove)
+                    assert completed.returncode != 0
+                    assert "text file exceeds 1048576 byte read limit" in completed.stderr, completed.stderr
+                    assert hashlib.sha256(settings.read_bytes()).hexdigest() == original_digest
             checks.append("oversized install/removal refuses before UTF-8 decoding and preserves bytes")
 
             for contents, message in [(b"{broken", "invalid hook settings JSON"),
@@ -104,7 +104,9 @@ def main():
                 completed = edit(link)
                 assert completed.returncode == 0, completed.stderr
                 assert link.is_symlink() and stat.S_IMODE(target.stat().st_mode) == 0o640
-                assert json.loads(target.read_text())["env"]["EXAMPLE"] == "preserved"
+                linked_settings = json.loads(target.read_text())
+                assert linked_settings["env"]["EXAMPLE"] == "preserved"
+                assert len(linked_settings["hooks"]["Stop"]) == 1
                 checks.append("symlink and target permissions survive installation")
         result["status"] = "PASS"
         print(json.dumps(result))

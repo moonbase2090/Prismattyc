@@ -189,6 +189,11 @@ pub(crate) fn instance_socket_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+#[cfg(windows)]
+pub(crate) fn instance_socket_dirs() -> Vec<PathBuf> {
+    crate::platform::user_directory().into_iter().collect()
+}
+
 /// `pmux.sock` → `default`; `pmux-NAME.sock` → `NAME`.
 pub(crate) fn instance_from_socket_name(name: &str) -> Option<&str> {
     let stem = name.strip_suffix(".sock")?;
@@ -1125,9 +1130,4 @@ mod tests {
             other => panic!("{other:?}"),
         }
     }
-}
-
-#[cfg(windows)]
-pub(crate) fn instance_socket_dirs() -> Vec<PathBuf> {
-    crate::platform::user_directory().into_iter().collect()
 }

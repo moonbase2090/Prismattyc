@@ -2117,6 +2117,43 @@ fn read_play_key(timeout: Duration) -> Result<Option<PlayKey>> {
     }
 }
 
+#[cfg(windows)]
+struct PlayRawStdin;
+#[cfg(windows)]
+impl PlayRawStdin {
+    fn enter() -> Result<Self> {
+        crossterm::terminal::enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+#[cfg(windows)]
+impl Drop for PlayRawStdin {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+#[cfg(windows)]
+fn read_play_key(timeout: Duration) -> Result<Option<PlayKey>> {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    if !event::poll(timeout)? {
+        return Ok(None);
+    }
+    Ok(match event::read()? {
+        Event::Key(k) if k.kind == KeyEventKind::Release => None,
+        Event::Key(k)
+            if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            Some(play_key_from_byte(3))
+        }
+        Event::Key(k) => Some(match k.code {
+            KeyCode::Enter => PlayKey::Enter,
+            KeyCode::Char(c) if c.is_ascii() => play_key_from_byte(c as u8),
+            _ => PlayKey::Other,
+        }),
+        _ => None,
+    })
+}
+
 struct NewArgs {
     name: String,
     program: Vec<String>,
@@ -7887,6 +7924,11 @@ fn signal(pid: u32, signal: prismattyc_mux::platform::Signal) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn signal(pid: u32, _signal: prismattyc_mux::platform::Signal) -> Result<()> {
+    prismattyc_mux::platform::terminate_process(pid).context("terminate process")
+}
+
 fn pid_alive(pid: u32) -> bool {
     procinfo::pid_alive(pid)
 }
@@ -11055,45 +11097,4 @@ mod tests {
         assert!(bad.contains("layout name"), "{bad}");
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-#[cfg(windows)]
-struct PlayRawStdin;
-#[cfg(windows)]
-impl PlayRawStdin {
-    fn enter() -> Result<Self> {
-        crossterm::terminal::enable_raw_mode()?;
-        Ok(Self)
-    }
-}
-#[cfg(windows)]
-impl Drop for PlayRawStdin {
-    fn drop(&mut self) {
-        let _ = crossterm::terminal::disable_raw_mode();
-    }
-}
-#[cfg(windows)]
-fn read_play_key(timeout: Duration) -> Result<Option<PlayKey>> {
-    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-    if !event::poll(timeout)? {
-        return Ok(None);
-    }
-    Ok(match event::read()? {
-        Event::Key(k) if k.kind == KeyEventKind::Release => None,
-        Event::Key(k)
-            if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) =>
-        {
-            Some(play_key_from_byte(3))
-        }
-        Event::Key(k) => Some(match k.code {
-            KeyCode::Enter => PlayKey::Enter,
-            KeyCode::Char(c) if c.is_ascii() => play_key_from_byte(c as u8),
-            _ => PlayKey::Other,
-        }),
-        _ => None,
-    })
-}
-#[cfg(windows)]
-fn signal(pid: u32, _signal: prismattyc_mux::platform::Signal) -> Result<()> {
-    prismattyc_mux::platform::terminate_process(pid).context("terminate process")
 }

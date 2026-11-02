@@ -1481,6 +1481,18 @@ fn local_winsize() -> Option<LocalWinsize> {
     })
 }
 
+#[cfg(windows)]
+fn local_winsize() -> Option<LocalWinsize> {
+    let (cols, rows) = crossterm::terminal::size().ok()?;
+    let (cols, rows) = normalize_winsize(cols, rows)?;
+    Some(LocalWinsize {
+        cols,
+        rows,
+        cell_width_px: prismattyc_emulator::NOMINAL_CELL_W_PX,
+        cell_height_px: prismattyc_emulator::NOMINAL_CELL_H_PX,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PaintFrame {
     content: PaneContent,
@@ -6537,10 +6549,9 @@ mod tests {
         });
         let _ = std::fs::remove_dir_all(&dir);
     }
-    use std::{
-        io::{BufRead, BufReader, Read, Write},
-        os::unix::net::UnixStream,
-    };
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    use prismattyc_mux::local_socket::UnixStream;
 
     use prismattyc_emulator::Emulator;
     use prismattyc_mux::{
@@ -11651,16 +11662,4 @@ mod tests {
         }
         panic!("subscriber on a missing socket must exit so the TTY loop can fall back");
     }
-}
-
-#[cfg(windows)]
-fn local_winsize() -> Option<LocalWinsize> {
-    let (cols, rows) = crossterm::terminal::size().ok()?;
-    let (cols, rows) = normalize_winsize(cols, rows)?;
-    Some(LocalWinsize {
-        cols,
-        rows,
-        cell_width_px: prismattyc_emulator::NOMINAL_CELL_W_PX,
-        cell_height_px: prismattyc_emulator::NOMINAL_CELL_H_PX,
-    })
 }

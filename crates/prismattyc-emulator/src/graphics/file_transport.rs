@@ -7,6 +7,9 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
+// Off unix only `Open` is produced (t=f is unsupported there); the other
+// variants stay so callers and tests match the same set on every platform.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FileError {
     Open,

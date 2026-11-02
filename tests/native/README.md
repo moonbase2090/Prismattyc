@@ -93,6 +93,24 @@ Windows reserves most Win+letter chords, so they are not checked. Both
 scripts exit 0 only when every check passes and write `result.txt` to the
 output directory.
 
+### Windows lib suites
+
+CI checks only the portable crates on Windows. To check the rest, run this on
+a clean Windows VM with the MSVC toolchain, from a checkout of the head under
+test (SSH works; no desktop is needed):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tests\native\windows-lib-suites.ps1 -Out build\windows-lib-suites
+```
+
+It runs `cargo clippy --workspace --all-targets -- -D warnings`, then runs each
+`prismattyc-mux` and `prismattyc-host` lib test on its own with a 120 s
+timeout (`-TimeoutSec`). A test that runs past it is killed with its child
+processes and reported as `HANG`. `-Crates` and `-Filter` narrow the run, and
+`-SkipClippy` skips the clippy step. It exits 0 only when clippy is clean and
+no test fails or hangs. `result.txt` lists each test that did not pass, and
+their logs are kept beside it.
+
 ### Pixel-alpha performance acceptance
 
 Run the conversion benchmark on a native host:

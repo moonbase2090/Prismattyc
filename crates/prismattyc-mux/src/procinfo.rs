@@ -886,7 +886,6 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
 
     #[cfg(unix)]
     fn procinfo_test_dir(tag: &str) -> PathBuf {
@@ -1157,6 +1156,7 @@ mod tests {
     #[test]
     fn background_job_on_pty_is_not_foreground() {
         use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        use std::io::{Read, Write};
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -1435,7 +1435,7 @@ mod windows {
                 *args.first_mut()? = process.exe()?.to_str()?.to_owned();
                 let name = executable_name(args.first()?);
                 let shell = matches!(name.as_str(), "cmd" | "powershell" | "pwsh")
-                    || is_shell_argv(&[name.clone()]);
+                    || is_shell_argv(std::slice::from_ref(&name));
                 let next = children.get(&pid).map(Vec::as_slice).unwrap_or(&[]);
                 if !shell {
                     if matches!(name.as_str(), "pmux" | "pmux-attach") && !next.is_empty() {
@@ -1510,7 +1510,7 @@ mod windows {
             return None;
         }
         let shell = executable_name(&crate::platform::default_shell());
-        if is_shell_argv(&[shell.clone()]) {
+        if is_shell_argv(std::slice::from_ref(&shell)) {
             return Some(shell_join(args));
         }
         if args.iter().any(|arg| arg.contains(['%', '!', '"'])) {

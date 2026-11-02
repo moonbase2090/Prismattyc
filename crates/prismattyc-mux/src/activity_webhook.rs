@@ -469,7 +469,13 @@ impl WebhookOwnership {
                     }
                 }
                 if event.kind == ActivityKind::Stopped
-                    || prior_run.is_some_and(|prior| runtime_run_changed(&prior, &event.run_id))
+                    || prior_run.is_some_and(|prior| {
+                        runtime_run_changed(
+                            &prior,
+                            &event.run_id,
+                            self.hooked_runs.contains_key(seat),
+                        )
+                    })
                 {
                     self.hooked_runs.remove(seat);
                 }
@@ -480,7 +486,7 @@ impl WebhookOwnership {
     }
 }
 
-fn runtime_run_changed(prior: &str, current: &str) -> bool {
+fn runtime_run_changed(prior: &str, current: &str, preserve_unrecognized_hook: bool) -> bool {
     fn parts(run_id: &str) -> Option<(&str, &str, Option<&str>, Option<&str>)> {
         let mut fields = run_id.split('-');
         if fields.next()? != "session" {
@@ -512,7 +518,9 @@ fn runtime_run_changed(prior: &str, current: &str) -> bool {
                     (Some(prior), Some(current)) => prior != current,
                     (Some(_), None) => true,
                     (None, Some(_)) => false,
-                    (None, None) => prior_foreground != current_foreground,
+                    (None, None) => {
+                        !preserve_unrecognized_hook && prior_foreground != current_foreground
+                    }
                 }
         }
         _ => prior != current,
@@ -728,7 +736,7 @@ fn snapshot_run_identity(
                         |foreground| crate::procinfo::is_process_descendant(*prior, foreground),
                     )
                 });
-            let harness_pid = detected.or(retained);
+            let harness_pid = retained.or(detected);
             if let Some(pid) = harness_pid {
                 harness_pids.insert(pane.id, pid);
             }
@@ -1095,7 +1103,7 @@ mod tests {
         assert!(!observe(
             &mut identity_ownership,
             ActivitySource::Runtime,
-            "session-7-process-none-shell",
+            "session-7-process-none-newpid",
             ActivityKind::Working
         ));
         assert!(!observe(
@@ -1116,23 +1124,33 @@ mod tests {
     fn runtime_identity_enrichment_preserves_hook_ownership() {
         assert!(!runtime_run_changed(
             "session-7-process-none-shell",
-            "session-7-process-harness-agent"
+            "session-7-process-harness-agent",
+            false
         ));
         assert!(runtime_run_changed(
             "session-7-process-harness-agent",
-            "session-7-process-none-successor"
+            "session-7-process-none-successor",
+            false
         ));
         assert!(runtime_run_changed(
             "session-7-process-harness-a-foreground",
-            "session-7-process-harness-b-foreground"
+            "session-7-process-harness-b-foreground",
+            true
         ));
         assert!(runtime_run_changed(
             "session-7-process-none-foreground",
-            "session-8-process-none-foreground"
+            "session-8-process-none-foreground",
+            true
         ));
         assert!(runtime_run_changed(
             "session-7-process-none-oldpid",
-            "session-7-process-none-newpid"
+            "session-7-process-none-newpid",
+            false
+        ));
+        assert!(!runtime_run_changed(
+            "session-7-process-none-oldpid",
+            "session-7-process-none-newpid",
+            true
         ));
     }
 

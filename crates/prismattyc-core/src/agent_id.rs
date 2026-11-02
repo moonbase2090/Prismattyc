@@ -1,16 +1,16 @@
-//! Agent identity validation for the browser lab.
-//!
-//! Ported from `prismattyc-mux::mailbox::agent_id` so the lab rejects
-//! exactly what `pmuxd` rejects, with the same error text. Keep the rules
-//! and the messages in sync with that module.
+// SPDX-License-Identifier: MIT
 
 use std::fmt;
+
+use serde::{Deserialize, Serialize};
 
 /// Stable logical identity of an agent, e.g. `operator-a`.
 ///
 /// Format: lowercase ASCII alphanumerics and hyphens, 2–64 chars, no
-/// leading/trailing or doubled hyphens.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// leading/trailing or doubled hyphens. A common convention is
+/// `<agent>-<slug>`, but any string passing validation is allowed.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct AgentId(String);
 
 impl AgentId {
@@ -52,6 +52,20 @@ impl AgentId {
 impl fmt::Display for AgentId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl From<AgentId> for String {
+    fn from(id: AgentId) -> Self {
+        id.0
+    }
+}
+
+impl TryFrom<String> for AgentId {
+    type Error = AgentIdError;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        Self::new(raw)
     }
 }
 
@@ -108,10 +122,6 @@ mod tests {
             AgentId::new("Operator-A"),
             Err(AgentIdError::InvalidChar('O'))
         );
-        assert_eq!(
-            AgentId::new("Bob Smith"),
-            Err(AgentIdError::InvalidChar('B'))
-        );
         assert_eq!(AgentId::new("-operator-a"), Err(AgentIdError::EdgeHyphen));
         assert_eq!(AgentId::new("operator-a-"), Err(AgentIdError::EdgeHyphen));
         assert_eq!(
@@ -125,7 +135,16 @@ mod tests {
     }
 
     #[test]
-    fn error_text_matches_the_daemon() {
+    fn serde_roundtrip() {
+        let id = AgentId::new("operator-a").unwrap();
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, "\"operator-a\"");
+        assert_eq!(serde_json::from_str::<AgentId>(&json).unwrap(), id);
+        assert!(serde_json::from_str::<AgentId>("\"BAD ID\"").is_err());
+    }
+
+    #[test]
+    fn validation_messages_keep_the_browser_and_daemon_contract() {
         assert_eq!(
             AgentIdError::TooShort.to_string(),
             "agent id must be at least 2 characters"

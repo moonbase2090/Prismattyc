@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod monitor_launcher;
+
 pub const REPOSITORY: &str = "moonbase2090/Prismattyc";
 pub const BINARIES: [&str; 6] = [
     "pmux",
@@ -59,6 +61,8 @@ struct Options {
     /// Include immutable prereleases. The app menu never sets this.
     pre: bool,
     bin_dir: Option<PathBuf>,
+    repair_monitor: bool,
+    from_monitor_version: Option<String>,
 }
 
 fn options(args: &[String]) -> Result<Options> {
@@ -70,6 +74,14 @@ fn options(args: &[String]) -> Result<Options> {
     ensure!(
         !(options.check && options.rollback),
         "--check and --rollback cannot be combined"
+    );
+    ensure!(
+        !options.repair_monitor || (!options.rollback && !options.pre),
+        "--repair-monitor-launcher cannot be combined with --rollback or --pre"
+    );
+    ensure!(
+        options.repair_monitor || options.from_monitor_version.is_none(),
+        "--from-monitor-version requires --repair-monitor-launcher"
     );
     Ok(options)
 }
@@ -83,6 +95,18 @@ fn apply_update_option<'a>(
     args: &mut impl Iterator<Item = &'a String>,
 ) -> Result<()> {
     if set_update_flag(options, arg) {
+        return Ok(());
+    }
+    if arg == "--from-monitor-version" {
+        let value = args
+            .next()
+            .context("--from-monitor-version needs a release version")?;
+        let version = Version::parse(value)?;
+        ensure!(
+            version.to_string() == *value,
+            "use a canonical release version"
+        );
+        options.from_monitor_version = Some(value.clone());
         return Ok(());
     }
     if arg == "--bin-dir" {
@@ -106,6 +130,7 @@ fn set_update_flag(options: &mut Options, arg: &str) -> bool {
         "--check" => options.check = true,
         "--json" => options.json = true,
         "--rollback" => options.rollback = true,
+        "--repair-monitor-launcher" => options.repair_monitor = true,
         "--pre" => options.pre = true,
         "--all" => {}
         _ => return false,
@@ -615,7 +640,7 @@ fn listed_releases() -> Result<Vec<Release>> {
     serde_json::from_slice(&bytes).context("parse release list")
 }
 
-fn fetch_release_json(url: &str) -> Result<Vec<u8>> {
+pub(crate) fn fetch_release_json(url: &str) -> Result<Vec<u8>> {
     let mut child = curl()
         .args([
             "--header",
@@ -628,6 +653,16 @@ fn fetch_release_json(url: &str) -> Result<Vec<u8>> {
         .spawn()
         .context("start HTTPS download (curl is required)")?;
     read_capped_child_stdout(&mut child, 4_194_304)
+}
+
+pub(crate) fn download_bounded(url: &str, cap: usize) -> Result<Vec<u8>> {
+    let mut child = curl()
+        .args(["--max-filesize", &cap.to_string()])
+        .arg(url)
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("start bounded HTTPS download")?;
+    read_capped_child_stdout(&mut child, cap)
 }
 
 /// Read up to `cap` bytes from a spawned child's stdout, killing it on
@@ -684,11 +719,15 @@ fn verify(path: &Path, asset: &Asset) -> Result<()> {
 
 /// Bound both runtime and output, including descendants that inherit stdout.
 pub fn version_label(executable: &Path) -> Result<String> {
+    executable_probe(executable, "--version", 4096, "version")
+}
+
+fn executable_probe(executable: &Path, argument: &str, cap: usize, label: &str) -> Result<String> {
     let mut command = Command::new(executable);
     #[cfg(unix)]
     command.process_group(0);
     command
-        .arg("--version")
+        .arg(argument)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -702,7 +741,7 @@ pub fn version_label(executable: &Path) -> Result<String> {
         let mut bytes = Vec::new();
         let result = stdout
             .by_ref()
-            .take(4097)
+            .take(cap as u64 + 1)
             .read_to_end(&mut bytes)
             .map(|_| bytes);
         let _ = tx.send(result);
@@ -717,16 +756,16 @@ pub fn version_label(executable: &Path) -> Result<String> {
                 }
             }
             ensure!(
-                data.as_ref().is_none_or(|b| b.len() <= 4096),
-                "version output exceeds limit"
+                data.as_ref().is_none_or(|b| b.len() <= cap),
+                "{label} output exceeds limit"
             );
             if let Some(status) = child.try_wait()? {
-                ensure!(status.success(), "version check failed");
+                ensure!(status.success(), "{label} check failed");
                 if let Some(bytes) = data.take() {
                     return Ok(String::from_utf8(bytes)?.trim().to_owned());
                 }
             }
-            ensure!(Instant::now() < deadline, "version check timed out");
+            ensure!(Instant::now() < deadline, "{label} check timed out");
             std::thread::sleep(Duration::from_millis(10));
         }
     })();
@@ -989,6 +1028,9 @@ pub fn run(args: &[String]) -> Result<()> {
 /// [`run`] so each function stays within the CRAP budget.
 fn run_locked(root: &Path, options: &Options) -> Result<()> {
     let _lock = lock(root)?;
+    if options.repair_monitor {
+        return monitor_launcher::run(root, options);
+    }
     if options.rollback {
         return run_rollback(root);
     }
@@ -1001,7 +1043,7 @@ fn is_help_flag(arg: &String) -> bool {
 }
 
 fn print_update_help() {
-    println!("pmux update [--check] [--json] [--pre] [--bin-dir PATH]\nprismattyc update [--check] [--json] [--pre] [--bin-dir PATH]\npmux update --rollback\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\n--pre includes immutable prereleases such as v0.3.0-rc.3. The default channel and the app menu stay on stable releases such as v0.3.0.\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together. --rollback restores that previous installation.\nOn macOS, verify SHA256SUMS-macos, Developer ID Team ID S24C53PD3Y, and Gatekeeper notarization. Keep the previous verified app for --rollback.\nprismattyc update is the same command as pmux update.\nUpdating does not stop sessions. The app menu restarts the host and safely restarts the daemon when it has no active sessions.\n--source is an explicit development-only source build.");
+    println!("pmux update [--check] [--json] [--pre] [--bin-dir PATH]\nprismattyc update [--check] [--json] [--pre] [--bin-dir PATH]\npmux update --rollback\npmux update --repair-monitor-launcher [--from-monitor-version VERSION] [--bin-dir PATH] [--check] [--json]\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\n--pre includes immutable prereleases such as v0.3.0-rc.3. The default channel and the app menu stay on stable releases such as v0.3.0.\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together. --rollback restores that previous installation.\nOn macOS, verify SHA256SUMS-macos, Developer ID Team ID S24C53PD3Y, and Gatekeeper notarization. Keep the previous verified app for --rollback.\nThe explicit --repair-monitor-launcher operation verifies only the frontend matching the installed managed core, with a backup and independent receipt. --from-monitor-version establishes ownership of an unreceipted legacy frontend by its immutable official asset digest. --check verifies the plan without replacing the launcher, receipt, or backup. Core rollback remains a six-binary transaction. macOS uses normal app replacement.\nprismattyc update is the same command as pmux update.\nUpdating does not stop sessions. The app menu restarts the host and safely restarts the daemon when it has no active sessions.\n--source is an explicit development-only source build.");
 }
 
 /// Fetch the latest release, compare versions, and either report or install.
@@ -1091,7 +1133,7 @@ fn run_rollback(root: &Path) -> Result<()> {
         let restored = rollback(root)?;
         println!(
             "{}",
-            serde_json::json!({"status":"rolled_back","version":restored,"restart_required":true})
+            serde_json::json!({"status":"rolled_back","version":restored,"restart_required":true,"monitor_launcher":"managed_separately"})
         );
         Ok(())
     }
@@ -1355,10 +1397,10 @@ fn report_install(version: &Version, json: bool) {
     if json {
         println!(
             "{}",
-            serde_json::json!({"status":"installed","version":version.to_string(),"repository":REPOSITORY,"restart_required":true})
+            serde_json::json!({"status":"installed","version":version.to_string(),"repository":REPOSITORY,"restart_required":true,"monitor_launcher":"managed_separately"})
         );
     } else {
-        println!("Installed {version} from {REPOSITORY}. Running components keep their current version.\nUse pmux restart to review and apply component restarts. Use pmux update --rollback or prismattyc update --rollback to restore the previous installation.");
+        println!("Installed {version} from {REPOSITORY}. Running components keep their current version.\nUse pmux restart to review and apply component restarts. Use pmux update --rollback or prismattyc update --rollback to restore the six core executables.\nThe monitor launcher is managed separately. Use pmux update --repair-monitor-launcher to install its matching contained frontend.");
     }
 }
 

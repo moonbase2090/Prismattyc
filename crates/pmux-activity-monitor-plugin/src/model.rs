@@ -4,8 +4,8 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use prismattyc_mux::activity::{ActivityKind, ActivityPage, ActivityRecord};
-use prismattyc_mux::mailbox::AgentId;
+use prismattyc_core::activity::{ActivityKind, ActivityPage, ActivityRecord};
+use prismattyc_core::AgentId;
 
 /// Seats kept per host before the seat with the oldest event is evicted.
 pub const MAX_SEATS: usize = 128;
@@ -112,6 +112,7 @@ pub enum Link {
     Disabled,
     /// The daemon answered but predates the activity feed.
     Unsupported,
+    PermissionDenied,
 }
 
 pub struct Host {

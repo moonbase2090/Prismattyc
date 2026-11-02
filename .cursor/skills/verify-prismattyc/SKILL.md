@@ -1,6 +1,6 @@
 ---
 name: verify-prismattyc
-description: Verify Prismattyc desktop UI, pmux sessions and mail, saved spaces, and Windows packaging when preparing PR proof or checking runtime behavior.
+description: Verify Prismattyc desktop UI, sessions and mail, saved spaces, contained plug-ins, and packaging when preparing PR proof or checking runtime behavior.
 ---
 
 # Verify Prismattyc
@@ -9,27 +9,32 @@ Read [the feature map](features/README.md), then select the entries affected by 
 
 ## Launch
 
-Run from the repository root. Python 3.8+ and a Unix shell are required for the CLI helper. Rust 1.90.0 is the CI toolchain. Build all binaries together so the host, CLI, and daemon belong to the same revision:
+Run from the repository root with Python 3.11+ and a Unix shell. Rust 1.90.0 is the CI toolchain. Prepare the reviewed official bundle first. For private development, explicitly set `PRISMATTYC_PLUGIN_BUNDLE_DIR` to a verified candidate directory before these commands. A missing official pin stops preparation. Build all seven binaries together:
 
 ```sh
 verify_repo=$(pwd)
 verify_target=$(mktemp -d /tmp/prismattyc-target-XXXXXX)
 export CARGO_TARGET_DIR="$verify_target"
-cargo +1.90.0 build --workspace --bins --locked
-verify_bins="$verify_target/debug"
+verify_bundle=$(python3 scripts/release/plugin_bundle_provenance.py prepare)
+export PRISMATTYC_PLUGIN_BUNDLE_DIR="$verify_bundle"
+CARGO_ENCODED_RUSTFLAGS=$(python3 scripts/release/plugin_bundle_provenance.py flags)
+export CARGO_ENCODED_RUSTFLAGS
+cargo +1.90.0 build --release --workspace --bins --locked
+cargo +1.90.0 build --release --manifest-path tools/activity-monitor/Cargo.toml --target-dir "$verify_target" --locked
+verify_bins="$verify_target/release"
 verify_evidence=$(mktemp -d /tmp/prismattyc-proof-XXXXXX)
 git rev-parse HEAD > "$verify_evidence/revision.txt"
 git diff --stat > "$verify_evidence/worktree.txt"
 uname -sm > "$verify_evidence/platform.txt"
+python3 scripts/release/plugin_bundle_provenance.py verify --bins "$verify_bins" --bundle "$verify_bundle" > "$verify_evidence/plugin-bundle.json"
 ```
 
 Use an installed compatible compiler and SDK on macOS. If the active linker rejects SDK `.tbd` targets, select a matching Xcode/Command Line Tools installation or an already-installed compatible `SDKROOT`; preserve that choice in the build log. Do not prescribe an SDK path that does not exist on the test machine. On Linux, install the native dependencies in `scripts/install-render-test-deps.sh` before driving X11 windows.
 
-For the optional activity feed, follow [agent activity](features/activity.md).
-Its standalone viewer has a separate manifest and lockfile. Build its adapter
-with `cargo build -p prismattyc-mux --bins --locked`, then run
-`python3 scripts/verify-activity.py` with the binaries and output paths in that
-feature recipe. The helper owns a private daemon and a live terminal viewer.
+For the optional activity feed and contained monitor, follow
+[agent activity](features/activity.md). The thin frontend has a separate
+manifest and lockfile, covered by Launch above. The production runtime driver
+installs and explicitly grants the packages inside its private daemon.
 
 For short-lived CLI drives, the helper below starts a fresh private `pmuxd` for each feature and waits for its Unix socket. It clears inherited mux/application variables and isolates HOME, configuration, data, state, and runtime paths. A disposable shell wrapper bypasses login startup files, so they cannot reset the isolated HOME or prompt. It owns teardown. Run the two drives serially:
 
@@ -43,6 +48,17 @@ For short-lived CLI drives, the helper below starts a fresh private `pmuxd` for 
 Each `--out` must be new. A successful drive prints `"status": "PASS"`. For desktop UI, use the native fixture in [desktop](features/desktop.md); it owns separate host and daemon processes. For Windows use [Windows](features/windows.md), not this Unix launch recipe.
 
 ## CI and test portability
+
+Full workspace tests build real version-matched component fixtures. Install the
+Wasm standard library for the test toolchain first:
+
+```sh
+rustup target add wasm32-unknown-unknown --toolchain 1.90.0
+```
+
+A native-only toolchain otherwise reports missing `core` from fixture builds.
+Using prebuilt production guests does not require rebuilding them for native
+package runtime proof.
 
 For changes to process-detection fixtures or Linux test runners, follow the
 [session and mail portability checks](features/sessions-mail.md#linux-test-portability).

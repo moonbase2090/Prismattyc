@@ -8,12 +8,12 @@
 //! `setIdentity`, which is the browser analogue of opening a second
 //! connection, not of reading someone else's mail.
 
-use crate::agent_id::AgentId;
 use crate::mailbox::{Letter, Mailbox};
 use prismattyc_core::splash::{
     art_frame, art_frame_width, FRAME_MS, HOLD_FRAME_MS, HOLD_MS, INTRO_MS, LOOP_MS, REFLECT_MS,
     SETTLED_MS,
 };
+use prismattyc_core::AgentId;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 

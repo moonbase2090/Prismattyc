@@ -92,6 +92,40 @@ a build tree. An incomplete existing installation must be repaired first.
 Linux release assets use `x86_64-unknown-linux-gnu` or
 `aarch64-unknown-linux-gnu`. Windows uses `x86_64-pc-windows-msvc`.
 
+### Replace an older activity monitor launcher
+
+On Linux and Windows, update the core first. Then start a second command
+to repair `pmux-activity-monitor` for that installed core release:
+
+```bash
+pmux update
+pmux update --repair-monitor-launcher --from-monitor-version 0.3.52 --check
+pmux update --repair-monitor-launcher --from-monitor-version 0.3.52
+```
+
+Replace `0.3.52` with the official version of your existing monitor executable.
+The older updater only knows its six core executables. The second command
+uses the new updater even when the core is already current. It selects the
+exact installed core tag and verifies the downloaded frontend's embedded
+plug-in bundle against that core. It leaves sessions and the daemon running.
+On macOS, replace the verified application bundle instead.
+
+The source version hint establishes ownership by comparing the existing
+file with its immutable official asset. Repair never runs the old monitor.
+It refuses unknown bytes, symlinks, reparse points, and files from another
+installation. Preserve an unknown file before moving it out of the way.
+When the launcher is absent or has a repair receipt, omit the source hint.
+`--bin-dir` must match the active core receipt. `--check` verifies the repair
+without replacing the launcher or writing its receipt and backup.
+
+Repair keeps the previous verified bytes and a separate receipt under
+`prismattyc/updates/monitor-launcher`. Retry after a sharing or replacement
+failure. A prepared receipt accepts its recorded old or new bytes and
+refuses an unrelated change. Core rollback restores its six executables
+and preserves this separate launcher, receipt, history, and backup. After
+core rollback, use a launcher compatible with the selected core before
+opening the monitor. Repair requires a core that supports contained plug-ins.
+
 On macOS, the updater downloads `Prismattyc-<tag>-macos-universal.zip`.
 It checks that zip against the GitHub asset digest and against
 `SHA256SUMS-macos`. When the release publishes
@@ -185,6 +219,11 @@ pmux update --source --mux
 
 `--source` explicitly selects the developer workflow. It pulls and builds
 source. Ordinary Update uses release artifacts.
+The source workflow verifies the reviewed plug-in bundle before installing
+any binary and passes the same bundle to each build. `--mux` also installs
+the thin activity monitor launcher. If the checkout has no reviewed bundle
+pin, preparation stops before installation. An explicit private candidate
+can be selected with `PRISMATTYC_PLUGIN_BUNDLE_DIR` for development.
 
 
 ## Uninstall

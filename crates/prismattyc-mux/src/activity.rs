@@ -8,7 +8,6 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Result};
-use serde::{Deserialize, Serialize};
 
 use crate::{
     ControlErrorCode, ControlRequest, ControlResponse, ControlResponseBody, ControlResponseData,
@@ -20,88 +19,10 @@ const MAX_PAGE: usize = 256;
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ActivityInput {
-    pub schema_version: u16,
-    pub seat: crate::mailbox::AgentId,
-    pub run_id: String,
-    pub event_id: String,
-    pub source: ActivitySource,
-    pub kind: ActivityKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActivitySource {
-    Notify,
-    Hooks,
-    Runtime,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActivityKind {
-    SessionStarted,
-    SessionFinished,
-    TurnStarted,
-    TurnFinished,
-    ToolStarted,
-    ToolFinished,
-    ToolFailed,
-    CommandStarted,
-    CommandFinished,
-    CommandFailed,
-    EditStarted,
-    EditFinished,
-    EditFailed,
-    TestStarted,
-    TestPassed,
-    TestFailed,
-    Working,
-    Waiting,
-    Stopped,
-    MailSent,
-    MailReceived,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActivityRecord {
-    pub sequence: u64,
-    pub received_at_ms: u64,
-    pub event: ActivityInput,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActivityCursor {
-    pub epoch: String,
-    pub sequence: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActivityReset {
-    Restarted,
-    RetentionGap,
-    AheadOfFeed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActivityPage {
-    pub epoch: String,
-    pub oldest_sequence: u64,
-    pub current_sequence: u64,
-    pub records: Vec<ActivityRecord>,
-    pub cursor: ActivityCursor,
-    pub has_more: bool,
-    pub reset: Option<ActivityReset>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActivityAck {
-    pub cursor: ActivityCursor,
-    pub duplicate: bool,
-}
+pub use prismattyc_core::activity::{
+    ActivityAck, ActivityCursor, ActivityInput, ActivityKind, ActivityPage, ActivityRecord,
+    ActivityReset, ActivitySource,
+};
 
 /// A daemon rejection that retains its machine-readable code without message text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +45,9 @@ pub(crate) struct ActivityFeed {
 }
 
 impl ActivityFeed {
+    pub(crate) fn epoch(&self) -> &str {
+        &self.epoch
+    }
     pub(crate) fn new() -> Result<Self, &'static str> {
         let mut bytes = [0u8; 16];
         getrandom::fill(&mut bytes).map_err(|_| "cannot create activity epoch")?;
@@ -135,12 +59,7 @@ impl ActivityFeed {
     }
 
     pub(crate) fn publish(&mut self, event: ActivityInput) -> Result<ActivityAck, &'static str> {
-        if event.schema_version != 1 {
-            return Err("unsupported activity schema");
-        }
-        if !valid_identifier(&event.run_id) || !valid_identifier(&event.event_id) {
-            return Err("activity identifiers must be 1..128 ASCII identifier characters");
-        }
+        event.validate_metadata()?;
         if let Some(prior) = self.retained.iter().find(|r| {
             r.event.seat == event.seat
                 && r.event.run_id == event.run_id
@@ -232,13 +151,6 @@ impl ActivityFeed {
             sequence,
         }
     }
-}
-
-fn valid_identifier(text: &str) -> bool {
-    (1..=128).contains(&text.len())
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-_:.".contains(&b))
 }
 
 /// Exchange one activity request over the existing local control socket.

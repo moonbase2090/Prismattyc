@@ -1,26 +1,36 @@
 // SPDX-License-Identifier: MIT
+//! Compatibility launcher. Views and queries run only through the daemon registry.
 
+use anyhow::{bail, ensure, Result};
+use prismattyc_core::AgentId;
+use prismattyc_mux::plugins::{Client, EndpointSource, Reply, Request};
+use serde_json::{json, Value};
 use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::Duration;
 
-use anyhow::{bail, Result};
-use prismattyc_mux::mailbox::AgentId;
-
-mod app;
-mod feed;
-mod model;
-mod query;
-mod term;
-mod ui;
-
-use app::Monitor;
-use feed::{read_page, Feed, Source, Update, POLL_INTERVAL};
-use ui::Palette;
+#[derive(Clone, Debug)]
+enum Source {
+    Socket(PathBuf),
+    Command(Vec<String>),
+}
+impl Source {
+    fn definition(&self) -> EndpointSource {
+        match self {
+            Self::Socket(path) => EndpointSource::Socket { path: path.clone() },
+            Self::Command(argv) => EndpointSource::CommandTail { argv: argv.clone() },
+        }
+    }
+}
 
 const SNAPSHOT_SIZE: (u16, u16) = (120, 24);
-const SNAPSHOT_WAIT: Duration = Duration::from_secs(3);
+const MONITOR: &str = "org.moonbase.activity-monitor";
+const CONNECTOR: &str = "org.moonbase.activity-connector";
 const USAGE: &str = "usage: pmux-activity-monitor [--socket PATH] [--host LABEL=PATH]... [--host-cmd LABEL JSON_ARGV]...
   (with no --socket or --host, reads this machine's pmuxd, found the way pmux finds it)
                              [--theme auto|dark|light] [--no-pixels] [--no-motion]
@@ -81,7 +91,11 @@ fn parse_size(raw: &str) -> Result<(u16, u16)> {
     let parsed = raw
         .split_once('x')
         .and_then(|(w, h)| Some((w.parse::<u16>().ok()?, h.parse::<u16>().ok()?)))
-        .filter(|(w, h)| (1..=1000).contains(w) && (1..=1000).contains(h));
+        .filter(|(w, h)| {
+            (1..=500).contains(w)
+                && (1..=200).contains(h)
+                && u32::from(*w) * u32::from(*h) <= 60_000
+        });
     parsed.ok_or_else(|| anyhow::anyhow!("--size takes COLSxROWS, for example 80x24"))
 }
 
@@ -222,157 +236,209 @@ fn parse_seat(raw: Option<std::ffi::OsString>) -> Result<AgentId> {
     AgentId::new(raw).map_err(|_| anyhow::anyhow!("a valid seat identifier is required"))
 }
 
-fn palette(choice: ThemeChoice, background_dark: Option<bool>) -> Palette {
-    match (choice, background_dark) {
-        (ThemeChoice::Light, _) | (ThemeChoice::Auto, Some(false)) => Palette::LIGHT,
-        _ => Palette::DARK,
-    }
-}
-
-/// Hosts in display order: the local socket first, then each --host in the order given.
-fn sources(options: &Options) -> (Vec<String>, Vec<Source>) {
-    let mut labels = Vec::new();
-    let mut sources = Vec::new();
-    if let Some(socket) = &options.socket {
-        labels.push(local_label().to_owned());
-        sources.push(Source::Socket(socket.clone()));
-    }
-    for (label, source) in &options.hosts {
-        labels.push(label.clone());
-        sources.push(source.clone());
-    }
-    (labels, sources)
-}
-
-/// Waits until every host has caught up or failed, then renders one frame as text.
-fn snapshot(options: &Options) -> Result<String> {
-    let (labels, sources) = sources(options);
-    let count = labels.len();
-    let mut monitor = Monitor::new(
-        labels,
-        palette(options.theme, None),
-        Some(Feed::start(sources)),
-    );
-    let mut settled = vec![false; count];
-    let mut reachable = vec![false; count];
-    let deadline = Instant::now() + SNAPSHOT_WAIT;
-    while settled.iter().any(|done| !done) && Instant::now() < deadline {
-        let Some(feed) = monitor.feed.as_ref() else {
-            break;
-        };
-        let Ok(update) = feed.updates.recv_timeout(Duration::from_millis(50)) else {
-            continue;
-        };
-        let host = update.host;
-        match &update.update {
-            Update::Page(page) => {
-                reachable[host] = true;
-                settled[host] |= !page.has_more;
-            }
-            Update::Disabled | Update::Unsupported => {
-                reachable[host] = true;
-                settled[host] = true;
-            }
-            Update::Disconnected => settled[host] = true,
-        }
-        let wall = app::now_ms();
-        let target = &mut monitor.hosts[host];
-        match update.update {
-            Update::Page(page) => target.apply(page, 0),
-            Update::Disconnected => target.disconnect(wall),
-            Update::Disabled => target.link = model::Link::Disabled,
-            Update::Unsupported => target.link = model::Link::Unsupported,
-        }
-    }
-    // Stop the readers before rendering so the frame shows a fixed state.
-    monitor.feed = None;
-    if !reachable.iter().any(|ok| *ok) {
-        bail!("activity feed unavailable");
-    }
-    monitor.ui.motion = false;
-    let (width, height) = options.size.unwrap_or(SNAPSHOT_SIZE);
-    let (grid, clusters) = monitor.frame(width, height, 0);
-    Ok(grid.display_text(&clusters))
-}
-
-fn main() -> Result<()> {
-    let Some(options) = options_from(env::args_os().skip(1))? else {
-        return Ok(());
-    };
-    match &options.mode {
-        Mode::Live => {
-            let probe = term::probe(options.pixels);
-            let (labels, sources) = sources(&options);
-            let mut monitor = Monitor::new(
-                labels,
-                palette(options.theme, probe.background_dark),
-                Some(Feed::start(sources)),
+fn query(client: &mut Client, contribution: &str, mut arguments: Value) -> Result<Value> {
+    arguments["host"] = json!("local");
+    match client.request(Request::Invoke {
+        id: "org.moonbase.activity-connector".into(),
+        contribution: contribution.into(),
+        arguments: arguments.to_string(),
+        min_interval_ms: 250,
+    })? {
+        Reply::Tool {
+            json,
+            is_error: false,
+        } => Ok(serde_json::from_str(&json)?),
+        Reply::Tool {
+            json,
+            is_error: true,
+        } => {
+            let value: Value = serde_json::from_str(&json)?;
+            bail!(
+                "{}",
+                value
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("activity query failed")
             );
-            monitor.ui.motion = options.motion;
-            term::run(monitor, probe)?;
         }
-        Mode::Snapshot => io::stdout().write_all(snapshot(&options)?.as_bytes())?,
-        Mode::Json => {
-            let socket = options.socket.as_deref().unwrap_or_else(|| unreachable!());
-            let page = feed::read_page(socket, None)
-                .map_err(|_| anyhow::anyhow!("activity feed unavailable"))?;
-            serde_json::to_writer_pretty(io::stdout().lock(), &page)?;
-            println!();
+        Reply::Retry { .. } => bail!("activity feed changed; retry"),
+        _ => bail!("unexpected activity query reply"),
+    }
+}
+
+fn require_enabled(client: &mut Client, id: &str) -> Result<()> {
+    let Reply::List { installed, states } = client.request(Request::List)? else {
+        bail!("unexpected plug-in status");
+    };
+    if states.iter().any(|state| state.id == id && state.enabled) {
+        return Ok(());
+    }
+    let installed = installed.iter().any(|package| package.id == id);
+    let state = if installed {
+        "installed but not enabled"
+    } else {
+        "not installed"
+    };
+    let catalog = if !installed {
+        let Reply::Catalog { packages } = client.request(Request::Discover { refresh: false })?
+        else {
+            bail!("unexpected plug-in catalog");
+        };
+        if packages.iter().any(|package| package.id == id) {
+            ""
+        } else {
+            "\nThis daemon has no trusted package for it. Use a matched release, or prepare a verified PRISMATTYC_PLUGIN_BUNDLE_DIR and rebuild the source binaries first."
         }
-        Mode::Seats => {
-            let socket = options.socket.as_deref().unwrap_or_else(|| unreachable!());
-            let observed = query::seats(socket)?;
-            serde_json::to_writer_pretty(io::stdout().lock(), &observed)?;
-            println!();
+    } else {
+        ""
+    };
+    let install = if installed {
+        String::new()
+    } else {
+        format!("\nOn this daemon, run: pmux plugin install {id}")
+    };
+    bail!("Plug-in {id} is {state}.{catalog}{install}\nApprove local read access: pmux plugin enable {id} --allow activity.read:local\nUse the same --socket target if one was supplied, or manage the package in Settings > Plug-ins. Activity collection does not enable plug-in access.");
+}
+
+fn tail(mut client: Client, socket: &std::path::Path, seat: Option<&AgentId>) -> Result<()> {
+    let stopped = Arc::new(AtomicBool::new(false));
+    let signal = stopped.clone();
+    ctrlc::set_handler(move || signal.store(true, Ordering::Release))?;
+    let mut cursor = None::<String>;
+    let mut last = Value::Null;
+    let mut disconnected = false;
+    let mut output = io::stdout().lock();
+    while !stopped.load(Ordering::Acquire) {
+        let response = query(&mut client, "poll", json!({"cursor":cursor,"seat":seat}));
+        let message = match response {
+            Ok(result) => {
+                let page = &result["page"];
+                let changed = last != page["cursor"] || !page["reset"].is_null() || disconnected;
+                cursor = result["next_cursor"].as_str().map(str::to_owned);
+                last = page["cursor"].clone();
+                disconnected = false;
+                changed.then(|| json!({"type":"activity","seat_filter":seat,"page":page}))
+            }
+            Err(_) => {
+                if let Ok(reconnected) = Client::connect(socket) {
+                    client = reconnected;
+                }
+                if disconnected {
+                    None
+                } else {
+                    disconnected = true;
+                    Some(json!({"type":"disconnected","retrying":true,"cursor":last}))
+                }
+            }
+        };
+        if let Some(message) = message {
+            if let Err(error) = serde_json::to_writer(&mut output, &message)
+                .map_err(io::Error::other)
+                .and_then(|()| output.write_all(b"\n"))
+                .and_then(|()| output.flush())
+            {
+                if error.kind() == io::ErrorKind::BrokenPipe || stopped.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                return Err(error.into());
+            }
         }
-        Mode::Recent(seat) => {
-            let socket = options.socket.as_deref().unwrap_or_else(|| unreachable!());
-            let recent = query::recent(socket, seat)?;
-            serde_json::to_writer_pretty(io::stdout().lock(), &recent)?;
-            println!();
-        }
-        Mode::Tail(seat) => {
-            let socket = options.socket.as_deref().unwrap_or_else(|| unreachable!());
-            query::tail(socket, seat.as_ref())?;
+        for _ in 0..5 {
+            if stopped.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
     Ok(())
 }
 
+fn main() -> Result<()> {
+    if prismattyc_mux::plugins::print_bundled_identity()? {
+        return Ok(());
+    }
+    let Some(options) = options_from(env::args_os().skip(1))? else {
+        return Ok(());
+    };
+    let socket = options
+        .socket
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(local_socket)?;
+    let mut client = Client::connect(&socket)?;
+    require_enabled(
+        &mut client,
+        if matches!(options.mode, Mode::Live | Mode::Snapshot) {
+            MONITOR
+        } else {
+            CONNECTOR
+        },
+    )?;
+    match &options.mode {
+        Mode::Live | Mode::Snapshot => {
+            let mut args = vec!["run".into(), "org.moonbase.activity-monitor".into()];
+            if options.socket.is_some() {
+                args.extend(["--endpoint".into(), format!("local={}", local_label())]);
+            }
+            if !options.hosts.is_empty() {
+                let Reply::Endpoints { endpoints } = client.request(Request::Endpoints)? else {
+                    bail!("unexpected endpoint list");
+                };
+                for (label, source) in &options.hosts {
+                    ensure!(endpoints.iter().any(|endpoint| endpoint.label == *label && endpoint.source == source.definition()),
+                        "host {label} is not registered with this transport; use pmux plugin endpoint add, then approve --allow activity.read:{label} for org.moonbase.activity-monitor");
+                    args.extend(["--endpoint".into(), label.clone()]);
+                }
+            }
+            drop(client);
+            args.extend([
+                "--theme".into(),
+                match options.theme {
+                    ThemeChoice::Auto => "auto",
+                    ThemeChoice::Dark => "dark",
+                    ThemeChoice::Light => "light",
+                }
+                .into(),
+            ]);
+            if !options.pixels {
+                args.push("--no-pixels".into());
+            }
+            if !options.motion {
+                args.push("--no-motion".into());
+            }
+            if matches!(options.mode, Mode::Snapshot) {
+                let (columns, rows) = options.size.unwrap_or(SNAPSHOT_SIZE);
+                args.extend([
+                    "--snapshot".into(),
+                    "--cols".into(),
+                    columns.to_string(),
+                    "--rows".into(),
+                    rows.to_string(),
+                ]);
+            }
+            prismattyc_mux::plugins::run_cli(&socket, args)
+        }
+        Mode::Tail(seat) => tail(client, &socket, seat.as_ref()),
+        mode => {
+            let mut result = match mode {
+                Mode::Json => query(&mut client, "poll", json!({}))?["page"].clone(),
+                Mode::Seats => query(&mut client, "seats", json!({}))?,
+                Mode::Recent(seat) => query(&mut client, "recent", json!({"seat":seat}))?,
+                _ => unreachable!(),
+            };
+            if let Some(result) = result.as_object_mut() {
+                result.remove("host");
+            }
+            serde_json::to_writer_pretty(io::stdout().lock(), &result)?;
+            println!();
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prismattyc_mux::activity::{ActivityPage, ActivityRecord};
-    use serde_json::json;
-
-    pub(super) fn record(seat: &str, sequence: u64, kind: &str) -> Result<ActivityRecord> {
-        Ok(serde_json::from_value(json!({
-            "sequence": sequence,
-            "received_at_ms": 1000,
-            "event": {
-                "schema_version": 1,
-                "seat": seat,
-                "run_id": "run-1",
-                "event_id": format!("event-{sequence}"),
-                "source": "runtime",
-                "kind": kind
-            }
-        }))?)
-    }
-
-    pub(super) fn page(records: Vec<ActivityRecord>, reset: Option<&str>) -> Result<ActivityPage> {
-        let sequence = records.last().map_or(0, |record| record.sequence);
-        Ok(serde_json::from_value(json!({
-            "epoch": "epoch-a",
-            "oldest_sequence": 1,
-            "current_sequence": sequence,
-            "records": records,
-            "cursor": {"epoch": "epoch-a", "sequence": sequence},
-            "has_more": false,
-            "reset": reset
-        }))?)
-    }
-
     const LOCAL: &str = "/run/test/pmux.sock";
 
     fn parse(args: &[&str]) -> Result<Options> {
@@ -427,16 +493,17 @@ mod tests {
             "--host",
             "lab=/tmp/b.sock",
         ])?;
-        let (labels, sources) = sources(&options);
-        assert_eq!(labels, vec![local_label(), "remote", "lab"]);
-        assert!(
-            matches!(&sources[0], Source::Socket(path) if path == std::path::Path::new("/tmp/a.sock"))
+        assert_eq!(
+            options.socket.as_deref(),
+            Some(std::path::Path::new("/tmp/a.sock"))
         );
+        assert_eq!(options.hosts[0].0, "remote");
         assert!(
-            matches!(&sources[1], Source::Command(argv) if argv == &["ssh", "windows-host", "pmux", "activity", "tail"])
+            matches!(&options.hosts[0].1, Source::Command(argv) if argv == &["ssh", "windows-host", "pmux", "activity", "tail"])
         );
+        assert_eq!(options.hosts[1].0, "lab");
         assert!(
-            matches!(&sources[2], Source::Socket(path) if path == std::path::Path::new("/tmp/b.sock"))
+            matches!(&options.hosts[1].1, Source::Socket(path) if path == std::path::Path::new("/tmp/b.sock"))
         );
         Ok(())
     }
@@ -596,56 +663,5 @@ mod tests {
             "linux"
         };
         assert_eq!(local_label(), expected);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_snapshot_waits_for_each_host_and_renders_its_seats() -> Result<()> {
-        let line = json!({
-            "type": "activity", "seat_filter": null,
-            "page": page(vec![record("worker-a", 1, "command_started")?], None)?
-        });
-        let argv =
-            json!(["/bin/sh", "-c", format!("printf '%s\\n' '{line}'; sleep 5")]).to_string();
-        let options = parse(&[
-            "--host-cmd",
-            "remote",
-            &argv,
-            "--snapshot",
-            "--size",
-            "80x10",
-        ])?;
-        let started = Instant::now();
-        let text = snapshot(&options)?;
-        // A caught-up host ends the wait before the snapshot deadline, and stopping the
-        // command does not wait for its sleeping child.
-        assert!(
-            started.elapsed() < SNAPSHOT_WAIT,
-            "a caught-up host ends the wait"
-        );
-        assert!(text.contains("remote  connected"), "{text}");
-        assert!(
-            text.contains("worker-a") && text.contains("command_started"),
-            "{text}"
-        );
-        assert_eq!(text.lines().count(), 10);
-        Ok(())
-    }
-
-    #[test]
-    fn theme_follows_the_terminal_background_unless_chosen() {
-        assert_eq!(palette(ThemeChoice::Auto, Some(false)), Palette::LIGHT);
-        assert_eq!(palette(ThemeChoice::Auto, Some(true)), Palette::DARK);
-        assert_eq!(palette(ThemeChoice::Auto, None), Palette::DARK);
-        assert_eq!(palette(ThemeChoice::Dark, Some(false)), Palette::DARK);
-        assert_eq!(palette(ThemeChoice::Light, Some(true)), Palette::LIGHT);
-    }
-
-    #[test]
-    fn a_snapshot_of_an_unreachable_feed_fails() -> Result<()> {
-        let options = parse(&["--socket", "/nonexistent/feed.sock", "--snapshot"])?;
-        let error = snapshot(&options).err().map(|error| error.to_string());
-        assert_eq!(error.as_deref(), Some("activity feed unavailable"));
-        Ok(())
     }
 }

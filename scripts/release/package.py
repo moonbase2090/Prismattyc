@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+from plugin_bundle_provenance import verify_binaries
 from release_version import parse_release_version, reports_release_version
 
 BINARIES = ('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host', 'pmux-activity-monitor')
@@ -53,10 +54,11 @@ for name in BINARIES:
 for name in (*BINARIES, 'pmux-pane-write'):
     if not (a.man_dir / f'{name}.1').is_file():
         p.error(f'missing manual: {name}.1')
+plugin_provenance = verify_binaries(a.bin_dir)
 a.out.mkdir(parents=True, exist_ok=False)
 shutil.copy2(repo / 'LICENSE', a.out / 'MIT.txt')
 shutil.copy2(repo / 'NOTICE.txt', a.out / 'NOTICE.txt')
-manifest = {'repository': 'moonbase2090/Prismattyc', 'version': a.version, 'target': a.target, 'assets': []}
+manifest = {'repository': 'moonbase2090/Prismattyc', 'version': a.version, 'target': a.target, 'assets': [], 'plugin_bundle': plugin_provenance}
 for name in BINARIES:
     target = a.out / f'prismattyc-v{a.version}-{a.target}-{name}'
     shutil.copy2(a.bin_dir / name, target)
@@ -79,6 +81,7 @@ with tempfile.TemporaryDirectory() as tmp:
         shutil.copy2(a.man_dir / f'{name}.1', root / 'share/man' / f'{name}.1')
     shutil.copy2(repo / 'scripts/release/install.sh', root / 'install.sh')
     shutil.copy2(repo / 'assets/brand/prismattyc-icon-tile.svg', root / 'share/prismattyc.svg')
+    (root / 'share/plugin-bundle.json').write_text(json.dumps(plugin_provenance, indent=2) + '\n')
     (root / 'VERSION').write_text(a.version + '\n')
     (root / 'INSTALL.txt').write_text(
         f'Prismattyc for Linux {architecture} (glibc 2.28 or newer).\n'

@@ -19,6 +19,7 @@ pub(super) enum Section {
     Colors,
     Remote,
     Mux,
+    Plugins,
     Keybindings,
     Advanced,
 }
@@ -35,6 +36,7 @@ impl Section {
         Self::Colors,
         Self::Remote,
         Self::Mux,
+        Self::Plugins,
         Self::Keybindings,
         Self::Advanced,
     ];
@@ -51,6 +53,7 @@ impl Section {
             Self::Colors => "Theme colors",
             Self::Remote => "Remote destinations",
             Self::Mux => "Multiplexer",
+            Self::Plugins => "Plug-ins",
             Self::Keybindings => "Keybindings",
             Self::Advanced => "Advanced",
         }
@@ -172,7 +175,9 @@ fn timing(key: &str) -> &'static str {
         "mux.allow_mixed_case_session_names" => "Next session name",
         "mux.space_open_runs_commands" => "Next Space open",
         "mux.remote_size" => "Next daemon start; no automatic restart",
-        "mux.experimental_activity" => "Live: pmuxd applies it within a second; no restart",
+        "mux.experimental_activity" => {
+            "Live, no restart; approve monitor and query access in Plug-ins"
+        }
         "mux.shell" => "Next shell selection",
         "window_opacity" | "chrome_opacity" => {
             "Live with alpha support; opaque non-macOS windows may need restart"

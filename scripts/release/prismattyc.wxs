@@ -128,6 +128,10 @@
     </ComponentGroup>
 
     <ComponentGroup Id="Docs" Directory="INSTALLFOLDER">
+      <Component Id="PluginBundleProvenance" Guid="30fb21a5-ff91-5f40-bf29-7501bdf26ef2">
+        <File Source="$(var.Payload)\plugin-bundle.json" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="plugin-bundle" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
       <Component Id="Readme" Guid="46d55b82-6be3-5ef6-a8dd-7a27a0f4bd2a">
         <File Source="$(var.Payload)\README.txt" />
         <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="readme" Type="integer" Value="1" KeyPath="yes" />

@@ -117,6 +117,24 @@ notarization before replacing `Prismattyc.app`. It keeps the previous app for
 rollback. Releases from v0.2.21 onward can be installed this way.
 `prismattyc update` runs the same installer.
 
+Linux and Windows packages also carry the separate thin
+`pmux-activity-monitor` frontend. Preserve the six-member core transaction
+for older updaters. After the core update finishes, a second process runs
+`pmux update --repair-monitor-launcher` for the exact installed tag.
+An unreceipted old launcher requires `--from-monitor-version VERSION` and
+must match that immutable official asset. Core rollback leaves the separate
+launcher and its repair history intact. See
+[launcher repair](update-and-restart.md#replace-an-older-activity-monitor-launcher).
+
+Before packaging, prepare the reviewed plug-in bundle once and share those
+exact target-neutral archives across native builds. All five physical
+consumers must report the same `--plugin-bundle` identity. Packaging verifies
+the core revision, catalog, pin, build receipt, and package digests, and
+includes `plugin-bundle.json`. A source change to an existing plug-in version
+requires a plug-in version bump. A core-only release reuses unchanged guest
+bytes and their original build receipt. First publication requires a reviewed
+official bundle pin. A private candidate does not authorize publication.
+
 After publication, check the complete asset list and the combined checksums.
 On a disposable Linux installation, run `pmux update --check`, install the
 release, test a coordinated restart, and verify rollback. On macOS, run

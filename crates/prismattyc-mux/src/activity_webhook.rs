@@ -26,6 +26,7 @@ const MAX_QUEUE: usize = 64;
 const MAX_ATTEMPTS: u8 = 6;
 const MAX_HOOKED_SEATS: usize = 512;
 const MAX_HOOKED_RUNS_PER_SEAT: usize = 16;
+const MAX_HOOKED_PROCESS_IDS_PER_RUN: usize = 32;
 const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
@@ -455,12 +456,18 @@ impl WebhookOwnership {
                     }
                     runs.insert(event.run_id.clone());
                     if !event.process_ids.is_empty() {
-                        self.hooked_processes
+                        let processes = self
+                            .hooked_processes
                             .entry(seat.to_owned())
                             .or_default()
                             .entry(event.run_id.clone())
-                            .or_default()
-                            .extend(event.process_ids.iter().copied());
+                            .or_default();
+                        for pid in &event.process_ids {
+                            if processes.len() == MAX_HOOKED_PROCESS_IDS_PER_RUN {
+                                break;
+                            }
+                            processes.insert(*pid);
+                        }
                     }
                     if self.hooked_runs.len() > MAX_HOOKED_SEATS {
                         if let Some(evict) = self
@@ -1225,6 +1232,17 @@ mod tests {
             "session-7-process-none-successor",
             vec![u32::MAX - 1]
         )));
+
+        let mut bounded = WebhookOwnership::default();
+        assert!(bounded.observe(&event(
+            ActivitySource::Hooks,
+            "long-run",
+            (1..=100).collect()
+        )));
+        assert_eq!(
+            bounded.hooked_processes["worker-a"]["long-run"].len(),
+            MAX_HOOKED_PROCESS_IDS_PER_RUN
+        );
     }
 
     #[test]

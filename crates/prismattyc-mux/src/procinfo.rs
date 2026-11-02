@@ -1722,15 +1722,15 @@ mod windows {
                         break;
                     }
                 }
-                pub(super) fn parent_pid(pid: u32) -> Option<u32> {
-                    process_tree()?
-                        .into_iter()
-                        .find_map(|(child, parent)| (child == pid).then_some(parent))
-                }
             }
             CloseHandle(snapshot);
             (!result.is_empty()).then_some(result)
         }
+    }
+    pub(super) fn parent_pid(pid: u32) -> Option<u32> {
+        process_tree()?
+            .into_iter()
+            .find_map(|(child, parent)| (child == pid).then_some(parent))
     }
 
     /// One process-list refresh. `find_server_pids` used to refresh once per pid.

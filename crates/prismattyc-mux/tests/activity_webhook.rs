@@ -67,7 +67,7 @@ fn start(config: String) -> Daemon {
     panic!("pmuxd did not listen");
 }
 
-fn receive_request(listener: TcpListener) -> Vec<u8> {
+fn receive_request(listener: &TcpListener) -> Vec<u8> {
     listener
         .set_nonblocking(true)
         .expect("set listener nonblocking");
@@ -122,7 +122,7 @@ fn control_request(socket: &std::path::Path, request: ControlRequest) -> Control
 fn configured_daemon_posts_activity_with_verifiable_signature() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    let receiver = std::thread::spawn(move || receive_request(listener));
+    let receiver = std::thread::spawn(move || receive_request(&listener));
     let dir = std::env::temp_dir().join(format!("pmux-webhook-key-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let secret_path = dir.join("key");
@@ -161,6 +161,85 @@ fn configured_daemon_posts_activity_with_verifiable_signature() {
     assert!(request.contains("\"pane_id\":null"));
     assert!(request.contains("\"space\":null"));
     assert!(!request.contains("01234567890123456789012345678901"));
+    drop(daemon);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn webhook_keeps_hook_failure_ahead_of_runtime_until_the_run_ends() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let dir = std::env::temp_dir().join(format!("pmux-webhook-precedence-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let secret_path = dir.join("key");
+    std::fs::write(&secret_path, b"01234567890123456789012345678901").unwrap();
+    let daemon = start(format!(
+        "[mux]\nactivity_webhook_url = \"http://{address}/notify\"\nactivity_webhook_secret_file = {:?}\n",
+        secret_path.display().to_string()
+    ));
+    std::thread::sleep(Duration::from_millis(600));
+
+    let publish = |request_id, source, run_id: &str, event_id: &str, kind| {
+        activity::exchange(
+            &daemon.socket,
+            ControlRequest::PublishActivity {
+                version: PROTOCOL_VERSION,
+                request_id,
+                event: ActivityInput {
+                    schema_version: 1,
+                    seat: AgentId::new("worker-a").unwrap(),
+                    run_id: run_id.into(),
+                    event_id: event_id.into(),
+                    source,
+                    kind,
+                },
+            },
+        )
+        .unwrap();
+    };
+
+    publish(
+        21,
+        ActivitySource::Hooks,
+        "harness-1",
+        "failed-1",
+        ActivityKind::CommandFailed,
+    );
+    let failed = String::from_utf8_lossy(&receive_request(&listener)).to_string();
+    assert!(failed.contains("\"state\":\"failed\""));
+
+    publish(
+        22,
+        ActivitySource::Runtime,
+        "pane-1",
+        "working-1",
+        ActivityKind::Working,
+    );
+    std::thread::sleep(Duration::from_millis(1_000));
+    assert!(
+        listener.accept().is_err(),
+        "runtime state overwrote active hook status"
+    );
+
+    publish(
+        23,
+        ActivitySource::Hooks,
+        "harness-1",
+        "finished-1",
+        ActivityKind::SessionFinished,
+    );
+    let finished = String::from_utf8_lossy(&receive_request(&listener)).to_string();
+    assert!(finished.contains("\"state\":\"stopped\""));
+    publish(
+        24,
+        ActivitySource::Runtime,
+        "pane-1",
+        "waiting-1",
+        ActivityKind::Waiting,
+    );
+    let waiting = String::from_utf8_lossy(&receive_request(&listener)).to_string();
+    assert!(waiting.contains("\"state\":\"waiting\""));
+
     drop(daemon);
     std::fs::remove_dir_all(dir).unwrap();
 }

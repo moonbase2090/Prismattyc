@@ -7,7 +7,7 @@ use prismattyc_core::activity::{ActivityCursor, ActivityInput, ActivityKind, Act
 use prismattyc_core::AgentId;
 use serde::Serialize;
 use sha2::Sha256;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
@@ -24,6 +24,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const DEBOUNCE: Duration = Duration::from_millis(750);
 const MAX_QUEUE: usize = 64;
 const MAX_ATTEMPTS: u8 = 6;
+const MAX_HOOKED_SEATS: usize = 512;
+const MAX_HOOKED_RUNS_PER_SEAT: usize = 16;
 const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
@@ -250,6 +252,7 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
     let mut active = false;
     let mut pending = Debouncer::default();
     let mut queue = VecDeque::<Delivery>::new();
+    let mut hooked_runs = HashMap::<String, HashSet<String>>::new();
     let mut session_context = HashMap::<String, SessionContext>::new();
     let mut next_snapshot = Instant::now();
     let mut request_id = 1u64;
@@ -260,6 +263,7 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
         let Some(config) = load_config(config_path) else {
             pending.by_seat.clear();
             queue.clear();
+            hooked_runs.clear();
             cursor = None;
             active = false;
             continue;
@@ -300,7 +304,19 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
         if let Ok(ControlResponseData::Activity { page }) =
             crate::activity::exchange(socket, request)
         {
+            if page.reset.is_some() {
+                hooked_runs.clear();
+            }
             for record in &page.records {
+                if !webhook_owns_record(
+                    &mut hooked_runs,
+                    &record.event.source,
+                    record.event.seat.as_str(),
+                    &record.event.run_id,
+                    record.event.kind,
+                ) {
+                    continue;
+                }
                 if let Some((state, reason)) = state_for(record.event.kind) {
                     let timestamp = record.received_at_ms.to_string();
                     let context = session_context.get(record.event.seat.as_str());
@@ -338,6 +354,47 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
                 }
             }
         }
+    }
+}
+
+fn webhook_owns_record(
+    hooked_runs: &mut HashMap<String, HashSet<String>>,
+    source: &ActivitySource,
+    seat: &str,
+    run_id: &str,
+    kind: ActivityKind,
+) -> bool {
+    match source {
+        ActivitySource::Hooks => {
+            let runs = hooked_runs.entry(seat.to_owned()).or_default();
+            if matches!(kind, ActivityKind::SessionFinished | ActivityKind::Stopped) {
+                runs.remove(run_id);
+                if runs.is_empty() {
+                    hooked_runs.remove(seat);
+                }
+            } else {
+                if runs.len() >= MAX_HOOKED_RUNS_PER_SEAT && !runs.contains(run_id) {
+                    if let Some(evict) = runs.iter().next().cloned() {
+                        runs.remove(&evict);
+                    }
+                }
+                runs.insert(run_id.to_owned());
+                if hooked_runs.len() > MAX_HOOKED_SEATS {
+                    if let Some(evict) =
+                        hooked_runs.keys().find(|key| key.as_str() != seat).cloned()
+                    {
+                        hooked_runs.remove(&evict);
+                    }
+                }
+            }
+            true
+        }
+        ActivitySource::Runtime if kind == ActivityKind::Stopped => {
+            hooked_runs.remove(seat);
+            true
+        }
+        ActivitySource::Runtime => !hooked_runs.contains_key(seat),
+        ActivitySource::Notify => true,
     }
 }
 
@@ -676,6 +733,61 @@ mod tests {
             debounce.take_ready(now + Duration::from_millis(1_300)),
             vec![b"latest".to_vec()]
         );
+    }
+
+    #[test]
+    fn hook_run_owns_webhook_status_until_it_finishes_or_runtime_stops() {
+        let mut hooked_runs = HashMap::new();
+        assert!(webhook_owns_record(
+            &mut hooked_runs,
+            &ActivitySource::Hooks,
+            "worker-a",
+            "run-a",
+            ActivityKind::CommandFailed,
+        ));
+        assert!(!webhook_owns_record(
+            &mut hooked_runs,
+            &ActivitySource::Runtime,
+            "worker-a",
+            "pane-run",
+            ActivityKind::Working,
+        ));
+        assert!(webhook_owns_record(
+            &mut hooked_runs,
+            &ActivitySource::Hooks,
+            "worker-a",
+            "run-a",
+            ActivityKind::SessionFinished,
+        ));
+        assert!(webhook_owns_record(
+            &mut hooked_runs,
+            &ActivitySource::Runtime,
+            "worker-a",
+            "pane-run",
+            ActivityKind::Waiting,
+        ));
+
+        assert!(webhook_owns_record(
+            &mut hooked_runs,
+            &ActivitySource::Hooks,
+            "worker-a",
+            "run-b",
+            ActivityKind::TurnStarted,
+        ));
+        assert!(webhook_owns_record(
+            &mut hooked_runs,
+            &ActivitySource::Runtime,
+            "worker-a",
+            "pane-run",
+            ActivityKind::Stopped,
+        ));
+        assert!(webhook_owns_record(
+            &mut hooked_runs,
+            &ActivitySource::Runtime,
+            "worker-a",
+            "pane-run",
+            ActivityKind::Waiting,
+        ));
     }
 
     #[test]

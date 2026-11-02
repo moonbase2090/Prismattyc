@@ -275,6 +275,11 @@ The bounded payload has `seat`, `state`, `reason`, `pane_id`, `space`, and
 included. Pane and Space are `null` when the activity record does not identify
 them.
 
+Hook events take precedence in webhook status while their run is active, so
+pane-state inference does not replace a specific tool failure or stop event.
+A hook `SessionEnd` or pane `stopped` transition releases that precedence and
+lets runtime state report a later hookless run.
+
 Python verification example:
 
 ```python

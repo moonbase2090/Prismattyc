@@ -179,11 +179,12 @@ impl Store {
             "catalog/package identity mismatch"
         );
         super::worker::validate(executable, package.component, package.schemas)?;
-        private_directory(&self.root)?;
+        private_directory(&self.root).context("secure plug-in store")?;
         let lock = crate::private_fs::open(
             &self.root.join("store.lock"),
             OpenOptions::new().read(true).write(true).create(true),
-        )?;
+        )
+        .context("open plug-in store lock")?;
         crate::platform::try_lock_exclusive(&lock)
             .context("plug-in store is busy; retry installation")?;
         self.check_catalog(std::slice::from_ref(&entry.entry))?;
@@ -193,22 +194,25 @@ impl Store {
             digest: entry.entry.sha256.clone(),
         };
         let objects = self.root.join("objects");
-        private_directory(&objects)?;
+        private_directory(&objects).context("secure plug-in objects directory")?;
         let destination = objects.join(&selected.digest);
         if destination.exists() {
             self.load(&selected)?;
             return Ok(selected);
         }
         let staging = objects.join(format!(".stage-{}", nonce()?));
-        private_directory(&staging)?;
+        private_directory(&staging).context("secure plug-in staging directory")?;
         let result = (|| -> Result<()> {
             let mut file = crate::private_fs::open(
                 &staging.join("package.pmux-plugin"),
                 OpenOptions::new().write(true).create_new(true),
-            )?;
+            )
+            .context("create staged plug-in archive")?;
             use std::io::Write;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
+            file.write_all(&bytes)
+                .context("write staged plug-in archive")?;
+            file.sync_all().context("sync staged plug-in archive")?;
+            drop(file);
             let receipt = Receipt {
                 version: 1,
                 entry: entry.entry.clone(),
@@ -217,8 +221,9 @@ impl Store {
             crate::config::write_file_atomic(
                 &staging.join("receipt.json"),
                 &serde_json::to_string(&receipt)?,
-            )?;
-            fs::rename(&staging, &destination)?;
+            )
+            .context("write staged plug-in receipt")?;
+            fs::rename(&staging, &destination).context("publish staged plug-in package")?;
             // Once renamed, publication succeeded even if directory sync is not
             // supported. Never report a failed operation after committing it.
             #[cfg(unix)]

@@ -67,12 +67,41 @@ jobs:
           import tempfile
           import socket
           import sys
+          import ctypes
+          from ctypes import wintypes
+          import json
+          import os
           sys.path.insert(0, str(Path("scripts").resolve()))
           spec = importlib.util.spec_from_file_location('plugin_proof', 'scripts/test-plugin-runtime.py')
           module = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(module)
           with tempfile.TemporaryDirectory(prefix='plugin-acl-preflight-') as directory:
               module.private_windows_directory(Path(directory))
+              staging = Path(directory) / 'staging'
+              destination = Path(directory) / 'published'
+              staging.mkdir()
+              (staging / 'package').write_bytes(b'package')
+              kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+              kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+              kernel.CreateFileW.restype = wintypes.HANDLE
+              kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+              kernel.CloseHandle.restype = wintypes.BOOL
+              handle = kernel.CreateFileW(str(staging / 'package'), 0x40000000, 7, None, 3, 0x80, None)
+              if handle == ctypes.c_void_p(-1).value:
+                  raise ctypes.WinError(ctypes.get_last_error())
+              try:
+                  try:
+                      os.rename(staging, destination)
+                  except OSError as error:
+                      open_writer_error = error.winerror
+                  else:
+                      open_writer_error = 0
+                      os.rename(destination, staging)
+              finally:
+                  assert kernel.CloseHandle(handle)
+              os.rename(staging, destination)
+              assert (destination / 'package').read_bytes() == b'package'
+              print(json.dumps({'open_writer_rename_error': open_writer_error, 'closed_writer_publication': 'PASS', 'share_mode': 7}))
           stream = socket.socket(getattr(socket, 'AF_UNIX', 1), socket.SOCK_STREAM)
           stream.close()
           print('PASS native Windows fixture permissions, Winsock family, and cleanup')

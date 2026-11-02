@@ -302,8 +302,16 @@ impl App {
                 },
                 "present": present_timing_json(frame.present),
             });
+            let glyphs = host.font.glyph_cache_stats();
+            let glyph_cache = serde_json::json!({
+                "hits": glyphs.hits,
+                "misses": glyphs.misses,
+                "evictions": glyphs.evictions,
+                "entries": glyphs.entries,
+            });
             let mut status = serde_json::json!({
                 "window_id": format!("{id:?}"),
+                "glyph_cache": glyph_cache,
                 "focused": host.window_focused,
                 "occluded": host.window_occluded,
                 "pane_count": host.mux.pane_count(),

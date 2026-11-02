@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use fontdue::{Font, FontSettings};
 use prismattyc_core::splash::{
@@ -16,6 +17,7 @@ use prismattyc_render::CellRectOverlay;
 use ttf_parser::GlyphId;
 
 use crate::config::PaneTitlesMode;
+use crate::glyph_cache::{GlyphCacheStats, LruCache};
 #[cfg(test)]
 use crate::theme::default_theme;
 use crate::theme::Theme;
@@ -311,6 +313,15 @@ enum GlyphPaint {
     Empty,
 }
 
+/// Cell glyphs kept per `FontMetrics`. Enough for a screen of mixed CJK text
+/// plus the usual ASCII and symbols; each entry is one small bitmap.
+const GLYPH_CACHE_CAPACITY: usize = 4096;
+/// Shaped emoji clusters (flags, ZWJ sequences). Each holds an RGBA bitmap.
+const CLUSTER_CACHE_CAPACITY: usize = 256;
+
+/// Key for a fitted cell glyph: the character and the box it must fit.
+type GlyphKey = (char, i32, i32);
+
 /// Probe order from. A candidate is accepted only when its
 /// rasterized ink fits in one cell — existence is not enough.
 const CLOSE_GLYPH_CANDIDATES: [char; 4] = ['\u{F467}', '\u{2715}', '\u{00D7}', 'x'];
@@ -355,6 +366,11 @@ pub struct FontMetrics {
     /// Ghostty-style lazy system faces (CJK, etc.). Not bundled.
     cover_cache: RefCell<HashMap<char, Option<crate::system_fonts::CoveringFace>>>,
     fallback_fonts: RefCell<HashMap<(PathBuf, u32), Font>>,
+    /// Rasterized cell glyphs, so repainting an unchanged glyph skips fontdue,
+    /// the system-fallback lookup and color-emoji PNG decoding.
+    glyph_cache: RefCell<LruCache<GlyphKey, Rc<GlyphPaint>>>,
+    /// Shaped emoji clusters; `None` records a cluster no emoji font shapes.
+    cluster_cache: RefCell<LruCache<Box<str>, Option<Rc<ColorGlyph>>>>,
     pub px: f32,
     pub cell_w: usize,
     pub cell_h: usize,
@@ -396,6 +412,8 @@ impl FontMetrics {
             emoji_fonts: Vec::new(),
             cover_cache: RefCell::new(HashMap::new()),
             fallback_fonts: RefCell::new(HashMap::new()),
+            glyph_cache: RefCell::new(LruCache::new(GLYPH_CACHE_CAPACITY)),
+            cluster_cache: RefCell::new(LruCache::new(CLUSTER_CACHE_CAPACITY)),
             px,
             cell_w,
             cell_h,
@@ -504,6 +522,8 @@ impl FontMetrics {
             emoji_fonts,
             cover_cache: RefCell::new(HashMap::new()),
             fallback_fonts: RefCell::new(HashMap::new()),
+            glyph_cache: RefCell::new(LruCache::new(GLYPH_CACHE_CAPACITY)),
+            cluster_cache: RefCell::new(LruCache::new(CLUSTER_CACHE_CAPACITY)),
             px,
             cell_w,
             cell_h,
@@ -692,6 +712,42 @@ impl FontMetrics {
             last = self.paint_char_at(ch, px);
         }
         last
+    }
+
+    /// [`Self::paint_char_fitting`] through the glyph cache.
+    fn cached_glyph_fitting(&self, ch: char, max_w: i32, max_h: i32) -> Rc<GlyphPaint> {
+        let key = (ch, max_w, max_h);
+        if let Some(paint) = self.glyph_cache.borrow_mut().get(&key) {
+            return paint;
+        }
+        // Rasterize without holding the cache borrow.
+        let paint = Rc::new(self.paint_char_fitting(ch, max_w, max_h));
+        self.glyph_cache.borrow_mut().insert(key, Rc::clone(&paint));
+        paint
+    }
+
+    /// [`Self::paint_emoji_cluster`] through the cluster cache. Clusters that
+    /// never need emoji shaping skip the cache so they cannot crowd it out.
+    fn cached_emoji_cluster(&self, cluster: &str) -> Option<Rc<ColorGlyph>> {
+        if !cluster_needs_emoji_shape(cluster) {
+            return None;
+        }
+        if let Some(color) = self.cluster_cache.borrow_mut().get(cluster) {
+            return color;
+        }
+        let color = self.paint_emoji_cluster(cluster).map(Rc::new);
+        self.cluster_cache
+            .borrow_mut()
+            .insert(cluster.into(), color.clone());
+        color
+    }
+
+    /// Glyph and cluster cache counters for this font.
+    pub(crate) fn glyph_cache_stats(&self) -> GlyphCacheStats {
+        self.glyph_cache
+            .borrow()
+            .stats()
+            .add(self.cluster_cache.borrow().stats())
     }
 
     /// CBDT/CBLC PNG strikes (fontdue cannot outline these).
@@ -6381,7 +6437,7 @@ fn blit_cluster_in(
     clip_max_x: usize,
     pin_nw: bool,
 ) {
-    if let Some(g) = font.paint_emoji_cluster(cluster) {
+    if let Some(g) = font.cached_emoji_cluster(cluster) {
         // RI flag pairs are two width-1 scalars that occupy one width-2 cell.
         // Measuring only the first scalar clips the flag glyph in half.
         let wide = cluster_occupies_two_cells(cluster);
@@ -6452,12 +6508,12 @@ fn blit_glyph_in(
 
     // Scale + shift any outline that would clip the cell. Nerd title
     // spinners and Grok Working frames (⸬ / ⁙) otherwise lose ink.
-    let paint = font.paint_char_fitting(ch, cell_w, font.cell_h as i32);
-    match paint {
+    let paint = font.cached_glyph_fitting(ch, cell_w, font.cell_h as i32);
+    match &*paint {
         GlyphPaint::Empty => {}
         GlyphPaint::Coverage(g) => {
             let mut ox = cell_x as i32 + g.xmin;
-            let mut oy = cell_y as i32 + font.coverage_origin_y(&g);
+            let mut oy = cell_y as i32 + font.coverage_origin_y(g);
             if pin_nw {
                 // Ignore baseline / xmin so the letter sits in the cell corner.
                 ox = clip_x0;
@@ -16436,5 +16492,113 @@ mod pixel_contract_tests {
         blit_rgba(&mut edge, 2, &src[..4], 1, 1, 2, 0, 0, 0, 10, 10);
         blit_rgba(&mut edge, 2, &src[..4], 1, 1, 0, 2, 0, 0, 10, 10);
         assert_eq!(edge, [0; 4]);
+    }
+}
+
+#[cfg(test)]
+mod glyph_cache_tests {
+    use super::*;
+
+    fn paint_text(font: &FontMetrics, text: &str) -> Vec<u32> {
+        let cols = text.chars().count();
+        let stride = font.cell_w * cols;
+        let mut buffer = vec![0u32; stride * (font.cell_h + 2)];
+        for (col, ch) in text.chars().enumerate() {
+            blit_glyph_in(
+                &mut buffer,
+                stride,
+                font,
+                ch,
+                col * font.cell_w,
+                0,
+                [255, 255, 255],
+                0,
+                stride,
+                false,
+            );
+        }
+        buffer
+    }
+
+    #[test]
+    fn repainting_unchanged_glyphs_hits_the_cache_with_identical_pixels() {
+        let font = FontMetrics::load_baked(16.0).expect("bundled font");
+        let text = "Hello, cache!";
+        let first = paint_text(&font, text);
+        let after_first = font.glyph_cache_stats();
+        // The second l, c and e in the line already hit on the first pass.
+        assert_eq!(after_first.hits, 3, "{after_first:?}");
+        assert!(after_first.misses > 0);
+
+        let second = paint_text(&font, text);
+        let after_second = font.glyph_cache_stats();
+        assert_eq!(first, second, "a cached glyph must paint the same pixels");
+        assert_eq!(
+            after_second.misses, after_first.misses,
+            "a repaint must not rasterize again"
+        );
+        assert_eq!(
+            after_second.hits,
+            after_first.hits + text.chars().count() as u64
+        );
+    }
+
+    #[test]
+    fn cached_glyphs_match_a_fresh_rasterization() {
+        let font = FontMetrics::load_baked(16.0).expect("bundled font");
+        let text = "Mgy|@\u{2715}\u{25c9}";
+        let warm = paint_text(&font, text);
+        let cached = paint_text(&font, text);
+        let fresh = paint_text(&FontMetrics::load_baked(16.0).expect("bundled font"), text);
+        assert_eq!(warm, cached);
+        assert_eq!(cached, fresh);
+    }
+
+    #[test]
+    fn a_new_font_starts_with_an_empty_cache() {
+        let font = FontMetrics::load_baked(16.0).expect("bundled font");
+        paint_text(&font, "abc");
+        assert_eq!(font.glyph_cache_stats().entries, 3);
+        // Zoom, scale change and config reload build a new FontMetrics.
+        let zoomed = FontMetrics::load_baked(20.0).expect("bundled font");
+        assert_eq!(zoomed.glyph_cache_stats(), GlyphCacheStats::default());
+    }
+
+    #[test]
+    fn the_fit_box_is_part_of_the_key() {
+        let font = FontMetrics::load_baked(16.0).expect("bundled font");
+        let w = font.cell_w as i32;
+        let h = font.cell_h as i32;
+        let narrow = font.cached_glyph_fitting('M', w, h);
+        let wide = font.cached_glyph_fitting('M', w * 2, h);
+        assert!(!Rc::ptr_eq(&narrow, &wide));
+        assert!(Rc::ptr_eq(&narrow, &font.cached_glyph_fitting('M', w, h)));
+        assert_eq!(font.glyph_cache_stats().entries, 2);
+    }
+
+    #[test]
+    fn plain_clusters_skip_the_cluster_cache() {
+        let font = FontMetrics::load_baked(16.0).expect("bundled font");
+        assert!(font.cached_emoji_cluster("a").is_none());
+        assert!(font.cached_emoji_cluster("e\u{301}").is_none());
+        assert_eq!(
+            font.cluster_cache.borrow().stats(),
+            GlyphCacheStats::default()
+        );
+    }
+
+    #[test]
+    fn emoji_clusters_are_shaped_once() {
+        let font = FontMetrics::load_baked(16.0).expect("bundled font");
+        let flag = "\u{1F1FA}\u{1F1F8}";
+        let first = font.cached_emoji_cluster(flag);
+        let second = font.cached_emoji_cluster(flag);
+        let stats = font.cluster_cache.borrow().stats();
+        assert_eq!((stats.misses, stats.hits, stats.entries), (1, 1, 1));
+        match (first, second) {
+            (Some(a), Some(b)) => assert!(Rc::ptr_eq(&a, &b)),
+            (None, None) => {}
+            _ => panic!("a cached cluster must not change between lookups"),
+        }
     }
 }

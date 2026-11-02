@@ -21,6 +21,7 @@ mod daemon_startup;
 mod file_writer;
 mod frame_damage;
 mod git_info;
+mod glyph_cache;
 #[cfg(feature = "gpu")]
 mod gpu;
 mod graphite;

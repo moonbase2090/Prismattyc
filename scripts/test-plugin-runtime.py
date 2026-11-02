@@ -309,7 +309,7 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
         (scratch / "discovery-result.json").write_text(json.dumps({"status":"PASS", "checks":["zero events", "520-event retention gap", "fresh monitor", "live discovery", "session removal"]}, indent=2) + "\n")
         print("PASS session discovery without hooks or events; unchanged cursor; 520-event retention gap; fresh monitor views retain quiet seats; live periodic discovery and session removal; existing activity-only grants", flush=True)
 
-    def mcp_proof(arguments, activity_only):
+    def mcp_proof(arguments, activity_only, expected_seats=()):
         import queue
         import threading
         messages = queue.Queue(maxsize=16)
@@ -352,7 +352,9 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
                 assert json.loads(result["content"][0]["text"])["hosts"] == [{"label":"local","endpoint":"local"}]
                 result = request(4,"tools/call",{"name":"pmux_activity_seats","arguments":{}})
                 assert not result.get("isError", False), result
-                assert json.loads(result["content"][0]["text"])["retained_history_only"] is True
+                seats = json.loads(result["content"][0]["text"])
+                assert seats["retained_history_only"] is False, seats
+                assert [seat["seat"] for seat in seats["seats"]] == list(expected_seats), seats
                 result = request(5,"tools/call",{"name":"pmux_activity_poll","arguments":{}})
                 assert result["isError"] and json.loads(result["content"][0]["text"])["error"]["code"] == "rate_limited", result
             else:
@@ -510,7 +512,10 @@ else:
         result = subprocess.run([str(launcher),"--socket",str(endpoint),"--host",f"other-socket={endpoint}","--snapshot"],env=env,capture_output=True,text=True, encoding="utf-8",timeout=45)
         assert result.returncode == 0 and "other-socket" in result.stdout, (result.stdout,result.stderr)
         result = subprocess.run([str(launcher),"--socket",str(endpoint),"--seats"],env=env,capture_output=True,text=True, encoding="utf-8",timeout=45)
-        assert result.returncode == 0 and json.loads(result.stdout)["retained_history_only"] is True, result.stderr
+        assert result.returncode == 0, result.stderr
+        local_seats = json.loads(result.stdout)
+        assert local_seats["retained_history_only"] is False, local_seats
+        assert [seat["seat"] for seat in local_seats["seats"]] == ["fixture-seat"], local_seats
         arguments = [json.loads(line) for line in query_log.read_text().splitlines()]
         assert arguments and all(args == ["activity","poll","--limit","256","--host-label","remote-query"] or args == ["activity","poll","--limit","256","--host-label","remote-query","--cursor","abc1:256"] or args == ["activity","poll","--limit","256","--host-label","remote-query","--cursor","abc1:300"] for args in arguments), arguments
         cli("endpoint","remove","remote-tail")
@@ -649,8 +654,8 @@ else:
             monitor_frame_proof()
             reply = cli("invoke",connector,"seats")
             assert not reply["is_error"] and json.loads(reply["json"])["seats"][0]["seat"] == "fixture-seat"
-            mcp_proof(["--activity-only"],True)
-            mcp_proof(["--activity-only","--supervise"],True)
+            mcp_proof(["--activity-only"],True,["fixture-seat"])
+            mcp_proof(["--activity-only","--supervise"],True,["fixture-seat"])
             exports = connection.plugin("exports",allowlist=[connector])["response"]["reply"]["tools"]
             assert len(exports) == 4
             cli("disable",connector)

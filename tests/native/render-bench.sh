@@ -109,27 +109,29 @@ parse_metrics() {
   python3 - "$HOST_LOG" "$from" <<'PY'
 import collections, re, sys
 path, start = sys.argv[1], int(sys.argv[2])
-pat = re.compile(
-    r"prismattyc-host: render parse=(\d+)us damage=(\d+)us raster=(\d+)us "
-    r"present=(\d+)us cells_painted=(\d+) rows_scrolled_as_blit=(\d+) "
-    r"full_repaint_reason=(\S+)"
-)
+# Read each render_timer field by name. The host has added fields to this line
+# over time, so a fixed-order pattern stops matching without any error.
+prefix = "prismattyc-host: render "
+field = re.compile(r"(\w+)=(\S+)")
+wanted = ("parse", "damage", "raster", "present", "cells_painted",
+          "rows_scrolled_as_blit", "full_repaint_reason")
 rows = []
 with open(path, encoding="utf-8", errors="replace") as fh:
     for i, line in enumerate(fh, start=1):
-        if i <= start:
+        if i <= start or prefix not in line:
             continue
-        m = pat.search(line)
-        if not m:
+        values = dict(field.findall(line.split(prefix, 1)[1]))
+        if not all(key in values for key in wanted):
             continue
+        us = lambda key: int(values[key].removesuffix("us"))
         rows.append({
-            "parse_us": int(m.group(1)),
-            "damage_us": int(m.group(2)),
-            "raster_us": int(m.group(3)),
-            "present_us": int(m.group(4)),
-            "cells_painted": int(m.group(5)),
-            "rows_scrolled_as_blit": int(m.group(6)),
-            "full_repaint_reason": m.group(7),
+            "parse_us": us("parse"),
+            "damage_us": us("damage"),
+            "raster_us": us("raster"),
+            "present_us": us("present"),
+            "cells_painted": int(values["cells_painted"]),
+            "rows_scrolled_as_blit": int(values["rows_scrolled_as_blit"]),
+            "full_repaint_reason": values["full_repaint_reason"],
         })
 if not rows:
     print("frames=0")
@@ -137,10 +139,14 @@ if not rows:
 n = len(rows)
 cells = [r["cells_painted"] for r in rows]
 raster = [r["raster_us"] for r in rows]
+# Frame time: host work for one frame, from parse to present.
+frame = sorted(r["parse_us"] + r["damage_us"] + r["raster_us"] + r["present_us"] for r in rows)
+pct = lambda q: frame[min(n - 1, int(q * n))]
 full = collections.Counter(r["full_repaint_reason"] for r in rows).most_common(1)[0][0]
 print(
     "frames={} cells_max={} cells_mean={} blit_sum={} "
-    "raster_max={} raster_mean={} parse_us={} present_us={} full={}".format(
+    "raster_max={} raster_mean={} parse_us={} present_us={} "
+    "frame_p50_us={} frame_p99_us={} full={}".format(
         n,
         max(cells),
         sum(cells) // n,
@@ -149,6 +155,8 @@ print(
         sum(raster) // n,
         sum(r["parse_us"] for r in rows) // n,
         sum(r["present_us"] for r in rows) // n,
+        pct(0.50),
+        pct(0.99),
         full,
     )
 )

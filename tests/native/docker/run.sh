@@ -239,7 +239,7 @@ render_bench() {
   sleep 1
   # Foot is the wall-clock reference. notcurses-demo is experiment 8.
   # Ignore pacman failure: the script still records prismattyc metrics.
-  docker exec -u 0 "$cid" pacman -Sy --noconfirm --needed foot notcurses \
+  docker exec -u 0 "$cid" pacman --disable-sandbox -Sy --noconfirm --needed foot notcurses \
     >/tmp/pt246-pacman.log 2>&1 || true
   local ver profile host_bin
   ver="$(docker exec -u tester "$cid" prismattyc-host --version 2>/dev/null \

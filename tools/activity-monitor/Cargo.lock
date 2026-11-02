@@ -1394,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-plugin-api"
-version = "0.3.53"
+version = "0.3.54"
 dependencies = [
  "serde",
  "unicode-segmentation",
@@ -1405,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-plugin-runtime"
-version = "0.3.53"
+version = "0.3.54"
 dependencies = [
  "anyhow",
  "pmux-plugin-api",

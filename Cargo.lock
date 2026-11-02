@@ -3119,7 +3119,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "pmux-activity-connector-plugin"
-version = "0.3.53"
+version = "0.3.54"
 dependencies = [
  "anyhow",
  "pmux-plugin-api",
@@ -3130,7 +3130,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-activity-monitor-plugin"
-version = "0.3.53"
+version = "0.3.54"
 dependencies = [
  "anyhow",
  "lunatui-core",
@@ -3160,7 +3160,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-plugin-api"
-version = "0.3.53"
+version = "0.3.54"
 dependencies = [
  "prismattyc-core",
  "serde",
@@ -3173,7 +3173,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-plugin-fixture"
-version = "0.3.53"
+version = "0.3.54"
 dependencies = [
  "anyhow",
  "pmux-plugin-api",
@@ -3183,7 +3183,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-plugin-runtime"
-version = "0.3.53"
+version = "0.3.54"
 dependencies = [
  "anyhow",
  "pmux-plugin-api",

@@ -367,7 +367,11 @@ pub fn in_terminal_foreground(root: u32, pid: u32) -> Option<bool> {
 #[cfg(not(windows))]
 fn command_in_foreground_pgid(root: u32, tpgid: u32) -> Option<String> {
     let pick = foreground_pid_in_pgid(root, tpgid)?;
-    cmdline_strings(pick).map(|args| unix_replay_command(pick, args))
+    let args = cmdline_strings(pick)?;
+    if is_shell_argv(&args) {
+        return None;
+    }
+    Some(unix_replay_command(pick, args))
 }
 
 #[cfg(not(windows))]

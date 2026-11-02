@@ -294,7 +294,7 @@ mod tests {
             )
             .unwrap_err()
             .to_string(),
-            "expected an activity request"
+            "expected an activity or snapshot request"
         );
         for (version, request_id) in [(2, 1), (1, 0)] {
             assert_eq!(

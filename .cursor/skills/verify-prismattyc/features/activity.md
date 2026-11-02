@@ -1,101 +1,134 @@
-# Agent activity
+# Agent activity and contained plug-ins
 
-The experimental feed observes headless seats without creating panes. It has a
-separate daemon-owned ring. It is off by default; `--experimental-activity` or
-`[mux] experimental_activity = true` turns it on, live: pmuxd watches the
-config and starts or stops the feed without a restart.
-See [the design note](../../../../docs/agent-activity-feed.md) for schema and limits.
+The daemon owns the optional headless activity ring. Collection is off by
+default. `[mux] experimental_activity = true` or `--experimental-activity`
+enables it. Config changes start or stop collection without restarting the
+daemon or replacing sessions. See [the feed design](../../../../docs/agent-activity-feed.md).
 
-## Build and drive
+The monitor UI and connector query logic run as contained plug-ins. The native
+`pmux-activity-monitor` executable presents validated frames and forwards its
+compatibility query modes. Installation leaves both packages disabled. Endpoint
+registration, package grants, and the MCP operator allowlist are separate steps.
 
-Build the daemon, adapter, and standalone viewer from the same checkout:
+## Build and drive the actual packages
+
+Use Launch to prepare a verified production bundle and build matched binaries.
+Then run the production driver, preserving its output outside disposable state:
 
 ```sh
-cargo build -p prismattyc-mux --bins --locked
-cargo build --manifest-path tools/activity-monitor/Cargo.toml --locked
-python3 scripts/verify-activity.py \
-  --bins target/debug \
-  --monitor tools/activity-monitor/target/debug/pmux-activity-monitor \
-  --out /tmp/activity-proof-new
+python3 scripts/test-plugin-runtime.py --bundle "$verify_bundle" \
+  --target-dir "$verify_target" --feature production \
+  > "$verify_evidence/contained-activity.log" 2>&1
 ```
 
-The driver needs Python 3, native binaries, a PTY or Windows ConPTY, and a new output directory. On Windows, use `python` and the monitor executable with its `.exe` suffix. It owns its
-daemon and viewer and uses isolated HOME, XDG paths, configuration, and socket.
-It checks the owned daemon process and pings its private socket before driving.
-Never use the operator's daemon for this proof.
+Require exit 0 and its final PASS. The driver verifies exact archive digests,
+empty initial store, installation disabled, explicit local grants, actual monitor
+cells and RGBA tiles, connector queries, direct and supervised activity-only MCP,
+default-empty exports, disable/revocation, stale-handle rejection, terminal input,
+resize and restore, hot feed epochs, preserved session identities, and verified
+offline metadata. It owns its private daemon, sockets, workers, terminal, and
+scratch cleanup. It uses the supplied guest bytes without rebuilding them.
+The native helper build needs Rust 1.90 and native dependencies. The fixture
+mode without `--bundle` additionally needs that toolchain's Wasm standard library.
 
-Require `status: PASS`, `direct_processes_reaped: true`, `viewer_exit_observed: true`, and
-`scratch_removed: true` in `result.json`. Inspect `viewer.txt` for `worker-live`
-and `command_started`, and retain `live-terminal.txt`. The live assertion starts
-the viewer first, then emits a hook event and observes its seat without keyboard
-input. A snapshot alone does not establish live updates.
+`scripts/verify-activity.py` predates package provisioning. It does not install
+or enable the contained packages, so it cannot verify a fresh installation.
+Its old provider-command recipe does not establish current contained viewer
+coverage. Actual provider hook proof additionally requires a reviewed installed
+provider runtime, its hook profile, and available authentication. Synthetic hook
+events establish feed behavior only. Record unavailable provider prerequisites.
 
-The same drive verifies rejection with the flag absent, omitted command content,
-duplicate/conflicting retries, page cursors, retention reset, boot epoch reset,
-unchanged pane/process identity, and the JSON connector modes. `--seats`,
-`--recent`, and a filtered `--tail` run against the real daemon. If it fails, retain its result and daemon log, check the
-failure, and use a fresh output directory when rerunning.
+## Review grants and remote endpoints
 
-For actual harness proof, add `--producer-command FILE`, a reviewed JSON argv
-array. `{socket}`, `{emitter}`, and `{seat}` expand to the driver's private
-endpoint, built adapter, and neutral seat. `{hooks}` and `{project}` name a temporary hook profile and workspace. The
-producer must load the supplied profile, exit successfully, and publish a
-`hooks` or `notify` event to the feed. An independent counter handler must run
-both before and after adapter removal. Require `producer_hooks_preserved` in
-the result. Add `--producer-failure-hook` only for runtimes supporting that event. Do not put credentials in
-the command file or commit local paths. Record which installed runtime/version
-was exercised separately from the portable synthetic hook fixture.
+Use only a fresh private daemon with the same verified bundle. The production
+driver covers local grants. For remote transport and recovery coverage, run the
+fixture mode with a separate target and evidence log:
 
-## Viewer UI
+```sh
+verify_fixture_target=$(mktemp -d /tmp/prismattyc-fixtures-XXXXXX)
+python3 scripts/test-plugin-runtime.py --target-dir "$verify_fixture_target" \
+  > "$verify_evidence/contained-fixtures.log" 2>&1
+```
 
-For changes to the viewer's layout, keys or rendering, also record the real
-viewer. Start `tools/activity-monitor/scripts/demo-feed.py --bins target/debug
---sockets FILE` and let it run for a few minutes so lanes have history. Then
-drive the monitor with `tools/activity-monitor/scripts/record-demo.py --plan
-PLAN --out CAST -- MONITOR --host mac=... --host-cmd windows '[...]'`, render
-the cast with `agg`, and inspect the frames. A plan resizes the pseudo-terminal
-the way a pane split does, sends keys, and can signal the demo feed to stop and
-restart the last host's daemon. Cover each layout tier the change touches
-(at least 150x36, 100x30, 64x20, 34x14 and 22x3), the timeline, and an outage.
-When frames look wrong, replay the cast in a VT emulator before blaming the
-viewer, because GIF encoders can leave faint artifacts.
+This builds real version-matched Wasm fixtures and production guests. Require
+its final PASS for socket, command-query and command-tail transports, atomic
+legacy endpoint import, no grant or helper execution during import, bounded
+catch-up, endpoint removal, helper cleanup, failed readiness, and durable disable.
+Do not use fixture guest bytes for production packaging.
 
-`cargo test --manifest-path tools/activity-monitor/Cargo.toml --locked`
-renders every tier through Lunatui and checks text, colors and keys. The
-recorded cast shows the cell path only. `record-demo.py --kitty` exercises the
-pixel path, and `extract-rasters.py` saves the rasters it uploaded. Inside
-Prismattyc the monitor probes with one real raw upload; only a Prismattyc that
-answers it gets pixel lanes, so prove pixel lanes with host frames from a build
-that shows raw uploads.
-`record-prismattyc.py` keeps a real Prismattyc host's presented frames and
-splits the monitor's pane through the control protocol. It needs an unlocked
-macOS desktop with an awake display. A clean Tart guest works, because it logs
-in automatically: run it over SSH in the guest. With `--shell --activity`, it
-opens a blank pane on a pmuxd that has the feed on; a `type` step runs
-`pmux-activity-monitor` there, and a `spawn` step can start
-`demo-feed.py --attach mac={socket}` to publish into that pmuxd.
+For manual review, `pmux plugin endpoint import` previews legacy definitions.
+Repeat with `--apply` only after reviewing them. `endpoint add` registers a
+transport. `plugin enable ID --version VERSION --allow activity.read:LABEL`
+then grants that named endpoint to the exact installed package. Match legacy
+`--host` and `--host-cmd` definitions against registered transports before opening
+the thin launcher. An imported label alone grants nothing.
 
-## Boundaries
+`pmux-mcp` exports no plug-ins by default. Its activity-only mode selects the
+connector's four declared activity tools and omits identity tools. Explicit
+`--plugin` selection remains bounded by enabled packages and their grants.
 
-The native transport and driver support Unix and Windows. Require an actual
-Windows runtime drive to claim Windows proof. Cross-compilation is insufficient.
-Runtime lifecycle proof does not establish every tool event or hosted-tool
-coverage. The feed must remain off by default.
+## Inspect viewer rendering
 
-## Config key and release packaging
+Pure layout, model, and frame-capture tests live in the guest crate:
 
-`cargo test -p prismattyc-mux --test activity_config --locked` starts real
-pmuxd processes with a private `PRISMATTYC_CONFIG`. It checks the feed is off
-by default and with `false`, on with `true` and with the flag, and that on a
-live daemon flipping the key off, on, off and on again starts and stops the
-feed (a fresh boot epoch each time) with the same sessions and panes. A broken
-config, or the flag, keeps a running feed on.
+```sh
+cargo +1.90.0 test -p pmux-activity-monitor-plugin --locked
+cargo +1.90.0 test --manifest-path tools/activity-monitor/Cargo.toml --locked
+```
 
-For a packaged build, use a clean VM: install the release artifact, start the
-app (or `pmux up`), and run `pmux-activity-monitor --json` from PATH; it reports
-the feed disabled. Without restarting anything, set `experimental_activity =
-true` under `[mux]` (settings panel or config file) and run it again: it must
-print a page. Set it back to `false`: `--json` reports the feed disabled again.
-List sessions and read the mailbox before and after to show that the session,
-its pane and its letters survive with the same pmuxd PID. Never point this at an
-operator's daemon.
+The second command tests the thin launcher's arguments. For visual changes,
+record the real frontend after installing/enabling the monitor and registering
+and granting every requested endpoint. Existing `demo-feed.py`, `record-demo.py`,
+and `record-prismattyc.py` do not provision those packages or grants.
+Cover each changed tier, including 150x36, 100x30, 64x20, 34x14, and 22x3,
+the timeline, and an outage. Inspect recorded frames in a VT emulator.
+A cell-only cast does not prove pixel lanes. Pixel proof needs a supported raw
+upload response and captured host frames from an allocated desktop.
+
+## Verify bundles and updater migration
+
+Physical metadata must come from each executable before installed forwarding:
+
+```sh
+cargo +1.90.0 build --release -p prismattyc-mux --example plugin_bundle --locked
+python3 scripts/release/plugin_bundle_provenance.py verify --bins "$verify_bins" \
+  --bundle "$verify_bundle" > "$verify_evidence/plugin-bundle.json"
+python3 tests/native/source-update-plugin-e2e.py --pmux "$verify_bins/pmux" \
+  --verifier "$verify_bins/examples/plugin_bundle" --bundle "$verify_bundle" \
+  --out "$verify_evidence/source-update"
+```
+
+Require all five consumer identities
+and the original guest build receipt to match. The source updater fixture
+uses actual CLI and bundle verification with external Git/Cargo shims. Require
+all three mux installation requests to share the bundle and build flags, and
+corruption to stop before any installation request. It does not install binaries.
+
+On native Linux or Windows, also run the actual older-updater migration:
+
+```sh
+python3 tests/native/monitor-launcher-update-e2e.py --bins "$verify_bins" \
+  --fetch-old-version 0.3.52 --out "$verify_evidence/monitor-cutover"
+```
+
+Require PASS for the six-core update followed by separate same-version repair,
+exact installed tag, immutable metadata and digest checks, ownership refusals,
+matching bundle and executable role, locks, retry, and core rollback preserving
+auxiliary state. Windows adds sharing-failure recovery. Missing symlink privilege
+produces PARTIAL and exit 2. The fixture uses actual executables with a transport
+substitute. Prepared-state recovery is seeded from its actual receipt and backup;
+it is not a timed kill test. macOS repairs through verified app replacement.
+
+## Verify packaged feed toggles
+
+Inside a clean VM, install the package and verify its physical provenance.
+Install both plug-ins disabled, inspect their exact versions/digests, and enable
+them with only the local activity grant. `pmux-activity-monitor --json` must then
+report the feed disabled. Without restarting the daemon, toggle collection on,
+off, and on again. Require a page only while enabled and a fresh epoch after
+reenabling. Compare daemon PID, session/window/pane/child-PID tuples, literal
+pane output, and mailbox records before and after. Do not use an operator's daemon.
+
+Native Windows and Linux package/runtime claims require that OS's clean proof
+environment. Cross-compilation and another OS's screenshots do not cover them.
+Keep missing runner, display, permission, or provider prerequisites explicit.

@@ -7,6 +7,7 @@ Windows users install the per-user package, run commands in their console, and o
 - `installer`: install, upgrade, command resolution, and uninstall.
 - `console-newline`: line-oriented output starts each line at column zero.
 - `new-pane-shell`: a new pane runs the configured or automatically selected shell.
+- `monitor-repair`: an older updater installs six core executables, then a second process repairs the separate contained monitor frontend.
 
 ## How to get to it (user POV)
 
@@ -15,6 +16,13 @@ Run the MSI, launch Prismattyc from Start, run `pmux ls` in cmd.exe or PowerShel
 ## Driving it with PowerShell and native captures
 
 Preconditions: an actual Windows desktop or disposable test VM, an account dedicated to installer verification, Rust/MSVC build tools, Python, .NET, and WiX. Use a clean account without an existing Prismattyc installation; the installer test changes that account's installed application and PATH. Unit tests on another OS do not satisfy this recipe.
+
+Prepare the reviewed official plug-in pin or explicitly select a verified
+private candidate through `PRISMATTYC_PLUGIN_BUNDLE_DIR`. A missing pin stops
+the build before packaging. The package carries seven executables and
+`plugin-bundle.json`. Require all five physical consumers' `--plugin-bundle`
+identities to match its core revision, catalog, pin, build receipt, and packages.
+Check the extracted and installed provenance file, not just the source manifest.
 
 That account is a local Windows user created for the proof. It is not the user who owns the development session. A live proof installs Prismattyc, starts `pmuxd`, or opens the host, and those write the per-user PATH, the Run key, `%LOCALAPPDATA%\Programs\Prismattyc`, and the default socket. Issue #307 was proved in a new profile with no Prismattyc install: the MSI ran there, Prismattyc opened there, Create was used with no manual `pmux up`, and `pmux ls` ran in that profile. The owner's PATH, Run key, `%LOCALAPPDATA%`, and socket stay as they were, so an open pmux session keeps running. Issues #310 (Settings opens a config editor), #311 (a same-version reinstall must replace the executables), and #312 (a quiet install still surfaces a `pmuxd` start failure) are live proofs and will use the same account.
 
@@ -32,6 +40,28 @@ The mux ConPTY fixture is `cargo test -p prismattyc-mux --lib`. It may run in th
 ## Gotchas
 
 The package proof's explicit PATH option does not alone prove an installer default; test a plain install and `ADDTOPATH=0` when those semantics change. Packaging/installer runs are not isolated by the Unix helper. macOS screenshots and chooser-unit tests are not Windows runtime proof. If the test desktop cannot be reached, report the missing connection and requested exact-tip checks to the coordinator; keep the PR's runtime proof marked outstanding.
+
+## Separate monitor repair
+
+After building the matched seven native executables, run in the disposable
+Windows VM:
+
+```powershell
+python tests/native/monitor-launcher-update-e2e.py --bins target/x86_64-pc-windows-msvc/release --fetch-old-version 0.3.52 --out build/monitor-cutover
+```
+
+Require `status=PASS`, sharing-failure recovery, unchanged six-core state during
+repair, idempotent replay, and preserved auxiliary receipt/history/backup after
+core rollback. Retain `commands.json` and `result.json`. A missing symlink
+privilege produces PARTIAL and exit 2. The fixture uses actual old and new
+executables, substitutes HTTPS transport, and seeds prepared-state recovery
+from the actual journal. It does not prove a timed process kill or published
+release installation. See [activity](activity.md#verify-bundles-and-updater-migration).
+
+Use the assigned clean Windows proof runner at the exact source SHA with
+per-step exit codes. Native captures also need an interactive desktop and a
+dedicated disposable profile. A missing runner endpoint blocks this drive;
+do not substitute a developer's Windows installation.
 
 ## Bundled font licenses
 

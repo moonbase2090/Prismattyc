@@ -225,7 +225,12 @@ mean their processes died. Disconnection leaves cached rows visibly stale and
 retries the endpoint. Press `q` to exit.
 
 `--snapshot` renders one 120 by 24 Lunatui grid as text. `--json` reads one bounded
-page. Both report pending history if the page does not contain the full buffer.
+page; add `--since EPOCH:SEQUENCE` to resume from a cursor printed in the page, or
+`--since UNIX_MILLISECONDS` to begin at a retained event time. A time query returns
+the first bounded page at or after that Unix timestamp, with a cursor for resuming.
+If the requested time predates the oldest retained event, `reset` is
+`retention_gap`. Both report pending history if the page does not contain the full
+buffer.
 The standalone tool pins Lunatui v0.1.18 by commit and has its own lockfile, so
 ordinary workspace builds do not acquire the viewer dependency.
 

@@ -303,7 +303,7 @@ fn foreground_pid_impl(root: u32) -> Option<u32> {
             if !is_shell_argv(&args) {
                 Some(root)
             } else {
-                first_non_shell_descendant(root)
+                first_non_shell_descendant(root).or(Some(root))
             }
         }
         TtyForeground::Unknown => None,
@@ -318,6 +318,7 @@ fn foreground_pid_in_pgid(root: u32, tpgid: u32) -> Option<u32> {
             members.push(pid);
         }
     }
+    let has_foreground_group_leader = members.contains(&tpgid);
     let non_shell: Vec<u32> = members
         .into_iter()
         .filter(|&pid| {
@@ -327,7 +328,7 @@ fn foreground_pid_in_pgid(root: u32, tpgid: u32) -> Option<u32> {
         })
         .collect();
     if non_shell.is_empty() {
-        return None;
+        return has_foreground_group_leader.then_some(tpgid);
     }
     let pick = non_shell
         .iter()

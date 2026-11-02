@@ -565,6 +565,7 @@ struct ProjectedSession {
     run_id: String,
     state: ActivityKind,
     harness_pids: HashMap<u64, u32>,
+    foreground_pids: HashMap<u64, u32>,
 }
 
 fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
@@ -632,7 +633,8 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
             let Ok(seat_id) = AgentId::new(seat.to_owned()) else {
                 continue;
             };
-            let (run_id, harness_pids) = snapshot_run_identity(&session, projected.get(seat));
+            let (run_id, harness_pids, foreground_pids) =
+                snapshot_run_identity(&session, projected.get(seat));
             let state = snapshot_state(&session, now_ms);
             current.insert(seat.to_owned());
             let changed = projected
@@ -660,6 +662,7 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
                         run_id,
                         state,
                         harness_pids,
+                        foreground_pids,
                     },
                 );
             }
@@ -699,9 +702,10 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
 fn snapshot_run_identity(
     session: &crate::control::SessionSnapshot,
     previous: Option<&ProjectedSession>,
-) -> (String, HashMap<u64, u32>) {
+) -> (String, HashMap<u64, u32>, HashMap<u64, u32>) {
     let previous = previous.filter(|previous| previous.session_id == session.id);
     let mut harness_pids = HashMap::new();
+    let mut foreground_pids = HashMap::new();
     let processes = session
         .windows
         .iter()
@@ -716,15 +720,22 @@ fn snapshot_run_identity(
             let retained = previous
                 .and_then(|previous| previous.harness_pids.get(&pane.id).copied())
                 .filter(|prior| {
-                    foreground_pid.is_some_and(|foreground| {
-                        crate::procinfo::is_process_descendant(*prior, foreground)
-                    })
+                    foreground_pid.map_or_else(
+                        || crate::procinfo::pid_alive(*prior),
+                        |foreground| crate::procinfo::is_process_descendant(*prior, foreground),
+                    )
                 });
             let harness_pid = detected.or(retained);
             if let Some(pid) = harness_pid {
                 harness_pids.insert(pane.id, pid);
             }
-            format!("{}:{child_pid:?}", pane.id)
+            let identity_pid = harness_pid.or(foreground_pid).or_else(|| {
+                previous.and_then(|previous| previous.foreground_pids.get(&pane.id).copied())
+            });
+            if let Some(pid) = identity_pid {
+                foreground_pids.insert(pane.id, pid);
+            }
+            format!("{}:{child_pid:?}:{identity_pid:?}", pane.id)
         })
         .collect::<Vec<_>>()
         .join(";");
@@ -751,6 +762,7 @@ fn snapshot_run_identity(
     (
         format!("session-{}-{process_key}-{harness_key}", session.id),
         harness_pids,
+        foreground_pids,
     )
 }
 

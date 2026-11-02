@@ -92,8 +92,14 @@ def native_build_flags(target=None, crt_static=False):
     if encoded is not None:
         flags = encoded.split('\x1f') if encoded else []
     else:
-        fallback = os.environ.get('CARGO_TARGET_' + target.upper().replace('-', '_') + '_RUSTFLAGS', '') if target else ''
-        flags = os.environ.get('RUSTFLAGS', fallback).split()
+        selected = os.environ.get('RUSTFLAGS')
+        if selected is None:
+            target = target or os.environ.get('CARGO_BUILD_TARGET')
+            if target is None and any(key.startswith('CARGO_TARGET_') and key.endswith('_RUSTFLAGS') for key in os.environ):
+                compiler = subprocess.check_output(['rustc', '+1.90.0', '-vV'], text=True)
+                target = next(line.removeprefix('host: ') for line in compiler.splitlines() if line.startswith('host: '))
+            selected = os.environ.get('CARGO_TARGET_' + target.upper().replace('-', '_') + '_RUSTFLAGS', '') if target else ''
+        flags = selected.split()
     if crt_static:
         flags.extend(['-C', 'target-feature=+crt-static'])
     roots = [

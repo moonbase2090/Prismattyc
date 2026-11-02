@@ -23,6 +23,8 @@ def main():
     parser.add_argument('--bundle', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
+    host = next(line.removeprefix('host: ') for line in subprocess.check_output(
+        ['rustc', '+1.90.0', '-vV'], text=True).splitlines() if line.startswith('host: '))
     args.out.mkdir(parents=True, exist_ok=False)
     results = {'status': 'FAIL', 'scope': 'source-update orchestration; actual bundle verifier; Git/Cargo shims'}
     records = []
@@ -54,7 +56,9 @@ if name=='git' and sys.argv[1:2]==['rev-parse']:print('1111111111111111111111111
             env = {k: v for k, v in os.environ.items() if not k.startswith(('PMUX', 'PRISMATTYC_', 'XDG_', 'CARGO_', 'RUSTFLAGS'))}
             env.update(HOME=str(repo / 'home'), PATH=str(tools) + os.pathsep + os.environ['PATH'],
                 PRISMATTYC_REPO=str(repo), PRISMATTYC_PLUGIN_BUNDLE_DIR=str(args.bundle.resolve()),
-                SOURCE_PROOF_CALLS=str(log), CARGO_TARGET_DIR=str(repo / 'target'))
+                SOURCE_PROOF_CALLS=str(log), CARGO_TARGET_DIR=str(repo / 'target'),
+                RUSTUP_HOME=os.environ.get('RUSTUP_HOME', str(Path.home() / '.rustup')))
+            env['CARGO_TARGET_' + host.upper().replace('-', '_') + '_RUSTFLAGS'] = '--cfg source_update_target_flags'
             proc = subprocess.run([str(args.pmux.resolve()), 'update', '--source', '--mux'], env=env, capture_output=True, text=True, timeout=60)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             installs = [call for call in calls if call['program'] == 'cargo' and call['args'][:1] == ['install']]
@@ -67,8 +71,22 @@ if name=='git' and sys.argv[1:2]==['rev-parse']:print('1111111111111111111111111
             assert (prepared / 'bundle-pin.json').read_bytes() == (args.bundle / 'bundle-pin.json').read_bytes()
             assert all(call['bundle'] == str(prepared) for call in installs)
             assert all(call['flags'] == installs[0]['flags'] for call in installs)
+            assert installs[0]['flags'].split('\x1f')[:2] == ['--cfg', 'source_update_target_flags']
             assert '--remap-path-prefix' in installs[0]['flags'].split('\x1f')
             assert any(flag.endswith('=/workspace') for flag in installs[0]['flags'].split('\x1f'))
+            for label, extra, expected in [
+                ('global flags', {'RUSTFLAGS': '--cfg source_update_global_flags'}, 'source_update_global_flags'),
+                ('encoded flags', {'RUSTFLAGS': '--cfg source_update_global_flags', 'CARGO_ENCODED_RUSTFLAGS': '--cfg\x1fsource_update_encoded_flags'}, 'source_update_encoded_flags'),
+            ]:
+                log.unlink()
+                proc = subprocess.run([str(args.pmux.resolve()), 'update', '--source', '--mux'], env={**env, **extra}, capture_output=True, text=True, timeout=60)
+                calls = [json.loads(line) for line in log.read_text().splitlines()]
+                records.append({'case': label, 'exit': proc.returncode, 'stderr': proc.stderr, 'calls': calls})
+                assert proc.returncode == 0, proc.stderr
+                selected = [call for call in calls if call['program'] == 'cargo' and call['args'][:1] == ['install']]
+                assert len(selected) == 3
+                assert all(call['flags'].split('\x1f')[:2] == ['--cfg', expected] for call in selected)
+                assert all('--remap-path-prefix' in call['flags'].split('\x1f') for call in selected)
             corrupt = root / 'corrupt'
             shutil.copytree(args.bundle, corrupt)
             next(corrupt.glob('*.pmux-plugin')).write_bytes(b'corrupt')

@@ -33,7 +33,7 @@ jobs:
     if: github.actor != 'nektos/act'
     uses: ./.github/workflows/plugin-artifacts.yml
     with:
-      mode: candidate
+      mode: pinned
 
   plugin-runtime:
     name: Contained plug-ins (${{ matrix.os }})

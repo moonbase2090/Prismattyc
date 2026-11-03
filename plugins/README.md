@@ -82,9 +82,11 @@ export PRISMATTYC_PLUGIN_BUNDLE_DIR="$(python3 scripts/release/prepare-plugin-bu
 ```
 
 A verified cache works offline. A different pin requires its own verified
-bundle. Until the first official catalog has been published and reviewed,
-this repository deliberately has no official pin. Use explicit candidates
-for private proof and CI; do not invent an unpublished official tag.
+bundle. Native CI and public core releases consume the same reviewed official
+pin. Use the `Plug-in artifacts` workflow's explicit `candidate` mode for
+unpublished guest changes; retain previous versions and bump a changed guest's
+manifest version before publishing its next catalog. Candidate proof does not
+replace validation of the official bundle selected for core publication.
 
 ## Check packaged consumers
 

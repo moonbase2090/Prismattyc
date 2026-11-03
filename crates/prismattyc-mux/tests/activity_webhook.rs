@@ -68,6 +68,10 @@ fn start(config: String) -> Daemon {
 }
 
 fn receive_request(listener: &TcpListener) -> Vec<u8> {
+    receive_request_with_status(listener, "204 No Content")
+}
+
+fn receive_request_with_status(listener: &TcpListener, status: &str) -> Vec<u8> {
     listener
         .set_nonblocking(true)
         .expect("set listener nonblocking");
@@ -103,9 +107,26 @@ fn receive_request(listener: &TcpListener) -> Vec<u8> {
         }
     }
     stream
-        .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        .write_all(
+            format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
         .unwrap();
     bytes
+}
+
+fn request_body(request: &[u8]) -> &[u8] {
+    let end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("request headers");
+    let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+    let length = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length: "))
+        .and_then(|value| value.parse::<usize>().ok())
+        .expect("content length");
+    &request[end + 4..end + 4 + length]
 }
 
 fn control_request(socket: &std::path::Path, request: ControlRequest) -> ControlResponse {
@@ -162,6 +183,62 @@ fn configured_daemon_posts_activity_with_verifiable_signature() {
     assert!(request.contains("\"pane_id\":null"));
     assert!(request.contains("\"space\":null"));
     assert!(!request.contains("01234567890123456789012345678901"));
+    drop(daemon);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn webhook_retries_redirect_and_server_error_responses_until_success() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let receiver = std::thread::spawn(move || {
+        ["302 Found", "500 Internal Server Error", "204 No Content"]
+            .into_iter()
+            .map(|status| receive_request_with_status(&listener, status))
+            .collect::<Vec<_>>()
+    });
+    let dir = std::env::temp_dir().join(format!("pmux-webhook-retry-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let secret_path = dir.join("key");
+    std::fs::write(&secret_path, b"01234567890123456789012345678901").unwrap();
+    let daemon = start(format!(
+        "[mux]\nactivity_webhook_url = \"http://{address}/notify\"\nactivity_webhook_secret_file = {:?}\n",
+        secret_path.display().to_string()
+    ));
+    std::thread::sleep(Duration::from_millis(600));
+    let event = ActivityInput {
+        schema_version: 1,
+        seat: AgentId::new("retry-worker").unwrap(),
+        run_id: "retry-run".into(),
+        event_id: "retry-event".into(),
+        source: ActivitySource::Notify,
+        kind: ActivityKind::Waiting,
+        process_ids: Vec::new(),
+    };
+    let response = activity::exchange(
+        &daemon.socket,
+        ControlRequest::PublishActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 31,
+            event,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        response,
+        ControlResponseData::ActivityPublished { .. }
+    ));
+    let requests = receiver.join().unwrap();
+    assert_eq!(requests.len(), 3, "302 and 500 must both be retried");
+    assert!(
+        requests
+            .windows(2)
+            .all(|pair| { request_body(&pair[0]) == request_body(&pair[1]) }),
+        "retries must preserve the event payload"
+    );
+    let body = String::from_utf8_lossy(request_body(&requests[0]));
+    assert!(body.contains("\"seat\":\"retry-worker\""));
+    assert!(body.contains("\"state\":\"waiting\""));
     drop(daemon);
     std::fs::remove_dir_all(dir).unwrap();
 }

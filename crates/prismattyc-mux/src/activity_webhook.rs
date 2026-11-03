@@ -102,9 +102,10 @@ impl WebhookConfig {
             .set("X-Prismattyc-Signature", &signature)
             .send_bytes(body);
         match response {
-            Ok(_) => Ok(()),
+            Ok(response) if (200..300).contains(&response.status()) => Ok(()),
             Err(ureq::Error::Status(code, _)) if (200..300).contains(&code) => Ok(()),
             Err(_) => bail!("webhook delivery failed"),
+            Ok(_) => bail!("webhook delivery failed"),
         }
     }
 }

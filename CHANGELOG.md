@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The host connects pmuxd panes and promotes them to log replicas on worker threads by default, so a slow or busy daemon no longer pauses the window while panes open. Set `PRISMATTYC_ASYNC_PANE_CONNECT=0` to keep the main-thread connect.
+
 ## [0.3.55] - 2026-11-03
 
 ### Added

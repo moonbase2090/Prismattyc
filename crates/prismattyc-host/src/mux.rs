@@ -2511,7 +2511,7 @@ pub(crate) struct MuxRuntime {
     alt_screen_scrollback: bool,
     wake: Option<Wake>,
     /// Connect and promote pmuxd panes off the main thread (render thread plan
-    /// PR 7). Off unless `PRISMATTYC_ASYNC_PANE_CONNECT` is set.
+    /// PR 7). On unless `PRISMATTYC_ASYNC_PANE_CONNECT=0` opts out.
     async_connect: bool,
     /// Panes that rang BEL since the last [`Self::take_pending_bells`].
     pending_bells: Vec<PaneId>,
@@ -5995,6 +5995,10 @@ mod tests {
     #[cfg(unix)]
     fn log_runtime(server: &PrivateMuxServer, name: &str) -> MuxRuntime {
         let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        // These tests check the synchronous promotion that the
+        // `PRISMATTYC_ASYNC_PANE_CONNECT=0` opt-out keeps; the async path
+        // has its own tests.
+        runtime.set_async_connect(false);
         let pane = runtime.focused_id();
         assert!(runtime
             .promote_to_log_replica(pane, name, name, &server.socket, None)
@@ -6109,6 +6113,8 @@ mod tests {
         let server = private_mux_server();
         let command = real_attach_command(&server.socket);
         let mut runtime = MuxRuntime::spawn("/bin/sh", &["-c".into(), command], 80, 24).unwrap();
+        // The synchronous promotion; `async_real_nested_attach_*` covers the default.
+        runtime.set_async_connect(false);
         let pane = runtime.focused_id();
         let root = runtime.panes[&pane]
             .child_pid()
@@ -8356,6 +8362,8 @@ mod tests {
         // The second attach also restores the previous iteration's live alert.
         for iteration in 0..2 {
             let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+            // Synchronous promotion, as with the async connect opt-out.
+            runtime.set_async_connect(false);
             let pane = runtime.focused_id();
             assert!(runtime
                 .promote_to_log_replica(pane, "alerts", "alerts", &server.socket, None)

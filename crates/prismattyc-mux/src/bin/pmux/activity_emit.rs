@@ -311,6 +311,10 @@ fn hook_detail(input: &Value) -> Option<prismattyc_mux::activity::ActivityDetail
         .or_else(|| input.get("exit_code"))
         .and_then(Value::as_i64)
         .and_then(|code| i32::try_from(code).ok());
+    let model = input
+        .get("model")
+        .and_then(Value::as_str)
+        .map(|value| display_text(value, 64));
     let operation_id = input
         .get("tool_use_id")
         .or_else(|| input.get("tool_call_id"))
@@ -325,13 +329,15 @@ fn hook_detail(input: &Value) -> Option<prismattyc_mux::activity::ActivityDetail
         exit_code,
         task,
         operation_id,
+        model,
     };
     (detail.tool.is_some()
         || detail.file.is_some()
         || detail.command.is_some()
         || detail.exit_code.is_some()
         || detail.task.is_some()
-        || detail.operation_id.is_some())
+        || detail.operation_id.is_some()
+        || detail.model.is_some())
     .then_some(detail)
 }
 
@@ -519,6 +525,19 @@ mod tests {
         for private in ["private", "session-a", "turn-a"] {
             assert!(!serialized.contains(private));
         }
+    }
+
+    #[test]
+    fn hook_keeps_only_an_explicit_bounded_model_field() {
+        let event = normalize(
+            AgentId::new("worker-model").unwrap(),
+            &json!({"hook_event_name":"SessionStart", "session_id":"session-model",
+                "model":"o4-mini", "prompt":"private prompt"}),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(event.detail.unwrap().model.as_deref(), Some("o4-mini"));
     }
 
     #[test]

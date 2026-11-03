@@ -475,6 +475,10 @@ pub(crate) mod tests {
                     session_id: id as u64 + 1,
                     state: ActivitySessionState::Waiting,
                     last_output_at_ms: None,
+                    harness: None,
+                    model: None,
+                    quota: None,
+                    project: None,
                 })
                 .collect(),
         }

@@ -501,6 +501,7 @@ fn convert_page(page: domain::ActivityPage) -> read::Page {
                         exit_code: detail.exit_code,
                         task: detail.task,
                         operation_id: detail.operation_id,
+                        model: detail.model,
                     }),
                 },
             })
@@ -562,6 +563,10 @@ fn convert_sessions(sessions: Option<domain::ActivitySessions>) -> Option<read::
                     domain::ActivitySessionState::Stopped => read::SessionState::Stopped,
                 },
                 last_output_at_ms: session.last_output_at_ms,
+                harness: session.harness,
+                model: session.model,
+                quota: session.quota,
+                project: session.project,
             })
             .collect(),
     })

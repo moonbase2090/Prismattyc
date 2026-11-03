@@ -161,8 +161,10 @@ mod tests {
             })).collect::<Vec<_>>(),
             "cursor":{"epoch":"abc1","sequence":264},"has_more":false,"reset":null,
             "sessions":{"observed_at_ms":1000,"seats":[
-                {"seat":"quiet-seat","session_id":1,"state":"idle","last_output_at_ms":null},
-                {"seat":"unhooked-seat","session_id":2,"state":"stuck","last_output_at_ms":null}
+                {"seat":"quiet-seat","session_id":1,"state":"idle","last_output_at_ms":null,
+                    "harness":"codex","model":"o4-mini","quota":null,"project":"Prismattyc"},
+                {"seat":"unhooked-seat","session_id":2,"state":"stuck","last_output_at_ms":null,
+                    "harness":null,"model":null,"quota":null,"project":null}
             ]}
         }))
         .unwrap();
@@ -176,6 +178,11 @@ mod tests {
         assert_eq!(page.records.len(), 256);
         assert_eq!(sessions.seats[0].state, ActivitySessionState::Idle);
         assert_eq!(sessions.seats[1].state, ActivitySessionState::Stuck);
+        assert_eq!(sessions.seats[0].harness.as_deref(), Some("codex"));
+        assert_eq!(sessions.seats[0].model.as_deref(), Some("o4-mini"));
+        assert_eq!(sessions.seats[0].project.as_deref(), Some("Prismattyc"));
+        assert!(sessions.seats[0].quota.is_none());
+        assert!(sessions.seats[1].harness.is_none());
     }
 
     #[test]

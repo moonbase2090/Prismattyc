@@ -30,7 +30,8 @@ impl Serialize for ActivityInput {
         let human_readable = serializer.is_human_readable();
         let omit_empty_process_ids = human_readable && self.process_ids.is_empty();
         let omit_missing_detail = human_readable && self.detail.is_none();
-        let field_count = 8 - usize::from(omit_empty_process_ids) - usize::from(omit_missing_detail);
+        let field_count =
+            8 - usize::from(omit_empty_process_ids) - usize::from(omit_missing_detail);
         let mut state = serializer.serialize_struct("ActivityInput", field_count)?;
         state.serialize_field("schema_version", &self.schema_version)?;
         state.serialize_field("seat", &self.seat)?;
@@ -59,6 +60,7 @@ pub struct ActivityDetail {
     pub task: Option<String>,
     /// Opaque correlation key; the UI hides it unless diagnostic IDs are on.
     pub operation_id: Option<String>,
+    pub model: Option<String>,
 }
 
 impl ActivityInput {
@@ -78,6 +80,7 @@ impl ActivityInput {
                 detail.file.as_deref(),
                 detail.command.as_deref(),
                 detail.task.as_deref(),
+                detail.model.as_deref(),
             ]
             .into_iter()
             .flatten()
@@ -187,6 +190,14 @@ pub struct ActivitySession {
     pub session_id: u64,
     pub state: ActivitySessionState,
     pub last_output_at_ms: Option<u64>,
+    #[serde(default)]
+    pub harness: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub quota: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -294,6 +305,7 @@ mod tests {
                 command: Some("cargo check".into()),
                 ..ActivityDetail::default()
             }),
+            process_ids: Vec::new(),
         };
         assert_eq!(event.validate_metadata(), Ok(()));
         event.detail.as_mut().unwrap().command = Some("line\nbreak".into());

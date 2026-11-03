@@ -2314,6 +2314,7 @@ mod tests {
                 duration_ms,
                 exit_code,
                 operation_id: Some(format!("op-{}", record.sequence)),
+                model: None,
             });
         }
         press(&mut monitor, KeyCode::End);

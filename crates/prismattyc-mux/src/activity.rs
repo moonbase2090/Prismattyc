@@ -51,6 +51,25 @@ impl ActivityFeed {
     pub(crate) fn epoch(&self) -> &str {
         &self.epoch
     }
+    pub(crate) fn latest_model_for_seat(&self, seat: &prismattyc_core::AgentId) -> Option<String> {
+        let latest_run_id = self
+            .retained
+            .iter()
+            .rev()
+            .find(|record| {
+                record.event.seat == *seat && record.event.source == ActivitySource::Hooks
+            })?
+            .event
+            .run_id
+            .as_str();
+        self.retained.iter().rev().find_map(|record| {
+            (record.event.seat == *seat
+                && record.event.source == ActivitySource::Hooks
+                && record.event.run_id == latest_run_id)
+                .then(|| record.event.detail.as_ref()?.model.clone())
+                .flatten()
+        })
+    }
     pub(crate) fn new() -> Result<Self, &'static str> {
         let mut bytes = [0u8; 16];
         getrandom::fill(&mut bytes).map_err(|_| "cannot create activity epoch")?;
@@ -448,6 +467,33 @@ mod tests {
         assert!(page.records.is_empty());
         assert_eq!(page.cursor.sequence, 3);
         assert_eq!(page.reset, None);
+    }
+
+    #[test]
+    fn latest_model_is_scoped_to_the_current_hook_run() {
+        let mut feed = ActivityFeed::new().unwrap();
+        let seat = crate::mailbox::AgentId::new("worker-a").unwrap();
+        let mut first = event(1);
+        first.source = ActivitySource::Hooks;
+        first.detail = Some(ActivityDetail {
+            model: Some("o4-mini".into()),
+            ..ActivityDetail::default()
+        });
+        feed.publish(first).unwrap();
+        let mut same_run = event(2);
+        same_run.source = ActivitySource::Hooks;
+        same_run.detail = Some(ActivityDetail::default());
+        feed.publish(same_run).unwrap();
+        assert_eq!(
+            feed.latest_model_for_seat(&seat).as_deref(),
+            Some("o4-mini")
+        );
+
+        let mut next_run = event(3);
+        next_run.source = ActivitySource::Hooks;
+        next_run.run_id = "run-2".into();
+        feed.publish(next_run).unwrap();
+        assert!(feed.latest_model_for_seat(&seat).is_none());
     }
 
     #[test]

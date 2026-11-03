@@ -29,6 +29,7 @@ pub fn page(page: read::Page) -> Result<domain::ActivityPage, read::Error> {
                     exit_code: detail.exit_code,
                     task: detail.task,
                     operation_id: detail.operation_id,
+                    model: detail.model,
                 }),
                 process_ids: Vec::new(),
             };
@@ -127,6 +128,10 @@ fn session_snapshot(
                                 }
                             },
                             last_output_at_ms: session.last_output_at_ms,
+                            harness: session.harness,
+                            model: session.model,
+                            quota: session.quota,
+                            project: session.project,
                         })
                     })
                     .collect::<Result<_, read::Error>>()?,

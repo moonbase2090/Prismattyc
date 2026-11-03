@@ -152,6 +152,28 @@ Install that optional event with `--failure-hook` only for runtimes that support
 it. The default installation uses SessionStart, SessionEnd, UserPromptSubmit,
 PreToolUse, PostToolUse, and Stop.
 
+### Harness hook coverage
+
+Hook availability and payloads differ by harness. This table records the
+documented source for lifecycle and tool activity; it does not imply that the
+feed installer configures every harness.
+
+| Harness | Documented source | Useful signals | Limits |
+| --- | --- | --- | --- |
+| Claude Code | [Hooks reference](https://code.claude.com/docs/en/hooks) | Session lifecycle, prompt submission, pre/post tool use, failures, and stop; JSON hook input includes session and tool context for applicable events. | Hooks must be configured in the user's trusted settings. Hosted tools and surfaces can have different hook support. |
+| Codex | [Hooks guide](https://learn.chatgpt.com/docs/hooks) | Session start, prompt submission, tool lifecycle, subagent lifecycle, stop, and interruption. Applicable payloads include session ID, model, working directory, and tool metadata. | Hook schemas and supported events depend on the Codex version and surface. Quota state is not a documented hook field. |
+| Muse Code | [Hooks guide](https://meta-models.github.io/muse-code-sdk/next/guides/extend/hooks/) | Session and prompt lifecycle, tool success/failure, model calls, subagents, and stop. Hooks receive JSON on stdin; event-specific payloads are documented separately. | Project hooks run only for trusted workspaces. Quota state is not a documented hook field. |
+| Gemini CLI | [Hooks reference](https://geminicli.com/docs/hooks/reference/) | Session lifecycle, prompt/agent/model events, and before/after tool events. Hook input is JSON on stdin and includes session ID, cwd, event name, and timestamp. | Hooks are configured in Gemini settings. Tool responses and prompts can contain content, so the activity adapter must discard them. Quota state is not a documented hook field. |
+| Kiro | [Hook types](https://kiro.dev/docs/hooks/types/) and [configuration reference](https://kiro.dev/docs/custom-agents/configuration-reference/) | Prompt, session, agent, and pre/post tool lifecycle, depending on Kiro surface/version. Command hooks receive event JSON. | Trigger support differs across IDE, CLI versions, and Web; Web does not run these local triggers. Quota state is not a documented hook field. |
+
+Use pmux's current session roster as the identity and liveness source. Hooks
+provide activity transitions and may add explicitly documented metadata, but
+must be bound to a pmux session rather than allowed to create an unnamed seat.
+Treat project as the session's cwd when available. Model, quota, current task,
+and ticket are unknown unless a documented field or explicit local integration
+supplies them; do not read transcripts, credentials, or terminal output to fill
+gaps. In particular, no source listed above documents a quota-state field.
+
 Hooks and notifications return success when observation fails and never write
 hook-control output to stdout. A disabled feed is a silent no-op. Other failures
 produce a fixed diagnostic without upstream input or daemon message text. Hook

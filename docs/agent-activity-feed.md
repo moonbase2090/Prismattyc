@@ -86,14 +86,18 @@ The normalized event has these fields:
 | `source` | `notify`, `hooks`, or `runtime`. |
 | `kind` | Closed activity enum in `activity.rs`. |
 | `process_ids` | Optional process-lineage metadata for correlating hook and runtime ownership. It is omitted when unavailable and is not included in webhook payloads. |
+| `detail` | Optional bounded display metadata: tool, relative file label, redacted command summary, duration, exit code, task/ticket key, and opaque operation correlation. |
 
 Identifiers permit ASCII letters, digits, hyphens, underscores, periods, and
-colons. Seat identities follow the existing mailbox identity format.
-The daemon accepts no free-text summary, arguments, command text, prompts,
-responses, file paths, file contents, or mail bodies. Adapters hash upstream
-correlation identifiers before publication. Operators still choose neutral seat
-identities. This format is data minimization, not authenticated seat attribution:
-any client with same-user socket access can assert a seat.
+colons. Seat identities follow the existing mailbox identity format. The
+optional `detail` record accepts only the named display fields, with printable
+values capped at 256 bytes. The hook adapter caps commands at 200 characters,
+redacts common credential flag/value patterns, and reports paths relative to
+the hook cwd (or just a basename when the path is outside it). It discards
+prompts, responses, file contents, terminal output, and mail bodies. Upstream
+session and tool correlation values are hashed before publication. This format
+is data minimization, not authenticated seat attribution: any client with
+same-user socket access can assert a seat.
 
 `process_ids` is a bounded list of process IDs: hook adapters report their
 nearest non-shell owner, and runtime projection reports the foreground or
@@ -113,6 +117,9 @@ returns an acknowledgement cursor and `duplicate`. The ring retains 512 records.
 Retries with the same seat, run, and event identity return the original cursor
 while retained. A retry with changed content fails. After eviction or restart,
 the same identity can be accepted again. There is no durable exactly-once claim.
+For matching hook tool start and finish events, the daemon adds a duration to
+the finish record. Pending starts are bounded to 1,024 entries and expire after
+30 minutes; unmatched finishes have no duration.
 
 Readers send a null cursor for initial retained history:
 

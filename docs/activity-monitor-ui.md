@@ -2,13 +2,13 @@
 
 ![The monitor reading two private daemons: overview, timeline, filter, an outage on windows, live resizes through every tier, keys, and the light theme](media/activity-monitor/activity-monitor.gif)
 
-The activity monitor is a terminal app for a person watching agent seats on more than one machine. Its job is to answer three questions in a glance from a narrow side pane: who needs me, who is stuck or failing, and what has this seat been doing. It reads the experimental activity feed in [agent-activity-feed.md](agent-activity-feed.md) and shows metadata only: host, seat, event kind, source, run and event identifiers, sequence numbers and timing. It never shows command text, paths, prompts, tool output or mail bodies, and it has no way to obtain them, because the feed does not carry them.
+The activity monitor is a terminal app for a person watching agent seats on more than one machine. Its job is to answer three questions in a glance from a narrow side pane: who needs me, who is stuck or failing, and what has this seat been doing. It reads the experimental activity feed in [agent-activity-feed.md](agent-activity-feed.md) and shows host, seat, event kind, source, sequence and timing, plus bounded hook summaries: tool name, relative file label, redacted command, duration and exit status. It does not show prompts, file contents, terminal output, tool responses or mail bodies. Run and event hashes are hidden by default and can be toggled with `i`.
 
 ## Direction
 
 The monitor speaks the same status language as Prismattyc's own chrome. In the Graphite pane chips, green means working, amber means waiting on you and coral means attention. The monitor uses those three colors for the same meanings, so a seat looks the same here as its pane does in the sidebar. Everything else stays quiet: the default terminal background (so pane transparency still shows through), one hairline color, muted secondary text and no boxes around rows.
 
-The monitor puts its visual weight in one place: a lane for each seat. A lane is a strip of time bins that runs from the left edge of its column to now, with each bin colored by the seat's state and as tall as the activity in that bin. A run of tool calls rises as a ridge. A seat waiting on you leaves a flat amber line, and a stopped seat leaves nothing. Lanes give the overview, and the timeline gives the detail.
+The monitor puts its visual weight in one place: a lane for each seat. A lane is a strip of time bins that runs from the left edge of its column to now, with each bin colored by the seat's state and as tall as the activity in that bin. A run of tool calls rises as a ridge. A seat waiting on you leaves a flat amber line, and a stopped seat leaves nothing. Lanes give the overview. The timeline groups events by a known task or ticket, then shows available tool, file, command, duration and status details.
 
 | Role | Dark | Light | Source |
 | --- | --- | --- | --- |
@@ -38,10 +38,11 @@ Failed stays until the seat reports something else. `*_finished` means an operat
 A row is stale when its last event is 30 seconds old, or when its host is disconnected. A stale row shows its age in amber, and in wider layouts it also says `stale`. Staleness never changes a seat's state, because a quiet seat might be thinking, not hung.
 
 Select a seat and press `d` to open its details. The view shows the current
-health state, most recent activity kind and source, and the age of the last
-progress signal. Ticket, model, quota, and project fields say `not reported`
-until an approved source supplies them; the monitor does not infer them from
-terminal output or agent transcripts. Press `Esc` to return to the list.
+health state, latest activity and any available tool, file, command, duration,
+exit status and task/ticket key. Model, quota and project fields say
+`not reported` until an approved source supplies them; the monitor does not
+infer them from terminal output or agent transcripts. Press `Esc` to return to
+the list. Events without a task/ticket key appear under `unassigned`.
 
 ## Hosts
 

@@ -768,7 +768,7 @@ mod tests {
             capabilities: vec![
                 lifecycle::Capability {
                     name: "pmux:activity/read".into(),
-                    version: "1.0.0".into(),
+                    version: "1.3.0".into(),
                     available,
                 },
                 lifecycle::Capability {

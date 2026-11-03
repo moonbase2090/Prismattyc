@@ -26,6 +26,45 @@ $result = Join-Path $Out 'result.txt'
 Set-Content -Path $result -Value '' -Encoding ascii
 $script:fails = 0
 function Log([string]$m) { $line = "[lib-suites] $m"; Write-Output $line; Add-Content -Path $result -Value $line -Encoding ascii }
+function Invoke-TimedTest(
+    [string]$FilePath,
+    [string]$Name,
+    [int]$TimeoutSeconds,
+    [string]$StdoutPath,
+    [string]$StderrPath
+) {
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = "$Name --exact --test-threads=1 --nocapture"
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    $stdout = [System.IO.File]::Open($StdoutPath, 'Create', 'Write', 'Read')
+    $stderr = [System.IO.File]::Open($StderrPath, 'Create', 'Write', 'Read')
+    try {
+        [void]$process.Start()
+        $stdoutCopy = $process.StandardOutput.BaseStream.CopyToAsync($stdout)
+        $stderrCopy = $process.StandardError.BaseStream.CopyToAsync($stderr)
+        $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
+        if ($timedOut) {
+            # A hung test can own child processes, so terminate its whole tree.
+            Start-Process -FilePath 'taskkill.exe' -Wait -WindowStyle Hidden `
+                -ArgumentList @('/PID', $process.Id, '/T', '/F') | Out-Null
+            if (-not $process.WaitForExit(5000)) { $process.Kill() }
+        }
+        $process.WaitForExit()
+        [void]$stdoutCopy.GetAwaiter().GetResult()
+        [void]$stderrCopy.GetAwaiter().GetResult()
+        [pscustomobject]@{ TimedOut = $timedOut; ExitCode = $process.ExitCode }
+    } finally {
+        $stdout.Dispose()
+        $stderr.Dispose()
+        $process.Dispose()
+    }
+}
 
 Push-Location $Repo
 try {
@@ -72,16 +111,13 @@ try {
         $pass = 0; $fail = 0; $hang = 0; $ignored = 0
         foreach ($name in $tests) {
             $log = Join-Path $logs (($name -replace '[^A-Za-z0-9_.-]', '_') + '.log')
-            $proc = Start-Process -FilePath $exe -PassThru -NoNewWindow `
-                -ArgumentList @($name, '--exact', '--test-threads=1', '--nocapture') `
-                -RedirectStandardOutput $log -RedirectStandardError "$log.err"
-            if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
-                # Kill the test's whole tree: a hung test often owns a child.
-                taskkill /PID $proc.Id /T /F 2>&1 | Out-Null
+            $run = Invoke-TimedTest -FilePath $exe -Name $name -TimeoutSeconds $TimeoutSec `
+                -StdoutPath $log -StderrPath "$log.err"
+            if ($run.TimedOut) {
                 $hang++; Log "HANG: $crate $name (over ${TimeoutSec}s)"
                 continue
             }
-            if ($proc.ExitCode -ne 0) { $fail++; Log "FAIL: $crate $name (exit $($proc.ExitCode))"; continue }
+            if ($run.ExitCode -ne 0) { $fail++; Log "FAIL: $crate $name (exit $($run.ExitCode))"; continue }
             if (Select-String -Path $log -Pattern '1 ignored' -Quiet) { $ignored++ } else { $pass++ }
             Remove-Item $log, "$log.err" -ErrorAction SilentlyContinue
         }

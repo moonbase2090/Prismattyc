@@ -2,7 +2,7 @@
 
 //! Viewer state for one or more activity feeds. Pure data: no I/O and no terminal.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use prismattyc_core::activity::{
     ActivityKind, ActivityPage, ActivityRecord, ActivitySessions, ActivitySource,
@@ -105,7 +105,22 @@ pub struct Seat {
     pub state_since_ms: u64,
     /// Local monotonic time (ms) of the last state change, for the row fade.
     pub changed_at: Option<u64>,
+    /// Who the seat is, for the details header.
+    pub info: SeatInfo,
     discovery: Option<(u64, ActivityRecord)>,
+}
+
+/// Seat facts for the details header. Each stays `None` (shown as unknown)
+/// until pmux reports it without ambiguity; nothing here is guessed from
+/// prompts, paths or command text.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SeatInfo {
+    /// The agent harness running in the seat, such as `claude` or `codex`.
+    pub harness: Option<String>,
+    pub model: Option<String>,
+    pub quota: Option<String>,
+    /// Repository name the seat works in, never a path.
+    pub project: Option<String>,
 }
 
 impl Seat {
@@ -214,13 +229,23 @@ impl Host {
         });
         for session in sessions.seats {
             let observation = session.observation(sessions.observed_at_ms);
+            // pmux sends each value only when it is unambiguous, so the latest
+            // snapshot replaces the old one, including a value it no longer has.
+            let info = SeatInfo {
+                harness: session.harness.clone(),
+                model: session.model.clone(),
+                quota: session.quota.clone(),
+                project: session.project.clone(),
+            };
             let seat = self.seats.entry(session.seat).or_insert_with(|| Seat {
                 history: VecDeque::new(),
                 state: SeatState::Unknown,
                 state_since_ms: sessions.observed_at_ms,
                 changed_at: None,
+                info: SeatInfo::default(),
                 discovery: None,
             });
+            seat.info = info;
             let replaced = seat
                 .discovery
                 .as_ref()
@@ -294,6 +319,7 @@ impl Host {
             state: SeatState::Unknown,
             state_since_ms: record.received_at_ms,
             changed_at: None,
+            info: SeatInfo::default(),
             discovery: None,
         });
         let state = next_state(seat.state, record.event.kind);
@@ -411,6 +437,257 @@ pub fn short_gap(ms: u64) -> String {
     }
 }
 
+/// What an operation did, from the family of its event kinds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Action {
+    Edit,
+    Command,
+    Test,
+    Tool,
+}
+
+impl Action {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Edit => "edit",
+            Self::Command => "command",
+            Self::Test => "test",
+            Self::Tool => "tool",
+        }
+    }
+}
+
+/// How an activity ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// Started, and nothing has ended it yet.
+    Running,
+    /// Started, but its turn or session ended without a result.
+    NoResult,
+    Succeeded,
+    Failed,
+    /// A seat event rather than an operation: session start, waiting, mail.
+    Note(&'static str),
+}
+
+/// One line of the details view: an operation from start to result, or a note.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Activity<'a> {
+    pub action: Option<Action>,
+    pub outcome: Outcome,
+    pub task: Option<&'a str>,
+    pub tool: Option<&'a str>,
+    /// The file edited, else the command run (already redacted by pmux).
+    pub target: Option<&'a str>,
+    pub duration_ms: Option<u64>,
+    pub exit_code: Option<i32>,
+    /// When it last changed: its result, or its start while running.
+    pub at_ms: u64,
+    started_ms: u64,
+    pub run_id: &'a str,
+    pub operation_id: Option<&'a str>,
+}
+
+/// Recent activities that share a task, newest first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskGroup<'a> {
+    /// `None` when no event named a task.
+    pub task: Option<&'a str>,
+    pub activities: Vec<Activity<'a>>,
+}
+
+impl TaskGroup<'_> {
+    pub fn failed(&self) -> usize {
+        self.activities
+            .iter()
+            .filter(|activity| activity.outcome == Outcome::Failed)
+            .count()
+    }
+
+    pub fn last_ms(&self) -> u64 {
+        self.activities.first().map_or(0, |activity| activity.at_ms)
+    }
+}
+
+enum Phase {
+    Start,
+    Done(bool),
+}
+
+fn operation(kind: ActivityKind) -> Option<(Action, Phase)> {
+    use ActivityKind::*;
+    Some(match kind {
+        EditStarted => (Action::Edit, Phase::Start),
+        EditFinished => (Action::Edit, Phase::Done(true)),
+        EditFailed => (Action::Edit, Phase::Done(false)),
+        CommandStarted => (Action::Command, Phase::Start),
+        CommandFinished => (Action::Command, Phase::Done(true)),
+        CommandFailed => (Action::Command, Phase::Done(false)),
+        TestStarted => (Action::Test, Phase::Start),
+        TestPassed => (Action::Test, Phase::Done(true)),
+        TestFailed => (Action::Test, Phase::Done(false)),
+        ToolStarted => (Action::Tool, Phase::Start),
+        ToolFinished => (Action::Tool, Phase::Done(true)),
+        ToolFailed => (Action::Tool, Phase::Done(false)),
+        _ => return None,
+    })
+}
+
+/// Seat events worth a line of their own. Turn starts and plain `working`
+/// pings only restate what the operations already show.
+fn note(kind: ActivityKind) -> Option<&'static str> {
+    use ActivityKind::*;
+    match kind {
+        SessionStarted => Some("session started"),
+        SessionFinished => Some("session ended"),
+        TurnFinished | Waiting => Some("waiting for input"),
+        Stopped => Some("stopped"),
+        MailSent => Some("sent mail"),
+        MailReceived => Some("received mail"),
+        _ => None,
+    }
+}
+
+/// True when an event ends every operation still open in its run.
+fn closes_run(kind: ActivityKind) -> bool {
+    use ActivityKind::*;
+    matches!(kind, TurnFinished | Waiting | Stopped | SessionFinished)
+}
+
+/// The seat's retained events as activities grouped by task. Each operation's
+/// start and result become one activity, paired by run and operation id (or,
+/// without one, by run and kind). Groups are ordered by their latest activity.
+pub fn task_groups(seat: &Seat) -> Vec<TaskGroup<'_>> {
+    let mut activities: Vec<Activity<'_>> = Vec::new();
+    let mut open: HashMap<(&str, Action, Option<&str>), usize> = HashMap::new();
+    // The last task named in each run; notes and bare results inherit it.
+    let mut run_task: HashMap<&str, &str> = HashMap::new();
+    for record in &seat.history {
+        let event = &record.event;
+        let run = event.run_id.as_str();
+        let detail = event.detail.as_ref();
+        let task = detail.and_then(|d| d.task.as_deref());
+        if let Some(task) = task {
+            run_task.insert(run, task);
+        }
+        let task = task.or_else(|| run_task.get(run).copied());
+        let tool = detail.and_then(|d| d.tool.as_deref());
+        let target = detail.and_then(|d| d.file.as_deref().or(d.command.as_deref()));
+        let operation_id = detail.and_then(|d| d.operation_id.as_deref());
+        let at_ms = record.received_at_ms;
+        if let Some((action, phase)) = operation(event.kind) {
+            let key = (run, action, operation_id);
+            match phase {
+                Phase::Start => {
+                    if let Some(previous) = open.insert(key, activities.len()) {
+                        activities[previous].outcome = Outcome::NoResult;
+                    }
+                    activities.push(Activity {
+                        action: Some(action),
+                        outcome: Outcome::Running,
+                        task,
+                        tool,
+                        target,
+                        duration_ms: None,
+                        exit_code: None,
+                        at_ms,
+                        started_ms: at_ms,
+                        run_id: run,
+                        operation_id,
+                    });
+                }
+                Phase::Done(ok) => {
+                    let outcome = if ok {
+                        Outcome::Succeeded
+                    } else {
+                        Outcome::Failed
+                    };
+                    let exit_code = detail.and_then(|d| d.exit_code);
+                    let duration = detail.and_then(|d| d.duration_ms);
+                    if let Some(index) = open.remove(&key) {
+                        let activity = &mut activities[index];
+                        activity.outcome = outcome;
+                        activity.exit_code = exit_code;
+                        activity.duration_ms =
+                            duration.or(Some(at_ms.saturating_sub(activity.started_ms)));
+                        activity.at_ms = at_ms;
+                        activity.task = activity.task.or(task);
+                        activity.tool = activity.tool.or(tool);
+                        activity.target = activity.target.or(target);
+                    } else {
+                        activities.push(Activity {
+                            action: Some(action),
+                            outcome,
+                            task,
+                            tool,
+                            target,
+                            duration_ms: duration,
+                            exit_code,
+                            at_ms,
+                            started_ms: at_ms,
+                            run_id: run,
+                            operation_id,
+                        });
+                    }
+                }
+            }
+            continue;
+        }
+        if closes_run(event.kind) {
+            open.retain(|(open_run, ..), index| {
+                if *open_run == run {
+                    activities[*index].outcome = Outcome::NoResult;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        if let Some(text) = note(event.kind) {
+            activities.push(Activity {
+                action: None,
+                outcome: Outcome::Note(text),
+                task,
+                tool: None,
+                target: None,
+                duration_ms: None,
+                exit_code: None,
+                at_ms,
+                started_ms: at_ms,
+                run_id: run,
+                operation_id: None,
+            });
+        }
+    }
+    let mut groups: Vec<TaskGroup<'_>> = Vec::new();
+    // Newest first, so each group's activities come out newest first too.
+    // Reversing first keeps the later of two same-millisecond events on top.
+    activities.reverse();
+    activities.sort_by_key(|activity| std::cmp::Reverse(activity.at_ms));
+    for activity in activities {
+        match groups.iter_mut().find(|group| group.task == activity.task) {
+            Some(group) => group.activities.push(activity),
+            None => groups.push(TaskGroup {
+                task: activity.task,
+                activities: vec![activity],
+            }),
+        }
+    }
+    groups
+}
+
+/// Formats how long an operation took: `850ms`, `1.2s`, `34s`, `2m05s`, `1h02m`.
+pub fn duration_text(ms: u64) -> String {
+    let secs = ms / 1000;
+    match ms {
+        0..=999 => format!("{ms}ms"),
+        1_000..=9_999 => format!("{}.{}s", secs, (ms % 1000) / 100),
+        10_000..=59_999 => format!("{secs}s"),
+        60_000..=3_599_999 => format!("{}m{:02}s", secs / 60, secs % 60),
+        _ => format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -440,6 +717,20 @@ pub(crate) mod tests {
                 "kind": kind
             }
         }))?)
+    }
+
+    /// A record whose event carries the safe `detail` fields pmux publishes.
+    pub fn record_detail(
+        seat: &str,
+        sequence: u64,
+        kind: &str,
+        at: u64,
+        run: &str,
+        detail: serde_json::Value,
+    ) -> Result<ActivityRecord> {
+        let mut record = record_run(seat, sequence, kind, at, run)?;
+        record.event.detail = Some(serde_json::from_value(detail)?);
+        Ok(record)
     }
 
     pub fn page_in(
@@ -482,6 +773,33 @@ pub(crate) mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn seat_facts_follow_the_latest_session_snapshot() -> Result<()> {
+        let mut host = Host::new("local");
+        let mut page = page_in("e0", vec![], None)?;
+        let mut sessions = discovered(&["coder"], 1_000);
+        sessions.seats[0].harness = Some("codex".into());
+        sessions.seats[0].model = Some("gpt-5".into());
+        sessions.seats[0].project = Some("Prismattyc".into());
+        page.sessions = Some(sessions);
+        host.apply(page.clone(), 0);
+        assert_eq!(
+            seat(&host, "coder").info,
+            SeatInfo {
+                harness: Some("codex".into()),
+                model: Some("gpt-5".into()),
+                quota: None,
+                project: Some("Prismattyc".into()),
+            }
+        );
+        // A later snapshot that no longer reports a value clears it, rather
+        // than leaving an old guess on screen.
+        page.sessions = Some(discovered(&["coder"], 2_000));
+        host.apply(page, 10);
+        assert_eq!(seat(&host, "coder").info, SeatInfo::default());
+        Ok(())
     }
 
     #[test]
@@ -899,5 +1217,151 @@ pub(crate) mod tests {
         assert_eq!(short_gap(400), "+0.4s");
         assert_eq!(short_gap(9_950), "+9.9s");
         assert_eq!(short_gap(12_000), "+12s");
+    }
+
+    fn seat_with(records: Vec<ActivityRecord>) -> Result<Host> {
+        let mut host = Host::new("mac");
+        host.apply(page_in("e1", records, None)?, 0);
+        Ok(host)
+    }
+
+    #[test]
+    fn an_operation_start_and_result_become_one_activity() -> Result<()> {
+        let host = seat_with(vec![
+            record_detail(
+                "builder",
+                1,
+                "command_started",
+                1_000,
+                "run-1",
+                json!({"tool": "Bash", "command": "cargo test", "task": "TASK-12", "operation_id": "op-1"}),
+            )?,
+            record_detail(
+                "builder",
+                2,
+                "command_failed",
+                35_000,
+                "run-1",
+                json!({"exit_code": 101, "duration_ms": 34_000, "operation_id": "op-1"}),
+            )?,
+        ])?;
+        let groups = task_groups(seat(&host, "builder"));
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].task, Some("TASK-12"));
+        let [activity] = groups[0].activities.as_slice() else {
+            panic!("one activity: {groups:?}");
+        };
+        assert_eq!(activity.action, Some(Action::Command));
+        assert_eq!(activity.outcome, Outcome::Failed);
+        assert_eq!(activity.tool, Some("Bash"));
+        assert_eq!(activity.target, Some("cargo test"));
+        assert_eq!(activity.duration_ms, Some(34_000));
+        assert_eq!(activity.exit_code, Some(101));
+        assert_eq!(activity.at_ms, 35_000);
+        assert_eq!(groups[0].failed(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn a_result_without_a_reported_duration_is_timed_from_its_start() -> Result<()> {
+        let host = seat_with(vec![
+            record_detail(
+                "builder",
+                1,
+                "edit_started",
+                1_000,
+                "run-1",
+                json!({"file": "ui.rs"}),
+            )?,
+            record_at("builder", 2, "edit_finished", 2_500)?,
+        ])?;
+        let groups = task_groups(seat(&host, "builder"));
+        let activity = &groups[0].activities[0];
+        assert_eq!(activity.outcome, Outcome::Succeeded);
+        assert_eq!(activity.target, Some("ui.rs"));
+        assert_eq!(activity.duration_ms, Some(1_500));
+        Ok(())
+    }
+
+    #[test]
+    fn open_operations_are_running_until_their_turn_ends() -> Result<()> {
+        let host = seat_with(vec![
+            record_at("builder", 1, "tool_started", 1_000)?,
+            record_run("builder", 2, "test_started", 2_000, "run-2")?,
+            record_at("builder", 3, "turn_finished", 3_000)?,
+        ])?;
+        let groups = task_groups(seat(&host, "builder"));
+        let outcomes: Vec<_> = groups[0]
+            .activities
+            .iter()
+            .map(|activity| (activity.action, activity.outcome))
+            .collect();
+        // Newest first: the turn's note, run-2's test still running, run-1's
+        // tool closed by the turn end without a result.
+        assert_eq!(
+            outcomes,
+            vec![
+                (None, Outcome::Note("waiting for input")),
+                (Some(Action::Test), Outcome::Running),
+                (Some(Action::Tool), Outcome::NoResult),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn activities_group_by_task_with_the_latest_group_first() -> Result<()> {
+        let task = |t: &str| json!({ "task": t });
+        let host = seat_with(vec![
+            record_detail(
+                "builder",
+                1,
+                "edit_finished",
+                1_000,
+                "run-1",
+                task("TASK-1"),
+            )?,
+            record_detail(
+                "builder",
+                2,
+                "edit_finished",
+                2_000,
+                "run-2",
+                task("TASK-2"),
+            )?,
+            // Same run as TASK-1, no task of its own: it inherits TASK-1.
+            record_at("builder", 3, "command_finished", 3_000)?,
+            record_run("builder", 4, "mail_received", 4_000, "run-3")?,
+        ])?;
+        let groups = task_groups(seat(&host, "builder"));
+        let summary: Vec<_> = groups
+            .iter()
+            .map(|group| (group.task, group.activities.len()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![(None, 1), (Some("TASK-1"), 2), (Some("TASK-2"), 1)]
+        );
+        assert_eq!(groups[1].activities[0].action, Some(Action::Command));
+        Ok(())
+    }
+
+    #[test]
+    fn turn_starts_and_working_pings_add_no_lines() -> Result<()> {
+        let host = seat_with(vec![
+            record_at("builder", 1, "turn_started", 1_000)?,
+            record_at("builder", 2, "working", 2_000)?,
+        ])?;
+        assert!(task_groups(seat(&host, "builder")).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn durations_read_at_a_glance() {
+        assert_eq!(duration_text(850), "850ms");
+        assert_eq!(duration_text(1_249), "1.2s");
+        assert_eq!(duration_text(34_000), "34s");
+        assert_eq!(duration_text(125_000), "2m05s");
+        assert_eq!(duration_text(3_720_000), "1h02m");
     }
 }

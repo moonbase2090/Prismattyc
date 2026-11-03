@@ -398,6 +398,7 @@ impl Ui {
             (Screen::List, KeyCode::Char('d')) => {
                 if self.selected.is_some() {
                     self.screen = Screen::Details;
+                    self.timeline_offset = 0;
                 }
             }
             (Screen::List, KeyCode::Char('f')) => self.filter = self.filter.next(),
@@ -408,16 +409,22 @@ impl Ui {
             ) => {
                 self.screen = Screen::List;
             }
-            (Screen::Timeline, KeyCode::Up | KeyCode::Char('k')) => {
+            (Screen::Timeline | Screen::Details, KeyCode::Up | KeyCode::Char('k')) => {
                 self.timeline_offset = self.timeline_offset.saturating_sub(1);
             }
-            (Screen::Timeline, KeyCode::Down | KeyCode::Char('j')) => self.timeline_offset += 1,
-            (Screen::Timeline, KeyCode::PageUp) => {
+            (Screen::Timeline | Screen::Details, KeyCode::Down | KeyCode::Char('j')) => {
+                self.timeline_offset += 1
+            }
+            (Screen::Timeline | Screen::Details, KeyCode::PageUp) => {
                 self.timeline_offset = self.timeline_offset.saturating_sub(page as usize);
             }
-            (Screen::Timeline, KeyCode::PageDown) => self.timeline_offset += page as usize,
-            (Screen::Timeline, KeyCode::Home | KeyCode::Char('g')) => self.timeline_offset = 0,
-            (Screen::Timeline, KeyCode::End | KeyCode::Char('G')) => {
+            (Screen::Timeline | Screen::Details, KeyCode::PageDown) => {
+                self.timeline_offset += page as usize
+            }
+            (Screen::Timeline | Screen::Details, KeyCode::Home | KeyCode::Char('g')) => {
+                self.timeline_offset = 0
+            }
+            (Screen::Timeline | Screen::Details, KeyCode::End | KeyCode::Char('G')) => {
                 self.timeline_offset = usize::MAX / 2
             }
             _ => {}
@@ -614,7 +621,7 @@ pub fn render(
             draw_timeline(&mut paint, body, &hosts[*host], id, ui, clock, true);
         }
         (Screen::Details, Some((host, id))) => {
-            draw_details(&mut paint, body, &hosts[*host], id, clock);
+            draw_details(&mut paint, body, &hosts[*host], id, ui, clock);
         }
         _ if tier == Tier::Wide && hint(hosts).is_none() => {
             let list_width = (area.width * 52 / 100).clamp(56, 96);
@@ -1456,92 +1463,259 @@ fn draw_timeline(
     }
 }
 
-fn draw_details(paint: &mut Painter<'_, '_>, area: Rect, host: &Host, id: &AgentId, clock: Clock) {
+/// One seat at a glance: who it is, then what it did, grouped by task.
+fn draw_details(
+    paint: &mut Painter<'_, '_>,
+    area: Rect,
+    host: &Host,
+    id: &AgentId,
+    ui: &mut Ui,
+    clock: Clock,
+) {
     let palette = *paint.palette;
     let Some(seat) = host.seats.get(id) else {
         return;
     };
+    if area.height == 0 || area.width < 8 {
+        return;
+    }
     let limit = area.x + area.width;
+    let bottom = area.y + area.height;
     let mut y = area.y;
     let mut x = paint.text(area.x, y, limit, "← ", fg(palette.muted));
     x = paint.text(x, y, limit, id.as_str(), bold(fg(palette.strong)));
-    paint.text(
+    x = paint.text(
         x + 1,
         y,
         limit,
         &format!("on {}", host.label),
         fg(palette.muted),
     );
-    y += 2;
-    let latest = seat.latest();
-    let detail = latest.event.detail.as_ref();
-    let values = [
-        ("Health", seat.state.word().to_owned()),
-        (
-            "Doing",
-            format!(
-                "{} ({})",
-                model::label(&latest.event.kind),
-                model::label(&latest.event.source)
-            ),
-        ),
-        (
-            "Tool",
-            detail
-                .and_then(|d| d.tool.clone())
-                .unwrap_or_else(|| "not reported".into()),
-        ),
-        (
-            "File",
-            detail
-                .and_then(|d| d.file.clone())
-                .unwrap_or_else(|| "not reported".into()),
-        ),
-        (
-            "Command",
-            detail
-                .and_then(|d| d.command.clone())
-                .unwrap_or_else(|| "not reported".into()),
-        ),
-        (
-            "Duration",
-            detail
-                .and_then(|d| d.duration_ms)
-                .map(|ms| format!("{ms} ms"))
-                .unwrap_or_else(|| "not reported".into()),
-        ),
-        (
-            "Exit status",
-            detail
-                .and_then(|d| d.exit_code)
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "not reported".into()),
-        ),
-        (
-            "Last progress",
-            format!(
-                "{} ago",
-                model::short_age(model::age_ms(seat, clock.wall_ms))
-            ),
-        ),
-        (
-            "Waypoint ticket",
-            detail
-                .and_then(|d| d.task.clone())
-                .unwrap_or_else(|| "not reported".into()),
-        ),
-        ("Model", "not reported".to_owned()),
-        ("Quota", "not reported".to_owned()),
-        ("Project", "not reported".to_owned()),
+    let state = format!(
+        "{} {} for {}",
+        seat.state.glyph(),
+        seat.state.word(),
+        model::short_age(clock.wall_ms.saturating_sub(seat.state_since_ms))
+    );
+    paint.text(x + 3, y, limit, &state, fg(palette.state(seat.state)));
+    y += 1;
+
+    let groups = model::task_groups(seat);
+    let unknown = "unknown";
+    let info = &seat.info;
+    let facts = [
+        ("Harness", info.harness.as_deref().unwrap_or(unknown)),
+        ("Model", info.model.as_deref().unwrap_or(unknown)),
+        ("Quota", info.quota.as_deref().unwrap_or(unknown)),
+        ("Project", info.project.as_deref().unwrap_or(unknown)),
     ];
-    for (label, value) in values {
-        if y >= area.y + area.height {
-            break;
+    let ticket = groups
+        .iter()
+        .find_map(|group| group.task)
+        .unwrap_or("none reported");
+    let progress = format!(
+        "{} ago",
+        model::short_age(model::age_ms(seat, clock.wall_ms))
+    );
+    // Facts wrap onto as many lines as the width needs.
+    let mut fact_x = area.x + 2;
+    for (label, value) in facts
+        .into_iter()
+        .chain([("Ticket", ticket), ("Last progress", progress.as_str())])
+    {
+        let width = (label.chars().count() + value.chars().count() + 4) as u16;
+        if fact_x > area.x + 2 && fact_x + width > limit {
+            fact_x = area.x + 2;
+            y += 1;
         }
-        let x = paint.text(area.x + 2, y, limit, label, fg(palette.muted));
-        paint.text(x + 2, y, limit, &value, fg(palette.text));
-        y += 1;
+        if y >= bottom {
+            return;
+        }
+        let value_x = paint.text(fact_x, y, limit, label, fg(palette.muted)) + 1;
+        let color = if value == unknown {
+            palette.muted
+        } else {
+            palette.text
+        };
+        fact_x = paint.text(value_x, y, limit, value, fg(color)) + 3;
     }
+    y += 2;
+    if y >= bottom {
+        return;
+    }
+    if groups.is_empty() {
+        paint.text(
+            area.x + 2,
+            y,
+            limit,
+            "No activity reported yet.",
+            fg(palette.muted),
+        );
+        return;
+    }
+
+    // One line per group heading and per activity, newest first.
+    let mut lines: Vec<(Option<&model::TaskGroup<'_>>, Option<&model::Activity<'_>>)> = Vec::new();
+    for group in &groups {
+        lines.push((Some(group), None));
+        lines.extend(
+            group
+                .activities
+                .iter()
+                .map(|activity| (None, Some(activity))),
+        );
+    }
+    let height = usize::from(bottom - y);
+    ui.page = height.saturating_sub(1).max(1);
+    ui.timeline_offset = ui.timeline_offset.min(lines.len().saturating_sub(height));
+    let width = usize::from(limit.saturating_sub(area.x));
+    let show_tool = width >= 48;
+    for (line, (group, activity)) in lines
+        .iter()
+        .skip(ui.timeline_offset)
+        .take(height)
+        .enumerate()
+    {
+        let row_y = y + line as u16;
+        if let Some(group) = group {
+            draw_task_heading(paint, area.x, row_y, limit, group, clock);
+            continue;
+        }
+        if let Some(activity) = activity {
+            draw_activity(
+                paint,
+                area.x + 2,
+                row_y,
+                limit,
+                activity,
+                ui,
+                clock,
+                show_tool,
+            );
+        }
+    }
+}
+
+fn draw_task_heading(
+    paint: &mut Painter<'_, '_>,
+    x: u16,
+    y: u16,
+    limit: u16,
+    group: &model::TaskGroup<'_>,
+    clock: Clock,
+) {
+    let palette = *paint.palette;
+    let name = group.task.unwrap_or("no ticket");
+    let x = paint.text(x, y, limit, name, bold(fg(palette.strong)));
+    let operations = group
+        .activities
+        .iter()
+        .filter(|activity| activity.action.is_some())
+        .count();
+    let mut summary = format!(
+        "{operations} activit{}",
+        if operations == 1 { "y" } else { "ies" }
+    );
+    let failed = group.failed();
+    if failed > 0 {
+        summary.push_str(&format!(", {failed} failed"));
+    }
+    summary.push_str(&format!(
+        ", last {} ago",
+        model::short_age(clock.wall_ms.saturating_sub(group.last_ms()))
+    ));
+    paint.text(x + 2, y, limit, &summary, fg(palette.muted));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_activity(
+    paint: &mut Painter<'_, '_>,
+    left: u16,
+    y: u16,
+    limit: u16,
+    activity: &model::Activity<'_>,
+    ui: &Ui,
+    clock: Clock,
+    show_tool: bool,
+) {
+    use model::Outcome;
+    let palette = *paint.palette;
+    let age = model::short_age(clock.wall_ms.saturating_sub(activity.at_ms));
+    paint.right(left + 4, y, 4, &age, fg(palette.muted));
+    let mut x = left + 5;
+    let (glyph, color) = match activity.outcome {
+        Outcome::Succeeded => ('✓', palette.state(SeatState::Working)),
+        Outcome::Failed => ('✗', palette.failed),
+        Outcome::Running => ('…', palette.state(SeatState::Working)),
+        Outcome::NoResult => ('?', palette.muted),
+        Outcome::Note(_) => ('·', palette.muted),
+    };
+    paint.text(x, y, limit, &glyph.to_string(), fg(color));
+    x += 2;
+    let Some(action) = activity.action else {
+        if let Outcome::Note(text) = activity.outcome {
+            paint.text(x, y, limit, text, fg(palette.muted));
+        }
+        return;
+    };
+    paint.text(x, y, limit, action.word(), fg(palette.text));
+    x += 8;
+    if show_tool {
+        if let Some(tool) = activity.tool {
+            paint.text(x, y, limit, &truncate(tool, 10), fg(palette.muted));
+        }
+        x += 11;
+    }
+    // The result sits at the right edge so durations line up.
+    let result = match activity.outcome {
+        Outcome::Running => "running".to_owned(),
+        Outcome::NoResult => "no result".to_owned(),
+        _ => {
+            let mut text = activity
+                .duration_ms
+                .map(model::duration_text)
+                .unwrap_or_default();
+            if activity.outcome == Outcome::Failed {
+                if let Some(code) = activity.exit_code {
+                    if !text.is_empty() {
+                        text.push_str("  ");
+                    }
+                    text.push_str(&format!("exit {code}"));
+                }
+            }
+            text
+        }
+    };
+    let ids = ui.hashes.then(|| {
+        let mut ids = format!("run {}", short_id(activity.run_id));
+        if let Some(operation) = activity.operation_id {
+            ids.push_str(&format!(" op {}", short_id(operation)));
+        }
+        ids
+    });
+    let tail = match &ids {
+        Some(ids) if result.is_empty() => ids.clone(),
+        Some(ids) => format!("{result}  {ids}"),
+        None => result,
+    };
+    let tail_width = tail.chars().count() as u16;
+    let tail_x = limit.saturating_sub(tail_width + 1).max(x);
+    let target_width = usize::from(tail_x.saturating_sub(x + 1));
+    if let Some(target) = activity.target {
+        paint.text(
+            x,
+            y,
+            limit,
+            &truncate(target, target_width),
+            fg(palette.text),
+        );
+    }
+    let tail_color = if activity.outcome == Outcome::Failed {
+        palette.failed
+    } else {
+        palette.muted
+    };
+    paint.text(tail_x, y, limit, &tail, fg(tail_color));
 }
 
 impl Palette {
@@ -1586,7 +1760,13 @@ fn draw_footer(
             ("q", "quit"),
             ("?", "keys"),
         ],
-        Screen::Details => &[("esc", "back"), ("i", "IDs"), ("q", "quit"), ("?", "keys")],
+        Screen::Details => &[
+            ("↑↓", "scroll"),
+            ("esc", "back"),
+            ("i", "IDs"),
+            ("q", "quit"),
+            ("?", "keys"),
+        ],
     };
     // Keep the most important hints that fit, then show them in a stable order.
     let mut budget = usize::from(area.width.saturating_sub(2));
@@ -1619,13 +1799,13 @@ fn draw_footer(
 
 fn draw_help(paint: &mut Painter<'_, '_>, area: Rect) {
     let lines = [
-        ("↑ ↓  j k", "move, or scroll the timeline"),
+        ("↑ ↓  j k", "move, or scroll the timeline or details"),
         ("PgUp PgDn", "move by a page"),
         ("g G", "first or last"),
         ("Tab", "next host (Shift-Tab: previous)"),
         ("Enter → l", "open the timeline"),
         ("d", "open selected seat details"),
-        ("i", "show or hide diagnostic hashes"),
+        ("i", "show or hide run and operation ids"),
         ("Esc ← h", "back to the list"),
         ("f", "filter: all, needs attention, working"),
         ("s", "sort: name, most recent, state"),
@@ -1881,13 +2061,13 @@ mod tests {
 ▌✕ bui╭────────────────────────────────────────────────────────╮
  ◆ rev│ Keys                                                   │
  ● wor│                                                        │
- windo│ ↑ ↓  j k    move, or scroll the timeline               │
+ windo│ ↑ ↓  j k    move, or scroll the timeline or details    │
  ● win│ PgUp PgDn   move by a page                             │
       │ g G         first or last                              │
       │ Tab         next host (Shift-Tab: previous)            │
       │ Enter → l   open the timeline                          │
       │ d           open selected seat details                 │
-      │ i           show or hide diagnostic hashes             │
+      │ i           show or hide run and operation ids         │
       │ Esc ← h     back to the list                           │
       │ f           filter: all, needs attention, working      │
       │ s           sort: name, most recent, state             │
@@ -2401,19 +2581,158 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn seat_details_show_current_observation_and_unreported_metadata() -> Result<()> {
+    /// The fleet plus a seat whose hooks report safe details for two tasks.
+    fn fleet_with_details() -> Result<Monitor> {
+        use crate::model::tests::record_detail;
+        use serde_json::json;
         let mut monitor = fleet()?;
-        press_char(&mut monitor, 'd');
-        let (text, ..) = draw(&mut monitor, 80, 24);
-        assert!(text.contains("builder on mac"), "{text}");
-        assert!(text.contains("Doing  test_failed (hooks)"), "{text}");
-        assert!(text.contains("Waypoint ticket  not reported"), "{text}");
-        assert!(text.contains("Model  not reported"), "{text}");
-        assert!(text.contains("Quota  not reported"), "{text}");
-        assert!(text.contains("Project  not reported"), "{text}");
+        let command =
+            |seq, kind, at, detail| record_detail("coder", seq, kind, at, "run-eeeeeeee1", detail);
+        monitor.hosts[0].apply(
+            page_in(
+                "e1",
+                vec![
+                    command(
+                        9,
+                        "edit_started",
+                        NOW - 80_000,
+                        json!({"tool": "Edit", "file": "src/ui.rs", "task": "TASK-12", "operation_id": "op-edit"}),
+                    )?,
+                    command(
+                        10,
+                        "edit_finished",
+                        NOW - 78_800,
+                        json!({"operation_id": "op-edit"}),
+                    )?,
+                    command(
+                        11,
+                        "command_started",
+                        NOW - 50_000,
+                        json!({"tool": "Bash", "command": "cargo test -p pmux-activity-monitor-plugin", "operation_id": "op-test"}),
+                    )?,
+                    command(
+                        12,
+                        "command_failed",
+                        NOW - 16_000,
+                        json!({"exit_code": 101, "duration_ms": 34_000, "operation_id": "op-test"}),
+                    )?,
+                    record_detail(
+                        "coder",
+                        13,
+                        "tool_started",
+                        NOW - 3_000,
+                        "run-eeeeeeee2",
+                        json!({"tool": "Read", "file": "docs/plan.md", "task": "TASK-31", "operation_id": "op-read"}),
+                    )?,
+                ],
+                None,
+            )?,
+            0,
+        );
+        Ok(monitor)
+    }
+
+    fn open_details(monitor: &mut Monitor, seat: &str) {
+        monitor.ui.selected = Some((0, AgentId::new(seat).unwrap()));
+        press_char(monitor, 'd');
+    }
+
+    #[test]
+    fn seat_details_group_activities_by_task_with_results() -> Result<()> {
+        let mut monitor = fleet_with_details()?;
+        open_details(&mut monitor, "coder");
+        let (text, ..) = draw(&mut monitor, 100, 24);
+        assert!(text.contains("coder on mac"), "{text}");
+        // Header facts: unknown until pmux reports them, ticket from the latest task.
+        assert!(text.contains("Harness unknown"), "{text}");
+        assert!(text.contains("Model unknown"), "{text}");
+        assert!(text.contains("Quota unknown"), "{text}");
+        assert!(text.contains("Project unknown"), "{text}");
+        assert!(text.contains("Ticket TASK-31"), "{text}");
+        // The newest task first, each start and result on one line.
+        let pt108 = text.find("TASK-31  1 activity, last 3s ago").expect(&text);
+        let pt111 = text.find("TASK-12  2 activities, 1 failed").expect(&text);
+        assert!(pt108 < pt111, "{text}");
+        let read = line_of(&text, "docs/plan.md");
+        assert!(read.contains("… tool") && read.contains("Read"), "{read}");
+        assert!(read.trim_end().ends_with("running"), "{read}");
+        let test = line_of(&text, "cargo test");
+        assert!(
+            test.contains("✗ command") && test.contains("Bash"),
+            "{test}"
+        );
+        assert!(test.trim_end().ends_with("34s  exit 101"), "{test}");
+        let edit = line_of(&text, "src/ui.rs");
+        assert!(
+            edit.contains("✓ edit") && edit.trim_end().ends_with("1.2s"),
+            "{edit}"
+        );
+        // No raw kind names or hashes unless asked for.
+        assert!(!text.contains("command_failed"), "{text}");
+        assert!(!text.contains("run eeee"), "{text}");
         press(&mut monitor, KeyCode::Esc);
         assert_eq!(monitor.ui.screen, Screen::List);
+        Ok(())
+    }
+
+    #[test]
+    fn seat_details_header_shows_reported_seat_facts() -> Result<()> {
+        let mut monitor = fleet_with_details()?;
+        let seat = monitor.hosts[0]
+            .seats
+            .get_mut(&AgentId::new("coder").unwrap())
+            .unwrap();
+        seat.info.harness = Some("claude".into());
+        seat.info.project = Some("Prismattyc".into());
+        open_details(&mut monitor, "coder");
+        let (text, ..) = draw(&mut monitor, 100, 24);
+        assert!(text.contains("Harness claude"), "{text}");
+        assert!(text.contains("Project Prismattyc"), "{text}");
+        assert!(text.contains("Model unknown"), "{text}");
+        assert!(text.contains("Quota unknown"), "{text}");
+        Ok(())
+    }
+
+    #[test]
+    fn seat_details_show_ids_only_when_toggled() -> Result<()> {
+        let mut monitor = fleet_with_details()?;
+        open_details(&mut monitor, "coder");
+        press_char(&mut monitor, 'i');
+        let (text, ..) = draw(&mut monitor, 120, 24);
+        let test = line_of(&text, "cargo test");
+        assert!(test.contains("exit 101  run "), "{test}");
+        assert!(test.contains(" op "), "{test}");
+        Ok(())
+    }
+
+    #[test]
+    fn seat_details_without_detail_fields_still_read_as_activities() -> Result<()> {
+        let mut monitor = fleet()?;
+        open_details(&mut monitor, "builder");
+        let (text, ..) = draw(&mut monitor, 80, 24);
+        assert!(text.contains("no ticket  1 activity, 1 failed"), "{text}");
+        let test = line_of(&text, "✗ test");
+        assert!(test.trim_end().ends_with("30s"), "{test}");
+        assert!(text.contains("Ticket none reported"), "{text}");
+        Ok(())
+    }
+
+    #[test]
+    fn seat_details_scroll_and_fit_a_narrow_pane() -> Result<()> {
+        let mut monitor = fleet_with_details()?;
+        open_details(&mut monitor, "coder");
+        let (text, ..) = draw(&mut monitor, 40, 12);
+        assert!(text.contains("coder"), "{text}");
+        assert!(
+            text.lines().all(|line| line.chars().count() <= 40),
+            "{text}"
+        );
+        let before = monitor.ui.timeline_offset;
+        press(&mut monitor, KeyCode::Down);
+        draw(&mut monitor, 40, 12);
+        assert!(monitor.ui.timeline_offset >= before);
+        press_char(&mut monitor, 'g');
+        assert_eq!(monitor.ui.timeline_offset, 0);
         Ok(())
     }
 

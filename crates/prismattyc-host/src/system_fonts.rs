@@ -130,12 +130,12 @@ fn coverage_for(path: &Path) -> Arc<Coverage> {
     coverage
 }
 
-fn read_font(path: &Path) -> Option<Vec<u8>> {
+fn read_font(path: &Path) -> Option<memmap2::Mmap> {
     #[cfg(test)]
     if let Ok(mut reads) = FONT_READS.lock() {
         reads.push(path.to_path_buf());
     }
-    std::fs::read(path).ok()
+    crate::font_file::map(path).ok()
 }
 
 fn build_coverage(data: &[u8]) -> Coverage {

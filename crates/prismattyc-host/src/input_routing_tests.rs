@@ -727,15 +727,15 @@ fn verify_dispatch(host: &mut HostState) {
     let rewritten = std::fs::read(&progress).unwrap_or_default();
     assert_ne!(rewritten, b"not-progress");
 
-    assert_eq!(host.font_zoom_steps, 0);
+    assert_eq!(requested_font_zoom_steps(host), 0);
     assert_eq!(dispatch(host, A::IncreaseFontSize), Dispatch::Handled);
-    assert_eq!(host.font_zoom_steps, 1);
+    assert_eq!(requested_font_zoom_steps(host), 1);
     assert_eq!(dispatch(host, A::DecreaseFontSize), Dispatch::Handled);
-    assert_eq!(host.font_zoom_steps, 0);
+    assert_eq!(requested_font_zoom_steps(host), 0);
     assert_eq!(dispatch(host, A::IncreaseFontSize), Dispatch::Handled);
-    assert_eq!(host.font_zoom_steps, 1);
+    assert_eq!(requested_font_zoom_steps(host), 1);
     assert_eq!(dispatch(host, A::ResetFontSize), Dispatch::Handled);
-    assert_eq!(host.font_zoom_steps, 0);
+    assert_eq!(requested_font_zoom_steps(host), 0);
 
     host.spacing.chrome_style = config::ChromeStyle::Classic;
     let classic = host.bar_color;
@@ -889,4 +889,10 @@ fn verify_dispatch(host: &mut HostState) {
         assert!(host.mux.tab_count() < before, "close tab removes one");
     }
     assert_eq!(dispatch(host, A::Detach), Dispatch::Exit);
+}
+
+fn requested_font_zoom_steps(host: &HostState) -> i8 {
+    host.pending_font_load
+        .as_ref()
+        .map_or(host.font_zoom_steps, |pending| pending.selection.zoom_steps)
 }

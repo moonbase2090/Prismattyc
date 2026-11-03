@@ -1545,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-plugin-api"
-version = "0.3.55"
+version = "0.3.56"
 dependencies = [
  "serde",
  "unicode-segmentation",
@@ -1556,7 +1556,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-plugin-runtime"
-version = "0.3.55"
+version = "0.3.56"
 dependencies = [
  "anyhow",
  "pmux-plugin-api",
@@ -1634,7 +1634,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-core"
-version = "0.3.55"
+version = "0.3.56"
 dependencies = [
  "serde",
  "unicode-width",
@@ -1642,7 +1642,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-emulator"
-version = "0.3.55"
+version = "0.3.56"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1657,7 +1657,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-mux"
-version = "0.3.55"
+version = "0.3.56"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1699,11 +1699,11 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-protocol"
-version = "0.3.55"
+version = "0.3.56"
 
 [[package]]
 name = "prismattyc-render"
-version = "0.3.55"
+version = "0.3.56"
 dependencies = [
  "prismattyc-core",
  "prismattyc-protocol",
@@ -1711,7 +1711,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-winres"
-version = "0.3.55"
+version = "0.3.56"
 dependencies = [
  "winresource",
 ]

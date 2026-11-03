@@ -2596,7 +2596,7 @@ mod tests {
                         9,
                         "edit_started",
                         NOW - 80_000,
-                        json!({"tool": "Edit", "file": "src/ui.rs", "task": "PT-111", "operation_id": "op-edit"}),
+                        json!({"tool": "Edit", "file": "src/ui.rs", "task": "TASK-12", "operation_id": "op-edit"}),
                     )?,
                     command(
                         10,
@@ -2622,7 +2622,7 @@ mod tests {
                         "tool_started",
                         NOW - 3_000,
                         "run-eeeeeeee2",
-                        json!({"tool": "Read", "file": "docs/plan.md", "task": "PT-108", "operation_id": "op-read"}),
+                        json!({"tool": "Read", "file": "docs/plan.md", "task": "TASK-31", "operation_id": "op-read"}),
                     )?,
                 ],
                 None,
@@ -2648,10 +2648,10 @@ mod tests {
         assert!(text.contains("Model unknown"), "{text}");
         assert!(text.contains("Quota unknown"), "{text}");
         assert!(text.contains("Project unknown"), "{text}");
-        assert!(text.contains("Ticket PT-108"), "{text}");
+        assert!(text.contains("Ticket TASK-31"), "{text}");
         // The newest task first, each start and result on one line.
-        let pt108 = text.find("PT-108  1 activity, last 3s ago").expect(&text);
-        let pt111 = text.find("PT-111  2 activities, 1 failed").expect(&text);
+        let pt108 = text.find("TASK-31  1 activity, last 3s ago").expect(&text);
+        let pt111 = text.find("TASK-12  2 activities, 1 failed").expect(&text);
         assert!(pt108 < pt111, "{text}");
         let read = line_of(&text, "docs/plan.md");
         assert!(read.contains("… tool") && read.contains("Read"), "{read}");

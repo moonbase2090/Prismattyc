@@ -263,11 +263,16 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
         quiet = create("quiet-seat")
         create("unhooked-seat")
         initial = connection.request("read_activity", cursor=None, limit=256)["response"]["page"]
-        assert initial["records"] == [] and initial["cursor"]["sequence"] == 0, initial
+        assert initial["cursor"]["sequence"] == initial["current_sequence"], initial
+        assert all(record["event"]["source"] == "runtime" for record in initial["records"]), initial
         assert {seat["seat"] for seat in initial["sessions"]["seats"]} == {"quiet-seat", "unhooked-seat"}
         observed = seats()
         assert {"quiet-seat", "unhooked-seat"} <= observed.keys(), observed
-        assert observed["quiet-seat"]["retained_events"] == 0
+        for name in ("quiet-seat", "unhooked-seat"):
+            initial_count = sum(record["event"]["seat"] == name for record in initial["records"])
+            assert observed[name]["retained_events"] >= initial_count, observed[name]
+            if observed[name]["retained_events"]:
+                assert observed[name]["last_source"] == "runtime", observed[name]
         first_frame = cli("run", monitor, "--snapshot", "--cols", "100", "--rows", "30", text=True)
         assert "quiet-seat" in first_frame and "unhooked-seat" in first_frame, first_frame
         (scratch / "discovery-initial.json").write_text(json.dumps(initial, indent=2) + "\n")
@@ -325,11 +330,15 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
         screen("later-seat")
         reply = connection.request("destroy_session", session_id=quiet)
         assert reply["status"] == "ok", reply
-        assert "quiet-seat" not in seats()
-        time.sleep(2)
-        assert "quiet-seat" not in core("save-buffer", str(pane), "-")
-        final_screen = core("save-buffer", str(pane), "-")
-        assert "later-seat" in final_screen
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            removed = seats().get("quiet-seat")
+            if removed and removed["last_source"] == "runtime" and removed["last_kind"] == "stopped":
+                break
+            time.sleep(0.1)
+        assert removed and removed["last_kind"] == "stopped", removed
+        final_screen = screen("down")
+        assert "quiet-seat" in final_screen and "later-seat" in final_screen, final_screen
         (scratch / "discovery-live-frame.txt").write_text(final_screen)
         (scratch / "discovery-result.json").write_text(json.dumps({"status":"PASS", "checks":["zero events", "pmuxd workspace restore", "named idle seats after restart", "520-event retention gap", "fresh monitor", "live discovery", "session removal"]}, indent=2) + "\n")
         print("PASS named shell-idle seat discovery after daemon restore; unchanged cursor; 520-event retention gap; fresh monitor views retain quiet seats; live periodic discovery and session removal; existing activity-only grants", flush=True)

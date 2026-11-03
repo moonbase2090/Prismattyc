@@ -22,20 +22,31 @@ pub enum SeatState {
     Unknown,
     Working,
     Waiting,
+    Idle,
+    Stuck,
     Failed,
     Stopped,
 }
 
 impl SeatState {
-    pub const ALL: [SeatState; 4] = [Self::Working, Self::Waiting, Self::Failed, Self::Stopped];
+    pub const ALL: [SeatState; 6] = [
+        Self::Working,
+        Self::Waiting,
+        Self::Idle,
+        Self::Stuck,
+        Self::Failed,
+        Self::Stopped,
+    ];
 
     pub fn word(self) -> &'static str {
         match self {
             Self::Unknown => "no state",
             Self::Working => "working",
             Self::Waiting => "waiting",
+            Self::Idle => "idle",
+            Self::Stuck => "stuck",
             Self::Failed => "failed",
-            Self::Stopped => "stopped",
+            Self::Stopped => "down",
         }
     }
 
@@ -44,6 +55,8 @@ impl SeatState {
             Self::Unknown => '·',
             Self::Working => '●',
             Self::Waiting => '◆',
+            Self::Idle => '○',
+            Self::Stuck => '!',
             Self::Failed => '✕',
             Self::Stopped => '■',
         }
@@ -54,9 +67,11 @@ impl SeatState {
         match self {
             Self::Failed => 0,
             Self::Waiting => 1,
+            Self::Stuck => 0,
             Self::Working => 2,
-            Self::Stopped => 3,
-            Self::Unknown => 4,
+            Self::Idle => 3,
+            Self::Stopped => 4,
+            Self::Unknown => 5,
         }
     }
 }
@@ -230,8 +245,21 @@ impl Host {
                         ActivityKind::Stopped | ActivityKind::SessionFinished
                     )
                 });
-            if !hooked || observation.event.kind == ActivityKind::Stopped {
-                let state = next_state(seat.state, observation.event.kind);
+            if !hooked
+                || matches!(
+                    session.state,
+                    prismattyc_core::activity::ActivitySessionState::Idle
+                        | prismattyc_core::activity::ActivitySessionState::Stuck
+                        | prismattyc_core::activity::ActivitySessionState::Stopped
+                )
+            {
+                let state = match session.state {
+                    prismattyc_core::activity::ActivitySessionState::Idle => SeatState::Idle,
+                    prismattyc_core::activity::ActivitySessionState::Stuck => SeatState::Stuck,
+                    prismattyc_core::activity::ActivitySessionState::Stopped => SeatState::Stopped,
+                    prismattyc_core::activity::ActivitySessionState::Working => SeatState::Working,
+                    prismattyc_core::activity::ActivitySessionState::Waiting => SeatState::Waiting,
+                };
                 if state != seat.state {
                     if seat.state != SeatState::Unknown {
                         seat.changed_at = fade_at;
@@ -447,6 +475,10 @@ pub(crate) mod tests {
                     session_id: id as u64 + 1,
                     state: ActivitySessionState::Waiting,
                     last_output_at_ms: None,
+                    harness: None,
+                    model: None,
+                    quota: None,
+                    project: None,
                 })
                 .collect(),
         }
@@ -471,6 +503,26 @@ pub(crate) mod tests {
         restarted.apply(first, 0);
         assert_eq!(restarted.seats.len(), 2);
         assert_eq!(restarted.sequence, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_exposes_idle_stuck_and_down_health() -> Result<()> {
+        use prismattyc_core::activity::ActivitySessionState;
+
+        let mut sessions = discovered(&["shell", "agent", "finished"], 10_000);
+        sessions.seats[0].state = ActivitySessionState::Idle;
+        sessions.seats[1].state = ActivitySessionState::Stuck;
+        sessions.seats[2].state = ActivitySessionState::Stopped;
+        let mut page = page_in("e0", vec![], None)?;
+        page.sessions = Some(sessions);
+        let mut host = Host::new("local");
+        host.apply(page, 0);
+
+        assert_eq!(seat(&host, "shell").state, SeatState::Idle);
+        assert_eq!(seat(&host, "agent").state, SeatState::Stuck);
+        assert_eq!(seat(&host, "finished").state, SeatState::Stopped);
+        assert_eq!(seat(&host, "finished").state.word(), "down");
         Ok(())
     }
 

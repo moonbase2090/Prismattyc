@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-package pmux:activity@1.0.0;
+package pmux:activity@1.3.0;
 
 interface read {
     enum source { notify, hooks, runtime }
@@ -12,6 +12,16 @@ interface read {
         test-started, test-passed, test-failed,
         working, waiting, stopped, mail-sent, mail-received,
     }
+    record detail {
+        tool: option<string>,
+        file: option<string>,
+        command: option<string>,
+        duration-ms: option<u64>,
+        exit-code: option<s32>,
+        task: option<string>,
+        operation-id: option<string>,
+        model: option<string>,
+    }
     record input {
         schema-version: u16,
         seat: string,
@@ -19,6 +29,7 @@ interface read {
         event-id: string,
         source: source,
         kind: kind,
+        detail: option<detail>,
     }
     record activity-record {
         sequence: u64,
@@ -27,12 +38,16 @@ interface read {
     }
     record cursor { epoch: string, sequence: u64 }
     enum reset { restarted, retention-gap, ahead-of-feed }
-    enum session-state { working, waiting, stopped }
+    enum session-state { working, waiting, idle, stuck, stopped }
     record session {
         seat: string,
         session-id: u64,
         state: session-state,
         last-output-at-ms: option<u64>,
+        harness: option<string>,
+        model: option<string>,
+        quota: option<string>,
+        project: option<string>,
     }
     record session-snapshot {
         observed-at-ms: u64,

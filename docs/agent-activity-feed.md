@@ -54,10 +54,16 @@ have no global ordering. Remote transport and access policy need separate work.
 
 Activity responses also carry an optional `sessions` snapshot with an observation
 time and every daemon session that has an agent identity. Each entry contains
-only the seat identity, numeric session ID, current working/waiting/stopped state,
-and last pane-output time. Session names, pane titles, and screen contents stay
-outside the feed. Reading this snapshot does not publish an event or advance
-the activity cursor.
+the seat identity, numeric session ID, current working/waiting/idle/stuck/stopped
+state, last pane-output time, and optional harness, model, quota, and project
+labels. Harness and project are set only when active agent panes agree; model
+comes only from an explicit structured hook field. Quota remains absent until a
+harness exposes a structured source. `idle` requires a positively detected
+shell prompt; `stuck` requires a detected agent process with no pane output for
+five minutes. An unreadable or unsupported process tree is never treated as an
+idle shell. Session names, pane titles, and screen contents stay outside the
+feed. Reading this snapshot does not publish an event or advance the activity
+cursor.
 
 The contained monitor and connector receive this metadata through the existing
 `activity.read` grant. The monitor refreshes discovery while open. `--seats`
@@ -86,14 +92,18 @@ The normalized event has these fields:
 | `source` | `notify`, `hooks`, or `runtime`. |
 | `kind` | Closed activity enum in `activity.rs`. |
 | `process_ids` | Optional process-lineage metadata for correlating hook and runtime ownership. It is omitted when unavailable and is not included in webhook payloads. |
+| `detail` | Optional bounded display metadata: tool, relative file label, redacted command summary, duration, exit code, task/ticket key, and opaque operation correlation. |
 
 Identifiers permit ASCII letters, digits, hyphens, underscores, periods, and
-colons. Seat identities follow the existing mailbox identity format.
-The daemon accepts no free-text summary, arguments, command text, prompts,
-responses, file paths, file contents, or mail bodies. Adapters hash upstream
-correlation identifiers before publication. Operators still choose neutral seat
-identities. This format is data minimization, not authenticated seat attribution:
-any client with same-user socket access can assert a seat.
+colons. Seat identities follow the existing mailbox identity format. The
+optional `detail` record accepts only the named display fields, with printable
+values capped at 256 bytes. The hook adapter caps commands at 200 characters,
+redacts common credential flag/value patterns, and reports paths relative to
+the hook cwd (or just a basename when the path is outside it). It discards
+prompts, responses, file contents, terminal output, and mail bodies. Upstream
+session and tool correlation values are hashed before publication. This format
+is data minimization, not authenticated seat attribution: any client with
+same-user socket access can assert a seat.
 
 `process_ids` is a bounded list of process IDs: hook adapters report their
 nearest non-shell owner, and runtime projection reports the foreground or
@@ -113,6 +123,9 @@ returns an acknowledgement cursor and `duplicate`. The ring retains 512 records.
 Retries with the same seat, run, and event identity return the original cursor
 while retained. A retry with changed content fails. After eviction or restart,
 the same identity can be accepted again. There is no durable exactly-once claim.
+For matching hook tool start and finish events, the daemon adds a duration to
+the finish record. Pending starts are bounded to 1,024 entries and expire after
+30 minutes; unmatched finishes have no duration.
 
 Readers send a null cursor for initial retained history:
 
@@ -151,6 +164,28 @@ document the same stdin command structure. Both support `PostToolUseFailure`.
 Install that optional event with `--failure-hook` only for runtimes that support
 it. The default installation uses SessionStart, SessionEnd, UserPromptSubmit,
 PreToolUse, PostToolUse, and Stop.
+
+### Harness hook coverage
+
+Hook availability and payloads differ by harness. This table records the
+documented source for lifecycle and tool activity; it does not imply that the
+feed installer configures every harness.
+
+| Harness | Documented source | Useful signals | Limits |
+| --- | --- | --- | --- |
+| Claude Code | [Hooks reference](https://code.claude.com/docs/en/hooks) | Session lifecycle, prompt submission, pre/post tool use, failures, and stop; JSON hook input includes session and tool context for applicable events. | Hooks must be configured in the user's trusted settings. Hosted tools and surfaces can have different hook support. |
+| Codex | [Hooks guide](https://learn.chatgpt.com/docs/hooks) | Session start, prompt submission, tool lifecycle, subagent lifecycle, stop, and interruption. Applicable payloads include session ID, model, working directory, and tool metadata. | Hook schemas and supported events depend on the Codex version and surface. Quota state is not a documented hook field. |
+| Muse Code | [Hooks guide](https://meta-models.github.io/muse-code-sdk/next/guides/extend/hooks/) | Session and prompt lifecycle, tool success/failure, model calls, subagents, and stop. Hooks receive JSON on stdin; event-specific payloads are documented separately. | Project hooks run only for trusted workspaces. Quota state is not a documented hook field. |
+| Gemini CLI | [Hooks reference](https://geminicli.com/docs/hooks/reference/) | Session lifecycle, prompt/agent/model events, and before/after tool events. Hook input is JSON on stdin and includes session ID, cwd, event name, and timestamp. | Hooks are configured in Gemini settings. Tool responses and prompts can contain content, so the activity adapter must discard them. Quota state is not a documented hook field. |
+| Kiro | [Hook types](https://kiro.dev/docs/hooks/types/) and [configuration reference](https://kiro.dev/docs/custom-agents/configuration-reference/) | Prompt, session, agent, and pre/post tool lifecycle, depending on Kiro surface/version. Command hooks receive event JSON. | Trigger support differs across IDE, CLI versions, and Web; Web does not run these local triggers. Quota state is not a documented hook field. |
+
+Use pmux's current session roster as the identity and liveness source. Hooks
+provide activity transitions and may add explicitly documented metadata, but
+must be bound to a pmux session rather than allowed to create an unnamed seat.
+Treat project as the session's cwd when available. Model, quota, current task,
+and ticket are unknown unless a documented field or explicit local integration
+supplies them; do not read transcripts, credentials, or terminal output to fill
+gaps. In particular, no source listed above documents a quota-state field.
 
 Hooks and notifications return success when observation fails and never write
 hook-control output to stdout. A disabled feed is a silent no-op. Other failures

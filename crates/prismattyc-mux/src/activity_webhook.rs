@@ -882,6 +882,7 @@ fn publish_runtime(
             event_id: format!("runtime-{}", *event_id),
             source: ActivitySource::Runtime,
             kind,
+            detail: None,
             process_ids,
         },
     };
@@ -1078,6 +1079,7 @@ mod tests {
                 event_id: "event-1".into(),
                 source,
                 kind,
+                detail: None,
                 process_ids: Vec::new(),
             })
         }
@@ -1224,6 +1226,7 @@ mod tests {
             event_id: "event-1".into(),
             source,
             kind: ActivityKind::CommandFailed,
+            detail: None,
             process_ids,
         };
         assert!(ownership.observe(&event(ActivitySource::Hooks, "hook-run", vec![hook_pid])));

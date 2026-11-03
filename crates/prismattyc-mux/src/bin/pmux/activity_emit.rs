@@ -188,6 +188,159 @@ fn hook_kind(name: &str, tool: Option<&str>, failed: bool) -> Option<ActivityKin
     }
 }
 
+fn display_text(value: &str, limit: usize) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(limit)
+        .collect()
+}
+
+fn secret_label(value: &str) -> bool {
+    let key = value
+        .trim_matches(['\'', '"'])
+        .split(['=', ':'])
+        .next()
+        .unwrap_or(value)
+        .trim_start_matches('-')
+        .to_ascii_lowercase();
+    [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "credential",
+        "api_key",
+        "api-key",
+        "apikey",
+        "auth",
+    ]
+    .iter()
+    .any(|label| key.contains(label))
+}
+
+fn redacted_command(value: &str) -> String {
+    let mut output = Vec::new();
+    let mut redact_next = false;
+    for part in value.split_whitespace() {
+        let token = part.trim_matches(['\'', '"']);
+        if redact_next {
+            output.push("[redacted]".to_owned());
+            redact_next = token.eq_ignore_ascii_case("bearer");
+        } else if token.eq_ignore_ascii_case("bearer") {
+            output.push("Bearer".to_owned());
+            redact_next = true;
+        } else if secret_label(token) {
+            if token.contains(['=', ':']) {
+                let key = token.split(['=', ':']).next().unwrap_or_default();
+                output.push(format!("{key}=[redacted]"));
+                redact_next = token.ends_with(':');
+            } else {
+                output.push(part.to_owned());
+                redact_next = true;
+            }
+        } else {
+            output.push(part.to_owned());
+        }
+    }
+    display_text(&output.join(" "), 200)
+}
+
+fn relative_file(value: &str, cwd: Option<&str>) -> Option<String> {
+    let path = Path::new(value);
+    let relative = if path.is_absolute() {
+        cwd.and_then(|cwd| path.strip_prefix(cwd).ok())
+            .or_else(|| path.file_name().map(Path::new))?
+    } else if path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir | std::path::Component::RootDir
+        )
+    }) {
+        path.file_name().map(Path::new)?
+    } else {
+        path
+    };
+    let shown = relative
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(part) => Some(part.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    let shown = display_text(&shown, 256);
+    (!shown.is_empty()).then_some(shown)
+}
+
+fn ticket_id(input: &Value) -> Option<String> {
+    let value = input
+        .get("ticket")
+        .or_else(|| input.get("task_id"))
+        .and_then(Value::as_str)?;
+    let (project, sequence) = value.split_once('-')?;
+    (!project.is_empty()
+        && project.chars().all(|ch| ch.is_ascii_alphanumeric())
+        && !sequence.is_empty()
+        && sequence.chars().all(|ch| ch.is_ascii_digit())
+        && value.len() <= 32)
+        .then(|| value.to_ascii_uppercase())
+}
+
+fn hook_detail(input: &Value) -> Option<prismattyc_mux::activity::ActivityDetail> {
+    let tool = input
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .map(|value| display_text(value, 64));
+    let args = input.get("tool_input");
+    let file = ["file_path", "filePath", "path", "target_file"]
+        .iter()
+        .find_map(|key| args.and_then(|args| args.get(*key)).and_then(Value::as_str))
+        .and_then(|value| relative_file(value, input.get("cwd").and_then(Value::as_str)));
+    let command = ["command", "cmd"]
+        .iter()
+        .find_map(|key| args.and_then(|args| args.get(*key)).and_then(Value::as_str))
+        .map(redacted_command);
+    let exit_code = input
+        .pointer("/tool_response/exit_code")
+        .or_else(|| input.get("exit_code"))
+        .and_then(Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok());
+    let model = input
+        .get("model")
+        .and_then(Value::as_str)
+        .map(|value| display_text(value, 64));
+    let operation_id = input
+        .get("tool_use_id")
+        .or_else(|| input.get("tool_call_id"))
+        .and_then(Value::as_str)
+        .map(opaque);
+    let task = ticket_id(input);
+    let detail = prismattyc_mux::activity::ActivityDetail {
+        tool,
+        file,
+        command,
+        duration_ms: None,
+        exit_code,
+        task,
+        operation_id,
+        model,
+    };
+    (detail.tool.is_some()
+        || detail.file.is_some()
+        || detail.command.is_some()
+        || detail.exit_code.is_some()
+        || detail.task.is_some()
+        || detail.operation_id.is_some()
+        || detail.model.is_some())
+    .then_some(detail)
+}
+
 fn normalize(seat: AgentId, input: &Value, notify: bool) -> Result<Option<ActivityInput>> {
     let (source, session, kind, key) = if notify {
         if input.get("type").and_then(Value::as_str) != Some("agent-turn-complete") {
@@ -252,6 +405,7 @@ fn normalize(seat: AgentId, input: &Value, notify: bool) -> Result<Option<Activi
             key,
         )
     };
+    let detail = (!notify).then(|| hook_detail(input)).flatten();
     Ok(Some(ActivityInput {
         schema_version: 1,
         seat,
@@ -266,6 +420,7 @@ fn normalize(seat: AgentId, input: &Value, notify: bool) -> Result<Option<Activi
         } else {
             Vec::new()
         },
+        detail,
     }))
 }
 
@@ -373,19 +528,52 @@ mod tests {
     }
 
     #[test]
+    fn hook_keeps_only_an_explicit_bounded_model_field() {
+        let event = normalize(
+            AgentId::new("worker-model").unwrap(),
+            &json!({"hook_event_name":"SessionStart", "session_id":"session-model",
+                "model":"o4-mini", "prompt":"private prompt"}),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(event.detail.unwrap().model.as_deref(), Some("o4-mini"));
+    }
+
+    #[test]
     fn hook_classifies_operation_and_explicit_failure() {
         let event = normalize(
             AgentId::new("worker-b").unwrap(),
             &json!({"hook_event_name":"PostToolUseFailure", "session_id":"session-b",
-                "tool_use_id":"call-b", "tool_name":"Bash",
-                "tool_input":{"command":"private-command"}, "error":"private-error"}),
+                "tool_use_id":"call-b", "tool_name":"Bash", "cwd":"/work/project",
+                "tool_input":{"command":"curl https://example.test --api-key=private-secret -H 'Authorization: Bearer private-bearer'",
+                    "file_path":"/work/project/src/main.rs"},
+                "exit_code":1, "ticket":"PT-108", "error":"private-error"}),
             false,
         )
         .unwrap()
         .unwrap();
         assert_eq!(event.kind, ActivityKind::CommandFailed);
         assert_eq!(event.source, ActivitySource::Hooks);
-        assert!(!serde_json::to_string(&event).unwrap().contains("private"));
+        let detail = event.detail.unwrap();
+        assert_eq!(detail.tool.as_deref(), Some("Bash"));
+        assert_eq!(detail.file.as_deref(), Some("src/main.rs"));
+        assert_eq!(detail.task.as_deref(), Some("PT-108"));
+        assert_eq!(detail.exit_code, Some(1));
+        assert!(detail
+            .command
+            .as_deref()
+            .is_some_and(|command| command.contains("[redacted]")));
+        let serialized = serde_json::to_string(&detail).unwrap();
+        for private in [
+            "private-secret",
+            "private-bearer",
+            "/work/project",
+            "call-b",
+            "private-error",
+        ] {
+            assert!(!serialized.contains(private));
+        }
         assert_eq!(
             hook_kind("PreToolUse", Some("apply_patch"), false),
             Some(ActivityKind::EditStarted)

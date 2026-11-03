@@ -362,8 +362,46 @@ pub const MAIL_INJECT_DIRTY_IDLE_MS: u64 = 60_000;
 /// output. The idle trigger fires once per quiet episode; new
 /// output re-arms it.
 pub const PANE_IDLE_TRIGGER_MS: u64 = 60_000;
+const ACTIVITY_STUCK_AFTER_MS: u64 = 5 * 60 * 1000;
 const MAIL_INJECT_EPOCH_WAIT_MS: u64 = 250;
 const MAIL_INJECT_EPOCH_SLICE_MS: u64 = 10;
+
+fn activity_project_name(pid: u32) -> Option<String> {
+    let cwd = crate::procinfo::cwd_of(pid)?;
+    let root = cwd.ancestors().find(|path| path.join(".git").exists())?;
+    let name = root.file_name()?.to_str()?;
+    if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
+        return None;
+    }
+    Some(name.to_owned())
+}
+
+fn activity_session_state(
+    live: bool,
+    foreground: crate::procinfo::TerminalForeground,
+    last_output_at_ms: Option<u64>,
+    observed_at_ms: u64,
+) -> prismattyc_core::activity::ActivitySessionState {
+    use crate::procinfo::TerminalForeground;
+    use prismattyc_core::activity::ActivitySessionState;
+
+    if !live {
+        ActivitySessionState::Stopped
+    } else if foreground == TerminalForeground::Shell {
+        ActivitySessionState::Idle
+    } else if foreground == TerminalForeground::Agent
+        && last_output_at_ms
+            .is_some_and(|at| observed_at_ms.saturating_sub(at) >= ACTIVITY_STUCK_AFTER_MS)
+    {
+        ActivitySessionState::Stuck
+    } else if last_output_at_ms
+        .is_some_and(|at| observed_at_ms.saturating_sub(at) < PANE_IDLE_TRIGGER_MS)
+    {
+        ActivitySessionState::Working
+    } else {
+        ActivitySessionState::Waiting
+    }
+}
 
 /// Same-step inject result. Defer/skip is success, not an Error — the
 /// caller must not count those as attempts.
@@ -2599,7 +2637,7 @@ impl ControlPlane {
     }
 
     fn activity_sessions(&self) -> prismattyc_core::activity::ActivitySessions {
-        use prismattyc_core::activity::{ActivitySession, ActivitySessionState, ActivitySessions};
+        use prismattyc_core::activity::{ActivitySession, ActivitySessions};
         let observed_at_ms = now_unix_ms();
         let seats = self
             .domain
@@ -2622,20 +2660,74 @@ impl ControlPlane {
                         .and_then(|live| live.child_pid(pane.get()))
                         .is_some()
                 });
-                let state = if !live {
-                    ActivitySessionState::Stopped
-                } else if last_output_at_ms
-                    .is_some_and(|at| observed_at_ms.saturating_sub(at) < PANE_IDLE_TRIGGER_MS)
-                {
-                    ActivitySessionState::Working
-                } else {
-                    ActivitySessionState::Waiting
-                };
+                let foregrounds = panes
+                    .iter()
+                    .filter(|pane| {
+                        self.live
+                            .as_ref()
+                            .and_then(|live| live.child_pid(pane.get()))
+                            .is_some()
+                    })
+                    .map(|pane| {
+                        crate::procinfo::terminal_foreground(
+                            self.live
+                                .as_ref()
+                                .and_then(|live| live.child_pid(pane.get()))
+                                .expect("filtered live pane"),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let foreground = [
+                    crate::procinfo::TerminalForeground::Agent,
+                    crate::procinfo::TerminalForeground::Other,
+                    crate::procinfo::TerminalForeground::Shell,
+                ]
+                .into_iter()
+                .find(|candidate| foregrounds.contains(candidate))
+                .unwrap_or(crate::procinfo::TerminalForeground::Unknown);
+                let state =
+                    activity_session_state(live, foreground, last_output_at_ms, observed_at_ms);
+                let agent_pids = panes
+                    .iter()
+                    .filter_map(|pane| {
+                        self.live
+                            .as_ref()
+                            .and_then(|live| live.child_pid(pane.get()))
+                    })
+                    .filter(|pid| {
+                        crate::inject_agent_slug(crate::procinfo::foreground_agent(*pid)).is_some()
+                    })
+                    .collect::<Vec<_>>();
+                let harnesses = agent_pids
+                    .iter()
+                    .filter_map(|pid| {
+                        crate::inject_agent_slug(crate::procinfo::foreground_agent(*pid))
+                    })
+                    .collect::<HashSet<_>>();
+                let harness = (harnesses.len() == 1)
+                    .then(|| harnesses.into_iter().next().map(str::to_owned))
+                    .flatten();
+                let project_names = agent_pids
+                    .iter()
+                    .map(|pid| activity_project_name(*pid))
+                    .collect::<Option<Vec<_>>>()
+                    .map(|names| names.into_iter().collect::<HashSet<_>>());
+                let project = project_names
+                    .filter(|names| !agent_pids.is_empty() && names.len() == 1)
+                    .and_then(|mut names| names.drain().next());
+                let model = self
+                    .activity
+                    .as_ref()
+                    .and_then(|feed| feed.latest_model_for_seat(&seat));
                 Some(ActivitySession {
                     seat,
                     session_id: session.id.get(),
                     state,
                     last_output_at_ms,
+                    harness,
+                    model,
+                    quota: None,
+                    project,
                 })
             })
             .collect();
@@ -8521,6 +8613,48 @@ fn control_peer_closed(stream: &UnixStream) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_health_requires_positive_shell_or_agent_evidence() {
+        use crate::procinfo::TerminalForeground as Foreground;
+        use prismattyc_core::activity::ActivitySessionState as State;
+
+        let now = 1_000_000;
+        assert_eq!(
+            activity_session_state(false, Foreground::Unknown, None, now),
+            State::Stopped
+        );
+        assert_eq!(
+            activity_session_state(true, Foreground::Shell, None, now),
+            State::Idle
+        );
+        assert_eq!(
+            activity_session_state(true, Foreground::Agent, None, now),
+            State::Waiting
+        );
+        assert_eq!(
+            activity_session_state(
+                true,
+                Foreground::Agent,
+                Some(now - ACTIVITY_STUCK_AFTER_MS),
+                now
+            ),
+            State::Stuck
+        );
+        assert_eq!(
+            activity_session_state(true, Foreground::Agent, Some(now - 10), now),
+            State::Working
+        );
+        assert_eq!(
+            activity_session_state(
+                true,
+                Foreground::Unknown,
+                Some(now - ACTIVITY_STUCK_AFTER_MS),
+                now
+            ),
+            State::Waiting
+        );
+    }
 
     /// A `sleep` that runs under any argv[0], for fake-agent symlinks such as
     /// `claude` or `muse-bin-*`. Ubuntu 26.04 makes `/bin/sleep` a uutils
@@ -17625,6 +17759,7 @@ function Read-Exact([int]$Count) {
             event_id: "event-1".into(),
             source: crate::activity::ActivitySource::Notify,
             kind: crate::activity::ActivityKind::TurnFinished,
+            detail: None,
             process_ids: Vec::new(),
         }
     }

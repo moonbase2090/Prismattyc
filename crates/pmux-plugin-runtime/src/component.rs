@@ -493,6 +493,16 @@ fn convert_page(page: domain::ActivityPage) -> read::Page {
                         domain::ActivitySource::Runtime => read::Source::Runtime,
                     },
                     kind: convert_kind(record.event.kind),
+                    detail: record.event.detail.map(|detail| read::Detail {
+                        tool: detail.tool,
+                        file: detail.file,
+                        command: detail.command,
+                        duration_ms: detail.duration_ms,
+                        exit_code: detail.exit_code,
+                        task: detail.task,
+                        operation_id: detail.operation_id,
+                        model: detail.model,
+                    }),
                 },
             })
             .collect(),
@@ -548,9 +558,15 @@ fn convert_sessions(sessions: Option<domain::ActivitySessions>) -> Option<read::
                 state: match session.state {
                     domain::ActivitySessionState::Working => read::SessionState::Working,
                     domain::ActivitySessionState::Waiting => read::SessionState::Waiting,
+                    domain::ActivitySessionState::Idle => read::SessionState::Idle,
+                    domain::ActivitySessionState::Stuck => read::SessionState::Stuck,
                     domain::ActivitySessionState::Stopped => read::SessionState::Stopped,
                 },
                 last_output_at_ms: session.last_output_at_ms,
+                harness: session.harness,
+                model: session.model,
+                quota: session.quota,
+                project: session.project,
             })
             .collect(),
     })
@@ -727,6 +743,7 @@ mod tests {
                         event_id: "event-1".into(),
                         source: domain::ActivitySource::Hooks,
                         kind: domain::ActivityKind::Waiting,
+                        detail: None,
                         process_ids: Vec::new(),
                     },
                 }],
@@ -751,7 +768,7 @@ mod tests {
             capabilities: vec![
                 lifecycle::Capability {
                     name: "pmux:activity/read".into(),
-                    version: "1.0.0".into(),
+                    version: "1.3.0".into(),
                     available,
                 },
                 lifecycle::Capability {

@@ -214,7 +214,7 @@ pub fn live_foreground_pid(root: u32) -> Option<u32> {
     {
         match windows::foreground(root) {
             windows::Foreground::Running { pid, .. } => Some(pid),
-            windows::Foreground::Unknown => None,
+            windows::Foreground::Unknown | windows::Foreground::Shell => None,
         }
     }
     #[cfg(not(windows))]
@@ -238,6 +238,87 @@ pub fn has_foreground(root: u32) -> bool {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalForeground {
+    Agent,
+    Shell,
+    Other,
+    Unknown,
+}
+
+/// Classify the terminal foreground process without treating an unreadable
+/// process tree as a shell prompt.
+pub fn terminal_foreground(root: u32) -> TerminalForeground {
+    #[cfg(windows)]
+    {
+        match windows::foreground(root) {
+            windows::Foreground::Running { args, .. } => {
+                if crate::inject_submit::classify_windows_argv(&args).is_some() {
+                    TerminalForeground::Agent
+                } else {
+                    TerminalForeground::Other
+                }
+            }
+            windows::Foreground::Shell => TerminalForeground::Shell,
+            windows::Foreground::Unknown => TerminalForeground::Unknown,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let group = match classify_tty(root) {
+            TtyForeground::Pgid(group) => group,
+            TtyForeground::NoTty | TtyForeground::Unknown => {
+                return bare_shell_without_foreground_group(root);
+            }
+        };
+        let mut saw_shell = false;
+        let mut saw_other = false;
+        for pid in tree_pids(root) {
+            if pgid_of(pid) != Some(group) {
+                continue;
+            }
+            let Some(args) = cmdline_strings(pid) else {
+                return TerminalForeground::Unknown;
+            };
+            if is_shell_argv(&args) {
+                saw_shell = true;
+            } else {
+                let command = unix_replay_command(pid, args);
+                if crate::classify_cmdline(&command).is_some() {
+                    return TerminalForeground::Agent;
+                }
+                saw_other = true;
+            }
+        }
+        if saw_other {
+            TerminalForeground::Other
+        } else if saw_shell {
+            TerminalForeground::Shell
+        } else {
+            TerminalForeground::Unknown
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn bare_shell_without_foreground_group(root: u32) -> TerminalForeground {
+    let Some(root_args) = cmdline_strings(root) else {
+        return TerminalForeground::Unknown;
+    };
+    if !is_shell_argv(&root_args) {
+        return TerminalForeground::Unknown;
+    }
+    for pid in tree_pids(root).into_iter().filter(|pid| *pid != root) {
+        let Some(args) = cmdline_strings(pid) else {
+            return TerminalForeground::Unknown;
+        };
+        if !is_shell_argv(&args) {
+            return TerminalForeground::Unknown;
+        }
+    }
+    TerminalForeground::Shell
+}
+
 pub fn foreground_agent(root: u32) -> crate::InjectAgent {
     #[cfg(windows)]
     {
@@ -246,7 +327,9 @@ pub fn foreground_agent(root: u32) -> crate::InjectAgent {
                 crate::inject_submit::classify_windows_argv(&args)
                     .unwrap_or(crate::InjectAgent::Unknown)
             }
-            _ => crate::InjectAgent::Unknown,
+            windows::Foreground::Shell | windows::Foreground::Unknown => {
+                crate::InjectAgent::Unknown
+            }
         }
     }
     #[cfg(not(windows))]
@@ -1283,12 +1366,14 @@ mod tests {
             .expect("spawn bare sh");
         std::thread::sleep(std::time::Duration::from_millis(50));
         let cmd = foreground_command_impl(bare.id());
+        let health = terminal_foreground(bare.id());
         let _ = bare.kill();
         let _ = bare.wait();
         assert!(
             cmd.is_none(),
             "bare shell must not record a command: {cmd:?}"
         );
+        assert_eq!(health, TerminalForeground::Shell);
     }
 
     #[cfg(target_os = "linux")]
@@ -1430,6 +1515,7 @@ mod windows {
             args: Vec<String>,
             forwarders: Vec<u32>,
         },
+        Shell,
         Unknown,
     }
 
@@ -1561,6 +1647,7 @@ mod windows {
                     }
                 }
                 Foreground::Unknown => None,
+                Foreground::Shell => Some(false),
             }
         }
 
@@ -1604,6 +1691,7 @@ mod windows {
                     }
                 }
                 match next {
+                    [] if shell => return Some(Foreground::Shell),
                     [] => return None,
                     [child] => {
                         let child_process = system.process(Pid::from_u32(*child))?;

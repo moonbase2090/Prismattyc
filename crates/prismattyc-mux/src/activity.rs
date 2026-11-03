@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Opt-in, process-local activity history and a bounded one-shot client.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -18,10 +18,12 @@ const CAPACITY: usize = 512;
 const MAX_PAGE: usize = 256;
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_PENDING_TOOL_STARTS: usize = 1024;
+const MAX_PENDING_TOOL_AGE_MS: u64 = 30 * 60 * 1000;
 
 pub use prismattyc_core::activity::{
-    ActivityAck, ActivityCursor, ActivityInput, ActivityKind, ActivityPage, ActivityRecord,
-    ActivityReset, ActivitySource,
+    ActivityAck, ActivityCursor, ActivityDetail, ActivityInput, ActivityKind, ActivityPage,
+    ActivityRecord, ActivityReset, ActivitySource,
 };
 
 /// A daemon rejection that retains its machine-readable code without message text.
@@ -42,11 +44,31 @@ pub(crate) struct ActivityFeed {
     epoch: String,
     sequence: u64,
     retained: VecDeque<ActivityRecord>,
+    pending_tool_starts: HashMap<(String, String, String), u64>,
 }
 
 impl ActivityFeed {
     pub(crate) fn epoch(&self) -> &str {
         &self.epoch
+    }
+    pub(crate) fn latest_model_for_seat(&self, seat: &prismattyc_core::AgentId) -> Option<String> {
+        let latest_run_id = self
+            .retained
+            .iter()
+            .rev()
+            .find(|record| {
+                record.event.seat == *seat && record.event.source == ActivitySource::Hooks
+            })?
+            .event
+            .run_id
+            .as_str();
+        self.retained.iter().rev().find_map(|record| {
+            (record.event.seat == *seat
+                && record.event.source == ActivitySource::Hooks
+                && record.event.run_id == latest_run_id)
+                .then(|| record.event.detail.as_ref()?.model.clone())
+                .flatten()
+        })
     }
     pub(crate) fn new() -> Result<Self, &'static str> {
         let mut bytes = [0u8; 16];
@@ -55,17 +77,32 @@ impl ActivityFeed {
             epoch: bytes.iter().map(|b| format!("{b:02x}")).collect(),
             sequence: 0,
             retained: VecDeque::with_capacity(CAPACITY),
+            pending_tool_starts: HashMap::new(),
         })
     }
 
     pub(crate) fn publish(&mut self, event: ActivityInput) -> Result<ActivityAck, &'static str> {
+        let received_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "system clock precedes activity epoch")?
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        self.publish_at(event, received_at_ms)
+    }
+
+    fn publish_at(
+        &mut self,
+        mut event: ActivityInput,
+        received_at_ms: u64,
+    ) -> Result<ActivityAck, &'static str> {
         event.validate_metadata()?;
         if let Some(prior) = self.retained.iter().find(|r| {
             r.event.seat == event.seat
                 && r.event.run_id == event.run_id
                 && r.event.event_id == event.event_id
         }) {
-            return if prior.event == event {
+            let same = prior.event == event || derived_duration_retry_matches(&prior.event, &event);
+            return if same {
                 Ok(ActivityAck {
                     cursor: self.cursor(prior.sequence),
                     duplicate: true,
@@ -78,11 +115,44 @@ impl ActivityFeed {
             .sequence
             .checked_add(1)
             .ok_or("activity sequence exhausted")?;
-        let received_at_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| "system clock precedes activity epoch")?
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64;
+        let operation = event.detail.as_ref().and_then(|detail| {
+            detail.operation_id.as_ref().map(|operation_id| {
+                (
+                    event.seat.to_string(),
+                    event.run_id.clone(),
+                    operation_id.clone(),
+                )
+            })
+        });
+        if let Some(key) = operation.as_ref() {
+            if is_operation_finish(event.kind) {
+                if let Some(started_at_ms) = self.pending_tool_starts.remove(key) {
+                    if let Some(detail) = event.detail.as_mut() {
+                        if detail.duration_ms.is_none() {
+                            detail.duration_ms = Some(received_at_ms.saturating_sub(started_at_ms));
+                        }
+                    }
+                }
+            }
+        }
+        if is_operation_start(event.kind) {
+            if let Some(key) = operation {
+                self.pending_tool_starts.retain(|_, started_at_ms| {
+                    received_at_ms.saturating_sub(*started_at_ms) <= MAX_PENDING_TOOL_AGE_MS
+                });
+                if self.pending_tool_starts.len() >= MAX_PENDING_TOOL_STARTS {
+                    if let Some(oldest) = self
+                        .pending_tool_starts
+                        .iter()
+                        .min_by_key(|(_, started_at_ms)| *started_at_ms)
+                        .map(|(key, _)| key.clone())
+                    {
+                        self.pending_tool_starts.remove(&oldest);
+                    }
+                }
+                self.pending_tool_starts.insert(key, received_at_ms);
+            }
+        }
         if self.retained.len() == CAPACITY {
             self.retained.pop_front();
         }
@@ -152,6 +222,48 @@ impl ActivityFeed {
             sequence,
         }
     }
+}
+
+fn derived_duration_retry_matches(prior: &ActivityInput, retry: &ActivityInput) -> bool {
+    if !is_operation_finish(prior.kind) || prior.kind != retry.kind {
+        return false;
+    }
+    let (Some(prior_detail), Some(retry_detail)) = (&prior.detail, &retry.detail) else {
+        return false;
+    };
+    if prior_detail.duration_ms.is_none()
+        || retry_detail.duration_ms.is_some()
+        || prior_detail.operation_id != retry_detail.operation_id
+    {
+        return false;
+    }
+    let mut prior = prior.clone();
+    prior.detail.as_mut().unwrap().duration_ms = None;
+    prior == *retry
+}
+
+fn is_operation_start(kind: ActivityKind) -> bool {
+    matches!(
+        kind,
+        ActivityKind::ToolStarted
+            | ActivityKind::CommandStarted
+            | ActivityKind::EditStarted
+            | ActivityKind::TestStarted
+    )
+}
+
+fn is_operation_finish(kind: ActivityKind) -> bool {
+    matches!(
+        kind,
+        ActivityKind::ToolFinished
+            | ActivityKind::ToolFailed
+            | ActivityKind::CommandFinished
+            | ActivityKind::CommandFailed
+            | ActivityKind::EditFinished
+            | ActivityKind::EditFailed
+            | ActivityKind::TestPassed
+            | ActivityKind::TestFailed
+    )
 }
 
 /// Exchange one activity or session-snapshot request over the existing local control socket.
@@ -277,6 +389,7 @@ mod tests {
             event_id: format!("event-{id}"),
             source: ActivitySource::Notify,
             kind: ActivityKind::TurnFinished,
+            detail: None,
             process_ids: Vec::new(),
         }
     }
@@ -354,6 +467,61 @@ mod tests {
         assert!(page.records.is_empty());
         assert_eq!(page.cursor.sequence, 3);
         assert_eq!(page.reset, None);
+    }
+
+    #[test]
+    fn latest_model_is_scoped_to_the_current_hook_run() {
+        let mut feed = ActivityFeed::new().unwrap();
+        let seat = crate::mailbox::AgentId::new("worker-a").unwrap();
+        let mut first = event(1);
+        first.source = ActivitySource::Hooks;
+        first.detail = Some(ActivityDetail {
+            model: Some("o4-mini".into()),
+            ..ActivityDetail::default()
+        });
+        feed.publish(first).unwrap();
+        let mut same_run = event(2);
+        same_run.source = ActivitySource::Hooks;
+        same_run.detail = Some(ActivityDetail::default());
+        feed.publish(same_run).unwrap();
+        assert_eq!(
+            feed.latest_model_for_seat(&seat).as_deref(),
+            Some("o4-mini")
+        );
+
+        let mut next_run = event(3);
+        next_run.source = ActivitySource::Hooks;
+        next_run.run_id = "run-2".into();
+        feed.publish(next_run).unwrap();
+        assert!(feed.latest_model_for_seat(&seat).is_none());
+    }
+
+    #[test]
+    fn operation_finish_records_bounded_duration_from_matching_start() {
+        let mut feed = ActivityFeed::new().unwrap();
+        let mut start = event(10);
+        start.kind = ActivityKind::CommandStarted;
+        start.detail = Some(ActivityDetail {
+            operation_id: Some("call-a".into()),
+            ..ActivityDetail::default()
+        });
+        feed.publish_at(start, 1_000).unwrap();
+
+        let mut finish = event(11);
+        finish.kind = ActivityKind::CommandFinished;
+        finish.detail = Some(ActivityDetail {
+            operation_id: Some("call-a".into()),
+            ..ActivityDetail::default()
+        });
+        feed.publish_at(finish.clone(), 1_750).unwrap();
+        let retry = feed.publish_at(finish, 9_999).unwrap();
+        assert!(retry.duplicate);
+
+        let page = feed.read(None, 2).unwrap();
+        assert_eq!(
+            page.records[1].event.detail.as_ref().unwrap().duration_ms,
+            Some(750)
+        );
     }
 
     #[test]

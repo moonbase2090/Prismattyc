@@ -80,6 +80,8 @@ impl Palette {
             SeatState::Unknown => self.muted,
             SeatState::Working => self.working,
             SeatState::Waiting => self.waiting,
+            SeatState::Idle => self.muted,
+            SeatState::Stuck => self.failed,
             SeatState::Failed => self.failed,
             SeatState::Stopped => self.stopped,
         }
@@ -193,6 +195,7 @@ impl Sort {
 pub enum Screen {
     List,
     Timeline,
+    Details,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -211,6 +214,8 @@ pub struct Ui {
     pub help: bool,
     pub pixels: bool,
     pub motion: bool,
+    /// Run and event hashes are hidden unless the operator opts into diagnostics.
+    pub hashes: bool,
     list_offset: usize,
     timeline_offset: usize,
     /// Rows per page from the last frame, for PgUp/PgDn.
@@ -229,6 +234,7 @@ impl Default for Ui {
             help: false,
             pixels: true,
             motion: true,
+            hashes: false,
             list_offset: 0,
             timeline_offset: 0,
             page: 10,
@@ -250,8 +256,10 @@ fn visible(host: &Host, seat: &Seat, filter: Filter, now: u64) -> bool {
         Filter::All => true,
         Filter::Working => seat.state == SeatState::Working,
         Filter::Attention => {
-            matches!(seat.state, SeatState::Waiting | SeatState::Failed)
-                || (seat.state == SeatState::Working && model::is_stale(host, seat, now))
+            matches!(
+                seat.state,
+                SeatState::Waiting | SeatState::Stuck | SeatState::Failed
+            ) || (seat.state == SeatState::Working && model::is_stale(host, seat, now))
         }
     }
 }
@@ -370,6 +378,7 @@ impl Ui {
             (_, KeyCode::Char('q')) => return true,
             (_, KeyCode::Char('?')) => self.help = true,
             (_, KeyCode::Char('p')) => self.pixels = !self.pixels,
+            (_, KeyCode::Char('i')) => self.hashes = !self.hashes,
             (Screen::List, KeyCode::Up | KeyCode::Char('k')) => self.step(&rows, -1),
             (Screen::List, KeyCode::Down | KeyCode::Char('j')) => self.step(&rows, 1),
             (Screen::List, KeyCode::PageUp) => self.step(&rows, -page),
@@ -386,10 +395,15 @@ impl Ui {
                     self.timeline_offset = 0;
                 }
             }
+            (Screen::List, KeyCode::Char('d')) => {
+                if self.selected.is_some() {
+                    self.screen = Screen::Details;
+                }
+            }
             (Screen::List, KeyCode::Char('f')) => self.filter = self.filter.next(),
             (Screen::List, KeyCode::Char('s')) => self.sort = self.sort.next(),
             (
-                Screen::Timeline,
+                Screen::Timeline | Screen::Details,
                 KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace,
             ) => {
                 self.screen = Screen::List;
@@ -546,8 +560,8 @@ fn blend(palette: &Palette, color: Color, alpha: f32) -> Color {
     Color::Rgb(mix(r, gr), mix(g, gg), mix(b, gb))
 }
 
-fn counts(hosts: &[Host]) -> [usize; 4] {
-    let mut out = [0; 4];
+fn counts(hosts: &[Host]) -> [usize; SeatState::ALL.len()] {
+    let mut out = [0; SeatState::ALL.len()];
     for seat in hosts.iter().flat_map(|host| host.seats.values()) {
         if let Some(index) = SeatState::ALL.iter().position(|state| *state == seat.state) {
             out[index] += 1;
@@ -592,12 +606,15 @@ pub fn render(
     let body = Rect::new(area.x, body_top, area.width, body_bottom - body_top);
     let rows = rows(hosts, ui, clock.wall_ms);
     let selected = ui.current(&rows);
-    if ui.screen == Screen::Timeline && selected.is_none() {
+    if ui.screen != Screen::List && selected.is_none() {
         ui.screen = Screen::List;
     }
     match (ui.screen, &selected) {
         (Screen::Timeline, Some((host, id))) => {
             draw_timeline(&mut paint, body, &hosts[*host], id, ui, clock, true);
+        }
+        (Screen::Details, Some((host, id))) => {
+            draw_details(&mut paint, body, &hosts[*host], id, clock);
         }
         _ if tier == Tier::Wide && hint(hosts).is_none() => {
             let list_width = (area.width * 52 / 100).clamp(56, 96);
@@ -1119,8 +1136,22 @@ fn draw_seat_row(
         base.fg(palette.muted)
     };
     paint.right(cols.age + 1, y, 4, &age, age_style);
-    if let (Some(flag), true) = (cols.flag, stale) {
-        paint.text(flag, y, flag + 5, "stale", base.fg(palette.waiting));
+    if let Some(flag) = cols.flag {
+        match seat.state {
+            SeatState::Idle | SeatState::Stuck | SeatState::Stopped => {
+                paint.text(
+                    flag,
+                    y,
+                    flag + 5,
+                    seat.state.word(),
+                    base.fg(palette.state(seat.state)),
+                );
+            }
+            _ if stale => {
+                paint.text(flag, y, flag + 5, "stale", base.fg(palette.waiting));
+            }
+            _ => {}
+        }
     }
     if let Some((lane_x, lane_w)) = cols.lane {
         paint.lane(
@@ -1190,31 +1221,47 @@ fn draw_timeline(
         model::short_age(clock.wall_ms.saturating_sub(seat.state_since_ms))
     );
     x = paint.text(x + 3, y, limit, &state, fg(palette.state(seat.state)));
-    if model::is_stale(host, seat, clock.wall_ms) {
+    if matches!(
+        seat.state,
+        SeatState::Idle | SeatState::Stuck | SeatState::Stopped
+    ) {
+        paint.text(
+            x + 2,
+            y,
+            limit,
+            seat.state.word(),
+            fg(palette.state(seat.state)),
+        );
+    } else if model::is_stale(host, seat, clock.wall_ms) {
         paint.text(x + 2, y, limit, "stale", fg(palette.waiting));
     }
     y += 1;
     let left = area.x + u16::from(full);
     let bottom = area.y + area.height;
     if y < bottom {
-        let mut runs: Vec<&str> = seat
+        let tasks: std::collections::BTreeSet<&str> = seat
             .history
             .iter()
-            .map(|r| r.event.run_id.as_str())
+            .map(|record| {
+                record
+                    .event
+                    .detail
+                    .as_ref()
+                    .and_then(|detail| detail.task.as_deref())
+                    .unwrap_or("unassigned")
+            })
             .collect();
-        runs.sort_unstable();
-        runs.dedup();
         let failures = seat
             .history
             .iter()
             .filter(|r| is_failure(r.event.kind))
             .count();
         let summary = format!(
-            "{} event{}  {} run{}  {} failure{}  last {} ago",
+            "{} event{}  {} task{}  {} failure{}  last {} ago",
             seat.history.len(),
             if seat.history.len() == 1 { "" } else { "s" },
-            runs.len(),
-            if runs.len() == 1 { "" } else { "s" },
+            tasks.len(),
+            if tasks.len() == 1 { "" } else { "s" },
             failures,
             if failures == 1 { "" } else { "s" },
             model::short_age(model::age_ms(seat, clock.wall_ms)),
@@ -1242,15 +1289,20 @@ fn draw_timeline(
     if y >= bottom {
         return;
     }
-    // Newest first, with a hairline whenever the run changes.
+    // Newest first, grouped by the ticket/task label rather than a correlation hash.
     let mut lines: Vec<Option<&ActivityRecord>> = Vec::new();
-    let mut previous_run: Option<&str> = None;
+    let mut previous_task: Option<&str> = None;
     for record in seat.history.iter().rev() {
-        let run = record.event.run_id.as_str();
-        if previous_run.is_some_and(|previous| previous != run) {
+        let task = record
+            .event
+            .detail
+            .as_ref()
+            .and_then(|detail| detail.task.as_deref())
+            .unwrap_or("unassigned");
+        if previous_task.is_some_and(|previous| previous != task) {
             lines.push(None);
         }
-        previous_run = Some(run);
+        previous_task = Some(task);
         lines.push(Some(record));
     }
     let height = usize::from(bottom - y);
@@ -1259,8 +1311,8 @@ fn draw_timeline(
     let width = limit.saturating_sub(left);
     let show_gap = width >= 40;
     let show_source = width >= 52;
-    let show_run = width >= 62;
-    let show_event = width >= 72;
+    let show_run = ui.hashes && width >= 62;
+    let show_event = ui.hashes && width >= 72;
     let show_seq = width >= 82;
     let history: Vec<&ActivityRecord> = seat.history.iter().collect();
     for (line, entry) in lines
@@ -1271,13 +1323,21 @@ fn draw_timeline(
     {
         let row_y = y + line as u16;
         let Some(record) = entry else {
-            // The run below this hairline is older.
+            // The task below this hairline is older.
             let older = lines[ui.timeline_offset + line + 1..]
                 .iter()
                 .flatten()
                 .next();
             let label = older
-                .map(|r| format!("── run {} ", short_id(&r.event.run_id)))
+                .map(|record| {
+                    let task = record
+                        .event
+                        .detail
+                        .as_ref()
+                        .and_then(|detail| detail.task.as_deref())
+                        .unwrap_or("unassigned");
+                    format!("── task {task} ── ")
+                })
                 .unwrap_or_default();
             let x = paint.text(left + 6, row_y, limit, &label, fg(palette.muted));
             let rule = "─".repeat(usize::from(limit.saturating_sub(x + 1)));
@@ -1327,15 +1387,42 @@ fn draw_timeline(
             fg(kind_color),
         );
         x += KIND_WIDTH as u16 + 1;
+        if let Some(detail) = record.event.detail.as_ref() {
+            if let Some(tool) = detail.tool.as_deref() {
+                x = paint.text(x, row_y, limit, tool, fg(palette.muted)) + 1;
+            }
+            if let Some(file) = detail.file.as_deref() {
+                x = paint.text(x, row_y, limit, file, fg(palette.text)) + 1;
+            } else if let Some(command) = detail.command.as_deref() {
+                x = paint.text(x, row_y, limit, command, fg(palette.text)) + 1;
+            }
+            if let Some(duration_ms) = detail.duration_ms {
+                x = paint.text(
+                    x,
+                    row_y,
+                    limit,
+                    &format!("{duration_ms}ms"),
+                    fg(palette.muted),
+                ) + 1;
+            }
+            if let Some(exit_code) = detail.exit_code {
+                x = paint.text(
+                    x,
+                    row_y,
+                    limit,
+                    &format!("exit {exit_code}"),
+                    fg(palette.muted),
+                ) + 1;
+            }
+        }
         if show_source {
-            paint.text(
+            x = paint.text(
                 x,
                 row_y,
                 limit,
                 &model::label(&record.event.source),
                 fg(palette.muted),
-            );
-            x += 9;
+            ) + 1;
         }
         if show_run {
             paint.text(
@@ -1369,6 +1456,94 @@ fn draw_timeline(
     }
 }
 
+fn draw_details(paint: &mut Painter<'_, '_>, area: Rect, host: &Host, id: &AgentId, clock: Clock) {
+    let palette = *paint.palette;
+    let Some(seat) = host.seats.get(id) else {
+        return;
+    };
+    let limit = area.x + area.width;
+    let mut y = area.y;
+    let mut x = paint.text(area.x, y, limit, "← ", fg(palette.muted));
+    x = paint.text(x, y, limit, id.as_str(), bold(fg(palette.strong)));
+    paint.text(
+        x + 1,
+        y,
+        limit,
+        &format!("on {}", host.label),
+        fg(palette.muted),
+    );
+    y += 2;
+    let latest = seat.latest();
+    let detail = latest.event.detail.as_ref();
+    let values = [
+        ("Health", seat.state.word().to_owned()),
+        (
+            "Doing",
+            format!(
+                "{} ({})",
+                model::label(&latest.event.kind),
+                model::label(&latest.event.source)
+            ),
+        ),
+        (
+            "Tool",
+            detail
+                .and_then(|d| d.tool.clone())
+                .unwrap_or_else(|| "not reported".into()),
+        ),
+        (
+            "File",
+            detail
+                .and_then(|d| d.file.clone())
+                .unwrap_or_else(|| "not reported".into()),
+        ),
+        (
+            "Command",
+            detail
+                .and_then(|d| d.command.clone())
+                .unwrap_or_else(|| "not reported".into()),
+        ),
+        (
+            "Duration",
+            detail
+                .and_then(|d| d.duration_ms)
+                .map(|ms| format!("{ms} ms"))
+                .unwrap_or_else(|| "not reported".into()),
+        ),
+        (
+            "Exit status",
+            detail
+                .and_then(|d| d.exit_code)
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "not reported".into()),
+        ),
+        (
+            "Last progress",
+            format!(
+                "{} ago",
+                model::short_age(model::age_ms(seat, clock.wall_ms))
+            ),
+        ),
+        (
+            "Waypoint ticket",
+            detail
+                .and_then(|d| d.task.clone())
+                .unwrap_or_else(|| "not reported".into()),
+        ),
+        ("Model", "not reported".to_owned()),
+        ("Quota", "not reported".to_owned()),
+        ("Project", "not reported".to_owned()),
+    ];
+    for (label, value) in values {
+        if y >= area.y + area.height {
+            break;
+        }
+        let x = paint.text(area.x + 2, y, limit, label, fg(palette.muted));
+        paint.text(x + 2, y, limit, &value, fg(palette.text));
+        y += 1;
+    }
+}
+
 impl Palette {
     /// Quieter than muted text, for secondary numbers.
     fn hairline_text(&self) -> Color {
@@ -1395,19 +1570,23 @@ fn draw_footer(
         Screen::List => &[
             ("↑↓", "move"),
             ("⏎", "timeline"),
+            ("d", "details"),
             ("q", "quit"),
             ("⇥", "host"),
             ("f", "filter"),
             ("?", "keys"),
             ("s", "sort"),
             ("p", "pixels"),
+            ("i", "IDs"),
         ],
         Screen::Timeline => &[
             ("↑↓", "scroll"),
             ("esc", "back"),
+            ("i", "IDs"),
             ("q", "quit"),
             ("?", "keys"),
         ],
+        Screen::Details => &[("esc", "back"), ("i", "IDs"), ("q", "quit"), ("?", "keys")],
     };
     // Keep the most important hints that fit, then show them in a stable order.
     let mut budget = usize::from(area.width.saturating_sub(2));
@@ -1425,8 +1604,9 @@ fn draw_footer(
     }
     let order: &[usize] = match ui.screen {
         _ if idle => &[0],
-        Screen::List => &[0, 1, 3, 4, 6, 7, 5, 2],
-        Screen::Timeline => &[0, 1, 3, 2],
+        Screen::List => &[0, 1, 2, 4, 5, 7, 8, 9, 6, 3],
+        Screen::Timeline => &[0, 1, 2, 3, 4],
+        Screen::Details => &[0, 1, 2, 3],
     };
     let mut x = area.x + 1;
     for index in order.iter().filter(|index| keep.contains(index)) {
@@ -1444,6 +1624,8 @@ fn draw_help(paint: &mut Painter<'_, '_>, area: Rect) {
         ("g G", "first or last"),
         ("Tab", "next host (Shift-Tab: previous)"),
         ("Enter → l", "open the timeline"),
+        ("d", "open selected seat details"),
+        ("i", "show or hide diagnostic hashes"),
         ("Esc ← h", "back to the list"),
         ("f", "filter: all, needs attention, working"),
         ("s", "sort: name, most recent, state"),
@@ -1594,7 +1776,7 @@ mod tests {
             14,
             "",
             r#"
- Activity monitor   ● 2 working  ◆ 1 waiting  ✕ 1 failed  ■ 0 stopped  !
+ Activity monitor   ● 2 working  ◆ 1 waiting  ○ 0 idle  ! 0 stuck  ✕ 1 failed  ■ 0 down  !
  mac  connected  3 seats  2 need you                         ▂         ▂    ▂     ▂    ▂   ▂     ▂▂
 ▌✕ builder    test_failed         2m stale                   ▃▁▁▁▁▁▁▁▁▁▃▁▁▁▁▃▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
  ◆ reviewer   turn_finished      41s stale                                        ▃▁▁▁▁▁▁▁▁▃▁▁▁▁▁▁▁
@@ -1607,14 +1789,14 @@ mod tests {
 
 
 
- ↑↓ move  ⏎ timeline  ⇥ host  f filter  s sort  ? keys  q quit"#,
+ ↑↓ move  ⏎ timeline  d details  ⇥ host  f filter  s sort  i IDs  ? keys  q quit"#,
         ),
         (
             60,
             12,
             "",
             r#"
- Activity monitor   ●2 ◆1 ✕1 ■0 !
+ Activity monitor   ●2 ◆1 ○0 !0 ✕1 ■0 !
  mac  connected  3 seats  2 need you
 ▌✕ builder    test_failed         2m
  ◆ reviewer   turn_finished      41s
@@ -1625,14 +1807,14 @@ mod tests {
 
 
 
- ↑↓ move  ⏎ timeline  ⇥ host  f filter  ? keys  q quit"#,
+ ↑↓ move  ⏎ timeline  d details  ⇥ host  f filter  q quit"#,
         ),
         (
             30,
             8,
             "",
             r#"
- ●2 ◆1 ✕1 ■0 !
+ ●2 ◆1 ○0 !0 ✕1 ■0 !
  mac  connected
 ▌✕ builder                  2m
  ◆ reviewer                41s
@@ -1646,9 +1828,9 @@ mod tests {
             20,
             "j",
             r#"
- Activity monitor   ● 2 working  ◆ 1 waiting  ✕ 1 failed  ■ 0 stopped  !
+ Activity monitor   ● 2 working  ◆ 1 waiting  ○ 0 idle  ! 0 stuck  ✕ 1 failed  ■ 0 down  !
  mac  connected  3 seats  2 need you             ▂  ▂▂ ▂ ▂▂ ▂ │ reviewer on mac   ◆ waiting for 41s  stale
- ✕ builder    test_failed         2m stale       ▃▁▁▃▃▁▁▁▁▁▁▁ │ 2 events  1 run  0 failures  last 41s ago
+ ✕ builder    test_failed         2m stale       ▃▁▁▃▃▁▁▁▁▁▁▁ │ 2 events  1 task  0 failures  last 41s ago
 ▌◆ reviewer   turn_finished      41s stale             ▃▁▁▃▁▁ │
  ● worker-a   command_started     4s                     ▃▁▁▅ │                                              ▃▁▁▁▁▃▁▁▁
  windows  retrying for 12s  1 seat  cached                    │ -10m                      -5m                      now
@@ -1665,46 +1847,47 @@ mod tests {
                                                               │
                                                               │
                                                               │
- ↑↓ move  ⏎ timeline  ⇥ host  f filter  s sort  ? keys  q quit"#,
+ ↑↓ move  ⏎ timeline  d details  ⇥ host  f filter  s sort  i IDs  ? keys  q quit"#,
         ),
         (
             90,
             16,
             "jl",
             r#"
- Activity monitor   ● 2 working  ◆ 1 waiting  ✕ 1 failed  ■ 0 stopped  !
+ Activity monitor   ● 2 working  ◆ 1 waiting  ○ 0 idle  ! 0 stuck  ✕ 1 failed  ■ 0 down  !
  ← reviewer on mac   ◆ waiting for 41s  stale
- 2 events  1 run  0 failures  last 41s ago
+ 2 events  1 task  0 failures  last 41s ago
 
                                                                            ▃▁▁▁▁▁▁▃▁▁▁▁▁▁
  -10m                                       -5m                                       now
 
-   41s +49s   ◆ turn_finished    hooks    run run-bbbb ev event-5  #5
-    1m        ● turn_started     hooks    run run-bbbb ev event-4  #4
+   41s +49s   ◆ turn_finished    hooks #5
+    1m        ● turn_started     hooks #4
 
 
 
 
 
 
- ↑↓ scroll  esc back  ? keys  q quit"#,
+ ↑↓ scroll  esc back  i IDs  q quit  ? keys"#,
         ),
         (
             70,
             20,
             "?",
             r#"
- Activity monitor   ●2 ◆1 ✕1 ■0 !
+ Activity monitor   ●2 ◆1 ○0 !0 ✕1 ■0 !
  mac  connected  3 seats  2 need you
-▌✕ builder    test_failed         2m
- ◆ rev╭────────────────────────────────────────────────────────╮
- ● wor│ Keys                                                   │
- windo│                                                        │
- ● win│ ↑ ↓  j k    move, or scroll the timeline               │
-      │ PgUp PgDn   move by a page                             │
+▌✕ bui╭────────────────────────────────────────────────────────╮
+ ◆ rev│ Keys                                                   │
+ ● wor│                                                        │
+ windo│ ↑ ↓  j k    move, or scroll the timeline               │
+ ● win│ PgUp PgDn   move by a page                             │
       │ g G         first or last                              │
       │ Tab         next host (Shift-Tab: previous)            │
       │ Enter → l   open the timeline                          │
+      │ d           open selected seat details                 │
+      │ i           show or hide diagnostic hashes             │
       │ Esc ← h     back to the list                           │
       │ f           filter: all, needs attention, working      │
       │ s           sort: name, most recent, state             │
@@ -1712,24 +1895,23 @@ mod tests {
       │ q           quit                                       │
       ╰────────────────────────────────────────────────────────╯
 
-
- ↑↓ move  ⏎ timeline  ⇥ host  f filter  s sort  ? keys  q quit"#,
+ ↑↓ move  ⏎ timeline  d details  ⇥ host  f filter  ? keys  q quit"#,
         ),
         (
             44,
             10,
             "l",
             r#"
- Activity monitor   ●2 ◆1 ✕1 ■0 !
+ Activity monitor   ●2 ◆1 ○0 !0 ✕1 ■0 !
  ← builder on mac   ✕ failed for 2m  stale
- 3 events  1 run  1 failure  last 2m ago
+ 3 events  1 task  1 failure  last 2m ago
                              ▃▁▁▃▁▃▁▁▁▁▁▁▁▁
  -10m                -5m                now
 
     2m +30s   ✕ test_failed
     2m +50s   ▸ test_started
     3m        ● turn_started
- ↑↓ scroll  esc back  ? keys  q quit"#,
+ ↑↓ scroll  esc back  i IDs  q quit"#,
         ),
     ];
 
@@ -2086,19 +2268,55 @@ mod tests {
             .nth(1)
             .unwrap_or_default();
         assert!(timeline_row.contains("✕ test_failed"), "{text}");
-        assert!(text.contains("3 events  1 run  1 failure  last 2m ago"));
+        assert!(text.contains("3 events  1 task  1 failure  last 2m ago"));
         press(&mut monitor, KeyCode::End);
         let (single, ..) = draw(&mut monitor, 140, 30);
         assert!(
-            single.contains("1 event  1 run  0 failures  last 19s ago"),
+            single.contains("1 event  1 task  0 failures  last 19s ago"),
             "{single}"
         );
         Ok(())
     }
 
     #[test]
-    fn timeline_lists_newest_first_and_marks_each_change_of_run() -> Result<()> {
+    fn timeline_groups_by_task_and_hides_diagnostic_hashes_by_default() -> Result<()> {
         let mut monitor = fleet()?;
+        let seat = monitor.hosts[0]
+            .seats
+            .get_mut(&AgentId::new("worker-a").unwrap())
+            .unwrap();
+        for record in &mut seat.history {
+            let (task, tool, file, command, duration_ms, exit_code) = match record.sequence {
+                6 => ("PT-107", None, None, None, None, None),
+                7 => (
+                    "PT-108",
+                    Some("Edit"),
+                    Some("src/lib.rs"),
+                    None,
+                    Some(950),
+                    Some(0),
+                ),
+                8 => (
+                    "PT-108",
+                    Some("Bash"),
+                    None,
+                    Some("cargo test --locked"),
+                    Some(1250),
+                    None,
+                ),
+                _ => continue,
+            };
+            record.event.detail = Some(prismattyc_core::activity::ActivityDetail {
+                task: Some(task.into()),
+                tool: tool.map(str::to_owned),
+                file: file.map(str::to_owned),
+                command: command.map(str::to_owned),
+                duration_ms,
+                exit_code,
+                operation_id: Some(format!("op-{}", record.sequence)),
+                model: None,
+            });
+        }
         press(&mut monitor, KeyCode::End);
         press(&mut monitor, KeyCode::Up);
         assert_eq!(
@@ -2107,14 +2325,20 @@ mod tests {
         );
         press(&mut monitor, KeyCode::Enter);
         assert_eq!(monitor.ui.screen, Screen::Timeline);
-        let (text, ..) = draw(&mut monitor, 100, 24);
+        let (text, ..) = draw(&mut monitor, 140, 24);
         let started = text.find("command_started").unwrap();
         let edit = text.find("edit_finished").unwrap();
-        let rule = text.find("── run run-cccc").unwrap();
+        let rule = text.find("── task PT-107").unwrap();
         let turn = text.find("turn_started").unwrap();
         assert!(started < edit && edit < rule && rule < turn, "{text}");
+        assert!(text.contains("cargo test --locked"), "{text}");
+        assert!(text.contains("src/lib.rs"), "{text}");
+        assert!(
+            !text.contains("run run-cccc") && !text.contains("ev cccc"),
+            "{text}"
+        );
         let row = line_of(&text, "command_started");
-        let (_, grid, _) = draw(&mut monitor, 100, 24);
+        let (_, grid, _) = draw(&mut monitor, 140, 24);
         let y = text.lines().position(|line| line == row).unwrap() as u16;
         let gap_x = column_of(row, "+5.0s");
         assert_eq!(
@@ -2126,8 +2350,14 @@ mod tests {
             row.contains("4s")
                 && row.contains("+5.0s")
                 && row.contains("hooks")
-                && row.contains("run run-cccc")
+                && row.contains("Bash")
                 && row.contains("#8")
+        );
+        press(&mut monitor, KeyCode::Char('i'));
+        let (with_ids, ..) = draw(&mut monitor, 140, 24);
+        assert!(
+            with_ids.contains("run run-cccc") && with_ids.contains("ev event-8"),
+            "{with_ids}"
         );
         press(&mut monitor, KeyCode::Esc);
         assert_eq!(monitor.ui.screen, Screen::List);
@@ -2150,9 +2380,9 @@ mod tests {
         let row = line_of(&small, "worker-a");
         assert!(!row.contains("command"), "{row}");
         assert!(row.trim_end().ends_with("4s"), "{row}");
-        assert!(small.lines().next().unwrap().contains("●2 ◆1 ✕1 ■0"));
+        assert!(small.lines().next().unwrap().contains("●2"));
         let (tiny, ..) = draw(&mut monitor, 20, 3);
-        assert_eq!(tiny.lines().next().unwrap().trim_end(), "●2 ◆1 ✕1 ■0 !");
+        assert!(tiny.lines().next().unwrap().contains("●2"));
         Ok(())
     }
 
@@ -2168,6 +2398,22 @@ mod tests {
         let y = text.lines().position(|line| line == row).unwrap() as u16;
         let x = column_of(row, "4s ");
         assert_eq!(grid.get(x, y).unwrap().style().fg, Palette::DARK.muted);
+        Ok(())
+    }
+
+    #[test]
+    fn seat_details_show_current_observation_and_unreported_metadata() -> Result<()> {
+        let mut monitor = fleet()?;
+        press_char(&mut monitor, 'd');
+        let (text, ..) = draw(&mut monitor, 80, 24);
+        assert!(text.contains("builder on mac"), "{text}");
+        assert!(text.contains("Doing  test_failed (hooks)"), "{text}");
+        assert!(text.contains("Waypoint ticket  not reported"), "{text}");
+        assert!(text.contains("Model  not reported"), "{text}");
+        assert!(text.contains("Quota  not reported"), "{text}");
+        assert!(text.contains("Project  not reported"), "{text}");
+        press(&mut monitor, KeyCode::Esc);
+        assert_eq!(monitor.ui.screen, Screen::List);
         Ok(())
     }
 

@@ -21,6 +21,16 @@ pub fn page(page: read::Page) -> Result<domain::ActivityPage, read::Error> {
                     read::Source::Runtime => domain::ActivitySource::Runtime,
                 },
                 kind: kind(record.event.kind),
+                detail: record.event.detail.map(|detail| domain::ActivityDetail {
+                    tool: detail.tool,
+                    file: detail.file,
+                    command: detail.command,
+                    duration_ms: detail.duration_ms,
+                    exit_code: detail.exit_code,
+                    task: detail.task,
+                    operation_id: detail.operation_id,
+                    model: detail.model,
+                }),
                 process_ids: Vec::new(),
             };
             event
@@ -111,11 +121,17 @@ fn session_snapshot(
                                 read::SessionState::Waiting => {
                                     domain::ActivitySessionState::Waiting
                                 }
+                                read::SessionState::Idle => domain::ActivitySessionState::Idle,
+                                read::SessionState::Stuck => domain::ActivitySessionState::Stuck,
                                 read::SessionState::Stopped => {
                                     domain::ActivitySessionState::Stopped
                                 }
                             },
                             last_output_at_ms: session.last_output_at_ms,
+                            harness: session.harness,
+                            model: session.model,
+                            quota: session.quota,
+                            project: session.project,
                         })
                     })
                     .collect::<Result<_, read::Error>>()?,

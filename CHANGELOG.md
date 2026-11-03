@@ -2,14 +2,23 @@
 
 ## [Unreleased]
 
+## [0.3.55] - 2026-11-03
+
 ### Added
 
-- Versioned contained plug-ins for activity views and queries, with exact package selection, endpoint grants, native Settings management, and cancellable workers. Guest packages are shared across native builds and versioned independently from the core.
-- A verified monitor-launcher repair command on Linux and Windows that preserves the six-executable core update and rollback transaction.
+- Versioned contained plug-ins for activity views and queries. Installations start disabled; enabling a plug-in selects an exact version and grants its endpoints explicitly. Settings and `pmux plugin` manage access, and workers stop when access is revoked.
+- Signed asynchronous activity webhooks, time-based activity cursors, and a one-command hook installer for supported harnesses.
+- The activity monitor discovers current agent sessions even when they have no recent hooks or their events have expired from history.
 
 ### Changed
 
-- After upgrading from the standalone 0.3.54 monitor, install and explicitly enable `org.moonbase.activity-monitor` for live/snapshot views and `org.moonbase.activity-connector` for JSON queries. Approve `activity.read:local` separately from the existing collection setting. Settings > Plug-ins and `pmux plugin` provide these actions; collection opt-in does not grant access automatically. Source builds need a verified plug-in bundle.
+- The activity monitor launcher can repair its frontend on Linux and Windows without changing the six-executable core update and rollback transaction.
+- Activity plug-ins must be installed and explicitly enabled after upgrading from the standalone monitor. Collection opt-in does not grant plug-in access.
+- Cell glyphs and shaped emoji are rasterized once per font and reused.
+
+### Fixed
+
+- Login restore keeps working after an agent harness updates itself by resolving a saved stable command through the restored shell's `PATH`.
 
 ## [0.3.54] - 2026-11-01
 

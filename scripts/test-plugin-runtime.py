@@ -8,6 +8,7 @@ operator's running daemon. Run on each supported OS before release.
 """
 
 import argparse
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -234,7 +235,81 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
         assert result.returncode == 0, result.stderr
         return result.stdout
 
-    def mcp_proof(arguments, activity_only):
+    def discovery_proof(connection):
+        connector = "org.moonbase.activity-connector"
+        monitor = "org.moonbase.activity-monitor"
+        for plugin in [connector, monitor]:
+            cli("install", plugin)
+            cli("enable", plugin, "--allow", "activity.read:local")
+
+        def create(name):
+            program = "cmd.exe" if os.name == "nt" else "/bin/sh"
+            argv = ["/d", "/c", "pause > nul"] if os.name == "nt" else ["-c", "read -r line"]
+            reply = connection.request("create_session", name=name,
+                spawn={"program":program,"argv":argv,"cwd":None,"env":{}},
+                agent_id=name, headless=False)
+            assert reply["status"] == "ok", reply
+            return reply["response"]["session_id"]
+
+        def seats():
+            reply = cli("invoke", connector, "seats")
+            assert not reply["is_error"], reply
+            return {seat["seat"]:seat for seat in json.loads(reply["json"])["seats"]}
+
+        quiet = create("quiet-seat")
+        create("unhooked-seat")
+        initial = connection.request("read_activity", cursor=None, limit=256)["response"]["page"]
+        assert initial["records"] == [] and initial["cursor"]["sequence"] == 0, initial
+        assert {seat["seat"] for seat in initial["sessions"]["seats"]} == {"quiet-seat", "unhooked-seat"}
+        observed = seats()
+        assert {"quiet-seat", "unhooked-seat"} <= observed.keys(), observed
+        assert observed["quiet-seat"]["retained_events"] == 0
+        first_frame = cli("run", monitor, "--snapshot", "--cols", "100", "--rows", "30", text=True)
+        assert "quiet-seat" in first_frame and "unhooked-seat" in first_frame, first_frame
+        (scratch / "discovery-initial.json").write_text(json.dumps(initial, indent=2) + "\n")
+        (scratch / "discovery-initial-frame.txt").write_text(first_frame)
+        for sequence in range(520):
+            reply = connection.request("publish_activity", event={"schema_version":1,
+                "seat":"busy-seat", "run_id":"busy-run", "event_id":f"event-{sequence}",
+                "source":"hooks", "kind":"working"})
+            assert reply["status"] == "ok", reply
+        page = connection.request("read_activity", cursor=initial["cursor"], limit=256)["response"]["page"]
+        assert page["reset"] == "retention_gap" and len(page["records"]) == 256, page
+        assert all(record["event"]["seat"] == "busy-seat" for record in page["records"])
+        assert {"quiet-seat", "unhooked-seat"} <= seats().keys()
+        restarted = cli("run", monitor, "--snapshot", "--cols", "100", "--rows", "30", text=True)
+        assert "quiet-seat" in restarted and "unhooked-seat" in restarted, restarted
+        (scratch / "discovery-retention-gap.json").write_text(json.dumps(page, indent=2) + "\n")
+        (scratch / "discovery-restarted-frame.txt").write_text(restarted)
+        core("new", "--no-attach", "--no-agent", "discovery-view", "--",
+            str(pmux), "--socket", str(endpoint), "plugin", "run", monitor, "--no-pixels")
+        view = next(session for session in connection.request("snapshot")["response"]["snapshot"]["sessions"] if session["name"] == "discovery-view")
+        pane = view["windows"][0]["panes"][0]["id"]
+
+        def screen(needle):
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                output = core("save-buffer", str(pane), "-")
+                if needle in output:
+                    return output
+                time.sleep(0.1)
+            raise AssertionError(f"live discovery view did not show {needle}: {output}")
+
+        screen("quiet-seat")
+        create("later-seat")
+        screen("later-seat")
+        reply = connection.request("destroy_session", session_id=quiet)
+        assert reply["status"] == "ok", reply
+        assert "quiet-seat" not in seats()
+        time.sleep(2)
+        assert "quiet-seat" not in core("save-buffer", str(pane), "-")
+        final_screen = core("save-buffer", str(pane), "-")
+        assert "later-seat" in final_screen
+        (scratch / "discovery-live-frame.txt").write_text(final_screen)
+        (scratch / "discovery-result.json").write_text(json.dumps({"status":"PASS", "checks":["zero events", "520-event retention gap", "fresh monitor", "live discovery", "session removal"]}, indent=2) + "\n")
+        print("PASS session discovery without hooks or events; unchanged cursor; 520-event retention gap; fresh monitor views retain quiet seats; live periodic discovery and session removal; existing activity-only grants", flush=True)
+
+    def mcp_proof(arguments, activity_only, expected_seats=()):
         import queue
         import threading
         messages = queue.Queue(maxsize=16)
@@ -277,7 +352,9 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
                 assert json.loads(result["content"][0]["text"])["hosts"] == [{"label":"local","endpoint":"local"}]
                 result = request(4,"tools/call",{"name":"pmux_activity_seats","arguments":{}})
                 assert not result.get("isError", False), result
-                assert json.loads(result["content"][0]["text"])["retained_history_only"] is True
+                seats = json.loads(result["content"][0]["text"])
+                assert seats["retained_history_only"] is False, seats
+                assert [seat["seat"] for seat in seats["seats"]] == list(expected_seats), seats
                 result = request(5,"tools/call",{"name":"pmux_activity_poll","arguments":{}})
                 assert result["isError"] and json.loads(result["content"][0]["text"])["error"]["code"] == "rate_limited", result
             else:
@@ -386,7 +463,7 @@ sys.stdin.readline()
             time.sleep(0.05)
         raise AssertionError("feed setting did not apply live")
 
-    def remote_proof():
+    def remote_proof(query_only=False):
         fixture = runtime / "endpoint-fixture.py"
         fixture.write_text('''import json, os, sys, time
 from pathlib import Path
@@ -427,6 +504,11 @@ else:
             assert time.monotonic() < deadline, value
             time.sleep(0.25)
         assert value["seats"][0]["retained_events"] == 300 and value["cursor"] == {"epoch":"abc1","sequence":300}, value
+        assert value["retained_history_only"] is True, value
+        if query_only:
+            (scratch / "remote-query-result.json").write_text(json.dumps(value, indent=2) + "\n")
+            print("PASS legacy remote query retains all 300 events and its source cursor without current-session metadata", flush=True)
+            return
         text = cli("run",monitor,"--snapshot","--cols","100","--rows","24","--endpoint","remote-tail",text=True)
         assert "remote-tail" in text and "remote-seat" in text and "test_failed" in text, text
         launcher = bins / f"pmux-activity-monitor{suffix}"
@@ -435,7 +517,10 @@ else:
         result = subprocess.run([str(launcher),"--socket",str(endpoint),"--host",f"other-socket={endpoint}","--snapshot"],env=env,capture_output=True,text=True, encoding="utf-8",timeout=45)
         assert result.returncode == 0 and "other-socket" in result.stdout, (result.stdout,result.stderr)
         result = subprocess.run([str(launcher),"--socket",str(endpoint),"--seats"],env=env,capture_output=True,text=True, encoding="utf-8",timeout=45)
-        assert result.returncode == 0 and json.loads(result.stdout)["retained_history_only"] is True, result.stderr
+        assert result.returncode == 0, result.stderr
+        local_seats = json.loads(result.stdout)
+        assert local_seats["retained_history_only"] is False, local_seats
+        assert [seat["seat"] for seat in local_seats["seats"]] == ["fixture-seat"], local_seats
         arguments = [json.loads(line) for line in query_log.read_text().splitlines()]
         assert arguments and all(args == ["activity","poll","--limit","256","--host-label","remote-query"] or args == ["activity","poll","--limit","256","--host-label","remote-query","--cursor","abc1:256"] or args == ["activity","poll","--limit","256","--host-label","remote-query","--cursor","abc1:300"] for args in arguments), arguments
         cli("endpoint","remove","remote-tail")
@@ -574,8 +659,8 @@ else:
             monitor_frame_proof()
             reply = cli("invoke",connector,"seats")
             assert not reply["is_error"] and json.loads(reply["json"])["seats"][0]["seat"] == "fixture-seat"
-            mcp_proof(["--activity-only"],True)
-            mcp_proof(["--activity-only","--supervise"],True)
+            mcp_proof(["--activity-only"],True,["fixture-seat"])
+            mcp_proof(["--activity-only","--supervise"],True,["fixture-seat"])
             exports = connection.plugin("exports",allowlist=[connector])["response"]["reply"]["tools"]
             assert len(exports) == 4
             cli("disable",connector)
@@ -601,7 +686,13 @@ else:
             feed(True)
             cli("install",monitor)
             cli("enable",monitor,"--allow","activity.read:local")
-            if feature == "endpoint-pressure":
+            if feature == "discovery":
+                discovery_proof(connection)
+            elif feature == "remote-query":
+                connector = "org.moonbase.activity-connector"
+                cli("install", connector)
+                remote_proof(query_only=True)
+            elif feature == "endpoint-pressure":
                 endpoint_pressure()
                 print("PASS32 endpoints with512 retained events each")
             else:
@@ -738,6 +829,7 @@ else:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--out", type=Path, help="retain proof artifacts in a new directory")
     parser.add_argument("--target-dir", type=Path, default=REPO / "target/plugin-proof")
     parser.add_argument("--bundle", type=Path, help="reuse a verified production artifact without compiling guests")
     parser.add_argument("--bins", type=Path, help="drive existing packaged production executables after verifying their physical bundle identities; build nothing")
@@ -745,15 +837,18 @@ def main():
     parser.add_argument("--toolchain", default="1.90.0")
     parser.add_argument("--release", action="store_true", dest="release", default=True, help="exercise optimized native binaries as shipped (default)")
     parser.add_argument("--debug", action="store_false", dest="release", help="use slower debug native binaries for local diagnostics")
-    parser.add_argument("--feature", choices=["all","endpoint-pressure","legacy-import","production"], default="all")
+    parser.add_argument("--feature", choices=["all","endpoint-pressure","legacy-import","production","discovery","remote-query"], default="all")
     args = parser.parse_args()
-    if bool(args.bundle) != (args.feature == "production"):
-        parser.error("--bundle and --feature production must be supplied together")
+    if bool(args.bundle) != (args.feature in ("production", "remote-query")):
+        parser.error("--bundle is required with --feature production or remote-query")
     if args.bins and (args.feature != "production" or not args.frame_probe):
         parser.error("--bins requires --bundle, --feature production, and --frame-probe")
     if args.frame_probe and not args.bins:
         parser.error("--frame-probe requires --bins")
-    with tempfile.TemporaryDirectory(prefix="pmux-plugin-build-") as work:
+    if args.out:
+        args.out = args.out.resolve()
+        args.out.mkdir(parents=True, exist_ok=False)
+    with (nullcontext(str(args.out)) if args.out else tempfile.TemporaryDirectory(prefix="pmux-plugin-build-")) as work:
         scratch = Path(work)
         if args.bins:
             sys.path.insert(0, str(REPO / "scripts/release"))

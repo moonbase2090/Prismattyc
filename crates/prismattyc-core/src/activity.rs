@@ -97,6 +97,54 @@ pub struct ActivityPage {
     pub cursor: ActivityCursor,
     pub has_more: bool,
     pub reset: Option<ActivityReset>,
+    /// Current daemon sessions, independent of retained history. Older sources omit it.
+    // Worker messages use postcard: an absent value still needs its positional None tag.
+    #[serde(default)]
+    pub sessions: Option<ActivitySessions>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivitySessions {
+    pub observed_at_ms: u64,
+    pub seats: Vec<ActivitySession>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivitySession {
+    pub seat: crate::AgentId,
+    pub session_id: u64,
+    pub state: ActivitySessionState,
+    pub last_output_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivitySessionState {
+    Working,
+    Waiting,
+    Stopped,
+}
+
+impl ActivitySession {
+    /// A display fallback, never inserted into event history or used as a cursor.
+    pub fn observation(&self, observed_at_ms: u64) -> ActivityRecord {
+        ActivityRecord {
+            sequence: 0,
+            received_at_ms: observed_at_ms,
+            event: ActivityInput {
+                schema_version: 1,
+                seat: self.seat.clone(),
+                run_id: format!("session-{}", self.session_id),
+                event_id: "session-snapshot".into(),
+                source: ActivitySource::Runtime,
+                kind: match self.state {
+                    ActivitySessionState::Working => ActivityKind::Working,
+                    ActivitySessionState::Waiting => ActivityKind::Waiting,
+                    ActivitySessionState::Stopped => ActivityKind::Stopped,
+                },
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -20,6 +20,7 @@ pub struct Retained {
     pub oldest_sequence: u64,
     pub cursor: ActivityCursor,
     pub records: Vec<ActivityRecord>,
+    pub sessions: Option<prismattyc_core::activity::ActivitySessions>,
 }
 
 /// Drain retained history in at most two pages, stopping at the first page's
@@ -34,6 +35,7 @@ pub fn retained(
     let watermark = page.current_sequence;
     let mut records = Vec::new();
     let mut prior_sequence = None;
+    let mut sessions = page.sessions.clone();
     for page_index in 0..MAX_QUERY_PAGES {
         if page.epoch != epoch || page.reset.is_some() {
             bail!("activity feed changed during the bounded query; retry");
@@ -58,6 +60,7 @@ pub fn retained(
                     sequence: watermark,
                 },
                 records,
+                sessions,
             });
         }
         if !page.has_more {
@@ -68,6 +71,7 @@ pub fn retained(
         }
         prior_sequence = Some(page.cursor.sequence);
         page = read(Some(page.cursor))?;
+        sessions = page.sessions.clone();
     }
     bail!("activity feed exceeded the bounded query page limit")
 }
@@ -97,7 +101,32 @@ fn base(history: &Retained) -> Value {
 /// Seats seen in retained history. Seeing a seat does not mean its process
 /// is alive.
 pub fn observed_seats(history: &Retained) -> Value {
+    let observations = history
+        .sessions
+        .as_ref()
+        .map(|snapshot| {
+            snapshot
+                .seats
+                .iter()
+                .map(|session| session.observation(snapshot.observed_at_ms))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let mut seats = BTreeMap::new();
+    for record in &observations {
+        seats.insert(
+            &record.event.seat,
+            ObservedSeat {
+                seat: &record.event.seat,
+                first_retained_sequence: 0,
+                last_sequence: 0,
+                last_received_at_ms: record.received_at_ms,
+                last_source: record.event.source,
+                last_kind: record.event.kind,
+                retained_events: 0,
+            },
+        );
+    }
     for record in &history.records {
         let entry = seats.entry(&record.event.seat).or_insert(ObservedSeat {
             seat: &record.event.seat,
@@ -108,6 +137,9 @@ pub fn observed_seats(history: &Retained) -> Value {
             last_kind: record.event.kind,
             retained_events: 0,
         });
+        if entry.retained_events == 0 {
+            entry.first_retained_sequence = record.sequence;
+        }
         entry.last_sequence = record.sequence;
         entry.last_received_at_ms = record.received_at_ms;
         entry.last_source = record.event.source;
@@ -115,6 +147,7 @@ pub fn observed_seats(history: &Retained) -> Value {
         entry.retained_events += 1;
     }
     let mut result = base(history);
+    result["retained_history_only"] = json!(history.sessions.is_none());
     result["seats"] = json!(seats.into_values().collect::<Vec<_>>());
     result
 }
@@ -140,6 +173,9 @@ pub fn recent_events(history: &Retained, seat: &AgentId, limit: Option<usize>) -
 pub fn filtered_page(mut page: ActivityPage, seat: Option<&AgentId>) -> ActivityPage {
     if let Some(seat) = seat {
         page.records.retain(|record| &record.event.seat == seat);
+        if let Some(sessions) = &mut page.sessions {
+            sessions.seats.retain(|session| &session.seat == seat);
+        }
     }
     page
 }
@@ -183,6 +219,28 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use prismattyc_core::activity::ActivityReset;
+    #[test]
+    fn seats_and_filtered_poll_include_sessions_without_retained_events() -> Result<()> {
+        let mut first = page(vec![], None)?;
+        first.sessions = Some(serde_json::from_value(json!({
+            "observed_at_ms": 5000, "seats": [
+                {"seat":"quiet","session_id":1,"state":"waiting","last_output_at_ms":null},
+                {"seat":"busy","session_id":2,"state":"working","last_output_at_ms":4900}
+            ]
+        }))?);
+        let history = retained(|_| Ok(first.clone()))?;
+        let result = observed_seats(&history);
+        assert_eq!(result["retained_history_only"], false);
+        assert_eq!(result["seats"][0]["seat"], "busy");
+        assert_eq!(result["seats"][0]["last_kind"], "working");
+        assert_eq!(result["seats"][1]["seat"], "quiet");
+        assert_eq!(result["seats"][1]["retained_events"], 0);
+        assert_eq!(history.cursor.sequence, 0);
+        let filtered = filtered_page(first, Some(&AgentId::new("quiet")?));
+        assert_eq!(filtered.sessions.unwrap().seats.len(), 1);
+        Ok(())
+    }
+
     fn record(seat: &str, sequence: u64, kind: &str) -> Result<ActivityRecord> {
         Ok(serde_json::from_value(json!({
             "sequence": sequence,

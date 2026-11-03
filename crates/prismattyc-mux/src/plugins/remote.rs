@@ -42,6 +42,7 @@ struct Snapshot {
     through: u64,
     error: Option<read::Error>,
     caught_up: bool,
+    sessions: Option<prismattyc_core::activity::ActivitySessions>,
 }
 
 impl Snapshot {
@@ -55,6 +56,7 @@ impl Snapshot {
             self.error = None;
             return Ok(());
         }
+        self.sessions = page.sessions;
         for record in page.records {
             if record.sequence > self.through {
                 self.records.push_back(record);
@@ -118,11 +120,25 @@ impl Snapshot {
             cursor: ActivityCursor { epoch, sequence },
             has_more: sequence < self.through,
             reset,
+            sessions: self.sessions.clone(),
         })
     }
 }
 
 fn validate_page(page: &ActivityPage) -> Result<()> {
+    if let Some(sessions) = &page.sessions {
+        ensure!(
+            sessions.seats.len() <= 4096,
+            "too many remote activity sessions"
+        );
+        let mut seats = std::collections::HashSet::new();
+        for session in &sessions.seats {
+            ensure!(
+                seats.insert(&session.seat),
+                "duplicate remote activity session"
+            );
+        }
+    }
     ensure!(
         !page.epoch.is_empty()
             && page.epoch.len() <= 128
@@ -720,6 +736,42 @@ mod tests {
             })).collect::<Vec<_>>(),
             "cursor":{"epoch":epoch,"sequence":end},"has_more":end<current,"reset":null
         })).unwrap()
+    }
+
+    #[test]
+    fn current_sessions_refresh_even_when_the_event_cursor_does_not_move() {
+        let mut cache = Snapshot::default();
+        let mut page = page("abc1", 1, 0, 0);
+        page.sessions = Some(serde_json::from_value(serde_json::json!({
+            "observed_at_ms":1000,"seats":[{"seat":"quiet-seat","session_id":7,"state":"waiting","last_output_at_ms":null}]
+        })).unwrap());
+        cache.apply(page.clone()).unwrap();
+        let initial = cache.page(None, 1).unwrap();
+        assert!(initial.records.is_empty());
+        assert_eq!(
+            initial.sessions.unwrap().seats[0].seat.as_str(),
+            "quiet-seat"
+        );
+        page.sessions.as_mut().unwrap().seats.clear();
+        cache.apply(page).unwrap();
+        let refreshed = cache.page(Some(initial.cursor), 1).unwrap();
+        assert!(refreshed.sessions.unwrap().seats.is_empty());
+        assert_eq!(refreshed.cursor.sequence, 0);
+    }
+
+    #[test]
+    fn remote_sessions_reject_duplicate_seat_identities() {
+        let mut page = page("abc1", 1, 0, 0);
+        page.sessions = Some(
+            serde_json::from_value(serde_json::json!({
+                "observed_at_ms":1000,"seats":[
+                    {"seat":"quiet-seat","session_id":7,"state":"waiting","last_output_at_ms":null},
+                    {"seat":"quiet-seat","session_id":8,"state":"working","last_output_at_ms":1000}
+                ]
+            }))
+            .unwrap(),
+        );
+        assert!(Snapshot::default().apply(page).is_err());
     }
 
     #[test]

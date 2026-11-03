@@ -41,8 +41,10 @@ python3 tests/native/macos-plugin-settings-e2e.py --bins "$verify_bins" \
 
 This fixture needs Python 3.11+, an unlocked display, Accessibility and screen
 capture permission, and matched binaries embedding production monitor 1.0.0.
-Use `--check-desktop-only` to check desktop prerequisites without launching
-processes. Host permissions do not allocate its desktop for input.
+Use `--check-desktop-only` to check Accessibility and an unlocked desktop
+without launching processes. This check does not test screen capture permission;
+the full fixture attempts capture later. Host permissions do not allocate its
+desktop for input.
 
 Require overall and per-chrome PASS, `host_reaped`, and `daemon_reaped`.
 Inspect classic and Graphite owned-window captures and frame records. Require

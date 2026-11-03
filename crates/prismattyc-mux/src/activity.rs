@@ -142,6 +142,7 @@ impl ActivityFeed {
             cursor: self.cursor(through),
             has_more: through < self.sequence,
             reset,
+            sessions: None,
         })
     }
 

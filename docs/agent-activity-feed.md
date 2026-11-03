@@ -50,6 +50,23 @@ independent. A future combined viewer needs explicit endpoint aliases, separate
 cursors, and separate connection status. Sequence numbers from different daemons
 have no global ordering. Remote transport and access policy need separate work.
 
+## Current sessions
+
+Activity responses also carry an optional `sessions` snapshot with an observation
+time and every daemon session that has an agent identity. Each entry contains
+only the seat identity, numeric session ID, current working/waiting/stopped state,
+and last pane-output time. Session names, pane titles, and screen contents stay
+outside the feed. Reading this snapshot does not publish an event or advance
+the activity cursor.
+
+The contained monitor and connector receive this metadata through the existing
+`activity.read` grant. The monitor refreshes discovery while open. `--seats`
+includes current sessions even when they have no retained events and reports
+`retained_history_only: false` when session metadata is available. Such seats
+have zero retained events and sequence zero until an event arrives. Older
+endpoints can omit `sessions` and continue to serve history-only views. A response
+with `sessions: null` also means that current-session metadata is unavailable.
+
 ## Event schema and replay
 
 The publisher sends one versioned JSON request per line:

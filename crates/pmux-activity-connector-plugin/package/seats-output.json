@@ -20,7 +20,7 @@
           "type": "string"
         },
         "retained_history_only": {
-          "const": true
+          "type": "boolean"
         },
         "epoch": {
           "type": "string"
@@ -38,7 +38,7 @@
         },
         "seats": {
           "type": "array",
-          "maxItems": 512,
+          "maxItems": 4608,
           "items": {
             "type": "object",
             "required": [
@@ -240,6 +240,60 @@
             "retention_gap",
             "ahead_of_feed"
           ]
+        },
+        "sessions": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "required": [
+            "observed_at_ms",
+            "seats"
+          ],
+          "properties": {
+            "observed_at_ms": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "seats": {
+              "type": "array",
+              "maxItems": 4096,
+              "items": {
+                "type": "object",
+                "required": [
+                  "seat",
+                  "session_id",
+                  "state",
+                  "last_output_at_ms"
+                ],
+                "properties": {
+                  "seat": {
+                    "type": "string"
+                  },
+                  "session_id": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "state": {
+                    "enum": [
+                      "working",
+                      "waiting",
+                      "stopped"
+                    ]
+                  },
+                  "last_output_at_ms": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

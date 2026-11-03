@@ -161,6 +161,7 @@ fn adopt_clears_nested_mark(promoted: bool, log_backed: bool) -> bool {
 /// The Windows idle scan calls `discover_windows` instead, so this function
 /// is compiled for the unix pump and for tests.
 #[cfg(any(not(windows), test))]
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn adopt_candidates(
     mux: &mut crate::mux::MuxRuntime,
     adopted: &mut Adopted,

@@ -327,7 +327,7 @@ pub(crate) fn session_directory() -> Vec<crate::attach_adopt::SessionEntry> {
 
 /// Live sessions from an explicit socket. Tests use this to keep their
 /// adoption fixture isolated from the developer's default pmuxd.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn session_directory_at(socket: &Path) -> Vec<crate::attach_adopt::SessionEntry> {
     live_snapshot_at(socket)
         .as_ref()

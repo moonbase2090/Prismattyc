@@ -22,15 +22,26 @@ jobs:
         with:
           # `&& 0 || 1` is wrong in GHA expressions (0 is falsy); PR --diff needs full history.
           fetch-depth: 0
+      # The pinned release is checksummed below, so a cached copy is safe to
+      # reuse and spares a download from GitHub on every run.
+      - name: Restore sc v0.1.5
+        uses: actions/cache@0c907a75c2c80ebcb7f088228285e798b750cf8f # v4.2.1
+        with:
+          path: ${{ runner.temp }}/sc-v0.1.5
+          key: sc-v0.1.5-${{ runner.os }}-${{ runner.arch }}
       - name: Install sc v0.1.5
         run: |
           set -eu
-          cd "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/sc-v0.1.5"
+          cd "$RUNNER_TEMP/sc-v0.1.5"
           asset=sc-v0.1.5-x86_64-unknown-linux-gnu.tar.gz
           base=https://github.com/moonbase2090/Scorecard/releases/download/v0.1.5
-          curl -fsSL -O "$base/$asset"
-          curl -fsSL -O "$base/SHA256SUMS"
-          sha256sum -c --ignore-missing SHA256SUMS
+          if ! { [ -f "$asset" ] && [ -f SHA256SUMS ] && sha256sum -c --ignore-missing SHA256SUMS; }; then
+            rm -f "$asset" SHA256SUMS
+            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -O "$base/$asset"
+            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -O "$base/SHA256SUMS"
+            sha256sum -c --ignore-missing SHA256SUMS
+          fi
           tar -xzf "$asset"
           mkdir -p "$HOME/.local/bin"
           install -m 755 sc sc-mcp "$HOME/.local/bin"

@@ -60,13 +60,14 @@ mod tests {
     #[test]
     fn starts_private_pmuxd_when_missing_and_waits_until_ready() {
         let binaries = crate::test_support::mux_bin_dir();
-        let pmux = binaries.join("pmux");
+        let pmux = binaries.join(prismattyc_mux::platform::executable_name("pmux"));
         let root = std::env::temp_dir().join(format!(
             "prismattyc-daemon-startup-{}-{}",
             std::process::id(),
             NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&root).unwrap();
+        prismattyc_mux::platform::secure_directory(&root).unwrap();
         let socket = root.join("pmux.sock");
         let spaces = prismattyc_mux::spaces_dir_for_socket(&socket);
         let private_mux = PrivateMux {

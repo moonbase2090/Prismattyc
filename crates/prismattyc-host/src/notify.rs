@@ -206,7 +206,15 @@ mod tests {
     fn spawn_detached_reaps_and_reports_spawn_failure() {
         // A real but harmless child proves the reaper path; a bogus binary
         // proves the spawn-failure path. Neither notifies nor makes sound.
-        assert!(spawn_detached(&mut Command::new("true")));
+        #[cfg(unix)]
+        let mut harmless = Command::new("true");
+        #[cfg(windows)]
+        let mut harmless = {
+            let mut command = Command::new("cmd.exe");
+            command.args(["/d", "/c", "exit", "0"]);
+            command
+        };
+        assert!(spawn_detached(&mut harmless));
         assert!(!spawn_detached(&mut Command::new(
             "prismattyc-no-such-player-binary"
         )));

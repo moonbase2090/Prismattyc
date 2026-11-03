@@ -1135,6 +1135,11 @@ impl PaneRuntime {
         cell_w: usize,
         cell_h: usize,
     ) -> Result<Self> {
+        #[cfg(all(test, windows))]
+        let test_shell = (child_args.is_empty() && matches!(program, "/bin/sh" | "sh"))
+            .then(prismattyc_mux::platform::default_shell);
+        #[cfg(all(test, windows))]
+        let program = test_shell.as_deref().unwrap_or(program);
         let pty_size = pty_size(cols, rows, cell_w, cell_h);
         let mut session =
             PtySession::spawn_config(program, child_args, cwd, &host_pane_env(), pty_size)
@@ -5911,7 +5916,7 @@ mod tests {
     }
 
     fn mux_binary(name: &str) -> PathBuf {
-        crate::test_support::mux_bin_dir().join(name)
+        crate::test_support::mux_bin_dir().join(prismattyc_mux::platform::executable_name(name))
     }
 
     fn private_mux_server() -> PrivateMuxServer {
@@ -5920,6 +5925,8 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("prismattyc-host-seam-{}-{id}", std::process::id()));
         std::fs::create_dir_all(&root).expect("create private mux test directory");
+        prismattyc_mux::platform::secure_directory(&root)
+            .expect("secure private mux test directory");
         let socket = root.join("pmuxd.sock");
         let data = root.join("data");
         std::fs::create_dir_all(&data).expect("create private mux data directory");
@@ -6636,6 +6643,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn real_osc_timer_respects_pin_until_idle_revert() {
         let script = r#"while :; do printf '\033]0;timer-zero\a'; sleep 0.25; printf '\033]2;timer-two\a'; sleep 0.25; done"#;
@@ -6756,6 +6764,7 @@ mod tests {
         assert!(!runtime.panes[&second].unseen_output);
     }
 
+    #[cfg(unix)]
     #[test]
     fn attention_drains_sets_badge_and_focus_clears_without_touching_unseen() {
         // Keep the child quiet so unrelated shell prompts cannot race this
@@ -6786,6 +6795,7 @@ mod tests {
         assert!(!runtime.panes[&second].unseen_output);
     }
 
+    #[cfg(unix)]
     #[test]
     fn attention_clears_when_unfocused_pane_outputs_again() {
         let mut runtime = MuxRuntime::spawn("/bin/cat", &[], 80, 24).unwrap();
@@ -7705,6 +7715,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn focus_next_attention_pane_cycles_layout_order() {
         let mut runtime = MuxRuntime::spawn("/bin/cat", &[], 80, 24).unwrap();

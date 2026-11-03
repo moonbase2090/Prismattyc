@@ -32,22 +32,36 @@ try {
     Log "head $(git rev-parse HEAD) rustc $((rustc --version) -join ' ')"
 
     if (-not $SkipClippy) {
-        cargo clippy --locked --workspace --all-targets -- -D warnings 2>&1 |
+        # Merge Cargo's streams before PowerShell 5.1 can turn stderr progress into NativeCommandError.
+        & $env:ComSpec /d /c 'cargo clippy --locked --workspace --all-targets -- -D warnings 2>&1' |
             Tee-Object -FilePath (Join-Path $Out 'clippy.log') | Out-Host
-        if ($LASTEXITCODE -ne 0) { Log 'FAIL: clippy --workspace --all-targets -D warnings'; $script:fails++ }
+        $clippyExitCode = $LASTEXITCODE
+        if ($clippyExitCode -ne 0) { Log 'FAIL: clippy --workspace --all-targets -D warnings'; $script:fails++ }
         else { Log 'PASS: clippy --workspace --all-targets -D warnings' }
     }
 
     foreach ($crate in $Crates) {
         # The lib test executable comes from cargo's JSON artifact messages.
         $exe = $null
-        cargo test --locked -p $crate --lib --no-run --message-format=json 2>$null | ForEach-Object {
+        $crateFile = $crate -replace '[^A-Za-z0-9_.-]', '_'
+        $buildJson = Join-Path $Out "$crateFile-test-build.jsonl"
+        $buildLog = Join-Path $Out "$crateFile-test-build.log"
+        $build = Start-Process -FilePath 'cargo' -Wait -PassThru -NoNewWindow `
+            -ArgumentList @('test', '--locked', '-p', $crate, '--lib', '--no-run', '--message-format=json') `
+            -RedirectStandardOutput $buildJson -RedirectStandardError $buildLog
+        Get-Content -Path $buildJson | ForEach-Object {
             if ($_ -notmatch '^\{') { return }
             $msg = $_ | ConvertFrom-Json
             if ($msg.reason -eq 'compiler-artifact' -and $msg.profile.test -and $msg.executable -and
                 ($msg.target.kind -contains 'lib')) { $exe = $msg.executable }
         }
-        if ($LASTEXITCODE -ne 0 -or -not $exe) { Log "FAIL: $crate lib tests did not build"; $script:fails++; continue }
+        if ($build.ExitCode -ne 0 -or -not $exe) {
+            Get-Content -Path $buildLog | Out-Host
+            Log "FAIL: $crate lib tests did not build"
+            $script:fails++
+            continue
+        }
+        Remove-Item $buildJson, $buildLog -ErrorAction SilentlyContinue
 
         $tests = & $exe --list --format terse |
             Where-Object { $_ -match ': test$' } |

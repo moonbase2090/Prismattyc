@@ -41,9 +41,12 @@ A row is stale when its last event is 30 seconds old, or when its host is discon
 
 Select a seat and press `d` to open its details. The top lines say who the seat
 is: its harness, model, quota and project, its ticket, and how long ago it last
-made progress. The harness, model, quota and project show `unknown` until pmux
-reports them without ambiguity. The monitor never infers them from terminal
-output, agent transcripts, prompts or paths. The ticket is the most recent task
+made progress. They come from pmux's session snapshot, and each shows `unknown`
+until pmux reports it without ambiguity. The harness and project (a repository
+name, never a path) appear only when every active agent pane in the session
+agrees. The model comes only from explicit hook metadata for the current run.
+No harness reports quota yet. The monitor never infers these values from
+terminal output, agent transcripts, prompts or paths. The ticket is the most recent task
 or ticket key an event carried, or `none reported`.
 
 Below that, the seat's retained activity is grouped by task, with the most

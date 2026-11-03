@@ -229,6 +229,14 @@ impl Host {
         });
         for session in sessions.seats {
             let observation = session.observation(sessions.observed_at_ms);
+            // pmux sends each value only when it is unambiguous, so the latest
+            // snapshot replaces the old one, including a value it no longer has.
+            let info = SeatInfo {
+                harness: session.harness.clone(),
+                model: session.model.clone(),
+                quota: session.quota.clone(),
+                project: session.project.clone(),
+            };
             let seat = self.seats.entry(session.seat).or_insert_with(|| Seat {
                 history: VecDeque::new(),
                 state: SeatState::Unknown,
@@ -237,6 +245,7 @@ impl Host {
                 info: SeatInfo::default(),
                 discovery: None,
             });
+            seat.info = info;
             let replaced = seat
                 .discovery
                 .as_ref()
@@ -764,6 +773,33 @@ pub(crate) mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn seat_facts_follow_the_latest_session_snapshot() -> Result<()> {
+        let mut host = Host::new("local");
+        let mut page = page_in("e0", vec![], None)?;
+        let mut sessions = discovered(&["coder"], 1_000);
+        sessions.seats[0].harness = Some("codex".into());
+        sessions.seats[0].model = Some("gpt-5".into());
+        sessions.seats[0].project = Some("Prismattyc".into());
+        page.sessions = Some(sessions);
+        host.apply(page.clone(), 0);
+        assert_eq!(
+            seat(&host, "coder").info,
+            SeatInfo {
+                harness: Some("codex".into()),
+                model: Some("gpt-5".into()),
+                quota: None,
+                project: Some("Prismattyc".into()),
+            }
+        );
+        // A later snapshot that no longer reports a value clears it, rather
+        // than leaving an old guess on screen.
+        page.sessions = Some(discovered(&["coder"], 2_000));
+        host.apply(page, 10);
+        assert_eq!(seat(&host, "coder").info, SeatInfo::default());
+        Ok(())
     }
 
     #[test]

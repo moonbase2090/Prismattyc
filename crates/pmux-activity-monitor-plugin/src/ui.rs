@@ -2676,6 +2676,24 @@ mod tests {
     }
 
     #[test]
+    fn seat_details_header_shows_reported_seat_facts() -> Result<()> {
+        let mut monitor = fleet_with_details()?;
+        let seat = monitor.hosts[0]
+            .seats
+            .get_mut(&AgentId::new("coder").unwrap())
+            .unwrap();
+        seat.info.harness = Some("claude".into());
+        seat.info.project = Some("Prismattyc".into());
+        open_details(&mut monitor, "coder");
+        let (text, ..) = draw(&mut monitor, 100, 24);
+        assert!(text.contains("Harness claude"), "{text}");
+        assert!(text.contains("Project Prismattyc"), "{text}");
+        assert!(text.contains("Model unknown"), "{text}");
+        assert!(text.contains("Quota unknown"), "{text}");
+        Ok(())
+    }
+
+    #[test]
     fn seat_details_show_ids_only_when_toggled() -> Result<()> {
         let mut monitor = fleet_with_details()?;
         open_details(&mut monitor, "coder");

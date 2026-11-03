@@ -37,6 +37,12 @@ Failed stays until the seat reports something else. `*_finished` means an operat
 
 A row is stale when its last event is 30 seconds old, or when its host is disconnected. A stale row shows its age in amber, and in wider layouts it also says `stale`. Staleness never changes a seat's state, because a quiet seat might be thinking, not hung.
 
+Select a seat and press `d` to open its details. The view shows the current
+health state, most recent activity kind and source, and the age of the last
+progress signal. Ticket, model, quota, and project fields say `not reported`
+until an approved source supplies them; the monitor does not infer them from
+terminal output or agent transcripts. Press `Esc` to return to the list.
+
 ## Hosts
 
 Each host has its own pmuxd, sequence and epoch, so the monitor keeps one cursor, connection state and seat table for each host. It never merges sequences across hosts.

@@ -193,6 +193,7 @@ impl Sort {
 pub enum Screen {
     List,
     Timeline,
+    Details,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -386,10 +387,15 @@ impl Ui {
                     self.timeline_offset = 0;
                 }
             }
+            (Screen::List, KeyCode::Char('d')) => {
+                if self.selected.is_some() {
+                    self.screen = Screen::Details;
+                }
+            }
             (Screen::List, KeyCode::Char('f')) => self.filter = self.filter.next(),
             (Screen::List, KeyCode::Char('s')) => self.sort = self.sort.next(),
             (
-                Screen::Timeline,
+                Screen::Timeline | Screen::Details,
                 KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace,
             ) => {
                 self.screen = Screen::List;
@@ -592,12 +598,15 @@ pub fn render(
     let body = Rect::new(area.x, body_top, area.width, body_bottom - body_top);
     let rows = rows(hosts, ui, clock.wall_ms);
     let selected = ui.current(&rows);
-    if ui.screen == Screen::Timeline && selected.is_none() {
+    if ui.screen != Screen::List && selected.is_none() {
         ui.screen = Screen::List;
     }
     match (ui.screen, &selected) {
         (Screen::Timeline, Some((host, id))) => {
             draw_timeline(&mut paint, body, &hosts[*host], id, ui, clock, true);
+        }
+        (Screen::Details, Some((host, id))) => {
+            draw_details(&mut paint, body, &hosts[*host], id, clock);
         }
         _ if tier == Tier::Wide && hint(hosts).is_none() => {
             let list_width = (area.width * 52 / 100).clamp(56, 96);
@@ -1369,6 +1378,56 @@ fn draw_timeline(
     }
 }
 
+fn draw_details(paint: &mut Painter<'_, '_>, area: Rect, host: &Host, id: &AgentId, clock: Clock) {
+    let palette = *paint.palette;
+    let Some(seat) = host.seats.get(id) else {
+        return;
+    };
+    let limit = area.x + area.width;
+    let mut y = area.y;
+    let mut x = paint.text(area.x, y, limit, "← ", fg(palette.muted));
+    x = paint.text(x, y, limit, id.as_str(), bold(fg(palette.strong)));
+    paint.text(
+        x + 1,
+        y,
+        limit,
+        &format!("on {}", host.label),
+        fg(palette.muted),
+    );
+    y += 2;
+    let latest = seat.latest();
+    let values = [
+        ("Health", seat.state.word().to_owned()),
+        (
+            "Doing",
+            format!(
+                "{} ({})",
+                model::label(&latest.event.kind),
+                model::label(&latest.event.source)
+            ),
+        ),
+        (
+            "Last progress",
+            format!(
+                "{} ago",
+                model::short_age(model::age_ms(seat, clock.wall_ms))
+            ),
+        ),
+        ("Waypoint ticket", "not reported".to_owned()),
+        ("Model", "not reported".to_owned()),
+        ("Quota", "not reported".to_owned()),
+        ("Project", "not reported".to_owned()),
+    ];
+    for (label, value) in values {
+        if y >= area.y + area.height {
+            break;
+        }
+        let x = paint.text(area.x + 2, y, limit, label, fg(palette.muted));
+        paint.text(x + 2, y, limit, &value, fg(palette.text));
+        y += 1;
+    }
+}
+
 impl Palette {
     /// Quieter than muted text, for secondary numbers.
     fn hairline_text(&self) -> Color {
@@ -1395,6 +1454,7 @@ fn draw_footer(
         Screen::List => &[
             ("↑↓", "move"),
             ("⏎", "timeline"),
+            ("d", "details"),
             ("q", "quit"),
             ("⇥", "host"),
             ("f", "filter"),
@@ -1408,6 +1468,7 @@ fn draw_footer(
             ("q", "quit"),
             ("?", "keys"),
         ],
+        Screen::Details => &[("esc", "back"), ("q", "quit"), ("?", "keys")],
     };
     // Keep the most important hints that fit, then show them in a stable order.
     let mut budget = usize::from(area.width.saturating_sub(2));
@@ -1425,8 +1486,9 @@ fn draw_footer(
     }
     let order: &[usize] = match ui.screen {
         _ if idle => &[0],
-        Screen::List => &[0, 1, 3, 4, 6, 7, 5, 2],
+        Screen::List => &[0, 1, 2, 3, 4, 6, 7, 5, 8],
         Screen::Timeline => &[0, 1, 3, 2],
+        Screen::Details => &[0, 1, 2],
     };
     let mut x = area.x + 1;
     for index in order.iter().filter(|index| keep.contains(index)) {
@@ -2168,6 +2230,22 @@ mod tests {
         let y = text.lines().position(|line| line == row).unwrap() as u16;
         let x = column_of(row, "4s ");
         assert_eq!(grid.get(x, y).unwrap().style().fg, Palette::DARK.muted);
+        Ok(())
+    }
+
+    #[test]
+    fn seat_details_show_current_observation_and_unreported_metadata() -> Result<()> {
+        let mut monitor = fleet()?;
+        press_char(&mut monitor, 'd');
+        let (text, ..) = draw(&mut monitor, 80, 24);
+        assert!(text.contains("builder on mac"), "{text}");
+        assert!(text.contains("Doing  test_failed (hooks)"), "{text}");
+        assert!(text.contains("Waypoint ticket  not reported"), "{text}");
+        assert!(text.contains("Model  not reported"), "{text}");
+        assert!(text.contains("Quota  not reported"), "{text}");
+        assert!(text.contains("Project  not reported"), "{text}");
+        press(&mut monitor, KeyCode::Esc);
+        assert_eq!(monitor.ui.screen, Screen::List);
         Ok(())
     }
 

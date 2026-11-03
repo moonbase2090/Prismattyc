@@ -170,6 +170,7 @@ impl ActivitySession {
                     ActivitySessionState::Waiting => ActivityKind::Waiting,
                     ActivitySessionState::Stopped => ActivityKind::Stopped,
                 },
+                process_ids: Vec::new(),
             },
         }
     }

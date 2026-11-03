@@ -95,6 +95,21 @@ def main():
                 assert settings.read_bytes() == contents
             checks.append("small malformed JSON and invalid UTF-8 remain unchanged")
 
+            env["PMUX_AGENT"] = "fixture-seat"
+            profiles = [scratch / relative for relative in (
+                ".claude/settings.json", ".codex/hooks.json", ".cursor/hooks.json",
+                ".kiro/hooks/pmux-activity.json")]
+            oversized = b" " * 4_194_303 + b"\xff"
+            for profile in profiles:
+                profile.parent.mkdir(parents=True, exist_ok=True)
+                profile.write_bytes(oversized)
+                completed = run(["activity-emit", "--install-hooks", "--all-harnesses"])
+                assert completed.returncode != 0
+                assert "text file exceeds 1048576 byte read limit" in completed.stderr, completed.stderr
+                assert profile.read_bytes() == oversized
+                profile.write_text("{}")
+            checks.append("all-harness installation bounds every profile before decoding and preserves bytes")
+
             if os.name != "nt":
                 target = scratch / "target.json"
                 target.write_text('{"env":{"EXAMPLE":"preserved"}}')

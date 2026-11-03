@@ -102,7 +102,18 @@ pmux-activity-monitor --host-cmd windows '["ssh","windows-host","pmux-activity-m
 
 `--theme auto|dark|light` picks the Prismattyc Graphite palette; `auto` follows the background color the terminal reports. `--no-motion` turns off the fade when a seat changes state live (replayed history never fades). `--no-pixels` keeps lanes in block characters. Where the terminal accepts raw RGBA Kitty uploads, lanes render as rasters through Lunatui's pixel sparkline. Inside Prismattyc the monitor first makes one real raw upload: a Prismattyc that keeps it gets pixel lanes, and older releases, which drop raw uploads, keep cells.
 
-The monitor keeps at most 128 seats per host and 256 events per seat, and evicts the seat with the oldest event when full. A daemon restart or retention gap clears that host's cached seats before the retained history replays.
+The monitor discovers every daemon session with an agent identity on its first
+poll and refreshes that list while open. Hooks add lifecycle and tool details;
+quiet seats appear without hooks and remain visible after event history expires.
+Without hook state, recent pane output means working, 60 seconds of silence
+means waiting, and no live pane child means stopped. The viewer removes a
+session with no retained events when the daemon no longer reports it.
+
+Each seat keeps at most 256 events. The 128-seat history limit applies to seats
+that are absent from the current session list; current sessions are not evicted.
+A daemon restart or retention gap clears cached history and reloads the current
+session list. Older endpoints that omit session metadata show retained events
+only.
 
 For a single bounded read, use one of these modes:
 

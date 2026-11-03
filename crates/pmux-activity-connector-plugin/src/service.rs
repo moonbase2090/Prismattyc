@@ -26,6 +26,7 @@ struct Arguments {
     host: Option<String>,
     seat: Option<String>,
     cursor: Option<String>,
+    since_ms: Option<u64>,
     limit: Option<u16>,
 }
 
@@ -105,10 +106,15 @@ pub fn execute(metadata: &mut impl Metadata, contribution: &str, arguments: &str
             && (args.host.is_some()
                 || args.seat.is_some()
                 || args.cursor.is_some()
+                || args.since_ms.is_some()
                 || args.limit.is_some()))
             || (contribution == "seats"
-                && (args.seat.is_some() || args.cursor.is_some() || args.limit.is_some()))
-            || (contribution == "recent" && args.cursor.is_some())
+                && (args.seat.is_some()
+                    || args.cursor.is_some()
+                    || args.since_ms.is_some()
+                    || args.limit.is_some()))
+            || (contribution == "recent" && (args.cursor.is_some() || args.since_ms.is_some()))
+            || (args.cursor.is_some() && args.since_ms.is_some())
             || args.limit.is_some_and(|limit| !(1..=256).contains(&limit))
         {
             return Err(Failure::new(
@@ -171,7 +177,7 @@ pub fn execute(metadata: &mut impl Metadata, contribution: &str, arguments: &str
             }
         };
         host = Some(endpoint.label.clone());
-        let mut value = if contribution == "poll" {
+        let mut value = if contribution == "poll" && args.since_ms.is_none() {
             let page = metadata
                 .poll(endpoint.handle, cursor, args.limit.unwrap_or(256))
                 .map_err(|error| Failure::read(error, endpoint.min_interval_ms))?;
@@ -194,7 +200,14 @@ pub fn execute(metadata: &mut impl Metadata, contribution: &str, arguments: &str
                     )
                 })
             })?;
-            if contribution == "seats" {
+            if contribution == "poll" {
+                let page = query::since_time(
+                    &history,
+                    args.since_ms.expect("time-based poll was selected"),
+                    args.limit.unwrap_or(256).into(),
+                );
+                query::poll_result(page, seat.as_ref())
+            } else if contribution == "seats" {
                 query::observed_seats(&history)
             } else {
                 query::recent_events(
@@ -296,7 +309,7 @@ mod tests {
             (
                 json!({
                     "schema_version":1,"host":"local","seat_filter":"other-seat","next_cursor":"a0:7",
-                    "page":{"epoch":"a0","oldest_sequence":1,"current_sequence":7,"records":[],"cursor":{"epoch":"a0","sequence":7},"has_more":false,"reset":null}
+                    "page":{"epoch":"a0","oldest_sequence":1,"current_sequence":7,"records":[],"cursor":{"epoch":"a0","sequence":7},"has_more":false,"reset":null,"sessions":null}
                 }),
                 false
             )

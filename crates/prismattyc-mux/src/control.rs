@@ -2588,11 +2588,61 @@ impl ControlPlane {
     ) -> Result<crate::activity::ActivityPage, pmux_plugin_api::host::pmux::activity::read::Error>
     {
         use pmux_plugin_api::host::pmux::activity::read::Error;
-        self.activity
+        let mut page = self
+            .activity
             .as_ref()
             .ok_or(Error::FeedDisabled)?
             .read(cursor, usize::from(limit))
-            .map_err(|_| Error::InvalidRequest)
+            .map_err(|_| Error::InvalidRequest)?;
+        page.sessions = Some(self.activity_sessions());
+        Ok(page)
+    }
+
+    fn activity_sessions(&self) -> prismattyc_core::activity::ActivitySessions {
+        use prismattyc_core::activity::{ActivitySession, ActivitySessionState, ActivitySessions};
+        let observed_at_ms = now_unix_ms();
+        let seats = self
+            .domain
+            .sessions()
+            .filter_map(|session| {
+                let seat = crate::mailbox::AgentId::new(session.agent_id.clone()?).ok()?;
+                let panes = session
+                    .windows
+                    .iter()
+                    .filter_map(|id| self.domain.window(*id))
+                    .flat_map(|window| window.layout.panes())
+                    .collect::<Vec<_>>();
+                let last_output_at_ms = panes
+                    .iter()
+                    .filter_map(|pane| self.last_output_at_ms.get(&pane.get()).copied())
+                    .max();
+                let live = panes.iter().any(|pane| {
+                    self.live
+                        .as_ref()
+                        .and_then(|live| live.child_pid(pane.get()))
+                        .is_some()
+                });
+                let state = if !live {
+                    ActivitySessionState::Stopped
+                } else if last_output_at_ms
+                    .is_some_and(|at| observed_at_ms.saturating_sub(at) < PANE_IDLE_TRIGGER_MS)
+                {
+                    ActivitySessionState::Working
+                } else {
+                    ActivitySessionState::Waiting
+                };
+                Some(ActivitySession {
+                    seat,
+                    session_id: session.id.get(),
+                    state,
+                    last_output_at_ms,
+                })
+            })
+            .collect();
+        ActivitySessions {
+            observed_at_ms,
+            seats,
+        }
     }
 
     /// `[mux] remote_size` policy. Default is [`RemoteSizePolicy::Latest`].
@@ -4248,9 +4298,10 @@ impl ControlPlane {
             }
             ControlRequest::ReadActivity { cursor, limit, .. } => {
                 let feed = self.activity.as_ref().ok_or_else(activity_disabled)?;
-                let page = feed.read(cursor, limit).map_err(|message| {
+                let mut page = feed.read(cursor, limit).map_err(|message| {
                     ControlError::new(ControlErrorCode::InvalidRequest, message)
                 })?;
+                page.sessions = Some(self.activity_sessions());
                 Ok(ControlResponseData::Activity { page })
             }
             ControlRequest::ServerInfo { .. } => Ok(ControlResponseData::ServerInfo {
@@ -17571,7 +17622,51 @@ function Read-Exact([int]$Count) {
             event_id: "event-1".into(),
             source: crate::activity::ActivitySource::Notify,
             kind: crate::activity::ActivityKind::TurnFinished,
+            process_ids: Vec::new(),
         }
+    }
+
+    #[test]
+    fn activity_sessions_are_available_without_events_in_native_and_plugin_reads() {
+        let (mut plane, _, _) = fixture(8);
+        let session = plane.domain.sessions().next().unwrap().id;
+        plane
+            .domain
+            .set_agent_id(session, Some("quiet-seat".into()))
+            .unwrap();
+        plane.enable_activity().unwrap();
+        let topology = plane.sequence();
+        let response = plane.handle(ControlRequest::ReadActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 1,
+            cursor: None,
+            limit: 1,
+        });
+        let ControlResponseBody::Ok {
+            response: ControlResponseData::Activity { page },
+        } = response.body
+        else {
+            panic!("expected activity page");
+        };
+        assert!(page.records.is_empty());
+        assert_eq!(page.cursor.sequence, 0);
+        let seats = page.sessions.unwrap().seats;
+        assert_eq!(seats.len(), 1);
+        assert_eq!(seats[0].seat.as_str(), "quiet-seat");
+        assert_eq!(seats[0].session_id, session.get());
+        assert_eq!(
+            seats[0].state,
+            prismattyc_core::activity::ActivitySessionState::Stopped
+        );
+        let page = plane.plugin_activity_page(None, 1).unwrap();
+        assert_eq!(page.sessions.unwrap().seats, seats);
+        assert!(page.records.is_empty());
+        assert_eq!(plane.sequence(), topology);
+        plane.disable_activity();
+        assert_eq!(
+            plane.plugin_activity_page(None, 1).unwrap_err(),
+            pmux_plugin_api::host::pmux::activity::read::Error::FeedDisabled
+        );
     }
 
     #[test]

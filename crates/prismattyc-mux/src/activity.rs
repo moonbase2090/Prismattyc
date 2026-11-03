@@ -142,6 +142,7 @@ impl ActivityFeed {
             cursor: self.cursor(through),
             has_more: through < self.sequence,
             reset,
+            sessions: None,
         })
     }
 
@@ -153,21 +154,25 @@ impl ActivityFeed {
     }
 }
 
-/// Exchange one activity request over the existing local control socket.
+/// Exchange one activity or session-snapshot request over the existing local control socket.
 /// Errors omit upstream payloads, paths, and server-supplied message text.
 pub fn exchange(socket: &Path, request: ControlRequest) -> Result<ControlResponseData> {
-    let (version, request_id, publishing) = match &request {
+    let (version, request_id, expected) = match &request {
         ControlRequest::PublishActivity {
             version,
             request_id,
             ..
-        } => (*version, *request_id, true),
+        } => (*version, *request_id, ExpectedResponse::Published),
         ControlRequest::ReadActivity {
             version,
             request_id,
             ..
-        } => (*version, *request_id, false),
-        _ => bail!("expected an activity request"),
+        } => (*version, *request_id, ExpectedResponse::Activity),
+        ControlRequest::Snapshot {
+            version,
+            request_id,
+        } => (*version, *request_id, ExpectedResponse::Snapshot),
+        _ => bail!("expected an activity or snapshot request"),
     };
     if version != PROTOCOL_VERSION || request_id == 0 {
         bail!("invalid activity request header");
@@ -233,9 +238,17 @@ pub fn exchange(socket: &Path, request: ControlRequest) -> Result<ControlRespons
     match response.body {
         ControlResponseBody::Ok { response }
             if matches!(
-                (&response, publishing),
-                (ControlResponseData::ActivityPublished { .. }, true)
-                    | (ControlResponseData::Activity { .. }, false)
+                (&response, expected),
+                (
+                    ControlResponseData::ActivityPublished { .. },
+                    ExpectedResponse::Published
+                ) | (
+                    ControlResponseData::Activity { .. },
+                    ExpectedResponse::Activity
+                ) | (
+                    ControlResponseData::Snapshot { .. },
+                    ExpectedResponse::Snapshot
+                )
             ) =>
         {
             Ok(response)
@@ -243,6 +256,13 @@ pub fn exchange(socket: &Path, request: ControlRequest) -> Result<ControlRespons
         ControlResponseBody::Error { error } => Err(ActivityRejected { code: error.code }.into()),
         _ => bail!("unexpected activity response kind"),
     }
+}
+
+#[derive(Clone, Copy)]
+enum ExpectedResponse {
+    Published,
+    Activity,
+    Snapshot,
 }
 
 #[cfg(test)]
@@ -257,6 +277,7 @@ mod tests {
             event_id: format!("event-{id}"),
             source: ActivitySource::Notify,
             kind: ActivityKind::TurnFinished,
+            process_ids: Vec::new(),
         }
     }
 
@@ -273,7 +294,7 @@ mod tests {
             )
             .unwrap_err()
             .to_string(),
-            "expected an activity request"
+            "expected an activity or snapshot request"
         );
         for (version, request_id) in [(2, 1), (1, 0)] {
             assert_eq!(

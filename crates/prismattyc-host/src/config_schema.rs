@@ -141,6 +141,9 @@ pub(crate) fn leaves() -> Vec<(String, Value)> {
     }
     let mut out = Vec::new();
     visit(schema(), "", &mut out);
+    // This rejected input exists only to produce a clear error for inline
+    // webhook secrets; it is not an editable preference or setting.
+    out.retain(|(path, _)| path != "mux.activity_webhook_secret");
     out
 }
 

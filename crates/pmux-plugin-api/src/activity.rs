@@ -21,6 +21,7 @@ pub fn page(page: read::Page) -> Result<domain::ActivityPage, read::Error> {
                     read::Source::Runtime => domain::ActivitySource::Runtime,
                 },
                 kind: kind(record.event.kind),
+                process_ids: Vec::new(),
             };
             event
                 .validate_metadata()
@@ -42,6 +43,7 @@ pub fn page(page: read::Page) -> Result<domain::ActivityPage, read::Error> {
             sequence: page.cursor.sequence,
         },
         has_more: page.has_more,
+        sessions: None,
         reset: page.reset.map(|reset| match reset {
             read::Reset::Restarted => domain::ActivityReset::Restarted,
             read::Reset::RetentionGap => domain::ActivityReset::RetentionGap,
@@ -75,4 +77,49 @@ fn kind(kind: read::Kind) -> domain::ActivityKind {
         read::Kind::MailSent => K::MailSent,
         read::Kind::MailReceived => K::MailReceived,
     }
+}
+
+pub fn poll(
+    endpoint: u64,
+    after: Option<&read::Cursor>,
+    limit: u16,
+) -> Result<domain::ActivityPage, read::Error> {
+    let mut result = page(read::poll(endpoint, after, limit)?)?;
+    result.sessions = session_snapshot(read::sessions(endpoint)?)?;
+    Ok(result)
+}
+
+fn session_snapshot(
+    snapshot: Option<read::SessionSnapshot>,
+) -> Result<Option<domain::ActivitySessions>, read::Error> {
+    snapshot
+        .map(|snapshot| {
+            Ok(domain::ActivitySessions {
+                observed_at_ms: snapshot.observed_at_ms,
+                seats: snapshot
+                    .seats
+                    .into_iter()
+                    .map(|session| {
+                        Ok(domain::ActivitySession {
+                            seat: prismattyc_core::AgentId::new(session.seat)
+                                .map_err(|_| read::Error::InvalidRequest)?,
+                            session_id: session.session_id,
+                            state: match session.state {
+                                read::SessionState::Working => {
+                                    domain::ActivitySessionState::Working
+                                }
+                                read::SessionState::Waiting => {
+                                    domain::ActivitySessionState::Waiting
+                                }
+                                read::SessionState::Stopped => {
+                                    domain::ActivitySessionState::Stopped
+                                }
+                            },
+                            last_output_at_ms: session.last_output_at_ms,
+                        })
+                    })
+                    .collect::<Result<_, read::Error>>()?,
+            })
+        })
+        .transpose()
 }

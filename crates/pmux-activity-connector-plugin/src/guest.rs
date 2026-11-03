@@ -27,7 +27,7 @@ impl Metadata for NativeMetadata {
             epoch: cursor.epoch,
             sequence: cursor.sequence,
         });
-        read::poll(endpoint, cursor.as_ref(), limit).and_then(activity::page)
+        activity::poll(endpoint, cursor.as_ref(), limit)
     }
 }
 

@@ -27,6 +27,17 @@ interface read {
     }
     record cursor { epoch: string, sequence: u64 }
     enum reset { restarted, retention-gap, ahead-of-feed }
+    enum session-state { working, waiting, stopped }
+    record session {
+        seat: string,
+        session-id: u64,
+        state: session-state,
+        last-output-at-ms: option<u64>,
+    }
+    record session-snapshot {
+        observed-at-ms: u64,
+        seats: list<session>,
+    }
     record page {
         epoch: string,
         oldest-sequence: u64,
@@ -43,6 +54,7 @@ interface read {
     }
     enum endpoint-kind { local, socket, command }
     record endpoint { handle: u64, label: string, kind: endpoint-kind, min-interval-ms: u32 }
+    sessions: func(endpoint: u64) -> result<option<session-snapshot>, error>;
     endpoints: func() -> result<list<endpoint>, error>;
     poll: func(endpoint: u64, after: option<cursor>, limit: u16) -> result<page, error>;
 }

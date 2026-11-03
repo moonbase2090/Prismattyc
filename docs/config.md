@@ -295,6 +295,10 @@ remote_size = "latest"
 # shell = "pwsh.exe"
 # Allow mixed-case and spaced session labels. true|false; default false.
 allow_mixed_case_session_names = false
+# Opt in to signed outbound activity notifications. http(s) URL.
+# activity_webhook_url = "https://example.invalid/activity"
+# Path to a private file containing the webhook HMAC key. file path; no inline key.
+# activity_webhook_secret_file = "~/.config/prismattyc/activity-webhook.key"
 # Collect activity metadata live, without a restart. Enable monitor and query access separately in Settings > Plug-ins. true|false; default false.
 experimental_activity = false
 

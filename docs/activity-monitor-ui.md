@@ -39,12 +39,31 @@ Failed stays until the seat reports something else. `*_finished` means an operat
 
 A row is stale when its last event is 30 seconds old, or when its host is disconnected. A stale row shows its age in amber, and in wider layouts it also says `stale`. Staleness never changes a seat's state. Idle requires a positive shell-prompt detection; unreadable process information stays unknown. Stuck requires a recognized foreground agent and five minutes without pane output. Down means the session has no live pane child.
 
-Select a seat and press `d` to open its details. The view shows the current
-health state, latest activity and any available tool, file, command, duration,
-exit status and task/ticket key. Model, quota and project fields say
-`not reported` until an approved source supplies them; the monitor does not
-infer them from terminal output or agent transcripts. Press `Esc` to return to
-the list. Events without a task/ticket key appear under `unassigned`.
+Select a seat and press `d` to open its details. The top lines say who the seat
+is: its harness, model, quota and project, its ticket, and how long ago it last
+made progress. They come from pmux's session snapshot, and each shows `unknown`
+until pmux reports it without ambiguity. The harness and project (a repository
+name, never a path) appear only when every active agent pane in the session
+agrees. The model comes only from explicit hook metadata for the current run.
+No harness reports quota yet. The monitor never infers these values from
+terminal output, agent transcripts, prompts or paths. The ticket is the most recent task
+or ticket key an event carried, or `none reported`.
+
+Below that, the seat's retained activity is grouped by task, with the most
+recently active task first. Each group heading counts its activities and
+failures. Each operation is one line: an operation's start and its result are
+paired by run and operation id, so an edit, command, test or tool call reads as
+one action. The line shows its age, a result mark, the action, the tool, the
+file edited or the command run, and on the right how long it took. A failure
+also shows its exit status. `✓` means it succeeded and `✗` that it failed. `…`
+means it is still running. `?` means its turn or session ended without a
+result. Session starts and ends, waiting for input, stops and mail appear as
+short notes. Turn starts and plain working pings add no lines. Activity without
+a task key is grouped under `no ticket`, and a result inherits the last task
+named in its run. Commands and file names arrive already shortened and
+redacted by pmux, and the view shortens them further to fit. Run and operation
+ids stay hidden unless you press `i`. `↑`/`↓`, `PgUp`/`PgDn` and `g`/`G` scroll.
+Press `Esc` to return to the list.
 
 ## Hosts
 

@@ -277,6 +277,7 @@ mod tests {
             event_id: format!("event-{id}"),
             source: ActivitySource::Notify,
             kind: ActivityKind::TurnFinished,
+            detail: None,
             process_ids: Vec::new(),
         }
     }

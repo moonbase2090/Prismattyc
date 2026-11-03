@@ -493,6 +493,15 @@ fn convert_page(page: domain::ActivityPage) -> read::Page {
                         domain::ActivitySource::Runtime => read::Source::Runtime,
                     },
                     kind: convert_kind(record.event.kind),
+                    detail: record.event.detail.map(|detail| read::Detail {
+                        tool: detail.tool,
+                        file: detail.file,
+                        command: detail.command,
+                        duration_ms: detail.duration_ms,
+                        exit_code: detail.exit_code,
+                        task: detail.task,
+                        operation_id: detail.operation_id,
+                    }),
                 },
             })
             .collect(),
@@ -727,6 +736,7 @@ mod tests {
                         event_id: "event-1".into(),
                         source: domain::ActivitySource::Hooks,
                         kind: domain::ActivityKind::Waiting,
+                        detail: None,
                         process_ids: Vec::new(),
                     },
                 }],

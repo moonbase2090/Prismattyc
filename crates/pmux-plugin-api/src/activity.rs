@@ -21,6 +21,15 @@ pub fn page(page: read::Page) -> Result<domain::ActivityPage, read::Error> {
                     read::Source::Runtime => domain::ActivitySource::Runtime,
                 },
                 kind: kind(record.event.kind),
+                detail: record.event.detail.map(|detail| domain::ActivityDetail {
+                    tool: detail.tool,
+                    file: detail.file,
+                    command: detail.command,
+                    duration_ms: detail.duration_ms,
+                    exit_code: detail.exit_code,
+                    task: detail.task,
+                    operation_id: detail.operation_id,
+                }),
                 process_ids: Vec::new(),
             };
             event

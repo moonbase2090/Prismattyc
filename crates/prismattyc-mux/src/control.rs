@@ -17622,6 +17622,7 @@ function Read-Exact([int]$Count) {
             event_id: "event-1".into(),
             source: crate::activity::ActivitySource::Notify,
             kind: crate::activity::ActivityKind::TurnFinished,
+            detail: None,
             process_ids: Vec::new(),
         }
     }

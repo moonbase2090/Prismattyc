@@ -14,6 +14,10 @@ pub struct ActivityInput {
     pub kind: ActivityKind,
     #[serde(default)]
     pub process_ids: Vec<u32>,
+    /// Safe, bounded fields for human-readable event details. Producers must
+    /// sanitize hook payloads before publication; omitted fields stay unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<ActivityDetail>,
 }
 
 impl Serialize for ActivityInput {
@@ -21,10 +25,12 @@ impl Serialize for ActivityInput {
     where
         S: Serializer,
     {
-        // Postcard encodes structs positionally, so omitted empty fields would
-        // shift the following fields in an enclosing activity page.
-        let omit_empty_process_ids = serializer.is_human_readable() && self.process_ids.is_empty();
-        let field_count = if omit_empty_process_ids { 6 } else { 7 };
+        // Postcard encodes structs positionally, so omitted fields would shift
+        // following fields in an enclosing activity page.
+        let human_readable = serializer.is_human_readable();
+        let omit_empty_process_ids = human_readable && self.process_ids.is_empty();
+        let omit_missing_detail = human_readable && self.detail.is_none();
+        let field_count = 8 - usize::from(omit_empty_process_ids) - usize::from(omit_missing_detail);
         let mut state = serializer.serialize_struct("ActivityInput", field_count)?;
         state.serialize_field("schema_version", &self.schema_version)?;
         state.serialize_field("seat", &self.seat)?;
@@ -35,8 +41,24 @@ impl Serialize for ActivityInput {
         if !omit_empty_process_ids {
             state.serialize_field("process_ids", &self.process_ids)?;
         }
+        if !omit_missing_detail {
+            state.serialize_field("detail", &self.detail)?;
+        }
         state.end()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityDetail {
+    pub tool: Option<String>,
+    pub file: Option<String>,
+    pub command: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub exit_code: Option<i32>,
+    pub task: Option<String>,
+    /// Opaque correlation key; the UI hides it unless diagnostic IDs are on.
+    pub operation_id: Option<String>,
 }
 
 impl ActivityInput {
@@ -49,6 +71,28 @@ impl ActivityInput {
         }
         if self.process_ids.len() > 256 || self.process_ids.contains(&0) {
             return Err("invalid activity process metadata");
+        }
+        if let Some(detail) = &self.detail {
+            for value in [
+                detail.tool.as_deref(),
+                detail.file.as_deref(),
+                detail.command.as_deref(),
+                detail.task.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if value.len() > 256 || value.chars().any(char::is_control) {
+                    return Err("activity detail fields must be at most 256 printable bytes");
+                }
+            }
+            if detail
+                .operation_id
+                .as_deref()
+                .is_some_and(|value| !valid_identifier(value))
+            {
+                return Err("activity operation identifier is invalid");
+            }
         }
         Ok(())
     }
@@ -170,6 +214,7 @@ impl ActivitySession {
                     ActivitySessionState::Waiting => ActivityKind::Waiting,
                     ActivitySessionState::Stopped => ActivityKind::Stopped,
                 },
+                detail: None,
                 process_ids: Vec::new(),
             },
         }
@@ -198,6 +243,7 @@ mod tests {
                 event_id: "event-1".into(),
                 source: ActivitySource::Hooks,
                 kind: ActivityKind::TurnStarted,
+                detail: None,
                 process_ids: Vec::new(),
             },
         };
@@ -229,5 +275,26 @@ mod tests {
             .unwrap()
             .validate_metadata()
             .is_err());
+    }
+
+    #[test]
+    fn details_are_bounded_and_reject_control_characters() {
+        let mut event = ActivityInput {
+            schema_version: 1,
+            seat: crate::AgentId::new("fixture-seat").unwrap(),
+            run_id: "r".into(),
+            event_id: "e".into(),
+            source: ActivitySource::Hooks,
+            kind: ActivityKind::CommandStarted,
+            detail: Some(ActivityDetail {
+                command: Some("cargo check".into()),
+                ..ActivityDetail::default()
+            }),
+        };
+        assert_eq!(event.validate_metadata(), Ok(()));
+        event.detail.as_mut().unwrap().command = Some("line\nbreak".into());
+        assert!(event.validate_metadata().is_err());
+        event.detail.as_mut().unwrap().command = Some("x".repeat(257));
+        assert!(event.validate_metadata().is_err());
     }
 }

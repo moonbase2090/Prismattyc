@@ -259,6 +259,7 @@ fn normalize(seat: AgentId, input: &Value, notify: bool) -> Result<Option<Activi
         event_id: opaque(&key),
         source,
         kind,
+        detail: None,
         process_ids: if source == ActivitySource::Hooks {
             prismattyc_mux::procinfo::activity_hook_owner_pid()
                 .into_iter()

@@ -18,6 +18,7 @@ import tempfile
 import unittest
 from unittest import mock
 import urllib.error
+import urllib.request
 
 spec = importlib.util.spec_from_file_location(
     "monitor_launcher_update_e2e", Path(__file__).with_name("monitor-launcher-update-e2e.py"))
@@ -60,6 +61,20 @@ class Response(io.BytesIO):
         self.close()
 
 
+class ResetResponse(Response):
+    """A response whose connection resets after `keep` bytes of the body."""
+
+    def __init__(self, data, url, keep):
+        super().__init__(data, url)
+        self.keep = keep
+
+    def read(self, size=-1):
+        if self.tell() >= self.keep:
+            raise ConnectionResetError('connection reset by peer')
+        size = self.keep - self.tell() if size < 0 else min(size, self.keep - self.tell())
+        return super().read(size)
+
+
 def http_error(code, headers):
     return urllib.error.HTTPError('https://api.github.com/x', code, 'error', headers, io.BytesIO())
 
@@ -76,7 +91,11 @@ class FakeGitHub:
         headers = dict(getattr(request, 'header_items', lambda: [])())
         self.requests.append((url, headers))
         if self.failures:
-            raise self.failures.pop(0)
+            failure = self.failures.pop(0)
+            if isinstance(failure, BaseException):
+                raise failure
+            if failure is not None:
+                return failure(url)
         if url.startswith('https://api.github.com/'):
             return Response(metadata(), url)
         return Response(BODY, url)
@@ -143,6 +162,41 @@ class FetchOld(unittest.TestCase):
             self.fetch(github, self.root / 'out')
         self.assertEqual(self.sleeps, [])
         self.assertEqual(len(github.requests), 1)
+
+
+    def test_a_reset_while_reading_metadata_is_retried(self):
+        # A single read of the metadata body resets before returning anything.
+        github = FakeGitHub(failures=[lambda url: ResetResponse(metadata(), url, keep=0)])
+        path = self.fetch(github, self.root / 'out')
+        self.assertEqual(path.read_bytes(), BODY)
+        self.assertEqual(len(github.requests), 3)
+        self.assertEqual(len(self.sleeps), 1)
+
+    def test_a_reset_mid_download_is_retried_from_scratch(self):
+        # The metadata succeeds; the binary resets after 4 bytes once.
+        github = FakeGitHub(failures=[None, lambda url: ResetResponse(BODY, url, keep=4)])
+        path = self.fetch(github, self.root / 'out')
+        self.assertEqual(path.read_bytes(), BODY)
+        self.assertEqual(len(github.requests), 3)
+
+    def test_a_download_that_keeps_failing_leaves_no_partial_file(self):
+        resets = [lambda url: ResetResponse(BODY, url, keep=4)] * e2e.FETCH_ATTEMPTS
+        github = FakeGitHub(failures=[None, *resets])
+        with self.assertRaises(ConnectionResetError):
+            self.fetch(github, self.root / 'out')
+        self.assertEqual(list((self.root / 'out').iterdir()), [])
+        self.assertEqual(len(self.sleeps), e2e.FETCH_ATTEMPTS - 1)
+
+
+class Redirects(unittest.TestCase):
+    def test_the_token_does_not_follow_a_redirect(self):
+        with mock.patch.dict(os.environ, {'GITHUB_TOKEN': 'secret-token'}, clear=True):
+            request = e2e.api_request('https://api.github.com/repos/o/r/releases/tags/v1')
+        self.assertEqual(dict(request.header_items()).get('Authorization'), 'Bearer secret-token')
+        for target in ('https://elsewhere.example/steal', 'https://api.github.com/repos/o/r/moved'):
+            redirected = urllib.request.HTTPRedirectHandler().redirect_request(
+                request, io.BytesIO(), 302, 'Found', {}, target)
+            self.assertNotIn('Authorization', dict(redirected.header_items()), target)
 
 
 class RetryWait(unittest.TestCase):

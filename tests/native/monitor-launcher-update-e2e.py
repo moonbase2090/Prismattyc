@@ -9,6 +9,7 @@ fixture. No production release, installation, daemon, or session is changed.
 import argparse
 from contextlib import contextmanager
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -59,31 +60,45 @@ def retry_wait(error, attempt, now=None):
     return max(1, min(wait, FETCH_MAX_WAIT_SECONDS))
 
 
-def open_with_retry(request, timeout):
-    for attempt in range(FETCH_ATTEMPTS):
+# Failures that end one attempt but may pass on the next: the request, a
+# reset or timeout while reading the body, or a body cut short.
+RETRYABLE = (urllib.error.URLError, ConnectionError, TimeoutError, http.client.HTTPException)
+
+
+def with_retry(label, attempt):
+    """Run `attempt()` until it succeeds, retrying what `retry_wait` allows.
+
+    `attempt` does the whole request, including reading the body, so a
+    failure part way through the read is retried too.
+    """
+    for number in range(FETCH_ATTEMPTS):
         try:
-            return urllib.request.urlopen(request, timeout=timeout)
-        except (urllib.error.URLError, TimeoutError) as error:
-            wait = retry_wait(error, attempt)
-            if wait is None or attempt + 1 == FETCH_ATTEMPTS:
+            return attempt()
+        except RETRYABLE as error:
+            wait = retry_wait(error, number)
+            if wait is None or number + 1 == FETCH_ATTEMPTS:
                 raise
             if isinstance(error, urllib.error.HTTPError):
                 error.close()
-            print(f'retrying {getattr(request, "full_url", request)} in {wait}s: {error}', file=sys.stderr)
+            print(f'retrying {label} in {wait}s: {error}', file=sys.stderr)
             time.sleep(wait)
     raise AssertionError('unreachable')
 
 
-def api_headers():
-    headers = {'Accept': 'application/vnd.github+json', 'User-Agent': 'Prismattyc-update-fixture'}
-    # Anonymous API calls share a small per-IP quota on CI runners. The token
-    # goes only to api.github.com; the asset download below stays anonymous,
-    # so it is never forwarded to the storage host GitHub redirects to.
+def api_request(url):
+    """A GitHub API request, authenticated when a token is set.
+
+    Anonymous API calls share a small per-IP quota on CI runners. The token is
+    an unredirected header: urllib never copies it onto a redirect, so it
+    cannot reach any host but this one. The asset download stays anonymous.
+    """
+    request = urllib.request.Request(
+        url, headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'Prismattyc-update-fixture'})
     token = os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
     if token:
         assert '\n' not in token and '\r' not in token
-        headers['Authorization'] = f'Bearer {token}'
-    return headers
+        request.add_unredirected_header('Authorization', f'Bearer {token}')
+    return request
 
 
 def old_release(raw, version, target):
@@ -127,20 +142,36 @@ def fetch_old(version, target, directory, cache=None):
             print(f'using cached {tag} {asset["name"]}', file=sys.stderr)
     if path is None:
         api = f'https://api.github.com/repos/{REPOSITORY}/releases/tags/{tag}'
-        request = urllib.request.Request(api, headers=api_headers())
-        with open_with_retry(request, timeout=60) as response:
-            raw = response.read(4 * 1024 * 1024 + 1)
+
+        def read_metadata():
+            with urllib.request.urlopen(api_request(api), timeout=60) as response:
+                return response.read(4 * 1024 * 1024 + 1)
+
+        raw = with_retry(api, read_metadata)
         asset, suffix = old_release(raw, version, target)
         path = directory / ('verified-old-pmux' + suffix)
-        with open_with_retry(asset['browser_download_url'], timeout=120) as response, path.open('xb') as output:
-            assert urllib.parse.urlsplit(response.geturl()).scheme == 'https'
-            remaining = asset['size'] + 1
-            while remaining:
-                data = response.read(min(remaining, 1024 * 1024))
-                if not data:
-                    break
-                output.write(data)
-                remaining -= len(data)
+
+        def download():
+            # Each attempt starts from nothing and leaves nothing behind.
+            path.unlink(missing_ok=True)
+            try:
+                with urllib.request.urlopen(asset['browser_download_url'], timeout=120) as response, \
+                        path.open('xb') as output:
+                    assert urllib.parse.urlsplit(response.geturl()).scheme == 'https'
+                    remaining = asset['size'] + 1
+                    while remaining:
+                        data = response.read(min(remaining, 1024 * 1024))
+                        if not data:
+                            break
+                        output.write(data)
+                        remaining -= len(data)
+                if path.stat().st_size < asset['size']:
+                    raise ConnectionError(f'download ended at {path.stat().st_size} of {asset["size"]} bytes')
+            except BaseException:
+                path.unlink(missing_ok=True)
+                raise
+
+        with_retry(asset['browser_download_url'], download)
         assert verified(path, asset)
         if cached:
             cached.mkdir(parents=True, exist_ok=True)

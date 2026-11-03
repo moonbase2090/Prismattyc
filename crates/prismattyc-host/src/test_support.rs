@@ -35,7 +35,11 @@ pub(crate) fn mux_bin_dir() -> &'static PathBuf {
         let executable = std::env::current_exe().expect("locate host test executable");
         let directory = executable.parent().unwrap().parent().unwrap().to_path_buf();
         let names = ["pmux", "pmuxd", "pmux-attach"];
-        if names.iter().any(|name| !directory.join(name).is_file()) {
+        if names.iter().any(|name| {
+            !directory
+                .join(prismattyc_mux::platform::executable_name(name))
+                .is_file()
+        }) {
             let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
             let profile = directory.file_name().unwrap().to_str().unwrap();
             let status = Command::new("cargo")
@@ -56,8 +60,9 @@ pub(crate) fn mux_bin_dir() -> &'static PathBuf {
             assert!(status.success(), "private mux fixture binary build failed");
         }
         for name in names {
+            let executable = prismattyc_mux::platform::executable_name(name);
             assert!(
-                directory.join(name).is_file(),
+                directory.join(executable).is_file(),
                 "missing fixture binary {name}"
             );
         }

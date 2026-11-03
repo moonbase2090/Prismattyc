@@ -502,10 +502,11 @@ mod tests {
 
     #[test]
     fn team_links_accept_web_and_absolute_paths_but_reject_control_text() {
+        let local = std::env::temp_dir().join("design notes.md");
         for link in [
             "https://example.com/review",
             "http://localhost:8080",
-            "/work/design notes.md",
+            local.to_str().unwrap(),
         ] {
             assert!(validate_link(link).is_ok(), "{link}");
         }

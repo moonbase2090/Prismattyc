@@ -188,6 +188,9 @@ pub(super) struct Remote {
 impl Remote {
     pub fn start(endpoint: Endpoint, active: Arc<AtomicUsize>) -> Result<Arc<Self>> {
         endpoint.validate()?;
+        // `fetch_update` is deprecated as `try_update` on newer Rust, which
+        // the minimum supported Rust (1.90) does not have yet.
+        #[allow(deprecated)]
         active
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 (count < 32).then_some(count + 1)
@@ -343,10 +346,10 @@ impl Pipe {
                 return Ok(Chunk::Idle);
             }
             let maximum = buffer.len().min(available as usize);
-            return match self.0.read(&mut buffer[..maximum])? {
+            match self.0.read(&mut buffer[..maximum])? {
                 0 => Ok(Chunk::End),
                 count => Ok(Chunk::Data(buffer[..count].to_vec())),
-            };
+            }
         }
         #[cfg(not(windows))]
         match self.0.read(&mut buffer) {

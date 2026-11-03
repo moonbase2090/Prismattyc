@@ -34,6 +34,11 @@ pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
 }
 
+#[cfg(unix)]
+pub fn secure_directory(path: &Path) -> io::Result<()> {
+    set_mode(path, 0o700)
+}
+
 #[cfg(all(windows, test))]
 pub(crate) use windows::private_to_user;
 #[cfg(windows)]
@@ -194,11 +199,11 @@ mod windows {
             )
         };
         let mut code = apply(owner);
-        if code == ERROR_INVALID_OWNER || code == ERROR_ACCESS_DENIED {
-            if enable_restore_privilege() {
-                code = apply(owner);
-                disable_restore_privilege();
-            }
+        if (code == ERROR_INVALID_OWNER || code == ERROR_ACCESS_DENIED)
+            && enable_restore_privilege()
+        {
+            code = apply(owner);
+            disable_restore_privilege();
         }
         if code != 0 {
             return Err(io::Error::from_raw_os_error(code as i32));
@@ -227,21 +232,15 @@ mod windows {
             if LookupPrivilegeValueW(ptr::null(), SE_RESTORE_NAME, &mut luid) == 0 {
                 return false;
             }
-            let mut privileges = TOKEN_PRIVILEGES {
+            let privileges = TOKEN_PRIVILEGES {
                 PrivilegeCount: 1,
                 Privileges: [LUID_AND_ATTRIBUTES {
                     Luid: luid,
                     Attributes: attributes,
                 }],
             };
-            let ok = AdjustTokenPrivileges(
-                token.0,
-                0,
-                &mut privileges,
-                0,
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
+            let ok =
+                AdjustTokenPrivileges(token.0, 0, &privileges, 0, ptr::null_mut(), ptr::null_mut());
             ok != 0 && GetLastError() != ERROR_NOT_ALL_ASSIGNED
         }
     }
@@ -1013,14 +1012,11 @@ pub fn default_shell() -> String {
     #[cfg(windows)]
     {
         let comspec = std::env::var("COMSPEC").ok();
-        return choose_windows_shell(configured.as_deref(), comspec.as_deref());
+        choose_windows_shell(configured.as_deref(), comspec.as_deref())
     }
     #[cfg(not(windows))]
     {
-        if let Some(shell) = configured {
-            return shell;
-        }
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+        configured.unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()))
     }
 }
 
@@ -1317,6 +1313,11 @@ mod tests {
     fn detached_spawn_closes_the_caller_stdout_pipe() {
         let (mut reader, writer) = std::io::pipe().expect("pipe");
         let write_handle = writer.as_raw_handle() as HANDLE;
+        assert_ne!(
+            unsafe { SetHandleInformation(write_handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) },
+            0,
+            "make the test pipe inheritable"
+        );
         let mut flags = 0u32;
         assert_ne!(
             unsafe { GetHandleInformation(write_handle, &mut flags) },

@@ -405,11 +405,9 @@ impl Panel {
                     Key::Named(NamedKey::ArrowDown) => {
                         self.focus = Focus::Rows((row + 1).min(self.row_count().saturating_sub(1)))
                     }
-                    Key::Named(NamedKey::Enter) => {
-                        if self.plugins.activate(row) {
-                            self.focus = Focus::Rows(0);
-                            self.scroll = 0;
-                        }
+                    Key::Named(NamedKey::Enter) if self.plugins.activate(row) => {
+                        self.focus = Focus::Rows(0);
+                        self.scroll = 0;
                     }
                     _ => {}
                 }

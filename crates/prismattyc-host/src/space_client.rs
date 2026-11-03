@@ -69,7 +69,7 @@ pub(crate) enum Report {
         name: String,
         generation: u64,
         epoch: u64,
-        #[cfg_attr(not(test), allow(dead_code))]
+        #[allow(dead_code)]
         thread: ThreadId,
     },
     Refresh {
@@ -390,9 +390,12 @@ fn run_refresh(job: RefreshJob) -> Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::io::Write;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
+    #[cfg(unix)]
     #[test]
     fn save_returns_before_the_command_finishes_on_another_thread() {
         let dir = std::env::temp_dir().join(format!("space-client-{}", std::process::id()));
@@ -455,6 +458,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn delayed_save_keeps_the_captured_view_after_the_shared_file_changes() {
         let dir = std::env::temp_dir().join(format!(

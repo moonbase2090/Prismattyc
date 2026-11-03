@@ -1553,7 +1553,7 @@ mod tests {
 
     #[test]
     fn docs_config_example_matches_generator() {
-        let docs = include_str!("../../../docs/config.md");
+        let docs = include_str!("../../../docs/config.md").replace("\r\n", "\n");
         let start = docs.find("```toml\n").expect("docs/config.md toml fence");
         let body = &docs[start + "```toml\n".len()..];
         let end = body.find("```").expect("closing fence");

@@ -1344,6 +1344,7 @@ mod tests {
         assert!(!base.join("updates").exists(), "updates still removed");
     }
 
+    #[cfg(unix)]
     #[test]
     fn full_uninstall_removes_everything_and_reports_gone() {
         let tmp = Scratch::new("full");
@@ -1367,6 +1368,7 @@ mod tests {
         assert!(!tmp.path().join("home/.local/bin/pmux").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlink_is_removed_as_link_target_untouched() {
         // Path safety: removing a symlinked inventory path must delete the

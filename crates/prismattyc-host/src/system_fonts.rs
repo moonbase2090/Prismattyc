@@ -275,6 +275,7 @@ mod tests {
         )));
     }
 
+    #[cfg(unix)]
     #[test]
     fn covering_face_finds_installed_cjk_glyph() {
         let face = covering_face('中').expect("test environment must provide a CJK face");
@@ -288,6 +289,7 @@ mod tests {
         assert_eq!(covering_face('中'), Some(face));
     }
 
+    #[cfg(unix)]
     #[test]
     fn new_cjk_characters_do_not_reread_the_font_file() {
         let face = covering_face('中').expect("test environment must provide a CJK face");
@@ -309,6 +311,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn coverage_index_matches_direct_cmap_lookup() {
         let face = covering_face('中').expect("test environment must provide a CJK face");

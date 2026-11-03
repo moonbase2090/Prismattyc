@@ -8727,7 +8727,7 @@ mod tests {
         let src = rgba_px(10, 20, 30);
         let out = cover_scale_rgba(1, 1, &src, 3, 3);
         assert_eq!(out.len(), 3 * 3 * 4);
-        for px in out.chunks_exact(4) {
+        for px in out.as_chunks::<4>().0.iter() {
             assert_eq!(px, &src);
         }
     }
@@ -8796,7 +8796,7 @@ mod tests {
         let cases: &[(usize, usize, u32)] = &[(3, 3, 1), (5, 4, 2), (2, 8, 7), (8, 1, 3)];
         for &(w, h, radius) in cases {
             let mut src = vec![0u8; w * h * 4];
-            for (i, px) in src.chunks_exact_mut(4).enumerate() {
+            for (i, px) in src.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 px[0] = (i * 17 % 256) as u8;
                 px[1] = (i * 41 % 256) as u8;
                 px[2] = (i * 73 % 256) as u8;
@@ -10914,7 +10914,7 @@ mod tests {
                 }
                 GlyphPaint::Color(g) => {
                     assert!(
-                        g.rgba.chunks_exact(4).any(|p| p[3] > 0),
+                        g.rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0),
                         "U+{:04X} color alpha",
                         ch as u32
                     );
@@ -11400,7 +11400,10 @@ mod tests {
                 assert!(g.bitmap.iter().any(|&b| b > 0), "CJK coverage ink");
             }
             GlyphPaint::Color(g) => {
-                assert!(g.rgba.chunks_exact(4).any(|p| p[3] > 0), "CJK color alpha");
+                assert!(
+                    g.rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0),
+                    "CJK color alpha"
+                );
             }
         }
     }
@@ -11419,7 +11422,7 @@ mod tests {
         match font.paint_char('\u{1F49C}') {
             GlyphPaint::Color(g) => {
                 assert!(
-                    g.rgba.chunks_exact(4).any(|p| p[3] > 0),
+                    g.rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0),
                     "purple heart color alpha"
                 );
             }

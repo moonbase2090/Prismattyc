@@ -395,9 +395,12 @@ mod tests {
     fn socket_path() -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        PathBuf::from(format!(
-            "/tmp/prism-snapshot-client-{}-{}-{n}.sock",
-            std::process::id(),
+        let directory =
+            std::env::temp_dir().join(format!("prism-snapshot-client-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        prismattyc_mux::platform::secure_directory(&directory).unwrap();
+        directory.join(format!(
+            "{}-{n}.sock",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|elapsed| elapsed.as_nanos())

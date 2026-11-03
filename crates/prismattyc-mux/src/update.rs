@@ -383,6 +383,9 @@ fn install_man_pages(repo: &Path) {
     }
 }
 
+#[cfg(windows)]
+fn install_man_pages(_repo: &Path) {}
+
 #[cfg(test)]
 mod tests {
     use super::{find_repo_from, UpdatePlan};
@@ -441,6 +444,3 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 }
-
-#[cfg(windows)]
-fn install_man_pages(_repo: &Path) {}

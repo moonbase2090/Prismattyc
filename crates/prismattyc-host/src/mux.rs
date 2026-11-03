@@ -1135,6 +1135,11 @@ impl PaneRuntime {
         cell_w: usize,
         cell_h: usize,
     ) -> Result<Self> {
+        #[cfg(all(test, windows))]
+        let test_shell = (child_args.is_empty() && matches!(program, "/bin/sh" | "sh"))
+            .then(prismattyc_mux::platform::default_shell);
+        #[cfg(all(test, windows))]
+        let program = test_shell.as_deref().unwrap_or(program);
         let pty_size = pty_size(cols, rows, cell_w, cell_h);
         let mut session =
             PtySession::spawn_config(program, child_args, cwd, &host_pane_env(), pty_size)
@@ -2545,7 +2550,7 @@ impl MuxRuntime {
         )
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn spawn_with_wake(
         program: &str,
         child_args: &[String],
@@ -4364,7 +4369,7 @@ impl MuxRuntime {
     }
 
     /// Test hook for the async connect path.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn set_async_connect(&mut self, enabled: bool) {
         self.async_connect = enabled;
     }
@@ -5501,7 +5506,9 @@ fn pty_size(cols: usize, rows: usize, cell_w: usize, cell_h: usize) -> PtySize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::process::{Child, Command, Stdio};
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant};
 
@@ -5847,6 +5854,7 @@ mod tests {
     /// match can fire on the echoed command line before the command's real
     /// output (e.g. `stty size`) reaches the screen, so wait for the output
     /// itself in the pane that runs it.
+    #[cfg(unix)]
     fn drain_pane_until(runtime: &mut MuxRuntime, pane: PaneId, needle: &str) {
         let deadline = Instant::now() + Duration::from_secs(6);
         while Instant::now() < deadline {
@@ -5868,6 +5876,7 @@ mod tests {
 
     /// Drain a pane without sending input. Policy seam assertions must remain
     /// valid after an idle host has had at least two seconds to poll.
+    #[cfg(unix)]
     fn idle_for(runtime: &mut MuxRuntime, duration: Duration) {
         assert!(
             duration >= Duration::from_secs(2),
@@ -5880,6 +5889,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn drain_title_until(runtime: &mut MuxRuntime, pane: PaneId, expected: &str) {
         let deadline = Instant::now() + Duration::from_secs(8);
         while Instant::now() < deadline {
@@ -5895,12 +5905,14 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     struct PrivateMuxServer {
         child: Child,
         socket: PathBuf,
         data: PathBuf,
     }
 
+    #[cfg(unix)]
     impl Drop for PrivateMuxServer {
         fn drop(&mut self) {
             let _ = self.child.kill();
@@ -5910,16 +5922,20 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn mux_binary(name: &str) -> PathBuf {
-        crate::test_support::mux_bin_dir().join(name)
+        crate::test_support::mux_bin_dir().join(prismattyc_mux::platform::executable_name(name))
     }
 
+    #[cfg(unix)]
     fn private_mux_server() -> PrivateMuxServer {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let id = SEQ.fetch_add(1, Ordering::Relaxed);
         let root =
             std::env::temp_dir().join(format!("prismattyc-host-seam-{}-{id}", std::process::id()));
         std::fs::create_dir_all(&root).expect("create private mux test directory");
+        prismattyc_mux::platform::secure_directory(&root)
+            .expect("secure private mux test directory");
         let socket = root.join("pmuxd.sock");
         let data = root.join("data");
         std::fs::create_dir_all(&data).expect("create private mux data directory");
@@ -5933,7 +5949,7 @@ mod tests {
         ] {
             command.env_remove(key);
         }
-        let guard = PrivateMuxServer {
+        let mut guard = PrivateMuxServer {
             child: command
                 .arg("--socket")
                 .arg(&socket)
@@ -5948,15 +5964,23 @@ mod tests {
             socket: socket.clone(),
             data: root,
         };
-        for _ in 0..200 {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
             if socket.exists() {
                 return guard;
+            }
+            if let Some(status) = guard.child.try_wait().expect("poll private pmuxd") {
+                panic!(
+                    "private pmuxd exited with {status} before publishing {}",
+                    socket.display()
+                );
             }
             thread::sleep(Duration::from_millis(10));
         }
         panic!("private pmuxd did not publish {}", socket.display());
     }
 
+    #[cfg(unix)]
     fn create_scrollback_session(server: &PrivateMuxServer, name: &str) {
         let script = "printf 'PERSISTED_SCROLLBACK_MARKER\\n'; for i in $(seq 1 100); do printf 'scroll line %03d\\n' \"$i\"; done; exec cat";
         let output = Command::new(mux_binary("pmux"))
@@ -5968,6 +5992,7 @@ mod tests {
         assert!(output.status.success(), "start session: {output:?}");
     }
 
+    #[cfg(unix)]
     fn log_runtime(server: &PrivateMuxServer, name: &str) -> MuxRuntime {
         let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
         let pane = runtime.focused_id();
@@ -5977,6 +6002,7 @@ mod tests {
         runtime
     }
 
+    #[cfg(unix)]
     fn has_scrollback(runtime: &mut MuxRuntime, marker: &str) -> bool {
         runtime.drain_all();
         runtime
@@ -5992,6 +6018,7 @@ mod tests {
             })
     }
 
+    #[cfg(unix)]
     fn wait_for_scrollback(runtime: &mut MuxRuntime, marker: &str) {
         let deadline = Instant::now() + Duration::from_secs(8);
         while Instant::now() < deadline {
@@ -6003,6 +6030,7 @@ mod tests {
         panic!("pane scrollback did not contain {marker:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn app_restart_reopens_full_pane_scrollback() {
         let server = private_mux_server();
@@ -6016,6 +6044,7 @@ mod tests {
         wait_for_scrollback(&mut after_restart, "PERSISTED_SCROLLBACK_MARKER");
     }
 
+    #[cfg(unix)]
     #[test]
     fn reopening_window_restores_full_pane_scrollback() {
         let server = private_mux_server();
@@ -6028,6 +6057,7 @@ mod tests {
         wait_for_scrollback(&mut reopened_window, "PERSISTED_SCROLLBACK_MARKER");
     }
 
+    #[cfg(unix)]
     #[test]
     fn pane_resize_keeps_full_scrollback() {
         let server = private_mux_server();
@@ -6058,10 +6088,12 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn shell_quote(value: &Path) -> String {
         format!("'{}'", value.to_string_lossy().replace('\'', "'\\''"))
     }
 
+    #[cfg(unix)]
     fn real_attach_command(socket: &Path) -> String {
         let attach = mux_binary("pmux-attach");
         format!(
@@ -6071,6 +6103,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     #[test]
     fn real_nested_attach_promotes_to_a_log_replica() {
         let server = private_mux_server();
@@ -6192,6 +6225,7 @@ mod tests {
         panic!("timed out; screen: {:?}", visible_text(runtime));
     }
 
+    #[cfg(unix)]
     #[test]
     fn async_open_paints_connecting_without_waiting_then_becomes_a_replica() {
         let server = private_mux_server();
@@ -6234,6 +6268,7 @@ mod tests {
         assert!(!visible_text(&runtime).contains("Connecting"));
     }
 
+    #[cfg(unix)]
     fn signal_server(server: &PrivateMuxServer, signal: &str) {
         let status = Command::new("kill")
             .arg(signal)
@@ -6249,6 +6284,7 @@ mod tests {
     /// wait; healthy steps take well under a millisecond (a tighter bound
     /// flakes when the whole suite loads the machine). The connects time out
     /// on their workers and the panes report the failure.
+    #[cfg(unix)]
     #[test]
     fn opening_eight_panes_against_a_stopped_pmuxd_never_stalls_the_main_thread() {
         const BUDGET: Duration = Duration::from_millis(250);
@@ -6315,6 +6351,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn async_promote_keeps_the_pty_until_the_replica_is_ready() {
         let server = private_mux_server();
@@ -6351,6 +6388,7 @@ mod tests {
         assert_eq!(runtime.attach_name_of(pane), Some("async-promote"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn async_promote_does_not_replace_a_pane_whose_child_exited() {
         let server = private_mux_server();
@@ -6375,6 +6413,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn async_real_nested_attach_promotes_and_keeps_its_mark_after_the_old_attach_exits() {
         let server = private_mux_server();
@@ -6433,6 +6472,7 @@ mod tests {
 
     /// Start a real nested attach, stop pmuxd so the promote's connect waits,
     /// and return what the adoption needs. The returned pid is the attach.
+    #[cfg(unix)]
     fn pending_real_promote(
         server: &PrivateMuxServer,
     ) -> (MuxRuntime, PaneId, u32, crate::attach_adopt::Adopted) {
@@ -6463,6 +6503,7 @@ mod tests {
         (runtime, pane, attach, adopted)
     }
 
+    #[cfg(unix)]
     fn settle_without_promotion(runtime: &mut MuxRuntime, pane: PaneId) {
         let deadline = Instant::now() + Duration::from_millis(2500);
         while Instant::now() < deadline {
@@ -6479,6 +6520,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn async_promote_is_dropped_when_the_nested_attach_is_killed_mid_connect() {
         let server = private_mux_server();
@@ -6501,6 +6543,7 @@ mod tests {
         assert_eq!(runtime.attach_session_of(pane), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn async_promote_is_cancelled_when_the_adoption_ends() {
         let server = private_mux_server();
@@ -6516,6 +6559,7 @@ mod tests {
         assert_eq!(runtime.attach_session_of(pane), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn async_promote_is_dropped_when_a_new_adoption_replaced_the_one_it_started_for() {
         let server = private_mux_server();
@@ -6529,6 +6573,7 @@ mod tests {
         assert_eq!(runtime.attach_session_of(pane), Some("another"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn async_promote_does_not_replace_a_child_that_exited_before_the_next_drain() {
         let server = private_mux_server();
@@ -6561,6 +6606,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn queued_input_reaches_the_pty_fallback_when_the_connect_fails() {
         let (release, gate) = mpsc::channel::<()>();
@@ -6592,6 +6638,7 @@ mod tests {
         assert!(runtime.log.is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_connecting_open_reports_the_pane_it_targets() {
         let server = private_mux_server();
@@ -6636,6 +6683,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn real_osc_timer_respects_pin_until_idle_revert() {
         let script = r#"while :; do printf '\033]0;timer-zero\a'; sleep 0.25; printf '\033]2;timer-two\a'; sleep 0.25; done"#;
@@ -6756,6 +6804,7 @@ mod tests {
         assert!(!runtime.panes[&second].unseen_output);
     }
 
+    #[cfg(unix)]
     #[test]
     fn attention_drains_sets_badge_and_focus_clears_without_touching_unseen() {
         // Keep the child quiet so unrelated shell prompts cannot race this
@@ -6786,6 +6835,7 @@ mod tests {
         assert!(!runtime.panes[&second].unseen_output);
     }
 
+    #[cfg(unix)]
     #[test]
     fn attention_clears_when_unfocused_pane_outputs_again() {
         let mut runtime = MuxRuntime::spawn("/bin/cat", &[], 80, 24).unwrap();
@@ -7207,6 +7257,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn phase2a_resize_applies_distinct_geometry_to_every_pty_and_emulator() {
         let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
@@ -7308,6 +7359,7 @@ mod tests {
         assert!(runtime.panes.contains_key(&first));
     }
 
+    #[cfg(unix)]
     #[test]
     fn clean_attach_pty_exit_preserves_success_status() {
         let mut runtime =
@@ -7705,6 +7757,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn focus_next_attention_pane_cycles_layout_order() {
         let mut runtime = MuxRuntime::spawn("/bin/cat", &[], 80, 24).unwrap();
@@ -8143,6 +8196,7 @@ mod tests {
         assert!(runtime.focus(runtime.focused_id()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn split_inherits_cwd_via_proc_pid() {
         // Spawn a shell that stays in a known directory (no OSC 7 required).
@@ -8184,6 +8238,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    #[cfg(unix)]
     #[test]
     fn background_output_sets_badge_and_focus_clears_it() {
         let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
@@ -8263,6 +8318,7 @@ mod tests {
         assert!(runtime.take_mail_rises(&mut last).is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn reopening_log_pane_restores_output_without_replaying_alerts() {
         let server = private_mux_server();
@@ -8352,6 +8408,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn bell_surfaces_per_pane_through_drain() {
         let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
@@ -9458,6 +9515,7 @@ mod tests {
         assert_ne!(runtime.focused_id(), first);
     }
 
+    #[cfg(unix)]
     #[test]
     fn real_child_exit_wakes_and_closes_only_pane_tab() {
         use std::sync::atomic::{AtomicBool, Ordering};

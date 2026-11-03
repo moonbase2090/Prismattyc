@@ -460,7 +460,9 @@ fn seed_focus(
     Ok(())
 }
 
-#[cfg(test)]
+// Every test drives a live MuxRuntime over /bin/sleep with a shell-script
+// fake pmux, so the module is unix-only.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::attach_tabs::AttachTabRecord;

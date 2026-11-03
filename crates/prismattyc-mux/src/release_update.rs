@@ -1516,7 +1516,10 @@ fn require_app_destination(path: &Path) -> Result<()> {
 
 #[cfg(any(test, target_os = "macos"))]
 fn sync_parent(parent: &Path) -> Result<()> {
+    #[cfg(unix)]
     File::open(parent)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = parent;
     Ok(())
 }
 
@@ -2662,6 +2665,7 @@ mod tests {
         fs::create_dir_all(&path).unwrap();
         path
     }
+    #[cfg(unix)]
     #[test]
     fn durable_receipt_selects_installation_without_overwriting_prior_metadata() {
         let dir = temporary();
@@ -2869,6 +2873,7 @@ mod tests {
         assert_eq!(fs::read(&pmux).unwrap(), b"old");
         fs::remove_dir_all(dir).unwrap();
     }
+    #[cfg(unix)]
     #[test]
     fn version_probe_bounds_output_and_reaps_descendants() {
         let dir = temporary();

@@ -1,6 +1,6 @@
 //! Minimal protocol 0.3 app: public client + protocol only, with fallback.
 
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 
 use prismattyc_protocol::{
     encode_collection_snapshot, encode_semantic_snapshot, encode_status_snapshot,
@@ -9,8 +9,7 @@ use prismattyc_protocol::{
     WorkspaceRows, WorkspaceSnapshot,
 };
 use prismattyc_rich_client::{
-    await_surface_session, encode_surface_query, enter_raw_stdin, RichGrant, Session,
-    NEGOTIATE_TIMEOUT,
+    await_surface_session, encode_surface_query, RichGrant, Session, NEGOTIATE_TIMEOUT,
 };
 
 const SURFACE_ROWS: WorkspaceRows = WorkspaceRows {
@@ -90,12 +89,25 @@ fn encode_surface(grant: &mut RichGrant) -> Result<Vec<u8>, prismattyc_protocol:
     Ok(wire)
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _raw = if io::stdin().is_terminal() {
-        enter_raw_stdin()
+/// Raw mode keeps the host's reply from echoing. The client's raw-TTY support
+/// is unix-only, so elsewhere the example runs with the terminal as it is.
+#[cfg(unix)]
+fn raw_stdin() -> Option<prismattyc_rich_client::RawStdin> {
+    use std::io::IsTerminal;
+    if io::stdin().is_terminal() {
+        prismattyc_rich_client::enter_raw_stdin()
     } else {
         None
-    };
+    }
+}
+
+#[cfg(not(unix))]
+fn raw_stdin() -> Option<()> {
+    None
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _raw = raw_stdin();
     let mut stdout = io::stdout().lock();
     stdout.write_all(&encode_surface_query()?)?;
     stdout.flush()?;

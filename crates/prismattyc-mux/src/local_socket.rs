@@ -2,7 +2,9 @@
 
 use std::io;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 #[cfg(unix)]
 pub use std::os::unix::net::{UnixListener, UnixStream};
@@ -141,7 +143,7 @@ fn connect_timeout_impl(path: &Path, timeout: Duration) -> io::Result<UnixStream
         if err != WSAEWOULDBLOCK && err != WSAEINPROGRESS {
             return Err(io::Error::from_raw_os_error(err));
         }
-        wait_for_connect(socket.0, event.0, timeout)?;
+        wait_for_connect(event.0, timeout)?;
     }
     socket_error_ok(socket.0)?;
     return into_blocking_stream(socket);
@@ -195,7 +197,6 @@ fn connect_timeout_impl(path: &Path, timeout: Duration) -> io::Result<UnixStream
     }
 
     fn wait_for_connect(
-        sock: SOCKET,
         event: windows_sys::Win32::Networking::WinSock::WSAEVENT,
         timeout: Duration,
     ) -> io::Result<()> {

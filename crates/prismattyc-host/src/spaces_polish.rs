@@ -428,6 +428,7 @@ pub(super) fn poll(host: &mut HostState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::collections::HashMap;
 
     #[test]
@@ -502,6 +503,7 @@ mod tests {
         assert!(state.armed);
     }
 
+    #[cfg(unix)]
     use prismattyc_mux::{PaneId, SavedSpace, SavedSpaceTab, SAVED_SPACE_VERSION};
 
     fn at(base: Instant, ms: u64) -> Instant {
@@ -652,10 +654,12 @@ mod tests {
         assert_ne!(wide, reordered);
     }
 
+    #[cfg(unix)]
     fn runtime() -> crate::mux::MuxRuntime {
         crate::mux::MuxRuntime::spawn("/bin/sleep", &["30".to_string()], 80, 24).unwrap()
     }
 
+    #[cfg(unix)]
     fn fake_mux_bin() -> String {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
@@ -673,6 +677,7 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
+    #[cfg(unix)]
     fn space_from_snaps(snaps: &[TabSnap]) -> SavedSpace {
         let mut sessions = Vec::new();
         for snap in snaps {
@@ -706,6 +711,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     /// Advance the synthetic clock the way [`poll`] does, and write only when
     /// the gate says the debounce has elapsed.
     fn save_when_due(
@@ -741,6 +747,7 @@ mod tests {
         panic!("autosave did not write {fingerprint}");
     }
 
+    #[cfg(unix)]
     fn reopen(saved: &SavedSpace, fake: &str) -> Vec<TabSnap> {
         use prismattyc_mux::attach_tabs::{AttachTabRecord, AttachTabsFile};
         let file = AttachTabsFile {
@@ -762,6 +769,7 @@ mod tests {
         snaps_from_attach(&crate::attach_tabs::records_from_runtime(&fresh, &panes))
     }
 
+    #[cfg(unix)]
     #[test]
     fn pane_add_split_and_close_autosave_the_live_tree() {
         let fake = fake_mux_bin();

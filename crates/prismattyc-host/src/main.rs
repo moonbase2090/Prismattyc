@@ -26193,6 +26193,7 @@ open(sys.argv[1], 'w').write(str(n))
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn pty_child_exiting_mid_paste_reports_incomplete() {
         // Raw mode, take a 64 KiB prefix, then exit with the rest unread.
@@ -26312,7 +26313,10 @@ open(sys.argv[1], 'w').write(str(n))
         // No program given: start $SHELL as a login shell so ~/.zprofile runs
         // and PATH matches Terminal.app (Finder/Dock launch has minimal PATH).
         let cli = Cli::parse(std::iter::empty()).expect("parse");
+        #[cfg(unix)]
         assert_eq!(cli.child_args, ["-l"]);
+        #[cfg(windows)]
+        assert!(cli.child_args.is_empty());
         let expected = prismattyc_mux::platform::default_shell();
         assert_eq!(cli.program, expected);
     }

@@ -19,7 +19,7 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&output)?;
     let mut catalog = Vec::new();
     let runtime = pmux_plugin_runtime::Runtime::new()?;
-    for pair in args[1..].chunks_exact(2) {
+    for pair in args[1..].as_chunks::<2>().0 {
         let source = Path::new(&pair[0]);
         let manifest = Manifest::parse(&std::fs::read(source.join("plugin.toml"))?)?;
         manifest.compatibility()?;

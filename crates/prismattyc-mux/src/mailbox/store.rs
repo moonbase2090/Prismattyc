@@ -544,6 +544,7 @@ mod tests {
         assert_eq!(claimed[0].id, id);
         assert_eq!(claimed[0].summary, "durable");
 
+        drop(store);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -569,6 +570,7 @@ mod tests {
         assert_eq!(store.commit(&agent("operator-a"), &[id]).unwrap(), 1);
         assert_eq!(store.depth(&agent("operator-a")).unwrap(), (0, 0));
 
+        drop(store);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

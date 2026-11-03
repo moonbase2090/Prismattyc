@@ -1765,11 +1765,12 @@ mod tests {
         assert!(edit.writes.is_empty());
         assert!(dialog.notice.as_deref().unwrap().contains("absolute"));
         assert!(dialog.values.background_image.is_none());
-        dialog.path_edit = Some("/tmp/wall.png".into());
+        let image = std::env::temp_dir().join("wall.png");
+        dialog.path_edit = Some(image.display().to_string());
         let edit = dialog.edit(Input::Enter, chrome(), 1200, 800);
         assert_eq!(
             edit.writes,
-            vec![Write::BackgroundImage(Some("/tmp/wall.png".into()))]
+            vec![Write::BackgroundImage(Some(image.display().to_string()))]
         );
     }
 

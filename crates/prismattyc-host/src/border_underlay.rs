@@ -11,16 +11,11 @@ const GRAPHITE_RING_OUTSET: usize = 3;
 ///
 /// `All` is a full frame or the flag-off path. `Slots` is the rings whose
 /// captured strips were restored on this partial frame.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum BorderRefresh {
+    #[default]
     All,
     Slots(Vec<PixelRect>),
-}
-
-impl Default for BorderRefresh {
-    fn default() -> Self {
-        Self::All
-    }
 }
 
 struct CapturedSlot {

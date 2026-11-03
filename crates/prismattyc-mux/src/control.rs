@@ -9188,22 +9188,17 @@ function Read-Exact([int]$Count) {
 
     #[test]
     fn live_pmux_sockets_in_skips_non_matching_names_and_missing_dirs() {
-        let missing = PathBuf::from(format!(
-            "/tmp/pmux-rtdiag-missing-{}-nope",
-            std::process::id()
-        ));
+        let temporary = std::env::temp_dir();
+        let missing = temporary.join(format!("pmux-rtdiag-missing-{}-nope", std::process::id()));
         assert!(live_pmux_sockets_in(&missing).is_empty());
 
-        let dir = PathBuf::from(format!(
-            "/tmp/pmux-rtdiag-{}-{:016x}",
-            std::process::id(),
-            {
-                let mut nonce = [0_u8; 8];
-                getrandom::fill(&mut nonce).expect("dir nonce");
-                u64::from_ne_bytes(nonce)
-            }
-        ));
+        let dir = temporary.join(format!("pmux-rtdiag-{}-{:016x}", std::process::id(), {
+            let mut nonce = [0_u8; 8];
+            getrandom::fill(&mut nonce).expect("dir nonce");
+            u64::from_ne_bytes(nonce)
+        }));
         fs::create_dir(&dir).unwrap();
+        crate::platform::secure_directory(&dir).unwrap();
         fs::write(dir.join("other.sock"), b"x").unwrap();
         fs::write(dir.join("pmux-work.txt"), b"x").unwrap();
         fs::write(dir.join("pmux-dead.sock"), b"not-a-socket").unwrap();
@@ -10027,6 +10022,7 @@ function Read-Exact([int]$Count) {
             .collect()
     }
 
+    #[cfg(unix)]
     #[test]
     fn subscribe_pane_from_seq_receives_exactly_later_output_bytes() {
         let (mut plane, _, pane) = live_fixture("subout");
@@ -10094,6 +10090,7 @@ function Read-Exact([int]$Count) {
         assert!(!later.is_empty(), "post-N Output must not be empty");
     }
 
+    #[cfg(unix)]
     #[test]
     fn subscribe_pane_reconnect_from_seq_receives_output_exactly_once() {
         let (mut plane, _, pane) = live_fixture("subre");
@@ -11977,6 +11974,7 @@ function Read-Exact([int]$Count) {
         assert_eq!(received, payload);
     }
 
+    #[cfg(unix)]
     #[test]
     fn large_response_write_aborts_on_shutdown() {
         // A client that never drains must not pin a server thread forever; the
@@ -12925,6 +12923,7 @@ function Read-Exact([int]$Count) {
             .any(|window| window.panes.iter().any(|candidate| candidate.id == pane_id)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn phase2b_live_server_client_disconnect_preserves_pty_and_emulator() {
         let (plane, _, pane) = live_fixture("READY");
@@ -13735,6 +13734,7 @@ function Read-Exact([int]$Count) {
         panic!("pane {pane} never contained {needle:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_pane_sync_fans_out_to_siblings_and_off_stays_focused() {
         let (mut plane, window, pane) = live_fixture("A");
@@ -13959,6 +13959,7 @@ function Read-Exact([int]$Count) {
         )));
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_pane_sync_rejects_observer_and_swallows_dead_sibling() {
         let (mut plane, window, pane) = live_fixture("A");
@@ -14253,6 +14254,7 @@ function Read-Exact([int]$Count) {
         assert_eq!(runs[1].fg, ColorWire::Ansi { n: 1 });
     }
 
+    #[cfg(unix)]
     #[test]
     fn read_pane_styled_carries_sgr_and_read_pane_stays_text() {
         let (mut plane, _, pane) = live_fixture("READY");

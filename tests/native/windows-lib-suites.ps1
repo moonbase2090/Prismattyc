@@ -1,6 +1,6 @@
 # Windows lib-suite check: the workspace builds and passes clippy for every
-# target, and each prismattyc-mux / prismattyc-host lib test finishes. A whole
-# lib run on Windows used to sit with no result for 30+ minutes, so each test
+# target, and each prismattyc-mux lib / prismattyc-host bin test finishes. A
+# whole run on Windows used to sit with no result for 30+ minutes, so each test
 # runs alone under a timeout, and the ones that hang are named.
 #
 #   powershell -ExecutionPolicy Bypass -File tests\native\windows-lib-suites.ps1 [-Repo DIR] [-Out DIR] [-TimeoutSec N] [-Crates a,b] [-Filter TEXT] [-SkipClippy]
@@ -80,19 +80,28 @@ try {
     }
 
     foreach ($crate in $Crates) {
-        # The lib test executable comes from cargo's JSON artifact messages.
+        # The selected unit-test executable comes from Cargo's JSON artifact messages.
+        if ($crate -eq 'prismattyc-host') {
+            $targetArgs = @('--bin', $crate)
+            $targetKind = 'bin'
+        } else {
+            $targetArgs = @('--lib')
+            $targetKind = 'lib'
+        }
         $exe = $null
         $crateFile = $crate -replace '[^A-Za-z0-9_.-]', '_'
         $buildJson = Join-Path $Out "$crateFile-test-build.jsonl"
         $buildLog = Join-Path $Out "$crateFile-test-build.log"
+        $buildArgs = @('test', '--locked', '-p', $crate) + $targetArgs +
+            @('--no-run', '--message-format=json')
         $build = Start-Process -FilePath 'cargo' -Wait -PassThru -NoNewWindow `
-            -ArgumentList @('test', '--locked', '-p', $crate, '--lib', '--no-run', '--message-format=json') `
+            -ArgumentList $buildArgs `
             -RedirectStandardOutput $buildJson -RedirectStandardError $buildLog
         Get-Content -Path $buildJson | ForEach-Object {
             if ($_ -notmatch '^\{') { return }
             $msg = $_ | ConvertFrom-Json
             if ($msg.reason -eq 'compiler-artifact' -and $msg.profile.test -and $msg.executable -and
-                ($msg.target.kind -contains 'lib')) { $exe = $msg.executable }
+                ($msg.target.kind -contains $targetKind)) { $exe = $msg.executable }
         }
         if ($build.ExitCode -ne 0 -or -not $exe) {
             Get-Content -Path $buildLog | Out-Host
@@ -121,7 +130,7 @@ try {
             if (Select-String -Path $log -Pattern '1 ignored' -Quiet) { $ignored++ } else { $pass++ }
             Remove-Item $log, "$log.err" -ErrorAction SilentlyContinue
         }
-        Log "$crate lib: $pass passed, $fail failed, $hang hung, $ignored ignored (of $(@($tests).Count))"
+        Log "$crate ${targetKind}: $pass passed, $fail failed, $hang hung, $ignored ignored (of $(@($tests).Count))"
         $script:fails += $fail + $hang
     }
 } finally {

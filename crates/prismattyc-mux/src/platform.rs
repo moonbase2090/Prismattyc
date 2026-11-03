@@ -1379,6 +1379,11 @@ mod tests {
     fn detached_spawn_closes_the_caller_stdout_pipe() {
         let (mut reader, writer) = std::io::pipe().expect("pipe");
         let write_handle = writer.as_raw_handle() as HANDLE;
+        assert_ne!(
+            unsafe { SetHandleInformation(write_handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) },
+            0,
+            "make the test pipe inheritable"
+        );
         let mut flags = 0u32;
         assert_ne!(
             unsafe { GetHandleInformation(write_handle, &mut flags) },

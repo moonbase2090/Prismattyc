@@ -104,11 +104,11 @@ powershell -ExecutionPolicy Bypass -File tests\native\windows-lib-suites.ps1 -Ou
 ```
 
 It runs `cargo clippy --workspace --all-targets -- -D warnings`, then runs each
-`prismattyc-mux` and `prismattyc-host` lib test on its own with a 120 s
-timeout (`-TimeoutSec`). A test that runs past it is killed with its child
-processes and reported as `HANG`. `-Crates` and `-Filter` narrow the run, and
-`-SkipClippy` skips the clippy step. It exits 0 only when clippy is clean and
-no test fails or hangs. `result.txt` lists each test that did not pass, and
+`prismattyc-mux` lib test and `prismattyc-host` bin unit test on its own with a
+120 s timeout (`-TimeoutSec`). A test that runs past it is killed with its
+child processes and reported as `HANG`. `-Crates` and `-Filter` narrow the run,
+and `-SkipClippy` skips the clippy step. It exits 0 only when clippy is clean
+and no test fails or hangs. `result.txt` lists each test that did not pass, and
 their logs are kept beside it.
 
 ### Pixel-alpha performance acceptance

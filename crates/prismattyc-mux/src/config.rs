@@ -915,10 +915,14 @@ mod tests {
     fn cli_instance_beats_env_and_file_socket() {
         // Inside a pmux pane PMUX_SOCKET points at the pane's own server;
         // `pmux --instance other` must still reach the other server.
-        with_mux_env(&[("PMUX_SOCKET", "/tmp/pane.sock")], || {
+        let temporary = std::env::temp_dir();
+        let pane_socket = temporary.join("pane.sock");
+        let file_socket = temporary.join("file.sock");
+        let cli_socket = temporary.join("cli.sock");
+        with_mux_env(&[("PMUX_SOCKET", pane_socket.to_str().unwrap())], || {
             let file = MuxSection {
                 instance: None,
-                socket: Some(PathBuf::from("/tmp/file.sock")),
+                socket: Some(file_socket),
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
@@ -933,25 +937,24 @@ mod tests {
             let (_, socket) = resolve_mux_target(None, None, &file).unwrap();
             assert_eq!(
                 socket.as_deref(),
-                Some(Path::new("/tmp/pane.sock")),
+                Some(pane_socket.as_path()),
                 "without --instance the env socket still applies"
             );
-            let (_, socket) = resolve_mux_target(
-                Some("other".into()),
-                Some(PathBuf::from("/tmp/cli.sock")),
-                &file,
-            )
-            .unwrap();
-            assert_eq!(socket.as_deref(), Some(Path::new("/tmp/cli.sock")));
+            let (_, socket) =
+                resolve_mux_target(Some("other".into()), Some(cli_socket.clone()), &file).unwrap();
+            assert_eq!(socket.as_deref(), Some(cli_socket.as_path()));
         });
     }
 
     #[test]
     fn cli_wins_over_file() {
         without_mux_env(|| {
+            let temporary = std::env::temp_dir();
+            let file_socket = temporary.join("file.sock");
+            let cli_socket = temporary.join("cli.sock");
             let file = MuxSection {
                 instance: Some("file".into()),
-                socket: Some(PathBuf::from("/tmp/file.sock")),
+                socket: Some(file_socket),
                 attach_on_new: None,
                 space_open_runs_commands: None,
                 remote_size: None,
@@ -959,14 +962,10 @@ mod tests {
                 experimental_activity: None,
                 shell: None,
             };
-            let (instance, socket) = resolve_mux_target(
-                Some("cli".into()),
-                Some(PathBuf::from("/tmp/cli.sock")),
-                &file,
-            )
-            .unwrap();
+            let (instance, socket) =
+                resolve_mux_target(Some("cli".into()), Some(cli_socket.clone()), &file).unwrap();
             assert_eq!(instance, "cli");
-            assert_eq!(socket.as_deref(), Some(Path::new("/tmp/cli.sock")));
+            assert_eq!(socket.as_deref(), Some(cli_socket.as_path()));
         });
     }
 

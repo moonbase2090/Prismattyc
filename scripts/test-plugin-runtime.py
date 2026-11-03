@@ -185,10 +185,13 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
         temporary.write_text(f"start_at_login = false\n[mux]\nexperimental_activity = {'true' if on else 'false'}\n")
         os.replace(temporary, config)
 
-    def start():
+    def start(restore_workspace=False):
         nonlocal daemon
         program = ["cmd.exe", "/d", "/c", "pause > nul"] if os.name == "nt" else ["/bin/sh", "-c", "read -r line"]
-        process = subprocess.Popen([str(pmuxd), "--socket", str(endpoint), "--", *program], env=env, stdout=log, stderr=log)
+        arguments = [str(pmuxd), "--socket", str(endpoint)]
+        if restore_workspace:
+            arguments.append("--restore-workspace")
+        process = subprocess.Popen([*arguments, "--", *program], env=env, stdout=log, stderr=log)
         daemon = process
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
@@ -235,7 +238,8 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
         assert result.returncode == 0, result.stderr
         return result.stdout
 
-    def discovery_proof(connection):
+    def discovery_proof():
+        nonlocal connection, daemon
         connector = "org.moonbase.activity-connector"
         monitor = "org.moonbase.activity-monitor"
         for plugin in [connector, monitor]:
@@ -268,12 +272,33 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
         assert "quiet-seat" in first_frame and "unhooked-seat" in first_frame, first_frame
         (scratch / "discovery-initial.json").write_text(json.dumps(initial, indent=2) + "\n")
         (scratch / "discovery-initial-frame.txt").write_text(first_frame)
+        core("space", "save", "activity-discovery", "quiet-seat", "unhooked-seat")
+        stop(daemon)
+        daemon, connection = start(restore_workspace=True)
+        deadline = time.monotonic() + 5
+        while True:
+            restored = connection.request("read_activity", cursor=None, limit=256)["response"]["page"]
+            restored_seats = {seat["seat"]: seat for seat in restored["sessions"]["seats"]}
+            assert {"quiet-seat", "unhooked-seat"} <= restored_seats.keys(), restored
+            if all(restored_seats[name]["state"] == "idle" for name in ("quiet-seat", "unhooked-seat")):
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+        if not all(restored_seats[name]["state"] == "idle" for name in ("quiet-seat", "unhooked-seat")):
+            processes = subprocess.run(["ps", "-axo", "pid,ppid,pgid,tpgid,command"], capture_output=True, text=True).stdout
+            shell_processes = [line for line in processes.splitlines() if "read -r line" in line or "pmuxd --socket" in line]
+            raise AssertionError(f"restored session health was not idle: {restored}; processes={shell_processes}")
+        restored_frame = cli("run", monitor, "--snapshot", "--cols", "100", "--rows", "30", text=True)
+        assert "quiet-seat" in restored_frame and "unhooked-seat" in restored_frame, restored_frame
+        (scratch / "discovery-daemon-restarted.json").write_text(json.dumps(restored, indent=2) + "\n")
+        (scratch / "discovery-daemon-restarted-frame.txt").write_text(restored_frame)
         for sequence in range(520):
             reply = connection.request("publish_activity", event={"schema_version":1,
                 "seat":"busy-seat", "run_id":"busy-run", "event_id":f"event-{sequence}",
                 "source":"hooks", "kind":"working"})
             assert reply["status"] == "ok", reply
-        page = connection.request("read_activity", cursor=initial["cursor"], limit=256)["response"]["page"]
+        page = connection.request("read_activity", cursor=restored["cursor"], limit=256)["response"]["page"]
         assert page["reset"] == "retention_gap" and len(page["records"]) == 256, page
         assert all(record["event"]["seat"] == "busy-seat" for record in page["records"])
         assert {"quiet-seat", "unhooked-seat"} <= seats().keys()
@@ -306,8 +331,8 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
         final_screen = core("save-buffer", str(pane), "-")
         assert "later-seat" in final_screen
         (scratch / "discovery-live-frame.txt").write_text(final_screen)
-        (scratch / "discovery-result.json").write_text(json.dumps({"status":"PASS", "checks":["zero events", "520-event retention gap", "fresh monitor", "live discovery", "session removal"]}, indent=2) + "\n")
-        print("PASS session discovery without hooks or events; unchanged cursor; 520-event retention gap; fresh monitor views retain quiet seats; live periodic discovery and session removal; existing activity-only grants", flush=True)
+        (scratch / "discovery-result.json").write_text(json.dumps({"status":"PASS", "checks":["zero events", "pmuxd workspace restore", "named idle seats after restart", "520-event retention gap", "fresh monitor", "live discovery", "session removal"]}, indent=2) + "\n")
+        print("PASS named shell-idle seat discovery after daemon restore; unchanged cursor; 520-event retention gap; fresh monitor views retain quiet seats; live periodic discovery and session removal; existing activity-only grants", flush=True)
 
     def mcp_proof(arguments, activity_only, expected_seats=()):
         import queue
@@ -687,7 +712,7 @@ else:
             cli("install",monitor)
             cli("enable",monitor,"--allow","activity.read:local")
             if feature == "discovery":
-                discovery_proof(connection)
+                discovery_proof()
             elif feature == "remote-query":
                 connector = "org.moonbase.activity-connector"
                 cli("install", connector)

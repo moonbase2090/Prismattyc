@@ -362,8 +362,36 @@ pub const MAIL_INJECT_DIRTY_IDLE_MS: u64 = 60_000;
 /// output. The idle trigger fires once per quiet episode; new
 /// output re-arms it.
 pub const PANE_IDLE_TRIGGER_MS: u64 = 60_000;
+const ACTIVITY_STUCK_AFTER_MS: u64 = 5 * 60 * 1000;
 const MAIL_INJECT_EPOCH_WAIT_MS: u64 = 250;
 const MAIL_INJECT_EPOCH_SLICE_MS: u64 = 10;
+
+fn activity_session_state(
+    live: bool,
+    foreground: crate::procinfo::TerminalForeground,
+    last_output_at_ms: Option<u64>,
+    observed_at_ms: u64,
+) -> prismattyc_core::activity::ActivitySessionState {
+    use crate::procinfo::TerminalForeground;
+    use prismattyc_core::activity::ActivitySessionState;
+
+    if !live {
+        ActivitySessionState::Stopped
+    } else if foreground == TerminalForeground::Shell {
+        ActivitySessionState::Idle
+    } else if foreground == TerminalForeground::Agent
+        && last_output_at_ms
+            .is_some_and(|at| observed_at_ms.saturating_sub(at) >= ACTIVITY_STUCK_AFTER_MS)
+    {
+        ActivitySessionState::Stuck
+    } else if last_output_at_ms
+        .is_some_and(|at| observed_at_ms.saturating_sub(at) < PANE_IDLE_TRIGGER_MS)
+    {
+        ActivitySessionState::Working
+    } else {
+        ActivitySessionState::Waiting
+    }
+}
 
 /// Same-step inject result. Defer/skip is success, not an Error — the
 /// caller must not count those as attempts.
@@ -2599,8 +2627,7 @@ impl ControlPlane {
     }
 
     fn activity_sessions(&self) -> prismattyc_core::activity::ActivitySessions {
-        use prismattyc_core::activity::{ActivitySession, ActivitySessionState, ActivitySessions};
-        const STUCK_AFTER_MS: u64 = 5 * 60 * 1000;
+        use prismattyc_core::activity::{ActivitySession, ActivitySessions};
         let observed_at_ms = now_unix_ms();
         let seats = self
             .domain
@@ -2648,22 +2675,8 @@ impl ControlPlane {
                 .into_iter()
                 .find(|candidate| foregrounds.contains(candidate))
                 .unwrap_or(crate::procinfo::TerminalForeground::Unknown);
-                let inactive_for_ms = last_output_at_ms.map(|at| observed_at_ms.saturating_sub(at));
-                let state = if !live {
-                    ActivitySessionState::Stopped
-                } else if foreground == crate::procinfo::TerminalForeground::Shell {
-                    ActivitySessionState::Idle
-                } else if foreground == crate::procinfo::TerminalForeground::Agent
-                    && inactive_for_ms.is_some_and(|age| age >= STUCK_AFTER_MS)
-                {
-                    ActivitySessionState::Stuck
-                } else if last_output_at_ms
-                    .is_some_and(|at| observed_at_ms.saturating_sub(at) < PANE_IDLE_TRIGGER_MS)
-                {
-                    ActivitySessionState::Working
-                } else {
-                    ActivitySessionState::Waiting
-                };
+                let state =
+                    activity_session_state(live, foreground, last_output_at_ms, observed_at_ms);
                 Some(ActivitySession {
                     seat,
                     session_id: session.id.get(),
@@ -8554,6 +8567,48 @@ fn control_peer_closed(stream: &UnixStream) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_health_requires_positive_shell_or_agent_evidence() {
+        use crate::procinfo::TerminalForeground as Foreground;
+        use prismattyc_core::activity::ActivitySessionState as State;
+
+        let now = 1_000_000;
+        assert_eq!(
+            activity_session_state(false, Foreground::Unknown, None, now),
+            State::Stopped
+        );
+        assert_eq!(
+            activity_session_state(true, Foreground::Shell, None, now),
+            State::Idle
+        );
+        assert_eq!(
+            activity_session_state(true, Foreground::Agent, None, now),
+            State::Waiting
+        );
+        assert_eq!(
+            activity_session_state(
+                true,
+                Foreground::Agent,
+                Some(now - ACTIVITY_STUCK_AFTER_MS),
+                now
+            ),
+            State::Stuck
+        );
+        assert_eq!(
+            activity_session_state(true, Foreground::Agent, Some(now - 10), now),
+            State::Working
+        );
+        assert_eq!(
+            activity_session_state(
+                true,
+                Foreground::Unknown,
+                Some(now - ACTIVITY_STUCK_AFTER_MS),
+                now
+            ),
+            State::Waiting
+        );
+    }
 
     /// A `sleep` that runs under any argv[0], for fake-agent symlinks such as
     /// `claude` or `muse-bin-*`. Ubuntu 26.04 makes `/bin/sleep` a uutils

@@ -265,8 +265,11 @@ pub fn terminal_foreground(root: u32) -> TerminalForeground {
     }
     #[cfg(not(windows))]
     {
-        let TtyForeground::Pgid(group) = classify_tty(root) else {
-            return TerminalForeground::Unknown;
+        let group = match classify_tty(root) {
+            TtyForeground::Pgid(group) => group,
+            TtyForeground::NoTty | TtyForeground::Unknown => {
+                return bare_shell_without_foreground_group(root);
+            }
         };
         let mut saw_shell = false;
         let mut saw_other = false;
@@ -295,6 +298,25 @@ pub fn terminal_foreground(root: u32) -> TerminalForeground {
             TerminalForeground::Unknown
         }
     }
+}
+
+#[cfg(not(windows))]
+fn bare_shell_without_foreground_group(root: u32) -> TerminalForeground {
+    let Some(root_args) = cmdline_strings(root) else {
+        return TerminalForeground::Unknown;
+    };
+    if !is_shell_argv(&root_args) {
+        return TerminalForeground::Unknown;
+    }
+    for pid in tree_pids(root).into_iter().filter(|pid| *pid != root) {
+        let Some(args) = cmdline_strings(pid) else {
+            return TerminalForeground::Unknown;
+        };
+        if !is_shell_argv(&args) {
+            return TerminalForeground::Unknown;
+        }
+    }
+    TerminalForeground::Shell
 }
 
 pub fn foreground_agent(root: u32) -> crate::InjectAgent {
@@ -1345,12 +1367,14 @@ mod tests {
             .expect("spawn bare sh");
         std::thread::sleep(std::time::Duration::from_millis(50));
         let cmd = foreground_command_impl(bare.id());
+        let health = terminal_foreground(bare.id());
         let _ = bare.kill();
         let _ = bare.wait();
         assert!(
             cmd.is_none(),
             "bare shell must not record a command: {cmd:?}"
         );
+        assert_eq!(health, TerminalForeground::Shell);
     }
 
     #[cfg(target_os = "linux")]

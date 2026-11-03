@@ -10396,6 +10396,14 @@ fn apply_space_refresh(
     else {
         return;
     };
+    // `pmux space open` writes this marker before it restores the first
+    // session and removes it once every session is in place; Space autosave
+    // waits on it too. A layout built from a half-restored Space closes the
+    // panes that are still reconnecting after a daemon restart. Check after
+    // taking the snapshot, so a restore that started meanwhile is seen.
+    if prismattyc_mux::space_autosave::restoring_marker(&spaces_dir(), owner).exists() {
+        return;
+    }
     host.mux.space_id = Some(owner.to_string());
     if !snapshot_covers_attachments(
         &host.attach_bound_at,

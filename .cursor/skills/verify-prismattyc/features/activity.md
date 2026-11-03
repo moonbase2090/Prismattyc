@@ -2,7 +2,8 @@
 
 The daemon owns the optional headless activity ring. Collection is off by
 default. `[mux] experimental_activity = true` or `--experimental-activity`
-enables it. Config changes start or stop collection without restarting the
+enables it. Configuring both `activity_webhook_url` and
+`activity_webhook_secret_file` also enables collection. Config changes start or stop collection without restarting the
 daemon or replacing sessions. See [the feed design](../../../../docs/agent-activity-feed.md).
 
 The monitor UI and connector query logic run as contained plug-ins. The native
@@ -38,6 +39,39 @@ coverage. Actual provider hook proof additionally requires a reviewed installed
 provider runtime, its hook profile, and available authentication. Synthetic hook
 events establish feed behavior only. Record unavailable provider prerequisites.
 
+## Edit hook settings with bounded reads
+
+The file-editing fixture runs independently of daemon collection and provider
+execution. Build `pmux` from this revision, then run:
+
+```sh
+python3 tests/native/hook-settings-e2e.py --pmux "$verify_bins/pmux" \
+  --out "$verify_evidence/hook-settings" --revision "$(git rev-parse HEAD)"
+```
+
+Require `status: PASS` in `result.json` and inspect `commands.json`. The fixture
+uses private profile/configuration paths and starts no daemon. It checks repeated
+installation and removal, unmanaged settings, exact 1 MiB acceptance, oversized
+refusal before UTF-8 decoding without changing the original bytes, and malformed
+input preservation. It also checks oversized Claude, Codex, Cursor, and Kiro
+profiles through `--install-hooks --all-harnesses`. Unix checks symlink and target-permission preservation;
+Windows omits that case. This drive proves file editing, not provider execution
+or contained-package provenance. It requires Python 3, a matching CLI binary,
+and a new output directory.
+
+Run the focused boundary and installer tests too:
+
+```sh
+cargo +1.90.0 test -p prismattyc-mux --lib --locked config::tests:: -- --test-threads=1
+cargo +1.90.0 test -p prismattyc-mux --bin pmux --locked activity_emit::install::tests:: -- --test-threads=1
+```
+
+The byte-consumption test must stop after the read limit plus one byte. The
+transaction tests cover oversized and small external edits during the
+compare-before-replace check, preserving external bytes and cleaning temporary
+replacements. Both reads use the hook installer's limit. Other configuration
+callers retain their existing unrestricted reads.
+
 ## Discover current sessions independently of history
 
 Run the discovery fixture in a clean private proof environment:
@@ -65,6 +99,20 @@ proof artifacts after the private runtime is cleaned up. Failed drives retain
 the artifacts written before failure. A debug worker can spend longer than
 15 seconds compiling its first live view; the fixture allows 45 seconds for
 that view to appear.
+
+## Verify webhook delivery locally
+
+Run the real-daemon integration fixture against its local receiver:
+
+```sh
+cargo +1.90.0 test -p prismattyc-mux --test activity_webhook --locked -- --test-threads=1
+```
+
+Require four passing tests for delivery headers and payload, retry responses,
+hook precedence, and session projection. The fixture owns its private daemons
+and receiver and requires Unix. It does not contact the configured production
+receiver or prove that receiver's deployment. Cryptographic signature checks
+are separate unit tests in `src/activity_webhook.rs`.
 
 ## Review grants and remote endpoints
 

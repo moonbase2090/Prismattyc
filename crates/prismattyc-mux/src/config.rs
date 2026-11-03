@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use std::io::Write;
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::time::SystemTime;
@@ -465,7 +465,7 @@ pub fn transact_config<T>(
     path: &Path,
     edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<T>,
 ) -> Result<ConfigCommit<T>> {
-    transact_file(path, |raw| {
+    transact_file(path, None, |raw| {
         let mut document = raw
             .parse::<toml_edit::DocumentMut>()
             .context("parse config before edit")?;
@@ -477,7 +477,7 @@ pub fn transact_config<T>(
 /// Deliberately replace the entire document (for an explicit template write).
 /// Read/modify/write callers use `transact_config` instead of a stale string.
 pub fn write_config_atomic(path: &Path, contents: &str) -> Result<()> {
-    transact_file(path, |_| Ok((contents.to_string(), ())))?.report();
+    transact_file(path, None, |_| Ok((contents.to_string(), ())))?.report();
     Ok(())
 }
 
@@ -504,15 +504,43 @@ pub fn write_file_atomic(path: &Path, contents: &str) -> Result<()> {
 
 enum Replacement<'a> {
     Unconditional,
-    IfUnchanged(Option<&'a str>),
+    IfUnchanged {
+        expected: Option<&'a str>,
+        max_read_bytes: Option<u64>,
+    },
 }
 
 /// Edit a text file under its advisory lock and detect external writes before replacement.
+/// `max_read_bytes` bounds both the initial read and the conflict check before decoding.
 pub fn transact_file<T>(
     path: &Path,
+    max_read_bytes: Option<u64>,
     edit: impl FnOnce(&str) -> Result<(String, T)>,
 ) -> Result<ConfigCommit<T>> {
-    locked_config_with_sync(path, edit, sync_config_directory)
+    locked_config_with_sync(path, max_read_bytes, edit, sync_config_directory)
+}
+
+fn read_optional_text(path: &Path, max_read_bytes: Option<u64>) -> Result<Option<String>> {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    read_text(&mut file, max_read_bytes).map(Some)
+}
+
+fn read_text(reader: &mut impl Read, max_read_bytes: Option<u64>) -> Result<String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(max_read_bytes.unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if let Some(limit) = max_read_bytes {
+        anyhow::ensure!(
+            bytes.len() as u64 <= limit,
+            "text file exceeds {limit} byte read limit"
+        );
+    }
+    String::from_utf8(bytes).context("text file is not valid UTF-8")
 }
 
 fn sync_config_directory(parent: &Path) -> std::io::Result<()> {
@@ -529,6 +557,7 @@ fn sync_config_directory(parent: &Path) -> std::io::Result<()> {
 
 fn locked_config_with_sync<T>(
     path: &Path,
+    max_read_bytes: Option<u64>,
     edit: impl FnOnce(&str) -> Result<(String, T)>,
     sync_directory: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> Result<ConfigCommit<T>> {
@@ -554,11 +583,7 @@ fn locked_config_with_sync<T>(
     options.mode(0o600);
     let lock = options.open(&lock_path).context("open config lock")?;
     lock.lock().context("lock config")?;
-    let original = match std::fs::read_to_string(&target) {
-        Ok(raw) => Some(raw),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error).context("read config under lock"),
-    };
+    let original = read_optional_text(&target, max_read_bytes).context("read config under lock")?;
     let raw = original.as_deref().unwrap_or_default();
     let (contents, value) = edit(raw)?;
     if contents == raw && target.exists() {
@@ -571,7 +596,10 @@ fn locked_config_with_sync<T>(
     let durability_warning = replace_file(
         &target,
         &contents,
-        Replacement::IfUnchanged(original.as_deref()),
+        Replacement::IfUnchanged {
+            expected: original.as_deref(),
+            max_read_bytes,
+        },
         sync_directory,
     )?;
     Ok(ConfigCommit {
@@ -621,12 +649,13 @@ fn replace_file(
         file.sync_all().context("sync temporary config")?;
         // Cooperating writers are serialized. Detect external edits made before
         // this check; an editor ignoring the advisory lock can still race rename.
-        if let Replacement::IfUnchanged(expected) = condition {
-            let current = match std::fs::read_to_string(target) {
-                Ok(raw) => Some(raw),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => return Err(error).context("recheck config before replacement"),
-            };
+        if let Replacement::IfUnchanged {
+            expected,
+            max_read_bytes,
+        } = condition
+        {
+            let current = read_optional_text(target, max_read_bytes)
+                .context("recheck config before replacement")?;
             anyhow::ensure!(
                 current.as_deref() == expected,
                 "config changed outside the settings editor; retry the edit"
@@ -760,6 +789,60 @@ mod tests {
     }
 
     #[test]
+    fn bounded_reader_stops_after_one_byte_past_limit() {
+        let mut reader = std::io::Cursor::new(b"abcdefghijklmnop");
+        let error = read_text(&mut reader, Some(8)).unwrap_err();
+        assert_eq!(error.to_string(), "text file exceeds 8 byte read limit");
+        assert_eq!(reader.position(), 9, "oversized input must not be drained");
+        let mut exact = std::io::Cursor::new(b"example!");
+        assert_eq!(read_text(&mut exact, Some(8)).unwrap(), "example!");
+    }
+
+    #[test]
+    fn bounded_transaction_limits_the_conflict_check_and_preserves_external_bytes() {
+        let path = temp_cfg("bounded-conflict");
+        std::fs::write(&path, "original").unwrap();
+        let error = transact_file(&path, Some(8), |raw| {
+            assert_eq!(raw, "original");
+            std::fs::write(&path, "external changes")?;
+            Ok(("updated".into(), ()))
+        })
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("recheck config before replacement"),
+            "{message}"
+        );
+        assert!(
+            message.contains("text file exceeds 8 byte read limit"),
+            "{message}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "external changes");
+        assert!(std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("prism-config")));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn bounded_transaction_detects_small_external_edits() {
+        let path = temp_cfg("bounded-small-conflict");
+        std::fs::write(&path, "original").unwrap();
+        let error = transact_file(&path, Some(8), |_| {
+            std::fs::write(&path, "outside")?;
+            Ok(("updated".into(), ()))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("changed outside"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "outside");
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
     fn generated_artifact_replacement_leaves_only_the_requested_file() {
         let path = temp_cfg("generated-artifact").with_file_name("pmux.service");
         write_file_atomic(&path, "[Service]\nExecStart=/opt/pmux login run\n").unwrap();
@@ -787,6 +870,7 @@ mod tests {
         let calls = std::cell::Cell::new(0);
         let result = locked_config_with_sync(
             &path,
+            None,
             |raw| {
                 calls.set(calls.get() + 1);
                 let mut document: toml_edit::DocumentMut = raw.parse()?;

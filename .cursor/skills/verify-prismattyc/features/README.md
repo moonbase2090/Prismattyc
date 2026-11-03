@@ -6,7 +6,7 @@ Read this index before selecting proof. Each feature file names the user entry p
 - [Saved spaces](spaces.md): create, save, open, rename, and delete saved definitions while sessions remain alive.
 - [Desktop UI](desktop.md): native rail deletion, session naming, restart rendering, settings and plug-in management, complete updates with session restoration, and macOS Dock restoration.
 - [Windows](windows.md): installer lifecycle, matched plug-in provenance, launcher repair, console newlines, and new-pane shell selection.
-- [Agent activity](activity.md): opt-in headless ingestion, contained monitor and connector, grants, native MCP, bundle identity, and updater migration.
+- [Agent activity](activity.md): opt-in headless ingestion, bounded hook-profile edits, contained monitor and connector, grants, native MCP, bundle identity, and updater migration.
 
 Start each CLI feature with the skill's fresh private daemon. Desktop fixtures own separate windows and data. Check doctor before driving and after surprises. Do not share sockets, artifact paths, or build targets between concurrent writers.
 

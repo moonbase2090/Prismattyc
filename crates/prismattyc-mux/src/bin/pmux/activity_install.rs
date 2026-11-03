@@ -130,10 +130,7 @@ fn transact_document(file: &Path, transform: impl FnOnce(Value) -> Result<Value>
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent).context("create hook settings directory")?;
     }
-    let commit = prismattyc_mux::config::transact_file(file, |raw| {
-        if raw.len() > 1024 * 1024 {
-            bail!("hook settings exceed 1 MiB");
-        }
+    let commit = prismattyc_mux::config::transact_file(file, Some(1024 * 1024), |raw| {
         let document = if raw.trim().is_empty() {
             json!({})
         } else {
@@ -316,6 +313,41 @@ mod tests {
 
     fn managed(label: &str) -> String {
         format!("{label} {MANAGED_MARKER}")
+    }
+
+    #[test]
+    fn oversized_hook_settings_reject_before_utf8_decoding() {
+        let directory = std::env::temp_dir().join(format!(
+            "pmux-hook-size-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("settings.json");
+        let mut original = vec![b' '; 4 * 1024 * 1024];
+        original[4 * 1024 * 1024 - 1] = 0xff;
+        std::fs::write(&path, &original).unwrap();
+        let cli = super::super::parse(
+            Path::new("/tmp/feed.sock"),
+            ["--seat", "worker-a", "--hook"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap();
+        let error = run(&cli, Some(&path), false).unwrap_err();
+        let saved = std::fs::read(&path).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(
+            saved, original,
+            "a rejected edit must preserve the original bytes"
+        );
+        assert!(
+            format!("{error:#}").contains("text file exceeds 1048576 byte read limit"),
+            "oversized settings must be rejected before decoding: {error:#}"
+        );
     }
 
     #[test]

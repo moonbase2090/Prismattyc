@@ -31,6 +31,11 @@ pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
 }
 
+#[cfg(unix)]
+pub fn secure_directory(path: &Path) -> io::Result<()> {
+    set_mode(path, 0o700)
+}
+
 #[cfg(all(windows, test))]
 pub(crate) use windows::private_to_user;
 #[cfg(windows)]

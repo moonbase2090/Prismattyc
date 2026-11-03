@@ -5885,6 +5885,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn drain_title_until(runtime: &mut MuxRuntime, pane: PaneId, expected: &str) {
         let deadline = Instant::now() + Duration::from_secs(8);
         while Instant::now() < deadline {

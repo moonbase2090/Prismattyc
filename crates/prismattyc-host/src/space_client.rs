@@ -69,7 +69,7 @@ pub(crate) enum Report {
         name: String,
         generation: u64,
         epoch: u64,
-        #[cfg_attr(not(test), allow(dead_code))]
+        #[allow(dead_code)]
         thread: ThreadId,
     },
     Refresh {

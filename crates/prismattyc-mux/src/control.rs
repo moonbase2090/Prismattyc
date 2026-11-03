@@ -10010,6 +10010,7 @@ function Read-Exact([int]$Count) {
         }));
     }
 
+    #[cfg(unix)]
     fn subscribe_output_bytes(events: &[crate::pane_log::PaneLogFrame]) -> Vec<u8> {
         events
             .iter()

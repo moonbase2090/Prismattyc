@@ -149,6 +149,36 @@ mod tests {
     }
 
     #[test]
+    fn current_session_states_cross_worker_wire_after_history_catch_up() {
+        use prismattyc_core::activity::ActivitySessionState;
+        let page: ActivityPage = serde_json::from_value(serde_json::json!({
+            "epoch":"abc1", "oldest_sequence":9, "current_sequence":264,
+            "records":(9..=264).map(|sequence| serde_json::json!({
+                "sequence":sequence,"received_at_ms":1000,"event":{
+                    "schema_version":1,"seat":"busy-seat","run_id":"busy-run",
+                    "event_id":format!("event-{sequence}"),"source":"hooks","kind":"working"
+                }
+            })).collect::<Vec<_>>(),
+            "cursor":{"epoch":"abc1","sequence":264},"has_more":false,"reset":null,
+            "sessions":{"observed_at_ms":1000,"seats":[
+                {"seat":"quiet-seat","session_id":1,"state":"idle","last_output_at_ms":null},
+                {"seat":"unhooked-seat","session_id":2,"state":"stuck","last_output_at_ms":null}
+            ]}
+        }))
+        .unwrap();
+        let mut bytes = Vec::new();
+        write(&mut bytes, &Request::Page(Ok(page))).unwrap();
+        let Request::Page(Ok(page)) = read::<Request>(&mut std::io::Cursor::new(bytes)).unwrap()
+        else {
+            panic!("expected an activity page");
+        };
+        let sessions = page.sessions.unwrap();
+        assert_eq!(page.records.len(), 256);
+        assert_eq!(sessions.seats[0].state, ActivitySessionState::Idle);
+        assert_eq!(sessions.seats[1].state, ActivitySessionState::Stuck);
+    }
+
+    #[test]
     fn compiler_and_manifest_errors_cannot_emit_terminal_controls() {
         assert_eq!(
             error_message("invalid \x1b]52;c;data\x07\npattern"),

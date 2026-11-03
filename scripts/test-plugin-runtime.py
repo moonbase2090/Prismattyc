@@ -340,8 +340,8 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
         final_screen = screen("down")
         assert "quiet-seat" in final_screen and "later-seat" in final_screen, final_screen
         (scratch / "discovery-live-frame.txt").write_text(final_screen)
-        (scratch / "discovery-result.json").write_text(json.dumps({"status":"PASS", "checks":["zero events", "pmuxd workspace restore", "named idle seats after restart", "520-event retention gap", "fresh monitor", "live discovery", "session removal"]}, indent=2) + "\n")
-        print("PASS named shell-idle seat discovery after daemon restore; unchanged cursor; 520-event retention gap; fresh monitor views retain quiet seats; live periodic discovery and session removal; existing activity-only grants", flush=True)
+        (scratch / "discovery-result.json").write_text(json.dumps({"status":"PASS", "checks":["runtime seed events only", "pmuxd workspace restore", "named idle seats after restart", "520-event retention gap", "fresh monitor", "live discovery", "stopped seat remains visible"]}, indent=2) + "\n")
+        print("PASS named shell-idle seat discovery after daemon restore; unchanged cursor; 520-event retention gap; fresh monitor views retain quiet seats; live periodic discovery and stopped-seat display; existing activity-only grants", flush=True)
 
     def mcp_proof(arguments, activity_only, expected_seats=()):
         import queue

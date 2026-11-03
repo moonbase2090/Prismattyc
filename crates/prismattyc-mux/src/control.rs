@@ -2713,7 +2713,7 @@ impl ControlPlane {
                     .collect::<Option<Vec<_>>>()
                     .map(|names| names.into_iter().collect::<HashSet<_>>());
                 let project = project_names
-                    .filter(|names| agent_pids.len() > 0 && names.len() == 1)
+                    .filter(|names| !agent_pids.is_empty() && names.len() == 1)
                     .and_then(|mut names| names.drain().next());
                 let model = self
                     .activity

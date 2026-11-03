@@ -55,6 +55,7 @@ pub fn since_time(history: &Retained, since_ms: u64, limit: usize) -> ActivityPa
         },
         has_more: sequence < history.cursor.sequence,
         reset: retention_gap.then_some(prismattyc_core::activity::ActivityReset::RetentionGap),
+        sessions: history.sessions.clone(),
     }
 }
 
@@ -271,6 +272,8 @@ mod tests {
         assert_eq!(result["seats"][1]["seat"], "quiet");
         assert_eq!(result["seats"][1]["retained_events"], 0);
         assert_eq!(history.cursor.sequence, 0);
+        let timed = since_time(&history, 0, 10);
+        assert_eq!(timed.sessions, history.sessions);
         let filtered = filtered_page(first, Some(&AgentId::new("quiet")?));
         assert_eq!(filtered.sessions.unwrap().seats.len(), 1);
         Ok(())

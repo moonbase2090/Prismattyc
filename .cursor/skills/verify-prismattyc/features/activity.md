@@ -2,7 +2,8 @@
 
 The daemon owns the optional headless activity ring. Collection is off by
 default. `[mux] experimental_activity = true` or `--experimental-activity`
-enables it. Config changes start or stop collection without restarting the
+enables it. Configuring both `activity_webhook_url` and
+`activity_webhook_secret_file` also enables collection. Config changes start or stop collection without restarting the
 daemon or replacing sessions. See [the feed design](../../../../docs/agent-activity-feed.md).
 
 The monitor UI and connector query logic run as contained plug-ins. The native
@@ -98,6 +99,20 @@ proof artifacts after the private runtime is cleaned up. Failed drives retain
 the artifacts written before failure. A debug worker can spend longer than
 15 seconds compiling its first live view; the fixture allows 45 seconds for
 that view to appear.
+
+## Verify webhook delivery locally
+
+Run the real-daemon integration fixture against its local receiver:
+
+```sh
+cargo +1.90.0 test -p prismattyc-mux --test activity_webhook --locked -- --test-threads=1
+```
+
+Require four passing tests for delivery headers and payload, retry responses,
+hook precedence, and session projection. The fixture owns its private daemons
+and receiver and requires Unix. It does not contact the configured production
+receiver or prove that receiver's deployment. Cryptographic signature checks
+are separate unit tests in `src/activity_webhook.rs`.
 
 ## Review grants and remote endpoints
 

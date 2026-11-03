@@ -34,6 +34,37 @@ PATH="$PWD/target/debug:$PATH" python3 tests/native/restart-spaces-e2e.py
 python3 tests/native/release-update-e2e.py --pmux target/debug/pmux --out build/update-check
 ```
 
+Check source updater bundle preparation with the actual CLI and bundle verifier:
+
+```bash
+python3 tests/native/source-update-plugin-e2e.py --help
+```
+
+This fixture replaces only external Git and Cargo installation commands.
+It requires the real production bundle, checks all three mux installation
+requests, and rejects a corrupt archive before any install request.
+
+On native Linux or Windows, check an older updater followed by launcher repair:
+
+```bash
+python3 tests/native/monitor-launcher-update-e2e.py --bins target/release --old-pmux /absolute/path/to/verified/old/pmux --out build/monitor-cutover
+```
+
+Build all seven new binaries with the same verified production bundle first.
+Verify the older official executable's origin, size, and digest before passing
+it to this fixture. The fixture uses actual native executables and a local
+HTTPS transport substitute. It checks the two-process update, exact-tag repair,
+ownership refusals, locks, digest and bundle validation, retry, and core rollback.
+Windows also checks a sharing failure. Prepared-state recovery uses the actual
+receipt and backup, without claiming a timed process-kill test. A missing
+symlink privilege produces a partial result and exit code 2.
+
+To drive the contained runtime directly from an installed package, build the
+`plugin_frame_probe` example separately, then pass `--bins INSTALLED_BIN_DIR`
+and `--frame-probe PATH` to `scripts/test-plugin-runtime.py` together with
+`--bundle VERIFIED_BUNDLE --feature production`. This mode verifies physical
+consumer provenance and builds nothing before starting its private daemon.
+
 Check Space rail transparency and opacity hot reload:
 
 ```bash
@@ -164,3 +195,33 @@ python3 tests/native/macos-restart-e2e.py --bins target/debug --out build/macos-
 Native framebuffer captures and desktop screenshots prove different paths.
 Read each fixture's output to see which path it checked. See [test requirements](../../docs/testing-policy.md)
 for release validation and [accessibility](../../docs/accessibility.md) for AT-SPI checks.
+
+### Plug-in Settings on macOS
+
+Use an allocated, unlocked macOS VM with Accessibility and Screen Recording
+permission for the process that launches the fixture. Build the host, CLI,
+daemon, and MCP helper from the same revision with a verified production plug-in
+bundle. Run the fixture inside that VM:
+
+```bash
+python3 tests/native/macos-plugin-settings-e2e.py \
+  --bins /tmp/plugin-proof-bins --out /tmp/plugin-settings-proof \
+  --revision FULL_SOURCE_COMMIT
+```
+
+The fixture opens Plug-ins through legacy Settings in classic and Graphite.
+It installs the monitor disabled, reviews its exact version and local activity
+grant, enables it, disables it, and reopens the page. A private socket proxy
+withholds List replies to check native close, cancellation, and reopening while
+the daemon remains available. CLI queries verify state after native actions.
+The fixture compares the displayed pane's text and every session, window, pane,
+and child PID, retains owned-window screenshots and fresh raster records, and
+reaps its host and daemon. Keep the output outside the source tree.
+
+For a prerequisite check without launching the application:
+
+```bash
+python3 tests/native/macos-plugin-settings-e2e.py \
+  --bins /tmp/plugin-proof-bins --out /tmp/plugin-settings-doctor \
+  --revision FULL_SOURCE_COMMIT --check-desktop-only
+```

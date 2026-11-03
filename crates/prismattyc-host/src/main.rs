@@ -21,6 +21,7 @@ mod daemon_startup;
 mod file_writer;
 mod frame_damage;
 mod git_info;
+mod glyph_cache;
 #[cfg(feature = "gpu")]
 mod gpu;
 mod graphite;
@@ -22185,6 +22186,9 @@ impl App {
 }
 
 fn main() -> Result<()> {
+    if prismattyc_mux::plugins::print_bundled_identity()? {
+        return Ok(());
+    }
     #[cfg(windows)]
     let restart_resume = restart::receive()?;
     #[cfg(windows)]

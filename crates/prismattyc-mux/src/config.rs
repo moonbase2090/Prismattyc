@@ -43,6 +43,12 @@ pub struct MuxSection {
     /// Serve the metadata-only activity feed. Default false. pmuxd watches the
     /// config and starts or stops the feed live, without a restart.
     pub experimental_activity: Option<bool>,
+    /// Optional outbound activity notification endpoint.
+    pub activity_webhook_url: Option<String>,
+    /// File containing the webhook HMAC key; inline keys are rejected.
+    pub activity_webhook_secret_file: Option<PathBuf>,
+    /// Unsupported by design: present only so inline secrets can be rejected.
+    pub activity_webhook_secret: Option<String>,
 }
 
 impl MuxSection {
@@ -282,6 +288,7 @@ pub struct MuxKeySpec {
 pub enum MuxKeyKind {
     String(&'static str),
     CommentedPath(&'static str),
+    CommentedString(&'static str),
     Bool(bool),
 }
 
@@ -330,8 +337,20 @@ pub const MUX_KEYS: &[MuxKeySpec] = &[
         kind: MuxKeyKind::Bool(false),
     },
     MuxKeySpec {
+        name: "activity_webhook_url",
+        doc: "Opt in to signed outbound activity notifications",
+        range: "http(s) URL",
+        kind: MuxKeyKind::CommentedString("https://example.invalid/activity"),
+    },
+    MuxKeySpec {
+        name: "activity_webhook_secret_file",
+        doc: "Path to a private file containing the webhook HMAC key",
+        range: "file path; no inline key",
+        kind: MuxKeyKind::CommentedPath("~/.config/prismattyc/activity-webhook.key"),
+    },
+    MuxKeySpec {
         name: "experimental_activity",
-        doc: "Serve the metadata-only activity feed for pmux-activity-monitor; pmuxd applies changes live, without a restart",
+        doc: "Collect activity metadata live, without a restart. Enable monitor and query access separately in Settings > Plug-ins",
         range: "true|false; default false",
         kind: MuxKeyKind::Bool(false),
     },
@@ -354,6 +373,9 @@ pub fn render_mux_section() -> String {
             }
             MuxKeyKind::CommentedPath(path) => {
                 out.push_str(&format!("# {} = \"{path}\"\n", key.name));
+            }
+            MuxKeyKind::CommentedString(value) => {
+                out.push_str(&format!("# {} = \"{value}\"\n", key.name));
             }
             MuxKeyKind::Bool(value) => {
                 out.push_str(&format!("{} = {value}\n", key.name));
@@ -388,6 +410,9 @@ pub fn merge_mux_section(document: &mut toml_edit::DocumentMut) {
             }
             MuxKeyKind::CommentedPath(path) => {
                 insert_commented_path(table, key.name, path);
+            }
+            MuxKeyKind::CommentedString(value) => {
+                insert_commented_path(table, key.name, value);
             }
             MuxKeyKind::Bool(value) => {
                 table.insert(key.name, toml_edit::value(value));
@@ -680,6 +705,12 @@ mod tests {
         for key in MUX_KEYS {
             assert!(text.contains(key.name), "mux template missing {}", key.name);
         }
+        assert!(text
+            .lines()
+            .any(|line| line.trim_start().starts_with("# activity_webhook_url =")));
+        assert!(text.lines().any(|line| line
+            .trim_start()
+            .starts_with("# activity_webhook_secret_file =")));
         let parsed: FileWithMux = toml::from_str(&text).expect("mux template parses");
         let mux = parsed.mux.expect("mux table");
         assert_eq!(mux.instance.as_deref(), Some("default"));
@@ -928,6 +959,9 @@ mod tests {
                 remote_size: None,
                 allow_mixed_case_session_names: None,
                 experimental_activity: None,
+                activity_webhook_url: None,
+                activity_webhook_secret_file: None,
+                activity_webhook_secret: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(Some("other".into()), None, &file).unwrap();
@@ -960,6 +994,9 @@ mod tests {
                 remote_size: None,
                 allow_mixed_case_session_names: None,
                 experimental_activity: None,
+                activity_webhook_url: None,
+                activity_webhook_secret_file: None,
+                activity_webhook_secret: None,
                 shell: None,
             };
             let (instance, socket) =
@@ -980,6 +1017,9 @@ mod tests {
                 remote_size: None,
                 allow_mixed_case_session_names: None,
                 experimental_activity: None,
+                activity_webhook_url: None,
+                activity_webhook_secret_file: None,
+                activity_webhook_secret: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
@@ -1000,6 +1040,9 @@ mod tests {
                 remote_size: None,
                 allow_mixed_case_session_names: None,
                 experimental_activity: None,
+                activity_webhook_url: None,
+                activity_webhook_secret_file: None,
+                activity_webhook_secret: None,
                 shell: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
@@ -1019,6 +1062,9 @@ mod tests {
                 remote_size: None,
                 allow_mixed_case_session_names: None,
                 experimental_activity: None,
+                activity_webhook_url: None,
+                activity_webhook_secret_file: None,
+                activity_webhook_secret: None,
                 shell: None,
             };
             assert!(resolve_mux_target(None, None, &file).is_err());

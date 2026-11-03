@@ -11,6 +11,11 @@ members = [
     "crates/prismattyc-render",
     "crates/prismattyc-rich-client",
     "crates/pmux-mcp",
+    "crates/pmux-plugin-api",
+    "crates/pmux-plugin-runtime",
+    "crates/pmux-plugin-fixture",
+    "crates/pmux-activity-monitor-plugin",
+    "crates/pmux-activity-connector-plugin",
     "crates/prismattyc-winres",
     "crates/prismattyc-cmd-forwarder",
 ]
@@ -32,6 +37,11 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 unicode-width = "0.2"
 vte = "0.15"
+lunatui-core = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898" }
+lunatui-image = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898" }
+lunatui-term = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898" }
+lunatui-theme = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898" }
+lunatui-widgets = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898", default-features = false, features = ["pixel-sparkline"] }
 
 [profile.mutants]
 inherits = "test"

@@ -19,6 +19,7 @@ pub(super) enum Section {
     Colors,
     Remote,
     Mux,
+    Plugins,
     Keybindings,
     Advanced,
 }
@@ -35,6 +36,7 @@ impl Section {
         Self::Colors,
         Self::Remote,
         Self::Mux,
+        Self::Plugins,
         Self::Keybindings,
         Self::Advanced,
     ];
@@ -51,6 +53,7 @@ impl Section {
             Self::Colors => "Theme colors",
             Self::Remote => "Remote destinations",
             Self::Mux => "Multiplexer",
+            Self::Plugins => "Plug-ins",
             Self::Keybindings => "Keybindings",
             Self::Advanced => "Advanced",
         }
@@ -128,6 +131,11 @@ fn choice(key: &str) -> Kind {
 }
 fn row(section: Section, key: &str, kind: Kind) -> Control {
     let meta = CONFIG_KEYS.iter().find(|meta| meta.name == key);
+    let mux_meta = key.strip_prefix("mux.").and_then(|name| {
+        prismattyc_mux::MUX_KEYS
+            .iter()
+            .find(|spec| spec.name == name)
+    });
     let default = meta.and_then(|meta| match meta.value {
         ConfigValue::Bool(v) | ConfigValue::CommentedBool(v) => Some(v.into()),
         ConfigValue::Usize(v) => Some((v as i64).into()),
@@ -151,7 +159,10 @@ fn row(section: Section, key: &str, kind: Kind) -> Control {
         paths: vec![key.split('.').map(str::to_owned).collect()],
         label,
         kind,
-        help: meta.map_or_else(String::new, |meta| meta.doc.to_string()),
+        help: meta
+            .map(|meta| meta.doc.to_string())
+            .or_else(|| mux_meta.map(|spec| format!("{}. {}.", spec.doc, spec.range)))
+            .unwrap_or_default(),
         timing: timing(key),
         default,
     }
@@ -172,7 +183,12 @@ fn timing(key: &str) -> &'static str {
         "mux.allow_mixed_case_session_names" => "Next session name",
         "mux.space_open_runs_commands" => "Next Space open",
         "mux.remote_size" => "Next daemon start; no automatic restart",
-        "mux.experimental_activity" => "Live: pmuxd applies it within a second; no restart",
+        "mux.experimental_activity" => {
+            "Live, no restart; approve monitor and query access in Plug-ins"
+        }
+        "mux.activity_webhook_url" | "mux.activity_webhook_secret_file" => {
+            "Live after config reload"
+        }
         "mux.shell" => "Next shell selection",
         "window_opacity" | "chrome_opacity" => {
             "Live with alpha support; opaque non-macOS windows may need restart"
@@ -348,6 +364,8 @@ pub(super) fn catalog() -> Vec<Control> {
         row(Section::Mux, "mux.remote_size", choice("mux.remote_size")),
         row(Section::Mux, "mux.shell", Kind::Text),
         row(Section::Mux, "mux.experimental_activity", Kind::Bool),
+        row(Section::Mux, "mux.activity_webhook_url", Kind::Text),
+        row(Section::Mux, "mux.activity_webhook_secret_file", Kind::Text),
     ];
     for row in &mut rows {
         if matches!(row.kind, Kind::Pair) {

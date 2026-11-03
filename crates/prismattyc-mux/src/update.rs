@@ -58,7 +58,7 @@ USAGE:
     (no flags)   same as --all
     --host       cargo install prismattyc-host (binary prismattyc-host; macOS: also rebuild Prismattyc.app)
     --mux        cargo install prismattyc-mux --bins (pmux, pmux-attach, pmuxd)
-                 and crates/pmux-mcp (pmux-mcp)
+                 and crates/pmux-mcp (pmux-mcp), plus the contained monitor frontend
     --all        host + mux bins + pmux-mcp + prismattyc
 
     Installing prismattyc also installs the prismattyc(1) man page when help2man is
@@ -69,7 +69,8 @@ USAGE:
     release. On macOS that replaces Prismattyc.app.
 
 Finds the checkout by walking from cwd (or $PRISMATTYC_REPO). Refuses a dirty
-tree. Checks out main and fast-forwards. Does not restart a running mux.
+tree. Checks out main and fast-forwards. Prepares one verified plug-in bundle for
+every native install. Does not restart a running mux.
 On macOS, installing the host also reassembles ~/Applications/Prismattyc.app and
 refreshes any other existing Prismattyc.app (set APP_DEST to install elsewhere).
 Quit the running app, then reopen it from the Dock — cargo install does not
@@ -142,10 +143,56 @@ fn git_stdout(repo: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn cargo_install(repo: &Path, args: &[&str]) -> Result<()> {
-    let status = Command::new("cargo")
+struct NativeBuild {
+    bundle: PathBuf,
+    flags: String,
+}
+
+impl NativeBuild {
+    fn prepare(repo: &Path) -> Result<Self> {
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let helper = repo.join("scripts/release/plugin_bundle_provenance.py");
+        let run = |operation: &str| -> Result<String> {
+            let result = Command::new(python)
+                .arg(&helper)
+                .arg(operation)
+                .current_dir(repo)
+                .stderr(std::process::Stdio::inherit())
+                .output()
+                .context("prepare the source build's verified plug-in bundle")?;
+            anyhow::ensure!(
+                result.status.success(),
+                "plug-in build preparation failed before cargo installation"
+            );
+            Ok(String::from_utf8(result.stdout)?
+                .trim_end_matches(['\r', '\n'])
+                .to_string())
+        };
+        let bundle = PathBuf::from(run("prepare")?);
+        anyhow::ensure!(
+            bundle.is_absolute() && bundle.is_dir(),
+            "plug-in preparation did not return a bundle directory"
+        );
+        Ok(Self {
+            bundle,
+            flags: run("flags")?,
+        })
+    }
+
+    fn command(&self, program: &str, repo: &Path) -> Command {
+        let mut command = Command::new(program);
+        command
+            .current_dir(repo)
+            .env("PRISMATTYC_PLUGIN_BUNDLE_DIR", &self.bundle)
+            .env("CARGO_ENCODED_RUSTFLAGS", &self.flags);
+        command
+    }
+}
+
+fn cargo_install(repo: &Path, build: &NativeBuild, args: &[&str]) -> Result<()> {
+    let status = build
+        .command("cargo", repo)
         .args(args)
-        .current_dir(repo)
         .status()
         .with_context(|| format!("cargo {}", args.join(" ")))?;
     if !status.success() {
@@ -158,6 +205,12 @@ fn cargo_install(repo: &Path, args: &[&str]) -> Result<()> {
 pub fn run_update(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<()> {
     let mut args: Vec<String> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
     if let Some(index) = args.iter().position(|a| a == "--source") {
+        anyhow::ensure!(
+            !args
+                .iter()
+                .any(|arg| arg == "--repair-monitor-launcher" || arg == "--from-monitor-version"),
+            "monitor launcher repair cannot be combined with --source"
+        );
         args.remove(index);
         return run_source_update(args);
     }
@@ -179,11 +232,13 @@ fn run_source_update(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<
     run_git(&repo, &["pull", "--ff-only"])?;
     let head = git_stdout(&repo, &["rev-parse", "--short", "HEAD"])?;
     eprintln!("prismattyc update: main @ {}", head.trim());
+    let build = NativeBuild::prepare(&repo)?;
 
     if plan.host {
         eprintln!("prismattyc update: installing prismattyc-host");
         cargo_install(
             &repo,
+            &build,
             &[
                 "install",
                 "--path",
@@ -197,6 +252,7 @@ fn run_source_update(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<
         eprintln!("prismattyc update: installing prismattyc-mux --bins");
         cargo_install(
             &repo,
+            &build,
             &[
                 "install",
                 "--path",
@@ -209,10 +265,23 @@ fn run_source_update(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<
         eprintln!("prismattyc update: installing pmux-mcp");
         cargo_install(
             &repo,
+            &build,
             &[
                 "install",
                 "--path",
                 "crates/pmux-mcp",
+                "--force",
+                "--locked",
+            ],
+        )?;
+        eprintln!("prismattyc update: installing the contained monitor frontend");
+        cargo_install(
+            &repo,
+            &build,
+            &[
+                "install",
+                "--path",
+                "tools/activity-monitor",
                 "--force",
                 "--locked",
             ],
@@ -222,6 +291,7 @@ fn run_source_update(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<
         eprintln!("prismattyc update: installing prismattyc");
         cargo_install(
             &repo,
+            &build,
             &[
                 "install",
                 "--path",
@@ -238,7 +308,7 @@ fn run_source_update(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<
     // of the binary, so it stays stale until the bundle is reassembled. Rebuild
     // it whenever the host was installed. No-op off macOS.
     let bundle_ok = if plan.host {
-        rebuild_macos_bundle(&repo)
+        rebuild_macos_bundle(&repo, &build)
     } else {
         true
     };
@@ -261,10 +331,10 @@ fn run_source_update(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<
 /// matches ~/.cargo/bin. Returns false if the script failed; cargo binaries
 /// are already installed either way.
 #[cfg(target_os = "macos")]
-fn rebuild_macos_bundle(repo: &Path) -> bool {
+fn rebuild_macos_bundle(repo: &Path, build: &NativeBuild) -> bool {
     let script = repo.join("scripts/install-prismattyc-host-macos.sh");
     eprintln!("prismattyc update: rebuilding macOS Prismattyc.app bundle");
-    match Command::new("bash").arg(&script).current_dir(repo).status() {
+    match build.command("bash", repo).arg(&script).status() {
         Ok(status) if status.success() => true,
         Ok(status) => {
             eprintln!(
@@ -286,7 +356,7 @@ fn rebuild_macos_bundle(repo: &Path) -> bool {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn rebuild_macos_bundle(_repo: &Path) -> bool {
+fn rebuild_macos_bundle(_repo: &Path, _build: &NativeBuild) -> bool {
     true
 }
 

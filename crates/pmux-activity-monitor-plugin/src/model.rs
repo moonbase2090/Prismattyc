@@ -4,8 +4,10 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use prismattyc_mux::activity::{ActivityKind, ActivityPage, ActivityRecord};
-use prismattyc_mux::mailbox::AgentId;
+use prismattyc_core::activity::{
+    ActivityKind, ActivityPage, ActivityRecord, ActivitySessions, ActivitySource,
+};
+use prismattyc_core::AgentId;
 
 /// Seats kept per host before the seat with the oldest event is evicted.
 pub const MAX_SEATS: usize = 128;
@@ -88,13 +90,14 @@ pub struct Seat {
     pub state_since_ms: u64,
     /// Local monotonic time (ms) of the last state change, for the row fade.
     pub changed_at: Option<u64>,
+    discovery: Option<(u64, ActivityRecord)>,
 }
 
 impl Seat {
     pub fn latest(&self) -> &ActivityRecord {
-        // A seat is only created with one record and history never drains to empty.
         self.history
             .back()
+            .or_else(|| self.discovery.as_ref().map(|(_, record)| record))
             .unwrap_or_else(|| unreachable!("seat without history"))
     }
 }
@@ -112,6 +115,7 @@ pub enum Link {
     Disabled,
     /// The daemon answered but predates the activity feed.
     Unsupported,
+    PermissionDenied,
 }
 
 pub struct Host {
@@ -174,20 +178,87 @@ impl Host {
             self.insert(record, live.then_some(local_ms));
         }
         self.sequence = self.sequence.max(page.cursor.sequence);
+        if let Some(sessions) = page.sessions {
+            self.discover(sessions, live.then_some(local_ms));
+        }
+    }
+
+    fn discover(&mut self, sessions: ActivitySessions, fade_at: Option<u64>) {
+        let current = sessions
+            .seats
+            .iter()
+            .map(|session| session.seat.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        self.seats.retain(|id, seat| {
+            if !current.contains(id) && seat.discovery.take().is_some() {
+                seat.state = SeatState::Stopped;
+                seat.state_since_ms = sessions.observed_at_ms;
+                seat.changed_at = fade_at;
+            }
+            current.contains(id) || !seat.history.is_empty()
+        });
+        for session in sessions.seats {
+            let observation = session.observation(sessions.observed_at_ms);
+            let seat = self.seats.entry(session.seat).or_insert_with(|| Seat {
+                history: VecDeque::new(),
+                state: SeatState::Unknown,
+                state_since_ms: sessions.observed_at_ms,
+                changed_at: None,
+                discovery: None,
+            });
+            let replaced = seat
+                .discovery
+                .as_ref()
+                .is_some_and(|(id, _)| *id != session.session_id);
+            if replaced {
+                seat.history.clear();
+            }
+            let hooked = seat
+                .history
+                .iter()
+                .rev()
+                .find(|record| {
+                    record.event.source != ActivitySource::Runtime
+                        && !matches!(
+                            record.event.kind,
+                            ActivityKind::MailSent | ActivityKind::MailReceived
+                        )
+                })
+                .is_some_and(|record| {
+                    !matches!(
+                        record.event.kind,
+                        ActivityKind::Stopped | ActivityKind::SessionFinished
+                    )
+                });
+            if !hooked || observation.event.kind == ActivityKind::Stopped {
+                let state = next_state(seat.state, observation.event.kind);
+                if state != seat.state {
+                    if seat.state != SeatState::Unknown {
+                        seat.changed_at = fade_at;
+                    }
+                    seat.state = state;
+                    seat.state_since_ms = sessions.observed_at_ms;
+                }
+            }
+            seat.discovery = Some((session.session_id, observation));
+        }
     }
 
     /// `fade_at` is the viewer time for a fade, or `None` for replayed history.
     fn insert(&mut self, record: ActivityRecord, fade_at: Option<u64>) {
         let seat_id = record.event.seat.clone();
-        if !self.seats.contains_key(&seat_id) && self.seats.len() == MAX_SEATS {
+        if !self.seats.contains_key(&seat_id) && self.seats.len() >= MAX_SEATS {
             let oldest = self
                 .seats
                 .iter()
+                .filter(|(_, seat)| seat.discovery.is_none())
                 .min_by_key(|(_, seat)| seat.latest().sequence)
                 .map(|(seat, _)| seat.clone());
             if let Some(oldest) = oldest {
                 self.seats.remove(&oldest);
                 self.evicted += 1;
+            } else {
+                return;
             }
         }
         let seat = self.seats.entry(seat_id).or_insert_with(|| Seat {
@@ -195,6 +266,7 @@ impl Host {
             state: SeatState::Unknown,
             state_since_ms: record.received_at_ms,
             changed_at: None,
+            discovery: None,
         });
         let state = next_state(seat.state, record.event.kind);
         if state != seat.state {
@@ -219,7 +291,13 @@ impl Host {
 }
 
 pub fn is_stale(host: &Host, seat: &Seat, now_ms: u64) -> bool {
-    !host.connected() || age_ms(seat, now_ms) >= STALE_MS
+    let observed = seat
+        .discovery
+        .as_ref()
+        .map_or(seat.latest().received_at_ms, |(_, record)| {
+            record.received_at_ms
+        });
+    !host.connected() || now_ms.saturating_sub(observed) >= STALE_MS
 }
 
 pub fn age_ms(seat: &Seat, now_ms: u64) -> u64 {
@@ -355,6 +433,106 @@ pub(crate) mod tests {
 
     fn seat<'a>(host: &'a Host, id: &str) -> &'a Seat {
         &host.seats[&AgentId::new(id).unwrap()]
+    }
+
+    fn discovered(names: &[&str], at: u64) -> prismattyc_core::activity::ActivitySessions {
+        use prismattyc_core::activity::{ActivitySession, ActivitySessionState, ActivitySessions};
+        ActivitySessions {
+            observed_at_ms: at,
+            seats: names
+                .iter()
+                .enumerate()
+                .map(|(id, name)| ActivitySession {
+                    seat: AgentId::new(*name).unwrap(),
+                    session_id: id as u64 + 1,
+                    state: ActivitySessionState::Waiting,
+                    last_output_at_ms: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn discovery_survives_empty_history_retention_reset_and_repoll() -> Result<()> {
+        let mut host = Host::new("local");
+        let mut first = page_in("e0", vec![], None)?;
+        first.sessions = Some(discovered(&["quiet", "unhooked"], 1_000));
+        host.apply(first.clone(), 0);
+        assert_eq!(host.seats.len(), 2);
+        assert_eq!(seat(&host, "quiet").state, SeatState::Waiting);
+        assert!(seat(&host, "quiet").history.is_empty());
+        assert_eq!(host.sequence, 0);
+        first.sessions = Some(discovered(&["quiet", "unhooked"], 60_000));
+        first.reset = Some(prismattyc_core::activity::ActivityReset::RetentionGap);
+        host.apply(first.clone(), 10);
+        assert_eq!(host.seats.len(), 2);
+        assert!(!is_stale(&host, seat(&host, "quiet"), 60_001));
+        let mut restarted = Host::new("local");
+        restarted.apply(first, 0);
+        assert_eq!(restarted.seats.len(), 2);
+        assert_eq!(restarted.sequence, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_keeps_hook_state_and_removes_departed_unhooked_seats() -> Result<()> {
+        let mut host = Host::new("local");
+        let mut page = page_in(
+            "e0",
+            vec![record_at("hooked", 1, "tool_failed", 1_000)?],
+            None,
+        )?;
+        page.sessions = Some(discovered(&["hooked", "quiet"], 2_000));
+        host.apply(page, 0);
+        assert_eq!(seat(&host, "hooked").state, SeatState::Failed);
+        let mut page = page_in("e0", vec![], None)?;
+        page.sessions = Some(discovered(&[], 3_000));
+        host.apply(page, 10);
+        assert_eq!(host.seats.len(), 1);
+        assert_eq!(seat(&host, "hooked").state, SeatState::Stopped);
+        assert_eq!(seat(&host, "hooked").history.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_derives_state_when_history_has_only_mail_or_finished_hooks() -> Result<()> {
+        let mut host = Host::new("local");
+        let mut page = page_in(
+            "e0",
+            vec![
+                record_at("mail-only", 1, "mail_received", 1000)?,
+                record_at("finished", 2, "session_finished", 1000)?,
+            ],
+            None,
+        )?;
+        page.sessions = Some(discovered(&["mail-only", "finished"], 2000));
+        host.apply(page, 0);
+        assert_eq!(seat(&host, "mail-only").state, SeatState::Waiting);
+        assert_eq!(seat(&host, "finished").state, SeatState::Waiting);
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_does_not_evict_live_seats_at_the_history_limit() -> Result<()> {
+        let names = (0..MAX_SEATS + 2)
+            .map(|n| format!("live-{n}"))
+            .collect::<Vec<_>>();
+        let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut host = Host::new("local");
+        let mut page = page_in("e0", vec![], None)?;
+        page.sessions = Some(discovered(&refs, 1_000));
+        host.apply(page, 0);
+        host.apply(
+            page_in(
+                "e0",
+                vec![record_at("historical", 1, "waiting", 1_100)?],
+                None,
+            )?,
+            0,
+        );
+        assert_eq!(host.seats.len(), MAX_SEATS + 2);
+        assert!(host.seats.contains_key(&AgentId::new("live-0")?));
+        Ok(())
     }
 
     #[test]

@@ -45,8 +45,8 @@ pub const PROTOCOL_VERSION: u16 = 1;
 const DEFAULT_EVENT_CAPACITY: usize = 256;
 const MAX_EVENT_CAPACITY: usize = 4096;
 const MAX_EVENT_BATCH: usize = 256;
-const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 /// Pane-state recovery is streamed in bounded response frames.
 const PANE_STATE_CHUNK_BYTES: usize = 128 * 1024;
 pub const MAX_PANE_STATE_BYTES: usize = 256 * 1024 * 1024;
@@ -460,6 +460,12 @@ fn dirty_input_still_open(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlRequest {
+    Plugin {
+        version: u16,
+        request_id: u64,
+        plugin_api: String,
+        operation: crate::plugins::Request,
+    },
     PublishActivity {
         version: u16,
         request_id: u64,
@@ -1000,7 +1006,12 @@ pub enum ControlRequest {
 impl ControlRequest {
     fn header(&self) -> (u16, u64) {
         match self {
-            Self::PublishActivity {
+            Self::Plugin {
+                version,
+                request_id,
+                ..
+            }
+            | Self::PublishActivity {
                 version,
                 request_id,
                 ..
@@ -1340,7 +1351,8 @@ impl ControlRequest {
             | Self::Close { client_id, .. }
             | Self::MovePane { client_id, .. }
             | Self::Resize { client_id, .. } => *client_id,
-            Self::PublishActivity { .. }
+            Self::Plugin { .. }
+            | Self::PublishActivity { .. }
             | Self::ReadActivity { .. }
             | Self::ServerInfo { .. }
             | Self::Ping { .. }
@@ -1457,6 +1469,9 @@ pub struct MailPeer {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ControlResponseData {
+    Plugin {
+        reply: crate::plugins::Reply,
+    },
     ActivityPublished {
         ack: crate::activity::ActivityAck,
     },
@@ -2560,6 +2575,74 @@ impl ControlPlane {
     /// Whether the activity feed is on.
     pub fn activity_enabled(&self) -> bool {
         self.activity.is_some()
+    }
+
+    pub(crate) fn plugin_activity_epoch(&self) -> Option<String> {
+        self.activity.as_ref().map(|feed| feed.epoch().to_owned())
+    }
+
+    pub(crate) fn plugin_activity_page(
+        &self,
+        cursor: Option<crate::activity::ActivityCursor>,
+        limit: u16,
+    ) -> Result<crate::activity::ActivityPage, pmux_plugin_api::host::pmux::activity::read::Error>
+    {
+        use pmux_plugin_api::host::pmux::activity::read::Error;
+        let mut page = self
+            .activity
+            .as_ref()
+            .ok_or(Error::FeedDisabled)?
+            .read(cursor, usize::from(limit))
+            .map_err(|_| Error::InvalidRequest)?;
+        page.sessions = Some(self.activity_sessions());
+        Ok(page)
+    }
+
+    fn activity_sessions(&self) -> prismattyc_core::activity::ActivitySessions {
+        use prismattyc_core::activity::{ActivitySession, ActivitySessionState, ActivitySessions};
+        let observed_at_ms = now_unix_ms();
+        let seats = self
+            .domain
+            .sessions()
+            .filter_map(|session| {
+                let seat = crate::mailbox::AgentId::new(session.agent_id.clone()?).ok()?;
+                let panes = session
+                    .windows
+                    .iter()
+                    .filter_map(|id| self.domain.window(*id))
+                    .flat_map(|window| window.layout.panes())
+                    .collect::<Vec<_>>();
+                let last_output_at_ms = panes
+                    .iter()
+                    .filter_map(|pane| self.last_output_at_ms.get(&pane.get()).copied())
+                    .max();
+                let live = panes.iter().any(|pane| {
+                    self.live
+                        .as_ref()
+                        .and_then(|live| live.child_pid(pane.get()))
+                        .is_some()
+                });
+                let state = if !live {
+                    ActivitySessionState::Stopped
+                } else if last_output_at_ms
+                    .is_some_and(|at| observed_at_ms.saturating_sub(at) < PANE_IDLE_TRIGGER_MS)
+                {
+                    ActivitySessionState::Working
+                } else {
+                    ActivitySessionState::Waiting
+                };
+                Some(ActivitySession {
+                    seat,
+                    session_id: session.id.get(),
+                    state,
+                    last_output_at_ms,
+                })
+            })
+            .collect();
+        ActivitySessions {
+            observed_at_ms,
+            seats,
+        }
     }
 
     /// `[mux] remote_size` policy. Default is [`RemoteSizePolicy::Latest`].
@@ -4202,6 +4285,10 @@ impl ControlPlane {
         request: ControlRequest,
     ) -> Result<ControlResponseData, ControlError> {
         match request {
+            ControlRequest::Plugin { .. } => Err(ControlError::new(
+                ControlErrorCode::InvalidRequest,
+                "plug-in operations require a frontend connection",
+            )),
             ControlRequest::PublishActivity { event, .. } => {
                 let feed = self.activity.as_mut().ok_or_else(activity_disabled)?;
                 let ack = feed.publish(event).map_err(|message| {
@@ -4211,9 +4298,10 @@ impl ControlPlane {
             }
             ControlRequest::ReadActivity { cursor, limit, .. } => {
                 let feed = self.activity.as_ref().ok_or_else(activity_disabled)?;
-                let page = feed.read(cursor, limit).map_err(|message| {
+                let mut page = feed.read(cursor, limit).map_err(|message| {
                     ControlError::new(ControlErrorCode::InvalidRequest, message)
                 })?;
+                page.sessions = Some(self.activity_sessions());
                 Ok(ControlResponseData::Activity { page })
             }
             ControlRequest::ServerInfo { .. } => Ok(ControlResponseData::ServerInfo {
@@ -7317,6 +7405,7 @@ pub struct ControlServer {
     maintenance_thread: Option<thread::JoinHandle<()>>,
     attention_thread: Option<thread::JoinHandle<()>>,
     plane: Arc<Mutex<ControlPlane>>,
+    plugins: Arc<crate::plugins::Service>,
 }
 
 impl ControlServer {
@@ -7343,6 +7432,8 @@ impl ControlServer {
             cvar: Condvar::new(),
         });
         let plane = Arc::new(Mutex::new(plane));
+        let plugins = Arc::new(crate::plugins::Service::new(path.clone(), &plane));
+        let thread_plugins = plugins.clone();
         let attention_thread =
             crate::attention::spawn_reconciler(Arc::clone(&plane), Arc::clone(&stop));
         let thread_stop = Arc::clone(&stop);
@@ -7358,6 +7449,7 @@ impl ControlServer {
                     thread_stop,
                     thread_shutdown,
                     clients,
+                    thread_plugins,
                 )
             }) {
             Ok(thread) => thread,
@@ -7406,6 +7498,7 @@ impl ControlServer {
             maintenance_thread,
             attention_thread,
             plane,
+            plugins,
         })
     }
 
@@ -7426,6 +7519,7 @@ impl ControlServer {
 impl Drop for ControlServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        self.plugins.stop();
         let watch = self
             .plane
             .lock()
@@ -7478,6 +7572,7 @@ fn accept_loop(
     stop: Arc<AtomicBool>,
     shutdown: Arc<ShutdownGate>,
     clients: Arc<AtomicUsize>,
+    plugins: Arc<crate::plugins::Service>,
 ) {
     while !stop.load(Ordering::Acquire) {
         match listener.accept() {
@@ -7491,11 +7586,18 @@ fn accept_loop(
                 let client_stop = Arc::clone(&stop);
                 let client_shutdown = Arc::clone(&shutdown);
                 let client_count = Arc::clone(&clients);
+                let client_plugins = plugins.clone();
                 if thread::Builder::new()
                     .name("prism-control-client".into())
                     .spawn(move || {
                         let _guard = ClientCountGuard(client_count);
-                        let _ = handle_client(stream, client_plane, client_stop, client_shutdown);
+                        let _ = handle_client(
+                            stream,
+                            client_plane,
+                            client_stop,
+                            client_shutdown,
+                            client_plugins,
+                        );
                     })
                     .is_err()
                 {
@@ -7519,6 +7621,7 @@ impl Drop for ClientCountGuard {
 }
 
 struct ClientConnState {
+    plugin_connection: Option<String>,
     last_request_id: u64,
     snapshot_established: bool,
     /// Last client registered on this connection (disconnect clears leases).
@@ -7548,12 +7651,14 @@ fn handle_client(
     plane: Arc<Mutex<ControlPlane>>,
     stop: Arc<AtomicBool>,
     shutdown: Arc<ShutdownGate>,
+    plugins: Arc<crate::plugins::Service>,
 ) -> io::Result<()> {
     verify_same_user(&stream)?;
     configure_accepted_stream(&stream)?;
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
     let mut state = ClientConnState {
+        plugin_connection: None,
         last_request_id: 0,
         snapshot_established: false,
         connection_client: None,
@@ -7566,7 +7671,11 @@ fn handle_client(
         &stop,
         &shutdown,
         &mut state,
+        &plugins,
     );
+    if let Some(connection) = &state.plugin_connection {
+        plugins.close(connection);
+    }
     if let Some(client_raw) = state.connection_client {
         if let Ok(mut guard) = plane.lock() {
             let _ = guard.handle(ControlRequest::DisconnectClient {
@@ -7898,6 +8007,7 @@ fn handle_client_loop(
     stop: &Arc<AtomicBool>,
     shutdown: &Arc<ShutdownGate>,
     state: &mut ClientConnState,
+    plugins: &crate::plugins::Service,
 ) -> io::Result<()> {
     while !stop.load(Ordering::Acquire) {
         match read_frame(reader, &mut state.frame) {
@@ -7999,6 +8109,49 @@ fn handle_client_loop(
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             ControlResponse::error(request_id, guard.snapshot_required_error())
+        } else if let ControlRequest::Plugin {
+            operation,
+            plugin_api,
+            ..
+        } = request
+        {
+            state.last_request_id = request_id.max(state.last_request_id);
+            if request_id == 0 || version != PROTOCOL_VERSION {
+                ControlResponse::error(
+                    request_id,
+                    ControlError::new(
+                        ControlErrorCode::InvalidRequest,
+                        "invalid plug-in request header",
+                    ),
+                )
+            } else if plugin_api != pmux_plugin_api::API_VERSION {
+                ControlResponse::error(
+                    request_id,
+                    ControlError::new(
+                        ControlErrorCode::IncompatibleVersion,
+                        "frontend and daemon have incompatible plug-in APIs; update Prismattyc",
+                    ),
+                )
+            } else {
+                let reply = (|| -> anyhow::Result<crate::plugins::Reply> {
+                    if state.plugin_connection.is_none() {
+                        state.plugin_connection = Some(crate::plugins::connection_id()?);
+                    }
+                    plugins.handle(state.plugin_connection.as_deref().unwrap(), operation)
+                })();
+                match reply {
+                    Ok(reply) => {
+                        ControlResponse::ok(request_id, ControlResponseData::Plugin { reply })
+                    }
+                    Err(error) => ControlResponse::error(
+                        request_id,
+                        ControlError::new(
+                            ControlErrorCode::InvalidRequest,
+                            crate::plugins::error_message(&error.to_string()),
+                        ),
+                    ),
+                }
+            }
         } else if is_mail_wait {
             if request_id != 0 {
                 state.last_request_id = request_id;
@@ -17472,7 +17625,51 @@ function Read-Exact([int]$Count) {
             event_id: "event-1".into(),
             source: crate::activity::ActivitySource::Notify,
             kind: crate::activity::ActivityKind::TurnFinished,
+            process_ids: Vec::new(),
         }
+    }
+
+    #[test]
+    fn activity_sessions_are_available_without_events_in_native_and_plugin_reads() {
+        let (mut plane, _, _) = fixture(8);
+        let session = plane.domain.sessions().next().unwrap().id;
+        plane
+            .domain
+            .set_agent_id(session, Some("quiet-seat".into()))
+            .unwrap();
+        plane.enable_activity().unwrap();
+        let topology = plane.sequence();
+        let response = plane.handle(ControlRequest::ReadActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 1,
+            cursor: None,
+            limit: 1,
+        });
+        let ControlResponseBody::Ok {
+            response: ControlResponseData::Activity { page },
+        } = response.body
+        else {
+            panic!("expected activity page");
+        };
+        assert!(page.records.is_empty());
+        assert_eq!(page.cursor.sequence, 0);
+        let seats = page.sessions.unwrap().seats;
+        assert_eq!(seats.len(), 1);
+        assert_eq!(seats[0].seat.as_str(), "quiet-seat");
+        assert_eq!(seats[0].session_id, session.get());
+        assert_eq!(
+            seats[0].state,
+            prismattyc_core::activity::ActivitySessionState::Stopped
+        );
+        let page = plane.plugin_activity_page(None, 1).unwrap();
+        assert_eq!(page.sessions.unwrap().seats, seats);
+        assert!(page.records.is_empty());
+        assert_eq!(plane.sequence(), topology);
+        plane.disable_activity();
+        assert_eq!(
+            plane.plugin_activity_page(None, 1).unwrap_err(),
+            pmux_plugin_api::host::pmux::activity::read::Error::FeedDisabled
+        );
     }
 
     #[test]

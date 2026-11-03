@@ -9,6 +9,7 @@ The host presents terminals, space navigation, and naming overlays. Native input
 - `host-restart`: terminal state survives a host restart and is presented again.
 - `complete-update`: session-stop consent, private configuration backup, full component restart, and an explicit restoration choice.
 - `window-restore`: a Dock click restores a minimized macOS window, including when another window remains visible.
+- `plugin-settings`: install disabled, approve an exact package and endpoint grants, disable/revoke, and close a page with blocked socket work.
 
 ## How to get to it (user POV)
 
@@ -22,6 +23,36 @@ Preconditions: same-revision binaries from Launch. macOS recipes require a logge
 - On macOS, run `python3 tests/native/macos-restart-e2e.py --bins "$verify_bins" --out "$verify_evidence/restart"`. Read its `result.json`, command records, and before/after PNGs. This checks presented pixels and retained live PTYs, not just process restart.
 - On macOS, run `python3 tests/native/macos-window-restore-e2e.py --bins "$verify_bins" --out "$verify_evidence/window-restore" --revision "$(git rev-parse HEAD)"`. The fixture rejects a host whose embedded revision differs before sending input. It uses native Cmd+N, the yellow titlebar button, and its own Dock icon. Require `result.json` to report `PASS` for a visible sibling, normal activation, all windows minimized, and the last window. Inspect `native-result.json`, both render-status files, OS window screenshots, and `cleanup.json`. Window count must remain unchanged during restoration. This drive covers the Dock icon; minimized thumbnails and the Window menu need separate native checks when those entry points change.
 - For Linux naming regression checks, run `cargo +1.90.0 test --locked -p prismattyc-host session_prompt::tests::real_window_session_naming -- --exact --nocapture` after building the binaries. Require one executed test. For a visible naming change, additionally drive the real Rename action, capture the overlay with the typed mixed-case/spaced label, accept it, and capture the resulting row. Check `pmux whoami` from that pane or a read-only snapshot for its derived mailbox. The fixture's internal dispatch alone is not native input proof.
+
+## Plug-in management
+
+The existing Settings page exposes Plug-ins without enabling `settings_panel`.
+The full editor also has this section. Installation leaves a package disabled.
+Enabling selects an exact installed version and only the checked grants.
+Disabling stops its workers and revokes grants. Closing the page cancels its
+pending socket request.
+
+In an allocated clean macOS VM, run:
+
+```sh
+python3 tests/native/macos-plugin-settings-e2e.py --bins "$verify_bins" \
+  --out "$verify_evidence/plugin-settings-native" --revision "$(git rev-parse HEAD)"
+```
+
+This fixture needs Python 3.11+, an unlocked display, Accessibility and screen
+capture permission, and matched binaries embedding production monitor 1.0.0.
+Use `--check-desktop-only` to check Accessibility and an unlocked desktop
+without launching processes. This check does not test screen capture permission;
+the full fixture attempts capture later. Host permissions do not allocate its
+desktop for input.
+
+Require overall and per-chrome PASS, `host_reaped`, and `daemon_reaped`.
+Inspect classic and Graphite owned-window captures and frame records. Require
+the selected version/digest, only `activity.read:local` after Enable, stopped
+state with empty grants after Disable, reset draft on reopen, and two cancelled
+blocked List requests per chrome. `settings_panel` stays absent. The displayed
+pane's literal text and every session/window/pane/child-PID tuple must survive.
+This dedicated fixture does not prove every complete-editor control below.
 
 ## Complete update and restoration
 

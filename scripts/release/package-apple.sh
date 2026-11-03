@@ -90,6 +90,10 @@ cp "$ROOT/crates/prismattyc-host/assets/fonts/"*.txt "$RESOURCES/"
 cp "$ROOT/scripts/install-prismattyc-terminfo.sh" "$RESOURCES/"
 python3 "$ROOT/scripts/package-terminfo.py" --out "$RESOURCES/terminfo"
 
+python3 "$ROOT/scripts/release/plugin_bundle_provenance.py" verify --bins "$BIN_ROOT/aarch64-apple-darwin/release" --out "$RESOURCES/plugin-bundle.json"
+python3 "$ROOT/scripts/release/plugin_bundle_provenance.py" verify --bins "$BIN_ROOT/x86_64-apple-darwin/release" --out "$WORK/x86-plugin-bundle.json"
+cmp "$RESOURCES/plugin-bundle.json" "$WORK/x86-plugin-bundle.json"
+
 for name in prismattyc-host pmux pmuxd pmux-attach pmux-mcp prismattyc pmux-activity-monitor; do
   arm64="$BIN_ROOT/aarch64-apple-darwin/release/$name"
   x86_64="$BIN_ROOT/x86_64-apple-darwin/release/$name"
@@ -294,7 +298,7 @@ done
 ditto "$APP" "$DIST/Prismattyc.app"
 cp "$DMG" "$DIST/"
 cp "$ZIP" "$DIST/"
-python3 - "$DIST" "$VERSION" "$TAG" <<'PY'
+python3 - "$DIST" "$VERSION" "$TAG" "$RESOURCES/plugin-bundle.json" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -324,6 +328,7 @@ manifest = {
     "repository": "moonbase2090/Prismattyc",
     "version": version,
     "target": "universal-apple-darwin",
+    "plugin_bundle": json.loads(pathlib.Path(sys.argv[4]).read_text()),
     "assets": assets,
 }
 (dist / "manifest-macos-universal.json").write_text(json.dumps(manifest, indent=2) + "\n")

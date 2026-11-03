@@ -45,7 +45,11 @@ for name in pmux pmuxd pmux-attach pmux-mcp prismattyc prismattyc-host pmux-acti
   if [[ -e "$prefix/bin/$name" || -L "$prefix/bin/$name" ]]; then
     [[ -f "$prefix/bin/$name" && ! -L "$prefix/bin/$name" ]] &&
       cmp --silent "bin/$name" "$prefix/bin/$name" || {
-      echo "An existing $name is installed in $prefix/bin. Use pmux update for that installation." >&2
+      if [[ "$name" == pmux-activity-monitor ]]; then
+        echo "An existing monitor launcher is installed in $prefix/bin. Update the core first, then run pmux update --repair-monitor-launcher. For an unreceipted official launcher, supply --from-monitor-version VERSION. Preserve unknown files before changing them." >&2
+      else
+        echo "An existing $name is installed in $prefix/bin. Use pmux update for that installation." >&2
+      fi
       exit 1
     }
   fi
@@ -64,7 +68,8 @@ done
 mkdir -p "$prefix/share/applications" "$prefix/share/icons/hicolor/scalable/apps" "$prefix/share/man/man1"
 install -m 644 share/prismattyc.svg "$prefix/share/icons/hicolor/scalable/apps/prismattyc.svg"
 install -m 644 share/man/*.1 "$prefix/share/man/man1/"
-mkdir -p "$prefix/share/licenses/prismattyc"
+mkdir -p "$prefix/share/licenses/prismattyc" "$prefix/share/prismattyc"
+install -m 644 share/plugin-bundle.json "$prefix/share/prismattyc/plugin-bundle.json"
 install -m 644 share/licenses/*.txt "$prefix/share/licenses/prismattyc/"
 # Quote Exec according to the Desktop Entry specification.
 exec_path="${prefix//\\/\\\\}/bin/prismattyc-host"

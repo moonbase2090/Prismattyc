@@ -148,6 +148,8 @@ session
     session-config <save|check|restore> FILE
                                   save, check or restore session configurations
                                   (default: derive a unique lowercase address).
+    plugin <discover|list|inspect|install|enable|disable|invoke>
+                                  manage opt-in contained plug-ins
     login <enable|disable|status|sync>
                                   start at login and restore workspace
     doctor [SESSION]              pane shell, login state, child pid, lease, attach state
@@ -304,6 +306,7 @@ enum Verb {
     Whoami,
     StatusSet,
     ActivityEmit,
+    Plugin,
     Send,
     PaneWrite,
     SaveBuffer,
@@ -365,6 +368,7 @@ const VERBS: &[(&str, Verb)] = &[
     ("whoami", Verb::Whoami),
     ("status-set", Verb::StatusSet),
     ("activity-emit", Verb::ActivityEmit),
+    ("plugin", Verb::Plugin),
     ("send", Verb::Send),
     ("pane-write", Verb::PaneWrite),
     ("save-buffer", Verb::SaveBuffer),
@@ -466,8 +470,11 @@ fn parse_argv(args: impl IntoIterator<Item = String>) -> Result<Cli> {
 }
 
 fn main() -> Result<()> {
-    let _vt = prismattyc_mux::platform::enable_console_vt();
+    if prismattyc_mux::plugins::print_bundled_identity()? {
+        return Ok(());
+    }
     prismattyc_mux::release_update::forward_installed("pmux")?;
+    let vt = prismattyc_mux::platform::enter_console_vt();
     // Execute stays in `main` rather than a new `run`. Extracting `run`
     // scores C=75 as a new function and PT-277 blocks it; leaving the
     // same code here is allowed because `main` is already above 30
@@ -524,6 +531,7 @@ fn main() -> Result<()> {
         }
         Verb::Uninstall => {
             reject_session_flag(cli_session.as_deref(), "uninstall")?;
+            drop(vt);
             return prismattyc_mux::run_uninstall(rest);
         }
         Verb::Config => {
@@ -545,6 +553,10 @@ fn main() -> Result<()> {
     // without changing PMUX_SOCKET's caller-identity semantics.
     std::env::set_var("PRISMATTYC_SPACES_SOCKET", &paths.socket);
     match verb {
+        Verb::Plugin => {
+            reject_session_flag(cli_session.as_deref(), "plugin")?;
+            prismattyc_mux::plugins::run_cli(&paths.socket, rest)
+        }
         Verb::Login => {
             reject_session_flag(cli_session.as_deref(), "login")?;
             cmd_login(&paths, &rest)
@@ -629,7 +641,9 @@ fn main() -> Result<()> {
         Verb::Attention => cmd_attention(&paths, parse_attention_args(cli_session, rest)?),
         Verb::Mailbox => {
             reject_session_flag(cli_session.as_deref(), "mail")?;
-            cmd_mailbox(&paths, rest)
+            let code = cmd_mailbox(&paths, rest)?;
+            drop(vt);
+            std::process::exit(code)
         }
         Verb::MailDoorbell => cmd_mail(&paths, parse_mail_args(cli_session, rest)?),
         Verb::Space => {
@@ -637,6 +651,7 @@ fn main() -> Result<()> {
             match cmd_space(&paths, rest, &file) {
                 Err(err) if err.is::<SpaceUsage>() => {
                     eprint!("{SPACE_USAGE}");
+                    drop(vt);
                     std::process::exit(2);
                 }
                 other => other,
@@ -647,6 +662,7 @@ fn main() -> Result<()> {
             match cmd_session(&paths, rest, &file) {
                 Err(err) if err.is::<SessionUsage>() => {
                     eprint!("{SESSION_USAGE}");
+                    drop(vt);
                     std::process::exit(2);
                 }
                 other => other,
@@ -815,7 +831,7 @@ _prismattyc_mux() {
     arrange) COMPREPLY=( $(compgen -W "main-vertical main-horizontal even-h even-v grid" -- "$cur") ); return ;;
     stop|kick|doctor) COMPREPLY=( $(compgen -W "--session" -- "$cur") ); return ;;
     restart) COMPREPLY=( $(compgen -W "--all --host --daemon --mcp --plan --stop-sessions --json --help" -- "$cur") ); return ;;
-    update) COMPREPLY=( $(compgen -W "--check --rollback --pre --bin-dir --json --source --host --mux --all --help" -- "$cur") ); return ;;
+    update) COMPREPLY=( $(compgen -W "--check --rollback --pre --bin-dir --repair-monitor-launcher --from-monitor-version --json --source --host --mux --all --help" -- "$cur") ); return ;;
   esac
   if [[ "$cur" == -* ]]; then
     COMPREPLY=( $(compgen -W "--instance --socket --session --help" -- "$cur") )
@@ -889,7 +905,7 @@ case $state in
       join-pane) _arguments '--to[Window id]:id:' '-h' '-v' '1:pane:' ;;
       arrange) _arguments '1:session:' '2:kind:(main-vertical main-horizontal even-h even-v grid)' ;;
       restart) _arguments '--all' '--host' '--daemon' '--mcp' '--plan' '--stop-sessions' '--json' '--help' ;;
-      update) _arguments '--check' '--rollback' '--pre' '--bin-dir[Install directory]:directory:_files -/' '--json' '--source' '--host' '--mux' '--all' '--help' ;;
+      update) _arguments '--check' '--rollback' '--pre' '--repair-monitor-launcher' '--from-monitor-version[Existing monitor release]:version:' '--bin-dir[Install directory]:directory:_files -/' '--json' '--source' '--host' '--mux' '--all' '--help' ;;
     esac
     ;;
 esac
@@ -1525,7 +1541,9 @@ fn cmd_tutorial(
     cli_socket: Option<PathBuf>,
     rest: Vec<String>,
 ) -> Result<()> {
-    let args = parse_tutorial_args(&rest)?;
+    let Some(args) = parse_tutorial_args(&rest)? else {
+        return Ok(());
+    };
     if !args.play {
         print!("{PMUX_TUTORIAL}");
         return Ok(());
@@ -1551,7 +1569,7 @@ fn cmd_tutorial(
     cmd_tutorial_play(&paths, catalog, progress, args.level.as_deref())
 }
 
-fn parse_tutorial_args(rest: &[String]) -> Result<TutorialArgs> {
+fn parse_tutorial_args(rest: &[String]) -> Result<Option<TutorialArgs>> {
     let mut play = false;
     let mut level = None;
     let mut reset = false;
@@ -1578,7 +1596,7 @@ fn parse_tutorial_args(rest: &[String]) -> Result<TutorialArgs> {
                      --play runs the shared walkthrough as text captions.\n\
                      --level ID starts at that level. --reset deletes walkthrough.json first."
                 );
-                std::process::exit(0);
+                return Ok(None);
             }
             other => bail!("pmux tutorial: unknown argument {other}"),
         }
@@ -1586,7 +1604,7 @@ fn parse_tutorial_args(rest: &[String]) -> Result<TutorialArgs> {
     if (level.is_some() || reset) && !play {
         bail!("--level and --reset require --play");
     }
-    Ok(TutorialArgs { play, level, reset })
+    Ok(Some(TutorialArgs { play, level, reset }))
 }
 
 fn format_play_step(
@@ -4725,7 +4743,7 @@ fn resolve_mail_identity(
     }
 }
 
-fn cmd_mailbox(paths: &Paths, rest: Vec<String>) -> Result<()> {
+fn cmd_mailbox(paths: &Paths, rest: Vec<String>) -> Result<i32> {
     let mut iter = rest.into_iter().peekable();
     let mut cli_as = None;
     while iter.peek().map(String::as_str) == Some("--as") {
@@ -4735,7 +4753,7 @@ fn cmd_mailbox(paths: &Paths, rest: Vec<String>) -> Result<()> {
     let verb_name = iter.next().context(MAIL_USAGE)?;
     if verb_name == "--help" || verb_name == "-h" {
         println!("{MAIL_USAGE}");
-        return Ok(());
+        return Ok(0);
     }
     let verb = parse_mail_verb(&verb_name, iter).with_context(|| MAIL_USAGE)?;
 
@@ -4743,7 +4761,7 @@ fn cmd_mailbox(paths: &Paths, rest: Vec<String>) -> Result<()> {
     // usage and exits 0 without contacting the daemon or committing anything.
     if let MailVerb::Help = verb {
         println!("{MAIL_USAGE}");
-        return Ok(());
+        return Ok(0);
     }
 
     let mut client = Client::connect(&paths.socket)?;
@@ -4758,7 +4776,7 @@ fn cmd_mailbox(paths: &Paths, rest: Vec<String>) -> Result<()> {
     // `status` is the one verb that does not require an identity — it is a
     // diagnostic for operators checking daemon reachability.
     if let MailVerb::Status = verb {
-        return cmd_mailbox_status(paths, &mut client, client_id, cli_as.as_deref());
+        return cmd_mailbox_status(paths, &mut client, client_id, cli_as.as_deref()).map(|()| 0);
     }
 
     let agent = resolve_mail_identity(&mut client, paths, cli_as.as_deref())?.context(
@@ -4872,7 +4890,7 @@ fn cmd_mailbox(paths: &Paths, rest: Vec<String>) -> Result<()> {
             bail!("expected depth, got {reply:?}");
         };
         println!("open: {open} held: {held}");
-        std::process::exit(if open == 0 { 1 } else { 0 });
+        return Ok(if open == 0 { 1 } else { 0 });
     }
 
     let claim_format = match &verb {
@@ -4880,7 +4898,7 @@ fn cmd_mailbox(paths: &Paths, rest: Vec<String>) -> Result<()> {
         _ => MailClaimFormat::Human,
     };
     print_mail_reply(reply, claim_format);
-    Ok(())
+    Ok(0)
 }
 
 /// `pmux mail status` — no identity required. Prints the socket path,
@@ -10232,11 +10250,12 @@ mod tests {
 
     #[test]
     fn parse_tutorial_args_play_level_and_reset() {
-        let none = parse_tutorial_args(&[]).unwrap();
+        let none = parse_tutorial_args(&[]).unwrap().unwrap();
         assert!(!none.play);
         assert!(none.level.is_none());
         assert!(!none.reset);
-        let play = parse_tutorial_args(&["--play".into()]).unwrap();
+        assert!(parse_tutorial_args(&["--help".into()]).unwrap().is_none());
+        let play = parse_tutorial_args(&["--play".into()]).unwrap().unwrap();
         assert!(play.play);
         let all = parse_tutorial_args(&[
             "--play".into(),
@@ -10244,6 +10263,7 @@ mod tests {
             "window".into(),
             "--reset".into(),
         ])
+        .unwrap()
         .unwrap();
         assert!(all.play);
         assert_eq!(all.level.as_deref(), Some("window"));

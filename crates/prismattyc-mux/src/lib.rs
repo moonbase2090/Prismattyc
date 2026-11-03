@@ -8,6 +8,7 @@
 
 pub mod activity;
 pub mod activity_config;
+pub mod activity_webhook;
 pub mod attach_focus;
 mod attach_scan;
 pub mod attach_tabs;
@@ -127,4 +128,5 @@ pub mod local_socket;
 #[cfg(any(target_os = "macos", all(test, unix)))]
 pub(crate) mod path_shim;
 pub mod platform;
+pub mod plugins;
 pub mod private_fs;

@@ -344,7 +344,15 @@ fn fake_repo(root: &Path) -> PathBuf {
     std::fs::create_dir_all(repo.join("crates/prismattyc-mux")).unwrap();
     std::fs::create_dir_all(repo.join("crates/prismattyc")).unwrap();
     std::fs::create_dir_all(repo.join("crates/pmux-mcp")).unwrap();
-    std::fs::create_dir_all(repo.join("scripts")).unwrap();
+    std::fs::create_dir_all(repo.join("scripts/release")).unwrap();
+    std::fs::create_dir_all(repo.join("prepared-bundle")).unwrap();
+    // This fixture isolates Git/Cargo failure handling. The native source-update
+    // drive separately checks the actual verifier and corrupt-archive refusal.
+    std::fs::write(
+        repo.join("scripts/release/plugin_bundle_provenance.py"),
+        "from pathlib import Path\nimport sys\nif sys.argv[1] == 'prepare':\n print(Path(__file__).resolve().parents[2] / 'prepared-bundle')\nelif sys.argv[1] == 'flags':\n print('--cfg\\x1fsource_update_fixture')\nelse:\n raise SystemExit(2)\n",
+    )
+    .unwrap();
     repo
 }
 
@@ -431,6 +439,7 @@ fn source_update_uses_the_fake_toolchain() {
     let cargo_log = std::fs::read_to_string(root.join("cargo.log")).unwrap();
     assert!(cargo_log.contains("crates/prismattyc-mux"), "{cargo_log}");
     assert!(cargo_log.contains("crates/pmux-mcp"), "{cargo_log}");
+    assert!(cargo_log.contains("tools/activity-monitor"), "{cargo_log}");
     assert!(!cargo_log.contains("crates/prismattyc-host"), "{cargo_log}");
 
     let _ = std::fs::remove_file(root.join("cargo.log"));

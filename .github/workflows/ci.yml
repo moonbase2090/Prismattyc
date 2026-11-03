@@ -28,6 +28,124 @@ env:
   MUTANTS_MEMORY: "8g"
 
 jobs:
+  plugin-artifacts:
+    name: Build plug-ins once
+    if: github.actor != 'nektos/act'
+    uses: ./.github/workflows/plugin-artifacts.yml
+    with:
+      mode: candidate
+
+  plugin-runtime:
+    name: Contained plug-ins (${{ matrix.os }})
+    needs: plugin-artifacts
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the native Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.90.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Check native Windows fixture permissions before compiling
+        if: runner.os == 'Windows'
+        shell: python
+        run: |
+          import importlib.util
+          from pathlib import Path
+          import tempfile
+          import socket
+          import sys
+          import ctypes
+          from ctypes import wintypes
+          import json
+          import os
+          sys.path.insert(0, str(Path("scripts").resolve()))
+          spec = importlib.util.spec_from_file_location('plugin_proof', 'scripts/test-plugin-runtime.py')
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          with tempfile.TemporaryDirectory(prefix='plugin-acl-preflight-') as directory:
+              module.private_windows_directory(Path(directory))
+              staging = Path(directory) / 'staging'
+              destination = Path(directory) / 'published'
+              staging.mkdir()
+              (staging / 'package').write_bytes(b'package')
+              kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+              kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+              kernel.CreateFileW.restype = wintypes.HANDLE
+              kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+              kernel.CloseHandle.restype = wintypes.BOOL
+              handle = kernel.CreateFileW(str(staging / 'package'), 0x40000000, 7, None, 3, 0x80, None)
+              if handle == ctypes.c_void_p(-1).value:
+                  raise ctypes.WinError(ctypes.get_last_error())
+              try:
+                  try:
+                      os.rename(staging, destination)
+                  except OSError as error:
+                      open_writer_error = error.winerror
+                  else:
+                      open_writer_error = 0
+                      os.rename(destination, staging)
+              finally:
+                  assert kernel.CloseHandle(handle)
+              os.rename(staging, destination)
+              assert (destination / 'package').read_bytes() == b'package'
+              print(json.dumps({'open_writer_rename_error': open_writer_error, 'closed_writer_publication': 'PASS', 'share_mode': 7}))
+          stream = socket.socket(getattr(socket, 'AF_UNIX', 1), socket.SOCK_STREAM)
+          stream.close()
+          print('PASS native Windows fixture permissions, Winsock family, and cleanup')
+
+      - name: Prove Windows console modes and transport selection before compiling
+        if: runner.os == 'Windows'
+        run: cargo run --locked --manifest-path scripts/windows-console-probe/Cargo.toml
+
+      - name: Download the same guest bytes on every OS
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ${{ needs.plugin-artifacts.outputs.artifact-name }}
+          path: target/native-plugin-bundle
+
+      - name: Install Linux native adapter dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --yes --no-install-recommends pkg-config libfontconfig1-dev libfreetype6-dev
+
+      - name: Exercise production archives through native adapters
+        run: python scripts/test-plugin-runtime.py --bundle target/native-plugin-bundle --feature production
+
+      - name: Build the complete matched native installation
+        if: runner.os != 'macOS'
+        env:
+          PRISMATTYC_PLUGIN_BUNDLE_DIR: ${{ github.workspace }}/target/native-plugin-bundle
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/plugin-proof
+        run: cargo build --workspace --bins --release --locked
+
+      - name: Exercise older updater then contained launcher repair
+        if: runner.os != 'macOS'
+        run: python tests/native/monitor-launcher-update-e2e.py --bins target/plugin-proof/release --fetch-old-version 0.3.52 --out target/monitor-launcher-proof
+
+      - name: Retain launcher migration results
+        if: always() && runner.os != 'macOS'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: monitor-launcher-proof-${{ matrix.os }}
+          path: |
+            target/monitor-launcher-proof/commands.json
+            target/monitor-launcher-proof/result.json
+          if-no-files-found: warn
+
   format:
     name: Format
     runs-on: ubuntu-24.04
@@ -75,6 +193,7 @@ jobs:
         run: scripts/release/confirm-apple-sdk.sh
 
   linux-al2023:
+    needs: plugin-artifacts
     name: Linux AL2023 (${{ matrix.arch }})
     strategy:
       fail-fast: false
@@ -97,6 +216,19 @@ jobs:
         with:
           toolchain: 1.90.0
           targets: ${{ matrix.target }}
+
+      - name: Download the shared guest archives
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ${{ needs.plugin-artifacts.outputs.artifact-name }}
+          path: target/native-plugin-bundle
+
+      - name: Prepare the verified CI candidate
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --yes --no-install-recommends pkg-config libfontconfig1-dev libfreetype6-dev
+          directory="$(python3 scripts/release/prepare-plugin-bundle.py --candidate target/native-plugin-bundle --target-dir target)"
+          printf 'PRISMATTYC_PLUGIN_BUNDLE_DIR=%s\n' "$directory" >> "$GITHUB_ENV"
 
       - name: Install cargo-zigbuild and Zig
         run: scripts/release/setup-zigbuild.sh
@@ -197,6 +329,7 @@ jobs:
           fi
           rustup toolchain install 1.90.0 --profile minimal
           rustup default 1.90.0
+          rustup target add wasm32-unknown-unknown --toolchain 1.90.0
 
       - name: Install tmux
         run: |
@@ -252,6 +385,7 @@ jobs:
           fi
           rustup toolchain install 1.90.0 --profile minimal
           rustup default 1.90.0
+          rustup target add wasm32-unknown-unknown --toolchain 1.90.0
 
       - name: Install tmux
         run: |
@@ -1002,6 +1136,7 @@ jobs:
           fi
           rustup toolchain install 1.90.0 --profile minimal
           rustup default 1.90.0
+          rustup target add wasm32-unknown-unknown --toolchain 1.90.0
           rustup component add llvm-tools-preview
 
       - name: Install real-window test display
@@ -1116,6 +1251,7 @@ jobs:
           fi
           rustup toolchain install 1.90.0 --profile minimal
           rustup default 1.90.0
+          rustup target add wasm32-unknown-unknown --toolchain 1.90.0
           rustup component add llvm-tools-preview
 
       - name: Install real-window test display
@@ -1227,6 +1363,7 @@ jobs:
           fi
           rustup toolchain install 1.90.0 --profile minimal
           rustup default 1.90.0
+          rustup target add wasm32-unknown-unknown --toolchain 1.90.0
 
       - name: Install tmux
         run: |

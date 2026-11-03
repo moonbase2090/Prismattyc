@@ -1,6 +1,9 @@
 //! OS operations shared by the daemon, clients and host.
 use std::{fs, io, path::Path};
 
+mod console_vt;
+pub use console_vt::*;
+
 pub fn lock_exclusive(file: &fs::File) -> io::Result<()> {
     file.lock()
 }
@@ -763,13 +766,6 @@ pub fn terminate_process(pid: u32) -> io::Result<()> {
 /// `CREATE_NO_WINDOW`. A GUI parent that starts a console child without this
 /// flag gets a new console window.
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-/// `ENABLE_VIRTUAL_TERMINAL_PROCESSING`.
-pub const VT_OUTPUT_PROCESSING: u32 = 0x0004;
-/// `DISABLE_NEWLINE_AUTO_RETURN`.
-pub const VT_DISABLE_NEWLINE_AUTO_RETURN: u32 = 0x0008;
-/// `ENABLE_VIRTUAL_TERMINAL_INPUT`.
-pub const VT_INPUT: u32 = 0x0200;
-
 /// Flags for a short-lived helper. `CommandExt::creation_flags` replaces the
 /// whole mask, and Windows ignores `CREATE_NO_WINDOW` when it is combined
 /// with `DETACHED_PROCESS`, so this must not be applied to [`spawn_detached`].
@@ -780,32 +776,6 @@ pub fn helper_creation_flags() -> u32 {
 /// `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`.
 pub fn detach_creation_flags() -> u32 {
     0x0000_0008 | 0x0000_0200
-}
-
-pub fn console_vt_output_flags() -> u32 {
-    VT_OUTPUT_PROCESSING
-}
-
-pub fn console_vt_raw_output_flags() -> u32 {
-    VT_OUTPUT_PROCESSING | VT_DISABLE_NEWLINE_AUTO_RETURN
-}
-
-pub fn console_vt_input_flags() -> u32 {
-    VT_INPUT
-}
-
-/// Line-oriented CLI output. Virtual-terminal processing stays on, and a
-/// newline still returns to column 0. A console that already disabled
-/// auto-return is corrected for this process.
-pub fn cli_console_output_mode(mode: u32) -> u32 {
-    (mode | VT_OUTPUT_PROCESSING) & !VT_DISABLE_NEWLINE_AUTO_RETURN
-}
-
-/// Full-screen attach. A bare line feed moves down without returning to
-/// column 0, matching the stream the pane writes. Drop restores the mode
-/// captured before this mask was applied.
-pub fn raw_console_output_mode(mode: u32) -> u32 {
-    mode | console_vt_raw_output_flags()
 }
 
 /// Start `program` without allocating a console window on Windows.
@@ -834,47 +804,6 @@ pub fn hide_console(command: &mut std::process::Command) {
 /// look ready.
 pub fn stdout_vt_ready(stdout_accepted: bool, _stderr_accepted: bool) -> bool {
     stdout_accepted
-}
-
-/// Enable virtual-terminal sequences on a console CLI.
-///
-/// Returns true when stdout accepted output processing. Stderr is enabled too,
-/// but its result does not decide color. A pipe, a file, or a rejected stdout
-/// mode returns false. Unix terminals already interpret the sequences, so this
-/// reports ready there.
-pub fn enable_console_vt() -> bool {
-    #[cfg(not(windows))]
-    {
-        true
-    }
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-        use windows_sys::Win32::System::Console::{
-            GetConsoleMode, GetStdHandle, SetConsoleMode, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
-            STD_OUTPUT_HANDLE,
-        };
-        unsafe fn apply(handle_id: u32, update: fn(u32) -> u32) -> bool {
-            let handle = GetStdHandle(handle_id);
-            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-                return false;
-            }
-            let mut mode = 0u32;
-            if GetConsoleMode(handle, &mut mode) == 0 {
-                return false;
-            }
-            SetConsoleMode(handle, update(mode)) != 0
-        }
-        fn input_mode(mode: u32) -> u32 {
-            mode | console_vt_input_flags()
-        }
-        unsafe {
-            let _input = apply(STD_INPUT_HANDLE, input_mode);
-            let out = apply(STD_OUTPUT_HANDLE, cli_console_output_mode);
-            let err = apply(STD_ERROR_HANDLE, cli_console_output_mode);
-            stdout_vt_ready(out, err)
-        }
-    }
 }
 
 pub fn detach_command(command: &mut std::process::Command) {
@@ -1551,7 +1480,7 @@ mod console_flags {
     #[cfg(not(windows))]
     #[test]
     fn unix_terminals_already_accept_vt() {
-        assert!(super::enable_console_vt());
+        assert!(super::enter_console_vt().stdout_ready());
     }
 
     #[cfg(windows)]

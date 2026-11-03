@@ -10,6 +10,7 @@ import struct
 import subprocess
 import tempfile
 import zipfile
+from plugin_bundle_provenance import verify_binaries
 from release_version import parse_release_version, reports_release_version
 
 BINARIES = ('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host', 'pmux-activity-monitor')
@@ -92,6 +93,7 @@ def main():
         result = subprocess.run([str(path), '--version'], capture_output=True, text=True, timeout=10, check=True)
         if not reports_release_version(result.stdout, args.version):
             parser.error(f'{name}: unexpected version output {result.stdout!r}')
+    plugin_provenance = verify_binaries(bins)
     args.out.mkdir(parents=True, exist_ok=False)
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()
     dirty = bool(subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=normal'], cwd=repo, text=True).strip())
@@ -104,6 +106,7 @@ def main():
         'signed': args.signed,
         'signing': 'azure-artifact-signing' if args.signed else 'unsigned',
         'assets': [],
+        'plugin_bundle': plugin_provenance,
     }
     for name in BINARIES:
         target = args.out / f'prismattyc-v{args.version}-{args.target}-{name}.exe'
@@ -123,6 +126,7 @@ def main():
         shutil.copy2(repo / 'LICENSE', root / 'licenses/MIT.txt')
         shutil.copy2(repo / 'NOTICE.txt', root / 'licenses/NOTICE.txt')
         shutil.copy2(repo / 'crates/prismattyc-host/themes/OMARCHY-LICENSE.txt', root / 'licenses/OMARCHY-LICENSE.txt')
+        (root / 'plugin-bundle.json').write_text(json.dumps(plugin_provenance, indent=2) + '\n', encoding='utf-8')
         (root / 'VERSION').write_text(args.version + '\n', encoding='utf-8')
         (root / 'README.txt').write_text(
             'Prismattyc native Windows x64\n\n'

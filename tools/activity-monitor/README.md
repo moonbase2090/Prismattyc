@@ -1,72 +1,136 @@
 # Activity monitor
 
-This opt-in terminal viewer reads the experimental activity feed from one or more daemons. It shows every seat's state and recent activity, including seats with no terminal pane.
+The monitor shows seat state and recent metadata from one or more daemons,
+including seats with no terminal pane. Its UI runs as a contained plug-in.
+The native launcher presents validated frames; JSON modes use the contained
+activity connector. Neither package is enabled automatically.
 
 ### Use it from a release
 
-Release builds ship `pmux-activity-monitor` next to `pmux`. The macOS app links it onto PATH beside its `pmux` link, the Windows MSI puts it in the same `cmd` directory as `pmux.exe`, and the Linux tarball's `install.sh` installs it with the other binaries. The feed is off by default. Turn it on in the Prismattyc config file:
+A matched release carries `pmux-activity-monitor` and verified packages for
+`org.moonbase.activity-monitor` and `org.moonbase.activity-connector`.
+In Settings > Plug-ins, install each package, review its exact version and
+permissions, select local activity access, and enable it. The CLI equivalent
+for the initial package versions is:
+
+```sh
+pmux plugin discover
+pmux plugin install org.moonbase.activity-monitor --version 1.0.0
+pmux plugin enable org.moonbase.activity-monitor --version 1.0.0 --allow activity.read:local
+pmux plugin install org.moonbase.activity-connector --version 1.0.0
+pmux plugin enable org.moonbase.activity-connector --version 1.0.0 --allow activity.read:local
+```
+
+Use the same `--socket` target on these commands if the launcher uses an
+explicit socket. Installation leaves packages disabled. The monitor package
+serves live and snapshot modes. The connector serves `--json`, `--seats`,
+`--recent`, and `--tail`. Review the available version before selecting a
+later package; updates and grants remain explicit.
+
+Collection is separate and off by default. Turn it on in Settings under Mux,
+or in the config file:
 
 ```toml
 [mux]
 experimental_activity = true
 ```
 
-The running pmuxd picks up the change within a second, with no restart, and sessions are untouched; setting it back to `false` stops the feed the same way. The settings panel lists it under Mux. Then run `pmux-activity-monitor` in any pane.
+The running daemon applies collection changes within a second without a
+restart. Sessions stay alive. After approval and collection enablement,
+`pmux-activity-monitor` is the whole command in a pane. Setting collection
+back to `false` stops the feed and discards its history.
 
-A Linux installation that `pmux update` manages does not fetch the monitor yet; copy `bin/pmux-activity-monitor` from the release tarball next to `pmux`.
+After upgrading from 0.3.54, an existing collection opt-in does not install
+or grant plug-ins. Complete the approval above. On Linux and Windows, an
+older updater still manages six core executables. Update the core first,
+then run the new command `pmux update --repair-monitor-launcher`; use
+`--from-monitor-version 0.3.54` for an unreceipted official 0.3.54 launcher.
+See [launcher repair](../../docs/update-and-restart.md#replace-an-older-activity-monitor-launcher)
+for ownership checks, dry checks, and rollback. macOS replaces the verified app.
 
 ### Build from source
 
-Build the daemon from the repository root and this standalone tool with its own lockfile:
+Prepare a verified bundle before building any consumer. The default uses the
+reviewed official pin. For private development, explicitly set
+`PRISMATTYC_PLUGIN_BUNDLE_DIR` to an existing verified candidate first. A source
+build without a bundle has an empty catalog and cannot install these packages.
 
 ```sh
-cargo build -p prismattyc-mux --bin pmuxd --locked
-cargo build --manifest-path tools/activity-monitor/Cargo.toml --locked
+export CARGO_TARGET_DIR="$PWD/target"
+PRISMATTYC_PLUGIN_BUNDLE_DIR=$(python3 scripts/release/plugin_bundle_provenance.py prepare)
+export PRISMATTYC_PLUGIN_BUNDLE_DIR
+CARGO_ENCODED_RUSTFLAGS=$(python3 scripts/release/plugin_bundle_provenance.py flags)
+export CARGO_ENCODED_RUSTFLAGS
+cargo +1.90.0 build --workspace --bins --locked
+cargo +1.90.0 build --manifest-path tools/activity-monitor/Cargo.toml --target-dir "$CARGO_TARGET_DIR" --locked
 ```
 
-Start a private daemon with `--experimental-activity` and a separate socket. Then pass that socket to the viewer:
+Start a private daemon in a separate terminal with a private absolute socket,
+then repeat the install/enable commands above with that socket on every command:
 
 ```sh
-tools/activity-monitor/target/debug/pmux-activity-monitor --socket /tmp/activity-demo/control.sock
+mkdir -m 700 /tmp/activity-demo
+target/debug/pmuxd --experimental-activity --socket /tmp/activity-demo/feed.sock -- /bin/sh
 ```
 
-With no `--socket` or `--host`, the monitor reads the pmuxd that `pmux` would use, so in a blank Prismattyc pane `pmux-activity-monitor` is the whole command. When the feed is off, the daemon predates it, or no daemon answers, the pane says which and what can be done. The `pmux activity` commands, added separately, include `pmux activity monitor`. It runs this binary from beside `pmux` with pmux's socket and passes other arguments through, so a blank Prismattyc pane needs only that command.
+After approval, open the viewer:
 
-The live view fits the pane and follows it through splits and resizes. It groups seats by host, colors each seat by state (working, waiting, failed, stopped), marks rows stale after 30 seconds or while their host is unreachable, and draws a five-minute lane of activity for each seat. Enter opens a seat's timeline. `?` lists the keys and `q` quits. [The UI design](../../docs/activity-monitor-ui.md) covers the layout tiers, colors, states and keys.
+```sh
+target/debug/pmux-activity-monitor --socket /tmp/activity-demo/feed.sock
+```
 
-The monitor shows identifiers, event kinds, sources, sequences and timing. It does not display command arguments, tool output, file contents, prompts or message bodies, and the feed does not carry them.
+With no `--socket` or `--host`, the monitor selects the daemon the same way
+`pmux` does. The live view follows pane splits and resizes. Enter opens a
+seat's timeline, `?` lists keys, and `q` quits. It shows identifiers, event
+kinds, sources, sequences, and timing. The feed carries no command arguments,
+tool output, file contents, prompts, or message bodies.
+[The UI design](../../docs/activity-monitor-ui.md) covers layout and keys.
 
 ### More than one host
 
-Each host has its own daemon, so each gets its own cursor and connection state. `--socket` is this machine, labelled `mac`, `linux` or `windows`. Add more with `--host LABEL=SOCKET`, or read another machine through a command that prints `tail` JSON lines:
+Each host has its own daemon, so each gets its own cursor and connection state. `--socket` is this machine, labelled `mac`, `linux` or `windows`. Register each remote transport and approve its named grant first. For example:
 
 ```sh
-pmux-activity-monitor --socket /tmp/activity-demo/control.sock \
-  --host-cmd windows '["ssh","windows-host","pmux","activity","tail","--from-oldest"]'
+pmux plugin endpoint add windows --command-tail '["ssh","windows-host","pmux-activity-monitor","--tail"]'
+pmux plugin enable org.moonbase.activity-monitor --version 1.0.0 --allow activity.read:local --allow activity.read:windows
+pmux-activity-monitor --host-cmd windows '["ssh","windows-host","pmux-activity-monitor","--tail"]'
 ```
 
-`--host-cmd` takes a JSON argv and runs it without a shell. Its stderr is discarded so remote diagnostics cannot corrupt the screen. A command that exits is restarted with backoff, and replayed records are applied once.
+`--host-cmd` must exactly match its registered transport. Importing or registering an endpoint grants no access. The remote daemon also needs its connector installed and enabled. The native broker runs the approved JSON argv without a shell. Its stderr is discarded so remote diagnostics cannot corrupt the screen. A command that exits is restarted with backoff, and replayed records are applied once.
 
 ### Display options
 
 `--theme auto|dark|light` picks the Prismattyc Graphite palette; `auto` follows the background color the terminal reports. `--no-motion` turns off the fade when a seat changes state live (replayed history never fades). `--no-pixels` keeps lanes in block characters. Where the terminal accepts raw RGBA Kitty uploads, lanes render as rasters through Lunatui's pixel sparkline. Inside Prismattyc the monitor first makes one real raw upload: a Prismattyc that keeps it gets pixel lanes, and older releases, which drop raw uploads, keep cells.
 
-The monitor keeps at most 128 seats per host and 256 events per seat, and evicts the seat with the oldest event when full. A daemon restart or retention gap clears that host's cached seats before the retained history replays.
+The monitor discovers every daemon session with an agent identity on its first
+poll and refreshes that list while open. Hooks add lifecycle and tool details;
+quiet seats appear without hooks and remain visible after event history expires.
+Without hook state, recent pane output means working, 60 seconds of silence
+means waiting, and no live pane child means stopped. The viewer removes a
+session with no retained events when the daemon no longer reports it.
+
+Each seat keeps at most 256 events. The 128-seat history limit applies to seats
+that are absent from the current session list; current sessions are not evicted.
+A daemon restart or retention gap clears cached history and reloads the current
+session list. Older endpoints that omit session metadata show retained events
+only.
 
 For a single bounded read, use one of these modes:
 
 ```sh
-tools/activity-monitor/target/debug/pmux-activity-monitor --socket /tmp/activity-demo/control.sock --snapshot --size 80x24
-tools/activity-monitor/target/debug/pmux-activity-monitor --socket /tmp/activity-demo/control.sock --json
+target/debug/pmux-activity-monitor --socket /tmp/activity-demo/control.sock --snapshot --size 80x24
+target/debug/pmux-activity-monitor --socket /tmp/activity-demo/control.sock --json
 ```
 
 `--snapshot` waits up to three seconds for every host to catch up, then renders one frame as text at `--size` (120 by 24 by default). It fails when no host is reachable. `--json` prints one page from the daemon, including its cursor and reset reason.
 
-Lunatui's own run loop has a fixed grid size, so the monitor drives the Lunatui session, encoder and pixel layer from its own loop. Network requests and commands run on background threads, and pages wait in a bounded channel with their cursor until the UI takes them. Lunatui handles terminal setup and restoration on Unix and Windows. Windows runtime behavior of the live view has not been verified.
+The native presenter owns the Lunatui session, encoder, pixel layer, and terminal restoration. The guest owns its model and layout. The native broker owns remote requests and commands. Native Windows runtime proof remains required before claiming that platform is verified.
 
 The Lunatui crates use the v0.1.18 release commit `d847e749eb773f7d48edd7d9e429bcc9cbe9e898`.
 
 ### Recording the UI
+
+The recording helpers create private daemons but do not install packages or approve grants. Provision the monitor, connector, and requested endpoints in those private stores before recording.
 
 `scripts/demo-feed.py` starts private daemons for `mac` and `windows` and publishes scripted metadata events. `SIGUSR1` stops the last host's daemon and `SIGUSR2` starts it again. `scripts/record-demo.py` runs the unmodified monitor in a pseudo-terminal, sends keys and pane resizes from a JSON plan, and writes an asciicast of exactly what the monitor printed. Render it with `agg`. `--kitty` answers the capability probe as a Kitty-graphics terminal so the pixel path runs, and `scripts/extract-rasters.py` saves each raster the monitor uploaded. `scripts/record-prismattyc.py` runs the monitor in a real Prismattyc pane, splits that pane through the control protocol, and keeps the host's presented frames. It needs an unlocked macOS desktop with an awake display, such as a clean Tart VM.
 
@@ -75,10 +139,10 @@ The Lunatui crates use the v0.1.18 release commit `d847e749eb773f7d48edd7d9e429b
 Shell clients can query the same local feed without a terminal:
 
 ```sh
-tools/activity-monitor/target/debug/pmux-activity-monitor --socket /tmp/activity-demo/control.sock --seats
-tools/activity-monitor/target/debug/pmux-activity-monitor --socket /tmp/activity-demo/control.sock --recent worker-a
-tools/activity-monitor/target/debug/pmux-activity-monitor --socket /tmp/activity-demo/control.sock --tail
-tools/activity-monitor/target/debug/pmux-activity-monitor --socket /tmp/activity-demo/control.sock --tail --seat worker-a
+target/debug/pmux-activity-monitor --socket /tmp/activity-demo/control.sock --seats
+target/debug/pmux-activity-monitor --socket /tmp/activity-demo/control.sock --recent worker-a
+target/debug/pmux-activity-monitor --socket /tmp/activity-demo/control.sock --tail
+target/debug/pmux-activity-monitor --socket /tmp/activity-demo/control.sock --tail --seat worker-a
 ```
 
 `--seats` returns a JSON object with `epoch`, `cursor`, `oldest_sequence`, `observed_through_sequence`, and `seats`. Each seat entry has its identifier, first retained sequence, last sequence, last receive timestamp, last source, last kind, and retained event count. These are seats observed in retained history. Presence in this list does not establish that a process is alive, and an absent seat may have aged out of retention.

@@ -1,0 +1,15 @@
+manifest_version = 1
+id = "org.moonbase.activity-monitor"
+version = "1.0.0"
+plugin_api = "^1.0.0"
+component = "monitor.wasm"
+notices = ["LICENSE"]
+
+[requires]
+"pmux:activity/read" = "^1.0.0"
+"pmux:view/frame" = "^1.0.0"
+
+[[contributions]]
+kind = "view"
+id = "main"
+title = "Activity monitor"

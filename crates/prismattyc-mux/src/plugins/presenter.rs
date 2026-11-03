@@ -8,27 +8,28 @@
 
 use std::io::{self, IsTerminal};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::{Duration, Instant};
-
-use lunatui_core::{diff_runs, ClusterTable, Color, Grid, Rect, Style};
-use lunatui_term::{
-    ColorMode, Encoder, Event, MouseTracking, PixelLayer, PixelMode, Session, SessionOptions,
-    SyncOutput,
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::app::Monitor;
+use anyhow::{bail, ensure, Result};
+use lunatui_core::Rect;
+use lunatui_image::ImageSink;
+use lunatui_term::{
+    Event, MouseTracking, PixelLayer, PixelMode, Session, SessionOptions, SyncOutput,
+};
+use pmux_plugin_api::host::pmux::view::frame;
 
-/// Frame interval while a fade runs.
-const ANIMATION: Duration = Duration::from_millis(33);
-/// Longest wait for input before checking size and feed again.
+use super::paint::Painter;
+use super::{Client, Reply, Request};
+
+/// Longest wait for input before checking terminal geometry again.
 const IDLE_WAIT: Duration = Duration::from_millis(50);
-/// Redraw at least this often so ages and staleness stay current.
-const TICK: Duration = Duration::from_secs(1);
 
 pub struct Probe {
     pub layer: PixelLayer,
-    /// The layer draws true pixels.
-    pub pixels: bool,
     pub background_dark: Option<bool>,
     pending_input: Vec<u8>,
 }
@@ -57,7 +58,6 @@ pub fn probe(pixels: bool) -> Probe {
                 };
                 return Probe {
                     layer,
-                    pixels: mode.is_pixels(),
                     background_dark: reply.caps.background_dark,
                     pending_input,
                 };
@@ -67,7 +67,6 @@ pub fn probe(pixels: bool) -> Probe {
     let _ = pixels;
     Probe {
         layer: PixelLayer::new(PixelMode::Cells),
-        pixels: false,
         background_dark: None,
         pending_input: Vec::new(),
     }
@@ -232,47 +231,112 @@ pub fn size() -> Option<(u16, u16)> {
     }
 }
 
-fn spawn_input(pending: Vec<u8>) -> io::Result<mpsc::Receiver<io::Result<Vec<Event>>>> {
-    let (sender, receiver) = mpsc::channel();
-    #[cfg(unix)]
-    {
-        use std::io::Read;
+struct Input {
+    receiver: Option<mpsc::Receiver<io::Result<Vec<Event>>>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
 
-        use lunatui_term::Parser;
+impl Drop for Input {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        // Dropping the receiver also releases a producer blocked on the bound.
+        drop(self.receiver.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 
-        let mut reader = io::Cursor::new(pending).chain(io::stdin());
-        std::thread::Builder::new()
-            .name("activity-input".into())
-            .spawn(move || {
-                let mut parser = Parser::new();
+fn spawn_input(pending: Vec<u8>) -> io::Result<Input> {
+    let (sender, receiver) = mpsc::sync_channel(8);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopped = stop.clone();
+    let thread = std::thread::Builder::new()
+        .name("pmux-view-input".into())
+        .spawn(move || {
+            #[cfg(unix)]
+            {
+                use std::io::Read;
+                let mut parser = lunatui_term::Parser::new();
+                let send = |mut events: Vec<Event>| {
+                    events.retain(|event| matches!(event, Event::Key(_)));
+                    events.is_empty() || sender.send(Ok(events)).is_ok()
+                };
+                if !send(decode(&mut parser, &pending)) {
+                    return;
+                }
+                let mut input = io::stdin();
                 let mut buffer = [0; 4096];
-                loop {
-                    match reader.read(&mut buffer) {
+                while !stopped.load(Ordering::Acquire) {
+                    let mut descriptor = libc::pollfd {
+                        fd: libc::STDIN_FILENO,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY: descriptor is valid writable storage for one pollfd.
+                    let ready = unsafe { libc::poll(&mut descriptor, 1, 100) };
+                    if ready == 0 {
+                        continue;
+                    }
+                    if ready < 0 {
+                        let error = io::Error::last_os_error();
+                        if error.kind() == io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        let _ = sender.send(Err(error));
+                        return;
+                    }
+                    match input.read(&mut buffer) {
                         Ok(0) => {
-                            let _ = sender.send(Ok(parser.flush()));
+                            let _ = send(parser.flush());
                             return;
                         }
                         Ok(length) => {
-                            let events = decode(&mut parser, &buffer[..length]);
-                            if !events.is_empty() && sender.send(Ok(events)).is_err() {
+                            if !send(decode(&mut parser, &buffer[..length])) {
                                 return;
                             }
                         }
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                         Err(error) => {
                             let _ = sender.send(Err(error));
                             return;
                         }
                     }
                 }
-            })?;
-    }
-    #[cfg(windows)]
-    {
-        let _ = pending;
-        // The worker stops when the receiver is dropped at exit.
-        std::mem::forget(lunatui_term::sys::windows::spawn_input_reader(sender)?);
-    }
-    Ok(receiver)
+            }
+            #[cfg(windows)]
+            {
+                let _ = pending;
+                while !stopped.load(Ordering::Acquire) {
+                    let event = (|| -> io::Result<Option<Event>> {
+                        if !crossterm::event::poll(Duration::from_millis(100))? {
+                            return Ok(None);
+                        }
+                        Ok(lunatui_term::sys::windows::map_event(
+                            crossterm::event::read()?,
+                        ))
+                    })();
+                    match event {
+                        Ok(Some(event @ Event::Key(_))) => {
+                            if sender.send(Ok(vec![event])).is_err() {
+                                return;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            let _ = sender.send(Err(error));
+                            return;
+                        }
+                    }
+                }
+            }
+        })?;
+    Ok(Input {
+        receiver: Some(receiver),
+        stop,
+        thread: Some(thread),
+    })
 }
 
 /// Parses one read from the terminal.
@@ -288,101 +352,230 @@ fn decode(parser: &mut lunatui_term::Parser, bytes: &[u8]) -> Vec<Event> {
     events
 }
 
-/// Runs the monitor in the alternate screen until the person quits or input ends.
-pub fn run(mut monitor: Monitor, probe: Probe) -> io::Result<()> {
-    if !io::stdout().is_terminal() {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "the live monitor needs an interactive terminal; use --snapshot or --json",
-        ));
-    }
-    let Probe {
-        layer: mut images,
-        pixels,
-        pending_input,
-        ..
-    } = probe;
-    let input = spawn_input(pending_input)?;
-    let mut session = Session::enter_with_options(
-        io::stdout(),
-        SessionOptions {
-            sync_output: SyncOutput::Enabled,
-            mouse_tracking: MouseTracking::Disabled,
-        },
-    )?;
-    let epoch = Instant::now();
-    let mut encoder = Encoder::new();
-    let mut clusters = ClusterTable::new();
-    let mut current = (0u16, 0u16);
-    let mut prev = Grid::new(1, 1);
-    let mut dirty = true;
-    let mut last_frame = Instant::now();
-    loop {
-        let (width, height) = size().unwrap_or((80, 24));
-        let resized = (width, height) != current;
-        if resized {
-            current = (width, height);
-            prev = Grid::new(width, height);
-            dirty = true;
-        }
-        let mono = epoch.elapsed();
-        dirty |= monitor.drain(mono_ms(mono));
-        let animating = monitor.animating(mono_ms(mono));
-        let due = last_frame.elapsed() >= if animating { ANIMATION } else { TICK };
-        if dirty || due {
-            let area = Rect::new(0, 0, width, height);
-            let mut next = Grid::new(width, height);
-            next.fill(area, Style::new().bg(Color::Default), ' ', &mut clusters);
-            images.begin_frame();
-            monitor.render(
-                &mut next,
-                &mut clusters,
-                Some(&mut images),
-                area,
-                mono_ms(epoch.elapsed()),
-                pixels,
-            );
-            if images.needs_cell_repaint() {
-                prev = Grid::new(width, height);
-            }
-            let changed = !diff_runs(&prev, &next).is_empty();
-            let cells = encoder.encode_diff(&prev, &next, &clusters, ColorMode::TrueColor);
-            let (upload, placements) = images.finish_frame_parts();
-            if !upload.is_empty() {
-                session.present_frame(upload)?;
-            }
-            // After a resize the terminal may have reflowed the old frame; start from a clear screen.
-            let clear: &[u8] = if resized {
-                b"\x1b[0m\x1b[H\x1b[2J"
-            } else {
-                b""
-            };
-            if changed || resized || !placements.is_empty() {
-                session.present_frame_parts(&[clear, cells, placements])?;
-            }
-            prev = next;
-            dirty = false;
-            last_frame = Instant::now();
-        }
-        let wait = if animating { ANIMATION } else { IDLE_WAIT };
-        match input.recv_timeout(wait) {
-            Ok(Ok(events)) => {
-                for event in events {
-                    if monitor.event(&event) {
-                        let clear = images.clear();
-                        if !clear.is_empty() {
-                            session.present_frame(clear)?;
-                        }
-                        return Ok(());
+struct Frontend {
+    client: Client,
+    handle: String,
+    viewport: frame::Viewport,
+    painter: Painter,
+    next_tick: Instant,
+    resize: bool,
+}
+
+enum Flow {
+    Continue,
+    Closed,
+}
+
+impl Frontend {
+    fn event(&mut self, event: frame::Event, session: &mut Session<io::Stdout>) -> Result<Flow> {
+        let tick = matches!(&event, frame::Event::Tick(_));
+        let reply = self.client.request(Request::ViewEvent {
+            handle: self.handle.clone(),
+            event,
+        })?;
+        let interval = match reply {
+            Reply::Frame {
+                handle,
+                content,
+                next_tick_ms,
+            } => {
+                ensure!(
+                    handle == self.handle && (33..=1000).contains(&next_tick_ms),
+                    "invalid view frame metadata"
+                );
+                let frame = super::decode_frame(&content, &self.viewport)?;
+                if let Some(output) = self.painter.encode(frame) {
+                    if !output.upload.is_empty() {
+                        session.present_frame(&output.upload)?;
                     }
+                    if !output.paint.is_empty() {
+                        session.present_frame(&output.paint)?;
+                    }
+                } else {
+                    ensure!(
+                        self.viewport.pixels.is_some(),
+                        "view frame cannot be presented in cell mode"
+                    );
+                    let clear = self.painter.clear();
+                    if !clear.is_empty() {
+                        session.present_frame(&clear)?;
+                    }
+                    self.viewport.pixels = None;
+                    self.resize = true;
                 }
-                dirty = true;
+                next_tick_ms
             }
-            Ok(Err(error)) => return Err(error),
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return Ok(()),
-        }
+            Reply::ViewClosed { handle } => {
+                ensure!(handle == self.handle, "invalid closed-view handle");
+                return Ok(Flow::Closed);
+            }
+            Reply::Idle | Reply::Retry { .. } => 250,
+            _ => bail!("unexpected component view reply"),
+        };
+        let deadline = Instant::now() + Duration::from_millis(u64::from(interval));
+        self.next_tick = if tick {
+            deadline
+        } else {
+            self.next_tick.min(deadline)
+        };
+        Ok(Flow::Continue)
     }
+
+    fn drive(
+        &mut self,
+        input: &mpsc::Receiver<io::Result<Vec<Event>>>,
+        session: &mut Session<io::Stdout>,
+    ) -> Result<()> {
+        let epoch = Instant::now();
+        let mut keys = std::collections::VecDeque::new();
+        loop {
+            let viewport = self::viewport(self.viewport.pixels);
+            if viewport != self.viewport {
+                self.viewport = viewport;
+                self.resize = true;
+            }
+            if self.resize {
+                self.resize = false;
+                if matches!(
+                    self.event(frame::Event::Resize(self.viewport), session)?,
+                    Flow::Closed
+                ) {
+                    break;
+                }
+                if self.resize {
+                    continue;
+                }
+            }
+            if Instant::now() >= self.next_tick {
+                if matches!(
+                    self.event(frame::Event::Tick(clock(epoch)?), session)?,
+                    Flow::Closed
+                ) {
+                    break;
+                }
+                if self.resize {
+                    continue;
+                }
+            }
+            if let Some(key) = keys.pop_front() {
+                if matches!(self.event(frame::Event::Key(key), session)?, Flow::Closed) {
+                    break;
+                }
+                continue;
+            }
+            let wait = self
+                .next_tick
+                .saturating_duration_since(Instant::now())
+                .min(IDLE_WAIT);
+            match input.recv_timeout(wait) {
+                Ok(Ok(events)) => {
+                    if events.iter().any(|event| matches!(event, Event::Key(key) if key.kind != lunatui_term::KeyKind::Release && key.modifiers.is_control() && matches!(key.code, lunatui_term::KeyCode::Char('c'|'C')))) { break; }
+                    keys.extend(events.iter().filter_map(|event| match event {
+                        Event::Key(key) => super::input::key(key),
+                        _ => None,
+                    }));
+                }
+                Ok(Err(error)) => return Err(error.into()),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Drive a component view while the native frontend owns terminal state.
+pub(super) fn run(
+    mut client: Client,
+    id: String,
+    contribution: String,
+    mut preferences: frame::Preferences,
+    pixels: bool,
+    endpoints: Option<Vec<super::ViewEndpoint>>,
+) -> Result<()> {
+    ensure!(
+        io::stdout().is_terminal(),
+        "the live view needs an interactive terminal; use --snapshot"
+    );
+    let probe = probe(pixels);
+    preferences.dark_background = probe.background_dark;
+    let cell_pixels = probe
+        .layer
+        .pixel_target(Rect::new(0, 0, 1, 1))
+        .and_then(|target| {
+            Some(frame::PixelSize {
+                width: target.size().width().try_into().ok()?,
+                height: target.size().height().try_into().ok()?,
+            })
+        });
+    let viewport = viewport(cell_pixels);
+    let Reply::ViewOpened { handle } = client.request(Request::OpenView {
+        endpoints,
+        id,
+        contribution,
+        viewport,
+        preferences,
+    })?
+    else {
+        bail!("expected a view handle");
+    };
+    let mut view = Frontend {
+        client,
+        handle,
+        viewport,
+        painter: Painter::new(probe.layer),
+        next_tick: Instant::now(),
+        resize: false,
+    };
+    let pending_input = probe.pending_input;
+    let result = (|| -> Result<()> {
+        let mut session = Session::enter_with_options(
+            io::stdout(),
+            SessionOptions {
+                sync_output: SyncOutput::Enabled,
+                mouse_tracking: MouseTracking::Disabled,
+            },
+        )?;
+        let input = spawn_input(pending_input)?;
+        let result = view.drive(
+            input.receiver.as_ref().expect("live input receiver"),
+            &mut session,
+        );
+        let clear = view.painter.clear();
+        let cleanup = if clear.is_empty() {
+            Ok(())
+        } else {
+            session.present_frame(&clear).map_err(anyhow::Error::from)
+        };
+        result.and(cleanup)
+    })();
+    let _ = view.client.request(Request::CloseView {
+        handle: view.handle.clone(),
+    });
+    result
+}
+
+fn viewport(pixels: Option<frame::PixelSize>) -> frame::Viewport {
+    let (columns, rows) = size().unwrap_or((80, 24));
+    let columns = columns.clamp(1, 500);
+    let rows = rows
+        .clamp(1, 200)
+        .min((pmux_plugin_api::MAX_VIEW_CELLS / usize::from(columns)) as u16);
+    frame::Viewport {
+        columns,
+        rows,
+        pixels,
+    }
+}
+
+fn clock(epoch: Instant) -> Result<frame::Clock> {
+    Ok(frame::Clock {
+        wall_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_millis()
+            .try_into()?,
+        monotonic_ms: mono_ms(epoch.elapsed()),
+    })
 }
 
 fn mono_ms(duration: Duration) -> u64 {

@@ -1,0 +1,261 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "min_interval_ms",
+        "hosts"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "host": {
+          "type": "string"
+        },
+        "min_interval_ms": {
+          "type": "integer",
+          "minimum": 250,
+          "maximum": 60000
+        },
+        "hosts": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "required": [
+              "label",
+              "endpoint"
+            ],
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "endpoint": {
+                "enum": [
+                  "local",
+                  "command"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "error"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "host": {
+          "type": "string"
+        },
+        "error": {
+          "type": "object",
+          "required": [
+            "code",
+            "message"
+          ],
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "retry_after_ms": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "cursor": {
+      "type": "object",
+      "required": [
+        "epoch",
+        "sequence"
+      ],
+      "properties": {
+        "epoch": {
+          "type": "string"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "record": {
+      "type": "object",
+      "required": [
+        "sequence",
+        "received_at_ms",
+        "event"
+      ],
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "received_at_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "event": {
+          "type": "object",
+          "required": [
+            "schema_version",
+            "seat",
+            "run_id",
+            "event_id",
+            "source",
+            "kind"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "seat": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "event_id": {
+              "type": "string"
+            },
+            "source": {
+              "enum": [
+                "notify",
+                "hooks",
+                "runtime"
+              ]
+            },
+            "kind": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "page": {
+      "type": "object",
+      "required": [
+        "epoch",
+        "oldest_sequence",
+        "current_sequence",
+        "records",
+        "cursor",
+        "has_more",
+        "reset"
+      ],
+      "properties": {
+        "epoch": {
+          "type": "string"
+        },
+        "oldest_sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "current_sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "records": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/record"
+          }
+        },
+        "cursor": {
+          "$ref": "#/$defs/cursor"
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "reset": {
+          "enum": [
+            null,
+            "restarted",
+            "retention_gap",
+            "ahead_of_feed"
+          ]
+        },
+        "sessions": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "required": [
+            "observed_at_ms",
+            "seats"
+          ],
+          "properties": {
+            "observed_at_ms": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "seats": {
+              "type": "array",
+              "maxItems": 4096,
+              "items": {
+                "type": "object",
+                "required": [
+                  "seat",
+                  "session_id",
+                  "state",
+                  "last_output_at_ms"
+                ],
+                "properties": {
+                  "seat": {
+                    "type": "string"
+                  },
+                  "session_id": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "state": {
+                    "enum": [
+                      "working",
+                      "waiting",
+                      "stopped"
+                    ]
+                  },
+                  "last_output_at_ms": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

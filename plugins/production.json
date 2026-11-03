@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "crates": [
+    "pmux-activity-monitor-plugin",
+    "pmux-activity-connector-plugin"
+  ]
+}

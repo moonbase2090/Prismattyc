@@ -6049,9 +6049,9 @@ fn dump_styled_json(client: &mut Client, client_id: u64, pane_id: u64, watch: bo
 }
 
 fn main() -> Result<()> {
-    let _vt = prismattyc_mux::platform::enable_console_vt();
     prismattyc_mux::release_update::forward_installed("pmux-attach")?;
     let cli = Cli::parse(std::env::args().skip(1))?;
+    let _vt = prismattyc_mux::platform::enter_console_vt();
     // Keep Space reads aligned with the socket selected by this attach client.
     if cli.socket_explicit {
         std::env::set_var("PRISMATTYC_SPACES_SOCKET", &cli.socket);

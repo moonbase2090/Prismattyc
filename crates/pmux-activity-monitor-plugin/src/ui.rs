@@ -7,8 +7,8 @@ use lunatui_core::{Attrs, Color, Rect, Style};
 use lunatui_term::{Event, KeyCode, KeyEvent, KeyKind};
 use lunatui_theme::{Theme, Token, Variant};
 use lunatui_widgets::{RenderCx, Sparkline, SparklineBar, Widget};
-use prismattyc_mux::activity::{ActivityKind, ActivityRecord};
-use prismattyc_mux::mailbox::AgentId;
+use prismattyc_core::activity::{ActivityKind, ActivityRecord};
+use prismattyc_core::AgentId;
 
 use crate::model::{self, Host, Link, Seat, SeatState};
 
@@ -715,6 +715,7 @@ fn link_text(host: &Host, now: u64) -> (String, bool) {
         ),
         Link::Disabled => ("feed off".to_owned(), true),
         Link::Unsupported => ("no activity feed".to_owned(), true),
+        Link::PermissionDenied => ("permission denied".to_owned(), true),
     }
 }
 
@@ -956,6 +957,10 @@ pub fn hint(hosts: &[Host]) -> Option<(&'static str, &'static str)> {
         return None;
     }
     match host.link {
+        Link::PermissionDenied => Some((
+            "Activity read access has not been granted.",
+            "Enable this plug-in with an approved activity.read scope. This view cannot change its permissions.",
+        )),
         Link::Disabled => Some((
             "Activity feed is disabled for this daemon.",
             "Turn it on with experimental_activity = true under [mux] in the Prismattyc config or the settings panel. The running pmuxd picks it up within a second, and this view connects by itself.",
@@ -1023,6 +1028,7 @@ fn draw_note(paint: &mut Painter<'_, '_>, area: Rect, y: u16, host: &Host, filte
     let text = match (&host.link, host.seats.is_empty()) {
         (Link::Connecting, _) => "Connecting to the activity feed.",
         (Link::Disabled, _) => "Activity feed is disabled for this daemon.",
+        (Link::PermissionDenied, _) => "Activity read access has not been granted.",
         (Link::Unsupported, _) => "This pmuxd is older than the activity feed.",
         (Link::Retrying { .. }, true) => "Can't reach this host's feed. Retrying.",
         (_, true) => "No activity yet. Seats appear when their hooks publish.",
@@ -1504,8 +1510,8 @@ pub(crate) mod tests_support {
 
     /// Two hosts: mac with three seats in different states, windows disconnected with one.
     pub fn fleet() -> Result<Monitor> {
-        let mut monitor = Monitor::new(vec!["mac".into(), "windows".into()], Palette::DARK, None);
-        monitor.fixed_now = Some(NOW);
+        let mut monitor = Monitor::new(vec!["mac".into(), "windows".into()], Palette::DARK, 0);
+        monitor.now_ms = NOW;
         monitor.hosts[0].apply(
             page_in(
                 "e1",
@@ -1752,8 +1758,8 @@ mod tests {
 
     /// One host with 30 seats named seat-01..seat-30, drawn once at 60x12.
     fn many() -> Result<Monitor> {
-        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, None);
-        monitor.fixed_now = Some(NOW);
+        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, 0);
+        monitor.now_ms = NOW;
         let records = (1..=30)
             .map(|n| record_run(&format!("seat-{n:02}"), n, "working", NOW - 1_000, "run-1"))
             .collect::<Result<Vec<_>>>()?;
@@ -1787,8 +1793,8 @@ mod tests {
 
     #[test]
     fn timeline_keys_scroll_and_every_back_key_returns_to_the_list() -> Result<()> {
-        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, None);
-        monitor.fixed_now = Some(NOW);
+        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, 0);
+        monitor.now_ms = NOW;
         let records = (1..=40)
             .map(|n| record_run("busy", n, "tool_started", NOW - 50_000 + n * 1_000, "run-1"))
             .collect::<Result<Vec<_>>>()?;
@@ -1873,9 +1879,9 @@ mod tests {
         let mut monitor = Monitor::new(
             vec!["a-host".into(), "empty".into(), "c-host".into()],
             Palette::DARK,
-            None,
+            0,
         );
-        monitor.fixed_now = Some(NOW);
+        monitor.now_ms = NOW;
         monitor.hosts[0].apply(
             page_in("e", vec![record_run("one", 1, "working", NOW, "r")?], None)?,
             0,
@@ -1952,8 +1958,8 @@ mod tests {
 
     #[test]
     fn a_lone_host_with_the_feed_off_says_it_cannot_be_enabled_here_yet() -> Result<()> {
-        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, None);
-        monitor.fixed_now = Some(NOW);
+        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, 0);
+        monitor.now_ms = NOW;
         monitor.hosts[0].link = Link::Disabled;
         let (text, ..) = draw(&mut monitor, 80, 24);
         let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
@@ -1978,8 +1984,8 @@ mod tests {
 
     #[test]
     fn a_lone_host_that_predates_the_feed_says_so() -> Result<()> {
-        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, None);
-        monitor.fixed_now = Some(NOW);
+        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, 0);
+        monitor.now_ms = NOW;
         monitor.hosts[0].link = Link::Unsupported;
         let (text, ..) = draw(&mut monitor, 80, 24);
         assert!(text.contains("This pmuxd has no activity feed."), "{text}");
@@ -1993,8 +1999,8 @@ mod tests {
 
     #[test]
     fn an_unreachable_lone_host_says_how_to_start_pmuxd() -> Result<()> {
-        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, None);
-        monitor.fixed_now = Some(NOW);
+        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, 0);
+        monitor.now_ms = NOW;
         monitor.hosts[0].disconnect(NOW - 5_000);
         let (text, ..) = draw(&mut monitor, 120, 30);
         assert!(text.contains("Can't reach pmuxd."), "{text}");
@@ -2006,7 +2012,7 @@ mod tests {
 
     #[test]
     fn hints_are_only_for_a_lone_host_with_nothing_to_show() -> Result<()> {
-        let mut two = Monitor::new(vec!["mac".into(), "windows".into()], Palette::DARK, None);
+        let mut two = Monitor::new(vec!["mac".into(), "windows".into()], Palette::DARK, 0);
         two.hosts[0].link = Link::Disabled;
         two.hosts[1].link = Link::Disabled;
         assert_eq!(hint(&two.hosts), None);
@@ -2014,7 +2020,7 @@ mod tests {
         monitor.hosts.truncate(1);
         monitor.hosts[0].link = Link::Disabled;
         assert_eq!(hint(&monitor.hosts), None, "cached seats stay visible");
-        let fresh = Monitor::new(vec!["mac".into()], Palette::DARK, None);
+        let fresh = Monitor::new(vec!["mac".into()], Palette::DARK, 0);
         assert_eq!(hint(&fresh.hosts), None, "connecting is not a problem yet");
         Ok(())
     }
@@ -2335,8 +2341,8 @@ mod tests {
 
     #[test]
     fn the_selection_stays_visible_when_the_pane_shrinks() -> Result<()> {
-        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, None);
-        monitor.fixed_now = Some(NOW);
+        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, 0);
+        monitor.now_ms = NOW;
         let records = (1..=30)
             .map(|n| record_run(&format!("seat-{n:02}"), n, "working", NOW - 1_000, "run-1"))
             .collect::<Result<Vec<_>>>()?;
@@ -2353,8 +2359,8 @@ mod tests {
 
     #[test]
     fn empty_and_unavailable_feeds_explain_what_to_do() -> Result<()> {
-        let mut monitor = Monitor::new(vec!["mac".into(), "windows".into()], Palette::DARK, None);
-        monitor.fixed_now = Some(NOW);
+        let mut monitor = Monitor::new(vec!["mac".into(), "windows".into()], Palette::DARK, 0);
+        monitor.now_ms = NOW;
         monitor.hosts[0].apply(page_in("e", Vec::new(), None)?, 0);
         monitor.hosts[1].link = Link::Disabled;
         let (text, ..) = draw(&mut monitor, 80, 24);
@@ -2378,7 +2384,7 @@ mod tests {
 
     #[test]
     fn ctrl_c_quits_from_any_screen() {
-        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, None);
+        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, 0);
         monitor.ui.help = true;
         let key =
             KeyEvent::press(KeyCode::Char('c')).modifiers(lunatui_term::Modifiers::new().control());

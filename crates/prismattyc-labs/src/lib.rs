@@ -17,11 +17,10 @@
 //! `wasm-pack build crates/prismattyc-labs --target web --out-dir <site>/labs/pkg`.
 //! The UI itself lives in the separate `prismattyc-website` repository.
 
-pub mod agent_id;
 pub mod mailbox;
 
-pub use agent_id::{AgentId, AgentIdError};
 pub use mailbox::{Letter, Mailbox};
+pub use prismattyc_core::{AgentId, AgentIdError};
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_lab;

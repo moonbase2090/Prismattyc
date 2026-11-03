@@ -13,7 +13,7 @@ use std::io;
 use std::process::Stdio;
 use std::time::Duration;
 
-use prismattyc_mux::mailbox::AgentId;
+use crate::framing::{BoundedLines, INPUT_BYTES, OUTPUT_BYTES};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Lines, Stdout};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -23,7 +23,7 @@ const RESTART_ATTEMPTS: usize = 5;
 struct ChildSession {
     process: Child,
     stdin: ChildStdin,
-    stdout: Lines<BufReader<ChildStdout>>,
+    stdout: Lines<BufReader<BoundedLines<ChildStdout>>>,
 }
 
 #[derive(Default)]
@@ -84,13 +84,13 @@ impl ProtocolState {
     }
 }
 
-pub async fn run(agent: &AgentId) -> io::Result<()> {
+pub async fn run(arguments: &[String]) -> io::Result<()> {
     let mut executable = std::env::current_exe()?;
     let mut child_version = env!("CARGO_PKG_VERSION").to_string();
-    let mut host_input = BufReader::new(tokio::io::stdin()).lines();
+    let mut host_input = BufReader::new(BoundedLines::new(tokio::io::stdin(), INPUT_BYTES)).lines();
     let mut host_output = tokio::io::stdout();
     let mut state = ProtocolState::default();
-    let mut child = spawn_child(&executable, agent)?;
+    let mut child = spawn_child(&executable, arguments)?;
     let socket = crate::mail::mux_socket();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
 
@@ -101,7 +101,7 @@ pub async fn run(agent: &AgentId) -> io::Result<()> {
                 let _=requests::register_version(&socket,"mcp",&child_version);
                 if let Some(request)=requests::take(&socket,"mcp") {
                     let replacement=prismattyc_mux::release_update::installed_binary("pmux-mcp").unwrap_or_else(||executable.clone());
-                    child=restart_child(child,&replacement,agent,&mut state,&mut host_output).await?;
+                    child=restart_child(child,&replacement,arguments,&mut state,&mut host_output).await?;
                     executable=replacement;
                     let probe=executable.clone();
                     child_version=tokio::task::spawn_blocking(move ||prismattyc_mux::release_update::version_label(&probe)).await.ok().and_then(Result::ok).unwrap_or_else(||"unknown".into());
@@ -124,7 +124,7 @@ pub async fn run(agent: &AgentId) -> io::Result<()> {
                     child = restart_child(
                         child,
                         &executable,
-                        agent,
+                        arguments,
                         &mut state,
                         &mut host_output,
                     ).await?;
@@ -140,7 +140,7 @@ pub async fn run(agent: &AgentId) -> io::Result<()> {
                         child = restart_child(
                             child,
                             &executable,
-                            agent,
+                            arguments,
                             &mut state,
                             &mut host_output,
                         ).await?;
@@ -154,7 +154,7 @@ pub async fn run(agent: &AgentId) -> io::Result<()> {
 async fn restart_child(
     mut old_child: ChildSession,
     executable: &std::path::Path,
-    agent: &AgentId,
+    arguments: &[String],
     state: &mut ProtocolState,
     host_output: &mut Stdout,
 ) -> io::Result<ChildSession> {
@@ -174,7 +174,7 @@ async fn restart_child(
 
     let mut last_error = None;
     for attempt in 1..=RESTART_ATTEMPTS {
-        match spawn_child(executable, agent) {
+        match spawn_child(executable, arguments) {
             Ok(mut child) => match bootstrap_child(&mut child, state, host_output).await {
                 Ok(()) => {
                     eprintln!("pmux-mcp supervisor: child restarted (attempt {attempt})");
@@ -234,10 +234,9 @@ async fn bootstrap_child(
     Ok(())
 }
 
-fn spawn_child(executable: &std::path::Path, agent: &AgentId) -> io::Result<ChildSession> {
+fn spawn_child(executable: &std::path::Path, arguments: &[String]) -> io::Result<ChildSession> {
     let mut process = Command::new(executable)
-        .arg("--as")
-        .arg(agent.to_string())
+        .args(arguments)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -254,7 +253,7 @@ fn spawn_child(executable: &std::path::Path, agent: &AgentId) -> io::Result<Chil
     Ok(ChildSession {
         process,
         stdin,
-        stdout: BufReader::new(stdout).lines(),
+        stdout: BufReader::new(BoundedLines::new(stdout, OUTPUT_BYTES)).lines(),
     })
 }
 

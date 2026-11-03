@@ -51,7 +51,7 @@ try {
     $wxs = Join-Path $repo 'scripts\release\prismattyc.wxs'
     $olderBuilt = Join-Path $stage 'older.msi'
     $sameBuilt = Join-Path $stage 'same.msi'
-    & $wix build $wxs -arch x64 `
+    & $wix build $wxs -arch x64 -ext WixToolset.Util.wixext/5.0.2 `
         -d "ProductVersion=$olderProduct" `
         -d "SourceVersion=$($manifest.version)" `
         -d "Payload=$($payload.FullName)" `
@@ -59,7 +59,7 @@ try {
         -o $olderBuilt
     if ($LASTEXITCODE -ne 0) { throw "older MSI build exited $LASTEXITCODE" }
     # A second build of the same ProductVersion gets a new ProductCode.
-    & $wix build $wxs -arch x64 `
+    & $wix build $wxs -arch x64 -ext WixToolset.Util.wixext/5.0.2 `
         -d "ProductVersion=$($manifest.msi_product_version)" `
         -d "SourceVersion=$($manifest.version)" `
         -d "Payload=$($payload.FullName)" `

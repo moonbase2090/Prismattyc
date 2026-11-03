@@ -1,0 +1,38 @@
+manifest_version = 1
+id = "org.moonbase.activity-connector"
+version = "1.0.0"
+plugin_api = "^1.0.0"
+component = "connector.wasm"
+notices = ["LICENSE"]
+
+[requires]
+"pmux:activity/read" = "^1.0.0"
+"pmux:tool/call" = "^1.0.0"
+
+[[contributions]]
+kind = "command"
+id = "hosts"
+mcp_name = "pmux_activity_hosts"
+input_schema = "hosts-input.json"
+output_schema = "hosts-output.json"
+
+[[contributions]]
+kind = "command"
+id = "seats"
+mcp_name = "pmux_activity_seats"
+input_schema = "seats-input.json"
+output_schema = "seats-output.json"
+
+[[contributions]]
+kind = "command"
+id = "recent"
+mcp_name = "pmux_activity_recent"
+input_schema = "recent-input.json"
+output_schema = "recent-output.json"
+
+[[contributions]]
+kind = "command"
+id = "poll"
+mcp_name = "pmux_activity_poll"
+input_schema = "poll-input.json"
+output_schema = "poll-output.json"

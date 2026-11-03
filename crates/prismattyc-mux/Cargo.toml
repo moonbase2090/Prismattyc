@@ -12,16 +12,27 @@ anyhow.workspace = true
 mutants = "0.0.3"
 crossterm.workspace = true
 getrandom = "0.3"
+hmac = "0.12"
 png = "0.17"
 portable-pty.workspace = true
 prismattyc-core = { path = "../prismattyc-core" }
 prismattyc-emulator = { path = "../prismattyc-emulator" }
 prismattyc-protocol = { path = "../prismattyc-protocol" }
 prismattyc-render = { path = "../prismattyc-render" }
+pmux-plugin-api = { path = "../pmux-plugin-api", features = ["host"] }
+pmux-plugin-runtime = { path = "../pmux-plugin-runtime" }
+postcard = { version = "1.1.3", default-features = false, features = ["alloc"] }
+jsonschema = { version = "=0.60.2", default-features = false }
+base64 = "0.22"
+lunatui-core.workspace = true
+lunatui-image.workspace = true
+lunatui-term = { workspace = true, features = ["pixel-layer"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 semver = "1.0"
 sha2 = "0.10"
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+url = "2.5"
 toml = "0.8"
 toml_edit = "0.22"
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -40,12 +51,15 @@ arboard = { version = "3.6", default-features = false, features = [
 arboard = "3.6"
 
 [dev-dependencies]
+wit-component = "=0.239.0"
+pmux-plugin-fixture = { path = "../pmux-plugin-fixture" }
 prismattyc-core = { path = "../prismattyc-core" }
 
 [build-dependencies]
 prismattyc-winres = { path = "../prismattyc-winres" }
+serde_json = "1.0"
 
 [target.'cfg(windows)'.dependencies]
 uds_windows = "1.2.1"
 sysinfo = { version = "0.37.2", default-features = false, features = ["system"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_Networking_WinSock", "Win32_System_Console", "Win32_System_Memory", "Win32_System_JobObjects", "Win32_UI_Shell"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_Networking_WinSock", "Win32_System_Console", "Win32_System_Memory", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_UI_Shell"] }

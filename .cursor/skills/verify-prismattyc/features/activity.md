@@ -13,6 +13,13 @@ registration, package grants, and the MCP operator allowlist are separate steps.
 
 ## Build and drive the actual packages
 
+Before preparing a release branch or core tag, run
+`python3 scripts/release/prepare-plugin-bundle.py` without `--candidate` and
+require exit 0. A missing official pin requires the owner to publish the first
+catalog and review its generated pin; follow `plugins/README.md`. CI candidate
+proof does not satisfy this release prerequisite. Release branches now reject
+a missing official pin before the shared bundle build starts.
+
 Use Launch to prepare a verified production bundle and build matched binaries.
 Then run the production driver, preserving its output outside disposable state:
 

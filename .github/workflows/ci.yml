@@ -294,6 +294,9 @@ jobs:
       - name: Check nightly mutants argv and sharding
         run: python3 scripts/mutants-nightly_test.py
 
+      - name: Check plug-in release preflight
+        run: python3 scripts/release/plugin_artifacts_workflow_test.py
+
       - name: Check graphite-core dependency pin
         run: |
           set -euo pipefail

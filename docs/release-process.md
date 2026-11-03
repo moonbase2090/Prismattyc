@@ -18,6 +18,12 @@ and a signed universal macOS app distributed as a DMG and a zip.
 2. Merge the release source into `main` and complete the release gates in
    [the testing policy](testing-policy.md). The CRAP release gate is
    advisory for Prismattyc: it reports a warning but never fails.
+   Before creating the core tag, run
+   `python3 scripts/release/prepare-plugin-bundle.py` and require a verified
+   official bundle. For the first catalog, follow the owner publication and
+   pin review steps in [Immutable plug-in bundles](../plugins/README.md#official-catalog-pins).
+   A successful candidate build in CI does not establish this prerequisite.
+   Release branches require the official pin even when CI builds a candidate.
 3. Confirm that the repository has the Apple secrets listed below.
 4. Push a tag such as `v0.2.21` to start the release workflow.
 5. Wait for every build job. The publish job creates the release only after

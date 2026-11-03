@@ -33,6 +33,18 @@ jobs:
       - name: Check out frozen source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Require the official pin before release preparation
+        env:
+          BUNDLE_MODE: ${{ inputs.mode || 'candidate' }}
+          SOURCE_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          if [[ "$BUNDLE_MODE" == pinned || "$SOURCE_BRANCH" == release/* ]]; then
+            if [ ! -f plugins/bundle-pin.json ]; then
+              echo '::error::Publish and review the first official plug-in catalog, then commit plugins/bundle-pin.json before preparing a core release. See plugins/README.md.'
+              exit 1
+            fi
+          fi
+
       - name: Install Rust and the guest target
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:

@@ -17,6 +17,7 @@
 - Activity plug-ins must be installed and explicitly enabled after upgrading from the standalone monitor. Collection opt-in does not grant plug-in access.
 - Cell glyphs and shaped emoji are rasterized once per font and reused.
 - Font changes from configuration reload, zoom, and display scale load off the window event thread. Repeated changes keep only the newest pending request.
+- Seat details group activity by task and pair operation starts with their results. Each action shows its outcome, available file or command, duration, and failure exit status. The details view scrolls and keeps run and operation identifiers behind the diagnostic toggle.
 
 ### Fixed
 

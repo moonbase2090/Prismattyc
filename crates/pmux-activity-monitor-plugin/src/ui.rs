@@ -2587,7 +2587,7 @@ mod tests {
         use serde_json::json;
         let mut monitor = fleet()?;
         let command =
-            |seq, kind, at, detail| record_detail("coder", seq, kind, at, "run-eeeeeeee1", detail);
+            |seq, kind, at, detail| record_detail("seat-a", seq, kind, at, "run-eeeeeeee1", detail);
         monitor.hosts[0].apply(
             page_in(
                 "e1",
@@ -2596,7 +2596,7 @@ mod tests {
                         9,
                         "edit_started",
                         NOW - 80_000,
-                        json!({"tool": "Edit", "file": "src/ui.rs", "task": "TASK-12", "operation_id": "op-edit"}),
+                        json!({"tool": "tool-edit", "file": "src/ui.rs", "task": "task-a", "operation_id": "op-edit"}),
                     )?,
                     command(
                         10,
@@ -2608,7 +2608,7 @@ mod tests {
                         11,
                         "command_started",
                         NOW - 50_000,
-                        json!({"tool": "Bash", "command": "cargo test -p pmux-activity-monitor-plugin", "operation_id": "op-test"}),
+                        json!({"tool": "tool-run", "command": "run-checks --suite activity-monitor-plugin", "operation_id": "op-test"}),
                     )?,
                     command(
                         12,
@@ -2617,12 +2617,12 @@ mod tests {
                         json!({"exit_code": 101, "duration_ms": 34_000, "operation_id": "op-test"}),
                     )?,
                     record_detail(
-                        "coder",
+                        "seat-a",
                         13,
                         "tool_started",
                         NOW - 3_000,
                         "run-eeeeeeee2",
-                        json!({"tool": "Read", "file": "docs/plan.md", "task": "TASK-31", "operation_id": "op-read"}),
+                        json!({"tool": "tool-read", "file": "docs/plan.md", "task": "task-b", "operation_id": "op-read"}),
                     )?,
                 ],
                 None,
@@ -2640,25 +2640,28 @@ mod tests {
     #[test]
     fn seat_details_group_activities_by_task_with_results() -> Result<()> {
         let mut monitor = fleet_with_details()?;
-        open_details(&mut monitor, "coder");
+        open_details(&mut monitor, "seat-a");
         let (text, ..) = draw(&mut monitor, 100, 24);
-        assert!(text.contains("coder on mac"), "{text}");
+        assert!(text.contains("seat-a on mac"), "{text}");
         // Header facts: unknown until pmux reports them, ticket from the latest task.
         assert!(text.contains("Harness unknown"), "{text}");
         assert!(text.contains("Model unknown"), "{text}");
         assert!(text.contains("Quota unknown"), "{text}");
         assert!(text.contains("Project unknown"), "{text}");
-        assert!(text.contains("Ticket TASK-31"), "{text}");
+        assert!(text.contains("Ticket task-b"), "{text}");
         // The newest task first, each start and result on one line.
-        let pt108 = text.find("TASK-31  1 activity, last 3s ago").expect(&text);
-        let pt111 = text.find("TASK-12  2 activities, 1 failed").expect(&text);
-        assert!(pt108 < pt111, "{text}");
+        let newer = text.find("task-b  1 activity, last 3s ago").expect(&text);
+        let older = text.find("task-a  2 activities, 1 failed").expect(&text);
+        assert!(newer < older, "{text}");
         let read = line_of(&text, "docs/plan.md");
-        assert!(read.contains("… tool") && read.contains("Read"), "{read}");
-        assert!(read.trim_end().ends_with("running"), "{read}");
-        let test = line_of(&text, "cargo test");
         assert!(
-            test.contains("✗ command") && test.contains("Bash"),
+            read.contains("… tool") && read.contains("tool-read"),
+            "{read}"
+        );
+        assert!(read.trim_end().ends_with("running"), "{read}");
+        let test = line_of(&text, "run-checks");
+        assert!(
+            test.contains("✗ command") && test.contains("tool-run"),
             "{test}"
         );
         assert!(test.trim_end().ends_with("34s  exit 101"), "{test}");
@@ -2680,14 +2683,14 @@ mod tests {
         let mut monitor = fleet_with_details()?;
         let seat = monitor.hosts[0]
             .seats
-            .get_mut(&AgentId::new("coder").unwrap())
+            .get_mut(&AgentId::new("seat-a").unwrap())
             .unwrap();
-        seat.info.harness = Some("claude".into());
-        seat.info.project = Some("Prismattyc".into());
-        open_details(&mut monitor, "coder");
+        seat.info.harness = Some("harness-a".into());
+        seat.info.project = Some("project-a".into());
+        open_details(&mut monitor, "seat-a");
         let (text, ..) = draw(&mut monitor, 100, 24);
-        assert!(text.contains("Harness claude"), "{text}");
-        assert!(text.contains("Project Prismattyc"), "{text}");
+        assert!(text.contains("Harness harness-a"), "{text}");
+        assert!(text.contains("Project project-a"), "{text}");
         assert!(text.contains("Model unknown"), "{text}");
         assert!(text.contains("Quota unknown"), "{text}");
         Ok(())
@@ -2696,10 +2699,10 @@ mod tests {
     #[test]
     fn seat_details_show_ids_only_when_toggled() -> Result<()> {
         let mut monitor = fleet_with_details()?;
-        open_details(&mut monitor, "coder");
+        open_details(&mut monitor, "seat-a");
         press_char(&mut monitor, 'i');
         let (text, ..) = draw(&mut monitor, 120, 24);
-        let test = line_of(&text, "cargo test");
+        let test = line_of(&text, "run-checks");
         assert!(test.contains("exit 101  run "), "{test}");
         assert!(test.contains(" op "), "{test}");
         Ok(())
@@ -2720,19 +2723,25 @@ mod tests {
     #[test]
     fn seat_details_scroll_and_fit_a_narrow_pane() -> Result<()> {
         let mut monitor = fleet_with_details()?;
-        open_details(&mut monitor, "coder");
-        let (text, ..) = draw(&mut monitor, 40, 12);
-        assert!(text.contains("coder"), "{text}");
-        assert!(
-            text.lines().all(|line| line.chars().count() <= 40),
-            "{text}"
-        );
-        let before = monitor.ui.timeline_offset;
-        press(&mut monitor, KeyCode::Down);
-        draw(&mut monitor, 40, 12);
-        assert!(monitor.ui.timeline_offset >= before);
-        press_char(&mut monitor, 'g');
+        open_details(&mut monitor, "seat-a");
+        // Nine rows leave less room than the seat's five activity lines need,
+        // so the list has to scroll.
+        let (top, ..) = draw(&mut monitor, 40, 9);
+        assert!(top.contains("seat-a"), "{top}");
+        assert!(top.lines().all(|line| line.chars().count() <= 40), "{top}");
         assert_eq!(monitor.ui.timeline_offset, 0);
+        press(&mut monitor, KeyCode::Down);
+        let (scrolled, ..) = draw(&mut monitor, 40, 9);
+        assert_eq!(monitor.ui.timeline_offset, 1, "{scrolled}");
+        assert_ne!(top, scrolled, "scrolling must change the visible rows");
+        assert!(
+            top.contains("task-b") && !scrolled.contains("task-b  1"),
+            "{scrolled}"
+        );
+        press_char(&mut monitor, 'g');
+        let (back, ..) = draw(&mut monitor, 40, 9);
+        assert_eq!(monitor.ui.timeline_offset, 0);
+        assert_eq!(back, top);
         Ok(())
     }
 

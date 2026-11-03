@@ -115,7 +115,7 @@ pub struct Seat {
 /// prompts, paths or command text.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SeatInfo {
-    /// The agent harness running in the seat, such as `claude` or `codex`.
+    /// The agent harness running in the seat, as pmux names it.
     pub harness: Option<String>,
     pub model: Option<String>,
     pub quota: Option<String>,
@@ -779,26 +779,26 @@ pub(crate) mod tests {
     fn seat_facts_follow_the_latest_session_snapshot() -> Result<()> {
         let mut host = Host::new("local");
         let mut page = page_in("e0", vec![], None)?;
-        let mut sessions = discovered(&["coder"], 1_000);
-        sessions.seats[0].harness = Some("codex".into());
-        sessions.seats[0].model = Some("gpt-5".into());
-        sessions.seats[0].project = Some("Prismattyc".into());
+        let mut sessions = discovered(&["seat-a"], 1_000);
+        sessions.seats[0].harness = Some("harness-a".into());
+        sessions.seats[0].model = Some("model-a".into());
+        sessions.seats[0].project = Some("project-a".into());
         page.sessions = Some(sessions);
         host.apply(page.clone(), 0);
         assert_eq!(
-            seat(&host, "coder").info,
+            seat(&host, "seat-a").info,
             SeatInfo {
-                harness: Some("codex".into()),
-                model: Some("gpt-5".into()),
+                harness: Some("harness-a".into()),
+                model: Some("model-a".into()),
                 quota: None,
-                project: Some("Prismattyc".into()),
+                project: Some("project-a".into()),
             }
         );
         // A later snapshot that no longer reports a value clears it, rather
         // than leaving an old guess on screen.
-        page.sessions = Some(discovered(&["coder"], 2_000));
+        page.sessions = Some(discovered(&["seat-a"], 2_000));
         host.apply(page, 10);
-        assert_eq!(seat(&host, "coder").info, SeatInfo::default());
+        assert_eq!(seat(&host, "seat-a").info, SeatInfo::default());
         Ok(())
     }
 
@@ -1234,7 +1234,7 @@ pub(crate) mod tests {
                 "command_started",
                 1_000,
                 "run-1",
-                json!({"tool": "Bash", "command": "cargo test", "task": "TASK-12", "operation_id": "op-1"}),
+                json!({"tool": "tool-run", "command": "run-checks", "task": "task-a", "operation_id": "op-1"}),
             )?,
             record_detail(
                 "builder",
@@ -1247,14 +1247,14 @@ pub(crate) mod tests {
         ])?;
         let groups = task_groups(seat(&host, "builder"));
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].task, Some("TASK-12"));
+        assert_eq!(groups[0].task, Some("task-a"));
         let [activity] = groups[0].activities.as_slice() else {
             panic!("one activity: {groups:?}");
         };
         assert_eq!(activity.action, Some(Action::Command));
         assert_eq!(activity.outcome, Outcome::Failed);
-        assert_eq!(activity.tool, Some("Bash"));
-        assert_eq!(activity.target, Some("cargo test"));
+        assert_eq!(activity.tool, Some("tool-run"));
+        assert_eq!(activity.target, Some("run-checks"));
         assert_eq!(activity.duration_ms, Some(34_000));
         assert_eq!(activity.exit_code, Some(101));
         assert_eq!(activity.at_ms, 35_000);
@@ -1319,7 +1319,7 @@ pub(crate) mod tests {
                 "edit_finished",
                 1_000,
                 "run-1",
-                task("TASK-1"),
+                task("task-a"),
             )?,
             record_detail(
                 "builder",
@@ -1327,9 +1327,9 @@ pub(crate) mod tests {
                 "edit_finished",
                 2_000,
                 "run-2",
-                task("TASK-2"),
+                task("task-b"),
             )?,
-            // Same run as TASK-1, no task of its own: it inherits TASK-1.
+            // Same run as task-a, no task of its own: it inherits task-a.
             record_at("builder", 3, "command_finished", 3_000)?,
             record_run("builder", 4, "mail_received", 4_000, "run-3")?,
         ])?;
@@ -1340,7 +1340,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             summary,
-            vec![(None, 1), (Some("TASK-1"), 2), (Some("TASK-2"), 1)]
+            vec![(None, 1), (Some("task-a"), 2), (Some("task-b"), 1)]
         );
         assert_eq!(groups[1].activities[0].action, Some(Action::Command));
         Ok(())

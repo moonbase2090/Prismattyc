@@ -36,6 +36,10 @@ allow = [
   "Unicode-3.0",
   "Zlib",
 ]
+# Mozilla CA root data is separately licensed under CDLA-Permissive-2.0.
+exceptions = [
+  { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+]
 confidence-threshold = 0.8
 
 [licenses.private]

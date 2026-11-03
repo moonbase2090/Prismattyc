@@ -215,6 +215,10 @@ fn main() -> Result<()> {
     let config_path = prism_config_path();
     let config_seen = prismattyc_mux::activity_config::Fingerprint::of(&config_path);
     let mux_file = load_mux_section(&config_path).ok();
+    if let Some(file) = mux_file.as_ref() {
+        prismattyc_mux::activity_webhook::WebhookConfig::from_mux(file)
+            .context("invalid activity webhook configuration")?;
+    }
     let remote_size = mux_file
         .as_ref()
         .and_then(|file| resolve_remote_size(None, file).ok())
@@ -258,13 +262,16 @@ fn main() -> Result<()> {
     // [mux] experimental_activity applies live: no restart, sessions untouched.
     let activity_config = prismattyc_mux::activity_config::Watcher::start(
         server.plane(),
-        config_path,
+        config_path.clone(),
         cli.experimental_activity,
         config_seen,
         prismattyc_mux::activity_config::POLL,
     )?;
+    let activity_webhook =
+        prismattyc_mux::activity_webhook::Worker::start(cli.socket.clone(), config_path)?;
     println!("{}", server.path().display());
     server.wait_shutdown();
+    drop(activity_webhook);
     prismattyc_mux::private_fs::write(&stopped_path, b"intentional shutdown\n")?;
     drop(activity_config);
     drop(space_autosave);
@@ -296,7 +303,12 @@ const BOOTSTRAP_SESSION: &str = "default";
 /// The flag or `[mux] experimental_activity = true` turns the feed on at
 /// start. After that, the activity config watcher applies edits live.
 fn activity_enabled(cli: &Cli, file: Option<&prismattyc_mux::MuxSection>) -> bool {
-    cli.experimental_activity || file.is_some_and(|file| file.experimental_activity())
+    cli.experimental_activity
+        || file.is_some_and(|file| {
+            file.experimental_activity()
+                || (file.activity_webhook_url.is_some()
+                    && file.activity_webhook_secret_file.is_some())
+        })
 }
 
 fn bootstrap_plane(cli: &Cli) -> Result<ControlPlane> {

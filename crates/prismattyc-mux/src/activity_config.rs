@@ -70,7 +70,10 @@ pub fn wanted(flag: bool, file: Result<&MuxSection, &anyhow::Error>) -> Option<b
     if flag {
         return Some(true);
     }
-    file.ok().map(MuxSection::experimental_activity)
+    file.ok().map(|file| {
+        file.experimental_activity()
+            || (file.activity_webhook_url.is_some() && file.activity_webhook_secret_file.is_some())
+    })
 }
 
 /// Background watcher; dropping it stops the thread.
@@ -154,6 +157,15 @@ fn apply(plane: &Arc<Mutex<ControlPlane>>, config: &Path, flag: bool) -> Result<
         return Err(Pending::NoValue);
     }
     let file = parse_mux_section(&raw, config);
+    if let Ok(section) = file.as_ref() {
+        if section.activity_webhook_url.is_some()
+            || section.activity_webhook_secret_file.is_some()
+            || section.activity_webhook_secret.is_some()
+        {
+            crate::activity_webhook::WebhookConfig::from_mux(section)
+                .map_err(|error| Pending::Failed(error.to_string()))?;
+        }
+    }
     let Some(on) = wanted(flag, file.as_ref()) else {
         let why = file
             .err()
@@ -185,6 +197,9 @@ mod tests {
     fn section(on: Option<bool>) -> MuxSection {
         MuxSection {
             experimental_activity: on,
+            activity_webhook_url: None,
+            activity_webhook_secret_file: None,
+            activity_webhook_secret: None,
             ..MuxSection::default()
         }
     }
@@ -202,6 +217,16 @@ mod tests {
         assert_eq!(wanted(false, Ok(&section(Some(true)))), Some(true));
         assert_eq!(wanted(false, Ok(&section(Some(false)))), Some(false));
         assert_eq!(wanted(false, Ok(&section(None))), Some(false));
+    }
+
+    #[test]
+    fn webhook_is_opt_in_and_enables_the_feed_only_with_both_settings() {
+        let mut config = section(None);
+        assert_eq!(wanted(false, Ok(&config)), Some(false));
+        config.activity_webhook_url = Some("https://example.invalid/activity".into());
+        assert_eq!(wanted(false, Ok(&config)), Some(false));
+        config.activity_webhook_secret_file = Some("/private/key".into());
+        assert_eq!(wanted(false, Ok(&config)), Some(true));
     }
 
     #[test]

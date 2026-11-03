@@ -23,6 +23,42 @@ pub struct Retained {
     pub sessions: Option<prismattyc_core::activity::ActivitySessions>,
 }
 
+/// Return the first bounded page at or after a Unix-millisecond timestamp.
+/// The cursor advances through the current watermark when no retained event
+/// matches, so subsequent polls do not replay old records.
+pub fn since_time(history: &Retained, since_ms: u64, limit: usize) -> ActivityPage {
+    let matching = history
+        .records
+        .iter()
+        .filter(|record| record.received_at_ms >= since_ms)
+        .collect::<Vec<_>>();
+    let records = matching
+        .iter()
+        .take(limit)
+        .map(|record| (*record).clone())
+        .collect::<Vec<_>>();
+    let sequence = records
+        .last()
+        .map_or(history.cursor.sequence, |record| record.sequence);
+    let retention_gap = history
+        .records
+        .first()
+        .is_some_and(|record| since_ms < record.received_at_ms);
+    ActivityPage {
+        epoch: history.epoch.clone(),
+        oldest_sequence: history.oldest_sequence,
+        current_sequence: history.cursor.sequence,
+        records,
+        cursor: ActivityCursor {
+            epoch: history.epoch.clone(),
+            sequence,
+        },
+        has_more: sequence < history.cursor.sequence,
+        reset: retention_gap.then_some(prismattyc_core::activity::ActivityReset::RetentionGap),
+        sessions: history.sessions.clone(),
+    }
+}
+
 /// Drain retained history in at most two pages, stopping at the first page's
 /// `current_sequence` so a busy producer cannot keep the query running. Fails
 /// rather than mixing histories when the daemon resets between pages.
@@ -236,6 +272,8 @@ mod tests {
         assert_eq!(result["seats"][1]["seat"], "quiet");
         assert_eq!(result["seats"][1]["retained_events"], 0);
         assert_eq!(history.cursor.sequence, 0);
+        let timed = since_time(&history, 0, 10);
+        assert_eq!(timed.sessions, history.sessions);
         let filtered = filtered_page(first, Some(&AgentId::new("quiet")?));
         assert_eq!(filtered.sessions.unwrap().seats.len(), 1);
         Ok(())
@@ -280,6 +318,30 @@ mod tests {
                 None,
             )
         })
+    }
+
+    #[test]
+    fn time_poll_filters_retained_events_and_returns_a_resumable_cursor() -> Result<()> {
+        let mut history = three()?;
+        history.records[1].received_at_ms = 2_000;
+        history.records[2].received_at_ms = 3_000;
+        let page = since_time(&history, 2_000, 1);
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].sequence, 2);
+        assert_eq!(page.cursor.sequence, 2);
+        assert!(page.has_more);
+        assert_eq!(page.reset, None);
+        Ok(())
+    }
+
+    #[test]
+    fn time_poll_marks_a_gap_when_the_requested_time_predates_retained_history() -> Result<()> {
+        let history = three()?;
+        let page = since_time(&history, 0, 256);
+        assert_eq!(page.records.len(), 3);
+        assert_eq!(page.reset, Some(ActivityReset::RetentionGap));
+        assert_eq!(page.cursor.sequence, 3);
+        Ok(())
     }
 
     #[test]

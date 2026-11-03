@@ -35,13 +35,13 @@ const USAGE: &str = "usage: pmux-activity-monitor [--socket PATH] [--host LABEL=
   (with no --socket or --host, reads this machine's pmuxd, found the way pmux finds it)
                              [--theme auto|dark|light] [--no-pixels] [--no-motion]
                              [--snapshot [--size COLSxROWS]]
-       pmux-activity-monitor --socket PATH (--json | --seats | --recent SEAT | --tail [--seat SEAT])
+       pmux-activity-monitor --socket PATH (--json [--since CURSOR|UNIX_MS] | --seats | --recent SEAT | --tail [--seat SEAT])
        pmux-activity-monitor --version";
 
 enum Mode {
     Live,
     Snapshot,
-    Json,
+    Json(Option<String>),
     Seats,
     Recent(AgentId),
     Tail(Option<AgentId>),
@@ -133,6 +133,7 @@ fn options_with(
     let mut hosts: Vec<(String, Source)> = Vec::new();
     let mut mode = None;
     let mut seat = None;
+    let mut since = None;
     let mut size = None;
     let mut theme = ThemeChoice::Auto;
     let mut pixels = true;
@@ -160,7 +161,8 @@ fn options_with(
                 hosts.push((label, Source::Command(parse_argv(&next(&mut args)?)?)));
             }
             Some("--snapshot") if mode.is_none() => mode = Some(Mode::Snapshot),
-            Some("--json") if mode.is_none() => mode = Some(Mode::Json),
+            Some("--json") if mode.is_none() => mode = Some(Mode::Json(None)),
+            Some("--since") if since.is_none() => since = Some(next(&mut args)?),
             Some("--seats") if mode.is_none() => mode = Some(Mode::Seats),
             Some("--recent") if mode.is_none() => {
                 mode = Some(Mode::Recent(parse_seat(args.next())?));
@@ -190,9 +192,12 @@ fn options_with(
             _ => bail!(USAGE),
         }
     }
-    let mode = match (mode, seat) {
-        (Some(Mode::Tail(_)), seat) => Mode::Tail(seat),
-        (mode, None) => mode.unwrap_or(Mode::Live),
+    let mode = match (mode, seat, since) {
+        (Some(Mode::Tail(_)), seat, None) => Mode::Tail(seat),
+        (Some(Mode::Json(_)), None, since) => Mode::Json(since),
+        (mode, None, None) => mode.unwrap_or(Mode::Live),
+        (Some(Mode::Json(_)), Some(_), _) => bail!("--seat requires --tail"),
+        (_, _, Some(_)) => bail!("--since requires --json"),
         _ => bail!("--seat requires --tail"),
     };
     // With no host named, read this machine's own pmuxd, as `pmux` would.
@@ -201,7 +206,7 @@ fn options_with(
     }
     let query = matches!(
         mode,
-        Mode::Json | Mode::Seats | Mode::Recent(_) | Mode::Tail(_)
+        Mode::Json(_) | Mode::Seats | Mode::Recent(_) | Mode::Tail(_)
     );
     if query && !hosts.is_empty() {
         bail!("--json, --seats, --recent and --tail read one feed: use --socket, not --host");
@@ -421,7 +426,16 @@ fn main() -> Result<()> {
         Mode::Tail(seat) => tail(client, &socket, seat.as_ref()),
         mode => {
             let mut result = match mode {
-                Mode::Json => query(&mut client, "poll", json!({}))?["page"].clone(),
+                Mode::Json(since) => {
+                    let arguments = match since {
+                        Some(value) if value.parse::<u64>().is_ok() => {
+                            json!({"since_ms":value.parse::<u64>()?})
+                        }
+                        Some(cursor) => json!({"cursor":cursor}),
+                        None => json!({}),
+                    };
+                    query(&mut client, "poll", arguments)?["page"].clone()
+                }
                 Mode::Seats => query(&mut client, "seats", json!({}))?,
                 Mode::Recent(seat) => query(&mut client, "recent", json!({"seat":seat}))?,
                 _ => unreachable!(),
@@ -613,7 +627,15 @@ mod tests {
         ));
         assert!(matches!(
             parse(&["--socket", "/a", "--json"])?.mode,
-            Mode::Json
+            Mode::Json(None)
+        ));
+        assert!(matches!(
+            parse(&["--socket", "/a", "--json", "--since", "0123abcd:7"])?.mode,
+            Mode::Json(Some(ref cursor)) if cursor == "0123abcd:7"
+        ));
+        assert!(matches!(
+            parse(&["--socket", "/a", "--json", "--since", "1730000000000"])?.mode,
+            Mode::Json(Some(ref timestamp)) if timestamp == "1730000000000"
         ));
         assert!(matches!(
             parse(&["--socket", "/a", "--seats"])?.mode,
@@ -632,6 +654,7 @@ mod tests {
         for twice in [
             &["--socket", "/a", "--socket", "/b"][..],
             &["--socket", "/a", "--json", "--json"],
+            &["--socket", "/a", "--json", "--since", "x", "--since", "y"],
             &["--socket", "/a", "--seats", "--json"],
             &["--socket", "/a", "--snapshot", "--tail"],
             &["--socket", "/a", "--recent", "worker-a", "--seats"],

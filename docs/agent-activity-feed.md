@@ -85,6 +85,7 @@ The normalized event has these fields:
 | `event_id` | Retry identity within that seat and run, with the same identifier limit. |
 | `source` | `notify`, `hooks`, or `runtime`. |
 | `kind` | Closed activity enum in `activity.rs`. |
+| `process_ids` | Optional process-lineage metadata for correlating hook and runtime ownership. It is omitted when unavailable and is not included in webhook payloads. |
 
 Identifiers permit ASCII letters, digits, hyphens, underscores, periods, and
 colons. Seat identities follow the existing mailbox identity format.
@@ -93,6 +94,13 @@ responses, file paths, file contents, or mail bodies. Adapters hash upstream
 correlation identifiers before publication. Operators still choose neutral seat
 identities. This format is data minimization, not authenticated seat attribution:
 any client with same-user socket access can assert a seat.
+
+`process_ids` is a bounded list of process IDs: hook adapters report their
+nearest non-shell owner, and runtime projection reports the foreground or
+retained harness processes for the session's panes. The webhook worker uses this
+metadata to keep hook status while runtime activity remains in that process
+tree, then release it after a replacement. It does not expose process IDs in
+webhook payloads.
 
 Kinds cover session and turn start/end, tool/command/edit start/end/failure,
 explicit test start/pass/failure, working/waiting/stopped state, and mail
@@ -194,11 +202,32 @@ target/debug/pmux --socket /tmp/activity-demo/feed.sock activity-emit \
   --seat worker-a --install-hooks /absolute/path/worker-a-hooks.json
 ```
 
-Load that file through the runtime's documented settings or managed-hook option.
-Use `--schema-version 1` when its loader requires that field. Runtime hooks can
-run with a stripped environment, so the generated command embeds the explicit
-socket and seat. A shared global file with one fixed seat would misattribute
-other sessions. Use a separate profile for each seat.
+For a user-level install across Claude Code, Codex, Cursor, and Kiro, set the
+agent identity in the harness environment and run:
+
+```sh
+PMUX_AGENT=worker-a target/debug/pmux --socket /tmp/activity-demo/feed.sock \
+  activity-emit --install-hooks --all-harnesses
+```
+
+This writes Claude settings to `~/.claude/settings.json`, Codex hooks to
+`~/.codex/hooks.json`, Cursor hooks to `~/.cursor/hooks.json`, and a Kiro hook
+profile to `~/.kiro/hooks/pmux-activity.json`. The installed command reads
+`PMUX_AGENT` when the hook runs, so set it in the environment inherited by the
+harness too. Cursor and Kiro event names are translated to the activity schema.
+The installer removes and replaces only handlers marked as pmux activity
+handlers; unrelated settings and hooks are retained. Review and approve the
+generated hooks using each harness's normal trust controls.
+
+Independently, `pmuxd` publishes pane-state transitions for every
+agent-bound session. It reports `stopped` when no pane child is running,
+`working` after recent pane output, and `waiting` after a minute without output.
+These runtime records coexist with harness hook events, so sessions remain
+visible when hooks are absent or a harness changes within a pane.
+
+Load a per-seat file through the runtime's documented settings or managed-hook
+option. Use `--schema-version 1` when its loader requires that field. In
+per-seat mode, the generated command embeds the explicit socket and seat.
 
 Installation merges JSON settings under a file lock and commits atomically.
 It preserves unrelated settings, handlers, and managed-hook pointers. Repeating
@@ -225,11 +254,63 @@ mean their processes died. Disconnection leaves cached rows visibly stale and
 retries the endpoint. Press `q` to exit.
 
 `--snapshot` renders one 120 by 24 Lunatui grid as text. `--json` reads one bounded
-page. Both report pending history if the page does not contain the full buffer.
+page; add `--since EPOCH:SEQUENCE` to resume from a cursor printed in the page, or
+`--since UNIX_MILLISECONDS` to begin at a retained event time. A time query returns
+the first bounded page at or after that Unix timestamp, with a cursor for resuming.
+If the requested time predates the oldest retained event, `reset` is
+`retention_gap`. Both report pending history if the page does not contain the full
+buffer.
 The standalone tool pins Lunatui v0.1.18 by commit and has its own lockfile, so
 ordinary workspace builds do not acquire the viewer dependency.
 
 ## Bot access through Shell
+
+## Signed webhook delivery
+
+Webhook delivery is opt-in. Set both `[mux] activity_webhook_url` and
+`activity_webhook_secret_file`; the latter names a file containing at least 32
+bytes of key material. An inline `activity_webhook_secret` is rejected. The
+webhook setting enables the daemon activity feed. A newly enabled receiver starts
+from the current cursor, so it does not replay retained events from before opt-in.
+
+Each POST uses `Content-Type: application/json`,
+`X-Prismattyc-Timestamp` (Unix seconds), and
+`X-Prismattyc-Signature: sha256=<hex>`. The HMAC input is the timestamp, a dot,
+and the exact raw request body. Receivers should reject timestamps more than 300
+seconds from their clock, then compare signatures with a constant-time function.
+The bounded payload has `seat`, `state`, `reason`, `pane_id`, `space`, and
+`timestamp`. The reason is a safe generic activity label; no prompt text is
+included. Pane and Space are `null` when the activity record does not identify
+them.
+
+Hook events take precedence in webhook status while their run is active, so
+pane-state inference does not replace a specific tool failure or stop event.
+A hook `SessionEnd` or pane `stopped` transition releases that precedence and
+lets runtime state report a later hookless run. A change in pane process identity
+also releases it, which covers a replacement harness without an end hook.
+
+Python verification example:
+
+```python
+import hashlib
+import hmac
+import time
+
+def verify(raw_body: bytes, headers: dict[str, str], secret: bytes) -> bool:
+    timestamp = headers["X-Prismattyc-Timestamp"]
+    if abs(int(time.time()) - int(timestamp)) > 300:
+        return False
+    expected = "sha256=" + hmac.new(
+        secret, timestamp.encode() + b"." + raw_body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, headers["X-Prismattyc-Signature"])
+```
+
+The daemon coalesces updates per seat, holds at most 64 queued deliveries, and
+retries transient failures with exponential backoff before dropping a delivery
+after six attempts. Delivery runs on a background thread and does not block
+pmuxd's control path. Logs and errors omit webhook URLs, query strings, userinfo,
+secret contents, and receiver response bodies.
 
 A bot with Shell access to a host can query the same private socket without
 opening a terminal UI. The monitor's connector modes emit JSON:

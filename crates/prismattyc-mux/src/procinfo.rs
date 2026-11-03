@@ -27,6 +27,98 @@ pub fn children_of(pid: u32) -> Vec<u32> {
     children_of_impl(pid)
 }
 
+/// Whether `child` is `parent` or a descendant in the live process tree.
+#[must_use]
+pub fn is_process_descendant(parent: u32, child: u32) -> bool {
+    if parent == child {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        windows_pid_in_tree(parent, child)
+    }
+    #[cfg(not(windows))]
+    {
+        tree_pids(parent).contains(&child)
+    }
+}
+
+/// Nearest non-shell process above the hook adapter in its pane process tree.
+#[must_use]
+pub fn activity_hook_owner_pid() -> Option<u32> {
+    let mut pid = std::process::id();
+    let mut owner = None;
+    let mut passed_shell = false;
+    for _ in 0..32 {
+        let parent = process_parent(pid)?;
+        let args = process_args(parent)?;
+        if is_hook_shell_argv(&args) {
+            if owner.is_some() {
+                return owner;
+            }
+            passed_shell = true;
+        } else if passed_shell {
+            return Some(parent);
+        } else {
+            owner = Some(parent);
+        }
+        pid = parent;
+    }
+    owner
+}
+
+fn is_hook_shell_argv(args: &[String]) -> bool {
+    if is_shell_argv(args) {
+        return true;
+    }
+    #[cfg(windows)]
+    return args
+        .first()
+        .map(|program| executable_name(program))
+        .is_some_and(|name| matches!(name.as_str(), "powershell" | "pwsh" | "cmd"));
+    #[cfg(not(windows))]
+    false
+}
+
+fn process_args(pid: u32) -> Option<Vec<String>> {
+    #[cfg(not(windows))]
+    {
+        cmdline_strings(pid)
+    }
+    #[cfg(windows)]
+    {
+        cmdline(pid).map(|args| {
+            args.into_iter()
+                .map(|arg| String::from_utf8_lossy(&arg).into_owned())
+                .collect()
+        })
+    }
+}
+
+fn process_parent(pid: u32) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        let raw = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let close = raw.rfind(')')?;
+        return raw
+            .get(close + 1..)?
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return macos::parent_pid(pid);
+    }
+    #[cfg(windows)]
+    {
+        return windows::parent_pid(pid);
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
 /// Working directory of `pid`, if the platform exposes it.
 #[must_use]
 pub fn cwd_of(pid: u32) -> Option<PathBuf> {
@@ -113,6 +205,20 @@ pub fn live_foreground_command(root: u32) -> Option<String> {
     }
     #[cfg(not(windows))]
     foreground_command_impl(root)
+}
+
+/// Foreground process id for a live terminal child, when available.
+#[must_use]
+pub fn live_foreground_pid(root: u32) -> Option<u32> {
+    #[cfg(windows)]
+    {
+        match windows::foreground(root) {
+            windows::Foreground::Running { pid, .. } => Some(pid),
+            windows::Foreground::Unknown => None,
+        }
+    }
+    #[cfg(not(windows))]
+    foreground_pid_impl(root)
 }
 
 #[cfg(windows)]
@@ -260,12 +366,39 @@ pub fn in_terminal_foreground(root: u32, pid: u32) -> Option<bool> {
 
 #[cfg(not(windows))]
 fn command_in_foreground_pgid(root: u32, tpgid: u32) -> Option<String> {
+    let pick = foreground_pid_in_pgid(root, tpgid)?;
+    let args = cmdline_strings(pick)?;
+    if is_shell_argv(&args) {
+        return None;
+    }
+    Some(unix_replay_command(pick, args))
+}
+
+#[cfg(not(windows))]
+fn foreground_pid_impl(root: u32) -> Option<u32> {
+    match classify_tty(root) {
+        TtyForeground::Pgid(tpgid) => foreground_pid_in_pgid(root, tpgid),
+        TtyForeground::NoTty => {
+            let args = cmdline_strings(root)?;
+            if !is_shell_argv(&args) {
+                Some(root)
+            } else {
+                first_non_shell_descendant(root).or(Some(root))
+            }
+        }
+        TtyForeground::Unknown => None,
+    }
+}
+
+#[cfg(not(windows))]
+fn foreground_pid_in_pgid(root: u32, tpgid: u32) -> Option<u32> {
     let mut members = Vec::new();
     for pid in tree_pids(root) {
         if pgid_of(pid) == Some(tpgid) {
             members.push(pid);
         }
     }
+    let has_foreground_group_leader = members.contains(&tpgid);
     let non_shell: Vec<u32> = members
         .into_iter()
         .filter(|&pid| {
@@ -275,14 +408,14 @@ fn command_in_foreground_pgid(root: u32, tpgid: u32) -> Option<String> {
         })
         .collect();
     if non_shell.is_empty() {
-        return None;
+        return has_foreground_group_leader.then_some(tpgid);
     }
     let pick = non_shell
         .iter()
         .copied()
         .find(|pid| *pid == tpgid)
         .unwrap_or(non_shell[0]);
-    cmdline_strings(pick).map(|args| unix_replay_command(pick, args))
+    Some(pick)
 }
 
 #[cfg(not(windows))]
@@ -847,6 +980,21 @@ mod macos {
             return None;
         }
         Some((info.pbi_pgid, info.e_tpgid))
+    }
+
+    pub(super) fn parent_pid(pid: u32) -> Option<u32> {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::pid_t,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                size,
+            )
+        };
+        (n >= size && info.pbi_ppid > 0).then_some(info.pbi_ppid)
     }
 
     pub(super) fn cwd(pid: u32) -> Option<PathBuf> {
@@ -1582,6 +1730,11 @@ mod windows {
             CloseHandle(snapshot);
             (!result.is_empty()).then_some(result)
         }
+    }
+    pub(super) fn parent_pid(pid: u32) -> Option<u32> {
+        process_tree()?
+            .into_iter()
+            .find_map(|(child, parent)| (child == pid).then_some(parent))
     }
 
     /// One process-list refresh. `find_server_pids` used to refresh once per pid.

@@ -727,6 +727,7 @@ mod tests {
                         event_id: "event-1".into(),
                         source: domain::ActivitySource::Hooks,
                         kind: domain::ActivityKind::Waiting,
+                        process_ids: Vec::new(),
                     },
                 }],
                 cursor: domain::ActivityCursor {

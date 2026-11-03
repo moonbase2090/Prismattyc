@@ -132,9 +132,25 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/plugin-proof
         run: cargo build --workspace --bins --release --locked
 
+      - name: Unit-test the older release fetch
+        if: runner.os != 'macOS'
+        run: python tests/native/monitor-launcher-update-e2e_test.py
+
+      # A published release is immutable, so a hit is reused with no GitHub
+      # request; the script re-checks its size and digest either way.
+      - name: Restore the older release under test
+        if: runner.os != 'macOS'
+        uses: actions/cache@0c907a75c2c80ebcb7f088228285e798b750cf8f # v4.2.1
+        with:
+          path: target/old-release-cache
+          key: old-release-0.3.52-${{ runner.os }}-${{ runner.arch }}
+
       - name: Exercise older updater then contained launcher repair
         if: runner.os != 'macOS'
-        run: python tests/native/monitor-launcher-update-e2e.py --bins target/plugin-proof/release --fetch-old-version 0.3.52 --out target/monitor-launcher-proof
+        env:
+          # Anonymous API calls share a small per-IP quota on hosted runners.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python tests/native/monitor-launcher-update-e2e.py --bins target/plugin-proof/release --fetch-old-version 0.3.52 --cache-dir target/old-release-cache --out target/monitor-launcher-proof
 
       - name: Retain launcher migration results
         if: always() && runner.os != 'macOS'

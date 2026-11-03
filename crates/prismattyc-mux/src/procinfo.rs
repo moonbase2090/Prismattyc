@@ -214,7 +214,7 @@ pub fn live_foreground_pid(root: u32) -> Option<u32> {
     {
         match windows::foreground(root) {
             windows::Foreground::Running { pid, .. } => Some(pid),
-            windows::Foreground::Unknown => None,
+            windows::Foreground::Unknown | windows::Foreground::Shell => None,
         }
     }
     #[cfg(not(windows))]

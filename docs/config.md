@@ -40,6 +40,10 @@ restart the host after changing it.
 pause the window. It defaults to `true`.
 `snapshot_client` is on by default; set it to false to turn the snapshot connection off. The host reads
 that key at startup only; a later edit does not start or stop the cache.
+The host connects each pmuxd pane, and promotes it to a log replica, on a
+worker thread, so a slow or busy daemon does not pause the window. Set
+`PRISMATTYC_ASYNC_PANE_CONNECT=0` in the host's environment to connect on the
+main thread instead.
 `macos_present` selects the macOS window presenter at startup. It defaults to
 `"tiles"`; `"iosurface"` enables the three-buffer IOSurface path. Unknown
 values warn and use `"tiles"`. Other platforms ignore this key.

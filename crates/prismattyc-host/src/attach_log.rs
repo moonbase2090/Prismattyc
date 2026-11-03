@@ -213,12 +213,23 @@ pub(crate) fn pty_fallback_requested() -> bool {
     )
 }
 
-/// `PRISMATTYC_ASYNC_PANE_CONNECT=1` connects and promotes pmuxd panes on
-/// worker threads instead of blocking the main thread. Off by default.
+/// Connect and promote pmuxd panes on worker threads instead of blocking the
+/// main thread. On by default; `PRISMATTYC_ASYNC_PANE_CONNECT=0` (or `false`,
+/// `no`, `off`) keeps the synchronous connect.
 pub(crate) fn async_connect_requested() -> bool {
-    matches!(
-        std::env::var("PRISMATTYC_ASYNC_PANE_CONNECT").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
+    async_connect_from(
+        std::env::var("PRISMATTYC_ASYNC_PANE_CONNECT")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn async_connect_from(value: Option<&str>) -> bool {
+    !matches!(
+        value
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("0" | "false" | "no" | "off")
     )
 }
 
@@ -2089,6 +2100,23 @@ fn push_color(out: &mut String, color: prismattyc_mux::ColorWire, foreground: bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn async_pane_connect_is_on_unless_explicitly_turned_off() {
+        for on in [
+            None,
+            Some("1"),
+            Some("true"),
+            Some("yes"),
+            Some(""),
+            Some("anything"),
+        ] {
+            assert!(async_connect_from(on), "{on:?}");
+        }
+        for off in ["0", "false", "no", "off", "FALSE", " Off "] {
+            assert!(!async_connect_from(Some(off)), "{off:?}");
+        }
+    }
     use prismattyc_emulator::Emulator;
     use prismattyc_mux::PaneEvent;
     use std::sync::atomic::AtomicU64;

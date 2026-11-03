@@ -9,6 +9,7 @@
 
 ### Changed
 
+- The host connects pmuxd panes and promotes them to log replicas on worker threads by default, so a slow or busy daemon no longer pauses the window while panes open. Set `PRISMATTYC_ASYNC_PANE_CONNECT=0` to keep the main-thread connect.
 - After upgrading from the standalone 0.3.54 monitor, install and explicitly enable `org.moonbase.activity-monitor` for live/snapshot views and `org.moonbase.activity-connector` for JSON queries. Approve `activity.read:local` separately from the existing collection setting. Settings > Plug-ins and `pmux plugin` provide these actions; collection opt-in does not grant access automatically. Source builds need a verified plug-in bundle.
 
 ## [0.3.54] - 2026-11-01

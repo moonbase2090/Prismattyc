@@ -2623,7 +2623,7 @@ impl ControlPlane {
                         .and_then(|live| live.child_pid(pane.get()))
                         .is_some()
                 });
-                let foreground = panes
+                let foregrounds = panes
                     .iter()
                     .filter(|pane| {
                         self.live
@@ -2639,8 +2639,15 @@ impl ControlPlane {
                                 .expect("filtered live pane"),
                         )
                     })
-                    .find(|status| *status != crate::procinfo::TerminalForeground::Unknown)
-                    .unwrap_or(crate::procinfo::TerminalForeground::Unknown);
+                    .collect::<Vec<_>>();
+                let foreground = [
+                    crate::procinfo::TerminalForeground::Agent,
+                    crate::procinfo::TerminalForeground::Other,
+                    crate::procinfo::TerminalForeground::Shell,
+                ]
+                .into_iter()
+                .find(|candidate| foregrounds.contains(candidate))
+                .unwrap_or(crate::procinfo::TerminalForeground::Unknown);
                 let inactive_for_ms = last_output_at_ms.map(|at| observed_at_ms.saturating_sub(at));
                 let state = if !live {
                     ActivitySessionState::Stopped

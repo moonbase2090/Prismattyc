@@ -77,6 +77,8 @@ pub fn probe(pixels: bool) -> Probe {
 /// Lunatui 0.1.18 uploads raw RGBA (`f=32`). Prismattyc answers every graphics query with OK,
 /// but releases before raw-upload support drop raw uploads, which would leave lanes erased and
 /// blank. So inside Prismattyc pixels need `raw_upload_shown`, a real upload that is answered.
+// Only the unix probe path uses this; the tests run everywhere.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn pixel_mode(
     requested: bool,
     caps: &lunatui_term::Caps,
@@ -95,6 +97,7 @@ pub fn pixel_mode(
 }
 
 /// Kitty image number used for the raw-upload probe.
+#[cfg_attr(not(unix), allow(dead_code))]
 const PROBE_IMAGE: u32 = 4_242;
 
 /// Uploads one 1x1 raw RGBA image with an image number, then asks for device attributes.
@@ -153,6 +156,7 @@ fn raw_upload_shown(tty: &std::fs::File) -> (bool, Vec<u8>) {
     (scan.image_id.is_some(), scan.rest)
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Default, PartialEq, Eq)]
 struct RawProbe {
     /// The terminal's id for the probe image, when it answered OK.
@@ -163,6 +167,7 @@ struct RawProbe {
     rest: Vec<u8>,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn scan_raw_probe(bytes: &[u8]) -> RawProbe {
     let mut probe = RawProbe::default();
     let mut index = 0;
@@ -196,6 +201,7 @@ fn scan_raw_probe(bytes: &[u8]) -> RawProbe {
     probe
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
@@ -585,8 +591,10 @@ fn mono_ms(duration: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use lunatui_term::{KeyCode, Parser};
 
+    #[cfg(unix)]
     fn codes(events: &[Event]) -> Vec<KeyCode> {
         events
             .iter()

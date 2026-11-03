@@ -58,8 +58,10 @@ fn main() -> Result<()> {
         .iter()
         .map(|tile| {
             tile.rgba
-                .chunks_exact(4)
-                .filter(|pixel| pixel.starts_with(&[255, 122, 107, 255]))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|pixel| **pixel == [255, 122, 107, 255])
                 .count()
         })
         .sum::<usize>();

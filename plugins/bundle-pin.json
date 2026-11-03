@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "source": {
+    "kind": "official",
+    "tag": "pmux-plugins-v1.0.0"
+  },
+  "catalog_sha256": "f9468cf1fd2a2303b7231bed237785850369d2fb71af8ae64b01739b3ac1b47c",
+  "catalog_bytes": 421,
+  "receipt_sha256": "49078160805aa0f95a0536b07ea7cb83714b9201d634f3307af432cdd9ee2232",
+  "receipt_bytes": 1124
+}

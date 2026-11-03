@@ -33,7 +33,7 @@ jobs:
     if: github.actor != 'nektos/act'
     uses: ./.github/workflows/plugin-artifacts.yml
     with:
-      mode: candidate
+      mode: pinned
 
   plugin-runtime:
     name: Contained plug-ins (${{ matrix.os }})
@@ -293,6 +293,9 @@ jobs:
 
       - name: Check nightly mutants argv and sharding
         run: python3 scripts/mutants-nightly_test.py
+
+      - name: Check plug-in release preflight
+        run: python3 scripts/release/plugin_artifacts_workflow_test.py
 
       - name: Check graphite-core dependency pin
         run: |

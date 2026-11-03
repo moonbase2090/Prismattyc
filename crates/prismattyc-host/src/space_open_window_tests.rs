@@ -1447,10 +1447,29 @@ fn reopen_space_after_restart(
         }) {
             break cache.expect("attach cache");
         }
-        assert!(
-            Instant::now() < deadline,
-            "attach cache did not include all reopened sessions: keys={keys:?}"
-        );
+        if Instant::now() >= deadline {
+            let host = app.windows.get(&window).unwrap();
+            let panes: Vec<String> = host
+                .attach_pane_sessions
+                .iter()
+                .map(|(pane, id)| {
+                    format!(
+                        "pane={pane:?} id={id} name={:?} placeholder={} alive={:?}",
+                        host.mux.attach_name_of(*pane),
+                        host.mux.is_placeholder(*pane),
+                        host.mux.pane(*pane).map(|runtime| runtime.child_alive),
+                    )
+                })
+                .collect();
+            let live: Vec<String> = live
+                .iter()
+                .map(|session| format!("{}={}", session.id, session.name))
+                .collect();
+            panic!(
+                "attach cache did not include all reopened sessions: keys={keys:?} \
+                 live={live:?} panes={panes:#?}"
+            );
+        }
         std::thread::sleep(Duration::from_millis(20));
     };
     let host = app.windows.get(&window).unwrap();

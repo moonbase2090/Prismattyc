@@ -2159,7 +2159,7 @@ mod tests {
             .unwrap()
             .to_path_buf();
         let socket = mux_socket().unwrap();
-        let _daemon = Daemon(
+        let daemon = Daemon(
             std::process::Command::new(binaries.join("pmuxd"))
                 .arg("--socket")
                 .arg(&socket)
@@ -2170,12 +2170,25 @@ mod tests {
                 .spawn()
                 .unwrap(),
         );
+        // pmuxd answers on its socket before it adopts its first session into
+        // the default Space, and publishes its pid only after that. Every
+        // snapshot below must see the session's final Space, so wait for the
+        // pid rather than for the socket.
+        let pid_path = socket.with_extension("pid");
+        let daemon_pid = daemon.0.id().to_string();
         let started = Instant::now();
         let initial = loop {
-            if let Some(snapshot) = live_snapshot() {
-                break snapshot;
+            let published =
+                std::fs::read_to_string(&pid_path).is_ok_and(|text| text.trim() == daemon_pid);
+            if published {
+                if let Some(snapshot) = live_snapshot() {
+                    break snapshot;
+                }
             }
-            assert!(started.elapsed() < prismattyc_core::test_time_budget(Duration::from_secs(3)));
+            assert!(
+                started.elapsed() < prismattyc_core::test_time_budget(Duration::from_secs(3)),
+                "pmuxd did not publish its pid"
+            );
             thread::sleep(Duration::from_millis(20));
         };
         let session = &initial.sessions[0];

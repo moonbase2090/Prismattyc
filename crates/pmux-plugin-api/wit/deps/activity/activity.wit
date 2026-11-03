@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-package pmux:activity@1.1.0;
+package pmux:activity@1.2.0;
 
 interface read {
     enum source { notify, hooks, runtime }
@@ -37,7 +37,7 @@ interface read {
     }
     record cursor { epoch: string, sequence: u64 }
     enum reset { restarted, retention-gap, ahead-of-feed }
-    enum session-state { working, waiting, stopped }
+    enum session-state { working, waiting, idle, stuck, stopped }
     record session {
         seat: string,
         session-id: u64,

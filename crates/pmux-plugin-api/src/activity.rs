@@ -120,6 +120,8 @@ fn session_snapshot(
                                 read::SessionState::Waiting => {
                                     domain::ActivitySessionState::Waiting
                                 }
+                                read::SessionState::Idle => domain::ActivitySessionState::Idle,
+                                read::SessionState::Stuck => domain::ActivitySessionState::Stuck,
                                 read::SessionState::Stopped => {
                                     domain::ActivitySessionState::Stopped
                                 }

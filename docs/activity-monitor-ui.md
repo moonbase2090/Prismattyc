@@ -20,22 +20,24 @@ The monitor puts its visual weight in one place: a lane for each seat. A lane is
 | Selection / focus | `#1c2330` / `#5aa2ff` | `#eaf1fc` / `#2f6fd0` | Focused title row / focus color |
 | Hairline | `#262a32` | `#d5d9df` | Graphite hairline |
 
-Shape carries state as well as color, so the states stay distinct without color: `●` working, `◆` waiting, `✕` failed, `■` stopped and `·` no state yet. The theme follows the terminal background reported by the probe and falls back to dark. `--theme light|dark` overrides it.
+Shape carries state as well as color, so the states stay distinct without color: `●` working, `◆` waiting, `○` idle, `!` stuck, `✕` failed, `■` down and `·` no state yet. The theme follows the terminal background reported by the probe and falls back to dark. `--theme light|dark` overrides it.
 
 ## State
 
-Each event kind sets a seat state. Mail events leave the state unchanged.
+Activity events and the daemon's live session snapshot set a seat state. Mail events leave the state unchanged.
 
 | State | Kinds |
 | --- | --- |
 | Working | `working`, `turn_started`, any `*_started`, `*_finished`, `test_passed` |
 | Waiting | `waiting`, `turn_finished`, `session_started` (a new session waits for its first prompt) |
 | Failed | `tool_failed`, `command_failed`, `edit_failed`, `test_failed` |
-| Stopped | `stopped`, `session_finished` |
+| Idle | pmuxd positively detects the shell prompt and no foreground agent |
+| Stuck | pmuxd detects a foreground agent with no pane output for five minutes |
+| Down | `stopped`, `session_finished`, or no live pane child |
 
 Failed stays until the seat reports something else. `*_finished` means an operation ended, so the timeline never shows it as a success. Only `test_passed` gets a check mark.
 
-A row is stale when its last event is 30 seconds old, or when its host is disconnected. A stale row shows its age in amber, and in wider layouts it also says `stale`. Staleness never changes a seat's state, because a quiet seat might be thinking, not hung.
+A row is stale when its last event is 30 seconds old, or when its host is disconnected. A stale row shows its age in amber, and in wider layouts it also says `stale`. Staleness never changes a seat's state. Idle requires a positive shell-prompt detection; unreadable process information stays unknown. Stuck requires a recognized foreground agent and five minutes without pane output. Down means the session has no live pane child.
 
 Select a seat and press `d` to open its details. The view shows the current
 health state, latest activity and any available tool, file, command, duration,
@@ -63,7 +65,7 @@ The layout is recomputed from the pane size on every frame, so splitting or resi
 
 ```
 Wide (>= 110 cols, >= 14 rows): list and timeline side by side
- Activity monitor   ● 5 working  ◆ 2 waiting  ✕ 1 failed  ■ 2 stopped
+ Activity monitor   ● 5 working  ◆ 2 waiting  ○ 1 idle  ! 1 stuck  ✕ 1 failed  ■ 1 down
  mac  connected  7 seats  ▁▂▅▇▅▂▁▂▃  │ worker-a  mac  ● working for 41s
 ▌● worker-a      command_started   4s ▁▂▅▇▆▃│ ▁▁▂▅▇▆▃▂▅▇▇▆▅▃▁▂▃▅▆▇▅▃
  ◆ reviewer-2    turn_finished    41s ▅▃▁▁▁▁│   4s  +0.4s ▸ command_started hooks  run 3fa2c1e0
@@ -93,7 +95,7 @@ Enter opens the timeline for the selected seat, and in the wide tier the timelin
 | `Tab` / `Shift-Tab` | Jump to the next or previous host |
 | `Enter` / `→` / `l` | Open the timeline |
 | `Esc` / `←` / `h` | Back to the list |
-| `f` | Filter: all, needs attention (waiting, failed, stale), working |
+| `f` | Filter: all, needs attention (waiting, stuck, failed, stale), working |
 | `s` | Sort: by name, by most recent, by state |
 | `p` | Toggle pixel lanes when the terminal supports them |
 | `?` | Show the keys |

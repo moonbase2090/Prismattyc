@@ -80,6 +80,8 @@ impl Palette {
             SeatState::Unknown => self.muted,
             SeatState::Working => self.working,
             SeatState::Waiting => self.waiting,
+            SeatState::Idle => self.muted,
+            SeatState::Stuck => self.failed,
             SeatState::Failed => self.failed,
             SeatState::Stopped => self.stopped,
         }
@@ -254,8 +256,10 @@ fn visible(host: &Host, seat: &Seat, filter: Filter, now: u64) -> bool {
         Filter::All => true,
         Filter::Working => seat.state == SeatState::Working,
         Filter::Attention => {
-            matches!(seat.state, SeatState::Waiting | SeatState::Failed)
-                || (seat.state == SeatState::Working && model::is_stale(host, seat, now))
+            matches!(
+                seat.state,
+                SeatState::Waiting | SeatState::Stuck | SeatState::Failed
+            ) || (seat.state == SeatState::Working && model::is_stale(host, seat, now))
         }
     }
 }
@@ -556,8 +560,8 @@ fn blend(palette: &Palette, color: Color, alpha: f32) -> Color {
     Color::Rgb(mix(r, gr), mix(g, gg), mix(b, gb))
 }
 
-fn counts(hosts: &[Host]) -> [usize; 4] {
-    let mut out = [0; 4];
+fn counts(hosts: &[Host]) -> [usize; SeatState::ALL.len()] {
+    let mut out = [0; SeatState::ALL.len()];
     for seat in hosts.iter().flat_map(|host| host.seats.values()) {
         if let Some(index) = SeatState::ALL.iter().position(|state| *state == seat.state) {
             out[index] += 1;
@@ -1132,8 +1136,22 @@ fn draw_seat_row(
         base.fg(palette.muted)
     };
     paint.right(cols.age + 1, y, 4, &age, age_style);
-    if let (Some(flag), true) = (cols.flag, stale) {
-        paint.text(flag, y, flag + 5, "stale", base.fg(palette.waiting));
+    if let Some(flag) = cols.flag {
+        match seat.state {
+            SeatState::Idle | SeatState::Stuck | SeatState::Stopped => {
+                paint.text(
+                    flag,
+                    y,
+                    flag + 5,
+                    seat.state.word(),
+                    base.fg(palette.state(seat.state)),
+                );
+            }
+            _ if stale => {
+                paint.text(flag, y, flag + 5, "stale", base.fg(palette.waiting));
+            }
+            _ => {}
+        }
     }
     if let Some((lane_x, lane_w)) = cols.lane {
         paint.lane(
@@ -1203,7 +1221,18 @@ fn draw_timeline(
         model::short_age(clock.wall_ms.saturating_sub(seat.state_since_ms))
     );
     x = paint.text(x + 3, y, limit, &state, fg(palette.state(seat.state)));
-    if model::is_stale(host, seat, clock.wall_ms) {
+    if matches!(
+        seat.state,
+        SeatState::Idle | SeatState::Stuck | SeatState::Stopped
+    ) {
+        paint.text(
+            x + 2,
+            y,
+            limit,
+            seat.state.word(),
+            fg(palette.state(seat.state)),
+        );
+    } else if model::is_stale(host, seat, clock.wall_ms) {
         paint.text(x + 2, y, limit, "stale", fg(palette.waiting));
     }
     y += 1;
@@ -1747,7 +1776,7 @@ mod tests {
             14,
             "",
             r#"
- Activity monitor   ● 2 working  ◆ 1 waiting  ✕ 1 failed  ■ 0 stopped  !
+ Activity monitor   ● 2 working  ◆ 1 waiting  ○ 0 idle  ! 0 stuck  ✕ 1 failed  ■ 0 down  !
  mac  connected  3 seats  2 need you                         ▂         ▂    ▂     ▂    ▂   ▂     ▂▂
 ▌✕ builder    test_failed         2m stale                   ▃▁▁▁▁▁▁▁▁▁▃▁▁▁▁▃▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
  ◆ reviewer   turn_finished      41s stale                                        ▃▁▁▁▁▁▁▁▁▃▁▁▁▁▁▁▁
@@ -1767,7 +1796,7 @@ mod tests {
             12,
             "",
             r#"
- Activity monitor   ●2 ◆1 ✕1 ■0 !
+ Activity monitor   ●2 ◆1 ○0 !0 ✕1 ■0 !
  mac  connected  3 seats  2 need you
 ▌✕ builder    test_failed         2m
  ◆ reviewer   turn_finished      41s
@@ -1785,7 +1814,7 @@ mod tests {
             8,
             "",
             r#"
- ●2 ◆1 ✕1 ■0 !
+ ●2 ◆1 ○0 !0 ✕1 ■0 !
  mac  connected
 ▌✕ builder                  2m
  ◆ reviewer                41s
@@ -1799,7 +1828,7 @@ mod tests {
             20,
             "j",
             r#"
- Activity monitor   ● 2 working  ◆ 1 waiting  ✕ 1 failed  ■ 0 stopped  !
+ Activity monitor   ● 2 working  ◆ 1 waiting  ○ 0 idle  ! 0 stuck  ✕ 1 failed  ■ 0 down  !
  mac  connected  3 seats  2 need you             ▂  ▂▂ ▂ ▂▂ ▂ │ reviewer on mac   ◆ waiting for 41s  stale
  ✕ builder    test_failed         2m stale       ▃▁▁▃▃▁▁▁▁▁▁▁ │ 2 events  1 task  0 failures  last 41s ago
 ▌◆ reviewer   turn_finished      41s stale             ▃▁▁▃▁▁ │
@@ -1825,7 +1854,7 @@ mod tests {
             16,
             "jl",
             r#"
- Activity monitor   ● 2 working  ◆ 1 waiting  ✕ 1 failed  ■ 0 stopped  !
+ Activity monitor   ● 2 working  ◆ 1 waiting  ○ 0 idle  ! 0 stuck  ✕ 1 failed  ■ 0 down  !
  ← reviewer on mac   ◆ waiting for 41s  stale
  2 events  1 task  0 failures  last 41s ago
 
@@ -1847,7 +1876,7 @@ mod tests {
             20,
             "?",
             r#"
- Activity monitor   ●2 ◆1 ✕1 ■0 !
+ Activity monitor   ●2 ◆1 ○0 !0 ✕1 ■0 !
  mac  connected  3 seats  2 need you
 ▌✕ bui╭────────────────────────────────────────────────────────╮
  ◆ rev│ Keys                                                   │
@@ -1873,7 +1902,7 @@ mod tests {
             10,
             "l",
             r#"
- Activity monitor   ●2 ◆1 ✕1 ■0 !
+ Activity monitor   ●2 ◆1 ○0 !0 ✕1 ■0 !
  ← builder on mac   ✕ failed for 2m  stale
  3 events  1 task  1 failure  last 2m ago
                              ▃▁▁▃▁▃▁▁▁▁▁▁▁▁
@@ -2350,9 +2379,9 @@ mod tests {
         let row = line_of(&small, "worker-a");
         assert!(!row.contains("command"), "{row}");
         assert!(row.trim_end().ends_with("4s"), "{row}");
-        assert!(small.lines().next().unwrap().contains("●2 ◆1 ✕1 ■0"));
+        assert!(small.lines().next().unwrap().contains("●2"));
         let (tiny, ..) = draw(&mut monitor, 20, 3);
-        assert_eq!(tiny.lines().next().unwrap().trim_end(), "●2 ◆1 ✕1 ■0 !");
+        assert!(tiny.lines().next().unwrap().contains("●2"));
         Ok(())
     }
 

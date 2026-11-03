@@ -54,10 +54,13 @@ have no global ordering. Remote transport and access policy need separate work.
 
 Activity responses also carry an optional `sessions` snapshot with an observation
 time and every daemon session that has an agent identity. Each entry contains
-only the seat identity, numeric session ID, current working/waiting/stopped state,
-and last pane-output time. Session names, pane titles, and screen contents stay
-outside the feed. Reading this snapshot does not publish an event or advance
-the activity cursor.
+only the seat identity, numeric session ID, current working/waiting/idle/stuck/
+stopped state, and last pane-output time. `idle` requires a positively detected
+shell prompt; `stuck` requires a detected agent process with no pane output for
+five minutes. An unreadable or unsupported process tree is never treated as an
+idle shell. Session names, pane titles, and screen contents stay outside the
+feed. Reading this snapshot does not publish an event or advance the activity
+cursor.
 
 The contained monitor and connector receive this metadata through the existing
 `activity.read` grant. The monitor refreshes discovery while open. `--seats`

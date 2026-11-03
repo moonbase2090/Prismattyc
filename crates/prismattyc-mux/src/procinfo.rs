@@ -238,6 +238,65 @@ pub fn has_foreground(root: u32) -> bool {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalForeground {
+    Agent,
+    Shell,
+    Other,
+    Unknown,
+}
+
+/// Classify the terminal foreground process without treating an unreadable
+/// process tree as a shell prompt.
+pub fn terminal_foreground(root: u32) -> TerminalForeground {
+    #[cfg(windows)]
+    {
+        match windows::foreground(root) {
+            windows::Foreground::Running { args, .. } => {
+                if crate::inject_submit::classify_windows_argv(&args).is_some() {
+                    TerminalForeground::Agent
+                } else {
+                    TerminalForeground::Other
+                }
+            }
+            windows::Foreground::Shell => TerminalForeground::Shell,
+            windows::Foreground::Unknown => TerminalForeground::Unknown,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let TtyForeground::Pgid(group) = classify_tty(root) else {
+            return TerminalForeground::Unknown;
+        };
+        let mut saw_shell = false;
+        let mut saw_other = false;
+        for pid in tree_pids(root) {
+            if pgid_of(pid) != Some(group) {
+                continue;
+            }
+            let Some(args) = cmdline_strings(pid) else {
+                return TerminalForeground::Unknown;
+            };
+            if is_shell_argv(&args) {
+                saw_shell = true;
+            } else {
+                let command = unix_replay_command(pid, args);
+                if crate::classify_cmdline(&command).is_some() {
+                    return TerminalForeground::Agent;
+                }
+                saw_other = true;
+            }
+        }
+        if saw_other {
+            TerminalForeground::Other
+        } else if saw_shell {
+            TerminalForeground::Shell
+        } else {
+            TerminalForeground::Unknown
+        }
+    }
+}
+
 pub fn foreground_agent(root: u32) -> crate::InjectAgent {
     #[cfg(windows)]
     {
@@ -246,7 +305,9 @@ pub fn foreground_agent(root: u32) -> crate::InjectAgent {
                 crate::inject_submit::classify_windows_argv(&args)
                     .unwrap_or(crate::InjectAgent::Unknown)
             }
-            _ => crate::InjectAgent::Unknown,
+            windows::Foreground::Shell | windows::Foreground::Unknown => {
+                crate::InjectAgent::Unknown
+            }
         }
     }
     #[cfg(not(windows))]
@@ -1430,6 +1491,7 @@ mod windows {
             args: Vec<String>,
             forwarders: Vec<u32>,
         },
+        Shell,
         Unknown,
     }
 
@@ -1561,6 +1623,7 @@ mod windows {
                     }
                 }
                 Foreground::Unknown => None,
+                Foreground::Shell => Some(false),
             }
         }
 
@@ -1604,6 +1667,7 @@ mod windows {
                     }
                 }
                 match next {
+                    [] if shell => return Some(Foreground::Shell),
                     [] => return None,
                     [child] => {
                         let child_process = system.process(Pid::from_u32(*child))?;

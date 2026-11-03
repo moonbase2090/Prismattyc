@@ -2600,6 +2600,7 @@ impl ControlPlane {
 
     fn activity_sessions(&self) -> prismattyc_core::activity::ActivitySessions {
         use prismattyc_core::activity::{ActivitySession, ActivitySessionState, ActivitySessions};
+        const STUCK_AFTER_MS: u64 = 5 * 60 * 1000;
         let observed_at_ms = now_unix_ms();
         let seats = self
             .domain
@@ -2622,8 +2623,33 @@ impl ControlPlane {
                         .and_then(|live| live.child_pid(pane.get()))
                         .is_some()
                 });
+                let foreground = panes
+                    .iter()
+                    .filter(|pane| {
+                        self.live
+                            .as_ref()
+                            .and_then(|live| live.child_pid(pane.get()))
+                            .is_some()
+                    })
+                    .map(|pane| {
+                        crate::procinfo::terminal_foreground(
+                            self.live
+                                .as_ref()
+                                .and_then(|live| live.child_pid(pane.get()))
+                                .expect("filtered live pane"),
+                        )
+                    })
+                    .find(|status| *status != crate::procinfo::TerminalForeground::Unknown)
+                    .unwrap_or(crate::procinfo::TerminalForeground::Unknown);
+                let inactive_for_ms = last_output_at_ms.map(|at| observed_at_ms.saturating_sub(at));
                 let state = if !live {
                     ActivitySessionState::Stopped
+                } else if foreground == crate::procinfo::TerminalForeground::Shell {
+                    ActivitySessionState::Idle
+                } else if foreground == crate::procinfo::TerminalForeground::Agent
+                    && inactive_for_ms.is_some_and(|age| age >= STUCK_AFTER_MS)
+                {
+                    ActivitySessionState::Stuck
                 } else if last_output_at_ms
                     .is_some_and(|at| observed_at_ms.saturating_sub(at) < PANE_IDLE_TRIGGER_MS)
                 {

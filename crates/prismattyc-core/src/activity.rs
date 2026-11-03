@@ -194,6 +194,8 @@ pub struct ActivitySession {
 pub enum ActivitySessionState {
     Working,
     Waiting,
+    Idle,
+    Stuck,
     Stopped,
 }
 
@@ -212,6 +214,8 @@ impl ActivitySession {
                 kind: match self.state {
                     ActivitySessionState::Working => ActivityKind::Working,
                     ActivitySessionState::Waiting => ActivityKind::Waiting,
+                    ActivitySessionState::Idle => ActivityKind::Waiting,
+                    ActivitySessionState::Stuck => ActivityKind::Working,
                     ActivitySessionState::Stopped => ActivityKind::Stopped,
                 },
                 detail: None,

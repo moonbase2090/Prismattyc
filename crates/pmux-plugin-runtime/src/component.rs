@@ -557,6 +557,8 @@ fn convert_sessions(sessions: Option<domain::ActivitySessions>) -> Option<read::
                 state: match session.state {
                     domain::ActivitySessionState::Working => read::SessionState::Working,
                     domain::ActivitySessionState::Waiting => read::SessionState::Waiting,
+                    domain::ActivitySessionState::Idle => read::SessionState::Idle,
+                    domain::ActivitySessionState::Stuck => read::SessionState::Stuck,
                     domain::ActivitySessionState::Stopped => read::SessionState::Stopped,
                 },
                 last_output_at_ms: session.last_output_at_ms,

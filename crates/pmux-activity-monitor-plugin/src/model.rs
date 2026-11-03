@@ -1234,7 +1234,7 @@ pub(crate) mod tests {
                 "command_started",
                 1_000,
                 "run-1",
-                json!({"tool": "Bash", "command": "cargo test", "task": "PT-111", "operation_id": "op-1"}),
+                json!({"tool": "Bash", "command": "cargo test", "task": "TASK-12", "operation_id": "op-1"}),
             )?,
             record_detail(
                 "builder",
@@ -1247,7 +1247,7 @@ pub(crate) mod tests {
         ])?;
         let groups = task_groups(seat(&host, "builder"));
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].task, Some("PT-111"));
+        assert_eq!(groups[0].task, Some("TASK-12"));
         let [activity] = groups[0].activities.as_slice() else {
             panic!("one activity: {groups:?}");
         };
@@ -1313,9 +1313,23 @@ pub(crate) mod tests {
     fn activities_group_by_task_with_the_latest_group_first() -> Result<()> {
         let task = |t: &str| json!({ "task": t });
         let host = seat_with(vec![
-            record_detail("builder", 1, "edit_finished", 1_000, "run-1", task("PT-1"))?,
-            record_detail("builder", 2, "edit_finished", 2_000, "run-2", task("PT-2"))?,
-            // Same run as PT-1, no task of its own: it inherits PT-1.
+            record_detail(
+                "builder",
+                1,
+                "edit_finished",
+                1_000,
+                "run-1",
+                task("TASK-1"),
+            )?,
+            record_detail(
+                "builder",
+                2,
+                "edit_finished",
+                2_000,
+                "run-2",
+                task("TASK-2"),
+            )?,
+            // Same run as TASK-1, no task of its own: it inherits TASK-1.
             record_at("builder", 3, "command_finished", 3_000)?,
             record_run("builder", 4, "mail_received", 4_000, "run-3")?,
         ])?;
@@ -1326,7 +1340,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             summary,
-            vec![(None, 1), (Some("PT-1"), 2), (Some("PT-2"), 1)]
+            vec![(None, 1), (Some("TASK-1"), 2), (Some("TASK-2"), 1)]
         );
         assert_eq!(groups[1].activities[0].action, Some(Action::Command));
         Ok(())

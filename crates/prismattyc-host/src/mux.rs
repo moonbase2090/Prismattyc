@@ -5949,7 +5949,7 @@ mod tests {
         ] {
             command.env_remove(key);
         }
-        let guard = PrivateMuxServer {
+        let mut guard = PrivateMuxServer {
             child: command
                 .arg("--socket")
                 .arg(&socket)
@@ -5964,9 +5964,16 @@ mod tests {
             socket: socket.clone(),
             data: root,
         };
-        for _ in 0..200 {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
             if socket.exists() {
                 return guard;
+            }
+            if let Some(status) = guard.child.try_wait().expect("poll private pmuxd") {
+                panic!(
+                    "private pmuxd exited with {status} before publishing {}",
+                    socket.display()
+                );
             }
             thread::sleep(Duration::from_millis(10));
         }

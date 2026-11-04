@@ -372,15 +372,14 @@ fn apply(host: &mut HostState, target: &Target, name: &str) -> Result<()> {
             {
                 bail!("a space with that name exists");
             }
-            run_pmux_space(&[
-                "space".into(),
-                "rename".into(),
-                space.clone(),
-                name.to_string(),
-            ])
+            space_commands::submit(
+                host,
+                space_client::Operation::Rename {
+                    old: space.clone(),
+                    new: name.to_string(),
+                },
+            )
             .map_err(|error| anyhow::anyhow!(error))?;
-            resolve_host_space(host);
-            refresh_rail(host);
         }
     }
     finish_arrangement(host);

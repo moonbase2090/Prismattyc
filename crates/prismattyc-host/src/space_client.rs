@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Space file reads, team describe, and autosave run on one worker thread.
+//! Space reads, snapshots, and commands run on one worker thread.
 //! The main thread submits a job and applies the report on a later pump.
 //! Drop joins the worker. It does not call `measure_subprocess_wait`.
 
@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{self, ThreadId};
+use std::time::SystemTime;
 
 use prismattyc_mux::team_attention::AttentionRequest;
 use prismattyc_mux::SavedSpace;
@@ -18,15 +19,89 @@ use prismattyc_mux::Snapshot;
 use crate::mux::Wake;
 
 enum Job {
-    Poll { dir: PathBuf, name: String },
+    Poll(PollJob),
     Save(SaveJob),
     Refresh(RefreshJob),
+    Command(CommandJob),
 }
 
 enum Kind {
     Poll,
     Save,
     Refresh,
+    Command,
+}
+
+pub(crate) enum Operation {
+    Rename { old: String, new: String },
+    Delete { name: String },
+    Undo { path: PathBuf },
+    PaneTitle { session: String, title: String },
+}
+
+impl Operation {
+    fn args(&self) -> Vec<String> {
+        match self {
+            Self::Rename { old, new } => {
+                vec!["space".into(), "rename".into(), old.clone(), new.clone()]
+            }
+            Self::Delete { name } => vec!["space".into(), "rm".into(), name.clone()],
+            Self::Undo { path } => vec![
+                "space".into(),
+                "undo".into(),
+                path.to_string_lossy().into_owned(),
+            ],
+            Self::PaneTitle { session, title } => {
+                let mut args = vec!["rename-pane".into(), "--session".into(), session.clone()];
+                if !title.is_empty() {
+                    args.push(title.clone());
+                }
+                args
+            }
+        }
+    }
+}
+
+pub(crate) struct CommandJob {
+    pub pmux: PathBuf,
+    pub dir: PathBuf,
+    pub operation: Operation,
+    pub current: Option<String>,
+    pub owner: Option<String>,
+    pub epoch: u64,
+}
+
+pub(crate) struct PollJob {
+    pub dir: PathBuf,
+    pub name: String,
+    pub snapshot: SnapshotInput,
+    pub epoch: u64,
+}
+
+pub(crate) enum SnapshotInput {
+    Cached(Option<(SystemTime, Snapshot)>),
+    Fetch(PathBuf),
+}
+
+impl SnapshotInput {
+    pub(crate) fn capture(client: Option<&crate::snapshot_client::SnapshotClient>) -> Self {
+        match client {
+            Some(client) => Self::Cached(client.fresh_observed()),
+            None => crate::attach_log::mux_socket()
+                .ok()
+                .map_or(Self::Cached(None), Self::Fetch),
+        }
+    }
+
+    fn read(self) -> Option<(SystemTime, Snapshot)> {
+        match self {
+            Self::Cached(snapshot) => snapshot,
+            Self::Fetch(socket) => {
+                let started = SystemTime::now();
+                crate::attach_log::live_snapshot_at(&socket).map(|snapshot| (started, snapshot))
+            }
+        }
+    }
 }
 
 /// `pmux space save` arguments captured on the main thread.
@@ -43,12 +118,11 @@ pub(crate) struct SaveJob {
     pub epoch: u64,
 }
 
-/// One heartbeat of Space chip facts. Paths and the snapshot are copied
-/// in so the worker does not read host state or the environment.
+/// One heartbeat of Space chip facts, captured without reading host state
+/// from the worker. Without a snapshot cache, the worker fetches one.
 pub(crate) struct RefreshJob {
     pub dir: PathBuf,
-    pub names: Vec<String>,
-    pub snapshot: Snapshot,
+    pub snapshot: SnapshotInput,
     pub requests: Vec<AttentionRequest>,
     pub now_ms: u64,
     pub current: Option<String>,
@@ -61,6 +135,8 @@ pub(crate) enum Report {
     Poll {
         name: String,
         space: Option<SavedSpace>,
+        snapshot: Option<Snapshot>,
+        epoch: u64,
         #[allow(dead_code)]
         thread: ThreadId,
     },
@@ -73,11 +149,21 @@ pub(crate) enum Report {
         thread: ThreadId,
     },
     Refresh {
+        directory: crate::space_rail::Directory,
+        snapshot: Option<(SystemTime, Snapshot)>,
         pane_names: HashMap<String, Vec<String>>,
         attention: HashMap<String, usize>,
         resolved: Option<(String, SavedSpace)>,
         generation: u64,
         owner: Option<String>,
+        #[allow(dead_code)]
+        thread: ThreadId,
+    },
+    Command {
+        job: CommandJob,
+        result: Result<(), String>,
+        directory: crate::space_rail::Directory,
+        resolved: Option<(String, SavedSpace)>,
         #[allow(dead_code)]
         thread: ThreadId,
     },
@@ -87,6 +173,7 @@ struct Flags {
     poll: AtomicBool,
     save: AtomicBool,
     refresh: AtomicBool,
+    command: AtomicBool,
     busy: AtomicUsize,
 }
 
@@ -105,6 +192,7 @@ impl Client {
             poll: AtomicBool::new(false),
             save: AtomicBool::new(false),
             refresh: AtomicBool::new(false),
+            command: AtomicBool::new(false),
             busy: AtomicUsize::new(0),
         });
         let flags_thread = Arc::clone(&flags);
@@ -120,8 +208,8 @@ impl Client {
         }
     }
 
-    pub(crate) fn submit_poll(&self, dir: PathBuf, name: String) -> bool {
-        self.enqueue(Job::Poll { dir, name }, Kind::Poll)
+    pub(crate) fn submit_poll(&self, job: PollJob) -> bool {
+        self.enqueue(Job::Poll(job), Kind::Poll)
     }
 
     pub(crate) fn submit_save(&self, job: SaveJob) -> bool {
@@ -130,6 +218,10 @@ impl Client {
 
     pub(crate) fn submit_refresh(&self, job: RefreshJob) -> bool {
         self.enqueue(Job::Refresh(job), Kind::Refresh)
+    }
+
+    pub(crate) fn submit_command(&self, job: CommandJob) -> bool {
+        self.enqueue(Job::Command(job), Kind::Command)
     }
 
     pub(crate) fn refresh_busy(&self) -> bool {
@@ -175,6 +267,7 @@ impl Client {
             Kind::Poll => &self.flags.poll,
             Kind::Save => &self.flags.save,
             Kind::Refresh => &self.flags.refresh,
+            Kind::Command => &self.flags.command,
         }
     }
 }
@@ -193,14 +286,16 @@ impl Drop for Client {
 fn worker(jobs: Receiver<Job>, reports: Sender<Report>, flags: Arc<Flags>, wake: Wake) {
     while let Ok(job) = jobs.recv() {
         let (kind, report) = match job {
-            Job::Poll { dir, name } => (Kind::Poll, run_poll(dir, name)),
+            Job::Poll(job) => (Kind::Poll, run_poll(job)),
             Job::Save(job) => (Kind::Save, run_save(job)),
             Job::Refresh(job) => (Kind::Refresh, run_refresh(job)),
+            Job::Command(job) => (Kind::Command, run_command(job)),
         };
         let flag = match kind {
             Kind::Poll => &flags.poll,
             Kind::Save => &flags.save,
             Kind::Refresh => &flags.refresh,
+            Kind::Command => &flags.command,
         };
         // The report is queued before the flag drops so a settled caller
         // that sees `busy == 0` can drain it.
@@ -211,11 +306,13 @@ fn worker(jobs: Receiver<Job>, reports: Sender<Report>, flags: Arc<Flags>, wake:
     }
 }
 
-fn run_poll(dir: PathBuf, name: String) -> Report {
-    let space = prismattyc_mux::load_space(&dir, &name).ok();
+fn run_poll(job: PollJob) -> Report {
+    let space = prismattyc_mux::load_space(&job.dir, &job.name).ok();
     Report::Poll {
-        name,
+        name: job.name,
         space,
+        snapshot: job.snapshot.read().map(|(_, snapshot)| snapshot),
+        epoch: job.epoch,
         thread: thread::current().id(),
     }
 }
@@ -351,21 +448,25 @@ fn write_view_exclusive(
 }
 
 fn run_refresh(job: RefreshJob) -> Report {
+    let directory = crate::space_rail::Directory::read(&job.dir);
+    let snapshot = job.snapshot.read();
     let mut pane_names = HashMap::new();
     let mut attention = HashMap::new();
-    for name in &job.names {
+    for name in &directory.names {
         let Ok(space) = prismattyc_mux::load_space(&job.dir, name) else {
             continue;
         };
         pane_names.insert(
             name.clone(),
-            crate::space_view::pane_names(&space, &job.snapshot),
+            snapshot.as_ref().map_or_else(Vec::new, |(_, snapshot)| {
+                crate::space_view::pane_names(&space, snapshot)
+            }),
         );
         let details = prismattyc_mux::space_team::describe(
             name,
             &space,
             Default::default(),
-            Some(&job.snapshot),
+            snapshot.as_ref().map(|(_, snapshot)| snapshot),
             &job.requests,
             job.now_ms,
         );
@@ -378,11 +479,42 @@ fn run_refresh(job: RefreshJob) -> Report {
         .as_deref()
         .and_then(|name| crate::space_view::resolve_space(&job.dir, name, job.owner.as_deref()));
     Report::Refresh {
+        directory,
+        snapshot,
         pane_names,
         attention,
         resolved,
         generation: job.generation,
         owner: job.owner,
+        thread: thread::current().id(),
+    }
+}
+
+fn run_command(job: CommandJob) -> Report {
+    let args = job.operation.args();
+    let mut command = Command::new(&job.pmux);
+    prismattyc_mux::platform::hide_console(&mut command);
+    let result = match command
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+    {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("pmux {} exited {status}", args.join(" "))),
+        Err(error) => Err(format!("could not run pmux: {error}")),
+    };
+    let directory = crate::space_rail::Directory::read(&job.dir);
+    let resolved = job
+        .current
+        .as_deref()
+        .and_then(|name| crate::space_view::resolve_space(&job.dir, name, job.owner.as_deref()));
+    Report::Command {
+        job,
+        result,
+        directory,
+        resolved,
         thread: thread::current().id(),
     }
 }
@@ -394,6 +526,294 @@ mod tests {
     use std::io::Write;
     #[cfg(unix)]
     use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_and_poll_submit_without_waiting_for_a_snapshot_response() {
+        use prismattyc_mux::local_socket::UnixListener;
+
+        for poll in [false, true] {
+            let dir = scratch_dir(if poll {
+                "poll-snapshot"
+            } else {
+                "refresh-snapshot"
+            });
+            let socket = PathBuf::from("/tmp").join(format!(
+                "space-snapshot-{}-{}.sock",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let listener = UnixListener::bind(&socket).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let saved = SavedSpace {
+                version: prismattyc_mux::OWNED_SPACE_VERSION,
+                id: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+                created_at_unix_ms: Some(1),
+                saved_at_unix: 1,
+                sessions: Vec::new(),
+                tabs: Vec::new(),
+                active_tab: 0,
+                focused_session: None,
+            };
+            prismattyc_mux::save_space(&dir, "desk", &saved).unwrap();
+            let client = Client::spawn(Arc::new(|| {}));
+            let snapshot = SnapshotInput::Fetch(socket.clone());
+            assert!(if poll {
+                client.submit_poll(PollJob {
+                    dir: dir.clone(),
+                    name: "desk".into(),
+                    snapshot,
+                    epoch: 17,
+                })
+            } else {
+                client.submit_refresh(RefreshJob {
+                    dir: dir.clone(),
+                    snapshot,
+                    requests: Vec::new(),
+                    now_ms: 1,
+                    current: Some("desk".into()),
+                    owner: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+                    generation: 17,
+                })
+            });
+            assert!(
+                client.drain().is_empty(),
+                "submission waited for the unanswered socket"
+            );
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "worker did not connect");
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept failed: {error}"),
+                }
+            };
+            assert!(
+                client.drain().is_empty(),
+                "the accepted socket has not answered"
+            );
+            drop(stream);
+            let report = loop {
+                if let Some(report) = client.drain().into_iter().next() {
+                    break report;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "snapshot failure was not reported"
+                );
+                thread::sleep(Duration::from_millis(5));
+            };
+            match report {
+                Report::Poll {
+                    name,
+                    space,
+                    snapshot,
+                    epoch,
+                    thread,
+                } => {
+                    assert!(poll);
+                    assert_eq!(name, "desk");
+                    assert_eq!(
+                        space.unwrap().id.as_deref(),
+                        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                    );
+                    assert!(snapshot.is_none());
+                    assert_eq!(epoch, 17);
+                    assert_ne!(thread, thread::current().id());
+                }
+                Report::Refresh {
+                    directory,
+                    snapshot,
+                    resolved,
+                    generation,
+                    thread,
+                    ..
+                } => {
+                    assert!(!poll);
+                    assert_eq!(directory.names, ["desk"]);
+                    assert_eq!(resolved.unwrap().0, "desk");
+                    assert!(snapshot.is_none());
+                    assert_eq!(generation, 17);
+                    assert_ne!(thread, thread::current().id());
+                }
+                _ => panic!("unexpected report"),
+            }
+            drop(client);
+            drop(listener);
+            std::fs::remove_file(socket).unwrap();
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn menu_commands_return_while_the_helper_is_blocked_and_report_its_result() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Gate {
+            dir: PathBuf,
+            release: Option<Sender<()>>,
+            watchdog: Option<thread::JoinHandle<()>>,
+        }
+        impl Drop for Gate {
+            fn drop(&mut self) {
+                if let Some(release) = self.release.take() {
+                    let _ = release.send(());
+                }
+                if let Some(watchdog) = self.watchdog.take() {
+                    watchdog.join().unwrap();
+                }
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+
+        for (index, operation, expected, exit) in [
+            (
+                0,
+                Operation::Rename {
+                    old: "before".into(),
+                    new: "after".into(),
+                },
+                vec!["space", "rename", "before", "after"],
+                0,
+            ),
+            (
+                1,
+                Operation::Delete {
+                    name: "before".into(),
+                },
+                vec!["space", "rm", "before"],
+                0,
+            ),
+            (
+                2,
+                Operation::Undo {
+                    path: PathBuf::from("undo.json"),
+                },
+                vec!["space", "undo", "undo.json"],
+                7,
+            ),
+            (
+                3,
+                Operation::PaneTitle {
+                    session: "7".into(),
+                    title: "new title".into(),
+                },
+                vec!["rename-pane", "--session", "7", "new title"],
+                0,
+            ),
+        ] {
+            let client = Client::spawn(Arc::new(|| {}));
+            let dir = std::env::temp_dir().join(format!(
+                "space-command-{}-{index}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            let helper = dir.join("pmux-gated");
+            std::fs::write(&helper, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\nprintf started > \"$0.started\"\nwhile [ ! -f \"$0.release\" ]; do sleep 0.01; done\nexit {exit}\n")).unwrap();
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let timed_out = Arc::new(AtomicBool::new(false));
+            let timeout_flag = Arc::clone(&timed_out);
+            let release_path = helper.with_extension("release");
+            let (release, wait_release) = mpsc::channel();
+            let watchdog = thread::spawn(move || {
+                if wait_release.recv_timeout(Duration::from_secs(5)).is_err() {
+                    timeout_flag.store(true, Ordering::Release);
+                }
+                std::fs::write(release_path, b"release").unwrap();
+            });
+            let gate = Gate {
+                dir: dir.clone(),
+                release: Some(release),
+                watchdog: Some(watchdog),
+            };
+            assert!(client.submit_command(CommandJob {
+                pmux: helper.clone(),
+                dir: dir.clone(),
+                operation,
+                current: None,
+                owner: None,
+                epoch: 17
+            }));
+            assert!(
+                !timed_out.load(Ordering::Acquire),
+                "submitting waited for the blocked command"
+            );
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !helper.with_extension("started").exists() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(
+                std::fs::read_to_string(helper.with_extension("started")).unwrap(),
+                "started"
+            );
+            assert!(
+                client.drain().is_empty(),
+                "a blocked helper has no completion"
+            );
+            assert!(!client.submit_command(CommandJob {
+                pmux: helper.clone(),
+                dir: dir.clone(),
+                operation: Operation::Delete {
+                    name: "second".into()
+                },
+                current: None,
+                owner: None,
+                epoch: 18
+            }));
+            gate.release.as_ref().unwrap().send(()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let report = loop {
+                if let Some(report) = client.drain().into_iter().next() {
+                    break report;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "released command did not complete"
+                );
+                thread::sleep(Duration::from_millis(5));
+            };
+            let Report::Command {
+                job,
+                result,
+                thread,
+                ..
+            } = report
+            else {
+                panic!("expected a command completion")
+            };
+            assert_eq!(job.epoch, 17);
+            assert_ne!(thread, thread::current().id());
+            assert_eq!(
+                std::fs::read_to_string(helper.with_extension("args"))
+                    .unwrap()
+                    .lines()
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            if exit == 0 {
+                assert_eq!(result, Ok(()));
+            } else {
+                assert_eq!(
+                    result,
+                    Err("pmux space undo undo.json exited exit status: 7".into())
+                );
+            }
+            assert!(!timed_out.load(Ordering::Acquire));
+            drop(gate);
+            drop(client);
+        }
+    }
 
     #[cfg(unix)]
     #[test]

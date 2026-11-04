@@ -6,6 +6,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod a11y;
+mod activity_monitor_tab;
 #[cfg(any(target_os = "macos", test))]
 mod agent_skills;
 mod attach_adopt;
@@ -17423,6 +17424,7 @@ fn mux_command_for(action: keybind::Action) -> Option<MuxCommand> {
         | Action::SessionSplitDown
         | Action::TerminalSwitcher
         | Action::AgentMessages
+        | Action::ActivityMonitor
         | Action::JumpNeedsYou
         | Action::UpdateRestart
         | Action::RecentMessages => return None,
@@ -20268,6 +20270,10 @@ fn dispatch_action(
     }
     if action == A::AgentMessages {
         terminal_switcher::messages(host);
+        return Dispatch::Handled;
+    }
+    if action == A::ActivityMonitor {
+        activity_monitor_tab::open(host);
         return Dispatch::Handled;
     }
     if action == A::UpdateRestart {

@@ -364,6 +364,8 @@ session_split_down = "ctrl+alt+shift+b"
 terminal_switcher = "ctrl+shift+o"
 # view pending mail and pane input queue receipts.
 # agent_messages = []
+# open the activity monitor in a new tab.
+# activity_monitor = []
 # focus the next pane that needs your attention.
 jump_needs_you = "ctrl+shift+u"
 # update, restart components, and inspect versions.

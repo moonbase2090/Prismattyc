@@ -816,6 +816,16 @@ fn verify_dispatch(host: &mut HostState) {
     assert!(host.terminal_messages);
     assert!(host.terminal_targets.is_some());
 
+    quiet(host);
+    let tabs = host.mux.tab_count();
+    assert_eq!(dispatch(host, A::ActivityMonitor), Dispatch::Handled);
+    assert_eq!(host.mux.tab_count(), tabs + 1, "{}", toast_text(host));
+    assert_eq!(
+        host.mux.fixed_tab_name(host.mux.active_window()),
+        Some("Activity monitor")
+    );
+    assert!(host.mux.is_retained_local_terminal(host.mux.focused_id()));
+
     host.space_polish.undo = None;
     assert_eq!(dispatch(host, A::UndoSpaceChange), Dispatch::Handled);
     assert!(

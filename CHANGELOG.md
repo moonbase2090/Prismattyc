@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The command palette has an `activity_monitor` entry that opens the activity monitor in a new tab, pointed at the daemon this window uses. It has no default shortcut; bind one with `activity_monitor` under `[keys]`.
+
 ## [0.3.56] - 2026-11-03
 
 This release replaces 0.3.55, which was tagged but not published, and includes

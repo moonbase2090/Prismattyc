@@ -9,6 +9,7 @@
 ### Fixed
 
 - The settings panel shows the built-in default for `[mux]` keys that are not in the config file, so the first Enter on a boolean changes it.
+- On Windows, opening the activity monitor no longer opens an empty console window. pmuxd now starts its plug-in worker, webhook sender and default-Space `pmux` calls without a console window.
 
 ## [0.3.57] - 2026-11-04
 

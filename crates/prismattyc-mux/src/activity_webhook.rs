@@ -679,6 +679,17 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
             .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
             .unwrap_or(0);
         let mut current = std::collections::HashSet::new();
+        // One read of every seat pane's processes per tick, not one per pane.
+        let processes = crate::procinfo::PaneProcesses::read(
+            &snapshot
+                .sessions
+                .iter()
+                .filter(|session| session.agent_id.is_some())
+                .flat_map(|session| session.windows.iter())
+                .flat_map(|window| window.panes.iter())
+                .filter_map(|pane| pane.child_pid)
+                .collect::<Vec<_>>(),
+        );
         for session in snapshot.sessions {
             let Some(seat) = session.agent_id.as_deref() else {
                 continue;
@@ -687,7 +698,7 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
                 continue;
             };
             let (run_id, harness_pids, foreground_pids) =
-                snapshot_run_identity(&session, projected.get(seat));
+                snapshot_run_identity(&session, projected.get(seat), &processes);
             let state = snapshot_state(&session, now_ms);
             current.insert(seat.to_owned());
             let changed = projected
@@ -757,6 +768,7 @@ fn run_session_projection(socket: &Path, stopped: mpsc::Receiver<()>) {
 fn snapshot_run_identity(
     session: &crate::control::SessionSnapshot,
     previous: Option<&ProjectedSession>,
+    processes: &crate::procinfo::PaneProcesses,
 ) -> (String, HashMap<u64, u32>, HashMap<u64, u32>) {
     let previous = previous.filter(|previous| previous.session_id == session.id);
     let mut harness_pids = HashMap::new();
@@ -767,17 +779,17 @@ fn snapshot_run_identity(
         .flat_map(|window| window.panes.iter())
         .map(|pane| (pane, pane.child_pid))
         .map(|(pane, child_pid)| {
-            let foreground_pid = child_pid.and_then(crate::procinfo::live_foreground_pid);
-            let recognized = child_pid.is_some_and(|root| {
-                crate::procinfo::foreground_agent(root) != crate::InjectAgent::Unknown
-            });
+            let process = child_pid.map(|root| processes.get(root));
+            let foreground_pid = process.and_then(|process| process.foreground_pid);
+            let recognized =
+                process.is_some_and(|process| process.agent != crate::InjectAgent::Unknown);
             let detected = recognized.then_some(foreground_pid).flatten();
             let retained = previous
                 .and_then(|previous| previous.harness_pids.get(&pane.id).copied())
                 .filter(|prior| {
                     foreground_pid.map_or_else(
                         || crate::procinfo::pid_alive(*prior),
-                        |foreground| crate::procinfo::is_process_descendant(*prior, foreground),
+                        |foreground| processes.is_descendant(*prior, foreground),
                     )
                 });
             let harness_pid = retained.or(detected);

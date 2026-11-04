@@ -340,6 +340,105 @@ pub fn foreground_agent(root: u32) -> crate::InjectAgent {
     }
 }
 
+/// What a status poll needs about one pane's process tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneProcess {
+    pub foreground: TerminalForeground,
+    pub agent: crate::InjectAgent,
+    /// The terminal foreground process, when a command is running.
+    pub foreground_pid: Option<u32>,
+    /// The pane root's working directory. Read only for agent panes.
+    pub cwd: Option<PathBuf>,
+}
+
+impl PaneProcess {
+    const UNKNOWN: Self = Self {
+        foreground: TerminalForeground::Unknown,
+        agent: crate::InjectAgent::Unknown,
+        foreground_pid: None,
+        cwd: None,
+    };
+}
+
+/// Process facts for several pane roots, read together. On Windows this is
+/// one system process snapshot and one process refresh for every root, not
+/// one or more per pane. On macOS and Linux each root still goes through the
+/// foreground, agent and foreground-pid helpers, each of which reads that
+/// pane's own processes (no system-wide snapshot); callers bound how often
+/// that happens.
+#[derive(Clone, Debug, Default)]
+pub struct PaneProcesses {
+    panes: std::collections::HashMap<u32, PaneProcess>,
+    #[cfg(windows)]
+    parents: std::collections::HashMap<u32, u32>,
+}
+
+impl PaneProcesses {
+    /// Read every root at once. A root that cannot be read is `Unknown`.
+    #[must_use]
+    pub fn read(roots: &[u32]) -> Self {
+        #[cfg(windows)]
+        {
+            windows::pane_processes(roots)
+        }
+        #[cfg(not(windows))]
+        {
+            Self {
+                panes: roots
+                    .iter()
+                    .map(|&root| (root, unix_pane_process(root)))
+                    .collect(),
+            }
+        }
+    }
+
+    /// Facts for `root`; `Unknown` when it was not part of the read.
+    #[must_use]
+    pub fn get(&self, root: u32) -> &PaneProcess {
+        self.panes.get(&root).unwrap_or(&PaneProcess::UNKNOWN)
+    }
+
+    /// Whether `child` is `parent` or under it. Windows answers from the
+    /// snapshot this view was read from.
+    #[must_use]
+    pub fn is_descendant(&self, parent: u32, child: u32) -> bool {
+        #[cfg(windows)]
+        {
+            if parent == child {
+                return true;
+            }
+            let mut pid = child;
+            let mut seen = HashSet::new();
+            while seen.insert(pid) && seen.len() <= 256 {
+                match self.parents.get(&pid) {
+                    Some(&next) if next == parent => return true,
+                    Some(&next) => pid = next,
+                    None => return false,
+                }
+            }
+            false
+        }
+        #[cfg(not(windows))]
+        {
+            is_process_descendant(parent, child)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn unix_pane_process(root: u32) -> PaneProcess {
+    let foreground = terminal_foreground(root);
+    let agent = foreground_agent(root);
+    PaneProcess {
+        foreground,
+        agent,
+        foreground_pid: live_foreground_pid(root),
+        cwd: (agent != crate::InjectAgent::Unknown)
+            .then(|| cwd_of(root))
+            .flatten(),
+    }
+}
+
 #[cfg(not(windows))]
 enum TtyForeground {
     /// Controlling terminal's foreground process group.
@@ -1118,6 +1217,35 @@ mod macos {
 mod tests {
     use super::*;
 
+    #[test]
+    fn pane_processes_answer_unknown_for_roots_not_read() {
+        let processes = PaneProcesses::read(&[]);
+        assert_eq!(processes.get(4_000_000), &PaneProcess::UNKNOWN);
+        assert!(processes.is_descendant(7, 7));
+    }
+
+    #[test]
+    fn pane_processes_match_the_single_root_reads() {
+        let mut child =
+            std::process::Command::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" })
+                .args(if cfg!(windows) {
+                    vec!["/d", "/c", "ping -n 30 127.0.0.1 > nul"]
+                } else {
+                    vec!["-c", "sleep 30"]
+                })
+                .spawn()
+                .expect("spawn a pane stand-in");
+        let root = child.id();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let processes = PaneProcesses::read(&[root]);
+        let process = processes.get(root);
+        assert_eq!(process.foreground, terminal_foreground(root));
+        assert_eq!(process.agent, foreground_agent(root));
+        assert_eq!(process.foreground_pid, live_foreground_pid(root));
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     #[cfg(unix)]
     fn procinfo_test_dir(tag: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -1523,6 +1651,117 @@ mod windows {
         ProcessSnapshot::capture(&[root])
             .and_then(|snapshot| snapshot.inspect(root))
             .unwrap_or(Foreground::Unknown)
+    }
+
+    /// Most processes one combined read refreshes; beyond it roots are Unknown.
+    const MAX_PANE_PROCESSES: usize = 4096;
+
+    /// One process-tree snapshot and one refresh (command line, executable,
+    /// working directory) for all of `roots`.
+    pub(super) fn pane_processes(roots: &[u32]) -> PaneProcesses {
+        let Some(tree) = process_tree() else {
+            return PaneProcesses::default();
+        };
+        let parents: HashMap<u32, u32> = tree.iter().copied().collect();
+        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (pid, parent) in tree {
+            children.entry(parent).or_default().push(pid);
+        }
+        let mut subtrees = HashMap::new();
+        let mut all = HashSet::new();
+        for &root in roots {
+            let mut seen = Vec::new();
+            let mut queue = VecDeque::from([root]);
+            while let Some(pid) = queue.pop_front() {
+                if seen.contains(&pid) || !parents.contains_key(&pid) || seen.len() >= 256 {
+                    seen.clear();
+                    break;
+                }
+                seen.push(pid);
+                if let Some(next) = children.get(&pid) {
+                    queue.extend(next.iter().copied());
+                }
+            }
+            if seen.is_empty() || all.len() + seen.len() > MAX_PANE_PROCESSES {
+                continue;
+            }
+            all.extend(seen.iter().copied());
+            subtrees.insert(root, seen);
+        }
+        let pids = all.into_iter().map(Pid::from_u32).collect::<Vec<_>>();
+        let mut system = System::new();
+        if !pids.is_empty() {
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&pids),
+                true,
+                ProcessRefreshKind::nothing()
+                    .with_cmd(UpdateKind::Always)
+                    .with_exe(UpdateKind::Always)
+                    .with_cwd(UpdateKind::Always),
+            );
+        }
+        let snapshot = ProcessSnapshot {
+            parents,
+            children,
+            system,
+            pids,
+        };
+        let panes = subtrees
+            .into_iter()
+            .map(|(root, subtree)| {
+                let readable = subtree.iter().all(|pid| {
+                    snapshot
+                        .system
+                        .process(Pid::from_u32(*pid))
+                        .is_some_and(|process| !process.cmd().is_empty() && process.exe().is_some())
+                });
+                let inspected = readable
+                    .then(|| snapshot.inspect(root))
+                    .flatten()
+                    .unwrap_or(Foreground::Unknown);
+                let (foreground, agent, foreground_pid) = match inspected {
+                    Foreground::Running { pid, args, .. } => {
+                        match crate::inject_submit::classify_windows_argv(&args) {
+                            Some(agent) => (TerminalForeground::Agent, agent, Some(pid)),
+                            None => (
+                                TerminalForeground::Other,
+                                crate::InjectAgent::Unknown,
+                                Some(pid),
+                            ),
+                        }
+                    }
+                    Foreground::Shell => {
+                        (TerminalForeground::Shell, crate::InjectAgent::Unknown, None)
+                    }
+                    Foreground::Unknown => (
+                        TerminalForeground::Unknown,
+                        crate::InjectAgent::Unknown,
+                        None,
+                    ),
+                };
+                let cwd = (agent != crate::InjectAgent::Unknown)
+                    .then(|| {
+                        snapshot
+                            .system
+                            .process(Pid::from_u32(root))
+                            .and_then(|process| process.cwd().map(Path::to_path_buf))
+                    })
+                    .flatten();
+                (
+                    root,
+                    PaneProcess {
+                        foreground,
+                        agent,
+                        foreground_pid,
+                        cwd,
+                    },
+                )
+            })
+            .collect();
+        PaneProcesses {
+            panes,
+            parents: snapshot.parents,
+        }
     }
 
     pub struct ProcessSnapshot {

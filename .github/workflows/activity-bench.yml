@@ -1,8 +1,8 @@
 name: Activity bench
 
 # Measures activity reads, the monitor snapshot and pmuxd CPU with many live
-# seats on a hosted Windows runner, at the pull request's head and at its
-# base, with the same benchmark script. Informational only: this is not a
+# seats on a hosted Windows runner, at the pull request's head commit and at
+# its merge-base with the target branch, with the head's benchmark script. Informational only: this is not a
 # required check, and it runs only when the code it measures changes.
 # Hosted-runner numbers are noisier than a dedicated machine; compare the two
 # runs of one job, not runs across jobs.
@@ -32,16 +32,25 @@ jobs:
       ACTIVITY_BENCH_SEATS: '20'
       ACTIVITY_BENCH_WINDOW: '10'
     steps:
+      # The pull request's head commit itself, not the merge preview, and its
+      # merge-base with the target branch, so each result names what it ran.
       - name: Check out the head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
           path: head
 
-      - name: Check out the base
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          path: base
+      - name: Check out the merge-base
+        shell: pwsh
+        env:
+          TARGET: ${{ github.event.pull_request.base.sha }}
+        run: |
+          $base = (git -C head merge-base $env:TARGET HEAD).Trim()
+          if (-not $base) { throw "no merge-base with $env:TARGET" }
+          git -C head worktree add --detach ../base $base
+          if ($LASTEXITCODE -ne 0) { throw "worktree add failed" }
+          Write-Output "Head $(git -C head rev-parse HEAD), merge-base $base"
 
       - name: Install the Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
@@ -55,8 +64,9 @@ jobs:
           python-version: '3.12'
 
       # Both runs share one target directory, so the second build reuses the
-      # dependencies. The base runs the head's script so both measure the same.
-      - name: Benchmark the base
+      # dependencies. The merge-base runs the head's script so both measure
+      # the same thing.
+      - name: Benchmark the merge-base
         shell: pwsh
         run: |
           Copy-Item head/scripts/test-plugin-runtime.py base/scripts/test-plugin-runtime.py -Force
@@ -88,7 +98,11 @@ jobs:
               ("pmuxd CPU, feed on, no readers", lambda r: f"{r['pmuxd_cpu_percent_idle_feed_on']} %"),
               ("pmuxd CPU, polled like a monitor", lambda r: f"{r['pmuxd_cpu_percent_monitor_polling']} %"),
           ]
-          lines = ["## Activity bench (windows-2025)", "", "| | base | head |", "|---|---|---|"]
+          def short(name):
+              return (runs[name] or {}).get("commit") or "unknown"
+          lines = ["## Activity bench (windows-2025)", "",
+                   f"Merge-base `{short('base')}`, head `{short('head')}`.", "",
+                   "| | merge-base | head |", "|---|---|---|"]
           for label, cell in rows:
               lines.append(f"| {label} | " + " | ".join(cell(runs[n]) if runs[n] else "no result" for n in ("base", "head")) + " |")
           lines += ["", "```json", json.dumps(runs, indent=2), "```"]

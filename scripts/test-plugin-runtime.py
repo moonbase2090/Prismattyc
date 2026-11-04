@@ -322,7 +322,9 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
             polls += 1
             time.sleep(0.25)
         polled = cpu_seconds(daemon.pid) - before
+        measured = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True)
         result = {
+            "commit": measured.stdout.strip() if measured.returncode == 0 else None,
             "seats": count,
             "platform": sys.platform,
             "cold_read_ms": summary(cold),

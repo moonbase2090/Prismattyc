@@ -362,7 +362,10 @@ impl PaneProcess {
 
 /// Process facts for several pane roots, read together. On Windows this is
 /// one system process snapshot and one process refresh for every root, not
-/// one or more per pane. Elsewhere each root's tree is walked once.
+/// one or more per pane. On macOS and Linux each root still goes through the
+/// foreground, agent and foreground-pid helpers, each of which reads that
+/// pane's own processes (no system-wide snapshot); callers bound how often
+/// that happens.
 #[derive(Clone, Debug, Default)]
 pub struct PaneProcesses {
     panes: std::collections::HashMap<u32, PaneProcess>,

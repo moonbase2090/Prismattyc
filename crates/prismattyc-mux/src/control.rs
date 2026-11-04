@@ -2649,8 +2649,10 @@ impl ControlPlane {
     }
 
     /// Process facts for `roots`, read at most once per
-    /// [`ACTIVITY_PROCESS_TTL`] for the same set of panes. Paged reads, the
-    /// session projection and a monitor's polls share one read.
+    /// [`ACTIVITY_PROCESS_TTL`] for the same set of panes. Every activity read
+    /// shares it: native and plug-in reads, paged reads, a monitor's polls and
+    /// the session projection's feed reads. The projection's run-identity
+    /// check takes its own batched read once per tick instead.
     fn activity_pane_processes(&self, mut roots: Vec<u32>) -> Arc<crate::procinfo::PaneProcesses> {
         roots.sort_unstable();
         roots.dedup();

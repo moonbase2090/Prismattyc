@@ -525,6 +525,12 @@ fn doctor_and_kick_viewer_leave_session() {
     let empty = umbrella(&socket, &["doctor", "work"]);
     assert!(empty.status.success(), "{}", stderr(&empty));
     let doctor = stdout(&empty);
+    let version_line = format!(
+        "pmuxd running version: {} (installed pmux: {})",
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_VERSION")
+    );
+    assert!(doctor.lines().any(|line| line == version_line), "{doctor}");
     assert!(doctor.contains("attach: none"), "{doctor}");
     assert!(
         doctor.contains("pane shell:") && doctor.contains("(from "),

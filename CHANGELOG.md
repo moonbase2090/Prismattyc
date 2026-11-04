@@ -11,6 +11,10 @@
 This release replaces 0.3.55, which was tagged but not published, and includes
 its [changes](https://github.com/moonbase2090/Prismattyc/blob/v0.3.55/CHANGELOG.md#0355---2026-11-03).
 
+### Erratum
+
+- The published `SHA256SUMS` also names `SHA256SUMS.tmp`, which was not uploaded. Digests for the real assets are correct; skip the temporary-file entry when verifying the full list.
+
 ### Fixed
 
 - Publication of 0.3.55 stopped because the official plug-in catalog pin was missing. Core builds now select the reviewed immutable `pmux-plugins-v1.0.0` catalog, with the same verified archive bytes across platforms.

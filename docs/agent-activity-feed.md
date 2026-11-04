@@ -167,17 +167,243 @@ PreToolUse, PostToolUse, and Stop.
 
 ### Harness hook coverage
 
-Hook availability and payloads differ by harness. This table records the
-documented source for lifecycle and tool activity; it does not imply that the
-feed installer configures every harness.
+Hook availability and payloads differ by harness. This section records, per
+harness, which documented hook fields can fill each `detail` and
+current-session field, and how reliable each one is. It does not imply that
+the feed installer configures every harness. Field names below are the
+documented payload keys for the harness versions current when this was
+written; check the installed runtime before relying on any of them.
 
-| Harness | Documented source | Useful signals | Limits |
-| --- | --- | --- | --- |
-| Claude Code | [Hooks reference](https://code.claude.com/docs/en/hooks) | Session lifecycle, prompt submission, pre/post tool use, failures, and stop; JSON hook input includes session and tool context for applicable events. | Hooks must be configured in the user's trusted settings. Hosted tools and surfaces can have different hook support. |
-| Codex | [Hooks guide](https://learn.chatgpt.com/docs/hooks) | Session start, prompt submission, tool lifecycle, subagent lifecycle, stop, and interruption. Applicable payloads include session ID, model, working directory, and tool metadata. | Hook schemas and supported events depend on the Codex version and surface. Quota state is not a documented hook field. |
-| Muse Code | [Hooks guide](https://meta-models.github.io/muse-code-sdk/next/guides/extend/hooks/) | Session and prompt lifecycle, tool success/failure, model calls, subagents, and stop. Hooks receive JSON on stdin; event-specific payloads are documented separately. | Project hooks run only for trusted workspaces. Quota state is not a documented hook field. |
-| Gemini CLI | [Hooks reference](https://geminicli.com/docs/hooks/reference/) | Session lifecycle, prompt/agent/model events, and before/after tool events. Hook input is JSON on stdin and includes session ID, cwd, event name, and timestamp. | Hooks are configured in Gemini settings. Tool responses and prompts can contain content, so the activity adapter must discard them. Quota state is not a documented hook field. |
-| Kiro | [Hook types](https://kiro.dev/docs/hooks/types/) and [configuration reference](https://kiro.dev/docs/custom-agents/configuration-reference/) | Prompt, session, agent, and pre/post tool lifecycle, depending on Kiro surface/version. Command hooks receive event JSON. | Trigger support differs across IDE, CLI versions, and Web; Web does not run these local triggers. Quota state is not a documented hook field. |
+Reliability terms:
+
+- **Reliable**: a documented structured field on a documented event.
+- **Best effort**: present only on some events, tools, surfaces, or
+  versions, or nested inside tool-specific output the adapter must parse
+  defensively.
+- **Unknown**: no documented structured field. The feed leaves the value
+  absent instead of inferring it.
+
+#### Field matrix
+
+| Feed field | Claude Code | Codex | Muse Code | Gemini CLI | Kiro | Cursor |
+| --- | --- | --- | --- | --- | --- | --- |
+| Event kind and time | Reliable: `hook_event_name`; time is daemon receipt time | Reliable: `hook_event_name` | Reliable: `hook_event_name` | Reliable: `hook_event_name` plus ISO 8601 `timestamp` | Reliable: `hook_event_name` (trigger names vary by version) | Reliable: per-event hook name (camelCase) |
+| Seat identity | Not in payload; from install (`--seat` or `PMUX_AGENT`) | Same | Same | Same | Same | Same |
+| Session correlation (`run_id` source) | Reliable: `session_id` on every event | Reliable: `session_id` (subagent hooks carry the parent session) | Reliable: `session_id` | Reliable: `session_id` | Reliable: `session_id` | Reliable: `conversation_id` |
+| Tool name | Reliable: `tool_name` on tool events | Reliable: canonical `tool_name` (for example `Bash`, `apply_patch`) | Reliable: `tool_name`; built-ins also answer to common aliases | Reliable: `tool_name` on tool events | Reliable: `tool_name` (MCP tools use internal `mcp_<server>_<tool>` ids) | Reliable: `tool_name` |
+| Operation correlation (`operation_id` source) | Reliable: `tool_use_id` pairs pre and post events | Reliable: `tool_use_id` on tool events | Reliable: documented per event in the hook event reference | Unknown: no documented tool-call id; pairing is best effort by tool and order | Unknown: no documented tool-call id in trigger payloads | Reliable: `tool_use_id` |
+| File edited | Reliable: `tool_input.file_path` for file tools (always absolute) | Best effort: patches arrive as `tool_input.command` text for `apply_patch`, not a structured path | Best effort: tool-specific `tool_input` paths | Best effort: tool-specific `tool_input` paths | Best effort: tool-specific `tool_input` paths | Reliable: `tool_input.file_path`; `afterFileEdit` is edit-specific |
+| Command run | Reliable: `tool_input.command` for the shell tool | Reliable: `tool_input.command` for `Bash` and `apply_patch` | Reliable: `tool_input.command` for the shell tool | Best effort: tool-specific input | Best effort: tool-specific input | Reliable: `tool_input.command`; `afterShellExecution` is shell-specific |
+| Duration | Reliable: optional `duration_ms` on `PostToolUse` and `PostToolUseFailure`; excludes permission prompts and pre-tool hooks | Unknown as a payload field; derive by pairing pre and post events | Unknown as a payload field; derive by pairing | Best effort: derive by pairing, but no tool-call id | Best effort: derive by pairing, but no tool-call id | Reliable: `duration` (milliseconds) on `postToolUse` |
+| Exit status | Best effort: success and failure are separate events (`PostToolUse` vs `PostToolUseFailure`); a numeric exit code is tool-specific inside `tool_response`, not a documented common field | Best effort: `tool_response` is tool-specific model-facing output; no documented structured exit code | Best effort: failure is a separate event (`PostToolUseFailure`); numeric code is not a documented common field | Best effort: `tool_response.error` presence signals failure; no numeric code | Unknown: no documented result or exit field in trigger payloads | Best effort: shell results embed `exitCode` inside the `tool_output` JSON string; failure is also a separate event |
+| Model | Best effort: only `SessionStart` may carry `model`, and not always; `PostModelSwitch` carries `to_model` on changes | Reliable: `model` is a documented common field | Reliable: `model` appears on session and turn payloads (can be `unknown` for non-model providers) | Unknown: model events exist, but no documented common model field | Unknown | Reliable: `model` and `model_id` on tool payloads |
+| Quota or usage | Unknown: no documented hook field | Unknown | Unknown | Unknown | Unknown | Unknown |
+| Project / cwd | Reliable as cwd only: `cwd` on every event; project is not a schema field | Reliable as cwd only: `cwd` | Reliable as cwd only: `cwd` | Reliable as cwd only: `cwd` | Reliable as cwd only: `cwd` | Reliable as cwd only: `cwd` |
+| Current task or ticket | Unknown: no documented field; never infer from prompt or paths | Unknown | Unknown | Unknown | Unknown | Unknown: subagent payloads carry a free-text `task` description, which is content, not a ticket reference |
+| Waiting signal | Reliable: `PermissionRequest` fires while approval is pending | Best effort: no dedicated approval event in the common set; `Interrupt` covers user interruption | Reliable: `PermissionRequest` | Unknown: `Notification` is the nearest signal and is not approval-specific | Unknown | Unknown: no approval-pending event in the agent hook set |
+| Session start and stop | Reliable: `SessionStart`, `SessionEnd`, `Stop` per turn | Reliable: `SessionStart`, `SessionEnd` (main thread only), `Stop`; plus `agent-turn-complete` notifications | Reliable: `SessionStart`, `SessionEnd`, `Stop`, `StopFailure` | Reliable: `SessionStart`, `SessionEnd` | Best effort: `SessionStart` and `SessionEnd` are CLI V3 triggers; earlier versions used `agentSpawn` with no end counterpart | Reliable: `sessionStart`, `sessionEnd`, `stop` |
+| Idle or stuck | Not a hook signal; derive from event gaps and pane state | Same | Same | Same | Same | Same |
+
+Reading the matrix:
+
+- Event kind, tool name, and paired start/finish duration are the portable
+  core. Every harness documents pre and post tool events. Pairing is exact
+  only where a tool-call id exists (Claude Code, Codex, Muse Code,
+  Cursor). Without one (Gemini CLI, Kiro), durations pair by tool and order
+  within a session and can misattribute overlapping calls.
+- A numeric exit code is never a documented common field. Report the
+  success/failure event split as the exit signal, and a numeric code only
+  when a tool-specific structured value is present and parsed defensively.
+- `SessionEnd` does not fire when a process is killed or crashes. Treat a
+  missing end event as unknown, and let pane process state decide liveness.
+- File and command text stay redacted and truncated by the adapter, or
+  omitted. No field in any payload is a task or ticket reference; the
+  adapter accepts an explicit `ticket` or `task_id` key only from a
+  producer that sets one deliberately. If a future harness documents a
+  structured ticket reference, add it as a separate optional schema field
+  rather than overloading `task`.
+- No harness documents a quota or usage field in hook payloads. Quota
+  remains absent from the feed until one does.
+
+#### Claude Code
+
+Source: [Hooks reference](https://code.claude.com/docs/en/hooks).
+
+Events used by the installer: `SessionStart`, `SessionEnd`,
+`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, and optionally
+`PostToolUseFailure`. Common fields include `session_id`, `cwd`,
+`permission_mode`, and `hook_event_name`; tool events add `tool_name`,
+`tool_input`, and `tool_use_id`. `PermissionRequest` is available but not
+installed by default; it is the documented waiting-for-approval signal.
+
+Sample `PostToolUse` payload (paths shortened):
+
+```json
+{
+  "session_id": "abc123",
+  "cwd": "/path/to/project",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": { "file_path": "/path/to/project/file.txt", "content": "..." },
+  "tool_response": { "filePath": "/path/to/project/file.txt", "type": "create" },
+  "tool_use_id": "toolu_01ABC123...",
+  "duration_ms": 12
+}
+```
+
+The adapter keeps `tool_name`, a relative file label, and the hashed
+`tool_use_id`. It currently discards the payload `duration_ms` and lets the
+daemon compute duration from paired events; the payload value is the more
+precise source where present, because it excludes permission prompts.
+
+#### Codex
+
+Sources: [Hooks guide](https://learn.chatgpt.com/docs/hooks) and the
+[turn notification reference](https://learn.chatgpt.com/docs/config-file/config-advanced#notifications).
+
+Common fields include `session_id`, `cwd`, `hook_event_name`, and `model`.
+Tool events add `turn_id`, canonical `tool_name`, `tool_use_id`,
+`tool_input`, and on completion a tool-specific `tool_response`. Shell and
+patch calls both put their text in `tool_input.command`, so command display
+needs the same redaction as shell text, and edited-file extraction from
+patch text stays best effort. Some specialized tool paths can opt out of
+the default hook path, so a missing event does not prove inactivity.
+
+The `--notify` path is separate and much thinner. It documents only
+turn completion:
+
+```json
+{ "type": "agent-turn-complete", "thread-id": "...", "turn-id": "..." }
+```
+
+#### Muse Code
+
+Source: [Hooks guide](https://meta-models.github.io/muse-code-sdk/next/guides/extend/hooks/).
+
+The event catalog matches the Claude-style names and adds `PreLLMCall` and
+`PostLLMCall`. Session and turn payloads carry `session_id`, `cwd`,
+`model`, and `permission_mode`; turn payloads add `turn_id`. Project hook
+files run only in trusted workspaces.
+
+Sample `SessionStart` payload:
+
+```json
+{
+  "hook_event_name": "SessionStart",
+  "source": "startup",
+  "session_id": "01a0ae0d-1cdf-7221-b5e5-96159c9a1ec0",
+  "cwd": "/path/to/project",
+  "transcript_path": null,
+  "model": "unknown",
+  "permission_mode": "default"
+}
+```
+
+Because the event names and field names align with the Claude-style
+profile, the same installer profile shape applies. The feed installer does
+not yet write a Muse settings file in `--all-harnesses` mode; use a
+per-seat hook file loaded through the runtime's documented settings.
+
+#### Gemini CLI
+
+Source: [Hooks reference](https://geminicli.com/docs/hooks/reference/).
+
+Event names differ: `BeforeTool` and `AfterTool` cover tool calls, with
+`BeforeAgent`, `AfterAgent`, model hooks, `SessionStart`, `SessionEnd`,
+`Notification`, and `PreCompress` around them. The base input on every
+event is:
+
+```json
+{
+  "session_id": "...",
+  "transcript_path": "...",
+  "cwd": "...",
+  "hook_event_name": "BeforeTool",
+  "timestamp": "..."
+}
+```
+
+`AfterTool` adds `tool_name`, `tool_input`, and a `tool_response` object
+whose `error` member signals failure. Tool responses and prompts can
+contain content, so an adapter must discard them. There is no documented
+tool-call id. Adapter sketch: translate `BeforeTool` to the pre-tool kind
+and `AfterTool` to the post-tool kind, read only `tool_name` and the
+presence of `tool_response.error`, and mark derived durations best
+effort. The current adapter does not perform this translation, and the
+installer does not write Gemini settings.
+
+No documented local hook surface was found for the `agy` (Antigravity)
+CLI. Treat it as hook-less: pane-state runtime events still report the
+seat, and hook coverage can be added if a hook reference is published.
+
+#### Kiro
+
+Sources: [Hook types](https://kiro.dev/docs/hooks/types/) and the
+[configuration reference](https://kiro.dev/docs/custom-agents/configuration-reference/).
+
+Trigger payloads are minimal. The documented examples carry
+`hook_event_name`, `cwd`, and `session_id`, with `tool_name` and
+`tool_input` on tool triggers:
+
+```json
+{
+  "hook_event_name": "PreToolUse",
+  "cwd": "/current/working/directory",
+  "session_id": "abc123-def456-789",
+  "tool_name": "mcp_postgres_query",
+  "tool_input": { }
+}
+```
+
+Trigger support differs across IDE, CLI versions, and Web; Web does not
+run these local triggers. `SessionEnd` is a CLI V3 trigger. No
+tool-response, exit-status, or tool-call-id field is documented, so Kiro
+tool activity reports starts reliably and finishes without exit detail,
+and durations stay best effort.
+
+#### Cursor
+
+Source: [Hooks documentation](https://cursor.com/docs/hooks).
+
+Cursor uses camelCase agent events: `sessionStart`, `sessionEnd`,
+`beforeSubmitPrompt`, `preToolUse`, `postToolUse`, `postToolUseFailure`,
+shell- and file-specific events, and `stop`. Tool payloads are the
+richest of the set. `postToolUse` documents `tool_name`, `tool_input`,
+`tool_output`, `tool_use_id`, `cwd`, a millisecond `duration`, and
+`model` fields:
+
+```json
+{
+  "tool_name": "Shell",
+  "tool_input": { "command": "npm test" },
+  "tool_output": "{\"exitCode\":0,\"stdout\":\"...\"}",
+  "tool_use_id": "abc123",
+  "cwd": "/path/to/project",
+  "duration": 5432,
+  "model_id": "..."
+}
+```
+
+The numeric exit code hides inside the `tool_output` JSON string. That
+string also carries command output, which the feed must never republish;
+parse out only the numeric code and discard the rest, or omit the code.
+The installer registers the six common events today; `postToolUseFailure`
+is documented but not installed, so Cursor failures currently arrive only
+when a post event reports them.
+
+#### Gaps between payloads and the current adapter
+
+- The payload `duration_ms` (Claude Code) and `duration` (Cursor) values
+  are discarded. Prefer them over daemon-paired durations when present.
+- `PermissionRequest` maps to the waiting kind in the adapter, but the
+  installer does not register it for any harness.
+- Gemini CLI event names are not translated, and neither Gemini CLI nor
+  Muse Code has an `--all-harnesses` install target.
+- Cursor `postToolUseFailure` is not installed.
+- Patch text (`apply_patch`) is classified as an edit with no structured
+  file label. Extracting paths from patch headers is possible but stays
+  best effort and must keep the same redaction rules.
 
 Use pmux's current session roster as the identity and liveness source. Hooks
 provide activity transitions and may add explicitly documented metadata, but

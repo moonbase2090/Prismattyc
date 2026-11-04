@@ -9,6 +9,7 @@
 ### Fixed
 
 - The settings panel shows the built-in default for `[mux]` keys that are not in the config file, so the first Enter on a boolean changes it.
+- On Windows, opening the activity monitor no longer opens an empty console window. pmuxd now starts its plug-in worker, webhook sender and default-Space `pmux` calls without a console window.
 - Plug-in selections, grants and activity endpoints survive a reboot or logout. Each daemon keeps them in its instance directory under the data directory instead of beside its socket, whose runtime directory the system clears, and moves a journal that an earlier version kept beside the socket on first use.
 
 ## [0.3.57] - 2026-11-04

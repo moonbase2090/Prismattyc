@@ -521,6 +521,43 @@ fn enter_toggles_boolean_and_shift_enter_opens_its_editor() {
 }
 
 #[test]
+fn enter_on_an_absent_default_on_mux_key_turns_it_off() {
+    // The activity feed is on when the key is left out, so the first Enter
+    // must write the opt-out, not the value already in effect.
+    let mut fixture = Fixture::new("");
+    fixture.open_key("mux.experimental_activity");
+    fixture.press(NamedKey::Escape);
+    fixture.press(NamedKey::Enter);
+    fixture.settle();
+    let saved: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&fixture.panel.path).unwrap()).unwrap();
+    assert_eq!(saved["mux"]["experimental_activity"].as_bool(), Some(false));
+}
+
+#[test]
+fn mux_rows_take_their_defaults_from_the_shared_mux_table() {
+    let default = |key: &str| {
+        controls::catalog()
+            .into_iter()
+            .find(|control| control.paths[0].join(".") == key)
+            .unwrap_or_else(|| panic!("no row for {key}"))
+            .default
+    };
+    assert_eq!(default("mux.experimental_activity"), Some(true.into()));
+    assert_eq!(default("mux.attach_on_new"), Some(true.into()));
+    assert_eq!(
+        default("mux.allow_mixed_case_session_names"),
+        Some(false.into())
+    );
+    assert_eq!(default("mux.remote_size"), Some("latest".into()));
+    assert_eq!(
+        default("mux.socket"),
+        None,
+        "a commented example is not a default"
+    );
+}
+
+#[test]
 fn enter_cycles_border_color_and_arrows_still_reverse_choices() {
     let mut fixture = Fixture::new("focus_border = \"blue\"\nspace_startup = \"ask\"\n");
     fixture.open_key("focus_border");

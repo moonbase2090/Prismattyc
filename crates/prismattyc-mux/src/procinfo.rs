@@ -193,6 +193,33 @@ pub fn foreground_command(root: u32) -> Option<String> {
     live_foreground_command(root)
 }
 
+/// The argv a restore should run for a foreground command it saved.
+///
+/// An agent launched with a startup prompt must not run that prompt again
+/// when a Space or session configuration is restored, which would start a new
+/// task instead of returning to the old one. Known agents are saved as the
+/// program and the way it reopens its most recent conversation in the pane's
+/// directory. Agents whose reopening flag is not known are saved as the bare
+/// program, so they start idle. Every other command is saved unchanged.
+#[must_use]
+pub fn resume_args(args: Vec<String>) -> Vec<String> {
+    use crate::inject_submit::InjectAgent;
+    let Some(program) = args.first() else {
+        return args;
+    };
+    let tail: &[&str] = match crate::inject_submit::classify_agent_argv0(program) {
+        Some(InjectAgent::Claude) => &["--continue"],
+        Some(InjectAgent::Codex) => &["resume", "--last"],
+        Some(InjectAgent::Cursor | InjectAgent::Grok | InjectAgent::Kiro | InjectAgent::Muse) => {
+            &[]
+        }
+        Some(InjectAgent::Unknown) | None => return args,
+    };
+    std::iter::once(program.clone())
+        .chain(tail.iter().map(|arg| (*arg).to_string()))
+        .collect()
+}
+
 /// Terminal foreground only. Ignores [`TEST_FOREGROUND_COMMAND_ENV`].
 #[must_use]
 pub fn live_foreground_command(root: u32) -> Option<String> {
@@ -223,7 +250,7 @@ pub fn live_foreground_pid(root: u32) -> Option<u32> {
 
 #[cfg(windows)]
 pub fn replay_command(args: &[String]) -> Option<String> {
-    windows::command(args)
+    windows::command(&resume_args(args.to_vec()))
 }
 
 pub fn has_foreground(root: u32) -> bool {
@@ -629,7 +656,8 @@ fn cmdline_strings(pid: u32) -> Option<Vec<String>> {
 }
 
 #[cfg(not(windows))]
-fn unix_replay_command(pid: u32, mut args: Vec<String>) -> String {
+fn unix_replay_command(pid: u32, args: Vec<String>) -> String {
+    let mut args = resume_args(args);
     if let Some(program) = args
         .first()
         .and_then(|program| stable_program_name(pid, program))
@@ -1371,6 +1399,30 @@ mod tests {
             socket
         ));
         assert!(!argv_matches_server(&[], socket));
+    }
+
+    #[test]
+    fn a_saved_agent_command_resumes_instead_of_replaying_its_prompt() {
+        let args = |list: &[&str]| list.iter().map(|a| (*a).to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            resume_args(args(&["/usr/local/bin/claude", "fix the login bug"])),
+            args(&["/usr/local/bin/claude", "--continue"])
+        );
+        assert_eq!(
+            resume_args(args(&["codex", "--model", "x", "write tests"])),
+            args(&["codex", "resume", "--last"])
+        );
+        assert_eq!(
+            resume_args(args(&["cursor-agent", "do the thing"])),
+            args(&["cursor-agent"])
+        );
+        // Anything else is saved as it ran.
+        assert_eq!(resume_args(args(&["sleep", "30"])), args(&["sleep", "30"]));
+        assert_eq!(
+            resume_args(args(&["echo", "claude"])),
+            args(&["echo", "claude"])
+        );
+        assert!(resume_args(Vec::new()).is_empty());
     }
 
     #[test]

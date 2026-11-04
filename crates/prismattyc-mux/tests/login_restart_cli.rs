@@ -456,6 +456,69 @@ fn session_configuration_restores_names_directories_and_commands_without_replay(
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// A pane running an agent that was given a startup prompt is saved as the
+/// agent's resume command. Restoring must not run that prompt again.
+#[test]
+fn a_saved_agent_resumes_instead_of_replaying_its_startup_prompt() {
+    let root = temp_root("agent-resume");
+    let socket = socket_path(&root);
+    let server = start_server(&socket, &root);
+    let cwd = root.join("project");
+    std::fs::create_dir(&cwd).unwrap();
+    // A process named `claude` with a prompt in its arguments, which stays up.
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &[
+            "new",
+            "--no-attach",
+            "seat",
+            "--",
+            "/bin/bash",
+            "-c",
+            "exec -a claude /bin/sh -c 'sleep 999; :' claude 'do the secret task'",
+        ],
+    ));
+    let file = root.join("configuration.json");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let command = loop {
+        let _ = std::fs::remove_file(&file);
+        let saved = pmux(
+            &socket,
+            &root,
+            &[],
+            &["session-config", "save", file.to_str().unwrap()],
+        );
+        if saved.status.success() {
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            let seat = value["space"]["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["name"] == "seat")
+                .cloned();
+            if let Some(command) = seat.and_then(|s| {
+                s["windows"][0]["root"]["command"]
+                    .as_str()
+                    .map(str::to_owned)
+            }) {
+                break command;
+            }
+        }
+        assert!(Instant::now() < deadline, "the agent was never saved");
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    assert_eq!(command, "claude --continue", "saved {command:?}");
+    assert!(
+        !command.contains("secret"),
+        "the prompt was saved: {command}"
+    );
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn login_preference_keeps_comments_and_unrelated_config() {
     let root = temp_root("login-preservation");

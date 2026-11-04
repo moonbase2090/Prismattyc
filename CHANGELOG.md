@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- On Windows, opening the activity monitor no longer opens an empty console window. pmuxd now starts its plug-in worker, webhook sender and default-Space `pmux` calls without a console window.
+
 ## [0.3.57] - 2026-11-04
 
 This hotfix replaces 0.3.56, withdrawn because of excessive Windows pmuxd CPU

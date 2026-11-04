@@ -697,8 +697,9 @@ else:
             stop(daemon)
             daemon, connection = start()
             pid = daemon.pid
-            baseline = connection.request("snapshot")["response"]["snapshot"]["sessions"]
+            # Let the restarted daemon's first pane settle (title, child) first.
             time.sleep(3)
+            baseline = connection.request("snapshot")["response"]["snapshot"]["sessions"]
             assert enabled_states() == {}, cli("list")
             assert all(not state["grants"] for state in cli("list")["states"]), cli("list")
             for entry in expected_catalog:
@@ -749,7 +750,8 @@ else:
             reply = cli("invoke",connector,"poll")
             assert not reply["is_error"] and json.loads(reply["json"])["page"]["records"] == []
             assert connection.request("publish_activity",event={**event,"event_id":"after-reenable"})["status"] == "ok"
-            assert connection.request("snapshot")["response"]["snapshot"]["sessions"] == baseline
+            sessions = connection.request("snapshot")["response"]["snapshot"]["sessions"]
+            assert sessions == baseline, {"baseline": baseline, "now": sessions}
             terminal_view()
             stop(daemon)
             assert sorted(cli("discover")["packages"],key=lambda entry: (entry["id"],entry["version"])) == sorted(expected_catalog,key=lambda entry: (entry["id"],entry["version"]))

@@ -7,7 +7,7 @@
 //! paint code and the input code read one geometry.
 
 use std::path::Path;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::SystemTime;
 
 use crate::mux::{effective_tab_end_pad, tab_close_left, HostGeom};
 
@@ -782,8 +782,38 @@ pub struct RailEdit {
     pub selected: bool,
 }
 
-const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_NAME_CHARS: usize = 64;
+
+/// Directory facts read by the Space worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Directory {
+    pub names: Vec<String>,
+    layouts: std::collections::HashMap<String, Vec<Vec<String>>>,
+    stamp: Option<SystemTime>,
+}
+
+impl Directory {
+    pub(crate) fn read(dir: &Path) -> Self {
+        let names: Vec<String> = prismattyc_mux::list_spaces(dir)
+            .map(|entries| entries.into_iter().map(|entry| entry.name).collect())
+            .unwrap_or_default();
+        let layouts = names
+            .iter()
+            .filter_map(|name| {
+                let space = prismattyc_mux::load_space(dir, name).ok()?;
+                Some((
+                    name.clone(),
+                    normalized_tabs(space.tabs.into_iter().map(|tab| tab.sessions)),
+                ))
+            })
+            .collect();
+        Self {
+            stamp: dir_stamp(dir),
+            names,
+            layouts,
+        }
+    }
+}
 
 /// Rail state: the chip list, the current space, and the keyboard mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -811,7 +841,7 @@ pub struct SpaceRail {
     /// Sidebar-collapsed spaces, by name (issue #113). Per window, session
     /// memory only; the default bars layout ignores it.
     collapsed_spaces: std::collections::HashSet<String>,
-    last_poll: Option<Instant>,
+    layouts: std::collections::HashMap<String, Vec<Vec<String>>>,
     dir_stamp: Option<SystemTime>,
     /// Inputs of the last [`Self::infer_current`] scan: directory stamp and
     /// normalized live tabs. A repeat with the same inputs is a no-op, so
@@ -835,7 +865,7 @@ impl SpaceRail {
             keyboard: false,
             side_scroll: 0,
             collapsed_spaces: std::collections::HashSet::new(),
-            last_poll: None,
+            layouts: Default::default(),
             dir_stamp: None,
             infer_tried: None,
         }
@@ -1062,12 +1092,14 @@ impl SpaceRail {
 
     /// Reload the chip list from `dir`. Returns whether anything changed.
     pub fn refresh(&mut self, dir: &Path) -> bool {
-        self.dir_stamp = dir_stamp(dir);
-        self.last_poll = Some(Instant::now());
+        self.apply_directory(Directory::read(dir))
+    }
+
+    pub(crate) fn apply_directory(&mut self, directory: Directory) -> bool {
+        self.dir_stamp = directory.stamp;
+        self.layouts = directory.layouts;
         self.infer_tried = None;
-        let names: Vec<String> = prismattyc_mux::list_spaces(dir)
-            .map(|entries| entries.into_iter().map(|entry| entry.name).collect())
-            .unwrap_or_default();
+        let names = directory.names;
         if names == self.names {
             return false;
         }
@@ -1089,24 +1121,6 @@ impl SpaceRail {
         true
     }
 
-    /// Once a second, re-read the directory when its mtime moved (a
-    /// `pmux space save` / `rm` from a terminal). Returns whether the chip
-    /// list changed.
-    pub fn poll(&mut self, dir: &Path, now: Instant) -> bool {
-        if self
-            .last_poll
-            .is_some_and(|last| now.duration_since(last) < REFRESH_INTERVAL)
-        {
-            return false;
-        }
-        self.last_poll = Some(now);
-        let stamp = dir_stamp(dir);
-        if stamp == self.dir_stamp && !self.names.is_empty() {
-            return false;
-        }
-        self.refresh(dir)
-    }
-
     pub fn set_current(&mut self, name: Option<String>) {
         self.current = name.filter(|name| !name.is_empty());
     }
@@ -1125,7 +1139,7 @@ impl SpaceRail {
     /// space has the same tabs — the same session names grouped the same
     /// way, order-free — that space is current (PT-123). Returns whether
     /// `current` changed.
-    pub fn infer_current(&mut self, dir: &Path, live_tabs: &[Vec<String>]) -> bool {
+    pub fn infer_current(&mut self, live_tabs: &[Vec<String>]) -> bool {
         if self.current_index().is_some() || live_tabs.is_empty() {
             return false;
         }
@@ -1136,10 +1150,9 @@ impl SpaceRail {
         }
         self.infer_tried = Some(key);
         let mut matches = self.names.iter().filter(|name| {
-            prismattyc_mux::load_space(dir, name).is_ok_and(|space| {
-                !space.tabs.is_empty()
-                    && normalized_tabs(space.tabs.iter().map(|tab| tab.sessions.clone())) == live
-            })
+            self.layouts
+                .get(*name)
+                .is_some_and(|tabs| !tabs.is_empty() && *tabs == live)
         });
         let Some(found) = matches.next().cloned() else {
             return false;
@@ -2207,18 +2220,18 @@ mod tests {
             vec!["z".to_string()],
             vec!["y".to_string(), "x".to_string()],
         ];
-        assert!(rail.infer_current(&dir, &live));
+        assert!(rail.infer_current(&live));
         assert_eq!(rail.current.as_deref(), Some("work"));
         // Already current: no change.
-        assert!(!rail.infer_current(&dir, &live));
+        assert!(!rail.infer_current(&live));
         // Two identical candidates: ambiguous, stays unknown.
         let mut rail = SpaceRail::new(None);
         rail.refresh(&dir);
-        assert!(!rail.infer_current(&dir, &[vec!["x".to_string()]]));
+        assert!(!rail.infer_current(&[vec!["x".to_string()]]));
         assert!(rail.current.is_none());
         // No match / no live attach tabs.
-        assert!(!rail.infer_current(&dir, &[vec!["q".to_string()]]));
-        assert!(!rail.infer_current(&dir, &[]));
+        assert!(!rail.infer_current(&[vec!["q".to_string()]]));
+        assert!(!rail.infer_current(&[]));
         // Same inputs again: gated, no rescan even if a match appears now
         // (the directory stamp is unchanged from the rail's view)...
         let live = vec![
@@ -2226,18 +2239,26 @@ mod tests {
             vec!["z".to_string()],
         ];
         let mut rail = SpaceRail::new(None);
-        rail.refresh(&dir);
+        let directory = Directory::read(&dir);
         prismattyc_mux::remove_space(&dir, "work").unwrap();
-        assert!(!rail.infer_current(&dir, &live));
+        rail.apply_directory(directory);
+        assert!(
+            rail.infer_current(&live),
+            "inference uses the worker's captured layout"
+        );
+        assert_eq!(rail.current.as_deref(), Some("work"));
+        rail.current = None;
+        rail.refresh(&dir);
+        assert!(!rail.infer_current(&live));
         prismattyc_mux::save_space(&dir, "work", &space(&[("A", &["x", "y"]), ("B", &["z"])]))
             .unwrap();
         assert!(
-            !rail.infer_current(&dir, &live),
+            !rail.infer_current(&live),
             "same stamp + same live tabs: no rescan"
         );
         // ...until a refresh (names / directory change) resets the gate.
         rail.refresh(&dir);
-        assert!(rail.infer_current(&dir, &live));
+        assert!(rail.infer_current(&live));
         assert_eq!(rail.current.as_deref(), Some("work"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2319,8 +2340,6 @@ mod tests {
         assert_eq!(rail.focus, Some(1), "focus clamps to the + chip");
         assert!(rail.confirm.is_none());
         assert_eq!(rail.current_index(), None);
-        // poll is throttled: an immediate second poll does nothing.
-        assert!(!rail.poll(&dir, Instant::now()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

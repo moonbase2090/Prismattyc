@@ -298,11 +298,16 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
             cold.append(read_ms())
         burst = [read_ms() for _ in range(40)]
         snapshot = []
+        snapshot_failures = []
         for _ in range(5):
             started = time.perf_counter()
-            text = cli("run", monitor, "--snapshot", "--cols", "120", "--rows", "40", text=True)
+            # Record a failed snapshot (such as a plug-in call deadline) instead
+            # of stopping, so a slow baseline still produces numbers.
+            result = subprocess.run([str(pmux), "--socket", str(endpoint), "plugin", "run", monitor, "--snapshot", "--cols", "120", "--rows", "40"],
+                env=env, capture_output=True, text=True, encoding="utf-8", timeout=120)
             snapshot.append((time.perf_counter() - started) * 1000)
-            assert "bench-seat-" in text, text
+            if result.returncode != 0 or "bench-seat-" not in result.stdout:
+                snapshot_failures.append(result.stderr.strip().splitlines()[-1][:200] if result.stderr.strip() else "no seats drawn")
         window = float(os.environ.get("ACTIVITY_BENCH_WINDOW", "10"))
         before = cpu_seconds(daemon.pid)
         time.sleep(window)
@@ -323,6 +328,8 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
             "cold_read_ms": summary(cold),
             "back_to_back_read_ms": summary(burst),
             "monitor_snapshot_ms": summary(snapshot),
+            "monitor_snapshot_failures": len(snapshot_failures),
+            "monitor_snapshot_errors": sorted(set(snapshot_failures)),
             "pmuxd_cpu_percent_idle_feed_on": round(100 * idle / window, 1),
             "pmuxd_cpu_percent_monitor_polling": round(100 * polled / window, 1),
             "monitor_polls": polls,

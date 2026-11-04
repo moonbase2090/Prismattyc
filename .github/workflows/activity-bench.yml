@@ -1,0 +1,107 @@
+name: Activity bench
+
+# Measures activity reads, the monitor snapshot and pmuxd CPU with many live
+# seats on a hosted Windows runner, at the pull request's head and at its
+# base, with the same benchmark script. Informational only: this is not a
+# required check, and it runs only when the code it measures changes.
+# Hosted-runner numbers are noisier than a dedicated machine; compare the two
+# runs of one job, not runs across jobs.
+
+on:
+  pull_request:
+    paths:
+      - crates/prismattyc-mux/src/procinfo.rs
+      - crates/prismattyc-mux/src/control.rs
+      - crates/prismattyc-mux/src/activity*.rs
+      - scripts/test-plugin-runtime.py
+      - .github/workflows/activity-bench.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: activity-bench-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    name: Activity bench (windows-2025)
+    runs-on: windows-2025
+    timeout-minutes: 150
+    env:
+      ACTIVITY_BENCH_SEATS: '20'
+      ACTIVITY_BENCH_WINDOW: '10'
+    steps:
+      - name: Check out the head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: head
+
+      - name: Check out the base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.90.0
+          targets: wasm32-unknown-unknown
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      # Both runs share one target directory, so the second build reuses the
+      # dependencies. The base runs the head's script so both measure the same.
+      - name: Benchmark the base
+        shell: pwsh
+        run: |
+          Copy-Item head/scripts/test-plugin-runtime.py base/scripts/test-plugin-runtime.py -Force
+          Set-Location base
+          python scripts/test-plugin-runtime.py --feature activity-bench --target-dir "$env:RUNNER_TEMP/bench-target" --out "$env:RUNNER_TEMP/bench-base"
+
+      - name: Benchmark the head
+        shell: pwsh
+        run: |
+          Set-Location head
+          python scripts/test-plugin-runtime.py --feature activity-bench --target-dir "$env:RUNNER_TEMP/bench-target" --out "$env:RUNNER_TEMP/bench-head"
+
+      - name: Summarize
+        if: always()
+        shell: python
+        run: |
+          import json, os
+          from pathlib import Path
+          temp = Path(os.environ["RUNNER_TEMP"])
+          runs = {}
+          for name in ("base", "head"):
+              path = temp / f"bench-{name}" / "activity-bench.json"
+              runs[name] = json.loads(path.read_text()) if path.exists() else None
+          rows = [
+              ("cold read, median / max ms", lambda r: f"{r['cold_read_ms']['median']} / {r['cold_read_ms']['max']}"),
+              ("back-to-back read, median / max ms", lambda r: f"{r['back_to_back_read_ms']['median']} / {r['back_to_back_read_ms']['max']}"),
+              ("monitor --snapshot, median ms", lambda r: str(r['monitor_snapshot_ms']['median'])),
+              ("monitor --snapshot failures of 5", lambda r: str(r['monitor_snapshot_failures'])),
+              ("pmuxd CPU, feed on, no readers", lambda r: f"{r['pmuxd_cpu_percent_idle_feed_on']} %"),
+              ("pmuxd CPU, polled like a monitor", lambda r: f"{r['pmuxd_cpu_percent_monitor_polling']} %"),
+          ]
+          lines = ["## Activity bench (windows-2025)", "", "| | base | head |", "|---|---|---|"]
+          for label, cell in rows:
+              lines.append(f"| {label} | " + " | ".join(cell(runs[n]) if runs[n] else "no result" for n in ("base", "head")) + " |")
+          lines += ["", "```json", json.dumps(runs, indent=2), "```"]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("\n".join(lines) + "\n")
+          print("\n".join(lines))
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: activity-bench
+          path: |
+            ${{ runner.temp }}/bench-base/activity-bench.json
+            ${{ runner.temp }}/bench-head/activity-bench.json
+          if-no-files-found: warn

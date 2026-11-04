@@ -661,8 +661,23 @@ fn consented_restart_and_restore_keep_every_space_member() {
     let listed = ok(&pmux(&["space", "ls"]));
     assert!(listed.contains("desk  2 sessions"), "{listed}");
 
+    // New shells settle for a moment (title, directory), and the restart
+    // refuses a configuration the live sessions no longer match. Save until
+    // a check right after the save agrees.
     let file = root.join("configuration.json");
-    ok(&pmux(&["session-config", "save", file.to_str().unwrap()]));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let _ = std::fs::remove_file(&file);
+        ok(&pmux(&["session-config", "save", file.to_str().unwrap()]));
+        std::thread::sleep(Duration::from_millis(500));
+        if pmux(&["session-config", "check", file.to_str().unwrap()])
+            .status
+            .success()
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the sessions never settled");
+    }
     let restarted = ok(&pmux(&[
         "restart",
         "--daemon",

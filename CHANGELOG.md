@@ -10,6 +10,7 @@
 
 - The settings panel shows the built-in default for `[mux]` keys that are not in the config file, so the first Enter on a boolean changes it.
 - Restarting pmuxd with a session configuration, as Update and Restart does, no longer empties the Spaces. The restart used to stop each session while Space autosave was still running, so autosave saved every Space without its sessions. The restored sessions then belonged to Spaces whose files no longer listed them. Autosave now stays off for those Spaces from the restart until `pmux session-config restore` has put every session back.
+- `pmux stop` no longer reports a failure when pmuxd exits between the check that it is running and the signal to stop it.
 
 ## [0.3.57] - 2026-11-04
 

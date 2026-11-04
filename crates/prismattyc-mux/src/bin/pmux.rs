@@ -7951,8 +7951,11 @@ fn server_gone(pid: u32, socket: &Path) -> bool {
 #[cfg(unix)]
 fn signal(pid: u32, signal: prismattyc_mux::platform::Signal) -> Result<()> {
     let pid = rustix::process::Pid::from_raw(pid as i32).context("invalid pid")?;
-    rustix::process::kill_process(pid, signal).with_context(|| format!("signal {pid:?}"))?;
-    Ok(())
+    match rustix::process::kill_process(pid, signal) {
+        // It exited between the liveness check and the signal: already stopped.
+        Err(rustix::io::Errno::SRCH) => Ok(()),
+        result => result.with_context(|| format!("signal {pid:?}")),
+    }
 }
 
 #[cfg(windows)]

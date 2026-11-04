@@ -142,11 +142,15 @@ class XdotoolInput:
         *mods, name = chord.split("+")
         name = XDO_KEYS.get(name, name)
         sym = "+".join([{"ctrl": "ctrl", "alt": "alt", "shift": "shift"}[m] for m in mods] + [name])
-        subprocess.run(["xdotool", "key", "--window", self.window, "--clearmodifiers", sym], check=True)
+        # No --window: that sends synthetic events, which the host ignores.
+        # XTEST input goes to the focused window, which is the host.
+        subprocess.run(["xdotool", "windowfocus", "--sync", self.window], check=True)
+        subprocess.run(["xdotool", "key", "--clearmodifiers", sym], check=True)
         time.sleep(0.15)
 
     def type(self, text):
-        subprocess.run(["xdotool", "type", "--window", self.window, "--delay", "40", text], check=True)
+        subprocess.run(["xdotool", "windowfocus", "--sync", self.window], check=True)
+        subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "40", text], check=True)
         time.sleep(0.15)
 
 

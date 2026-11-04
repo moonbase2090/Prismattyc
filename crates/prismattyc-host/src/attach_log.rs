@@ -1102,6 +1102,21 @@ impl Drop for LogPane {
 }
 
 impl LogPane {
+    #[cfg(test)]
+    pub(crate) fn from_events_for_test(
+        pane_id: u64,
+        events_rx: mpsc::Receiver<LogMessage>,
+    ) -> Self {
+        Self {
+            pane_id,
+            events_rx,
+            event_budget: HostByteBudget::new(HOST_EVENT_BUDGET_BYTES),
+            resize: Arc::new(Mutex::new(None)),
+            stop: Arc::new(AtomicBool::new(false)),
+            session_key: "test".into(),
+        }
+    }
+
     pub(crate) fn try_recv(&self) -> Result<LogMessage, mpsc::TryRecvError> {
         self.events_rx.try_recv()
     }

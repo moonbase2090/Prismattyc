@@ -12,7 +12,7 @@ const CHILD_ENV: &str = "PRISMATTYC_RENDER_TEST_CHILD";
 #[test]
 fn routes_transparency_rail_clicks_and_actions() {
     if std::env::var_os(CHILD_ENV).is_some() {
-        exercise_in_window();
+        exercise_in_window(false);
         std::fs::write(
             std::env::var_os(render_window_tests::RESULT_ENV).unwrap(),
             b"complete",
@@ -25,18 +25,39 @@ fn routes_transparency_rail_clicks_and_actions() {
     );
 }
 
-fn exercise_in_window() {
+#[test]
+fn full_settings_keep_update_layout_and_messages_menus_available() {
+    if std::env::var_os(CHILD_ENV).is_some() {
+        exercise_in_window(true);
+        std::fs::write(
+            std::env::var_os(render_window_tests::RESULT_ENV).unwrap(),
+            b"complete",
+        )
+        .unwrap();
+        return;
+    }
+    render_window_tests::run_in_private_display(
+        "input_routing_tests::full_settings_keep_update_layout_and_messages_menus_available",
+    );
+}
+
+fn exercise_in_window(full_settings: bool) {
     struct Proof {
         app: App,
         done: bool,
+        full_settings: bool,
     }
     impl ApplicationHandler<UserAction> for Proof {
         fn resumed(&mut self, event_loop: &ActiveEventLoop) {
             let id = self.app.open_window(event_loop, false).unwrap();
             let host = self.app.windows.get_mut(&id).unwrap();
-            verify_transparency(host);
-            verify_rail(host);
-            verify_dispatch(host);
+            if self.full_settings {
+                verify_full_settings_menus(host);
+            } else {
+                verify_transparency(host);
+                verify_rail(host);
+                verify_dispatch(host);
+            }
             self.done = true;
             self.app.windows.clear();
             event_loop.exit();
@@ -59,9 +80,48 @@ fn exercise_in_window() {
         ..config::ConfigFile::default()
     };
     let app = App::new(cli, config, None, event_loop.create_proxy()).unwrap();
-    let mut proof = Proof { app, done: false };
+    let mut proof = Proof {
+        app,
+        done: false,
+        full_settings,
+    };
     event_loop.run_app(&mut proof).unwrap();
     assert!(proof.done, "the event loop must run the input assertions");
+}
+
+fn verify_full_settings_menus(host: &mut HostState) {
+    std::fs::write(config::config_path(), "settings_panel = true\n").unwrap();
+    host.spacing.chrome_style = config::ChromeStyle::Graphite;
+    for (action, header) in [
+        (keybind::Action::UpdateRestart, "UPDATE AND RESTART"),
+        (keybind::Action::ChromeLayout, "LAYOUT"),
+        (keybind::Action::RecentMessages, "RECENT MESSAGES"),
+    ] {
+        quiet(host);
+        host.settings = None;
+        assert_eq!(dispatch(host, action), Dispatch::Handled);
+        assert_eq!(panel_header(host).as_deref(), Some(header));
+        assert!(
+            host.settings.is_none(),
+            "the requested menu must stay visible"
+        );
+    }
+    quiet(host);
+    space_panel::update_page(host, "Checking for updates.", &[]);
+    let (header, rows) = space_panel::rows(host).unwrap();
+    assert_eq!(header, "UPDATE AND RESTART");
+    assert_eq!(rows[0].name, "Checking for updates.");
+
+    quiet(host);
+    assert_eq!(
+        dispatch(host, keybind::Action::SpaceSettings),
+        Dispatch::Handled
+    );
+    assert!(
+        host.settings.is_some(),
+        "Settings must retain its full editor"
+    );
+    assert!(host.space_panel.is_none());
 }
 
 fn values_at(window: f32, chrome: f32, follows: bool) -> transparency::Values {

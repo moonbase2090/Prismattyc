@@ -248,6 +248,108 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
         assert result.returncode == 0, result.stderr
         return result.stdout
 
+    def cpu_seconds(pid):
+        if os.name == "nt":
+            output = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                f"(Get-Process -Id {pid}).TotalProcessorTime.TotalSeconds"],
+                capture_output=True, text=True, timeout=30, check=True).stdout
+            return float(output.strip())
+        stat = Path(f"/proc/{pid}/stat")
+        if stat.exists():
+            fields = stat.read_text().rsplit(")", 1)[1].split()
+            return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+        value = subprocess.run(["ps", "-o", "time=", "-p", str(pid)], capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+        days, _, clock = value.rpartition("-")
+        seconds = 0.0
+        for part in clock.split(":"):
+            seconds = seconds * 60 + float(part)
+        return seconds + int(days or 0) * 86400
+
+    def activity_bench():
+        # Repeatable cost of seat metadata: N live seats, then the reads a
+        # monitor and pmuxd's own session projection make.
+        connector = "org.moonbase.activity-connector"
+        cli("install", connector)
+        cli("enable", connector, "--allow", "activity.read:local")
+        count = int(os.environ.get("ACTIVITY_BENCH_SEATS", "20"))
+        program = "cmd.exe" if os.name == "nt" else "/bin/sh"
+        argv = ["/d", "/c", "pause > nul"] if os.name == "nt" else ["-c", "read -r line"]
+        for index in range(count):
+            name = f"bench-seat-{index:02d}"
+            reply = connection.request("create_session", name=name,
+                spawn={"program": program, "argv": argv, "cwd": None, "env": {}},
+                agent_id=name, headless=False)
+            assert reply["status"] == "ok", reply
+
+        def read_ms():
+            started = time.perf_counter()
+            reply = connection.request("read_activity", cursor=None, limit=256)
+            elapsed = (time.perf_counter() - started) * 1000
+            assert reply["status"] == "ok", reply
+            seats = reply["response"]["page"]["sessions"]["seats"]
+            assert sum(seat["seat"].startswith("bench-seat-") for seat in seats) == count, seats
+            last_states.clear()
+            last_states.extend(seat["state"] for seat in seats if seat["seat"].startswith("bench-seat-"))
+            return elapsed
+
+        last_states = []
+
+        def summary(values):
+            ordered = sorted(values)
+            return {"median": round(ordered[len(ordered) // 2], 2), "max": round(ordered[-1], 2), "n": len(ordered)}
+
+        time.sleep(3)
+        read_ms()
+        # Every bench seat has a live pane, so its processes are inspected.
+        assert "stopped" not in last_states, last_states
+        cold = []
+        for _ in range(5):
+            time.sleep(2.5)
+            cold.append(read_ms())
+        burst = [read_ms() for _ in range(40)]
+        snapshot = []
+        snapshot_failures = []
+        for _ in range(5):
+            started = time.perf_counter()
+            # Record a failed snapshot (such as a plug-in call deadline) instead
+            # of stopping, so a slow baseline still produces numbers.
+            result = subprocess.run([str(pmux), "--socket", str(endpoint), "plugin", "run", monitor, "--snapshot", "--cols", "120", "--rows", "40"],
+                env=env, capture_output=True, text=True, encoding="utf-8", timeout=120)
+            snapshot.append((time.perf_counter() - started) * 1000)
+            if result.returncode != 0 or "bench-seat-" not in result.stdout:
+                snapshot_failures.append(result.stderr.strip().splitlines()[-1][:200] if result.stderr.strip() else "no seats drawn")
+        window = float(os.environ.get("ACTIVITY_BENCH_WINDOW", "10"))
+        before = cpu_seconds(daemon.pid)
+        time.sleep(window)
+        idle = cpu_seconds(daemon.pid) - before
+        # A monitor reads up to two pages every 250 ms.
+        before = cpu_seconds(daemon.pid)
+        deadline = time.monotonic() + window
+        polls = 0
+        while time.monotonic() < deadline:
+            read_ms()
+            read_ms()
+            polls += 1
+            time.sleep(0.25)
+        polled = cpu_seconds(daemon.pid) - before
+        measured = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True)
+        result = {
+            "commit": measured.stdout.strip() if measured.returncode == 0 else None,
+            "seats": count,
+            "platform": sys.platform,
+            "cold_read_ms": summary(cold),
+            "back_to_back_read_ms": summary(burst),
+            "monitor_snapshot_ms": summary(snapshot),
+            "monitor_snapshot_failures": len(snapshot_failures),
+            "monitor_snapshot_errors": sorted(set(snapshot_failures)),
+            "pmuxd_cpu_percent_idle_feed_on": round(100 * idle / window, 1),
+            "pmuxd_cpu_percent_monitor_polling": round(100 * polled / window, 1),
+            "monitor_polls": polls,
+            "seat_states": sorted(set(last_states)),
+        }
+        (scratch / "activity-bench.json").write_text(json.dumps(result, indent=2) + "\n")
+        print("ACTIVITY_BENCH " + json.dumps(result), flush=True)
+
     def discovery_proof():
         nonlocal connection, daemon
         connector = "org.moonbase.activity-connector"
@@ -769,6 +871,8 @@ else:
                 connector = "org.moonbase.activity-connector"
                 cli("install", connector)
                 remote_proof(query_only=True)
+            elif feature == "activity-bench":
+                activity_bench()
             elif feature == "endpoint-pressure":
                 endpoint_pressure()
                 print("PASS32 endpoints with512 retained events each")
@@ -914,7 +1018,7 @@ def main():
     parser.add_argument("--toolchain", default="1.90.0")
     parser.add_argument("--release", action="store_true", dest="release", default=True, help="exercise optimized native binaries as shipped (default)")
     parser.add_argument("--debug", action="store_false", dest="release", help="use slower debug native binaries for local diagnostics")
-    parser.add_argument("--feature", choices=["all","endpoint-pressure","legacy-import","production","discovery","remote-query"], default="all")
+    parser.add_argument("--feature", choices=["all","activity-bench","endpoint-pressure","legacy-import","production","discovery","remote-query"], default="all")
     args = parser.parse_args()
     if bool(args.bundle) != (args.feature in ("production", "remote-query")):
         parser.error("--bundle is required with --feature production or remote-query")

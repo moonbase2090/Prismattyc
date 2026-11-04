@@ -366,8 +366,17 @@ const ACTIVITY_STUCK_AFTER_MS: u64 = 5 * 60 * 1000;
 const MAIL_INJECT_EPOCH_WAIT_MS: u64 = 250;
 const MAIL_INJECT_EPOCH_SLICE_MS: u64 = 10;
 
-fn activity_project_name(pid: u32) -> Option<String> {
-    let cwd = crate::procinfo::cwd_of(pid)?;
+/// How long one read of seat panes' processes serves activity reads.
+const ACTIVITY_PROCESS_TTL: Duration = Duration::from_secs(2);
+
+/// One read of seat panes' processes and the panes it covered.
+struct CachedPaneProcesses {
+    at: Instant,
+    roots: Vec<u32>,
+    processes: Arc<crate::procinfo::PaneProcesses>,
+}
+
+fn activity_project_name(cwd: &Path) -> Option<String> {
     let root = cwd.ancestors().find(|path| path.join(".git").exists())?;
     let name = root.file_name()?.to_str()?;
     if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
@@ -2429,6 +2438,8 @@ pub struct ControlPlane {
     /// Tests run `/bin/sh` children; this stands in for the agent classifier.
     #[cfg(test)]
     inject_agent_override: Option<crate::InjectAgent>,
+    /// The latest read of seat panes' processes, shared by activity reads.
+    activity_processes: Mutex<Option<CachedPaneProcesses>>,
     /// Last OutputActivity timestamp per pane (unix ms).
     last_output_at_ms: HashMap<u64, u64>,
     /// Panes whose idle trigger already fired for the current quiet episode.
@@ -2561,6 +2572,7 @@ impl ControlPlane {
             pane_write_receipts: HashMap::new(),
             #[cfg(test)]
             inject_agent_override: None,
+            activity_processes: Mutex::new(None),
             last_output_at_ms: HashMap::new(),
             pane_idle_fired: HashSet::new(),
             output_bytes: HashMap::new(),
@@ -2636,10 +2648,42 @@ impl ControlPlane {
         Ok(page)
     }
 
+    /// Process facts for `roots`, read at most once per
+    /// [`ACTIVITY_PROCESS_TTL`] for the same set of panes. Every activity read
+    /// shares it: native and plug-in reads, paged reads, a monitor's polls and
+    /// the session projection's feed reads. The projection's run-identity
+    /// check takes its own batched read once per tick instead.
+    fn activity_pane_processes(&self, mut roots: Vec<u32>) -> Arc<crate::procinfo::PaneProcesses> {
+        roots.sort_unstable();
+        roots.dedup();
+        let mut cached = self
+            .activity_processes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(cached) = cached
+            .as_ref()
+            .filter(|cached| cached.roots == roots && cached.at.elapsed() < ACTIVITY_PROCESS_TTL)
+        {
+            return Arc::clone(&cached.processes);
+        }
+        let processes = Arc::new(crate::procinfo::PaneProcesses::read(&roots));
+        *cached = Some(CachedPaneProcesses {
+            at: Instant::now(),
+            roots,
+            processes: Arc::clone(&processes),
+        });
+        processes
+    }
+
     fn activity_sessions(&self) -> prismattyc_core::activity::ActivitySessions {
         use prismattyc_core::activity::{ActivitySession, ActivitySessions};
         let observed_at_ms = now_unix_ms();
-        let seats = self
+        let child_pid = |pane: &PaneId| {
+            self.live
+                .as_ref()
+                .and_then(|live| live.child_pid(pane.get()))
+        };
+        let seat_panes = self
             .domain
             .sessions()
             .filter_map(|session| {
@@ -2650,32 +2694,27 @@ impl ControlPlane {
                     .filter_map(|id| self.domain.window(*id))
                     .flat_map(|window| window.layout.panes())
                     .collect::<Vec<_>>();
+                Some((session, seat, panes))
+            })
+            .collect::<Vec<_>>();
+        let processes = self.activity_pane_processes(
+            seat_panes
+                .iter()
+                .flat_map(|(_, _, panes)| panes.iter().filter_map(child_pid))
+                .collect(),
+        );
+        let seats = seat_panes
+            .into_iter()
+            .map(|(session, seat, panes)| {
                 let last_output_at_ms = panes
                     .iter()
                     .filter_map(|pane| self.last_output_at_ms.get(&pane.get()).copied())
                     .max();
-                let live = panes.iter().any(|pane| {
-                    self.live
-                        .as_ref()
-                        .and_then(|live| live.child_pid(pane.get()))
-                        .is_some()
-                });
-                let foregrounds = panes
+                let roots = panes.iter().filter_map(child_pid).collect::<Vec<_>>();
+                let live = !roots.is_empty();
+                let foregrounds = roots
                     .iter()
-                    .filter(|pane| {
-                        self.live
-                            .as_ref()
-                            .and_then(|live| live.child_pid(pane.get()))
-                            .is_some()
-                    })
-                    .map(|pane| {
-                        crate::procinfo::terminal_foreground(
-                            self.live
-                                .as_ref()
-                                .and_then(|live| live.child_pid(pane.get()))
-                                .expect("filtered live pane"),
-                        )
-                    })
+                    .map(|root| processes.get(*root).foreground)
                     .collect::<Vec<_>>();
                 let foreground = [
                     crate::procinfo::TerminalForeground::Agent,
@@ -2687,39 +2726,31 @@ impl ControlPlane {
                 .unwrap_or(crate::procinfo::TerminalForeground::Unknown);
                 let state =
                     activity_session_state(live, foreground, last_output_at_ms, observed_at_ms);
-                let agent_pids = panes
+                let agents = roots
                     .iter()
-                    .filter_map(|pane| {
-                        self.live
-                            .as_ref()
-                            .and_then(|live| live.child_pid(pane.get()))
-                    })
-                    .filter(|pid| {
-                        crate::inject_agent_slug(crate::procinfo::foreground_agent(*pid)).is_some()
-                    })
+                    .map(|root| processes.get(*root))
+                    .filter(|process| crate::inject_agent_slug(process.agent).is_some())
                     .collect::<Vec<_>>();
-                let harnesses = agent_pids
+                let harnesses = agents
                     .iter()
-                    .filter_map(|pid| {
-                        crate::inject_agent_slug(crate::procinfo::foreground_agent(*pid))
-                    })
+                    .filter_map(|process| crate::inject_agent_slug(process.agent))
                     .collect::<HashSet<_>>();
                 let harness = (harnesses.len() == 1)
                     .then(|| harnesses.into_iter().next().map(str::to_owned))
                     .flatten();
-                let project_names = agent_pids
+                let project_names = agents
                     .iter()
-                    .map(|pid| activity_project_name(*pid))
+                    .map(|process| process.cwd.as_deref().and_then(activity_project_name))
                     .collect::<Option<Vec<_>>>()
                     .map(|names| names.into_iter().collect::<HashSet<_>>());
                 let project = project_names
-                    .filter(|names| !agent_pids.is_empty() && names.len() == 1)
+                    .filter(|names| !agents.is_empty() && names.len() == 1)
                     .and_then(|mut names| names.drain().next());
                 let model = self
                     .activity
                     .as_ref()
                     .and_then(|feed| feed.latest_model_for_seat(&seat));
-                Some(ActivitySession {
+                ActivitySession {
                     seat,
                     session_id: session.id.get(),
                     state,
@@ -2728,7 +2759,7 @@ impl ControlPlane {
                     model,
                     quota: None,
                     project,
-                })
+                }
             })
             .collect();
         ActivitySessions {
@@ -17768,6 +17799,31 @@ function Read-Exact([int]$Count) {
             detail: None,
             process_ids: Vec::new(),
         }
+    }
+
+    #[test]
+    fn activity_reads_share_one_process_read_for_the_same_panes() {
+        let (plane, _, _) = fixture(8);
+        let first = plane.activity_pane_processes(vec![2, 1]);
+        let again = plane.activity_pane_processes(vec![1, 2, 2]);
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "paging and repeated polls reuse one read"
+        );
+        let other = plane.activity_pane_processes(vec![1]);
+        assert!(
+            !Arc::ptr_eq(&first, &other),
+            "a changed pane set reads again"
+        );
+        plane
+            .activity_processes
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .at -= ACTIVITY_PROCESS_TTL;
+        let expired = plane.activity_pane_processes(vec![1]);
+        assert!(!Arc::ptr_eq(&other, &expired), "an old read is replaced");
     }
 
     #[test]

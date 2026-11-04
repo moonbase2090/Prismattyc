@@ -66,7 +66,15 @@ jobs:
 
       - name: Build with the production plug-in bundle
         run: |
-          bundle="$(python scripts/release/prepare-plugin-bundle.py --target-dir "$RUNNER_TEMP/target" | tail -1)"
+          # The pinned release is fetched without a token; shared runner
+          # addresses can hit the anonymous rate limit, so retry with a pause.
+          for attempt in 1 2 3 4; do
+            if bundle="$(python scripts/release/prepare-plugin-bundle.py --target-dir "$RUNNER_TEMP/target" | tail -1)"; then
+              break
+            fi
+            [ "$attempt" = 4 ] && exit 1
+            sleep $((attempt * 90))
+          done
           echo "bundle: $bundle"
           export PRISMATTYC_PLUGIN_BUNDLE_DIR="$bundle"
           export CARGO_TARGET_DIR="$RUNNER_TEMP/target"

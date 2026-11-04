@@ -19,6 +19,7 @@ Steps, each recorded in result.json with PASS or FAIL:
 """
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import platform
@@ -231,6 +232,13 @@ class Flow:
         self.root = Path(tempfile.mkdtemp(prefix="amf-"))
         runtime = self.root / "run"
         runtime.mkdir(mode=0o700)
+        if WINDOWS:
+            # pmuxd requires an owner-only, inheritable DACL on the socket's parent.
+            spec = importlib.util.spec_from_file_location(
+                "plugin_runtime", Path(__file__).resolve().parents[2] / "scripts" / "test-plugin-runtime.py")
+            helper = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(helper)
+            helper.private_windows_directory(runtime)
         for name in ("home", "config", "data", "state"):
             (self.root / name).mkdir()
         self.config = self.root / "config.toml"
@@ -245,6 +253,7 @@ class Flow:
                    XDG_RUNTIME_DIR=str(runtime), XDG_CONFIG_HOME=str(self.root / "config"),
                    XDG_DATA_HOME=str(self.root / "data"), XDG_STATE_HOME=str(self.root / "state"),
                    PRISMATTYC_CONFIG=str(self.config), PRISMATTYC_NO_AGENT_SKILLS="1",
+                   PRISMATTYC_DUMP_PRESENT=str(out / "present.png"),
                    PATH=f"{bins}{os.pathsep}{env.get('PATH', '')}")
         if WINDOWS:
             env["USERPROFILE"] = env["HOME"]
@@ -369,12 +378,34 @@ class Flow:
             record.update(body() or {})
             record["status"] = "PASS"
         except Exception as error:  # recorded, then re-raised after the report
-            record.update(status="FAIL", error=f"{type(error).__name__}: {error}", screen=self.screen())
+            record.update(status="FAIL", error=f"{type(error).__name__}: {error}")
+            self.diagnose(name)
             raise
         finally:
             record["seconds"] = round(time.monotonic() - started, 2)
             self.steps.append(record)
             print(f"{record['status']} {name}", flush=True)
+
+    def diagnose(self, name):
+        """Everything pmux can say about a failed step, next to result.json."""
+        report = {}
+        for label, probe in [("render_status", lambda: json.loads(self.cli("render-status", "--json"))),
+                             ("spaces", lambda: self.cli("space", "ls")),
+                             ("sessions", lambda: self.cli("ls"))]:
+            try:
+                report[label] = probe()
+            except Exception as error:  # a broken probe must not hide the others
+                report[label] = f"{type(error).__name__}: {error}"
+        screens = {}
+        try:
+            for session in self.snapshot()["sessions"]:
+                for window in session["windows"]:
+                    for pane in window["panes"]:
+                        screens[f"{session['name']}/{pane['id']}"] = self.cli("save-buffer", str(pane["id"]), "-", check=False)
+        except Exception as error:
+            screens["error"] = str(error)
+        report["screens"] = screens
+        (self.out / f"diagnose-{name}.json").write_text(json.dumps(report, indent=2) + "\n")
 
     def palette_open(self):
         self.keys.key(PALETTE)

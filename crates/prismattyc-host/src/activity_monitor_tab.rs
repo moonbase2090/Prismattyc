@@ -8,9 +8,12 @@ use crate::HostState;
 const LAUNCHER: &str = "pmux-activity-monitor";
 const TITLE: &str = "Activity monitor";
 
-/// The launcher next to this binary, else one in the installed app bundle,
-/// else the bare name for the pane's `PATH`.
+/// `PMUX_ACTIVITY_MONITOR` when set, else the launcher next to this binary,
+/// else one in the installed app bundle, else the bare name for `PATH`.
 fn launcher(executable: Option<&Path>) -> PathBuf {
+    if let Some(path) = std::env::var_os("PMUX_ACTIVITY_MONITOR").filter(|path| !path.is_empty()) {
+        return PathBuf::from(path);
+    }
     executable
         .and_then(|executable| prismattyc_mux::executable::sibling(executable, &[LAUNCHER]))
         .or_else(|| prismattyc_mux::executable::app_companion(&[LAUNCHER]))

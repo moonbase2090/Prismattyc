@@ -4,7 +4,7 @@
 
 ### Added
 
-- The command palette has an `activity_monitor` entry that opens the activity monitor in a new tab, pointed at the daemon this window uses. It has no default shortcut; bind one with `activity_monitor` under `[keys]`.
+- The command palette has an `activity_monitor` entry that opens the activity monitor in a new tab, pointed at the daemon this window uses. It has no default shortcut; bind one with `activity_monitor` under `[keys]`. `PMUX_ACTIVITY_MONITOR` overrides the launcher path.
 
 ## [0.3.56] - 2026-11-03
 

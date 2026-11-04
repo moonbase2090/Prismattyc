@@ -817,6 +817,8 @@ fn verify_dispatch(host: &mut HostState) {
     assert!(host.terminal_targets.is_some());
 
     quiet(host);
+    // The launcher is built in its own workspace; any program stands in for it.
+    std::env::set_var("PMUX_ACTIVITY_MONITOR", "/bin/sh");
     let tabs = host.mux.tab_count();
     assert_eq!(dispatch(host, A::ActivityMonitor), Dispatch::Handled);
     assert_eq!(host.mux.tab_count(), tabs + 1, "{}", toast_text(host));

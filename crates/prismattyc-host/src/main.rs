@@ -96,6 +96,7 @@ mod session_prompt;
 mod settings;
 mod sidebar;
 mod space_client;
+mod space_commands;
 mod space_open;
 #[cfg(test)]
 #[cfg(target_os = "linux")]
@@ -1387,8 +1388,13 @@ struct HostState {
     restore_blank_terminals: bool,
     /// Blocking Space file and autosave work.
     space_client: space_client::Client,
+    space_command_pending: bool,
     /// Space file the worker just loaded for the polish poll.
-    space_poll_loaded: Option<(String, Option<prismattyc_mux::SavedSpace>)>,
+    space_poll_loaded: Option<(
+        String,
+        Option<prismattyc_mux::SavedSpace>,
+        Option<prismattyc_mux::Snapshot>,
+    )>,
     /// Divider drag (PT-133): the split whose ratio follows the pointer.
     divider_drag: Option<mux::Divider>,
     /// A resize cursor is showing (over a divider or while dragging one).
@@ -3993,11 +3999,6 @@ impl App {
                 continue;
             };
             let phase_started = Instant::now();
-            if host.space_rail.poll(&spaces_dir(), rail_now) {
-                rail_changed(host);
-            }
-            timing.record_phase(pump_timing::Phase::SpaceRailPoll, phase_started.elapsed());
-            let phase_started = Instant::now();
             sync_remote_rail(host, remote_changed);
             timing.record_phase(pump_timing::Phase::SyncRemoteRail, phase_started.elapsed());
             let phase_started = Instant::now();
@@ -4012,7 +4013,7 @@ impl App {
                 && !host.space_rail.names.is_empty()
             {
                 let live = live_tab_session_names(host);
-                if host.space_rail.infer_current(&spaces_dir(), &live) {
+                if host.space_rail.infer_current(&live) {
                     let inferred = host.space_rail.current.clone();
                     host.space_rail.current = None;
                     set_current_space(host, inferred);
@@ -4700,6 +4701,7 @@ impl App {
                 space_autosave_enabled: self.file_config.space_autosave_enabled(),
                 restore_blank_terminals: self.file_config.restore_blank_terminals.unwrap_or(false),
                 space_client: space_client::Client::spawn(self.wake.clone()),
+                space_command_pending: false,
                 space_poll_loaded: None,
                 divider_drag: None,
                 divider_cursor: false,
@@ -9463,30 +9465,22 @@ fn commit_tab_rename(host: &mut HostState) {
         // `attach_session` is the mux session id; `--session` resolves an
         // id or a name, so an all-digit id is never read as a pane id.
         let live_attach = !host.mux.is_placeholder(pane);
-        let mut pane_ok = true;
         if let Some(session) = host
             .mux
             .attach_session_of(pane)
             .filter(|_| live_attach)
             .map(str::to_string)
         {
-            let mut args = vec!["rename-pane".to_string(), "--session".to_string(), session];
-            if !title.is_empty() {
-                args.push(title);
+            if let Err(error) =
+                space_commands::submit(host, space_client::Operation::PaneTitle { session, title })
+            {
+                rail_error_toast(host, &format!(" Could not rename pane: {error} "));
+                observe_host_action(host, keybind::Action::RenamePane, false);
             }
-            let status = pmux_command()
-                .args(&args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::inherit())
-                .status();
-            pane_ok = matches!(status, Ok(status) if status.success());
-            if !pane_ok {
-                rail_error_toast(host, " pmux rename-pane failed; see the log ");
-            }
+        } else {
+            observe_host_action(host, keybind::Action::RenamePane, true);
         }
         host.dirty = true;
-        observe_host_action(host, keybind::Action::RenamePane, pane_ok);
         return;
     }
     match host.mux.set_fixed_tab_name(edit.window, Some(&edit.buffer)) {
@@ -10215,25 +10209,43 @@ fn refresh_space_views(host: &mut HostState) {
     settings::poll(host);
     space_panel::poll(host);
     drain_space_client(host);
+    if host.space_command_pending {
+        return;
+    }
     let now = Instant::now();
     let refresh_busy = host.space_client.refresh_busy();
     let refresh_due = host
         .last_space_refresh
         .is_none_or(|last| now.duration_since(last) >= CACHE_POLL_HEARTBEAT);
-    // A save on this pump persists the pre-regroup view. `pmux space save`
-    // then releases a pane that already belongs to the other Space. The
-    // clock is read once so a slow poll cannot also queue that refresh.
     if !refresh_busy && !refresh_due {
         spaces_polish::poll(host);
     }
     if !refresh_due || refresh_busy {
         return;
     }
-    let observed = snapshot_client::snapshot_observed(host.snapshot_client.as_deref());
+    let snapshot = space_client::SnapshotInput::capture(host.snapshot_client.as_deref());
+    host.last_space_refresh = Some(now);
+    let requests = space_panel::attention_requests(host);
+    let _ = host.space_client.submit_refresh(space_client::RefreshJob {
+        dir: spaces_dir(),
+        snapshot,
+        requests,
+        now_ms: prismattyc_mux::host_render_status::unix_ms(),
+        current: host.space_rail.current.clone(),
+        owner: host.mux.space_id.clone(),
+        generation: host.space_epoch,
+    });
+}
+
+fn apply_space_snapshot(
+    host: &mut HostState,
+    snapshot: &prismattyc_mux::Snapshot,
+    fetched_at: SystemTime,
+) {
     #[cfg(windows)]
     let cached_cwd = host.windows_cwds.clone();
     if host.mux.refresh_git_info(
-        observed.as_ref().map(|(_, snapshot)| snapshot),
+        Some(snapshot),
         #[cfg(windows)]
         Some(&cached_cwd),
         #[cfg(not(windows))]
@@ -10241,20 +10253,19 @@ fn refresh_space_views(host: &mut HostState) {
     ) {
         host.dirty = true;
     }
-    let Some((_, snapshot)) = observed else {
-        host.last_space_refresh = Some(now);
-        if !host.space_rail.attention_counts.is_empty() {
-            host.space_rail.attention_counts.clear();
-            host.dirty = true;
-        }
-        return;
-    };
     let bindings: Vec<_> = host
         .attach_pane_sessions
         .iter()
         .filter_map(|(pane, id)| {
+            if host
+                .attach_bound_at
+                .get(pane)
+                .is_some_and(|bound| *bound > fetched_at)
+            {
+                return None;
+            }
             let recorded = host.mux.attach_name_of(*pane);
-            let session = space_view::bound_session(&snapshot, id, recorded)?;
+            let session = space_view::bound_session(snapshot, id, recorded)?;
             (recorded != Some(session.name.as_str()))
                 .then(|| (*pane, id.clone(), session.name.clone()))
         })
@@ -10264,22 +10275,6 @@ fn refresh_space_views(host: &mut HostState) {
         mark_layout_dirty(host);
         host.dirty = true;
     }
-    host.last_space_refresh = Some(now);
-    let requests = space_panel::attention_requests(host);
-    let names = host.space_rail.names.clone();
-    let current = host.space_rail.current.clone();
-    let owner = host.mux.space_id.clone();
-    let generation = host.space_epoch;
-    let _ = host.space_client.submit_refresh(space_client::RefreshJob {
-        dir: spaces_dir(),
-        names,
-        snapshot,
-        requests,
-        now_ms: prismattyc_mux::host_render_status::unix_ms(),
-        current,
-        owner,
-        generation,
-    });
 }
 
 /// Start the font's fallback worker on the first pump after a font is built,
@@ -10297,11 +10292,21 @@ fn drain_font_fallbacks(host: &mut HostState) {
 fn drain_space_client(host: &mut HostState) {
     for report in host.space_client.drain() {
         match report {
-            space_client::Report::Poll { name, space, .. } => {
-                if host.restore_prompt.is_some() || host.space_opens.blocks_persist() {
+            space_client::Report::Poll {
+                name,
+                space,
+                snapshot,
+                epoch,
+                ..
+            } => {
+                if host.space_command_pending
+                    || epoch != host.space_epoch
+                    || host.restore_prompt.is_some()
+                    || host.space_opens.blocks_persist()
+                {
                     host.space_poll_loaded = None;
                 } else {
-                    host.space_poll_loaded = Some((name, space));
+                    host.space_poll_loaded = Some((name, space, snapshot));
                 }
             }
             space_client::Report::Save {
@@ -10326,7 +10331,7 @@ fn drain_space_client(host: &mut HostState) {
                     spaces_polish::SaveCompletion::Apply => {
                         spaces_polish::finish_save(&mut host.space_polish, ok, true);
                         if ok {
-                            refresh_rail(host);
+                            host.last_space_refresh = None;
                             set_current_space(host, Some(name));
                             host.space_rail.save_status = "Saved".into();
                         } else {
@@ -10337,13 +10342,31 @@ fn drain_space_client(host: &mut HostState) {
                 }
             }
             space_client::Report::Refresh {
+                directory,
+                snapshot,
                 pane_names,
                 attention,
                 resolved,
                 generation,
                 owner,
                 ..
-            } => apply_space_refresh(host, pane_names, attention, resolved, generation, owner),
+            } => {
+                if host.space_rail.apply_directory(directory) {
+                    rail_changed(host);
+                }
+                apply_space_refresh(
+                    host, pane_names, attention, resolved, snapshot, generation, owner,
+                );
+            }
+            space_client::Report::Command {
+                job,
+                result,
+                directory,
+                resolved,
+                ..
+            } => {
+                space_commands::complete(host, job, result, directory, resolved);
+            }
         }
     }
 }
@@ -10353,6 +10376,7 @@ fn apply_space_refresh(
     pane_names: HashMap<String, Vec<String>>,
     attention_counts: HashMap<String, usize>,
     resolved: Option<(String, prismattyc_mux::SavedSpace)>,
+    observed: Option<(std::time::SystemTime, prismattyc_mux::Snapshot)>,
     generation: u64,
     requested_owner: Option<String>,
 ) {
@@ -10364,8 +10388,16 @@ fn apply_space_refresh(
         host.space_rail.live_pane_names = pane_names;
         host.dirty = true;
     }
-    if host.space_opens.blocks_persist() || host.restore_prompt.is_some() {
+    if host.space_command_pending
+        || host.space_opens.blocks_persist()
+        || host.restore_prompt.is_some()
+        || generation != host.space_epoch
+        || requested_owner != host.mux.space_id
+    {
         return;
+    }
+    if let Some((fetched_at, snapshot)) = &observed {
+        apply_space_snapshot(host, snapshot, *fetched_at);
     }
     let Some((name, space)) = resolved else {
         return;
@@ -10385,15 +10417,12 @@ fn apply_space_refresh(
     }
     if host.space_rail.current.as_deref() != Some(name.as_str()) {
         set_current_space(host, Some(name.clone()));
-        refresh_rail(host);
         persist_attach_layout_from_live(host);
     }
     let Some(owner) = space.id.as_deref() else {
         return;
     };
-    let Some((snapshot_at, snapshot)) =
-        snapshot_client::snapshot_observed(host.snapshot_client.as_deref())
-    else {
+    let Some((snapshot_at, snapshot)) = observed else {
         return;
     };
     // `pmux space open` writes this marker before it restores the first
@@ -10779,20 +10808,10 @@ fn apply_rail_verdict(host: &mut HostState, verdict: space_rail::RailVerdict) {
         }
         RailVerdict::Open(name) => open_space_from_host(host, &name, SpaceOpenMode::Switch),
         RailVerdict::Rename { old, new } => {
-            match run_pmux_space(&["space".into(), "rename".into(), old.clone(), new.clone()]) {
-                Ok(_) => {
-                    resolve_host_space(host);
-                    refresh_rail(host);
-                    if host.space_rail.keyboard {
-                        if let Some(index) = host.space_rail.names.iter().position(|n| *n == new) {
-                            host.space_rail.focus = Some(index);
-                        }
-                    }
-                }
-                Err(error) => {
-                    eprintln!("prismattyc-host: rename space {old} to {new}: {error:#}");
-                    host.space_rail.notice = Some("rename failed; see the log");
-                }
+            if let Err(error) =
+                space_commands::submit(host, space_client::Operation::Rename { old, new })
+            {
+                rail_error_toast(host, &format!(" Could not rename: {error} "));
             }
         }
         RailVerdict::Reorder { name, to } => {
@@ -10810,10 +10829,7 @@ fn apply_rail_verdict(host: &mut HostState, verdict: space_rail::RailVerdict) {
             }
         }
         RailVerdict::Delete(name) => {
-            if let Err(error) = run_pmux_space(&["space".into(), "rm".into(), name.clone()]) {
-                eprintln!("prismattyc-host: delete space {name}: {error:#}");
-            }
-            refresh_rail(host);
+            space_commands::delete(host, name);
         }
         RailVerdict::Create(name) => session_prompt::create_space(host, name),
     }
@@ -11381,10 +11397,7 @@ fn apply_space_context_action(host: &mut HostState, chip: usize, action: SpaceCo
             }
         }
         SpaceContextAction::Delete => {
-            if let Err(error) = run_pmux_space(&["space".into(), "rm".into(), name.clone()]) {
-                eprintln!("prismattyc-host: delete space {name}: {error:#}");
-            }
-            refresh_rail(host);
+            space_commands::delete(host, name);
         }
     }
 }
@@ -15664,6 +15677,10 @@ fn remove_exited_session_from_space(
 
 /// Release saved membership, then detach every local view of that session.
 fn remove_session_from_space(host: &mut HostState, pane: PaneId, kill: bool) {
+    if host.space_command_pending {
+        rail_error_toast(host, " Another Space operation is still running ");
+        return;
+    }
     let Some(session) = host
         .mux
         .attach_name_of(pane)
@@ -15771,6 +15788,10 @@ fn remove_session_from_space(host: &mut HostState, pane: PaneId, kill: bool) {
 
 /// Transfer one daemon identity. The daemon validates exclusive ownership.
 fn move_to_space_from_host(host: &mut HostState, target: &str, whole_session: bool) {
+    if host.space_command_pending {
+        rail_error_toast(host, " Another Space operation is still running ");
+        return;
+    }
     let selected = match move_target::take_valid(host) {
         Ok(target) => target,
         Err(error) => {
@@ -15951,13 +15972,7 @@ fn apply_space_picker_verdict(
             true
         }
         SpacePickerVerdict::Deleted(name) => {
-            if let Err(error) = run_pmux_space(&["space".into(), "rm".into(), name.clone()]) {
-                rail_error_toast(host, &format!(" delete failed: {error} "));
-            }
-            refresh_rail(host);
-            if let Some(picker) = host.space_picker.as_mut() {
-                picker.status = Some(format!("deleted {name}"));
-            }
+            space_commands::delete(host, name);
             host.dirty = true;
             true
         }

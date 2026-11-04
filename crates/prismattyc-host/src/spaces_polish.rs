@@ -106,19 +106,8 @@ pub(super) fn undo(host: &mut HostState) {
         rail_error_toast(host, " Nothing to undo ");
         return;
     };
-    match run_pmux_space(&[
-        "space".into(),
-        "undo".into(),
-        path.to_string_lossy().into_owned(),
-    ]) {
-        Ok(()) => {
-            host.space_polish.undo = None;
-            host.last_space_refresh = None;
-            host.observed_space_sessions.clear();
-            refresh_rail(host);
-            rail_toast(host, " Membership restored; sessions kept running ");
-        }
-        Err(error) => rail_error_toast(host, &format!(" Could not undo: {error} ")),
+    if let Err(error) = space_commands::submit(host, space_client::Operation::Undo { path }) {
+        rail_error_toast(host, &format!(" Could not undo: {error} "));
     }
 }
 
@@ -334,12 +323,14 @@ fn decide(
 
 /// True when a live member of this Space is neither attached nor a session
 /// this window has already applied. Autosave must not release that member.
-fn view_omits_unobserved_member(host: &HostState) -> bool {
+fn view_omits_unobserved_member(
+    host: &HostState,
+    snapshot: Option<&prismattyc_mux::Snapshot>,
+) -> bool {
     let Some(owner) = host.mux.space_id.as_deref() else {
         return false;
     };
-    let Some(snapshot) = snapshot_client::snapshot_for_periodic(host.snapshot_client.as_deref())
-    else {
+    let Some(snapshot) = snapshot else {
         return false;
     };
     snapshot.sessions.iter().any(|session| {
@@ -354,7 +345,9 @@ fn view_omits_unobserved_member(host: &HostState) -> bool {
 
 pub(super) fn poll(host: &mut HostState) {
     let now = Instant::now();
-    let blocked = host.restore_prompt.is_some() || host.space_opens.blocks_persist();
+    let blocked = host.space_command_pending
+        || host.restore_prompt.is_some()
+        || host.space_opens.blocks_persist();
     if !begin_poll(&mut host.space_polish, now, blocked) {
         return;
     }
@@ -366,16 +359,24 @@ pub(super) fn poll(host: &mut HostState) {
     let loaded = host
         .space_poll_loaded
         .take()
-        .filter(|(loaded_name, _)| loaded_name == &name);
-    let Some((_, space)) = loaded else {
-        let _ = host.space_client.submit_poll(spaces_dir(), name);
+        .filter(|(loaded_name, _, _)| loaded_name == &name);
+    let Some((_, space, snapshot)) = loaded else {
+        let _ = host.space_client.submit_poll(space_client::PollJob {
+            dir: spaces_dir(),
+            name,
+            snapshot: space_client::SnapshotInput::capture(host.snapshot_client.as_deref()),
+            epoch: host.space_epoch,
+        });
         return;
+    };
+    let snapshot = match host.snapshot_client.as_deref() {
+        Some(client) => client.fresh(),
+        None => snapshot,
     };
     let step = match space {
         Some(space) if space.id == host.mux.space_id => {
             let live = live_snaps(host);
-            let snap = snapshot_client::snapshot_for_periodic(host.snapshot_client.as_deref());
-            let (shapes_match, shapes) = saved_shapes(&space, snap.as_ref());
+            let (shapes_match, shapes) = saved_shapes(&space, snapshot.as_ref());
             let fingerprint = format!("{name}:{live:?}:{shapes}");
             decide(
                 &mut host.space_polish,
@@ -395,7 +396,7 @@ pub(super) fn poll(host: &mut HostState) {
     // A pane move assigns the session to this Space before the window
     // attaches it. The daemon id is not in `observed_space_sessions` yet.
     // Saving the current view would release that session.
-    if step.write && !view_omits_unobserved_member(host) {
+    if step.write && !view_omits_unobserved_member(host, snapshot.as_ref()) {
         if let Some(generation) = claim_save(&mut host.space_polish, &name) {
             persist_attach_layout_from_live(host);
             // `attach_layout` is the file just handed to the writer, including

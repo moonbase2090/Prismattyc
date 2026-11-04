@@ -27,12 +27,12 @@ serves live and snapshot modes. The connector serves `--json`, `--seats`,
 `--recent`, and `--tail`. Review the available version before selecting a
 later package; updates and grants remain explicit.
 
-Collection is separate and off by default. Turn it on in Settings under Mux,
+Collection is separate and on by default. Turn it off in Settings under Mux,
 or in the config file:
 
 ```toml
 [mux]
-experimental_activity = true
+experimental_activity = false
 ```
 
 The running daemon applies collection changes within a second without a

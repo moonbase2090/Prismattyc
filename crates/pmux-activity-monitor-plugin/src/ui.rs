@@ -987,11 +987,11 @@ pub fn hint(hosts: &[Host]) -> Option<(&'static str, &'static str)> {
         )),
         Link::Disabled => Some((
             "Activity feed is disabled for this daemon.",
-            "Turn it on with experimental_activity = true under [mux] in the Prismattyc config or the settings panel. The running pmuxd picks it up within a second, and this view connects by itself.",
+            "It was turned off with experimental_activity = false under [mux]. Set it to true in the Prismattyc config or the settings panel. The running pmuxd picks it up within a second, and this view connects by itself.",
         )),
         Link::Unsupported => Some((
             "This pmuxd has no activity feed.",
-            "It is older than the feed. Update Prismattyc for a pmuxd that has one, then set experimental_activity = true under [mux]; the feed is off by default.",
+            "It is older than the feed. Update Prismattyc and restart pmuxd; the feed is on by default unless experimental_activity = false under [mux].",
         )),
         Link::Retrying { .. } => Some((
             "Can't reach pmuxd.",
@@ -2333,7 +2333,10 @@ mod tests {
             title > 4 && title < 14,
             "roughly centered: line {title}\n{text}"
         );
-        assert!(text.contains("experimental_activity = true under [mux]"));
+        assert!(
+            text.contains("experimental_activity = false under [mux]"),
+            "{text}"
+        );
         assert!(!text.contains("not available yet"), "{text}");
         assert!(lines[1].trim_start().starts_with("mac  feed off"));
         // At a small size it still wraps inside the pane.

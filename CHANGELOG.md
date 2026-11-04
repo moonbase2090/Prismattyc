@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The activity feed is on by default. pmuxd serves seat activity metadata without any setup, and `experimental_activity = false` under `[mux]`, in the settings panel or the config file, turns it off live. Configs that already contain `experimental_activity = false`, including ones written by earlier versions, keep the feed off. The feed carries no command text, paths, prompts, tool output or mail bodies, and monitor and query access are still granted separately in Settings > Plug-ins.
+
 ### Fixed
 
+- The settings panel shows the built-in default for `[mux]` keys that are not in the config file, so the first Enter on a boolean changes it.
 - Restarting pmuxd with a session configuration, as Update and Restart does, no longer empties the Spaces. The restart used to stop each session while Space autosave was still running, so autosave saved every Space without its sessions. The restored sessions then belonged to Spaces whose files no longer listed them. Autosave now stays off for those Spaces from the restart until `pmux session-config restore` has put every session back.
 
 ## [0.3.57] - 2026-11-04

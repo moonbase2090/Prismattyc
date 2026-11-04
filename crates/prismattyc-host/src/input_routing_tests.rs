@@ -822,8 +822,14 @@ fn verify_dispatch(host: &mut HostState) {
     let tabs = host.mux.tab_count();
     assert_eq!(dispatch(host, A::ActivityMonitor), Dispatch::Handled);
     assert_eq!(host.mux.tab_count(), tabs + 1, "{}", toast_text(host));
+    let monitor = host.mux.focused_id();
     assert_eq!(
-        host.mux.fixed_tab_name(host.mux.active_window()),
+        host.mux
+            .tab_panes()
+            .into_iter()
+            .find(|(_, panes)| panes.contains(&monitor))
+            .map(|(title, _)| title)
+            .as_deref(),
         Some("Activity monitor")
     );
     assert!(host.mux.is_retained_local_terminal(host.mux.focused_id()));

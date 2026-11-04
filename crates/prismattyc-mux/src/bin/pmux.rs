@@ -7951,8 +7951,14 @@ fn server_gone(pid: u32, socket: &Path) -> bool {
 #[cfg(unix)]
 fn signal(pid: u32, signal: prismattyc_mux::platform::Signal) -> Result<()> {
     let pid = rustix::process::Pid::from_raw(pid as i32).context("invalid pid")?;
-    match rustix::process::kill_process(pid, signal) {
-        // It exited between the liveness check and the signal: already stopped.
+    signalled(rustix::process::kill_process(pid, signal), pid)
+}
+
+/// The outcome of signalling `pid`. ESRCH means it exited between the
+/// liveness check and the signal, so it is already stopped.
+#[cfg(unix)]
+fn signalled(result: rustix::io::Result<()>, pid: rustix::process::Pid) -> Result<()> {
+    match result {
         Err(rustix::io::Errno::SRCH) => Ok(()),
         result => result.with_context(|| format!("signal {pid:?}")),
     }
@@ -8105,13 +8111,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn stop_still_reports_a_signal_it_may_not_send() {
-        // pid 1 exists and belongs to root: EPERM is not "already gone".
-        if rustix::process::geteuid().is_root() {
-            return;
-        }
-        let error = signal(1, prismattyc_mux::platform::Signal::TERM).unwrap_err();
+    fn stop_still_reports_errors_other_than_a_gone_process() {
+        // The errno is handed in, so no real process is signalled.
+        let pid = rustix::process::Pid::from_raw(4242).unwrap();
+        signalled(Err(rustix::io::Errno::SRCH), pid).expect("gone counts as stopped");
+        let error = signalled(Err(rustix::io::Errno::PERM), pid).unwrap_err();
         assert!(format!("{error:#}").contains("signal"), "{error:#}");
+        signalled(Ok(()), pid).expect("delivered");
     }
     use prismattyc_mux::{
         EventBatch, EventEnvelope, MailWake, PaneContent, PaneGeometry, PaneInputLedger,

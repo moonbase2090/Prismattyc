@@ -28,13 +28,21 @@ fn socket_path(root: &Path) -> PathBuf {
     root.join("pmux.sock")
 }
 
+/// Tears down the test daemon however the test ends. `pmux restart` replaces
+/// the child with a new detached pmuxd, so killing the child alone could
+/// leave that replacement running; stopping whatever serves the private
+/// socket covers both.
 struct ServerGuard {
     child: Child,
     socket: PathBuf,
+    root: PathBuf,
 }
 
 impl Drop for ServerGuard {
     fn drop(&mut self) {
+        if self.socket.exists() {
+            let _ = pmux(&self.socket, &self.root, &[], &["stop"]);
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.socket);
@@ -55,6 +63,7 @@ fn start_server(socket: &Path, root: &Path) -> ServerGuard {
             .spawn()
             .expect("spawn pmuxd"),
         socket: socket.to_path_buf(),
+        root: root.to_path_buf(),
     };
     for _ in 0..100 {
         if socket.exists() {

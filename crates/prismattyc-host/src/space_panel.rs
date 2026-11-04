@@ -619,7 +619,7 @@ pub(super) fn update_page(
     actions: &[(&str, update_flow::Action)],
 ) {
     if host.space_panel.is_none() {
-        settings(host);
+        open_settings_menu(host);
     }
     let panel = host.space_panel.as_mut().unwrap();
     panel.pending = None;
@@ -694,7 +694,7 @@ pub(super) fn resize(host: &mut HostState, physical_width: u32) {
 }
 
 pub(super) fn maintenance(host: &mut HostState) {
-    settings(host);
+    open_settings_menu(host);
     let panel = host.space_panel.as_mut().unwrap();
     panel.maintenance = true;
     panel.page = Page::Maintenance;
@@ -714,7 +714,7 @@ pub(super) fn layout(host: &mut HostState) {
     if host.spacing.chrome_style != config::ChromeStyle::Graphite {
         return;
     }
-    settings(host);
+    open_settings_menu(host);
     let panel = host.space_panel.as_mut().unwrap();
     panel.page = Page::Layout;
     panel.rebuild();
@@ -736,7 +736,7 @@ fn save_layout(path: &std::path::Path, mode: config::LayoutMode) -> anyhow::Resu
 
 /// Open Recent messages: every status message, shown or hidden (#171).
 pub(super) fn messages(host: &mut HostState) {
-    settings(host);
+    open_settings_menu(host);
     show_messages(host);
 }
 
@@ -755,6 +755,10 @@ pub(super) fn settings(host: &mut HostState) {
         crate::settings::open(host);
         return;
     }
+    open_settings_menu(host);
+}
+
+fn open_settings_menu(host: &mut HostState) {
     open(host, host.space_rail.current.clone().unwrap_or_default());
     let panel = host.space_panel.as_mut().unwrap();
     panel.pending = None;

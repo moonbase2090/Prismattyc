@@ -421,7 +421,11 @@ selected and running versions, effective grants, failures and pending updates.
 | Core rollback | Leave incompatible packages installed but stopped with a typed reason. Do not run a native substitute. |
 
 Durable selections and grants use one atomic per-instance journal, separate
-from workspace persistence. Retry IDs make administrative requests safe after
+from workspace persistence. It sits in the instance's directory under the data
+directory (`<data>/prismattyc/workspaces/<instance key>/plugins.json`), not
+beside the socket, so it survives the reboot or logout that clears the runtime
+directory. A journal that an earlier version kept beside the socket is moved
+there by the next daemon to manage plug-ins. Retry IDs make administrative requests safe after
 a lost response. Startup finishes or discards interrupted transitions using
 the committed journal. PID alone never identifies an owned worker.
 

@@ -171,6 +171,13 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
             raise
     config = runtime / "config.toml"
     endpoint = runtime / "daemon.sock"
+
+    def saved_journal():
+        # The instance's durable plug-in journal, under the isolated data directory.
+        found = list((runtime / "data" / "prismattyc" / "workspaces").glob("*/plugins.json"))
+        assert len(found) == 1, found
+        return found[0]
+
     env = {key: value for key, value in os.environ.items() if not key.startswith(("HIVE_", "PMUX_", "PRISMATTYC_"))}
     env.update(XDG_DATA_HOME=str(runtime / "data"), XDG_CONFIG_HOME=str(runtime / "config"), PRISMATTYC_CONFIG=str(config), PMUX_SESSION_AGENTS=str(runtime / "agents.json"))
     suffix = ".exe" if os.name == "nt" else ""
@@ -610,7 +617,7 @@ else:
         hosts.write_text('min_interval_ms = 1000\n[[host]]\nlabel = "local"\nsocket = "default"\n'
             + f'[[host]]\nlabel = "{long_label}"\ncommand = {json.dumps(query)}\n')
         arguments = ["--host",f"legacy-socket={endpoint}","--host-cmd","a-24-character-host-label",json.dumps(query),"--activity-hosts",str(hosts)]
-        journal = endpoint.with_suffix(".plugins.json")
+        journal = saved_journal()
         before = journal.read_bytes()
         preview = cli("endpoint","import",*arguments)
         assert preview["applied"] is False and len(preview["proposed_endpoints"]) == 3
@@ -838,7 +845,7 @@ else:
         daemon.kill()
         daemon.wait(timeout=10)
         wait_gone(crash_pid)
-        journal = endpoint.with_suffix(".plugins.json")
+        journal = saved_journal()
         before = journal.read_bytes()
         offline = cli("list")
         assert next(state for state in offline["states"] if state["id"] == connector)["observed"] == "daemon_unavailable"

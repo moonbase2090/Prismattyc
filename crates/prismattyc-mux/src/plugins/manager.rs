@@ -57,7 +57,11 @@ impl Service {
         if self.manager.get().is_none() {
             let _initializing = self.initializing.lock().unwrap();
             if self.manager.get().is_none() {
-                let manager = Arc::new(Manager::new(&self.socket, self.plane.clone())?);
+                let manager = Arc::new(Manager::new(
+                    &self.socket,
+                    &state_directory(&self.socket),
+                    self.plane.clone(),
+                )?);
                 let _ = self.manager.set(manager);
             }
         }
@@ -225,6 +229,30 @@ struct Manager {
     active_remotes: Arc<AtomicUsize>,
 }
 
+/// Where an instance keeps its plug-in journal: next to its saved workspace
+/// in the data directory, so selections, grants and endpoints survive the
+/// reboot or logout that clears the runtime directory holding the socket.
+pub(crate) fn state_directory(socket: &Path) -> PathBuf {
+    crate::workspace::path(socket)
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+}
+
+/// The runtime-directory journal that earlier versions kept beside the socket.
+fn legacy_journal(socket: &Path) -> PathBuf {
+    socket.with_extension("plugins.json")
+}
+
+/// The saved journal for read-only use while no daemon runs. A journal not
+/// yet moved by a daemon is still read from its earlier place.
+fn saved_journal(socket: &Path, directory: &Path) -> Result<Journal> {
+    let path = directory.join("plugins.json");
+    if !path.try_exists()? && legacy_journal(socket).try_exists()? {
+        return load_journal(&legacy_journal(socket));
+    }
+    load_journal(&path)
+}
+
 fn load_journal(path: &Path) -> Result<Journal> {
     let journal: Journal = if path.try_exists()? {
         serde_json::from_slice(&read_private(path, 1024 * 1024)?)?
@@ -262,12 +290,26 @@ fn load_journal(path: &Path) -> Result<Journal> {
     Ok(journal)
 }
 
+/// Move a journal from beside the socket, where earlier versions kept it, to
+/// the durable `path`. Runs under the journal lock. A durable journal that
+/// already exists wins, and the earlier file is left alone.
+fn adopt_legacy_journal(socket: &Path, path: &Path) -> Result<()> {
+    let legacy = legacy_journal(socket);
+    if path.try_exists()? || !legacy.try_exists()? {
+        return Ok(());
+    }
+    let journal = load_journal(&legacy).context("read the earlier plug-in journal")?;
+    crate::config::write_file_atomic(path, &serde_json::to_string(&journal)?)?;
+    std::fs::remove_file(&legacy).context("remove the earlier plug-in journal")?;
+    Ok(())
+}
+
 impl Manager {
-    fn new(socket: &Path, plane: Weak<Mutex<ControlPlane>>) -> Result<Self> {
-        let path = socket.with_extension("plugins.json");
-        private_directory(path.parent().context("plug-in journal has no parent")?)?;
+    fn new(socket: &Path, directory: &Path, plane: Weak<Mutex<ControlPlane>>) -> Result<Self> {
+        let path = directory.join("plugins.json");
+        private_directory(directory)?;
         let writer = crate::private_fs::open(
-            &socket.with_extension("plugins.lock"),
+            &directory.join("plugins.lock"),
             std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -275,6 +317,7 @@ impl Manager {
         )?;
         crate::platform::try_lock_exclusive(&writer)
             .context("another manager owns this plug-in journal")?;
+        adopt_legacy_journal(socket, &path)?;
         let journal = load_journal(&path)?;
         let slots = journal
             .selections
@@ -714,7 +757,7 @@ pub fn inspect_offline(socket: &Path, request: Request) -> Result<Reply> {
             packages: catalog.list(),
         });
     }
-    let journal = load_journal(&socket.with_extension("plugins.json"))?;
+    let journal = saved_journal(socket, &state_directory(socket))?;
     let state = State {
         journal,
         slots: BTreeMap::new(),
@@ -1612,10 +1655,15 @@ mod tests {
         root.join("daemon.sock")
     }
 
+    /// Each test's durable state directory, beside its private socket.
+    fn state(socket: &Path) -> PathBuf {
+        socket.with_file_name("state")
+    }
+
     #[test]
     fn disabled_state_survives_restart_and_retry_ids_cannot_change_their_action() {
         let socket = socket();
-        let manager = Manager::new(&socket, Weak::new()).unwrap();
+        let manager = Manager::new(&socket, &state(&socket), Weak::new()).unwrap();
         let action = AdminAction::Disable {
             id: "org.moonbase.example".into(),
         };
@@ -1638,7 +1686,7 @@ mod tests {
             )
             .is_err());
         let saved: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(socket.with_extension("plugins.json")).unwrap())
+            serde_json::from_slice(&std::fs::read(state(&socket).join("plugins.json")).unwrap())
                 .unwrap();
         assert_eq!(
             saved["selections"]["org.moonbase.example"],
@@ -1646,7 +1694,7 @@ mod tests {
         );
         assert_eq!(saved["completed"].as_array().unwrap().len(), 1);
         drop(manager);
-        let restarted = Manager::new(&socket, Weak::new()).unwrap();
+        let restarted = Manager::new(&socket, &state(&socket), Weak::new()).unwrap();
         let state = restarted.state.lock().unwrap();
         assert!(!status(&state, "org.moonbase.example").enabled);
         assert_ne!(state.slots["org.moonbase.example"].generation, generation);
@@ -1658,7 +1706,7 @@ mod tests {
     #[test]
     fn disabled_and_uninstalled_plugins_have_no_mcp_exports() {
         let socket = socket();
-        let manager = Manager::new(&socket, Weak::new()).unwrap();
+        let manager = Manager::new(&socket, &state(&socket), Weak::new()).unwrap();
         manager
             .admin(
                 "a".repeat(32),
@@ -1686,13 +1734,111 @@ mod tests {
         std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
     }
 
+    fn disable_example(manager: &Manager, retry: char) {
+        manager
+            .admin(
+                retry.to_string().repeat(32),
+                AdminAction::Disable {
+                    id: "org.moonbase.example".into(),
+                },
+            )
+            .unwrap();
+    }
+
+    fn saved_state(manager: &Manager) -> Option<Desired> {
+        manager
+            .state
+            .lock()
+            .unwrap()
+            .journal
+            .selections
+            .get("org.moonbase.example")
+            .cloned()
+    }
+
+    #[test]
+    fn saved_state_survives_a_cleared_runtime_directory() {
+        let root = socket().with_file_name("");
+        let runtime = root.join("runtime");
+        private_directory(&runtime).unwrap();
+        let socket = runtime.join("daemon.sock");
+        let directory = root.join("data");
+        let manager = Manager::new(&socket, &directory, Weak::new()).unwrap();
+        disable_example(&manager, 'a');
+        drop(manager);
+        // Reboot or logout empties the runtime directory that holds the socket.
+        std::fs::remove_dir_all(&runtime).unwrap();
+        private_directory(&runtime).unwrap();
+        let restarted = Manager::new(&socket, &directory, Weak::new()).unwrap();
+        assert!(matches!(
+            saved_state(&restarted),
+            Some(Desired::Disabled { selected: None })
+        ));
+        drop(restarted);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_journal_beside_the_socket_is_moved_to_the_data_directory_once() {
+        let socket = socket();
+        let earlier = socket.with_file_name("earlier");
+        let manager = Manager::new(&socket, &earlier, Weak::new()).unwrap();
+        disable_example(&manager, 'a');
+        drop(manager);
+        std::fs::rename(earlier.join("plugins.json"), legacy_journal(&socket)).unwrap();
+
+        // A daemon that is not running reads the earlier journal where it is.
+        let offline = saved_journal(&socket, &state(&socket)).unwrap();
+        assert!(offline.selections.contains_key("org.moonbase.example"));
+
+        let manager = Manager::new(&socket, &state(&socket), Weak::new()).unwrap();
+        assert!(matches!(
+            saved_state(&manager),
+            Some(Desired::Disabled { selected: None })
+        ));
+        assert!(!legacy_journal(&socket).exists(), "moved, not copied");
+        assert!(state(&socket).join("plugins.json").exists());
+        drop(manager);
+        std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_durable_journal_wins_over_an_earlier_one_left_beside_the_socket() {
+        let socket = socket();
+        let manager = Manager::new(&socket, &state(&socket), Weak::new()).unwrap();
+        manager
+            .admin(
+                "c".repeat(32),
+                AdminAction::Disable {
+                    id: "org.moonbase.other".into(),
+                },
+            )
+            .unwrap();
+        drop(manager);
+        let other = socket.with_file_name("other");
+        let manager = Manager::new(&socket, &other, Weak::new()).unwrap();
+        disable_example(&manager, 'b');
+        drop(manager);
+        std::fs::rename(other.join("plugins.json"), legacy_journal(&socket)).unwrap();
+        let before = std::fs::read(legacy_journal(&socket)).unwrap();
+
+        let manager = Manager::new(&socket, &state(&socket), Weak::new()).unwrap();
+        assert!(
+            saved_state(&manager).is_none(),
+            "the durable journal is kept"
+        );
+        assert_eq!(std::fs::read(legacy_journal(&socket)).unwrap(), before);
+        drop(manager);
+        std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
+    }
+
     #[test]
     fn only_one_manager_can_write_an_instance_journal() {
         let socket = socket();
-        let first = Manager::new(&socket, Weak::new()).unwrap();
-        assert!(Manager::new(&socket, Weak::new()).is_err());
+        let first = Manager::new(&socket, &state(&socket), Weak::new()).unwrap();
+        assert!(Manager::new(&socket, &state(&socket), Weak::new()).is_err());
         drop(first);
-        let second = Manager::new(&socket, Weak::new()).unwrap();
+        let second = Manager::new(&socket, &state(&socket), Weak::new()).unwrap();
         drop(second);
         std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
     }
@@ -1700,8 +1846,8 @@ mod tests {
     #[test]
     fn a_failed_journal_commit_changes_neither_desired_state_nor_retry_history() {
         let socket = socket();
-        let manager = Manager::new(&socket, Weak::new()).unwrap();
-        std::fs::create_dir(socket.with_extension("plugins.json")).unwrap();
+        let manager = Manager::new(&socket, &state(&socket), Weak::new()).unwrap();
+        std::fs::create_dir(state(&socket).join("plugins.json")).unwrap();
         assert!(manager
             .admin(
                 "a".repeat(32),

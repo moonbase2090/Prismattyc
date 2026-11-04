@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Plug-in selections, grants and activity endpoints survive a reboot or logout. Each daemon keeps them in its instance directory under the data directory instead of beside its socket, whose runtime directory the system clears, and moves a journal that an earlier version kept beside the socket on first use.
+
 ## [0.3.56] - 2026-11-03
 
 This release replaces 0.3.55, which was tagged but not published, and includes

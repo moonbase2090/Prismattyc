@@ -2,11 +2,20 @@
 
 ## [Unreleased]
 
+## [0.3.57] - 2026-11-04
+
+This hotfix replaces 0.3.56, withdrawn because of excessive Windows pmuxd CPU
+use and an Update and Restart crash.
+
 ### Fixed
 
+- Choosing Update and Restart in the command palette keeps the app open and opens its submenu when Full Settings is enabled. Layout and Recent Messages menus also remain available.
 - pmuxd no longer keeps a CPU core busy on Windows with many panes while the activity feed is on, and the activity monitor no longer times out there. On Windows, seat status takes one process snapshot for all panes instead of several per pane, and pmuxd's own session tracking takes one such snapshot per second. On every platform, activity reads within two seconds of each other share one read of the panes' processes, as long as the set of seat panes is unchanged.
+- Combined release checksums list only real asset names. Temporary checksum output stays outside the asset directory and the finished list replaces the old one atomically.
 
 ## [0.3.56] - 2026-11-03
+
+Withdrawn because of excessive Windows pmuxd CPU use and an Update and Restart crash.
 
 This release replaces 0.3.55, which was tagged but not published, and includes
 its [changes](https://github.com/moonbase2090/Prismattyc/blob/v0.3.55/CHANGELOG.md#0355---2026-11-03).

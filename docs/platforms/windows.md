@@ -135,8 +135,7 @@ directory `platform::data_home` uses. It does not stop or restart any process.
 Live proofs that install Prismattyc, start `pmuxd`, or open the host run as a
 local Windows user created for that proof, in a profile with no Prismattyc
 install. They do not run in the account that owns the development session.
-Issue #307 was proved that way. Issues #310, #311, and #312 will use the
-same account. The owner's PATH, Run key, and
+Issue #307 was proved that way. The owner's PATH, Run key, and
 `%LOCALAPPDATA%` stay unchanged. The mux ConPTY fixture is
 `cargo test -p prismattyc-mux --lib`. It does not install Prismattyc, write
 the Run key, or use the default socket. It does start ConPTY guests in

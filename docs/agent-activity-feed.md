@@ -167,25 +167,209 @@ PreToolUse, PostToolUse, and Stop.
 
 ### Harness hook coverage
 
-Hook availability and payloads differ by harness. This table records the
-documented source for lifecycle and tool activity; it does not imply that the
-feed installer configures every harness.
+Hook availability and payloads differ by harness. This section records
+which documented hook field shapes can fill each `detail` and
+current-session field, and how reliable each shape is. Public text here
+stays generic: harnesses appear as payload profiles, identified by their
+event naming and correlation fields. The installer code and each
+runtime's own hook reference (linked in the adapter notes above) name the
+concrete profile for a given runtime. Field names below are documented
+payload keys for the runtime versions current when this was written;
+check the installed runtime before relying on any of them.
 
-| Harness | Documented source | Useful signals | Limits |
-| --- | --- | --- | --- |
-| Claude Code | [Hooks reference](https://code.claude.com/docs/en/hooks) | Session lifecycle, prompt submission, pre/post tool use, failures, and stop; JSON hook input includes session and tool context for applicable events. | Hooks must be configured in the user's trusted settings. Hosted tools and surfaces can have different hook support. |
-| Codex | [Hooks guide](https://learn.chatgpt.com/docs/hooks) | Session start, prompt submission, tool lifecycle, subagent lifecycle, stop, and interruption. Applicable payloads include session ID, model, working directory, and tool metadata. | Hook schemas and supported events depend on the Codex version and surface. Quota state is not a documented hook field. |
-| Muse Code | [Hooks guide](https://meta-models.github.io/muse-code-sdk/next/guides/extend/hooks/) | Session and prompt lifecycle, tool success/failure, model calls, subagents, and stop. Hooks receive JSON on stdin; event-specific payloads are documented separately. | Project hooks run only for trusted workspaces. Quota state is not a documented hook field. |
-| Gemini CLI | [Hooks reference](https://geminicli.com/docs/hooks/reference/) | Session lifecycle, prompt/agent/model events, and before/after tool events. Hook input is JSON on stdin and includes session ID, cwd, event name, and timestamp. | Hooks are configured in Gemini settings. Tool responses and prompts can contain content, so the activity adapter must discard them. Quota state is not a documented hook field. |
-| Kiro | [Hook types](https://kiro.dev/docs/hooks/types/) and [configuration reference](https://kiro.dev/docs/custom-agents/configuration-reference/) | Prompt, session, agent, and pre/post tool lifecycle, depending on Kiro surface/version. Command hooks receive event JSON. | Trigger support differs across IDE, CLI versions, and Web; Web does not run these local triggers. Quota state is not a documented hook field. |
+Reliability terms:
 
-Use pmux's current session roster as the identity and liveness source. Hooks
-provide activity transitions and may add explicitly documented metadata, but
-must be bound to a pmux session rather than allowed to create an unnamed seat.
-Treat project as the session's cwd when available. Model, quota, current task,
-and ticket are unknown unless a documented field or explicit local integration
-supplies them; do not read transcripts, credentials, or terminal output to fill
-gaps. In particular, no source listed above documents a quota-state field.
+- **Reliable**: a documented structured field on a documented event.
+- **Best effort**: present only on some events, tools, surfaces, or
+  versions, or nested inside tool-specific output the adapter must parse
+  defensively.
+- **Unknown**: no documented structured field. The feed leaves the value
+  absent instead of inferring it.
+
+Profiles observed across current runtimes:
+
+- **Profile P1**: PascalCase event names, stdin JSON, a tool-call id on
+  tool events, an optional payload duration on completion, and a model
+  field only at session start (with a separate model-change event).
+- **Profile P2**: PascalCase event names, stdin JSON, a tool-call id,
+  a documented common model field, patch operations delivered as command
+  text, and a separate turn-completion notification channel.
+- **Profile P3**: PascalCase event names, stdin JSON, a tool-call id,
+  a model field on session and turn payloads, and model-call lifecycle
+  events.
+- **Profile B1**: Before/After event names, stdin JSON with a base
+  timestamp, and no documented tool-call id.
+- **Profile T1**: Trigger-style events with minimal payloads
+  (event name, cwd, session id, tool name, tool input), trigger sets
+  that vary by surface and version, and no documented result fields.
+- **Profile C1**: camelCase event names, stdin JSON, a tool-call id,
+  a payload duration on completion, model fields on tool payloads, and
+  shell exit codes embedded in a JSON output string.
+
+#### Field matrix
+
+| Feed field | P1 | P2 | P3 | B1 | T1 | C1 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Event kind and time | Reliable: `hook_event_name`; time is daemon receipt time | Reliable: `hook_event_name` | Reliable: `hook_event_name` | Reliable: `hook_event_name` plus ISO 8601 `timestamp` | Reliable: `hook_event_name` (trigger names vary by version) | Reliable: per-event hook name |
+| Seat identity | Not in payload; from install (`--seat` or the agent identity environment variable) | Same | Same | Same | Same | Same |
+| Session correlation (`run_id` source) | Reliable: `session_id` on every event | Reliable: `session_id` (subagent hooks carry the parent session) | Reliable: `session_id` | Reliable: `session_id` | Reliable: `session_id` | Reliable: `conversation_id` |
+| Tool name | Reliable: `tool_name` on tool events | Reliable: canonical `tool_name` | Reliable: `tool_name`; built-ins also answer to common aliases | Reliable: `tool_name` on tool events | Reliable: `tool_name` (external tools use internal ids) | Reliable: `tool_name` |
+| Operation correlation (`operation_id` source) | Reliable: tool-call id pairs pre and post events | Reliable: tool-call id on tool events | Reliable: documented per event | Unknown: no documented tool-call id; pairing is best effort by tool and order | Unknown: no documented tool-call id in trigger payloads | Reliable: tool-call id |
+| File edited | Reliable: `tool_input.file_path` for file tools (always absolute) | Best effort: patches arrive as `tool_input.command` text, not a structured path | Best effort: tool-specific `tool_input` paths | Best effort: tool-specific `tool_input` paths | Best effort: tool-specific `tool_input` paths | Reliable: `tool_input.file_path`; a dedicated file-edit event exists |
+| Command run | Reliable: `tool_input.command` for the shell tool | Reliable: `tool_input.command` for shell and patch calls | Reliable: `tool_input.command` for the shell tool | Best effort: tool-specific input | Best effort: tool-specific input | Reliable: `tool_input.command`; a dedicated shell-completion event exists |
+| Duration | Reliable: optional `duration_ms` on completion events; excludes approval prompts and pre-tool hooks | Unknown as a payload field; derive by pairing pre and post events | Unknown as a payload field; derive by pairing | Best effort: derive by pairing, but no tool-call id | Best effort: derive by pairing, but no tool-call id | Reliable: `duration` (milliseconds) on completion |
+| Exit status | Best effort: success and failure are separate events; a numeric exit code is tool-specific inside `tool_response`, not a documented common field | Best effort: `tool_response` is tool-specific model-facing output; no documented structured exit code | Best effort: failure is a separate event; numeric code is not a documented common field | Best effort: `tool_response.error` presence signals failure; no numeric code | Unknown: no documented result or exit field in trigger payloads | Best effort: shell results embed `exitCode` inside the `tool_output` JSON string; failure is also a separate event |
+| Model | Best effort: only session start may carry `model`, and not always; a model-change event carries `to_model` | Reliable: `model` is a documented common field | Reliable: `model` appears on session and turn payloads (can be `unknown` for non-model providers) | Unknown: model events exist, but no documented common model field | Unknown | Reliable: `model` and `model_id` on tool payloads |
+| Quota or usage | Unknown: no documented hook field | Unknown | Unknown | Unknown | Unknown | Unknown |
+| Project / cwd | Reliable as cwd only: `cwd` on every event; project is not a schema field | Reliable as cwd only: `cwd` | Reliable as cwd only: `cwd` | Reliable as cwd only: `cwd` | Reliable as cwd only: `cwd` | Reliable as cwd only: `cwd` |
+| Current task or ticket | Unknown: no documented field; never infer from prompt or paths | Unknown | Unknown | Unknown | Unknown | Unknown: subagent payloads carry a free-text `task` description, which is content, not a ticket reference |
+| Waiting signal | Reliable: an approval-request event fires while approval is pending | Best effort: no dedicated approval event in the common set; an interrupt event covers user interruption | Reliable: an approval-request event | Unknown: a notification event is the nearest signal and is not approval-specific | Unknown | Unknown: no approval-pending event in the agent hook set |
+| Session start and stop | Reliable: session start/end events, stop per turn | Reliable: session start/end (main thread only), stop; plus turn-completion notifications | Reliable: session start/end, stop, stop-failure | Reliable: session start/end | Best effort: session end exists only in newer trigger sets; older sets have a spawn event with no end counterpart | Reliable: session start/end, stop |
+| Idle or stuck | Not a hook signal; derive from event gaps and pane state | Same | Same | Same | Same | Same |
+
+Reading the matrix:
+
+- Event kind, tool name, and paired start/finish duration are the
+  portable core. Every profile documents pre and post tool events.
+  Pairing is exact only where a tool-call id exists. Without one,
+  durations pair by tool and order within a session and can
+  misattribute overlapping calls.
+- A numeric exit code is never a documented common field. Report the
+  success/failure event split as the exit signal, and a numeric code
+  only when a tool-specific structured value is present and parsed
+  defensively.
+- A session-end event does not fire when a process is killed or
+  crashes. Treat a missing end event as unknown, and let pane process
+  state decide liveness.
+- File and command text stay redacted and truncated by the adapter, or
+  omitted. No field in any payload is a task or ticket reference; the
+  adapter accepts an explicit `ticket` or `task_id` key only from a
+  producer that sets one deliberately. If a future runtime documents a
+  structured ticket reference, add it as a separate optional schema
+  field rather than overloading `task`.
+- No profile documents a quota or usage field in hook payloads. Quota
+  remains absent from the feed until one does.
+
+#### Representative payload shapes
+
+A PascalCase completion event with a payload duration (values are
+placeholders; tool input and response bodies are never republished):
+
+```json
+{
+  "session_id": "abc123",
+  "cwd": "/path/to/project",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "<file-write tool>",
+  "tool_input": { "file_path": "/path/to/project/file.txt" },
+  "tool_response": { "filePath": "/path/to/project/file.txt", "type": "create" },
+  "tool_use_id": "call-0001",
+  "duration_ms": 12
+}
+```
+
+The adapter keeps `tool_name`, a relative file label, and the hashed
+tool-call id. It currently discards a payload duration and lets the
+daemon compute duration from paired events; the payload value is the
+more precise source where present, because it excludes approval
+prompts.
+
+A session-start event carrying identity and environment context:
+
+```json
+{
+  "hook_event_name": "SessionStart",
+  "source": "startup",
+  "session_id": "abc123",
+  "cwd": "/path/to/project",
+  "transcript_path": null,
+  "model": "unknown",
+  "permission_mode": "default"
+}
+```
+
+A Before/After profile sends the same base input on every event:
+
+```json
+{
+  "session_id": "...",
+  "transcript_path": "...",
+  "cwd": "...",
+  "hook_event_name": "BeforeTool",
+  "timestamp": "..."
+}
+```
+
+Its completion event adds `tool_name`, `tool_input`, and a
+`tool_response` object whose `error` member signals failure. Tool
+responses and prompts can contain content, so an adapter must discard
+them. Adapter sketch: translate the before event to the pre-tool kind
+and the after event to the post-tool kind, read only `tool_name` and
+the presence of `tool_response.error`, and mark derived durations
+best effort. The current adapter does not perform this translation,
+and the installer writes no settings for this profile.
+
+A trigger-profile tool payload is minimal:
+
+```json
+{
+  "hook_event_name": "PreToolUse",
+  "cwd": "/current/working/directory",
+  "session_id": "abc123-def456-789",
+  "tool_name": "<external tool id>",
+  "tool_input": { }
+}
+```
+
+With no documented tool-response, exit-status, or tool-call-id field,
+this profile reports tool starts reliably and finishes without exit
+detail, and durations stay best effort.
+
+A camelCase completion event documents the richest shape:
+
+```json
+{
+  "tool_name": "<shell tool>",
+  "tool_input": { "command": "<redacted command summary>" },
+  "tool_output": "{\"exitCode\":0,\"stdout\":\"...\"}",
+  "tool_use_id": "abc123",
+  "cwd": "/path/to/project",
+  "duration": 5432,
+  "model_id": "..."
+}
+```
+
+The numeric exit code hides inside the `tool_output` JSON string.
+That string also carries command output, which the feed must never
+republish; parse out only the numeric code and discard the rest, or
+omit the code.
+
+One profile also documents a separate notification channel that
+reports only turn completion:
+
+```json
+{ "type": "agent-turn-complete", "thread-id": "...", "turn-id": "..." }
+```
+
+At least one current CLI runtime documents no local hook surface at
+all. Treat such a runtime as hook-less: pane-state runtime events
+still report the seat, and hook coverage can be added if a hook
+reference is published.
+
+#### Gaps between payloads and the current adapter
+
+- Payload duration values (`duration_ms`, `duration`) are discarded.
+  Prefer them over daemon-paired durations when present.
+- The approval-request event maps to the waiting kind in the adapter,
+  but the installer does not register it for any profile.
+- Before/After event names are not translated, and two PascalCase
+  profiles have no `--all-harnesses` install target between them.
+- A documented camelCase failure event is not installed, so failures
+  for that profile arrive only when a completion event reports them.
+- Patch text is classified as an edit with no structured file label.
+  Extracting paths from patch headers is possible but stays best
+  effort and must keep the same redaction rules.
 
 Hooks and notifications return success when observation fails and never write
 hook-control output to stdout. A disabled feed is a silent no-op. Other failures

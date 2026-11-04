@@ -8092,6 +8092,27 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_counts_a_process_that_is_already_gone_as_stopped() {
+        // No pid can be this large on Linux or macOS, so kill reports ESRCH.
+        signal(i32::MAX as u32, prismattyc_mux::platform::Signal::TERM)
+            .expect("an exited process is already stopped");
+        signal(i32::MAX as u32, prismattyc_mux::platform::Signal::KILL)
+            .expect("an exited process is already stopped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_still_reports_a_signal_it_may_not_send() {
+        // pid 1 exists and belongs to root: EPERM is not "already gone".
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let error = signal(1, prismattyc_mux::platform::Signal::TERM).unwrap_err();
+        assert!(format!("{error:#}").contains("signal"), "{error:#}");
+    }
     use prismattyc_mux::{
         EventBatch, EventEnvelope, MailWake, PaneContent, PaneGeometry, PaneInputLedger,
         PaneSnapshot, SavedSpaceSession, SizeOwner, SizeOwnerKind, WindowBounds,

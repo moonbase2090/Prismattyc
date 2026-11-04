@@ -877,26 +877,19 @@ fn verify_dispatch(host: &mut HostState) {
     assert!(host.terminal_targets.is_some());
 
     quiet(host);
-    // The launcher is built in its own workspace; any program stands in for
-    // it. The override is thread-local, so other tests never see it.
-    crate::activity_monitor_tab::TEST_LAUNCHER
-        .with(|launcher| *launcher.borrow_mut() = Some("/bin/sh".into()));
+    // The action hands the Space to `pmux space monitor` in the background
+    // and says so; it never opens a tab of its own.
     let tabs = host.mux.tab_count();
-    let dispatched = dispatch(host, A::ActivityMonitor);
-    crate::activity_monitor_tab::TEST_LAUNCHER.with(|launcher| *launcher.borrow_mut() = None);
-    assert_eq!(dispatched, Dispatch::Handled);
-    assert_eq!(host.mux.tab_count(), tabs + 1, "{}", toast_text(host));
-    let monitor = host.mux.focused_id();
-    assert_eq!(
-        host.mux
-            .tab_panes()
-            .into_iter()
-            .find(|(_, panes)| panes.contains(&monitor))
-            .map(|(title, _)| title)
-            .as_deref(),
-        Some("Activity monitor")
+    assert_eq!(dispatch(host, A::ActivityMonitor), Dispatch::Handled);
+    assert_eq!(host.mux.tab_count(), tabs);
+    assert!(
+        toast_text(host).contains("Activity Monitor"),
+        "{}",
+        toast_text(host)
     );
-    assert!(host.mux.is_retained_local_terminal(host.mux.focused_id()));
+    // A second request while the first runs does not start another helper.
+    assert_eq!(dispatch(host, A::ActivityMonitor), Dispatch::Handled);
+    host.activity_monitor = Default::default();
 
     host.space_polish.undo = None;
     assert_eq!(dispatch(host, A::UndoSpaceChange), Dispatch::Handled);

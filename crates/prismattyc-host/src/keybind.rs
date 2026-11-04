@@ -56,7 +56,7 @@ pub enum Action {
     SessionSplitDown,
     TerminalSwitcher,
     AgentMessages,
-    /// Open the activity monitor in a new tab.
+    /// Open or focus the Activity Monitor Space.
     ActivityMonitor,
     /// Focus the next pane that needs attention (issue #184).
     JumpNeedsYou,
@@ -396,7 +396,7 @@ impl Action {
             Action::SessionSplitDown => "split down with an automatically named session".into(),
             Action::TerminalSwitcher => "find a terminal across Spaces".into(),
             Action::AgentMessages => "view pending mail and pane input queue receipts".into(),
-            Action::ActivityMonitor => "open the activity monitor in a new tab".into(),
+            Action::ActivityMonitor => "open the Activity Monitor Space".into(),
             Action::JumpNeedsYou => "focus the next pane that needs your attention".into(),
             Action::UpdateRestart => "update, restart components, and inspect versions".into(),
             Action::RecentMessages => "show recent status messages, including hidden toasts".into(),

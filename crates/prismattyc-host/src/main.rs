@@ -6,7 +6,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod a11y;
-mod activity_monitor_tab;
+mod activity_monitor_space;
 #[cfg(any(target_os = "macos", test))]
 mod agent_skills;
 mod attach_adopt;
@@ -1431,6 +1431,7 @@ struct HostState {
     windows_cwds: HashMap<u32, PathBuf>,
     /// Serialize helpers and fence cache writes until their layout applies.
     space_opens: space_open::Opens,
+    activity_monitor: activity_monitor_space::Pending,
     space_open_observation: Option<space_outcome::Observation>,
     last_space_open: Option<space_outcome::Report>,
     last_space_refresh: Option<Instant>,
@@ -3858,6 +3859,7 @@ impl App {
             drain_font_fallbacks(host);
             let started = Instant::now();
             advance_space_opens(host);
+            activity_monitor_space::poll(host);
             poll_walkthrough_demo(host);
             timing.record_phase(pump_timing::Phase::AdvanceSpaceOpens, started.elapsed());
             let started = Instant::now();
@@ -4721,6 +4723,7 @@ impl App {
                 #[cfg(windows)]
                 windows_cwds: HashMap::new(),
                 space_opens: space_open::Opens::default(),
+                activity_monitor: activity_monitor_space::Pending::default(),
                 space_open_observation: None,
                 last_space_open: None,
                 last_space_refresh: None,
@@ -20273,7 +20276,7 @@ fn dispatch_action(
         return Dispatch::Handled;
     }
     if action == A::ActivityMonitor {
-        activity_monitor_tab::open(host);
+        activity_monitor_space::open(host);
         return Dispatch::Handled;
     }
     if action == A::UpdateRestart {

@@ -366,8 +366,11 @@ const ACTIVITY_STUCK_AFTER_MS: u64 = 5 * 60 * 1000;
 const MAIL_INJECT_EPOCH_WAIT_MS: u64 = 250;
 const MAIL_INJECT_EPOCH_SLICE_MS: u64 = 10;
 
-fn activity_project_name(pid: u32) -> Option<String> {
-    let cwd = crate::procinfo::cwd_of(pid)?;
+fn activity_project_name(
+    pid: u32,
+    processes: &crate::procinfo::ActivityProcessSnapshot,
+) -> Option<String> {
+    let cwd = processes.cwd_of(pid)?;
     let root = cwd.ancestors().find(|path| path.join(".git").exists())?;
     let name = root.file_name()?.to_str()?;
     if name.is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
@@ -2639,7 +2642,7 @@ impl ControlPlane {
     fn activity_sessions(&self) -> prismattyc_core::activity::ActivitySessions {
         use prismattyc_core::activity::{ActivitySession, ActivitySessions};
         let observed_at_ms = now_unix_ms();
-        let seats = self
+        let sessions = self
             .domain
             .sessions()
             .filter_map(|session| {
@@ -2650,32 +2653,38 @@ impl ControlPlane {
                     .filter_map(|id| self.domain.window(*id))
                     .flat_map(|window| window.layout.panes())
                     .collect::<Vec<_>>();
+                Some((seat, session.id.get(), panes))
+            })
+            .collect::<Vec<_>>();
+        let process_roots = sessions
+            .iter()
+            .flat_map(|(_, _, panes)| panes)
+            .filter_map(|pane| {
+                self.live
+                    .as_ref()
+                    .and_then(|live| live.child_pid(pane.get()))
+            })
+            .collect::<Vec<_>>();
+        let processes = crate::procinfo::ActivityProcessSnapshot::capture(&process_roots);
+        let seats = sessions
+            .into_iter()
+            .map(|(seat, session_id, panes)| {
                 let last_output_at_ms = panes
                     .iter()
                     .filter_map(|pane| self.last_output_at_ms.get(&pane.get()).copied())
                     .max();
-                let live = panes.iter().any(|pane| {
-                    self.live
-                        .as_ref()
-                        .and_then(|live| live.child_pid(pane.get()))
-                        .is_some()
-                });
-                let foregrounds = panes
+                let roots = panes
                     .iter()
-                    .filter(|pane| {
+                    .filter_map(|pane| {
                         self.live
                             .as_ref()
                             .and_then(|live| live.child_pid(pane.get()))
-                            .is_some()
                     })
-                    .map(|pane| {
-                        crate::procinfo::terminal_foreground(
-                            self.live
-                                .as_ref()
-                                .and_then(|live| live.child_pid(pane.get()))
-                                .expect("filtered live pane"),
-                        )
-                    })
+                    .collect::<Vec<_>>();
+                let live = !roots.is_empty();
+                let foregrounds = roots
+                    .iter()
+                    .map(|root| processes.terminal_foreground(*root))
                     .collect::<Vec<_>>();
                 let foreground = [
                     crate::procinfo::TerminalForeground::Agent,
@@ -2687,48 +2696,42 @@ impl ControlPlane {
                 .unwrap_or(crate::procinfo::TerminalForeground::Unknown);
                 let state =
                     activity_session_state(live, foreground, last_output_at_ms, observed_at_ms);
-                let agent_pids = panes
+                let agent_roots = roots
                     .iter()
-                    .filter_map(|pane| {
-                        self.live
-                            .as_ref()
-                            .and_then(|live| live.child_pid(pane.get()))
-                    })
-                    .filter(|pid| {
-                        crate::inject_agent_slug(crate::procinfo::foreground_agent(*pid)).is_some()
+                    .filter_map(|root| {
+                        crate::inject_agent_slug(processes.foreground_agent(*root))
+                            .map(|harness| (*root, harness.to_owned()))
                     })
                     .collect::<Vec<_>>();
-                let harnesses = agent_pids
+                let harnesses = agent_roots
                     .iter()
-                    .filter_map(|pid| {
-                        crate::inject_agent_slug(crate::procinfo::foreground_agent(*pid))
-                    })
-                    .collect::<HashSet<_>>();
+                    .map(|(_, harness)| harness.clone())
+                    .collect::<HashSet<String>>();
                 let harness = (harnesses.len() == 1)
-                    .then(|| harnesses.into_iter().next().map(str::to_owned))
+                    .then(|| harnesses.into_iter().next())
                     .flatten();
-                let project_names = agent_pids
+                let project_names = agent_roots
                     .iter()
-                    .map(|pid| activity_project_name(*pid))
+                    .map(|(root, _)| activity_project_name(*root, &processes))
                     .collect::<Option<Vec<_>>>()
                     .map(|names| names.into_iter().collect::<HashSet<_>>());
                 let project = project_names
-                    .filter(|names| !agent_pids.is_empty() && names.len() == 1)
+                    .filter(|names| !agent_roots.is_empty() && names.len() == 1)
                     .and_then(|mut names| names.drain().next());
                 let model = self
                     .activity
                     .as_ref()
                     .and_then(|feed| feed.latest_model_for_seat(&seat));
-                Some(ActivitySession {
+                ActivitySession {
                     seat,
-                    session_id: session.id.get(),
+                    session_id,
                     state,
                     last_output_at_ms,
                     harness,
                     model,
                     quota: None,
                     project,
-                })
+                }
             })
             .collect();
         ActivitySessions {

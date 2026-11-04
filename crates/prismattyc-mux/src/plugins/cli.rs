@@ -111,8 +111,8 @@ fn read_request(args: &[String]) -> Result<Option<Request>> {
 }
 
 fn view(mut client: Client, args: &[String]) -> Result<()> {
-    let id = args.first().context("run requires a plug-in ID")?.clone();
-    let mut contribution = None;
+    let target = args.first().context("run requires a plug-in ID")?;
+    let (id, mut contribution) = view_target(target)?;
     let mut columns = 80;
     let mut rows = 24;
     let mut snapshot = false;
@@ -216,6 +216,17 @@ fn view(mut client: Client, args: &[String]) -> Result<()> {
     ensure!(frame_handle == handle, "frame belongs to another view");
     print!("{}", super::decode_frame(&content, &viewport)?.text());
     Ok(())
+}
+
+fn view_target(target: &str) -> Result<(String, Option<String>)> {
+    let Some((id, contribution)) = target.rsplit_once(':') else {
+        return Ok((target.to_owned(), None));
+    };
+    ensure!(
+        !id.is_empty() && !contribution.is_empty(),
+        "run target must be ID or ID:VIEW"
+    );
+    Ok((id.to_owned(), Some(contribution.to_owned())))
 }
 
 fn endpoint(args: &[String]) -> Result<Request> {
@@ -324,4 +335,22 @@ fn options(args: &[String]) -> Result<(Option<String>, Vec<String>)> {
         }
     }
     Ok((version, grants))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qualified_view_target_separates_plugin_and_contribution() {
+        assert_eq!(
+            view_target("org.moonbase.activity-monitor:main").unwrap(),
+            ("org.moonbase.activity-monitor".into(), Some("main".into()))
+        );
+        assert_eq!(
+            view_target("org.moonbase.activity-monitor").unwrap(),
+            ("org.moonbase.activity-monitor".into(), None)
+        );
+        assert!(view_target("org.moonbase.activity-monitor:").is_err());
+    }
 }

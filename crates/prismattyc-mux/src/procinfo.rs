@@ -246,6 +246,74 @@ pub enum TerminalForeground {
     Unknown,
 }
 
+/// One activity-read view of the pane processes.
+///
+/// Windows process inspection is expensive, so capture every live pane root
+/// together and reuse that data while assembling one activity page. Other
+/// platforms keep their existing per-process inspection behavior.
+pub struct ActivityProcessSnapshot {
+    #[cfg(windows)]
+    windows: Option<WindowsProcessSnapshot>,
+}
+
+impl ActivityProcessSnapshot {
+    pub fn capture(roots: &[u32]) -> Self {
+        #[cfg(windows)]
+        {
+            Self {
+                windows: WindowsProcessSnapshot::capture_activity(roots),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = roots;
+            Self {}
+        }
+    }
+
+    pub fn terminal_foreground(&self, root: u32) -> TerminalForeground {
+        #[cfg(windows)]
+        {
+            self.windows.as_ref().map_or_else(
+                || crate::procinfo::terminal_foreground(root),
+                |snapshot| snapshot.terminal_foreground(root),
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            crate::procinfo::terminal_foreground(root)
+        }
+    }
+
+    pub fn foreground_agent(&self, root: u32) -> crate::InjectAgent {
+        #[cfg(windows)]
+        {
+            self.windows.as_ref().map_or_else(
+                || crate::procinfo::foreground_agent(root),
+                |snapshot| snapshot.agent(root),
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            crate::procinfo::foreground_agent(root)
+        }
+    }
+
+    pub fn cwd_of(&self, pid: u32) -> Option<PathBuf> {
+        #[cfg(windows)]
+        {
+            self.windows.as_ref().map_or_else(
+                || crate::procinfo::cwd_of(pid),
+                |snapshot| snapshot.cwd_of(pid),
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            crate::procinfo::cwd_of(pid)
+        }
+    }
+}
+
 /// Classify the terminal foreground process without treating an unreadable
 /// process tree as a shell prompt.
 pub fn terminal_foreground(root: u32) -> TerminalForeground {
@@ -1534,6 +1602,14 @@ mod windows {
 
     impl ProcessSnapshot {
         pub fn capture(roots: &[u32]) -> Option<Self> {
+            Self::capture_processes(roots, false)
+        }
+
+        pub(super) fn capture_activity(roots: &[u32]) -> Option<Self> {
+            Self::capture_processes(roots, true)
+        }
+
+        fn capture_processes(roots: &[u32], include_cwd: bool) -> Option<Self> {
             if roots.is_empty() || roots.len() > 256 {
                 return None;
             }
@@ -1560,13 +1636,13 @@ mod windows {
                 }
             }
             let mut system = System::new();
-            system.refresh_processes_specifics(
-                ProcessesToUpdate::Some(&pids),
-                true,
-                ProcessRefreshKind::nothing()
-                    .with_cmd(UpdateKind::Always)
-                    .with_exe(UpdateKind::Always),
-            );
+            let mut refresh = ProcessRefreshKind::nothing()
+                .with_cmd(UpdateKind::Always)
+                .with_exe(UpdateKind::Always);
+            if include_cwd {
+                refresh = refresh.with_cwd(UpdateKind::Always);
+            }
+            system.refresh_processes_specifics(ProcessesToUpdate::Some(&pids), true, refresh);
             if pids.iter().any(|pid| {
                 system
                     .process(*pid)
@@ -1594,6 +1670,27 @@ mod windows {
                 }
                 _ => crate::InjectAgent::Unknown,
             }
+        }
+
+        pub fn terminal_foreground(&self, root: u32) -> TerminalForeground {
+            match self.inspect(root) {
+                Some(Foreground::Running { args, .. }) => {
+                    if crate::inject_submit::classify_windows_argv(&args).is_some() {
+                        TerminalForeground::Agent
+                    } else {
+                        TerminalForeground::Other
+                    }
+                }
+                Some(Foreground::Shell) => TerminalForeground::Shell,
+                Some(Foreground::Unknown) | None => TerminalForeground::Unknown,
+            }
+        }
+
+        pub(super) fn cwd_of(&self, pid: u32) -> Option<PathBuf> {
+            self.system
+                .process(Pid::from_u32(pid))?
+                .cwd()
+                .map(Path::to_path_buf)
         }
 
         pub fn cmdline(&self, pid: u32) -> Option<Vec<Vec<u8>>> {

@@ -641,6 +641,8 @@ else:
     def monitor_frame_proof():
         text = cli("run", monitor, "main", "--snapshot", "--cols", "100", "--rows", "24", text=True)
         assert "fixture-seat" in text and "test_failed" in text
+        qualified = cli("run", f"{monitor}:main", "--snapshot", "--cols", "100", "--rows", "24", text=True)
+        assert qualified == text
         probe_binary = frame_probe or bins / f"examples/plugin_frame_probe{suffix}"
         probe = subprocess.run([str(probe_binary), str(endpoint)], env=env, capture_output=True, text=True, encoding="utf-8", timeout=45)
         assert probe.returncode == 0, probe.stderr
@@ -649,6 +651,30 @@ else:
         # The 12-column seat name leaves a 53-cell lane at 8 pixels per cell.
         assert frame["rasters"] == [{"width":424,"height":16,"bytes":27136}] * 2, frame["rasters"]
         assert frame["failure_pixels"] > 0
+
+    def windows_activity_snapshot_pressure():
+        assert os.name == "nt", "Windows activity snapshot pressure proof requires Windows"
+        sessions = []
+        try:
+            for index in range(20):
+                name = f"snapshot-seat-{index:02d}"
+                reply = connection.request("create_session", name=name,
+                    spawn={"program":"cmd.exe","argv":["/d","/c","pause > nul"],"cwd":None,"env":{}},
+                    agent_id=name, headless=False)
+                assert reply["status"] == "ok", reply
+                sessions.append(reply["response"]["session_id"])
+            started = time.monotonic()
+            frame = cli("run", f"{monitor}:main", "--snapshot", "--cols", "100", "--rows", "40", text=True)
+            elapsed_ms = round((time.monotonic() - started) * 1000)
+            assert "snapshot-seat-00" in frame, frame
+            (scratch / "windows-activity-snapshot.json").write_text(json.dumps({
+                "sessions": len(sessions), "elapsed_ms": elapsed_ms,
+                "qualified_target": f"{monitor}:main", "result": "pass"
+            }, indent=2) + "\n")
+        finally:
+            for session_id in reversed(sessions):
+                reply = connection.request("destroy_session", session_id=session_id)
+                assert reply["status"] == "ok", reply
 
     try:
         setting(False)
@@ -726,6 +752,9 @@ else:
                 connector = "org.moonbase.activity-connector"
                 cli("install", connector)
                 remote_proof(query_only=True)
+            elif feature == "windows-activity-snapshot":
+                windows_activity_snapshot_pressure()
+                print("PASS qualified monitor target and one Windows process snapshot per activity page")
             elif feature == "endpoint-pressure":
                 endpoint_pressure()
                 print("PASS32 endpoints with512 retained events each")
@@ -758,6 +787,8 @@ else:
         cli("enable", monitor, "--allow", "activity.read:local")
         failed = {**event, "event_id": "event-2", "kind": "test_failed"}
         assert connection.request("publish_activity", event=failed)["status"] == "ok"
+        if os.name == "nt":
+            windows_activity_snapshot_pressure()
         monitor_frame_proof()
         assert connection.plugin("exports", allowlist=[])["response"]["reply"]["tools"] == []
         connector = "org.moonbase.activity-connector"
@@ -871,7 +902,7 @@ def main():
     parser.add_argument("--toolchain", default="1.90.0")
     parser.add_argument("--release", action="store_true", dest="release", default=True, help="exercise optimized native binaries as shipped (default)")
     parser.add_argument("--debug", action="store_false", dest="release", help="use slower debug native binaries for local diagnostics")
-    parser.add_argument("--feature", choices=["all","endpoint-pressure","legacy-import","production","discovery","remote-query"], default="all")
+    parser.add_argument("--feature", choices=["all","endpoint-pressure","legacy-import","production","discovery","remote-query","windows-activity-snapshot"], default="all")
     args = parser.parse_args()
     if bool(args.bundle) != (args.feature in ("production", "remote-query")):
         parser.error("--bundle is required with --feature production or remote-query")

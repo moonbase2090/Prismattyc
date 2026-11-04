@@ -520,6 +520,92 @@ fn a_saved_agent_resumes_instead_of_replaying_its_startup_prompt() {
 }
 
 #[test]
+fn session_configuration_replays_original_launch_arguments_after_exec() {
+    let root = temp_root("original-launch-arguments");
+    let socket = socket_path(&root);
+    let server = start_server(&socket, &root);
+    let log = root.join("arguments");
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &[
+            "new",
+            "--no-attach",
+            "work",
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf '%s\\n' \"$@\" >> \"$0\"; exec sleep 999",
+            log.to_str().unwrap(),
+            "resume",
+            "conversation-123",
+            "--model",
+            "model one",
+            "--config",
+            "model_reasoning_effort=high",
+        ],
+    ));
+    let doctor = ok(&pmux(&socket, &root, &[], &["doctor", "work"]));
+    let child: u32 = doctor
+        .lines()
+        .find_map(|line| line.split_once("child "))
+        .and_then(|(_, rest)| rest.split(',').next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !prismattyc_mux::procinfo::live_foreground_command(child)
+        .is_some_and(|command| command.contains("sleep 999"))
+    {
+        assert!(Instant::now() < deadline, "fixture did not exec sleep");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let file = root.join("configuration.json");
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "save", file.to_str().unwrap()],
+    ));
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let work = saved["space"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["name"] == "work")
+        .unwrap();
+    let command = work["windows"][0]["root"]["command"].as_str().unwrap();
+    assert!(command.starts_with("/bin/sh -c "), "{command}");
+    assert!(
+        command.ends_with(
+            "resume conversation-123 --model 'model one' --config model_reasoning_effort=high"
+        ),
+        "{command}"
+    );
+    ok(&pmux(&socket, &root, &[], &["stop", "work"]));
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "restore", file.to_str().unwrap()],
+    ));
+    let expected =
+        "resume\nconversation-123\n--model\nmodel one\n--config\nmodel_reasoning_effort=high\n";
+    let twice = format!("{expected}{expected}");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while std::fs::read_to_string(&log).unwrap_or_default() != twice {
+        assert!(
+            Instant::now() < deadline,
+            "original arguments were not replayed"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn session_configuration_restores_valid_sessions_after_a_stale_directory() {
     let root = temp_root("stale-session-directory");
     let socket = socket_path(&root);

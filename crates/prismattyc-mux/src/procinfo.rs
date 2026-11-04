@@ -220,6 +220,48 @@ pub fn resume_args(args: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+/// Whether the pane was launched as an interactive shell.
+pub(crate) fn interactive_shell(spawn: &crate::SpawnSpec) -> bool {
+    let shell = Path::new(&spawn.program)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let posix = matches!(shell, "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh")
+        && spawn
+            .argv
+            .iter()
+            .all(|arg| matches!(arg.as_str(), "-l" | "--login" | "-i"));
+    let windows = cfg!(windows)
+        && spawn
+            .program
+            .eq_ignore_ascii_case(&crate::platform::default_shell())
+        && spawn.argv.is_empty();
+    posix || windows
+}
+
+/// Preserve explicit launch arguments even when the child has re-executed.
+/// Interactive shells instead need their current foreground command.
+pub(crate) fn replay_spawn_command(spawn: &crate::SpawnSpec, pid: Option<u32>) -> Option<String> {
+    if spawn.program.is_empty() || interactive_shell(spawn) {
+        return None;
+    }
+    let args = std::iter::once(spawn.program.clone())
+        .chain(spawn.argv.iter().cloned())
+        .collect::<Vec<_>>();
+    #[cfg(not(windows))]
+    {
+        Some(match pid {
+            Some(pid) => unix_replay_command(pid, args),
+            None => shell_join(&args),
+        })
+    }
+    #[cfg(windows)]
+    {
+        let _ = pid;
+        replay_command(&args)
+    }
+}
+
 /// Terminal foreground only. Ignores [`TEST_FOREGROUND_COMMAND_ENV`].
 #[must_use]
 pub fn live_foreground_command(root: u32) -> Option<String> {

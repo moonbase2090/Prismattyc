@@ -37,6 +37,10 @@ sessions alone, so retrying does not replay a command into a running session.
 Session configuration does not save terminal output or unsaved program state.
 The configuration file stays available after restoration.
 
+For a program launched directly in a pane, saving preserves its original
+command and arguments. For an interactive shell, it captures the current
+foreground command instead.
+
 Restore reports sessions with unavailable working directories and continues
 restoring the other sessions. It checks every pane's saved directory before
 creating that session. Recreate a missing directory or correct its path in a

@@ -331,7 +331,7 @@ A camelCase completion event documents the richest shape:
 ```json
 {
   "tool_name": "<shell tool>",
-  "tool_input": { "command": "npm test" },
+  "tool_input": { "command": "<redacted command summary>" },
   "tool_output": "{\"exitCode\":0,\"stdout\":\"...\"}",
   "tool_use_id": "abc123",
   "cwd": "/path/to/project",

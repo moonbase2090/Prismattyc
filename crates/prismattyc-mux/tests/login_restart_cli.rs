@@ -520,6 +520,76 @@ fn a_saved_agent_resumes_instead_of_replaying_its_startup_prompt() {
 }
 
 #[test]
+fn session_configuration_restores_valid_sessions_after_a_stale_directory() {
+    let root = temp_root("stale-session-directory");
+    let socket = socket_path(&root);
+    let server = start_server(&socket, &root);
+    for name in ["alpha", "stale", "zulu"] {
+        let cwd = root.join(name);
+        std::fs::create_dir(&cwd).unwrap();
+        ok(&pmux(
+            &socket,
+            &root,
+            &[],
+            &["new", "--no-attach", "--cwd", cwd.to_str().unwrap(), name],
+        ));
+    }
+    let file = root.join("configuration.json");
+    ok(&pmux(
+        &socket,
+        &root,
+        &[(prismattyc_mux::procinfo::TEST_FOREGROUND_COMMAND_ENV, "")],
+        &["session-config", "save", file.to_str().unwrap()],
+    ));
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    for session in saved["space"]["sessions"].as_array_mut().unwrap() {
+        let name = session["name"].as_str().unwrap().to_string();
+        if matches!(name.as_str(), "alpha" | "zulu") {
+            session["windows"][0]["root"]["command"] = format!("printf {name} > restored").into();
+        } else if name == "stale" {
+            let stale = session["windows"][0]["root"].clone();
+            session["windows"][0]["root"] = serde_json::json!({
+                "kind": "split", "axis": "horizontal", "ratio": 0.5,
+                "first": {"kind": "leaf", "cwd": root}, "second": stale,
+            });
+        }
+    }
+    std::fs::write(&file, serde_json::to_vec_pretty(&saved).unwrap()).unwrap();
+    for name in ["alpha", "stale", "zulu"] {
+        ok(&pmux(&socket, &root, &[], &["stop", name]));
+    }
+    std::fs::remove_dir(root.join("stale")).unwrap();
+    let restored = pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "restore", file.to_str().unwrap()],
+    );
+    let listing = ok(&pmux(&socket, &root, &[], &["ls"]));
+    assert!(listing.contains("zulu"), "{listing}\n{}", text(&restored));
+    fail(&restored, "stale");
+    std::fs::create_dir(root.join("stale")).unwrap();
+    let retry = ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "restore", file.to_str().unwrap()],
+    ));
+    assert!(retry.contains("Restored 1 sessions."), "{retry}");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    for name in ["alpha", "zulu"] {
+        let marker = root.join(name).join("restored");
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), name);
+    }
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn login_preference_keeps_comments_and_unrelated_config() {
     let root = temp_root("login-preservation");
     let socket = socket_path(&root);

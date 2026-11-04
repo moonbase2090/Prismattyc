@@ -148,6 +148,7 @@ fn restore(client: &mut Client, client_id: u64, paths: &Paths, file: &Path) -> R
         }
     }
     let mut restored = 0;
+    let mut failures = Vec::new();
     for saved in &config.space.sessions {
         let before = take_snapshot(client)?;
         if before.sessions.iter().any(|s| s.name == saved.name) {
@@ -155,22 +156,23 @@ fn restore(client: &mut Client, client_id: u64, paths: &Paths, file: &Path) -> R
             continue;
         }
         let result = if saved.windows.is_empty() {
-            client.request(|request_id| ControlRequest::CreateSession {
-                version: PROTOCOL_VERSION,
-                request_id,
-                name: saved.name.clone(),
-                spawn: default_layout_spawn(None),
-                cols: None,
-                rows: None,
-                agent_id: saved.agent.clone(),
-                derive_agent_id: false,
-                headless: true,
-            })?;
-            ApplyResult::Created {
-                windows: 0,
-                panes: 0,
-                agent: saved.agent.clone(),
-            }
+            client
+                .request(|request_id| ControlRequest::CreateSession {
+                    version: PROTOCOL_VERSION,
+                    request_id,
+                    name: saved.name.clone(),
+                    spawn: default_layout_spawn(None),
+                    cols: None,
+                    rows: None,
+                    agent_id: saved.agent.clone(),
+                    derive_agent_id: false,
+                    headless: true,
+                })
+                .map(|_| ApplyResult::Created {
+                    windows: 0,
+                    panes: 0,
+                    agent: saved.agent.clone(),
+                })
         } else {
             let layout = SavedLayout {
                 version: 1,
@@ -185,7 +187,14 @@ fn restore(client: &mut Client, client_id: u64, paths: &Paths, file: &Path) -> R
                 &saved.name,
                 saved.agent.clone(),
                 ApplyExisting::Skip,
-            )?
+            )
+        };
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                failures.push(format!("{}: {error:#}", saved.name));
+                continue;
+            }
         };
         let after = take_snapshot(client)?;
         let live = after
@@ -246,6 +255,12 @@ fn restore(client: &mut Client, client_id: u64, paths: &Paths, file: &Path) -> R
             .filter_map(|(_, owner)| owner.as_deref()),
     )?;
     println!("Restored {restored} sessions.");
+    ensure!(
+        failures.is_empty(),
+        "Could not restore {} sessions:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
     Ok(())
 }
 

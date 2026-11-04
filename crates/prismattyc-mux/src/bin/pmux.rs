@@ -6308,6 +6308,21 @@ fn apply_saved_layout(
         .iter()
         .find(|session| session.name == target || session.id.to_string() == target)
         .map(|session| session.id);
+    if existing_id.is_none() || matches!(existing, ApplyExisting::AddWindows) {
+        for window in &layout.windows {
+            let (root, splits) = plan(&window.root);
+            for cwd in root
+                .into_iter()
+                .chain(splits.into_iter().filter_map(|split| split.cwd))
+            {
+                ensure!(
+                    cwd.is_absolute() && cwd.is_dir(),
+                    "saved working directory is unavailable: {}",
+                    cwd.display()
+                );
+            }
+        }
+    }
     match existing_id {
         Some(session_id) => match existing {
             ApplyExisting::Skip => Ok(ApplyResult::Skipped),

@@ -144,12 +144,44 @@ def main():
         key(36)  # Enter.
 
     try:
+        result['binary_version'] = command(bins / 'pmux', '--version').strip()
         initial_bins = args.upgrade_app / 'Contents/MacOS' if args.upgrade_app else bins
         with (out / 'daemon.log').open('w') as log:
             daemon = subprocess.Popen([str(initial_bins / 'pmuxd'), '--socket', env['PMUX_SOCKET'],
                                        '--', '/bin/sh'], env=env, cwd=out / 'project', stdout=log, stderr=log)
         wait(lambda: Path(env['PMUX_SOCKET']).is_socket(), 'private daemon')
         cli('doctor')
+        if not args.upgrade_app:
+            cli('new', '--no-attach', 'metadata', '--', '/bin/sh')
+            metadata_session = next(s for s in snapshot()['sessions'] if s['name'] == 'metadata')
+            metadata_pane = metadata_session['windows'][0]['panes'][0]['id']
+            metadata_file = Path(cli('space', 'save', 'metadata-proof').strip())
+            (out / 'metadata-before.json').write_bytes(metadata_file.read_bytes())
+            next_directory = out / 'project' / 'next'
+            next_directory.mkdir()
+            metadata_launch = [sys.executable, '-c', 'import time; time.sleep(600)',
+                               'resume', 'conversation-123', '--model', 'model one',
+                               '--config', 'model_reasoning_effort=high']
+            cli('pane-write', str(metadata_pane), '--text',
+                'cd ' + shlex.quote(str(next_directory)) + '; ' + shlex.join(metadata_launch),
+                '--submit', 'enter', '--json')
+
+            def refreshed_metadata():
+                saved = json.loads(metadata_file.read_text())
+                leaf = saved['sessions'][0]['windows'][0]['root']
+                command = leaf.get('command', '')
+                return (leaf['cwd'] == str(next_directory.resolve())
+                        and "resume conversation-123 --model 'model one'" in command
+                        and '--config model_reasoning_effort=high' in command)
+
+            wait(refreshed_metadata, 'same-layout directory and resume command autosaved')
+            (out / 'metadata-after.json').write_bytes(metadata_file.read_bytes())
+            cli('stop', 'metadata')
+            wait(lambda: json.loads(metadata_file.read_text())['sessions'] == [],
+                 'closed session pruned from its saved Space')
+            (out / 'metadata-closed.json').write_bytes(metadata_file.read_bytes())
+            cli('space', 'rm', 'metadata-proof')
+            record('same-layout directory and resume arguments autosaved; closed session pruned')
         cli('new', '--no-attach', 'work', '--', '/bin/sh')
         session = next(s for s in snapshot()['sessions'] if s['name'] == 'work')
         pane = session['windows'][0]['panes'][0]

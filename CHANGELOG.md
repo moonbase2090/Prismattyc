@@ -6,6 +6,15 @@
 
 - The command palette has an `activity_monitor` entry that opens a Space named Activity Monitor, or switches to it when it already exists. The Space holds one session running the activity monitor. The monitor starts again when it was quit. `pmux space monitor` does the same from a terminal. The entry has no default shortcut; bind one with `activity_monitor` under `[keys]`. `PMUX_ACTIVITY_MONITOR` overrides the monitor path.
 
+### Changed
+
+- The activity feed is on by default. pmuxd serves seat activity metadata without any setup, and `experimental_activity = false` under `[mux]`, in the settings panel or the config file, turns it off live. Configs that already contain `experimental_activity = false`, including ones written by earlier versions, keep the feed off. The feed carries no command text, paths, prompts, tool output or mail bodies, and monitor and query access are still granted separately in Settings > Plug-ins.
+
+### Fixed
+
+- The settings panel shows the built-in default for `[mux]` keys that are not in the config file, so the first Enter on a boolean changes it.
+- On Windows, opening the activity monitor no longer opens an empty console window. pmuxd now starts its plug-in worker, webhook sender and default-Space `pmux` calls without a console window.
+
 ## [0.3.57] - 2026-11-04
 
 This hotfix replaces 0.3.56, withdrawn because of excessive Windows pmuxd CPU

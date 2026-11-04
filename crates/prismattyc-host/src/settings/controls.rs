@@ -148,6 +148,15 @@ fn row(section: Section, key: &str, kind: Kind) -> Control {
         }
         ConfigValue::CommentedString(_) | ConfigValue::CommentedPath(_) => None,
     });
+    // `[mux]` keys keep their defaults in the shared mux table.
+    let default = default.or_else(|| {
+        mux_meta.and_then(|spec| match spec.kind {
+            prismattyc_mux::MuxKeyKind::Bool(v) => Some(v.into()),
+            prismattyc_mux::MuxKeyKind::String(v) => Some(v.into()),
+            prismattyc_mux::MuxKeyKind::CommentedPath(_)
+            | prismattyc_mux::MuxKeyKind::CommentedString(_) => None,
+        })
+    });
     let title = key.rsplit('.').next().unwrap_or(key).replace('_', " ");
     let mut chars = title.chars();
     let label = chars

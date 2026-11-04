@@ -68,7 +68,12 @@ impl Cancellation {
 
 impl Process {
     fn spawn(executable: &Path) -> Result<Self> {
-        let mut child = Command::new(executable)
+        let mut command = Command::new(executable);
+        // pmuxd has no console, so without CREATE_NO_WINDOW Windows would
+        // open an empty console window for this console-subsystem child.
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000);
+        let mut child = command
             .arg(super::INTERNAL_WORKER_ARG)
             .env_clear()
             .current_dir(

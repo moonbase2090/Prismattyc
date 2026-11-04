@@ -230,6 +230,7 @@ fn verify_space_rename(app: &mut App, event_loop: &ActiveEventLoop, source: Wind
             new: "renamed-a".into(),
         },
     );
+    refresh_space_views_settled(app.windows.get_mut(&source).unwrap());
     assert!(!space_json_exists("a"), "host rename did not reach the CLI");
     // Reusing a name must not redirect a window that still displays that name.
     let mut replacement = load_space(&spaces_dir(), "renamed-a").unwrap();

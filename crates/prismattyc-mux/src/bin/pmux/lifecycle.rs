@@ -153,6 +153,14 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
                 let (mut client, client_id, session_ids) =
                     session_config::check_for_restart(paths, file)
                         .context("session consent check failed; no sessions were stopped")?;
+                let snapshot = take_snapshot(&mut client)?;
+                session_config::hold_spaces(
+                    snapshot
+                        .sessions
+                        .iter()
+                        .filter(|session| session_ids.contains(&session.id))
+                        .filter_map(|session| session.space_id.as_deref()),
+                )?;
                 if opts.delete_consent_config {
                     std::fs::remove_file(file)?;
                 }

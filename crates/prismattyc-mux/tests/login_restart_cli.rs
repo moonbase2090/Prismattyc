@@ -642,3 +642,58 @@ fn session_configuration_restart_stops_only_consented_sessions() {
     ok(&pmux(&socket, &root, &[], &["stop"]));
     drop(server);
 }
+
+#[test]
+fn consented_restart_and_restore_keep_every_space_member() {
+    let root = temp_root("cfg-space");
+    let socket = socket_path(&root);
+    let server = start_server(&socket, &root);
+    let pmux = |args: &[&str]| pmux(&socket, &root, &[], args);
+    ok(&pmux(&[
+        "space",
+        "create",
+        "desk",
+        "--session-name",
+        "alpha",
+        "--no-attach",
+    ]));
+    ok(&pmux(&["space", "add", "desk", "--name", "beta"]));
+    let listed = ok(&pmux(&["space", "ls"]));
+    assert!(listed.contains("desk  2 sessions"), "{listed}");
+
+    let file = root.join("configuration.json");
+    ok(&pmux(&["session-config", "save", file.to_str().unwrap()]));
+    let restarted = ok(&pmux(&[
+        "restart",
+        "--daemon",
+        "--stop-sessions",
+        "--consented-config",
+        file.to_str().unwrap(),
+        "--worker",
+        "--json",
+    ]));
+    assert!(
+        restarted.contains("\"status\":\"restarted\""),
+        "{restarted}"
+    );
+    ok(&pmux(&[
+        "session-config",
+        "restore",
+        file.to_str().unwrap(),
+    ]));
+    // Several autosave ticks on the new daemon, after the restore.
+    std::thread::sleep(Duration::from_secs(2));
+
+    let listed = ok(&pmux(&["space", "ls"]));
+    assert!(
+        listed.contains("desk  2 sessions"),
+        "a restart must not empty the Space: {listed}"
+    );
+    let reopened = pmux(&["space", "open", "desk", "--replace", "--no-run"]);
+    assert!(reopened.status.success(), "{}", text(&reopened));
+    let sessions = ok(&pmux(&["restart", "--plan", "--json"]));
+    assert!(sessions.contains("\"alpha\""), "{sessions}");
+    assert!(sessions.contains("\"beta\""), "{sessions}");
+    ok(&pmux(&["stop"]));
+    drop(server);
+}

@@ -1,6 +1,6 @@
 manifest_version = 1
 id = "org.moonbase.activity-connector"
-version = "1.0.0"
+version = "1.0.1"
 plugin_api = "^1.0.0"
 component = "connector.wasm"
 notices = ["LICENSE"]

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-package pmux:view@1.0.0;
+package pmux:view@1.1.0;
 
 interface frame {
     record rgb { r: u8, g: u8, b: u8 }
@@ -53,5 +53,13 @@ interface frame {
     /// meta=32, caps-lock=64, num-lock=128. No terminal wire offset.
     record key { code: key-code, modifiers: u8 }
     record clock { wall-ms: u64, monotonic-ms: u64 }
-    variant event { key(key), resize(viewport), tick(clock), close }
+    enum mouse-button { left, middle, right }
+    enum wheel { up, down, left, right }
+    /// What the pointer did. `moved` has no button held.
+    variant mouse-action { press(mouse-button), release(mouse-button), drag(mouse-button), moved, wheel(wheel) }
+    /// A pointer event at a zero-based cell of the viewport. Modifier bits
+    /// as in `key`; terminals report only shift, alt and control.
+    record mouse { action: mouse-action, column: u16, row: u16, modifiers: u8 }
+    /// `mouse` is new in 1.1.0. It is last so the other cases keep their order.
+    variant event { key(key), resize(viewport), tick(clock), close, mouse(mouse) }
 }

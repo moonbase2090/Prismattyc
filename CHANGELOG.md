@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Plug-in views get mouse input. The view interface is now `pmux:view@1.1.0`, with a `mouse` event carrying a press, release or wheel turn and its cell. Hosts forward presses, releases and the wheel but not pointer motion. In the activity monitor, a click selects a seat, a second click on it opens its details, the wheel moves the selection or scrolls the timeline and details, and a right-click goes back to the list. The activity monitor package is now 1.1.0 and the connector 1.0.1, both built for the new interface.
+
 ### Changed
 
 - The activity feed is on by default. pmuxd serves seat activity metadata without any setup, and `experimental_activity = false` under `[mux]`, in the settings panel or the config file, turns it off live. Configs that already contain `experimental_activity = false`, including ones written by earlier versions, keep the feed off. The feed carries no command text, paths, prompts, tool output or mail bodies, and monitor and query access are still granted separately in Settings > Plug-ins.

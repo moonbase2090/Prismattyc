@@ -3703,6 +3703,19 @@ fn cmd_doctor(paths: &Paths, key: Option<String>) -> Result<()> {
     prismattyc_mux::login::report(&paths.socket)?;
     require_live(paths)?;
     let mut client = Client::connect(&paths.socket)?;
+    let daemon_version = match client.request(|request_id| ControlRequest::ServerInfo {
+        version: PROTOCOL_VERSION,
+        request_id,
+    }) {
+        Ok(ControlResponseData::ServerInfo {
+            package_version, ..
+        }) => package_version,
+        _ => "unknown".to_string(),
+    };
+    println!(
+        "pmuxd running version: {daemon_version} (installed pmux: {})",
+        env!("CARGO_PKG_VERSION")
+    );
     let registered = client.request(|request_id| ControlRequest::RegisterClient {
         version: PROTOCOL_VERSION,
         request_id,

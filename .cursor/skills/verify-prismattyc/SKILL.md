@@ -86,6 +86,10 @@ UI proof includes the action or open overlay and the resulting screen, plus a re
 
 Put artifact links and actual assertions/results in the PR Proof section. Preserve failures and distinguish retries from a clean first pass. A test selector that runs zero tests is not proof. Do not equate mocks, internal state setters, Linux rendering, or macOS captures with Windows runtime coverage. For a dry-run, inspect resulting files/processes/network or refs to establish what it actually skipped.
 
+For release checksum changes, run `python3 scripts/release/write_checksums_test.py`.
+Require only real asset names and literal expected digests in the output, no
+temporary files left in the asset directory, and the same result on repetition.
+
 ## Cleanup
 
 The CLI helper terminates and waits for only its own daemon, removes its scratch tree, and retains its evidence directory on success or failure. Confirm `daemon_reaped` and `scratch_removed` in `result.json`, then confirm `commands.jsonl` and `pane.txt` still exist after a successful run. Native fixtures own their teardown too; check their final status and inspect residual recorded PIDs if interrupted. Never use process-name kills or stop the user's mux.

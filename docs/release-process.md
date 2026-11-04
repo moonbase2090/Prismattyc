@@ -43,6 +43,11 @@ The Windows package includes the shared license notices.
 Platform checksum files remain alongside the combined checksum. GitHub also
 provides source archives for the tag.
 
+The combined checksum writer keeps its temporary output outside the asset
+directory and replaces `SHA256SUMS` atomically. Run
+`python3 scripts/release/write_checksums_test.py` to check real asset membership
+and repeated generation before changing this step.
+
 ## Run a signed dry run
 
 Set `dry_run` to `true` to build, sign, and notarize all platform assets without

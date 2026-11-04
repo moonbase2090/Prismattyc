@@ -562,10 +562,7 @@ jobs:
             echo 'dist must be flat; unexpected subdirectory' >&2
             exit 1
           fi
-          cd dist
-          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\0' \
-            | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS.tmp
-          mv SHA256SUMS.tmp SHA256SUMS
+          python3 scripts/release/write_checksums.py dist
 
       - name: Build release notes from the changelog
         env:

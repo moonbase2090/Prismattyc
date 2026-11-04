@@ -159,6 +159,9 @@ Set-Acl -LiteralPath $env:ACTIVITY_PROOF_RUNTIME -AclObject $acl;
             subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', prepare],
                            env=dict(env, ACTIVITY_PROOF_RUNTIME=str(endpoint.parent)),
                            capture_output=True, timeout=15, check=True)
+        config = scratch / 'config.toml'
+        default_config = config.read_text()
+        config.write_text(default_config + '[mux]\nexperimental_activity = false\n')
         start(False)
         for reply in [request('publish_activity', event=event(0)),
                       request('read_activity', cursor=None, limit=10)]:
@@ -166,7 +169,12 @@ Set-Acl -LiteralPath $env:ACTIVITY_PROOF_RUNTIME -AclObject $acl;
         ignored = emit('worker-off', '--hook', input=json.dumps({
             'hook_event_name': 'SessionStart', 'session_id': 'disabled-session'}))
         assert ignored.returncode == 0 and ignored.stdout == '' and ignored.stderr == ''
-        checks.append('disabled by default')
+        checks.append('disabled by opt-out')
+        stop()
+        config.write_text(default_config)
+        start(False)
+        assert request('read_activity', cursor=None, limit=10)['status'] == 'ok'
+        checks.append('enabled by default')
         stop()
         start(True)
         snapshot = request('snapshot')['response']['snapshot']

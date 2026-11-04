@@ -5757,6 +5757,124 @@ mod tests {
         assert!(rendered.contains("LOG_BATCH_FINAL_MARKER"));
     }
 
+    fn restored_emulator(marker: &str) -> Box<Emulator> {
+        let mut emulator = Emulator::new(80, 24, MAX_SCROLLBACK);
+        for line in 0..200 {
+            let text = if line == 0 {
+                marker.to_string()
+            } else {
+                format!("restored line {line}")
+            };
+            emulator.feed(format!("{text}\r\n").as_bytes());
+        }
+        Box::new(emulator)
+    }
+
+    fn scrollback_contains(pane: &PaneRuntime, needle: &str) -> bool {
+        pane.emulator
+            .screen()
+            .export_state()
+            .scrollback
+            .iter()
+            .any(|row| row.text.contains(needle))
+    }
+
+    #[test]
+    fn expired_log_deadline_defers_restore_swap() {
+        let mut runtime = MuxRuntime::spawn("sh", &[], 80, 24).expect("test mux runtime");
+        let (tx, rx) = mpsc::channel();
+        tx.send(LogMessage::RestoreReady {
+            through_seq: 7,
+            restored: Ok(restored_emulator("RESTORE_SWAP_MARKER")),
+            reservations: Vec::new(),
+        })
+        .unwrap();
+        let pane = runtime.focused_mut();
+        pane.log = Some(attach_log::LogPane::from_events_for_test(1, rx));
+
+        let (dirty, _, more) = pane.drain_log(Some(Instant::now() - Duration::from_millis(1)));
+        assert!(!dirty, "an expired deadline must not apply the swap");
+        assert!(more, "the deferred swap must be carried to a later turn");
+        assert_eq!(pane.restore_state_seq, None);
+        assert!(
+            !scrollback_contains(pane, "RESTORE_SWAP_MARKER"),
+            "restored history must not land before its budgeted turn"
+        );
+
+        let (dirty, _, more) = pane.drain_log(Some(Instant::now() + Duration::from_secs(1)));
+        assert!(dirty);
+        assert!(!more);
+        assert_eq!(pane.restore_state_seq, Some(7));
+        assert!(
+            scrollback_contains(pane, "RESTORE_SWAP_MARKER"),
+            "the budgeted turn applies the deferred swap"
+        );
+        drop(tx);
+    }
+
+    #[test]
+    fn restore_swap_and_oversized_replay_apply_across_budgeted_passes() {
+        let mut runtime = MuxRuntime::spawn("sh", &[], 80, 24).expect("test mux runtime");
+        let (tx, rx) = mpsc::channel();
+        // Mirror production: the ready emulator is built off this thread and
+        // handed over whole, so the drain side never decodes or imports.
+        let worker = thread::spawn(move || restored_emulator("RESTORED_HISTORY_MARKER"));
+        tx.send(LogMessage::RestoreReady {
+            through_seq: 3,
+            restored: Ok(worker.join().unwrap()),
+            reservations: Vec::new(),
+        })
+        .unwrap();
+        let mut bytes = vec![b'B'; 100_000];
+        bytes.extend_from_slice(b"\nREPLAY_FINAL_MARKER\n");
+        tx.send(LogMessage::Batch {
+            snapshot: None,
+            events: vec![prismattyc_mux::PaneLogFrame {
+                seq: 4,
+                event: prismattyc_mux::PaneEvent::Output { bytes },
+            }],
+            replay_through: 3,
+            reservation: attach_log::HostReservation::empty(),
+            counters: attach_log::PolicyCounters::default(),
+        })
+        .unwrap();
+        let pane = runtime.focused_mut();
+        pane.log = Some(attach_log::LogPane::from_events_for_test(1, rx));
+
+        let (_, _, more) = pane.drain_log(Some(Instant::now() + Duration::from_millis(8)));
+        assert!(more, "one budgeted pass cannot finish the oversized replay");
+        assert_eq!(
+            pane.restore_state_seq,
+            Some(3),
+            "the swap itself is one unit"
+        );
+        assert!(
+            scrollback_contains(pane, "RESTORED_HISTORY_MARKER"),
+            "restored history lands with the swap, ahead of the replay tail"
+        );
+        assert!(
+            !visible_text(pane).contains("REPLAY_FINAL_MARKER"),
+            "the replay tail waits for later budgeted passes"
+        );
+
+        let mut passes = 0;
+        loop {
+            passes += 1;
+            assert!(passes <= 20, "budgeted passes must make progress");
+            let (_, _, more) = pane.drain_log(Some(Instant::now() + Duration::from_millis(8)));
+            if !more {
+                break;
+            }
+        }
+        assert!(pane.pending_log_batch.is_none());
+        let rendered: String = visible_text(pane)
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        assert!(rendered.contains("REPLAY_FINAL_MARKER"));
+        drop(tx);
+    }
+
     #[test]
     #[cfg(unix)]
     fn expired_pty_drain_deadline_yields_and_next_turn_delivers_output() {

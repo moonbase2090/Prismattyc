@@ -128,11 +128,11 @@ USAGE:
     pmuxd [--socket PATH] [--cols N] [--rows N] [--experimental-rich] [--experimental-activity] [--restore-workspace] [PROGRAM [ARGS...]]
     pmuxd --socket /absolute/path.sock -- /bin/bash -l
 
-The activity feed is off by default; --experimental-activity, or
-experimental_activity = true under [mux] in the Prismattyc config file, enables
-bounded, process-local activity history for explicit publishers and observers.
-pmuxd watches the config file and starts or stops the feed live when the key
-changes, without a restart; the flag keeps it on for this daemon's life.
+The activity feed is on by default: bounded, process-local activity history
+for explicit publishers and observers. experimental_activity = false under
+[mux] in the Prismattyc config file turns it off. pmuxd watches the config file
+and starts or stops the feed live when the key changes, without a restart.
+--experimental-activity keeps the feed on for this daemon's life.
 
 The server owns PTYs, emulators, topology, leases, and authoritative geometry.
 Clients attach over a same-user 0600 Unix socket. Exiting a client does not
@@ -300,8 +300,9 @@ fn ensure_default_space(socket: &std::path::Path, adopt: Option<&str>) {
 /// Name of the session a daemon starts with when nothing is restored.
 const BOOTSTRAP_SESSION: &str = "default";
 
-/// The flag or `[mux] experimental_activity = true` turns the feed on at
-/// start. After that, the activity config watcher applies edits live.
+/// The feed starts on unless `[mux] experimental_activity = false`; the flag
+/// overrides that. A missing config file is the default, on. After start, the
+/// activity config watcher applies edits live.
 fn activity_enabled(cli: &Cli, file: Option<&prismattyc_mux::MuxSection>) -> bool {
     cli.experimental_activity
         || file.is_some_and(|file| {

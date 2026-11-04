@@ -8,9 +8,21 @@ use crate::HostState;
 const LAUNCHER: &str = "pmux-activity-monitor";
 const TITLE: &str = "Activity monitor";
 
+#[cfg(test)]
+thread_local! {
+    /// A stand-in launcher for tests on this thread, so they never change the
+    /// process environment that other tests read.
+    pub(crate) static TEST_LAUNCHER: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// `PMUX_ACTIVITY_MONITOR` when set, else the launcher next to this binary,
 /// else one in the installed app bundle, else the bare name for `PATH`.
 fn launcher(executable: Option<&Path>) -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = TEST_LAUNCHER.with(|launcher| launcher.borrow().clone()) {
+        return path;
+    }
     if let Some(path) = std::env::var_os("PMUX_ACTIVITY_MONITOR").filter(|path| !path.is_empty()) {
         return PathBuf::from(path);
     }

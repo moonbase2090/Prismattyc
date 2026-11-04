@@ -877,16 +877,13 @@ fn verify_dispatch(host: &mut HostState) {
     assert!(host.terminal_targets.is_some());
 
     quiet(host);
-    // The launcher is built in its own workspace; any program stands in for it.
-    // Restore the variable right after the dispatch that reads it.
-    let launcher = std::env::var_os("PMUX_ACTIVITY_MONITOR");
-    std::env::set_var("PMUX_ACTIVITY_MONITOR", "/bin/sh");
+    // The launcher is built in its own workspace; any program stands in for
+    // it. The override is thread-local, so other tests never see it.
+    crate::activity_monitor_tab::TEST_LAUNCHER
+        .with(|launcher| *launcher.borrow_mut() = Some("/bin/sh".into()));
     let tabs = host.mux.tab_count();
     let dispatched = dispatch(host, A::ActivityMonitor);
-    match launcher {
-        Some(value) => std::env::set_var("PMUX_ACTIVITY_MONITOR", value),
-        None => std::env::remove_var("PMUX_ACTIVITY_MONITOR"),
-    }
+    crate::activity_monitor_tab::TEST_LAUNCHER.with(|launcher| *launcher.borrow_mut() = None);
     assert_eq!(dispatched, Dispatch::Handled);
     assert_eq!(host.mux.tab_count(), tabs + 1, "{}", toast_text(host));
     let monitor = host.mux.focused_id();

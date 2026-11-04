@@ -57,6 +57,7 @@ fn exercise_in_window(full_settings: bool) {
                 verify_transparency(host);
                 verify_rail(host);
                 verify_dispatch(host);
+                verify_space_command_completions(host);
             }
             self.done = true;
             self.app.windows.clear();
@@ -122,6 +123,123 @@ fn verify_full_settings_menus(host: &mut HostState) {
         "Settings must retain its full editor"
     );
     assert!(host.space_panel.is_none());
+}
+
+fn verify_space_command_completions(host: &mut HostState) {
+    use space_client::{CommandJob, Operation};
+    let dir = std::env::temp_dir().join(format!("space-completion-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let saved = prismattyc_mux::SavedSpace {
+        version: prismattyc_mux::OWNED_SPACE_VERSION,
+        id: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+        created_at_unix_ms: Some(1),
+        saved_at_unix: 1,
+        sessions: Vec::new(),
+        tabs: Vec::new(),
+        active_tab: 0,
+        focused_session: None,
+    };
+    prismattyc_mux::save_space(&dir, "renamed-a", &saved).unwrap();
+    let job = |operation, epoch| CommandJob {
+        pmux: PathBuf::from("unused-in-completion"),
+        dir: dir.clone(),
+        operation,
+        current: Some("a".into()),
+        owner: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+        epoch,
+    };
+    host.space_epoch = 20;
+    host.mux.space_id = Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into());
+    host.space_rail.current = Some("b".into());
+    host.space_command_pending = true;
+    assert_eq!(
+        space_commands::submit(host, Operation::Delete { name: "b".into() }),
+        Err("another Space operation is still running".into())
+    );
+    space_commands::complete(
+        host,
+        job(
+            Operation::Rename {
+                old: "a".into(),
+                new: "renamed-a".into(),
+            },
+            19,
+        ),
+        Ok(()),
+        space_rail::Directory::read(&dir),
+        Some(("renamed-a".into(), saved.clone())),
+    );
+    assert_eq!(host.space_rail.current.as_deref(), Some("b"));
+    assert_eq!(
+        host.mux.space_id.as_deref(),
+        Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+    );
+    assert_eq!(host.space_rail.names, ["renamed-a"]);
+    assert!(!host.space_command_pending);
+
+    host.mux.space_id = Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+    host.space_rail.current = Some("a".into());
+    host.space_command_pending = true;
+    space_commands::complete(
+        host,
+        job(
+            Operation::Rename {
+                old: "a".into(),
+                new: "renamed-a".into(),
+            },
+            20,
+        ),
+        Ok(()),
+        space_rail::Directory::read(&dir),
+        Some(("renamed-a".into(), saved)),
+    );
+    assert_eq!(host.space_rail.current.as_deref(), Some("renamed-a"));
+
+    let undo = dir.join("undo.json");
+    host.space_polish.undo = Some(undo.clone());
+    host.observed_space_sessions
+        .insert("keep-this-session".into());
+    // Same owner after leaving and returning is a different visit.
+    space_commands::complete(
+        host,
+        job(Operation::Undo { path: undo.clone() }, 19),
+        Ok(()),
+        space_rail::Directory::read(&dir),
+        None,
+    );
+    assert_eq!(host.space_polish.undo.as_ref(), Some(&undo));
+    assert!(host.observed_space_sessions.contains("keep-this-session"));
+    space_commands::complete(
+        host,
+        job(Operation::Undo { path: undo }, 20),
+        Ok(()),
+        space_rail::Directory::read(&dir),
+        None,
+    );
+    assert!(host.space_polish.undo.is_none());
+    assert!(host.observed_space_sessions.is_empty());
+
+    host.space_command_pending = true;
+    space_commands::complete(
+        host,
+        job(
+            Operation::Rename {
+                old: "renamed-a".into(),
+                new: "failed".into(),
+            },
+            20,
+        ),
+        Err("fixture failure".into()),
+        space_rail::Directory::read(&dir),
+        None,
+    );
+    assert_eq!(host.space_rail.current.as_deref(), Some("renamed-a"));
+    assert!(!host.space_command_pending);
+    assert_eq!(
+        host.status_history.newest_first().next().unwrap().text,
+        "Could not rename: fixture failure"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 fn values_at(window: f32, chrome: f32, follows: bool) -> transparency::Values {

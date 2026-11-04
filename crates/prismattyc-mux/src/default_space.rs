@@ -7,7 +7,7 @@
 //! any name, is left alone, so the call never adds a second default.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{bail, Context, Result};
 
@@ -95,7 +95,7 @@ pub fn ensure(
 }
 
 fn run_pmux(pmux: &Path, socket: &Path, args: &[&str]) -> Result<()> {
-    let mut command = Command::new(pmux);
+    let mut command = crate::platform::hidden_command(pmux);
     command
         .arg("--socket")
         .arg(socket)

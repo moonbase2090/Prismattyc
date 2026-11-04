@@ -22,7 +22,7 @@
 use crate::local_socket::UnixStream;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread;
 use std::time::Duration;
@@ -162,7 +162,7 @@ fn send_cell_exited(
     };
     let body = serde_json::to_vec(&job).map_err(|e| e.to_string())?;
 
-    let mut child = Command::new(&exe)
+    let mut child = crate::platform::hidden_command(&exe)
         .arg(INTERNAL_SEND_ARG)
         .env_clear()
         .stdin(Stdio::piped())

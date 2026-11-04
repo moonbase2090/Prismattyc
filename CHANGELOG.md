@@ -5,9 +5,12 @@
 ### Changed
 
 - The activity monitor and activity connector plug-ins are ready with no setup. The first time a daemon built with the official bundle finds either one with no saved state, it installs the bundled version and enables it with local activity access only, so `pmux-activity-monitor` works in a pane on a fresh install. Disabling either one in Settings > Plug-ins or with `pmux plugin disable` keeps it off across restarts and updates. Remote endpoints still need explicit grants, and packages installed by hand still start disabled.
+- The activity feed is on by default. pmuxd serves seat activity metadata without any setup, and `experimental_activity = false` under `[mux]`, in the settings panel or the config file, turns it off live. Configs that already contain `experimental_activity = false`, including ones written by earlier versions, keep the feed off. The feed carries no command text, paths, prompts, tool output or mail bodies, and monitor and query access are still granted separately in Settings > Plug-ins.
 
 ### Fixed
 
+- The settings panel shows the built-in default for `[mux]` keys that are not in the config file, so the first Enter on a boolean changes it.
+- On Windows, opening the activity monitor no longer opens an empty console window. pmuxd now starts its plug-in worker, webhook sender and default-Space `pmux` calls without a console window.
 - Plug-in selections, grants and activity endpoints survive a reboot or logout. Each daemon keeps them in its instance directory under the data directory instead of beside its socket, whose runtime directory the system clears, and moves a journal that an earlier version kept beside the socket on first use.
 
 ## [0.3.57] - 2026-11-04

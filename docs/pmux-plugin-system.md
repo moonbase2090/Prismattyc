@@ -462,7 +462,8 @@ Preserve the shared configuration key from the independent delivery:
 experimental_activity = false
 ```
 
-The default is false; true opts into metadata collection. pmuxd reads this
+This proposal shipped with a default of false. The default is now true;
+false opts out of metadata collection. pmuxd reads this
 setting during startup and watches the config for live changes. The existing
 `--experimental-activity` flag also works; the effective state is flag OR key.
 An unreadable startup config retains the default-off setting unless the flag

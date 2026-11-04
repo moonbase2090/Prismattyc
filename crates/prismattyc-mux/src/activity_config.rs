@@ -3,11 +3,12 @@
 //!
 //! The watcher polls the file's metadata (modification time and length, plus
 //! change time and inode on Unix). On a change it re-reads `[mux]` and applies
-//! `flag || experimental_activity`. Turning the feed off drops its ring, so
-//! readers and publishers get `activity_disabled`; turning it on starts a fresh
-//! feed with a new boot epoch. Sessions, panes and mail are never touched.
+//! `flag || experimental_activity`, where a key left out means on. Turning
+//! the feed off drops its ring, so readers and publishers get
+//! `activity_disabled`; turning it on starts a fresh feed with a new boot
+//! epoch. Sessions, panes and mail are never touched.
 //!
-//! Only a readable file with an explicit value changes the feed. A missing,
+//! Only a readable, non-empty file changes the feed. A missing,
 //! empty, unreadable or invalid file keeps the current state, as the host's own
 //! config watcher does for a save in progress, and is retried on the next poll
 //! until it reads cleanly.
@@ -216,12 +217,16 @@ mod tests {
     fn the_config_key_decides_without_the_flag() {
         assert_eq!(wanted(false, Ok(&section(Some(true)))), Some(true));
         assert_eq!(wanted(false, Ok(&section(Some(false)))), Some(false));
-        assert_eq!(wanted(false, Ok(&section(None))), Some(false));
+        assert_eq!(
+            wanted(false, Ok(&section(None))),
+            Some(true),
+            "a key left out is the default, on"
+        );
     }
 
     #[test]
     fn webhook_is_opt_in_and_enables_the_feed_only_with_both_settings() {
-        let mut config = section(None);
+        let mut config = section(Some(false));
         assert_eq!(wanted(false, Ok(&config)), Some(false));
         config.activity_webhook_url = Some("https://example.invalid/activity".into());
         assert_eq!(wanted(false, Ok(&config)), Some(false));
@@ -300,7 +305,7 @@ mod tests {
         assert!(!on(&plane));
         tmp.write("[mux]\n");
         assert_eq!(apply(&plane, &tmp.config(), false), Ok(()));
-        assert!(!on(&plane), "an absent key is the default, off");
+        assert!(on(&plane), "an absent key is the default, on");
     }
 
     #[test]

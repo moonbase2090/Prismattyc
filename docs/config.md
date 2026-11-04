@@ -303,8 +303,8 @@ allow_mixed_case_session_names = false
 # activity_webhook_url = "https://example.invalid/activity"
 # Path to a private file containing the webhook HMAC key. file path; no inline key.
 # activity_webhook_secret_file = "~/.config/prismattyc/activity-webhook.key"
-# Collect activity metadata live, without a restart. Enable monitor and query access separately in Settings > Plug-ins. true|false; default false.
-experimental_activity = false
+# Collect activity metadata live, without a restart. Enable monitor and query access separately in Settings > Plug-ins. true|false; default true.
+experimental_activity = true
 
 [keys]
 # Host actions. An entry replaces that action's default chords.
@@ -880,7 +880,7 @@ instance = "default"                 # $XDG_RUNTIME_DIR/prismattyc/pmux.sock
 # space_open_runs_commands = "agents"  # agents|all|none; `pmux space open --no-run` skips
 # remote_size = "latest"               # latest|host; TTY attach fits, detach restores host
 # allow_mixed_case_session_names = false  # default false; permit mixed-case or spaced session labels
-# experimental_activity = false          # default false; live: pmuxd starts or stops the activity feed, no restart
+# experimental_activity = false          # default true; false turns the activity feed off live, no restart
 # shell = "pwsh.exe"                    # unset: COMSPEC or cmd.exe on Windows
 ```
 

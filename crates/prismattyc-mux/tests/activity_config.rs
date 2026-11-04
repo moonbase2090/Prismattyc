@@ -1,7 +1,8 @@
 //! `[mux] experimental_activity` turns on the activity feed, so an
 //! app-managed daemon can serve `pmux-activity-monitor` without a separate
 //! pmuxd. pmuxd applies edits live, without a restart, and leaves sessions
-//! alone. The flag still works, and the default is off.
+//! alone. The feed is on by default, `false` opts out, and the flag still
+//! keeps it on.
 
 #![cfg(unix)]
 
@@ -180,9 +181,30 @@ fn feed_on(socket: &Path) -> bool {
 }
 
 #[test]
-fn feed_is_off_without_the_flag_or_the_config_key() {
+fn feed_is_on_by_default_without_a_config_file() {
     let fixture = start(None, false);
-    assert!(!feed_on(&fixture.socket));
+    assert!(feed_on(&fixture.socket));
+}
+
+#[test]
+fn feed_is_on_by_default_when_the_config_leaves_the_key_out() {
+    let fixture = start(Some("[mux]\nshell = \"/bin/sh\"\n"), false);
+    assert!(feed_on(&fixture.socket));
+}
+
+#[test]
+fn setting_the_key_false_stops_a_default_feed_on_a_live_daemon() {
+    let fixture = start(None, false);
+    let epoch = feed_epoch(&fixture.socket).expect("on by default");
+    let sessions = topology(&fixture.socket);
+    assert_eq!(flip(&fixture, false), None);
+    let again = flip(&fixture, true).expect("feed on again");
+    assert_ne!(epoch, again, "turning the feed back on starts a fresh feed");
+    assert_eq!(
+        topology(&fixture.socket),
+        sessions,
+        "sessions and panes are untouched"
+    );
 }
 
 #[test]

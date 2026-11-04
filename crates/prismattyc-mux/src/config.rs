@@ -40,8 +40,9 @@ pub struct MuxSection {
     /// Allow user-entered session labels to preserve mixed case and spaces.
     /// Default false to keep session labels in the mailbox-address format.
     pub allow_mixed_case_session_names: Option<bool>,
-    /// Serve the metadata-only activity feed. Default false. pmuxd watches the
-    /// config and starts or stops the feed live, without a restart.
+    /// Serve the metadata-only activity feed. Default true; `false` opts out.
+    /// pmuxd watches the config and starts or stops the feed live, without a
+    /// restart.
     pub experimental_activity: Option<bool>,
     /// Optional outbound activity notification endpoint.
     pub activity_webhook_url: Option<String>,
@@ -52,9 +53,10 @@ pub struct MuxSection {
 }
 
 impl MuxSection {
-    /// The activity feed is opt-in. `pmuxd --experimental-activity` also turns it on.
+    /// The activity feed is on unless the key is `false`.
+    /// `pmuxd --experimental-activity` keeps it on whatever the key says.
     pub fn experimental_activity(&self) -> bool {
-        self.experimental_activity.unwrap_or(false)
+        self.experimental_activity.unwrap_or(true)
     }
 
     /// Mixed-case session labels are opt-in.
@@ -351,8 +353,8 @@ pub const MUX_KEYS: &[MuxKeySpec] = &[
     MuxKeySpec {
         name: "experimental_activity",
         doc: "Collect activity metadata live, without a restart. Enable monitor and query access separately in Settings > Plug-ins",
-        range: "true|false; default false",
-        kind: MuxKeyKind::Bool(false),
+        range: "true|false; default true",
+        kind: MuxKeyKind::Bool(true),
     },
 ];
 

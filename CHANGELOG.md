@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The activity feed is on by default. pmuxd serves seat activity metadata without any setup, and `experimental_activity = false` under `[mux]`, in the settings panel or the config file, turns it off live. Configs that already contain `experimental_activity = false`, including ones written by earlier versions, keep the feed off. The feed carries no command text, paths, prompts, tool output or mail bodies, and monitor and query access are still granted separately in Settings > Plug-ins.
+
+### Fixed
+
+- The settings panel shows the built-in default for `[mux]` keys that are not in the config file, so the first Enter on a boolean changes it.
+
 ## [0.3.56] - 2026-11-03
 
 This release replaces 0.3.55, which was tagged but not published, and includes

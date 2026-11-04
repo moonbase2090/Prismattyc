@@ -818,9 +818,16 @@ fn verify_dispatch(host: &mut HostState) {
 
     quiet(host);
     // The launcher is built in its own workspace; any program stands in for it.
+    // Restore the variable right after the dispatch that reads it.
+    let launcher = std::env::var_os("PMUX_ACTIVITY_MONITOR");
     std::env::set_var("PMUX_ACTIVITY_MONITOR", "/bin/sh");
     let tabs = host.mux.tab_count();
-    assert_eq!(dispatch(host, A::ActivityMonitor), Dispatch::Handled);
+    let dispatched = dispatch(host, A::ActivityMonitor);
+    match launcher {
+        Some(value) => std::env::set_var("PMUX_ACTIVITY_MONITOR", value),
+        None => std::env::remove_var("PMUX_ACTIVITY_MONITOR"),
+    }
+    assert_eq!(dispatched, Dispatch::Handled);
     assert_eq!(host.mux.tab_count(), tabs + 1, "{}", toast_text(host));
     let monitor = host.mux.focused_id();
     assert_eq!(

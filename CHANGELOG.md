@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- pmuxd no longer keeps a CPU core busy on Windows with many panes while the activity feed is on, and the activity monitor no longer times out there. On Windows, seat status takes one process snapshot for all panes instead of several per pane, and pmuxd's own session tracking takes one such snapshot per second. On every platform, activity reads within two seconds share one read of the panes' processes.
+- pmuxd no longer keeps a CPU core busy on Windows with many panes while the activity feed is on, and the activity monitor no longer times out there. On Windows, seat status takes one process snapshot for all panes instead of several per pane, and pmuxd's own session tracking takes one such snapshot per second. On every platform, activity reads within two seconds of each other share one read of the panes' processes, as long as the set of seat panes is unchanged.
 
 ## [0.3.56] - 2026-11-03
 

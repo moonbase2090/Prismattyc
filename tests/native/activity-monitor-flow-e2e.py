@@ -59,6 +59,14 @@ def wait_for(check, label, timeout=20.0):
     raise Failed(f"timed out: {label}" + (f" ({last})" if last else ""))
 
 
+def poll(check, timeout):
+    """Like wait_for, but a timeout returns False so the caller can retry."""
+    try:
+        return wait_for(check, "poll", timeout)
+    except Failed:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Native input. Each backend sends one named key, optionally with modifiers,
 # and types plain text.
@@ -326,6 +334,7 @@ class Flow:
                                      env=self.env, stdout=log, stderr=log)
         wait_for(lambda: self.status().get("space") is not None or self.status(), "host render status", 60)
         self.keys = native_input(self.host.pid)
+        self.wait_ready()
 
     def stop(self):
         for process in (self.host, self.daemon):
@@ -411,12 +420,43 @@ class Flow:
         report["screens"] = screens
         (self.out / f"diagnose-{name}.json").write_text(json.dumps(report, indent=2) + "\n")
 
+    def palette(self):
+        """The open palette's query, or None while it is closed."""
+        return self.status().get("palette")
+
     def palette_open(self):
-        self.keys.key(PALETTE)
-        time.sleep(0.5)
-        self.keys.type("activity monitor")
-        time.sleep(0.4)
-        self.keys.key("enter")
+        # Native input can be lost while a window settles, so confirm each
+        # stage through render-status rather than trusting the keys landed.
+        query = "activity monitor"
+        last = None
+        for _ in range(3):
+            if self.palette() is not None:
+                self.keys.key("escape")
+                wait_for(lambda: self.palette() is None, "palette closed before retry", 10)
+            self.keys.key(PALETTE)
+            if not poll(lambda: self.palette() == "", 5):
+                last = "the palette shortcut did not open the palette"
+                continue
+            self.keys.type(query)
+            if not poll(lambda: self.palette() == query, 5):
+                last = f"palette query was {self.palette()!r}"
+                continue
+            self.keys.key("enter")
+            wait_for(lambda: self.palette() is None, "palette ran the entry and closed", 10)
+            return
+        raise Failed(f"palette never took the query: {last}")
+
+    def wait_ready(self):
+        """The host has focus and the default pane's shell has drawn a prompt."""
+        def ready():
+            if not self.status().get("focused"):
+                return False
+            for session in self.snapshot()["sessions"]:
+                if session["name"] == "default":
+                    pane = session["windows"][0]["panes"][0]["id"]
+                    return bool(self.cli("save-buffer", str(pane), "-", check=False).strip())
+            return False
+        wait_for(ready, "host focused with a shell prompt", 60)
 
     def open(self):
         self.palette_open()

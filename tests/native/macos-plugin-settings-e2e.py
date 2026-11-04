@@ -101,6 +101,8 @@ def run_case(args,desktop,style):
     wrapper=root/'shell';wrapper.write_text('#!/bin/sh\nexport PS1="proof$ "\nexec /bin/sh\n');wrapper.chmod(0o755)
     env={key:value for key,value in os.environ.items() if not key.startswith(('PMUX','PRISMATTYC_','XDG_'))}
     env.update(HOME=str(root/'home'),SHELL=str(wrapper),PATH=f'{args.bins}:/usr/bin:/bin:/usr/sbin:/sbin',PMUX_SOCKET=str(root/'runtime/pmux.sock'),XDG_RUNTIME_DIR=str(root/'runtime'),XDG_CONFIG_HOME=str(root/'config'),XDG_DATA_HOME=str(root/'data'),XDG_STATE_HOME=str(root/'state'),PRISMATTYC_CONFIG=str(config),PRISMATTYC_NO_AGENT_SKILLS='1',PRISMATTYC_DUMP_PRESENT=str(root/'present.png'))
+    # This proof drives the manual install and enable path, so start with no default plug-ins.
+    env['PRISMATTYC_DEFAULT_PLUGINS']='0'
     daemon=host=None;proxy=None;commands=[];captures=[];result={'style':style,'revision':args.revision,'status':'FAIL'}
     clipboard=subprocess.check_output(['/usr/bin/pbpaste'])
     last_action_ms=0

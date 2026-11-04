@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The activity monitor and activity connector plug-ins are ready with no setup. The first time a daemon built with the official bundle finds either one with no saved state, it installs the bundled version and enables it with local activity access only, so `pmux-activity-monitor` works in a pane on a fresh install. Disabling either one in Settings > Plug-ins or with `pmux plugin disable` keeps it off across restarts and updates. Remote endpoints still need explicit grants, and packages installed by hand still start disabled.
+
 ### Fixed
 
 - Plug-in selections, grants and activity endpoints survive a reboot or logout. Each daemon keeps them in its instance directory under the data directory instead of beside its socket, whose runtime directory the system clears, and moves a journal that an earlier version kept beside the socket on first use.

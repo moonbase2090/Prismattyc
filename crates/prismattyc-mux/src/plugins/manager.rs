@@ -28,8 +28,18 @@ use crate::ControlPlane;
 
 const MAX_WORKERS: usize = 16;
 
-/// Constructed without touching disk. Disabled-by-default daemons need no new
-/// storage or executable until the first explicit plug-in request.
+/// Official plug-ins that start enabled on a fresh install, each with
+/// [`DEFAULT_GRANT`]. Users can disable either one; that choice is kept.
+pub(crate) const DEFAULT_PLUGINS: [&str; 2] = [
+    "org.moonbase.activity-monitor",
+    "org.moonbase.activity-connector",
+];
+
+/// Local activity access, the only grant a default plug-in gets.
+const DEFAULT_GRANT: &str = "activity.read:local";
+
+/// Constructed without touching disk. Storage is created by the first plug-in
+/// request or by [`Service::seed_defaults`].
 pub(crate) struct Service {
     socket: PathBuf,
     plane: Weak<Mutex<ControlPlane>>,
@@ -50,6 +60,43 @@ impl Service {
     }
 
     pub(crate) fn handle(&self, connection: &str, request: Request) -> Result<Reply> {
+        self.manager()?.handle(connection, request)
+    }
+
+    /// Install and enable the default plug-ins that have no saved state, on a
+    /// background thread. Failures are logged and never stop the daemon.
+    /// `PRISMATTYC_DEFAULT_PLUGINS=0` skips this.
+    pub(crate) fn seed_defaults(self: &Arc<Self>) {
+        if std::env::var_os("PRISMATTYC_DEFAULT_PLUGINS").is_some_and(|value| value == "0") {
+            return;
+        }
+        let service = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("pmux-default-plugins".into())
+            .spawn(move || {
+                let outcomes = match service.manager() {
+                    Ok(manager) => manager.seed_defaults(),
+                    Err(error) => {
+                        eprintln!("pmuxd: default plug-ins not set up: {error:#}");
+                        return;
+                    }
+                };
+                for (id, outcome) in outcomes {
+                    match outcome {
+                        Ok(true) => eprintln!("pmuxd: enabled default plug-in {id}"),
+                        Ok(false) => {}
+                        Err(error) => {
+                            eprintln!("pmuxd: default plug-in {id} not enabled: {error:#}");
+                        }
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            eprintln!("pmuxd: default plug-ins not set up: {error}");
+        }
+    }
+
+    fn manager(&self) -> Result<&Arc<Manager>> {
         ensure!(
             !self.stopped.load(Ordering::Acquire),
             "plug-in service is stopping"
@@ -69,7 +116,7 @@ impl Service {
             self.stop();
             bail!("plug-in service is stopping");
         }
-        self.manager.get().unwrap().handle(connection, request)
+        Ok(self.manager.get().unwrap())
     }
 
     pub(crate) fn close(&self, connection: &str) {
@@ -475,6 +522,70 @@ impl Manager {
             .administration
             .try_lock()
             .map_err(|_| anyhow::anyhow!("another plug-in change is in progress; retry"))?;
+        self.admin_held(retry_id, action)
+    }
+
+    /// Install and enable each default plug-in that has no saved state, with
+    /// local activity access. A saved selection, enabled or disabled, is a
+    /// decision already made and is left alone. Only packages compiled into
+    /// this binary are used, so a build without the official bundle seeds
+    /// nothing. Returns whether each plug-in was enabled now.
+    fn seed_defaults(&self) -> Vec<(&'static str, Result<bool>)> {
+        // Held across the check and both changes, so a disable sent while the
+        // daemon starts is either seen here or applied after the seed.
+        let _administration = self.administration.lock().unwrap();
+        let bundled = match Catalog::bundled() {
+            Ok(bundled) => bundled,
+            Err(error) => {
+                return DEFAULT_PLUGINS
+                    .iter()
+                    .map(|id| (*id, Err(anyhow::anyhow!("{error:#}"))))
+                    .collect()
+            }
+        };
+        DEFAULT_PLUGINS
+            .iter()
+            .map(|id| (*id, self.seed_one(&bundled, id)))
+            .collect()
+    }
+
+    fn seed_one(&self, bundled: &Catalog, id: &str) -> Result<bool> {
+        if self
+            .state
+            .lock()
+            .unwrap()
+            .journal
+            .selections
+            .contains_key(id)
+        {
+            return Ok(false);
+        }
+        let Ok(entry) = bundled.get(id, None) else {
+            return Ok(false);
+        };
+        let version = entry.entry.version.clone();
+        let Reply::Installed { package } = self.admin_held(
+            nonce()?,
+            AdminAction::Install {
+                id: id.to_owned(),
+                version: Some(version),
+            },
+        )?
+        else {
+            bail!("install returned an unexpected reply");
+        };
+        self.admin_held(
+            nonce()?,
+            AdminAction::Enable {
+                package,
+                grants: vec![DEFAULT_GRANT.to_owned()],
+            },
+        )?;
+        Ok(true)
+    }
+
+    /// The body of `admin`. The caller holds `administration`.
+    fn admin_held(&self, retry_id: String, action: AdminAction) -> Result<Reply> {
         let action_digest = digest(&serde_json::to_vec(&action)?);
         if let Some(completed) = self
             .state
@@ -1830,6 +1941,55 @@ mod tests {
         assert_eq!(std::fs::read(legacy_journal(&socket)).unwrap(), before);
         drop(manager);
         std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn seeding_leaves_a_saved_disable_alone() {
+        let socket = socket();
+        let manager = Manager::new(&socket, &state(&socket), Weak::new()).unwrap();
+        manager
+            .admin(
+                "d".repeat(32),
+                AdminAction::Disable {
+                    id: DEFAULT_PLUGINS[0].into(),
+                },
+            )
+            .unwrap();
+        let before = std::fs::read(state(&socket).join("plugins.json")).unwrap();
+        let seeded = manager.seed_one(&Catalog::bundled().unwrap(), DEFAULT_PLUGINS[0]);
+        assert!(!seeded.unwrap(), "a saved selection is never reseeded");
+        assert_eq!(
+            std::fs::read(state(&socket).join("plugins.json")).unwrap(),
+            before
+        );
+        drop(manager);
+        std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn seeding_does_nothing_without_a_bundled_package() {
+        // A test build has no official bundle compiled in.
+        let socket = socket();
+        let manager = Manager::new(&socket, &state(&socket), Weak::new()).unwrap();
+        for (id, outcome) in manager.seed_defaults() {
+            assert!(!outcome.unwrap(), "{id} has no bundled package to seed");
+        }
+        assert!(!state(&socket).join("plugins.json").exists());
+        assert!(manager.state.lock().unwrap().journal.selections.is_empty());
+        drop(manager);
+        std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn the_defaults_are_the_official_activity_plugins_with_local_access_only() {
+        assert_eq!(
+            DEFAULT_PLUGINS,
+            [
+                "org.moonbase.activity-monitor",
+                "org.moonbase.activity-connector"
+            ]
+        );
+        assert_eq!(DEFAULT_GRANT, "activity.read:local");
     }
 
     #[test]

@@ -180,6 +180,9 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
 
     env = {key: value for key, value in os.environ.items() if not key.startswith(("HIVE_", "PMUX_", "PRISMATTYC_"))}
     env.update(XDG_DATA_HOME=str(runtime / "data"), XDG_CONFIG_HOME=str(runtime / "config"), PRISMATTYC_CONFIG=str(config), PMUX_SESSION_AGENTS=str(runtime / "agents.json"))
+    if feature != "production":
+        # These proofs drive explicit install and enable from an empty store.
+        env["PRISMATTYC_DEFAULT_PLUGINS"] = "0"
     suffix = ".exe" if os.name == "nt" else ""
     pmux = bins / f"pmux{suffix}"
     pmuxd = bins / f"pmuxd{suffix}"
@@ -667,8 +670,39 @@ else:
             assert expected_catalog is not None
             assert {entry["id"] for entry in expected_catalog} == {monitor, "org.moonbase.activity-connector"}
             assert sorted(cli("discover")["packages"], key=lambda entry: (entry["id"],entry["version"])) == sorted(expected_catalog, key=lambda entry: (entry["id"],entry["version"]))
-            assert cli("list")["installed"] == []
             launcher = bins / f"pmux-activity-monitor{suffix}"
+
+            def enabled_states():
+                return {state["id"]: state for state in cli("list")["states"] if state["enabled"]}
+
+            # A fresh daemon installs and enables both official plug-ins, local access only.
+            deadline = time.monotonic() + 60
+            while len(enabled_states()) < len(expected_catalog):
+                assert time.monotonic() < deadline, cli("list")
+                time.sleep(0.25)
+            seeded = enabled_states()
+            for entry in expected_catalog:
+                state = seeded[entry["id"]]
+                assert state["grants"] == ["activity.read:local"], state
+                assert state["selected"]["version"] == entry["version"] and state["selected"]["digest"] == entry["sha256"], state
+            feed(True)
+            for arguments in (["--snapshot"], ["--seats"]):
+                result = subprocess.run([str(launcher), "--socket", str(endpoint), *arguments], env=env, capture_output=True, text=True, encoding="utf-8", timeout=45)
+                assert result.returncode == 0, (arguments, result.stderr)
+            assert json.loads(result.stdout)["retained_history_only"] is False
+            feed(False)
+            # A user's disable is kept across a restart; seeding never reverses it.
+            for entry in expected_catalog:
+                cli("disable", entry["id"])
+            stop(daemon)
+            daemon, connection = start()
+            pid = daemon.pid
+            baseline = connection.request("snapshot")["response"]["snapshot"]["sessions"]
+            time.sleep(3)
+            assert enabled_states() == {}, cli("list")
+            assert all(not state["grants"] for state in cli("list")["states"]), cli("list")
+            for entry in expected_catalog:
+                assert any(package["id"] == entry["id"] for package in cli("list")["installed"])
 
             def onboarding(arguments, plugin, installed):
                 result = subprocess.run([str(launcher), "--socket", str(endpoint), *arguments], env=env, capture_output=True, text=True, encoding="utf-8", timeout=10)
@@ -681,8 +715,8 @@ else:
             feed(True)
             for arguments in ([], ["--snapshot"], ["--json"], ["--seats"], ["--recent", "fixture-seat"], ["--tail"]):
                 plugin = monitor if arguments in ([], ["--snapshot"]) else "org.moonbase.activity-connector"
-                onboarding(arguments, plugin, False)
-            assert cli("list")["installed"] == [], "Collection opt-in must not silently install or grant plug-ins"
+                onboarding(arguments, plugin, True)
+            assert enabled_states() == {}, "Collection does not re-enable a disabled plug-in"
             feed(False)
             for entry in expected_catalog:
                 package = cli("install",entry["id"],"--version",entry["version"])["package"]
@@ -721,7 +755,7 @@ else:
             assert sorted(cli("discover")["packages"],key=lambda entry: (entry["id"],entry["version"])) == sorted(expected_catalog,key=lambda entry: (entry["id"],entry["version"]))
             saved = cli("list")
             assert len(saved["installed"]) == 2 and all(state["enabled"] and state["observed"] == "daemon_unavailable" for state in saved["states"])
-            print("PASS exact production catalog/archive digests; empty store; installation stays disabled; explicit grants; real monitor cells/RGBA; connector/direct+supervised MCP; live terminal and hot feed without daemon restart; offline verified metadata; guests were not rebuilt")
+            print("PASS exact production catalog/archive digests; fresh daemon enables both with local access only and the launcher needs no setup; a disable survives restart; reinstall is idempotent; explicit grants; real monitor cells/RGBA; connector/direct+supervised MCP; live terminal and hot feed without daemon restart; offline verified metadata; guests were not rebuilt")
             return
         if feature != "all":
             feed(True)

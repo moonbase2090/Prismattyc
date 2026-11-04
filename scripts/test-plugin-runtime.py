@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1084,6 +1085,13 @@ def main():
     parser.add_argument("--debug", action="store_false", dest="release", help="use slower debug native binaries for local diagnostics")
     parser.add_argument("--feature", choices=["all","activity-bench","endpoint-pressure","legacy-import","production","discovery","remote-query"], default="all")
     args = parser.parse_args()
+    # A killed run (timeout, cancel, closed terminal) still runs the finally
+    # blocks that stop each isolated daemon.
+    def interrupted(signum, _frame):
+        raise SystemExit(128 + signum)
+    for name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), interrupted)
     if bool(args.bundle) != (args.feature in ("production", "remote-query")):
         parser.error("--bundle is required with --feature production or remote-query")
     if args.bins and (args.feature != "production" or not args.frame_probe):

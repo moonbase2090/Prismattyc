@@ -24,6 +24,7 @@ import json
 import os
 import platform
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -57,6 +58,44 @@ def wait_for(check, label, timeout=20.0):
             last = error
         time.sleep(0.1)
     raise Failed(f"timed out: {label}" + (f" ({last})" if last else ""))
+
+
+# Each child leads its own process group, so teardown reaches whatever it
+# started (pane shells, the monitor, a launcher) and not this script.
+GROUP = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32"
+         else {"start_new_session": True})
+
+
+def kill_tree(process):
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True, timeout=60)
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(10)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+
+
+def kill_pid(pid):
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, timeout=60)
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def poll(check, timeout):
@@ -304,7 +343,7 @@ class Flow:
         log = (self.out / "daemon.log").open("w")
         shell = ["cmd.exe"] if WINDOWS else ["/bin/sh"]
         self.daemon = subprocess.Popen([str(self.bins / f"pmuxd{EXE}"), "--socket", str(self.socket), "--", *shell],
-                                       env=self.env, stdout=log, stderr=log)
+                                       env=self.env, stdout=log, stderr=log, **GROUP)
         wait_for(lambda: self.socket.exists(), "daemon socket")
         # A build with default plug-ins enables both; otherwise enable them here.
         def enabled():
@@ -331,19 +370,47 @@ class Flow:
                 assert reply["status"] == "ok", reply
         log = (self.out / "host.log").open("w")
         self.host = subprocess.Popen([str(self.bins / f"prismattyc-host{EXE}"), "--no-splash"],
-                                     env=self.env, stdout=log, stderr=log)
+                                     env=self.env, stdout=log, stderr=log, **GROUP)
         wait_for(lambda: self.status().get("space") is not None or self.status(), "host render status", 60)
         self.keys = native_input(self.host.pid)
         self.wait_ready()
 
     def stop(self):
+        """Tear down the host, the daemon and everything they started.
+
+        Returns what was still running from this build's binaries after
+        both trees were stopped, after killing it too.
+        """
         for process in (self.host, self.daemon):
             if process and process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
+                kill_tree(process)
+        time.sleep(1)
+        swept = self.leftovers()
+        for pid, command in swept:
+            kill_pid(pid)
+        return [command for _, command in swept]
+
+    def leftovers(self):
+        """Processes still running from this build's binaries, as (pid, command)."""
+        bins = str(self.bins)
+        if WINDOWS:
+            script = ("Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and "
+                      f"$_.ExecutablePath.StartsWith('{bins}', 'OrdinalIgnoreCase') }} | "
+                      "ForEach-Object { \"$($_.ProcessId)`t$($_.Name)\" }")
+            out = subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                                 capture_output=True, text=True, timeout=60).stdout
+        else:
+            out = subprocess.run(["ps", "-A", "-o", "pid=,command="], capture_output=True, text=True).stdout
+            # Match the executable only: this script's own command line names
+            # the binaries directory too.
+            rows = (line.strip().partition(" ") for line in out.splitlines())
+            out = "\n".join(f"{pid}\t{command}" for pid, _, command in rows if command.startswith(bins + os.sep))
+        found = []
+        for line in out.splitlines():
+            pid, _, command = line.partition("\t")
+            if pid.strip().isdigit() and int(pid) != os.getpid():
+                found.append((int(pid), Path(command.split()[0]).name if command else "?"))
+        return found
 
     # -- observations -------------------------------------------------------
 
@@ -555,6 +622,14 @@ def main():
     flow = Flow(args.bins.resolve(), args.out.resolve())
     started = time.monotonic()
     status = "FAIL"
+    swept = []
+
+    # A killed run (timeout, cancel, closed terminal) still tears down.
+    def interrupted(signum, _frame):
+        raise SystemExit(128 + signum)
+    for name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), interrupted)
     try:
         flow.start()
         flow.step("open", flow.open)
@@ -564,13 +639,19 @@ def main():
         flow.step("close", flow.close_step)
         status = "PASS"
     finally:
-        flow.stop()
-        result = {"status": status, "platform": platform.platform(),
+        swept = flow.stop()
+        if swept:
+            # Anything left after both trees stopped is a leak, even in a pass.
+            print(f"FAIL leftover processes after teardown: {swept}", flush=True)
+            status = "FAIL"
+        result = {"status": status, "platform": platform.platform(), "leftovers_after_teardown": swept,
                   "default_plugins_seeded": getattr(flow, "seeded", None), "seconds": round(time.monotonic() - started, 1),
                   "steps": flow.steps}
         (args.out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
         shutil.rmtree(flow.root, ignore_errors=True)
     print(f"{status} activity monitor flow", flush=True)
+    if status != "PASS":
+        sys.exit(1)
 
 
 if __name__ == "__main__":

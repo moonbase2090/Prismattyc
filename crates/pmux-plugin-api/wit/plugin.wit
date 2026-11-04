@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MIT
 
-package pmux:plugin@1.0.0;
+package pmux:plugin@2.0.0;
 
 interface host {
-    use pmux:view/frame@1.1.0.{clock};
+    use pmux:view/frame@2.0.0.{clock};
     now: func() -> clock;
     asset: func(name: string) -> result<list<u8>, string>;
 }
 
 interface lifecycle {
-    use pmux:view/frame@1.1.0.{viewport, preferences, event, content};
+    use pmux:view/frame@2.0.0.{viewport, preferences, event, content};
     use pmux:tool/call@1.0.0.{request, response};
     record capability { name: string, version: string, available: bool }
     record limits {

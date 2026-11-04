@@ -4,7 +4,7 @@
 
 ### Added
 
-- Plug-in views get mouse input. The view interface is now `pmux:view@1.1.0`, with a `mouse` event carrying a press, release or wheel turn and its cell. Hosts forward presses, releases and the wheel but not pointer motion. In the activity monitor, a click selects a seat, a second click on it opens its details, the wheel moves the selection or scrolls the timeline and details, and a right-click goes back to the list. The activity monitor package is now 1.1.0 and the connector 1.0.1, both built for the new interface.
+- Plug-in views get mouse input. The plug-in API is now `pmux:plugin@2.0.0` and the view interface `pmux:view@2.0.0`, with a `mouse` event carrying a press, release or wheel turn and its cell. A new event case breaks components built for 1.x, so plug-ins built for 1.x are listed as incompatible until they are rebuilt. Hosts forward presses, releases and the wheel but not pointer motion. In the activity monitor, a click selects a seat, a second click on it opens its details, the wheel moves the selection or scrolls the timeline and details, and a right-click goes back to the list. The activity monitor package is now 1.1.0 and the connector 1.0.1, both built for the new interface.
 
 ### Changed
 

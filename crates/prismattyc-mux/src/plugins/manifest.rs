@@ -256,11 +256,11 @@ mod tests {
 manifest_version = 1
 id = "org.moonbase.example"
 version = "1.2.3"
-plugin_api = ">=1, <2"
+plugin_api = ">=2, <3"
 component = "view.wasm"
 notices = ["LICENSE"]
 [requires]
-"pmux:view/frame" = "^1"
+"pmux:view/frame" = "^2"
 [[contributions]]
 kind = "view"
 id = "main"
@@ -298,12 +298,25 @@ title = "Example"
     fn incompatible_manifests_remain_readable_without_becoming_executable() {
         let manifest = Manifest::parse(
             source()
-                .replace("plugin_api = \">=1, <2\"", "plugin_api = \"^2\"")
+                .replace("plugin_api = \">=2, <3\"", "plugin_api = \"^1\"")
                 .as_bytes(),
         )
         .unwrap();
         assert_eq!(manifest.version, "1.2.3");
         assert!(manifest.compatibility().is_err());
+        // A package built for the 1.x view event, as the published 1.0.0
+        // activity monitor is, cannot link against the 2.0 event.
+        assert!(Manifest::parse(
+            source()
+                .replace(
+                    "\"pmux:view/frame\" = \"^2\"",
+                    "\"pmux:view/frame\" = \"^1.0.0\""
+                )
+                .as_bytes(),
+        )
+        .unwrap()
+        .compatibility()
+        .is_err());
         assert!(Manifest::parse(source().as_bytes())
             .unwrap()
             .compatibility()

@@ -139,12 +139,12 @@ hook or publisher-provided compiled native cache.
 manifest_version = 1
 id = "org.moonbase.activity-monitor"
 version = "1.0.0"
-plugin_api = ">=1.0.0, <2.0.0"
+plugin_api = ">=2.0.0, <3.0.0"
 component = "monitor.wasm"
 
 [requires]
 "pmux:activity/read" = ">=1.0.0, <2.0.0"
-"pmux:view/frame" = ">=1.0.0, <2.0.0"
+"pmux:view/frame" = ">=2.0.0, <3.0.0"
 
 [[contributions]]
 id = "main"
@@ -224,8 +224,8 @@ Keep these versions separate:
 | Version | Meaning |
 | --- | --- |
 | Manifest version | Package metadata grammar, initially 1. |
-| Plug-in API | Component lifecycle/event/reply contract, initially `pmux:plugin@1.0.0`. |
-| Capability version | Each typed host contract, initially activity read, frame view and tool call at 1.0.0. |
+| Plug-in API | Component lifecycle/event/reply contract, now `pmux:plugin@2.0.0`. |
+| Capability version | Each typed host contract: activity read, frame view and tool call. Frame view is at 2.0.0. |
 | Activity schema | Existing metadata record schema 1. |
 | Query JSON schema | Connector/CLI result contract, initially the held connector's schema 1. |
 | Core protocol and package release | Existing control protocol and independently versioned app/plug-in releases. Neither implies component compatibility. |
@@ -239,6 +239,12 @@ highest exact mutually supported version. For example, a host supporting API
 the manifest range also allows 1.1.0. Semver ranges do not make a component ABI
 compatible by themselves. Supported bindings come from authoritative versioned
 WIT definitions; adapters for older contracts must be explicit.
+
+A change to an existing type, such as a new case in a variant or a new field in
+a record, breaks components built for the old type, so it takes a major
+version. Version 2.0.0 of the plug-in API and of `pmux:view` added the `mouse`
+view event. The host has no adapter for 1.x, so a package built for 1.x reports
+itself as incompatible, and a catalog keeps it only as a retained older version.
 
 The initial `start` context contains the selected exact versions, admitted
 contributions, resource limits and feature flags. `ready` confirms that context

@@ -555,6 +555,28 @@ class Flow:
                     return bool(self.cli("save-buffer", str(pane), "-", check=False).strip())
             return False
         wait_for(ready, "host focused with a shell prompt", 60)
+        self.warm_up()
+
+    def warm_up(self):
+        """Native input lost while the window settles is retried until Enter reaches the shell.
+
+        Each Enter adds a prompt line to the default pane, so a longer screen
+        proves the host delivered the key rather than swallowing it.
+        """
+        pane = next(s["windows"][0]["panes"][0]["id"] for s in self.snapshot()["sessions"] if s["name"] == "default")
+
+        def lines():
+            return len([l for l in self.cli("save-buffer", str(pane), "-", check=False).splitlines() if l.strip()])
+
+        before, dropped = lines(), 0
+        for _ in range(40):
+            self.keys.key("enter")
+            if poll(lambda: lines() > before, 1):
+                break
+            dropped += 1
+        else:
+            raise Failed("the host never delivered a key to the default pane")
+        self.warmup_dropped = dropped
 
     def open(self):
         self.palette_open()

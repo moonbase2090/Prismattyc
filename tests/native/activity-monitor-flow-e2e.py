@@ -38,8 +38,8 @@ SPACE = "Activity Monitor"
 SEATS = ["alpha-seat", "bravo-seat", "charlie-seat", "delta-seat"]
 # The monitor's own session is a working seat, so it heads the list.
 ROWS = ["activity-monitor"] + sorted(SEATS)
-PALETTE = "ctrl+alt+f7"
-CLOSE_TAB = "ctrl+alt+f8"
+PALETTE = "ctrl+shift+f7"
+CLOSE_TAB = "ctrl+shift+f8"
 WINDOWS = os.name == "nt"
 EXE = ".exe" if WINDOWS else ""
 
@@ -667,8 +667,10 @@ class Flow:
     def close_step(self):
         self.keys.key("q")
         wait_for(lambda: not self.monitor_processes(), "monitor exited")
+        # The host keeps a window's last tab open, so the key must leave the view alone.
         self.keys.key(CLOSE_TAB)
-        wait_for(lambda: self.monitor_session() is None, "tab close ended the session", 30)
+        time.sleep(1)
+        assert self.monitor_session() is not None, "the last tab closed"
         self.cli("space", "rm", SPACE)
         wait_for(lambda: self.space_sessions() is None, "Space removed")
         time.sleep(1)

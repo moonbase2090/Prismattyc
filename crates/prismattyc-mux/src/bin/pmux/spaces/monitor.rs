@@ -7,11 +7,16 @@ use super::*;
 /// The Space, its session and its tab all carry this name.
 pub(in super::super) const NAME: &str = "Activity Monitor";
 const LAUNCHER: &str = "pmux-activity-monitor";
+const PLUGINS: [&str; 2] = [
+    "org.moonbase.activity-connector",
+    "org.moonbase.activity-monitor",
+];
 const USAGE: &str = "usage: pmux space monitor";
 
 pub(in super::super) fn run(paths: &Paths, args: Vec<String>) -> Result<()> {
     anyhow::ensure!(args.is_empty(), "{USAGE}");
     ensure_live_server(paths)?;
+    ensure_plugin(&paths.socket)?;
     let command = command(&launcher(), &prismattyc_mux::platform::default_shell());
     anyhow::ensure!(
         !command_has_line_break(&command),
@@ -70,6 +75,30 @@ pub(in super::super) fn run(paths: &Paths, args: Vec<String>) -> Result<()> {
     match write_pane_command(&mut client, client_id, pane, &command, !fresh)? {
         WritePaneCommand::Wrote => println!("{NAME}: started the monitor"),
         WritePaneCommand::SkipRunning => println!("{NAME}: the monitor is running"),
+    }
+    Ok(())
+}
+
+/// Choosing the Activity Monitor is the approval to read this machine's own activity: a fresh
+/// install has the plug-ins neither installed nor enabled, and the monitor refuses to start
+/// without them. Each gets the local read grant only. One already enabled is left alone,
+/// whatever it was granted.
+fn ensure_plugin(socket: &Path) -> Result<()> {
+    use prismattyc_mux::plugins::{Client, Reply, Request};
+    for id in PLUGINS {
+        let mut client = Client::connect(socket)?;
+        let Reply::List { installed, states } = client.request(Request::List)? else {
+            anyhow::bail!("unexpected plug-in status");
+        };
+        drop(client);
+        if states.iter().any(|state| state.id == id && state.enabled) {
+            continue;
+        }
+        if !installed.iter().any(|package| package.id == id) {
+            prismattyc_mux::plugins::run_cli(socket, vec!["install".into(), id.into()])?;
+        }
+        let enable = ["enable", id, "--allow", "activity.read:local"];
+        prismattyc_mux::plugins::run_cli(socket, enable.map(String::from).to_vec())?;
     }
     Ok(())
 }

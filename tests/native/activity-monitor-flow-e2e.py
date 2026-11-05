@@ -378,7 +378,7 @@ class Flow:
 
         time.sleep(3)
         self.seeded = {"org.moonbase.activity-monitor", "org.moonbase.activity-connector"} <= enabled()
-        if not self.seeded:
+        if not self.seeded and not self.headless:
             for plugin in ("org.moonbase.activity-connector", "org.moonbase.activity-monitor"):
                 self.cli("plugin", "install", plugin)
                 self.cli("plugin", "enable", plugin, "--allow", "activity.read:local")

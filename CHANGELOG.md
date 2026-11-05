@@ -4,7 +4,7 @@
 
 ### Added
 
-- The command palette has an `activity_monitor` entry that opens a Space named Activity Monitor, or switches to it when it already exists. The Space holds one session running the activity monitor. The monitor starts again when it was quit. `pmux space monitor` does the same from a terminal. The entry has no default shortcut; bind one with `activity_monitor` under `[keys]`. `PMUX_ACTIVITY_MONITOR` overrides the monitor path.
+- The command palette has an `activity_monitor` entry that opens a Space named Activity Monitor, or switches to it when it already exists. The Space holds one session running the activity monitor. The monitor starts again when it was quit. `pmux space monitor` does the same from a terminal. The entry has no default shortcut; bind one with `activity_monitor` under `[keys]`. `PMUX_ACTIVITY_MONITOR` overrides the monitor path. Opening it on a fresh install installs and enables the two activity plug-ins with the local read grant, and no other grant.
 
 ### Changed
 

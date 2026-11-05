@@ -293,7 +293,8 @@ Not recommended now:
 
 Each PR is small, follows `REVIEW_POLICY.md`, and has a **Proof** section
 with before and after tables from the isolated harness. Trunk behavior
-ships behind a setting that is off by default; turning it on is its own PR.
+ships on by default unless the owner asked for a setting; turning on a gated
+feature is its own PR.
 
 | # | PR | Fits with | Proof |
 | --- | --- | --- | --- |

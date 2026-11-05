@@ -16,7 +16,7 @@ All examples in this section describe the proposed interface.
 
 ```sh
 pmux plugin search activity
-pmux plugin install org.moonbase.activity-monitor@1.0.0
+pmux plugin install org.moonbase.activity-monitor@1.1.0
 pmux plugin inspect org.moonbase.activity-monitor
 pmux plugin enable org.moonbase.activity-monitor --allow activity.read:local
 pmux plugin run org.moonbase.activity-monitor:main
@@ -39,7 +39,7 @@ The connector is another package using the same installation and capability
 contracts:
 
 ```sh
-pmux plugin install org.moonbase.activity-connector@1.0.0
+pmux plugin install org.moonbase.activity-connector@1.0.1
 pmux plugin enable org.moonbase.activity-connector --allow activity.read:local
 pmux plugin invoke org.moonbase.activity-connector:seats --json '{}'
 pmux-mcp --activity-only
@@ -138,7 +138,7 @@ hook or publisher-provided compiled native cache.
 ```toml
 manifest_version = 1
 id = "org.moonbase.activity-monitor"
-version = "1.0.0"
+version = "1.1.0"
 plugin_api = ">=2.0.0, <3.0.0"
 component = "monitor.wasm"
 
@@ -158,8 +158,8 @@ MCP exports, allowing CLI and MCP registration to derive from one declaration:
 ```toml
 manifest_version = 1
 id = "org.moonbase.activity-connector"
-version = "1.0.0"
-plugin_api = ">=1.0.0, <2.0.0"
+version = "1.0.1"
+plugin_api = ">=2.0.0, <3.0.0"
 component = "connector.wasm"
 
 [requires]
@@ -245,6 +245,9 @@ a record, breaks components built for the old type, so it takes a major
 version. Version 2.0.0 of the plug-in API and of `pmux:view` added the `mouse`
 view event. The host has no adapter for 1.x, so a package built for 1.x reports
 itself as incompatible, and a catalog keeps it only as a retained older version.
+An enabled plug-in whose selected package is incompatible moves to the newest
+bundled version that this core can run, keeping its grants. When the bundle has no
+such version it stays put and is reported as incompatible.
 
 The initial `start` context contains the selected exact versions, admitted
 contributions, resource limits and feature flags. `ready` confirms that context

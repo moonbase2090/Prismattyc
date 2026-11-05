@@ -3,27 +3,35 @@
 The monitor shows seat state and recent metadata from one or more daemons,
 including seats with no terminal pane. Its UI runs as a contained plug-in.
 The native launcher presents validated frames; JSON modes use the contained
-activity connector. Neither package is enabled automatically.
+activity connector. A release enables both packages with local activity
+access the first time its daemon starts, and keeps them off once disabled.
 
 ### Use it from a release
 
 A matched release carries `pmux-activity-monitor` and verified packages for
-`org.moonbase.activity-monitor` and `org.moonbase.activity-connector`.
-In Settings > Plug-ins, install each package, review its exact version and
-permissions, select local activity access, and enable it. The CLI equivalent
-for the initial package versions is:
+`org.moonbase.activity-monitor` and `org.moonbase.activity-connector`. There
+is nothing to set up: the first time a release daemon finds either package
+with no saved state, it installs the bundled version and enables it with
+`activity.read:local` only. Remote endpoints still need an explicit grant.
+Run `pmux-activity-monitor` in a pane.
+
+To turn either one off, disable it in Settings > Plug-ins or run:
 
 ```sh
-pmux plugin discover
-pmux plugin install org.moonbase.activity-monitor --version 1.0.0
-pmux plugin enable org.moonbase.activity-monitor --version 1.0.0 --allow activity.read:local
-pmux plugin install org.moonbase.activity-connector --version 1.0.0
-pmux plugin enable org.moonbase.activity-connector --version 1.0.0 --allow activity.read:local
+pmux plugin disable org.moonbase.activity-monitor
+pmux plugin disable org.moonbase.activity-connector
+```
+
+A disabled package stays disabled across restarts and updates; the daemon
+only fills in plug-ins that have no saved state. To turn one back on:
+
+```sh
+pmux plugin enable org.moonbase.activity-monitor --allow activity.read:local
 ```
 
 Use the same `--socket` target on these commands if the launcher uses an
-explicit socket. Installation leaves packages disabled. The monitor package
-serves live and snapshot modes. The connector serves `--json`, `--seats`,
+explicit socket. A package you install by hand stays disabled until you
+enable it. The monitor package serves live and snapshot modes. The connector serves `--json`, `--seats`,
 `--recent`, and `--tail`. Review the available version before selecting a
 later package; updates and grants remain explicit.
 
@@ -40,8 +48,8 @@ restart. Sessions stay alive. After approval and collection enablement,
 `pmux-activity-monitor` is the whole command in a pane. Setting collection
 back to `false` stops the feed and discards its history.
 
-After upgrading from 0.3.54, an existing collection opt-in does not install
-or grant plug-ins. Complete the approval above. On Linux and Windows, an
+After upgrading, a daemon with no saved plug-in state enables both packages
+as above; one you disabled stays off. On Linux and Windows, an
 older updater still manages six core executables. Update the core first,
 then run the new command `pmux update --repair-monitor-launcher`; use
 `--from-monitor-version 0.3.54` for an unreceipted official 0.3.54 launcher.

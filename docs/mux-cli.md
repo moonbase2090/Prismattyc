@@ -491,8 +491,9 @@ On a cold host launch, the registered host asks **Restore last space?**
 if its saved attach-tabs cache contains sessions. Choose **Restore** to
 restore the saved tabs and focus. Exited panes remain available; press
 Enter in an exited pane to reopen it. Choose **Start fresh** or press
-Escape to keep the fresh window without restoring panes. The saved cache
-and space files stay intact. The host asks once on its first window.
+Escape to keep the fresh window without restoring panes. This replaces the
+host's saved view with an empty view, so the next launch stays fresh. Saved
+Space files and daemon sessions stay intact. The host asks once on its first window.
 Later windows and explicit attach targets do not show this prompt.
 
 Restore resolves saved session names and checks Space ownership before it

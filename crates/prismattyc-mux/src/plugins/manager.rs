@@ -1865,7 +1865,7 @@ mod tests {
     #[test]
     fn an_incompatible_selection_stays_put_when_the_bundle_has_nothing_newer() {
         let socket = socket();
-        let manager = Manager::new(&socket, Weak::new()).unwrap();
+        let manager = Manager::new(&socket, &state(&socket), Weak::new()).unwrap();
         let selected = Installed {
             id: "org.moonbase.not-bundled".into(),
             version: "1.0.0".into(),

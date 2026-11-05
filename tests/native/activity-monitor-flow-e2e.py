@@ -276,9 +276,35 @@ def native_input(pid):
 # ---------------------------------------------------------------------------
 # Processes and pmux.
 
+KEY_BYTES = {
+    "up": "\x1b[A", "down": "\x1b[B", "right": "\x1b[C", "left": "\x1b[D",
+    "home": "\x1b[H", "end": "\x1b[F", "pageup": "\x1b[5~", "pagedown": "\x1b[6~",
+    "enter": "\r", "escape": "\x1b", "backspace": "\x7f", "tab": "\t",
+    "shift+tab": "\x1b[Z", "space": " ",
+}
+
+
+class PaneInput:
+    """Keys written to the monitor pane's terminal with `pmux send`."""
+
+    def __init__(self, flow):
+        self.flow = flow
+
+    def key(self, chord):
+        pane = self.flow.monitor_pane()["id"]
+        self.flow.cli("send", pane, "--literal", "--force", "--", KEY_BYTES.get(chord, chord))
+
+    def type(self, text):
+        for character in text:
+            self.key(character)
+
+
 class Flow:
-    def __init__(self, bins, out):
+    def __init__(self, bins, out, headless=False):
         self.bins, self.out = bins, out
+        # headless: no GUI host. Keys go to the pane's terminal as bytes, the way the
+        # host writes them, so this runs where no desktop session exists.
+        self.headless = headless
         # Short root: Unix socket paths have a small limit.
         self.root = Path(tempfile.mkdtemp(prefix="amf-"))
         runtime = self.root / "run"
@@ -368,6 +394,9 @@ class Flow:
                          "event_id": hashlib.sha256(f"{seat}:{index}".encode()).hexdigest()}
                 reply = self.request("publish_activity", event=event)
                 assert reply["status"] == "ok", reply
+        if self.headless:
+            self.keys = PaneInput(self)
+            return
         log = (self.out / "host.log").open("w")
         self.host = subprocess.Popen([str(self.bins / f"prismattyc-host{EXE}"), "--no-splash"],
                                      env=self.env, stdout=log, stderr=log, **GROUP)
@@ -534,6 +563,17 @@ class Flow:
         return {"space": SPACE, "pane": self.monitor_pane()["id"], "tabs": len(tabs),
                 "monitor_processes": len(self.monitor_processes())}
 
+    def open_headless(self):
+        self.cli("space", "monitor")
+        wait_for(lambda: all(seat in self.screen() for seat in SEATS), "monitor lists every seat", 60)
+        return {"pane": self.monitor_pane()["id"], "monitor_processes": len(self.monitor_processes())}
+
+    def quit_headless(self):
+        self.keys.key("q")
+        wait_for(lambda: not any(seat in self.screen() for seat in SEATS), "monitor quit to the shell")
+        wait_for(lambda: not self.monitor_processes(), "monitor process exited")
+        return {"monitor_processes": 0}
+
     def reopen(self):
         pane = self.monitor_pane()["id"]
         pid = self.monitor_pane().get("child_pid")
@@ -617,9 +657,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bins", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--no-gui", action="store_true",
+                        help="drive the monitor pane through its terminal, without a GUI host")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=False)
-    flow = Flow(args.bins.resolve(), args.out.resolve())
+    flow = Flow(args.bins.resolve(), args.out.resolve(), args.no_gui)
     started = time.monotonic()
     status = "FAIL"
     swept = []
@@ -632,11 +674,16 @@ def main():
             signal.signal(getattr(signal, name), interrupted)
     try:
         flow.start()
-        flow.step("open", flow.open)
-        flow.step("reopen", flow.reopen)
-        flow.step("keys", flow.keys_step)
-        flow.step("quit", flow.quit_step)
-        flow.step("close", flow.close_step)
+        if args.no_gui:
+            flow.step("open", flow.open_headless)
+            flow.step("keys", flow.keys_step)
+            flow.step("quit", flow.quit_headless)
+        else:
+            flow.step("open", flow.open)
+            flow.step("reopen", flow.reopen)
+            flow.step("keys", flow.keys_step)
+            flow.step("quit", flow.quit_step)
+            flow.step("close", flow.close_step)
         status = "PASS"
     finally:
         swept = flow.stop()

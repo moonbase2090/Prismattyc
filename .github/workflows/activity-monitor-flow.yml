@@ -82,7 +82,12 @@ jobs:
           cargo build --release --locked --manifest-path tools/activity-monitor/Cargo.toml
           ls "$RUNNER_TEMP/target/release"
 
+      - name: Run the pane keys flow (no desktop)
+        if: always()
+        run: python tests/native/activity-monitor-flow-e2e.py --no-gui --bins "$RUNNER_TEMP/target/release" --out "$RUNNER_TEMP/pane-keys"
+
       - name: Run the user flow
+        if: always()
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
             Xvfb :99 -screen 0 1920x1080x24 &
@@ -104,5 +109,6 @@ jobs:
           name: activity-monitor-flow-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/flow
+            ${{ runner.temp }}/pane-keys
             ${{ runner.temp }}/bench/activity-bench.json
           if-no-files-found: warn

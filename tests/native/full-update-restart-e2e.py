@@ -14,11 +14,29 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+
+
+def executable_path(pid):
+    if sys.platform == 'darwin':
+        lib = C.CDLL('/usr/lib/libproc.dylib')
+        lib.proc_pidpath.argtypes = [C.c_int, C.c_void_p, C.c_uint32]
+        buffer = C.create_string_buffer(4096)
+        return Path(os.fsdecode(buffer.value)).resolve() if lib.proc_pidpath(pid, buffer, len(buffer)) > 0 else None
+    try:
+        return Path(os.readlink(f'/proc/{pid}/exe')).resolve()
+    except OSError:
+        return None
+
+
+def process_tree():
+    output = subprocess.check_output(['ps', '-A', '-o', 'pid=,ppid=,pgid='], text=True)
+    return [tuple(map(int, row.split())) for row in output.splitlines()]
 
 
 def main():
@@ -28,10 +46,15 @@ def main():
     parser.add_argument('--upgrade-app', type=Path)
     parser.add_argument('--native', action='store_true')
     args = parser.parse_args()
+    assert sys.platform in ('linux', 'darwin'), 'This fixture requires Linux or macOS'
     assert not (args.native and args.upgrade_app), 'Record installer and native UI drives separately'
     if args.native:
         assert sys.platform == 'darwin', 'Native keys require a macOS desktop'
     bins, out = args.bins.resolve(), args.out.resolve()
+    assert not any(parent.suffix == '.app' for parent in bins.parents), '--bins must be a dedicated build directory'
+    build_images = {bins / name for name in ('pmuxd', 'pmux', 'prismattyc-host')}
+    active = [pid for pid, _, _ in process_tree() if executable_path(pid) in build_images]
+    assert not active, f'build directory already has running processes: {active}'
     out.mkdir(parents=True, exist_ok=False)
     runtime = Path(tempfile.mkdtemp(prefix='pupdate-', dir='/tmp'))
     for name in ('home', 'config', 'data', 'state', 'project'):
@@ -49,10 +72,42 @@ def main():
                PRISMATTYC_NO_AGENT_SKILLS='1', PRISMATTYC_DUMP_PRESENT=str(out / 'present.png'))
     daemon = host = None
     result = {'status': 'FAIL', 'mode': 'native' if args.native else 'cli', 'checks': []}
+    owned_pids = set()
+    owned_groups = set()
+    # These build paths belong to this fixture. Installed binaries are tracked
+    # by the PID returned by the private socket, never swept by executable name.
+
+    def interrupted(number, _frame):
+        raise SystemExit(128 + number)
+
+    previous_handlers = {}
+
+    def track_processes():
+        rows = process_tree()
+        owned_pids.update(pid for pid, _, _ in rows if executable_path(pid) in build_images)
+        while True:
+            descendants = {pid for pid, parent, _ in rows if parent in owned_pids}
+            if descendants <= owned_pids:
+                break
+            owned_pids.update(descendants)
+        owned_groups.update(group for pid, _, group in rows if pid in owned_pids)
+        assert os.getpgrp() not in owned_groups, 'fixture process must remain outside child groups'
+
+    def live_owned_processes():
+        return [(pid, group) for pid, _, group in process_tree()
+                if group in owned_groups and executable_path(pid) is not None]
+
+    def daemon_identity(expected, label):
+        pid = json.loads(cli('versions'))['daemon']['pid']
+        owned_pids.add(pid)
+        image = executable_path(pid)
+        result[label] = {'pid': pid, 'executable': str(image)}
+        assert image == expected.resolve(), f'{label}: expected {expected}, got {image}'
+        return pid
 
     def command(executable, *words, timeout=90):
         p = subprocess.run([str(executable), *map(str, words)], env=env, cwd=out / 'project',
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, timeout=timeout, start_new_session=True)
         with (out / 'commands.jsonl').open('a') as log:
             log.write(json.dumps({'executable': str(executable), 'args': list(map(str, words)),
                                   'exit': p.returncode, 'stdout': p.stdout, 'stderr': p.stderr}) + '\n')
@@ -144,12 +199,17 @@ def main():
         key(36)  # Enter.
 
     try:
+        for number in (signal.SIGTERM, signal.SIGHUP):
+            previous_handlers[number] = signal.signal(number, interrupted)
         result['binary_version'] = command(bins / 'pmux', '--version').strip()
         initial_bins = args.upgrade_app / 'Contents/MacOS' if args.upgrade_app else bins
         with (out / 'daemon.log').open('w') as log:
             daemon = subprocess.Popen([str(initial_bins / 'pmuxd'), '--socket', env['PMUX_SOCKET'],
-                                       '--', '/bin/sh'], env=env, cwd=out / 'project', stdout=log, stderr=log)
+                                       '--', '/bin/sh'], env=env, cwd=out / 'project', stdout=log, stderr=log,
+                                      start_new_session=True)
+        owned_pids.add(daemon.pid)
         wait(lambda: Path(env['PMUX_SOCKET']).is_socket(), 'private daemon')
+        daemon_identity(initial_bins / 'pmuxd', 'initial_daemon')
         cli('doctor')
         if not args.upgrade_app:
             cli('new', '--no-attach', 'metadata', '--', '/bin/sh')
@@ -194,7 +254,9 @@ def main():
         (out / 'before.json').write_text(json.dumps(snapshot(), indent=2))
         if args.native:
             host = subprocess.Popen([str(bins / 'prismattyc-host'), '--no-splash', '--attach-session', 'work'],
-                                    env=env, stdout=(out / 'host.log').open('w'), stderr=subprocess.STDOUT)
+                                    env=env, stdout=(out / 'host.log').open('w'), stderr=subprocess.STDOUT,
+                                    start_new_session=True)
+            owned_pids.add(host.pid)
             wait(lambda: status().get('last_raster', {}).get('present_succeeded'), 'native host frame')
             initial_instance = render_status()['host_instance']
             key(32, (1 << 18) | (1 << 19))  # Ctrl-Alt-U.
@@ -258,7 +320,8 @@ def main():
             wait(lambda: marker.read_text() == 'xx', 'saved command relaunched')
             repeated = cli('session-config', 'restore', backup)
             assert 'Restored 0 sessions.' in repeated, repeated
-        assert json.loads(cli('versions'))['daemon']['pid'] != old_pid
+        expected_daemon = (args.upgrade_app / 'Contents/MacOS/pmuxd' if args.upgrade_app else bins / 'pmuxd')
+        assert daemon_identity(expected_daemon, 'replacement_daemon') != old_pid
         assert marker.read_text() == 'xx', 'a command was lost or replayed'
         letters = json.loads(cli('mail', '--as', 'work', 'claim', '--json'))['letters']
         assert len(letters) == 1 and letters[0]['body'] == 'durable-mail-proof'
@@ -269,27 +332,69 @@ def main():
         record('daemon replaced and saved command restored exactly once')
         record('mail survives daemon restart and session recreation')
         result['status'] = 'PASS'
-    except Exception as error:
+    except BaseException as error:
         result['error'] = repr(error)
         raise
     finally:
-        if host is not None and host.poll() is None:
-            host.terminate()
-            host.wait(timeout=10)
-        if Path(env['PMUX_SOCKET']).exists():
-            try:
-                cli('stop')
-            except Exception as error:
-                result['cleanup_error'] = repr(error)
-        if daemon is not None:
-            try:
-                daemon.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                daemon.terminate()
-                daemon.wait(timeout=10)
-        result['socket_removed'] = not Path(env['PMUX_SOCKET']).exists()
-        shutil.rmtree(runtime)
-        (out / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+        for number in previous_handlers:
+            signal.signal(number, signal.SIG_IGN)
+        try:
+            if Path(env['PMUX_SOCKET']).is_socket():
+                try:
+                    data = command(bins / 'pmux', '--socket', env['PMUX_SOCKET'], 'versions', timeout=3)
+                    pid = json.loads(data)['daemon']['pid']
+                    expected = {bins / 'pmuxd'}
+                    if args.upgrade_app:
+                        expected.add((args.upgrade_app / 'Contents/MacOS/pmuxd').resolve())
+                    if executable_path(pid) in expected:
+                        owned_pids.add(pid)
+                except Exception as error:
+                    result['cleanup_identity_error'] = repr(error)
+            track_processes()
+            result['cleanup_process_groups'] = sorted(owned_groups)
+            if Path(env['PMUX_SOCKET']).exists():
+                try:
+                    command(bins / 'pmux', '--socket', env['PMUX_SOCKET'], 'stop', timeout=10)
+                except Exception as error:
+                    result['cleanup_stop_error'] = repr(error)
+            for number in (signal.SIGTERM, signal.SIGKILL):
+                track_processes()
+                for group in {group for _, group in live_owned_processes()}:
+                    try:
+                        os.killpg(group, number)
+                    except ProcessLookupError:
+                        pass
+                    except PermissionError:
+                        # macOS can return EPERM after the last live member exits.
+                        if any(live_group == group for _, live_group in live_owned_processes()):
+                            raise
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    for child in (host, daemon):
+                        if child is not None:
+                            child.poll()
+                    remaining = [pid for pid, _ in live_owned_processes()]
+                    if not remaining:
+                        break
+                    time.sleep(.1)
+                if not remaining:
+                    break
+            result['cleanup_remaining_pids'] = remaining
+            result['daemon_reaped'] = daemon is None or daemon.poll() is not None
+            result['host_reaped'] = host is None or host.poll() is not None
+            result['socket_removed'] = not Path(env['PMUX_SOCKET']).exists()
+            shutil.rmtree(runtime)
+            result['scratch_removed'] = not runtime.exists()
+            assert not remaining, f'fixture processes remain: {remaining}'
+            assert result['daemon_reaped'] and result['host_reaped'], 'fixture children were not reaped'
+        except BaseException as error:
+            result['status'] = 'FAIL'
+            result['cleanup_error'] = repr(error)
+            raise
+        finally:
+            (out / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+            for number, handler in previous_handlers.items():
+                signal.signal(number, handler)
 
 
 if __name__ == '__main__':

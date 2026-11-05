@@ -241,13 +241,24 @@ fn restart_plans_and_cooperative_components() {
         "{scheduled}"
     );
     let deadline = Instant::now() + Duration::from_secs(20);
+    let mut replacement_pid = None;
     while Instant::now() < deadline {
-        let status = pmux(&server_socket, &root, &[], &["status"]);
-        if status.status.success() && text(&status).contains("running") {
-            break;
+        let versions = pmux(&server_socket, &root, &[], &["versions"]);
+        if versions.status.success() {
+            let versions: serde_json::Value = serde_json::from_slice(&versions.stdout).unwrap();
+            if let Some(pid) = versions["daemon"]["pid"].as_u64() {
+                if pid != u64::from(server.child.id()) {
+                    replacement_pid = Some(pid);
+                    break;
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    assert!(
+        replacement_pid.is_some(),
+        "restart never replaced the original daemon"
+    );
     let status = ok(&pmux(&server_socket, &root, &[], &["status"]));
     assert!(status.contains("running"), "{status}");
     let _ = pmux(&server_socket, &root, &[], &["stop"]);

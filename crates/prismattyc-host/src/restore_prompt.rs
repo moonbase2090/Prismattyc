@@ -228,6 +228,12 @@ pub(super) fn finish(host: &mut HostState, accept: bool) {
     } else {
         host.local_views.fresh = true;
         set_current_space(host, None);
+        if let Some(path) = host.attach_layout_path.clone() {
+            host.force_attach_write = true;
+            if let Err(error) = enqueue_attach_tabs(host, &path, Default::default()) {
+                rail_error_toast(host, &format!(" Could not save fresh workspace: {error} "));
+            }
+        }
     }
     host.dirty = true;
     host.window

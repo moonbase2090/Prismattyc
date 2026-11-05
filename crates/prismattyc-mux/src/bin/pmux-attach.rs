@@ -648,6 +648,9 @@ fn subscribe_paint_loop(socket: PathBuf, pane_id: u64, mut signal: UnixStream, s
         };
         seq
     };
+    // The first frame can predate this cursor. Refresh it once so output
+    // already included in the probe is painted without replaying the log.
+    bump_wake(&mut signal);
     while !stop.load(Ordering::Acquire) {
         let request_id = match client.send(|request_id| ControlRequest::SubscribePane {
             version: PROTOCOL_VERSION,
@@ -11648,6 +11651,93 @@ mod tests {
         assert_eq!(row[0].character, 'S');
         assert_eq!(row[3].character, 'T');
         assert_eq!(row[4].character, 'Z');
+    }
+
+    #[test]
+    fn log_paint_wake_refreshes_the_frame_after_its_initial_cursor_probe() {
+        let socket = std::env::temp_dir().join(format!(
+            "paint-start-{}-{}.sock",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = prismattyc_mux::local_socket::UnixListener::bind(&socket).unwrap();
+        let (subscribed_tx, subscribed_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(peer.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let register: ControlRequest = serde_json::from_str(&line).unwrap();
+            let ControlRequest::RegisterClient { request_id, .. } = register else {
+                panic!("expected registration, got {register:?}");
+            };
+            write_registered(&mut peer, request_id);
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            let probe: ControlRequest = serde_json::from_str(&line).unwrap();
+            let request_id = match probe {
+                ControlRequest::SubscribePane {
+                    request_id,
+                    from_seq: u64::MAX,
+                    ..
+                } => request_id,
+                other => panic!("expected cursor probe, got {other:?}"),
+            };
+            let response = prismattyc_mux::ControlResponse {
+                version: PROTOCOL_VERSION,
+                request_id,
+                body: ControlResponseBody::Ok {
+                    response: ControlResponseData::PaneSubscribe {
+                        pane_id: 1,
+                        gap: false,
+                        snapshot: None,
+                        events: Vec::new(),
+                        through_seq: 17,
+                        done: true,
+                    },
+                },
+            };
+            serde_json::to_writer(&mut peer, &response).unwrap();
+            peer.write_all(b"\n").unwrap();
+            peer.flush().unwrap();
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            let subscribe: ControlRequest = serde_json::from_str(&line).unwrap();
+            assert!(matches!(
+                subscribe,
+                ControlRequest::SubscribePane { from_seq: 17, .. }
+            ));
+            subscribed_tx.send(()).unwrap();
+            finish_rx.recv().unwrap();
+        });
+        let (mut ready, signal) = UnixStream::pair().unwrap();
+        ready
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_stop = std::sync::Arc::clone(&stop);
+        let worker_socket = socket.clone();
+        let worker = std::thread::spawn(move || {
+            super::subscribe_paint_loop(worker_socket, 1, signal, &worker_stop);
+        });
+        subscribed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut byte = [0];
+        let wake = ready.read(&mut byte);
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        finish_tx.send(()).unwrap();
+        server.join().unwrap();
+        worker.join().unwrap();
+        std::fs::remove_file(socket).unwrap();
+        assert_eq!(
+            wake.unwrap(),
+            1,
+            "the probe must wake a possibly stale first frame"
+        );
+        assert_eq!(byte, [1]);
     }
 
     #[test]

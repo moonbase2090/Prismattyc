@@ -28,13 +28,21 @@ fn socket_path(root: &Path) -> PathBuf {
     root.join("pmux.sock")
 }
 
+/// Tears down the test daemon however the test ends. `pmux restart` replaces
+/// the child with a new detached pmuxd, so killing the child alone could
+/// leave that replacement running; stopping whatever serves the private
+/// socket covers both.
 struct ServerGuard {
     child: Child,
     socket: PathBuf,
+    root: PathBuf,
 }
 
 impl Drop for ServerGuard {
     fn drop(&mut self) {
+        if self.socket.exists() {
+            let _ = pmux(&self.socket, &self.root, &[], &["stop"]);
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.socket);
@@ -55,6 +63,7 @@ fn start_server(socket: &Path, root: &Path) -> ServerGuard {
             .spawn()
             .expect("spawn pmuxd"),
         socket: socket.to_path_buf(),
+        root: root.to_path_buf(),
     };
     for _ in 0..100 {
         if socket.exists() {
@@ -232,13 +241,24 @@ fn restart_plans_and_cooperative_components() {
         "{scheduled}"
     );
     let deadline = Instant::now() + Duration::from_secs(20);
+    let mut replacement_pid = None;
     while Instant::now() < deadline {
-        let status = pmux(&server_socket, &root, &[], &["status"]);
-        if status.status.success() && text(&status).contains("running") {
-            break;
+        let versions = pmux(&server_socket, &root, &[], &["versions"]);
+        if versions.status.success() {
+            let versions: serde_json::Value = serde_json::from_slice(&versions.stdout).unwrap();
+            if let Some(pid) = versions["daemon"]["pid"].as_u64() {
+                if pid != u64::from(server.child.id()) {
+                    replacement_pid = Some(pid);
+                    break;
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    assert!(
+        replacement_pid.is_some(),
+        "restart never replaced the original daemon"
+    );
     let status = ok(&pmux(&server_socket, &root, &[], &["status"]));
     assert!(status.contains("running"), "{status}");
     let _ = pmux(&server_socket, &root, &[], &["stop"]);
@@ -447,6 +467,239 @@ fn session_configuration_restores_names_directories_and_commands_without_replay(
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// A pane running an agent that was given a startup prompt is saved as the
+/// agent's resume command. Restoring must not run that prompt again.
+#[test]
+fn a_saved_agent_resumes_instead_of_replaying_its_startup_prompt() {
+    let root = temp_root("agent-resume");
+    let socket = socket_path(&root);
+    let server = start_server(&socket, &root);
+    let cwd = root.join("project");
+    std::fs::create_dir(&cwd).unwrap();
+    // A process named `claude` with a prompt in its arguments, which stays up.
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &[
+            "new",
+            "--no-attach",
+            "seat",
+            "--",
+            "/bin/bash",
+            "-c",
+            "exec -a claude /bin/sh -c 'sleep 999; :' claude 'do the secret task'",
+        ],
+    ));
+    let file = root.join("configuration.json");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let command = loop {
+        let _ = std::fs::remove_file(&file);
+        let saved = pmux(
+            &socket,
+            &root,
+            &[],
+            &["session-config", "save", file.to_str().unwrap()],
+        );
+        if saved.status.success() {
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            let seat = value["space"]["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["name"] == "seat")
+                .cloned();
+            if let Some(command) = seat.and_then(|s| {
+                s["windows"][0]["root"]["command"]
+                    .as_str()
+                    .map(str::to_owned)
+            }) {
+                break command;
+            }
+        }
+        assert!(Instant::now() < deadline, "the agent was never saved");
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    assert_eq!(command, "claude --continue", "saved {command:?}");
+    assert!(
+        !command.contains("secret"),
+        "the prompt was saved: {command}"
+    );
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn session_configuration_replays_original_launch_arguments_after_exec() {
+    let root = temp_root("original-launch-arguments");
+    let socket = socket_path(&root);
+    let server = start_server(&socket, &root);
+    let log = root.join("arguments");
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &[
+            "new",
+            "--no-attach",
+            "work",
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf '%s\\n' \"$@\" >> \"$0\"; exec sleep 999",
+            log.to_str().unwrap(),
+            "resume",
+            "conversation-123",
+            "--model",
+            "model one",
+            "--config",
+            "model_reasoning_effort=high",
+        ],
+    ));
+    let doctor = ok(&pmux(&socket, &root, &[], &["doctor", "work"]));
+    let child: u32 = doctor
+        .lines()
+        .find_map(|line| line.split_once("child "))
+        .and_then(|(_, rest)| rest.split(',').next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !prismattyc_mux::procinfo::live_foreground_command(child)
+        .is_some_and(|command| command.contains("sleep 999"))
+    {
+        assert!(Instant::now() < deadline, "fixture did not exec sleep");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let file = root.join("configuration.json");
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "save", file.to_str().unwrap()],
+    ));
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let work = saved["space"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["name"] == "work")
+        .unwrap();
+    let command = work["windows"][0]["root"]["command"].as_str().unwrap();
+    assert!(command.starts_with("/bin/sh -c "), "{command}");
+    assert!(
+        command.ends_with(
+            "resume conversation-123 --model 'model one' --config model_reasoning_effort=high"
+        ),
+        "{command}"
+    );
+    ok(&pmux(&socket, &root, &[], &["stop", "work"]));
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "restore", file.to_str().unwrap()],
+    ));
+    let expected =
+        "resume\nconversation-123\n--model\nmodel one\n--config\nmodel_reasoning_effort=high\n";
+    let twice = format!("{expected}{expected}");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while std::fs::read_to_string(&log).unwrap_or_default() != twice {
+        assert!(
+            Instant::now() < deadline,
+            "original arguments were not replayed"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn session_configuration_restores_valid_sessions_after_a_stale_directory() {
+    let root = temp_root("stale-session-directory");
+    let socket = socket_path(&root);
+    let server = start_server(&socket, &root);
+    for name in ["alpha", "stale", "zulu"] {
+        let cwd = root.join(name);
+        std::fs::create_dir(&cwd).unwrap();
+        ok(&pmux(
+            &socket,
+            &root,
+            &[],
+            &["new", "--no-attach", "--cwd", cwd.to_str().unwrap(), name],
+        ));
+    }
+    let space_file =
+        PathBuf::from(ok(&pmux(&socket, &root, &[], &["space", "save", "desk"])).trim());
+    let space: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&space_file).unwrap()).unwrap();
+    let marker = space_file
+        .parent()
+        .unwrap()
+        .join(format!(".restoring-{}", space["id"].as_str().unwrap()));
+    std::fs::write(&marker, b"").unwrap();
+    let file = root.join("configuration.json");
+    ok(&pmux(
+        &socket,
+        &root,
+        &[(prismattyc_mux::procinfo::TEST_FOREGROUND_COMMAND_ENV, "")],
+        &["session-config", "save", file.to_str().unwrap()],
+    ));
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    for session in saved["space"]["sessions"].as_array_mut().unwrap() {
+        let name = session["name"].as_str().unwrap().to_string();
+        if matches!(name.as_str(), "alpha" | "zulu") {
+            session["windows"][0]["root"]["command"] = format!("printf {name} > restored").into();
+        } else if name == "stale" {
+            let stale = session["windows"][0]["root"].clone();
+            session["windows"][0]["root"] = serde_json::json!({
+                "kind": "split", "axis": "horizontal", "ratio": 0.5,
+                "first": {"kind": "leaf", "cwd": root}, "second": stale,
+            });
+        }
+    }
+    std::fs::write(&file, serde_json::to_vec_pretty(&saved).unwrap()).unwrap();
+    for name in ["alpha", "stale", "zulu"] {
+        ok(&pmux(&socket, &root, &[], &["stop", name]));
+    }
+    std::fs::remove_dir(root.join("stale")).unwrap();
+    let restored = pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "restore", file.to_str().unwrap()],
+    );
+    let listing = ok(&pmux(&socket, &root, &[], &["ls"]));
+    assert!(listing.contains("zulu"), "{listing}\n{}", text(&restored));
+    fail(&restored, "stale");
+    assert!(marker.exists(), "a partial restore must keep autosave held");
+    std::fs::create_dir(root.join("stale")).unwrap();
+    let retry = ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "restore", file.to_str().unwrap()],
+    ));
+    assert!(retry.contains("Restored 1 sessions."), "{retry}");
+    assert!(
+        !marker.exists(),
+        "a complete retry releases the autosave hold"
+    );
+    let deadline = Instant::now() + Duration::from_secs(8);
+    for name in ["alpha", "zulu"] {
+        let marker = root.join(name).join("restored");
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), name);
+    }
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn login_preference_keeps_comments_and_unrelated_config() {
     let root = temp_root("login-preservation");
@@ -640,5 +893,75 @@ fn session_configuration_restart_stops_only_consented_sessions() {
     let sessions = ok(&pmux(&socket, &root, &[], &["restart", "--plan", "--json"]));
     assert!(!sessions.contains("\"work\""), "{sessions}");
     ok(&pmux(&socket, &root, &[], &["stop"]));
+    drop(server);
+}
+
+#[test]
+fn consented_restart_and_restore_keep_every_space_member() {
+    let root = temp_root("cfg-space");
+    let socket = socket_path(&root);
+    let server = start_server(&socket, &root);
+    let pmux = |args: &[&str]| pmux(&socket, &root, &[], args);
+    ok(&pmux(&[
+        "space",
+        "create",
+        "desk",
+        "--session-name",
+        "alpha",
+        "--no-attach",
+    ]));
+    ok(&pmux(&["space", "add", "desk", "--name", "beta"]));
+    let listed = ok(&pmux(&["space", "ls"]));
+    assert!(listed.contains("desk  2 sessions"), "{listed}");
+
+    // New shells settle for a moment (title, directory), and the restart
+    // refuses a configuration the live sessions no longer match. Save until
+    // a check right after the save agrees.
+    let file = root.join("configuration.json");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let _ = std::fs::remove_file(&file);
+        ok(&pmux(&["session-config", "save", file.to_str().unwrap()]));
+        std::thread::sleep(Duration::from_millis(500));
+        if pmux(&["session-config", "check", file.to_str().unwrap()])
+            .status
+            .success()
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the sessions never settled");
+    }
+    let restarted = ok(&pmux(&[
+        "restart",
+        "--daemon",
+        "--stop-sessions",
+        "--consented-config",
+        file.to_str().unwrap(),
+        "--worker",
+        "--json",
+    ]));
+    assert!(
+        restarted.contains("\"status\":\"restarted\""),
+        "{restarted}"
+    );
+    ok(&pmux(&[
+        "session-config",
+        "restore",
+        file.to_str().unwrap(),
+    ]));
+    // Several autosave ticks on the new daemon, after the restore.
+    std::thread::sleep(Duration::from_secs(2));
+
+    let listed = ok(&pmux(&["space", "ls"]));
+    assert!(
+        listed.contains("desk  2 sessions"),
+        "a restart must not empty the Space: {listed}"
+    );
+    let reopened = pmux(&["space", "open", "desk", "--replace", "--no-run"]);
+    assert!(reopened.status.success(), "{}", text(&reopened));
+    let sessions = ok(&pmux(&["restart", "--plan", "--json"]));
+    assert!(sessions.contains("\"alpha\""), "{sessions}");
+    assert!(sessions.contains("\"beta\""), "{sessions}");
+    ok(&pmux(&["stop"]));
     drop(server);
 }

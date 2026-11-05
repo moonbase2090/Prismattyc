@@ -7633,6 +7633,12 @@ impl ControlServer {
         Arc::clone(&self.plane)
     }
 
+    /// Enable the default plug-ins that have no saved state, in the
+    /// background. Never fails; see `plugins::Service::seed_defaults`.
+    pub fn seed_default_plugins(&self) {
+        self.plugins.seed_defaults();
+    }
+
     /// Block until a flushed `ShutdownAccepted` has requested process exit.
     pub fn wait_shutdown(&self) {
         self.shutdown.wait();

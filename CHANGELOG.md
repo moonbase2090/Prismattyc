@@ -6,14 +6,27 @@
 
 - The command palette has an `activity_monitor` entry that opens a Space named Activity Monitor, or switches to it when it already exists. The Space holds one session running the activity monitor. The monitor starts again when it was quit. `pmux space monitor` does the same from a terminal. The entry has no default shortcut; bind one with `activity_monitor` under `[keys]`. `PMUX_ACTIVITY_MONITOR` overrides the monitor path. Opening it on a fresh install installs and enables the two activity plug-ins with the local read grant, and no other grant.
 
+## [0.3.58] - 2026-11-05
+
 ### Changed
 
+- The activity monitor and activity connector plug-ins are ready with no setup. The first time a daemon built with the official bundle finds either one with no saved state, it installs the bundled version and enables it with local activity access only, so `pmux-activity-monitor` works in a pane on a fresh install. Disabling either one in Settings > Plug-ins or with `pmux plugin disable` keeps it off across restarts and updates. Remote endpoints still need explicit grants, and packages installed by hand still start disabled.
 - The activity feed is on by default. pmuxd serves seat activity metadata without any setup, and `experimental_activity = false` under `[mux]`, in the settings panel or the config file, turns it off live. Configs that already contain `experimental_activity = false`, including ones written by earlier versions, keep the feed off. The feed carries no command text, paths, prompts, tool output or mail bodies, and monitor and query access are still granted separately in Settings > Plug-ins.
 
 ### Fixed
 
+- Space rename, deletion, undo and pane-title changes run on a worker thread. Uncached daemon snapshots and Space directory reads also stay off the window thread.
+- Start fresh saves an empty host view, so restarting the app or daemon does not reopen the previous Space. Saved Space definitions and daemon sessions remain available for explicit reopening.
 - The settings panel shows the built-in default for `[mux]` keys that are not in the config file, so the first Enter on a boolean changes it.
 - On Windows, opening the activity monitor no longer opens an empty console window. pmuxd now starts its plug-in worker, webhook sender and default-Space `pmux` calls without a console window.
+- Restarting pmuxd with a session configuration, as Update and Restart does, no longer empties the Spaces. The restart used to stop each session while Space autosave was still running, so autosave saved every Space without its sessions. The restored sessions then belonged to Spaces whose files no longer listed them. Autosave now stays off for those Spaces from the restart until `pmux session-config restore` has put every session back.
+- `pmux stop` no longer reports a failure when pmuxd exits between the check that it is running and the signal to stop it.
+- Session restoration preserves pane working directories and original explicit launch arguments for ordinary programs. Known coding agents keep supported conversation selectors and options and resume without replaying startup prompts. Missing directories are reported while valid sessions restore, and partially restored Spaces stay held until a successful retry.
+- Plug-in selections, grants and activity endpoints survive a reboot or logout. Each daemon keeps them in its instance directory under the data directory instead of beside its socket, whose runtime directory the system clears, and moves a journal that an earlier version kept beside the socket on first use.
+
+### Documentation
+
+- Documented which activity hooks and metadata fields each supported harness provides.
 
 ## [0.3.57] - 2026-11-04
 

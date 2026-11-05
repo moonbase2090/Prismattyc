@@ -58,11 +58,22 @@ This dedicated fixture does not prove every complete-editor control below.
 
 `tests/native/full-update-restart-e2e.py` uses private runtime, configuration,
 and data paths. It records commands, before/after snapshots, a result file,
-and terminal output. Each output directory must be new.
+and terminal output. Each output directory must be new. Use a dedicated build
+directory with no other running fixture. Teardown tracks child process groups
+and exact build executable paths, including replacement processes. SIGTERM
+and SIGHUP run the same teardown and retain the result file.
 
-- Run `python3 tests/native/full-update-restart-e2e.py --bins "$verify_bins" --out "$verify_evidence/update-cli"` for daemon replacement, restored directories and commands, retry behavior, and mailbox durability.
+- Run `python3 tests/native/full-update-restart-e2e.py --bins "$verify_bins" --out "$verify_evidence/update-cli"` for daemon replacement, restored directories and commands, retry behavior, and mailbox durability. The current-build drive also checks same-layout directory and resume-command autosave, then prunes a closed session from its saved Space. Inspect `binary_version` in `result.json` against the intended revision.
 - On a logged-in macOS desktop with Accessibility permission, add `--native` with a separate output directory. The fixture sends native keys to its owned host PID, checks cancellation preserves sessions, chooses Save and continue, waits for the replacement app's restore offer, and restores sessions. Inspect the consent, offer, and result PNGs and JSON snapshots. Match each capture to the host instance, PID, and capture sequence in its frame sidecar; sequence numbers reset on exec. The PNGs show presented app pixels, not OS composition.
 - In a disposable clean macOS VM only, install the released 0.3.38 app and run the CLI fixture with `--upgrade-app /Applications/Prismattyc.app`. This performs a real release download, verification, and app replacement. It then restarts the private daemon from the installed app and restores the saved configuration. Retain the initial app checksum and actual updater output. This command changes that VM's app installation.
+
+Inspect `initial_daemon` and `replacement_daemon` in `result.json`. Their
+executable paths must match the intended build or disposable installed app.
+Require `cleanup_remaining_pids` to be empty and `scratch_removed` to be true,
+including after an interrupted run. To prove interruption cleanup, start a
+separate CLI drive, wait for `metadata-before.json`, then send SIGTERM or SIGHUP
+to that Python PID. Require exit status 128 plus the signal number and inspect
+the retained result and actual process images before starting another drive.
 
 The native fixture's current-release restart path and the real installer
 path are separate drives. Record which ran. Neither one substitutes for

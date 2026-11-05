@@ -716,7 +716,7 @@ def main():
             print(f"FAIL leftover processes after teardown: {swept}", flush=True)
             status = "FAIL"
         result = {"status": status, "platform": platform.platform(), "leftovers_after_teardown": swept,
-                  "default_plugins_seeded": getattr(flow, "seeded", None), "seconds": round(time.monotonic() - started, 1),
+                  "default_plugins_seeded": getattr(flow, "seeded", None), "warmup_keys_dropped": getattr(flow, "warmup_dropped", None), "seconds": round(time.monotonic() - started, 1),
                   "steps": flow.steps}
         (args.out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
         shutil.rmtree(flow.root, ignore_errors=True)

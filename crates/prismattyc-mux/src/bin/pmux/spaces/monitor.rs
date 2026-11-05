@@ -16,7 +16,10 @@ const USAGE: &str = "usage: pmux space monitor";
 pub(in super::super) fn run(paths: &Paths, args: Vec<String>) -> Result<()> {
     anyhow::ensure!(args.is_empty(), "{USAGE}");
     ensure_live_server(paths)?;
-    ensure_plugin(&paths.socket)?;
+    // Best effort: without the plug-ins the monitor itself says how to install and enable them.
+    if let Err(error) = ensure_plugin(&paths.socket) {
+        eprintln!("pmux: could not enable the activity plug-ins: {error:#}");
+    }
     let command = command(&launcher(), &prismattyc_mux::platform::default_shell());
     anyhow::ensure!(
         !command_has_line_break(&command),

@@ -28,13 +28,21 @@ fn socket_path(root: &Path) -> PathBuf {
     root.join("pmux.sock")
 }
 
+/// Tears down the test daemon however the test ends. `pmux restart` replaces
+/// the child with a new detached pmuxd, so killing the child alone could
+/// leave that replacement running; stopping whatever serves the private
+/// socket covers both.
 struct ServerGuard {
     child: Child,
     socket: PathBuf,
+    root: PathBuf,
 }
 
 impl Drop for ServerGuard {
     fn drop(&mut self) {
+        if self.socket.exists() {
+            let _ = pmux(&self.socket, &self.root, &[], &["stop"]);
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.socket);
@@ -55,6 +63,7 @@ fn start_server(socket: &Path, root: &Path) -> ServerGuard {
             .spawn()
             .expect("spawn pmuxd"),
         socket: socket.to_path_buf(),
+        root: root.to_path_buf(),
     };
     for _ in 0..100 {
         if socket.exists() {
@@ -447,6 +456,69 @@ fn session_configuration_restores_names_directories_and_commands_without_replay(
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// A pane running an agent that was given a startup prompt is saved as the
+/// agent's resume command. Restoring must not run that prompt again.
+#[test]
+fn a_saved_agent_resumes_instead_of_replaying_its_startup_prompt() {
+    let root = temp_root("agent-resume");
+    let socket = socket_path(&root);
+    let server = start_server(&socket, &root);
+    let cwd = root.join("project");
+    std::fs::create_dir(&cwd).unwrap();
+    // A process named `claude` with a prompt in its arguments, which stays up.
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &[
+            "new",
+            "--no-attach",
+            "seat",
+            "--",
+            "/bin/bash",
+            "-c",
+            "exec -a claude /bin/sh -c 'sleep 999; :' claude 'do the secret task'",
+        ],
+    ));
+    let file = root.join("configuration.json");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let command = loop {
+        let _ = std::fs::remove_file(&file);
+        let saved = pmux(
+            &socket,
+            &root,
+            &[],
+            &["session-config", "save", file.to_str().unwrap()],
+        );
+        if saved.status.success() {
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            let seat = value["space"]["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["name"] == "seat")
+                .cloned();
+            if let Some(command) = seat.and_then(|s| {
+                s["windows"][0]["root"]["command"]
+                    .as_str()
+                    .map(str::to_owned)
+            }) {
+                break command;
+            }
+        }
+        assert!(Instant::now() < deadline, "the agent was never saved");
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    assert_eq!(command, "claude --continue", "saved {command:?}");
+    assert!(
+        !command.contains("secret"),
+        "the prompt was saved: {command}"
+    );
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn login_preference_keeps_comments_and_unrelated_config() {
     let root = temp_root("login-preservation");
@@ -640,5 +712,75 @@ fn session_configuration_restart_stops_only_consented_sessions() {
     let sessions = ok(&pmux(&socket, &root, &[], &["restart", "--plan", "--json"]));
     assert!(!sessions.contains("\"work\""), "{sessions}");
     ok(&pmux(&socket, &root, &[], &["stop"]));
+    drop(server);
+}
+
+#[test]
+fn consented_restart_and_restore_keep_every_space_member() {
+    let root = temp_root("cfg-space");
+    let socket = socket_path(&root);
+    let server = start_server(&socket, &root);
+    let pmux = |args: &[&str]| pmux(&socket, &root, &[], args);
+    ok(&pmux(&[
+        "space",
+        "create",
+        "desk",
+        "--session-name",
+        "alpha",
+        "--no-attach",
+    ]));
+    ok(&pmux(&["space", "add", "desk", "--name", "beta"]));
+    let listed = ok(&pmux(&["space", "ls"]));
+    assert!(listed.contains("desk  2 sessions"), "{listed}");
+
+    // New shells settle for a moment (title, directory), and the restart
+    // refuses a configuration the live sessions no longer match. Save until
+    // a check right after the save agrees.
+    let file = root.join("configuration.json");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let _ = std::fs::remove_file(&file);
+        ok(&pmux(&["session-config", "save", file.to_str().unwrap()]));
+        std::thread::sleep(Duration::from_millis(500));
+        if pmux(&["session-config", "check", file.to_str().unwrap()])
+            .status
+            .success()
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the sessions never settled");
+    }
+    let restarted = ok(&pmux(&[
+        "restart",
+        "--daemon",
+        "--stop-sessions",
+        "--consented-config",
+        file.to_str().unwrap(),
+        "--worker",
+        "--json",
+    ]));
+    assert!(
+        restarted.contains("\"status\":\"restarted\""),
+        "{restarted}"
+    );
+    ok(&pmux(&[
+        "session-config",
+        "restore",
+        file.to_str().unwrap(),
+    ]));
+    // Several autosave ticks on the new daemon, after the restore.
+    std::thread::sleep(Duration::from_secs(2));
+
+    let listed = ok(&pmux(&["space", "ls"]));
+    assert!(
+        listed.contains("desk  2 sessions"),
+        "a restart must not empty the Space: {listed}"
+    );
+    let reopened = pmux(&["space", "open", "desk", "--replace", "--no-run"]);
+    assert!(reopened.status.success(), "{}", text(&reopened));
+    let sessions = ok(&pmux(&["restart", "--plan", "--json"]));
+    assert!(sessions.contains("\"alpha\""), "{sessions}");
+    assert!(sessions.contains("\"beta\""), "{sessions}");
+    ok(&pmux(&["stop"]));
     drop(server);
 }

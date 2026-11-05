@@ -237,6 +237,50 @@ fn restore(client: &mut Client, client_id: u64, paths: &Paths, file: &Path) -> R
     if let Some(view) = &config.view {
         attach_tabs::save(&paths.space_view_path(), view)?;
     }
+    // Every session is back with its Space, so autosave may resume. An
+    // earlier failure returns before this and leaves the hold in place.
+    release_spaces(
+        config
+            .owners
+            .iter()
+            .filter_map(|(_, owner)| owner.as_deref()),
+    )?;
     println!("Restored {restored} sessions.");
+    Ok(())
+}
+
+/// Keep Space autosave off these Spaces while a restart stops their sessions
+/// and `session-config restore` recreates them. Without this, autosave on the
+/// old daemon records each stopped session as closed by the user and writes
+/// the Space without it, and the restored sessions then belong to a file that
+/// no longer lists them. Uses the marker that `pmux space open` sets while it
+/// builds a Space; restore, `space open` and `space save` clear it.
+pub(super) fn hold_spaces<'a>(ids: impl IntoIterator<Item = &'a str>) -> Result<()> {
+    let dir = spaces_dir();
+    for id in ids
+        .into_iter()
+        .filter(|id| prismattyc_mux::valid_space_id(id))
+    {
+        let marker = prismattyc_mux::space_autosave::restoring_marker(&dir, id);
+        std::fs::write(&marker, b"").with_context(|| format!("write {}", marker.display()))?;
+    }
+    Ok(())
+}
+
+fn release_spaces<'a>(ids: impl IntoIterator<Item = &'a str>) -> Result<()> {
+    let dir = spaces_dir();
+    for id in ids
+        .into_iter()
+        .filter(|id| prismattyc_mux::valid_space_id(id))
+    {
+        let marker = prismattyc_mux::space_autosave::restoring_marker(&dir, id);
+        match std::fs::remove_file(&marker) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("remove {}", marker.display()))
+            }
+        }
+    }
     Ok(())
 }

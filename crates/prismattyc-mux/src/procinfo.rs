@@ -229,8 +229,8 @@ pub fn replay_command(args: &[String]) -> Option<String> {
 pub fn has_foreground(root: u32) -> bool {
     #[cfg(windows)]
     {
-        let _ = root;
-        true
+        // Only a shell sitting at its prompt is idle; an unreadable tree is not.
+        !matches!(windows::foreground(root), windows::Foreground::Shell)
     }
     #[cfg(not(windows))]
     {

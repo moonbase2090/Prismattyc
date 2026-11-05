@@ -255,6 +255,8 @@ fn main() -> Result<()> {
     // before any of them can open one.
     ensure_default_space(&cli.socket, adopt);
     instance.publish_pid(&cli.socket)?;
+    // Off the startup path; a failure is logged and the daemon keeps running.
+    server.seed_default_plugins();
     let checkpoint =
         prismattyc_mux::workspace::Checkpointer::start(server.plane(), cli.socket.clone())?;
     let space_autosave =

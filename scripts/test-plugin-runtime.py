@@ -157,7 +157,7 @@ class Connection:
         return reply
 
     def plugin(self, operation, **fields):
-        return self.request("plugin", plugin_api="1.0.0", operation={"operation": operation, **fields})
+        return self.request("plugin", plugin_api="2.0.0", operation={"operation": operation, **fields})
 
 
 def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=None):
@@ -788,7 +788,7 @@ else:
             # A fresh daemon installs and enables both official plug-ins, local access only.
             deadline = time.monotonic() + 60
             while len(enabled_states()) < len(current):
-                assert time.monotonic() < deadline, cli("list")
+                assert time.monotonic() < deadline, (cli("list"), (scratch / "daemon.log").read_text(errors="replace")[-4000:].replace(str(runtime), "<runtime>").replace(str(scratch), "<proof>"))
                 time.sleep(0.25)
             seeded = enabled_states()
             for entry in current:
@@ -856,7 +856,7 @@ else:
             cli("disable",connector)
             assert connection.plugin("exports",allowlist=[connector])["response"]["reply"]["tools"] == []
             assert connection.plugin("call_export",handle=exports[0]["handle"],arguments="{}")["status"] == "error"
-            cli("enable",connector,"--version","1.0.0","--allow","activity.read:local")
+            cli("enable",connector,"--version",next(entry["version"] for entry in current if entry["id"] == connector),"--allow","activity.read:local")
             feed(False)
             reply = cli("invoke",connector,"poll")
             assert reply["is_error"] and json.loads(reply["json"])["error"]["code"] == "feed_disabled"

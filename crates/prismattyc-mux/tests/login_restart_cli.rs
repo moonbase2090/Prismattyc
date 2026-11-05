@@ -620,6 +620,15 @@ fn session_configuration_restores_valid_sessions_after_a_stale_directory() {
             &["new", "--no-attach", "--cwd", cwd.to_str().unwrap(), name],
         ));
     }
+    let space_file =
+        PathBuf::from(ok(&pmux(&socket, &root, &[], &["space", "save", "desk"])).trim());
+    let space: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&space_file).unwrap()).unwrap();
+    let marker = space_file
+        .parent()
+        .unwrap()
+        .join(format!(".restoring-{}", space["id"].as_str().unwrap()));
+    std::fs::write(&marker, b"").unwrap();
     let file = root.join("configuration.json");
     ok(&pmux(
         &socket,
@@ -655,6 +664,7 @@ fn session_configuration_restores_valid_sessions_after_a_stale_directory() {
     let listing = ok(&pmux(&socket, &root, &[], &["ls"]));
     assert!(listing.contains("zulu"), "{listing}\n{}", text(&restored));
     fail(&restored, "stale");
+    assert!(marker.exists(), "a partial restore must keep autosave held");
     std::fs::create_dir(root.join("stale")).unwrap();
     let retry = ok(&pmux(
         &socket,
@@ -663,6 +673,10 @@ fn session_configuration_restores_valid_sessions_after_a_stale_directory() {
         &["session-config", "restore", file.to_str().unwrap()],
     ));
     assert!(retry.contains("Restored 1 sessions."), "{retry}");
+    assert!(
+        !marker.exists(),
+        "a complete retry releases the autosave hold"
+    );
     let deadline = Instant::now() + Duration::from_secs(8);
     for name in ["alpha", "zulu"] {
         let marker = root.join(name).join("restored");

@@ -1509,6 +1509,14 @@ mod tests {
             saved.windows[0].root.leaf_commands(),
             vec![Some("agent resume conversation-123 --model 'model one' --config model_reasoning_effort=high"), None, None]
         );
+        let spawn = session.windows[0].panes[0].spawn.as_mut().unwrap();
+        spawn.program = "codex".into();
+        spawn.argv.push("do the secret task".into());
+        let saved = from_snapshot_with(&session, CwdSource::Live);
+        assert_eq!(
+            saved.windows[0].root.leaf_commands(),
+            vec![Some("codex resume conversation-123 --model 'model one' --config model_reasoning_effort=high"), None, None]
+        );
     }
 
     #[test]

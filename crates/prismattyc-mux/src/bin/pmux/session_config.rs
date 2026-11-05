@@ -246,6 +246,13 @@ fn restore(client: &mut Client, client_id: u64, paths: &Paths, file: &Path) -> R
     if let Some(view) = &config.view {
         attach_tabs::save(&paths.space_view_path(), view)?;
     }
+    println!("Restored {restored} sessions.");
+    ensure!(
+        failures.is_empty(),
+        "Could not restore {} sessions:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
     // Every session is back with its Space, so autosave may resume. An
     // earlier failure returns before this and leaves the hold in place.
     release_spaces(
@@ -254,13 +261,6 @@ fn restore(client: &mut Client, client_id: u64, paths: &Paths, file: &Path) -> R
             .iter()
             .filter_map(|(_, owner)| owner.as_deref()),
     )?;
-    println!("Restored {restored} sessions.");
-    ensure!(
-        failures.is_empty(),
-        "Could not restore {} sessions:\n{}",
-        failures.len(),
-        failures.join("\n")
-    );
     Ok(())
 }
 

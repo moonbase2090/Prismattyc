@@ -193,31 +193,145 @@ pub fn foreground_command(root: u32) -> Option<String> {
     live_foreground_command(root)
 }
 
-/// The argv a restore should run for a foreground command it saved.
-///
-/// An agent launched with a startup prompt must not run that prompt again
-/// when a Space or session configuration is restored, which would start a new
-/// task instead of returning to the old one. Known agents are saved as the
-/// program and the way it reopens its most recent conversation in the pane's
-/// directory. Agents whose reopening flag is not known are saved as the bare
-/// program, so they start idle. Every other command is saved unchanged.
+/// Resume known agents without replaying their startup prompt. Preserve
+/// explicit session selection and recognized model, configuration and policy
+/// options. Other agents reopen idle; non-agent commands stay unchanged.
 #[must_use]
 pub fn resume_args(args: Vec<String>) -> Vec<String> {
     use crate::inject_submit::InjectAgent;
     let Some(program) = args.first() else {
         return args;
     };
-    let tail: &[&str] = match crate::inject_submit::classify_agent_argv0(program) {
-        Some(InjectAgent::Claude) => &["--continue"],
-        Some(InjectAgent::Codex) => &["resume", "--last"],
-        Some(InjectAgent::Cursor | InjectAgent::Grok | InjectAgent::Kiro | InjectAgent::Muse) => {
-            &[]
-        }
+    let agent = match crate::inject_submit::classify_agent_argv0(program) {
+        Some(InjectAgent::Claude) => InjectAgent::Claude,
+        Some(InjectAgent::Codex) => InjectAgent::Codex,
         Some(InjectAgent::Unknown) | None => return args,
+        Some(_) => return vec![program.clone()],
     };
-    std::iter::once(program.clone())
-        .chain(tail.iter().map(|arg| (*arg).to_string()))
-        .collect()
+    let mut options = Vec::new();
+    let mut session = None;
+    let mut session_override = None;
+    let mut positional_seen = false;
+    let mut index = 1;
+    while let Some(arg) = args.get(index) {
+        if arg == "--" {
+            break;
+        }
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) => (flag, Some(value)),
+            None => (arg.as_str(), None),
+        };
+        let selector =
+            agent == InjectAgent::Claude && matches!(flag, "--resume" | "-r" | "--session-id");
+        let resume_subcommand = agent == InjectAgent::Codex && !positional_seen && arg == "resume";
+        if selector || resume_subcommand {
+            let value = inline.map(str::to_owned).or_else(|| {
+                args.get(index + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with('-'))
+                    .map(|value| {
+                        index += 1;
+                        value.clone()
+                    })
+            });
+            if flag == "--session-id" {
+                session_override = value;
+            } else if value.is_some() {
+                session = value;
+            }
+            positional_seen |= resume_subcommand;
+        } else if (agent == InjectAgent::Claude
+            && matches!(flag, "--continue" | "-c" | "--fork-session"))
+            || (agent == InjectAgent::Codex && matches!(flag, "--last" | "--all"))
+        {
+            // Selection is rendered once below; a restore never forks.
+        } else {
+            let takes_value = matches!(flag, "--model" | "--effort")
+                || (agent == InjectAgent::Codex
+                    && matches!(
+                        flag,
+                        "-m" | "--config"
+                            | "-c"
+                            | "--profile"
+                            | "-p"
+                            | "--sandbox"
+                            | "-s"
+                            | "--ask-for-approval"
+                            | "-a"
+                            | "--enable"
+                            | "--disable"
+                            | "--cd"
+                            | "-C"
+                            | "--add-dir"
+                            | "--local-provider"
+                    ))
+                || (agent == InjectAgent::Claude
+                    && matches!(
+                        flag,
+                        "--permission-mode"
+                            | "--settings"
+                            | "--setting-sources"
+                            | "--agent"
+                            | "--agents"
+                    ));
+            let toggle = (agent == InjectAgent::Codex
+                && matches!(
+                    flag,
+                    "--yolo"
+                        | "--dangerously-bypass-approvals-and-sandbox"
+                        | "--full-auto"
+                        | "--search"
+                        | "--no-alt-screen"
+                        | "--no-daemon"
+                        | "--oss"
+                        | "--strict-config"
+                ))
+                || (agent == InjectAgent::Claude
+                    && matches!(
+                        flag,
+                        "--dangerously-skip-permissions"
+                            | "--allow-dangerously-skip-permissions"
+                            | "--disable-slash-commands"
+                            | "--strict-mcp-config"
+                            | "--chrome"
+                            | "--no-chrome"
+                            | "--bare"
+                    ));
+            if takes_value {
+                if inline.is_some() {
+                    options.push(arg.clone());
+                } else if let Some(value) =
+                    args.get(index + 1).filter(|value| !value.starts_with('-'))
+                {
+                    options.extend([arg.clone(), value.clone()]);
+                    index += 1;
+                } else {
+                    break;
+                }
+            } else if toggle && inline.is_none() {
+                options.push(arg.clone());
+            } else if arg.starts_with('-') {
+                // Unknown option arity makes later tokens ambiguous.
+                break;
+            } else {
+                positional_seen = true;
+            }
+        }
+        index += 1;
+    }
+    let mut restored = vec![program.clone()];
+    match agent {
+        InjectAgent::Claude => match session_override.or(session) {
+            Some(id) => restored.extend(["--resume".into(), id]),
+            None => restored.push("--continue".into()),
+        },
+        InjectAgent::Codex => {
+            restored.push("resume".into());
+            restored.push(session.unwrap_or_else(|| "--last".into()));
+        }
+        _ => unreachable!(),
+    }
+    restored.extend(options);
+    restored
 }
 
 /// Whether the pane was launched as an interactive shell.
@@ -245,19 +359,32 @@ pub(crate) fn replay_spawn_command(spawn: &crate::SpawnSpec, pid: Option<u32>) -
     if spawn.program.is_empty() || interactive_shell(spawn) {
         return None;
     }
-    let args = std::iter::once(spawn.program.clone())
+    let mut args = std::iter::once(spawn.program.clone())
         .chain(spawn.argv.iter().cloned())
         .collect::<Vec<_>>();
+    let mut owner = pid;
+    if crate::inject_submit::classify_agent_argv0(&spawn.program).is_none() {
+        if let Some((foreground, live_args)) =
+            pid.and_then(foreground_process_args).filter(|(_, args)| {
+                args.first()
+                    .and_then(|program| crate::inject_submit::classify_agent_argv0(program))
+                    .is_some()
+            })
+        {
+            owner = Some(foreground);
+            args = live_args;
+        }
+    }
     #[cfg(not(windows))]
     {
-        Some(match pid {
+        Some(match owner {
             Some(pid) => unix_replay_command(pid, args),
-            None => shell_join(&args),
+            None => shell_join(&resume_args(args)),
         })
     }
     #[cfg(windows)]
     {
-        let _ = pid;
+        let _ = owner;
         replay_command(&args)
     }
 }
@@ -520,19 +647,23 @@ enum TtyForeground {
 
 #[cfg(not(windows))]
 fn foreground_command_impl(root: u32) -> Option<String> {
-    match classify_tty(root) {
-        TtyForeground::Pgid(tpgid) => command_in_foreground_pgid(root, tpgid),
-        TtyForeground::NoTty => {
-            // Piped tests / no job control. A background job can still
-            // look like a child here.
-            let args = cmdline_strings(root)?;
-            if !is_shell_argv(&args) {
-                return Some(unix_replay_command(root, args));
-            }
-            let child = first_non_shell_descendant(root)?;
-            cmdline_strings(child).map(|args| unix_replay_command(child, args))
+    let (pid, args) = foreground_process_args(root)?;
+    Some(unix_replay_command(pid, args))
+}
+
+fn foreground_process_args(root: u32) -> Option<(u32, Vec<String>)> {
+    #[cfg(windows)]
+    {
+        match windows::foreground(root) {
+            windows::Foreground::Running { pid, args, .. } => Some((pid, args)),
+            _ => None,
         }
-        TtyForeground::Unknown => None,
+    }
+    #[cfg(not(windows))]
+    {
+        let pid = foreground_pid_impl(root)?;
+        let args = cmdline_strings(pid)?;
+        (!is_shell_argv(&args)).then_some((pid, args))
     }
 }
 
@@ -613,16 +744,6 @@ pub fn in_terminal_foreground(root: u32, pid: u32) -> Option<bool> {
         TtyForeground::Pgid(group) => pgid_of(pid).map(|pgid| pgid == group),
         TtyForeground::NoTty | TtyForeground::Unknown => None,
     }
-}
-
-#[cfg(not(windows))]
-fn command_in_foreground_pgid(root: u32, tpgid: u32) -> Option<String> {
-    let pick = foreground_pid_in_pgid(root, tpgid)?;
-    let args = cmdline_strings(pick)?;
-    if is_shell_argv(&args) {
-        return None;
-    }
-    Some(unix_replay_command(pick, args))
 }
 
 #[cfg(not(windows))]
@@ -1444,6 +1565,60 @@ mod tests {
     }
 
     #[test]
+    fn saved_agent_resume_keeps_identity_and_model_options_without_the_prompt() {
+        let args = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| item.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            resume_args(args(&[
+                "codex",
+                "resume",
+                "conversation-123",
+                "--model",
+                "model one",
+                "--config",
+                "model_reasoning_effort=high",
+                "--yolo",
+                "do the secret task",
+            ])),
+            args(&[
+                "codex",
+                "resume",
+                "conversation-123",
+                "--model",
+                "model one",
+                "--config",
+                "model_reasoning_effort=high",
+                "--yolo",
+            ])
+        );
+        assert_eq!(
+            resume_args(args(&[
+                "claude",
+                "--resume",
+                "conversation-456",
+                "--model",
+                "model two",
+                "--effort",
+                "high",
+                "do the secret task",
+            ])),
+            args(&[
+                "claude",
+                "--resume",
+                "conversation-456",
+                "--model",
+                "model two",
+                "--effort",
+                "high",
+            ])
+        );
+    }
+
+    #[test]
     fn a_saved_agent_command_resumes_instead_of_replaying_its_prompt() {
         let args = |list: &[&str]| list.iter().map(|a| (*a).to_string()).collect::<Vec<_>>();
         assert_eq!(
@@ -1452,7 +1627,7 @@ mod tests {
         );
         assert_eq!(
             resume_args(args(&["codex", "--model", "x", "write tests"])),
-            args(&["codex", "resume", "--last"])
+            args(&["codex", "resume", "--last", "--model", "x"])
         );
         assert_eq!(
             resume_args(args(&["cursor-agent", "do the thing"])),
@@ -1465,6 +1640,53 @@ mod tests {
             args(&["echo", "claude"])
         );
         assert!(resume_args(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn agent_resume_selectors_and_inline_options_survive_repeated_saves() {
+        let args = |list: &[&str]| list.iter().map(|a| (*a).to_string()).collect::<Vec<_>>();
+        for (input, expected) in [
+            (
+                args(&[
+                    "codex",
+                    "--model=x",
+                    "resume",
+                    "id-123",
+                    "--config=a=b",
+                    "prompt",
+                ]),
+                args(&["codex", "resume", "id-123", "--model=x", "--config=a=b"]),
+            ),
+            (
+                args(&[
+                    "claude",
+                    "--session-id=id-456",
+                    "--fork-session",
+                    "--effort=high",
+                    "prompt",
+                ]),
+                args(&["claude", "--resume", "id-456", "--effort=high"]),
+            ),
+            (
+                args(&["codex", "resume", "--last", "--model", "x", "prompt"]),
+                args(&["codex", "resume", "--last", "--model", "x"]),
+            ),
+            (
+                args(&[
+                    "claude",
+                    "--resume=id-789",
+                    "--future-option",
+                    "value",
+                    "--model",
+                    "prompt",
+                ]),
+                args(&["claude", "--resume", "id-789"]),
+            ),
+        ] {
+            let saved = resume_args(input);
+            assert_eq!(saved, expected);
+            assert_eq!(resume_args(saved), expected);
+        }
     }
 
     #[test]

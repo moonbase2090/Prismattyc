@@ -63,8 +63,8 @@ pub enum SavedNode {
         cwd: Option<PathBuf>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         program: Option<String>,
-        /// Foreground command at save time (space files). Absent when the
-        /// pane child is the shell itself. `space open` may re-run it.
+        /// Explicit launch command or interactive shell's foreground command
+        /// at save time. `space open` may re-run it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
         /// Pane title set with `pmux rename-pane` (PT-128). Absent when the
@@ -438,8 +438,10 @@ fn leaf_meta(pane: &PaneSnapshot, cwd_source: CwdSource) -> LeafMeta {
             .filter(|program| !program.is_empty()),
         command: match cwd_source {
             CwdSource::Live => pane
-                .child_pid
-                .and_then(crate::procinfo::foreground_command)
+                .spawn
+                .as_ref()
+                .and_then(|spawn| crate::procinfo::replay_spawn_command(spawn, pane.child_pid))
+                .or_else(|| pane.child_pid.and_then(crate::procinfo::foreground_command))
                 .filter(|command| !command.is_empty()),
             CwdSource::Spawn => None,
         },
@@ -1484,6 +1486,37 @@ mod tests {
             },
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn live_command_preserves_explicit_launch_arguments_without_a_readable_process() {
+        let mut session = three_pane_session();
+        let pane = &mut session.windows[0].panes[0];
+        pane.child_pid = None;
+        let spawn = pane.spawn.as_mut().unwrap();
+        spawn.program = "agent".into();
+        spawn.argv = vec![
+            "resume".into(),
+            "conversation-123".into(),
+            "--model".into(),
+            "model one".into(),
+            "--config".into(),
+            "model_reasoning_effort=high".into(),
+        ];
+        let saved = from_snapshot_with(&session, CwdSource::Live);
+        assert_eq!(
+            saved.windows[0].root.leaf_commands(),
+            vec![Some("agent resume conversation-123 --model 'model one' --config model_reasoning_effort=high"), None, None]
+        );
+        let spawn = session.windows[0].panes[0].spawn.as_mut().unwrap();
+        spawn.program = "codex".into();
+        spawn.argv.push("do the secret task".into());
+        let saved = from_snapshot_with(&session, CwdSource::Live);
+        assert_eq!(
+            saved.windows[0].root.leaf_commands(),
+            vec![Some("codex resume conversation-123 --model 'model one' --config model_reasoning_effort=high"), None, None]
+        );
     }
 
     #[test]

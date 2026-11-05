@@ -241,13 +241,24 @@ fn restart_plans_and_cooperative_components() {
         "{scheduled}"
     );
     let deadline = Instant::now() + Duration::from_secs(20);
+    let mut replacement_pid = None;
     while Instant::now() < deadline {
-        let status = pmux(&server_socket, &root, &[], &["status"]);
-        if status.status.success() && text(&status).contains("running") {
-            break;
+        let versions = pmux(&server_socket, &root, &[], &["versions"]);
+        if versions.status.success() {
+            let versions: serde_json::Value = serde_json::from_slice(&versions.stdout).unwrap();
+            if let Some(pid) = versions["daemon"]["pid"].as_u64() {
+                if pid != u64::from(server.child.id()) {
+                    replacement_pid = Some(pid);
+                    break;
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    assert!(
+        replacement_pid.is_some(),
+        "restart never replaced the original daemon"
+    );
     let status = ok(&pmux(&server_socket, &root, &[], &["status"]));
     assert!(status.contains("running"), "{status}");
     let _ = pmux(&server_socket, &root, &[], &["stop"]);
@@ -515,6 +526,176 @@ fn a_saved_agent_resumes_instead_of_replaying_its_startup_prompt() {
         !command.contains("secret"),
         "the prompt was saved: {command}"
     );
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn session_configuration_replays_original_launch_arguments_after_exec() {
+    let root = temp_root("original-launch-arguments");
+    let socket = socket_path(&root);
+    let server = start_server(&socket, &root);
+    let log = root.join("arguments");
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &[
+            "new",
+            "--no-attach",
+            "work",
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf '%s\\n' \"$@\" >> \"$0\"; exec sleep 999",
+            log.to_str().unwrap(),
+            "resume",
+            "conversation-123",
+            "--model",
+            "model one",
+            "--config",
+            "model_reasoning_effort=high",
+        ],
+    ));
+    let doctor = ok(&pmux(&socket, &root, &[], &["doctor", "work"]));
+    let child: u32 = doctor
+        .lines()
+        .find_map(|line| line.split_once("child "))
+        .and_then(|(_, rest)| rest.split(',').next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !prismattyc_mux::procinfo::live_foreground_command(child)
+        .is_some_and(|command| command.contains("sleep 999"))
+    {
+        assert!(Instant::now() < deadline, "fixture did not exec sleep");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let file = root.join("configuration.json");
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "save", file.to_str().unwrap()],
+    ));
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let work = saved["space"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["name"] == "work")
+        .unwrap();
+    let command = work["windows"][0]["root"]["command"].as_str().unwrap();
+    assert!(command.starts_with("/bin/sh -c "), "{command}");
+    assert!(
+        command.ends_with(
+            "resume conversation-123 --model 'model one' --config model_reasoning_effort=high"
+        ),
+        "{command}"
+    );
+    ok(&pmux(&socket, &root, &[], &["stop", "work"]));
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "restore", file.to_str().unwrap()],
+    ));
+    let expected =
+        "resume\nconversation-123\n--model\nmodel one\n--config\nmodel_reasoning_effort=high\n";
+    let twice = format!("{expected}{expected}");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while std::fs::read_to_string(&log).unwrap_or_default() != twice {
+        assert!(
+            Instant::now() < deadline,
+            "original arguments were not replayed"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn session_configuration_restores_valid_sessions_after_a_stale_directory() {
+    let root = temp_root("stale-session-directory");
+    let socket = socket_path(&root);
+    let server = start_server(&socket, &root);
+    for name in ["alpha", "stale", "zulu"] {
+        let cwd = root.join(name);
+        std::fs::create_dir(&cwd).unwrap();
+        ok(&pmux(
+            &socket,
+            &root,
+            &[],
+            &["new", "--no-attach", "--cwd", cwd.to_str().unwrap(), name],
+        ));
+    }
+    let space_file =
+        PathBuf::from(ok(&pmux(&socket, &root, &[], &["space", "save", "desk"])).trim());
+    let space: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&space_file).unwrap()).unwrap();
+    let marker = space_file
+        .parent()
+        .unwrap()
+        .join(format!(".restoring-{}", space["id"].as_str().unwrap()));
+    std::fs::write(&marker, b"").unwrap();
+    let file = root.join("configuration.json");
+    ok(&pmux(
+        &socket,
+        &root,
+        &[(prismattyc_mux::procinfo::TEST_FOREGROUND_COMMAND_ENV, "")],
+        &["session-config", "save", file.to_str().unwrap()],
+    ));
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    for session in saved["space"]["sessions"].as_array_mut().unwrap() {
+        let name = session["name"].as_str().unwrap().to_string();
+        if matches!(name.as_str(), "alpha" | "zulu") {
+            session["windows"][0]["root"]["command"] = format!("printf {name} > restored").into();
+        } else if name == "stale" {
+            let stale = session["windows"][0]["root"].clone();
+            session["windows"][0]["root"] = serde_json::json!({
+                "kind": "split", "axis": "horizontal", "ratio": 0.5,
+                "first": {"kind": "leaf", "cwd": root}, "second": stale,
+            });
+        }
+    }
+    std::fs::write(&file, serde_json::to_vec_pretty(&saved).unwrap()).unwrap();
+    for name in ["alpha", "stale", "zulu"] {
+        ok(&pmux(&socket, &root, &[], &["stop", name]));
+    }
+    std::fs::remove_dir(root.join("stale")).unwrap();
+    let restored = pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "restore", file.to_str().unwrap()],
+    );
+    let listing = ok(&pmux(&socket, &root, &[], &["ls"]));
+    assert!(listing.contains("zulu"), "{listing}\n{}", text(&restored));
+    fail(&restored, "stale");
+    assert!(marker.exists(), "a partial restore must keep autosave held");
+    std::fs::create_dir(root.join("stale")).unwrap();
+    let retry = ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "restore", file.to_str().unwrap()],
+    ));
+    assert!(retry.contains("Restored 1 sessions."), "{retry}");
+    assert!(
+        !marker.exists(),
+        "a complete retry releases the autosave hold"
+    );
+    let deadline = Instant::now() + Duration::from_secs(8);
+    for name in ["alpha", "zulu"] {
+        let marker = root.join(name).join("restored");
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), name);
+    }
     drop(server);
     std::fs::remove_dir_all(root).unwrap();
 }

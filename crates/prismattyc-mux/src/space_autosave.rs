@@ -4,7 +4,7 @@
 //! The desktop host saves the Space it shows. Nothing saved a layout change
 //! made without a host window (pane titles, splits, closed panes), so a
 //! daemon restart reopened the older arrangement. This worker rewrites the
-//! per-session `windows` of a Space file when the live shape differs, and
+//! per-session layout and command metadata when the live session differs, and
 //! drops a session that no longer exists. A session that moved to another
 //! Space, a member the file does not list, and a Space whose last `space
 //! open` did not finish are left alone. Tab order and focus belong to the
@@ -13,7 +13,7 @@ use crate::attach_tabs::{layout_for_sessions, remap_layout};
 use crate::control::{ControlPlane, Snapshot};
 use crate::layout_file::{
     from_sessions, list_spaces, load_space, save_space, spaces_dir_for_socket, SavedNode,
-    SavedSpace, SavedWindow,
+    SavedSpace, SavedSpaceSession, SavedWindow,
 };
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
-/// A changed shape must hold for two ticks (one second) before it is written.
+/// A change must hold for two ticks (one second) before it is written.
 const TICK: Duration = Duration::from_millis(500);
 
 fn shape(node: &SavedNode) -> serde_json::Value {
@@ -51,6 +51,19 @@ fn window_shapes(windows: &[SavedWindow]) -> String {
     serde_json::Value::Array(shapes).to_string()
 }
 
+fn session_shape(session: &SavedSpaceSession) -> String {
+    window_shapes(&session.windows)
+}
+
+fn session_restore_metadata(session: &SavedSpaceSession) -> String {
+    let windows: Vec<_> = session
+        .windows
+        .iter()
+        .map(|window| serde_json::json!([window.title, window.root]))
+        .collect();
+    serde_json::json!([session.agent, windows]).to_string()
+}
+
 /// How a session that is in the file but gone from the daemon is treated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Closes {
@@ -67,7 +80,7 @@ pub(crate) enum Plan {
     /// Space, a member is not listed in the file, or nothing is left and
     /// the daemon never saw the Space in use.
     Mismatch,
-    /// Same members, same window shapes.
+    /// Same members and persisted session metadata.
     InSync,
     /// The file with the live windows and without sessions that no longer
     /// exist, and a fingerprint of the change.
@@ -75,6 +88,15 @@ pub(crate) enum Plan {
 }
 
 pub(crate) fn plan(saved: &SavedSpace, snapshot: &Snapshot, closes: Closes) -> Plan {
+    plan_by_session(saved, snapshot, closes, session_restore_metadata)
+}
+
+fn plan_by_session(
+    saved: &SavedSpace,
+    snapshot: &Snapshot,
+    closes: Closes,
+    session_fingerprint: fn(&SavedSpaceSession) -> String,
+) -> Plan {
     let Some(id) = saved.id.as_deref() else {
         return Plan::Mismatch;
     };
@@ -91,14 +113,14 @@ pub(crate) fn plan(saved: &SavedSpace, snapshot: &Snapshot, closes: Closes) -> P
         if live.space_id.as_deref() != Some(id) || live.windows.is_empty() {
             return Plan::Mismatch;
         }
-        let Some(windows) = from_sessions(&[live]).sessions.pop().map(|s| s.windows) else {
+        let Some(current) = from_sessions(&[live]).sessions.pop() else {
             return Plan::Mismatch;
         };
         let mut kept = entry.clone();
-        let live_shape = window_shapes(&windows);
-        if live_shape != window_shapes(&entry.windows) {
-            fingerprint.push_str(&format!("{}:{live_shape};", entry.name));
-            kept.windows = windows;
+        let live_state = session_fingerprint(&current);
+        if live_state != session_fingerprint(entry) {
+            fingerprint.push_str(&format!("{}:{live_state};", entry.name));
+            kept = current;
         }
         next.sessions.push(kept);
     }
@@ -140,7 +162,7 @@ pub(crate) fn plan(saved: &SavedSpace, snapshot: &Snapshot, closes: Closes) -> P
 /// shapes. `pmux space open` uses this to tell a finished retry from one that
 /// found a half-built session and skipped it.
 pub fn restore_matches(saved: &SavedSpace, snapshot: &Snapshot) -> bool {
-    plan(saved, snapshot, Closes::Drop) == Plan::InSync
+    plan_by_session(saved, snapshot, Closes::Drop, session_shape) == Plan::InSync
 }
 
 /// `[spaces] autosave`, else the legacy `space_autosave`, else on. The host
@@ -477,15 +499,19 @@ mod tests {
     }
 
     #[test]
-    fn a_new_pane_title_or_split_is_a_change_but_a_cwd_move_is_not() {
+    fn pane_titles_splits_and_working_directories_are_saved() {
         let before = [session("a", Some(SPACE), &[("", "/one")])];
         let file = saved(&before);
 
         let cd = snapshot(vec![session("a", Some(SPACE), &[("", "/two")])]);
-        assert_eq!(
-            plan(&file, &cd, Closes::Drop),
-            Plan::InSync,
-            "cwd is not layout"
+        let next = changed(plan(&file, &cd, Closes::Drop));
+        assert!(matches!(
+            &next.sessions[0].windows[0].root,
+            SavedNode::Leaf { cwd: Some(cwd), .. } if cwd == Path::new("/two")
+        ));
+        assert!(
+            restore_matches(&file, &cd),
+            "restoration compares layout only"
         );
 
         let titled = snapshot(vec![session("a", Some(SPACE), &[("build", "/one")])]);
@@ -505,6 +531,31 @@ mod tests {
             SavedNode::Split { ratio, .. } if (*ratio - 0.4).abs() < 1e-9
         ));
         assert_eq!(next.tabs, file.tabs, "tabs stay with the host");
+    }
+
+    #[test]
+    fn a_new_resume_command_refreshes_an_unchanged_layout() {
+        let mut live = session("a", Some(SPACE), &[("", "/one")]);
+        let mut file = saved(&[live.clone()]);
+        if let SavedNode::Leaf { command, .. } = &mut file.sessions[0].windows[0].root {
+            *command = Some("agent --resume old --model old".into());
+        }
+        live.windows[0].panes[0].child_pid = Some(1);
+        let prior = std::env::var_os(crate::procinfo::TEST_FOREGROUND_COMMAND_ENV);
+        std::env::set_var(
+            crate::procinfo::TEST_FOREGROUND_COMMAND_ENV,
+            "agent --resume new --model current --effort high",
+        );
+        let result = plan(&file, &snapshot(vec![live]), Closes::Drop);
+        match prior {
+            Some(value) => std::env::set_var(crate::procinfo::TEST_FOREGROUND_COMMAND_ENV, value),
+            None => std::env::remove_var(crate::procinfo::TEST_FOREGROUND_COMMAND_ENV),
+        }
+        let next = changed(result);
+        assert_eq!(
+            next.sessions[0].windows[0].root.leaf_commands(),
+            vec![Some("agent --resume new --model current --effort high")]
+        );
     }
 
     #[test]
@@ -580,14 +631,25 @@ mod tests {
         save_space(&dir, "desk", &saved(&before.sessions)).unwrap();
         let config = dir.join("missing.toml");
         let mut state = State::default();
-        let live = snapshot(vec![session("a", Some(SPACE), &[("build", "/x")])]);
+        let mut current = session("a", Some(SPACE), &[("", "/y")]);
+        current.agent_id = Some("current-agent".into());
+        let live = snapshot(vec![current]);
 
         sync(&dir, &config, &mut state, Pass::Tick, || Ok(live_of(&live))).unwrap();
-        assert_eq!(leaf_title(&load_space(&dir, "desk").unwrap()), None);
+        let pending = load_space(&dir, "desk").unwrap();
+        assert!(matches!(
+            &pending.sessions[0].windows[0].root,
+            SavedNode::Leaf { cwd: Some(cwd), .. } if cwd == Path::new("/x")
+        ));
+        assert_eq!(pending.sessions[0].agent, None);
 
         sync(&dir, &config, &mut state, Pass::Tick, || Ok(live_of(&live))).unwrap();
         let written = load_space(&dir, "desk").unwrap();
-        assert_eq!(leaf_title(&written).as_deref(), Some("build"));
+        assert!(matches!(
+            &written.sessions[0].windows[0].root,
+            SavedNode::Leaf { cwd: Some(cwd), .. } if cwd == Path::new("/y")
+        ));
+        assert_eq!(written.sessions[0].agent.as_deref(), Some("current-agent"));
         assert_eq!(written.id.as_deref(), Some(SPACE));
         assert!(state.pending.is_empty());
         let _ = std::fs::remove_dir_all(&dir);

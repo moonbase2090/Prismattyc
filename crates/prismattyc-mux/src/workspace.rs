@@ -411,26 +411,7 @@ impl Workspace {
                 }
                 // Explicit launch commands already have a complete argv.
                 // Only an interactive shell needs its foreground job resumed.
-                let shell = Path::new(&pane.spawn.program)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
-                let interactive_posix =
-                    matches!(shell, "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh")
-                        && pane
-                            .spawn
-                            .argv
-                            .iter()
-                            .all(|a| matches!(a.as_str(), "-l" | "--login" | "-i"));
-                // The Windows replay formatter uses the configured command
-                // shell, so do not feed its syntax into a different shell.
-                let interactive_windows = cfg!(windows)
-                    && pane
-                        .spawn
-                        .program
-                        .eq_ignore_ascii_case(&crate::platform::default_shell())
-                    && pane.spawn.argv.is_empty();
-                if resume && (interactive_posix || interactive_windows) {
+                if resume && crate::procinfo::interactive_shell(&pane.spawn) {
                     pane.resume_command = crate::procinfo::live_foreground_command(pid);
                 }
                 if let Ok(path) = std::env::var("PATH") {

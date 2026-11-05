@@ -5049,13 +5049,11 @@ Each session belongs to only one Space. Other Spaces keep running.
   attach [NAME] [--session S]  Attach in this TTY; default to saved focus.
   add NAME [--session S | --name NEW] [--tab TITLE]
     Create a session or add an unassigned session. Use Move for another owner.
-  move NAME --session S       Transfer all panes, processes, and mailbox.
-  move NAME --session-id ID   Transfer by exact numeric session ID.
+  move NAME --session S|--session-id ID  Transfer all panes, processes, mailbox.
   move NAME --pane P [--to-session S]  Transfer one live pane.
   rename OLD NEW             Keep the Space identity and live sessions.
   remove NAME --session S    Release ownership; keep the session alive.
-  monitor                    Create or reopen the Activity Monitor Space and
-    start the activity monitor in its session.
+  monitor                    Open the Activity Monitor Space and run it.
   details NAME [--json]      Read roles, live state, attention, and links.
   result NAME [--json]       Read retained desktop open results.
   role NAME SESSION ROLE    Set a session role.

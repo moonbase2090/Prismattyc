@@ -38,8 +38,8 @@ SPACE = "Activity Monitor"
 SEATS = ["alpha-seat", "bravo-seat", "charlie-seat", "delta-seat"]
 # The monitor's own session is a working seat, so it heads the list.
 ROWS = ["activity-monitor"] + sorted(SEATS)
-PALETTE = "ctrl+shift+f7"
-CLOSE_TAB = "ctrl+shift+f8"
+PALETTE = "ctrl+alt+shift+j"
+CLOSE_TAB = "ctrl+alt+shift+k"
 WINDOWS = os.name == "nt"
 EXE = ".exe" if WINDOWS else ""
 

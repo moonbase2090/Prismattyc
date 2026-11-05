@@ -779,7 +779,17 @@ else:
                 onboarding(arguments, plugin, False)
             assert cli("list")["installed"] == [], "Collection opt-in must not silently install or grant plug-ins"
             feed(False)
+            # Packages built for an older plug-in API stay listed but cannot be installed.
+            newest = {}
             for entry in expected_catalog:
+                version = tuple(int(part) for part in entry["version"].split("."))
+                if entry["id"] not in newest or version > newest[entry["id"]][0]:
+                    newest[entry["id"]] = (version, entry)
+            current = [entry for _, entry in newest.values()]
+            for entry in expected_catalog:
+                if entry not in current:
+                    assert "incompatible plug-in API" in cli("install",entry["id"],"--version",entry["version"],succeeds=False)
+            for entry in current:
                 package = cli("install",entry["id"],"--version",entry["version"])["package"]
                 assert package["digest"] == entry["sha256"]
             connector = "org.moonbase.activity-connector"
@@ -787,7 +797,7 @@ else:
             cli("run",monitor,"--snapshot",succeeds=False)
             cli("invoke",connector,"seats",succeeds=False)
             assert connection.plugin("exports",allowlist=[connector])["response"]["reply"]["tools"] == []
-            for entry in expected_catalog:
+            for entry in current:
                 cli("enable",entry["id"],"--version",entry["version"],"--allow","activity.read:local")
             epoch = feed(True)
             event = {"schema_version":1,"seat":"fixture-seat","run_id":"artifact-proof","event_id":"failed-test","source":"hooks","kind":"test_failed"}

@@ -87,7 +87,9 @@ provide the initial migration state.
 The host offers **Restore workspace** as its first action. With login restore
 enabled, it starts or connects to the daemon in the background and restores
 after three seconds. Keyboard navigation cancels the countdown. **Esc**
-keeps a fresh window. `space_startup = "fresh"` overrides automatic host
+keeps a fresh window and saves an empty host view for the next launch. Saved
+Space definitions and daemon sessions remain available for explicit reopening.
+`space_startup = "fresh"` overrides automatic host
 restore. The daemon can restore and run sessions while the host is closed.
 
 Host-owned blank terminals retain the separate

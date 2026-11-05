@@ -29,6 +29,16 @@ normal [pmux target resolution](mux-cli.md). Run opens a view. Disable closes
 that instance's plug-in views and revokes its tool calls. Other instances and
 user sessions continue running.
 
+Default plug-ins: the official activity monitor and activity connector start
+enabled. When pmuxd starts, a background step looks at each of the two. If it
+has no saved selection (enabled or disabled) and the binary's own verified
+bundle carries it, the step installs that exact bundled version and enables it
+with `activity.read:local` only. It goes through the same manager transition,
+readiness check and journal as an explicit Install and Enable. A saved
+selection is never changed, so a disable stays in effect. A build without the
+official bundle seeds nothing. A failure is logged and never stops the daemon.
+`PRISMATTYC_DEFAULT_PLUGINS=0` skips the step, for proofs of the manual flow.
+
 The app offers the same install, permission and enable operations in Settings.
 Installing or enabling the monitor does not turn on activity collection.
 When collection is off, the view reports `feed_disabled` and links to the
@@ -335,7 +345,9 @@ explicit four-export selection, not an implicit global registration policy.
 ## Permissions and containment
 
 Saved grants are separate from manifest requests. Install grants nothing.
-Enable requires approval for requested data access, scoped to configured
+The default plug-ins above are the one exception: they get
+`activity.read:local` and no other grant. Otherwise, Enable requires approval
+for requested data access, scoped to configured
 endpoint IDs. View and tool imports require the matching declared contribution;
 they provide access only to its own view or admitted invocation. They confer
 no pane, mail, filesystem, publication or admin authority.
@@ -430,7 +442,11 @@ selected and running versions, effective grants, failures and pending updates.
 | Core rollback | Leave incompatible packages installed but stopped with a typed reason. Do not run a native substitute. |
 
 Durable selections and grants use one atomic per-instance journal, separate
-from workspace persistence. Retry IDs make administrative requests safe after
+from workspace persistence. It sits in the instance's directory under the data
+directory (`<data>/prismattyc/workspaces/<instance key>/plugins.json`), not
+beside the socket, so it survives the reboot or logout that clears the runtime
+directory. A journal that an earlier version kept beside the socket is moved
+there by the next daemon to manage plug-ins. Retry IDs make administrative requests safe after
 a lost response. Startup finishes or discards interrupted transitions using
 the committed journal. PID alone never identifies an owned worker.
 
@@ -601,7 +617,8 @@ Owner review should decide whether to accept:
 - Per-instance daemon ownership, private matching-version workers and no
   offline activation or initial shared-package garbage collection.
 - Host-rendered cell/RGBA views and the resulting monitor adaptation cost.
-- Official-source packages first, explicit grants and updates, and no additional
+- Official-source packages first, explicit grants and updates (except the two
+  default activity plug-ins' local grant, an owner decision), and no additional
   catalog/local-import policy until separately reviewed.
 
 The first authorized implementation unit, after approval, should test runtime

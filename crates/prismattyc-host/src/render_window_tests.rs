@@ -583,7 +583,15 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
         host.attach_pane_sessions.is_empty(),
         "decline must not restore husks later"
     );
-    assert_eq!(std::fs::read(&path).unwrap(), original);
+    test_support::wait_for_attach_write(app.windows.get_mut(&id).unwrap());
+    let declined = attach_tabs::load(&path).unwrap();
+    assert!(
+        declined.tabs.is_empty(),
+        "Start fresh must clear the previous view"
+    );
+    assert_eq!(declined.space, None);
+    assert_eq!(declined.space_id, None);
+    assert_eq!(declined.focused_session, None);
     let later = app.open_window(event_loop, false).unwrap();
     assert!(
         app.windows[&later].restore_prompt.is_none(),
@@ -653,6 +661,19 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
     restore_prompt::dispatch_key(host, &Key::Named(NamedKey::Escape), false);
     assert!(host.restore_prompt.is_none());
     assert!(host.attach_pane_sessions.is_empty());
+    test_support::wait_for_attach_write(host);
+    app.windows.clear();
+    let id = app.open_window(event_loop, false).unwrap();
+    let host = app.windows.get(&id).unwrap();
+    assert!(
+        host.restore_prompt.is_none(),
+        "a cold launch must keep the fresh choice"
+    );
+    assert!(host.attach_pane_sessions.is_empty());
+    assert_eq!(host.mux.tab_count(), 1);
+
+    // An explicit later workspace update can still be restored.
+    attach_tabs::persist_if_changed(&path, &mut None, saved.clone()).unwrap();
     app.windows.clear();
     let id = app.open_window(event_loop, false).unwrap();
     let host = app.windows.get_mut(&id).unwrap();

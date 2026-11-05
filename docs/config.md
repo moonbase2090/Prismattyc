@@ -1005,6 +1005,10 @@ When that key is absent, the legacy `space_autosave` value applies. When
 both are absent, autosave stays on. Autosave does not run while a space is
 opening or being restored.
 
+The daemon also refreshes saved working directories, foreground commands,
+and agent bindings after they remain stable for about one second. These
+changes are saved even when the pane arrangement stays the same.
+
 Set `space_reorder = true` to drag saved Space chips in any rail or Graphite
 sidebar, or focus the rail and use `Shift+Left` / `Shift+Right` (horizontal)
 or `Shift+Up` / `Shift+Down` (vertical). The shared order is stored separately

@@ -36,6 +36,8 @@ from native_control import control_socket  # noqa: E402
 
 SPACE = "Activity Monitor"
 SEATS = ["alpha-seat", "bravo-seat", "charlie-seat", "delta-seat"]
+# The monitor's own session is a working seat, so it heads the list.
+ROWS = ["activity-monitor"] + sorted(SEATS)
 PALETTE = "ctrl+alt+f7"
 CLOSE_TAB = "ctrl+alt+f8"
 WINDOWS = os.name == "nt"
@@ -457,7 +459,7 @@ class Flow:
     def selected(self):
         for line in self.screen().splitlines():
             if "▌" in line:
-                for seat in SEATS:
+                for seat in ROWS:
                     if seat in line:
                         return seat
         return None
@@ -595,7 +597,7 @@ class Flow:
             wait_for(expect, f"{label} after {chord}", 10)
             checked.append(f"{chord}: {label}")
 
-        order = sorted(SEATS)
+        order = ROWS
         press("home", lambda: self.selected() == order[0], "first seat")
         press("down", lambda: self.selected() == order[1], "next seat")
         press("j", lambda: self.selected() == order[2], "next seat")

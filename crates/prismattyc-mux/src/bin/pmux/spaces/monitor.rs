@@ -120,6 +120,11 @@ fn launcher() -> PathBuf {
 /// `PMUX_SOCKET`, so the monitor reads this daemon without `--socket`.
 fn command(program: &Path, shell: &str) -> String {
     let program = program.to_string_lossy();
+    // A canonicalized Windows path is verbatim (`\\?\C:\...`), which cmd.exe cannot run.
+    let program = match program.strip_prefix(r"\\?\") {
+        Some(plain) if !plain.starts_with("UNC\\") => std::borrow::Cow::Borrowed(plain),
+        _ => program,
+    };
     // Either separator: a Windows shell path is parsed the same everywhere.
     let shell = shell.rsplit(['/', '\\']).next().unwrap_or(shell);
     let shell = shell.to_ascii_lowercase();
@@ -150,6 +155,11 @@ mod tests {
         assert_eq!(
             command(windows, r"C:\Program Files\PowerShell\7\pwsh.exe"),
             r"& 'C:\Users\O''Neil\AppData\Local\Prismattyc\bin\pmux-activity-monitor.exe'"
+        );
+        let verbatim = Path::new(r"\\?\C:\Users\me\bin\pmux-activity-monitor.exe");
+        assert_eq!(
+            command(verbatim, r"C:\Windows\System32\cmd.exe"),
+            r#""C:\Users\me\bin\pmux-activity-monitor.exe""#
         );
         assert_eq!(
             command(windows, r"C:\Windows\System32\cmd.exe"),

@@ -609,7 +609,7 @@ class Flow:
         press("pageup", lambda: self.selected() == order[0], "page up")
         press("pagedown", lambda: self.selected() == order[-1], "page down")
         press("home", lambda: self.selected() == order[0], "first seat")
-        press("enter", lambda: "turn_finished" in self.screen() and "▌" not in self.screen(), "timeline")
+        press("enter", lambda: "esc back" in self.screen() and "▌" not in self.screen(), "timeline")
         press("down", lambda: True, "timeline scroll")
         press("pageup", lambda: True, "timeline page")
         press("escape", lambda: self.selected() == order[0], "back to the list")

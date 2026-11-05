@@ -330,8 +330,8 @@ damage moves into the snapshot.
 ## Plan
 
 Each PR is small, follows `REVIEW_POLICY.md`, and has a **Proof** section.
-Trunk PRs that add behavior are flag-gated and off by default; turning a
-flag on is its own PR. "Scenario" refers to the isolated harness above.
+Trunk PRs that add behavior ship on by default unless the owner asked for a
+flag; turning on a gated feature is its own PR. "Scenario" refers to the isolated harness above.
 
 | # | PR | Issue | Proof |
 | --- | --- | --- | --- |

@@ -220,12 +220,13 @@ def run_case(args,desktop,style):
     def status(after_ms=0):
         assert host.poll() is None,'Owned host has exited'
         return checked_window_status(json.loads(cli('render-status','--json')),host.pid,int(time.time()*1000),after_ms)
-    def identities():
+    def snapshot():
         with socket.socket(socket.AF_UNIX) as stream:
             stream.settimeout(5);stream.connect(env['PMUX_SOCKET'])
             stream.sendall(b'{"version":1,"request_id":1,"type":"snapshot"}\n')
-            snapshot=json.loads(stream.makefile().readline())['response']['snapshot']
-        return sorted((session['id'],window['id'],pane['id'],pane['child_pid']) for session in snapshot['sessions'] for window in session['windows'] for pane in window['panes'])
+            return json.loads(stream.makefile().readline())['response']['snapshot']
+    def identities():
+        return sorted((session['id'],window['id'],pane['id'],pane['child_pid']) for session in snapshot()['sessions'] for window in session['windows'] for pane in window['panes'])
     def pane_lines():return [line.rstrip() for line in cli('save-buffer','sample-1','-').splitlines() if line.strip()]
     def saved():return tomllib.loads(config.read_text())
     def key(code,flags=0):
@@ -250,7 +251,8 @@ def run_case(args,desktop,style):
         with (root/'daemon.log').open('w') as log:
             daemon=subprocess.Popen([str(args.bins/'pmuxd'),'--socket',env['PMUX_SOCKET'],'--',str(wrapper)],env=env,cwd=root,stdout=log,stderr=log)
         wait(lambda:Path(env['PMUX_SOCKET']).exists(),'daemon socket');cli('space','create','sample','--no-attach')
-        cli('send','sample-1',"printf '0O 1Il {} [] != ->\\n'",'--enter')
+        sample=next(session for session in snapshot()['sessions'] if session['name']=='sample-1')
+        cli('send',sample['windows'][0]['panes'][0]['id'],"printf '0O 1Il {} [] != ->\\n'",'--enter')
         with (root/'host.log').open('w') as log:
             host=subprocess.Popen([str(args.bins/'prismattyc-host'),'--no-splash','--attach-session','sample-1'],env=env,cwd=root,stdout=log,stderr=log)
         wait(lambda:status().get('space')=='sample','owned host')

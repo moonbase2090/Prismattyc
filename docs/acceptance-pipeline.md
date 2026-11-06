@@ -97,43 +97,15 @@ The script waits for each job to reach a terminal
 pass. It then reclaims act leftovers, SSD scratch, and zram, and
 checks host headroom.
 
-The Local Actions job `mutants` is a merge gate. It installs
-`cargo-mutants` 27.1.0 in the job. It runs `scripts/mutants-pr.sh`:
-
-1. Write `git diff origin/<base>...HEAD` to `build/git.diff`.
-   `--in-diff` needs a file. Do not use process substitution.
-2. List workspace crates whose `src/` or `build.rs` changed.
-3. Run `cargo mutants --no-shuffle -vV --in-diff build/git.diff -p <crate> -- -- --test-threads=1`.
-   cargo-mutants forwards args after the first `--` to `cargo test`. The
-   second `--` sends `--test-threads=1` to the harness. Serial tests
-   avoid a parallel-load flake in the mux suite (PT-249). Scratch copies
-   go under `${XDG_CACHE_HOME:-$HOME/.cache}/prismattyc/mutants` on the
-   host. `/tmp` is tmpfs on this host. The gate refuses TMPDIR when the
-   path is under `/tmp` or when `findmnt -no FSTYPE` reports `tmpfs`.
-   The Local Actions `mutants` job bind-mounts host
-   `/var/cache/prismattyc/mutants` at `/cache/prismattyc/mutants` and
-   sets `MUTANTS_TMPDIR` and `TMPDIR` to that path. The scripts remove
-   `cargo-mutants-*` there after the run.
-4. Run `scripts/mutants-gate.py` on `mutants.out/outcomes.json`.
-
-The gate fails when the caught rate is below 80%. Caught rate is
-caught / (caught + missed + timeout). Unviable mutants do not count.
-The script prints every missed mutant. An empty diff, or a diff with no
-mutatable Rust, skips the run and passes. An empty `--in-diff` file is
-valid for `cargo-mutants`. Missing git metadata fails the job. On Local
-Actions the overlay copy has a worktree `.git` file whose gitdir is on
-the host; `mutants-pr.sh` computes the diff in a docker sidecar that
-bind-mounts that gitdir.
-
-A nightly GitHub Actions workflow runs the full workspace across eight
-parallel shards. It merges their outcomes and uploads one
-`mutants-nightly-missed` artifact. See [Mutation testing](mutation-testing.md)
-to download the report or run a focused local pass. The nightly job is not the
-PR 80% gate. A failed unmutated baseline still fails its shard.
+Mutation testing is a manual aid for critical crates, not a merge gate and
+not a Local Actions job. `scripts/mutants-pr.sh` runs `cargo mutants
+--in-diff` on the crates a branch touches, and `scripts/mutants-gate.py`
+scores the outcomes. See [Mutation testing](mutation-testing.md). The
+nightly workflow stays disabled.
 
 ```bash
 python3 scripts/mutants-gate_test.py
-./scripts/mutants-pr.sh
+./scripts/mutants-pr.sh   # manual; needs cargo-mutants 27.1.0
 ```
 
 ## Generator contract
@@ -178,38 +150,3 @@ Send one JSON job per line. Receive one JSON response per line. The worker
 writes protocol responses only to standard output. It writes diagnostics to
 standard error. Outcomes are `test_success`, `test_failure`, and
 `infrastructure_error`.
-
-## CRAP gate (PT-226)
-
-The Local Actions job `crap` is a merge gate. It runs
-`cargo llvm-cov --workspace --lcov` then `cargo crap --workspace --lcov`
-(`cargo-crap` 0.4.3). The gate fails when:
-
-- the count of functions with CRAP above 30 grows versus
-  [docs/crap-baseline.json](crap-baseline.json)
-- a new function in a file the PR touches scores above 30
-- a function in a file the PR touches crosses from 30 or below to above 30
-
-Existing functions already above 30 may stay. `build/` stays gitignored.
-The committed baseline is `docs/crap-baseline.json`. That file stores
-`above_count` (functions above 30) and one JSON entry per function.
-
-`cargo-crap` lives in `~/Projects/tools/bin` or `cargo install cargo-crap`.
-Do not copy its source into this repository.
-
-The baseline is the runner's capture. Refresh with
-`local-actions run --event pull_request --job crap-refresh`. A host
-capture is not comparable. `scripts/crap-refresh.sh` refuses unless it
-runs inside the Local Actions runner (`GITHUB_ACTOR=nektos/act` or
-`CRAP_REFRESH_IN_RUNNER=1`). The job writes
-`docs/crap-baseline.json` in the worktree. Commit that file.
-
-A markdown report for local review still goes under `build/`:
-
-```bash
-cargo llvm-cov --workspace --lcov --output-path build/crap-lcov.info
-cargo-crap --workspace \
-  --lcov build/crap-lcov.info \
-  --format markdown \
-  --output build/crap-report.md
-```

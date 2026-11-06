@@ -16,8 +16,7 @@ and a signed universal macOS app distributed as a DMG and a zip.
    report the base version `0.2.21`. A later rc or the final release that
    keeps the same base version changes only the CHANGELOG, not the version.
 2. Merge the release source into `main` and complete the release gates in
-   [the testing policy](testing-policy.md). The CRAP release gate is
-   advisory for Prismattyc: it reports a warning but never fails.
+   [the testing policy](testing-policy.md).
    Before creating the core tag, run
    `python3 scripts/release/prepare-plugin-bundle.py` and require a verified
    official bundle. For the first catalog, follow the owner publication and

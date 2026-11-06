@@ -38,19 +38,21 @@ class StagePartitionTests(unittest.TestCase):
                 seen.add(job)
                 self.assertEqual(staged.stage_of(job), name)
 
-    def test_heavy_stages_are_mutants_crap_e2e(self) -> None:
-        self.assertTrue(staged.is_heavy_stage("mutants"))
-        self.assertTrue(staged.is_heavy_stage("crap"))
+    def test_the_only_heavy_stage_is_e2e(self) -> None:
+        self.assertFalse(staged.is_heavy_stage("mutants"))
+        self.assertFalse(staged.is_heavy_stage("crap"))
         self.assertTrue(staged.is_heavy_stage("e2e"))
         self.assertFalse(staged.is_heavy_stage("light"))
 
     def test_select_from_and_only(self) -> None:
-        names = [name for name, _ in staged.select_stages(from_stage="crap")]
-        self.assertEqual(names, ["crap", "e2e"])
-        only = staged.select_stages(only="mutants")
-        self.assertEqual(only, [("mutants", ("mutants",))])
+        names = [name for name, _ in staged.select_stages(from_stage="e2e")]
+        self.assertEqual(names, ["e2e"])
+        only = staged.select_stages(only="light")
+        self.assertEqual([name for name, _ in only], ["light"])
         with self.assertRaises(ValueError):
-            staged.select_stages(from_stage="light", only="mutants")
+            staged.select_stages(from_stage="light", only="e2e")
+        with self.assertRaises(KeyError):
+            staged.select_stages(only="mutants")
         with self.assertRaises(KeyError):
             staged.select_stages(only="nightly")
 
@@ -58,13 +60,12 @@ class StagePartitionTests(unittest.TestCase):
         plan = staged.build_run_plan()
         kinds = [step[0] for step in plan]
         self.assertEqual(kinds[0], "reclaim")
-        self.assertIn(("headroom", "mutants", ""), plan)
-        self.assertIn(("run", "mutants", "mutants"), plan)
-        self.assertIn(("reclaim", "mutants", ""), plan)
+        self.assertIn(("headroom", "e2e", ""), plan)
         self.assertIn(("run", "e2e", "render-bench"), plan)
-        mutants_headroom = plan.index(("headroom", "mutants", ""))
+        self.assertIn(("reclaim", "e2e", ""), plan)
+        e2e_headroom = plan.index(("headroom", "e2e", ""))
         light_reclaim = plan.index(("reclaim", "light", ""))
-        self.assertLess(light_reclaim, mutants_headroom)
+        self.assertLess(light_reclaim, e2e_headroom)
 
     def test_cli_lists_stages(self) -> None:
         self.assertEqual(staged.main(["--list-stages"]), 0)

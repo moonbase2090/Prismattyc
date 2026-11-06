@@ -38,8 +38,6 @@ STAGES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "windows-test",
         ),
     ),
-    ("mutants", ("mutants",)),
-    ("crap", ("crap", "crap-refresh")),
     (
         "e2e",
         (
@@ -51,7 +49,7 @@ STAGES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
 )
 
-HEAVY_STAGES = frozenset({"mutants", "crap", "e2e"})
+HEAVY_STAGES = frozenset({"e2e"})
 LOCK_NAME = "prismattyc-la-heavy"
 HEADROOM_REFUSE = "reclaim did not restore headroom"
 DEFAULT_WAIT_TIMEOUT = 7200

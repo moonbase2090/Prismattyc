@@ -195,6 +195,8 @@ building native executables, so each platform exercises the same guest bytes.
 This option does not grant production provenance to private fixture packages.
 
 For native screenshots on an allocated desktop, start a controlled live seat:
+The supplied binary directory must include the matched `pmux-attach` frontend
+as well as `pmux`, `pmuxd`, and `pmux-activity-monitor`.
 
 ```sh
 python3 tests/native/activity-graph-seat.py --bins "$verify_bins" \

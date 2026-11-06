@@ -43,6 +43,10 @@ def main():
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), interrupted)
     bins, output = args.bins.resolve(), args.out.resolve()
+    suffix = ".exe" if os.name == "nt" else ""
+    for binary in ("pmux", "pmuxd", "pmux-attach", "pmux-activity-monitor"):
+        if not (bins / f"{binary}{suffix}").is_file():
+            parser.error(f"missing {binary}; build the matching native binaries before capture")
     output.mkdir(parents=True, exist_ok=False)
     runtime = Path(tempfile.mkdtemp(prefix="pmux-graph-")).resolve()
     daemon = connection = None
@@ -61,7 +65,6 @@ def main():
                    PMUX_SOCKET=str(socket), PRISMATTYC_DEFAULT_PLUGINS="0",
                    PMUX_SESSION_AGENTS=str(runtime / "agents.json"),
                    TERM="xterm-256color", LANG="en_US.UTF-8")
-        suffix = ".exe" if os.name == "nt" else ""
         pmux, launcher = bins / f"pmux{suffix}", bins / f"pmux-activity-monitor{suffix}"
 
         def cli(*arguments):

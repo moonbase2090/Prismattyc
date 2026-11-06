@@ -246,8 +246,9 @@ python3 tests/native/activity-graph-seat.py --bins "$verify_bins" \
   --out "$verify_evidence/graph-seat" --seconds 600
 ```
 
-Wait for `ready.json`, then run its attach command in a native terminal on that
-same machine. The default view shows synthetic sample history with neutral
+Wait for `ready.json`, then run the generated `graph-seat/attach.py` with Python
+in a native terminal on that same machine. It supplies the isolated environment
+and the matching binary. The default view shows synthetic sample history with neutral
 labels. Capture only the owned seat window, inspect braille glyphs and colors,
 and exclude prompts, paths, usernames, and machine names. Keep `ready.json`
 private because it contains runtime paths. Text frames are not screenshots.

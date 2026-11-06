@@ -621,6 +621,26 @@ impl graphite_core::TextMetrics for ChromeMetrics {
     }
 }
 
+pub(crate) use graphite_core::{LegendPaint, LegendRun};
+
+/// Pack the Ctrl+Shift legend runs with the renderer-independent core model.
+pub(crate) fn legend_pack(
+    chrome: ChromeGeom,
+    runs: &[LegendRun],
+    width: usize,
+    bottom: usize,
+    rows: usize,
+) -> LegendPaint {
+    graphite_core::legend_keys(
+        &ChromeMetrics,
+        chrome.scale_milli,
+        runs,
+        width,
+        bottom,
+        rows,
+    )
+}
+
 /// Lay out the tabs bar using the renderer-independent core model.
 pub(crate) fn bar_layout(
     chrome: ChromeGeom,

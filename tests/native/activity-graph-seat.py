@@ -133,7 +133,15 @@ while True:
         ready = {"status": "READY", "daemon_pid": daemon.pid, "socket": str(socket),
                  "seat": "graph-proof", "attach": [str(pmux), "--socket", str(socket), "attach", "graph-proof"],
                  "version": cli("--version").strip(), "data": "synthetic sample history"}
+        ready["environment"] = {key: value for key, value in env.items()
+                                if key.startswith(("PMUX", "PRISMATTYC_", "XDG_"))
+                                or key in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA")}
         (output / "ready.json").write_text(json.dumps(ready, indent=2) + "\n")
+        (output / "attach.py").write_text('''import json, os, subprocess
+from pathlib import Path
+ready = json.loads(Path(__file__).with_name('ready.json').read_text())
+raise SystemExit(subprocess.call(ready['attach'], env={**os.environ, **ready['environment']}))
+''')
         print(json.dumps(ready), flush=True)
         deadline = time.monotonic() + args.seconds
         while not (output / "stop").exists() and time.monotonic() < deadline:

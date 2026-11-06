@@ -54,8 +54,9 @@ def main():
                             "--remove-hooks" if remove else "--install-hooks", str(path)])
 
             settings = scratch / "settings.json"
-            settings.write_text(json.dumps({"env": {"EXAMPLE": "preserved"}, "hooks": {
-                "Stop": [{"hooks": [{"type": "command", "command": "echo preserve"}]}]}}))
+            original_settings = {"env": {"EXAMPLE": "preserved"}, "hooks": {
+                "Stop": [{"hooks": [{"type": "command", "command": "echo preserve"}]}]}}
+            settings.write_text(json.dumps(original_settings))
             for _ in range(2):
                 completed = edit(settings)
                 assert completed.returncode == 0, completed.stderr
@@ -67,9 +68,57 @@ def main():
             for _ in range(2):
                 completed = edit(settings, remove=True)
                 assert completed.returncode == 0, completed.stderr
-            assert json.loads(settings.read_text())["hooks"]["Stop"] == [
-                {"hooks": [{"type": "command", "command": "echo preserve"}]}]
+            assert json.loads(settings.read_text()) == original_settings
             checks.append("repeated install/removal preserves unmanaged settings")
+
+            for name, original in (
+                ("absent", {"env": {"EXAMPLE": "preserved"}}),
+                ("empty-parent", {"hooks": {}}),
+                ("empty-events", {"schema_version": 1, "hooks": {
+                    "PreToolUse": [], "PostToolUseFailure": [], "CustomEvent": []}}),
+                ("schema-only", {"schema_version": 1}),
+            ):
+                profile = scratch / f"{name}.json"
+                profile.write_text(json.dumps(original))
+                install = ["activity-emit", "--seat", "fixture-seat", "--install-hooks",
+                           str(profile), "--schema-version", "1", "--failure-hook"]
+                completed = run(install)
+                assert completed.returncode == 0, completed.stderr
+                installed_bytes = profile.read_bytes()
+                receipt = profile.with_name(f".{profile.name}.pmux-activity-origin")
+                receipt_bytes = receipt.read_bytes()
+                completed = run(install)
+                assert completed.returncode == 0, completed.stderr
+                assert profile.read_bytes() == installed_bytes and receipt.read_bytes() == receipt_bytes
+                completed = run(["activity-emit", "--seat", "rebound-seat",
+                                 "--install-hooks", str(profile)])
+                assert completed.returncode == 0, completed.stderr
+                rebound = json.loads(profile.read_text())
+                if "PostToolUseFailure" in original.get("hooks", {}):
+                    assert rebound["hooks"]["PostToolUseFailure"] == []
+                else:
+                    assert "PostToolUseFailure" not in rebound["hooks"]
+                for _ in range(2):
+                    completed = edit(profile, remove=True)
+                    assert completed.returncode == 0, completed.stderr
+                    assert json.loads(profile.read_text()) == original
+            checks.append("install/rebind/removal restores absent and preexisting empty profile fields")
+
+            guard = scratch / "receipt-guard.json"
+            guard.write_text("{}")
+            completed = edit(guard)
+            assert completed.returncode == 0, completed.stderr
+            guarded_bytes = guard.read_bytes()
+            receipt = guard.with_name(f".{guard.name}.pmux-activity-origin")
+            for broken, message in (
+                (b"{broken", "invalid hook origin receipt"),
+                (b"\xff" * 65_537, "hook origin receipt exceeds 65536 byte read limit"),
+            ):
+                receipt.write_bytes(broken)
+                completed = edit(guard, remove=True)
+                assert completed.returncode != 0 and message in completed.stderr, completed.stderr
+                assert guard.read_bytes() == guarded_bytes and receipt.read_bytes() == broken
+            checks.append("malformed and oversized ownership receipts preserve profile and receipt bytes")
 
             settings.write_bytes(b"{}" + b" " * (1_048_576 - 2))
             completed = edit(settings)
@@ -122,7 +171,11 @@ def main():
                 linked_settings = json.loads(target.read_text())
                 assert linked_settings["env"]["EXAMPLE"] == "preserved"
                 assert len(linked_settings["hooks"]["Stop"]) == 1
-                checks.append("symlink and target permissions survive installation")
+                completed = edit(target, remove=True)
+                assert completed.returncode == 0, completed.stderr
+                assert json.loads(target.read_text()) == {"env": {"EXAMPLE": "preserved"}}
+                assert link.is_symlink() and stat.S_IMODE(target.stat().st_mode) == 0o640
+                checks.append("symlink aliases share ownership and preserve target permissions")
         result["status"] = "PASS"
         print(json.dumps(result))
     finally:

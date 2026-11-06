@@ -145,7 +145,8 @@ The persistent default lives in the Prismattyc configuration:
 activity_graph_style = "braille"
 ```
 
-The flag overrides this setting. Relaunch the monitor after changing the file;
+The complete Settings panel exposes the same choice under **Multiplexer >
+Activity graph style**. The flag overrides this setting. Relaunch the monitor after changing it;
 the daemon needs no restart. Omitted settings select braille. `TERM=dumb`
 selects ASCII because that terminal declares text-only support. An unknown
 terminal or unavailable pixel protocol keeps the chosen cell style. Terminal
@@ -160,6 +161,12 @@ On a terminal that accepts raw RGBA Kitty graphics uploads, lanes render through
 Lunatui's pixel sparkline as one raster per lane. The selected cell style stays
 available when pixels are unsupported or disabled. `--no-pixels` selects cells;
 `p` switches pixel lanes on or off at runtime without changing the cell style.
+
+Default braille lanes with synthetic sample history on macOS and Linux:
+
+![Braille activity lanes in macOS Terminal](media/activity-monitor/braille-macos.png)
+
+![Braille activity lanes in Linux xterm](media/activity-monitor/braille-linux.png)
 
 Prismattyc releases before raw-upload support decode Kitty graphics but drop raw RGBA uploads (`f=32`), which Lunatui 0.1.18 sends, and they answer every graphics query with OK. A query cannot tell the two apart, so inside Prismattyc the monitor makes one real 1x1 raw upload with an image number, followed by a device-attributes request. A Prismattyc that keeps the image answers OK first and gets pixel lanes; an older one answers only the attributes and keeps cell lanes. The probe image is deleted again, and keys typed during the probe are kept.
 

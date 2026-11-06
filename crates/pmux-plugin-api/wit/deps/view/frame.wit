@@ -60,6 +60,6 @@ interface frame {
     /// A pointer event at a zero-based cell of the viewport. Modifier bits
     /// as in `key`; terminals report only shift, alt and control.
     record mouse { action: mouse-action, column: u16, row: u16, modifiers: u8 }
-    /// `mouse` is new in 1.1.0. It is last so the other cases keep their order.
+    /// `mouse` is new in 2.0.0. It is last so the other cases keep their order.
     variant event { key(key), resize(viewport), tick(clock), close, mouse(mouse) }
 }

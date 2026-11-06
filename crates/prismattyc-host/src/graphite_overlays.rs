@@ -5,6 +5,7 @@
 //! call these painters.
 
 use crate::graphite::{self, Face, Rect};
+pub(crate) use crate::graphite::{LegendPaint, LegendRun};
 use crate::mux::ChromeGeom;
 use crate::raster::{
     self, FontMetrics, OverlaySurface, PaletteFrame, PaletteLayout, PaletteLine, ThemePickerRow,
@@ -993,30 +994,6 @@ pub(crate) fn find_prompt(
     );
 }
 
-/// One piece of the Ctrl+Shift legend, in chord-strip order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LegendRun {
-    /// Status that is not a shortcut (`Prismattyc [1]`, `*2`, `!1`).
-    Text(String),
-    /// Keycap chips for one shortcut, then its caption. The caption may be empty.
-    Keys { caps: Vec<String>, caption: String },
-}
-
-/// A keycap the legend drew. A chip that does not fit the row is absent,
-/// and a shortcut is omitted whole rather than cut through a chip.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LegendChip {
-    pub rect: Rect,
-    pub label: String,
-}
-
-/// Chips and captions actually drawn for one legend row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LegendPaint {
-    pub chips: Vec<LegendChip>,
-    pub captions: Vec<String>,
-}
-
 /// Paint a plain one-row Graphite notice above the spaces rail.
 ///
 /// Config errors and the edit-config hint use this path. The Ctrl+Shift
@@ -1066,61 +1043,6 @@ pub(crate) fn legend(
     );
 }
 
-struct LegendMetrics {
-    key_px: f32,
-    label_px: f32,
-    pad: f32,
-    key_h: usize,
-    radius: f32,
-    chip_gap: f32,
-    caption_gap: f32,
-    group_gap: f32,
-}
-
-fn legend_metrics(chrome: ChromeGeom, bar_h: usize) -> LegendMetrics {
-    let scale = chrome.scale_milli as f32 / 1000.0;
-    LegendMetrics {
-        key_px: graphite::KEY_TEXT * scale,
-        label_px: chrome.px(11.0).max(9) as f32,
-        pad: graphite::KEY_PAD_X * scale,
-        key_h: chrome.px(graphite::KEY_H).clamp(1, bar_h.max(1)),
-        radius: 4.0 * scale,
-        chip_gap: 4.0 * scale,
-        caption_gap: 6.0 * scale,
-        group_gap: 12.0 * scale,
-    }
-}
-
-fn legend_chip_width(label: &str, metrics: &LegendMetrics) -> f32 {
-    (graphite::text_width(Face::Mono, metrics.key_px, label) + 2.0 * metrics.pad)
-        .ceil()
-        .max((metrics.pad * 2.0).ceil())
-}
-
-fn legend_run_width(run: &LegendRun, metrics: &LegendMetrics) -> f32 {
-    match run {
-        LegendRun::Text(text) if text.is_empty() => 0.0,
-        LegendRun::Text(text) => graphite::text_width(Face::Regular, metrics.label_px, text),
-        LegendRun::Keys { caps, caption } => {
-            if caps.is_empty() {
-                return 0.0;
-            }
-            let mut width = 0.0;
-            for (index, cap) in caps.iter().enumerate() {
-                if index > 0 {
-                    width += metrics.chip_gap;
-                }
-                width += legend_chip_width(cap, metrics);
-            }
-            if !caption.is_empty() {
-                width += metrics.caption_gap;
-                width += graphite::text_width(Face::Regular, metrics.label_px, caption);
-            }
-            width
-        }
-    }
-}
-
 /// Paint the one-row Graphite Ctrl+Shift keycap legend above the spaces rail.
 ///
 /// Chips match the command-field keycap: mono text on `key`, a `key_line`
@@ -1141,10 +1063,7 @@ pub(crate) fn legend_keys(
     alpha: u8,
 ) -> LegendPaint {
     if stride == 0 || bottom == 0 || rows == 0 {
-        return LegendPaint {
-            chips: Vec::new(),
-            captions: Vec::new(),
-        };
+        return LegendPaint::default();
     }
     let row_h = chrome.px(22.0).max(16);
     let bar_h = row_h.saturating_mul(rows).min(bottom);
@@ -1158,106 +1077,59 @@ pub(crate) fn legend_keys(
         tok.status_line,
         255,
     );
-    let metrics = legend_metrics(chrome, bar_h);
-    let key_y = y + bar_h.saturating_sub(metrics.key_h) / 2;
-    let limit = stride.saturating_sub(chrome.px(8.0)) as f32;
-    let mut pen = chrome.px(12.0) as f32;
-    let mut started = false;
-    let mut chips = Vec::new();
-    let mut captions = Vec::new();
-    for run in runs {
-        let width = legend_run_width(run, &metrics);
-        if width <= 0.0 {
-            continue;
-        }
-        let start = if started {
-            pen + metrics.group_gap
-        } else {
-            pen
-        };
-        if start + width > limit {
-            break;
-        }
-        match run {
-            LegendRun::Text(text) => {
-                draw_text(
-                    buffer,
-                    stride,
-                    Rect::new(start.round() as usize, y, width.ceil() as usize, bar_h),
-                    Face::Regular,
-                    metrics.label_px,
-                    text,
-                    tok.text,
-                    0,
-                    stride,
-                );
-            }
-            LegendRun::Keys { caps, caption } => {
-                let mut chip_pen = start;
-                for (index, cap) in caps.iter().enumerate() {
-                    if index > 0 {
-                        chip_pen += metrics.chip_gap;
-                    }
-                    let chip_w = legend_chip_width(cap, &metrics) as usize;
-                    let rect = Rect::new(chip_pen.round() as usize, key_y, chip_w, metrics.key_h);
-                    graphite::outlined_round_rect(
-                        buffer,
-                        stride,
-                        rect,
-                        metrics.radius,
-                        tok.key_line,
-                        tok.key,
-                    );
-                    let pad = metrics.pad.round() as usize;
-                    draw_text(
-                        buffer,
-                        stride,
-                        Rect::new(
-                            rect.x.saturating_add(pad),
-                            rect.y,
-                            rect.w.saturating_sub(pad),
-                            rect.h,
-                        ),
-                        Face::Mono,
-                        metrics.key_px,
-                        cap,
-                        tok.key_text,
-                        rect.x,
-                        rect.right(),
-                    );
-                    chips.push(LegendChip {
-                        rect,
-                        label: cap.clone(),
-                    });
-                    chip_pen += chip_w as f32;
-                }
-                if !caption.is_empty() {
-                    chip_pen += metrics.caption_gap;
-                    let caption_w = graphite::text_width(Face::Regular, metrics.label_px, caption);
-                    draw_text(
-                        buffer,
-                        stride,
-                        Rect::new(
-                            chip_pen.round() as usize,
-                            y,
-                            caption_w.ceil() as usize,
-                            bar_h,
-                        ),
-                        Face::Regular,
-                        metrics.label_px,
-                        caption,
-                        tok.text,
-                        0,
-                        stride,
-                    );
-                    captions.push(caption.clone());
-                }
-            }
-        }
-        pen = start + width;
-        started = true;
+    let packed = graphite::legend_pack(chrome, runs, stride, bottom, rows);
+    let scale = chrome.scale_milli as f32 / 1000.0;
+    let key_px = graphite::KEY_TEXT * scale;
+    let label_px = chrome.px(11.0).max(9) as f32;
+    let pad = (graphite::KEY_PAD_X * scale).round() as usize;
+    let radius = 4.0 * scale;
+    for item in &packed.texts {
+        draw_text(
+            buffer,
+            stride,
+            item.rect,
+            Face::Regular,
+            label_px,
+            &item.text,
+            tok.text,
+            0,
+            stride,
+        );
     }
-    LegendPaint { chips, captions }
+    for chip in &packed.chips {
+        let rect = chip.rect;
+        graphite::outlined_round_rect(buffer, stride, rect, radius, tok.key_line, tok.key);
+        draw_text(
+            buffer,
+            stride,
+            Rect::new(
+                rect.x.saturating_add(pad),
+                rect.y,
+                rect.w.saturating_sub(pad),
+                rect.h,
+            ),
+            Face::Mono,
+            key_px,
+            &chip.label,
+            tok.key_text,
+            rect.x,
+            rect.right(),
+        );
+    }
+    for caption in &packed.caption_rects {
+        draw_text(
+            buffer,
+            stride,
+            caption.rect,
+            Face::Regular,
+            label_px,
+            &caption.text,
+            tok.text,
+            0,
+            stride,
+        );
+    }
+    packed
 }
 
 fn splash_ink(ink: [u8; 3], art: bool, tok: &graphite::Tokens, accent: graphite::Rgb) -> [u8; 3] {

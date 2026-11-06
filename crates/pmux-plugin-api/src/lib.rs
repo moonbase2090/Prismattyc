@@ -10,6 +10,8 @@ pub const MAX_TILE_DIMENSION: u32 = 4096;
 pub const MAX_HOST_IMPORTS_PER_CALL: u16 = 64;
 pub const MAX_ACTIVITY_READS_PER_SECOND: u16 = 64;
 
+pub mod monitor;
+
 pub mod modifiers {
     pub const SHIFT: u8 = 1;
     pub const ALT: u8 = 2;

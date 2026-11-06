@@ -9,6 +9,7 @@ use pmux_plugin_api::guest::pmux::{
     plugin::{host, lifecycle},
     view::frame,
 };
+use pmux_plugin_api::monitor::GraphStyle;
 use pmux_plugin_api::{activity, modifiers as bits, API_VERSION};
 
 use crate::{
@@ -46,6 +47,7 @@ impl View {
         };
         let clock = host::now();
         let mut monitor = Monitor::new(vec!["local".into()], palette, clock.wall_ms);
+        monitor.ui.graph_style = GraphStyle::from_view(&reference.contribution)?;
         monitor.ui.motion = preferences.motion && !preferences.snapshot;
         let readable = context
             .capabilities

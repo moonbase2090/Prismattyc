@@ -13,3 +13,13 @@ notices = ["LICENSE"]
 kind = "view"
 id = "main"
 title = "Activity monitor"
+
+[[contributions]]
+kind = "view"
+id = "block"
+title = "Activity monitor (block graphs)"
+
+[[contributions]]
+kind = "view"
+id = "ascii"
+title = "Activity monitor (ASCII graphs)"

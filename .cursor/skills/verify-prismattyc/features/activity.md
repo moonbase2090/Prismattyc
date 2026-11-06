@@ -239,6 +239,22 @@ directory. The driver verifies every archive's exact size and SHA-256 before
 building native executables, so each platform exercises the same guest bytes.
 This option does not grant production provenance to private fixture packages.
 
+For native screenshots on an allocated desktop, start a controlled live seat:
+
+```sh
+python3 tests/native/activity-graph-seat.py --bins "$verify_bins" \
+  --out "$verify_evidence/graph-seat" --seconds 600
+```
+
+Wait for `ready.json`, then run its attach command in a native terminal on that
+same machine. The default view shows synthetic sample history with neutral
+labels. Capture only the owned seat window, inspect braille glyphs and colors,
+and exclude prompts, paths, usernames, and machine names. Keep `ready.json`
+private because it contains runtime paths. Text frames are not screenshots.
+Create `graph-seat/stop` after capture. Require `result.json` to report PASS,
+`daemon_reaped`, and `scratch_removed`. The deadline and interruption handlers
+also clean the private daemon and scratch directory.
+
 Pure layout, model, and frame-capture tests live in the guest crate:
 
 ```sh

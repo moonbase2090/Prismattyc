@@ -375,15 +375,22 @@ class Flow:
         wait_for(lambda: self.socket.exists(), "daemon socket")
         # A build with default plug-ins enables both; otherwise enable them here.
         def enabled():
-            listing = json.loads(self.cli("plugin", "list"))
+            try:
+                listing = json.loads(self.cli("plugin", "list"))
+            except (subprocess.CalledProcessError, ValueError):
+                return set()
             return {state.get("id") for state in listing.get("states", []) if state.get("enabled") or state.get("state") == "enabled"}
 
-        time.sleep(3)
-        self.seeded = {"org.moonbase.activity-monitor", "org.moonbase.activity-connector"} <= enabled()
+        want = {"org.moonbase.activity-monitor", "org.moonbase.activity-connector"}
+        # Default seeding runs in the background after the socket appears.
+        self.seeded = bool(poll(lambda: want <= enabled(), 60))
         if not self.seeded and not self.headless:
             for plugin in ("org.moonbase.activity-connector", "org.moonbase.activity-monitor"):
-                self.cli("plugin", "install", plugin)
-                self.cli("plugin", "enable", plugin, "--allow", "activity.read:local")
+                for verb in (("install", plugin), ("enable", plugin, "--allow", "activity.read:local")):
+                    try:
+                        self.cli("plugin", *verb)
+                    except subprocess.CalledProcessError as error:
+                        print(f"plugin {verb[0]} {plugin} failed: {error.stdout!r} {error.stderr!r}", flush=True)
         program = "cmd.exe" if WINDOWS else "/bin/sh"
         argv = ["/d", "/c", "pause > nul"] if WINDOWS else ["-c", "read -r line"]
         for seat in SEATS:

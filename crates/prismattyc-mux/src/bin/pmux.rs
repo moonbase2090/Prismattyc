@@ -5049,11 +5049,11 @@ Each session belongs to only one Space. Other Spaces keep running.
   attach [NAME] [--session S]  Attach in this TTY; default to saved focus.
   add NAME [--session S | --name NEW] [--tab TITLE]
     Create a session or add an unassigned session. Use Move for another owner.
-  move NAME --session S       Transfer all panes, processes, and mailbox.
-  move NAME --session-id ID   Transfer by exact numeric session ID.
+  move NAME --session S|--session-id ID  Transfer all panes, processes, mailbox.
   move NAME --pane P [--to-session S]  Transfer one live pane.
   rename OLD NEW             Keep the Space identity and live sessions.
   remove NAME --session S    Release ownership; keep the session alive.
+  monitor                    Open the Activity Monitor Space and run it.
   details NAME [--json]      Read roles, live state, attention, and links.
   result NAME [--json]       Read retained desktop open results.
   role NAME SESSION ROLE    Set a session role.
@@ -5101,6 +5101,7 @@ enum SpaceVerb {
     Reset(Vec<String>),
     Add(Vec<String>),
     Remove(Vec<String>),
+    Monitor(Vec<String>),
     Ls,
     Catalog,
     Help,
@@ -5125,6 +5126,7 @@ fn parse_space_verb(rest: Vec<String>) -> Result<SpaceVerb, SpaceUsage> {
         Some("reset") => Ok(SpaceVerb::Reset(rest.into_iter().skip(1).collect())),
         Some("add") => Ok(SpaceVerb::Add(rest.into_iter().skip(1).collect())),
         Some("remove") => Ok(SpaceVerb::Remove(rest.into_iter().skip(1).collect())),
+        Some("monitor") => Ok(SpaceVerb::Monitor(rest.into_iter().skip(1).collect())),
         Some("ls") if rest.len() == 1 => Ok(SpaceVerb::Ls),
         Some("catalog") if rest.len() == 1 => Ok(SpaceVerb::Catalog),
         _ => Err(SpaceUsage),
@@ -5160,6 +5162,7 @@ fn cmd_space(paths: &Paths, rest: Vec<String>, file: &prismattyc_mux::MuxSection
             space_commands::add(paths, args, file.allow_mixed_case_session_names())
         }
         SpaceVerb::Remove(args) => space_commands::remove(paths, args),
+        SpaceVerb::Monitor(args) => space_commands::monitor::run(paths, args),
     }
 }
 

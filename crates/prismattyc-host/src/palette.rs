@@ -1444,6 +1444,7 @@ mod tests {
                 "move_pane_to_space",
                 "undo_space_change",
                 "save_space",
+                "activity_monitor",
                 "jump_needs_you",
                 "terminal_switcher"
             ]

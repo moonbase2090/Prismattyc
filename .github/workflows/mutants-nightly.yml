@@ -94,7 +94,7 @@ jobs:
           fi
           cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
           if [ -f "$cargo_env" ]; then . "$cargo_env"; fi
-          rustup toolchain install 1.90.0 --profile minimal
+          rustup toolchain install 1.90.0 --profile minimal --target wasm32-unknown-unknown
           rustup default 1.90.0
 
       - name: Install pinned mutation tools once
@@ -212,7 +212,7 @@ jobs:
           fi
           cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
           if [ -f "$cargo_env" ]; then . "$cargo_env"; fi
-          rustup toolchain install 1.90.0 --profile minimal
+          rustup toolchain install 1.90.0 --profile minimal --target wasm32-unknown-unknown
           rustup default 1.90.0
           sudo apt-get update -qq
           sudo apt-get install -y -qq tmux
@@ -280,7 +280,7 @@ jobs:
           fi
           cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
           if [ -f "$cargo_env" ]; then . "$cargo_env"; fi
-          rustup toolchain install 1.90.0 --profile minimal
+          rustup toolchain install 1.90.0 --profile minimal --target wasm32-unknown-unknown
           rustup default 1.90.0
           sudo apt-get update -qq
           sudo apt-get install -y -qq tmux
@@ -364,7 +364,7 @@ jobs:
           fi
           cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
           if [ -f "$cargo_env" ]; then . "$cargo_env"; fi
-          rustup toolchain install 1.90.0 --profile minimal
+          rustup toolchain install 1.90.0 --profile minimal --target wasm32-unknown-unknown
           rustup default 1.90.0
           sudo apt-get update -qq
           sudo apt-get install -y -qq tmux

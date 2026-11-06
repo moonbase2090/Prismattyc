@@ -409,6 +409,14 @@ impl SidebarTree {
                     nodes
                 }
             };
+            if !space.current {
+                for tab in &mut tabs {
+                    tab.selected = false;
+                    for pane in &mut tab.panes {
+                        pane.focused = false;
+                    }
+                }
+            }
             let titles: Vec<_> = tabs.iter().map(|tab| tab.title.clone()).collect();
             for (index, tab) in tabs.iter_mut().enumerate() {
                 if titles.iter().filter(|title| **title == tab.title).count() > 1 {
@@ -556,6 +564,42 @@ mod tests {
         }]);
         assert_eq!(tree.spaces[0].tabs[0].title, "Local notes");
         assert_eq!(tree.spaces[0].tabs[0].panes[0].title, "shell title");
+    }
+
+    #[test]
+    fn inactive_runtime_keeps_mixed_panes_without_keyboard_focus() {
+        let info = live_tab(
+            "Workbench",
+            true,
+            vec![("worker", false), ("Blank keeper", true)],
+            Some(1),
+        );
+        let live = [LiveTab {
+            info: &info,
+            session_names: &["worker".into()],
+            mail: &[2, 0],
+            attention: &[true, false],
+        }];
+        let tree = SidebarTree::build(&[SpaceInput {
+            name: "space-a",
+            current: false,
+            collapsed: false,
+            attention: 1,
+            tabs: TabsSource::Live(&live),
+        }]);
+        let tab = &tree.spaces[0].tabs[0];
+        assert_eq!(tab.title, "Workbench");
+        assert!(!tab.selected);
+        assert_eq!(
+            tab.panes
+                .iter()
+                .map(|pane| (pane.title.as_str(), pane.focused, pane.mail, pane.attention))
+                .collect::<Vec<_>>(),
+            [
+                ("worker", false, 2, true),
+                ("Blank keeper", false, 0, false)
+            ]
+        );
     }
 
     #[test]

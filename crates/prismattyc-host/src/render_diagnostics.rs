@@ -283,6 +283,18 @@ impl App {
                     "width": slot.w, "height": slot.h
                 }))
             }).collect();
+            let sidebar_rows: Vec<_> = host.sidebar_rows.iter().filter_map(|(slot, row)| {
+                let space = host.sidebar_tree.spaces.get(row.space)?;
+                let label = match row.kind {
+                    crate::sidebar::RowKind::Space => &space.name,
+                    crate::sidebar::RowKind::Tab => &space.tabs.get(row.tab?)?.title,
+                    crate::sidebar::RowKind::Pane => &space.tabs.get(row.tab?)?.panes.get(row.pane?)?.title,
+                };
+                Some(serde_json::json!({
+                    "space": space.name, "kind": format!("{:?}", row.kind), "label": label,
+                    "x": slot.x, "y": slot.y, "width": slot.w, "height": slot.h,
+                }))
+            }).collect();
             let frame = host.render_frame;
             let last_raster = serde_json::json!({
                 "unix_ms": frame.raster_at_unix_ms,
@@ -361,6 +373,7 @@ impl App {
             });
             if let Some(status) = status.as_object_mut() {
                 status.insert("pump".into(), pump.clone());
+                status.insert("sidebar_rows".into(), serde_json::Value::Array(sidebar_rows));
                 status.insert("last_raster".into(), last_raster);
                 status.insert(
                     "render_sample".into(),

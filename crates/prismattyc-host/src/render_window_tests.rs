@@ -188,6 +188,109 @@ fn hyperlink_hover_respects_session_modal_and_view_lifetime() {
 }
 
 #[test]
+fn sidebar_keeps_blank_terminal_in_inactive_space() {
+    const NAME: &str = "render_window_tests::sidebar_keeps_blank_terminal_in_inactive_space";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        run_in_private_display(NAME);
+        return;
+    }
+    struct Proof {
+        app: App,
+        completed: bool,
+    }
+    impl ApplicationHandler<UserAction> for Proof {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            let id = self.app.open_window(event_loop, false).unwrap();
+            let host = self.app.windows.get_mut(&id).unwrap();
+            let alpha_owner = prismattyc_mux::new_space_id().unwrap();
+            let beta_owner = prismattyc_mux::new_space_id().unwrap();
+            for (name, owner) in [("alpha", &alpha_owner), ("beta", &beta_owner)] {
+                let space = serde_json::from_value(serde_json::json!({
+                    "version": 2, "saved_at_unix": 0, "sessions": [], "id": owner
+                }))
+                .unwrap();
+                prismattyc_mux::save_space(&spaces_dir(), name, &space).unwrap();
+                load_space(&spaces_dir(), name).unwrap();
+            }
+            host.space_rail.names = vec!["alpha".into(), "beta".into()];
+            host.space_rail.set_current(Some("alpha".into()));
+            host.mux.space_id = Some(alpha_owner.clone());
+            let pane = host.mux.focused_id();
+            host.mux.retain_local_terminal(pane);
+            host.mux.set_pane_title(pane, Some("Blank keeper".into()));
+            let child = host.mux.focused().child_pid().unwrap();
+            let project = |host: &HostState| {
+                graphite_sidebar_tree(
+                    host,
+                    &host.mux.tab_infos(),
+                    &host.mux.tab_pane_mail(),
+                    &host.mux.tab_pane_attention(),
+                )
+            };
+            let before = project(host);
+            assert_eq!(before.spaces[0].tabs[0].panes[0].title, "Blank keeper");
+            assert!(!local_views::switch(host, Some(beta_owner)).unwrap());
+            host.space_rail.set_current(Some("beta".into()));
+            let parked = &host.local_views.parked[&Some(alpha_owner.clone())].mux;
+            assert_eq!(parked.focused_id(), pane);
+            assert_eq!(parked.focused().child_pid(), Some(child));
+            assert!(parked.focused().child_alive);
+            let away = project(host);
+            assert_eq!(
+                away.spaces[0].tabs.len(),
+                1,
+                "parked blank tab vanished from sidebar"
+            );
+            assert_eq!(away.spaces[0].tabs[0].panes[0].title, "Blank keeper");
+            assert!(!away.spaces[0].tabs[0].selected);
+            assert!(!away.spaces[0].tabs[0].panes[0].focused);
+            let original = load_space(&spaces_dir(), "alpha").unwrap();
+            let mut replacement = original.clone();
+            replacement.id = Some(prismattyc_mux::new_space_id().unwrap());
+            prismattyc_mux::save_space(&spaces_dir(), "alpha", &replacement).unwrap();
+            assert!(
+                project(host).spaces[0].tabs.is_empty(),
+                "a replacement Space must not borrow the old owner's blank terminal"
+            );
+            prismattyc_mux::save_space(&spaces_dir(), "alpha", &original).unwrap();
+            assert!(local_views::switch(host, Some(alpha_owner)).unwrap());
+            host.space_rail.set_current(Some("alpha".into()));
+            assert_eq!(host.mux.focused_id(), pane);
+            assert_eq!(host.mux.focused().child_pid(), Some(child));
+            assert_eq!(
+                project(host).spaces[0].tabs[0].panes[0].title,
+                "Blank keeper"
+            );
+            self.completed = true;
+            self.app.windows.clear();
+            event_loop.exit();
+        }
+        fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+    }
+    let event_loop = EventLoop::<UserAction>::with_user_event()
+        .with_x11()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
+    let cli = Cli::parse(["--no-splash", "/bin/cat"].into_iter().map(String::from)).unwrap();
+    let config = config::ConfigFile {
+        a11y: Some(config::A11ySection {
+            os_tree: Some(false),
+            announce: Some(false),
+        }),
+        ..Default::default()
+    };
+    let app = App::new(cli, config, None, event_loop.create_proxy()).unwrap();
+    let mut proof = Proof {
+        app,
+        completed: false,
+    };
+    event_loop.run_app(&mut proof).unwrap();
+    assert!(proof.completed);
+    std::fs::write(std::env::var_os(RESULT_ENV).unwrap(), b"complete").unwrap();
+}
+
+#[test]
 #[should_panic(expected = "window fixture did not complete")]
 fn missing_child_test_is_rejected() {
     // Rust's test harness returns success when --exact matches no tests.

@@ -14303,8 +14303,8 @@ fn graphite_tab_text(
 }
 
 /// Sidebar tree for `layout = "sidebar"` (#113): live tabs for the current
-/// space, saved files for the rest, collapse state from the rail. Attention
-/// follows the same badge switch as the tabs bar.
+/// space and parked local views, saved files for the rest, collapse state
+/// from the rail. Attention follows the same badge switch as the tabs bar.
 fn graphite_sidebar_tree(
     host: &HostState,
     tabs: &[mux::TabInfo],
@@ -14359,11 +14359,55 @@ fn graphite_sidebar_tree(
         })
         .collect();
     let mut saved = Vec::new();
+    let mut parked_tabs = HashMap::new();
     for name in &host.space_rail.names {
         if Some(name) == current.as_ref() {
             continue;
         }
         if let Ok(space) = load_space(&spaces_dir(), name) {
+            if let Some(view) = space
+                .id
+                .as_ref()
+                .and_then(|owner| host.local_views.parked.get(&Some(owner.clone())))
+            {
+                let mut infos = view.mux.tab_infos();
+                let names: Vec<Vec<String>> = view
+                    .mux
+                    .tab_panes()
+                    .iter()
+                    .map(|(_, panes)| {
+                        panes
+                            .iter()
+                            .filter_map(|pane| view.mux.attach_name_of(*pane).map(str::to_string))
+                            .collect()
+                    })
+                    .collect();
+                for (index, info) in infos.iter_mut().enumerate() {
+                    if names[index].is_empty() {
+                        info.title = graphite_tab_text(host, index, info, None).label;
+                    }
+                }
+                let mail = view.mux.tab_pane_mail();
+                let attention = view.mux.tab_pane_attention();
+                let live: Vec<_> = infos
+                    .iter()
+                    .enumerate()
+                    .map(|(index, info)| sidebar::LiveTab {
+                        info,
+                        session_names: &names[index],
+                        mail: &mail[index],
+                        attention: &attention[index],
+                    })
+                    .collect();
+                let mut parked = sidebar::SidebarTree::build(&[sidebar::SpaceInput {
+                    name,
+                    current: false,
+                    collapsed: false,
+                    attention: 0,
+                    tabs: sidebar::TabsSource::Live(&live),
+                }]);
+                parked_tabs.insert(name, parked.spaces.remove(0).tabs);
+            }
             let (tabs, order) = sidebar::saved_tabs(&space, snapshot);
             saved.push((name.clone(), tabs, order));
         }
@@ -14412,7 +14456,13 @@ fn graphite_sidebar_tree(
             });
         }
     }
-    sidebar::SidebarTree::build(&inputs)
+    let mut tree = sidebar::SidebarTree::build(&inputs);
+    for space in &mut tree.spaces {
+        if let Some(tabs) = parked_tabs.remove(&space.name) {
+            space.tabs = tabs;
+        }
+    }
+    tree
 }
 
 /// Graphite sidebar (#113): paint the 256 px tree column and the 44 px

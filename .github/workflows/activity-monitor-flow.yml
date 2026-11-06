@@ -10,6 +10,7 @@ on:
   pull_request:
     paths:
       - crates/prismattyc-host/src/activity_monitor_space.rs
+      - crates/prismattyc-host/src/render_diagnostics.rs
       - crates/prismattyc-mux/src/bin/pmux/spaces/monitor.rs
       - crates/pmux-activity-monitor-plugin/**
       - crates/prismattyc-mux/src/plugins/**
@@ -69,16 +70,18 @@ jobs:
         run: python tests/native/activity-monitor-flow-e2e_test.py
 
       - name: Build with the production plug-in bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # The pinned release is fetched without a token; shared runner
-          # addresses can hit the anonymous rate limit, so retry with a pause.
-          for attempt in 1 2 3 4; do
-            if bundle="$(python scripts/release/prepare-plugin-bundle.py --target-dir "$RUNNER_TEMP/target" | tail -1)"; then
-              break
-            fi
-            [ "$attempt" = 4 ] && exit 1
-            sleep $((attempt * 90))
-          done
+          # Authenticate the download to avoid shared-runner anonymous limits.
+          # Preparation still verifies every byte against the reviewed pin.
+          tag="$(python -c 'import json; p=json.load(open("plugins/bundle-pin.json")); assert p["source"]["kind"] == "official"; print(p["source"]["tag"])')"
+          source="$RUNNER_TEMP/official-bundle"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$source" \
+            --pattern pmux-plugins.json --pattern plugin-build-receipt.json \
+            --pattern '*.pmux-plugin'
+          cp plugins/bundle-pin.json "$source/bundle-pin.json"
+          bundle="$(python scripts/release/prepare-plugin-bundle.py --bundle "$source" --target-dir "$RUNNER_TEMP/target")"
           echo "bundle: $bundle"
           export PRISMATTYC_PLUGIN_BUNDLE_DIR="$bundle"
           export CARGO_TARGET_DIR="$RUNNER_TEMP/target"
@@ -103,7 +106,7 @@ jobs:
           python tests/native/activity-monitor-flow-e2e.py --bins "$RUNNER_TEMP/target/release" --out "$RUNNER_TEMP/flow"
 
       - name: Run the activity bench
-        if: always()
+        if: success()
         run: python scripts/test-plugin-runtime.py --feature activity-bench --target-dir "$RUNNER_TEMP/target" --out "$RUNNER_TEMP/bench"
 
       - name: Upload evidence

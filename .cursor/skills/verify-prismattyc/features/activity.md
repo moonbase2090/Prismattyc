@@ -39,6 +39,9 @@ Accessibility permission; Linux needs X11, XTEST, xdotool, and a window manager;
 Windows needs an interactive user session. The fixture owns private daemon,
 host, and synthetic activity state. It does not prove provider hook execution.
 Match the recorded revision and binary build before claiming exact-head proof.
+Map daemon pane IDs through `current_panes` to the host's
+`visible_pane_content_rects`. `visible_pane_slots` includes pane headers and
+padding, so it cannot locate terminal cells.
 
 The mouse event belongs to `pmux:plugin@2.0.0` and `pmux:view@2.0.0`. These
 contract versions differ from monitor package 1.1.0, connector package 1.0.1,

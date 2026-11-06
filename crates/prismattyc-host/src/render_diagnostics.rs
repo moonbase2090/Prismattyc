@@ -324,6 +324,7 @@ impl App {
                 "space_rail_px": host.mux.geom().rail_px,
                 "focused_pane": host.mux.focused_id().get(),
                 "visible_pane_slots": host.mux.panes_and_rects().map(|(id, _, rect)| (id.get(), host.mux.geom().pane_slot_px(rect))).collect::<Vec<_>>(),
+                "visible_pane_content_rects": host.mux.panes_and_rects().map(|(id, _, rect)| (id.get(), host.mux.geom().pane_content_px(rect))).collect::<Vec<_>>(),
                 "session_prompt_open": host.session_prompt.is_some(),
                 // The open command palette's query, or null when it is closed.
                 "palette": host.palette.as_ref().map(|palette| &palette.query),

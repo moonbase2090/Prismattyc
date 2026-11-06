@@ -52,7 +52,7 @@ class Failed(AssertionError):
 def monitor_cell_point(status, pane, frame, pixels, column, row):
     """Map a monitor cell to the native client's screen coordinates."""
     attachments = {item["pane_id"]: item["remote_pane_id"] for item in status["current_panes"]}
-    for local_id, bounds in status["visible_pane_slots"]:
+    for local_id, bounds in status["visible_pane_content_rects"]:
         if attachments.get(f"PaneId({local_id})") == pane["id"]:
             px, py, pw, ph = bounds
             break

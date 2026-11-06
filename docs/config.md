@@ -305,6 +305,8 @@ allow_mixed_case_session_names = true
 # activity_webhook_secret_file = "~/.config/prismattyc/activity-webhook.key"
 # Collect activity metadata live, without a restart. Enable monitor and query access separately in Settings > Plug-ins. true|false; default true.
 experimental_activity = true
+# Activity monitor cell graph style. Kitty pixels remain independent. braille|block|ascii; default braille.
+activity_graph_style = "braille"
 
 [keys]
 # Host actions. An entry replaces that action's default chords.

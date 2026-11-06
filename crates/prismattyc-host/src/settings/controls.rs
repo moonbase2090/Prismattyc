@@ -195,6 +195,7 @@ fn timing(key: &str) -> &'static str {
         "mux.experimental_activity" => {
             "Live, no restart; approve monitor and query access in Plug-ins"
         }
+        "mux.activity_graph_style" => "Next activity monitor launch",
         "mux.activity_webhook_url" | "mux.activity_webhook_secret_file" => {
             "Live after config reload"
         }
@@ -373,6 +374,11 @@ pub(super) fn catalog() -> Vec<Control> {
         row(Section::Mux, "mux.remote_size", choice("mux.remote_size")),
         row(Section::Mux, "mux.shell", Kind::Text),
         row(Section::Mux, "mux.experimental_activity", Kind::Bool),
+        row(
+            Section::Mux,
+            "mux.activity_graph_style",
+            choice("mux.activity_graph_style"),
+        ),
         row(Section::Mux, "mux.activity_webhook_url", Kind::Text),
         row(Section::Mux, "mux.activity_webhook_secret_file", Kind::Text),
     ];

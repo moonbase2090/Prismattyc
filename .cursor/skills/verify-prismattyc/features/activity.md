@@ -239,6 +239,12 @@ directory. The driver verifies every archive's exact size and SHA-256 before
 building native executables, so each platform exercises the same guest bytes.
 This option does not grant production provenance to private fixture packages.
 
+The complete Settings panel also exposes **Multiplexer > Activity graph style**.
+The native macOS Settings drive in [desktop](desktop.md#complete-settings-and-fonts)
+cycles block, ASCII, and braille through Accessibility, checks each saved value,
+then resets to the inherited braille default. Relaunch the monitor to apply it;
+changing this choice does not restart the daemon or an existing monitor.
+
 For native screenshots on an allocated desktop, start a controlled live seat:
 The supplied binary directory must include the matched `pmux-attach` frontend
 as well as `pmux`, `pmuxd`, and `pmux-activity-monitor`.

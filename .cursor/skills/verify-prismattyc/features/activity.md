@@ -1,15 +1,48 @@
 # Agent activity and contained plug-ins
 
-The daemon owns the optional headless activity ring. Collection is off by
-default. `[mux] experimental_activity = true` or `--experimental-activity`
+The daemon owns the headless activity ring. Collection is on by default.
+`[mux] experimental_activity = false` disables it; `--experimental-activity`
 enables it. Configuring both `activity_webhook_url` and
 `activity_webhook_secret_file` also enables collection. Config changes start or stop collection without restarting the
 daemon or replacing sessions. See [the feed design](../../../../docs/agent-activity-feed.md).
 
 The monitor UI and connector query logic run as contained plug-ins. The native
 `pmux-activity-monitor` executable presents validated frames and forwards its
-compatibility query modes. Installation leaves both packages disabled. Endpoint
-registration, package grants, and the MCP operator allowlist are separate steps.
+compatibility query modes. First use installs and enables the bundled defaults
+with local activity access when no saved package selection exists. Saved disables
+are preserved. Explicit package installation leaves the package disabled.
+`PRISMATTYC_DEFAULT_PLUGINS=0` skips default provisioning for isolated tests.
+Endpoint registration, package grants, and the MCP operator allowlist are
+separate steps.
+
+## Drive mouse input through the native host
+
+After Launch, run the coordinate boundary replay and both monitor flows:
+
+```sh
+python3 tests/native/activity-monitor-flow-e2e_test.py
+python3 tests/native/activity-monitor-flow-e2e.py --no-gui \
+  --bins "$verify_bins" --out "$verify_evidence/activity-pane"
+python3 tests/native/activity-monitor-flow-e2e.py \
+  --bins "$verify_bins" --out "$verify_evidence/activity-native"
+```
+
+Require `PASS`, `result.json`, and empty `leftovers_after_teardown` for each
+flow. Inspect the native mouse step for click selection, second-click details,
+wheel selection and return, and click-to-dismiss help. Plain right-click opens
+the host pane menu; Shift+right-click passes through to return to the monitor's
+list. The terminal-only flow sends SGR mouse reports directly to the pane and
+does not prove host input routing.
+
+The native drive requires an allocated interactive desktop. macOS needs
+Accessibility permission; Linux needs X11, XTEST, xdotool, and a window manager;
+Windows needs an interactive user session. The fixture owns private daemon,
+host, and synthetic activity state. It does not prove provider hook execution.
+Match the recorded revision and binary build before claiming exact-head proof.
+
+The mouse event belongs to `pmux:plugin@2.0.0` and `pmux:view@2.0.0`. These
+contract versions differ from monitor package 1.1.0, connector package 1.0.1,
+and the official bundle tag `pmux-plugins-v1.1.0`.
 
 ## Build and drive the actual packages
 

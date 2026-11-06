@@ -25,6 +25,7 @@ import os
 import platform
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -46,6 +47,28 @@ EXE = ".exe" if WINDOWS else ""
 
 class Failed(AssertionError):
     pass
+
+
+def monitor_cell_point(status, pane, frame, pixels, column, row):
+    """Map a monitor cell to the native client's screen coordinates."""
+    attachments = {item["pane_id"]: item["remote_pane_id"] for item in status["current_panes"]}
+    for local_id, bounds in status["visible_pane_slots"]:
+        if attachments.get(f"PaneId({local_id})") == pane["id"]:
+            px, py, pw, ph = bounds
+            break
+    else:
+        raise Failed(f"monitor pane {pane['id']} has no visible host attachment")
+    cell_w, cell_h = pw / pane["geometry"]["cols"], ph / pane["geometry"]["rows"]
+    return (int(frame[0] + (px + (column + 0.5) * cell_w) * frame[2] / pixels[0]),
+            int(frame[1] + (py + (row + 0.5) * cell_h) * frame[3] / pixels[1]))
+
+
+def png_pixels(path):
+    with path.open("rb") as image:
+        header = image.read(24)
+    if len(header) != 24 or header[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("host has not written a PNG header")
+    return struct.unpack(">II", header[16:24])
 
 
 def wait_for(check, label, timeout=20.0):
@@ -124,9 +147,10 @@ MAC_FLAGS = {"shift": 1 << 17, "ctrl": 1 << 18, "alt": 1 << 19, "cmd": 1 << 20}
 
 
 class MacInput:
-    def __init__(self, pid):
+    def __init__(self, pid, present):
         import ctypes
         self.pid = pid
+        self.present = present
         self.c = ctypes
         quartz = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
         quartz.CGEventCreateKeyboardEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_bool]
@@ -183,12 +207,14 @@ class MacInput:
             self.key("space" if ch == " " else ch)
 
     def frame(self):
-        """The host window as (x, y, width, height) in global points, title bar included."""
+        """The rendered client area in global points, excluding the native title bar."""
         out = subprocess.check_output(["osascript", "-e", 'tell application "System Events" to get '
                                        f'{{position, size}} of window 1 of (first process whose unix id is {self.pid})'],
                                       text=True, timeout=20)
         x, y, w, h = (int(float(part)) for part in out.replace(" ", "").split(","))
-        return x, y, w, h
+        pixel_w, pixel_h = png_pixels(self.present)
+        client_h = pixel_h * w / pixel_w
+        return x, y + h - client_h, w, client_h
 
     def _mouse(self, kind, x, y, button=0):
         event = self.quartz.CGEventCreateMouseEvent(None, kind, self.Point(x, y), button)
@@ -375,10 +401,10 @@ class WindowsInput:
         time.sleep(0.3)
 
 
-def native_input(pid):
+def native_input(pid, present):
     system = platform.system()
     if system == "Darwin":
-        return MacInput(pid)
+        return MacInput(pid, present)
     if system == "Windows":
         return WindowsInput(pid)
     return XdotoolInput(pid)
@@ -534,7 +560,7 @@ class Flow:
         self.host = subprocess.Popen([str(self.bins / f"prismattyc-host{EXE}"), "--no-splash"],
                                      env=self.env, stdout=log, stderr=log, **GROUP)
         wait_for(lambda: self.status().get("space") is not None or self.status(), "host render status", 60)
-        self.keys = native_input(self.host.pid)
+        self.keys = native_input(self.host.pid, self.out / "present.png")
         self.wait_ready()
 
     def stop(self):
@@ -842,15 +868,12 @@ class Flow:
         return {"keys": checked}
 
     def mouse_step(self):
-        """Native pointer events through the host: select, open, wheel and close the help."""
-        x0, y0, _, _ = self.keys.frame()
-        pane = self.monitor_pane()
-        # The host reports the pane's pixel rectangle inside its window.
-        slots = {slot[0]: slot[1] for slot in self.status().get("visible_pane_slots") or []}
-        px, py, pw, ph = slots[pane["id"]]
-        cell_w, cell_h = pw / pane["geometry"]["cols"], ph / pane["geometry"]["rows"]
-        x = int(x0 + px + 20 * cell_w)
+        """Native pointer events through the host: select, open, wheel, back and help."""
         checked = []
+
+        def point(row):
+            return monitor_cell_point(self.status(), self.monitor_pane(), self.keys.frame(),
+                                      png_pixels(self.out / "present.png"), 20, row)
 
         def back_to_list():
             for _ in range(3):
@@ -866,23 +889,32 @@ class Flow:
                 row = self.row_of(target)
                 if row is None:
                     continue
-                y = int(y0 + py + (row + 0.5) * cell_h)
+                x, y = point(row)
                 self.keys.click(x, y)
                 if poll(lambda: self.selected() == target, 3):
-                    return y
-            raise Failed(f"no click selected {target} (pane at {y0 + py}, cell {cell_h:.1f}px)")
+                    return
+            raise Failed(f"no native click selected {target}")
 
         self.keys.key("home")
         time.sleep(0.5)
         seat = next(name for name in SEATS if name != self.selected())
-        y = click_seat(seat)
+        click_seat(seat)
         checked.append(f"click selected {seat}")
+        x, y = point(self.row_of(seat))
         self.keys.click(x, y)
         wait_for(lambda: "esc back" in self.screen() and "▌" not in self.screen(), "second click opens the seat", 10)
         checked.append("second click opened the details")
-        # The host keeps right-click for its own pane menu, so go back with the keyboard.
+        self.keys.click(x, y, button="right")
+        wait_for(lambda: self.status().get("context_menu") is not None, "plain right-click opens the pane menu", 10)
         self.keys.key("escape")
-        wait_for(lambda: self.selected() == seat, "back to the list", 10)
+        wait_for(lambda: self.status().get("context_menu") is None, "pane menu closed", 10)
+        assert self.selected() is None, "closing the pane menu also changed the monitor view"
+        checked.append("plain right-click kept the host pane menu")
+        self.keys.click(x, y, button="right", shift=True)
+        wait_for(lambda: self.selected() == seat and self.status().get("context_menu") is None,
+                 "Shift+right-click through the host returns to the list", 10)
+        checked.append("Shift+right-click went back to the list through the host")
+        x, y = point(self.row_of(seat))
         turn = 1 if self.seat_at(self.row_of(seat) + 1) is not None else -1  # the last seat cannot move down
         self.keys.wheel(x, y, turn)
         wait_for(lambda: self.selected() not in (None, seat), "the wheel moves the selection", 10)

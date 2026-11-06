@@ -3184,7 +3184,9 @@ name = "pmux-plugin-api"
 version = "0.3.59"
 dependencies = [
  "prismattyc-core",
+ "schemars",
  "serde",
+ "serde_json",
  "unicode-segmentation",
  "unicode-width",
  "wasmtime",

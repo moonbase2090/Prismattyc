@@ -41,7 +41,7 @@ lunatui-core = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e74
 lunatui-image = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898" }
 lunatui-term = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898" }
 lunatui-theme = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898" }
-lunatui-widgets = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898", default-features = false, features = ["pixel-sparkline"] }
+lunatui-widgets = { git = "https://github.com/moonbase2090/lunatui", rev = "d847e749eb773f7d48edd7d9e429bcc9cbe9e898", default-features = false, features = ["pixel-sparkline", "canvas"] }
 
 [profile.mutants]
 inherits = "test"

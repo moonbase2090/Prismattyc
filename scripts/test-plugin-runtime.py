@@ -858,17 +858,87 @@ else:
         for item in imported:
             cli("endpoint","remove",item["label"])
 
-    def monitor_frame_proof():
+    def monitor_frame_proof(style=None):
         text = cli("run", monitor, "main", "--snapshot", "--cols", "100", "--rows", "24", text=True)
         assert "fixture-seat" in text and "test_failed" in text
         probe_binary = frame_probe or bins / f"examples/plugin_frame_probe{suffix}"
-        probe = subprocess.run([str(probe_binary), str(endpoint)], env=env, capture_output=True, text=True, encoding="utf-8", timeout=45)
+        probe_args = [str(probe_binary), str(endpoint)]
+        if style is not None:
+            probe_args.append(style)
+        probe = subprocess.run(probe_args, env=env, capture_output=True, text=True, encoding="utf-8", timeout=45)
         assert probe.returncode == 0, probe.stderr
         frame = json.loads(probe.stdout)
         assert frame["cells"] == 2400 and "fixture-seat" in frame["text"]
         # The 12-column seat name leaves a 53-cell lane at 8 pixels per cell.
         assert frame["rasters"] == [{"width":424,"height":16,"bytes":27136}] * 2, frame["rasters"]
         assert frame["failure_pixels"] > 0
+        return frame
+
+    def graph_style_proof():
+        cli("install", monitor)
+        cli("enable", monitor, "--allow", "activity.read:local")
+        feed(True)
+        event = {"schema_version": 1, "seat": "fixture-seat", "run_id": "graph-proof",
+                 "event_id": "graph-failed", "source": "hooks", "kind": "test_failed"}
+        assert connection.request("publish_activity", event=event)["status"] == "ok"
+        launcher = bins / f"pmux-activity-monitor{suffix}"
+        records = []
+
+        def snapshot(name, style=None, configured=None, term="xterm-256color", succeeds=True):
+            setting(True)
+            if configured is not None:
+                with config.open("a") as output:
+                    output.write(f'activity_graph_style = "{configured}"\n')
+            arguments = ["--socket", str(endpoint), "--snapshot", "--size", "100x24", "--no-pixels"]
+            if style is not None:
+                arguments.extend(["--graph-style", style])
+            result = subprocess.run([str(launcher), *arguments], env={**env, "TERM": term},
+                                    capture_output=True, text=True, encoding="utf-8", timeout=45)
+            records.append({"case": name, "argv": [argument.replace(str(runtime), "<runtime>") for argument in arguments],
+                            "term": term, "exit_code": result.returncode,
+                            "stdout": result.stdout, "stderr": result.stderr.replace(str(runtime), "<runtime>")})
+            assert (result.returncode == 0) == succeeds, result.stderr
+            if not succeeds:
+                assert "unknown variant" in result.stderr, result.stderr
+                return
+            assert "fixture-seat" in result.stdout and "test_failed" in result.stdout, result.stdout
+            (scratch / f"graph-{name}.txt").write_text(result.stdout, encoding="utf-8")
+            return result.stdout
+
+        def has_braille(text):
+            return any("\u2801" <= character <= "\u28ff" for character in text)
+
+        def has_blocks(text):
+            return any("\u2581" <= character <= "\u2588" for character in text)
+
+        try:
+            assert has_braille(snapshot("default"))
+            assert has_braille(snapshot("braille", style="braille"))
+            assert has_braille(snapshot("unknown-terminal", term="unknown-terminal"))
+            block = snapshot("block", style="block")
+            assert has_blocks(block) and not has_braille(block)
+            ascii_frame = snapshot("ascii", style="ascii")
+            assert not has_braille(ascii_frame) and not has_blocks(ascii_frame)
+            lane = next(line for line in ascii_frame.splitlines() if "fixture-seat" in line)[46:99]
+            assert lane.strip() and set(lane) <= set(" ._:-=+*#"), lane
+            assert has_blocks(snapshot("configured-block", configured="block"))
+            assert has_braille(snapshot("override", style="braille", configured="block"))
+            fallback = snapshot("fallback", configured="braille", term="dumb")
+            assert not has_braille(fallback) and not has_blocks(fallback)
+            assert next(line for line in fallback.splitlines() if "fixture-seat" in line)[46:99].strip()
+            snapshot("invalid-config", configured="invalid", succeeds=False)
+            setting(True)
+            pixels = {style: monitor_frame_proof(style) for style in ("braille", "block", "ascii")}
+            (scratch / "graph-pixel-styles.json").write_text(json.dumps(pixels, indent=2) + "\n")
+            assert daemon.poll() is None and daemon.pid == pid
+            (scratch / "graph-styles-result.json").write_text(json.dumps({
+                "status": "PASS", "cases": [record["case"] for record in records],
+                "pixels": "typed RGBA lanes retained", "daemon": "preserved",
+                "scope": "real contained component and launcher; text frames, not desktop screenshots",
+            }, indent=2) + "\n")
+            print("PASS default braille, all graph styles, config/CLI precedence, known-ASCII fallback and unchanged pixel uploads", flush=True)
+        finally:
+            (scratch / "graph-styles-commands.json").write_text(json.dumps(records, indent=2) + "\n")
 
     try:
         setting(False)
@@ -876,6 +946,9 @@ else:
         pid = daemon.pid
         baseline = connection.request("snapshot")["response"]["snapshot"]["sessions"]
         monitor = "org.moonbase.activity-monitor"
+        if feature == "graph-styles":
+            graph_style_proof()
+            return
         if feature == "production":
             assert expected_catalog is not None
             assert {entry["id"] for entry in expected_catalog} == {monitor, "org.moonbase.activity-connector"}
@@ -1138,7 +1211,7 @@ def main():
     parser.add_argument("--toolchain", default="1.90.0")
     parser.add_argument("--release", action="store_true", dest="release", default=True, help="exercise optimized native binaries as shipped (default)")
     parser.add_argument("--debug", action="store_false", dest="release", help="use slower debug native binaries for local diagnostics")
-    parser.add_argument("--feature", choices=["all","activity-bench","endpoint-pressure","legacy-import","production","discovery","remote-query"], default="all")
+    parser.add_argument("--feature", choices=["all","activity-bench","endpoint-pressure","legacy-import","production","discovery","remote-query","graph-styles"], default="all")
     args = parser.parse_args()
     # A killed run (timeout, cancel, closed terminal) still runs the finally
     # blocks that stop each isolated daemon.

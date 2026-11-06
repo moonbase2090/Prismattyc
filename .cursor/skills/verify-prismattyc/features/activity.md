@@ -220,6 +220,21 @@ connector's four declared activity tools and omits identity tools. Explicit
 
 ## Inspect viewer rendering
 
+For graph-style changes, exercise the actual candidate component and launcher:
+
+```sh
+python3 scripts/test-plugin-runtime.py --feature graph-styles \
+  --target-dir "$verify_target" --out "$verify_evidence/graph-styles" --debug
+```
+
+Require its final PASS and `graph-styles-result.json`. Inspect the saved text
+frames and command records for default braille, explicit braille/block/ASCII,
+the persistent `[mux] activity_graph_style`, CLI precedence, known-ASCII
+`TERM=dumb` fallback, invalid-config refusal, and retained typed pixel uploads.
+Unknown terminal/font coverage must keep braille. This mode builds unpublished
+candidate guests; it does not prove the official catalog pin or replace native
+Windows, macOS, and Linux screenshots of the changed lanes.
+
 Pure layout, model, and frame-capture tests live in the guest crate:
 
 ```sh

@@ -14,6 +14,8 @@ mod package;
 mod paint;
 mod presenter;
 mod protocol;
+
+pub use pmux_plugin_api::monitor::GraphStyle;
 mod remote;
 mod schema;
 mod wire;

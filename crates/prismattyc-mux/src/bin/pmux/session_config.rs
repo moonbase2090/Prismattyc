@@ -234,7 +234,10 @@ fn restore(client: &mut Client, client_id: u64, paths: &Paths, file: &Path) -> R
                 .zip(live_leaf_ids(&live_window.layout))
             {
                 if let Some(command) = command.filter(|value| !value.is_empty()) {
-                    match write_pane_command(client, client_id, pane, command, true)? {
+                    // The pane was just created for this restore, so nothing in it is a program to protect.
+                    // On Windows a new pane's process tree can read as unknown, which skip_if_running
+                    // treats as busy, leaving a bare shell.
+                    match write_pane_command(client, client_id, pane, command, false)? {
                         WritePaneCommand::Wrote => {}
                         WritePaneCommand::SkipRunning => println!("Kept the program already running in session {}; its saved command was not replayed.", saved.name),
                     }

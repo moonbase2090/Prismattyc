@@ -28,7 +28,10 @@ python3 tests/native/activity-monitor-flow-e2e.py \
 ```
 
 Require `PASS`, `result.json`, and empty `leftovers_after_teardown` for each
-flow. Inspect the native mouse step for click selection, second-click details,
+flow. The native open step must report active SGR mouse tracking, and quit must
+report `mouse_capture_restored: true` before reopening. Windows views register
+capture through scoped console input flags as well as terminal sequences.
+Inspect the native mouse step for click selection, second-click details,
 wheel selection and return, and click-to-dismiss help. Plain right-click opens
 the host pane menu; Shift+right-click passes through to return to the monitor's
 list. The terminal-only flow sends SGR mouse reports directly to the pane and

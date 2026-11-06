@@ -543,6 +543,8 @@ pub(super) fn run(
                 mouse_tracking: MouseTracking::Sgr,
             },
         )?;
+        #[cfg(windows)]
+        let _mouse_input = crate::platform::ConsoleMouseInput::enter()?;
         let input = spawn_input(pending_input)?;
         let result = view.drive(
             input.receiver.as_ref().expect("live input receiver"),

@@ -106,3 +106,68 @@ impl Drop for ConsoleVt {
         }
     }
 }
+
+#[cfg(any(windows, test))]
+fn console_mouse_input_mode(mode: u32) -> u32 {
+    const NATIVE_MOUSE: u32 = 0x0010 | 0x0008 | 0x0080;
+    const QUICK_EDIT: u32 = 0x0040;
+    (mode | NATIVE_MOUSE) & !(QUICK_EDIT | VT_INPUT)
+}
+
+/// Win32 input records for an interactive view. Enter after raw mode so
+/// ConPTY registers mouse capture; drop before the terminal session restores.
+#[cfg(windows)]
+#[must_use]
+pub struct ConsoleMouseInput {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    mode: u32,
+}
+
+#[cfg(windows)]
+impl ConsoleMouseInput {
+    pub fn enter() -> std::io::Result<Self> {
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            System::Console::{GetConsoleMode, GetStdHandle, SetConsoleMode, STD_INPUT_HANDLE},
+        };
+        let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "interactive view requires console stdin",
+            ));
+        }
+        let mut mode = 0;
+        if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if unsafe { SetConsoleMode(handle, console_mouse_input_mode(mode)) } == 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe { SetConsoleMode(handle, mode) };
+            return Err(error);
+        }
+        Ok(Self { handle, mode })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ConsoleMouseInput {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::System::Console::SetConsoleMode(self.handle, self.mode) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::console_mouse_input_mode;
+
+    #[test]
+    fn native_mouse_input_replaces_vt_input_and_quick_edit() {
+        assert_eq!(console_mouse_input_mode(0x0240), 0x0098);
+    }
+
+    #[test]
+    fn native_mouse_input_preserves_unrelated_console_flags() {
+        assert_eq!(console_mouse_input_mode(0x0220), 0x00b8);
+    }
+}

@@ -720,6 +720,13 @@ class Flow:
         session = self.monitor_session()
         return session["windows"][0]["panes"][0] if session else None
 
+    def monitor_mouse_mode(self):
+        pane = self.monitor_pane()
+        if pane is None:
+            return None
+        return next((state for state in self.status().get("current_panes", [])
+                     if state["remote_pane_id"] == pane["id"]), None)
+
     def screen(self):
         pane = self.monitor_pane()
         return self.cli("save-buffer", str(pane["id"]), "-") if pane else ""
@@ -862,9 +869,14 @@ class Flow:
         wait_for(lambda: self.space_sessions() == 1, "Space with one session")
         wait_for(lambda: self.status().get("space") == SPACE, "host shows the Space", 30)
         wait_for(lambda: all(seat in self.screen() for seat in SEATS), "monitor lists every seat", 30)
+        wait_for(lambda: (state := self.monitor_mouse_mode())
+                 and state["mouse_tracking"] != "Off" and state["mouse_sgr"],
+                 "monitor advertises mouse capture through the host", 10)
+        mouse = self.monitor_mouse_mode()
         tabs = self.status().get("tabs") or []
         return {"space": SPACE, "pane": self.monitor_pane()["id"], "tabs": len(tabs),
-                "monitor_processes": len(self.monitor_processes())}
+                "monitor_processes": len(self.monitor_processes()),
+                "mouse_tracking": mouse["mouse_tracking"], "mouse_sgr": mouse["mouse_sgr"]}
 
     def open_headless(self):
         self.cli("space", "monitor")
@@ -1058,10 +1070,13 @@ class Flow:
         self.keys.key("q")
         wait_for(lambda: not any(seat in self.screen() for seat in SEATS), "monitor quit to the shell")
         wait_for(lambda: not self.monitor_processes(), "monitor process exited")
+        wait_for(lambda: (state := self.monitor_mouse_mode())
+                 and state["mouse_tracking"] == "Off" and not state["mouse_sgr"],
+                 "monitor mouse capture restored to the shell", 10)
         assert self.space_sessions() == 1, "quitting changed the Space"
         self.palette_open()
         wait_for(lambda: all(seat in self.screen() for seat in SEATS), "palette started the monitor again", 30)
-        return {"monitor_processes": len(self.monitor_processes())}
+        return {"monitor_processes": len(self.monitor_processes()), "mouse_capture_restored": True}
 
     def close_step(self):
         self.keys.key("q")

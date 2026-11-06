@@ -1,0 +1,114 @@
+name: Activity monitor flow
+
+# The Activity Monitor Space as a user meets it, on each desktop platform:
+# palette open, reopen, every monitor key, quit and close, driven with native
+# input into a real host (tests/native/activity-monitor-flow-e2e.py). Then the
+# activity bench with a live monitor in a pane, for CPU and memory numbers.
+# Informational: not a required check. It runs when the code it drives changes.
+
+on:
+  pull_request:
+    paths:
+      - crates/prismattyc-host/src/activity_monitor_space.rs
+      - crates/prismattyc-mux/src/bin/pmux/spaces/monitor.rs
+      - crates/pmux-activity-monitor-plugin/**
+      - crates/prismattyc-mux/src/plugins/**
+      - tools/activity-monitor/**
+      - tests/native/activity-monitor-flow-e2e.py
+      - scripts/test-plugin-runtime.py
+      - .github/workflows/activity-monitor-flow.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: activity-monitor-flow-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flow:
+    name: Activity monitor flow (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26, windows-2025]
+    env:
+      ACTIVITY_BENCH_SEATS: '20'
+      ACTIVITY_BENCH_WINDOW: '10'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.90.0
+          targets: wasm32-unknown-unknown
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Install the Linux display and input tools
+        if: runner.os == 'Linux'
+        run: |
+          ./scripts/install-render-test-deps.sh
+          sudo apt-get install -y -qq --no-install-recommends xdotool openbox
+
+      - name: Build with the production plug-in bundle
+        run: |
+          # The pinned release is fetched without a token; shared runner
+          # addresses can hit the anonymous rate limit, so retry with a pause.
+          for attempt in 1 2 3 4; do
+            if bundle="$(python scripts/release/prepare-plugin-bundle.py --target-dir "$RUNNER_TEMP/target" | tail -1)"; then
+              break
+            fi
+            [ "$attempt" = 4 ] && exit 1
+            sleep $((attempt * 90))
+          done
+          echo "bundle: $bundle"
+          export PRISMATTYC_PLUGIN_BUNDLE_DIR="$bundle"
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/target"
+          cargo build --release --locked -p prismattyc-mux -p prismattyc-host --bins
+          cargo build --release --locked --manifest-path tools/activity-monitor/Cargo.toml
+          ls "$RUNNER_TEMP/target/release"
+
+      - name: Run the pane keys flow (no desktop)
+        if: always()
+        run: python tests/native/activity-monitor-flow-e2e.py --no-gui --bins "$RUNNER_TEMP/target/release" --out "$RUNNER_TEMP/pane-keys"
+
+      - name: Run the user flow
+        if: always()
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            Xvfb :99 -screen 0 1920x1080x24 &
+            export DISPLAY=:99 WINIT_UNIX_BACKEND=x11
+            sleep 2
+            openbox &
+            sleep 1
+          fi
+          python tests/native/activity-monitor-flow-e2e.py --bins "$RUNNER_TEMP/target/release" --out "$RUNNER_TEMP/flow"
+
+      - name: Run the activity bench
+        if: always()
+        run: python scripts/test-plugin-runtime.py --feature activity-bench --target-dir "$RUNNER_TEMP/target" --out "$RUNNER_TEMP/bench"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: activity-monitor-flow-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/flow
+            ${{ runner.temp }}/pane-keys
+            ${{ runner.temp }}/bench/activity-bench.json
+          if-no-files-found: warn

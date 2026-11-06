@@ -56,6 +56,8 @@ pub enum Action {
     SessionSplitDown,
     TerminalSwitcher,
     AgentMessages,
+    /// Open or focus the Activity Monitor Space.
+    ActivityMonitor,
     /// Focus the next pane that needs attention (issue #184).
     JumpNeedsYou,
     UpdateRestart,
@@ -196,6 +198,7 @@ impl Action {
             Action::SessionSplitDown,
             Action::TerminalSwitcher,
             Action::AgentMessages,
+            Action::ActivityMonitor,
             Action::JumpNeedsYou,
             Action::UpdateRestart,
             Action::RecentMessages,
@@ -294,6 +297,7 @@ impl Action {
             Action::SessionSplitDown => "session_split_down".into(),
             Action::TerminalSwitcher => "terminal_switcher".into(),
             Action::AgentMessages => "agent_messages".into(),
+            Action::ActivityMonitor => "activity_monitor".into(),
             Action::JumpNeedsYou => "jump_needs_you".into(),
             Action::UpdateRestart => "update_restart".into(),
             Action::RecentMessages => "recent_messages".into(),
@@ -392,6 +396,7 @@ impl Action {
             Action::SessionSplitDown => "split down with an automatically named session".into(),
             Action::TerminalSwitcher => "find a terminal across Spaces".into(),
             Action::AgentMessages => "view pending mail and pane input queue receipts".into(),
+            Action::ActivityMonitor => "open the Activity Monitor Space".into(),
             Action::JumpNeedsYou => "focus the next pane that needs your attention".into(),
             Action::UpdateRestart => "update, restart components, and inspect versions".into(),
             Action::RecentMessages => "show recent status messages, including hidden toasts".into(),
@@ -564,6 +569,7 @@ impl Action {
             | Action::ArrangeSplit
             | Action::ArrangeGrid => ActionGroup::Layout,
             Action::AgentMessages
+            | Action::ActivityMonitor
             | Action::JumpNeedsYou
             | Action::TerminalSwitcher
             | Action::OpenSpace
@@ -620,6 +626,7 @@ impl Action {
             Action::SelectTab(_) => Some("Enter, then press the tab digit."),
             Action::Layout(_) => Some("Enter, then press the column count. Spawns panes up to N."),
             Action::AgentMessages => Some("Read agent messages and inspect pending deliveries."),
+            Action::ActivityMonitor => Some("See what each agent seat is doing; press q in the monitor to quit."),
             Action::JumpNeedsYou => Some("Clears attention on the pane you focus."),
             Action::UpdateRestart => Some("Check installed versions, update, or restart components."),
             Action::RecentMessages => Some("Settings choose which toasts show: all, errors, or off."),
@@ -1197,7 +1204,10 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         Action::SessionSplitRight => vec!["ctrl+alt+shift+r"],
         Action::SessionSplitDown => vec!["ctrl+alt+shift+b"],
         Action::TerminalSwitcher => vec!["ctrl+shift+o"],
-        Action::AgentMessages | Action::UpdateRestart | Action::RecentMessages => vec![],
+        Action::AgentMessages
+        | Action::ActivityMonitor
+        | Action::UpdateRestart
+        | Action::RecentMessages => vec![],
         Action::JumpNeedsYou => vec!["ctrl+shift+u"],
 
         Action::CloseTab => vec!["ctrl+shift+q"],
@@ -1612,6 +1622,7 @@ mod tests {
         matches!(
             action,
             Action::AgentMessages
+                | Action::ActivityMonitor
                 | Action::UpdateRestart
                 | Action::RecentMessages
                 | Action::PresetSingle

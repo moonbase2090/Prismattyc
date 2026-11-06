@@ -459,6 +459,17 @@ target/debug/pmux --socket /tmp/activity-demo/feed.sock activity-emit \
   --seat worker-a --remove-hooks /absolute/path/worker-a-hooks.json
 ```
 
+Removal preserves preexisting empty event arrays and unrelated settings. It
+removes empty event arrays, the `hooks` object, and `schema_version` only when
+the installer recorded creating them. Reinstalling without `--failure-hook`
+also removes its empty `PostToolUseFailure` array when the installer created it.
+Older managed entries without that record retain empty fields during removal.
+The record is an adjacent `.FILENAME.pmux-activity-origin` receipt beside the
+resolved profile target. It stores fingerprints and field origins without
+changing hook commands. Keep it with the profile when moving the file.
+Missing or mismatched receipts make removal conservative; malformed receipts
+or receipts larger than 64 KiB refuse the edit and preserve the profile.
+
 For a manually configured lifecycle command, use the absolute `pmux` executable
 followed by `--socket PATH activity-emit --seat worker-a --hook`. For turn
 notifications, replace `--hook` with `--notify`; the runtime appends its JSON

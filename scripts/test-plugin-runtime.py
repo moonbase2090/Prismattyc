@@ -9,10 +9,12 @@ operator's running daemon. Run on each supported OS before release.
 
 import argparse
 from contextlib import nullcontext
+import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -332,6 +334,111 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
             polls += 1
             time.sleep(0.25)
         polled = cpu_seconds(daemon.pid) - before
+
+        def rss_mb(pid):
+            if os.name == "nt":
+                output = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                    f"(Get-Process -Id {pid}).WorkingSet64"],
+                    capture_output=True, text=True, timeout=30, check=True).stdout
+                return round(int(output.strip()) / 2**20, 1)
+            status = Path(f"/proc/{pid}/status")
+            if status.exists():
+                line = next(line for line in status.read_text().splitlines() if line.startswith("VmRSS:"))
+                return round(int(line.split()[1]) / 1024, 1)
+            output = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True, timeout=10, check=True).stdout
+            return round(int(output.strip()) / 1024, 1)
+
+        def workers():
+            # pmuxd's plug-in workers are copies of pmuxd; panes are other programs.
+            if os.name == "nt":
+                output = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                    f"Get-CimInstance Win32_Process -Filter 'ParentProcessId={daemon.pid}' | "
+                    "Where-Object { $_.Name -like 'pmuxd*' } | ForEach-Object { $_.ProcessId }"],
+                    capture_output=True, text=True, timeout=30, check=True).stdout
+                return [int(line) for line in output.split()]
+            output = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,comm="], capture_output=True, text=True, timeout=10, check=True).stdout
+            found = []
+            for line in output.splitlines():
+                fields = line.split(None, 2)
+                if len(fields) == 3 and fields[1] == str(daemon.pid) and Path(fields[2]).name.startswith("pmuxd"):
+                    found.append(int(fields[0]))
+            return found
+
+        def worker_cpu():
+            return sum(cpu_seconds(pid) for pid in workers())
+
+        def worker_rss():
+            return round(sum(rss_mb(pid) for pid in workers()), 1)
+
+        pmuxd_rss_idle = rss_mb(daemon.pid)
+        # The live monitor in a pane, the way the Activity Monitor Space runs it.
+        live_monitor = "org.moonbase.activity-monitor"
+        cli("install", live_monitor)
+        cli("enable", live_monitor, "--allow", "activity.read:local")
+        launcher = bins / f"pmux-activity-monitor{suffix}"
+        reply = connection.request("create_session", name="bench-monitor",
+            spawn={"program": str(launcher), "argv": ["--socket", str(endpoint)], "cwd": None, "env": {}},
+            headless=False)
+        assert reply["status"] == "ok", reply
+
+        def monitor_pid():
+            snapshot = connection.request("snapshot")["response"]["snapshot"]
+            panes = [pane for session in snapshot["sessions"] if session["name"] == "bench-monitor"
+                     for window in session["windows"] for pane in window["panes"]]
+            return panes[0]["child_pid"] if panes and panes[0].get("child_pid") else None
+
+        deadline = time.monotonic() + 20
+        while monitor_pid() is None:
+            assert time.monotonic() < deadline, "the live monitor never started"
+            time.sleep(0.25)
+        viewer = monitor_pid()
+        time.sleep(5)
+        before = (cpu_seconds(daemon.pid), cpu_seconds(viewer), worker_cpu())
+        time.sleep(window)
+        after = (cpu_seconds(daemon.pid), cpu_seconds(viewer), worker_cpu())
+        watched = [round(100 * (late - early) / window, 1) for early, late in zip(before, after)]
+        rss_watched = (rss_mb(daemon.pid), rss_mb(viewer), worker_rss())
+        # Seat load: every seat runs one turn with a test every two seconds.
+        published = 0
+
+        def publish(seat, run, kind):
+            nonlocal published
+            event = {"schema_version": 1, "seat": seat, "run_id": run,
+                     "event_id": hashlib.sha256(f"{seat}:{run}:{kind}:{time.monotonic_ns()}".encode()).hexdigest(),
+                     "source": "hooks", "kind": kind}
+            reply = connection.request("publish_activity", event=event)
+            assert reply["status"] == "ok", reply
+            published += 1
+
+        before = (cpu_seconds(daemon.pid), cpu_seconds(viewer), worker_cpu())
+        started = time.monotonic()
+        deadline = started + window
+        turn = 0
+        while time.monotonic() < deadline:
+            turn += 1
+            for index in range(count):
+                seat = f"bench-seat-{index:02d}"
+                run = hashlib.sha256(f"{seat}:{turn}".encode()).hexdigest()
+                for kind in ("turn_started", "test_started", "test_passed", "turn_finished"):
+                    publish(seat, run, kind)
+            time.sleep(2.0)
+        loaded_window = time.monotonic() - started
+        after = (cpu_seconds(daemon.pid), cpu_seconds(viewer), worker_cpu())
+        loaded = [round(100 * (late - early) / loaded_window, 1) for early, late in zip(before, after)]
+        rss_loaded = (rss_mb(daemon.pid), rss_mb(viewer), worker_rss())
+        assert monitor_pid() == viewer, "the live monitor exited under load"
+        live = {
+            "pmuxd_rss_mb_idle_feed_on": pmuxd_rss_idle,
+            "watched_idle": {"pmuxd_cpu_percent": watched[0], "monitor_cpu_percent": watched[1],
+                             "plugin_worker_cpu_percent": watched[2],
+                             "pmuxd_rss_mb": rss_watched[0], "monitor_rss_mb": rss_watched[1],
+                             "plugin_worker_rss_mb": rss_watched[2]},
+            "watched_under_load": {"events_per_second": round(published / loaded_window, 1),
+                                   "pmuxd_cpu_percent": loaded[0], "monitor_cpu_percent": loaded[1],
+                                   "plugin_worker_cpu_percent": loaded[2],
+                                   "pmuxd_rss_mb": rss_loaded[0], "monitor_rss_mb": rss_loaded[1],
+                                   "plugin_worker_rss_mb": rss_loaded[2]},
+        }
         measured = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True)
         result = {
             "commit": measured.stdout.strip() if measured.returncode == 0 else None,
@@ -346,6 +453,7 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
             "pmuxd_cpu_percent_monitor_polling": round(100 * polled / window, 1),
             "monitor_polls": polls,
             "seat_states": sorted(set(last_states)),
+            "live_monitor": live,
         }
         (scratch / "activity-bench.json").write_text(json.dumps(result, indent=2) + "\n")
         print("ACTIVITY_BENCH " + json.dumps(result), flush=True)
@@ -1032,6 +1140,13 @@ def main():
     parser.add_argument("--debug", action="store_false", dest="release", help="use slower debug native binaries for local diagnostics")
     parser.add_argument("--feature", choices=["all","activity-bench","endpoint-pressure","legacy-import","production","discovery","remote-query"], default="all")
     args = parser.parse_args()
+    # A killed run (timeout, cancel, closed terminal) still runs the finally
+    # blocks that stop each isolated daemon.
+    def interrupted(signum, _frame):
+        raise SystemExit(128 + signum)
+    for name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), interrupted)
     if bool(args.bundle) != (args.feature in ("production", "remote-query")):
         parser.error("--bundle is required with --feature production or remote-query")
     if args.bins and (args.feature != "production" or not args.frame_probe):

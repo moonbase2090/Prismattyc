@@ -4,6 +4,7 @@
 
 ### Added
 
+- The command palette has an `activity_monitor` entry that opens a Space named Activity Monitor, or switches to it when it already exists. The Space holds one session running the activity monitor. The monitor starts again when it was quit. `pmux space monitor` does the same from a terminal. The entry has no default shortcut; bind one with `activity_monitor` under `[keys]`. `PMUX_ACTIVITY_MONITOR` overrides the monitor path. Opening it on a fresh install installs and enables the two activity plug-ins with the local read grant, and no other grant.
 - Plug-in views get mouse input. The plug-in API is now `pmux:plugin@2.0.0` and the view interface `pmux:view@2.0.0`, with a `mouse` event carrying a press, release or wheel turn and its cell. A new event case breaks components built for 1.x, so plug-ins built for 1.x are listed as incompatible until they are rebuilt. Hosts forward presses, releases and the wheel but not pointer motion. In the activity monitor, a click selects a seat, a second click on it opens its details, the wheel moves the selection or scrolls the timeline and details, and a right-click goes back to the list. The activity monitor package is now 1.1.0 and the connector 1.0.1, both built for the new interface. An enabled plug-in whose selected package is incompatible moves to the newest bundled version that runs on this core, keeping its grants; older packages stay listed as incompatible, and nothing moves when no compatible version is bundled.
 
 ## [0.3.58] - 2026-11-05

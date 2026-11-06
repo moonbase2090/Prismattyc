@@ -132,7 +132,7 @@ Prismattyc releases before raw-upload support decode Kitty graphics but drop raw
 
 ## Launch
 
-With no `--socket` or `--host`, the monitor reads the pmuxd that `pmux` would use: `PMUX_INSTANCE` and `PMUX_SOCKET` (every pmux pane exports it), then the `[mux]` config, then pmux's default path. In a blank Prismattyc pane, `pmux-activity-monitor` is the whole command. The `pmux activity` commands, added separately, include `pmux activity monitor [ARGS]`, which does the same with pmux's resolved socket. `--snapshot --size COLSxROWS` renders one frame as text for scripts and tests.
+With no `--socket` or `--host`, the monitor reads the pmuxd that `pmux` would use: `PMUX_INSTANCE` and `PMUX_SOCKET` (every pmux pane exports it), then the `[mux]` config, then pmux's default path. In the Prismattyc app, choose Activity Monitor in the command palette (or run `pmux space monitor`): it opens or focuses a Space named Activity Monitor and runs the monitor there, and on a fresh install it first installs and enables the two activity plug-ins with the local read grant and nothing else. Choosing it again while the monitor runs changes nothing, and after `q` it starts the monitor again. In a blank Prismattyc pane, `pmux-activity-monitor` is the whole command. The `pmux activity` commands, added separately, include `pmux activity monitor [ARGS]`, which does the same with pmux's resolved socket. `--snapshot --size COLSxROWS` renders one frame as text for scripts and tests.
 
 When the only host has nothing to show, the pane explains why instead of showing an empty list:
 

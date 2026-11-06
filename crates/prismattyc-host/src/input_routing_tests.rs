@@ -994,6 +994,21 @@ fn verify_dispatch(host: &mut HostState) {
     assert!(host.terminal_messages);
     assert!(host.terminal_targets.is_some());
 
+    quiet(host);
+    // The action hands the Space to `pmux space monitor` in the background
+    // and says so; it never opens a tab of its own.
+    let tabs = host.mux.tab_count();
+    assert_eq!(dispatch(host, A::ActivityMonitor), Dispatch::Handled);
+    assert_eq!(host.mux.tab_count(), tabs);
+    assert!(
+        toast_text(host).contains("Activity Monitor"),
+        "{}",
+        toast_text(host)
+    );
+    // A second request while the first runs does not start another helper.
+    assert_eq!(dispatch(host, A::ActivityMonitor), Dispatch::Handled);
+    host.activity_monitor = Default::default();
+
     host.space_polish.undo = None;
     assert_eq!(dispatch(host, A::UndoSpaceChange), Dispatch::Handled);
     assert!(

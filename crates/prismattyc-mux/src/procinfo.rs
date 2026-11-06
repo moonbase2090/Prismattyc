@@ -955,6 +955,36 @@ pub(crate) fn executable_name(program: &str) -> String {
     name.strip_suffix(".exe").unwrap_or(&name).to_string()
 }
 
+/// Undo the rename an in-place self-update leaves on a running Windows
+/// executable. A running `claude.exe` cannot be overwritten, so updaters move
+/// it aside (`claude.exe.old.<stamp>.<pid>`, `agy.exe.<stamp>.old`) and a live
+/// process then reports that temporary path as its image. Saving that path
+/// restores to a file that no longer exists, leaving a bare shell.
+#[cfg(any(windows, test))]
+fn strip_replaced_exe_suffix(path: &str) -> Option<String> {
+    let split = path.rfind(['\\', '/']).map_or(0, |index| index + 1);
+    let (dir, file) = path.split_at(split);
+    let lower = file.to_ascii_lowercase();
+    let end = lower.find(".exe.")? + ".exe".len();
+    let parts: Vec<&str> = lower[end + 1..].split('.').collect();
+    let numeric = |part: &&str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    let replaced = match parts.as_slice() {
+        ["old"] => true,
+        ["old", rest @ ..] => rest.iter().all(numeric),
+        [stamp @ .., "old"] => stamp.iter().all(numeric),
+        _ => false,
+    };
+    replaced.then(|| format!("{dir}{}", &file[..end]))
+}
+
+/// The path to relaunch for a live process image, undoing an updater's
+/// rename when the original name is back in place.
+#[cfg(windows)]
+fn live_program_path(exe: &str) -> String {
+    strip_replaced_exe_suffix(exe)
+        .filter(|original| Path::new(original).is_file())
+        .unwrap_or_else(|| exe.to_owned())
+}
 /// Quote argv so a shell can parse it back.
 #[must_use]
 pub fn shell_join(args: &[String]) -> String {
@@ -1406,6 +1436,25 @@ mod macos {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn replaced_exe_suffix_is_stripped() {
+        for (input, want) in [
+            (
+                r"C:\u\.local\bin\claude.exe.old.1793976500346.66520",
+                Some(r"C:\u\.local\bin\claude.exe"),
+            ),
+            (
+                r"C:\u\agy\bin\agy.exe.1793983045218694700.old",
+                Some(r"C:\u\agy\bin\agy.exe"),
+            ),
+            (r"C:\u\bin\codex.EXE.old", Some(r"C:\u\bin\codex.EXE")),
+            (r"C:\u\bin\claude.exe", None),
+            (r"C:\u\bin\tool.exe.config", None),
+            (r"C:\u\bin\tool.exe.old.x", None),
+        ] {
+            assert_eq!(strip_replaced_exe_suffix(input).as_deref(), want, "{input}");
+        }
+    }
     use super::*;
 
     #[test]
@@ -2222,7 +2271,8 @@ mod windows {
                     .iter()
                     .map(|arg| arg.to_str().map(str::to_owned))
                     .collect::<Option<_>>()?;
-                *args.first_mut()? = process.exe()?.to_str()?.to_owned();
+                let exe = process.exe()?.to_str()?.to_owned();
+                *args.first_mut()? = live_program_path(&exe);
                 let name = executable_name(args.first()?);
                 let shell = matches!(name.as_str(), "cmd" | "powershell" | "pwsh")
                     || is_shell_argv(std::slice::from_ref(&name));

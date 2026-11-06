@@ -202,16 +202,19 @@ fn sidebar_keeps_blank_terminal_in_inactive_space() {
         fn resumed(&mut self, event_loop: &ActiveEventLoop) {
             let id = self.app.open_window(event_loop, false).unwrap();
             let host = self.app.windows.get_mut(&id).unwrap();
-            for name in ["alpha", "beta"] {
+            let alpha_owner = prismattyc_mux::new_space_id().unwrap();
+            let beta_owner = prismattyc_mux::new_space_id().unwrap();
+            for (name, owner) in [("alpha", &alpha_owner), ("beta", &beta_owner)] {
                 let space = serde_json::from_value(serde_json::json!({
-                    "version": 2, "saved_at_unix": 0, "sessions": [], "id": name
+                    "version": 2, "saved_at_unix": 0, "sessions": [], "id": owner
                 }))
                 .unwrap();
                 prismattyc_mux::save_space(&spaces_dir(), name, &space).unwrap();
+                load_space(&spaces_dir(), name).unwrap();
             }
             host.space_rail.names = vec!["alpha".into(), "beta".into()];
             host.space_rail.set_current(Some("alpha".into()));
-            host.mux.space_id = Some("alpha".into());
+            host.mux.space_id = Some(alpha_owner.clone());
             let pane = host.mux.focused_id();
             host.mux.retain_local_terminal(pane);
             host.mux.set_pane_title(pane, Some("Blank keeper".into()));
@@ -226,9 +229,9 @@ fn sidebar_keeps_blank_terminal_in_inactive_space() {
             };
             let before = project(host);
             assert_eq!(before.spaces[0].tabs[0].panes[0].title, "Blank keeper");
-            assert!(!local_views::switch(host, Some("beta".into())).unwrap());
+            assert!(!local_views::switch(host, Some(beta_owner)).unwrap());
             host.space_rail.set_current(Some("beta".into()));
-            let parked = &host.local_views.parked[&Some("alpha".into())].mux;
+            let parked = &host.local_views.parked[&Some(alpha_owner.clone())].mux;
             assert_eq!(parked.focused_id(), pane);
             assert_eq!(parked.focused().child_pid(), Some(child));
             assert!(parked.focused().child_alive);
@@ -243,14 +246,14 @@ fn sidebar_keeps_blank_terminal_in_inactive_space() {
             assert!(!away.spaces[0].tabs[0].panes[0].focused);
             let original = load_space(&spaces_dir(), "alpha").unwrap();
             let mut replacement = original.clone();
-            replacement.id = Some("replacement-alpha".into());
+            replacement.id = Some(prismattyc_mux::new_space_id().unwrap());
             prismattyc_mux::save_space(&spaces_dir(), "alpha", &replacement).unwrap();
             assert!(
                 project(host).spaces[0].tabs.is_empty(),
                 "a replacement Space must not borrow the old owner's blank terminal"
             );
             prismattyc_mux::save_space(&spaces_dir(), "alpha", &original).unwrap();
-            assert!(local_views::switch(host, Some("alpha".into())).unwrap());
+            assert!(local_views::switch(host, Some(alpha_owner)).unwrap());
             host.space_rail.set_current(Some("alpha".into()));
             assert_eq!(host.mux.focused_id(), pane);
             assert_eq!(host.mux.focused().child_pid(), Some(child));

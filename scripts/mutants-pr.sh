@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Manual cargo-mutants pass on the crates a branch touches (PT-225). Not a merge gate.
+# Manual cargo-mutants pass on the crates a branch touches. Not a merge gate.
 # Usage: ./scripts/mutants-pr.sh
 #
 # Writes origin/<base>...HEAD to build/git.diff, runs cargo mutants

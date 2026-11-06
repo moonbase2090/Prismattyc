@@ -15,7 +15,7 @@ after reclaim, the script exits with `reclaim did not restore
 headroom`. Single-job debug still uses
 `local-actions run --job NAME`.
 
-Heavy jobs must not overlap on the dogfood host (PT-305): the
+Heavy jobs must not overlap on one local machine: the
 native-container jobs (`spaces-e2e`, `spaces-e2e-wayland`,
 `walkthrough-caption-e2e`, `render-bench`). `scripts/la-heavy-serial.py` takes one
 exclusive lock for those jobs. Acquire waits and retries when the lock

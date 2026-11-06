@@ -145,7 +145,7 @@ def build(args, scratch):
         connector_module = target / "wasm32-unknown-unknown/release/pmux_activity_connector_plugin.wasm"
         run("run", "-p", "prismattyc-mux", "--example", "package_plugin", "--locked", "--", str(bundle), str(good), str(module), str(bad), str(module), str(monitor), str(monitor_module), str(connector), str(connector_module))
     run("build", "-p", "prismattyc-mux", "--example", "plugin_frame_probe", "--locked")
-    run("build", "-p", "prismattyc-mux", "--bin", "pmux", "--bin", "pmuxd", "--locked", PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
+    run("build", "-p", "prismattyc-mux", "--bin", "pmux", "--bin", "pmuxd", "--bin", "pmux-attach", "--locked", PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
     run("build", "-p", "pmux-mcp", "--locked", PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
     run("build", "--manifest-path", "tools/activity-monitor/Cargo.toml", "--locked", PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
     return target / ("release" if args.release else "debug")

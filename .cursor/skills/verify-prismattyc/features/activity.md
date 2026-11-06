@@ -39,6 +39,10 @@ Accessibility permission; Linux needs X11, XTEST, xdotool, and a window manager;
 Windows needs an interactive user session. The fixture owns private daemon,
 host, and synthetic activity state. It does not prove provider hook execution.
 Match the recorded revision and binary build before claiming exact-head proof.
+Retain `native-input.json` with the native flow result. It records injected
+event flags or the registered native window and actual pointer target. Compare
+these receipts with render status's `input_state` and pane mouse modes to
+distinguish input targeting from guest behavior.
 Map daemon pane IDs through `current_panes` to the host's
 `visible_pane_content_rects`. `visible_pane_slots` includes pane headers and
 padding, so it cannot locate terminal cells.

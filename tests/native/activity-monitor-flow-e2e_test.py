@@ -4,6 +4,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location(
     "activity_flow", Path(__file__).with_name("activity-monitor-flow-e2e.py"))
@@ -54,6 +55,54 @@ class MonitorPointer(unittest.TestCase):
         pane = {"id": 2, "geometry": {"cols": 83, "rows": 26}}
         with self.assertRaisesRegex(flow.Failed, "no visible host attachment"):
             flow.monitor_cell_point(status, pane, (100, 200, 980, 630), (980, 630), 20, 5)
+
+
+class InheritedFlagsQuartz:
+    """An OS event sink whose newly allocated events inherit held Shift."""
+    def __init__(self):
+        self.posted = []
+
+    def CGEventCreateMouseEvent(self, source, kind, point, button):
+        return {"kind": kind, "point": point, "flags": flow.MAC_FLAGS["shift"]}
+
+    def CGEventCreateScrollWheelEvent2(self, source, units, count, y, x, z):
+        return {"kind": 22, "delta": y, "flags": flow.MAC_FLAGS["shift"]}
+
+    def CGEventSetFlags(self, event, flags):
+        event["flags"] = flags
+
+    def CGEventGetFlags(self, event):
+        return event["flags"]
+
+    def CGEventGetIntegerValueField(self, event, field):
+        return event["delta"]
+
+    def CGEventSetLocation(self, event, point):
+        event["point"] = point
+
+    def CGEventPost(self, tap, event):
+        self.posted.append(dict(event))
+
+    def CFRelease(self, event):
+        pass
+
+
+class MacPointerModifiers(unittest.TestCase):
+    def test_plain_wheel_after_shift_right_click_emits_unmodified_events(self):
+        adapter = flow.MacInput.__new__(flow.MacInput)
+        adapter.quartz = InheritedFlagsQuartz()
+        adapter.Point = lambda x, y: (x, y)
+        adapter.diagnostics = {"events": []}
+        with patch.object(flow.time, "sleep"):
+            adapter.click(100, 200, button="right", shift=True)
+            adapter.wheel(100, 200, -1)
+        self.assertEqual(adapter.quartz.posted, [
+            {"kind": 5, "point": (100, 200), "flags": 0},
+            {"kind": 3, "point": (100, 200), "flags": 131072},
+            {"kind": 4, "point": (100, 200), "flags": 131072},
+            {"kind": 5, "point": (100, 200), "flags": 0},
+            {"kind": 22, "delta": 1, "point": (100, 200), "flags": 0},
+        ])
 
 
 if __name__ == "__main__":

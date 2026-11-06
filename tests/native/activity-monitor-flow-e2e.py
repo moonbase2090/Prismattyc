@@ -74,7 +74,7 @@ def kill_tree(process):
     else:
         try:
             os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
         try:
             process.wait(10)
@@ -82,7 +82,7 @@ def kill_tree(process):
             pass
         try:
             os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
     try:
         process.wait(10)
@@ -196,13 +196,17 @@ class MacInput:
         self.quartz.CGEventPost(0, event)
         self.quartz.CFRelease(event)
 
-    def click(self, x, y, button="left"):
+    def click(self, x, y, button="left", shift=False):
         right = button == "right"
         self._mouse(5, x, y)
         time.sleep(0.1)
-        self._mouse(3 if right else 1, x, y, 1 if right else 0)
-        time.sleep(0.05)
-        self._mouse(4 if right else 2, x, y, 1 if right else 0)
+        for kind in ((3, 4) if right else (1, 2)):
+            event = self.quartz.CGEventCreateMouseEvent(None, kind, self.Point(x, y), 1 if right else 0)
+            assert event, "mouse event allocation"
+            self.quartz.CGEventSetFlags(event, MAC_FLAGS["shift"] if shift else 0)
+            self.quartz.CGEventPost(0, event)
+            self.quartz.CFRelease(event)
+            time.sleep(0.05)
         time.sleep(0.3)
 
     def wheel(self, x, y, notches):
@@ -254,10 +258,16 @@ class XdotoolInput:
         fields = dict(line.split("=") for line in out.split())
         return int(fields["X"]), int(fields["Y"]), int(fields["WIDTH"]), int(fields["HEIGHT"])
 
-    def click(self, x, y, button="left"):
+    def click(self, x, y, button="left", shift=False):
         subprocess.run(["xdotool", "mousemove", "--sync", str(x), str(y)], check=True)
         time.sleep(0.1)
-        subprocess.run(["xdotool", "click", "3" if button == "right" else "1"], check=True)
+        if shift:
+            subprocess.run(["xdotool", "keydown", "shift"], check=True)
+        try:
+            subprocess.run(["xdotool", "click", "3" if button == "right" else "1"], check=True)
+        finally:
+            if shift:
+                subprocess.run(["xdotool", "keyup", "shift"], check=True)
         time.sleep(0.3)
 
     def wheel(self, x, y, notches):
@@ -339,15 +349,19 @@ class WindowsInput:
         self.user.ClientToScreen(self.hwnd, self.c.byref(origin))
         return origin.x, origin.y, rect.right - rect.left, rect.bottom - rect.top
 
-    def click(self, x, y, button="left"):
+    def click(self, x, y, button="left", shift=False):
         if self.user.GetForegroundWindow() != self.hwnd:
             self._focus()
         down, up = (0x8, 0x10) if button == "right" else (0x2, 0x4)
         self.user.SetCursorPos(int(x), int(y))
         time.sleep(0.1)
+        if shift:
+            self._vk(WIN_MOD["shift"], False)
         self.user.mouse_event(down, 0, 0, 0, 0)
         time.sleep(0.05)
         self.user.mouse_event(up, 0, 0, 0, 0)
+        if shift:
+            self._vk(WIN_MOD["shift"], True)
         time.sleep(0.3)
 
     def wheel(self, x, y, notches):
@@ -394,6 +408,21 @@ class PaneInput:
     def type(self, text):
         for character in text:
             self.key(character)
+
+    def mouse(self, button, column, row, release):
+        """One SGR mouse report at a zero-based cell, as a terminal would send it."""
+        pane = self.flow.monitor_pane()["id"]
+        report = f"\x1b[<{button};{column + 1};{row + 1}{'m' if release else 'M'}"
+        self.flow.cli("send", pane, "--literal", "--force", "--", report)
+        time.sleep(0.3)
+
+    def click(self, column, row, button=0):
+        self.mouse(button, column, row, False)
+        self.mouse(button, column, row, True)
+
+    def wheel(self, column, row, notches):
+        for _ in range(abs(notches)):
+            self.mouse(65 if notches > 0 else 64, column, row, False)
 
 
 class Flow:
@@ -566,6 +595,15 @@ class Flow:
                         return seat
         return None
 
+    def row_of(self, seat):
+        """The screen row (zero-based) a seat is listed on right now; the list reorders with age."""
+        return next((i for i, line in enumerate(self.screen().splitlines()) if seat in line), None)
+
+    def seat_at(self, row):
+        lines = self.screen().splitlines()
+        text = lines[row] if 0 <= row < len(lines) else ""
+        return next((seat for seat in ROWS if seat in text), None)
+
     def space_sessions(self):
         for line in self.cli("space", "ls").splitlines():
             if line.startswith(SPACE + "  "):
@@ -694,6 +732,52 @@ class Flow:
         wait_for(lambda: all(seat in self.screen() for seat in SEATS), "monitor lists every seat", 60)
         return {"pane": self.monitor_pane()["id"], "monitor_processes": len(self.monitor_processes())}
 
+    def mouse_headless(self):
+        """Terminal mouse reports reach the monitor: select, open, right-click back, wheel, help."""
+        checked = []
+        self.keys.key("home")
+        time.sleep(0.5)
+        seat = next(name for name in SEATS if name != self.selected())
+
+        def back_to_list():
+            for _ in range(3):
+                if self.selected() is not None:
+                    return
+                self.keys.key("escape")
+                time.sleep(0.3)
+
+        row = None
+        for _ in range(12):  # the list reorders, so look again before each click
+            back_to_list()
+            row = self.row_of(seat)
+            if row is not None:
+                self.keys.click(20, row)
+                if poll(lambda: self.selected() == seat, 3):
+                    break
+        else:
+            raise Failed(f"no click selected {seat} (last row {row}):\n" + "\n".join(self.screen().splitlines()[:9]))
+        checked.append(f"click selected {seat}")
+        row = self.row_of(seat)
+        self.keys.click(20, row)
+        wait_for(lambda: "esc back" in self.screen() and "▌" not in self.screen(), "second click opens the seat", 10)
+        checked.append("second click opened the details")
+        self.keys.click(20, row, 2)
+        wait_for(lambda: self.selected() == seat, "right-click back to the list", 10)
+        checked.append("right-click went back to the list")
+        row = self.row_of(seat)
+        turn = 1 if self.seat_at(row + 1) is not None else -1  # the last seat cannot move down
+        self.keys.wheel(20, row, turn)
+        wait_for(lambda: self.selected() not in (None, seat), "the wheel moves the selection", 10)
+        self.keys.wheel(20, row, -turn)
+        wait_for(lambda: self.selected() == seat, "the wheel moves the selection back", 10)
+        checked.append("wheel moved the selection down and back")
+        self.keys.key("?")
+        wait_for(lambda: "first or last" in self.screen(), "help", 10)
+        self.keys.click(20, row)
+        wait_for(lambda: "first or last" not in self.screen(), "a click closes the help", 10)
+        checked.append("a click closed the help")
+        return {"mouse": checked}
+
     def quit_headless(self):
         self.keys.key("q")
         wait_for(lambda: not any(seat in self.screen() for seat in SEATS), "monitor quit to the shell")
@@ -758,17 +842,15 @@ class Flow:
         return {"keys": checked}
 
     def mouse_step(self):
-        """Real pointer events through the host: select, open, wheel and go back."""
-        x0, y0, width, height = self.keys.frame()
+        """Native pointer events through the host: select, open, wheel and close the help."""
+        x0, y0, _, _ = self.keys.frame()
         pane = self.monitor_pane()
-        rows = pane["geometry"]["rows"]
-        pitch = height / max(rows, 1)
-        x = x0 + width // 4
+        # The host reports the pane's pixel rectangle inside its window.
+        slots = {slot[0]: slot[1] for slot in self.status().get("visible_pane_slots") or []}
+        px, py, pw, ph = slots[pane["id"]]
+        cell_w, cell_h = pw / pane["geometry"]["cols"], ph / pane["geometry"]["rows"]
+        x = int(x0 + px + 20 * cell_w)
         checked = []
-
-        def line_of(seat):
-            lines = self.screen().splitlines()
-            return next((i for i, line in enumerate(lines) if seat in line), None)
 
         def back_to_list():
             for _ in range(3):
@@ -778,44 +860,35 @@ class Flow:
                 time.sleep(0.3)
 
         def click_seat(target):
-            """Click until the target seat is the selected one; return the y that did it."""
-            back_to_list()
-            line = line_of(target)
-            assert line is not None, f"{target} is not on the screen"
-            y = y0 + (line + 0.5) * pitch
-            y = max(y, y0 + 36)
-            for _ in range(14):
-                self.keys.click(x, int(y))
-                if self.selected() == target:
-                    return int(y)
-                current = self.selected()
-                if current is None:  # a click landed on a selected seat and opened it
-                    back_to_list()
-                    current = self.selected()
-                if current in ROWS:
-                    y += (ROWS.index(target) - ROWS.index(current)) * pitch
-                else:
-                    y += pitch
-            raise Failed(f"no click selected {target}; last y {int(y)} of {y0}+{height}")
+            """Click the seat's row until it is selected; the list reorders, so look again each time."""
+            for _ in range(8):
+                back_to_list()
+                row = self.row_of(target)
+                if row is None:
+                    continue
+                y = int(y0 + py + (row + 0.5) * cell_h)
+                self.keys.click(x, y)
+                if poll(lambda: self.selected() == target, 3):
+                    return y
+            raise Failed(f"no click selected {target} (pane at {y0 + py}, cell {cell_h:.1f}px)")
 
-        # Start from the first seat so the second seat is a move, not a repeat.
-        back_to_list()
         self.keys.key("home")
-        wait_for(lambda: self.selected() == ROWS[0], "first seat", 10)
-        y = click_seat(ROWS[2])
-        checked.append(f"click selected {ROWS[2]}")
+        time.sleep(0.5)
+        seat = next(name for name in SEATS if name != self.selected())
+        y = click_seat(seat)
+        checked.append(f"click selected {seat}")
         self.keys.click(x, y)
         wait_for(lambda: "esc back" in self.screen() and "▌" not in self.screen(), "second click opens the seat", 10)
         checked.append("second click opened the details")
-        self.keys.click(x, y, "right")
-        wait_for(lambda: self.selected() == ROWS[2], "right-click back to the list", 10)
-        checked.append("right-click went back to the list")
-        self.keys.wheel(x, y, 1)
-        wait_for(lambda: self.selected() == ROWS[3], "wheel down moves the selection", 10)
-        checked.append("wheel down moved the selection")
-        self.keys.wheel(x, y, -1)
-        wait_for(lambda: self.selected() == ROWS[2], "wheel up moves the selection", 10)
-        checked.append("wheel up moved it back")
+        # The host keeps right-click for its own pane menu, so go back with the keyboard.
+        self.keys.key("escape")
+        wait_for(lambda: self.selected() == seat, "back to the list", 10)
+        turn = 1 if self.seat_at(self.row_of(seat) + 1) is not None else -1  # the last seat cannot move down
+        self.keys.wheel(x, y, turn)
+        wait_for(lambda: self.selected() not in (None, seat), "the wheel moves the selection", 10)
+        self.keys.wheel(x, y, -turn)
+        wait_for(lambda: self.selected() == seat, "the wheel moves the selection back", 10)
+        checked.append("wheel moved the selection down and back")
         self.keys.key("?")
         wait_for(lambda: "first or last" in self.screen(), "help", 10)
         self.keys.click(x, y)
@@ -871,6 +944,7 @@ def main():
         if args.no_gui:
             flow.step("open", flow.open_headless)
             flow.step("keys", flow.keys_step)
+            flow.step("mouse", flow.mouse_headless)
             flow.step("quit", flow.quit_headless)
         else:
             flow.step("open", flow.open)

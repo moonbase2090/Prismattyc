@@ -3,7 +3,7 @@
 
 use anyhow::{bail, ensure, Result};
 use prismattyc_core::AgentId;
-use prismattyc_mux::plugins::{Client, EndpointSource, Reply, Request};
+use prismattyc_mux::plugins::{Client, EndpointSource, GraphStyle, Reply, Request};
 use serde_json::{json, Value};
 use std::env;
 use std::io::{self, Write};
@@ -34,6 +34,7 @@ const CONNECTOR: &str = "org.moonbase.activity-connector";
 const USAGE: &str = "usage: pmux-activity-monitor [--socket PATH] [--host LABEL=PATH]... [--host-cmd LABEL JSON_ARGV]...
   (with no --socket or --host, reads this machine's pmuxd, found the way pmux finds it)
                              [--theme auto|dark|light] [--no-pixels] [--no-motion]
+                             [--graph-style braille|block|ascii]
                              [--snapshot [--size COLSxROWS]]
        pmux-activity-monitor --socket PATH (--json [--since CURSOR|UNIX_MS] | --seats | --recent SEAT | --tail [--seat SEAT])
        pmux-activity-monitor --version";
@@ -61,6 +62,7 @@ struct Options {
     size: Option<(u16, u16)>,
     theme: ThemeChoice,
     pixels: bool,
+    graph_style: Option<GraphStyle>,
     motion: bool,
 }
 
@@ -137,6 +139,7 @@ fn options_with(
     let mut size = None;
     let mut theme = ThemeChoice::Auto;
     let mut pixels = true;
+    let mut graph_style = None;
     let mut motion = true;
     let next = |args: &mut dyn Iterator<Item = std::ffi::OsString>| -> Result<String> {
         args.next()
@@ -179,6 +182,17 @@ fn options_with(
                 };
             }
             Some("--no-pixels") => pixels = false,
+            Some("--graph-style") => {
+                graph_style = Some(
+                    args.next()
+                        .and_then(|arg| arg.into_string().ok())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("--graph-style requires braille, block or ascii")
+                        })?
+                        .parse::<GraphStyle>()
+                        .map_err(anyhow::Error::msg)?,
+                );
+            }
             Some("--no-motion") => motion = false,
             Some("--help" | "-h") => {
                 println!("{USAGE}");
@@ -230,6 +244,7 @@ fn options_with(
         size,
         theme,
         pixels,
+        graph_style,
         motion,
     }))
 }
@@ -358,6 +373,16 @@ fn tail(mut client: Client, socket: &std::path::Path, seat: Option<&AgentId>) ->
     Ok(())
 }
 
+fn graph_style(
+    cli: Option<GraphStyle>,
+    configured: Option<GraphStyle>,
+    term: Option<&str>,
+) -> GraphStyle {
+    cli.or(configured)
+        .unwrap_or_default()
+        .for_terminal(term == Some("dumb"))
+}
+
 fn main() -> Result<()> {
     if prismattyc_mux::plugins::print_bundled_identity()? {
         return Ok(());
@@ -381,7 +406,13 @@ fn main() -> Result<()> {
     )?;
     match &options.mode {
         Mode::Live | Mode::Snapshot => {
-            let mut args = vec!["run".into(), "org.moonbase.activity-monitor".into()];
+            let config = prismattyc_mux::load_mux_section(&prismattyc_mux::prism_config_path())?;
+            let style = graph_style(
+                options.graph_style,
+                config.activity_graph_style,
+                env::var("TERM").ok().as_deref(),
+            );
+            let mut args = vec!["run".into(), MONITOR.into(), style.view().into()];
             if options.socket.is_some() {
                 args.extend(["--endpoint".into(), format!("local={}", local_label())]);
             }
@@ -577,6 +608,10 @@ mod tests {
     fn display_flags_parse_and_default_on() -> Result<()> {
         let plain = parse(&["--socket", "/a"])?;
         assert!(plain.pixels && plain.motion && plain.theme == ThemeChoice::Auto);
+        assert_eq!(
+            graph_style(plain.graph_style, None, None),
+            GraphStyle::Braille
+        );
         assert!(matches!(plain.mode, Mode::Live));
         let set = parse(&[
             "--socket",
@@ -596,6 +631,40 @@ mod tests {
             ThemeChoice::Auto
         );
         assert!(parse(&["--socket", "/a", "--theme", "sepia"]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn graph_style_honors_cli_config_and_only_known_ascii_fallback() -> Result<()> {
+        for (value, style) in [
+            ("braille", GraphStyle::Braille),
+            ("block", GraphStyle::Block),
+            ("ascii", GraphStyle::Ascii),
+        ] {
+            assert_eq!(
+                parse(&["--socket", "/a", "--graph-style", value])?.graph_style,
+                Some(style)
+            );
+        }
+        assert_eq!(
+            graph_style(None, Some(GraphStyle::Block), None),
+            GraphStyle::Block
+        );
+        assert_eq!(
+            graph_style(
+                Some(GraphStyle::Braille),
+                Some(GraphStyle::Block),
+                Some("xterm-256color")
+            ),
+            GraphStyle::Braille
+        );
+        assert_eq!(graph_style(None, None, Some("dumb")), GraphStyle::Ascii);
+        assert_eq!(
+            graph_style(None, None, Some("unknown-terminal")),
+            GraphStyle::Braille
+        );
+        assert!(parse(&["--socket", "/a", "--graph-style", "pixels"]).is_err());
+        assert!(parse(&["--socket", "/a", "--graph-style"]).is_err());
         Ok(())
     }
 

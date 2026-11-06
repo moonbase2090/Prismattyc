@@ -44,6 +44,8 @@ pub struct MuxSection {
     /// pmuxd watches the config and starts or stops the feed live, without a
     /// restart.
     pub experimental_activity: Option<bool>,
+    /// Activity monitor cell graphs. Defaults to braille; pixels are independent.
+    pub activity_graph_style: Option<pmux_plugin_api::monitor::GraphStyle>,
     /// Optional outbound activity notification endpoint.
     pub activity_webhook_url: Option<String>,
     /// File containing the webhook HMAC key; inline keys are rejected.
@@ -355,6 +357,12 @@ pub const MUX_KEYS: &[MuxKeySpec] = &[
         doc: "Collect activity metadata live, without a restart. Enable monitor and query access separately in Settings > Plug-ins",
         range: "true|false; default true",
         kind: MuxKeyKind::Bool(true),
+    },
+    MuxKeySpec {
+        name: "activity_graph_style",
+        doc: "Activity monitor cell graph style. Kitty pixels remain independent",
+        range: "braille|block|ascii; default braille",
+        kind: MuxKeyKind::String("braille"),
     },
 ];
 
@@ -685,6 +693,32 @@ fn first_name(candidates: [Option<String>; 3]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_graph_style_is_typed_and_omission_keeps_braille() {
+        use pmux_plugin_api::monitor::GraphStyle;
+        let path = Path::new("config.toml");
+        let defaults = parse_mux_section("[mux]\n", path).unwrap();
+        assert_eq!(
+            defaults.activity_graph_style.unwrap_or_default(),
+            GraphStyle::Braille
+        );
+        for (name, style) in [
+            ("braille", GraphStyle::Braille),
+            ("block", GraphStyle::Block),
+            ("ascii", GraphStyle::Ascii),
+        ] {
+            let input = format!("[mux]\nactivity_graph_style = \"{name}\"\n");
+            assert_eq!(
+                parse_mux_section(&input, path)
+                    .unwrap()
+                    .activity_graph_style,
+                Some(style)
+            );
+            assert!(mux_unknown_key_warnings(&input).unwrap().is_empty());
+        }
+        assert!(parse_mux_section("[mux]\nactivity_graph_style = \"pixels\"\n", path).is_err());
+    }
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -1045,6 +1079,7 @@ mod tests {
                 remote_size: None,
                 allow_mixed_case_session_names: None,
                 experimental_activity: None,
+                activity_graph_style: None,
                 activity_webhook_url: None,
                 activity_webhook_secret_file: None,
                 activity_webhook_secret: None,
@@ -1080,6 +1115,7 @@ mod tests {
                 remote_size: None,
                 allow_mixed_case_session_names: None,
                 experimental_activity: None,
+                activity_graph_style: None,
                 activity_webhook_url: None,
                 activity_webhook_secret_file: None,
                 activity_webhook_secret: None,
@@ -1103,6 +1139,7 @@ mod tests {
                 remote_size: None,
                 allow_mixed_case_session_names: None,
                 experimental_activity: None,
+                activity_graph_style: None,
                 activity_webhook_url: None,
                 activity_webhook_secret_file: None,
                 activity_webhook_secret: None,
@@ -1126,6 +1163,7 @@ mod tests {
                 remote_size: None,
                 allow_mixed_case_session_names: None,
                 experimental_activity: None,
+                activity_graph_style: None,
                 activity_webhook_url: None,
                 activity_webhook_secret_file: None,
                 activity_webhook_secret: None,
@@ -1148,6 +1186,7 @@ mod tests {
                 remote_size: None,
                 allow_mixed_case_session_names: None,
                 experimental_activity: None,
+                activity_graph_style: None,
                 activity_webhook_url: None,
                 activity_webhook_secret_file: None,
                 activity_webhook_secret: None,

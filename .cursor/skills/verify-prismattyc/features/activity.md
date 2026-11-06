@@ -60,10 +60,16 @@ python3 tests/native/hook-settings-e2e.py --pmux "$verify_bins/pmux" \
 
 Require `status: PASS` in `result.json` and inspect `commands.json`. The fixture
 uses private profile/configuration paths and starts no daemon. It checks repeated
-installation and removal, unmanaged settings, exact 1 MiB acceptance, oversized
+installation and removal, unmanaged settings, and complete profile-shape
+restoration after reinstalling with a different seat and disabling the failure
+hook. Require absent fields to disappear and preexisting empty objects and
+arrays to remain. It also checks exact 1 MiB acceptance, oversized
 refusal before UTF-8 decoding without changing the original bytes, and malformed
-input preservation. It also checks oversized Claude, Codex, Cursor, and Kiro
-profiles through `--install-hooks --all-harnesses`. Unix checks symlink and target-permission preservation;
+input preservation. Ownership receipts must stay unchanged on identical
+reinstallation, and malformed or oversized receipts must preserve both files.
+It also checks oversized Claude, Codex, Cursor, and Kiro
+profiles through `--install-hooks --all-harnesses`. Unix checks receipt identity
+through symlink aliases and target-permission preservation;
 Windows omits that case. This drive proves file editing, not provider execution
 or contained-package provenance. It requires Python 3, a matching CLI binary,
 and a new output directory.
@@ -72,7 +78,7 @@ Run the focused boundary and installer tests too:
 
 ```sh
 cargo +1.90.0 test -p prismattyc-mux --lib --locked config::tests:: -- --test-threads=1
-cargo +1.90.0 test -p prismattyc-mux --bin pmux --locked activity_emit::install::tests:: -- --test-threads=1
+cargo +1.90.0 test -p prismattyc-mux --bin pmux --locked activity_emit::install:: -- --test-threads=1
 ```
 
 The byte-consumption test must stop after the read limit plus one byte. The

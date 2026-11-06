@@ -7,6 +7,10 @@ use serde_json::{json, Value};
 
 use super::{Cli, MANAGED_MARKER};
 
+#[path = "activity_install_receipt.rs"]
+mod receipt;
+use receipt::CreatedFields;
+
 const EVENTS: &[&str] = &[
     "SessionStart",
     "SessionEnd",
@@ -63,15 +67,22 @@ fn reconcile(
     command: Option<&str>,
     schema: bool,
     failure: bool,
+    fields: &mut CreatedFields,
 ) -> Result<Value> {
     let object = document
         .as_object_mut()
         .context("hook settings must be a JSON object")?;
+    let mut created = fields.clone();
+    if command.is_some() {
+        created.hooks |= !object.contains_key("hooks");
+        created.schema |= schema && !object.contains_key("schema_version");
+    }
     if schema {
         match object.get("schema_version") {
-            None => {
+            None if command.is_some() => {
                 object.insert("schema_version".into(), json!(1));
             }
+            None => {}
             Some(value) if value == &json!(1) => {}
             _ => bail!("hook settings use a different schema version"),
         }
@@ -84,9 +95,9 @@ fn reconcile(
         .as_object_mut()
         .context("hooks must be a JSON object")?;
     // Remove only handlers carrying our marker, including events disabled by a later install.
-    for entries in hooks.values_mut() {
+    hooks.retain(|event, entries| {
         let Some(entries) = entries.as_array_mut() else {
-            continue;
+            return true;
         };
         entries.retain_mut(|entry| {
             let Some(handlers) = entry.get_mut("hooks").and_then(Value::as_array_mut) else {
@@ -101,13 +112,20 @@ fn reconcile(
             });
             before == handlers.len() || !handlers.is_empty()
         });
-    }
+        !created.events.contains(event) || !entries.is_empty()
+    });
     if let Some(command) = command {
         let mut events = EVENTS.to_vec();
         if failure {
             events.push("PostToolUseFailure");
         }
+        created
+            .events
+            .retain(|event| events.contains(&event.as_str()));
         for event in events {
+            if !hooks.contains_key(event) {
+                created.events.insert(event.to_owned());
+            }
             let entries = hooks.entry(event).or_insert_with(|| json!([]));
             entries
                 .as_array_mut()
@@ -116,13 +134,32 @@ fn reconcile(
                     "hooks": [{"type":"command", "command":command, "timeout":5}]
                 }));
         }
+    } else {
+        let remove_hooks = created.hooks && hooks.is_empty();
+        if remove_hooks {
+            object.remove("hooks");
+        }
+        if created.schema && object.get("schema_version") == Some(&json!(1)) {
+            object.remove("schema_version");
+        }
+        created = CreatedFields::default();
     }
+    *fields = created;
     Ok(document)
 }
 
 fn transact(file: &Path, command: Option<&str>, schema: bool, failure: bool) -> Result<bool> {
     transact_document(file, |document| {
-        reconcile(document, command, schema, failure)
+        let receipt_file = receipt::path(file)?;
+        let before = receipt::load(&receipt_file, &document)?;
+        let mut after = before.clone();
+        let updated = reconcile(document.clone(), command, schema, failure, &mut after)?;
+        if (updated != document || after != before)
+            && (before != CreatedFields::default() || after != CreatedFields::default())
+        {
+            receipt::save(&receipt_file, &document, before, &updated, after)?;
+        }
+        Ok(updated)
     })
 }
 
@@ -363,8 +400,9 @@ mod tests {
         )
         .unwrap();
         let command = command(&cli, Path::new("/tmp/pmux"), None).unwrap();
-        let once = reconcile(original.clone(), Some(&command), true, true).unwrap();
-        let twice = reconcile(once.clone(), Some(&command), true, true).unwrap();
+        let mut fields = CreatedFields::default();
+        let once = reconcile(original.clone(), Some(&command), true, true, &mut fields).unwrap();
+        let twice = reconcile(once.clone(), Some(&command), true, true, &mut fields).unwrap();
         assert_eq!(twice, once);
         assert_eq!(twice["env"]["EXAMPLE"], "preserve-me");
         assert_eq!(twice["managed_hooks_path"], "existing-managed-file");
@@ -386,34 +424,191 @@ mod tests {
     fn changed_binding_and_removal_preserve_other_handlers() {
         let original =
             json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":"preserve"}]}]}});
-        let first = reconcile(original, Some(&managed("first")), false, true).unwrap();
-        let second = reconcile(first, Some(&managed("second")), false, false).unwrap();
+        let mut fields = CreatedFields::default();
+        let first = reconcile(original, Some(&managed("first")), false, true, &mut fields).unwrap();
+        let second = reconcile(first, Some(&managed("second")), false, false, &mut fields).unwrap();
         assert_eq!(second["hooks"]["Stop"].as_array().unwrap().len(), 2);
         assert_eq!(
             second["hooks"]["Stop"][1]["hooks"][0]["command"],
             managed("second")
         );
-        assert!(second["hooks"]["PostToolUseFailure"]
-            .as_array()
-            .unwrap()
-            .is_empty());
-        let removed = reconcile(second, None, false, false).unwrap();
+        assert!(second["hooks"].get("PostToolUseFailure").is_none());
+        let removed = reconcile(second, None, false, false, &mut fields).unwrap();
         assert_eq!(
             removed["hooks"]["Stop"],
             json!([{"hooks":[{"type":"command","command":"preserve"}]}])
         );
         assert_eq!(
-            reconcile(removed.clone(), None, false, false).unwrap(),
+            reconcile(removed.clone(), None, false, false, &mut fields).unwrap(),
             removed
         );
     }
 
     #[test]
+    fn removal_restores_preexisting_empty_arrays_and_unrelated_settings() {
+        let original = json!({
+            "schema_version": 1,
+            "env": {"EXAMPLE": "preserve-me"},
+            "hooks": {
+                "PreToolUse": [],
+                "CustomEvent": [],
+                "Stop": [{"hooks": [{"type": "command", "command": "user-handler"}]}]
+            }
+        });
+        let mut fields = CreatedFields::default();
+        let installed = reconcile(
+            original.clone(),
+            Some(&managed("first")),
+            true,
+            true,
+            &mut fields,
+        )
+        .unwrap();
+        let rebound = reconcile(
+            installed,
+            Some(&managed("second")),
+            true,
+            false,
+            &mut fields,
+        )
+        .unwrap();
+        assert!(rebound["hooks"].get("PostToolUseFailure").is_none());
+        let removed = reconcile(rebound, None, false, false, &mut fields).unwrap();
+        assert_eq!(removed, original);
+        assert_eq!(
+            reconcile(removed, None, false, false, &mut fields).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn removal_restores_absent_hook_and_schema_fields() {
+        let original = json!({"env": {"EXAMPLE": "preserve-me"}});
+        let mut fields = CreatedFields::default();
+        let installed = reconcile(
+            original.clone(),
+            Some(&managed("first")),
+            true,
+            true,
+            &mut fields,
+        )
+        .unwrap();
+        let reinstalled = reconcile(
+            installed.clone(),
+            Some(&managed("first")),
+            true,
+            true,
+            &mut fields,
+        )
+        .unwrap();
+        assert_eq!(reinstalled, installed);
+        assert_eq!(
+            reconcile(reinstalled, None, false, false, &mut fields).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn reinstall_keeps_created_event_ownership_while_user_handlers_are_present() {
+        let mut fields = CreatedFields::default();
+        let mut installed = reconcile(
+            json!({}),
+            Some(&managed("first")),
+            false,
+            false,
+            &mut fields,
+        )
+        .unwrap();
+        installed["hooks"]["Stop"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "hooks": [{"type": "command", "command": "user-handler"}]
+            }));
+        let mut rebound = reconcile(
+            installed,
+            Some(&managed("second")),
+            false,
+            false,
+            &mut fields,
+        )
+        .unwrap();
+        rebound["hooks"]["Stop"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|entry| entry["hooks"][0]["command"] != "user-handler");
+        assert_eq!(
+            reconcile(rebound, None, false, false, &mut fields).unwrap(),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn legacy_managed_entries_preserve_unknown_container_origins() {
+        let original = json!({"schema_version": 1, "hooks": {
+            "CustomEvent": [], "Stop": [{"hooks": [{"command": managed("legacy")}]}]
+        }});
+        assert_eq!(
+            reconcile(original, None, false, false, &mut CreatedFields::default()).unwrap(),
+            json!({"schema_version": 1, "hooks": {"CustomEvent": [], "Stop": []}})
+        );
+        assert_eq!(
+            reconcile(json!({}), None, true, false, &mut CreatedFields::default()).unwrap(),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn recording_created_fields_keeps_the_command_unchanged() {
+        let mut fields = CreatedFields::default();
+        let installed = reconcile(
+            json!({}),
+            Some("fixture --managed-hook=pmux-activity-v1"),
+            true,
+            true,
+            &mut fields,
+        )
+        .unwrap();
+        assert_eq!(
+            installed["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "fixture --managed-hook=pmux-activity-v1"
+        );
+    }
+
+    #[test]
     fn invalid_shapes_and_schema_are_rejected() {
-        assert!(reconcile(json!([]), Some("cmd"), false, false).is_err());
-        assert!(reconcile(json!({"hooks":[]}), Some("cmd"), false, false).is_err());
-        assert!(reconcile(json!({"schema_version":2}), Some("cmd"), true, false).is_err());
-        assert!(reconcile(json!({"hooks":{"Stop":{}}}), Some("cmd"), false, false).is_err());
+        assert!(reconcile(
+            json!([]),
+            Some("cmd"),
+            false,
+            false,
+            &mut CreatedFields::default()
+        )
+        .is_err());
+        assert!(reconcile(
+            json!({"hooks":[]}),
+            Some("cmd"),
+            false,
+            false,
+            &mut CreatedFields::default()
+        )
+        .is_err());
+        assert!(reconcile(
+            json!({"schema_version":2}),
+            Some("cmd"),
+            true,
+            false,
+            &mut CreatedFields::default()
+        )
+        .is_err());
+        assert!(reconcile(
+            json!({"hooks":{"Stop":{}}}),
+            Some("cmd"),
+            false,
+            false,
+            &mut CreatedFields::default()
+        )
+        .is_err());
     }
 
     #[test]

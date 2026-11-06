@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Replay the native activity flow's pane identity and coordinate boundaries."""
 import importlib.util
+import ctypes
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -103,6 +104,34 @@ class MacPointerModifiers(unittest.TestCase):
             {"kind": 5, "point": (100, 200), "flags": 0},
             {"kind": 22, "delta": 1, "point": (100, 200), "flags": 0},
         ])
+
+
+class NativeX11Geometry:
+    def XOpenDisplay(self, name):
+        return 1
+
+    def XGetGeometry(self, display, window, root, x, y, width, height, border, depth):
+        for pointer, value in [(root, 100), (x, 1), (y, 20), (width, 1066),
+                               (height, 598), (border, 1), (depth, 24)]:
+            pointer._obj.value = value
+        return 1
+
+    def XTranslateCoordinates(self, display, window, root, source_x, source_y, x, y, child):
+        x._obj.value = 600 + source_x
+        y._obj.value = 331 + source_y
+        return 1
+
+    def XCloseDisplay(self, display):
+        return 0
+
+
+class X11PointerOrigin(unittest.TestCase):
+    def test_client_origin_does_not_add_window_manager_decoration_twice(self):
+        adapter = flow.XdotoolInput.__new__(flow.XdotoolInput)
+        adapter.c, adapter.x11, adapter.window = ctypes, NativeX11Geometry(), "4194306"
+        old_geometry = "WINDOW=4194306\nX=601\nY=351\nWIDTH=1066\nHEIGHT=598\nSCREEN=0\n"
+        with patch.object(flow.subprocess, "check_output", return_value=old_geometry):
+            self.assertEqual(adapter.frame(), (600, 331, 1066, 598))
 
 
 if __name__ == "__main__":

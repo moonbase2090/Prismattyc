@@ -43,6 +43,8 @@ Retain `native-input.json` with the native flow result. It records injected
 event flags or the registered native window and actual pointer target. Compare
 these receipts with render status's `input_state` and pane mouse modes to
 distinguish input targeting from guest behavior.
+The Linux driver reads the client origin directly from X11; window-manager
+decorations must not offset the terminal cell coordinates.
 Map daemon pane IDs through `current_panes` to the host's
 `visible_pane_content_rects`. `visible_pane_slots` includes pane headers and
 padding, so it cannot locate terminal cells.

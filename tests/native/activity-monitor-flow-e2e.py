@@ -279,6 +279,19 @@ def native_window_handle(window_id):
 
 class XdotoolInput:
     def __init__(self, pid, window_id):
+        import ctypes
+        self.c = ctypes
+        self.x11 = ctypes.CDLL("libX11.so.6")
+        self.x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        self.x11.XOpenDisplay.restype = ctypes.c_void_p
+        self.x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        self.x11.XGetGeometry.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint)]
+        self.x11.XTranslateCoordinates.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+            ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_ulong)]
         out = wait_for(lambda: subprocess.check_output(
             ["xdotool", "search", "--onlyvisible", "--pid", str(pid)], text=True).strip(),
             "host window")
@@ -306,9 +319,23 @@ class XdotoolInput:
         time.sleep(0.15)
 
     def frame(self):
-        out = subprocess.check_output(["xdotool", "getwindowgeometry", "--shell", self.window], text=True)
-        fields = dict(line.split("=") for line in out.split())
-        return int(fields["X"]), int(fields["Y"]), int(fields["WIDTH"]), int(fields["HEIGHT"])
+        display = self.x11.XOpenDisplay(None)
+        if not display:
+            raise Failed("cannot open the owned X11 display")
+        try:
+            root, child = self.c.c_ulong(), self.c.c_ulong()
+            x, y = self.c.c_int(), self.c.c_int()
+            width, height, border, depth = (self.c.c_uint() for _ in range(4))
+            if not self.x11.XGetGeometry(display, int(self.window), self.c.byref(root),
+                    self.c.byref(x), self.c.byref(y), self.c.byref(width), self.c.byref(height),
+                    self.c.byref(border), self.c.byref(depth)):
+                raise Failed("cannot read the registered X11 window geometry")
+            if not self.x11.XTranslateCoordinates(display, int(self.window), root.value, 0, 0,
+                    self.c.byref(x), self.c.byref(y), self.c.byref(child)):
+                raise Failed("cannot translate the X11 client origin")
+            return x.value, y.value, width.value, height.value
+        finally:
+            self.x11.XCloseDisplay(display)
 
     def _move(self, x, y):
         subprocess.run(["xdotool", "mousemove", str(x), str(y)], check=True)

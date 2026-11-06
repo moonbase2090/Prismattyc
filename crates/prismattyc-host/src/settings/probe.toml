@@ -110,6 +110,7 @@ shell = "/bin/sh"
 activity_webhook_url = "https://example.invalid/activity"
 activity_webhook_secret_file = "/tmp/settings-example.key"
 experimental_activity = true
+activity_graph_style = "ascii"
 
 [[remote]]
 id = "sample-box"

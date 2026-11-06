@@ -296,11 +296,21 @@ def run_case(args,desktop,style):
             wait(lambda:saved().get('font')==identity,'font selection')
             wait(lambda:('font '+label+' (') in (root/'host.log').read_text(),'actual primary font load')
             key(53);key(53);time.sleep(1);capture(identity.split(':')[1],False)
+        key(97)
+        for _ in range(10):key(124) # Multiplexer section.
+        for graph_style in ['block','ascii','braille']:
+            press_row('Activity graph style')
+            wait(lambda:saved().get('mux',{}).get('activity_graph_style')==graph_style,'graph style '+graph_style)
+            capture('graph-style-'+graph_style,True)
+        key(36,1<<17)
+        press_row(': Reset / inherit ')
+        wait(lambda:'activity_graph_style' not in saved().get('mux',{}),'graph style reset to default braille')
+        key(53);key(53)
         key(97);key(125);key(36) # Appearance, first setting, exact bool editor.
         press_row(': Reset / inherit ')
         wait(lambda:'settings_panel' not in saved(),'gate reset')
         capture('legacy-restored',True)
-        result.update(status='PASS',sessions='preserved',choice_cycle='enter-arrow-directions-shift-enter-reset',font_px='saved-and-reset',fonts='selected-through-native-accessibility',gate='enabled-and-reset')
+        result.update(status='PASS',sessions='preserved',choice_cycle='enter-arrow-directions-shift-enter-reset',font_px='saved-and-reset',fonts='selected-through-native-accessibility',graph_styles='block-ascii-braille-saved-and-reset',gate='enabled-and-reset')
     except Exception as error:
         result['error']=str(error)
         raise

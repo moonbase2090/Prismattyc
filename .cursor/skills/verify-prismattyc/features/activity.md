@@ -240,8 +240,9 @@ building native executables, so each platform exercises the same guest bytes.
 This option does not grant production provenance to private fixture packages.
 
 The complete Settings panel also exposes **Multiplexer > Activity graph style**.
-The native macOS Settings drive in [desktop](desktop.md#complete-settings-and-fonts)
-cycles block, ASCII, and braille through Accessibility, checks each saved value,
+Run `tests/native/macos-settings-e2e.py` from [desktop](desktop.md#complete-settings-and-fonts)
+with `--feature graph-styles` for a focused native drive. It starts with the
+complete panel enabled and cycles block, ASCII, and braille with native keys, checks each saved value,
 then resets to the inherited braille default. Relaunch the monitor to apply it;
 changing this choice does not restart the daemon or an existing monitor.
 

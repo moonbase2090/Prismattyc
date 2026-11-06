@@ -195,7 +195,9 @@ def run_case(args,desktop,style):
     root=args.out/style;root.mkdir()
     for name in ['home','config','data','state','runtime']: (root/name).mkdir(mode=0o700)
     config=root/'config.toml'
-    config.write_text(f'chrome_style="{style}"\nsplash=false\nstart_at_login=false\nautomatic_update_checks=false\ninstall_agent_skills=false\nspace_startup="restore"\n[a11y]\nos_tree=true\n[keys]\nspace_settings="f6"\nnew_tab=["left","right","up","down"]\n')
+    config.write_text(f'chrome_style="{style}"\nsplash=false\nstart_at_login=false\nautomatic_update_checks=false\ninstall_agent_skills=false\nspace_startup="restore"\n[a11y]\nos_tree=true\n[keys]\nspace_settings="ctrl+alt+f6"\n')
+    if args.feature=='graph-styles':
+        config.write_text('settings_panel=true\n'+config.read_text())
     wrapper=root/'shell';wrapper.write_text('#!/bin/sh\nexport PS1="proof$ "\nexec /bin/sh\n');wrapper.chmod(0o755)
     env={key:value for key,value in os.environ.items() if not key.startswith(('PMUX','PRISMATTYC_','XDG_'))}
     env.update(HOME=str(root/'home'),SHELL=str(wrapper),PATH=f'{args.bins}:/usr/bin:/bin:/usr/sbin:/sbin',PMUX_SOCKET=str(root/'runtime/pmux.sock'),XDG_RUNTIME_DIR=str(root/'runtime'),XDG_CONFIG_HOME=str(root/'config'),XDG_DATA_HOME=str(root/'data'),XDG_STATE_HOME=str(root/'state'),PRISMATTYC_CONFIG=str(config),PRISMATTYC_NO_AGENT_SKILLS='1',PRISMATTYC_DUMP_PRESENT=str(root/'present.png'))
@@ -247,6 +249,19 @@ def run_case(args,desktop,style):
         captures.extend(desktop.capture(host.pid,root/(label+'.png')))
         shutil.copy2(config,root/(label+'.toml'))
         shutil.copy2(root/'present.png',root/(label+'-framebuffer.png'))
+    def graph_styles():
+        key(97,(1<<18)|(1<<19))
+        for _ in range(10):key(124) # Multiplexer section.
+        for _ in range(9):key(125) # Activity graph style row.
+        for graph_style in ['block','ascii','braille']:
+            key(36)
+            wait(lambda:saved().get('mux',{}).get('activity_graph_style')==graph_style,'graph style '+graph_style)
+            capture('graph-style-'+graph_style,True)
+        key(36,1<<17)
+        key(125);key(125);key(36) # Reset / inherit, below Value and Save.
+        wait(lambda:'activity_graph_style' not in saved().get('mux',{}),'graph style reset to default braille')
+        capture('graph-style-reset',True)
+        key(53);key(53)
     try:
         with (root/'daemon.log').open('w') as log:
             daemon=subprocess.Popen([str(args.bins/'pmuxd'),'--socket',env['PMUX_SOCKET'],'--',str(wrapper)],env=env,cwd=root,stdout=log,stderr=log)
@@ -256,13 +271,20 @@ def run_case(args,desktop,style):
         with (root/'host.log').open('w') as log:
             host=subprocess.Popen([str(args.bins/'prismattyc-host'),'--no-splash','--attach-session','sample-1'],env=env,cwd=root,stdout=log,stderr=log)
         wait(lambda:status().get('space')=='sample','owned host')
+        assert 'prismattyc-host: ignoring config:' not in (root/'host.log').read_text(),'Host rejected fixture configuration; inspect host.log'
         desktop.prerequisite()
         running=desktop.running(desktop.cls(b'NSRunningApplication'),desktop.sel(b'runningApplicationWithProcessIdentifier:'),host.pid)
         assert running and desktop.activate(running,desktop.sel(b'activateWithOptions:'),2),'Owned host activation failed'
         wait(lambda:status()['focused'],'focused host')
         before=identities();wait(lambda:any('0O 1Il {} [] != ->' in line for line in pane_lines()),'neutral comparison text')
         before_text=pane_lines();capture('default-font',False)
-        key(97) # F6 opens legacy settings.
+        if args.feature=='graph-styles':
+            graph_styles()
+            assert identities()==before,'Settings changed live sessions'
+            assert pane_lines()==before_text,'Settings input reached the PTY'
+            result.update(status='PASS',sessions='preserved',graph_styles='block-ascii-braille-saved-and-reset')
+            return result
+        key(97,(1<<18)|(1<<19)) # F6 opens legacy settings.
         key(115) # Home.
         if style=='graphite':key(125);key(125) # Skip layout choices.
         key(36)
@@ -293,22 +315,13 @@ def run_case(args,desktop,style):
         assert identities()==before,'Modal arrow bindings changed live sessions'
         assert pane_lines()==before_text,'Modal navigation or text reached the PTY'
         for identity,label in [('bundled:ibm-plex-mono','IBM Plex Mono'),('bundled:commit-mono','Commit Mono')]:
-            key(97);key(124);key(125);key(36)
+            key(97,(1<<18)|(1<<19));key(124);key(125);key(36)
             press_row(label+' (bundled)');press_row(': Save ')
             wait(lambda:saved().get('font')==identity,'font selection')
             wait(lambda:('font '+label+' (') in (root/'host.log').read_text(),'actual primary font load')
             key(53);key(53);time.sleep(1);capture(identity.split(':')[1],False)
-        key(97)
-        for _ in range(10):key(124) # Multiplexer section.
-        for graph_style in ['block','ascii','braille']:
-            press_row('Activity graph style')
-            wait(lambda:saved().get('mux',{}).get('activity_graph_style')==graph_style,'graph style '+graph_style)
-            capture('graph-style-'+graph_style,True)
-        key(36,1<<17)
-        press_row(': Reset / inherit ')
-        wait(lambda:'activity_graph_style' not in saved().get('mux',{}),'graph style reset to default braille')
-        key(53);key(53)
-        key(97);key(125);key(36) # Appearance, first setting, exact bool editor.
+        graph_styles()
+        key(97,(1<<18)|(1<<19));key(125);key(36) # Appearance, first setting, exact bool editor.
         press_row(': Reset / inherit ')
         wait(lambda:'settings_panel' not in saved(),'gate reset')
         capture('legacy-restored',True)
@@ -325,6 +338,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bins',type=Path,required=True);parser.add_argument('--out',type=Path,required=True)
     parser.add_argument('--revision',required=True);parser.add_argument('--check-desktop-only',action='store_true')
+    parser.add_argument('--feature',choices=['all','graph-styles'],default='all')
     args=parser.parse_args();args.bins=args.bins.resolve();args.out=args.out.resolve();args.out.mkdir(parents=True,exist_ok=False)
     result={'revision':args.revision,'status':'BLOCKED','host_started':False,'daemon_started':False}
     try:

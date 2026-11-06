@@ -109,7 +109,20 @@ def build(args, scratch):
         profile = ["--release"] if args.release else []
         subprocess.run([*cargo, command[0], *profile, *command[1:]], cwd=REPO, env={**env, **overrides}, check=True)
 
-    if args.bundle:
+    if args.fixture_bundle:
+        bundle = args.fixture_bundle.resolve()
+        index = bundle / "pmux-plugins.json"
+        assert index.stat().st_size <= 64 * 1024, "fixture catalog exceeds its byte budget"
+        catalog = json.loads(index.read_bytes())
+        assert catalog["version"] == 1 and 0 < len(catalog["packages"]) <= 64
+        for entry in catalog["packages"]:
+            digest = entry["sha256"]
+            assert len(digest) == 64 and all(character in "0123456789abcdef" for character in digest)
+            archive = bundle / f"{digest}.pmux-plugin"
+            assert archive.stat().st_size == entry["bytes"] <= 64 * 1024 * 1024
+            assert hashlib.sha256(archive.read_bytes()).hexdigest() == digest
+        print("PASS reused exact private fixture archives " + hashlib.sha256(index.read_bytes()).hexdigest(), flush=True)
+    elif args.bundle:
         bundle = args.bundle.resolve()
         run("build", "-p", "prismattyc-mux", "--example", "plugin_bundle", "--locked")
         helper = target / ("release" if args.release else "debug") / "examples" / ("plugin_bundle.exe" if os.name == "nt" else "plugin_bundle")
@@ -1205,7 +1218,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, help="retain proof artifacts in a new directory")
     parser.add_argument("--target-dir", type=Path, default=REPO / "target/plugin-proof")
-    parser.add_argument("--bundle", type=Path, help="reuse a verified production artifact without compiling guests")
+    sources = parser.add_mutually_exclusive_group()
+    sources.add_argument("--bundle", type=Path, help="reuse a verified production artifact without compiling guests")
+    sources.add_argument("--fixture-bundle", type=Path, help="reuse exact private fixture archives for graph-style proof on another OS; not production provenance")
     parser.add_argument("--bins", type=Path, help="drive existing packaged production executables after verifying their physical bundle identities; build nothing")
     parser.add_argument("--frame-probe", type=Path, help="separately built native plugin_frame_probe helper, required with --bins")
     parser.add_argument("--toolchain", default="1.90.0")
@@ -1222,6 +1237,8 @@ def main():
             signal.signal(getattr(signal, name), interrupted)
     if bool(args.bundle) != (args.feature in ("production", "remote-query")):
         parser.error("--bundle is required with --feature production or remote-query")
+    if args.fixture_bundle and args.feature != "graph-styles":
+        parser.error("--fixture-bundle applies only to --feature graph-styles")
     if args.bins and (args.feature != "production" or not args.frame_probe):
         parser.error("--bins requires --bundle, --feature production, and --frame-probe")
     if args.frame_probe and not args.bins:

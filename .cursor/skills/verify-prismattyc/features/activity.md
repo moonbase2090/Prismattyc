@@ -234,6 +234,10 @@ the persistent `[mux] activity_graph_style`, CLI precedence, known-ASCII
 Unknown terminal/font coverage must keep braille. This mode builds unpublished
 candidate guests; it does not prove the official catalog pin or replace native
 Windows, macOS, and Linux screenshots of the changed lanes.
+For another OS, pass `--fixture-bundle` pointing at the first run's `bundle`
+directory. The driver verifies every archive's exact size and SHA-256 before
+building native executables, so each platform exercises the same guest bytes.
+This option does not grant production provenance to private fixture packages.
 
 Pure layout, model, and frame-capture tests live in the guest crate:
 

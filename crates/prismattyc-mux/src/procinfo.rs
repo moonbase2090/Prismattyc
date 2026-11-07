@@ -955,6 +955,43 @@ pub(crate) fn executable_name(program: &str) -> String {
     name.strip_suffix(".exe").unwrap_or(&name).to_string()
 }
 
+/// Undo the rename an in-place self-update leaves on a running Windows
+/// executable. A running `tool.exe` cannot be overwritten, so updaters move
+/// it aside (`tool.exe.old.<stamp>.<pid>`, `helper.exe.<stamp>.old`) and a live
+/// process then reports that temporary path as its image. Saving that path
+/// restores to a file that no longer exists, leaving a bare shell.
+#[cfg(any(windows, test))]
+fn strip_replaced_exe_suffix(path: &str) -> Option<String> {
+    let split = path.rfind(['\\', '/']).map_or(0, |index| index + 1);
+    let (dir, file) = path.split_at(split);
+    let lower = file.to_ascii_lowercase();
+    let end = lower.find(".exe.")? + ".exe".len();
+    let parts: Vec<&str> = lower[end + 1..].split('.').collect();
+    let numeric = |part: &&str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    let replaced = match parts.as_slice() {
+        ["old"] => true,
+        ["old", rest @ ..] => rest.iter().all(numeric),
+        [stamp @ .., "old"] => stamp.iter().all(numeric),
+        _ => false,
+    };
+    replaced.then(|| format!("{dir}{}", &file[..end]))
+}
+
+/// The path to relaunch for a live process image: the original name when an
+/// updater's rename is recognized and `exists` finds that file back in place,
+/// otherwise the image path unchanged.
+#[cfg(any(windows, test))]
+fn select_live_program_path(exe: &str, exists: impl Fn(&str) -> bool) -> String {
+    strip_replaced_exe_suffix(exe)
+        .filter(|original| exists(original))
+        .unwrap_or_else(|| exe.to_owned())
+}
+
+#[cfg(windows)]
+fn live_program_path(exe: &str) -> String {
+    select_live_program_path(exe, |original| Path::new(original).is_file())
+}
+
 /// Quote argv so a shell can parse it back.
 #[must_use]
 pub fn shell_join(args: &[String]) -> String {
@@ -1407,6 +1444,65 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replaced_exe_suffix_is_stripped() {
+        for (input, want) in [
+            (
+                r"C:\u\.local\bin\tool.exe.old.1793976500346.66520",
+                Some(r"C:\u\.local\bin\tool.exe"),
+            ),
+            (
+                r"C:\u\helper\bin\helper.exe.1793983045218694700.old",
+                Some(r"C:\u\helper\bin\helper.exe"),
+            ),
+            (r"C:\u\bin\other.EXE.old", Some(r"C:\u\bin\other.EXE")),
+            (r"C:\u\bin\tool.exe", None),
+            (r"C:\u\bin\tool.exe.config", None),
+            (r"C:\u\bin\tool.exe.old.x", None),
+        ] {
+            assert_eq!(strip_replaced_exe_suffix(input).as_deref(), want, "{input}");
+        }
+    }
+    #[test]
+    fn live_path_uses_the_restored_executable_only_when_it_exists() {
+        let renamed = r"C:\u\bin\tool.exe.old.1793976500346.66520";
+        let restored = r"C:\u\bin\tool.exe";
+        assert_eq!(
+            select_live_program_path(renamed, |path| path == restored),
+            restored
+        );
+        assert_eq!(
+            select_live_program_path(renamed, |_| false),
+            renamed,
+            "a missing restored executable falls back to the live image"
+        );
+        let plain = r"C:\u\bin\tool.exe";
+        assert_eq!(select_live_program_path(plain, |_| true), plain);
+        let other = r"C:\u\bin\tool.exe.config";
+        assert_eq!(select_live_program_path(other, |_| true), other);
+    }
+
+    #[test]
+    fn live_path_checks_the_file_system_for_the_restored_executable() {
+        let dir = std::env::temp_dir().join(format!("pmux-live-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let restored = dir.join("tool.exe");
+        let renamed = dir.join("tool.exe.old.1.2");
+        let renamed_text = renamed.to_str().unwrap();
+        std::fs::write(&renamed, b"old").unwrap();
+        let on_disk = |path: &str| Path::new(path).is_file();
+        assert_eq!(
+            select_live_program_path(renamed_text, on_disk),
+            renamed_text
+        );
+        std::fs::write(&restored, b"new").unwrap();
+        assert_eq!(
+            select_live_program_path(renamed_text, on_disk),
+            restored.to_str().unwrap()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn pane_processes_answer_unknown_for_roots_not_read() {
@@ -2222,7 +2318,8 @@ mod windows {
                     .iter()
                     .map(|arg| arg.to_str().map(str::to_owned))
                     .collect::<Option<_>>()?;
-                *args.first_mut()? = process.exe()?.to_str()?.to_owned();
+                let exe = process.exe()?.to_str()?.to_owned();
+                *args.first_mut()? = live_program_path(&exe);
                 let name = executable_name(args.first()?);
                 let shell = matches!(name.as_str(), "cmd" | "powershell" | "pwsh")
                     || is_shell_argv(std::slice::from_ref(&name));

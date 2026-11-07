@@ -50,9 +50,16 @@ impl Drop for ServerGuard {
 }
 
 fn start_server(socket: &Path, root: &Path) -> ServerGuard {
+    start_server_with_env(socket, root, &[])
+}
+
+fn start_server_with_env(socket: &Path, root: &Path, env: &[(&str, &str)]) -> ServerGuard {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pmuxd"));
     clear_command_env(&mut command);
     apply_isolation(&mut command, root);
+    for (key, value) in env {
+        command.env(key, value);
+    }
     let guard = ServerGuard {
         child: command
             .arg("--socket")
@@ -462,6 +469,71 @@ fn session_configuration_restores_names_directories_and_commands_without_replay(
     assert_eq!(
         std::fs::read_to_string(cwd.join("launches")).unwrap(),
         "restored"
+    );
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A new pane can read as busy at the moment the saved command is written
+/// (a slow shell start, or on Windows a process tree that cannot be read).
+/// Restore must still replay the command into the pane it just created.
+#[test]
+fn restore_replays_the_saved_command_into_a_pane_that_looks_busy() {
+    let root = temp_root("cfg-busy");
+    let socket = socket_path(&root);
+    // A shell that is a foreground program (not a shell) for a few seconds
+    // before it becomes one, so the new pane looks busy when restore writes.
+    let slow = root.join("slow-shell");
+    std::fs::write(
+        &slow,
+        "#!/usr/bin/env python3\nimport os, time\ntime.sleep(3)\nos.execv('/bin/sh', ['sh'])\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&slow, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let server = start_server_with_env(&socket, &root, &[("SHELL", slow.to_str().unwrap())]);
+    let cwd = root.join("project");
+    std::fs::create_dir(&cwd).unwrap();
+    let cwd = cwd.canonicalize().unwrap();
+    let mut create = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    clear_command_env(&mut create);
+    apply_isolation(&mut create, &root);
+    ok(&create
+        .current_dir(&cwd)
+        .arg("--socket")
+        .arg(&socket)
+        .args(["new", "--no-attach", "work"])
+        .output()
+        .unwrap());
+    let file = root.join("configuration.json");
+    let launch = "printf restored >> launches".to_string();
+    ok(&pmux(
+        &socket,
+        &root,
+        &[(
+            prismattyc_mux::procinfo::TEST_FOREGROUND_COMMAND_ENV,
+            &launch,
+        )],
+        &["session-config", "save", file.to_str().unwrap()],
+    ));
+    ok(&pmux(&socket, &root, &[], &["stop", "work"]));
+    let restored = ok(&pmux(
+        &socket,
+        &root,
+        &[("SHELL", slow.to_str().unwrap())],
+        &["session-config", "restore", file.to_str().unwrap()],
+    ));
+    assert!(
+        !restored.contains("Kept the program already running"),
+        "restore skipped the command in its own new pane: {restored}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !cwd.join("launches").exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("launches")).unwrap_or_default(),
+        "restored",
+        "the saved command was not replayed into the new pane"
     );
     drop(server);
     std::fs::remove_dir_all(root).unwrap();

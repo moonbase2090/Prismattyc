@@ -38,6 +38,15 @@ impl Fixture {
         Self::configured(true)
     }
 
+    fn new_without_mixed_case_names() -> Self {
+        // Explicit opt-out: write the setting as false, unlike `new`
+        // which writes no config at all and gets the default.
+        let f = Self::configured(true);
+        let config = f.dir.join("config/prismattyc/config.toml");
+        std::fs::write(config, "[mux]\nallow_mixed_case_session_names = false\n").unwrap();
+        f
+    }
+
     fn configured(allow_mixed_case_names: bool) -> Self {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
@@ -285,7 +294,8 @@ fn readable_space_sessions_rename_keeps_process_mail_and_old_addresses() {
 
 #[test]
 fn mixed_case_display_names_keep_case_and_use_lowercase_unique_mailboxes() {
-    let f = Fixture::new_with_mixed_case_names();
+    // No config file: mixed-case names are accepted by default.
+    let f = Fixture::new();
     f.ok(&["new", "--no-attach", "Graphite-Main"]);
     let created = f.snapshot();
     let session = created
@@ -328,6 +338,31 @@ fn mixed_case_display_names_keep_case_and_use_lowercase_unique_mailboxes() {
         .find(|session| session.name == "Graphite Worker")
         .unwrap();
     assert_eq!(session.agent_id.as_deref(), Some("graphite-worker"));
+}
+
+#[test]
+fn explicit_opt_out_rejects_mixed_case_but_keeps_lowercase_names() {
+    let f = Fixture::new_without_mixed_case_names();
+    let out = f
+        .cli(&["new", "--no-attach", "Graphite-Main"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "mixed-case name succeeded despite opt-out: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("allow_mixed_case_session_names"),
+        "rejection does not name the setting: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    f.ok(&["new", "--no-attach", "graphite-main"]);
+    let snapshot = f.snapshot();
+    assert!(snapshot
+        .sessions
+        .iter()
+        .any(|session| session.name == "graphite-main"));
 }
 
 #[test]

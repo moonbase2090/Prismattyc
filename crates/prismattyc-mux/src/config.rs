@@ -38,7 +38,8 @@ pub struct MuxSection {
     /// Pane program. Empty uses the platform default.
     pub shell: Option<String>,
     /// Allow user-entered session labels to preserve mixed case and spaces.
-    /// Default false to keep session labels in the mailbox-address format.
+    /// Default true; set false to keep session labels in the
+    /// mailbox-address format.
     pub allow_mixed_case_session_names: Option<bool>,
     /// Serve the metadata-only activity feed. Default true; `false` opts out.
     /// pmuxd watches the config and starts or stops the feed live, without a
@@ -59,9 +60,9 @@ impl MuxSection {
         self.experimental_activity.unwrap_or(true)
     }
 
-    /// Mixed-case session labels are opt-in.
+    /// Mixed-case session labels are allowed unless the key is `false`.
     pub fn allow_mixed_case_session_names(&self) -> bool {
-        self.allow_mixed_case_session_names.unwrap_or(false)
+        self.allow_mixed_case_session_names.unwrap_or(true)
     }
 }
 
@@ -335,8 +336,8 @@ pub const MUX_KEYS: &[MuxKeySpec] = &[
     MuxKeySpec {
         name: "allow_mixed_case_session_names",
         doc: "Allow mixed-case and spaced session labels",
-        range: "true|false; default false",
-        kind: MuxKeyKind::Bool(false),
+        range: "true|false; default true",
+        kind: MuxKeyKind::Bool(true),
     },
     MuxKeySpec {
         name: "activity_webhook_url",

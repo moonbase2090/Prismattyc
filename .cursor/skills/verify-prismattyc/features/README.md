@@ -8,6 +8,8 @@ Read this index before selecting proof. Each feature file names the user entry p
 - [Windows](windows.md): installer lifecycle, matched plug-in provenance, launcher repair, console newlines, and new-pane shell selection.
 - [Agent activity](activity.md): headless ingestion, bounded hook-profile edits, contained monitor and connector, native mouse input, grants, native MCP, bundle identity, and updater migration.
 
+Before a release, run the [release smoke matrix](../../../../docs/release-smoke.md) on macOS, Linux and Windows; it reuses these recipes against the shipped packages.
+
 Start each CLI feature with the skill's fresh private daemon. Desktop fixtures own separate windows and data. Check doctor before driving and after surprises. Do not share sockets, artifact paths, or build targets between concurrent writers.
 
 Record feature and entry point, tested revision, OS/backend, command, action, visible result, and durable side effect. Capture both action and result for UI changes. An unreachable entry needs the attempted command and missing prerequisite; another platform's pass does not verify it.

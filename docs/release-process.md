@@ -145,6 +145,10 @@ requires a plug-in version bump. A core-only release reuses unchanged guest
 bytes and their original build receipt. First publication requires a reviewed
 official bundle pin. A private candidate does not authorize publication.
 
+Before tagging, run the [release smoke matrix](release-smoke.md) on the
+dry-run build for macOS, Linux and Windows, and run it again on the published
+assets.
+
 After publication, check the complete asset list and the combined checksums.
 On a disposable Linux installation, run `pmux update --check`, install the
 release, test a coordinated restart, and verify rollback. On macOS, run

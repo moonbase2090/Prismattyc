@@ -38,5 +38,6 @@ Start with the [README](../README.md) for installation and basic use.
 
 See [Contributing](../CONTRIBUTING.md) for build and test commands,
 [Workspace layout](workspace.md) for the source tree, and
-[Release packaging](release-process.md) for the distribution tools. See
+[Release packaging](release-process.md) for the distribution tools,
+[Release smoke matrix](release-smoke.md) for the per-platform checks before a release. See
 [Mutation testing](mutation-testing.md) for the manual mutation pass on a critical crate.

@@ -3,12 +3,29 @@
 
 use anyhow::{bail, Context, Result};
 use pmux_plugin_api::host::pmux::view::frame;
+use pmux_plugin_api::monitor::GraphStyle;
 use prismattyc_mux::plugins::{decode_frame, Client, Reply, Request};
 
 fn main() -> Result<()> {
-    let socket = std::env::args_os()
-        .nth(1)
-        .context("usage: plugin_frame_probe SOCKET")?;
+    let mut arguments = std::env::args_os().skip(1);
+    let socket = arguments
+        .next()
+        .context("usage: plugin_frame_probe SOCKET [braille|block|ascii]")?;
+    let style = arguments
+        .next()
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("graph style must be UTF-8"))?
+                .parse::<GraphStyle>()
+                .map_err(anyhow::Error::msg)
+        })
+        .transpose()?
+        .unwrap_or_default();
+    anyhow::ensure!(
+        arguments.next().is_none(),
+        "unexpected frame probe arguments"
+    );
     let mut client = Client::connect(std::path::Path::new(&socket))?;
     let viewport = frame::Viewport {
         columns: 100,
@@ -21,7 +38,7 @@ fn main() -> Result<()> {
     let Reply::ViewOpened { handle } = client.request(Request::OpenView {
         endpoints: None,
         id: "org.moonbase.activity-monitor".into(),
-        contribution: "main".into(),
+        contribution: style.view().into(),
         viewport,
         preferences: frame::Preferences {
             motion: false,

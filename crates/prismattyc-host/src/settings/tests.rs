@@ -463,6 +463,7 @@ fn enter_cycles_every_finite_choice_and_persists_immediately() {
         ("toasts", &["all", "errors", "off"]),
         ("mux.space_open_runs_commands", &["agents", "all", "none"]),
         ("mux.remote_size", &["latest", "host"]),
+        ("mux.activity_graph_style", &["braille", "block", "ascii"]),
     ];
     let mut fixture = Fixture::new("");
     let mut covered = BTreeSet::new();
@@ -544,6 +545,7 @@ fn mux_rows_take_their_defaults_from_the_shared_mux_table() {
             .default
     };
     assert_eq!(default("mux.experimental_activity"), Some(true.into()));
+    assert_eq!(default("mux.activity_graph_style"), Some("braille".into()));
     assert_eq!(default("mux.attach_on_new"), Some(true.into()));
     assert_eq!(
         default("mux.allow_mixed_case_session_names"),

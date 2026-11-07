@@ -1547,6 +1547,7 @@ dependencies = [
 name = "pmux-plugin-api"
 version = "0.3.58"
 dependencies = [
+ "schemars",
  "serde",
  "unicode-segmentation",
  "unicode-width",

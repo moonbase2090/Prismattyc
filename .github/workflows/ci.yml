@@ -365,6 +365,14 @@ jobs:
       - name: Test GPU adapter enumeration without hardware
         run: cargo test -p prismattyc-host --features gpu,wgpu/noop --bin prismattyc-host instance_enumerates_adapters_without_a_window
 
+      - name: Update and restart end to end
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          cargo build --locked -p prismattyc-mux --bins
+          python3 tests/native/update-restart-e2e.py --bins target/debug --out build/update-restart-e2e
+
 
   test-ubuntu-26:
     name: Test (ubuntu-26.04 preview)

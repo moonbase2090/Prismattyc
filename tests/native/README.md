@@ -34,6 +34,15 @@ PATH="$PWD/target/debug:$PATH" python3 tests/native/restart-spaces-e2e.py
 python3 tests/native/release-update-e2e.py --pmux target/debug/pmux --out build/update-check
 ```
 
+Check Update and Restart on a private daemon. The run saves a session
+configuration, restarts the daemon with every session stopped, restores, and
+checks that each pane runs its program again rather than a bare shell. It then
+stops the daemon and reopens the Space. It starts no window:
+
+```bash
+python3 tests/native/update-restart-e2e.py --bins target/debug --out build/update-restart-e2e
+```
+
 Check source updater bundle preparation with the actual CLI and bundle verifier:
 
 ```bash

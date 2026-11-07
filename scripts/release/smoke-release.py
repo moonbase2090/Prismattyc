@@ -14,6 +14,7 @@ directories, and never touches an installed copy's state:
 
 The Windows package has its own installer proof; see docs/release-smoke.md.
 """
+# Checks raise explicitly rather than use assert, so python -O cannot skip them.
 import argparse
 import json
 import platform
@@ -83,21 +84,24 @@ def main():
         found = {}
         for name in CORE:
             path = bins / name
-            assert path.is_file(), f'missing shipped executable: {path}'
+            if not path.is_file():
+                raise AssertionError(f'missing shipped executable: {path}')
             found[name] = version_of(path)
         for name in OPTIONAL:
             if (bins / name).is_file():
                 found[name] = version_of(bins / name)
-        assert len(set(found.values())) == 1, f'executables disagree on the version: {found}'
-        if args.expect_version:
-            assert set(found.values()) == {args.expect_version}, (args.expect_version, found)
+        if len(set(found.values())) != 1:
+            raise AssertionError(f'executables disagree on the version: {found}')
+        if args.expect_version and set(found.values()) != {args.expect_version}:
+            raise AssertionError(f'expected {args.expect_version}, found {found}')
         return found
 
     def drive(label, script, *extra):
         def run():
             proc = subprocess.run([sys.executable, '-I', str(script), *extra], capture_output=True, text=True, timeout=900)
             (args.out / f'{label}.log').write_text(proc.stdout + proc.stderr)
-            assert proc.returncode == 0, (proc.stdout + proc.stderr)[-2000:]
+            if proc.returncode != 0:
+                raise AssertionError((proc.stdout + proc.stderr)[-2000:])
             return (proc.stdout.strip().splitlines() or [''])[-1][:300]
         return run
 

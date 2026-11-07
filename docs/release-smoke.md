@@ -3,7 +3,8 @@
 Run this matrix against a release candidate before you tag it, and again
 against the published assets. Each row runs in a clean environment for its
 platform, installs nothing the owner depends on, and ends with a pass or
-fail you can read from a file. A pass on one row says nothing about another.
+fail you can read from a file or log (`smoke.json` on Linux and macOS,
+`windows-msi.log` and the noted exit status on Windows). A pass on one row says nothing about another.
 
 | Platform | Environment | Package under test | Command |
 | --- | --- | --- | --- |
@@ -55,19 +56,22 @@ below 2.28, and `smoke/linux/run/smoke/smoke.json` says `"status": "PASS"`.
 
 ## macOS (Tart)
 
-Use the Tart clean-VM queue and its rules: one VM at a time, a fresh clone of
-the pinned base image, deleted when done. Recheck the candidate before you
-start.
+Use a fresh clone of the pinned clean macOS image, one VM at a time, and
+delete it when done. Recheck the candidate before you start.
 
 In the guest:
 
+0. Copy these three files from the source tree at the release commit into one
+   guest directory, `tools/`: `scripts/release/smoke-release.py`,
+   `.cursor/skills/verify-prismattyc/scripts/verify-cli.py` and
+   `tests/native/update-restart-e2e.py`. The release package does not carry them.
 1. Download the zip and `SHA256SUMS-macos`; run `shasum -a 256 -c` on the zip.
 2. Unzip. Run `codesign --verify --strict --deep Prismattyc.app` and
    `spctl --assess --type execute Prismattyc.app`; both must succeed.
 3. Run the shared check on the app's executables:
 
    ```sh
-   python3 scripts/release/smoke-release.py \
+   python3 tools/smoke-release.py \
      --bins Prismattyc.app/Contents/MacOS --out smoke/macos --expect-version VERSION
    ```
 
@@ -89,16 +93,20 @@ a developer's installation. The MSI changes that account's PATH, Run key and
 per-user program folder.
 
 1. Download the MSI, the zip and `SHA256SUMS-windows`; compare the SHA-256
-   values.
+   values. Copy `scripts/release/test-windows-msi.ps1` from the source tree at
+   the release commit into the guest; the package does not carry it. It needs
+   no other file.
 2. Run the installer lifecycle against the published MSI, with the previous
    release's MSI as the upgrade source:
 
    ```powershell
-   ./scripts/release/test-windows-msi.ps1 -Msi <new.msi> -UpgradeFrom <previous.msi> `
-     -ExpectedVersion VERSION
+   .\test-windows-msi.ps1 -Msi <new.msi> -UpgradeFrom <previous.msi> `
+     -ExpectedVersion VERSION *>&1 | Tee-Object smoke\windows-msi.log
    ```
 
    It installs, upgrades, resolves `pmux` from a new process and uninstalls.
+   It throws on the first failure. Its evidence is the exit status, which you
+   note, and `smoke\windows-msi.log`.
 3. Unzip the zip. Run `--version` on each executable and require one version.
 4. On the installed package, open Prismattyc, create a Space with no manual
    `pmux up`, run `pmux ls` in cmd.exe and PowerShell, then use Update and

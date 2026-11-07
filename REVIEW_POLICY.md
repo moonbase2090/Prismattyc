@@ -2,16 +2,6 @@
 
 This policy applies to every pull request, whether a person or an agent wrote it.
 
-## Suspended until MB2090 says otherwise
-
-Until MB2090 says otherwise, one agent works a story and one peer reviews it. Moonbase approves, merges, and deploys.
-
-- A pull request does not need a Proof section.
-- Extra review gates are off. That includes a new review at a new tip, a second reviewer, and dry-run demands.
-- Peer findings do not block. File each one as a follow-up and fix it after deployment.
-
-The no-PII rule and the authorship rules still apply. While this note is in effect, it suspends section 2, the proof and extra-review requirements in sections 3 and 4, and the review exceptions that demand another review. Agents do not merge.
-
 ## 1. Classify every PR
 
 **Trunk**: the change touches shared code that other parts depend on:
@@ -59,7 +49,7 @@ For every test, ask: would it fail if the behavior it names broke? If not, rejec
 - compare against a snapshot or golden file regenerated from current output without review
 - still pass when the implementation is deleted or replaced with a stub or default
 
-Missed mutants from cargo-mutants point to tests like these. See docs/mutation-testing.md.
+Run the test against a broken version of the code to see that it can fail. For a deliberate check on a critical crate, see docs/mutation-testing.md; it is a manual aid, not a merge gate.
 
 ## 7. Merging
 

@@ -9,16 +9,15 @@ Every PR passes these jobs before merge. On the 32 GiB Linux host, run
 `scripts/la-staged-pr.sh`. Do not fire one-shot
 `local-actions run --event pull_request`. That path leaves act
 containers up and keeps zram full. The staged script runs light jobs,
-then mutants, then CRAP, then e2e. It reclaims after each stage. It
+then e2e. It reclaims after each stage. It
 checks host headroom before each heavy stage. If headroom still fails
 after reclaim, the script exits with `reclaim did not restore
 headroom`. Single-job debug still uses
 `local-actions run --job NAME`.
 
-Heavy jobs must not overlap on the dogfood host (PT-305): `mutants`,
+Heavy jobs must not overlap on one local machine: the
 native-container jobs (`spaces-e2e`, `spaces-e2e-wayland`,
-`walkthrough-caption-e2e`, `render-bench`), and CRAP lcov (`crap`,
-`crap-refresh`, `crap-release`). `scripts/la-heavy-serial.py` takes one
+`walkthrough-caption-e2e`, `render-bench`). `scripts/la-heavy-serial.py` takes one
 exclusive lock for those jobs. Acquire waits and retries when the lock
 is held. A wait timeout is infrastructure. It is not a content red.
 The lock is a Docker container named `prismattyc-la-heavy`. The owner
@@ -47,13 +46,13 @@ Unit tests use a temp lock dir and do not append tokens to
 | Box e2e caption | `walkthrough-caption-e2e` | `tests/native/walkthrough-caption-e2e.sh` in the native test container; X11; double-click `[show me]` advances one step and does not skip; never skip the job |
 | Box e2e Wayland | `spaces-e2e-wayland` | `tests/native/spaces-e2e-wayland.sh`; weston headless `--socket=pt290-wayland`; native `wl_shm` ARGB8888 |
 | Render bench | `render-bench` | `tests/native/render-bench.sh` in the native test container; per-frame cells max/mean; archive under `build/render-bench/<version>` |
-| CRAP | `crap` | `cargo llvm-cov` + `cargo-crap`; new or newly above-40 functions in PR-touched files block merge; global counts are informational; top 10 per crate |
-| Mutation | `mutants` | one crate at a time, with render routing and remainder shards; caught rate at or above 60% per crate when scored ≥ 5; score only the merged full universe; fewer scored are reported, not gated; runner OOM is infrastructure; refuse to start below host headroom; scratch on disk, never tmpfs `/tmp` |
-
-A nightly GitHub Actions workflow runs `cargo-mutants` across eight parallel
-shards and uploads one artifact listing the missed mutants. See
-[Mutation testing](mutation-testing.md) to download the report or run a
-focused local pass.
+CRAP and mutation are not merge gates. A new test must be able to fail:
+break the code it covers and watch it go red, and say so in the PR. The
+proof in the PR (commands run and their output, or a screenshot from a
+clean VM of the relevant OS) and the end-to-end flows carry the weight.
+[Mutation testing](mutation-testing.md) describes a manual pass for
+critical crates; it is an aid, not a gate. Scorecard still reports CRAP as
+advice.
 
 ## Validate new work incrementally
 
@@ -63,166 +62,10 @@ Do not repeat the complete workspace suite solely because documentation,
 version stamps, or gate thresholds changed. Repeat a broader suite when a
 new failure or a shared-code change justifies it.
 
-For a scoped mutation run, retain every mutant generated from the new diff.
-Report its base revision, test selectors, complete denominator, and result.
-Label carried-forward evidence separately. A focused run does not establish
-a new full-workspace gate pass. Run long validation jobs in the background
-and retain their status and logs.
-
-## Route PR mutations
-
-`scripts/mutants-pr.sh` supplies the PR diff for each touched crate.
-`scripts/mutants-route.py` first converts added or replacement lines to
-insert-only selection hunks. This excludes unchanged deletion neighbours
-that cargo-mutants would otherwise select. Pure deletions select no surviving
-code. Function-replacement mutations remain eligible when their span contains
-a changed line. The complete selected mutation set is retained.
-`scripts/mutants-route.py` then runs these steps:
-
-1. Select changed lines inside the functions and modules listed below.
-2. List the tests for each selected group. Fail if a selector matches zero
-   tests. Discover mutations for each group. Verify each complete identity
-   against the original mutation set.
-3. Run the ordinary full crate test suite on the unmutated source.
-4. Run each routed group in its declared named test phase.
-5. Split the non-render remainder into fixed-size shards (default 16
-   identities; `MUTANTS_SHARD_SIZE`). Use the same iterate and merge
-   contract as the render phases. Overlap partners stay in one shard.
-6. Retain validated full-suite misses as missed. Do not run them again in
-   the same invocation. Send focused misses and timeouts to the full suite.
-7. Retry a full-suite timeout once when source-line selection can isolate it
-   without repeating a completed miss. Otherwise retain it as a scored
-   timeout. Record the reason in `retry_policy`.
-8. Validate every phase report. Replace each focused survivor result with its
-   full-suite result. Score each original mutation once. Do not treat a
-   mid-run shard rate as the gate result.
-
-The real-window phase applies to these functions in
-`crates/prismattyc-host/src/main.rs`:
-
-- `App::paint`
-- `PresentBackend::paint`
-- `PresentBackend::supports_partial_raster`
-- `current_full_repaint_reason`
-- `rasterize_frame`
-
-The declared source-to-test mapping is below. All source paths are
-relative to `crates/prismattyc-host/src/`.
-
-| Source | Fast test selector | Match |
-| --- | --- | --- |
-| `space_open.rs` | `space_open::tests::` | Substring |
-| `main.rs`: `open_space_from_host`, `advance_space_opens`, `poll_host_attach_tabs`, `persist_attach_selection` | `space_open_window_tests::delayed_chip_opens_keep_cache_label_and_focus_in_order` | Exact |
-| The five `main.rs` functions above | `render_window_tests::real_window_paint_reaches_the_backend` | Exact |
-| `wayland_shm/buffer_age.rs` | `wayland_shm::buffer_age::tests::` | Substring |
-| `frame_damage.rs` | `frame_damage::tests::` | Substring |
-| `main.rs`: `framebuffer_scroll_plan`, `apply_framebuffer_scroll_blits` | `tests::framebuffer_scroll_` | Substring |
-| `main.rs`: `row_after_scrolls` | `tests::row_after_scrolls_tracks_copied_cursor_pixels` | Exact |
-
-The router runs one fast phase for each non-empty mapping group. It then
-runs full-suite remainder shards. Fallback covers identities that still need
-a full-suite result and eligible timeout retries. Each validated outcome
-records `suite_scope` as `focused` or `full`. A full-suite miss stays missed;
-an implicit second-pass catch must not improve its score. An operator may
-request a separate rerun in a fresh output directory to investigate flakiness.
-Pass `--exact` only for complete test names. Do not use the broad
-`tests::` selector, which also matches tests in unrelated modules.
-
-All other functions use the full suite. Extend the fast list only after
-you validate a focused test for the added function. See the
-[Space mutation routes](mutants-space-routes.md) for selector scope
-and measurement limits. A mutation whose span
-overlaps a changed line remains in the score, even when most of its
-function did not change. Record coverage debt without excluding it.
-
-### Baseline and result accounting
-
-The full unmutated baseline runs even when the fast phase catches every
-mutation. Each mutation run uses `--jobs 1` and `--test-threads=1`.
-The fallback skips its duplicate baseline after the ordinary full suite
-passes. Nightly runs continue to use the full suite for every mutation.
-
-Routing requires cargo-mutants 27.1.0. Its regex filters do not cover
-`StructField` mutations. The router therefore selects current source
-lines through `fast-*.diff` and verifies discovery. These files are
-selection input. Do not apply them as source patches.
-
-The router combines only the current fast-phase name files for `--iterate`.
-Completed misses never enter the iterate name files. The router excludes
-them with `full-fallback.diff` and verifies the remaining discovery identities.
-An identity without a full-suite result that cannot be selected fails the run.
-It verifies the names in `caught.txt`, `unviable.txt`, and
-`previously_caught.txt` against actual results before reuse. A source or
-diff change, missing outcome, duplicate identity, unexpected mutation,
-inconsistent count, empty test selection, failed baseline, or failed phase
-stops the run.
-
-Read `build/mutants-pr/<crate>/routing.json` for the source digest,
-selection counts, and shard list. The same directory contains discovery
-JSON, phase logs, matched test names, and separate `fast-*/`, `shard-*/`,
-and `full/` reports. `retained_full_misses` counts full misses that do not
-repeat. `retained_full_timeouts` counts timeouts that cannot be isolated from
-those misses. `full` counts identities actually sent to the final fallback.
-The validated combined report is
-`mutants.out/outcomes.json`. A routing failure cannot pass the gate
-through the small-sample exception.
-
-## Detect mutants runner OOM
-
-The kernel OOM killer usually targets rustc or a test binary, not
-`cargo-mutants`. The wrapper then exits 2 (missed) or 4 (baseline
-failed). The gate must not treat that as a caught-rate failure.
-
-After each run, read `/sys/fs/cgroup/memory.events` (`oom_kill`) and
-compare it with the sample taken before the run. An increment is OOM,
-regardless of the exit code. `cargo-mutants` exit 137 is a second
-signal (the wrapper itself was killed). Override the events path with
-`MUTANTS_OOM_EVENTS`.
-
-Exit policy:
-
-- PR (`scripts/mutants-pr.sh`): OOM fails the job with exit 137. Do not
-  keep scoring missed mutants.
-- Nightly (`scripts/mutants-nightly.sh`): OOM fails that shard. The other
-  matrix shards keep running and the summary job reports incomplete results.
-
-The job container memory cap is containment (`MUTANTS_MEMORY`, default
-`8g`). Keep this cap so the container dies before the 32 GiB host
-(PT-305). Do not raise it. The mutants job container also passes
-`--init` so pid 1 reaps (PT-259). act's default pid 1 is
-`tail -f /dev/null`, which does not reap. Every
-Local Actions job that sets `container.options` also passes `--init`.
-That field replaces act's `--container-options`. Without `--init` here,
-the reaper is dropped.
-
-The PR gate also refuses to start when the host is already under
-pressure. Require at least 10 GiB `MemAvailable` and swap use below 50%
-(`MUTANTS_MIN_FREE_RAM`, `MUTANTS_MAX_SWAP_RATIO`). The job reads host
-`/proc/meminfo`. When the 8g cgroup hides the host view, it uses a
-pid-host Docker sidecar. Set `MUTANTS_HOST_MEMINFO` to inject a file.
-A failed floor check is infrastructure. It is not a caught-rate failure.
-The job refuses to start while swap use exceeds the limit.
-
-Put cargo-mutants scratch on disk. On the host, use
-`${XDG_CACHE_HOME:-$HOME/.cache}/prismattyc/mutants`. Do not use `/tmp`.
-`/tmp` is tmpfs on the dogfood host and fills with multi-GiB
-`cargo-mutants-*` leftovers.
-
-The gate refuses TMPDIR when the path is under `/tmp` or when
-`findmnt -no FSTYPE` reports `tmpfs` for that path. A path other than
-`/tmp` that still sits on tmpfs also fails.
-
-The Local Actions `mutants` job bind-mounts host
-`/var/cache/prismattyc/mutants` at `/cache/prismattyc/mutants`. It sets
-`MUTANTS_TMPDIR` and `TMPDIR` to the container path. act cannot
-interpolate env into `container.options`, so the host path is fixed.
-Create `/var/cache/prismattyc/mutants` on SSD. You may symlink that
-directory to `${XDG_CACHE_HOME:-$HOME/.cache}/prismattyc/mutants`.
-
 ## Run Local Actions in stages
 
 Use `scripts/la-staged-pr.sh` on the 32 GiB host. The stages are
-`light`, `mutants`, `crap`, and `e2e`. `phase3-rich` stays in
+`light` and `e2e`. `phase3-rich` stays in
 `ci.yml` for hand and nightly runs. It is not a required light-stage
 job. `local-actions run --job` returns when the job is queued
 (exit 0). That is not a pass. The script waits on
@@ -232,8 +75,7 @@ pass. The script then reclaims. Do not reclaim while a stage job is
 still queued or running.
 
 `scripts/la-reclaim-host.sh` stops leftover `act-*` containers,
-drops `prismattyc-la-heavy` when no other heavy job remains, and
-deletes `cargo-mutants-*` under the SSD cache paths. It does not
+drops `prismattyc-la-heavy` when no other heavy job remains. It does not
 clear host `/tmp`.
 
 Zram reclaim needs passwordless access to a root-owned helper. Configure
@@ -258,105 +100,8 @@ for arbitrary commands. Test with
 Pass `--allow-missing-zram` only on hosts that have no zram. The staged
 script reclaims swap between stages before the next headroom check.
 
-Run mutation tests one crate at a time and keep one worker. Shard the
-remaining mutation set when necessary. Do not combine crates under a
-single memory cap.
-
-Act cannot interpolate env into `container.options`, so the YAML starts
-at 8g and the job applies `MUTANTS_MEMORY` with `docker update`, then
-reads `memory.max` and fails if it does not match. Raise the env if a
-baseline compile is killed at 8g with `oom_kill` incrementing.
-
 `gherkin-mutator` acceptance mutation stays for Termwright features
 (`scripts/acceptance-mutate.sh`).
-
-## Check CRAP before merge
-
-The `crap` job compares each function in a PR-touched file with
-[the committed baseline](crap-baseline.json). It blocks merge in two cases:
-
-- A new function in a touched file has CRAP above 40.
-- A function in a touched file moves from CRAP at or below 40 to above 40.
-
-The ordinary merge job scans the whole touched file. An incremental run
-may score only the changed functions when it records its scope and carries
-forward the prior evidence. A function already above 40 may remain above 40. A lower global count does not excuse
-a new or newly above-threshold function in a touched file.
-
-The global count may grow without blocking the PR. The report prints the
-baseline count, current count, previous-release count, reduction target,
-and top 10 functions above 40 per crate. The comparisons with the baseline
-and previous-release counts are informational. The job must obtain the
-complete changed-file list. Missing git metadata is a failure.
-
-## Check CRAP before a tagged release
-
-Run this check from the release candidate checkout before you cut a tag:
-
-```bash
-local-actions run --event workflow_dispatch --job crap-release
-```
-
-The Local Actions daemon must use that checkout as its root. The gate is
-advisory on Prismattyc because of known legacy debt: it reports the count
-against the threshold as a `::warning` annotation plus a job summary, names
-any new functions above CRAP 40, and always exits 0, so it never fails the
-job. Review the warning before you publish the tag, and keep a regular
-whittle-down task against the baseline. A feature or fix merge does not
-run this check.
-
-[The release workflow](../.github/workflows/crap-release.yml) captures
-coverage in the runner and invokes `scripts/crap-gate.py --release`.
-It compares against at least 10 fewer functions above CRAP 40 than the last
-refreshed baseline. The target stops at zero. One report line prints the
-current count, last refreshed baseline count, actual delta, and target.
-The regular `crap` job continues to enforce the file-scoped merge checks.
-
-The comparison source is the last deliberately refreshed baseline. It
-does not track the workspace version or update at merge time; only the
-release PR moves the version.
-The release check counts that baseline's entries. The `previous_release`
-and `previous_above_count` fields describe the earlier refresh and remain
-visible for context. For example, a baseline count of 181 gives a release
-target of 171, even if the workspace version has moved since the refresh.
-
-Keep [the refresh script](../scripts/crap-refresh.sh) as the deliberate
-update path. After an intentional cleanup, run
-`local-actions run --job crap-refresh` and review the resulting baseline
-before you commit it. A host coverage capture is not comparable. Do not
-refresh merely to move the release target past a warning candidate, and
-never refresh to hide new debt: the baseline still must not absorb
-functions the gate just called out.
-
-## Read a high CRAP score before you split
-
-CRAP at coverage 0 is C²+C. An exhaustive match over N enum variants is
-cyclomatic N or N+1. That score is not a design problem by itself.
-
-Classify a hot function before you extract:
-
-1. **Name map.** Pure match. No I/O. Each arm returns a label or grouping.
-   Table-test every variant. Keep the match in one place. The compiler
-   exhaustive match is the ratchet when the enum grows.
-2. **Dispatcher.** Match or branch that does I/O, mutation, or process work
-   inline. Extract a pure decision only when the arm chooses among outcomes.
-   Do not split a function whose only cost is being exhaustive.
-
-`control_event_kind` is a name map (22 `Event` arms). Table tests drop it
-from CRAP 552 to about 23. `cmd_detach_other` and `run_update` are
-dispatchers. Send a classification with the arithmetic before you cut those.
-
-CRAP is C²(1 − cov)³ + C. The trailing +C is a floor. A function cannot
-score below its cyclomatic complexity. Coverage cannot bring a function
-with C above 40 under the threshold.
-
-When C is above 40, either accept the function as a permanent resident of
-the above-40 count, or change its structure for reasons that stand on
-their own. Do not split it to chase the number.
-
-The release −10 target cannot reach zero while any such residents remain.
-Count the functions that are above 40 and have C above 40. That count is
-the reachable floor.
 
 ## Seam rules
 
@@ -397,8 +142,7 @@ the reachable floor.
 
 `.github/pull_request_template.md` asks for: what changed, how it was
 verified (unit, e2e step, box run, screenshots), the no-op test (what
-the step would catch if the change were a no-op), the CRAP delta, the
-mutants score, and which seams the change touches. If the no-op answer
+the step would catch if the change were a no-op), and which seams the change touches. If the no-op answer
 is nothing, the step is wrong.
 
 ## Run host render tests with a real window

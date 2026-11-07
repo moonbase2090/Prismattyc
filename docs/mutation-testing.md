@@ -1,5 +1,11 @@
 # Mutation testing
 
+Mutation testing is a manual aid for critical crates. It is not a merge gate:
+no pull request job runs it, and the Mutants nightly workflow stays disabled.
+To run one on a branch, install cargo-mutants 27.1.0 and run
+`./scripts/mutants-pr.sh`, which mutates the crates the branch touches, or
+dispatch the nightly by hand.
+
 The Mutants nightly uses a pinned source commit for a complete workspace
 rotation. Each scheduled run executes the next batch of 16 round-robin shards.
 A second job runs cargo-mutants with `--in-diff` on current main, comparing the

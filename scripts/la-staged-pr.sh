@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Staged Local Actions PR run for the 32 GiB Nexus host (PT-305).
 # Do not use one-shot `local-actions run --event pull_request` on that
-# host. This script runs light, mutants, CRAP, then e2e. After each
+# host. This script runs light, then e2e. After each
 # local-actions run it waits for a terminal status. It does not
 # reclaim until that job has finished. It checks host headroom
 # before each heavy stage.
@@ -23,7 +23,7 @@ usage() {
 Usage: scripts/la-staged-pr.sh [options]
 
 Options:
-  --from STAGE          Start at this stage (light, mutants, crap, e2e)
+  --from STAGE          Start at this stage (light, e2e)
   --only STAGE          Run one stage
   --event EVENT         local-actions event (default: pull_request)
   --dry-run             Print the plan. Do not run jobs.

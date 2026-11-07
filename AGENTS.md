@@ -19,4 +19,4 @@ No tautological tests. A test must fail when the behavior it covers breaks. Don'
 - compare against a snapshot or golden file regenerated from current output without review
 - still pass when the implementation is deleted or replaced with a stub or default
 
-cargo-mutants finds code changes that no test catches. See docs/mutation-testing.md.
+Show that each new test can fail: break the code it covers and watch it go red. cargo-mutants is a manual aid for critical crates, not a merge gate. See docs/mutation-testing.md.

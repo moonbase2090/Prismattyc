@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# PR cargo-mutants gate (PT-225).
+# Manual cargo-mutants pass on the crates a branch touches. Not a merge gate.
 # Usage: ./scripts/mutants-pr.sh
 #
 # Writes origin/<base>...HEAD to build/git.diff, runs cargo mutants
 # with render routing and remainder shards per touched crate, then
-# scripts/mutants-gate.py (60% caught per crate when scored >= 5).
+# scripts/mutants-gate.py (60% caught per crate when scored >= 5, reported only).
 # Two crates in one invocation hit the 8g job cap (PT-286). Do not
 # raise MUTANTS_MEMORY to combine them. Refuse to start when host
 # RAM or swap is below the PT-305 floor.

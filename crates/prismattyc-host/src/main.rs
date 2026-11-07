@@ -20786,7 +20786,7 @@ fn mouse_input_decision(context: MouseInputContext) -> MouseInputDecision {
         }
     }
 
-    if context.tracking.is_on() && !context.shift {
+    if context.tracking.is_on() && (!context.shift || context.button == MouseButton::Right) {
         return MouseInputDecision::App {
             button: mouse_button_code(context.button),
         };
@@ -25209,6 +25209,45 @@ mod tests {
                     ..base(ElementState::Released, MouseButton::Right)
                 },
                 MouseInputDecision::App { button: Some(2) },
+            ),
+            (
+                "shift right press bypasses the pane menu into the app",
+                MouseInputContext {
+                    shift: true,
+                    tracking: prismattyc_emulator::MouseTracking::Click,
+                    ..base(ElementState::Pressed, MouseButton::Right)
+                },
+                MouseInputDecision::App { button: Some(2) },
+            ),
+            (
+                "shift right release reaches the app",
+                MouseInputContext {
+                    shift: true,
+                    tracking: prismattyc_emulator::MouseTracking::Any,
+                    ..base(ElementState::Released, MouseButton::Right)
+                },
+                MouseInputDecision::App { button: Some(2) },
+            ),
+            (
+                "shift middle still bypasses tracking",
+                MouseInputContext {
+                    shift: true,
+                    tracking: prismattyc_emulator::MouseTracking::Click,
+                    ..base(ElementState::Pressed, MouseButton::Middle)
+                },
+                MouseInputDecision::Ignore {
+                    clear_app_button: false,
+                },
+            ),
+            (
+                "shift right without reporting stays untracked",
+                MouseInputContext {
+                    shift: true,
+                    ..base(ElementState::Pressed, MouseButton::Right)
+                },
+                MouseInputDecision::Ignore {
+                    clear_app_button: false,
+                },
             ),
             (
                 "tracked unknown button",

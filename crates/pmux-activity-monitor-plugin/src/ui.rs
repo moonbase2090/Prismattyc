@@ -4,7 +4,7 @@
 //! the pane size and the clock, so every tier can be rendered and checked in tests.
 
 use lunatui_core::{Attrs, Color, Rect, Style};
-use lunatui_term::{Event, KeyCode, KeyEvent, KeyKind};
+use lunatui_term::{Event, KeyCode, KeyEvent, KeyKind, MouseButton, MouseEvent, MouseKind, Scroll};
 use lunatui_theme::{Theme, Token, Variant};
 use lunatui_widgets::{RenderCx, Sparkline, SparklineBar, Widget};
 use prismattyc_core::activity::{ActivityKind, ActivityRecord};
@@ -222,6 +222,8 @@ pub struct Ui {
     page: usize,
     /// Tier of the last frame.
     last_tier: Tier,
+    /// First screen row and number of list rows drawn in the last frame, for clicks.
+    list_lines: (u16, usize),
 }
 
 impl Default for Ui {
@@ -239,6 +241,7 @@ impl Default for Ui {
             timeline_offset: 0,
             page: 10,
             last_tier: Tier::Medium,
+            list_lines: (0, 0),
         }
     }
 }
@@ -435,7 +438,57 @@ impl Ui {
     pub fn event(&mut self, event: &Event, hosts: &[Host], now: u64) -> bool {
         match event {
             Event::Key(key) => self.key(key, hosts, now),
+            Event::Mouse(mouse) => {
+                self.mouse(mouse, hosts, now);
+                false
+            }
             _ => false,
+        }
+    }
+
+    /// A click selects the seat under it, and a click on the selected seat
+    /// opens its details. The wheel moves the selection, or scrolls the
+    /// timeline and details. Any click closes the help.
+    fn mouse(&mut self, mouse: &MouseEvent, hosts: &[Host], now: u64) {
+        let rows = rows(hosts, self, now);
+        self.current(&rows);
+        if self.help {
+            if matches!(mouse.kind, MouseKind::Down(_)) {
+                self.help = false;
+            }
+            return;
+        }
+        match (self.screen, mouse.kind) {
+            (Screen::List, MouseKind::Down(MouseButton::Left)) => {
+                let (top, shown) = self.list_lines;
+                let Some(line) = mouse.row.checked_sub(top).map(usize::from) else {
+                    return;
+                };
+                if line >= shown {
+                    return;
+                }
+                if let Some(Row::Seat(host, id)) = rows.get(self.list_offset + line) {
+                    let target = (*host, id.clone());
+                    if self.selected.as_ref() == Some(&target) {
+                        self.screen = Screen::Details;
+                        self.timeline_offset = 0;
+                    } else {
+                        self.selected = Some(target);
+                    }
+                }
+            }
+            (Screen::List, MouseKind::Scroll(Scroll::Up)) => self.step(&rows, -1),
+            (Screen::List, MouseKind::Scroll(Scroll::Down)) => self.step(&rows, 1),
+            (Screen::Timeline | Screen::Details, MouseKind::Scroll(Scroll::Up)) => {
+                self.timeline_offset = self.timeline_offset.saturating_sub(3);
+            }
+            (Screen::Timeline | Screen::Details, MouseKind::Scroll(Scroll::Down)) => {
+                self.timeline_offset += 3;
+            }
+            (Screen::Timeline | Screen::Details, MouseKind::Down(MouseButton::Right)) => {
+                self.screen = Screen::List;
+            }
+            _ => {}
         }
     }
 }
@@ -777,6 +830,7 @@ fn draw_list(
     // When rows are cut off, the last line says how many instead of showing a partial list.
     let overflow = rows.len() > ui.list_offset + height;
     let shown = if overflow { height - 1 } else { height };
+    ui.list_lines = (area.y, shown);
     let longest = hosts
         .iter()
         .flat_map(|host| host.seats.keys())
@@ -1810,6 +1864,7 @@ fn draw_help(paint: &mut Painter<'_, '_>, area: Rect) {
         ("f", "filter: all, needs attention, working"),
         ("s", "sort: name, most recent, state"),
         ("p", "pixel lanes on or off, where supported"),
+        ("mouse", "click selects, again opens; wheel moves"),
         ("q", "quit"),
     ];
     let palette = *paint.palette;
@@ -2057,13 +2112,12 @@ mod tests {
             "?",
             r#"
  Activity monitor   ●2 ◆1 ○0 !0 ✕1 ■0 !
- mac  connected  3 seats  2 need you
-▌✕ bui╭────────────────────────────────────────────────────────╮
- ◆ rev│ Keys                                                   │
- ● wor│                                                        │
- windo│ ↑ ↓  j k    move, or scroll the timeline or details    │
- ● win│ PgUp PgDn   move by a page                             │
-      │ g G         first or last                              │
+ mac  ╭────────────────────────────────────────────────────────╮
+▌✕ bui│ Keys                                                   │
+ ◆ rev│                                                        │
+ ● wor│ ↑ ↓  j k    move, or scroll the timeline or details    │
+ windo│ PgUp PgDn   move by a page                             │
+ ● win│ g G         first or last                              │
       │ Tab         next host (Shift-Tab: previous)            │
       │ Enter → l   open the timeline                          │
       │ d           open selected seat details                 │
@@ -2072,6 +2126,7 @@ mod tests {
       │ f           filter: all, needs attention, working      │
       │ s           sort: name, most recent, state             │
       │ p           pixel lanes on or off, where supported     │
+      │ mouse       click selects, again opens; wheel moves    │
       │ q           quit                                       │
       ╰────────────────────────────────────────────────────────╯
 
@@ -2128,6 +2183,57 @@ mod tests {
         monitor.hosts[0].apply(page_in("e", records, None)?, 0);
         monitor.frame(60, 12, 0);
         Ok(monitor)
+    }
+
+    fn click(monitor: &mut Monitor, kind: MouseKind, row: u16) {
+        monitor.event(&Event::Mouse(MouseEvent {
+            kind,
+            column: 5,
+            row,
+            modifiers: lunatui_term::Modifiers::new(),
+            unit: lunatui_term::MouseUnit::Cells,
+        }));
+    }
+
+    fn screen_row_of(monitor: &mut Monitor, seat: &str) -> u16 {
+        let (text, ..) = draw(monitor, 60, 12);
+        text.lines()
+            .position(|line| line.contains(seat))
+            .expect("seat on screen") as u16
+    }
+
+    #[test]
+    fn clicks_select_and_open_seats_and_the_wheel_moves_or_scrolls() -> Result<()> {
+        let mut monitor = many()?;
+        let row = screen_row_of(&mut monitor, "seat-03");
+        click(&mut monitor, MouseKind::Down(MouseButton::Left), row);
+        assert_eq!(selected(&monitor), Some((0, "seat-03".into())));
+        assert_eq!(monitor.ui.screen, Screen::List);
+        // A click on the selected seat opens its details.
+        screen_row_of(&mut monitor, "seat-03");
+        click(&mut monitor, MouseKind::Down(MouseButton::Left), row);
+        assert_eq!(monitor.ui.screen, Screen::Details);
+        click(&mut monitor, MouseKind::Scroll(Scroll::Down), row);
+        assert_eq!(monitor.ui.timeline_offset, 3);
+        click(&mut monitor, MouseKind::Scroll(Scroll::Up), row);
+        assert_eq!(monitor.ui.timeline_offset, 0);
+        click(&mut monitor, MouseKind::Down(MouseButton::Right), row);
+        assert_eq!(monitor.ui.screen, Screen::List);
+        // The wheel moves the selection in the list.
+        click(&mut monitor, MouseKind::Scroll(Scroll::Down), row);
+        assert_eq!(selected(&monitor), Some((0, "seat-04".into())));
+        click(&mut monitor, MouseKind::Scroll(Scroll::Up), row);
+        assert_eq!(selected(&monitor), Some((0, "seat-03".into())));
+        // Clicks off the list and releases do nothing; a click closes the help.
+        draw(&mut monitor, 60, 12);
+        click(&mut monitor, MouseKind::Down(MouseButton::Left), 0);
+        click(&mut monitor, MouseKind::Up(MouseButton::Left), row);
+        assert_eq!(selected(&monitor), Some((0, "seat-03".into())));
+        press_char(&mut monitor, '?');
+        click(&mut monitor, MouseKind::Down(MouseButton::Left), row);
+        assert!(!monitor.ui.help);
+        assert_eq!(selected(&monitor), Some((0, "seat-03".into())));
+        Ok(())
     }
 
     #[test]

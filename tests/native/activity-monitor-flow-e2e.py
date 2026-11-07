@@ -23,8 +23,10 @@ import importlib.util
 import json
 import os
 import platform
+import re
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -46,6 +48,28 @@ EXE = ".exe" if WINDOWS else ""
 
 class Failed(AssertionError):
     pass
+
+
+def monitor_cell_point(status, pane, frame, pixels, column, row):
+    """Map a monitor cell to the native client's screen coordinates."""
+    attachments = {item["pane_id"]: item["remote_pane_id"] for item in status["current_panes"]}
+    for local_id, bounds in status["visible_pane_content_rects"]:
+        if attachments.get(f"PaneId({local_id})") == pane["id"]:
+            px, py, pw, ph = bounds
+            break
+    else:
+        raise Failed(f"monitor pane {pane['id']} has no visible host attachment")
+    cell_w, cell_h = pw / pane["geometry"]["cols"], ph / pane["geometry"]["rows"]
+    return (int(frame[0] + (px + (column + 0.5) * cell_w) * frame[2] / pixels[0]),
+            int(frame[1] + (py + (row + 0.5) * cell_h) * frame[3] / pixels[1]))
+
+
+def png_pixels(path):
+    with path.open("rb") as image:
+        header = image.read(24)
+    if len(header) != 24 or header[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("host has not written a PNG header")
+    return struct.unpack(">II", header[16:24])
 
 
 def wait_for(check, label, timeout=20.0):
@@ -74,7 +98,7 @@ def kill_tree(process):
     else:
         try:
             os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
         try:
             process.wait(10)
@@ -82,7 +106,7 @@ def kill_tree(process):
             pass
         try:
             os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
     try:
         process.wait(10)
@@ -124,17 +148,34 @@ MAC_FLAGS = {"shift": 1 << 17, "ctrl": 1 << 18, "alt": 1 << 19, "cmd": 1 << 20}
 
 
 class MacInput:
-    def __init__(self, pid):
+    def __init__(self, pid, present):
         import ctypes
         self.pid = pid
+        self.present = present
         self.c = ctypes
         quartz = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
         quartz.CGEventCreateKeyboardEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_bool]
         quartz.CGEventCreateKeyboardEvent.restype = ctypes.c_void_p
         quartz.CGEventSetFlags.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+        quartz.CGEventGetFlags.argtypes = [ctypes.c_void_p]
+        quartz.CGEventGetFlags.restype = ctypes.c_uint64
+        quartz.CGEventGetIntegerValueField.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        quartz.CGEventGetIntegerValueField.restype = ctypes.c_int64
         quartz.CGEventPostToPid.argtypes = [ctypes.c_int, ctypes.c_void_p]
         quartz.CFRelease.argtypes = [ctypes.c_void_p]
+
+        class Point(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+        self.Point = Point
+        quartz.CGEventCreateMouseEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint32, Point, ctypes.c_uint32]
+        quartz.CGEventCreateMouseEvent.restype = ctypes.c_void_p
+        quartz.CGEventCreateScrollWheelEvent2.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                                                          ctypes.c_int32, ctypes.c_int32, ctypes.c_int32]
+        quartz.CGEventCreateScrollWheelEvent2.restype = ctypes.c_void_p
+        quartz.CGEventSetLocation.argtypes = [ctypes.c_void_p, Point]
+        quartz.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
         self.quartz = quartz
+        self.diagnostics = {"events": []}
         # Keys posted to a background app are dropped; bring the host forward.
         subprocess.run(["osascript", "-e", 'tell application "System Events" to set frontmost of '
                         f'(first process whose unix id is {pid}) to true'], capture_output=True, timeout=20)
@@ -171,6 +212,57 @@ class MacInput:
         for ch in text:
             self.key("space" if ch == " " else ch)
 
+    def frame(self):
+        """The rendered client area in global points, excluding the native title bar."""
+        out = subprocess.check_output(["osascript", "-e", 'tell application "System Events" to get '
+                                       f'{{position, size}} of window 1 of (first process whose unix id is {self.pid})'],
+                                      text=True, timeout=20)
+        x, y, w, h = (int(float(part)) for part in out.replace(" ", "").split(","))
+        pixel_w, pixel_h = png_pixels(self.present)
+        client_h = pixel_h * w / pixel_w
+        return x, y + h - client_h, w, client_h
+
+    def _mouse(self, kind, x, y, button=0):
+        event = self.quartz.CGEventCreateMouseEvent(None, kind, self.Point(x, y), button)
+        assert event, "mouse event allocation"
+        inherited = self.quartz.CGEventGetFlags(event)
+        self.quartz.CGEventSetFlags(event, 0)
+        self.diagnostics["events"].append({"kind": kind, "point": [x, y],
+                                           "inherited_flags": inherited, "flags": 0})
+        self.quartz.CGEventPost(0, event)
+        self.quartz.CFRelease(event)
+
+    def click(self, x, y, button="left", shift=False):
+        right = button == "right"
+        self._mouse(5, x, y)
+        time.sleep(0.1)
+        for kind in ((3, 4) if right else (1, 2)):
+            event = self.quartz.CGEventCreateMouseEvent(None, kind, self.Point(x, y), 1 if right else 0)
+            assert event, "mouse event allocation"
+            self.quartz.CGEventSetFlags(event, MAC_FLAGS["shift"] if shift else 0)
+            self.quartz.CGEventPost(0, event)
+            self.quartz.CFRelease(event)
+            time.sleep(0.05)
+        time.sleep(0.3)
+
+    def wheel(self, x, y, notches):
+        """Positive notches turn the wheel down the list."""
+        self._mouse(5, x, y)
+        time.sleep(0.1)
+        for _ in range(abs(notches)):
+            event = self.quartz.CGEventCreateScrollWheelEvent2(None, 1, 1, -1 if notches > 0 else 1, 0, 0)
+            assert event, "scroll event allocation"
+            inherited = self.quartz.CGEventGetFlags(event)
+            self.quartz.CGEventSetFlags(event, 0)
+            self.quartz.CGEventSetLocation(event, self.Point(x, y))
+            self.diagnostics["events"].append({"kind": 22, "point": [x, y],
+                "inherited_flags": inherited, "flags": self.quartz.CGEventGetFlags(event),
+                "delta": self.quartz.CGEventGetIntegerValueField(event, 11)})
+            self.quartz.CGEventPost(0, event)
+            self.quartz.CFRelease(event)
+            time.sleep(0.15)
+        time.sleep(0.3)
+
 
 XDO_KEYS = {"up": "Up", "down": "Down", "left": "Left", "right": "Right", "pageup": "Prior",
             "pagedown": "Next", "home": "Home", "end": "End", "enter": "Return", "escape": "Escape",
@@ -178,12 +270,36 @@ XDO_KEYS = {"up": "Up", "down": "Down", "left": "Left", "right": "Right", "pageu
             "_": "underscore", "space": "space"}
 
 
+def native_window_handle(window_id):
+    match = re.fullmatch(r"WindowId\((\d+)\)", window_id)
+    if not match:
+        raise Failed(f"unexpected native window ID: {window_id}")
+    return int(match[1])
+
+
 class XdotoolInput:
-    def __init__(self, pid):
+    def __init__(self, pid, window_id):
+        import ctypes
+        self.c = ctypes
+        self.x11 = ctypes.CDLL("libX11.so.6")
+        self.x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        self.x11.XOpenDisplay.restype = ctypes.c_void_p
+        self.x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        self.x11.XGetGeometry.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint)]
+        self.x11.XTranslateCoordinates.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+            ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_ulong)]
         out = wait_for(lambda: subprocess.check_output(
             ["xdotool", "search", "--onlyvisible", "--pid", str(pid)], text=True).strip(),
             "host window")
-        self.window = out.splitlines()[-1]
+        self.window = str(native_window_handle(window_id))
+        self.diagnostics = {"render_window": self.window, "windows": out.splitlines(), "pointer": []}
+        owner = subprocess.check_output(["xdotool", "getwindowpid", self.window], text=True).strip()
+        if int(owner) != pid:
+            raise Failed("the registered X11 window does not belong to the host")
         subprocess.run(["xdotool", "windowactivate", "--sync", self.window], check=False)
         subprocess.run(["xdotool", "windowfocus", "--sync", self.window], check=True)
 
@@ -202,6 +318,54 @@ class XdotoolInput:
         subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "40", text], check=True)
         time.sleep(0.15)
 
+    def frame(self):
+        display = self.x11.XOpenDisplay(None)
+        if not display:
+            raise Failed("cannot open the owned X11 display")
+        try:
+            root, child = self.c.c_ulong(), self.c.c_ulong()
+            x, y = self.c.c_int(), self.c.c_int()
+            width, height, border, depth = (self.c.c_uint() for _ in range(4))
+            if not self.x11.XGetGeometry(display, int(self.window), self.c.byref(root),
+                    self.c.byref(x), self.c.byref(y), self.c.byref(width), self.c.byref(height),
+                    self.c.byref(border), self.c.byref(depth)):
+                raise Failed("cannot read the registered X11 window geometry")
+            if not self.x11.XTranslateCoordinates(display, int(self.window), root.value, 0, 0,
+                    self.c.byref(x), self.c.byref(y), self.c.byref(child)):
+                raise Failed("cannot translate the X11 client origin")
+            return x.value, y.value, width.value, height.value
+        finally:
+            self.x11.XCloseDisplay(display)
+
+    def _move(self, x, y):
+        subprocess.run(["xdotool", "mousemove", str(x), str(y)], check=True)
+        time.sleep(0.1)
+        out = subprocess.check_output(["xdotool", "getmouselocation", "--shell"], text=True)
+        fields = dict(line.split("=") for line in out.split())
+        self.diagnostics["pointer"].append({"requested": [x, y], "actual": fields,
+            "client_frame": self.frame(), "focus": subprocess.check_output(
+                ["xdotool", "getwindowfocus"], text=True).strip()})
+        if (int(fields["X"]), int(fields["Y"])) != (x, y):
+            raise Failed("X11 pointer did not reach the requested position")
+
+    def click(self, x, y, button="left", shift=False):
+        self._move(x, y)
+        if shift:
+            subprocess.run(["xdotool", "keydown", "shift"], check=True)
+        try:
+            subprocess.run(["xdotool", "click", "3" if button == "right" else "1"], check=True)
+        finally:
+            if shift:
+                subprocess.run(["xdotool", "keyup", "shift"], check=True)
+        time.sleep(0.3)
+
+    def wheel(self, x, y, notches):
+        self._move(x, y)
+        for _ in range(abs(notches)):
+            subprocess.run(["xdotool", "click", "5" if notches > 0 else "4"], check=True)
+            time.sleep(0.15)
+        time.sleep(0.3)
+
 
 WIN_VK = {"up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27, "pageup": 0x21, "pagedown": 0x22,
           "home": 0x24, "end": 0x23, "enter": 0x0D, "escape": 0x1B, "tab": 0x09, "backspace": 0x08,
@@ -211,33 +375,63 @@ EXTENDED = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28}
 
 
 class WindowsInput:
-    def __init__(self, pid):
+    def __init__(self, pid, window_id):
         import ctypes
         from ctypes import wintypes
         self.c, self.w = ctypes, wintypes
         self.user = ctypes.WinDLL("user32", use_last_error=True)
         self.pid = pid
-        self.hwnd = wait_for(self._find, "host window")
+        self.user.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        self.user.GetWindowThreadProcessId.restype = wintypes.DWORD
+        self.user.IsWindowVisible.argtypes = [wintypes.HWND]
+        self.user.IsWindowVisible.restype = wintypes.BOOL
+        self.user.GetForegroundWindow.restype = wintypes.HWND
+        self.user.SetForegroundWindow.argtypes = [wintypes.HWND]
+        self.user.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        self.user.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        self.user.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+        self.user.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+        self.user.WindowFromPoint.argtypes = [wintypes.POINT]
+        self.user.WindowFromPoint.restype = wintypes.HWND
+        self.user.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        self.user.GetAncestor.restype = wintypes.HWND
+        self.user.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        self.user.GetDpiForWindow.argtypes = [wintypes.HWND]
+        self.user.GetDpiForWindow.restype = wintypes.UINT
+        self.hwnd = native_window_handle(window_id)
+        self.diagnostics = {"render_window": self.hwnd, "windows": self._windows(), "pointer": []}
+        wait_for(lambda: self._owner(self.hwnd) == self.pid and self.user.IsWindowVisible(self.hwnd),
+                 "registered host window")
         self._focus()
 
-    def _find(self):
+    def _owner(self, hwnd):
+        owner = self.w.DWORD()
+        self.user.GetWindowThreadProcessId(hwnd, self.c.byref(owner))
+        return owner.value
+
+    def _windows(self):
         found = []
-        proc = self.c.WINFUNCTYPE(self.c.c_bool, self.w.HWND, self.w.LPARAM)
+        proc = self.c.WINFUNCTYPE(self.w.BOOL, self.w.HWND, self.w.LPARAM)
 
         def each(hwnd, _):
-            owner = self.w.DWORD()
-            self.user.GetWindowThreadProcessId(hwnd, self.c.byref(owner))
-            if owner.value == self.pid and self.user.IsWindowVisible(hwnd):
-                found.append(hwnd)
+            if self._owner(hwnd) == self.pid and self.user.IsWindowVisible(hwnd):
+                name = self.c.create_unicode_buffer(256)
+                rect = self.w.RECT()
+                self.user.GetClassNameW(hwnd, name, len(name))
+                self.user.GetClientRect(hwnd, self.c.byref(rect))
+                found.append({"hwnd": hwnd, "class": name.value,
+                              "client": [rect.right - rect.left, rect.bottom - rect.top]})
             return True
 
         self.user.EnumWindows(proc(each), 0)
-        return found[0] if found else None
+        return found
 
     def _focus(self):
         self.user.ShowWindow(self.hwnd, 9)
         self.user.SetForegroundWindow(self.hwnd)
         time.sleep(0.3)
+        if self.user.GetForegroundWindow() != self.hwnd:
+            raise Failed(f"the registered host window is not foreground: {self.diagnostics}")
 
     def _vk(self, vk, up):
         extended = 0x1 if vk in EXTENDED else 0
@@ -265,14 +459,64 @@ class WindowsInput:
         for ch in text:
             self.key("space" if ch == " " else ch)
 
+    def frame(self):
+        """The client area as (x, y, width, height) in screen pixels."""
+        rect = self.w.RECT()
+        if not self.user.GetClientRect(self.hwnd, self.c.byref(rect)):
+            raise self.c.WinError(self.c.get_last_error())
+        origin = self.w.POINT(0, 0)
+        if not self.user.ClientToScreen(self.hwnd, self.c.byref(origin)):
+            raise self.c.WinError(self.c.get_last_error())
+        return origin.x, origin.y, rect.right - rect.left, rect.bottom - rect.top
 
-def native_input(pid):
+    def _move(self, x, y):
+        if not self.user.SetCursorPos(int(x), int(y)):
+            raise self.c.WinError(self.c.get_last_error())
+        time.sleep(0.1)
+        point = self.w.POINT()
+        if not self.user.GetCursorPos(self.c.byref(point)):
+            raise self.c.WinError(self.c.get_last_error())
+        target = self.user.WindowFromPoint(point)
+        target_root = self.user.GetAncestor(target, 2)  # GA_ROOT
+        owner = self._owner(target)
+        self.diagnostics["pointer"].append({"requested": [int(x), int(y)],
+            "actual": [point.x, point.y], "target_window": target, "target_pid": owner,
+            "target_root": target_root,
+            "client_frame": self.frame(), "dpi": self.user.GetDpiForWindow(self.hwnd)})
+        if (point.x, point.y) != (int(x), int(y)) or owner != self.pid or target_root != self.hwnd:
+            raise Failed("native pointer did not reach the owned host window")
+
+    def click(self, x, y, button="left", shift=False):
+        if self.user.GetForegroundWindow() != self.hwnd:
+            self._focus()
+        down, up = (0x8, 0x10) if button == "right" else (0x2, 0x4)
+        self._move(x, y)
+        if shift:
+            self._vk(WIN_MOD["shift"], False)
+        self.user.mouse_event(down, 0, 0, 0, 0)
+        time.sleep(0.05)
+        self.user.mouse_event(up, 0, 0, 0, 0)
+        if shift:
+            self._vk(WIN_MOD["shift"], True)
+        time.sleep(0.3)
+
+    def wheel(self, x, y, notches):
+        if self.user.GetForegroundWindow() != self.hwnd:
+            self._focus()
+        self._move(x, y)
+        for _ in range(abs(notches)):
+            self.user.mouse_event(0x800, 0, 0, (-120 if notches > 0 else 120) & 0xFFFFFFFF, 0)
+            time.sleep(0.15)
+        time.sleep(0.3)
+
+
+def native_input(pid, present, window_id):
     system = platform.system()
     if system == "Darwin":
-        return MacInput(pid)
+        return MacInput(pid, present)
     if system == "Windows":
-        return WindowsInput(pid)
-    return XdotoolInput(pid)
+        return WindowsInput(pid, window_id)
+    return XdotoolInput(pid, window_id)
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +543,21 @@ class PaneInput:
     def type(self, text):
         for character in text:
             self.key(character)
+
+    def mouse(self, button, column, row, release):
+        """One SGR mouse report at a zero-based cell, as a terminal would send it."""
+        pane = self.flow.monitor_pane()["id"]
+        report = f"\x1b[<{button};{column + 1};{row + 1}{'m' if release else 'M'}"
+        self.flow.cli("send", pane, "--literal", "--force", "--", report)
+        time.sleep(0.3)
+
+    def click(self, column, row, button=0):
+        self.mouse(button, column, row, False)
+        self.mouse(button, column, row, True)
+
+    def wheel(self, column, row, notches):
+        for _ in range(abs(notches)):
+            self.mouse(65 if notches > 0 else 64, column, row, False)
 
 
 class Flow:
@@ -410,7 +669,7 @@ class Flow:
         self.host = subprocess.Popen([str(self.bins / f"prismattyc-host{EXE}"), "--no-splash"],
                                      env=self.env, stdout=log, stderr=log, **GROUP)
         wait_for(lambda: self.status().get("space") is not None or self.status(), "host render status", 60)
-        self.keys = native_input(self.host.pid)
+        self.keys = native_input(self.host.pid, self.out / "present.png", self.status()["window_id"])
         self.wait_ready()
 
     def stop(self):
@@ -426,6 +685,8 @@ class Flow:
         swept = self.leftovers()
         for pid, command in swept:
             kill_pid(pid)
+        if hasattr(getattr(self, "keys", None), "diagnostics"):
+            (self.out / "native-input.json").write_text(json.dumps(self.keys.diagnostics, indent=2) + "\n")
         return [command for _, command in swept]
 
     def leftovers(self):
@@ -459,6 +720,13 @@ class Flow:
         session = self.monitor_session()
         return session["windows"][0]["panes"][0] if session else None
 
+    def monitor_mouse_mode(self):
+        pane = self.monitor_pane()
+        if pane is None:
+            return None
+        return next((state for state in self.status().get("current_panes", [])
+                     if state["remote_pane_id"] == pane["id"]), None)
+
     def screen(self):
         pane = self.monitor_pane()
         return self.cli("save-buffer", str(pane["id"]), "-") if pane else ""
@@ -470,6 +738,15 @@ class Flow:
                     if seat in line:
                         return seat
         return None
+
+    def row_of(self, seat):
+        """The screen row (zero-based) a seat is listed on right now; the list reorders with age."""
+        return next((i for i, line in enumerate(self.screen().splitlines()) if seat in line), None)
+
+    def seat_at(self, row):
+        lines = self.screen().splitlines()
+        text = lines[row] if 0 <= row < len(lines) else ""
+        return next((seat for seat in ROWS if seat in text), None)
 
     def space_sessions(self):
         for line in self.cli("space", "ls").splitlines():
@@ -507,6 +784,8 @@ class Flow:
     def diagnose(self, name):
         """Everything pmux can say about a failed step, next to result.json."""
         report = {}
+        if hasattr(getattr(self, "keys", None), "diagnostics"):
+            report["native_input"] = self.keys.diagnostics
         for label, probe in [("render_status", lambda: json.loads(self.cli("render-status", "--json"))),
                              ("spaces", lambda: self.cli("space", "ls")),
                              ("sessions", lambda: self.cli("ls"))]:
@@ -590,14 +869,65 @@ class Flow:
         wait_for(lambda: self.space_sessions() == 1, "Space with one session")
         wait_for(lambda: self.status().get("space") == SPACE, "host shows the Space", 30)
         wait_for(lambda: all(seat in self.screen() for seat in SEATS), "monitor lists every seat", 30)
+        wait_for(lambda: (state := self.monitor_mouse_mode())
+                 and state["mouse_tracking"] != "Off" and state["mouse_sgr"],
+                 "monitor advertises mouse capture through the host", 10)
+        mouse = self.monitor_mouse_mode()
         tabs = self.status().get("tabs") or []
         return {"space": SPACE, "pane": self.monitor_pane()["id"], "tabs": len(tabs),
-                "monitor_processes": len(self.monitor_processes())}
+                "monitor_processes": len(self.monitor_processes()),
+                "mouse_tracking": mouse["mouse_tracking"], "mouse_sgr": mouse["mouse_sgr"]}
 
     def open_headless(self):
         self.cli("space", "monitor")
         wait_for(lambda: all(seat in self.screen() for seat in SEATS), "monitor lists every seat", 60)
         return {"pane": self.monitor_pane()["id"], "monitor_processes": len(self.monitor_processes())}
+
+    def mouse_headless(self):
+        """Terminal mouse reports reach the monitor: select, open, right-click back, wheel, help."""
+        checked = []
+        self.keys.key("home")
+        time.sleep(0.5)
+        seat = next(name for name in SEATS if name != self.selected())
+
+        def back_to_list():
+            for _ in range(3):
+                if self.selected() is not None:
+                    return
+                self.keys.key("escape")
+                time.sleep(0.3)
+
+        row = None
+        for _ in range(12):  # the list reorders, so look again before each click
+            back_to_list()
+            row = self.row_of(seat)
+            if row is not None:
+                self.keys.click(20, row)
+                if poll(lambda: self.selected() == seat, 3):
+                    break
+        else:
+            raise Failed(f"no click selected {seat} (last row {row}):\n" + "\n".join(self.screen().splitlines()[:9]))
+        checked.append(f"click selected {seat}")
+        row = self.row_of(seat)
+        self.keys.click(20, row)
+        wait_for(lambda: "esc back" in self.screen() and "▌" not in self.screen(), "second click opens the seat", 10)
+        checked.append("second click opened the details")
+        self.keys.click(20, row, 2)
+        wait_for(lambda: self.selected() == seat, "right-click back to the list", 10)
+        checked.append("right-click went back to the list")
+        row = self.row_of(seat)
+        turn = 1 if self.seat_at(row + 1) is not None else -1  # the last seat cannot move down
+        self.keys.wheel(20, row, turn)
+        wait_for(lambda: self.selected() not in (None, seat), "the wheel moves the selection", 10)
+        self.keys.wheel(20, row, -turn)
+        wait_for(lambda: self.selected() == seat, "the wheel moves the selection back", 10)
+        checked.append("wheel moved the selection down and back")
+        self.keys.key("?")
+        wait_for(lambda: "first or last" in self.screen(), "help", 10)
+        self.keys.click(20, row)
+        wait_for(lambda: "first or last" not in self.screen(), "a click closes the help", 10)
+        checked.append("a click closed the help")
+        return {"mouse": checked}
 
     def quit_headless(self):
         self.keys.key("q")
@@ -662,14 +992,91 @@ class Flow:
         press("p", lambda: True, "pixels")
         return {"keys": checked}
 
+    def mouse_step(self):
+        """Native pointer events through the host: select, open, wheel, back and help."""
+        checked = []
+
+        def point(row):
+            status, pane = self.status(), self.monitor_pane()
+            frame, pixels = self.keys.frame(), png_pixels(self.out / "present.png")
+            target = monitor_cell_point(status, pane, frame, pixels, 20, row)
+            self.keys.diagnostics.setdefault("mapping", []).append({"pane": pane["id"],
+                "cell": [20, row], "client_frame": frame, "render_pixels": pixels,
+                "content_rects": status["visible_pane_content_rects"], "point": target})
+            return target
+
+        def back_to_list():
+            for _ in range(3):
+                if self.selected() is not None:
+                    return
+                self.keys.key("escape")
+                time.sleep(0.3)
+
+        def click_seat(target):
+            """Click the seat's row until it is selected; the list reorders, so look again each time."""
+            for _ in range(8):
+                back_to_list()
+                row = self.row_of(target)
+                if row is None:
+                    continue
+                x, y = point(row)
+                self.keys.click(x, y)
+                if poll(lambda: self.selected() == target, 3):
+                    return
+            raise Failed(f"no native click selected {target}")
+
+        self.keys.key("home")
+        time.sleep(0.5)
+        seat = next(name for name in SEATS if name != self.selected())
+        click_seat(seat)
+        checked.append(f"click selected {seat}")
+        x, y = point(self.row_of(seat))
+        self.keys.click(x, y)
+        wait_for(lambda: "esc back" in self.screen() and "▌" not in self.screen(), "second click opens the seat", 10)
+        checked.append("second click opened the details")
+        self.keys.click(x, y, button="right")
+        wait_for(lambda: self.status().get("context_menu") is not None, "plain right-click opens the pane menu", 10)
+        self.keys.key("escape")
+        wait_for(lambda: self.status().get("context_menu") is None, "pane menu closed", 10)
+        assert self.selected() is None, "closing the pane menu also changed the monitor view"
+        checked.append("plain right-click kept the host pane menu")
+        self.keys.click(x, y, button="right", shift=True)
+        wait_for(lambda: self.selected() == seat and self.status().get("context_menu") is None,
+                 "Shift+right-click through the host returns to the list", 10)
+        checked.append("Shift+right-click went back to the list through the host")
+        order = [name for line in self.screen().splitlines() for name in ROWS if name in line]
+        self.keys.key("home")
+        wait_for(lambda: self.selected() == order[0], "first seat before wheel proof", 10)
+        self.keys.key("down")
+        wheel_seat = order[1]
+        wait_for(lambda: self.selected() == wheel_seat, "interior seat before wheel proof", 10)
+        row = self.row_of(wheel_seat)
+        assert self.seat_at(row - 1) is not None and self.seat_at(row + 1) is not None, "wheel proof needs an interior seat"
+        x, y = point(row)
+        self.keys.wheel(x, y, 1)
+        wait_for(lambda: self.selected() not in (None, wheel_seat), "the wheel moves the selection", 10)
+        moved = self.selected()
+        self.keys.wheel(x, y, -1)
+        wait_for(lambda: self.selected() == wheel_seat, "the wheel moves the selection back", 10)
+        checked.append(f"wheel moved {wheel_seat} to {moved} and back")
+        self.keys.key("?")
+        wait_for(lambda: "first or last" in self.screen(), "help", 10)
+        self.keys.click(x, y)
+        wait_for(lambda: "first or last" not in self.screen(), "a click closes the help", 10)
+        checked.append("a click closed the help")
+        return {"mouse": checked}
+
     def quit_step(self):
         self.keys.key("q")
         wait_for(lambda: not any(seat in self.screen() for seat in SEATS), "monitor quit to the shell")
         wait_for(lambda: not self.monitor_processes(), "monitor process exited")
+        wait_for(lambda: (state := self.monitor_mouse_mode())
+                 and state["mouse_tracking"] == "Off" and not state["mouse_sgr"],
+                 "monitor mouse capture restored to the shell", 10)
         assert self.space_sessions() == 1, "quitting changed the Space"
         self.palette_open()
         wait_for(lambda: all(seat in self.screen() for seat in SEATS), "palette started the monitor again", 30)
-        return {"monitor_processes": len(self.monitor_processes())}
+        return {"monitor_processes": len(self.monitor_processes()), "mouse_capture_restored": True}
 
     def close_step(self):
         self.keys.key("q")
@@ -710,11 +1117,13 @@ def main():
         if args.no_gui:
             flow.step("open", flow.open_headless)
             flow.step("keys", flow.keys_step)
+            flow.step("mouse", flow.mouse_headless)
             flow.step("quit", flow.quit_headless)
         else:
             flow.step("open", flow.open)
             flow.step("reopen", flow.reopen)
             flow.step("keys", flow.keys_step)
+            flow.step("mouse", flow.mouse_step)
             flow.step("quit", flow.quit_step)
             flow.step("close", flow.close_step)
         status = "PASS"

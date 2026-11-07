@@ -182,6 +182,10 @@ impl View {
                     return Ok(lifecycle::Reply::Closed);
                 }
             }
+            frame::Event::Mouse(mouse) => {
+                self.monitor.now_ms = self.clock.wall_ms;
+                self.monitor.event(&Event::Mouse(mouse_event(mouse)));
+            }
         }
         if self.reference.preferences.snapshot
             && self
@@ -265,6 +269,45 @@ fn key_event(key: frame::Key) -> KeyEvent {
         },
     };
     KeyEvent::press(code).modifiers(modifiers)
+}
+
+fn mouse_event(mouse: frame::Mouse) -> lunatui_term::MouseEvent {
+    use lunatui_term::{MouseButton, MouseKind, MouseUnit, Scroll};
+    let button = |button| match button {
+        frame::MouseButton::Left => MouseButton::Left,
+        frame::MouseButton::Middle => MouseButton::Middle,
+        frame::MouseButton::Right => MouseButton::Right,
+    };
+    let kind = match mouse.action {
+        frame::MouseAction::Press(pressed) => MouseKind::Down(button(pressed)),
+        frame::MouseAction::Release(released) => MouseKind::Up(button(released)),
+        frame::MouseAction::Drag(held) => MouseKind::Drag(button(held)),
+        frame::MouseAction::Moved => MouseKind::Move,
+        frame::MouseAction::Wheel(frame::Wheel::Up) => MouseKind::Scroll(Scroll::Up),
+        frame::MouseAction::Wheel(frame::Wheel::Down) => MouseKind::Scroll(Scroll::Down),
+        frame::MouseAction::Wheel(frame::Wheel::Left) => MouseKind::Scroll(Scroll::Left),
+        frame::MouseAction::Wheel(frame::Wheel::Right) => MouseKind::Scroll(Scroll::Right),
+    };
+    let mut modifiers = Modifiers::new();
+    for (bit, apply) in [
+        (
+            pmux_plugin_api::modifiers::SHIFT,
+            Modifiers::shift as fn(Modifiers) -> Modifiers,
+        ),
+        (pmux_plugin_api::modifiers::ALT, Modifiers::alt),
+        (pmux_plugin_api::modifiers::CONTROL, Modifiers::control),
+    ] {
+        if mouse.modifiers & bit != 0 {
+            modifiers = apply(modifiers);
+        }
+    }
+    lunatui_term::MouseEvent {
+        kind,
+        column: mouse.column,
+        row: mouse.row,
+        modifiers,
+        unit: MouseUnit::Cells,
+    }
 }
 
 thread_local! { static VIEW: RefCell<Option<View>> = const { RefCell::new(None) }; }

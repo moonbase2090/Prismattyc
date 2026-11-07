@@ -773,7 +773,11 @@ mod tests {
                 },
                 lifecycle::Capability {
                     name: role_capability.into(),
-                    version: "1.0.0".into(),
+                    version: CONTRACTS
+                        .iter()
+                        .find(|(name, _)| *name == role_capability)
+                        .map(|(_, version)| version.to_string())
+                        .expect("the role's contract"),
                     available: true,
                 },
             ],

@@ -481,11 +481,11 @@ mod tests {
                 br#"manifest_version = 1
 id = "org.moonbase.example"
 version = "1.0.0"
-plugin_api = "^1"
+plugin_api = "^2"
 component = "view.wasm"
 notices = ["LICENSE"]
 [requires]
-"pmux:view/frame" = "^1"
+"pmux:view/frame" = "^2"
 [[contributions]]
 kind = "view"
 id = "main"

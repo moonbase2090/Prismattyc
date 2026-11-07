@@ -77,6 +77,10 @@ jobs:
         shell: pwsh
         run: |
           Set-Location head
+          # The two checkouts share build outputs. The head's contract files are older
+          # than the merge-base build that just ran, so cargo would keep the merge-base's
+          # generated API version. Touching them makes the head regenerate its own.
+          Get-ChildItem crates/pmux-plugin-api/wit -Recurse -File | ForEach-Object { $_.LastWriteTime = Get-Date }
           python scripts/test-plugin-runtime.py --feature activity-bench --target-dir "$env:RUNNER_TEMP/bench-target" --out "$env:RUNNER_TEMP/bench-head"
 
       - name: Summarize

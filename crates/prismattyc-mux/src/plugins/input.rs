@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: MIT
 
-use lunatui_term::{KeyCode, KeyEvent, KeyKind};
+use lunatui_term::{
+    KeyCode, KeyEvent, KeyKind, Modifiers, MouseButton, MouseEvent, MouseKind, Scroll,
+};
 use pmux_plugin_api::host::pmux::view::frame;
 use pmux_plugin_api::modifiers as bits;
 
-pub(super) fn key(key: &KeyEvent) -> Option<frame::Key> {
-    if key.kind == KeyKind::Release {
-        return None;
-    }
-    let modifiers = key.modifiers;
+fn modifier_bits(modifiers: Modifiers) -> u8 {
     let mut flags = 0;
     for (set, bit) in [
         (modifiers.is_shift(), bits::SHIFT),
@@ -24,6 +22,15 @@ pub(super) fn key(key: &KeyEvent) -> Option<frame::Key> {
             flags |= bit;
         }
     }
+    flags
+}
+
+pub(super) fn key(key: &KeyEvent) -> Option<frame::Key> {
+    if key.kind == KeyKind::Release {
+        return None;
+    }
+    let modifiers = key.modifiers;
+    let flags = modifier_bits(modifiers);
     let code = match key.code {
         KeyCode::Char(character) => frame::KeyCode::Character(character),
         KeyCode::F(number) => frame::KeyCode::Function(number),
@@ -52,6 +59,37 @@ pub(super) fn key(key: &KeyEvent) -> Option<frame::Key> {
     })
 }
 
+/// Presses, releases and the wheel. Motion is dropped here: every event is a
+/// round trip to the plug-in and a new frame, and the views act on clicks.
+pub(super) fn mouse(mouse: &MouseEvent) -> Option<frame::Mouse> {
+    fn button(button: MouseButton) -> Option<frame::MouseButton> {
+        match button {
+            MouseButton::Left => Some(frame::MouseButton::Left),
+            MouseButton::Middle => Some(frame::MouseButton::Middle),
+            MouseButton::Right => Some(frame::MouseButton::Right),
+            MouseButton::Extra(_) => None,
+        }
+    }
+    if mouse.unit != lunatui_term::MouseUnit::Cells {
+        return None;
+    }
+    let action = match mouse.kind {
+        MouseKind::Down(pressed) => frame::MouseAction::Press(button(pressed)?),
+        MouseKind::Up(released) => frame::MouseAction::Release(button(released)?),
+        MouseKind::Scroll(Scroll::Up) => frame::MouseAction::Wheel(frame::Wheel::Up),
+        MouseKind::Scroll(Scroll::Down) => frame::MouseAction::Wheel(frame::Wheel::Down),
+        MouseKind::Scroll(Scroll::Left) => frame::MouseAction::Wheel(frame::Wheel::Left),
+        MouseKind::Scroll(Scroll::Right) => frame::MouseAction::Wheel(frame::Wheel::Right),
+        MouseKind::Drag(_) | MouseKind::Move => return None,
+    };
+    Some(frame::Mouse {
+        action,
+        column: mouse.column,
+        row: mouse.row,
+        modifiers: modifier_bits(mouse.modifiers),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,5 +105,29 @@ mod tests {
         ));
         assert_eq!(mapped.modifiers, 5);
         assert!(key(&native.kind(KeyKind::Release)).is_none());
+    }
+
+    #[test]
+    fn clicks_and_the_wheel_reach_the_view_but_motion_does_not() {
+        let at = |kind| MouseEvent {
+            kind,
+            column: 7,
+            row: 3,
+            modifiers: Modifiers::new().shift(),
+            unit: lunatui_term::MouseUnit::Cells,
+        };
+        let press = mouse(&at(MouseKind::Down(MouseButton::Left))).unwrap();
+        assert!(matches!(
+            press.action,
+            frame::MouseAction::Press(frame::MouseButton::Left)
+        ));
+        assert_eq!((press.column, press.row, press.modifiers), (7, 3, 1));
+        assert!(matches!(
+            mouse(&at(MouseKind::Scroll(Scroll::Down))).unwrap().action,
+            frame::MouseAction::Wheel(frame::Wheel::Down)
+        ));
+        assert!(mouse(&at(MouseKind::Move)).is_none());
+        assert!(mouse(&at(MouseKind::Drag(MouseButton::Left))).is_none());
+        assert!(mouse(&at(MouseKind::Down(MouseButton::Extra(8)))).is_none());
     }
 }

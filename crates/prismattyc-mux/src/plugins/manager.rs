@@ -1073,6 +1073,9 @@ impl Manager {
             loaded
         };
         if let Err(error) = package.manifest.compatibility() {
+            if self.move_to_compatible(id, &installed, &grants) {
+                return self.selection(id);
+            }
             let mut state = self.state.lock().unwrap();
             if let Some(slot) = state
                 .slots
@@ -1090,6 +1093,51 @@ impl Manager {
             generation,
             grants,
         })
+    }
+
+    /// A selected package this core cannot run moves to the newest bundled version that it can,
+    /// keeping the grants it had. Nothing moves when the bundle has no such version.
+    fn move_to_compatible(
+        &self,
+        id: &str,
+        selected: &Installed,
+        grants: &BTreeSet<String>,
+    ) -> bool {
+        let moved = (|| -> Result<bool> {
+            let newest = self
+                .catalog
+                .lock()
+                .unwrap()
+                .clone()
+                .get(id, None)?
+                .entry
+                .version
+                .clone();
+            if newest == selected.version {
+                return Ok(false);
+            }
+            let retry = |step: &str| {
+                digest(format!("{step}:{id}:{}:{newest}", selected.version).as_bytes())[..32]
+                    .to_string()
+            };
+            let action = AdminAction::Install {
+                id: id.into(),
+                version: Some(newest.clone()),
+            };
+            let Reply::Installed { package } = self.admin(retry("install"), action)? else {
+                return Ok(false);
+            };
+            if self.store.load(&package)?.manifest.compatibility().is_err() {
+                return Ok(false);
+            }
+            let action = AdminAction::Enable {
+                package,
+                grants: grants.iter().cloned().collect(),
+            };
+            self.admin(retry("enable"), action)?;
+            Ok(true)
+        })();
+        moved.unwrap_or(false)
     }
 
     fn tool(self: &Arc<Self>, id: &str, contribution: &str) -> Result<String> {
@@ -1811,6 +1859,20 @@ mod tests {
         assert_ne!(state.slots["org.moonbase.example"].generation, generation);
         drop(state);
         drop(restarted);
+        std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn an_incompatible_selection_stays_put_when_the_bundle_has_nothing_newer() {
+        let socket = socket();
+        let manager = Manager::new(&socket, &state(&socket), Weak::new()).unwrap();
+        let selected = Installed {
+            id: "org.moonbase.not-bundled".into(),
+            version: "1.0.0".into(),
+            digest: "0".repeat(64),
+        };
+        assert!(!manager.move_to_compatible(&selected.id, &selected, &BTreeSet::new()));
+        drop(manager);
         std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
     }
 

@@ -159,7 +159,7 @@ class Connection:
         return reply
 
     def plugin(self, operation, **fields):
-        return self.request("plugin", plugin_api="1.0.0", operation={"operation": operation, **fields})
+        return self.request("plugin", plugin_api="2.0.0", operation={"operation": operation, **fields})
 
 
 def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=None):
@@ -881,17 +881,25 @@ else:
             assert {entry["id"] for entry in expected_catalog} == {monitor, "org.moonbase.activity-connector"}
             assert sorted(cli("discover")["packages"], key=lambda entry: (entry["id"],entry["version"])) == sorted(expected_catalog, key=lambda entry: (entry["id"],entry["version"]))
             launcher = bins / f"pmux-activity-monitor{suffix}"
+            # Only the newest version of each plug-in runs on this core; older packages
+            # built for an earlier plug-in API stay listed as retained versions.
+            newest = {}
+            for entry in expected_catalog:
+                version = tuple(int(part) for part in entry["version"].split("."))
+                if entry["id"] not in newest or version > newest[entry["id"]][0]:
+                    newest[entry["id"]] = (version, entry)
+            current = [entry for _, entry in newest.values()]
 
             def enabled_states():
                 return {state["id"]: state for state in cli("list")["states"] if state["enabled"]}
 
             # A fresh daemon installs and enables both official plug-ins, local access only.
             deadline = time.monotonic() + 60
-            while len(enabled_states()) < len(expected_catalog):
-                assert time.monotonic() < deadline, cli("list")
+            while len(enabled_states()) < len(current):
+                assert time.monotonic() < deadline, (cli("list"), (scratch / "daemon.log").read_text(errors="replace")[-4000:].replace(str(runtime), "<runtime>").replace(str(scratch), "<proof>"))
                 time.sleep(0.25)
             seeded = enabled_states()
-            for entry in expected_catalog:
+            for entry in current:
                 state = seeded[entry["id"]]
                 assert state["grants"] == ["activity.read:local"], state
                 assert state["selected"]["version"] == entry["version"] and state["selected"]["digest"] == entry["sha256"], state
@@ -902,7 +910,7 @@ else:
             assert json.loads(result.stdout)["retained_history_only"] is False
             feed(False)
             # A user's disable is kept across a restart; seeding never reverses it.
-            for entry in expected_catalog:
+            for entry in current:
                 cli("disable", entry["id"])
             stop(daemon)
             daemon, connection = start()
@@ -912,7 +920,7 @@ else:
             baseline = connection.request("snapshot")["response"]["snapshot"]["sessions"]
             assert enabled_states() == {}, cli("list")
             assert all(not state["grants"] for state in cli("list")["states"]), cli("list")
-            for entry in expected_catalog:
+            for entry in current:
                 assert any(package["id"] == entry["id"] for package in cli("list")["installed"])
 
             def onboarding(arguments, plugin, installed):
@@ -929,7 +937,11 @@ else:
                 onboarding(arguments, plugin, True)
             assert enabled_states() == {}, "Collection does not re-enable a disabled plug-in"
             feed(False)
+            # Packages built for an older plug-in API stay listed but cannot be installed.
             for entry in expected_catalog:
+                if entry not in current:
+                    assert "incompatible plug-in API" in cli("install",entry["id"],"--version",entry["version"],succeeds=False)
+            for entry in current:
                 package = cli("install",entry["id"],"--version",entry["version"])["package"]
                 assert package["digest"] == entry["sha256"]
             connector = "org.moonbase.activity-connector"
@@ -937,7 +949,7 @@ else:
             cli("run",monitor,"--snapshot",succeeds=False)
             cli("invoke",connector,"seats",succeeds=False)
             assert connection.plugin("exports",allowlist=[connector])["response"]["reply"]["tools"] == []
-            for entry in expected_catalog:
+            for entry in current:
                 cli("enable",entry["id"],"--version",entry["version"],"--allow","activity.read:local")
             epoch = feed(True)
             event = {"schema_version":1,"seat":"fixture-seat","run_id":"artifact-proof","event_id":"failed-test","source":"hooks","kind":"test_failed"}
@@ -952,7 +964,7 @@ else:
             cli("disable",connector)
             assert connection.plugin("exports",allowlist=[connector])["response"]["reply"]["tools"] == []
             assert connection.plugin("call_export",handle=exports[0]["handle"],arguments="{}")["status"] == "error"
-            cli("enable",connector,"--version","1.0.0","--allow","activity.read:local")
+            cli("enable",connector,"--version",next(entry["version"] for entry in current if entry["id"] == connector),"--allow","activity.read:local")
             feed(False)
             reply = cli("invoke",connector,"poll")
             assert reply["is_error"] and json.loads(reply["json"])["error"]["code"] == "feed_disabled"

@@ -1140,7 +1140,18 @@ on a supporting version before the command can return data.
 
 Each window reports `current_panes` at the snapshot time. Each pane includes
 its alternate-screen state, scroll offset, stored image count, and rich
-layout flags. `last_raster` reports the latest raster attempt. Its timestamp
+layout flags. Map a daemon pane ID through `remote_pane_id` to its local
+`pane_id` before looking up window geometry. `visible_pane_content_rects`
+pairs local pane IDs with terminal content rectangles in rendered pixels.
+`visible_pane_slots` includes pane headers and padding. Use the content
+rectangle when locating terminal cells.
+
+`input_state` reports the host's pointer position, local cursor cell, Shift
+state, and focused terminal's mouse reporting mode. Pane entries also report
+their own mouse mode. Compare these with the content rectangle when tracing
+input through an attached pane.
+
+`last_raster` reports the latest raster attempt. Its timestamp
 can be older than the snapshot when the window is idle. Check
 `present_succeeded` before treating that attempt as a displayed frame.
 

@@ -1,12 +1,12 @@
 manifest_version = 1
 id = "org.moonbase.runtime-fixture"
 version = "1.0.0"
-plugin_api = "^1"
+plugin_api = "^2"
 component = "fixture.wasm"
 notices = ["LICENSE"]
 [requires]
 "pmux:activity/read" = "^1"
-"pmux:view/frame" = "^1"
+"pmux:view/frame" = "^2"
 "pmux:tool/call" = "^1"
 [[contributions]]
 kind = "view"

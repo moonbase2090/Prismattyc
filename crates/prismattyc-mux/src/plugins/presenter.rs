@@ -266,7 +266,7 @@ fn spawn_input(pending: Vec<u8>) -> io::Result<Input> {
                 use std::io::Read;
                 let mut parser = lunatui_term::Parser::new();
                 let send = |mut events: Vec<Event>| {
-                    events.retain(|event| matches!(event, Event::Key(_)));
+                    events.retain(|event| matches!(event, Event::Key(_) | Event::Mouse(_)));
                     events.is_empty() || sender.send(Ok(events)).is_ok()
                 };
                 if !send(decode(&mut parser, &pending)) {
@@ -324,7 +324,7 @@ fn spawn_input(pending: Vec<u8>) -> io::Result<Input> {
                         ))
                     })();
                     match event {
-                        Ok(Some(event @ Event::Key(_))) => {
+                        Ok(Some(event @ (Event::Key(_) | Event::Mouse(_)))) => {
                             if sender.send(Ok(vec![event])).is_err() {
                                 return;
                             }
@@ -433,7 +433,7 @@ impl Frontend {
         session: &mut Session<io::Stdout>,
     ) -> Result<()> {
         let epoch = Instant::now();
-        let mut keys = std::collections::VecDeque::new();
+        let mut pending = std::collections::VecDeque::new();
         loop {
             let viewport = self::viewport(self.viewport.pixels);
             if viewport != self.viewport {
@@ -463,8 +463,8 @@ impl Frontend {
                     continue;
                 }
             }
-            if let Some(key) = keys.pop_front() {
-                if matches!(self.event(frame::Event::Key(key), session)?, Flow::Closed) {
+            if let Some(event) = pending.pop_front() {
+                if matches!(self.event(event, session)?, Flow::Closed) {
                     break;
                 }
                 continue;
@@ -476,8 +476,9 @@ impl Frontend {
             match input.recv_timeout(wait) {
                 Ok(Ok(events)) => {
                     if events.iter().any(|event| matches!(event, Event::Key(key) if key.kind != lunatui_term::KeyKind::Release && key.modifiers.is_control() && matches!(key.code, lunatui_term::KeyCode::Char('c'|'C')))) { break; }
-                    keys.extend(events.iter().filter_map(|event| match event {
-                        Event::Key(key) => super::input::key(key),
+                    pending.extend(events.iter().filter_map(|event| match event {
+                        Event::Key(key) => super::input::key(key).map(frame::Event::Key),
+                        Event::Mouse(mouse) => super::input::mouse(mouse).map(frame::Event::Mouse),
                         _ => None,
                     }));
                 }
@@ -539,9 +540,11 @@ pub(super) fn run(
             io::stdout(),
             SessionOptions {
                 sync_output: SyncOutput::Enabled,
-                mouse_tracking: MouseTracking::Disabled,
+                mouse_tracking: MouseTracking::Sgr,
             },
         )?;
+        #[cfg(windows)]
+        let _mouse_input = crate::platform::ConsoleMouseInput::enter()?;
         let input = spawn_input(pending_input)?;
         let result = view.drive(
             input.receiver.as_ref().expect("live input receiver"),

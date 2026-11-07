@@ -547,7 +547,7 @@ fn mux_rows_take_their_defaults_from_the_shared_mux_table() {
     assert_eq!(default("mux.attach_on_new"), Some(true.into()));
     assert_eq!(
         default("mux.allow_mixed_case_session_names"),
-        Some(false.into())
+        Some(true.into())
     );
     assert_eq!(default("mux.remote_size"), Some("latest".into()));
     assert_eq!(

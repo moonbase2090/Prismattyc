@@ -100,6 +100,7 @@ per-user program folder.
    release's MSI as the upgrade source:
 
    ```powershell
+   New-Item -ItemType Directory -Force smoke | Out-Null
    .\test-windows-msi.ps1 -Msi <new.msi> -UpgradeFrom <previous.msi> `
      -ExpectedVersion VERSION *>&1 | Tee-Object smoke\windows-msi.log
    ```

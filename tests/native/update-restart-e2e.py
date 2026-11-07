@@ -10,6 +10,7 @@ restart too. It starts no window and never touches the real socket.
 import argparse
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -30,8 +31,9 @@ def main():
     bins = args.bins.resolve()
     args.out.mkdir(parents=True, exist_ok=False)
     records = []
-    with tempfile.TemporaryDirectory(prefix='pmux-upd-', dir='/tmp') as tmp:
-        root = Path(tmp)
+    tmp = tempfile.mkdtemp(prefix='pmux-upd-', dir='/tmp')
+    root = Path(tmp)
+    try:
         sock = root / 'pmux.sock'
         project = root / 'project'
         project.mkdir()
@@ -175,7 +177,7 @@ def main():
             assert not sock.exists(), 'the daemon is still running'
             cli('up')
             assert snapshot() == {} or 'alpha' not in snapshot(), 'sessions survived a stop'
-            cli('space', 'open', 'desk')
+            cli('space', 'open', 'desk', '--no-attach')
             assert_back('space_reopen_after_daemon_restart_runs_programs', 4)
             status = 'PASS'
             print('UPDATE_RESTART_E2E_COMPLETE: ' + ', '.join(checks), flush=True)
@@ -183,6 +185,19 @@ def main():
             subprocess.run([str(bins / 'pmux'), 'stop'], env=env, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, timeout=30)
             (args.out / 'result.json').write_text(json.dumps(dict(status=status, checks=checks, records=records), indent=2) + '\n')
+    finally:
+        # Nothing may outlive the run: no process using the private root and
+        # no file left in it, whether the run passed or failed.
+        deadline = time.monotonic() + 15
+        while True:
+            leftover = [line for line in subprocess.run(['ps', '-A', '-o', 'pid=,args='], capture_output=True,
+                                                         text=True).stdout.splitlines() if tmp in line]
+            if not leftover or time.monotonic() > deadline:
+                break
+            time.sleep(0.2)
+        shutil.rmtree(tmp, ignore_errors=True)
+        assert not leftover, 'processes outlived the test: ' + repr(leftover)
+        assert not os.path.exists(tmp), 'files left in ' + tmp
 
 
 if __name__ == '__main__':

@@ -109,7 +109,20 @@ def build(args, scratch):
         profile = ["--release"] if args.release else []
         subprocess.run([*cargo, command[0], *profile, *command[1:]], cwd=REPO, env={**env, **overrides}, check=True)
 
-    if args.bundle:
+    if args.fixture_bundle:
+        bundle = args.fixture_bundle.resolve()
+        index = bundle / "pmux-plugins.json"
+        assert index.stat().st_size <= 64 * 1024, "fixture catalog exceeds its byte budget"
+        catalog = json.loads(index.read_bytes())
+        assert catalog["version"] == 1 and 0 < len(catalog["packages"]) <= 64
+        for entry in catalog["packages"]:
+            digest = entry["sha256"]
+            assert len(digest) == 64 and all(character in "0123456789abcdef" for character in digest)
+            archive = bundle / f"{digest}.pmux-plugin"
+            assert archive.stat().st_size == entry["bytes"] <= 64 * 1024 * 1024
+            assert hashlib.sha256(archive.read_bytes()).hexdigest() == digest
+        print("PASS reused exact private fixture archives " + hashlib.sha256(index.read_bytes()).hexdigest(), flush=True)
+    elif args.bundle:
         bundle = args.bundle.resolve()
         run("build", "-p", "prismattyc-mux", "--example", "plugin_bundle", "--locked")
         helper = target / ("release" if args.release else "debug") / "examples" / ("plugin_bundle.exe" if os.name == "nt" else "plugin_bundle")
@@ -132,7 +145,7 @@ def build(args, scratch):
         connector_module = target / "wasm32-unknown-unknown/release/pmux_activity_connector_plugin.wasm"
         run("run", "-p", "prismattyc-mux", "--example", "package_plugin", "--locked", "--", str(bundle), str(good), str(module), str(bad), str(module), str(monitor), str(monitor_module), str(connector), str(connector_module))
     run("build", "-p", "prismattyc-mux", "--example", "plugin_frame_probe", "--locked")
-    run("build", "-p", "prismattyc-mux", "--bin", "pmux", "--bin", "pmuxd", "--locked", PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
+    run("build", "-p", "prismattyc-mux", "--bin", "pmux", "--bin", "pmuxd", "--bin", "pmux-attach", "--locked", PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
     run("build", "-p", "pmux-mcp", "--locked", PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
     run("build", "--manifest-path", "tools/activity-monitor/Cargo.toml", "--locked", PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
     return target / ("release" if args.release else "debug")
@@ -858,17 +871,87 @@ else:
         for item in imported:
             cli("endpoint","remove",item["label"])
 
-    def monitor_frame_proof():
+    def monitor_frame_proof(style=None):
         text = cli("run", monitor, "main", "--snapshot", "--cols", "100", "--rows", "24", text=True)
         assert "fixture-seat" in text and "test_failed" in text
         probe_binary = frame_probe or bins / f"examples/plugin_frame_probe{suffix}"
-        probe = subprocess.run([str(probe_binary), str(endpoint)], env=env, capture_output=True, text=True, encoding="utf-8", timeout=45)
+        probe_args = [str(probe_binary), str(endpoint)]
+        if style is not None:
+            probe_args.append(style)
+        probe = subprocess.run(probe_args, env=env, capture_output=True, text=True, encoding="utf-8", timeout=45)
         assert probe.returncode == 0, probe.stderr
         frame = json.loads(probe.stdout)
         assert frame["cells"] == 2400 and "fixture-seat" in frame["text"]
         # The 12-column seat name leaves a 53-cell lane at 8 pixels per cell.
         assert frame["rasters"] == [{"width":424,"height":16,"bytes":27136}] * 2, frame["rasters"]
         assert frame["failure_pixels"] > 0
+        return frame
+
+    def graph_style_proof():
+        cli("install", monitor)
+        cli("enable", monitor, "--allow", "activity.read:local")
+        feed(True)
+        event = {"schema_version": 1, "seat": "fixture-seat", "run_id": "graph-proof",
+                 "event_id": "graph-failed", "source": "hooks", "kind": "test_failed"}
+        assert connection.request("publish_activity", event=event)["status"] == "ok"
+        launcher = bins / f"pmux-activity-monitor{suffix}"
+        records = []
+
+        def snapshot(name, style=None, configured=None, term="xterm-256color", succeeds=True):
+            setting(True)
+            if configured is not None:
+                with config.open("a") as output:
+                    output.write(f'activity_graph_style = "{configured}"\n')
+            arguments = ["--socket", str(endpoint), "--snapshot", "--size", "100x24", "--no-pixels"]
+            if style is not None:
+                arguments.extend(["--graph-style", style])
+            result = subprocess.run([str(launcher), *arguments], env={**env, "TERM": term},
+                                    capture_output=True, text=True, encoding="utf-8", timeout=45)
+            records.append({"case": name, "argv": [argument.replace(str(runtime), "<runtime>") for argument in arguments],
+                            "term": term, "exit_code": result.returncode,
+                            "stdout": result.stdout, "stderr": result.stderr.replace(str(runtime), "<runtime>")})
+            assert (result.returncode == 0) == succeeds, result.stderr
+            if not succeeds:
+                assert "unknown variant" in result.stderr, result.stderr
+                return
+            assert "fixture-seat" in result.stdout and "test_failed" in result.stdout, result.stdout
+            (scratch / f"graph-{name}.txt").write_text(result.stdout, encoding="utf-8")
+            return result.stdout
+
+        def has_braille(text):
+            return any("\u2801" <= character <= "\u28ff" for character in text)
+
+        def has_blocks(text):
+            return any("\u2581" <= character <= "\u2588" for character in text)
+
+        try:
+            assert has_braille(snapshot("default"))
+            assert has_braille(snapshot("braille", style="braille"))
+            assert has_braille(snapshot("unknown-terminal", term="unknown-terminal"))
+            block = snapshot("block", style="block")
+            assert has_blocks(block) and not has_braille(block)
+            ascii_frame = snapshot("ascii", style="ascii")
+            assert not has_braille(ascii_frame) and not has_blocks(ascii_frame)
+            lane = next(line for line in ascii_frame.splitlines() if "fixture-seat" in line)[46:99]
+            assert lane.strip() and set(lane) <= set(" ._:-=+*#"), lane
+            assert has_blocks(snapshot("configured-block", configured="block"))
+            assert has_braille(snapshot("override", style="braille", configured="block"))
+            fallback = snapshot("fallback", configured="braille", term="dumb")
+            assert not has_braille(fallback) and not has_blocks(fallback)
+            assert next(line for line in fallback.splitlines() if "fixture-seat" in line)[46:99].strip()
+            snapshot("invalid-config", configured="invalid", succeeds=False)
+            setting(True)
+            pixels = {style: monitor_frame_proof(style) for style in ("braille", "block", "ascii")}
+            (scratch / "graph-pixel-styles.json").write_text(json.dumps(pixels, indent=2) + "\n")
+            assert daemon.poll() is None and daemon.pid == pid
+            (scratch / "graph-styles-result.json").write_text(json.dumps({
+                "status": "PASS", "cases": [record["case"] for record in records],
+                "pixels": "typed RGBA lanes retained", "daemon": "preserved",
+                "scope": "real contained component and launcher; text frames, not desktop screenshots",
+            }, indent=2) + "\n")
+            print("PASS default braille, all graph styles, config/CLI precedence, known-ASCII fallback and unchanged pixel uploads", flush=True)
+        finally:
+            (scratch / "graph-styles-commands.json").write_text(json.dumps(records, indent=2) + "\n")
 
     try:
         setting(False)
@@ -876,6 +959,9 @@ else:
         pid = daemon.pid
         baseline = connection.request("snapshot")["response"]["snapshot"]["sessions"]
         monitor = "org.moonbase.activity-monitor"
+        if feature == "graph-styles":
+            graph_style_proof()
+            return
         if feature == "production":
             assert expected_catalog is not None
             assert {entry["id"] for entry in expected_catalog} == {monitor, "org.moonbase.activity-connector"}
@@ -1132,13 +1218,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, help="retain proof artifacts in a new directory")
     parser.add_argument("--target-dir", type=Path, default=REPO / "target/plugin-proof")
-    parser.add_argument("--bundle", type=Path, help="reuse a verified production artifact without compiling guests")
+    sources = parser.add_mutually_exclusive_group()
+    sources.add_argument("--bundle", type=Path, help="reuse a verified production artifact without compiling guests")
+    sources.add_argument("--fixture-bundle", type=Path, help="reuse exact private fixture archives for graph-style proof on another OS; not production provenance")
     parser.add_argument("--bins", type=Path, help="drive existing packaged production executables after verifying their physical bundle identities; build nothing")
     parser.add_argument("--frame-probe", type=Path, help="separately built native plugin_frame_probe helper, required with --bins")
     parser.add_argument("--toolchain", default="1.90.0")
     parser.add_argument("--release", action="store_true", dest="release", default=True, help="exercise optimized native binaries as shipped (default)")
     parser.add_argument("--debug", action="store_false", dest="release", help="use slower debug native binaries for local diagnostics")
-    parser.add_argument("--feature", choices=["all","activity-bench","endpoint-pressure","legacy-import","production","discovery","remote-query"], default="all")
+    parser.add_argument("--feature", choices=["all","activity-bench","endpoint-pressure","legacy-import","production","discovery","remote-query","graph-styles"], default="all")
     args = parser.parse_args()
     # A killed run (timeout, cancel, closed terminal) still runs the finally
     # blocks that stop each isolated daemon.
@@ -1149,6 +1237,8 @@ def main():
             signal.signal(getattr(signal, name), interrupted)
     if bool(args.bundle) != (args.feature in ("production", "remote-query")):
         parser.error("--bundle is required with --feature production or remote-query")
+    if args.fixture_bundle and args.feature != "graph-styles":
+        parser.error("--fixture-bundle applies only to --feature graph-styles")
     if args.bins and (args.feature != "production" or not args.frame_probe):
         parser.error("--bins requires --bundle, --feature production, and --frame-probe")
     if args.frame_probe and not args.bins:

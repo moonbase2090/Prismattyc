@@ -84,17 +84,15 @@ jobs:
           bundle="$(python scripts/release/prepare-plugin-bundle.py --bundle "$source" --target-dir "$RUNNER_TEMP/target")"
           echo "bundle: $bundle"
           export PRISMATTYC_PLUGIN_BUNDLE_DIR="$bundle"
-          export CARGO_TARGET_DIR="$RUNNER_TEMP/target"
-          cargo build --release --locked -p prismattyc-mux -p prismattyc-host --bins
-          cargo build --release --locked --manifest-path tools/activity-monitor/Cargo.toml
+          cargo build --release --locked --target-dir "$RUNNER_TEMP/target" -p prismattyc-mux -p prismattyc-host --bins
+          cargo build --release --locked --target-dir "$RUNNER_TEMP/target" --manifest-path tools/activity-monitor/Cargo.toml
           ls "$RUNNER_TEMP/target/release"
+          python -c 'import os, pathlib, sys; exe = ".exe" if os.name == "nt" else ""; root = pathlib.Path(sys.argv[1]); required = ["pmux", "pmuxd", "prismattyc-host", "pmux-activity-monitor"]; missing = [name + exe for name in required if not (root / (name + exe)).is_file()]; assert not missing, f"missing native flow binaries in {root}: {missing}"' "$RUNNER_TEMP/target/release"
 
       - name: Run the pane keys flow (no desktop)
-        if: always()
         run: python tests/native/activity-monitor-flow-e2e.py --no-gui --bins "$RUNNER_TEMP/target/release" --out "$RUNNER_TEMP/pane-keys"
 
       - name: Run the user flow
-        if: always()
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
             Xvfb :99 -screen 0 1920x1080x24 &

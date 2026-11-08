@@ -6,7 +6,8 @@
 use lunatui_core::{Attrs, Color, Rect, Style};
 use lunatui_term::{Event, KeyCode, KeyEvent, KeyKind, MouseButton, MouseEvent, MouseKind, Scroll};
 use lunatui_theme::{Theme, Token, Variant};
-use lunatui_widgets::{RenderCx, Sparkline, SparklineBar, Widget};
+use lunatui_widgets::RenderCx;
+use pmux_plugin_api::monitor::GraphStyle;
 use prismattyc_core::activity::{ActivityKind, ActivityRecord};
 use prismattyc_core::AgentId;
 
@@ -213,6 +214,7 @@ pub struct Ui {
     pub sort: Sort,
     pub help: bool,
     pub pixels: bool,
+    pub graph_style: GraphStyle,
     pub motion: bool,
     /// Run and event hashes are hidden unless the operator opts into diagnostics.
     pub hashes: bool,
@@ -235,6 +237,7 @@ impl Default for Ui {
             sort: Sort::Name,
             help: false,
             pixels: true,
+            graph_style: GraphStyle::default(),
             motion: true,
             hashes: false,
             list_offset: 0,
@@ -511,6 +514,7 @@ struct Painter<'a, 'b> {
     cx: &'a mut RenderCx<'b>,
     palette: &'a Palette,
     pixels: bool,
+    graph_style: GraphStyle,
 }
 
 fn fg(color: Color) -> Style {
@@ -539,6 +543,14 @@ fn short_id(id: &str) -> String {
 }
 
 impl Painter<'_, '_> {
+    fn lane_width(&self, columns: u16) -> usize {
+        usize::from(columns)
+            * if self.graph_style == GraphStyle::Braille {
+                2
+            } else {
+                1
+            }
+    }
     /// Writes `text` at `x`, clipped to end before `limit`. Returns the column after the text.
     fn text(&mut self, x: u16, y: u16, limit: u16, text: &str, style: Style) -> u16 {
         if x >= limit {
@@ -576,36 +588,21 @@ impl Painter<'_, '_> {
         window: u64,
         bg: Color,
     ) {
-        let bins = model::lane(history, now, window, usize::from(area.width));
+        let bins = model::lane(history, now, window, self.lane_width(area.width));
         self.lane_bins(area, &bins, bg, None);
     }
 
     /// Draws bins colored by state, or all in `ink` when given.
     fn lane_bins(&mut self, area: Rect, bins: &[model::Bin], bg: Color, ink: Option<Color>) {
-        if area.width == 0 {
-            return;
+        crate::graph::Lane {
+            bins,
+            style: self.graph_style,
+            pixels: self.pixels,
+            background: bg,
+            palette: self.palette,
+            ink,
         }
-        let bars: Vec<SparklineBar> = bins
-            .iter()
-            .map(|bin| match bin.state {
-                None => SparklineBar::absent(),
-                Some(state) => {
-                    let base =
-                        u64::from(state != SeatState::Stopped && state != SeatState::Unknown);
-                    // Capped below a full block so lanes on adjacent rows stay apart.
-                    let value = (base + u64::from(bin.events) * 2).min(7);
-                    let color = ink.unwrap_or_else(|| self.palette.state(state));
-                    SparklineBar::value(value).style(fg(color).bg(bg))
-                }
-            })
-            .collect();
-        Sparkline::new(&bars)
-            .max(8)
-            .style(Style::new().bg(bg))
-            .absent_value_symbol(" ")
-            .absent_value_style(Style::new().bg(bg))
-            .pixels(self.pixels)
-            .render(area, self.cx);
+        .render(area, self.cx);
     }
 }
 
@@ -647,6 +644,7 @@ pub fn render(
         cx,
         palette,
         pixels,
+        graph_style: ui.graph_style,
     };
     if tier == Tier::Tiny {
         draw_counts(
@@ -991,7 +989,7 @@ fn draw_host_row(
     // A lane of the host's combined activity, aligned with the seat lanes.
     if let Some((lane_x, lane_w)) = columns(area, tier, longest).lane {
         if x + 2 <= lane_x && !host.seats.is_empty() {
-            let width = usize::from(lane_w);
+            let width = paint.lane_width(lane_w);
             let mut total = vec![
                 model::Bin {
                     events: 0,
@@ -2154,6 +2152,8 @@ mod tests {
     fn every_tier_draws_the_reviewed_frame() -> Result<()> {
         for (width, height, keys, expected) in FRAMES {
             let mut monitor = fleet()?;
+            // These reviewed frames retain coverage of the selectable legacy style.
+            monitor.ui.graph_style = GraphStyle::Block;
             for key in keys.chars() {
                 press_char(&mut monitor, key);
             }
@@ -2162,6 +2162,15 @@ mod tests {
             let expected: Vec<&str> = expected.trim_start_matches('\n').lines().collect();
             assert_eq!(actual, expected, "{width}x{height} after {keys:?}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn normal_monitor_uses_braille_without_enabling_a_flag() -> Result<()> {
+        let mut monitor = fleet()?;
+        let (text, ..) = draw(&mut monitor, 100, 14);
+        assert_eq!(monitor.ui.graph_style, GraphStyle::Braille);
+        assert_eq!(line_of(&text, "builder").chars().nth(98), Some('⣀'));
         Ok(())
     }
 

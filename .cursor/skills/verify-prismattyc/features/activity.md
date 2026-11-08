@@ -58,6 +58,14 @@ and the official bundle tag `pmux-plugins-v1.1.0`.
 
 ## Build and drive the actual packages
 
+The native Activity Monitor flow builds the matching release executables into
+one target directory, checks that `pmux`, `pmuxd`, `prismattyc-host`, and
+`pmux-activity-monitor` exist there, then passes that directory to
+`tests/native/activity-monitor-flow-e2e.py`. Run the no-desktop pane-key flow
+before the GUI flow and activity bench; skip those drives if build or binary
+verification fails so missing executables are not reported as flow failures.
+CI runs this flow on Linux, macOS, and Windows with the official bundle.
+
 Before preparing a release branch or core tag, run
 `python3 scripts/release/prepare-plugin-bundle.py` without `--candidate` and
 require exit 0. A missing official pin requires the owner to publish the first
@@ -219,6 +227,51 @@ connector's four declared activity tools and omits identity tools. Explicit
 `--plugin` selection remains bounded by enabled packages and their grants.
 
 ## Inspect viewer rendering
+
+For graph-style changes, exercise the actual candidate component and launcher:
+
+```sh
+python3 scripts/test-plugin-runtime.py --feature graph-styles \
+  --target-dir "$verify_target" --out "$verify_evidence/graph-styles" --debug
+```
+
+Require its final PASS and `graph-styles-result.json`. Inspect the saved text
+frames and command records for default braille, explicit braille/block/ASCII,
+the persistent `[mux] activity_graph_style`, CLI precedence, known-ASCII
+`TERM=dumb` fallback, invalid-config refusal, and retained typed pixel uploads.
+Unknown terminal/font coverage must keep braille. This mode builds unpublished
+candidate guests; it does not prove the official catalog pin or replace native
+Windows, macOS, and Linux screenshots of the changed lanes.
+For another OS, pass `--fixture-bundle` pointing at the first run's `bundle`
+directory. The driver verifies every archive's exact size and SHA-256 before
+building native executables, so each platform exercises the same guest bytes.
+This option does not grant production provenance to private fixture packages.
+
+The complete Settings panel also exposes **Multiplexer > Activity graph style**.
+Run `tests/native/macos-settings-e2e.py` from [desktop](desktop.md#complete-settings-and-fonts)
+with `--feature graph-styles` for a focused native drive. It starts with the
+complete panel enabled and cycles block, ASCII, and braille with native keys, checks each saved value,
+then resets to the inherited braille default. Relaunch the monitor to apply it;
+changing this choice does not restart the daemon or an existing monitor.
+
+For native screenshots on an allocated desktop, start a controlled live seat:
+The supplied binary directory must include the matched `pmux-attach` frontend
+as well as `pmux`, `pmuxd`, and `pmux-activity-monitor`.
+
+```sh
+python3 tests/native/activity-graph-seat.py --bins "$verify_bins" \
+  --out "$verify_evidence/graph-seat" --seconds 600
+```
+
+Wait for `ready.json`, then run the generated `graph-seat/attach.py` with Python
+in a native terminal on that same machine. It supplies the isolated environment
+and the matching binary. The default view shows synthetic sample history with neutral
+labels. Capture only the owned seat window, inspect braille glyphs and colors,
+and exclude prompts, paths, usernames, and machine names. Keep `ready.json`
+private because it contains runtime paths. Text frames are not screenshots.
+Create `graph-seat/stop` after capture. Require `result.json` to report PASS,
+`daemon_reaped`, and `scratch_removed`. The deadline and interruption handlers
+also clean the private daemon and scratch directory.
 
 Pure layout, model, and frame-capture tests live in the guest crate:
 

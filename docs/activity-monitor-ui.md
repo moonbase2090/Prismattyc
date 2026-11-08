@@ -126,7 +126,54 @@ Sorting by name is the default, so rows don't jump while you read them.
 
 When a seat changes state in a live update, its row fades from a tint of the new state color to the normal background over 900 milliseconds. History replayed on connect, after a feed reset or while catching up does not fade, so the first frame is not covered in tints. This is the only animation the monitor starts on its own, and `--no-motion` turns it off.
 
-On a terminal that accepts raw RGBA Kitty graphics uploads, lanes render through Lunatui's pixel sparkline as one raster per lane, with eight times the vertical resolution and no gaps between columns. The cell rendering is drawn first and replaced only when the raster is accepted, so a terminal without pixel support, a multiplexer or `--no-pixels` gets the same lanes in block characters. `p` switches between the two at runtime.
+Cell lanes use braille by default. Each character has two time samples and four
+vertical dots in the U+2800 block. State colors are unchanged; when two samples
+share a character, the later sample supplies its color.
+
+Choose `braille`, `block`, or `ascii` when launching the monitor:
+
+```sh
+pmux-activity-monitor --graph-style braille
+pmux-activity-monitor --graph-style block --no-pixels
+pmux-activity-monitor --graph-style ascii
+```
+
+The persistent default lives in the Prismattyc configuration:
+
+```toml
+[mux]
+activity_graph_style = "braille"
+```
+
+The complete Settings panel exposes the same choice under **Multiplexer >
+Activity graph style**. The flag overrides this setting. Relaunch the monitor after changing it;
+the daemon needs no restart. Omitted settings select braille. `TERM=dumb`
+selects ASCII because that terminal declares text-only support. An unknown
+terminal or unavailable pixel protocol keeps the chosen cell style. Terminal
+probes cannot reliably determine a font's braille coverage; use the explicit
+`ascii` or `block` choice if the font does not contain those glyphs.
+
+The contained package declares `main`, `block`, and `ascii` views. Direct
+`pmux plugin run org.moonbase.activity-monitor block` selects the block view;
+the normal launcher applies the configuration and terminal fallback.
+
+On a terminal that accepts raw RGBA Kitty graphics uploads, lanes render through
+Lunatui's pixel sparkline as one raster per lane. The selected cell style stays
+available when pixels are unsupported or disabled. `--no-pixels` selects cells;
+`p` switches pixel lanes on or off at runtime without changing the cell style.
+
+Default braille lanes with synthetic sample history on macOS, Linux, and Windows:
+
+![Braille activity lanes in macOS Terminal](media/activity-monitor/braille-macos.png)
+
+![Braille activity lanes in Linux xterm](media/activity-monitor/braille-linux.png)
+
+![Braille activity lanes in a Windows console](media/activity-monitor/braille-windows.png)
+
+The Windows capture also includes a live worker pane. The same console's
+[block capture](media/activity-monitor/block-windows.png) shows missing glyphs
+in its font; the [ASCII capture](media/activity-monitor/ascii-windows.png) is
+legible. Choose ASCII when the terminal font lacks the selected graph glyphs.
 
 Prismattyc releases before raw-upload support decode Kitty graphics but drop raw RGBA uploads (`f=32`), which Lunatui 0.1.18 sends, and they answer every graphics query with OK. A query cannot tell the two apart, so inside Prismattyc the monitor makes one real 1x1 raw upload with an image number, followed by a device-attributes request. A Prismattyc that keeps the image answers OK first and gets pixel lanes; an older one answers only the attributes and keeps cell lanes. The probe image is deleted again, and keys typed during the probe are kept.
 

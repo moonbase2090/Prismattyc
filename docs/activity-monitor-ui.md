@@ -162,11 +162,18 @@ Lunatui's pixel sparkline as one raster per lane. The selected cell style stays
 available when pixels are unsupported or disabled. `--no-pixels` selects cells;
 `p` switches pixel lanes on or off at runtime without changing the cell style.
 
-Default braille lanes with synthetic sample history on macOS and Linux:
+Default braille lanes with synthetic sample history on macOS, Linux, and Windows:
 
 ![Braille activity lanes in macOS Terminal](media/activity-monitor/braille-macos.png)
 
 ![Braille activity lanes in Linux xterm](media/activity-monitor/braille-linux.png)
+
+![Braille activity lanes in a Windows console](media/activity-monitor/braille-windows.png)
+
+The Windows capture also includes a live worker pane. The same console's
+[block capture](media/activity-monitor/block-windows.png) shows missing glyphs
+in its font; the [ASCII capture](media/activity-monitor/ascii-windows.png) is
+legible. Choose ASCII when the terminal font lacks the selected graph glyphs.
 
 Prismattyc releases before raw-upload support decode Kitty graphics but drop raw RGBA uploads (`f=32`), which Lunatui 0.1.18 sends, and they answer every graphics query with OK. A query cannot tell the two apart, so inside Prismattyc the monitor makes one real 1x1 raw upload with an image number, followed by a device-attributes request. A Prismattyc that keeps the image answers OK first and gets pixel lanes; an older one answers only the attributes and keeps cell lanes. The probe image is deleted again, and keys typed during the probe are kept.
 

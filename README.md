@@ -206,8 +206,8 @@ troubleshooting, compatibility, and application integration.
 
 ## Version
 
-The workspace package version is **`0.3.58`**.
-See the [0.3.58 changelog](CHANGELOG.md#0358---2026-11-05) for the changes
+The workspace package version is **`0.3.59`**.
+See the [0.3.59 changelog](CHANGELOG.md#0359---2026-11-07) for the changes
 and [GitHub Releases](https://github.com/moonbase2090/Prismattyc/releases)
 for published builds.
 

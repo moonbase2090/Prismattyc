@@ -58,6 +58,14 @@ and the official bundle tag `pmux-plugins-v1.1.0`.
 
 ## Build and drive the actual packages
 
+The native Activity Monitor flow builds the matching release executables into
+one target directory, checks that `pmux`, `pmuxd`, `prismattyc-host`, and
+`pmux-activity-monitor` exist there, then passes that directory to
+`tests/native/activity-monitor-flow-e2e.py`. Run the no-desktop pane-key flow
+before the GUI flow and activity bench; skip those drives if build or binary
+verification fails so missing executables are not reported as flow failures.
+CI runs this flow on Linux, macOS, and Windows with the official bundle.
+
 Before preparing a release branch or core tag, run
 `python3 scripts/release/prepare-plugin-bundle.py` without `--candidate` and
 require exit 0. A missing official pin requires the owner to publish the first

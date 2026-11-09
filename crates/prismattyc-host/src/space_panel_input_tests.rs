@@ -142,6 +142,8 @@ fn verify_input(host: &mut HostState) {
     assert!(host.space_panel.as_ref().unwrap().input.is_none());
     assert!(!host.dirty, "a panel with no field does not repaint");
 
+    verify_escape_dismisses_overlays(host);
+
     show_input(host, "keep", false, Choice::Role("seat".into()));
     assert!(input_key_logical(host, &Key::Named(NamedKey::Escape)));
     assert!(host.space_panel.as_ref().unwrap().input.is_none());
@@ -867,6 +869,48 @@ fn verify_activate(
         "a pane that is not on a tab is not focused"
     );
     assert!(host.space_team_focus.is_none());
+}
+
+/// Escape closes the pane menu and the panel before it can reach the pane,
+/// with the pane in the state a plug-in view leaves it (mouse reporting on)
+/// and whatever the host believes about held modifiers.
+fn verify_escape_dismisses_overlays(host: &mut HostState) {
+    let escape = Key::Named(NamedKey::Escape);
+    let _ = host.emulator.feed(b"\x1b[?1003h\x1b[?1006h");
+    assert!(host.emulator.mouse_tracking().is_on());
+    for mods in [
+        ModifiersState::empty(),
+        ModifiersState::SHIFT,
+        ModifiersState::CONTROL,
+        ModifiersState::ALT,
+        ModifiersState::SUPER,
+    ] {
+        host.modifiers = mods;
+        show(host, "team-a", None, Choice::None);
+        assert!(escape_dismisses_overlay(host, &escape, &escape), "{mods:?}");
+        assert!(host.context_menu.is_none() && host.space_panel.is_none());
+
+        let pane = host.mux.focused_id();
+        open_context_menu(host, ContextMenuTarget::Pane(pane));
+        assert!(host.context_menu.is_some());
+        assert!(escape_dismisses_overlay(host, &escape, &escape), "{mods:?}");
+        assert!(
+            host.context_menu.is_none(),
+            "the pane menu closed on {mods:?}"
+        );
+        assert!(host.context_menu_target.is_none());
+    }
+    // Another key leaves the overlay open; with no overlay open Escape is not
+    // taken, so it still reaches the pane.
+    host.modifiers = ModifiersState::empty();
+    show(host, "team-a", None, Choice::None);
+    let enter = Key::Named(NamedKey::Enter);
+    assert!(!escape_dismisses_overlay(host, &enter, &enter));
+    assert!(host.context_menu.is_some() && host.space_panel.is_some());
+    close_context_menu(host);
+    assert!(!escape_dismisses_overlay(host, &escape, &escape));
+    let _ = host.emulator.feed(b"\x1b[?1003l\x1b[?1006l");
+    host.dirty = false;
 }
 
 fn show(host: &mut HostState, space: &str, owner: Option<String>, choice: Choice) {

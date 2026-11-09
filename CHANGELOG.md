@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.3.60] - 2026-11-08
+
+### Changed
+
+- The activity monitor uses braille graphs by default. Settings, `activity_graph_style` and `--graph-style` can select braille, block or ASCII; `TERM=dumb` selects ASCII.
+
+### Fixed
+
+- On Windows, Update and Restart relaunches saved agent commands from the current executable after an updater renames the running executable, instead of leaving agent panes as bare shells.
+
+## [0.3.60-rc.1]
+
+Release candidate for 0.3.60, with the [same changes](#0360---2026-11-08).
+
 ## [0.3.59] - 2026-11-07
 
 ### Added

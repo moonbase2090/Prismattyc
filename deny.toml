@@ -1,6 +1,8 @@
 # cargo-deny: advisories, licenses, bans, and sources.
 # https://embarkstudios.github.io/cargo-deny/
-# The allow-list was surveyed against Cargo.lock. The project is MIT.
+# scripts/cargo-deny-check.py applies this file to the root workspace and to
+# every workspace-excluded or standalone crate. The allow-list was surveyed
+# against those lockfiles. The project is MIT.
 [graph]
 all-features = true
 

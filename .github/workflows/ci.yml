@@ -1124,5 +1124,8 @@ jobs:
       - name: Install cargo-deny 0.20.2
         run: cargo install cargo-deny --version 0.20.2 --locked
 
+      - name: Check which manifests cargo-deny covers
+        run: python3 scripts/cargo-deny-check_test.py
+
       - name: Check advisories, licenses, bans and sources
-        run: cargo deny --log-level warn --manifest-path ./Cargo.toml --config deny.toml --all-features check
+        run: python3 scripts/cargo-deny-check.py

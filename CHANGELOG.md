@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.3.61] - 2026-11-10
+
+### Fixed
+
+- Activity hook observation now shares one two-second deadline across stdin and the activity exchange.
+- `pmux mail watch` and connected MCP agents now distinguish a quiet mailbox from a daemon that exited, and return promptly when the daemon stops.
+
+## [0.3.61-rc.1]
+
+Release candidate for 0.3.61, with the [same changes](#0361---2026-11-10).
+
 ## [0.3.60] - 2026-11-08
 
 ### Changed

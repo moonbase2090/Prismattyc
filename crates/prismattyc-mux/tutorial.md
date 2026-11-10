@@ -189,8 +189,8 @@ Verbs:
 
 - Exit 0: a letter arrived. Run `pmux mail claim` next.
 - Exit 1: the mailbox stayed quiet until the timeout. Default timeout
-  is 300 seconds. A quiet mailbox is not a mux failure and is not a
-  stalled or dead daemon. Run `watch` again, or use `pmux mail inbox`
+  is 300 seconds. Timeout is not a mux failure. A quiet mailbox is not
+  a stalled or dead daemon. Run `watch` again, or use `pmux mail inbox`
   to peek.
 - Exit 3: pmuxd exited while this client was connected. The report is
   `pmuxd exited while this client was connected`.

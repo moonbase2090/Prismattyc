@@ -375,8 +375,9 @@ reference is published.
 Hooks and notifications return success when observation fails and never write
 hook-control output to stdout. A disabled feed is a silent no-op. Other failures
 produce a fixed diagnostic without upstream input or daemon message text. Hook
-stdin is limited to 1 MiB and a two-second wait. Connect, write, and read share a
-separate two-second deadline. Installed handlers have a five-second timeout.
+stdin is limited to 1 MiB. Reading that stdin and the activity RPC share one
+two-second deadline: connect, write, and read use only the time still left, and
+neither wait starts a fresh timeout. Installed handlers have a five-second timeout.
 There is no spool or automatic retry. Correlated events have stable retry
 identities; lifecycle events without correlation receive new identities.
 

@@ -14,6 +14,8 @@ Steps, each recorded in result.json with PASS or FAIL:
   open        palette -> Activity Monitor: the Space, its tab and the monitor
   reopen      palette again: the same Space and session, no second monitor
   keys        every list, timeline, details and help key, checked on screen
+  mouse       native clicks, wheel and right-clicks through the host
+  overlays    Escape closes the control panel and the pane menu with the monitor focused
   quit        q leaves the session's shell; the palette starts the monitor again
   close       close the tab and remove the Space: no monitor process is left
 """
@@ -808,10 +810,9 @@ class Flow:
         """The open palette's query, or None while it is closed."""
         return self.status().get("palette")
 
-    def palette_open(self):
+    def palette_open(self, query="activity monitor"):
         # Native input can be lost while a window settles, so confirm each
         # stage through render-status rather than trusting the keys landed.
-        query = "activity monitor"
         last = None
         for _ in range(3):
             if self.palette() is not None:
@@ -1066,6 +1067,37 @@ class Flow:
         checked.append("a click closed the help")
         return {"mouse": checked}
 
+    def overlay_step(self):
+        """Escape closes the control panel and the pane menu with the monitor pane focused."""
+        checked = []
+        self.keys.key("home")
+        time.sleep(0.5)
+        selected = self.selected()
+        assert self.monitor_mouse_mode()["mouse_tracking"] != "Off", "the monitor should be capturing the mouse"
+
+        def closed():
+            status = self.status()
+            return status.get("context_menu") is None and status.get("space_details") is None
+
+        self.palette_open("update restart")
+        wait_for(lambda: self.status().get("space_details") is not None, "the control panel opens", 10)
+        self.keys.key("escape")
+        wait_for(closed, "Escape closes the control panel", 10)
+        assert self.selected() == selected, "closing the control panel reached the monitor"
+        checked.append("Escape closed the control panel")
+
+        status, pane = self.status(), self.monitor_pane()
+        frame, pixels = self.keys.frame(), png_pixels(self.out / "present.png")
+        x, y = monitor_cell_point(status, pane, frame, pixels, 20, 6)
+        # Pointer motion first: the monitor asked for it, and the host forwards it.
+        self.keys.click(x + 40, y + 20, button="right")
+        wait_for(lambda: self.status().get("context_menu") is not None, "the pane menu opens", 10)
+        self.keys.key("escape")
+        wait_for(closed, "Escape closes the pane menu", 10)
+        assert self.selected() == selected, "closing the pane menu reached the monitor"
+        checked.append("Escape closed the pane menu")
+        return {"overlays": checked}
+
     def quit_step(self):
         self.keys.key("q")
         wait_for(lambda: not any(seat in self.screen() for seat in SEATS), "monitor quit to the shell")
@@ -1124,6 +1156,7 @@ def main():
             flow.step("reopen", flow.reopen)
             flow.step("keys", flow.keys_step)
             flow.step("mouse", flow.mouse_step)
+            flow.step("overlays", flow.overlay_step)
             flow.step("quit", flow.quit_step)
             flow.step("close", flow.close_step)
         status = "PASS"

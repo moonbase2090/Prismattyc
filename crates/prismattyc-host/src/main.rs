@@ -11578,6 +11578,19 @@ fn activate_context_menu(
     }
 }
 
+/// Escape closes an open context menu or panel before any other key
+/// handling, and before anything reaches the focused pane or plug-in view.
+/// It does not depend on the menu having rows to show, on a modifier the
+/// host believes is held, or on which key name the platform reports.
+fn escape_dismisses_overlay(host: &mut HostState, logical: &Key, unmodified: &Key) -> bool {
+    let open = host.context_menu.is_some() || host.space_panel.is_some() || host.settings.is_some();
+    if !open || !(palette::is_escape(logical) || palette::is_escape(unmodified)) {
+        return false;
+    }
+    close_context_menu(host);
+    true
+}
+
 fn handle_context_menu_key(
     host: &mut HostState,
     event: &winit::event::KeyEvent,
@@ -11585,6 +11598,9 @@ fn handle_context_menu_key(
     child_args: &[String],
 ) -> Option<Dispatch> {
     if space_panel::input_key(host, event) {
+        return Some(Dispatch::Handled);
+    }
+    if escape_dismisses_overlay(host, &event.logical_key, &event.key_without_modifiers()) {
         return Some(Dispatch::Handled);
     }
     let _menu = host.context_menu.as_ref()?;
@@ -22087,6 +22103,10 @@ impl ApplicationHandler<UserAction> for App {
             WindowEvent::Focused(focused) => {
                 host.window_focused = focused;
                 if !focused {
+                    // The release of a modifier pressed while another window
+                    // had focus is never delivered here; a stale modifier
+                    // would make menus ignore keys.
+                    host.modifiers = ModifiersState::empty();
                     if host.palette.take().is_some() {
                         host.palette_layout = None;
                         host.window

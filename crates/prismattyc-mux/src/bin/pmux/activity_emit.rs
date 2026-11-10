@@ -3,6 +3,7 @@
 
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use prismattyc_mux::activity::{
@@ -424,29 +425,120 @@ fn normalize(seat: AgentId, input: &Value, notify: bool) -> Result<Option<Activi
     }))
 }
 
+/// Run two ordered observation waits on one bound.
+///
+/// `clock` reports how long the observation has already been running. The
+/// second wait receives only the time still left. It does not get `bound`
+/// again, so the waits cannot add up to more than `bound`.
+fn drive_observation<C, A, B, T, U>(bound: Duration, mut clock: C, first: A, second: B) -> Result<U>
+where
+    C: FnMut() -> Duration,
+    A: FnOnce(Duration) -> Result<T>,
+    B: FnOnce(Duration, T) -> Result<U>,
+{
+    let left = bound.saturating_sub(clock());
+    if left.is_zero() {
+        bail!("hook input deadline exceeded");
+    }
+    let value = first(left)?;
+    let left = bound.saturating_sub(clock());
+    if left.is_zero() {
+        bail!("activity request deadline exceeded");
+    }
+    second(left, value)
+}
+
+fn read_limited_input<R>(reader: R, deadline: Instant) -> Result<Vec<u8>>
+where
+    R: Read + Send + 'static,
+{
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        bail!("hook input deadline exceeded");
+    }
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = reader
+            .take((MAX_INPUT + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes);
+        let _ = sender.send(result);
+    });
+    let bytes = receiver
+        .recv_timeout(remaining)
+        .context("hook input deadline exceeded")??;
+    Ok(bytes)
+}
+
+fn read_hook_event<R>(
+    reader: R,
+    seat: AgentId,
+    hook_event: Option<&str>,
+    deadline: Instant,
+) -> Result<Option<ActivityInput>>
+where
+    R: Read + Send + 'static,
+{
+    let bytes = read_limited_input(reader, deadline)?;
+    if bytes.len() > MAX_INPUT {
+        bail!("activity input exceeds limit");
+    }
+    let mut input: Value = serde_json::from_slice(&bytes).context("invalid hook input")?;
+    if let (Some(name), Some(object)) = (hook_event, input.as_object_mut()) {
+        object.insert("hook_event_name".into(), Value::String(name.to_owned()));
+    }
+    normalize(seat, &input, false)
+}
+
+fn publish_activity_event(socket: &Path, event: ActivityInput, deadline: Instant) -> Result<()> {
+    match activity::exchange_until(
+        socket,
+        ControlRequest::PublishActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 1,
+            event,
+        },
+        deadline,
+    )? {
+        ControlResponseData::ActivityPublished { .. } => Ok(()),
+        _ => bail!("unexpected activity response"),
+    }
+}
+
+/// Read hook stdin and publish it, sharing `bound` across both waits.
+fn publish_hook<R>(
+    reader: R,
+    socket: &Path,
+    seat: AgentId,
+    hook_event: Option<&str>,
+    bound: Duration,
+) -> Result<()>
+where
+    R: Read + Send + 'static,
+{
+    let started = Instant::now();
+    drive_observation(
+        bound,
+        || started.elapsed(),
+        |remaining| read_hook_event(reader, seat, hook_event, Instant::now() + remaining),
+        |remaining, event| match event {
+            Some(event) => publish_activity_event(socket, event, Instant::now() + remaining),
+            None => Ok(()),
+        },
+    )
+}
+
 fn publish(cli: &Cli) -> Result<()> {
     let event = match &cli.mode {
         Mode::Hook => {
-            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-            std::thread::spawn(move || {
-                let mut bytes = Vec::new();
-                let result = io::stdin()
-                    .take((MAX_INPUT + 1) as u64)
-                    .read_to_end(&mut bytes)
-                    .map(|_| bytes);
-                let _ = sender.send(result);
-            });
-            let bytes = receiver
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .context("hook input deadline exceeded")??;
-            if bytes.len() > MAX_INPUT {
-                bail!("activity input exceeds limit");
-            }
-            let mut input: Value = serde_json::from_slice(&bytes).context("invalid hook input")?;
-            if let (Some(event), Some(object)) = (cli.hook_event.as_ref(), input.as_object_mut()) {
-                object.insert("hook_event_name".into(), Value::String(event.clone()));
-            }
-            normalize(cli.seat.clone(), &input, false)?
+            return publish_hook(
+                io::stdin(),
+                &cli.socket,
+                cli.seat.clone(),
+                cli.hook_event.as_deref(),
+                activity::CLIENT_TIMEOUT,
+            );
         }
         Mode::Notify(raw) => {
             if raw.len() > MAX_INPUT {
@@ -583,5 +675,201 @@ mod tests {
             Some(ActivityKind::ToolFinished)
         );
         assert_eq!(hook_kind("Unknown", None, false), None);
+    }
+
+    #[test]
+    fn observation_budget_is_shared_and_does_not_restart_for_the_activity_rpc() {
+        use std::cell::{Cell, RefCell};
+        let bound = Duration::from_millis(2_000);
+        let elapsed = Cell::new(Duration::ZERO);
+        let granted = RefCell::new(Vec::new());
+        let published = drive_observation(
+            bound,
+            || elapsed.get(),
+            |budget| {
+                granted.borrow_mut().push(budget);
+                elapsed.set(elapsed.get() + Duration::from_millis(1_200));
+                Ok("hook-bytes")
+            },
+            |budget, input| {
+                assert_eq!(input, "hook-bytes");
+                granted.borrow_mut().push(budget);
+                elapsed.set(elapsed.get() + budget);
+                Ok("published")
+            },
+        )
+        .unwrap();
+        assert_eq!(published, "published");
+        assert_eq!(
+            granted.into_inner(),
+            vec![Duration::from_millis(2_000), Duration::from_millis(800)]
+        );
+        assert!(
+            elapsed.get() <= bound,
+            "stdin plus the activity RPC ran for {:?}, past {bound:?}",
+            elapsed.get()
+        );
+    }
+
+    #[test]
+    fn observation_does_not_call_the_activity_rpc_after_the_deadline_is_spent() {
+        use std::cell::Cell;
+        let bound = Duration::from_millis(2_000);
+        let elapsed = Cell::new(Duration::from_millis(500));
+        let rpc_called = Cell::new(false);
+        let error = drive_observation(
+            bound,
+            || elapsed.get(),
+            |budget| {
+                assert_eq!(budget, Duration::from_millis(1_500));
+                elapsed.set(elapsed.get() + budget);
+                Ok(())
+            },
+            |budget, _| {
+                rpc_called.set(true);
+                let _ = budget;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "activity request deadline exceeded");
+        assert!(!rpc_called.get());
+        assert_eq!(elapsed.get(), bound);
+    }
+
+    #[test]
+    fn spent_observation_does_not_start_either_wait() {
+        use std::cell::Cell;
+        let calls = Cell::new(0);
+        let error = drive_observation(
+            Duration::from_millis(2_000),
+            || Duration::from_millis(2_000),
+            |_| {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+            |_, _| {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "hook input deadline exceeded");
+        assert_eq!(calls.get(), 0);
+    }
+
+    /// Hold a TCP connection open so a read blocks until `release` is dropped.
+    fn held_stdin() -> (
+        std::net::TcpStream,
+        std::sync::mpsc::Sender<()>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, unblock) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let _accepted = listener.accept().unwrap();
+            let _ = unblock.recv();
+        });
+        let stream = std::net::TcpStream::connect(address).unwrap();
+        (stream, release, server)
+    }
+
+    #[test]
+    fn hook_stdin_read_stops_at_its_deadline() {
+        let (reader, release, server) = held_stdin();
+        let bound = Duration::from_millis(200);
+        let started = Instant::now();
+        let error = read_limited_input(reader, started + bound).unwrap_err();
+        let elapsed = started.elapsed();
+        drop(release);
+        let _ = server.join();
+        assert!(
+            error.to_string().contains("deadline"),
+            "stdin read failed another way: {error}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(700),
+            "stdin read waited {elapsed:?} on a {bound:?} deadline"
+        );
+        assert!(
+            elapsed + Duration::from_millis(80) >= bound,
+            "stdin read returned after {elapsed:?}, before {bound:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_observation_keeps_stdin_and_the_activity_rpc_inside_one_deadline() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+
+        const BOUND: Duration = Duration::from_millis(800);
+        const STDIN_DELAY: Duration = Duration::from_millis(500);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let payload =
+            br#"{"hook_event_name":"SessionStart","session_id":"bound-session"}"#.to_vec();
+        let stdin_server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            std::thread::sleep(STDIN_DELAY);
+            let _ = sock.write_all(&payload);
+        });
+        let reader = std::net::TcpStream::connect(address).unwrap();
+
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::path::PathBuf::from(format!(
+            "/tmp/activity-obs-{}-{}.sock",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&path);
+        let rpc = prismattyc_mux::local_socket::UnixListener::bind(&path).unwrap();
+        rpc.set_nonblocking(true).unwrap();
+        let (release, unblock) = mpsc::channel::<()>();
+        let rpc_server = std::thread::spawn(move || {
+            let mut stream = loop {
+                match rpc.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        match unblock.recv_timeout(Duration::from_millis(20)) {
+                            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        }
+                    }
+                    Err(_) => return,
+                }
+            };
+            let mut buf = [0u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _ = unblock.recv_timeout(Duration::from_secs(3));
+        });
+
+        let started = Instant::now();
+        let error = publish_hook(
+            reader,
+            &path,
+            AgentId::new("worker-bound").unwrap(),
+            None,
+            BOUND,
+        )
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        drop(release);
+        let _ = stdin_server.join();
+        let _ = rpc_server.join();
+        let _ = std::fs::remove_file(&path);
+
+        // Separate two-second-style waits would be STDIN_DELAY + BOUND (1.3s).
+        assert!(
+            elapsed <= BOUND + Duration::from_millis(300),
+            "observation waited {elapsed:?}, past one {BOUND:?} deadline: {error}"
+        );
+        assert!(
+            elapsed + Duration::from_millis(150) >= BOUND,
+            "observation returned after {elapsed:?}, before the {BOUND:?} deadline: {error}"
+        );
     }
 }

@@ -17,7 +17,12 @@ use crate::{
 const CAPACITY: usize = 512;
 const MAX_PAGE: usize = 256;
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
-const CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Bound for one activity exchange.
+///
+/// A hook observation also reads stdin before this exchange. That read and the
+/// exchange share one deadline of this length; the exchange must not start a
+/// fresh timeout of its own.
+pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_PENDING_TOOL_STARTS: usize = 1024;
 const MAX_PENDING_TOOL_AGE_MS: u64 = 30 * 60 * 1000;
 
@@ -268,7 +273,21 @@ fn is_operation_finish(kind: ActivityKind) -> bool {
 
 /// Exchange one activity or session-snapshot request over the existing local control socket.
 /// Errors omit upstream payloads, paths, and server-supplied message text.
+///
+/// Connect, write, and read share [`CLIENT_TIMEOUT`], measured from this call.
 pub fn exchange(socket: &Path, request: ControlRequest) -> Result<ControlResponseData> {
+    exchange_until(socket, request, Instant::now() + CLIENT_TIMEOUT)
+}
+
+/// Exchange one request, stopping at `deadline` instead of starting a new timeout.
+///
+/// A caller that already waited on another source (hook stdin) passes the same
+/// deadline here. A spent deadline fails before connecting.
+pub fn exchange_until(
+    socket: &Path,
+    request: ControlRequest,
+    deadline: Instant,
+) -> Result<ControlResponseData> {
     let (version, request_id, expected) = match &request {
         ControlRequest::PublishActivity {
             version,
@@ -295,8 +314,11 @@ pub fn exchange(socket: &Path, request: ControlRequest) -> Result<ControlRespons
         bail!("activity request exceeds 8192 bytes");
     }
     bytes.push(b'\n');
-    let deadline = Instant::now() + CLIENT_TIMEOUT;
-    let mut stream = crate::local_socket::connect_timeout(socket, CLIENT_TIMEOUT)
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        bail!("activity request deadline exceeded");
+    }
+    let mut stream = crate::local_socket::connect_timeout(socket, remaining)
         .map_err(|_| anyhow!("cannot connect to activity daemon"))?;
     let mut written = 0;
     while written < bytes.len() {
@@ -679,6 +701,78 @@ mod tests {
         let mut input = serde_json::to_value(event(1)).unwrap();
         input["command"] = serde_json::json!("private-secret-marker");
         assert!(serde_json::from_value::<ActivityInput>(input).is_err());
+    }
+
+    #[test]
+    fn exchange_until_does_not_connect_after_its_deadline() {
+        let started = Instant::now();
+        let error = exchange_until(
+            Path::new("unused-activity-deadline.sock"),
+            ControlRequest::ReadActivity {
+                version: PROTOCOL_VERSION,
+                request_id: 1,
+                cursor: None,
+                limit: 1,
+            },
+            Instant::now(),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "activity request deadline exceeded");
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "a spent deadline still waited {}",
+            started.elapsed().as_millis()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exchange_until_stops_a_silent_daemon_at_the_given_deadline() {
+        use std::io::Read;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::path::PathBuf::from(format!(
+            "/tmp/activity-deadline-{}-{}.sock",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = crate::local_socket::UnixListener::bind(&path).unwrap();
+        let (release, unblock) = mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let _ = unblock.recv_timeout(Duration::from_secs(2));
+        });
+        let bound = Duration::from_millis(200);
+        let started = Instant::now();
+        let error = exchange_until(
+            &path,
+            ControlRequest::ReadActivity {
+                version: PROTOCOL_VERSION,
+                request_id: 7,
+                cursor: None,
+                limit: 1,
+            },
+            started + bound,
+        )
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        drop(release);
+        let _ = server.join();
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            elapsed < Duration::from_millis(700),
+            "silent daemon waited {elapsed:?} on a {bound:?} deadline: {error}"
+        );
+        assert!(
+            elapsed + Duration::from_millis(80) >= bound,
+            "silent daemon returned after {elapsed:?}, before {bound:?}: {error}"
+        );
     }
 
     #[cfg(unix)]

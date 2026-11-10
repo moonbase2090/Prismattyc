@@ -4,8 +4,8 @@
     "kind": "official",
     "tag": "pmux-plugins-v1.2.0"
   },
-  "catalog_sha256": "42e4b710ac7f8331d685522406cb2a9e534e9161aaf935d08f40f5b8250ca486",
+  "catalog_sha256": "753e0c90e1ab14535338b10198b466366e077a21228b1593170ce6dea57d9d51",
   "catalog_bytes": 993,
-  "receipt_sha256": "24eb6fa1e8608f7ca81a3207a21a89d320b6cc33e6954acc74fd3bc66fa2b88f",
+  "receipt_sha256": "24b0b946d9815ec0344d07f7a8219d59f319c52d83f6c4070b8ee29b9dbf1979",
   "receipt_bytes": 2656
 }

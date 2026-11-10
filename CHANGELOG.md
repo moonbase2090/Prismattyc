@@ -2,9 +2,17 @@
 
 ## [Unreleased]
 
+## [0.3.61] - 2026-11-10
+
 ### Fixed
 
-- Escape closes the pane menu and the control panel with any pane focused, including a plug-in view such as the activity monitor. A modifier the host believes is held, a menu with nothing to show, or a platform that reports Escape as a control character no longer keeps the overlay open, and the host forgets held modifiers when its window loses focus.
+- Activity hook observation now shares one two-second deadline across stdin and the activity exchange.
+- `pmux mail watch` and connected clients now distinguish a quiet mailbox from a daemon that exited, and return promptly when the daemon stops.
+- Escape closes the pane menu and control panel even when a modifier appears held, the menu has no rows, or the platform reports Escape as a control character. The host also clears held modifiers when its window loses focus.
+
+## [0.3.61-rc.1]
+
+Release candidate for 0.3.61, with the [same changes](#0361---2026-11-10).
 
 ## [0.3.60] - 2026-11-08
 

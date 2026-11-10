@@ -188,9 +188,12 @@ Verbs:
 `pmux mail watch` exit codes:
 
 - Exit 0: a letter arrived. Run `pmux mail claim` next.
-- Exit 1: the wait timed out. Default timeout is 300 seconds.
-  Timeout is not a mux failure. The mailbox is fine. Run `watch`
-  again, or use `pmux mail inbox` to peek.
+- Exit 1: the mailbox stayed quiet until the timeout. Default timeout
+  is 300 seconds. A quiet mailbox is not a mux failure and is not a
+  stalled or dead daemon. Run `watch` again, or use `pmux mail inbox`
+  to peek.
+- Exit 3: pmuxd exited while this client was connected. The report is
+  `pmuxd exited while this client was connected`.
 
 Loop:
 
@@ -200,7 +203,8 @@ while pmux mail watch; do pmux mail claim --json; done
 
 The `while` condition is exit 0. Exit 1 ends the loop. That is
 expected when no mail arrives before the timeout. Start the loop
-again if you still want to wait.
+again if you still want to wait. Exit 3 also ends the loop: the
+daemon is gone, so waiting again will not help until pmuxd is back.
 
 Rules:
 

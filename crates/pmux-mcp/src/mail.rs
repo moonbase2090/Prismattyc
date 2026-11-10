@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 
 use prismattyc_mux::mailbox::AgentId;
 use prismattyc_mux::{
-    default_socket_path, ControlRequest, ControlResponse, ControlResponseBody, ControlResponseData,
-    PROTOCOL_VERSION,
+    agent_transport_error, daemon_exit_report, default_socket_path, is_daemon_exit_report,
+    transport_link_lost, ConnectedRole, ControlRequest, ControlResponse, ControlResponseBody,
+    ControlResponseData, PROTOCOL_VERSION,
 };
 
 /// One mailbox verb after hello.
@@ -206,14 +207,14 @@ fn call(
 ) -> Result<ControlResponseData, String> {
     *next_id += 1;
     let request = build(*next_id);
-    serde_json::to_writer(&mut *stream, &request).map_err(|error| error.to_string())?;
-    stream.write_all(b"\n").map_err(io_err)?;
-    stream.flush().map_err(io_err)?;
-    let mut reader = BufReader::new(stream.try_clone().map_err(io_err)?);
+    serde_json::to_writer(&mut *stream, &request).map_err(agent_encode_error)?;
+    stream.write_all(b"\n").map_err(agent_io)?;
+    stream.flush().map_err(agent_io)?;
+    let mut reader = BufReader::new(stream.try_clone().map_err(agent_io)?);
     let mut line = String::new();
-    reader.read_line(&mut line).map_err(io_err)?;
+    reader.read_line(&mut line).map_err(agent_io)?;
     if line.is_empty() {
-        return Err("mux closed without a reply".into());
+        return Err(daemon_exit_report(ConnectedRole::Agent));
     }
     let response: ControlResponse =
         serde_json::from_str(&line).map_err(|error| error.to_string())?;
@@ -225,12 +226,27 @@ fn call(
                 Ok(response)
             }
         }
-        ControlResponseBody::Error { error } => Err(error.to_string()),
+        ControlResponseBody::Error { error } => {
+            if is_daemon_exit_report(&error.message) {
+                Err(daemon_exit_report(ConnectedRole::Agent))
+            } else {
+                Err(error.to_string())
+            }
+        }
     }
 }
 
-fn io_err(error: io::Error) -> String {
-    error.to_string()
+fn agent_io(error: io::Error) -> String {
+    agent_transport_error(&error)
+}
+
+fn agent_encode_error(error: serde_json::Error) -> String {
+    match error.io_error_kind() {
+        Some(kind) if transport_link_lost(&io::Error::new(kind, "control link lost")) => {
+            daemon_exit_report(ConnectedRole::Agent)
+        }
+        _ => error.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -336,11 +352,100 @@ mod tests {
             ControlResponseData::MailCommitted { committed: 1 }
         ));
         let inbox = exchange(&socket, &recipient, MailOp::Inbox).expect("inbox");
-        assert_eq!(format_data(&inbox), "open: 0 held: 0\n");
+        let inbox_text = format_data(&inbox);
+        assert_eq!(inbox_text, "open: 0 held: 0\n");
+        let lower = inbox_text.to_ascii_lowercase();
+        assert!(
+            !lower.contains("stalled") && !lower.contains("dead") && !inbox_text.contains("exited"),
+            "an empty inbox is quiet mail, not a dead daemon: {inbox_text}"
+        );
         assert!(matches!(
             inbox,
             ControlResponseData::MailDepth { open: 0, held: 0 }
         ));
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dropped_daemon_socket_is_an_agent_exit() {
+        use std::io::BufRead;
+        use std::os::unix::net::UnixListener;
+
+        let socket = std::env::temp_dir().join(format!(
+            "pmux-mcp-exit-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream);
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            drop(reader);
+        });
+        let agent = AgentId::new("kiro-sb").unwrap();
+        let started = std::time::Instant::now();
+        let error = exchange(&socket, &agent, MailOp::Inbox).expect_err("daemon dropped");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "an agent must not wait out a mail budget after the daemon leaves"
+        );
+        assert_eq!(error, "pmuxd exited while this agent was connected");
+        assert!(!error.to_ascii_lowercase().contains("stalled"));
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_slow_daemon_is_not_an_agent_exit() {
+        use std::io::BufRead;
+        use std::os::unix::net::UnixListener;
+
+        let socket = std::env::temp_dir().join(format!(
+            "pmux-mcp-slow-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream);
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            let _ = reader.read_line(&mut line);
+        });
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(80)))
+            .unwrap();
+        let mut next_id = 0;
+        let error = call(&mut stream, &mut next_id, |request_id| {
+            ControlRequest::RegisterClient {
+                version: PROTOCOL_VERSION,
+                request_id,
+            }
+        })
+        .expect_err("read times out");
+        drop(stream);
+        let lower = error.to_ascii_lowercase();
+        assert!(
+            !error.contains("pmuxd exited")
+                && !lower.contains("stalled")
+                && !lower.contains("dead"),
+            "a timeout while the daemon is still there is not an exit: {error}"
+        );
+        server.join().unwrap();
         let _ = std::fs::remove_file(&socket);
     }
 }

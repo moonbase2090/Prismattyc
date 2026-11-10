@@ -75,22 +75,24 @@ use prismattyc_mux::walkthrough::{
 };
 use prismattyc_mux::{
     attach_tabs, attach_targets_session, classify_attach, classify_control_request_id,
-    default_socket_path, diagnose_runtime_dir_miss_from_env, from_sessions, from_snapshot,
+    daemon_exit_report, default_socket_path, diagnose_runtime_dir_miss_from_env, drive_mail_watch,
+    from_sessions, from_snapshot,
     host_register::{
         attach_pty_fallback, host_ack_path_from_socket, host_pane_nested,
         host_pid_path_from_socket, live_host_pid, route_seat_to_host, should_host_route_seat,
         wait_host_ack,
     },
     layouts_dir, list_layouts, list_spaces, load_layout, load_mux_section, load_space,
-    next_stale_skip, plan, prism_config_path, probe_socket_liveness, procinfo, remove_layout,
-    remove_space, resolve_attach_on_new, resolve_mux_target, resolve_space_open_runs_commands,
-    save_layout, scan_attach_clients, space_active_session, space_bind_agent,
-    space_sessions_in_tab_order, spaces_dir, validate_layout_name, ArrangementWire, AttachClient,
-    AttachKind, AxisWire, ControlError, ControlErrorCode, ControlIdMatch, ControlRequest,
-    ControlResponse, ControlResponseBody, ControlResponseData, Event, LayoutSnapshot, PaneEvent,
-    SavedLayout, SavedNode, SavedSpace, SavedSpaceTab, SavedWindow, SessionSnapshot, Snapshot,
-    SocketLiveness, SpaceOpenRunsCommands, SpawnSpec, WindowSnapshot, MAIL_ATTENTION_CELL,
-    PROTOCOL_VERSION,
+    next_stale_skip, observation_from_reply, plan, present_mail_watch, prism_config_path,
+    probe_socket_liveness, procinfo, remove_layout, remove_space, resolve_attach_on_new,
+    resolve_mux_target, resolve_space_open_runs_commands, save_layout, scan_attach_clients,
+    space_active_session, space_bind_agent, space_sessions_in_tab_order, spaces_dir,
+    transport_link_lost, validate_layout_name, ArrangementWire, AttachClient, AttachKind, AxisWire,
+    ConnectedRole, ControlError, ControlErrorCode, ControlIdMatch, ControlRequest, ControlResponse,
+    ControlResponseBody, ControlResponseData, DaemonPresence, Event, LayoutSnapshot,
+    MailObservation, PaneEvent, SavedLayout, SavedNode, SavedSpace, SavedSpaceTab, SavedWindow,
+    SessionSnapshot, Snapshot, SocketLiveness, SpaceOpenRunsCommands, SpawnSpec, SystemClock,
+    WindowSnapshot, MAIL_ATTENTION_CELL, MAIL_WATCH_GRACE, MAIL_WATCH_SLICE, PROTOCOL_VERSION,
 };
 
 const STOP_GRACE: Duration = Duration::from_secs(2);
@@ -4534,7 +4536,7 @@ verbs:
   commit <id>...                         acknowledge held letters (gone for good)
   release <id>...                        return held letters to open
   inbox                                  peek at open/held depth
-  watch [--timeout <secs>]               block until mail arrives (exit 0) or timeout (exit 1, not a mux failure); default 300s
+  watch [--timeout <secs>]               block until mail arrives (exit 0), the mailbox stays quiet (exit 1, not a mux failure), or pmuxd exits (exit 3); default 300s
   alias <name>                           bind a shorthand to your agent (self-serve)
   who                                    list bound agents (presence)
   broadcast --summary <s> [--body <b>]   send to every bound agent except yours
@@ -4778,10 +4780,17 @@ fn cmd_mailbox(paths: &Paths, rest: Vec<String>) -> Result<i32> {
     }
 
     let mut client = Client::connect(&paths.socket)?;
-    let registered = client.request(|request_id| ControlRequest::RegisterClient {
+    let registered = match client.request(|request_id| ControlRequest::RegisterClient {
         version: PROTOCOL_VERSION,
         request_id,
-    })?;
+    }) {
+        Ok(registered) => registered,
+        Err(error) if client_lost_daemon(&error) => {
+            eprintln!("{}", daemon_exit_report(ConnectedRole::Client));
+            return Ok(3);
+        }
+        Err(error) => return Err(error),
+    };
     let ControlResponseData::ClientRegistered { client_id } = registered else {
         bail!("server returned an unexpected registration response");
     };
@@ -4795,12 +4804,19 @@ fn cmd_mailbox(paths: &Paths, rest: Vec<String>) -> Result<i32> {
     let agent = resolve_mail_identity(&mut client, paths, cli_as.as_deref())?.context(
         "no identity: pass --as <agent>, set PMUX_AGENT, or run inside an agent-bound pmux pane",
     )?;
-    let seated = client.request(|request_id| ControlRequest::MailHello {
+    let seated = match client.request(|request_id| ControlRequest::MailHello {
         version: PROTOCOL_VERSION,
         request_id,
         client_id,
         agent: agent.clone(),
-    })?;
+    }) {
+        Ok(seated) => seated,
+        Err(error) if client_lost_daemon(&error) => {
+            eprintln!("{}", daemon_exit_report(ConnectedRole::Client));
+            return Ok(3);
+        }
+        Err(error) => return Err(error),
+    };
     if !matches!(seated, ControlResponseData::MailSeated { .. }) {
         bail!("server returned an unexpected mail-hello response");
     }
@@ -4830,7 +4846,7 @@ fn cmd_mailbox(paths: &Paths, rest: Vec<String>) -> Result<i32> {
         }
     }
     if let MailVerb::Watch { timeout_ms } = &verb {
-        client.hold_for_wait(*timeout_ms)?;
+        return watch_mail(&mut client, paths, client_id, *timeout_ms);
     }
 
     let request = |request_id| -> ControlRequest {
@@ -4894,17 +4910,14 @@ fn cmd_mailbox(paths: &Paths, rest: Vec<String>) -> Result<i32> {
         }
     };
 
-    let reply = client.request(request)?;
-
-    // Watch is the shell-watcher primitive: exit status carries the answer
-    // so `while pmux mail watch; do ...; done` needs no output parsing.
-    if let MailVerb::Watch { .. } = verb {
-        let ControlResponseData::MailDepth { open, held } = reply else {
-            bail!("expected depth, got {reply:?}");
-        };
-        println!("open: {open} held: {held}");
-        return Ok(if open == 0 { 1 } else { 0 });
-    }
+    let reply = match client.request(request) {
+        Ok(reply) => reply,
+        Err(error) if client_lost_daemon(&error) => {
+            eprintln!("{}", daemon_exit_report(ConnectedRole::Client));
+            return Ok(3);
+        }
+        Err(error) => return Err(error),
+    };
 
     let claim_format = match &verb {
         MailVerb::Claim { format } => *format,
@@ -4917,6 +4930,73 @@ fn cmd_mailbox(paths: &Paths, rest: Vec<String>) -> Result<i32> {
 /// `pmux mail status` — no identity required. Prints the socket path,
 /// checks reachability, and lists bound agents. The probe hello binds only
 /// this connection; with no session it never appears in `who`.
+/// Block until mail arrives, the quiet budget ends, or the daemon exits.
+/// Exit 1 is a quiet mailbox. Exit 3 is a daemon that left while this
+/// client was connected. Neither reports the mailbox as stalled or dead.
+fn watch_mail(client: &mut Client, paths: &Paths, client_id: u64, timeout_ms: u32) -> Result<i32> {
+    let request_id = match client.send_request(|request_id| ControlRequest::MailWait {
+        version: PROTOCOL_VERSION,
+        request_id,
+        client_id,
+        timeout_ms,
+    }) {
+        Ok(request_id) => request_id,
+        Err(error) if client_lost_daemon(&error) => {
+            eprintln!("{}", daemon_exit_report(ConnectedRole::Client));
+            return Ok(3);
+        }
+        Err(error) => return Err(error),
+    };
+    let clock = SystemClock::start();
+    let verdict = drive_mail_watch(
+        Duration::from_millis(u64::from(timeout_ms)),
+        MAIL_WATCH_GRACE,
+        MAIL_WATCH_SLICE,
+        &clock,
+        |wait| {
+            let observation = client.poll_mail_reply(request_id, wait);
+            let presence = if matches!(observation, MailObservation::ReadTimedOut) {
+                watch_daemon_presence(paths)
+            } else {
+                DaemonPresence::Running
+            };
+            (observation, presence)
+        },
+    );
+    let presented = present_mail_watch(&verdict);
+    if let Some(line) = &presented.stderr {
+        eprintln!("{line}");
+    }
+    if !presented.stdout.is_empty() {
+        println!("{}", presented.stdout);
+    }
+    Ok(presented.code)
+}
+
+fn client_lost_daemon(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains(&daemon_exit_report(ConnectedRole::Client))
+        || format!("{error}").contains(&daemon_exit_report(ConnectedRole::Client))
+}
+
+/// Confirmed process death, or a socket that is gone. A live pid stays
+/// running so a quiet mailbox is not declared dead.
+fn watch_daemon_presence(paths: &Paths) -> DaemonPresence {
+    // A live pid is enough. Connecting on every quiet slice would open a
+    // handshake the mailbox did not ask for, and a busy daemon can look
+    // stale to that probe.
+    if let Some(pid) = read_valid_pid(paths).or_else(|| find_server_pid(&paths.socket)) {
+        return if pid_alive(pid) {
+            DaemonPresence::Running
+        } else {
+            DaemonPresence::Exited
+        };
+    }
+    match probe_socket_liveness(&paths.socket) {
+        SocketLiveness::Live | SocketLiveness::Foreign => DaemonPresence::Running,
+        SocketLiveness::Missing | SocketLiveness::Stale => DaemonPresence::Exited,
+    }
+}
+
 fn cmd_mailbox_status(
     paths: &Paths,
     client: &mut Client,
@@ -8027,6 +8107,23 @@ fn log_tail(path: &Path, lines: usize) -> String {
     all[start..].join("\n")
 }
 
+fn client_link_io(error: io::Error) -> anyhow::Error {
+    if transport_link_lost(&error) {
+        anyhow::anyhow!("{}", daemon_exit_report(ConnectedRole::Client))
+    } else {
+        anyhow::Error::from(error)
+    }
+}
+
+fn client_encode_error(error: serde_json::Error) -> anyhow::Error {
+    match error.io_error_kind() {
+        Some(kind) if transport_link_lost(&io::Error::new(kind, "control link lost")) => {
+            anyhow::anyhow!("{}", daemon_exit_report(ConnectedRole::Client))
+        }
+        _ => anyhow::Error::from(error),
+    }
+}
+
 struct Client {
     socket_identity: String,
     reader: BufReader<UnixStream>,
@@ -8056,18 +8153,58 @@ impl Client {
             .checked_add(1)
             .context("request ID space exhausted")?;
         let request = make(request_id);
-        serde_json::to_writer(&mut self.writer, &request)?;
-        self.writer.write_all(b"\n")?;
-        self.writer.flush()?;
+        serde_json::to_writer(&mut self.writer, &request).map_err(client_encode_error)?;
+        self.writer.write_all(b"\n").map_err(client_link_io)?;
+        self.writer.flush().map_err(client_link_io)?;
         Ok(request_id)
     }
 
     fn read_response(&mut self) -> Result<ControlResponse> {
         let mut line = String::new();
-        if self.reader.read_line(&mut line)? == 0 {
-            bail!("server closed the control connection");
+        match self.reader.read_line(&mut line) {
+            Ok(0) => bail!("{}", daemon_exit_report(ConnectedRole::Client)),
+            Ok(_) => Ok(serde_json::from_str(&line)?),
+            Err(error) if transport_link_lost(&error) => {
+                bail!("{}", daemon_exit_report(ConnectedRole::Client))
+            }
+            Err(error) => Err(error.into()),
         }
-        Ok(serde_json::from_str(&line)?)
+    }
+
+    /// One slice of a mail watch. A timeout while the socket is still open
+    /// is silence, not an exit. A closed socket is the daemon leaving.
+    fn poll_mail_reply(&mut self, awaited: u64, slice: Duration) -> MailObservation {
+        let deadline = Instant::now() + slice;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return MailObservation::ReadTimedOut;
+            }
+            if self
+                .reader
+                .get_ref()
+                .set_read_timeout(Some(remaining))
+                .is_err()
+            {
+                return MailObservation::Failed("could not bound the mail wait read".to_string());
+            }
+            let mut line = String::new();
+            match self.reader.read_line(&mut line) {
+                Ok(0) => return MailObservation::LinkClosed,
+                Ok(_) => return observation_from_reply(&line, awaited),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    return MailObservation::ReadTimedOut;
+                }
+                Err(error) if transport_link_lost(&error) => return MailObservation::LinkClosed,
+                Err(error) => return MailObservation::Failed(error.to_string()),
+            }
+        }
     }
 
     fn read_matching(&mut self, request_id: u64) -> Result<ControlResponse> {
@@ -8102,9 +8239,9 @@ impl Client {
         }
     }
 
-    /// `mail watch` blocks server-side for the whole wait; the default 2s
-    /// socket timeout would cut the reply. Give the read side the wait
-    /// plus a margin.
+    /// Pipe subscribe blocks server-side for the whole wait. The default
+    /// 2s socket timeout would cut the reply, so the read side gets the
+    /// wait plus a margin.
     fn hold_for_wait(&self, timeout_ms: u32) -> Result<()> {
         self.reader
             .get_ref()
@@ -8116,6 +8253,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prismattyc_mux::judge_mail_wait;
 
     #[cfg(unix)]
     #[test]
@@ -8301,6 +8439,138 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_missing_daemon_socket_is_not_a_live_mail_peer() {
+        let paths = Paths {
+            view_path: None,
+            target_is_explicit: false,
+            socket: PathBuf::from("/tmp/prismattyc-mail-daemon-missing.sock"),
+            pidfile: PathBuf::from("/tmp/prismattyc-mail-daemon-missing.pid"),
+            logfile: PathBuf::from("/tmp/prismattyc-mail-daemon-missing.log"),
+        };
+        assert_eq!(
+            watch_daemon_presence(&paths),
+            DaemonPresence::Exited,
+            "a socket that is not there is a dead daemon, not a quiet mailbox"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_closed_mail_socket_reports_daemon_exit_without_waiting() {
+        use std::os::unix::net::UnixListener;
+        let directory = std::env::temp_dir().join(format!(
+            "pmux-mail-exit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.contains("mail_wait"), "{line}");
+            drop(reader);
+            drop(stream);
+        });
+        let mut client = Client::connect(&socket).unwrap();
+        let request_id = client
+            .send_request(|request_id| ControlRequest::MailWait {
+                version: PROTOCOL_VERSION,
+                request_id,
+                client_id: 1,
+                timeout_ms: 300_000,
+            })
+            .unwrap();
+        let started = Instant::now();
+        let observation = client.poll_mail_reply(request_id, Duration::from_secs(30));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "a closed daemon must not sit for the mail budget"
+        );
+        assert_eq!(observation, MailObservation::LinkClosed);
+        let verdict = judge_mail_wait(
+            observation,
+            DaemonPresence::Running,
+            Duration::ZERO,
+            Duration::from_secs(300),
+            ConnectedRole::Client,
+        );
+        let presented = present_mail_watch(&verdict);
+        assert_eq!(presented.code, 3);
+        assert_eq!(
+            presented.stderr.as_deref(),
+            Some("pmuxd exited while this client was connected")
+        );
+        assert!(presented.stdout.is_empty());
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_quiet_mail_reply_is_not_an_exit() {
+        use std::io::Write;
+        use std::os::unix::net::UnixListener;
+        let directory = std::env::temp_dir().join(format!(
+            "pmux-mail-quiet-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let reply = concat!(
+                r#"{"version":1,"request_id":1,"status":"ok","response":{"kind":"mail_depth","open":0,"held":0}}"#,
+                "\n"
+            );
+            stream.write_all(reply.as_bytes()).unwrap();
+        });
+        let mut client = Client::connect(&socket).unwrap();
+        let request_id = client
+            .send_request(|request_id| ControlRequest::MailWait {
+                version: PROTOCOL_VERSION,
+                request_id,
+                client_id: 1,
+                timeout_ms: 1_000,
+            })
+            .unwrap();
+        let observation = client.poll_mail_reply(request_id, Duration::from_secs(2));
+        let verdict = judge_mail_wait(
+            observation,
+            DaemonPresence::Exited,
+            Duration::from_secs(3600),
+            Duration::from_secs(300),
+            ConnectedRole::Client,
+        );
+        let presented = present_mail_watch(&verdict);
+        assert_eq!(presented.code, 1);
+        assert_eq!(presented.stdout, "open: 0 held: 0");
+        let lower = presented.stdout.to_ascii_lowercase();
+        assert!(
+            !lower.contains("stalled") && !lower.contains("dead"),
+            "{}",
+            presented.stdout
+        );
+        assert!(presented.stderr.is_none());
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

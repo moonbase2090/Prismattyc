@@ -7648,6 +7648,15 @@ impl ControlServer {
 impl Drop for ControlServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        // Wake mail waiters before joining threads. The guard must be
+        // dropped before ring: a waiter holds the watch lock while it
+        // takes the plane lock.
+        let mail = self
+            .plane
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .mail_watch();
+        mail.ring();
         self.plugins.stop();
         let watch = self
             .plane
@@ -7822,28 +7831,56 @@ fn handle_client(
 /// a connection thread forever.
 const MAX_MAIL_WAIT: Duration = Duration::from_secs(3600);
 
+/// How `MailWait` finished. `PeerGone` means the client socket is already
+/// closed, so there is nobody to answer.
+enum MailWaitFinish {
+    Reply(Box<ControlResponse>),
+    PeerGone,
+}
+
+fn finish_reply(response: ControlResponse) -> MailWaitFinish {
+    MailWaitFinish::Reply(Box::new(response))
+}
+
+fn daemon_exited_reply(request_id: u64) -> ControlResponse {
+    ControlResponse::error(
+        request_id,
+        ControlError::new(
+            ControlErrorCode::Internal,
+            crate::mail_liveness::daemon_exit_report(crate::mail_liveness::ConnectedRole::Client),
+        ),
+    )
+}
+
 /// Serve `MailWait` on the client thread. The wait parks on the
 /// shared [`crate::mailbox::MailboxWatch`] while NOT holding the plane
-/// lock; the predicate re-locks the plane briefly per check. Replies
-/// `MailDepth` either way: `open > 0` means mail arrived.
+/// lock; the predicate re-locks the plane briefly per check.
+///
+/// A quiet timeout replies `MailDepth` (`open == 0`). Mail arriving
+/// replies `MailDepth` with `open > 0`. Daemon shutdown ends the wait
+/// immediately with [`daemon_exit_report`](crate::mail_liveness::daemon_exit_report)
+/// instead of holding the client until the timeout. A closed client
+/// socket ends the wait without a reply.
 fn handle_mail_wait(
     plane: &Arc<Mutex<ControlPlane>>,
     request: &ControlRequest,
     request_id: u64,
-) -> ControlResponse {
+    stop: &AtomicBool,
+    peer_closed: &dyn Fn() -> bool,
+) -> MailWaitFinish {
     let ControlRequest::MailWait {
         client_id,
         timeout_ms,
         ..
     } = request
     else {
-        return ControlResponse::error(
+        return finish_reply(ControlResponse::error(
             request_id,
             ControlError::new(
                 ControlErrorCode::Internal,
                 "handle_mail_wait: wrong variant",
             ),
-        );
+        ));
     };
     let (agent, watch) = {
         let guard = plane
@@ -7851,30 +7888,52 @@ fn handle_mail_wait(
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match guard.mail_wait_prepare(*client_id) {
             Ok(prepared) => prepared,
-            Err(error) => return ControlResponse::error(request_id, error),
+            Err(error) => return finish_reply(ControlResponse::error(request_id, error)),
         }
     };
     let timeout = Duration::from_millis(u64::from(*timeout_ms)).min(MAX_MAIL_WAIT);
-    let waited = watch.wait_until(timeout, || -> Result<Option<()>, ControlError> {
-        let guard = plane
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (open, _) = guard.mail_depth_for(&agent)?;
-        Ok((open > 0).then_some(()))
-    });
-    let result = match waited {
-        Ok(arrived) => arrived.is_some(),
-        Err(error) => return ControlResponse::error(request_id, error),
+    let deadline = Instant::now() + timeout;
+    let arrived = loop {
+        if stop.load(Ordering::Acquire) {
+            return finish_reply(daemon_exited_reply(request_id));
+        }
+        if peer_closed() {
+            return MailWaitFinish::PeerGone;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break false;
+        }
+        // Bound the park so a missed ring still notices shutdown.
+        let slice = remaining.min(Duration::from_millis(50));
+        match watch.wait_until(slice, || -> Result<Option<bool>, ControlError> {
+            if stop.load(Ordering::Acquire) {
+                return Ok(Some(false));
+            }
+            let guard = plane
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let (open, _) = guard.mail_depth_for(&agent)?;
+            Ok((open > 0).then_some(true))
+        }) {
+            Ok(Some(false)) => return finish_reply(daemon_exited_reply(request_id)),
+            Ok(Some(true)) => break true,
+            Ok(None) => {}
+            Err(error) => {
+                return finish_reply(ControlResponse::error(request_id, error));
+            }
+        }
     };
-    let _ = result;
+    let _ = arrived;
     let guard = plane
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     match guard.mail_depth_for(&agent) {
-        Ok((open, held)) => {
-            ControlResponse::ok(request_id, ControlResponseData::MailDepth { open, held })
-        }
-        Err(error) => ControlResponse::error(request_id, error),
+        Ok((open, held)) => finish_reply(ControlResponse::ok(
+            request_id,
+            ControlResponseData::MailDepth { open, held },
+        )),
+        Err(error) => finish_reply(ControlResponse::error(request_id, error)),
     }
 }
 
@@ -8285,12 +8344,31 @@ fn handle_client_loop(
             if request_id != 0 {
                 state.last_request_id = request_id;
             }
-            if stop.load(Ordering::Acquire) {
-                return Ok(());
-            }
             // Park on the mail watch WITHOUT holding the plane lock; the
-            // predicate re-locks briefly per check.
-            handle_mail_wait(plane, &request, request_id)
+            // predicate re-locks briefly per check. Shutdown and a closed
+            // client both end the park instead of waiting out the timeout.
+            match handle_mail_wait(plane, &request, request_id, stop, &|| {
+                control_peer_closed(writer)
+            }) {
+                MailWaitFinish::PeerGone => return Ok(()),
+                MailWaitFinish::Reply(response) => {
+                    // Shutdown sets `stop` before this write. The exit
+                    // report still has to reach the client; the socket
+                    // close that follows is what a killed daemon looks like.
+                    let allow_write = Arc::new(AtomicBool::new(false));
+                    let stop_for_write =
+                        if crate::mail_liveness::is_daemon_exit_report(match &response.body {
+                            ControlResponseBody::Error { error } => error.message.as_str(),
+                            _ => "",
+                        }) {
+                            &allow_write
+                        } else {
+                            stop
+                        };
+                    write_response(writer, &response, stop_for_write)?;
+                    continue;
+                }
+            }
         } else if is_subscribe {
             if request_id == 0 {
                 ControlResponse::error(
@@ -10200,6 +10278,19 @@ function Read-Exact([int]$Count) {
         ));
     }
 
+    fn mail_wait_reply(
+        plane: &Arc<Mutex<ControlPlane>>,
+        request: &ControlRequest,
+        request_id: u64,
+        stop: &AtomicBool,
+        peer_closed: &dyn Fn() -> bool,
+    ) -> ControlResponse {
+        match handle_mail_wait(plane, request, request_id, stop, peer_closed) {
+            MailWaitFinish::Reply(response) => *response,
+            MailWaitFinish::PeerGone => panic!("mail wait ended because the client was gone"),
+        }
+    }
+
     #[test]
     fn mail_wait_wakes_on_send_and_times_out_clean() {
         use std::sync::mpsc;
@@ -10208,8 +10299,9 @@ function Read-Exact([int]$Count) {
         let peer = mail_hello(&mut plane.lock().unwrap(), 1, "operator-a");
         let cursor = mail_hello(&mut plane.lock().unwrap(), 2, "operator-b");
 
-        // Timeout path: no mail, short wait.
-        let response = handle_mail_wait(
+        // Timeout path: no mail, short wait. Quiet must not look like an exit.
+        let running = AtomicBool::new(false);
+        let response = mail_wait_reply(
             &plane,
             &ControlRequest::MailWait {
                 version: PROTOCOL_VERSION,
@@ -10218,6 +10310,8 @@ function Read-Exact([int]$Count) {
                 timeout_ms: 50,
             },
             3,
+            &running,
+            &|| false,
         );
         assert!(matches!(
             response.body,
@@ -10225,12 +10319,15 @@ function Read-Exact([int]$Count) {
                 response: ControlResponseData::MailDepth { open: 0, held: 0 }
             }
         ));
+        let rendered = format!("{response:?}");
+        assert!(!rendered.contains("exited"), "{rendered}");
 
         // Arrival path: a sender on "another connection" stores and rings.
         let (done_tx, done_rx) = mpsc::channel();
         let waiter_plane = Arc::clone(&plane);
         let waiter = std::thread::spawn(move || {
-            let response = handle_mail_wait(
+            let running = AtomicBool::new(false);
+            let response = mail_wait_reply(
                 &waiter_plane,
                 &ControlRequest::MailWait {
                     version: PROTOCOL_VERSION,
@@ -10239,6 +10336,8 @@ function Read-Exact([int]$Count) {
                     timeout_ms: 30_000,
                 },
                 4,
+                &running,
+                &|| false,
             );
             done_tx.send(response).unwrap();
         });
@@ -10270,6 +10369,125 @@ function Read-Exact([int]$Count) {
                 response: ControlResponseData::MailDepth { open: 1, .. }
             }
         ));
+    }
+
+    #[test]
+    fn mail_wait_already_stopping_is_an_exit_not_a_quiet_timeout() {
+        let (plane, _, _) = fixture(8);
+        let plane = Arc::new(Mutex::new(plane));
+        let peer = mail_hello(&mut plane.lock().unwrap(), 1, "operator-a");
+        let stop = AtomicBool::new(true);
+        let started = Instant::now();
+        let response = mail_wait_reply(
+            &plane,
+            &ControlRequest::MailWait {
+                version: PROTOCOL_VERSION,
+                request_id: 3,
+                client_id: peer,
+                timeout_ms: 30_000,
+            },
+            3,
+            &stop,
+            &|| false,
+        );
+        let elapsed = started.elapsed();
+        let ControlResponseBody::Error { error } = response.body else {
+            panic!("daemon shutdown must not look like quiet mail: {response:?}");
+        };
+        assert!(
+            crate::mail_liveness::is_daemon_exit_report(&error.message),
+            "{}",
+            error.message
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "shutdown must not wait out the mail timeout ({elapsed:?})"
+        );
+    }
+
+    #[test]
+    fn mail_wait_wakes_when_the_daemon_stops_mid_wait() {
+        use std::sync::{mpsc, Barrier};
+        let (plane, _, _) = fixture(8);
+        let plane = Arc::new(Mutex::new(plane));
+        let peer = mail_hello(&mut plane.lock().unwrap(), 1, "operator-a");
+        let barrier = Arc::new(Barrier::new(2));
+        let hook_barrier = Arc::clone(&barrier);
+        let hooked = Arc::new(AtomicBool::new(false));
+        let hook_once = Arc::clone(&hooked);
+        plane
+            .lock()
+            .unwrap()
+            .mail_watch()
+            .set_post_check_hook(Some(std::sync::Arc::new(move || {
+                if !hook_once.swap(true, Ordering::AcqRel) {
+                    hook_barrier.wait();
+                }
+            })));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (done_tx, done_rx) = mpsc::channel();
+        let waiter_plane = Arc::clone(&plane);
+        let waiter_stop = Arc::clone(&stop);
+        let waiter = std::thread::spawn(move || {
+            let response = mail_wait_reply(
+                &waiter_plane,
+                &ControlRequest::MailWait {
+                    version: PROTOCOL_VERSION,
+                    request_id: 3,
+                    client_id: peer,
+                    timeout_ms: 2_000,
+                },
+                3,
+                &waiter_stop,
+                &|| false,
+            );
+            done_tx.send(response).unwrap();
+        });
+        barrier.wait();
+        stop.store(true, Ordering::Release);
+        plane.lock().unwrap().mail_watch().ring();
+        let response = done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("stopping the daemon must wake a parked mail wait");
+        waiter.join().unwrap();
+        plane.lock().unwrap().mail_watch().set_post_check_hook(None);
+        let ControlResponseBody::Error { error } = response.body else {
+            panic!("a daemon that stops mid-wait must not report quiet mail: {response:?}");
+        };
+        assert!(
+            crate::mail_liveness::is_daemon_exit_report(&error.message),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn mail_wait_returns_when_the_client_is_already_gone() {
+        let (plane, _, _) = fixture(8);
+        let plane = Arc::new(Mutex::new(plane));
+        let peer = mail_hello(&mut plane.lock().unwrap(), 1, "operator-a");
+        let stop = AtomicBool::new(false);
+        let started = Instant::now();
+        let finish = handle_mail_wait(
+            &plane,
+            &ControlRequest::MailWait {
+                version: PROTOCOL_VERSION,
+                request_id: 3,
+                client_id: peer,
+                timeout_ms: 30_000,
+            },
+            3,
+            &stop,
+            &|| true,
+        );
+        assert!(
+            matches!(finish, MailWaitFinish::PeerGone),
+            "a closed client must not stay parked"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "a closed client must not wait out the mail timeout"
+        );
     }
 
     #[test]

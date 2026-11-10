@@ -81,6 +81,16 @@ jobs:
             *) echo 'unsupported plug-in artifact mode' >&2; exit 2 ;;
           esac
 
+      - name: Require a version bump for changed plug-in sources
+        env:
+          SOURCE_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          flags=()
+          if [[ "$SOURCE_BRANCH" == release/* || "$SOURCE_BRANCH" == v* ]]; then
+            flags+=(--require-published)
+          fi
+          python3 scripts/release/check-plugin-sources.py --bundle target/native-plugin-bundle "${flags[@]}"
+
       - name: Record exact artifact identity
         id: identity
         run: |

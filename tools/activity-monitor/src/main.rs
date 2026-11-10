@@ -383,6 +383,14 @@ fn graph_style(
         .for_terminal(term == Some("dumb"))
 }
 
+/// Whether the selected package lacks the view that was asked for, which happens when an older
+/// installed copy has not yet been replaced by the bundled one.
+fn lacks_view(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains("unknown view contribution"))
+}
+
 fn main() -> Result<()> {
     if prismattyc_mux::plugins::print_bundled_identity()? {
         return Ok(());
@@ -452,7 +460,17 @@ fn main() -> Result<()> {
                     rows.to_string(),
                 ]);
             }
-            prismattyc_mux::plugins::run_cli(&socket, args)
+            match prismattyc_mux::plugins::run_cli(&socket, args.clone()) {
+                Err(error) if style != GraphStyle::Braille && lacks_view(&error) => {
+                    eprintln!(
+                        "pmux-activity-monitor: the installed activity monitor has no {} graph view; using the default view. Restart the daemon to pick up the bundled version.",
+                        style.view()
+                    );
+                    args[2] = GraphStyle::Braille.view().into();
+                    prismattyc_mux::plugins::run_cli(&socket, args)
+                }
+                result => result,
+            }
         }
         Mode::Tail(seat) => tail(client, &socket, seat.as_ref()),
         mode => {
@@ -632,6 +650,18 @@ mod tests {
         );
         assert!(parse(&["--socket", "/a", "--theme", "sepia"]).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn only_a_missing_view_triggers_the_default_view_fallback() {
+        assert!(lacks_view(&anyhow::anyhow!("unknown view contribution")));
+        assert!(lacks_view(
+            &anyhow::anyhow!("unknown view contribution").context("opening view")
+        ));
+        assert!(!lacks_view(&anyhow::anyhow!(
+            "activity feed changed; retry"
+        )));
+        assert!(!lacks_view(&anyhow::anyhow!("view was revoked")));
     }
 
     #[test]

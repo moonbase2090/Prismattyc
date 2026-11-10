@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The activity monitor package is now 1.2.0, so the block and ASCII graph views and the braille default are not hidden behind an older 1.1.0. The daemon moves an enabled default plug-in that sits on an older version than the bundled one to the bundled version at start, keeping its grants; a disabled plug-in stays disabled. `pmux-activity-monitor` falls back to the default view, with a note, when the installed package lacks the requested graph view. CI now refuses plug-in sources that change under a version the pinned bundle already holds, and release branches and tags refuse a source version the pin does not hold.
+
 ## [0.3.61] - 2026-11-10
 
 ### Fixed

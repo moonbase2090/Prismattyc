@@ -13,7 +13,7 @@ use std::process::ExitCode;
 
 use prismattyc_mux::mailbox::AgentId;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
 use rmcp::{
     schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler, ServiceExt,
 };
@@ -52,9 +52,9 @@ struct Adapter {
 }
 
 impl ServerHandler for Adapter {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         self.mail.as_ref().map(ServerHandler::get_info).unwrap_or_else(|| {
-            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
                 .with_instructions("Read-only activity tools from the operator-selected daemon plug-in. No mailbox identity is configured.")
         })
     }
@@ -527,8 +527,8 @@ fn render_tutorial(agent: &AgentId, presence: &str, inbox: &str) -> String {
 
 #[tool_handler]
 impl ServerHandler for PmuxMcp {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             format!(
                 "You are {agent}. pmux mail is the in-mux agent mailbox. \
                  Call pmux_tutorial first for mail, direct pane input, and Space workflows. \

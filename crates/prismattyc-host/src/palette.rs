@@ -8,6 +8,16 @@ use super::{config, resolve_editor_command};
 use std::path::Path;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
+/// Escape as winit reports it: the named key, or the control character some
+/// input sources deliver as text.
+pub(crate) fn is_escape(key: &Key) -> bool {
+    match key {
+        Key::Named(NamedKey::Escape) => true,
+        Key::Character(text) => text.as_str() == "\u{1b}",
+        _ => false,
+    }
+}
+
 /// Most recent actions kept for the RECENT section.
 pub const RECENT_CAP: usize = 5;
 /// File name under the prismattyc data dir that persists the recents.
@@ -756,11 +766,15 @@ impl ContextMenu {
 
     #[must_use]
     pub fn key(&mut self, key: &Key, mods: ModifiersState, row_count: usize) -> ContextMenuVerdict {
+        // Escape always dismisses: a held modifier or an empty menu must not
+        // trap the user in an overlay.
+        if is_escape(key) {
+            return ContextMenuVerdict::Close;
+        }
         if mods.control_key() || mods.alt_key() || mods.super_key() || row_count == 0 {
             return ContextMenuVerdict::Consumed;
         }
         match key {
-            Key::Named(NamedKey::Escape) => ContextMenuVerdict::Close,
             Key::Named(NamedKey::Home) => {
                 self.confirm = None;
                 self.selected = 0;
@@ -1904,6 +1918,64 @@ mod tests {
                 menu.key(&Key::Named(NamedKey::ArrowDown), empty_mods(), 0),
                 ContextMenuVerdict::Consumed
             );
+        }
+    }
+
+    #[test]
+    fn escape_closes_every_context_menu_whatever_modifier_is_held() {
+        let held = [
+            ModifiersState::empty(),
+            ModifiersState::SHIFT,
+            ModifiersState::CONTROL,
+            ModifiersState::ALT,
+            ModifiersState::SUPER,
+            ModifiersState::CONTROL | ModifiersState::SUPER,
+        ];
+        let escapes = [
+            Key::Named(NamedKey::Escape),
+            Key::Character("\u{1b}".into()),
+        ];
+        for kind in [
+            ContextMenuKind::SpaceChip,
+            ContextMenuKind::Pane,
+            ContextMenuKind::RailSpace,
+            ContextMenuKind::RailSession,
+            ContextMenuKind::RailSessionSolo,
+            ContextMenuKind::RailPane,
+        ] {
+            for mods in held {
+                for escape in &escapes {
+                    for rows in [0, 3] {
+                        let mut menu = ContextMenu::new(kind);
+                        assert_eq!(
+                            menu.key(escape, mods, rows),
+                            ContextMenuVerdict::Close,
+                            "{kind:?} {mods:?} {escape:?} rows={rows}"
+                        );
+                    }
+                }
+            }
+        }
+        // Only Escape is exempt: another key under a held modifier is still
+        // swallowed without acting.
+        let mut menu = ContextMenu::new(ContextMenuKind::Pane);
+        assert_eq!(
+            menu.key(&Key::Character("x".into()), ModifiersState::CONTROL, 3),
+            ContextMenuVerdict::Consumed
+        );
+    }
+
+    #[test]
+    fn only_escape_counts_as_escape() {
+        assert!(is_escape(&Key::Named(NamedKey::Escape)));
+        assert!(is_escape(&Key::Character("\u{1b}".into())));
+        for other in [
+            Key::Named(NamedKey::Enter),
+            Key::Named(NamedKey::Tab),
+            Key::Character("e".into()),
+            Key::Character("".into()),
+        ] {
+            assert!(!is_escape(&other), "{other:?}");
         }
     }
 }

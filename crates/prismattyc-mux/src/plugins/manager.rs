@@ -572,7 +572,7 @@ impl Manager {
             if !is_older(&selected.version, &entry.entry.version) {
                 return Ok(false);
             }
-            return Ok(self.move_to_compatible(id, &selected, &grants));
+            return Ok(self.move_to_compatible(id, &selected, &grants, true));
         }
         let Ok(entry) = bundled.get(id, None) else {
             return Ok(false);
@@ -1099,7 +1099,7 @@ impl Manager {
             loaded
         };
         if let Err(error) = package.manifest.compatibility() {
-            if self.move_to_compatible(id, &installed, &grants) {
+            if self.move_to_compatible(id, &installed, &grants, false) {
                 return self.selection(id);
             }
             let mut state = self.state.lock().unwrap();
@@ -1123,12 +1123,21 @@ impl Manager {
 
     /// A selected package this core cannot run moves to the newest bundled version that it can,
     /// keeping the grants it had. Nothing moves when the bundle has no such version.
+    /// `held` is true when the caller already holds the administration lock.
     fn move_to_compatible(
         &self,
         id: &str,
         selected: &Installed,
         grants: &BTreeSet<String>,
+        held: bool,
     ) -> bool {
+        let admin = |retry: String, action: AdminAction| {
+            if held {
+                self.admin_held(retry, action)
+            } else {
+                self.admin(retry, action)
+            }
+        };
         let moved = (|| -> Result<bool> {
             let newest = self
                 .catalog
@@ -1150,7 +1159,7 @@ impl Manager {
                 id: id.into(),
                 version: Some(newest.clone()),
             };
-            let Reply::Installed { package } = self.admin(retry("install"), action)? else {
+            let Reply::Installed { package } = admin(retry("install"), action)? else {
                 return Ok(false);
             };
             if self.store.load(&package)?.manifest.compatibility().is_err() {
@@ -1160,7 +1169,7 @@ impl Manager {
                 package,
                 grants: grants.iter().cloned().collect(),
             };
-            self.admin(retry("enable"), action)?;
+            admin(retry("enable"), action)?;
             Ok(true)
         })();
         moved.unwrap_or(false)
@@ -1897,7 +1906,7 @@ mod tests {
             version: "1.0.0".into(),
             digest: "0".repeat(64),
         };
-        assert!(!manager.move_to_compatible(&selected.id, &selected, &BTreeSet::new()));
+        assert!(!manager.move_to_compatible(&selected.id, &selected, &BTreeSet::new(), false));
         drop(manager);
         std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
     }

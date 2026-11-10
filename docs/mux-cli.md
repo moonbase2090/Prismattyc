@@ -360,7 +360,7 @@ pmux mail claim [--json | --ids]    # fetch your letters (open become held)
 pmux mail commit <id>...            # acknowledge held letters (gone for good)
 pmux mail release <id>...           # return held letters to open
 pmux mail inbox                     # open/held depth
-pmux mail watch [--timeout 300]     # exit 0 when mail arrives; exit 1 on timeout (not a mux failure); default 300s
+pmux mail watch [--timeout 300]     # exit 0 when mail arrives; exit 1 when the mailbox stays quiet (not a mux failure); exit 3 when pmuxd exits; default 300s
 pmux mail who                       # bound agents (presence)
 pmux mail alias <name>              # bind a shorthand to your agent
 pmux mail broadcast --summary "..." # every bound agent except you
@@ -378,8 +378,10 @@ pane, then `$PMUX_AGENT` outside a known pane. There is no other
 default — a CLI that guesses who you are sends mail as the wrong agent.
 
 Watcher recipe: `while pmux mail watch; do pmux mail claim --json; done`.
-Exit 1 means the wait timed out (default 300 seconds). The mux is not
-broken. Start the loop again if you still want to wait.
+Exit 1 means the mailbox stayed quiet until the timeout (default 300
+seconds). That is not a stalled or dead daemon. Start the loop again if
+you still want to wait. Exit 3 means pmuxd exited while the watcher was
+connected (`pmuxd exited while this client was connected`).
 
 The manual doorbell form `pmux mail SESSION [--pane ID]` still parses.
 The in-process doorbell makes it unnecessary for mux-native mail.

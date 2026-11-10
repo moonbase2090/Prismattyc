@@ -348,9 +348,14 @@ fn mail_watch_blocks_server_side_and_wakes_on_send() {
         &["mail", "--as", "kiro-pm", "watch", "--timeout", "1"],
     );
     assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.contains("open: 0"), "{output:?}");
+    let rendered = format!("{stdout}{stderr}");
+    let lower = rendered.to_ascii_lowercase();
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("open: 0"),
-        "{output:?}"
+        !lower.contains("stalled") && !lower.contains("dead") && !rendered.contains("exited"),
+        "a quiet mailbox is not a dead daemon: {output:?}"
     );
 
     // Wake path: a send 200ms in must wake the parked wait (exit 0) well
@@ -387,4 +392,73 @@ fn mail_watch_blocks_server_side_and_wakes_on_send() {
         elapsed < test_time_budget(Duration::from_secs(4)),
         "watch must wake on the ring, not run to timeout ({elapsed:?})"
     );
+}
+
+#[test]
+fn mail_watch_reports_when_the_daemon_exits() {
+    let socket = socket_path();
+    let data = data_dir();
+    let mut server = start_server(&socket, &data);
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    clear_command_env(&mut command);
+    let mut child = command
+        .arg("--socket")
+        .arg(&socket)
+        .args(["mail", "--as", "kiro-pm", "watch", "--timeout", "30"])
+        .env_remove("PMUX_AGENT")
+        .env_remove("PRISMATTYC_PANE_ID")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn mail watch");
+    let watcher = child.id();
+    let connected = std::time::Instant::now();
+    while !process_has_unix_socket(watcher) {
+        if connected.elapsed() > Duration::from_secs(2) || child.try_wait().ok().flatten().is_some()
+        {
+            let output = child.wait_with_output().expect("watch output");
+            panic!(
+                "watcher never connected: status {:?} stdout {} stderr {}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::yield_now();
+    }
+    let killed = std::time::Instant::now();
+    let _ = server.child.kill();
+    let _ = server.child.wait();
+    let output = child.wait_with_output().expect("watch output");
+    let elapsed = killed.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "daemon exit must not wait out the mail budget ({elapsed:?})"
+    );
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("pmuxd exited while this client was connected"),
+        "{output:?}"
+    );
+    assert!(
+        !stderr.to_ascii_lowercase().contains("stalled"),
+        "{output:?}"
+    );
+    assert!(output.stdout.is_empty(), "{output:?}");
+}
+
+/// True once `pid` has a socket open. `pmux mail watch` opens the control
+/// socket and nothing else, so this is the connected daemon peer.
+fn process_has_unix_socket(pid: u32) -> bool {
+    let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        std::fs::read_link(entry.path())
+            .ok()
+            .is_some_and(|link| link.to_string_lossy().starts_with("socket:["))
+    })
 }

@@ -31,6 +31,7 @@ mod layout;
 mod layout_file;
 mod live;
 pub mod login;
+pub mod mail_liveness;
 pub mod mailbox;
 mod pane_log;
 mod pane_log_persist;
@@ -114,6 +115,12 @@ pub use layout_file::{
     SAVED_SPACE_VERSION,
 };
 pub use live::{PMUX_SOCKET, PRISMATTYC_PANE_ID};
+pub use mail_liveness::{
+    agent_transport_error, daemon_exit_report, drive_mail_watch, is_daemon_exit_report,
+    judge_mail_wait, observation_from_reply, present_mail_watch, transport_link_lost,
+    ConnectedRole, DaemonPresence, MailClock, MailObservation, MailVerdict, MailWatchPresented,
+    ManualClock, SystemClock, MAIL_WATCH_GRACE, MAIL_WATCH_SLICE,
+};
 pub use pane_log::PaneFramePolicy;
 pub use pane_log_persist::resolve_pane_log_path;
 pub use remote_size::{

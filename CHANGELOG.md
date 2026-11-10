@@ -7,7 +7,7 @@
 ### Fixed
 
 - Activity hook observation now shares one two-second deadline across stdin and the activity exchange.
-- `pmux mail watch` and connected MCP agents now distinguish a quiet mailbox from a daemon that exited, and return promptly when the daemon stops.
+- `pmux mail watch` and connected clients now distinguish a quiet mailbox from a daemon that exited, and return promptly when the daemon stops.
 - Escape closes the pane menu and control panel even when a modifier appears held, the menu has no rows, or the platform reports Escape as a control character. The host also clears held modifiers when its window loses focus.
 
 ## [0.3.61-rc.1]

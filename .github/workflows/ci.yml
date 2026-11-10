@@ -280,6 +280,8 @@ jobs:
 
       - name: Check plug-in release preflight
         run: python3 scripts/release/plugin_artifacts_workflow_test.py
+      - name: Check the plug-in version guard
+        run: python3 scripts/release/check_plugin_sources_test.py
 
       - name: Check release checksum generation
         run: python3 scripts/release/write_checksums_test.py

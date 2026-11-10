@@ -83,7 +83,7 @@ impl Service {
                 };
                 for (id, outcome) in outcomes {
                     match outcome {
-                        Ok(true) => eprintln!("pmuxd: enabled default plug-in {id}"),
+                        Ok(true) => eprintln!("pmuxd: set up default plug-in {id}"),
                         Ok(false) => {}
                         Err(error) => {
                             eprintln!("pmuxd: default plug-in {id} not enabled: {error:#}");
@@ -527,9 +527,10 @@ impl Manager {
 
     /// Install and enable each default plug-in that has no saved state, with
     /// local activity access. A saved selection, enabled or disabled, is a
-    /// decision already made and is left alone. Only packages compiled into
+    /// decision already made and is left alone, except that an enabled default on an older
+    /// version than the bundled one moves forward with its grants. Only packages compiled into
     /// this binary are used, so a build without the official bundle seeds
-    /// nothing. Returns whether each plug-in was enabled now.
+    /// nothing. Returns whether each plug-in was enabled or moved to a newer version now.
     fn seed_defaults(&self) -> Vec<(&'static str, Result<bool>)> {
         // Held across the check and both changes, so a disable sent while the
         // daemon starts is either seen here or applied after the seed.
@@ -550,15 +551,28 @@ impl Manager {
     }
 
     fn seed_one(&self, bundled: &Catalog, id: &str) -> Result<bool> {
-        if self
+        let saved = self
             .state
             .lock()
             .unwrap()
             .journal
             .selections
-            .contains_key(id)
-        {
-            return Ok(false);
+            .get(id)
+            .cloned();
+        if let Some(saved) = saved {
+            // A saved choice is never reseeded. An enabled default that sits on an older
+            // version than this core carries moves forward, keeping its grants, so a stale
+            // installed copy cannot hide what the bundled package provides.
+            let Desired::Enabled { selected, grants } = saved else {
+                return Ok(false);
+            };
+            let Ok(entry) = bundled.get(id, None) else {
+                return Ok(false);
+            };
+            if !is_older(&selected.version, &entry.entry.version) {
+                return Ok(false);
+            }
+            return Ok(self.move_to_compatible(id, &selected, &grants, true));
         }
         let Ok(entry) = bundled.get(id, None) else {
             return Ok(false);
@@ -1037,6 +1051,18 @@ struct Selection {
     grants: BTreeSet<String>,
 }
 
+/// Whether `selected` is a lower semantic version than `bundled`. Anything that does not parse
+/// is left where it is.
+fn is_older(selected: &str, bundled: &str) -> bool {
+    match (
+        semver::Version::parse(selected),
+        semver::Version::parse(bundled),
+    ) {
+        (Ok(selected), Ok(bundled)) => selected < bundled,
+        _ => false,
+    }
+}
+
 impl Manager {
     fn selection(&self, id: &str) -> Result<Selection> {
         let (installed, grants, generation, cached) = {
@@ -1073,7 +1099,7 @@ impl Manager {
             loaded
         };
         if let Err(error) = package.manifest.compatibility() {
-            if self.move_to_compatible(id, &installed, &grants) {
+            if self.move_to_compatible(id, &installed, &grants, false) {
                 return self.selection(id);
             }
             let mut state = self.state.lock().unwrap();
@@ -1097,12 +1123,21 @@ impl Manager {
 
     /// A selected package this core cannot run moves to the newest bundled version that it can,
     /// keeping the grants it had. Nothing moves when the bundle has no such version.
+    /// `held` is true when the caller already holds the administration lock.
     fn move_to_compatible(
         &self,
         id: &str,
         selected: &Installed,
         grants: &BTreeSet<String>,
+        held: bool,
     ) -> bool {
+        let admin = |retry: String, action: AdminAction| {
+            if held {
+                self.admin_held(retry, action)
+            } else {
+                self.admin(retry, action)
+            }
+        };
         let moved = (|| -> Result<bool> {
             let newest = self
                 .catalog
@@ -1124,7 +1159,7 @@ impl Manager {
                 id: id.into(),
                 version: Some(newest.clone()),
             };
-            let Reply::Installed { package } = self.admin(retry("install"), action)? else {
+            let Reply::Installed { package } = admin(retry("install"), action)? else {
                 return Ok(false);
             };
             if self.store.load(&package)?.manifest.compatibility().is_err() {
@@ -1134,7 +1169,7 @@ impl Manager {
                 package,
                 grants: grants.iter().cloned().collect(),
             };
-            self.admin(retry("enable"), action)?;
+            admin(retry("enable"), action)?;
             Ok(true)
         })();
         moved.unwrap_or(false)
@@ -1871,7 +1906,7 @@ mod tests {
             version: "1.0.0".into(),
             digest: "0".repeat(64),
         };
-        assert!(!manager.move_to_compatible(&selected.id, &selected, &BTreeSet::new()));
+        assert!(!manager.move_to_compatible(&selected.id, &selected, &BTreeSet::new(), false));
         drop(manager);
         std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
     }
@@ -2026,6 +2061,18 @@ mod tests {
         );
         drop(manager);
         std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn only_a_lower_parsed_version_counts_as_older_than_the_bundled_one() {
+        assert!(is_older("1.1.0", "1.2.0"));
+        assert!(is_older("1.9.9", "2.0.0"));
+        assert!(is_older("1.2.0-rc.1", "1.2.0"));
+        assert!(!is_older("1.2.0", "1.2.0"));
+        assert!(!is_older("1.3.0", "1.2.0"));
+        assert!(!is_older("1.10.0", "1.9.0"), "compare numbers, not text");
+        assert!(!is_older("1.1", "1.2.0"));
+        assert!(!is_older("1.1.0", "latest"));
     }
 
     #[test]

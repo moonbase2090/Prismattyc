@@ -73,3 +73,9 @@ interface read {
     endpoints: func() -> result<list<endpoint>, error>;
     poll: func(endpoint: u64, after: option<cursor>, limit: u16) -> result<page, error>;
 }
+
+interface manage {
+    /// Removes a session only when the daemon confirms none of its panes has a live child.
+    enum removal { removed, live, missing }
+    remove-stopped: func(endpoint: u64, session-id: u64) -> result<removal, string>;
+}

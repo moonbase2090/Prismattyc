@@ -82,10 +82,9 @@ pub(in super::super) fn run(paths: &Paths, args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-/// Choosing the Activity Monitor is the approval to read this machine's own activity: a fresh
-/// install has the plug-ins neither installed nor enabled, and the monitor refuses to start
-/// without them. Each gets the local read grant only. One already enabled is left alone,
-/// whatever it was granted.
+/// Choosing the Activity Monitor approves local activity read and stopped-session cleanup for
+/// its own first-party plug-in. The connector remains read-only; an existing explicit disable
+/// is respected.
 fn ensure_plugin(socket: &Path) -> Result<()> {
     use prismattyc_mux::plugins::{Client, Reply, Request};
     for id in PLUGINS {
@@ -94,14 +93,30 @@ fn ensure_plugin(socket: &Path) -> Result<()> {
             anyhow::bail!("unexpected plug-in status");
         };
         drop(client);
-        if states.iter().any(|state| state.id == id && state.enabled) {
+        let state = states.iter().find(|state| state.id == id);
+        if state.is_some_and(|state| {
+            state.enabled
+                && (id != "org.moonbase.activity-monitor"
+                    || state
+                        .grants
+                        .iter()
+                        .any(|grant| grant == "activity.manage:local"))
+        }) {
             continue;
         }
         if !installed.iter().any(|package| package.id == id) {
             prismattyc_mux::plugins::run_cli(socket, vec!["install".into(), id.into()])?;
         }
-        let enable = ["enable", id, "--allow", "activity.read:local"];
-        prismattyc_mux::plugins::run_cli(socket, enable.map(String::from).to_vec())?;
+        let mut enable = vec![
+            "enable".to_owned(),
+            id.to_owned(),
+            "--allow".into(),
+            "activity.read:local".into(),
+        ];
+        if id == "org.moonbase.activity-monitor" {
+            enable.extend(["--allow".into(), "activity.manage:local".into()]);
+        }
+        prismattyc_mux::plugins::run_cli(socket, enable)?;
     }
     Ok(())
 }

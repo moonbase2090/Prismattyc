@@ -101,6 +101,25 @@ fn chunk_needs_redraw(
     }
 }
 
+struct LogCellSnapshot {
+    cell: prismattyc_core::Cell,
+    combining: Vec<char>,
+    hyperlink: Option<String>,
+}
+
+fn snapshot_log_row(screen: &prismattyc_core::Screen, row: usize) -> Vec<LogCellSnapshot> {
+    screen
+        .view_row(row)
+        .expect("snapshot row belongs to screen")
+        .enumerate()
+        .map(|(col, cell)| LogCellSnapshot {
+            cell: *cell,
+            combining: cell.combining_marks().to_vec(),
+            hyperlink: screen.hyperlink_uri_at_view(0, row, col).map(str::to_owned),
+        })
+        .collect()
+}
+
 struct ChunkSnapshot {
     damage: GridDamage,
     cursor: Cursor,
@@ -952,7 +971,7 @@ pub(crate) struct PaneRuntime {
     /// Live bottom moved while this pane is scrolled (chip `· new`).
     pub(crate) scroll_new_output: bool,
     pub(crate) last_content_epoch: u64,
-    log_grid: Vec<Vec<prismattyc_core::Cell>>,
+    log_grid: Vec<Vec<LogCellSnapshot>>,
     pub(crate) child_alive: bool,
     /// Exit status captured when the PTY is first reaped. Keeping it here
     /// lets attached-pane cleanup distinguish a successful exit from a
@@ -2107,19 +2126,6 @@ impl PaneRuntime {
             let epoch_changed = epoch != self.last_content_epoch;
             self.last_content_epoch = epoch;
             content_changed |= epoch_changed;
-            if self.view_scroll == 0 {
-                self.scroll_new_output = false;
-            } else if epoch_changed {
-                self.scroll_new_output = true;
-            }
-            let mid_drag = self.selection.active && self.selection.anchor.is_some();
-            if epoch_changed
-                && !mid_drag
-                && (self.selection.range().is_some() || self.keyboard_select_mode)
-            {
-                self.selection.clear();
-                self.keyboard_select_mode = false;
-            }
             metadata_changed |= force_redraw;
             dirty |= force_redraw || self.visible_after_feed(&before, Instant::now());
             if i + 1 == MAX_PTY_DRAIN_PER_PANE {
@@ -2128,13 +2134,28 @@ impl PaneRuntime {
         }
         let grid_changed = self.refresh_log_grid();
         let screen = self.emulator.screen();
+        let history_changed = screen.history_len() != before_drain.history
+            || screen.scrolled_lines() != before_drain.scrolled;
+        let content_changed = content_changed && (grid_changed || history_changed);
         let other_display_changed = screen.cursor() != before_drain.cursor
-            || screen.history_len() != before_drain.history
-            || screen.scrolled_lines() != before_drain.scrolled
+            || history_changed
             || self.emulator.cursor_shape() != before_drain.shape
             || self.emulator.cursor_blink() != before_drain.blink
             || self.emulator.cursor_visible() != before_drain.visible
             || image_stamp(self.emulator.images()) != before_drain.images;
+        if self.view_scroll == 0 {
+            self.scroll_new_output = false;
+        } else if content_changed {
+            self.scroll_new_output = true;
+        }
+        let mid_drag = self.selection.active && self.selection.anchor.is_some();
+        if content_changed
+            && !mid_drag
+            && (self.selection.range().is_some() || self.keyboard_select_mode)
+        {
+            self.selection.clear();
+            self.keyboard_select_mode = false;
+        }
         (
             metadata_changed || grid_changed || (dirty && other_display_changed),
             content_changed,
@@ -2148,15 +2169,24 @@ impl PaneRuntime {
             || self.log_grid.first().map(Vec::len) != Some(screen.columns())
         {
             self.log_grid = (0..screen.rows())
-                .map(|row| screen.row(row).unwrap_or_default().to_vec())
+                .map(|row| snapshot_log_row(screen, row))
                 .collect();
             return true;
         }
         let mut changed = false;
         for row in screen.damage().dirty_rows() {
-            let cells = screen.row(row).expect("damage row belongs to screen");
-            if self.log_grid[row] != cells {
-                self.log_grid[row].copy_from_slice(cells);
+            let same = screen
+                .view_row(row)
+                .expect("damage row belongs to screen")
+                .enumerate()
+                .zip(&self.log_grid[row])
+                .all(|((col, cell), cached)| {
+                    *cell == cached.cell
+                        && cell.combining_marks() == cached.combining
+                        && screen.hyperlink_uri_at_view(0, row, col) == cached.hyperlink.as_deref()
+                });
+            if !same {
+                self.log_grid[row] = snapshot_log_row(screen, row);
                 changed = true;
             }
         }
@@ -5778,6 +5808,16 @@ mod tests {
             (b"\x1b[H\x1b[2Kready> \x1b[H".as_slice(), false),
             (b"\x1b[Hbusy>  \x1b[H".as_slice(), true),
             (b"\x1b[H\x1b[2Kbusy>  \x1b[H".as_slice(), false),
+            (
+                b"\x1b[H\x1b]8;;https://example.invalid/a\x1b\\busy>  \x1b]8;;\x1b\\\x1b[H"
+                    .as_slice(),
+                true,
+            ),
+            (
+                b"\x1bc\x1b]8;;https://example.invalid/b\x1b\\busy>  \x1b]8;;\x1b\\\x1b[H"
+                    .as_slice(),
+                true,
+            ),
         ] {
             pane.pending_log_batch = Some(PendingLogBatch {
                 snapshot_ansi: None,
@@ -5795,8 +5835,10 @@ mod tests {
                 counters: attach_log::PolicyCounters::default(),
                 event_count: 1,
             });
-            let (dirty, _, more) = pane.drain_log(Some(Instant::now() + Duration::from_secs(1)));
+            let (dirty, content_changed, more) =
+                pane.drain_log(Some(Instant::now() + Duration::from_secs(1)));
             assert_eq!(dirty, expected_dirty);
+            assert_eq!(content_changed, expected_dirty);
             assert!(!more);
             assert!(pane.pending_log_batch.is_none());
             let _ = pane.emulator.take_damage();

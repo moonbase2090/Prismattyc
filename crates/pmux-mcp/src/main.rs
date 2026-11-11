@@ -20,6 +20,7 @@ use rmcp::{
 use serde::Deserialize;
 
 mod framing;
+mod http;
 mod mail;
 mod plugins;
 mod supervisor;
@@ -28,7 +29,7 @@ use mail::{format_data, mux_socket, MailOp};
 
 const USAGE: &str = "pmux-mcp — MCP stdio adapter over the pmux Mail* socket
 
-usage: pmux-mcp [-V|--version] [-h|--help] [--as <agent>] [--plugin ID]... [--supervise]\n       pmux-mcp --activity-only [--supervise]
+usage: pmux-mcp [-V|--version] [-h|--help] [--as <agent>] [--plugin ID]... [--supervise]\n       pmux-mcp --activity-only [--supervise]\n       pmux-mcp --activity-only --listen 127.0.0.1:PORT (--token-env NAME | --token-file PATH) [--allow-host HOST]...
 
 identity: --as <agent>, else $PMUX_AGENT. No default.\n--activity-only exports the selected activity connector without mailbox identity.\n--plugin ID adds explicitly allowed plug-in tools; the default allowlist is empty.
 Each tool call reconnects: MailHello, one op, drop. Watch is not a tool here.
@@ -37,13 +38,28 @@ Each tool call reconnects: MailHello, one op, drop. Watch is not a tool here.
 -h, --help     print this help and exit
 --supervise keeps the host-facing stdio transport open and restarts an
 inner adapter if it exits. Configure MCP hosts to launch this mode when
-they do not respawn failed stdio servers themselves.";
+they do not respawn failed stdio servers themselves.
+
+--listen serves the four read-only activity tools over streamable HTTP at /mcp
+instead of stdio. It is off unless given, binds a loopback address only, and
+needs --activity-only plus a bearer token from --token-env or --token-file
+(32+ bytes; a file must be mode 600). Requests without that bearer get 401.
+--listen cannot be combined with --as, --plugin or --supervise.
+--allow-host adds a Host header value to accept besides localhost, for a proxy
+that forwards the public hostname.";
 
 struct Config {
     agent: Option<AgentId>,
     plugins: Vec<String>,
     activity_only: bool,
     supervise: bool,
+    listen: Option<Listen>,
+}
+
+struct Listen {
+    addr: std::net::SocketAddr,
+    token: http::Token,
+    allowed_hosts: Vec<String>,
 }
 
 struct Adapter {
@@ -547,6 +563,10 @@ impl ServerHandler for PmuxMcp {
 
 fn parse_config() -> Result<Config, String> {
     let mut args = env::args().skip(1).peekable();
+    let mut listen: Option<String> = None;
+    let mut token_env: Option<String> = None;
+    let mut token_file: Option<PathBuf> = None;
+    let mut allowed_hosts = Vec::new();
     let mut agent: Option<String> = None;
     let mut supervise = false;
     let mut plugins = Vec::new();
@@ -562,6 +582,12 @@ fn parse_config() -> Result<Config, String> {
             "--supervise" => supervise = true,
             "--plugin" => plugins.push(args.next().ok_or("--plugin needs a plug-in ID")?),
             "--activity-only" => activity_only = true,
+            "--listen" => listen = Some(args.next().ok_or("--listen needs an IP:port")?),
+            "--token-env" => token_env = Some(args.next().ok_or("--token-env needs a name")?),
+            "--token-file" => {
+                token_file = Some(args.next().ok_or("--token-file needs a path")?.into())
+            }
+            "--allow-host" => allowed_hosts.push(args.next().ok_or("--allow-host needs a host")?),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -573,6 +599,30 @@ fn parse_config() -> Result<Config, String> {
             other => return Err(format!("unknown argument: {other}\n\n{USAGE}")),
         }
     }
+    if listen.is_none()
+        && (token_env.is_some() || token_file.is_some() || !allowed_hosts.is_empty())
+    {
+        return Err("--token-env, --token-file and --allow-host only apply with --listen".into());
+    }
+    let listen = match listen {
+        None => None,
+        Some(address) => {
+            // The HTTP listener carries the read-only activity tools and nothing else.
+            if !activity_only {
+                return Err("--listen requires --activity-only".into());
+            }
+            if agent.is_some() || !plugins.is_empty() || supervise {
+                return Err(
+                    "--listen cannot be combined with --as, --plugin or --supervise".into(),
+                );
+            }
+            Some(Listen {
+                addr: http::parse_listen(&address)?,
+                token: http::load_token(token_env.as_deref(), token_file.as_deref())?,
+                allowed_hosts,
+            })
+        }
+    };
     if activity_only {
         if agent.is_some() || !plugins.is_empty() {
             return Err("--activity-only cannot be combined with --as or --plugin".into());
@@ -582,6 +632,7 @@ fn parse_config() -> Result<Config, String> {
             plugins: vec!["org.moonbase.activity-connector".into()],
             activity_only,
             supervise,
+            listen,
         });
     }
     if plugins.len() > 16 {
@@ -607,6 +658,7 @@ fn parse_config() -> Result<Config, String> {
         plugins,
         activity_only,
         supervise,
+        listen: None,
     })
 }
 
@@ -654,6 +706,9 @@ async fn main() -> ExitCode {
         };
     }
     let socket = mux_socket();
+    if let Some(listen) = config.listen {
+        return serve_http(listen, socket, config.plugins).await;
+    }
     let server = Adapter {
         mail: config
             .agent
@@ -678,6 +733,39 @@ async fn main() -> ExitCode {
             eprintln!("pmux-mcp: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+async fn serve_http(listen: Listen, socket: PathBuf, plugins: Vec<String>) -> ExitCode {
+    let listener = match tokio::net::TcpListener::bind(listen.addr).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("pmux-mcp: cannot listen on {}: {error}", listen.addr);
+            return ExitCode::FAILURE;
+        }
+    };
+    match listener.local_addr() {
+        Ok(bound) => eprintln!(
+            "pmux-mcp: serving read-only activity tools at http://{bound}{}",
+            http::MCP_PATH
+        ),
+        Err(error) => eprintln!("pmux-mcp: {error}"),
+    }
+    let make = move || {
+        Ok(Adapter {
+            mail: None,
+            plugins: plugins::Plugins::new(socket.clone(), plugins.clone()),
+        })
+    };
+    tokio::select! {
+        result = http::serve(listener, listen.token, listen.allowed_hosts, make) => match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("pmux-mcp: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        _ = tokio::signal::ctrl_c() => ExitCode::SUCCESS,
     }
 }
 

@@ -62,6 +62,64 @@ and accepts an explicit `--plugins org.moonbase.activity-connector` allowlist.
 Its default plug-in allowlist is empty. A package cannot replace a core tool
 or automatically expose itself to every MCP client.
 
+### Reaching the activity tools off the machine
+
+`pmux-mcp --activity-only` can also serve those four read-only tools over
+streamable HTTP, so an MCP client that cannot run a local process can reach
+them through a tunnel. The listener is off unless you configure it:
+
+```sh
+export PMUX_MCP_BEARER="$(head -c 32 /dev/urandom | base64 | tr -d '=+/\n')"
+pmux-mcp --activity-only --listen 127.0.0.1:8765 --token-env PMUX_MCP_BEARER
+# or keep the secret in a file only you can read (mode 600):
+pmux-mcp --activity-only --listen 127.0.0.1:8765 --token-file ~/.config/pmux/mcp-bearer
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--listen IP:PORT` | Serve MCP at `http://IP:PORT/mcp`. Only a loopback address (`127.0.0.1`, `::1`) is accepted; `0.0.0.0` and LAN addresses are refused. |
+| `--token-env NAME` / `--token-file PATH` | Where the bearer secret comes from. Exactly one is required. It must be 32 to 512 printable ASCII bytes, and a file must not be readable by group or others. |
+| `--allow-host HOST` | Also accept this `Host` header, for a proxy that forwards a public hostname. Repeat for more. Not needed when the proxy rewrites `Host` to `localhost`. |
+
+The listener refuses to start without a token, without `--activity-only`, or
+combined with `--as`, `--plugin` or `--supervise`, so it can never carry
+mailbox, alias, or Space tools. Every request needs `Authorization: Bearer
+<secret>`; anything else gets `401` before any path or body is looked at. The
+secret is compared in constant time and is never logged or printed. The
+connector's existing one-second minimum interval for `pmux_activity_poll`
+applies unchanged, and at most 16 connections are served at once.
+
+The listener speaks plain HTTP on loopback. TLS and the public side belong to
+the tunnel. With a `cloudflared` tunnel, point the ingress at the local port
+and, if you front it with Cloudflare Access, send the service-token headers as
+well as the bearer:
+
+```yaml
+# cloudflared config.yml (hostname is yours)
+ingress:
+  - hostname: activity.example.com
+    service: http://127.0.0.1:8765
+    originRequest:
+      httpHostHeader: localhost
+  - service: http_status:404
+```
+
+```sh
+curl -sS https://activity.example.com/mcp \
+  -H "CF-Access-Client-Id: $ACCESS_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $ACCESS_CLIENT_SECRET" \
+  -H "Authorization: Bearer $PMUX_MCP_BEARER" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+The Access headers are checked by Cloudflare at the edge; the bearer is checked
+here, so a bypass of either layer alone still reaches nothing. Keep all three
+secrets out of the repository, shell history, and logs. The enabled
+`org.moonbase.activity-connector` package and its `activity.read:local` grant
+are still required, exactly as for the stdio server.
+
 Management mutations require a running, compatible selected daemon. An absent
 daemon returns `daemon_unavailable` with ordinary app/startup guidance; install
 does not create a mux session as a side effect. Cached catalog search can work

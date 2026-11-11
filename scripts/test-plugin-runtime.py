@@ -1069,7 +1069,16 @@ else:
             stop(daemon)
             assert sorted(cli("discover")["packages"],key=lambda entry: (entry["id"],entry["version"])) == sorted(expected_catalog,key=lambda entry: (entry["id"],entry["version"]))
             saved = cli("list")
-            assert len(saved["installed"]) == 2 and all(state["enabled"] and state["observed"] == "daemon_unavailable" for state in saved["states"])
+            installed = {(package["id"], package["version"]): package for package in saved["installed"]}
+            for entry in current:
+                package = installed[(entry["id"], entry["version"])]
+                assert package["digest"] == entry["sha256"], (entry, package)
+            catalog = {(entry["id"], entry["version"]): entry for entry in expected_catalog}
+            for key, package in installed.items():
+                entry = catalog[key]
+                assert package["digest"] == entry["sha256"], package
+            assert {state["id"] for state in saved["states"]} == {monitor, "org.moonbase.activity-connector"}
+            assert all(state["enabled"] and state["observed"] == "daemon_unavailable" for state in saved["states"])
             print("PASS exact production catalog/archive digests; fresh daemon enables both with local access only and the launcher needs no setup; a disable survives restart; reinstall is idempotent; explicit grants; real monitor cells/RGBA; connector/direct+supervised MCP; live terminal and hot feed without daemon restart; offline verified metadata; guests were not rebuilt")
             return
         if feature != "all":

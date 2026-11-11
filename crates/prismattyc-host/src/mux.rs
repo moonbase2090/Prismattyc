@@ -952,6 +952,7 @@ pub(crate) struct PaneRuntime {
     /// Live bottom moved while this pane is scrolled (chip `· new`).
     pub(crate) scroll_new_output: bool,
     pub(crate) last_content_epoch: u64,
+    log_grid: Vec<Vec<prismattyc_core::Cell>>,
     pub(crate) child_alive: bool,
     /// Exit status captured when the PTY is first reaped. Keeping it here
     /// lets attached-pane cleanup distinguish a successful exit from a
@@ -1621,6 +1622,7 @@ impl PaneRuntime {
             view_scroll: 0,
             scroll_new_output: false,
             last_content_epoch,
+            log_grid: Vec::new(),
             child_alive: true,
             exit_status: None,
             title: None,
@@ -1979,10 +1981,9 @@ impl PaneRuntime {
     /// bookkeeping as [`Self::drain_pty`], different source.
     fn drain_log(&mut self, deadline: Option<Instant>) -> (bool, bool, bool) {
         let before_drain = self.snapshot_chunk();
-        let screen = self.emulator.screen();
-        let grid_before: Vec<_> = (0..screen.rows())
-            .map(|row| screen.row(row).unwrap_or_default().to_vec())
-            .collect();
+        if self.log_grid.is_empty() {
+            self.refresh_log_grid();
+        }
         let mut metadata_changed = false;
         let mut dirty = false;
         let mut content_changed = false;
@@ -2125,12 +2126,8 @@ impl PaneRuntime {
                 more = true;
             }
         }
+        let grid_changed = self.refresh_log_grid();
         let screen = self.emulator.screen();
-        let grid_changed = grid_before.len() != screen.rows()
-            || grid_before
-                .iter()
-                .enumerate()
-                .any(|(row, cells)| screen.row(row) != Some(cells.as_slice()));
         let other_display_changed = screen.cursor() != before_drain.cursor
             || screen.history_len() != before_drain.history
             || screen.scrolled_lines() != before_drain.scrolled
@@ -2143,6 +2140,27 @@ impl PaneRuntime {
             content_changed,
             more,
         )
+    }
+
+    fn refresh_log_grid(&mut self) -> bool {
+        let screen = self.emulator.screen();
+        if self.log_grid.len() != screen.rows()
+            || self.log_grid.first().map(Vec::len) != Some(screen.columns())
+        {
+            self.log_grid = (0..screen.rows())
+                .map(|row| screen.row(row).unwrap_or_default().to_vec())
+                .collect();
+            return true;
+        }
+        let mut changed = false;
+        for row in screen.damage().dirty_rows() {
+            let cells = screen.row(row).expect("damage row belongs to screen");
+            if self.log_grid[row] != cells {
+                self.log_grid[row].copy_from_slice(cells);
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Apply at most one 8 KiB piece of snapshot or output data, or one
@@ -5759,6 +5777,7 @@ mod tests {
             (b"\x1b[Hready> \x1b[H".as_slice(), false),
             (b"\x1b[H\x1b[2Kready> \x1b[H".as_slice(), false),
             (b"\x1b[Hbusy>  \x1b[H".as_slice(), true),
+            (b"\x1b[H\x1b[2Kbusy>  \x1b[H".as_slice(), false),
         ] {
             pane.pending_log_batch = Some(PendingLogBatch {
                 snapshot_ansi: None,
@@ -5780,6 +5799,7 @@ mod tests {
             assert_eq!(dirty, expected_dirty);
             assert!(!more);
             assert!(pane.pending_log_batch.is_none());
+            let _ = pane.emulator.take_damage();
         }
         assert!(visible_text(pane).starts_with("busy>"));
     }

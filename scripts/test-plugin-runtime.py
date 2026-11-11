@@ -987,7 +987,12 @@ else:
             seeded = enabled_states()
             for entry in current:
                 state = seeded[entry["id"]]
-                assert state["grants"] == ["activity.read:local"], state
+                expected_grants = (
+                    ["activity.manage:local", "activity.read:local"]
+                    if entry["id"] == monitor
+                    else ["activity.read:local"]
+                )
+                assert state["grants"] == expected_grants, state
                 assert state["selected"]["version"] == entry["version"] and state["selected"]["digest"] == entry["sha256"], state
             feed(True)
             for arguments in (["--snapshot"], ["--seats"]):
@@ -1014,7 +1019,8 @@ else:
                 assert result.returncode != 0
                 assert plugin in result.stderr, result.stderr
                 assert (f"pmux plugin install {plugin}" in result.stderr) == (not installed), result.stderr
-                assert f"pmux plugin enable {plugin} --allow activity.read:local" in result.stderr, result.stderr
+                grants = "--allow activity.manage:local --allow activity.read:local" if plugin == monitor else "--allow activity.read:local"
+                assert f"pmux plugin enable {plugin} {grants}" in result.stderr, result.stderr
                 assert ("installed but not enabled" if installed else "not installed") in result.stderr, result.stderr
 
             feed(True)
@@ -1079,7 +1085,7 @@ else:
                 assert package["digest"] == entry["sha256"], package
             assert {state["id"] for state in saved["states"]} == {monitor, "org.moonbase.activity-connector"}
             assert all(state["enabled"] and state["observed"] == "daemon_unavailable" for state in saved["states"])
-            print("PASS exact production catalog/archive digests; fresh daemon enables both with local access only and the launcher needs no setup; a disable survives restart; reinstall is idempotent; explicit grants; real monitor cells/RGBA; connector/direct+supervised MCP; live terminal and hot feed without daemon restart; offline verified metadata; guests were not rebuilt")
+            print("PASS exact production catalog/archive digests; fresh daemon grants local read and stopped-session cleanup to the monitor and read-only access to the connector; the launcher needs no setup; a disable survives restart; reinstall is idempotent; real monitor cells/RGBA; connector/direct+supervised MCP; live terminal and hot feed without daemon restart; offline verified metadata; guests were not rebuilt")
             return
         if feature != "all":
             feed(True)

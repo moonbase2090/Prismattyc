@@ -1978,6 +1978,12 @@ impl PaneRuntime {
     /// Apply pane-log frames to the replica emulator (PT-111). Same
     /// bookkeeping as [`Self::drain_pty`], different source.
     fn drain_log(&mut self, deadline: Option<Instant>) -> (bool, bool, bool) {
+        let before_drain = self.snapshot_chunk();
+        let screen = self.emulator.screen();
+        let grid_before: Vec<_> = (0..screen.rows())
+            .map(|row| screen.row(row).unwrap_or_default().to_vec())
+            .collect();
+        let mut metadata_changed = false;
         let mut dirty = false;
         let mut content_changed = false;
         let mut more = false;
@@ -1986,7 +1992,14 @@ impl PaneRuntime {
                 more = true;
                 break;
             }
-            if self.pending_log_batch.is_some() {
+            let before = self.snapshot_chunk();
+            let mut force_redraw = true;
+            if let Some(batch) = self.pending_log_batch.as_ref() {
+                force_redraw = batch.snapshot_ansi.is_some()
+                    || !matches!(
+                        batch.events.front().map(|frame| &frame.event),
+                        Some(prismattyc_mux::PaneEvent::Output { .. })
+                    );
                 self.apply_pending_log_unit();
             } else {
                 let Some(log) = self.log.as_ref() else {
@@ -2031,6 +2044,7 @@ impl PaneRuntime {
                         reservation,
                         counters,
                     }) => {
+                        force_redraw = snapshot.is_some();
                         let snapshot_ansi = snapshot.map(|(cols, rows, bytes)| {
                             let cols = usize::try_from(cols).unwrap_or(self.cols).max(1);
                             let rows = usize::try_from(rows).unwrap_or(self.rows).max(1);
@@ -2105,12 +2119,30 @@ impl PaneRuntime {
                 self.selection.clear();
                 self.keyboard_select_mode = false;
             }
-            dirty = true;
+            metadata_changed |= force_redraw;
+            dirty |= force_redraw || self.visible_after_feed(&before, Instant::now());
             if i + 1 == MAX_PTY_DRAIN_PER_PANE {
                 more = true;
             }
         }
-        (dirty, content_changed, more)
+        let screen = self.emulator.screen();
+        let grid_changed = grid_before.len() != screen.rows()
+            || grid_before
+                .iter()
+                .enumerate()
+                .any(|(row, cells)| screen.row(row) != Some(cells.as_slice()));
+        let other_display_changed = screen.cursor() != before_drain.cursor
+            || screen.history_len() != before_drain.history
+            || screen.scrolled_lines() != before_drain.scrolled
+            || self.emulator.cursor_shape() != before_drain.shape
+            || self.emulator.cursor_blink() != before_drain.blink
+            || self.emulator.cursor_visible() != before_drain.visible
+            || image_stamp(self.emulator.images()) != before_drain.images;
+        (
+            metadata_changed || grid_changed || (dirty && other_display_changed),
+            content_changed,
+            more,
+        )
     }
 
     /// Apply at most one 8 KiB piece of snapshot or output data, or one
@@ -5714,6 +5746,42 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         panic!("timed out waiting for {needle:?}");
+    }
+
+    #[test]
+    fn attached_identical_output_does_not_request_a_redraw() {
+        let mut runtime = MuxRuntime::spawn("sh", &[], 80, 24).expect("test mux runtime");
+        let pane = runtime.focused_mut();
+        let _ = pane.emulator.feed(b"\x1b[Hready> \x1b[H");
+        let _ = pane.emulator.take_damage();
+        pane.last_content_epoch = pane.emulator.screen().content_epoch();
+        for (bytes, expected_dirty) in [
+            (b"\x1b[Hready> \x1b[H".as_slice(), false),
+            (b"\x1b[H\x1b[2Kready> \x1b[H".as_slice(), false),
+            (b"\x1b[Hbusy>  \x1b[H".as_slice(), true),
+        ] {
+            pane.pending_log_batch = Some(PendingLogBatch {
+                snapshot_ansi: None,
+                snapshot_offset: 0,
+                events: vec![prismattyc_mux::PaneLogFrame {
+                    seq: 1,
+                    event: prismattyc_mux::PaneEvent::Output {
+                        bytes: bytes.to_vec(),
+                    },
+                }]
+                .into(),
+                event_offset: 0,
+                replay_through: 0,
+                reservation: attach_log::HostReservation::empty(),
+                counters: attach_log::PolicyCounters::default(),
+                event_count: 1,
+            });
+            let (dirty, _, more) = pane.drain_log(Some(Instant::now() + Duration::from_secs(1)));
+            assert_eq!(dirty, expected_dirty);
+            assert!(!more);
+            assert!(pane.pending_log_batch.is_none());
+        }
+        assert!(visible_text(pane).starts_with("busy>"));
     }
 
     #[test]

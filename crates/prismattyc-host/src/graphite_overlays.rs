@@ -434,8 +434,23 @@ pub(crate) fn palette(
                         255,
                     );
                 }
+                let chord_label = if row.full_width
+                    || raster::palette_chord_fits(
+                        text_right.saturating_sub(text_x) / cell_w,
+                        graphite::text_width(Face::Mono, small_px, &row.chord_label).ceil()
+                            as usize
+                            / cell_w
+                            + 1,
+                        0,
+                        raster::PALETTE_MIN_NAME_CELLS,
+                        1,
+                    ) {
+                    row.chord_label.as_str()
+                } else {
+                    ""
+                };
                 let chord_px =
-                    graphite::text_width(Face::Mono, small_px, &row.chord_label).ceil() as usize;
+                    graphite::text_width(Face::Mono, small_px, chord_label).ceil() as usize;
                 let chord_x = text_right.saturating_sub(chord_px);
                 let gap = chrome.px(14.0);
                 let available_name_w = chord_x.saturating_sub(text_x.saturating_add(gap));
@@ -487,7 +502,7 @@ pub(crate) fn palette(
                     Rect::new(chord_x, text_y, chord_px, cell_h),
                     Face::Mono,
                     small_px,
-                    &row.chord_label,
+                    chord_label,
                     tok.key_text,
                     chord_x,
                     text_right,
@@ -520,7 +535,8 @@ pub(crate) fn palette(
 
     let detail_y = layout
         .detail_y
-        .or_else(|| frame.detail.map(|_| row_y.saturating_add(cell_h)));
+        .or_else(|| frame.detail.map(|_| row_y.saturating_add(cell_h)))
+        .filter(|_| !layout.detail_hidden);
     if let (Some(detail_y), Some(detail)) = (detail_y, frame.detail) {
         let detail_rect = Rect::new(
             x.saturating_add(inset / 2),
@@ -586,7 +602,12 @@ pub(crate) fn palette(
         Rect::new(text_x, footer_y, text_right.saturating_sub(text_x), cell_h),
         Face::Regular,
         small_px,
-        frame.footer,
+        &graphite::ellipsize(
+            Face::Regular,
+            small_px,
+            frame.footer,
+            text_right.saturating_sub(text_x) as f32,
+        ),
         tok.muted,
         text_x,
         text_right,
@@ -1148,7 +1169,12 @@ fn splash_ink(ink: [u8; 3], art: bool, tok: &graphite::Tokens, accent: graphite:
     }
 }
 
-fn splash_text(text: &str) -> &str {
+/// Height of one splash text line; the fit uses it to count rows.
+pub(crate) fn splash_line_height(font: &FontMetrics, chrome: ChromeGeom) -> usize {
+    font.cell_h.max(chrome.px(20.0)).max(1)
+}
+
+pub(crate) fn splash_text(text: &str) -> &str {
     if text == "⏎" {
         "Enter"
     } else {
@@ -1156,18 +1182,15 @@ fn splash_text(text: &str) -> &str {
     }
 }
 
-fn splash_line_style(
-    page: crate::splash::Page,
+pub(crate) fn splash_line_style(
+    fitted: &crate::splash::Fitted,
     line: usize,
-    art_rows: usize,
     font: &FontMetrics,
     chrome: ChromeGeom,
 ) -> (Face, f32) {
-    if line < art_rows {
+    if line < fitted.art_rows {
         (Face::Mono, font.px)
-    } else if (page == crate::splash::Page::Main && line == art_rows + 1)
-        || (page != crate::splash::Page::Main && line == 0)
-    {
+    } else if line == fitted.title_line {
         (Face::SemiBold, chrome.px(16.0).max(12) as f32)
     } else {
         (Face::Regular, chrome.px(13.0).max(10) as f32)
@@ -1182,8 +1205,7 @@ pub(crate) fn splash(
     font: &FontMetrics,
     chrome: ChromeGeom,
     tok: &graphite::Tokens,
-    page: crate::splash::Page,
-    lines: &[Vec<crate::splash::Span>],
+    fitted: &crate::splash::Fitted,
     animation_ms: Option<u64>,
     surface: OverlaySurface,
     buffer: &mut [u32],
@@ -1191,6 +1213,7 @@ pub(crate) fn splash(
     height: usize,
     focus_rgb: [u8; 3],
 ) {
+    let lines = &fitted.lines;
     if stride == 0 || height == 0 || font.cell_h == 0 {
         return;
     }
@@ -1199,16 +1222,13 @@ pub(crate) fn splash(
         buffer, stride, 0, 0, stride, height, 0.0, tok.ground, surface,
     );
 
-    let art_rows = if page == crate::splash::Page::Main {
-        prismattyc_core::splash::ART.len()
-    } else {
-        0
-    };
+    let art_rows = fitted.art_rows;
+    let animation_ms = animation_ms.filter(|_| fitted.animated_art());
     let line_widths: Vec<usize> = lines
         .iter()
         .enumerate()
         .map(|(index, line)| {
-            let (face, px) = splash_line_style(page, index, art_rows, font, chrome);
+            let (face, px) = splash_line_style(fitted, index, font, chrome);
             line.iter()
                 .map(|(text, _)| graphite::text_width(face, px, splash_text(text)))
                 .sum::<f32>()
@@ -1216,7 +1236,7 @@ pub(crate) fn splash(
         })
         .collect();
     let block_w = line_widths.iter().copied().max().unwrap_or(0).min(stride);
-    let line_h = font.cell_h.max(chrome.px(20.0));
+    let line_h = splash_line_height(font, chrome);
     let block_h = line_h.saturating_mul(lines.len()).min(height);
     let x0 = stride.saturating_sub(block_w) / 2;
     let y0 = height.saturating_sub(block_h) / 2;
@@ -1229,7 +1249,7 @@ pub(crate) fn splash(
         if row_y >= height {
             break;
         }
-        let (face, px) = splash_line_style(page, index, art_rows, font, chrome);
+        let (face, px) = splash_line_style(fitted, index, font, chrome);
         let center_y = row_y as f32 + line_h as f32 / 2.0;
         let mut pen = x0 as f32;
         for (text, ink) in line {
@@ -1263,7 +1283,15 @@ pub(crate) fn splash(
                     .collect()
             })
             .collect();
-        raster::rasterize_splash_art(font, &art_lines, buffer, stride, height, animation_ms);
+        raster::rasterize_splash_art(
+            font,
+            &art_lines,
+            buffer,
+            stride,
+            height,
+            animation_ms,
+            art_rows,
+        );
     }
 }
 
@@ -2342,16 +2370,24 @@ mod tests {
         let chrome = graphite_chrome();
         let page = crate::splash::Page::Main;
         let animation_ms = prismattyc_core::splash::SETTLED_MS + 2_000;
-        let lines = crate::splash::layout_with_resume(page, "0.3.0", 0, Some(animation_ms), false);
         let (width, height) = (1100, 640);
+        let fitted = crate::splash::layout_fit(
+            page,
+            "0.3.0",
+            0,
+            Some(animation_ms),
+            false,
+            width / font.cell_w,
+            height / font.cell_h,
+        );
+        assert_eq!(fitted.fit, crate::splash::Fit::Full);
         let backdrop = [180, 42, 76];
         let mut dark = vec![pack_argb(255, backdrop); width * height];
         splash(
             &font,
             chrome,
             &graphite::DARK,
-            page,
-            &lines,
+            &fitted,
             Some(animation_ms),
             OverlaySurface {
                 opacity: 0.72,
@@ -2369,8 +2405,7 @@ mod tests {
             &font,
             chrome,
             &graphite::LIGHT,
-            page,
-            &lines,
+            &fitted,
             None,
             OverlaySurface::default(),
             &mut light,
@@ -2389,8 +2424,7 @@ mod tests {
             &font,
             chrome,
             &graphite::DARK,
-            page,
-            &lines,
+            &fitted,
             Some(animation_ms + 1_500),
             OverlaySurface {
                 opacity: 0.72,

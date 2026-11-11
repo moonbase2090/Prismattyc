@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "vectorvault": {
+      "command": "/Users/brandan/Projects/VectorVault/.venv/bin/vectorvault-mcp",
+      "args": [],
+      "env": {
+        "AWS_PROFILE": "bmaj",
+        "VECTORVAULT_ROLE": "researcher",
+        "VECTORVAULT_AGENT_ID": "codex-prismattyc"
+      }
+    }
+  }
+}

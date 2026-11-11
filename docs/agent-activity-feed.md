@@ -575,6 +575,75 @@ page/rate limits, and host labels. It must not accept arbitrary socket paths
 from tool arguments. MCP packaging and access policy are design work only in
 this version. The existing Shell connector supplies the usable integration now.
 
+## Requirements for authenticated attribution
+
+Today a seat on the feed is a claim. The daemon admits a client by its
+same-user socket access (the peer user id on Unix, the private pipe or socket
+directory on Windows) and takes the seat name from the event the client sends.
+Nothing ties the name to the pane or process that produced it, so a viewer must
+read it as "a local process said so". Nothing in the viewer, webhook or Shell
+connector should present it as verified. This section lists what has to be true
+before the feed is aggregated across users or hosts, or before anything
+decides on the strength of a seat name. It is a set of requirements, not a
+design, and nothing here is built.
+
+### When it applies
+
+Same-user, single-host use stays as documented: the local user already owns
+every seat, so a forged seat name gains nothing. The requirements apply when
+any of these arrive:
+
+- a feed consumer on another account or host, including remote aggregation;
+- an action taken on the strength of a seat name (routing mail, granting a
+  capability, ending a session, billing or quota);
+- a producer that is not launched by Prismattyc (for example a hook adapter in
+  a harness started elsewhere).
+
+### Requirements
+
+1. **Bind a seat to a pane, not to a string.** The daemon decides which seat an
+   event belongs to from state it already holds: the session that spawned the
+   producer and the seat registered for that session. A client-supplied seat is
+   at most a hint and is rejected when it disagrees.
+2. **Prove the producer belongs to that pane.** On Unix, check the connecting
+   process against the pane's process tree using the peer process id; on Windows,
+   the client process id of the pipe. The environment variables a pane exports
+   (the pane id and agent name) identify the pane but are readable and copyable
+   by every process in it, so they must not be the only evidence.
+3. **Use a per-pane secret for producers the daemon cannot place.** For hook
+   adapters or a remote producer, issue a random token to the pane at spawn,
+   keep only a hash in the daemon, scope it to one seat and one daemon instance,
+   and let it be revoked when the session ends. A token is never logged, never
+   placed in event details or webhook payloads, and never accepted over a
+   transport that is not authenticated and encrypted.
+4. **Separate identities that the feed has merged.** Distinguish the seat (a
+   working identity), the process owner (an operating-system user) and the host.
+   An aggregate record carries all three. A seat name is unique only within one
+   host and daemon instance.
+5. **Say how sure the record is.** Each event carries how its seat was
+   established (placed by the daemon, token, or asserted). Viewers, queries
+   and webhook payloads show asserted events as such and never mix them into the
+   same list as verified ones without a mark.
+6. **Make attribution fail closed.** An event that cannot be placed, or whose
+   token is revoked, is dropped or kept as unattributed. It is not assigned to a
+   nearby seat. Rejections are counted and reported without the rejected values.
+7. **Sign what leaves the host.** For remote aggregation, the transport
+   authenticates the host (per-host key or certificate), carries a nonce or
+   sequence to resist replay, and is limited to the data minimization already
+   required for webhooks. Process ids stay local.
+8. **Keep the existing limits.** Authentication adds no prompts, terminal
+   content, tokens or file contents to events, and it does not change the
+   bounds on size, retention or rate.
+
+### What would show it works
+
+A design for this is accepted only with tests that fail on the claim-only
+behavior: a client in another pane forging this pane's seat is rejected; a
+copied token from an ended session is refused; an unplaced event never appears
+under a verified seat; the feed's output marks asserted and placed events
+differently; and the same cases pass on Windows, where process lineage and the
+peer check differ.
+
 ## Reproduce the proof
 
 ```sh
@@ -632,4 +701,5 @@ interface for each runtime. Durable history adds a journal/recovery design.
 Remote aggregation adds roughly 2 to 4 days after transport and access policy
 are agreed. A packaged read-only MCP connector adds roughly 1 to 2 days for
 endpoint policy, tool schemas, limits, and client proof. Authenticated per-seat
-attribution and a new upstream runtime event API need separate estimates.
+attribution (see Requirements for authenticated attribution) and a new
+upstream runtime event API need separate estimates.

@@ -1023,10 +1023,15 @@ else:
                 onboarding(arguments, plugin, True)
             assert enabled_states() == {}, "Collection does not re-enable a disabled plug-in"
             feed(False)
-            # Packages built for an older plug-in API stay listed but cannot be installed.
+            # Packages built for an older plug-in API stay listed but cannot be
+            # installed. Retained packages that still match this core's API can.
             for entry in expected_catalog:
                 if entry not in current:
-                    assert "incompatible plug-in API" in cli("install",entry["id"],"--version",entry["version"],succeeds=False)
+                    result = subprocess.run([str(pmux), "--socket", str(endpoint), "plugin", "install", entry["id"], "--version", entry["version"]], env=env, capture_output=True, text=True, encoding="utf-8", timeout=45)
+                    if result.returncode != 0:
+                        assert "incompatible plug-in API" in result.stderr, result.stderr
+                    else:
+                        assert json.loads(result.stdout)["package"]["digest"] == entry["sha256"], result.stdout
             for entry in current:
                 package = cli("install",entry["id"],"--version",entry["version"])["package"]
                 assert package["digest"] == entry["sha256"]

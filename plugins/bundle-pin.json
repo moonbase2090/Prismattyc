@@ -2,10 +2,10 @@
   "version": 1,
   "source": {
     "kind": "official",
-    "tag": "pmux-plugins-v1.1.0"
+    "tag": "pmux-plugins-v1.2.0"
   },
-  "catalog_sha256": "84e66687cb54bd35a5265216736baf4eb8a6924f6724240db96ad4f2e62f8415",
-  "catalog_bytes": 803,
-  "receipt_sha256": "f639c9764a214e27d33a6f7dfc0af501e4127d22ad85718ee33184a7d3ed6ec1",
-  "receipt_bytes": 2146
+  "catalog_sha256": "753e0c90e1ab14535338b10198b466366e077a21228b1593170ce6dea57d9d51",
+  "catalog_bytes": 993,
+  "receipt_sha256": "24b0b946d9815ec0344d07f7a8219d59f319c52d83f6c4070b8ee29b9dbf1979",
+  "receipt_bytes": 2656
 }

@@ -2184,8 +2184,26 @@ fn draw_removal_prompt(paint: &mut Painter<'_, '_>, area: Rect, prompt: &Removal
 
 fn draw_prompt_box(paint: &mut Painter<'_, '_>, area: Rect, title: &str, detail: &str) {
     let width = 68.min(area.width.saturating_sub(2));
-    let height = 7.min(area.height.saturating_sub(1));
-    if width < 24 || height < 5 {
+    if width < 24 {
+        return;
+    }
+    let detail_width = usize::from(width.saturating_sub(4)).max(1);
+    let mut detail_lines = Vec::new();
+    let mut line = String::new();
+    for word in detail.split_whitespace() {
+        if !line.is_empty() && line.len() + 1 + word.len() > detail_width {
+            detail_lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        detail_lines.push(line);
+    }
+    let height = (detail_lines.len() as u16 + 5).min(area.height.saturating_sub(1));
+    if height < 6 {
         return;
     }
     let x = area.x + (area.width - width) / 2;
@@ -2200,10 +2218,22 @@ fn draw_prompt_box(paint: &mut Painter<'_, '_>, area: Rect, title: &str, detail:
         title,
         bold(surface.fg(paint.palette.strong)),
     );
-    paint.text(x + 2, y + 3, limit, detail, surface.fg(paint.palette.text));
+    for (index, line) in detail_lines
+        .iter()
+        .take(usize::from(height.saturating_sub(5)))
+        .enumerate()
+    {
+        paint.text(
+            x + 2,
+            y + 3 + index as u16,
+            limit,
+            line,
+            surface.fg(paint.palette.text),
+        );
+    }
     paint.text(
         x + 2,
-        y + 5,
+        y + height - 2,
         limit,
         "Enter / y confirm    Esc / n cancel",
         surface.fg(paint.palette.muted),

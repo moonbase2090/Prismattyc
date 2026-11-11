@@ -750,7 +750,14 @@ mod tests {
                 "submitting waited for the blocked command"
             );
             let deadline = Instant::now() + Duration::from_secs(3);
-            while !helper.with_extension("started").exists() && Instant::now() < deadline {
+            // The helper creates the file before it writes into it, so wait for
+            // the content, not for the file to exist.
+            while std::fs::read_to_string(helper.with_extension("started"))
+                .ok()
+                .as_deref()
+                != Some("started")
+                && Instant::now() < deadline
+            {
                 thread::sleep(Duration::from_millis(5));
             }
             assert_eq!(

@@ -2,14 +2,22 @@
 
 ## [Unreleased]
 
+## [0.3.64] - 2026-11-12
+
 ### Added
 
+- The Activity Monitor can remove one or all stopped sessions with confirmation. Live sessions cannot be removed, and untracked historical rows can be hidden without daemon cleanup.
 - `pmux-mcp --activity-only --listen 127.0.0.1:PORT` serves the four read-only activity tools over streamable HTTP, for clients that reach the machine through a tunnel. It is off unless configured, binds loopback only, requires a bearer token from `--token-env` or `--token-file` (the file form is refused on Windows, where its access rights cannot be checked), and refuses to start together with `--as`, `--plugin` or `--supervise`.
 
 ### Fixed
 
+- The live sidebar tab row shows a tab's fixed name; unnamed tabs keep their derived label.
 - Escape closes every dialog, menu and overlay even when the platform reports it as text or only by its physical key, or while a modifier is held or stuck. The command palette, the Space picker and its delete confirmation, tab and Space rename, and the Space rail previously ignored Escape under Ctrl, Alt or Super.
 - The launch splash and the command palette fit small windows. A window too narrow or short for the block wordmark shows a two-row logo, then a one-line wordmark, and the splash copy wraps or is cut with an ellipsis instead of running off the edge. A fractional display scale gives fewer columns and rows for the same pixels, so it now picks the smaller forms where it must. A short window keeps the palette's command list by leaving out its detail panel, a narrow palette drops a row's keybinding when it would squeeze the name, and the palette's footer is cut with an ellipsis.
+
+## [0.3.64-rc.1]
+
+Release candidate for 0.3.64, with the [same changes](#0364---2026-11-12).
 
 ## [0.3.63] - 2026-11-11
 

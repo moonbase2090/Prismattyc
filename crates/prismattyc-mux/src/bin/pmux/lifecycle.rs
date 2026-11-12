@@ -98,17 +98,45 @@ fn shutdown_idle(paths: &Paths, client: &mut Client, client_id: u64) -> Result<(
     Ok(())
 }
 
+fn running_sessions(paths: &Paths) -> Result<Vec<(u64, String)>> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut delay = Duration::from_millis(25);
+    loop {
+        let held = prismattyc_mux::daemon_lock::DaemonLock::is_held(&paths.socket)?;
+        let result = match probe_socket_liveness(&paths.socket) {
+            SocketLiveness::Live => list_sessions(paths),
+            SocketLiveness::Missing | SocketLiveness::Stale if !held => return Ok(Vec::new()),
+            SocketLiveness::Missing | SocketLiveness::Stale => Err(anyhow::anyhow!(
+                "the daemon instance lock is occupied but no control peer answers"
+            )),
+            SocketLiveness::Foreign => bail!("foreign control socket"),
+        };
+        match result {
+            Ok(sessions) => return Ok(sessions),
+            Err(error) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if !held || remaining.is_zero() {
+                    let holder = if held {
+                        prismattyc_mux::daemon_lock::DaemonLock::holder_description(&paths.socket)
+                    } else {
+                        "the daemon".into()
+                    };
+                    return Err(error).context(format!("Could not read running sessions from {holder}. Wait for the daemon to respond and retry. No sessions were stopped."));
+                }
+                std::thread::sleep(delay.min(remaining));
+                delay = (delay * 2).min(Duration::from_millis(250));
+            }
+        }
+    }
+}
+
 pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("pmux restart [--all|--host|--daemon|--mcp] [--plan] [--json]\n\nRestart cooperative components. Default: all safe components.\nHost: restore windows and reconnect mux sessions; defer if blank terminals exist.\nMCP: restart supervised adapters without replaying pending operations.\nDaemon: restart only when no sessions exist. --stop-sessions explicitly permits\nstopping every session; the restart then runs from a detached helper.\n--consented-config FILE limits an update restart to the unchanged saved session list.\nUse --plan to inspect the impact before changing anything.");
         return Ok(());
     }
     let opts = parse(&args)?;
-    let sessions = match probe_socket_liveness(&paths.socket) {
-        SocketLiveness::Live => list_sessions(paths)?,
-        SocketLiveness::Missing | SocketLiveness::Stale => Vec::new(),
-        SocketLiveness::Foreign => bail!("foreign control socket"),
-    };
+    let sessions = running_sessions(paths)?;
     let hosts = components::live_components(&paths.socket, "host");
     let adapters = components::live_components(&paths.socket, "mcp");
     if opts.plan {
@@ -291,18 +319,30 @@ pub(super) fn versions(paths: &Paths) -> Result<()> {
             }
         }
     }
-    let daemon = if probe_socket_liveness(&paths.socket) == SocketLiveness::Live {
-        let mut client = Client::connect(&paths.socket)?;
-        match client.request(|request_id| ControlRequest::ServerInfo {
-            version: PROTOCOL_VERSION,
-            request_id,
-        }) {
-            Ok(ControlResponseData::ServerInfo {
-                package_version,
-                pid,
-            }) => json!({"version":package_version,"pid":pid}),
-            _ => {
-                json!({"version":null,"detail":"running daemon predates component version reporting"})
+    let liveness = probe_socket_liveness(&paths.socket);
+    let occupied = liveness == SocketLiveness::Live
+        || (matches!(liveness, SocketLiveness::Missing | SocketLiveness::Stale)
+            && prismattyc_mux::daemon_lock::DaemonLock::is_held(&paths.socket)?);
+    let daemon = if occupied {
+        let report = (|| -> Result<serde_json::Value> {
+            let mut client = Client::connect(&paths.socket)?;
+            match client.request(|request_id| ControlRequest::ServerInfo {
+                version: PROTOCOL_VERSION,
+                request_id,
+            })? {
+                ControlResponseData::ServerInfo {
+                    package_version,
+                    pid,
+                } => Ok(json!({"version":package_version,"pid":pid})),
+                _ => bail!("daemon returned an unexpected version response"),
+            }
+        })();
+        match report {
+            Ok(report) => report,
+            Err(error) => {
+                let holder =
+                    prismattyc_mux::daemon_lock::DaemonLock::holder_description(&paths.socket);
+                json!({"status":"running","version":null,"pid":read_valid_pid(paths),"detail":format!("{holder} is still running, but its version could not be read: {error:#}. Wait for it to respond before restarting.")})
             }
         }
     } else {

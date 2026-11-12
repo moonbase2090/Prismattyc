@@ -30,6 +30,14 @@ It installs the release, restarts the daemon and supervised MCP adapters,
 and relaunches the app. The result panel reports versions and failures in
 full-width text. A missing MCP server is reported as having nothing to restart.
 
+If the daemon still owns its instance lock but does not answer, the session
+check retries before reporting an error with its command and PID. It does not
+show an empty session list or stop sessions on that failure. Update, restart,
+and daemon locks retry for five seconds before naming the process blocking them.
+On macOS, the updater keeps a displaced app bundle while a process still maps
+its executables. The result names the retained bundle and the processes using it.
+Restart those components before removing the retained bundle.
+
 If you saved a configuration, the relaunched app offers **Restore sessions**
 or **Keep configuration for later**. Restoration recreates missing sessions
 in their saved directories and relaunches their commands. It leaves existing

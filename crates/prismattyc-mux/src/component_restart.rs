@@ -62,12 +62,15 @@ pub fn coordinator_lock(socket: &Path) -> Result<std::fs::File> {
     let directory = directory(socket);
     fs::create_dir_all(&directory)?;
     crate::platform::set_mode(&directory, 0o700)?;
-    let file = crate::platform::private_options()
+    let path = directory.join("restart.lock");
+    let mut file = crate::platform::private_options()
+        .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(directory.join("restart.lock"))?;
-    crate::platform::try_lock_exclusive(&file).context("another restart is in progress")?;
+        .open(&path)?;
+    crate::process_lock::acquire(&file, &path, "restart")?;
+    crate::process_lock::record_owner(&mut file, &path)?;
     Ok(file)
 }
 

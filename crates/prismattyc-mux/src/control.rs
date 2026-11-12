@@ -7273,7 +7273,7 @@ fn control_domain_error(error: DomainError) -> ControlError {
 pub enum SocketLiveness {
     /// Path does not exist.
     Missing,
-    /// Same-uid Unix socket with a peer that accepts connections.
+    /// Same-uid socket with an answering peer or a verified live instance lock owner.
     Live,
     /// Same-uid Unix socket leftover (no listener). Safe to replace.
     Stale,
@@ -7304,9 +7304,12 @@ pub fn probe_socket_liveness(path: impl AsRef<Path>) -> SocketLiveness {
     match UnixStream::connect(path) {
         // A successful connect is not proof of a live server: macOS keeps a
         // crashed server's socket connectable while its accept queue drains, so
-        // connect lands in a backlog no one will ever accept. Require the peer
-        // to answer the versioned handshake before declaring it Live.
+        // connect lands in a backlog no one will ever accept. Require an
+        // answering peer or a verified process that still owns the instance lock.
         Ok(stream) if control_peer_answers(&stream) => SocketLiveness::Live,
+        Ok(_) if crate::daemon_lock::DaemonLock::other_owner_pid(path).is_some() => {
+            SocketLiveness::Live
+        }
         Ok(_) => SocketLiveness::Stale,
         Err(error) if is_stale_connect_error(&error) => SocketLiveness::Stale,
         // Conservatively treat other connect failures as occupied so bind
@@ -7318,7 +7321,8 @@ pub fn probe_socket_liveness(path: impl AsRef<Path>) -> SocketLiveness {
 /// Whether a connected control socket answers the versioned handshake within
 /// `IO_TIMEOUT`. A peer that never replies — a crashed server whose accept queue
 /// is still draining, or a same-uid socket that does not speak this protocol —
-/// is not Live. The client socket is blocking, so `set_read_timeout` bounds the
+/// does not prove liveness. The instance lock can separately identify a live,
+/// unresponsive daemon. The client socket is blocking, so `set_read_timeout` bounds the
 /// wait via `SO_RCVTIMEO`.
 fn control_peer_answers(stream: &UnixStream) -> bool {
     if stream.set_read_timeout(Some(IO_TIMEOUT)).is_err()

@@ -1041,6 +1041,164 @@ fn root_rows_show_saved_values_before_help_text() {
 }
 
 #[test]
+fn appearance_rows_put_animation_controls_next_to_focus_border() {
+    use crate::raster::{
+        FontMetrics, OverlaySurface, PaletteFrame, PaletteLayoutMode, PaletteSection,
+    };
+    let mut fixture = Fixture::new("");
+    // Walk sections like open_key, but stop with the animation row focused
+    // instead of opening its editor.
+    let mut focused = None;
+    'sections: for _ in 0..Section::ALL.len() {
+        let indices = fixture.panel.indices();
+        if let Some(row) = indices
+            .iter()
+            .position(|&index| fixture.panel.controls[index].key() == "focus_border_animation")
+        {
+            fixture.press(NamedKey::ArrowDown);
+            while let Focus::Rows(current) = fixture.panel.focus {
+                if current == 0 {
+                    break;
+                }
+                fixture.press(NamedKey::ArrowUp);
+            }
+            if matches!(fixture.panel.focus, Focus::Sections) {
+                fixture.press(NamedKey::ArrowDown);
+            }
+            let current = match fixture.panel.focus {
+                Focus::Rows(row) => row,
+                _ => panic!("row focus"),
+            };
+            for _ in row..current {
+                fixture.press(NamedKey::ArrowUp);
+            }
+            for _ in current..row {
+                fixture.press(NamedKey::ArrowDown);
+            }
+            focused = Some(row);
+            break 'sections;
+        }
+        fixture.press(NamedKey::ArrowRight);
+    }
+    let focused = focused.expect("animation control is reachable");
+    let (header, rows) = fixture.panel.rows();
+    assert_eq!(header, "SETTINGS — Appearance");
+    // Root row 0 is the section label; setting rows follow in control order.
+    let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
+    let border = names
+        .iter()
+        .position(|name| *name == "Focus border")
+        .expect("border color row");
+    assert_eq!(
+        &names[border..border + 4],
+        [
+            "Focus border",
+            "Focus border animation",
+            "Focus border animation ms",
+            "Focus border animation head"
+        ],
+        "animation controls sit directly after the border color"
+    );
+    assert_eq!(fixture.panel.selected(), focused + 1);
+    assert_eq!(names[focused + 1], "Focus border animation");
+    // Unset keys read as the built-in default in the panel.
+    for offset in 1..=3 {
+        assert!(
+            rows[border + offset]
+                .describe
+                .starts_with("Default / inherit"),
+            "fresh config row {}: {}",
+            names[border + offset],
+            rows[border + offset].describe
+        );
+    }
+    // Cycling from the unset default steps from light-cycle, so the first
+    // Enter turns the sweep off and persists it; the next turns it back on.
+    fixture.press(NamedKey::Enter);
+    fixture.settle();
+    let loaded = config::load(&fixture.panel.path).unwrap();
+    assert_eq!(
+        loaded.focus_border_animation,
+        Some(crate::config::FocusBorderAnimation::None),
+        "first Enter from the on-by-default state writes none"
+    );
+    assert!(!loaded.light_cycle());
+    fixture.press(NamedKey::Enter);
+    fixture.settle();
+    let loaded = config::load(&fixture.panel.path).unwrap();
+    assert_eq!(
+        loaded.focus_border_animation,
+        Some(crate::config::FocusBorderAnimation::LightCycle)
+    );
+    assert!(loaded.light_cycle());
+    let (_, rows) = fixture.panel.rows();
+    assert!(
+        rows[border + 1].describe.starts_with("light-cycle"),
+        "saved value shows on the row: {}",
+        rows[border + 1].describe
+    );
+
+    if let Some(dir) = std::env::var_os("PRISMATTYC_DUMP_SETTINGS") {
+        let font = FontMetrics::load_with(15.0, None, &[]).unwrap();
+        let theme = crate::theme::shipped_default();
+        for graphite in [false, true] {
+            let sections = [PaletteSection {
+                header: &header,
+                subtitle: "",
+                rows: &rows,
+            }];
+            let frame = PaletteFrame {
+                layout_mode: PaletteLayoutMode::FixedHeight,
+                query: None,
+                query_focused: false,
+                chips: None,
+                sections: &sections,
+                selected: fixture.panel.selected(),
+                scroll: 0,
+                detail: None,
+                footer: "↑/↓ rows · ←/→ section or value · Enter edit/reset · Escape back",
+            };
+            let (width, height) = (1200, 800);
+            let mut pixels = vec![crate::raster::pack_argb(255, theme.default_bg); width * height];
+            let layout = crate::paint_palette_overlay(
+                &font,
+                &theme,
+                crate::mux::ChromeGeom {
+                    graphite,
+                    scale_milli: 1000,
+                },
+                [0x62, 0xa8, 0xff],
+                &frame,
+                OverlaySurface::default(),
+                &mut pixels,
+                width,
+                height,
+            )
+            .expect("settings paints");
+            assert!(
+                layout
+                    .rows
+                    .iter()
+                    .any(|row| row.global == fixture.panel.selected()),
+                "selected animation row is visible"
+            );
+            let dir = PathBuf::from(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            crate::write_present_png(
+                &dir.join(format!(
+                    "{}-focus-animation.png",
+                    if graphite { "graphite" } else { "classic" }
+                )),
+                &pixels,
+                width as u32,
+                height as u32,
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[test]
 fn stepping_an_extreme_integer_clamps_instead_of_overflowing() {
     let mut fixture = Fixture::new("");
     fixture.open_key("panes");

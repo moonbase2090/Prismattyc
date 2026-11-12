@@ -1570,6 +1570,10 @@ fn verify_split_panes(host: &mut HostState, first: PaneId) {
 }
 
 fn verify_steady_four_pane_partial(host: &mut HostState) {
+    // Steady means settled: park the default-on sweep so the retained
+    // partial frame and the full oracle paint the same border.
+    host.light_cycle = false;
+    host.border_anim = None;
     while host.mux.pane_count() < 4 {
         host.mux
             .split_focused("/bin/cat", &[], prismattyc_mux::Axis::Horizontal, 0.5)

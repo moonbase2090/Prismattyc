@@ -606,6 +606,64 @@ fn verify_activate(
     activate(host, 0);
     assert_eq!(host.link_click_mode, link_click::Mode::Plain);
 
+    host.light_cycle = true;
+    host.border_anim = Some(Instant::now());
+    show(
+        host,
+        "team-a",
+        None,
+        Choice::Preference("focus_border_animation".into(), "none".into()),
+    );
+    activate(host, 0);
+    assert!(!host.light_cycle, "none applies live");
+    assert!(
+        host.border_anim.is_none(),
+        "turning it off settles the sweep"
+    );
+    assert!(
+        config_body().contains("focus_border_animation = \"none\"")
+            || config_body().contains("focus_border_animation = 'none'"),
+        "config: {}",
+        config_body()
+    );
+    show(
+        host,
+        "team-a",
+        None,
+        Choice::Preference("focus_border_animation".into(), "light-cycle".into()),
+    );
+    activate(host, 0);
+    assert!(host.light_cycle, "light-cycle applies live");
+
+    host.light_cycle_head = true;
+    show(
+        host,
+        "team-a",
+        None,
+        Choice::Preference("focus_border_animation_head".into(), "false".into()),
+    );
+    activate(host, 0);
+    assert!(!host.light_cycle_head);
+    assert!(
+        config_body().contains("focus_border_animation_head = false"),
+        "head must save as a bool, config: {}",
+        config_body()
+    );
+
+    show(
+        host,
+        "team-a",
+        None,
+        Choice::Preference("focus_border_animation_ms".into(), "140".into()),
+    );
+    activate(host, 0);
+    assert_eq!(host.light_cycle_ms, 140);
+    assert!(
+        config_body().contains("focus_border_animation_ms = 140"),
+        "speed must save as an integer, config: {}",
+        config_body()
+    );
+
     use_bad_config();
     show(
         host,

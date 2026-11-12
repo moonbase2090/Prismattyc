@@ -134,7 +134,7 @@ automatic_update_checks = true
 # Focus border color. coral amber yellow green blue violet ink, or 0-6.
 focus_border = "blue"
 # Focus-change animation. "none" | "light-cycle".
-focus_border_animation = "none"
+focus_border_animation = "light-cycle"
 # Light-cycle sweep duration in ms. 50-5000.
 focus_border_animation_ms = 280
 # Draw the bright vehicle box at the sweep head. true|false.

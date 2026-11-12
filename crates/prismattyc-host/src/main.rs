@@ -87,6 +87,10 @@ mod escape_key_tests;
 // Keep cfg(test) separate so mutation targets exclude the test fixture.
 #[cfg(test)]
 #[cfg(target_os = "linux")]
+mod escape_live_tests;
+// Keep cfg(test) separate so mutation targets exclude the test fixture.
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 mod input_routing_tests;
 #[cfg(test)]
 #[cfg(target_os = "linux")]

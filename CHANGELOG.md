@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Escape closes every dialog, menu and overlay even when the platform reports it as text or only by its physical key, or while a modifier is held or stuck. The command palette, the Space picker and its delete confirmation, tab and Space rename, and the Space rail previously ignored Escape under Ctrl, Alt or Super.
+
 ## [0.3.62] - 2026-11-10
 
 ### Fixed

@@ -203,6 +203,7 @@ impl Host {
         }
         if new_epoch || page.reset.is_some() {
             self.sequence = 0;
+            self.dismissed.clear();
         }
         self.epoch = Some(page.epoch.clone());
         self.link = Link::Connected;
@@ -1119,6 +1120,31 @@ pub(crate) mod tests {
         host.apply(page_in("e", first, None)?, 0);
         assert_eq!(seat(&host, "sa").history.len(), 2);
         assert_eq!(seat(&host, "sa").state, SeatState::Waiting);
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_epoch_restores_a_live_seat_with_a_reused_id() -> Result<()> {
+        use prismattyc_core::activity::ActivitySessionState;
+
+        let mut host = Host::new("local");
+        let mut initial = page_in("e0", vec![], None)?;
+        let mut stopped = discovered(&["stopped"], 1_000);
+        stopped.seats[0].state = ActivitySessionState::Stopped;
+        initial.sessions = Some(stopped);
+        host.apply(initial, 0);
+        let seat = AgentId::new("stopped").unwrap();
+        assert!(host.dismiss_stopped(&seat));
+        assert!(host.is_dismissed(&seat, Some(1)));
+
+        let mut restarted = page_in("e1", vec![], None)?;
+        restarted.sessions = Some(discovered(&["stopped"], 2_000));
+        host.apply(restarted, 500);
+        let rows = crate::ui::rows(&[host], &crate::ui::Ui::default(), 2_000);
+        assert!(
+            rows.contains(&crate::ui::Row::Seat(0, seat)),
+            "a live seat in the new daemon lifetime must be visible"
+        );
         Ok(())
     }
 

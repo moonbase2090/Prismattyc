@@ -104,10 +104,14 @@ fn chunk_needs_redraw(
 struct LogCellSnapshot {
     cell: prismattyc_core::Cell,
     combining: Vec<char>,
-    hyperlink: Option<String>,
+    hyperlink: Option<Arc<str>>,
 }
 
-fn snapshot_log_row(screen: &prismattyc_core::Screen, row: usize) -> Vec<LogCellSnapshot> {
+fn snapshot_log_row(
+    screen: &prismattyc_core::Screen,
+    row: usize,
+    hyperlinks: &mut HashSet<Arc<str>>,
+) -> Vec<LogCellSnapshot> {
     screen
         .view_row(row)
         .expect("snapshot row belongs to screen")
@@ -115,7 +119,14 @@ fn snapshot_log_row(screen: &prismattyc_core::Screen, row: usize) -> Vec<LogCell
         .map(|(col, cell)| LogCellSnapshot {
             cell: *cell,
             combining: cell.combining_marks().to_vec(),
-            hyperlink: screen.hyperlink_uri_at_view(0, row, col).map(str::to_owned),
+            hyperlink: screen.hyperlink_uri_at_view(0, row, col).map(|uri| {
+                if let Some(shared) = hyperlinks.get(uri) {
+                    return Arc::clone(shared);
+                }
+                let shared: Arc<str> = Arc::from(uri);
+                hyperlinks.insert(Arc::clone(&shared));
+                shared
+            }),
         })
         .collect()
 }
@@ -972,6 +983,7 @@ pub(crate) struct PaneRuntime {
     pub(crate) scroll_new_output: bool,
     pub(crate) last_content_epoch: u64,
     log_grid: Vec<Vec<LogCellSnapshot>>,
+    log_hyperlinks: HashSet<Arc<str>>,
     pub(crate) child_alive: bool,
     /// Exit status captured when the PTY is first reaped. Keeping it here
     /// lets attached-pane cleanup distinguish a successful exit from a
@@ -1642,6 +1654,7 @@ impl PaneRuntime {
             scroll_new_output: false,
             last_content_epoch,
             log_grid: Vec::new(),
+            log_hyperlinks: HashSet::new(),
             child_alive: true,
             exit_status: None,
             title: None,
@@ -2169,8 +2182,9 @@ impl PaneRuntime {
             || self.log_grid.first().map(Vec::len) != Some(screen.columns())
         {
             self.log_grid = (0..screen.rows())
-                .map(|row| snapshot_log_row(screen, row))
+                .map(|row| snapshot_log_row(screen, row, &mut self.log_hyperlinks))
                 .collect();
+            self.log_hyperlinks.retain(|uri| Arc::strong_count(uri) > 1);
             return true;
         }
         let mut changed = false;
@@ -2186,9 +2200,12 @@ impl PaneRuntime {
                         && screen.hyperlink_uri_at_view(0, row, col) == cached.hyperlink.as_deref()
                 });
             if !same {
-                self.log_grid[row] = snapshot_log_row(screen, row);
+                self.log_grid[row] = snapshot_log_row(screen, row, &mut self.log_hyperlinks);
                 changed = true;
             }
+        }
+        if changed {
+            self.log_hyperlinks.retain(|uri| Arc::strong_count(uri) > 1);
         }
         changed
     }
@@ -5794,6 +5811,48 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         panic!("timed out waiting for {needle:?}");
+    }
+
+    #[test]
+    fn large_linked_pane_shares_cached_uri_storage() {
+        let shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
+        let mut runtime = MuxRuntime::spawn(shell, &[], 80, 24).unwrap();
+        let pane = runtime.focused_mut();
+        pane.emulator.resize(512, 256);
+        let prefix = "https://example.invalid/";
+        let uri = format!("{prefix}{}", "x".repeat(2048 - prefix.len()));
+        let mut output = format!("\x1b]8;;{uri}\x1b\\").into_bytes();
+        output.extend(std::iter::repeat_n(b'x', 512 * 256));
+        pane.emulator.feed(&output);
+        assert!(pane.refresh_log_grid());
+        let links: Vec<_> = pane
+            .log_grid
+            .iter()
+            .flatten()
+            .map(|cell| cell.hyperlink.as_ref().expect("linked cell"))
+            .collect();
+        assert_eq!(links.len(), 131_072);
+        assert!(links.iter().all(|link| link.as_ref() == uri));
+        let allocations: HashSet<_> = links.iter().map(|link| link.as_ptr()).collect();
+        assert_eq!(
+            allocations.len(),
+            1,
+            "one allocation for one URI across the pane"
+        );
+        drop(links);
+        let other_uri = "https://example.invalid/other";
+        pane.emulator
+            .feed(format!("\x1b[H\x1b]8;;{other_uri}\x1b\\y\x1b]8;;\x1b\\").as_bytes());
+        assert!(pane.refresh_log_grid());
+        assert_eq!(pane.log_grid[0][0].hyperlink.as_deref(), Some(other_uri));
+        assert_eq!(pane.log_grid[0][1].hyperlink.as_deref(), Some(uri.as_str()));
+        assert_eq!(pane.log_hyperlinks.len(), 2);
+        pane.emulator.resize(1, 1);
+        assert!(pane.refresh_log_grid());
+        assert_eq!(pane.log_hyperlinks.len(), 1);
+        pane.emulator.feed(b"\x1bc");
+        assert!(pane.refresh_log_grid());
+        assert!(pane.log_hyperlinks.is_empty());
     }
 
     #[test]

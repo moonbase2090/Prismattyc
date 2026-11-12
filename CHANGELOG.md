@@ -5,6 +5,7 @@
 ### Fixed
 
 - Escape closes every dialog, menu and overlay even when the platform reports it as text or only by its physical key, or while a modifier is held or stuck. The command palette, the Space picker and its delete confirmation, tab and Space rename, and the Space rail previously ignored Escape under Ctrl, Alt or Super.
+- The launch splash and the command palette fit small windows. A window too narrow or short for the block wordmark shows a two-row logo, then a one-line wordmark, and the splash copy wraps or is cut with an ellipsis instead of running off the edge. A fractional display scale gives fewer columns and rows for the same pixels, so it now picks the smaller forms where it must. A short window keeps the palette's command list by leaving out its detail panel, a narrow palette drops a row's keybinding when it would squeeze the name, and the palette's footer is cut with an ellipsis.
 
 ## [0.3.63] - 2026-11-11
 

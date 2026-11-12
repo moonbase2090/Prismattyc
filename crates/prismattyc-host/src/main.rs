@@ -93,6 +93,8 @@ mod escape_live_tests;
 #[cfg(target_os = "linux")]
 mod input_routing_tests;
 #[cfg(test)]
+mod overlay_fit_tests;
+#[cfg(test)]
 #[cfg(target_os = "linux")]
 mod pty_event_tests;
 #[cfg(test)]
@@ -8225,20 +8227,28 @@ fn rasterize_frame(
     // Topmost: the launch splash covers panes, chrome, and other overlays.
     if let Some(splash) = host.splash.as_ref() {
         let animation_ms = splash.frame_clock();
-        let lines = splash::layout_with_resume(
+        // The splash adapts to the window's cell grid: a fractional scale
+        // makes cells larger, so the same pixels hold fewer columns and rows.
+        let line_h = if geom.chrome.graphite {
+            graphite_overlays::splash_line_height(&host.font, geom.chrome)
+        } else {
+            host.font.cell_h
+        };
+        let fitted = splash::fit_to_window(
             splash.page,
             prismattyc_core::package_version(),
             splash.tip,
             animation_ms,
             splash.resume,
+            (width as usize, height as usize),
+            (host.font.cell_w, line_h),
         );
         if geom.chrome.graphite {
             graphite_overlays::splash(
                 &host.font,
                 geom.chrome,
                 &graphite::theme_tokens(&host.theme),
-                splash.page,
-                &lines,
+                &fitted,
                 animation_ms,
                 host_overlay_surface(host),
                 buffer,
@@ -8249,12 +8259,12 @@ fn rasterize_frame(
         } else {
             rasterize_splash(
                 &host.font,
-                &lines,
+                &fitted.lines,
                 buffer,
                 width as usize,
                 height as usize,
                 host.theme.default_bg,
-                animation_ms,
+                animation_ms.filter(|_| fitted.animated_art()),
             );
         }
     }

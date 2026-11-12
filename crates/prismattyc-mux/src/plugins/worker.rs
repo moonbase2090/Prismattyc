@@ -10,7 +10,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context, Result};
-use pmux_plugin_api::host::pmux::{activity::read, plugin::lifecycle};
+use pmux_plugin_api::host::pmux::{
+    activity::{manage, read},
+    plugin::lifecycle,
+};
 use pmux_plugin_runtime::{ActivityProvider, Runtime};
 use prismattyc_core::activity::{ActivityCursor, ActivityPage};
 
@@ -122,7 +125,10 @@ impl Process {
                     "plug-in worker deadline exceeded or revoked"
                 );
                 let response = wire::read(&mut pipes.input)?;
-                if matches!(&response, Response::Endpoints | Response::Poll { .. }) {
+                if matches!(
+                    &response,
+                    Response::Endpoints | Response::Poll { .. } | Response::RemoveStopped { .. }
+                ) {
                     imports += 1;
                     ensure!(
                         imports <= pmux_plugin_api::MAX_HOST_IMPORTS_PER_CALL,
@@ -136,6 +142,10 @@ impl Process {
                         after,
                         limit,
                     } => Request::Page(provider.poll(endpoint, after, limit)),
+                    Response::RemoveStopped {
+                        endpoint,
+                        session_id,
+                    } => Request::RemovedStopped(provider.remove_stopped(endpoint, session_id)),
                     Response::Failed(message) => bail!("plug-in worker failed: {message}"),
                     response => return Ok(response),
                 };
@@ -300,6 +310,9 @@ impl ActivityProvider for Denied {
     ) -> Result<ActivityPage, read::Error> {
         Err(read::Error::NotActivated)
     }
+    fn remove_stopped(&mut self, _: u64, _: u64) -> Result<manage::Removal, String> {
+        Err("session cleanup is unavailable".into())
+    }
 }
 
 struct Broker {
@@ -343,6 +356,28 @@ impl ActivityProvider for Broker {
         match self.receive()? {
             Request::Page(result) => result,
             _ => Err(read::Error::InvalidRequest),
+        }
+    }
+
+    fn remove_stopped(
+        &mut self,
+        endpoint: u64,
+        session_id: u64,
+    ) -> Result<manage::Removal, String> {
+        wire::write(
+            &mut std::io::stdout().lock(),
+            &Response::RemoveStopped {
+                endpoint,
+                session_id,
+            },
+        )
+        .map_err(|_| "plug-in worker was revoked".to_owned())?;
+        match self
+            .receive()
+            .map_err(|_| "plug-in worker was revoked".to_owned())?
+        {
+            Request::RemovedStopped(result) => result,
+            _ => Err("invalid session cleanup response".into()),
         }
     }
 }

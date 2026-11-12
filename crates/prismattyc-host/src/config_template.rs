@@ -20,7 +20,7 @@ use crate::keybind::{self, Action};
 pub const DEFAULT_FONT_PX: f32 = 15.0;
 const DEFAULT_THEME: &str = "prismattyc-dark";
 const DEFAULT_FOCUS_BORDER: &str = "blue";
-const DEFAULT_FOCUS_ANIMATION: &str = "none";
+const DEFAULT_FOCUS_ANIMATION: &str = "light-cycle";
 const DEFAULT_FOCUS_ANIMATION_MS: u64 = 280;
 const DEFAULT_PANES: usize = 1;
 
@@ -1261,6 +1261,12 @@ mod tests {
         assert!(parsed.splash());
         assert_eq!(parsed.splash, Some(true));
         assert_eq!(parsed.focus_border.as_deref(), Some(DEFAULT_FOCUS_BORDER));
+        assert_eq!(
+            parsed.focus_border_animation,
+            Some(crate::config::FocusBorderAnimation::LightCycle),
+            "a fresh config ships the light-cycle sweep on"
+        );
+        assert!(parsed.light_cycle());
         assert_eq!(parsed.font_px, Some(DEFAULT_FONT_PX));
         assert_eq!(parsed.macos_shortcuts, Some(false));
         assert_eq!(parsed.panes, Some(DEFAULT_PANES));

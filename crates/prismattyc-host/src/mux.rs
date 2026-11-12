@@ -101,6 +101,36 @@ fn chunk_needs_redraw(
     }
 }
 
+struct LogCellSnapshot {
+    cell: prismattyc_core::Cell,
+    combining: Vec<char>,
+    hyperlink: Option<Arc<str>>,
+}
+
+fn snapshot_log_row(
+    screen: &prismattyc_core::Screen,
+    row: usize,
+    hyperlinks: &mut HashSet<Arc<str>>,
+) -> Vec<LogCellSnapshot> {
+    screen
+        .view_row(row)
+        .expect("snapshot row belongs to screen")
+        .enumerate()
+        .map(|(col, cell)| LogCellSnapshot {
+            cell: *cell,
+            combining: cell.combining_marks().to_vec(),
+            hyperlink: screen.hyperlink_uri_at_view(0, row, col).map(|uri| {
+                if let Some(shared) = hyperlinks.get(uri) {
+                    return Arc::clone(shared);
+                }
+                let shared: Arc<str> = Arc::from(uri);
+                hyperlinks.insert(Arc::clone(&shared));
+                shared
+            }),
+        })
+        .collect()
+}
+
 struct ChunkSnapshot {
     damage: GridDamage,
     cursor: Cursor,
@@ -952,6 +982,8 @@ pub(crate) struct PaneRuntime {
     /// Live bottom moved while this pane is scrolled (chip `· new`).
     pub(crate) scroll_new_output: bool,
     pub(crate) last_content_epoch: u64,
+    log_grid: Vec<Vec<LogCellSnapshot>>,
+    log_hyperlinks: HashSet<Arc<str>>,
     pub(crate) child_alive: bool,
     /// Exit status captured when the PTY is first reaped. Keeping it here
     /// lets attached-pane cleanup distinguish a successful exit from a
@@ -1621,6 +1653,8 @@ impl PaneRuntime {
             view_scroll: 0,
             scroll_new_output: false,
             last_content_epoch,
+            log_grid: Vec::new(),
+            log_hyperlinks: HashSet::new(),
             child_alive: true,
             exit_status: None,
             title: None,
@@ -1978,6 +2012,11 @@ impl PaneRuntime {
     /// Apply pane-log frames to the replica emulator (PT-111). Same
     /// bookkeeping as [`Self::drain_pty`], different source.
     fn drain_log(&mut self, deadline: Option<Instant>) -> (bool, bool, bool) {
+        let before_drain = self.snapshot_chunk();
+        if self.log_grid.is_empty() {
+            self.refresh_log_grid();
+        }
+        let mut metadata_changed = false;
         let mut dirty = false;
         let mut content_changed = false;
         let mut more = false;
@@ -1986,7 +2025,14 @@ impl PaneRuntime {
                 more = true;
                 break;
             }
-            if self.pending_log_batch.is_some() {
+            let before = self.snapshot_chunk();
+            let mut force_redraw = true;
+            if let Some(batch) = self.pending_log_batch.as_ref() {
+                force_redraw = batch.snapshot_ansi.is_some()
+                    || !matches!(
+                        batch.events.front().map(|frame| &frame.event),
+                        Some(prismattyc_mux::PaneEvent::Output { .. })
+                    );
                 self.apply_pending_log_unit();
             } else {
                 let Some(log) = self.log.as_ref() else {
@@ -2031,6 +2077,7 @@ impl PaneRuntime {
                         reservation,
                         counters,
                     }) => {
+                        force_redraw = snapshot.is_some();
                         let snapshot_ansi = snapshot.map(|(cols, rows, bytes)| {
                             let cols = usize::try_from(cols).unwrap_or(self.cols).max(1);
                             let rows = usize::try_from(rows).unwrap_or(self.rows).max(1);
@@ -2092,25 +2139,75 @@ impl PaneRuntime {
             let epoch_changed = epoch != self.last_content_epoch;
             self.last_content_epoch = epoch;
             content_changed |= epoch_changed;
-            if self.view_scroll == 0 {
-                self.scroll_new_output = false;
-            } else if epoch_changed {
-                self.scroll_new_output = true;
-            }
-            let mid_drag = self.selection.active && self.selection.anchor.is_some();
-            if epoch_changed
-                && !mid_drag
-                && (self.selection.range().is_some() || self.keyboard_select_mode)
-            {
-                self.selection.clear();
-                self.keyboard_select_mode = false;
-            }
-            dirty = true;
+            metadata_changed |= force_redraw;
+            dirty |= force_redraw || self.visible_after_feed(&before, Instant::now());
             if i + 1 == MAX_PTY_DRAIN_PER_PANE {
                 more = true;
             }
         }
-        (dirty, content_changed, more)
+        let grid_changed = self.refresh_log_grid();
+        let screen = self.emulator.screen();
+        let history_changed = screen.history_len() != before_drain.history
+            || screen.scrolled_lines() != before_drain.scrolled;
+        let content_changed = content_changed && (grid_changed || history_changed);
+        let other_display_changed = screen.cursor() != before_drain.cursor
+            || history_changed
+            || self.emulator.cursor_shape() != before_drain.shape
+            || self.emulator.cursor_blink() != before_drain.blink
+            || self.emulator.cursor_visible() != before_drain.visible
+            || image_stamp(self.emulator.images()) != before_drain.images;
+        if self.view_scroll == 0 {
+            self.scroll_new_output = false;
+        } else if content_changed {
+            self.scroll_new_output = true;
+        }
+        let mid_drag = self.selection.active && self.selection.anchor.is_some();
+        if content_changed
+            && !mid_drag
+            && (self.selection.range().is_some() || self.keyboard_select_mode)
+        {
+            self.selection.clear();
+            self.keyboard_select_mode = false;
+        }
+        (
+            metadata_changed || grid_changed || (dirty && other_display_changed),
+            content_changed,
+            more,
+        )
+    }
+
+    fn refresh_log_grid(&mut self) -> bool {
+        let screen = self.emulator.screen();
+        if self.log_grid.len() != screen.rows()
+            || self.log_grid.first().map(Vec::len) != Some(screen.columns())
+        {
+            self.log_grid = (0..screen.rows())
+                .map(|row| snapshot_log_row(screen, row, &mut self.log_hyperlinks))
+                .collect();
+            self.log_hyperlinks.retain(|uri| Arc::strong_count(uri) > 1);
+            return true;
+        }
+        let mut changed = false;
+        for row in screen.damage().dirty_rows() {
+            let same = screen
+                .view_row(row)
+                .expect("damage row belongs to screen")
+                .enumerate()
+                .zip(&self.log_grid[row])
+                .all(|((col, cell), cached)| {
+                    *cell == cached.cell
+                        && cell.combining_marks() == cached.combining
+                        && screen.hyperlink_uri_at_view(0, row, col) == cached.hyperlink.as_deref()
+                });
+            if !same {
+                self.log_grid[row] = snapshot_log_row(screen, row, &mut self.log_hyperlinks);
+                changed = true;
+            }
+        }
+        if changed {
+            self.log_hyperlinks.retain(|uri| Arc::strong_count(uri) > 1);
+        }
+        changed
     }
 
     /// Apply at most one 8 KiB piece of snapshot or output data, or one
@@ -5714,6 +5811,98 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         panic!("timed out waiting for {needle:?}");
+    }
+
+    #[test]
+    fn large_linked_pane_shares_cached_uri_storage() {
+        let shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
+        let mut runtime = MuxRuntime::spawn(shell, &[], 80, 24).unwrap();
+        let pane = runtime.focused_mut();
+        pane.emulator.resize(512, 256);
+        let prefix = "https://example.invalid/";
+        let uri = format!("{prefix}{}", "x".repeat(2048 - prefix.len()));
+        let mut output = format!("\x1b]8;;{uri}\x1b\\").into_bytes();
+        output.extend(std::iter::repeat_n(b'x', 512 * 256));
+        pane.emulator.feed(&output);
+        assert!(pane.refresh_log_grid());
+        let links: Vec<_> = pane
+            .log_grid
+            .iter()
+            .flatten()
+            .map(|cell| cell.hyperlink.as_ref().expect("linked cell"))
+            .collect();
+        assert_eq!(links.len(), 131_072);
+        assert!(links.iter().all(|link| link.as_ref() == uri));
+        let allocations: HashSet<_> = links.iter().map(|link| link.as_ptr()).collect();
+        assert_eq!(
+            allocations.len(),
+            1,
+            "one allocation for one URI across the pane"
+        );
+        drop(links);
+        let other_uri = "https://example.invalid/other";
+        pane.emulator
+            .feed(format!("\x1b[H\x1b]8;;{other_uri}\x1b\\y\x1b]8;;\x1b\\").as_bytes());
+        assert!(pane.refresh_log_grid());
+        assert_eq!(pane.log_grid[0][0].hyperlink.as_deref(), Some(other_uri));
+        assert_eq!(pane.log_grid[0][1].hyperlink.as_deref(), Some(uri.as_str()));
+        assert_eq!(pane.log_hyperlinks.len(), 2);
+        pane.emulator.resize(1, 1);
+        assert!(pane.refresh_log_grid());
+        assert_eq!(pane.log_hyperlinks.len(), 1);
+        pane.emulator.feed(b"\x1bc");
+        assert!(pane.refresh_log_grid());
+        assert!(pane.log_hyperlinks.is_empty());
+    }
+
+    #[test]
+    fn attached_identical_output_does_not_request_a_redraw() {
+        let mut runtime = MuxRuntime::spawn("sh", &[], 80, 24).expect("test mux runtime");
+        let pane = runtime.focused_mut();
+        let _ = pane.emulator.feed(b"\x1b[Hready> \x1b[H");
+        let _ = pane.emulator.take_damage();
+        pane.last_content_epoch = pane.emulator.screen().content_epoch();
+        for (bytes, expected_dirty) in [
+            (b"\x1b[Hready> \x1b[H".as_slice(), false),
+            (b"\x1b[H\x1b[2Kready> \x1b[H".as_slice(), false),
+            (b"\x1b[Hbusy>  \x1b[H".as_slice(), true),
+            (b"\x1b[H\x1b[2Kbusy>  \x1b[H".as_slice(), false),
+            (
+                b"\x1b[H\x1b]8;;https://example.invalid/a\x1b\\busy>  \x1b]8;;\x1b\\\x1b[H"
+                    .as_slice(),
+                true,
+            ),
+            (
+                b"\x1bc\x1b]8;;https://example.invalid/b\x1b\\busy>  \x1b]8;;\x1b\\\x1b[H"
+                    .as_slice(),
+                true,
+            ),
+        ] {
+            pane.pending_log_batch = Some(PendingLogBatch {
+                snapshot_ansi: None,
+                snapshot_offset: 0,
+                events: vec![prismattyc_mux::PaneLogFrame {
+                    seq: 1,
+                    event: prismattyc_mux::PaneEvent::Output {
+                        bytes: bytes.to_vec(),
+                    },
+                }]
+                .into(),
+                event_offset: 0,
+                replay_through: 0,
+                reservation: attach_log::HostReservation::empty(),
+                counters: attach_log::PolicyCounters::default(),
+                event_count: 1,
+            });
+            let (dirty, content_changed, more) =
+                pane.drain_log(Some(Instant::now() + Duration::from_secs(1)));
+            assert_eq!(dirty, expected_dirty);
+            assert_eq!(content_changed, expected_dirty);
+            assert!(!more);
+            assert!(pane.pending_log_batch.is_none());
+            let _ = pane.emulator.take_damage();
+        }
+        assert!(visible_text(pane).starts_with("busy>"));
     }
 
     #[test]

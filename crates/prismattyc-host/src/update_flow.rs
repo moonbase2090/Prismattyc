@@ -294,9 +294,14 @@ fn complete_install(
     if let Some(running) = versions["running"].as_array_mut() {
         running.retain(|component| component["component"] != "host");
     }
-    let actual = versions["daemon"]["version"]
-        .as_str()
-        .context("could not verify the restarted daemon version")?;
+    let actual = versions["daemon"]["version"].as_str().with_context(|| {
+        format!(
+            "could not verify the restarted daemon version: {}",
+            versions["daemon"]["detail"]
+                .as_str()
+                .unwrap_or("daemon version unavailable")
+        )
+    })?;
     anyhow::ensure!(
         actual == plan.available,
         "The running daemon is {actual}; expected {}. The app has not restarted.",

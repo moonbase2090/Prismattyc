@@ -16,6 +16,7 @@ use std::path::Path;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
+use pmux_plugin_api::host::pmux::activity::manage;
 use pmux_plugin_api::host::pmux::{activity::read, plugin::lifecycle, tool::call};
 use pmux_plugin_runtime::ActivityProvider;
 use prismattyc_core::activity::{ActivityCursor, ActivityPage};
@@ -73,6 +74,9 @@ fn request(contribution: &str) -> lifecycle::Message {
 
 struct Disabled;
 impl ActivityProvider for Disabled {
+    fn remove_stopped(&mut self, _: u64, _: u64) -> Result<manage::Removal, String> {
+        Err("unavailable".into())
+    }
     fn endpoints(&mut self) -> Result<Vec<read::Endpoint>, read::Error> {
         Ok(vec![read::Endpoint {
             handle: 3,
@@ -152,6 +156,9 @@ struct PendingRead {
     release: mpsc::Receiver<()>,
 }
 impl ActivityProvider for PendingRead {
+    fn remove_stopped(&mut self, _: u64, _: u64) -> Result<manage::Removal, String> {
+        unreachable!()
+    }
     fn endpoints(&mut self) -> Result<Vec<read::Endpoint>, read::Error> {
         self.entered.send(()).unwrap();
         self.release.recv().unwrap();

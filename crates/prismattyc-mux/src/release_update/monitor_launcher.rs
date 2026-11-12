@@ -882,7 +882,7 @@ mod tests {
     #[test]
     fn durable_receipt_is_bound_to_its_registered_installation() {
         let scratch = Scratch::new();
-        let auxiliary = scratch.0.join("aux");
+        let auxiliary = scratch.0.join("monitor-launcher");
         private_directory(&auxiliary).unwrap();
         let bin_dir = scratch.0.join("bin");
         fs::create_dir(&bin_dir).unwrap();

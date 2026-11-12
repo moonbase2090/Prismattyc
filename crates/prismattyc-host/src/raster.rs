@@ -3025,6 +3025,29 @@ pub const PALETTE_MAX_CELLS: usize = 120;
 pub const PALETTE_LIST_LINES: usize = 14;
 /// Fixed command-palette height cap, measured in terminal cell rows.
 pub const PALETTE_FIXED_HEIGHT_CELLS: usize = 30;
+/// A window shorter than this many rows drops the palette's detail panel.
+pub const PALETTE_SHORT_WINDOW_ROWS: usize = 20;
+/// Narrowest name column a row keeps before its keybinding is dropped.
+pub const PALETTE_MIN_NAME_CELLS: usize = 10;
+
+/// True when a row's keybinding still fits beside a name column of at least
+/// [`PALETTE_MIN_NAME_CELLS`]. A narrow panel drops the description first (it
+/// takes whatever the name and keybinding leave), then the keybinding.
+#[must_use]
+pub fn palette_chord_fits(
+    inner_cells: usize,
+    chord_cells: usize,
+    name_x: usize,
+    name_cells: usize,
+    chord_gap: usize,
+) -> bool {
+    chord_cells == 0
+        || name_x
+            .saturating_add(name_cells.min(PALETTE_MIN_NAME_CELLS))
+            .saturating_add(chord_gap)
+            .saturating_add(chord_cells)
+            <= inner_cells
+}
 /// Inner inset on each side when the panel is not compact (PT-201).
 pub const PALETTE_INSET_CELLS: usize = 2;
 /// Extra pixels between list rows when the panel is not compact.
@@ -3231,6 +3254,8 @@ pub struct PaletteLayout {
     pub query_bounds: Option<PaletteListViewport>,
     /// Fixed detail panel top. `None` for content-fit overlays.
     pub detail_y: Option<usize>,
+    /// A window too short for the detail panel leaves it out for list rows.
+    pub detail_hidden: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3661,6 +3686,7 @@ pub fn palette_layout(
         },
         query_bounds,
         detail_y: None,
+        detail_hidden: false,
     })
 }
 
@@ -3745,8 +3771,14 @@ fn palette_fixed_layout(
     }
 
     let footer_y = bottom.saturating_sub(font.cell_h.saturating_mul(3) / 2);
+    // A short window spends the detail panel's rows on the list.
+    let short = buffer_height_px < font.cell_h.saturating_mul(PALETTE_SHORT_WINDOW_ROWS);
     let detail_y = footer_y.saturating_sub(font.cell_h.saturating_mul(4));
-    let list_bottom = detail_y.saturating_sub(font.cell_h);
+    let list_bottom = if short {
+        footer_y.saturating_sub(font.cell_h / 2)
+    } else {
+        detail_y.saturating_sub(font.cell_h)
+    };
     let list_height = list_bottom.saturating_sub(list_y);
     let reserved_header_gap = if geom.compact { 0 } else { font.cell_h };
     let line_slots = list_height.saturating_sub(reserved_header_gap) / geom.row_pitch_px.max(1);
@@ -3806,6 +3838,7 @@ fn palette_fixed_layout(
         },
         query_bounds,
         detail_y: Some(detail_y),
+        detail_hidden: short,
     })
 }
 
@@ -4076,6 +4109,15 @@ pub fn rasterize_palette_with_hover(
                 };
                 let chord_ink = if is_selected { selected_fg } else { muted };
                 let chord_cells = text_cells(&row.chord_label);
+                let chord_shown = row.full_width
+                    || palette_chord_fits(
+                        inner_cells,
+                        chord_cells,
+                        geom.name_x,
+                        regular_name_cells,
+                        geom.chord_gap_cells,
+                    );
+                let chord_cells = if chord_shown { chord_cells } else { 0 };
                 let (name_c, desc_c, desc_max, chord_c) = palette_row_columns(
                     inner_cells,
                     chord_cells,
@@ -4118,7 +4160,7 @@ pub fn rasterize_palette_with_hover(
                     buffer,
                     stride_px,
                     font,
-                    &row.chord_label,
+                    if chord_shown { &row.chord_label } else { "" },
                     text_x.saturating_add(font.cell_w.saturating_mul(chord_c)),
                     text_y,
                     chord_ink,
@@ -4150,7 +4192,8 @@ pub fn rasterize_palette_with_hover(
 
     let detail_y = layout
         .detail_y
-        .or_else(|| frame.detail.map(|_| row_y.saturating_add(font.cell_h)));
+        .or_else(|| frame.detail.map(|_| row_y.saturating_add(font.cell_h)))
+        .filter(|_| !layout.detail_hidden);
     if let Some(detail_y) = detail_y {
         let box_x = x.saturating_add(font.cell_w.saturating_mul(geom.inset_cells) / 2);
         let box_w = width.saturating_sub(font.cell_w.saturating_mul(geom.inset_cells));
@@ -4227,7 +4270,7 @@ pub fn rasterize_palette_with_hover(
         buffer,
         stride_px,
         font,
-        frame.footer,
+        &ellipsized(frame.footer, inner_cells),
         text_x,
         hint_y,
         focus_rgb,
@@ -4582,7 +4625,7 @@ pub fn rasterize_splash(
         stride_px,
         buffer_height_px,
         animation_ms,
-        false,
+        None,
     );
 }
 
@@ -4596,6 +4639,7 @@ pub(crate) fn rasterize_splash_art(
     stride_px: usize,
     buffer_height_px: usize,
     animation_ms: Option<u64>,
+    art_rows: usize,
 ) {
     rasterize_splash_lines(
         font,
@@ -4604,7 +4648,7 @@ pub(crate) fn rasterize_splash_art(
         stride_px,
         buffer_height_px,
         animation_ms,
-        true,
+        Some(art_rows),
     );
 }
 
@@ -4623,7 +4667,7 @@ fn plan_splash_blits(
     stride_px: usize,
     buffer_height_px: usize,
     animation_ms: Option<u64>,
-    art_only: bool,
+    art_only: Option<usize>,
 ) -> Option<SplashBlitPlan> {
     if stride_px == 0 || buffer_height_px == 0 {
         return None;
@@ -4652,7 +4696,7 @@ fn plan_splash_blits(
     let art_left = col_x0 + ART_MARGIN_LEFT * font.cell_w;
     let art_right = col_x0 + (art_frame_width() - ART_MARGIN) * font.cell_w;
     for (line_index, line) in lines.iter().enumerate() {
-        if art_only && line_index >= ART.len() {
+        if art_only.is_some_and(|rows| line_index >= rows) {
             break;
         }
         if row_y.saturating_add(font.cell_h) > buffer_height_px {
@@ -4705,7 +4749,7 @@ fn rasterize_splash_lines(
     stride_px: usize,
     buffer_height_px: usize,
     animation_ms: Option<u64>,
-    art_only: bool,
+    art_only: Option<usize>,
 ) {
     let plan = plan_splash_blits(
         font,
@@ -11159,7 +11203,7 @@ mod tests {
         let (w, h) = (1100_usize, 420_usize);
         let bg = [0x10, 0x10, 0x18];
         let bgp = pack_rgb(bg);
-        let plan = plan_splash_blits(&font, &lines, w, h, Some(at), false).expect("splash layout");
+        let plan = plan_splash_blits(&font, &lines, w, h, Some(at), None).expect("splash layout");
         let mut letters = vec![bgp; w * h];
         for (ch, x, y, rgb) in &plan.letters {
             blit_glyph(&mut letters, w, &font, *ch, *x, *y, *rgb);

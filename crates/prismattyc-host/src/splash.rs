@@ -313,6 +313,353 @@ pub fn layout_with_resume(
     lines
 }
 
+/// The wordmark in two rows of half blocks, for windows too narrow for [`ART`].
+/// One blank column separates letters.
+pub const COMPACT_ART: [&str; 2] = [
+    "█▀█ █▀█ ▀█▀ █▀▀ █▄█ █▀█ ▀█▀ ▀█▀ █ █ █▀▀",
+    "█▀▀ █▀▄ ▄█▄ ▄▄█ █ █ █▀█  █   █   █  █▄▄",
+];
+
+/// Columns of side padding the compact and one-line wordmarks keep.
+const NARROW_SIDE_PAD_COLS: usize = 2;
+
+/// How much of the wordmark a window can show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fit {
+    /// The animated block wordmark with its flare margins.
+    Full,
+    /// Two rows of half blocks, static.
+    Compact,
+    /// One line of text.
+    Wordmark,
+}
+
+/// A page laid out for a window of known size.
+#[derive(Debug, Clone)]
+pub struct Fitted {
+    pub fit: Fit,
+    pub lines: Vec<Vec<Span>>,
+    /// Leading lines that are wordmark art, painted as monospace cells.
+    pub art_rows: usize,
+    /// The line drawn as the page title.
+    pub title_line: usize,
+}
+
+impl Fitted {
+    /// True when the animated art, its flares and rays are on screen.
+    #[must_use]
+    pub fn animated_art(&self) -> bool {
+        self.fit == Fit::Full
+    }
+}
+
+fn cells(text: &str) -> usize {
+    prismattyc_core::line_display_width(text)
+}
+
+fn line_cells(line: &[Span]) -> usize {
+    line.iter().map(|(text, _)| cells(text)).sum()
+}
+
+/// Cut `text` to `max` columns, ending in an ellipsis when anything was cut.
+fn ellipsize(text: &str, max: usize) -> String {
+    if cells(text) <= max {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let w = prismattyc_core::char_display_width(ch);
+        if used + w + 1 > max {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    if max > 0 {
+        out.push('…');
+    }
+    out
+}
+
+/// Fit a styled line to `max` columns, cutting the last spans first.
+fn clip_line(line: Vec<Span>, max: usize) -> Vec<Span> {
+    if line_cells(&line) <= max {
+        return line;
+    }
+    let mut out = Vec::new();
+    let mut used = 0;
+    for (text, rgb) in line {
+        let room = max.saturating_sub(used);
+        if cells(&text) <= room {
+            used += cells(&text);
+            out.push((text, rgb));
+            continue;
+        }
+        let cut = ellipsize(&text, room);
+        if !cut.is_empty() {
+            out.push((cut, rgb));
+        }
+        break;
+    }
+    out
+}
+
+/// Break `text` at spaces into lines of at most `max` columns.
+fn wrap(text: &str, max: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split(' ') {
+        let word = if cells(word) > max {
+            ellipsize(word, max)
+        } else {
+            word.to_string()
+        };
+        if current.is_empty() {
+            current = word;
+        } else if cells(&current) + 1 + cells(&word) <= max {
+            current.push(' ');
+            current.push_str(&word);
+        } else {
+            lines.push(std::mem::replace(&mut current, word));
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// Rows the unconstrained main page needs.
+fn full_rows() -> usize {
+    layout(Page::Main, "0.0.0", 0, None).len()
+}
+
+/// Choose the wordmark a `cols` by `rows` window can show.
+#[must_use]
+pub fn fit_for(cols: usize, rows: usize) -> Fit {
+    if cols >= art_frame_width() && rows >= full_rows() {
+        return Fit::Full;
+    }
+    let compact_cols = COMPACT_ART[0].chars().count() + 2 * NARROW_SIDE_PAD_COLS;
+    // Two art rows, a gap, the title, a gap, the four topics, a gap, the keys.
+    if cols >= compact_cols && rows >= COMPACT_ART.len() + 10 {
+        return Fit::Compact;
+    }
+    Fit::Wordmark
+}
+
+/// One line of a fitted page and whether it may be dropped for height.
+struct Entry {
+    line: Vec<Span>,
+    /// Dropped first when the window is short; lower numbers go first.
+    drop_rank: Option<u8>,
+}
+
+fn keep(line: Vec<Span>) -> Entry {
+    Entry {
+        line,
+        drop_rank: None,
+    }
+}
+
+fn droppable(line: Vec<Span>, rank: u8) -> Entry {
+    Entry {
+        line,
+        drop_rank: Some(rank),
+    }
+}
+
+/// Lay `page` out for a window of `width_px` by `height_px` pixels, from the
+/// cell width and the line height the painter will use. A fractional display
+/// scale makes both larger, so the same pixels hold fewer columns and rows.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn fit_to_window(
+    page: Page,
+    version: &str,
+    tip: usize,
+    elapsed_ms: Option<u64>,
+    resume: bool,
+    (width_px, height_px): (usize, usize),
+    (cell_w, line_h): (usize, usize),
+) -> Fitted {
+    layout_fit(
+        page,
+        version,
+        tip,
+        elapsed_ms,
+        resume,
+        width_px / cell_w.max(1),
+        height_px / line_h.max(1),
+    )
+}
+
+/// Lay `page` out for a window of `cols` by `rows` cells: pick the wordmark
+/// that fits, keep every line inside the width (wrapping topic bullets and
+/// ellipsizing the rest), and drop the least useful lines when the height is
+/// short. The keys line is dropped last.
+#[must_use]
+pub fn layout_fit(
+    page: Page,
+    version: &str,
+    tip: usize,
+    elapsed_ms: Option<u64>,
+    resume: bool,
+    cols: usize,
+    rows: usize,
+) -> Fitted {
+    let fit = if page == Page::Main {
+        fit_for(cols, rows)
+    } else {
+        Fit::Wordmark
+    };
+    if fit == Fit::Full {
+        return Fitted {
+            fit,
+            art_rows: ART.len(),
+            title_line: ART.len() + 1,
+            lines: layout_with_resume(page, version, tip, elapsed_ms, resume),
+        };
+    }
+    let pad = if cols > 2 * NARROW_SIDE_PAD_COLS + 8 {
+        NARROW_SIDE_PAD_COLS
+    } else {
+        0
+    };
+    let room = cols.saturating_sub(2 * pad).max(1);
+    let indent = |line: Vec<Span>| -> Vec<Span> {
+        let mut line = clip_line(line, room);
+        if !line.is_empty() && pad > 0 {
+            line.insert(0, (" ".repeat(pad), INK));
+        }
+        line
+    };
+
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut art_rows = 0;
+    let mut title_line = 0;
+    match page {
+        Page::Main => {
+            if fit == Fit::Compact {
+                for row in COMPACT_ART {
+                    let lead = cols.saturating_sub(cells(row)) / 2;
+                    entries.push(keep(vec![(" ".repeat(lead), INK), (row.to_string(), INK)]));
+                }
+                art_rows = COMPACT_ART.len();
+                entries.push(droppable(vec![], 3));
+            }
+            title_line = entries.len();
+            let mut title: Vec<Span> = vec![
+                ("Prismattyc ".into(), INK),
+                (format!("v{version}{}", git_suffix()), DIM),
+            ];
+            if line_cells(&title) + 5 + cells(TAGLINE) <= room {
+                title.push(("  —  ".into(), DIM));
+                title.push((TAGLINE.into(), INK));
+            }
+            entries.push(keep(indent(title)));
+            entries.push(droppable(vec![], 2));
+            let tip_text = TIPS[tip % TIPS.len()];
+            for (index, text) in wrap(tip_text, room.saturating_sub(5)).iter().enumerate() {
+                let lead = if index == 0 { "tip: " } else { "     " };
+                entries.push(droppable(
+                    indent(vec![(lead.into(), ACCENT), (text.clone(), DIM)]),
+                    0,
+                ));
+            }
+            entries.push(droppable(vec![], 0));
+            let topic4 = if resume {
+                "Resume walkthrough"
+            } else {
+                "Walkthrough"
+            };
+            // The last topic goes first, so 1 stays longest.
+            for (rank, (key, label)) in [
+                ("1.  ", format!("What's new in v{version}")),
+                ("2.  ", "Docs & tips".to_string()),
+                ("3.  ", "Changelog".to_string()),
+                ("4.  ", topic4.to_string()),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                entries.push(droppable(
+                    indent(vec![(key.into(), ACCENT), (label, INK)]),
+                    10 - rank as u8,
+                ));
+            }
+            entries.push(droppable(vec![], 1));
+            // The long form needs 28 columns; a very narrow window gets the short one.
+            let start = if room >= 28 {
+                "  Start session      "
+            } else {
+                "  Start  "
+            };
+            entries.push(keep(indent(vec![
+                ("⏎".into(), ACCENT),
+                (start.into(), INK),
+                ("q".into(), ACCENT),
+                ("  Quit".into(), INK),
+            ])));
+        }
+        Page::Topic(topic) => {
+            let body = layout_with_resume(Page::Topic(topic), version, tip, None, false);
+            for line in body {
+                let text: String = line.iter().map(|(text, _)| text.as_str()).collect();
+                let text = text.trim_start();
+                if let Some(item) = text.strip_prefix("• ") {
+                    for (index, part) in wrap(item, room.saturating_sub(2)).into_iter().enumerate()
+                    {
+                        let lead = if index == 0 { "• " } else { "  " };
+                        entries.push(keep(indent(vec![(lead.into(), ACCENT), (part, INK)])));
+                    }
+                } else {
+                    let trimmed: Vec<Span> = line
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (text, rgb))| {
+                            (
+                                if index == 0 {
+                                    text.trim_start().to_string()
+                                } else {
+                                    text
+                                },
+                                rgb,
+                            )
+                        })
+                        .filter(|(text, _)| !text.is_empty())
+                        .collect();
+                    entries.push(keep(indent(trimmed)));
+                }
+            }
+        }
+    }
+    // Short window: remove the lowest ranks first until the page fits.
+    while entries.len() > rows {
+        let Some(victim) = entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| entry.drop_rank.map(|rank| (rank, index)))
+            .min_by_key(|(rank, index)| (*rank, std::cmp::Reverse(*index)))
+            .map(|(_, index)| index)
+        else {
+            break;
+        };
+        entries.remove(victim);
+        if victim < title_line {
+            title_line -= 1;
+        }
+    }
+    entries.truncate(rows.max(1));
+    Fitted {
+        fit,
+        art_rows,
+        title_line,
+        lines: entries.into_iter().map(|entry| entry.line).collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,5 +900,145 @@ mod tests {
             .flat_map(|line| line.iter().map(|(t, _)| t.as_str()))
             .collect();
         assert!(text.contains("releases"));
+    }
+
+    fn plain(line: &[Span]) -> String {
+        line.iter().map(|(text, _)| text.as_str()).collect()
+    }
+
+    fn page_text(fitted: &Fitted) -> String {
+        fitted
+            .lines
+            .iter()
+            .map(|line| plain(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_wordmark_shrinks_with_the_window() {
+        let wide = art_frame_width();
+        let tall = full_rows();
+        assert_eq!(fit_for(wide, tall), Fit::Full);
+        assert_eq!(fit_for(wide - 1, tall), Fit::Compact);
+        assert_eq!(fit_for(wide, tall - 1), Fit::Compact);
+        assert_eq!(fit_for(60, 30), Fit::Compact);
+        assert_eq!(fit_for(30, 30), Fit::Wordmark);
+        assert_eq!(fit_for(160, 8), Fit::Wordmark);
+    }
+
+    #[test]
+    fn a_roomy_window_keeps_the_animated_art_untouched() {
+        let fitted = layout_fit(Page::Main, "0.3.62", 0, Some(0), false, 160, 40);
+        let plain_layout = layout_with_resume(Page::Main, "0.3.62", 0, Some(0), false);
+        assert_eq!(fitted.fit, Fit::Full);
+        assert_eq!(fitted.art_rows, ART.len());
+        assert_eq!(fitted.lines, plain_layout);
+    }
+
+    #[test]
+    fn no_line_is_wider_than_the_window_or_taller_than_it_allows() {
+        let pages = [
+            Page::Main,
+            Page::Topic(Topic::WhatsNew),
+            Page::Topic(Topic::Docs),
+            Page::Topic(Topic::Changelog),
+            Page::Topic(Topic::Walkthrough),
+        ];
+        for page in pages {
+            for cols in 12..=130 {
+                for rows in [3, 6, 9, 12, 16, 24, 40] {
+                    let fitted = layout_fit(page, "0.3.62", 3, None, false, cols, rows);
+                    assert!(
+                        fitted.lines.len() <= rows,
+                        "{page:?} {cols}x{rows}: {} lines",
+                        fitted.lines.len()
+                    );
+                    for line in &fitted.lines {
+                        assert!(
+                            line_cells(line) <= cols,
+                            "{page:?} {cols}x{rows}: {:?} is {} columns",
+                            plain(line),
+                            line_cells(line)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_short_window_keeps_the_keys_and_loses_the_tip_first() {
+        let tall = layout_fit(Page::Main, "0.3.62", 0, None, false, 70, 20);
+        assert!(page_text(&tall).contains("tip:"));
+        let short = layout_fit(Page::Main, "0.3.62", 0, None, false, 70, 7);
+        let text = page_text(&short);
+        assert!(!text.contains("tip:"), "{text}");
+        assert!(
+            text.contains("Start session") && text.contains("Quit"),
+            "{text}"
+        );
+        assert!(text.contains("What's new"), "{text}");
+        let tiny = layout_fit(Page::Main, "0.3.62", 0, None, false, 70, 4);
+        let text = page_text(&tiny);
+        assert!(
+            text.contains("Quit"),
+            "the keys line is dropped last: {text}"
+        );
+        assert!(text.contains("Prismattyc"), "{text}");
+    }
+
+    #[test]
+    fn a_narrow_window_still_names_the_product_and_the_keys() {
+        for cols in 16..=40 {
+            let fitted = layout_fit(Page::Main, "0.3.62", 0, None, false, cols, 20);
+            let text = page_text(&fitted);
+            assert!(text.contains("Prismattyc"), "{cols}: {text}");
+            assert!(text.contains('q'), "{cols}: {text}");
+            assert_eq!(fitted.fit, Fit::Wordmark, "{cols}");
+            assert_eq!(fitted.art_rows, 0);
+            assert!(plain(&fitted.lines[fitted.title_line]).contains("Prismattyc"));
+        }
+    }
+
+    #[test]
+    fn the_compact_logo_is_centered_and_marks_its_rows_as_art() {
+        let fitted = layout_fit(Page::Main, "0.3.62", 0, None, false, 70, 24);
+        assert_eq!(fitted.fit, Fit::Compact);
+        assert_eq!(fitted.art_rows, COMPACT_ART.len());
+        let logo = plain(&fitted.lines[0]);
+        let lead = logo.chars().take_while(|c| *c == ' ').count();
+        let trail = 70 - lead - cells(COMPACT_ART[0]);
+        assert!(lead.abs_diff(trail) <= 1, "lead {lead}, trail {trail}");
+        assert!(!fitted.animated_art());
+        assert_eq!(
+            plain(&fitted.lines[fitted.title_line])
+                .trim_start()
+                .chars()
+                .next(),
+            Some('P')
+        );
+    }
+
+    #[test]
+    fn topic_bullets_wrap_instead_of_running_off_the_window() {
+        let fitted = layout_fit(Page::Topic(Topic::Docs), "0.3.62", 0, None, false, 40, 60);
+        let text = page_text(&fitted);
+        let longest = TIPS.iter().map(|tip| cells(tip)).max().unwrap();
+        assert!(
+            longest > 40,
+            "the fixture needs a tip longer than the window"
+        );
+        for tip in TIPS {
+            let last = tip.split(' ').next_back().unwrap();
+            assert!(text.contains(last), "'{last}' was cut from: {text}");
+        }
+    }
+
+    #[test]
+    fn compact_logo_rows_have_one_width_and_a_letter_per_column_group() {
+        assert_eq!(cells(COMPACT_ART[0]), cells(COMPACT_ART[1]));
+        // Ten letters of three columns with a gap between each.
+        assert_eq!(cells(COMPACT_ART[0]), 10 * 3 + 9);
     }
 }

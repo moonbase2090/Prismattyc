@@ -1052,7 +1052,8 @@ fn cmd_up(paths: &Paths, program: Vec<String>) -> Result<()> {
         }
         ensure!(
             Instant::now() < deadline,
-            "timed out waiting for pmuxd startup"
+            "timed out waiting for {} to finish daemon startup or shutdown; no process was stopped",
+            prismattyc_mux::daemon_lock::DaemonLock::holder_description(&paths.socket)
         );
         std::thread::sleep(Duration::from_millis(50));
     }

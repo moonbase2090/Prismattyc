@@ -317,3 +317,32 @@ async fn token_flags_without_listen_are_refused() {
     let stderr = refused(&["--activity-only", "--token-env", TOKEN_ENV]).await;
     assert!(stderr.contains("--listen"), "{stderr}");
 }
+
+#[tokio::test]
+async fn refused_callers_do_not_hold_connection_slots() {
+    let listener = listening(&[]).await;
+    // More refused keep-alive callers than the connection cap, all kept open by the client.
+    let mut held = Vec::new();
+    for _ in 0..40 {
+        let mut stream = TcpStream::connect(listener.addr).await.expect("connect");
+        let request = format!(
+            "POST /mcp HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: 0\r\n\r\n",
+            listener.addr
+        );
+        stream.write_all(request.as_bytes()).await.expect("write");
+        // The server answers 401 and then closes: reading reaches end of stream.
+        let mut raw = Vec::new();
+        tokio::time::timeout(WAIT, stream.read_to_end(&mut raw))
+            .await
+            .expect("a refused connection is closed by the server")
+            .expect("read");
+        let raw = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+        assert!(raw.starts_with("http/1.1 401"), "{raw}");
+        assert!(raw.contains("connection: close"), "{raw}");
+        held.push(stream);
+    }
+    // The slots are free, so a real caller is still served.
+    let bearer = format!("Bearer {TOKEN}");
+    let reply = post(listener.addr, "/mcp", Some(&bearer), None, INITIALIZE).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+}

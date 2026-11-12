@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use http_body_util::{BodyExt, Empty};
 use hyper::body::Bytes;
-use hyper::header::{HeaderValue, AUTHORIZATION, WWW_AUTHENTICATE};
+use hyper::header::{HeaderValue, AUTHORIZATION, CONNECTION, WWW_AUTHENTICATE};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
@@ -143,6 +143,12 @@ fn reply(status: StatusCode) -> Response<http_body_util::combinators::BoxBody<By
         response
             .headers_mut()
             .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    }
+    if !status.is_success() {
+        // Refused callers do not keep a connection (and its slot) open.
+        response
+            .headers_mut()
+            .insert(CONNECTION, HeaderValue::from_static("close"));
     }
     response
 }

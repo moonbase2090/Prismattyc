@@ -123,6 +123,7 @@ fn escape_closes_overlays_in_a_real_window() {
                 }
                 Some(sent) => {
                     if !(step.is_open)(host) {
+                        eprintln!("escape live: {} closed by {}", step.name, step.keys);
                         self.index += 1;
                         self.sent_at = None;
                         if self.index == self.steps.len() {

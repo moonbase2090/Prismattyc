@@ -11585,10 +11585,7 @@ fn activate_context_menu(
     }
 }
 
-/// Escape closes an open context menu or panel before any other key
-/// handling, and before anything reaches the focused pane or plug-in view.
-/// It does not depend on the menu having rows to show, on a modifier the
-/// host believes is held, or on which key name the platform reports.
+/// Whether a press is Escape, from the pieces of a key event (testable without winit).
 fn is_escape_press(
     logical: &Key,
     unmodified: &Key,
@@ -11629,6 +11626,10 @@ fn command_modifier_blocks_text(logical: &Key, modifiers: ModifiersState) -> boo
         && (modifiers.control_key() || modifiers.alt_key() || modifiers.super_key())
 }
 
+/// Escape closes an open context menu or panel before any other key
+/// handling, and before anything reaches the focused pane or plug-in view.
+/// It does not depend on the menu having rows to show, on a modifier the
+/// host believes is held, or on which key name the platform reports.
 fn escape_dismisses_overlay(host: &mut HostState, logical: &Key, unmodified: &Key) -> bool {
     let open = host.context_menu.is_some() || host.space_panel.is_some() || host.settings.is_some();
     if !open || !(palette::is_escape(logical) || palette::is_escape(unmodified)) {

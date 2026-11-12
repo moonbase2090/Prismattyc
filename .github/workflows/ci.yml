@@ -364,6 +364,13 @@ jobs:
           [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
           cargo test --workspace --locked
 
+      - name: Show the real-window Escape check
+        run: |
+          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
+          [ -f "$cargo_env" ] && . "$cargo_env"
+          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+          cargo test -p prismattyc-host --locked --bin prismattyc-host escape_closes_overlays_in_a_real_window -- --nocapture --test-threads=1
+
       - name: Test GPU adapter enumeration without hardware
         run: cargo test -p prismattyc-host --features gpu,wgpu/noop --bin prismattyc-host instance_enumerates_adapters_without_a_window
 

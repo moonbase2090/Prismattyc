@@ -2648,6 +2648,40 @@ impl ControlPlane {
         Ok(page)
     }
 
+    /// Remove an agent session only when no pane currently has a live child.
+    /// The check and destruction share the control-plane lock, so a session
+    /// cannot become live between the safety check and topology removal.
+    pub(crate) fn plugin_remove_stopped_session(
+        &mut self,
+        session_raw: u64,
+    ) -> Result<pmux_plugin_api::host::pmux::activity::manage::Removal, String> {
+        use pmux_plugin_api::host::pmux::activity::manage::Removal;
+
+        let session = session_id(session_raw).map_err(|error| error.to_string())?;
+        let Some(tracked) = self.domain.session(session) else {
+            return Ok(Removal::Missing);
+        };
+        if tracked.agent_id.is_none() {
+            return Err("stopped-session cleanup is limited to agent sessions".into());
+        }
+        let live = tracked
+            .windows
+            .iter()
+            .filter_map(|id| self.domain.window(*id))
+            .flat_map(|window| window.layout.panes())
+            .any(|pane| {
+                self.live
+                    .as_ref()
+                    .is_some_and(|live| live.child_pid(pane.get()).is_some())
+            });
+        if live {
+            return Ok(Removal::Live);
+        }
+        self.destroy_session(session_raw)
+            .map(|_| Removal::Removed)
+            .map_err(|error| error.to_string())
+    }
+
     /// Process facts for `roots`, read at most once per
     /// [`ACTIVITY_PROCESS_TTL`] for the same set of panes. Every activity read
     /// shares it: native and plug-in reads, paged reads, a monitor's polls and
@@ -7239,7 +7273,7 @@ fn control_domain_error(error: DomainError) -> ControlError {
 pub enum SocketLiveness {
     /// Path does not exist.
     Missing,
-    /// Same-uid Unix socket with a peer that accepts connections.
+    /// Same-uid socket with an answering peer or a verified live instance lock owner.
     Live,
     /// Same-uid Unix socket leftover (no listener). Safe to replace.
     Stale,
@@ -7270,9 +7304,12 @@ pub fn probe_socket_liveness(path: impl AsRef<Path>) -> SocketLiveness {
     match UnixStream::connect(path) {
         // A successful connect is not proof of a live server: macOS keeps a
         // crashed server's socket connectable while its accept queue drains, so
-        // connect lands in a backlog no one will ever accept. Require the peer
-        // to answer the versioned handshake before declaring it Live.
+        // connect lands in a backlog no one will ever accept. Require an
+        // answering peer or a verified process that still owns the instance lock.
         Ok(stream) if control_peer_answers(&stream) => SocketLiveness::Live,
+        Ok(_) if crate::daemon_lock::DaemonLock::other_owner_pid(path).is_some() => {
+            SocketLiveness::Live
+        }
         Ok(_) => SocketLiveness::Stale,
         Err(error) if is_stale_connect_error(&error) => SocketLiveness::Stale,
         // Conservatively treat other connect failures as occupied so bind
@@ -7284,7 +7321,8 @@ pub fn probe_socket_liveness(path: impl AsRef<Path>) -> SocketLiveness {
 /// Whether a connected control socket answers the versioned handshake within
 /// `IO_TIMEOUT`. A peer that never replies — a crashed server whose accept queue
 /// is still draining, or a same-uid socket that does not speak this protocol —
-/// is not Live. The client socket is blocking, so `set_read_timeout` bounds the
+/// does not prove liveness. The instance lock can separately identify a live,
+/// unresponsive daemon. The client socket is blocking, so `set_read_timeout` bounds the
 /// wait via `SO_RCVTIMEO`.
 fn control_peer_answers(stream: &UnixStream) -> bool {
     if stream.set_read_timeout(Some(IO_TIMEOUT)).is_err()
@@ -9789,6 +9827,58 @@ function Read-Exact([int]$Count) {
             kinds,
             vec!["created:work".to_string(), "destroyed:work".to_string()]
         );
+    }
+
+    #[test]
+    fn plugin_cleanup_refuses_live_children_and_only_removes_agent_sessions() {
+        use pmux_plugin_api::host::pmux::activity::manage::Removal;
+
+        let (mut stopped, _, _) = fixture(8);
+        let ordinary = stopped.snapshot().unwrap().sessions[0].id;
+        assert!(stopped
+            .plugin_remove_stopped_session(ordinary)
+            .unwrap_err()
+            .contains("agent sessions"));
+        let ordinary_id = session_id(ordinary).unwrap();
+        stopped
+            .domain
+            .name_session(ordinary_id, "stopped-agent", "stopped-agent")
+            .unwrap();
+        assert_eq!(
+            stopped.plugin_remove_stopped_session(ordinary).unwrap(),
+            Removal::Removed
+        );
+        assert!(stopped.domain.session(ordinary_id).is_none());
+
+        let mut domain = Domain::bootstrap("live-agent").unwrap();
+        let session = domain.sessions().next().unwrap();
+        let session_raw = session.id.get();
+        let window = session.windows[0];
+        let pane = domain.window(window).unwrap().layout.panes()[0];
+        domain
+            .name_session(session.id, "live-agent", "live-agent")
+            .unwrap();
+        let mut live = ControlPlane::new_live(
+            domain,
+            [WindowBounds {
+                window_id: window.get(),
+                cols: 80,
+                rows: 24,
+            }],
+            Some(8),
+            [(pane.get(), spawn())],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            live.plugin_remove_stopped_session(session_raw).unwrap(),
+            Removal::Live
+        );
+        assert!(live
+            .domain
+            .session(session_id(session_raw).unwrap())
+            .is_some());
+        assert!(live.live.as_ref().unwrap().child_pid(pane.get()).is_some());
     }
 
     #[test]

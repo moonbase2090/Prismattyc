@@ -489,8 +489,8 @@ struct Cli {
     /// True when the border came from CLI or env: pinned against config, at
     /// startup and across hot reloads.
     focus_border_pinned: bool,
-    /// Opt-in Tron light-cycle sweep on focus change (config-only key
-    /// `focus_border_animation = "light-cycle"`; default off).
+    /// Tron light-cycle sweep on focus change (config-only key
+    /// `focus_border_animation`; default on, `"none"` turns it off).
     light_cycle: bool,
     /// Sweep duration in ms (config `focus_border_animation_ms`).
     light_cycle_ms: u128,
@@ -676,7 +676,7 @@ impl Cli {
             focus_border,
             panes_pinned,
             focus_border_pinned,
-            light_cycle: false,
+            light_cycle: true,
             light_cycle_ms: DEFAULT_LIGHT_CYCLE_MS,
             light_cycle_head: true,
             reduced_motion: false,
@@ -708,11 +708,7 @@ impl Cli {
                 self.panes = panes;
             }
         }
-        self.light_cycle = matches!(
-            file.focus_border_animation
-                .map(crate::config::FocusBorderAnimation::as_str),
-            Some("light-cycle")
-        );
+        self.light_cycle = file.light_cycle();
         self.light_cycle_ms = file
             .focus_border_animation_ms
             .map_or(DEFAULT_LIGHT_CYCLE_MS, u128::from);
@@ -3523,12 +3519,7 @@ impl App {
                 }
             }
             if self.file_config.focus_border_animation != prior.focus_border_animation {
-                host.light_cycle = matches!(
-                    self.file_config
-                        .focus_border_animation
-                        .map(crate::config::FocusBorderAnimation::as_str),
-                    Some("light-cycle")
-                );
+                host.light_cycle = self.file_config.light_cycle();
                 if !host.light_cycle {
                     // Turning the animation off mid-sweep settles the border.
                     host.border_anim = None;
@@ -27923,9 +27914,9 @@ session mail (id 15)
     }
 
     #[test]
-    fn light_cycle_is_config_opt_in_and_reversible() {
+    fn light_cycle_defaults_on_and_none_turns_it_off() {
         let mut cli = Cli::parse(["--", "/bin/sh"].into_iter().map(str::to_owned)).expect("parse");
-        assert!(!cli.light_cycle, "animation must default off");
+        assert!(cli.light_cycle, "animation must default on");
         assert_eq!(cli.light_cycle_ms, DEFAULT_LIGHT_CYCLE_MS);
         assert!(cli.light_cycle_head, "vehicle head defaults on");
         cli.apply_config(&config::ConfigFile {
@@ -27937,23 +27928,35 @@ session mail (id 15)
         assert!(cli.light_cycle);
         assert_eq!(cli.light_cycle_ms, 600);
         assert!(!cli.light_cycle_head);
-        // Explicit "none" and a removed key both turn it back off.
+        // Explicit "none" turns it off.
         cli.apply_config(&config::ConfigFile {
             focus_border_animation: Some(crate::config::FocusBorderAnimation::None),
             ..Default::default()
         });
-        assert!(!cli.light_cycle);
+        assert!(!cli.light_cycle, "explicit none must turn it off");
+        // A removed key restores the on-by-default sweep and speed/head defaults.
         cli.apply_config(&config::ConfigFile::default());
-        assert!(!cli.light_cycle);
-        // Removed keys restore the speed/head defaults too.
+        assert!(cli.light_cycle, "a removed key restores the default sweep");
         assert_eq!(cli.light_cycle_ms, DEFAULT_LIGHT_CYCLE_MS);
         assert!(cli.light_cycle_head);
     }
 
     #[test]
-    fn sweep_arms_only_with_opt_in_motion_and_panes() {
+    fn missing_config_file_yields_light_cycle_with_head() {
+        let missing = std::env::temp_dir()
+            .join(format!("prism-missing-config-{}", std::process::id()))
+            .join("config.toml");
+        let file = config::load(&missing).expect("a missing config file loads as defaults");
+        let mut cli = Cli::parse(["--", "/bin/sh"].into_iter().map(str::to_owned)).expect("parse");
+        cli.apply_config(&file);
+        assert!(cli.light_cycle, "no config must still show the sweep");
+        assert!(cli.light_cycle_head, "no config must draw the head box");
+    }
+
+    #[test]
+    fn sweep_arms_only_with_animation_motion_and_panes() {
         assert!(sweep_armed(true, false, 2));
-        assert!(!sweep_armed(false, false, 2), "opt-in stays off");
+        assert!(!sweep_armed(false, false, 2), "animation off stays off");
         assert!(
             !sweep_armed(true, true, 2),
             "reduced motion shows the ring instantly"

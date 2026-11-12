@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use lunatui_term::{Event, KeyCode, KeyEvent, Modifiers};
 use pmux_plugin_api::guest::pmux::{
-    activity::read,
+    activity::{manage, read},
     plugin::{host, lifecycle},
     view::frame,
 };
@@ -182,6 +182,17 @@ impl View {
                 self.monitor.now_ms = self.clock.wall_ms;
                 if self.monitor.event(&Event::Key(key_event(key))) {
                     return Ok(lifecycle::Reply::Closed);
+                }
+                for request in self.monitor.ui.take_cleanup_requests() {
+                    let result = self
+                        .handles
+                        .get(request.host)
+                        .copied()
+                        .ok_or_else(|| "selected activity endpoint disappeared".to_owned())
+                        .and_then(|endpoint| manage::remove_stopped(endpoint, request.session_id));
+                    self.monitor
+                        .ui
+                        .resolve_cleanup(request, result, &mut self.monitor.hosts);
                 }
             }
             frame::Event::Mouse(mouse) => {

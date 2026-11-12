@@ -74,6 +74,8 @@ pub(super) enum Request {
     Stop,
     Endpoints(Result<Vec<read::Endpoint>, read::Error>),
     Page(Result<ActivityPage, read::Error>),
+    RemoveStopped { endpoint: u64, session_id: u64 },
+    RemovedStopped(Result<pmux_plugin_api::host::pmux::activity::manage::Removal, String>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -88,6 +90,10 @@ pub(super) enum Response {
         endpoint: u64,
         after: Option<ActivityCursor>,
         limit: u16,
+    },
+    RemoveStopped {
+        endpoint: u64,
+        session_id: u64,
     },
     Failed(String),
     Rejected,

@@ -31,7 +31,7 @@ impl Monitor {
     }
 
     pub fn event(&mut self, event: &Event) -> bool {
-        self.ui.event(event, &self.hosts, self.now_ms)
+        self.ui.event(event, &mut self.hosts, self.now_ms)
     }
 
     pub fn render(

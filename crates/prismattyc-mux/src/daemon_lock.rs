@@ -1,7 +1,7 @@
 //! Hold the instance lock before starting any PTY children.
 
 use std::fs::File;
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
 
 pub struct DaemonLock(File);
@@ -23,7 +23,7 @@ impl DaemonLock {
                 .write(true)
                 .create(true),
         )?;
-        crate::platform::try_lock_exclusive(&file)?;
+        crate::process_lock::acquire(&file, &socket.with_extension("lock"), "daemon")?;
         if matches!(
             crate::probe_socket_liveness(socket),
             crate::SocketLiveness::Live | crate::SocketLiveness::Foreign
@@ -33,8 +33,7 @@ impl DaemonLock {
                 "pmuxd is already running",
             ));
         }
-        file.set_len(0)?;
-        writeln!(file, "{}", std::process::id())?;
+        crate::process_lock::record_owner(&mut file, &socket.with_extension("lock"))?;
         Ok(Self(file))
     }
 
@@ -56,6 +55,23 @@ impl DaemonLock {
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(true),
             Err(error) => Err(error),
         }
+    }
+
+    /// A live instance still owns its lock even if it cannot answer a ping.
+    /// Exclude this process so bind can reclaim a stale socket after startup.
+    pub(crate) fn other_owner_pid(socket: &Path) -> Option<u32> {
+        if !Self::is_held(socket).ok()? {
+            return None;
+        }
+        let pid = crate::process_lock::recorded_pid(&socket.with_extension("lock"))?;
+        (pid != std::process::id()
+            && crate::procinfo::pid_alive(pid)
+            && crate::procinfo::cmdline_matches_server(pid, socket))
+        .then_some(pid)
+    }
+
+    pub fn holder_description(socket: &Path) -> String {
+        crate::process_lock::holder(&socket.with_extension("lock"))
     }
 
     pub fn publish_pid(&self, socket: &Path) -> io::Result<()> {

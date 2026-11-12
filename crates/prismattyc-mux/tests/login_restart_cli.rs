@@ -163,6 +163,70 @@ fn answer_host(socket: &Path) -> std::thread::JoinHandle<()> {
 }
 
 #[test]
+fn restart_plan_never_reports_a_locked_unresponsive_daemon_as_empty() {
+    let root = temp_root("plan-stalled");
+    let socket = socket_path(&root);
+    let server = start_server(&socket, &root);
+    let pid = server.child.id();
+    // The guard must resume the private daemon before ServerGuard tears it down,
+    // including when an assertion fails.
+    struct Resume(u32);
+    impl Drop for Resume {
+        fn drop(&mut self) {
+            let _ = Command::new("kill")
+                .args(["-CONT", &self.0.to_string()])
+                .status();
+        }
+    }
+    let _resume = Resume(pid);
+    assert!(Command::new("kill")
+        .args(["-STOP", &pid.to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let output = pmux(&socket, &root, &[], &["restart", "--plan", "--json"]);
+    fail(&output, "Could not read running sessions");
+    let detail = text(&output);
+    assert!(detail.contains(&format!("pid {pid}")), "{detail}");
+    assert!(detail.contains("pmuxd"), "{detail}");
+    assert!(!detail.contains("\"sessions\":[]"), "{detail}");
+    let versions: serde_json::Value =
+        serde_json::from_str(&ok(&pmux(&socket, &root, &[], &["versions"]))).unwrap();
+    assert_eq!(versions["daemon"]["status"], "running");
+    assert_eq!(versions["daemon"]["pid"], pid);
+    assert!(versions["daemon"]["detail"]
+        .as_str()
+        .unwrap()
+        .contains(&format!("pid {pid}")));
+    let mut duplicate = Command::new(env!("CARGO_BIN_EXE_pmuxd"));
+    clear_command_env(&mut duplicate);
+    apply_isolation(&mut duplicate, &root);
+    let refused = duplicate.arg("--socket").arg(&socket).output().unwrap();
+    fail(&refused, "daemon lock");
+    assert!(
+        text(&refused).contains(&format!("pid {pid}")),
+        "{}",
+        text(&refused)
+    );
+    assert!(text(&refused).contains("pmuxd"), "{}", text(&refused));
+    let resume = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(1));
+        drop(_resume);
+    });
+    let plan: serde_json::Value = serde_json::from_str(&ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["restart", "--plan", "--json"],
+    )))
+    .unwrap();
+    resume.join().unwrap();
+    assert_eq!(plan["sessions"].as_array().unwrap().len(), 1);
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn restart_plans_and_cooperative_components() {
     let root = temp_root("restart");
     let missing = root.join("missing.sock");

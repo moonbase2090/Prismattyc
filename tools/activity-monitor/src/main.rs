@@ -317,7 +317,12 @@ fn require_enabled(client: &mut Client, id: &str) -> Result<()> {
     } else {
         format!("\nOn this daemon, run: pmux plugin install {id}")
     };
-    bail!("Plug-in {id} is {state}.{catalog}{install}\nApprove local read access: pmux plugin enable {id} --allow activity.read:local\nUse the same --socket target if one was supplied, or manage the package in Settings > Plug-ins. Activity collection does not enable plug-in access.");
+    let approval = if id == MONITOR {
+        format!("Approve local read and stopped-session cleanup: pmux plugin enable {id} --allow activity.manage:local --allow activity.read:local")
+    } else {
+        format!("Approve local read access: pmux plugin enable {id} --allow activity.read:local")
+    };
+    bail!("Plug-in {id} is {state}.{catalog}{install}\n{approval}\nUse the same --socket target if one was supplied, or manage the package in Settings > Plug-ins. Activity collection does not enable plug-in access.");
 }
 
 fn tail(mut client: Client, socket: &std::path::Path, seat: Option<&AgentId>) -> Result<()> {

@@ -2,7 +2,7 @@
 
 //! Viewer state for one or more activity feeds. Pure data: no I/O and no terminal.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use prismattyc_core::activity::{
     ActivityKind, ActivityPage, ActivityRecord, ActivitySessions, ActivitySource,
@@ -110,6 +110,12 @@ pub struct Seat {
     discovery: Option<(u64, ActivityRecord)>,
 }
 
+impl Seat {
+    pub fn session_id(&self) -> Option<u64> {
+        self.discovery.as_ref().map(|(id, _)| *id)
+    }
+}
+
 /// Seat facts for the details header. Each stays `None` (shown as unknown)
 /// until pmux reports it without ambiguity; nothing here is guessed from
 /// prompts, paths or command text.
@@ -157,6 +163,7 @@ pub struct Host {
     pub reset: Option<String>,
     pub evicted: u64,
     pub seats: BTreeMap<AgentId, Seat>,
+    dismissed: BTreeSet<(AgentId, Option<u64>)>,
 }
 
 impl Host {
@@ -170,6 +177,7 @@ impl Host {
             reset: None,
             evicted: 0,
             seats: BTreeMap::new(),
+            dismissed: BTreeSet::new(),
         }
     }
 
@@ -195,6 +203,7 @@ impl Host {
         }
         if new_epoch || page.reset.is_some() {
             self.sequence = 0;
+            self.dismissed.clear();
         }
         self.epoch = Some(page.epoch.clone());
         self.link = Link::Connected;
@@ -228,6 +237,9 @@ impl Host {
             current.contains(id) || !seat.history.is_empty()
         });
         for session in sessions.seats {
+            self.dismissed.retain(|(seat, dismissed_id)| {
+                seat != &session.seat || *dismissed_id == Some(session.session_id)
+            });
             let observation = session.observation(sessions.observed_at_ms);
             // pmux sends each value only when it is unambiguous, so the latest
             // snapshot replaces the old one, including a value it no longer has.
@@ -295,6 +307,38 @@ impl Host {
             }
             seat.discovery = Some((session.session_id, observation));
         }
+    }
+
+    pub fn is_dismissed(&self, seat: &AgentId, session_id: Option<u64>) -> bool {
+        match session_id {
+            Some(id) => self.dismissed.contains(&(seat.clone(), Some(id))),
+            None => self
+                .dismissed
+                .iter()
+                .any(|(hidden_seat, _)| hidden_seat == seat),
+        }
+    }
+
+    pub fn dismiss_stopped(&mut self, seat_id: &AgentId) -> bool {
+        let Some(seat) = self.seats.get(seat_id) else {
+            return false;
+        };
+        if seat.state != SeatState::Stopped {
+            return false;
+        }
+        let session_id = seat.session_id();
+        self.dismiss_session(seat_id, session_id)
+    }
+
+    pub fn dismiss_session(&mut self, seat_id: &AgentId, session_id: Option<u64>) -> bool {
+        let Some(seat) = self.seats.get(seat_id) else {
+            return false;
+        };
+        if seat.session_id() != session_id {
+            return false;
+        }
+        self.dismissed.insert((seat_id.clone(), session_id));
+        true
     }
 
     /// `fade_at` is the viewer time for a fade, or `None` for replayed history.
@@ -825,6 +869,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn dismissed_session_stays_hidden_until_the_same_seat_restarts() -> Result<()> {
+        use prismattyc_core::activity::ActivitySessionState;
+
+        let mut host = Host::new("local");
+        let mut page = page_in("e0", vec![], None)?;
+        let mut sessions = discovered(&["stopped"], 1_000);
+        sessions.seats[0].state = ActivitySessionState::Stopped;
+        page.sessions = Some(sessions.clone());
+        host.apply(page, 0);
+        let seat = AgentId::new("stopped").unwrap();
+        assert!(host.dismiss_stopped(&seat));
+        assert!(host.is_dismissed(&seat, Some(1)));
+
+        let mut refresh = page_in("e0", vec![], None)?;
+        refresh.sessions = Some(sessions);
+        host.apply(refresh, 250);
+        assert!(host.is_dismissed(&seat, Some(1)));
+
+        let mut restart = discovered(&["stopped"], 2_000);
+        restart.seats[0].session_id = 2;
+        restart.seats[0].state = ActivitySessionState::Waiting;
+        let mut page = page_in("e0", vec![], None)?;
+        page.sessions = Some(restart);
+        host.apply(page, 500);
+        assert!(!host.is_dismissed(&seat, Some(2)));
+        Ok(())
+    }
+
+    #[test]
     fn discovery_exposes_idle_stuck_and_down_health() -> Result<()> {
         use prismattyc_core::activity::ActivitySessionState;
 
@@ -1047,6 +1120,31 @@ pub(crate) mod tests {
         host.apply(page_in("e", first, None)?, 0);
         assert_eq!(seat(&host, "sa").history.len(), 2);
         assert_eq!(seat(&host, "sa").state, SeatState::Waiting);
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_epoch_restores_a_live_seat_with_a_reused_id() -> Result<()> {
+        use prismattyc_core::activity::ActivitySessionState;
+
+        let mut host = Host::new("local");
+        let mut initial = page_in("e0", vec![], None)?;
+        let mut stopped = discovered(&["stopped"], 1_000);
+        stopped.seats[0].state = ActivitySessionState::Stopped;
+        initial.sessions = Some(stopped);
+        host.apply(initial, 0);
+        let seat = AgentId::new("stopped").unwrap();
+        assert!(host.dismiss_stopped(&seat));
+        assert!(host.is_dismissed(&seat, Some(1)));
+
+        let mut restarted = page_in("e1", vec![], None)?;
+        restarted.sessions = Some(discovered(&["stopped"], 2_000));
+        host.apply(restarted, 500);
+        let rows = crate::ui::rows(&[host], &crate::ui::Ui::default(), 2_000);
+        assert!(
+            rows.contains(&crate::ui::Row::Seat(0, seat)),
+            "a live seat in the new daemon lifetime must be visible"
+        );
         Ok(())
     }
 

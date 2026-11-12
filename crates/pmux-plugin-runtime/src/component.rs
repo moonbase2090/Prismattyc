@@ -6,7 +6,12 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, ensure, Context as _, Result};
-use pmux_plugin_api::host::pmux::{activity::read, plugin::host, plugin::lifecycle, view::frame};
+use pmux_plugin_api::host::pmux::{
+    activity::{manage, read},
+    plugin::host,
+    plugin::lifecycle,
+    view::frame,
+};
 use pmux_plugin_api::host::{Plugin, PluginPre};
 use pmux_plugin_api::{
     validate_viewport, ValidatedFrame, API_VERSION, CONTRACTS, IMPORT_CONTRACTS, MAX_FRAME_BYTES,
@@ -31,6 +36,8 @@ pub trait ActivityProvider: Send {
         after: Option<domain::ActivityCursor>,
         limit: u16,
     ) -> Result<domain::ActivityPage, read::Error>;
+    fn remove_stopped(&mut self, endpoint: u64, session_id: u64)
+        -> Result<manage::Removal, String>;
 }
 
 pub struct Runtime {
@@ -110,12 +117,17 @@ impl Runtime {
             .capabilities
             .iter()
             .any(|capability| capability.name == "pmux:activity/read" && capability.available);
+        let session_manage = context
+            .capabilities
+            .iter()
+            .any(|capability| capability.name == "pmux:activity/manage" && capability.available);
         let mut store = Store::new(
             &self.engine,
             HostState {
                 limits,
                 phase: Phase::Prepared,
                 activity,
+                session_manage,
                 provider,
                 assets,
                 started: Instant::now(),
@@ -278,6 +290,7 @@ struct HostState {
     limits: StoreLimits,
     phase: Phase,
     activity: bool,
+    session_manage: bool,
     provider: Box<dyn ActivityProvider>,
     assets: BTreeMap<String, Vec<u8>>,
     started: Instant,
@@ -286,6 +299,25 @@ struct HostState {
 }
 
 impl frame::Host for HostState {}
+impl manage::Host for HostState {
+    fn remove_stopped(
+        &mut self,
+        endpoint: u64,
+        session_id: u64,
+    ) -> Result<manage::Removal, String> {
+        if !matches!(self.phase, Phase::Active) {
+            return Err("plug-in is not active".into());
+        }
+        if !self.session_manage {
+            return Err("session cleanup permission is unavailable".into());
+        }
+        if self.calls >= pmux_plugin_api::MAX_HOST_IMPORTS_PER_CALL {
+            return Err("plug-in host import budget exceeded".into());
+        }
+        self.calls += 1;
+        self.provider.remove_stopped(endpoint, session_id)
+    }
+}
 impl pmux_plugin_api::host::pmux::tool::call::Host for HostState {}
 impl lifecycle::Host for HostState {}
 
@@ -702,6 +734,10 @@ mod tests {
     }
 
     impl ActivityProvider for Provider {
+        fn remove_stopped(&mut self, _: u64, _: u64) -> Result<manage::Removal, String> {
+            Ok(manage::Removal::Missing)
+        }
+
         fn endpoints(&mut self) -> Result<Vec<read::Endpoint>, read::Error> {
             Ok(vec![read::Endpoint {
                 handle: 7,

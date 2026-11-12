@@ -12,7 +12,9 @@ A matched release carries `pmux-activity-monitor` and verified packages for
 `org.moonbase.activity-monitor` and `org.moonbase.activity-connector`. There
 is nothing to set up: the first time a release daemon finds either package
 with no saved state, it installs the bundled version and enables it with
-`activity.read:local` only. Remote endpoints still need an explicit grant.
+`activity.read:local` for the connector, and `activity.read:local` plus
+`activity.manage:local` for the monitor's confirmed cleanup of stopped agent
+sessions. Remote read endpoints still need an explicit grant.
 Run `pmux-activity-monitor` in a pane.
 
 To turn either one off, disable it in Settings > Plug-ins or run:
@@ -26,7 +28,7 @@ A disabled package stays disabled across restarts and updates; the daemon
 only fills in plug-ins that have no saved state. To turn one back on:
 
 ```sh
-pmux plugin enable org.moonbase.activity-monitor --allow activity.read:local
+pmux plugin enable org.moonbase.activity-monitor --allow activity.manage:local --allow activity.read:local
 ```
 
 Use the same `--socket` target on these commands if the launcher uses an
@@ -100,7 +102,7 @@ Each host has its own daemon, so each gets its own cursor and connection state. 
 
 ```sh
 pmux plugin endpoint add windows --command-tail '["ssh","windows-host","pmux-activity-monitor","--tail"]'
-pmux plugin enable org.moonbase.activity-monitor --version 1.0.0 --allow activity.read:local --allow activity.read:windows
+pmux plugin enable org.moonbase.activity-monitor --version 1.3.0 --allow activity.manage:local --allow activity.read:local --allow activity.read:windows
 pmux-activity-monitor --host-cmd windows '["ssh","windows-host","pmux-activity-monitor","--tail"]'
 ```
 

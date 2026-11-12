@@ -795,13 +795,15 @@ fn lock(root: &Path) -> Result<File> {
     fs::create_dir_all(root)?;
     #[cfg(windows)]
     crate::platform::secure_directory(root)?;
-    let file = crate::platform::private_options()
+    let path = root.join("update.lock");
+    let mut file = crate::platform::private_options()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(root.join("update.lock"))?;
-    crate::platform::try_lock_exclusive(&file).context("another update or rollback is running")?;
+        .open(&path)?;
+    crate::process_lock::acquire(&file, &path, "update")?;
+    crate::process_lock::record_owner(&mut file, &path)?;
     Ok(file)
 }
 
@@ -1596,7 +1598,7 @@ fn replace_app_bundle_syncing(
     );
     let displaced = parent.join(format!(".Prismattyc.app.displaced-{}", std::process::id()));
     if displaced.exists() {
-        fs::remove_dir_all(&displaced)?;
+        discard_replaced_app(&displaced)?;
     }
     fs::rename(destination, &displaced).with_context(|| {
         format!(
@@ -1720,6 +1722,22 @@ fn sync_restored_parent(destination: &Path, parent: &Path) -> Result<()> {
 #[cfg(any(test, target_os = "macos"))]
 fn discard_replaced_app(path: &Path) -> Result<()> {
     if path.exists() {
+        #[cfg(target_os = "macos")]
+        {
+            let bins = path.join("Contents/MacOS");
+            let files = if bins.exists() {
+                fs::read_dir(bins)?
+                    .map(|entry| entry.map(|entry| entry.path()))
+                    .collect::<std::io::Result<Vec<_>>>()?
+                    .into_iter()
+                    .filter(|path| path.is_file())
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let holders = crate::process_lock::file_users(&files, true)?;
+            ensure!(holders.is_empty(), "The previous app is still mapped by {}. Close or restart those components before retrying.", holders.into_iter().map(crate::process_lock::process_label).collect::<Vec<_>>().join(", "));
+        }
         fs::remove_dir_all(path)?;
     }
     Ok(())
@@ -1728,8 +1746,7 @@ fn discard_replaced_app(path: &Path) -> Result<()> {
 #[cfg(any(test, target_os = "macos"))]
 fn leftover_app_notice(path: &Path, error: &dyn std::fmt::Display) -> String {
     format!(
-        "The new Prismattyc.app is installed, but the old app is still at {}. It was left there because deleting it failed: {error}. Remove that directory yourself with `rm -rf '{}'`.",
-        path.display(),
+        "The new Prismattyc.app is installed, but the previous app was kept at {}: {error}. Resolve the reported problem before removing that bundle.",
         path.display()
     )
 }
@@ -2827,6 +2844,101 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
+    fn update_lock_waits_for_a_finishing_owner() {
+        let dir = temporary();
+        let held = lock(&dir).unwrap();
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = std::sync::Arc::clone(&released);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            released.store(true, std::sync::atomic::Ordering::Release);
+            drop(held);
+        });
+        let acquired = lock(&dir);
+        let waited = observed.load(std::sync::atomic::Ordering::Acquire);
+        release.join().unwrap();
+        assert!(acquired.is_ok(), "{acquired:?}");
+        assert!(
+            waited,
+            "lock returned before the existing owner released it"
+        );
+        drop(acquired);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn update_lock_contention_names_its_holder() {
+        let dir = temporary();
+        let held = lock(&dir).unwrap();
+        let detail = format!("{:#}", lock(&dir).unwrap_err());
+        assert!(
+            detail.contains(&format!("pid {}", std::process::id())),
+            "{detail}"
+        );
+        assert!(detail.contains("update lock"), "{detail}");
+        drop(held);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn displaced_app_keeps_mapped_executables_until_the_process_exits() {
+        if let Some(ready) = std::env::var_os("PRISMATTYC_TEST_MAPPED_READY") {
+            fs::write(ready, b"ready").unwrap();
+            loop {
+                std::thread::park();
+            }
+        }
+        let dir = temporary();
+        let app = dir.join("Prismattyc.app");
+        let bins = app.join("Contents/MacOS");
+        fs::create_dir_all(&bins).unwrap();
+        let executable = bins.join("mapped-holder");
+        fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let ready = dir.join("ready");
+        let mut child = ChildGuard(Command::new(&executable)
+            .args(["--exact", "release_update::tests::displaced_app_keeps_mapped_executables_until_the_process_exits"])
+            .env("PRISMATTYC_TEST_MAPPED_READY", &ready)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "mapped fixture exited"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "mapped fixture did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let displaced = dir.join(".Prismattyc.app.displaced-test");
+        fs::rename(&app, &displaced).unwrap();
+        let removal = discard_replaced_app(&displaced);
+        assert!(removal.is_err(), "removed a mapped executable");
+        let detail = format!("{:#}", removal.unwrap_err());
+        assert!(
+            detail.contains(&format!("pid {}", child.0.id())),
+            "{detail}"
+        );
+        assert!(displaced.join("Contents/MacOS/mapped-holder").is_file());
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        discard_replaced_app(&displaced).unwrap();
+        assert!(!displaced.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn update_lock_refuses_overlap() {
         let dir = temporary();
         let held = lock(&dir).unwrap();
@@ -3396,15 +3508,15 @@ mod tests {
     }
 
     #[test]
-    fn leftover_old_app_notice_names_the_path_and_how_to_remove_it() {
+    fn leftover_old_app_notice_names_the_problem_before_removal() {
         let path = Path::new("/Applications/.Prismattyc.app.displaced-9");
         let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied");
         let notice = leftover_app_notice(path, &error);
         assert!(notice.contains(path.to_str().unwrap()), "{notice}");
         assert!(notice.contains("permission denied"), "{notice}");
-        assert!(notice.contains("rm -rf"), "{notice}");
+        assert!(!notice.contains("rm -rf"), "{notice}");
         assert!(
-            notice.contains("`rm -rf '/Applications/.Prismattyc.app.displaced-9'`."),
+            notice.contains("Resolve the reported problem before removing that bundle."),
             "{notice}"
         );
         assert!(

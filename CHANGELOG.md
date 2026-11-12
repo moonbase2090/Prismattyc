@@ -6,6 +6,22 @@
 
 - Escape closes every dialog, menu and overlay even when the platform reports it as text or only by its physical key, or while a modifier is held or stuck. The command palette, the Space picker and its delete confirmation, tab and Space rename, and the Space rail previously ignored Escape under Ctrl, Alt or Super.
 
+## [0.3.63] - 2026-11-11
+
+### Changed
+
+- Attached-pane log replay no longer redraws panes when the visible content is
+  unchanged.
+
+### Fixed
+
+- Startup waits for the helper's started marker before reading it.
+- Updated rustix to 1.1.6 to address an xattr advisory.
+
+## [0.3.63-rc.1]
+
+Release candidate for 0.3.63, with the [same changes](#0363---2026-11-11).
+
 ## [0.3.62] - 2026-11-10
 
 ### Fixed

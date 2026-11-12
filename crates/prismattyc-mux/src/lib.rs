@@ -35,6 +35,7 @@ pub mod mail_liveness;
 pub mod mailbox;
 mod pane_log;
 mod pane_log_persist;
+mod process_lock;
 pub mod procinfo;
 pub mod prompt_idle;
 pub mod release_update;

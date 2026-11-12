@@ -494,6 +494,37 @@ fn prefix_lock(bin_dir: &Path) -> Result<File> {
     Ok(file)
 }
 
+#[cfg(any(windows, test))]
+fn repair_windows_command(bin_dir: &Path) -> Result<()> {
+    let commands = bin_dir
+        .parent()
+        .context("registered installation prefix")?
+        .join("cmd");
+    if !plain_directory(&commands)? {
+        return Ok(());
+    }
+    let destination = commands.join("pmux-activity-monitor.exe");
+    match fs::symlink_metadata(&destination) {
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    // Packaged cmd executables select their bin target from their own filename.
+    let mut source = open_regular(&commands.join("pmux.exe"))
+        .context("read installed command forwarder; reinstall the MSI if it is missing")?;
+    let (incoming, mut file) = stage(&commands, true)?;
+    std::io::copy(&mut source, &mut file)?;
+    file.sync_all()?;
+    drop(file);
+    match fs::hard_link(&incoming.0, &destination) {
+        Ok(()) => {
+            crate::platform::sync_directory(&commands).context("sync monitor command directory")
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error).context("publish monitor command forwarder"),
+    }
+}
+
 fn report(
     status: &str,
     installation: &Installation,
@@ -548,6 +579,11 @@ pub(super) fn run(root: &Path, options: &Options) -> Result<()> {
             fingerprint(&destination)? == current,
             "launcher changed during verification"
         );
+        #[cfg(windows)]
+        if !options.check {
+            repair_windows_command(&installation.bin_dir)
+                .context("monitor frontend is current, but its command could not be restored")?;
+        }
         report(
             "current",
             &installation,
@@ -633,6 +669,9 @@ pub(super) fn run(root: &Path, options: &Options) -> Result<()> {
         "launcher changed before atomic replacement"
     );
     crate::platform::replace_file(&incoming.0, &destination)?;
+    #[cfg(windows)]
+    repair_windows_command(&installation.bin_dir)
+        .context("monitor frontend was installed, but its command could not be restored")?;
     let warning = crate::platform::sync_directory(&installation.bin_dir)
         .err()
         .map(|e| e.to_string());
@@ -673,6 +712,60 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn missing_windows_monitor_command_copies_the_installed_forwarder() {
+        let scratch = Scratch::new();
+        let bins = scratch.0.join("bin");
+        let commands = scratch.0.join("cmd");
+        fs::create_dir(&bins).unwrap();
+        fs::create_dir(&commands).unwrap();
+        fs::write(commands.join("pmux.exe"), b"installed generic forwarder").unwrap();
+        fs::write(bins.join("pmux-activity-monitor.exe"), b"verified frontend").unwrap();
+
+        repair_windows_command(&bins).unwrap();
+
+        assert_eq!(
+            fs::read(commands.join("pmux-activity-monitor.exe")).unwrap(),
+            b"installed generic forwarder"
+        );
+        assert_eq!(
+            fs::read(bins.join("pmux-activity-monitor.exe")).unwrap(),
+            b"verified frontend"
+        );
+        assert_eq!(fs::read_dir(&commands).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn windows_monitor_command_repair_preserves_existing_commands_and_standalone_layouts() {
+        let scratch = Scratch::new();
+        let bins = scratch.0.join("bin");
+        fs::create_dir(&bins).unwrap();
+        repair_windows_command(&bins).unwrap();
+        assert!(!scratch.0.join("cmd").exists());
+
+        let commands = scratch.0.join("cmd");
+        fs::create_dir(&commands).unwrap();
+        fs::write(commands.join("pmux.exe"), b"installed generic forwarder").unwrap();
+        repair_windows_command(&bins).unwrap();
+        assert_eq!(
+            fs::read(commands.join("pmux-activity-monitor.exe")).unwrap(),
+            b"installed generic forwarder"
+        );
+        fs::remove_file(commands.join("pmux.exe")).unwrap();
+        fs::write(
+            commands.join("pmux-activity-monitor.exe"),
+            b"existing command",
+        )
+        .unwrap();
+        repair_windows_command(&bins).unwrap();
+        repair_windows_command(&bins).unwrap();
+        assert_eq!(
+            fs::read(commands.join("pmux-activity-monitor.exe")).unwrap(),
+            b"existing command"
+        );
+        assert_eq!(fs::read_dir(&commands).unwrap().count(), 1);
     }
 
     fn old() -> Fingerprint {

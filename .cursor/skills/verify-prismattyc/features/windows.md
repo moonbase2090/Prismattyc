@@ -45,15 +45,21 @@ The package proof's explicit PATH option does not alone prove an installer defau
 
 ## Separate monitor repair
 
-After building the matched seven native executables, run in the disposable
-Windows VM:
+After building the matched seven native executables, retain
+`prismattyc-cmd-forwarder.exe` from the same workspace build beside them.
+The migration fixture uses it to reproduce an existing `cmd` installation
+with a missing monitor command. Run in the disposable Windows VM:
 
 ```powershell
 python tests/native/monitor-launcher-update-e2e.py --bins target/x86_64-pc-windows-msvc/release --fetch-old-version 0.3.52 --out build/monitor-cutover
 ```
 
 Require `status=PASS`, sharing-failure recovery, unchanged six-core state during
-repair, idempotent replay, and preserved auxiliary receipt/history/backup after
+repair, actual execution of `pmux-activity-monitor --version` through PATH,
+and command restoration on current-frontend replay. Neither `--check` path
+may create the missing command. Existing command entries remain unchanged;
+standalone installations without a `cmd` directory do not gain one.
+Require idempotent replay and preserved auxiliary receipt/history/backup after
 core rollback. Retain `commands.json` and `result.json`. A missing symlink
 privilege produces PARTIAL and exit 2. The fixture uses actual old and new
 executables, substitutes HTTPS transport, and seeds prepared-state recovery

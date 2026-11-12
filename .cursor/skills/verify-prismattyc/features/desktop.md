@@ -63,7 +63,7 @@ directory with no other running fixture. Teardown tracks child process groups
 and exact build executable paths, including replacement processes. SIGTERM
 and SIGHUP run the same teardown and retain the result file.
 
-- Run `python3 tests/native/full-update-restart-e2e.py --bins "$verify_bins" --out "$verify_evidence/update-cli"` for daemon replacement, restored directories and commands, retry behavior, and mailbox durability. The current-build drive also checks same-layout directory and resume-command autosave, then prunes a closed session from its saved Space. Inspect `binary_version` in `result.json` against the intended revision.
+- On Linux or macOS, run `python3 tests/native/full-update-restart-e2e.py --bins "$verify_bins" --out "$verify_evidence/update-cli"` for daemon replacement, restored directories and commands, retry behavior, and mailbox durability. The current-build drive also checks same-layout directory and resume-command autosave, then prunes a closed session from its saved Space. Inspect `binary_version` in `result.json` against the intended revision. This fixture rejects Windows.
 - On a logged-in macOS desktop with Accessibility permission, add `--native` with a separate output directory. The fixture sends native keys to its owned host PID, checks cancellation preserves sessions, chooses Save and continue, waits for the replacement app's restore offer, and restores sessions. Inspect the consent, offer, and result PNGs and JSON snapshots. Match each capture to the host instance, PID, and capture sequence in its frame sidecar; sequence numbers reset on exec. The PNGs show presented app pixels, not OS composition.
 - In a disposable clean macOS VM only, install the released 0.3.38 app and run the CLI fixture with `--upgrade-app /Applications/Prismattyc.app`. This performs a real release download, verification, and app replacement. It then restarts the private daemon from the installed app and restores the saved configuration. Retain the initial app checksum and actual updater output. This command changes that VM's app installation.
 
@@ -79,7 +79,8 @@ The native fixture's current-release restart path and the real installer
 path are separate drives. Record which ran. Neither one substitutes for
 clean-VM UI proof. A guest with no active display can supply CLI evidence
 only; record the failed capture command and missing display prerequisite.
-A Windows desktop is required to prove the Windows replacement-host path.
+A Windows desktop and a separate Windows driver are required to prove the
+Windows replacement-host path; the CLI fixture above does not provide one.
 
 ## Gotchas
 

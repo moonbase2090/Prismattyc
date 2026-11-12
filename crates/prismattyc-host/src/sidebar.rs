@@ -107,7 +107,10 @@ impl TabNode {
                 .collect()
         };
         TabNode {
-            title: info.title.clone(),
+            title: info
+                .fixed_name
+                .clone()
+                .unwrap_or_else(|| info.title.clone()),
             fixed_name: info.fixed_name.clone(),
             selected: info.selected,
             unseen: info.unseen,
@@ -377,7 +380,10 @@ impl SidebarTree {
                     .iter()
                     .map(|tab| {
                         let mut node = TabNode::live(tab.info, tab.mail, tab.attention);
-                        if node.panes.len() == 1 && !tab.session_names.is_empty() {
+                        if tab.info.fixed_name.is_none()
+                            && node.panes.len() == 1
+                            && !tab.session_names.is_empty()
+                        {
                             node.title = tab_label(&tab.info.title, tab.session_names);
                         }
                         node
@@ -800,6 +806,51 @@ mod tests {
         assert_eq!(notes.panes.len(), 1);
         assert_eq!(notes.panes[0].title, "notes");
         assert!(!notes.panes[0].focused, "focus sits in the other tab");
+    }
+
+    #[test]
+    fn live_tab_row_shows_fixed_name_and_survives_single_session_label() {
+        let mut named = live_tab("tn-1", true, vec![("a", true), ("b", false)], Some(0));
+        named.fixed_name = Some("Build".to_string());
+        let mut single = live_tab("tn-2", false, vec![], None);
+        single.fixed_name = Some("Docs".to_string());
+        let unnamed = live_tab("tn-3", false, vec![], None);
+        let sessions = ["shell".to_string()];
+        let none: [String; 0] = [];
+        let tabs = [
+            LiveTab {
+                info: &named,
+                session_names: &none,
+                mail: &[0, 0],
+                attention: &[false, false],
+            },
+            LiveTab {
+                info: &single,
+                session_names: &sessions,
+                mail: &[0],
+                attention: &[false],
+            },
+            LiveTab {
+                info: &unnamed,
+                session_names: &sessions,
+                mail: &[0],
+                attention: &[false],
+            },
+        ];
+        let tree = SidebarTree::build(&[SpaceInput {
+            name: "lab",
+            current: true,
+            collapsed: false,
+            attention: 0,
+            tabs: TabsSource::Live(&tabs),
+        }]);
+        let rows = &tree.spaces[0].tabs;
+        assert_eq!(rows[0].title, "Build");
+        assert_eq!(rows[1].title, "Docs");
+        assert_eq!(
+            rows[2].title, "tn-3 · shell",
+            "unnamed tabs keep the derived label"
+        );
     }
 
     #[test]

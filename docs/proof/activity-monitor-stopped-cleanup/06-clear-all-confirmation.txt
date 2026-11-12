@@ -1,0 +1,23 @@
+ Activity monitor   ● 1 working  ◆ 0 waiting  ○ 0 idle  ! 0 stuck  ✕ 0 failed  …
+ mac  connected  5 seats                                                     ⡇⡀
+▌● activity-monitor  working             7s                                   ⣄
+ ■ bravo-seat        stopped            17s down                             ⡇
+ ■ charlie-seat      turn_finished      17s down                             ⣇⣀
+
+
+
+
+        Clear stopped sessions
+
+        Clean up 2 tracked session(s); hide 0 old row(s). Live sessions
+        are refused.
+        Enter / y confirm    Esc / n cancel
+
+
+
+
+
+
+
+
+ x remove  X clear  : commands  ↑↓ move  ⏎ timeline  q quit  d details

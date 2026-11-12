@@ -7,6 +7,7 @@ use lunatui_core::{Attrs, Color, Rect, Style};
 use lunatui_term::{Event, KeyCode, KeyEvent, KeyKind, MouseButton, MouseEvent, MouseKind, Scroll};
 use lunatui_theme::{Theme, Token, Variant};
 use lunatui_widgets::RenderCx;
+use pmux_plugin_api::guest::pmux::activity::manage;
 use pmux_plugin_api::monitor::GraphStyle;
 use prismattyc_core::activity::{ActivityKind, ActivityRecord};
 use prismattyc_core::AgentId;
@@ -207,6 +208,22 @@ pub enum Row {
     Note(usize),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CleanupRequest {
+    pub host: usize,
+    pub seat: AgentId,
+    pub session_id: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RemovalPrompt {
+    One(CleanupRequest),
+    All {
+        tracked: Vec<CleanupRequest>,
+        untracked: Vec<(usize, AgentId)>,
+    },
+}
+
 pub struct Ui {
     pub screen: Screen,
     pub selected: Option<(usize, AgentId)>,
@@ -218,6 +235,10 @@ pub struct Ui {
     pub motion: bool,
     /// Run and event hashes are hidden unless the operator opts into diagnostics.
     pub hashes: bool,
+    command_palette: bool,
+    removal_prompt: Option<RemovalPrompt>,
+    cleanup_requests: Vec<CleanupRequest>,
+    notice: Option<String>,
     list_offset: usize,
     timeline_offset: usize,
     /// Rows per page from the last frame, for PgUp/PgDn.
@@ -240,6 +261,10 @@ impl Default for Ui {
             graph_style: GraphStyle::default(),
             motion: true,
             hashes: false,
+            command_palette: false,
+            removal_prompt: None,
+            cleanup_requests: Vec::new(),
+            notice: None,
             list_offset: 0,
             timeline_offset: 0,
             page: 10,
@@ -279,6 +304,7 @@ pub fn rows(hosts: &[Host], ui: &Ui, now: u64) -> Vec<Row> {
             .seats
             .iter()
             .filter(|(_, seat)| visible(host, seat, ui.filter, now))
+            .filter(|(id, seat)| !host.is_dismissed(id, seat.session_id()))
             .collect();
         match ui.sort {
             Sort::Name => {}
@@ -309,6 +335,107 @@ fn seat_rows(rows: &[Row]) -> Vec<(usize, AgentId)> {
 }
 
 impl Ui {
+    pub fn take_cleanup_requests(&mut self) -> Vec<CleanupRequest> {
+        std::mem::take(&mut self.cleanup_requests)
+    }
+
+    pub fn resolve_cleanup(
+        &mut self,
+        request: CleanupRequest,
+        result: Result<manage::Removal, String>,
+        hosts: &mut [Host],
+    ) {
+        match result {
+            Ok(manage::Removal::Removed) => {
+                let hidden = hosts.get_mut(request.host).is_some_and(|host| {
+                    host.dismiss_session(&request.seat, Some(request.session_id))
+                });
+                self.notice = Some(if hidden {
+                    "Removed the row and cleaned up the stopped pmux session.".into()
+                } else {
+                    "The session changed while cleanup ran; nothing was hidden.".into()
+                });
+            }
+            Ok(manage::Removal::Missing) => {
+                let hidden = hosts.get_mut(request.host).is_some_and(|host| {
+                    host.dismiss_session(&request.seat, Some(request.session_id))
+                });
+                self.notice = Some(if hidden {
+                    "Hidden the row only; the pmux session was already absent.".into()
+                } else {
+                    "The session changed while cleanup ran; nothing was hidden.".into()
+                });
+            }
+            Ok(manage::Removal::Live) => {
+                self.notice = Some("Still live; nothing was removed.".into());
+            }
+            Err(error) => self.notice = Some(format!("Cleanup unavailable: {error}")),
+        }
+    }
+
+    fn request_remove_selected(&mut self, hosts: &mut [Host]) {
+        let Some((host_index, seat_id)) = self.selected.clone() else {
+            self.notice = Some("Select a down session first.".into());
+            return;
+        };
+        let Some(session_id) = hosts
+            .get(host_index)
+            .and_then(|host| host.seats.get(&seat_id))
+            .filter(|seat| seat.state == SeatState::Stopped)
+            .and_then(Seat::session_id)
+        else {
+            let hidden = hosts
+                .get_mut(host_index)
+                .is_some_and(|host| host.dismiss_stopped(&seat_id));
+            self.notice = Some(if hidden {
+                "Hidden the row only; pmux no longer tracks this session.".into()
+            } else {
+                "Only down sessions can be removed.".into()
+            });
+            return;
+        };
+        self.removal_prompt = Some(RemovalPrompt::One(CleanupRequest {
+            host: host_index,
+            seat: seat_id,
+            session_id,
+        }));
+    }
+
+    fn request_clear_stopped(&mut self, hosts: &mut [Host]) {
+        let mut tracked = Vec::new();
+        let mut untracked = Vec::new();
+        for (host_index, host) in hosts.iter().enumerate() {
+            for (seat_id, seat) in &host.seats {
+                if seat.state != SeatState::Stopped || host.is_dismissed(seat_id, seat.session_id())
+                {
+                    continue;
+                }
+                if let Some(session_id) = seat.session_id() {
+                    tracked.push(CleanupRequest {
+                        host: host_index,
+                        seat: seat_id.clone(),
+                        session_id,
+                    });
+                } else {
+                    untracked.push((host_index, seat_id.clone()));
+                }
+            }
+        }
+        if tracked.is_empty() {
+            let mut hidden = 0usize;
+            for (host, seat) in untracked {
+                if hosts[host].dismiss_stopped(&seat) {
+                    hidden += 1;
+                }
+            }
+            self.notice = Some(format!(
+                "Hidden {hidden} down row(s); no stopped pmux sessions remain."
+            ));
+        } else {
+            self.removal_prompt = Some(RemovalPrompt::All { tracked, untracked });
+        }
+    }
+
     /// The selection, repaired to a visible seat when the selected one is gone.
     pub fn current(&mut self, rows: &[Row]) -> Option<(usize, AgentId)> {
         let seats = seat_rows(rows);
@@ -364,10 +491,52 @@ impl Ui {
     }
 
     /// Applies one key. Returns true to quit.
-    pub fn key(&mut self, key: &KeyEvent, hosts: &[Host], now: u64) -> bool {
+    pub fn key(&mut self, key: &KeyEvent, hosts: &mut [Host], now: u64) -> bool {
         if key.kind == KeyKind::Release {
             return false;
         }
+        if let Some(prompt) = self.removal_prompt.take() {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y' | 'Y') => {
+                    match prompt {
+                        RemovalPrompt::One(request) => self.cleanup_requests.push(request),
+                        RemovalPrompt::All { tracked, untracked } => {
+                            for (host, seat) in untracked {
+                                if hosts[host].dismiss_stopped(&seat) {
+                                    self.notice = Some(
+                                        "Cleared stopped rows; checking tracked pmux sessions…"
+                                            .into(),
+                                    );
+                                }
+                            }
+                            self.cleanup_requests.extend(tracked);
+                        }
+                    }
+                    self.notice = Some("Checking each session with pmuxd…".into());
+                }
+                KeyCode::Esc | KeyCode::Char('n' | 'N' | 'q') => {
+                    self.notice = Some("Nothing was removed.".into());
+                }
+                _ => self.removal_prompt = Some(prompt),
+            }
+            return false;
+        }
+        if self.command_palette {
+            match key.code {
+                KeyCode::Char('1') => {
+                    self.command_palette = false;
+                    self.request_remove_selected(hosts);
+                }
+                KeyCode::Char('2') => {
+                    self.command_palette = false;
+                    self.request_clear_stopped(hosts);
+                }
+                KeyCode::Esc | KeyCode::Char('q') => self.command_palette = false,
+                _ => {}
+            }
+            return false;
+        }
+        self.notice = None;
         let ctrl = key.modifiers.is_control();
         if ctrl && matches!(key.code, KeyCode::Char('c' | 'C')) {
             return true;
@@ -380,6 +549,18 @@ impl Ui {
         let rows = rows(hosts, self, now);
         self.current(&rows);
         let page = self.page.max(1) as isize;
+        if self.screen == Screen::List && key.code == KeyCode::Char('x') {
+            self.request_remove_selected(hosts);
+            return false;
+        }
+        if self.screen == Screen::List && key.code == KeyCode::Char('X') {
+            self.request_clear_stopped(hosts);
+            return false;
+        }
+        if self.screen == Screen::List && key.code == KeyCode::Char(':') {
+            self.command_palette = true;
+            return false;
+        }
         match (self.screen, key.code) {
             (_, KeyCode::Char('q')) => return true,
             (_, KeyCode::Char('?')) => self.help = true,
@@ -438,7 +619,7 @@ impl Ui {
         false
     }
 
-    pub fn event(&mut self, event: &Event, hosts: &[Host], now: u64) -> bool {
+    pub fn event(&mut self, event: &Event, hosts: &mut [Host], now: u64) -> bool {
         match event {
             Event::Key(key) => self.key(key, hosts, now),
             Event::Mouse(mouse) => {
@@ -619,7 +800,13 @@ fn blend(palette: &Palette, color: Color, alpha: f32) -> Color {
 
 fn counts(hosts: &[Host]) -> [usize; SeatState::ALL.len()] {
     let mut out = [0; SeatState::ALL.len()];
-    for seat in hosts.iter().flat_map(|host| host.seats.values()) {
+    for (host, seat) in hosts
+        .iter()
+        .flat_map(|host| host.seats.values().map(move |seat| (host, seat)))
+    {
+        if host.is_dismissed(&seat.latest().event.seat, seat.session_id()) {
+            continue;
+        }
         if let Some(index) = SeatState::ALL.iter().position(|state| *state == seat.state) {
             out[index] += 1;
         }
@@ -711,6 +898,12 @@ pub fn render(
     }
     if ui.help {
         draw_help(&mut paint, area);
+    }
+    if ui.command_palette {
+        draw_command_palette(&mut paint, area);
+    }
+    if let Some(prompt) = &ui.removal_prompt {
+        draw_removal_prompt(&mut paint, area, prompt);
     }
 }
 
@@ -1791,9 +1984,16 @@ fn draw_footer(
     let y = area.y + area.height - 1;
     let limit = area.x + area.width;
     let idle = hint(hosts).is_some();
+    if let Some(notice) = &ui.notice {
+        paint.text(area.x + 1, y, limit, notice, fg(paint.palette.focus));
+        return;
+    }
     let hints: &[(&str, &str)] = match ui.screen {
         _ if idle => &[("q", "quit")],
         Screen::List => &[
+            ("x", "remove"),
+            ("X", "clear"),
+            (":", "commands"),
             ("↑↓", "move"),
             ("⏎", "timeline"),
             ("d", "details"),
@@ -1836,7 +2036,7 @@ fn draw_footer(
     }
     let order: &[usize] = match ui.screen {
         _ if idle => &[0],
-        Screen::List => &[0, 1, 2, 4, 5, 7, 8, 9, 6, 3],
+        Screen::List => &[0, 1, 2, 3, 4, 6, 7, 9, 10, 11, 12, 8, 5],
         Screen::Timeline => &[0, 1, 2, 3, 4],
         Screen::Details => &[0, 1, 2, 3],
     };
@@ -1857,6 +2057,11 @@ fn draw_help(paint: &mut Painter<'_, '_>, area: Rect) {
         ("Tab", "next host (Shift-Tab: previous)"),
         ("Enter → l", "open the timeline"),
         ("d", "open selected seat details"),
+        (
+            "x / X",
+            "remove selected / clear down rows; confirm cleanup",
+        ),
+        (":", "open monitor commands"),
         ("i", "show or hide run and operation ids"),
         ("Esc ← h", "back to the list"),
         ("f", "filter: all, needs attention, working"),
@@ -1907,6 +2112,132 @@ fn draw_help(paint: &mut Painter<'_, '_>, area: Rect) {
         paint.text(x + 2, row, x + 13, key, surface.fg(palette.text));
         paint.text(x + 14, row, limit - 1, action, surface.fg(palette.muted));
     }
+}
+
+fn draw_command_palette(paint: &mut Painter<'_, '_>, area: Rect) {
+    let lines = [
+        ("1", "Remove selected stopped session"),
+        ("2", "Clear all stopped sessions"),
+    ];
+    let palette = *paint.palette;
+    let width = 48.min(area.width.saturating_sub(2));
+    let height = 7.min(area.height.saturating_sub(1));
+    if width < 24 || height < 6 {
+        return;
+    }
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 2;
+    let surface = Style::new().bg(palette.raised);
+    paint.fill(Rect::new(x, y, width, height), surface);
+    let border = surface.fg(palette.hairline);
+    let limit = x + width;
+    paint.text(
+        x,
+        y,
+        limit,
+        &format!("╭{}╮", "─".repeat(usize::from(width - 2))),
+        border,
+    );
+    for row in y + 1..y + height - 1 {
+        paint.text(x, row, limit, "│", border);
+        paint.text(limit - 1, row, limit, "│", border);
+    }
+    paint.text(
+        x,
+        y + height - 1,
+        limit,
+        &format!("╰{}╯", "─".repeat(usize::from(width - 2))),
+        border,
+    );
+    paint.text(
+        x + 2,
+        y + 1,
+        limit - 1,
+        "Activity commands",
+        bold(surface.fg(palette.strong)),
+    );
+    for (index, (key, action)) in lines.iter().enumerate() {
+        let row = y + 3 + index as u16;
+        paint.text(x + 2, row, x + 5, key, surface.fg(palette.focus));
+        paint.text(x + 6, row, limit - 1, action, surface.fg(palette.text));
+    }
+}
+
+fn draw_removal_prompt(paint: &mut Painter<'_, '_>, area: Rect, prompt: &RemovalPrompt) {
+    let detail = match prompt {
+        RemovalPrompt::One(_) => "Remove the down row and clean up its dead pmux session?",
+        RemovalPrompt::All { tracked, untracked } => {
+            return draw_prompt_box(
+                paint,
+                area,
+                "Clear stopped sessions",
+                &format!(
+                    "Clean up {} tracked session(s); hide {} old row(s). Live sessions are refused.",
+                    tracked.len(),
+                    untracked.len()
+                ),
+            );
+        }
+    };
+    draw_prompt_box(paint, area, "Remove stopped session", detail);
+}
+
+fn draw_prompt_box(paint: &mut Painter<'_, '_>, area: Rect, title: &str, detail: &str) {
+    let width = 68.min(area.width.saturating_sub(2));
+    if width < 24 {
+        return;
+    }
+    let detail_width = usize::from(width.saturating_sub(4)).max(1);
+    let mut detail_lines = Vec::new();
+    let mut line = String::new();
+    for word in detail.split_whitespace() {
+        if !line.is_empty() && line.len() + 1 + word.len() > detail_width {
+            detail_lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        detail_lines.push(line);
+    }
+    let height = (detail_lines.len() as u16 + 5).min(area.height.saturating_sub(1));
+    if height < 6 {
+        return;
+    }
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 2;
+    let surface = Style::new().bg(paint.palette.raised);
+    paint.fill(Rect::new(x, y, width, height), surface);
+    let limit = x + width - 1;
+    paint.text(
+        x + 2,
+        y + 1,
+        limit,
+        title,
+        bold(surface.fg(paint.palette.strong)),
+    );
+    for (index, line) in detail_lines
+        .iter()
+        .take(usize::from(height.saturating_sub(5)))
+        .enumerate()
+    {
+        paint.text(
+            x + 2,
+            y + 3 + index as u16,
+            limit,
+            line,
+            surface.fg(paint.palette.text),
+        );
+    }
+    paint.text(
+        x + 2,
+        y + height - 2,
+        limit,
+        "Enter / y confirm    Esc / n cancel",
+        surface.fg(paint.palette.muted),
+    );
 }
 
 #[cfg(test)]
@@ -2022,7 +2353,7 @@ mod tests {
 
 
 
- ↑↓ move  ⏎ timeline  d details  ⇥ host  f filter  s sort  i IDs  ? keys  q quit"#,
+ x remove  X clear  : commands  ↑↓ move  ⏎ timeline  q quit  ⇥ host  ? keys  f filter  d details"#,
         ),
         (
             60,
@@ -2040,7 +2371,7 @@ mod tests {
 
 
 
- ↑↓ move  ⏎ timeline  d details  ⇥ host  f filter  q quit"#,
+ x remove  X clear  : commands  ↑↓ move  ⏎ timeline"#,
         ),
         (
             30,
@@ -2054,7 +2385,7 @@ mod tests {
  ● worker-a                 4s
  windows  retrying for 12s
  ● win-agent               19s
- ↑↓ move  ⏎ timeline"#,
+ x remove  X clear"#,
         ),
         (
             120,
@@ -2080,7 +2411,7 @@ mod tests {
                                                               │
                                                               │
                                                               │
- ↑↓ move  ⏎ timeline  d details  ⇥ host  f filter  s sort  i IDs  ? keys  q quit"#,
+ x remove  X clear  : commands  ↑↓ move  ⏎ timeline  q quit  ⇥ host  ? keys  s sort  i IDs  f filter  d details"#,
         ),
         (
             90,
@@ -2109,16 +2440,17 @@ mod tests {
             20,
             "?",
             r#"
- Activity monitor   ●2 ◆1 ○0 !0 ✕1 ■0 !
- mac  ╭────────────────────────────────────────────────────────╮
-▌✕ bui│ Keys                                                   │
- ◆ rev│                                                        │
- ● wor│ ↑ ↓  j k    move, or scroll the timeline or details    │
- windo│ PgUp PgDn   move by a page                             │
- ● win│ g G         first or last                              │
-      │ Tab         next host (Shift-Tab: previous)            │
+ Activ╭────────────────────────────────────────────────────────╮
+ mac  │ Keys                                                   │
+▌✕ bui│                                                        │
+ ◆ rev│ ↑ ↓  j k    move, or scroll the timeline or details    │
+ ● wor│ PgUp PgDn   move by a page                             │
+ windo│ g G         first or last                              │
+ ● win│ Tab         next host (Shift-Tab: previous)            │
       │ Enter → l   open the timeline                          │
       │ d           open selected seat details                 │
+      │ x / X       remove selected / clear down rows; confirm…│
+      │ :           open monitor commands                      │
       │ i           show or hide run and operation ids         │
       │ Esc ← h     back to the list                           │
       │ f           filter: all, needs attention, working      │
@@ -2127,8 +2459,7 @@ mod tests {
       │ mouse       click selects, again opens; wheel moves    │
       │ q           quit                                       │
       ╰────────────────────────────────────────────────────────╯
-
- ↑↓ move  ⏎ timeline  d details  ⇥ host  f filter  ? keys  q quit"#,
+ x remove  X clear  : commands  ↑↓ move  ⏎ timeline  d details"#,
         ),
         (
             44,
@@ -2172,6 +2503,102 @@ mod tests {
         assert_eq!(monitor.ui.graph_style, GraphStyle::Braille);
         assert_eq!(line_of(&text, "builder").chars().nth(98), Some('⣀'));
         Ok(())
+    }
+
+    fn stopped_monitor() -> Monitor {
+        use prismattyc_core::activity::{ActivitySession, ActivitySessionState, ActivitySessions};
+
+        let mut monitor = Monitor::new(vec!["local".into()], Palette::DARK, 0);
+        let seat = AgentId::new("stopped-seat").unwrap();
+        let mut page = page_in("epoch", vec![], None).unwrap();
+        page.sessions = Some(ActivitySessions {
+            observed_at_ms: 1_000,
+            seats: vec![ActivitySession {
+                seat: seat.clone(),
+                session_id: 42,
+                state: ActivitySessionState::Stopped,
+                last_output_at_ms: None,
+                harness: None,
+                model: None,
+                quota: None,
+                project: None,
+            }],
+        });
+        monitor.hosts[0].apply(page, 0);
+        monitor.ui.selected = Some((0, seat));
+        monitor
+    }
+
+    #[test]
+    fn tracked_remove_prompts_and_refuses_a_session_that_became_live() {
+        let mut monitor = stopped_monitor();
+        press_char(&mut monitor, 'x');
+        assert!(monitor.ui.removal_prompt.is_some());
+        assert!(monitor.ui.take_cleanup_requests().is_empty());
+        press(&mut monitor, KeyCode::Enter);
+        let request = monitor.ui.take_cleanup_requests().pop().unwrap();
+        monitor
+            .ui
+            .resolve_cleanup(request, Ok(manage::Removal::Live), &mut monitor.hosts);
+        assert_eq!(counts(&monitor.hosts)[5], 1);
+        assert!(matches!(
+            rows(&monitor.hosts, &monitor.ui, 0).as_slice(),
+            [Row::Host(0), Row::Seat(0, _)]
+        ));
+    }
+
+    #[test]
+    fn command_palette_runs_selected_remove_and_clear_all() {
+        let mut one = stopped_monitor();
+        press_char(&mut one, ':');
+        assert!(one.ui.command_palette);
+        let (frame, ..) = draw(&mut one, 60, 12);
+        assert!(frame.contains("Activity commands"));
+        assert!(frame.contains("Remove selected stopped session"));
+        assert!(frame.contains("Clear all stopped sessions"));
+        press_char(&mut one, '1');
+        assert!(!one.ui.command_palette);
+        assert!(one.ui.removal_prompt.is_some());
+
+        let mut all = stopped_monitor();
+        press_char(&mut all, ':');
+        press_char(&mut all, '2');
+        assert!(all.ui.removal_prompt.is_some());
+    }
+
+    #[test]
+    fn cleanup_hides_the_session_and_keeps_it_hidden_after_a_stale_refresh() {
+        let mut monitor = stopped_monitor();
+        press_char(&mut monitor, 'x');
+        press(&mut monitor, KeyCode::Char('y'));
+        let request = monitor.ui.take_cleanup_requests().pop().unwrap();
+        monitor
+            .ui
+            .resolve_cleanup(request, Ok(manage::Removal::Removed), &mut monitor.hosts);
+        assert_eq!(counts(&monitor.hosts)[5], 0);
+        assert!(!rows(&monitor.hosts, &monitor.ui, 0)
+            .iter()
+            .any(|row| matches!(row, Row::Seat(..))));
+
+        let mut stale_refresh = page_in("epoch", vec![], None).unwrap();
+        stale_refresh.sessions = Some(prismattyc_core::activity::ActivitySessions {
+            observed_at_ms: 2_000,
+            seats: vec![prismattyc_core::activity::ActivitySession {
+                seat: AgentId::new("stopped-seat").unwrap(),
+                session_id: 42,
+                state: prismattyc_core::activity::ActivitySessionState::Stopped,
+                last_output_at_ms: None,
+                harness: None,
+                model: None,
+                quota: None,
+                project: None,
+            }],
+        });
+        monitor.hosts[0].apply(stale_refresh, 250);
+        assert_eq!(counts(&monitor.hosts)[5], 0);
+        assert!(!rows(&monitor.hosts, &monitor.ui, 0)
+            .iter()
+            .any(|row| matches!(row, Row::Seat(..))));
     }
 
     fn selected(monitor: &Monitor) -> Option<(usize, String)> {

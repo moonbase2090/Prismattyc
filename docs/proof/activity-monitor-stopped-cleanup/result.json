@@ -1,0 +1,56 @@
+{
+  "status": "PASS",
+  "tested_revision": "0b80ecf05c82136afbddc8fe4f00d74a68407b07",
+  "platform": "macOS Tart VM with isolated fresh app runtime",
+  "steps": [
+    {
+      "action": "Open monitor on the clean VM with four synthetic stopped sessions.",
+      "assertions": [
+        "four neutral synthetic stopped sessions visible"
+      ]
+    },
+    {
+      "action": "Press x for the selected stopped alpha-seat.",
+      "assertions": [
+        "confirmation asks before cleanup",
+        "alpha-seat is still tracked by pmuxd"
+      ]
+    },
+    {
+      "action": "Cancel with Escape.",
+      "assertions": [
+        "session remains present after cancel"
+      ]
+    },
+    {
+      "action": "Confirm alpha-seat cleanup with Enter.",
+      "assertions": [
+        "row removed",
+        "pmuxd session absent",
+        "success notice says cleanup completed"
+      ]
+    },
+    {
+      "action": "Remove an already-untracked historical down row with x.",
+      "assertions": [
+        "row hidden",
+        "no pmuxd session existed to clean up"
+      ]
+    },
+    {
+      "action": "Press X with two tracked stopped sessions.",
+      "assertions": [
+        "clear-all confirmation names two tracked sessions",
+        "live sessions are refused"
+      ]
+    },
+    {
+      "action": "Confirm clear-all with Enter.",
+      "assertions": [
+        "both down rows absent",
+        "both pmuxd sessions absent"
+      ]
+    }
+  ],
+  "leftovers_after_teardown": []
+}

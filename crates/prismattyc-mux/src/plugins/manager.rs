@@ -8,7 +8,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context, Result};
 use base64::Engine as _;
-use pmux_plugin_api::host::pmux::{activity::read, plugin::lifecycle, tool::call, view::frame};
+use pmux_plugin_api::host::pmux::{
+    activity::{manage, read},
+    plugin::lifecycle,
+    tool::call,
+    view::frame,
+};
 use pmux_plugin_api::{validate_viewport, ValidatedFrame, API_VERSION, CONTRACTS, MAX_FRAME_BYTES};
 use pmux_plugin_runtime::ActivityProvider;
 use prismattyc_core::activity::{ActivityCursor, ActivityPage};
@@ -35,8 +40,16 @@ pub(crate) const DEFAULT_PLUGINS: [&str; 2] = [
     "org.moonbase.activity-connector",
 ];
 
-/// Local activity access, the only grant a default plug-in gets.
+/// Local activity access, the default grant for read-only plug-ins.
 const DEFAULT_GRANT: &str = "activity.read:local";
+
+fn default_grants(id: &str) -> Vec<String> {
+    let mut grants = vec![DEFAULT_GRANT.to_owned()];
+    if id == "org.moonbase.activity-monitor" {
+        grants.push("activity.manage:local".into());
+    }
+    grants
+}
 
 /// Constructed without touching disk. Storage is created by the first plug-in
 /// request or by [`Service::seed_defaults`].
@@ -541,7 +554,7 @@ impl Manager {
                 return DEFAULT_PLUGINS
                     .iter()
                     .map(|id| (*id, Err(anyhow::anyhow!("{error:#}"))))
-                    .collect()
+                    .collect();
             }
         };
         DEFAULT_PLUGINS
@@ -572,6 +585,10 @@ impl Manager {
             if !is_older(&selected.version, &entry.entry.version) {
                 return Ok(false);
             }
+            let mut grants = grants;
+            if id == "org.moonbase.activity-monitor" && !grants.contains("activity.manage:local") {
+                grants.insert("activity.manage:local".into());
+            }
             return Ok(self.move_to_compatible(id, &selected, &grants, true));
         }
         let Ok(entry) = bundled.get(id, None) else {
@@ -592,7 +609,7 @@ impl Manager {
             nonce()?,
             AdminAction::Enable {
                 package,
-                grants: vec![DEFAULT_GRANT.to_owned()],
+                grants: default_grants(id),
             },
         )?;
         Ok(true)
@@ -635,7 +652,10 @@ impl Manager {
                 };
                 endpoint.validate()?;
                 let state = self.state.lock().unwrap();
-                ensure!(!state.journal.endpoints.contains_key(&label), "endpoint label already exists; remove it and approve new grants before replacing its transport");
+                ensure!(
+                    !state.journal.endpoints.contains_key(&label),
+                    "endpoint label already exists; remove it and approve new grants before replacing its transport"
+                );
                 ensure!(
                     state.journal.endpoints.len() < 31,
                     "too many configured endpoints"
@@ -830,6 +850,7 @@ fn validate_grants(
 ) -> Result<()> {
     ensure!(
         grants.iter().all(|grant| grant == "activity.read:local"
+            || grant == "activity.manage:local"
             || grant
                 .strip_prefix("activity.read:")
                 .is_some_and(|label| endpoints.contains_key(label))),
@@ -1024,7 +1045,8 @@ fn context(
                 && (*name != "pmux:activity/read"
                     || grants
                         .iter()
-                        .any(|grant| grant.starts_with("activity.read:")));
+                        .any(|grant| grant.starts_with("activity.read:")))
+                && (*name != "pmux:activity/manage" || grants.contains("activity.manage:local"));
             capabilities.push(lifecycle::Capability {
                 name: (*name).into(),
                 version: (*version).into(),
@@ -1069,7 +1091,9 @@ impl Manager {
             let state = self.state.lock().unwrap();
             let Some(Desired::Enabled { selected, grants }) = state.journal.selections.get(id)
             else {
-                bail!("plug-in {id} is not enabled; inspect its installation and grants with pmux plugin list");
+                bail!(
+                    "plug-in {id} is not enabled; inspect its installation and grants with pmux plugin list"
+                );
             };
             let slot = state
                 .slots
@@ -1735,6 +1759,48 @@ struct Provider {
 }
 
 impl ActivityProvider for Provider {
+    fn remove_stopped(
+        &mut self,
+        endpoint: u64,
+        session_id: u64,
+    ) -> Result<manage::Removal, String> {
+        if self.manager.stopped.load(Ordering::Acquire) {
+            return Err("plug-in manager stopped".into());
+        }
+        let state = self
+            .manager
+            .state
+            .lock()
+            .map_err(|_| "plug-in state is unavailable".to_owned())?;
+        let worker =
+            admitted(&state, &self.worker).map_err(|_| "plug-in worker was revoked".to_owned())?;
+        if !worker
+            .endpoints
+            .get(&endpoint)
+            .is_some_and(|(_, _, access)| matches!(access, Access::Local))
+        {
+            return Err("session cleanup is supported only for the local pmuxd".into());
+        }
+        let authorized = matches!(
+            state.journal.selections.get(&worker.plugin),
+            Some(Desired::Enabled { grants, .. }) if grants.contains("activity.manage:local")
+        );
+        if !authorized {
+            return Err("session cleanup permission is not approved".into());
+        }
+        drop(state);
+        let plane = self
+            .manager
+            .plane
+            .upgrade()
+            .ok_or("daemon is unavailable")?;
+        let result = plane
+            .lock()
+            .map_err(|_| "daemon control plane is unavailable".to_owned())?
+            .plugin_remove_stopped_session(session_id);
+        result
+    }
+
     fn endpoints(&mut self) -> Result<Vec<read::Endpoint>, read::Error> {
         if self.manager.stopped.load(Ordering::Acquire) {
             return Err(read::Error::Revoked);
@@ -2090,7 +2156,7 @@ mod tests {
     }
 
     #[test]
-    fn the_defaults_are_the_official_activity_plugins_with_local_access_only() {
+    fn the_default_monitor_gets_local_stopped_session_cleanup() {
         assert_eq!(
             DEFAULT_PLUGINS,
             [
@@ -2099,6 +2165,8 @@ mod tests {
             ]
         );
         assert_eq!(DEFAULT_GRANT, "activity.read:local");
+        assert!(default_grants(DEFAULT_PLUGINS[0]).contains(&"activity.manage:local".to_owned()));
+        assert!(!default_grants(DEFAULT_PLUGINS[1]).contains(&"activity.manage:local".to_owned()));
     }
 
     #[test]

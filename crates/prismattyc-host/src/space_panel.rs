@@ -188,6 +188,54 @@ impl Panel {
         );
     }
 
+    /// Focus border animation: mode, head box, and preset sweep speeds.
+    /// The complete settings editor keeps the exact millisecond integer.
+    fn focus_animation_rows(&mut self, config: &config::ConfigFile) {
+        let current = if config.light_cycle() {
+            "light-cycle"
+        } else {
+            "none"
+        };
+        for (value, label, detail) in [
+            (
+                "light-cycle",
+                "Focus animation: light-cycle",
+                "Sweep the focus border on focus change",
+            ),
+            (
+                "none",
+                "Focus animation: none",
+                "Focus ring appears instantly",
+            ),
+        ] {
+            self.row(
+                label,
+                if current == value { "Selected" } else { detail },
+                Choice::Preference("focus_border_animation".into(), value.into()),
+            );
+        }
+        let head = config.focus_border_animation_head.unwrap_or(true);
+        self.row(
+            format!("Animation head box: {}", if head { "on" } else { "off" }),
+            "Draw the bright vehicle box at the sweep head",
+            Choice::Preference("focus_border_animation_head".into(), (!head).to_string()),
+        );
+        let current_ms = config
+            .focus_border_animation_ms
+            .unwrap_or(DEFAULT_LIGHT_CYCLE_MS as u64);
+        for (ms, name) in [(140_u64, "fast"), (280, "normal"), (560, "slow")] {
+            self.row(
+                format!("Sweep speed: {name}"),
+                if current_ms == ms {
+                    "Selected".to_string()
+                } else {
+                    format!("{ms} ms sweep")
+                },
+                Choice::Preference("focus_border_animation_ms".into(), ms.to_string()),
+            );
+        }
+    }
+
     fn link_click_rows(&mut self, current: crate::link_click::Mode) {
         for (mode, value, detail) in [
             (
@@ -391,6 +439,7 @@ impl Panel {
                         Choice::Preference("space_startup".into(), value.into()),
                     );
                 }
+                self.focus_animation_rows(&config);
                 self.link_click_rows(config.link_click());
                 self.toast_rows(config.toasts());
             }
@@ -1100,8 +1149,14 @@ pub(super) fn activate(host: &mut HostState, index: usize) {
                     || key == "space_autosave"
                     || key == "restore_blank_terminals"
                     || key == "start_at_login"
+                    || key == "focus_border_animation_head"
                 {
                     toml_edit::value(value == "true")
+                } else if key == "focus_border_animation_ms" {
+                    match value.parse::<i64>() {
+                        Ok(ms) => toml_edit::value(ms),
+                        Err(_) => toml_edit::value(value.as_str()),
+                    }
                 } else {
                     toml_edit::value(value.as_str())
                 };
@@ -1123,6 +1178,26 @@ pub(super) fn activate(host: &mut HostState, index: usize) {
                     } else {
                         crate::link_click::Mode::Plain
                     };
+                }
+                Ok(()) if key == "focus_border_animation" => {
+                    panel.rebuild();
+                    // Apply now; the config watcher confirms it shortly.
+                    host.light_cycle = value == "light-cycle";
+                    if !host.light_cycle {
+                        host.border_anim = None;
+                    }
+                    host.dirty = true;
+                }
+                Ok(()) if key == "focus_border_animation_head" => {
+                    panel.rebuild();
+                    host.light_cycle_head = value == "true";
+                    host.dirty = true;
+                }
+                Ok(()) if key == "focus_border_animation_ms" => {
+                    panel.rebuild();
+                    if let Ok(ms) = value.parse::<u128>() {
+                        host.light_cycle_ms = ms;
+                    }
                 }
                 Ok(()) => panel.rebuild(),
                 Err(error) => {
@@ -1795,6 +1870,158 @@ mod layout_tests {
             .rows
             .iter()
             .any(|r| matches!(r.choice, Choice::Messages)));
+    }
+
+    #[test]
+    fn settings_offer_focus_animation_controls() {
+        let mut settings = panel(Page::Settings, None);
+        settings.rows.clear();
+        settings.focus_animation_rows(&config::ConfigFile {
+            focus_border_animation: Some(config::FocusBorderAnimation::None),
+            focus_border_animation_ms: Some(560),
+            focus_border_animation_head: Some(false),
+            ..Default::default()
+        });
+        assert_eq!(
+            labels(&settings),
+            [
+                (
+                    "Focus animation: light-cycle".into(),
+                    "Sweep the focus border on focus change".into()
+                ),
+                ("Focus animation: none".into(), "Selected".into()),
+                (
+                    "Animation head box: off".into(),
+                    "Draw the bright vehicle box at the sweep head".into()
+                ),
+                ("Sweep speed: fast".into(), "140 ms sweep".into()),
+                ("Sweep speed: normal".into(), "280 ms sweep".into()),
+                ("Sweep speed: slow".into(), "Selected".into()),
+            ]
+        );
+        let expected: [(&str, &str); 6] = [
+            ("focus_border_animation", "light-cycle"),
+            ("focus_border_animation", "none"),
+            ("focus_border_animation_head", "true"),
+            ("focus_border_animation_ms", "140"),
+            ("focus_border_animation_ms", "280"),
+            ("focus_border_animation_ms", "560"),
+        ];
+        for (row, (key, value)) in settings.rows.iter().zip(expected) {
+            assert!(
+                matches!(&row.choice, Choice::Preference(k, v) if k == key && v == value),
+                "{}",
+                row.label
+            );
+        }
+        // An unset config resolves to the shipped defaults in the rows.
+        settings.rows.clear();
+        settings.focus_animation_rows(&config::ConfigFile::default());
+        assert_eq!(
+            settings.rows[0].detail, "Selected",
+            "light-cycle by default"
+        );
+        assert_eq!(settings.rows[2].label, "Animation head box: on");
+        assert_eq!(
+            settings.rows[4].detail, "Selected",
+            "normal speed by default"
+        );
+        let full = panel(Page::Settings, None);
+        assert!(full
+            .rows
+            .iter()
+            .any(|r| r.label == "Focus animation: light-cycle"));
+        assert!(full.rows.iter().any(|r| r.label == "Sweep speed: slow"));
+    }
+
+    /// The focus animation rows on the Space settings page, through the
+    /// app painters for Graphite and classic chrome. Set
+    /// `PRISMATTYC_DUMP_FOCUS_ANIMATION_SETTING=<dir>` for PNGs.
+    #[test]
+    fn focus_animation_settings_paint_in_both_chromes() {
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let theme = theme::shipped_default();
+        let mut settings = panel(Page::Settings, None);
+        let first = settings
+            .rows
+            .iter()
+            .position(|r| r.label.starts_with("Focus animation: "))
+            .expect("Settings lists the focus animation rows");
+        settings.rows.truncate(first);
+        settings.focus_animation_rows(&config::ConfigFile::default());
+        let (width, height) = (1200, 800);
+        let paint = |panel: &Panel, selected: usize, graphite: bool| {
+            let rows: Vec<PaletteRow> = panel
+                .rows
+                .iter()
+                .map(|r| {
+                    let mut row =
+                        PaletteRow::plain(r.label.clone(), r.detail.clone(), String::new());
+                    row.full_width = matches!(r.choice, Choice::None);
+                    row
+                })
+                .collect();
+            let sections = [PaletteSection {
+                header: "SPACES SETTINGS",
+                subtitle: "",
+                rows: &rows,
+            }];
+            let frame = PaletteFrame {
+                layout_mode: PaletteLayoutMode::FixedHeight,
+                query: None,
+                query_focused: false,
+                chips: None,
+                sections: &sections,
+                selected,
+                scroll: 0,
+                detail: None,
+                footer: "Enter select · Esc close · ↑↓ move",
+            };
+            let mut buffer = vec![crate::raster::pack_argb(255, theme.default_bg); width * height];
+            let layout = paint_palette_overlay(
+                &font,
+                &theme,
+                mux::ChromeGeom {
+                    graphite,
+                    scale_milli: 1_000,
+                },
+                [0x5b, 0x9b, 0xff],
+                &frame,
+                OverlaySurface::default(),
+                &mut buffer,
+                width,
+                height,
+            )
+            .expect("panel paints");
+            (layout, buffer)
+        };
+        // Select the last animation row so every animation row is on screen.
+        let last = settings.rows.len() - 1;
+        for graphite in [true, false] {
+            let (layout, _) = paint(&settings, last, graphite);
+            assert!(
+                layout.rows.iter().any(|laid| laid.global == first)
+                    && layout.rows.iter().any(|laid| laid.global == last),
+                "the focus animation rows scroll into view"
+            );
+        }
+        let Some(dir) = std::env::var_os("PRISMATTYC_DUMP_FOCUS_ANIMATION_SETTING") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (graphite, chrome) in [(true, "graphite"), (false, "classic")] {
+            let (_, buffer) = paint(&settings, last, graphite);
+            write_present_png(
+                &dir.join(format!("{chrome}-settings-focus-animation.png")),
+                &buffer,
+                width as u32,
+                height as u32,
+            )
+            .unwrap();
+        }
     }
 
     #[test]

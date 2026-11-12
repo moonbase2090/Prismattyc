@@ -9,8 +9,11 @@ and a signed universal macOS app distributed as a DMG and a zip.
 1. Open the release PR on a `release/vX.Y.Z-rc.N-changelog` branch. Set
    the version in all four files: the `[workspace.package]` version in
    `Cargo.toml`, then `cargo update --workspace` to refresh only the
-   workspace entries in `Cargo.lock`, then the README and fidelity-matrix
-   sentences. Add the `## [X.Y.Z]` and `## [X.Y.Z-rc.N]` CHANGELOG sections,
+   workspace entries in `Cargo.lock`. Also update the standalone activity
+   monitor lockfile with
+   `cargo update --manifest-path tools/activity-monitor/Cargo.toml --package prismattyc-core --package prismattyc-mux`.
+   Then update the README and fidelity-matrix sentences. Add the
+   `## [X.Y.Z]` and `## [X.Y.Z-rc.N]` CHANGELOG sections,
    and run `scripts/check-workspace-version.sh`. The tag version must match
    the binaries. For a prerelease tag such as `v0.2.21-rc.1`, binaries may
    report the base version `0.2.21`. A later rc or the final release that

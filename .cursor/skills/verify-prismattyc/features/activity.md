@@ -9,7 +9,8 @@ daemon or replacing sessions. See [the feed design](../../../../docs/agent-activ
 The monitor UI and connector query logic run as contained plug-ins. The native
 `pmux-activity-monitor` executable presents validated frames and forwards its
 compatibility query modes. First use installs and enables the bundled defaults
-with local activity access when no saved package selection exists. Saved disables
+with local activity read for the connector and local read plus stopped-session
+cleanup for the monitor when no saved package selection exists. Saved disables
 are preserved. Explicit package installation leaves the package disabled.
 `PRISMATTYC_DEFAULT_PLUGINS=0` skips default provisioning for isolated tests.
 Endpoint registration, package grants, and the MCP operator allowlist are
@@ -54,7 +55,8 @@ padding, so it cannot locate terminal cells.
 
 The mouse event belongs to `pmux:plugin@2.0.0` and `pmux:view@2.0.0`. These
 contract versions differ from monitor package 1.1.0, connector package 1.0.1,
-and the official bundle tag `pmux-plugins-v1.1.0`.
+and the official bundle tag `pmux-plugins-v1.1.0`. The stopped-session
+cleanup capability is in monitor package 1.3.0; the connector remains read-only.
 
 ## Build and drive the actual packages
 
@@ -86,7 +88,8 @@ python3 scripts/test-plugin-runtime.py --bundle "$verify_bundle" \
 
 Require exit 0 and its final PASS. The driver verifies exact archive digests,
 empty initial store, installation disabled, explicit local grants, actual monitor
-cells and RGBA tiles, connector queries, direct and supervised activity-only MCP,
+cells and RGBA tiles, monitor read plus stopped-session cleanup grants, connector
+read-only grants and queries, direct and supervised activity-only MCP,
 default-empty exports, disable/revocation, stale-handle rejection, terminal input,
 resize and restore, hot feed epochs, preserved session identities, and verified
 offline metadata. It owns its private daemon, sockets, workers, terminal, and
@@ -342,7 +345,8 @@ consumers against the source revision and bundle before driving them. It builds
 nothing. Require both identity and runtime PASS lines and exit 0.
 
 Install both plug-ins disabled, inspect their exact versions/digests, and enable
-them with only the local activity grant. `pmux-activity-monitor --json` must then
+the monitor with local read and stopped-session cleanup grants and the connector
+with local read only. `pmux-activity-monitor --json` must then
 report the feed disabled. Without restarting the daemon, toggle collection on,
 off, and on again. Require a page only while enabled and a fresh epoch after
 reenabling. Compare daemon PID, session/window/pane/child-PID tuples, literal

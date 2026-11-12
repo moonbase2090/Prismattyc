@@ -2648,6 +2648,40 @@ impl ControlPlane {
         Ok(page)
     }
 
+    /// Remove an agent session only when no pane currently has a live child.
+    /// The check and destruction share the control-plane lock, so a session
+    /// cannot become live between the safety check and topology removal.
+    pub(crate) fn plugin_remove_stopped_session(
+        &mut self,
+        session_raw: u64,
+    ) -> Result<pmux_plugin_api::host::pmux::activity::manage::Removal, String> {
+        use pmux_plugin_api::host::pmux::activity::manage::Removal;
+
+        let session = session_id(session_raw).map_err(|error| error.to_string())?;
+        let Some(tracked) = self.domain.session(session) else {
+            return Ok(Removal::Missing);
+        };
+        if tracked.agent_id.is_none() {
+            return Err("stopped-session cleanup is limited to agent sessions".into());
+        }
+        let live = tracked
+            .windows
+            .iter()
+            .filter_map(|id| self.domain.window(*id))
+            .flat_map(|window| window.layout.panes())
+            .any(|pane| {
+                self.live
+                    .as_ref()
+                    .is_some_and(|live| live.child_pid(pane.get()).is_some())
+            });
+        if live {
+            return Ok(Removal::Live);
+        }
+        self.destroy_session(session_raw)
+            .map(|_| Removal::Removed)
+            .map_err(|error| error.to_string())
+    }
+
     /// Process facts for `roots`, read at most once per
     /// [`ACTIVITY_PROCESS_TTL`] for the same set of panes. Every activity read
     /// shares it: native and plug-in reads, paged reads, a monitor's polls and
@@ -9789,6 +9823,58 @@ function Read-Exact([int]$Count) {
             kinds,
             vec!["created:work".to_string(), "destroyed:work".to_string()]
         );
+    }
+
+    #[test]
+    fn plugin_cleanup_refuses_live_children_and_only_removes_agent_sessions() {
+        use pmux_plugin_api::host::pmux::activity::manage::Removal;
+
+        let (mut stopped, _, _) = fixture(8);
+        let ordinary = stopped.snapshot().unwrap().sessions[0].id;
+        assert!(stopped
+            .plugin_remove_stopped_session(ordinary)
+            .unwrap_err()
+            .contains("agent sessions"));
+        let ordinary_id = session_id(ordinary).unwrap();
+        stopped
+            .domain
+            .name_session(ordinary_id, "stopped-agent", "stopped-agent")
+            .unwrap();
+        assert_eq!(
+            stopped.plugin_remove_stopped_session(ordinary).unwrap(),
+            Removal::Removed
+        );
+        assert!(stopped.domain.session(ordinary_id).is_none());
+
+        let mut domain = Domain::bootstrap("live-agent").unwrap();
+        let session = domain.sessions().next().unwrap();
+        let session_raw = session.id.get();
+        let window = session.windows[0];
+        let pane = domain.window(window).unwrap().layout.panes()[0];
+        domain
+            .name_session(session.id, "live-agent", "live-agent")
+            .unwrap();
+        let mut live = ControlPlane::new_live(
+            domain,
+            [WindowBounds {
+                window_id: window.get(),
+                cols: 80,
+                rows: 24,
+            }],
+            Some(8),
+            [(pane.get(), spawn())],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            live.plugin_remove_stopped_session(session_raw).unwrap(),
+            Removal::Live
+        );
+        assert!(live
+            .domain
+            .session(session_id(session_raw).unwrap())
+            .is_some());
+        assert!(live.live.as_ref().unwrap().child_pid(pane.get()).is_some());
     }
 
     #[test]

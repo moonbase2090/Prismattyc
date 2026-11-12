@@ -36,6 +36,7 @@ scripts/__pycache__/
 
 # Local agent / MCP config (machine-specific paths, creds, identities)
 .mcp.json
+.mcp.json.bak*
 .claude/
 .cursor/
 .codex/

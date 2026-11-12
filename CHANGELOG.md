@@ -6,6 +6,22 @@
 
 - The launch splash and the command palette fit small windows. A window too narrow or short for the block wordmark shows a two-row logo, then a one-line wordmark, and the splash copy wraps or is cut with an ellipsis instead of running off the edge. A fractional display scale gives fewer columns and rows for the same pixels, so it now picks the smaller forms where it must. A short window keeps the palette's command list by leaving out its detail panel, a narrow palette drops a row's keybinding when it would squeeze the name, and the palette's footer is cut with an ellipsis.
 
+## [0.3.63] - 2026-11-11
+
+### Changed
+
+- Attached-pane log replay no longer redraws panes when the visible content is
+  unchanged.
+
+### Fixed
+
+- Startup waits for the helper's started marker before reading it.
+- Updated rustix to 1.1.6 to address an xattr advisory.
+
+## [0.3.63-rc.1]
+
+Release candidate for 0.3.63, with the [same changes](#0363---2026-11-11).
+
 ## [0.3.62] - 2026-11-10
 
 ### Fixed

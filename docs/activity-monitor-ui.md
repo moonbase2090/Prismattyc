@@ -116,11 +116,18 @@ Enter opens the timeline for the selected seat, and in the wide tier the timelin
 | `Esc` / `←` / `h` | Back to the list |
 | `f` | Filter: all, needs attention (waiting, stuck, failed, stale), working |
 | `s` | Sort: by name, by most recent, by state |
+| `x` | Remove the selected stopped session; confirm cleanup if pmuxd still tracks it |
+| `X` | Clear all stopped sessions with the same confirmation and live-session refusal |
+| `:` | Open the monitor command picker for either removal action |
 | `p` | Toggle pixel lanes when the terminal supports them |
 | `?` | Show the keys |
 | `q` / `Ctrl-C` | Quit |
 
 Sorting by name is the default, so rows don't jump while you read them.
+Removal hides stale rows across refreshes. If pmuxd still tracks a stopped
+agent session, confirmation removes that dead session too. If pmuxd no longer
+tracks it, only the monitor row is hidden. Live sessions remain visible and
+are never stopped by these actions.
 
 ## Motion and pixels
 
@@ -179,7 +186,7 @@ Prismattyc releases before raw-upload support decode Kitty graphics but drop raw
 
 ## Launch
 
-With no `--socket` or `--host`, the monitor reads the pmuxd that `pmux` would use: `PMUX_INSTANCE` and `PMUX_SOCKET` (every pmux pane exports it), then the `[mux]` config, then pmux's default path. In the Prismattyc app, choose Activity Monitor in the command palette (or run `pmux space monitor`): it opens or focuses a Space named Activity Monitor and runs the monitor there, and on a fresh install it first installs and enables the two activity plug-ins with the local read grant and nothing else. Choosing it again while the monitor runs changes nothing, and after `q` it starts the monitor again. In a blank Prismattyc pane, `pmux-activity-monitor` is the whole command. The `pmux activity` commands, added separately, include `pmux activity monitor [ARGS]`, which does the same with pmux's resolved socket. `--snapshot --size COLSxROWS` renders one frame as text for scripts and tests.
+With no `--socket` or `--host`, the monitor reads the pmuxd that `pmux` would use: `PMUX_INSTANCE` and `PMUX_SOCKET` (every pmux pane exports it), then the `[mux]` config, then pmux's default path. In the Prismattyc app, choose Activity Monitor in the command palette (or run `pmux space monitor`): it opens or focuses a Space named Activity Monitor and runs the monitor there. It enables local activity reading for the monitor and connector, and grants the monitor stopped-session cleanup. Cleanup is limited to agent sessions and pmuxd refuses any session with a live pane child. Choosing it again while the monitor runs changes nothing, and after `q` it starts the monitor again. In a blank Prismattyc pane, `pmux-activity-monitor` is the whole command. The `pmux activity` commands, added separately, include `pmux activity monitor [ARGS]`, which does the same with pmux's resolved socket. `--snapshot --size COLSxROWS` renders one frame as text for scripts and tests.
 
 When the only host has nothing to show, the pane explains why instead of showing an empty list:
 

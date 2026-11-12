@@ -551,6 +551,15 @@ impl ConfigFile {
         self.splash.unwrap_or(true)
     }
 
+    /// Light-cycle sweep on focus change. Default on; an explicit
+    /// `focus_border_animation = "none"` turns it off.
+    pub fn light_cycle(&self) -> bool {
+        !matches!(
+            self.focus_border_animation,
+            Some(FocusBorderAnimation::None)
+        )
+    }
+
     /// Automatically install the pmux Agent Skill. Default true.
     #[cfg(target_os = "macos")]
     pub fn install_agent_skills(&self) -> bool {

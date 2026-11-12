@@ -108,7 +108,9 @@ fn refuse_shared_file(path: &Path) -> Result<(), String> {
 
 #[cfg(not(unix))]
 fn refuse_shared_file(_: &Path) -> Result<(), String> {
-    Ok(())
+    // File ACLs are not checked here, so a token file could be readable by
+    // other accounts. Take the token from the environment instead.
+    Err("--token-file is not supported on this platform because its access rights cannot be verified; use --token-env".into())
 }
 
 /// Parse `--listen`. Only a loopback IP literal with a port is accepted.
@@ -338,6 +340,19 @@ mod tests {
             Some(&header(&format!("Bearer {SECRET}"))),
             &token
         ));
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn a_token_file_is_refused_where_access_rights_cannot_be_checked() {
+        let directory = std::env::temp_dir().join(format!("pmux-mcp-token-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("token");
+        std::fs::write(&path, format!("{SECRET}\n")).unwrap();
+        let error = load_token(None, Some(&path)).unwrap_err();
+        assert!(error.contains("use --token-env"), "{error}");
+        assert!(!error.contains(SECRET));
         std::fs::remove_dir_all(&directory).unwrap();
     }
 }

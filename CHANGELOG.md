@@ -4,7 +4,7 @@
 
 ### Added
 
-- `pmux-mcp --activity-only --listen 127.0.0.1:PORT` serves the four read-only activity tools over streamable HTTP, for clients that reach the machine through a tunnel. It is off unless configured, binds loopback only, requires a bearer token from `--token-env` or `--token-file`, and refuses to start together with `--as`, `--plugin` or `--supervise`.
+- `pmux-mcp --activity-only --listen 127.0.0.1:PORT` serves the four read-only activity tools over streamable HTTP, for clients that reach the machine through a tunnel. It is off unless configured, binds loopback only, requires a bearer token from `--token-env` or `--token-file` (the file form is refused on Windows, where its access rights cannot be checked), and refuses to start together with `--as`, `--plugin` or `--supervise`.
 
 ## [0.3.63] - 2026-11-11
 

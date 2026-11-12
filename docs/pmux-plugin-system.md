@@ -78,7 +78,7 @@ pmux-mcp --activity-only --listen 127.0.0.1:8765 --token-file ~/.config/pmux/mcp
 | Flag | Meaning |
 | --- | --- |
 | `--listen IP:PORT` | Serve MCP at `http://IP:PORT/mcp`. Only a loopback address (`127.0.0.1`, `::1`) is accepted; `0.0.0.0` and LAN addresses are refused. |
-| `--token-env NAME` / `--token-file PATH` | Where the bearer secret comes from. Exactly one is required. It must be 32 to 512 printable ASCII bytes, and a file must not be readable by group or others. |
+| `--token-env NAME` / `--token-file PATH` | Where the bearer secret comes from. Exactly one is required. It must be 32 to 512 printable ASCII bytes, and a file must not be readable by group or others. `--token-file` is Unix only: on Windows it is refused because file access rights are not checked, so use `--token-env`. |
 | `--allow-host HOST` | Also accept this `Host` header, for a proxy that forwards a public hostname. Repeat for more. Not needed when the proxy rewrites `Host` to `localhost`. |
 
 The listener refuses to start without a token, without `--activity-only`, or

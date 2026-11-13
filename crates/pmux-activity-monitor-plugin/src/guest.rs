@@ -285,7 +285,7 @@ fn key_event(key: frame::Key) -> KeyEvent {
 }
 
 fn mouse_event(mouse: frame::Mouse) -> lunatui_term::MouseEvent {
-    use lunatui_term::{MouseButton, MouseKind, MouseUnit, Scroll};
+    use lunatui_term::{MouseButton, MouseKind, Scroll};
     let button = |button| match button {
         frame::MouseButton::Left => MouseButton::Left,
         frame::MouseButton::Middle => MouseButton::Middle,
@@ -314,13 +314,7 @@ fn mouse_event(mouse: frame::Mouse) -> lunatui_term::MouseEvent {
             modifiers = apply(modifiers);
         }
     }
-    lunatui_term::MouseEvent {
-        kind,
-        column: mouse.column,
-        row: mouse.row,
-        modifiers,
-        unit: MouseUnit::Cells,
-    }
+    lunatui_term::MouseEvent::new(kind, mouse.column, mouse.row).modifiers(modifiers)
 }
 
 thread_local! { static VIEW: RefCell<Option<View>> = const { RefCell::new(None) }; }

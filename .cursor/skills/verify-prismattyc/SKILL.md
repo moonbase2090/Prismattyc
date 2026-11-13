@@ -32,7 +32,9 @@ python3 scripts/release/plugin_bundle_provenance.py verify --bins "$verify_bins"
 Use an installed compatible compiler and SDK on macOS. If the active linker rejects SDK `.tbd` targets, select a matching Xcode/Command Line Tools installation or an already-installed compatible `SDKROOT`; preserve that choice in the build log. Do not prescribe an SDK path that does not exist on the test machine. On Linux, install the native dependencies in `scripts/install-render-test-deps.sh` before driving X11 windows.
 
 For the optional activity feed and contained monitor, follow
-[agent activity](features/activity.md). The thin frontend has a separate
+[agent activity](features/activity.md), including its
+[terminal input drive](features/activity.md#verify-terminal-escape-disambiguation)
+when changing the shared presenter or Lunatui input pin. The thin frontend has a separate
 manifest and lockfile, covered by Launch above. The production runtime driver
 installs and explicitly grants the packages inside its private daemon.
 

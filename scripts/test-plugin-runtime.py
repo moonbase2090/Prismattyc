@@ -638,6 +638,50 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
         assert process.returncode == 0, (scratch / "mcp-stderr.log").read_text()
 
 
+    def mcp_http_proof(expected_seats=()):
+        import urllib.error
+        import urllib.request
+        secret = "http-proof-" + hashlib.sha256(os.urandom(16)).hexdigest()
+        process = subprocess.Popen([str(bins / f"pmux-mcp{suffix}"), "--activity-only", "--listen", "127.0.0.1:0", "--token-env", "PMUX_MCP_HTTP_PROOF"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env={**env,"PMUX_SOCKET":str(endpoint),"PMUX_MCP_HTTP_PROOF":secret,"PMUX_AGENT":"INVALID AMBIENT ID"})
+        try:
+            announced = process.stderr.readline().decode()
+            assert secret not in announced and "http://127.0.0.1:" in announced, announced
+            url = "http://" + announced.split("http://", 1)[1].strip()
+            def call(identity, method, params, bearer):
+                headers = {"Content-Type":"application/json","Accept":"application/json, text/event-stream"}
+                if bearer is not None:
+                    headers["Authorization"] = bearer
+                body = json.dumps({"jsonrpc":"2.0","id":identity,"method":method,"params":params}).encode()
+                try:
+                    with urllib.request.urlopen(urllib.request.Request(url, body, headers), timeout=30) as reply:
+                        return reply.status, json.loads(reply.read())
+                except urllib.error.HTTPError as error:
+                    return error.code, None
+            initialize = {"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"plugin-proof","version":"1"}}
+            assert call(1, "initialize", initialize, None)[0] == 401
+            assert call(1, "initialize", initialize, "Bearer " + secret + "x")[0] == 401
+            bearer = "Bearer " + secret
+            assert call(1, "initialize", initialize, bearer)[0] == 200
+            status, reply = call(2, "tools/list", {}, bearer)
+            names = sorted(tool["name"] for tool in reply["result"]["tools"])
+            assert status == 200 and names == ["pmux_activity_hosts","pmux_activity_poll","pmux_activity_recent","pmux_activity_seats"], (status, names)
+            status, reply = call(3, "tools/call", {"name":"pmux_activity_hosts","arguments":{}}, bearer)
+            assert status == 200 and not reply["result"].get("isError", False), reply
+            assert json.loads(reply["result"]["content"][0]["text"])["hosts"] == [{"label":"local","endpoint":"local"}]
+            status, reply = call(4, "tools/call", {"name":"pmux_activity_seats","arguments":{}}, bearer)
+            seats = json.loads(reply["result"]["content"][0]["text"])
+            assert [seat["seat"] for seat in seats["seats"]] == list(expected_seats), seats
+            status, reply = call(5, "tools/call", {"name":"pmux_send","arguments":{"to":"x","summary":"y"}}, bearer)
+            assert status != 200 or reply.get("error") or reply["result"].get("isError"), reply
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            process.stderr.close()
+
     def terminal_view():
         command = [str(pmux), "--socket", str(endpoint), "plugin", "run", "org.moonbase.activity-monitor", "--no-pixels"]
         driver = runtime / "terminal-driver.py"
@@ -1056,6 +1100,7 @@ else:
             assert not reply["is_error"] and json.loads(reply["json"])["seats"][0]["seat"] == "fixture-seat"
             mcp_proof(["--activity-only"],True,["fixture-seat"])
             mcp_proof(["--activity-only","--supervise"],True,["fixture-seat"])
+            mcp_http_proof(["fixture-seat"])
             exports = connection.plugin("exports",allowlist=[connector])["response"]["reply"]["tools"]
             assert len(exports) == 4
             cli("disable",connector)
@@ -1166,6 +1211,7 @@ else:
         feed(True)
         mcp_proof(["--activity-only"], True)
         mcp_proof(["--activity-only","--supervise"], True)
+        mcp_http_proof()
         mcp_proof(["--as","fixture-agent"], False)
         for arguments in [["--activity-only"],["--activity-only","--supervise"]]:
             mcp_rejects_unterminated_input(bins / f"pmux-mcp{suffix}",arguments,env,scratch / "mcp-oversize.log")

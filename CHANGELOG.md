@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A quiet Windows install no longer waits for the installer to time out after starting `pmuxd`. The start script now launches `pmux up` through the shell, so the install finishes when the script does.
+
 ## [0.3.64] - 2026-11-12
 
 ### Added

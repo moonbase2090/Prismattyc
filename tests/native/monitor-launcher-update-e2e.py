@@ -249,6 +249,11 @@ def main():
             bins = prefix / 'bin'
             for path in (bins, tools, assets, releases):
                 path.mkdir(parents=True)
+            if os.name == 'nt':
+                commands_dir = prefix / 'cmd'
+                commands_dir.mkdir()
+                shutil.copy2(args.bins / 'prismattyc-cmd-forwarder.exe', commands_dir / 'pmux.exe')
+                monitor_command = commands_dir / 'pmux-activity-monitor.exe'
             marker = root / 'old-collector-executed'
             env = {k: v for k, v in os.environ.items() if not k.startswith(('PMUX', 'PRISMATTYC_', 'XDG_'))}
             env.update(HOME=str(root / 'home'), USERPROFILE=str(root / 'home'), APPDATA=str(root / 'config'), LOCALAPPDATA=str(root / 'data'),
@@ -380,6 +385,8 @@ else:sys.exit(22)
             assert json.loads(checked.stdout)['status'] == 'would_repair'
             untouched()
             assert not auxiliary.exists(), 'Check created a receipt or backup'
+            if os.name == 'nt':
+                assert not monitor_command.exists(), 'Check created a command forwarder'
             assert not any(url.endswith('/latest') for url in requests()[before_requests:])
             checks.append('check verified the exact installed release without receipt, backup, launcher, or core mutation')
             other = root / 'other-bin'
@@ -453,15 +460,37 @@ else:sys.exit(22)
                 repaired = cli(*normal)
             assert json.loads(repaired.stdout)['status'] == 'repaired'
             assert digest(destination) == new_hash and core_state() == state_before and not marker.exists()
+            if os.name == 'nt':
+                assert monitor_command.is_file(), 'Repair left the monitor off the command PATH'
+                assert digest(monitor_command) == digest(commands_dir / 'pmux.exe')
+                command_env = dict(env, PATH=str(commands_dir) + os.pathsep + env['PATH'])
+                launched = subprocess.run(['cmd.exe', '/d', '/c', 'pmux-activity-monitor --version'],
+                    env=command_env, text=True, encoding='utf-8', capture_output=True, timeout=20)
+                commands.append({'args': ['cmd.exe', '/d', '/c', 'pmux-activity-monitor --version'],
+                    'exit': launched.returncode, 'stdout': launched.stdout, 'stderr': launched.stderr})
+                assert launched.returncode == 0 and launched.stdout.strip().startswith('pmux-activity-monitor ')
+                assert re.search(r'\b' + re.escape(new_version) + r'\b', launched.stdout), launched.stdout
+                checks.append('verified frontend repair restores the missing Windows cmd forwarder and executes it through PATH')
+                monitor_command.unlink()
             saved = json.loads((auxiliary / 'receipt.json').read_text())
             backup = auxiliary / ('backup-' + old_hash)
             assert digest(backup) == old_hash and saved['installed']['sha256'] == new_hash
             assert saved['previous']['fingerprint']['sha256'] == old_hash
             receipt_before = (auxiliary / 'receipt.json').read_bytes()
+            if os.name == 'nt':
+                checked_current = cli('--repair-monitor-launcher', '--check', '--json')
+                assert json.loads(checked_current.stdout)['status'] == 'current'
+                assert not monitor_command.exists(), 'Current-frontend check created a command'
+                assert (auxiliary / 'receipt.json').read_bytes() == receipt_before
+                assert core_state() == state_before
             replayed = cli('--repair-monitor-launcher', '--json')
             assert json.loads(replayed.stdout)['status'] == 'current'
             assert (auxiliary / 'receipt.json').read_bytes() == receipt_before
             assert digest(destination) == new_hash and core_state() == state_before
+            if os.name == 'nt':
+                assert monitor_command.is_file(), 'Current-frontend replay did not restore its missing command'
+                assert digest(monitor_command) == digest(commands_dir / 'pmux.exe')
+                checks.append('current-frontend replay restores a missing command without changing the six-core state or auxiliary receipt')
             checks.append('same-version second-process repair installs only the matched frontend; replay is idempotent')
             # Seed the recorded pre-rename state from the operation's actual journal and backup.
             shutil.copy2(backup, destination)

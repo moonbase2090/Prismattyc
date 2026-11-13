@@ -266,7 +266,7 @@ function Assert-Installed {
             [Environment]::GetEnvironmentVariable('Path', 'Machine'),
             [Environment]::GetEnvironmentVariable('Path', 'User')
         ) -join ';'
-        foreach ($name in @('prismattyc', 'pmux')) {
+        foreach ($name in @('prismattyc', 'pmux', 'pmux-activity-monitor')) {
             $resolved = @(Get-Command -Name $name -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
             $expectedShim = Join-Path $install.Cmd "$name.exe"
             $shown = if ($resolved) { [string]$resolved.Source } else { '<none>' }
@@ -279,6 +279,13 @@ function Assert-Installed {
             if (-not $shim -or $shim.Source -ne $expectedShim) {
                 throw "Get-Command $name.exe did not find the installed cmd forwarder"
             }
+            if ($name -eq 'pmux-activity-monitor') {
+                $label = & $name --version
+                if ($LASTEXITCODE -ne 0 -or $label -notmatch '^pmux-activity-monitor ') {
+                    throw "The installed monitor command did not execute its frontend: $label"
+                }
+                Write-Output $label
+            }
             Write-Output "Get-Command $name resolves to an installed command; its cmd shim also resolves"
         }
     } else {
@@ -287,7 +294,7 @@ function Assert-Installed {
             [Environment]::GetEnvironmentVariable('Path', 'Machine'),
             [Environment]::GetEnvironmentVariable('Path', 'User')
         ) -join ';'
-        foreach ($name in @('prismattyc', 'pmux')) {
+        foreach ($name in @('prismattyc', 'pmux', 'pmux-activity-monitor')) {
             $resolved = @(Get-Command -Name $name -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
             $expectedExe = Join-Path $install.Bin "$name.exe"
             if (-not $resolved -or [string]::Compare([string]$resolved.Source, $expectedExe, $true) -ne 0) {

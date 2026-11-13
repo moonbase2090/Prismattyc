@@ -53,10 +53,11 @@ Map daemon pane IDs through `current_panes` to the host's
 `visible_pane_content_rects`. `visible_pane_slots` includes pane headers and
 padding, so it cannot locate terminal cells.
 
-The mouse event belongs to `pmux:plugin@2.0.0` and `pmux:view@2.0.0`. These
-contract versions differ from monitor package 1.1.0, connector package 1.0.1,
-and the official bundle tag `pmux-plugins-v1.1.0`. The stopped-session
-cleanup capability is in monitor package 1.3.0; the connector remains read-only.
+The mouse event belongs to `pmux:plugin@2.0.0` and `pmux:view@2.0.0`.
+These contract versions are independent of package versions. Read the reviewed
+bundle tag from `plugins/bundle-pin.json` and package versions from the verified
+bundle's `pmux-plugins.json`. The monitor's stopped-session cleanup requires
+`activity.manage:local`; the connector remains read-only.
 
 ## Build and drive the actual packages
 
@@ -83,13 +84,15 @@ Then run the production driver, preserving its output outside disposable state:
 ```sh
 python3 scripts/test-plugin-runtime.py --bundle "$verify_bundle" \
   --target-dir "$verify_target" --feature production \
+  --out "$verify_evidence/activity-production" \
   > "$verify_evidence/contained-activity.log" 2>&1
 ```
 
 Require exit 0 and its final PASS. The driver verifies exact archive digests,
-empty initial store, installation disabled, explicit local grants, actual monitor
-cells and RGBA tiles, monitor read plus stopped-session cleanup grants, connector
-read-only grants and queries, direct and supervised activity-only MCP,
+empty initial store, fresh-daemon default provisioning of the newest bundled
+packages, and actual monitor cells and RGBA tiles. Require monitor local read
+plus stopped-session cleanup grants, connector read-only grants and queries,
+preserved disables after restart, idempotent reinstall, direct and supervised activity-only MCP,
 default-empty exports, disable/revocation, stale-handle rejection, terminal input,
 resize and restore, hot feed epochs, preserved session identities, and verified
 offline metadata. It owns its private daemon, sockets, workers, terminal, and
@@ -321,7 +324,11 @@ python3 tests/native/monitor-launcher-update-e2e.py --bins "$verify_bins" \
 Require PASS for the six-core update followed by separate same-version repair,
 exact installed tag, immutable metadata and digest checks, ownership refusals,
 matching bundle and executable role, locks, retry, and core rollback preserving
-auxiliary state. Windows adds sharing-failure recovery. Missing symlink privilege
+auxiliary state. On Windows, retain the workspace-built
+`prismattyc-cmd-forwarder.exe` beside the seven executables. Require sharing-failure
+recovery, restoration of the missing monitor command in an existing `cmd`
+layout, actual command execution through PATH, and restoration on current-frontend
+replay. Neither `--check` path may create the command. Missing symlink privilege
 produces PARTIAL and exit 2. The fixture uses actual executables with a transport
 substitute. Prepared-state recovery is seeded from its actual receipt and backup;
 it is not a timed kill test. macOS repairs through verified app replacement.

@@ -104,6 +104,37 @@ coverage. Actual provider hook proof additionally requires a reviewed installed
 provider runtime, its hook profile, and available authentication. Synthetic hook
 events establish feed behavior only. Record unavailable provider prerequisites.
 
+## Verify terminal Escape disambiguation
+
+After Launch, drive the shared Unix presenter through a real private PTY:
+
+```sh
+.cursor/skills/verify-prismattyc/scripts/verify-terminal-input.py \
+  --bins "$verify_bins" --out "$verify_evidence/terminal-input"
+```
+
+Require `status: PASS`, `daemon_reaped`, `scratch_removed`, and restored terminal
+modes in `result.json`. Inspect the saved monitor screens and byte schedule.
+The drive opens details for `000-beta`, sends lone Escape with the stream still
+open, and requires the list within 500 ms. It then sends Escape and `[A` in
+separate writes less than 40 ms apart and opens details for `000-alpha`.
+It also dismisses help and details using lone Escape, then quits normally.
+This tests the actual presenter, contained guest, and terminal emulator.
+It does not drive native desktop Escape routing or the separate attach parser.
+Windows uses its console event reader and the native activity flow above.
+
+Run the reader regressions as well:
+
+```sh
+cargo +1.90.0 test --locked -p prismattyc-mux --lib \
+  plugins::presenter::tests:: -- --test-threads=1
+```
+
+These use real open Unix streams to check split arrows, Alt modifiers, bounded
+lone Escape, and idle bracketed paste. The monitor drive cannot distinguish Alt
+modifiers because several monitor actions ignore them. Keep the reader's
+modifier assertion when changing this input path.
+
 ## Edit hook settings with bounded reads
 
 The file-editing fixture runs independently of daemon collection and provider

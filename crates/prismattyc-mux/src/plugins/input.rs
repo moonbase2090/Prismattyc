@@ -67,7 +67,7 @@ pub(super) fn mouse(mouse: &MouseEvent) -> Option<frame::Mouse> {
             MouseButton::Left => Some(frame::MouseButton::Left),
             MouseButton::Middle => Some(frame::MouseButton::Middle),
             MouseButton::Right => Some(frame::MouseButton::Right),
-            MouseButton::Extra(_) => None,
+            _ => None,
         }
     }
     if mouse.unit != lunatui_term::MouseUnit::Cells {
@@ -80,7 +80,7 @@ pub(super) fn mouse(mouse: &MouseEvent) -> Option<frame::Mouse> {
         MouseKind::Scroll(Scroll::Down) => frame::MouseAction::Wheel(frame::Wheel::Down),
         MouseKind::Scroll(Scroll::Left) => frame::MouseAction::Wheel(frame::Wheel::Left),
         MouseKind::Scroll(Scroll::Right) => frame::MouseAction::Wheel(frame::Wheel::Right),
-        MouseKind::Drag(_) | MouseKind::Move => return None,
+        _ => return None,
     };
     Some(frame::Mouse {
         action,
@@ -109,13 +109,7 @@ mod tests {
 
     #[test]
     fn clicks_and_the_wheel_reach_the_view_but_motion_does_not() {
-        let at = |kind| MouseEvent {
-            kind,
-            column: 7,
-            row: 3,
-            modifiers: Modifiers::new().shift(),
-            unit: lunatui_term::MouseUnit::Cells,
-        };
+        let at = |kind| MouseEvent::new(kind, 7, 3).modifiers(Modifiers::new().shift());
         let press = mouse(&at(MouseKind::Down(MouseButton::Left))).unwrap();
         assert!(matches!(
             press.action,

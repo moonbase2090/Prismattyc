@@ -2622,13 +2622,7 @@ mod tests {
     }
 
     fn click(monitor: &mut Monitor, kind: MouseKind, row: u16) {
-        monitor.event(&Event::Mouse(MouseEvent {
-            kind,
-            column: 5,
-            row,
-            modifiers: lunatui_term::Modifiers::new(),
-            unit: lunatui_term::MouseUnit::Cells,
-        }));
+        monitor.event(&Event::Mouse(MouseEvent::new(kind, 5, row)));
     }
 
     fn screen_row_of(monitor: &mut Monitor, seat: &str) -> u16 {

@@ -1129,24 +1129,24 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "lunatui-core"
-version = "0.1.18"
-source = "git+https://github.com/moonbase2090/lunatui?rev=d847e749eb773f7d48edd7d9e429bcc9cbe9e898#d847e749eb773f7d48edd7d9e429bcc9cbe9e898"
+version = "0.1.29"
+source = "git+https://github.com/moonbase2090/lunatui?rev=25f3ecf8dceb52a546770cddeae396ce1a345c44#25f3ecf8dceb52a546770cddeae396ce1a345c44"
 dependencies = [
  "unicode-segmentation",
 ]
 
 [[package]]
 name = "lunatui-image"
-version = "0.1.18"
-source = "git+https://github.com/moonbase2090/lunatui?rev=d847e749eb773f7d48edd7d9e429bcc9cbe9e898#d847e749eb773f7d48edd7d9e429bcc9cbe9e898"
+version = "0.1.29"
+source = "git+https://github.com/moonbase2090/lunatui?rev=25f3ecf8dceb52a546770cddeae396ce1a345c44#25f3ecf8dceb52a546770cddeae396ce1a345c44"
 dependencies = [
  "lunatui-core",
 ]
 
 [[package]]
 name = "lunatui-term"
-version = "0.1.18"
-source = "git+https://github.com/moonbase2090/lunatui?rev=d847e749eb773f7d48edd7d9e429bcc9cbe9e898#d847e749eb773f7d48edd7d9e429bcc9cbe9e898"
+version = "0.1.29"
+source = "git+https://github.com/moonbase2090/lunatui?rev=25f3ecf8dceb52a546770cddeae396ce1a345c44#25f3ecf8dceb52a546770cddeae396ce1a345c44"
 dependencies = [
  "crossterm",
  "libc",

@@ -2,9 +2,8 @@
 
 //! A small host loop around Lunatui's session, encoder and pixel layer.
 //!
-//! Lunatui 0.1.18's `run` draws into a grid of fixed size. A monitor in a pane has to follow
-//! the pane through splits and resizes, so this loop reads the terminal size every frame and
-//! repaints in full when it changes.
+//! Views follow pane splits and resizes by sampling terminal geometry each frame and
+//! repainting in full when it changes.
 
 use std::io::{self, IsTerminal};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -74,7 +73,7 @@ pub fn probe(pixels: bool) -> Probe {
 
 /// Chooses true pixels only where the uploads will be shown.
 ///
-/// Lunatui 0.1.18 uploads raw RGBA (`f=32`). Prismattyc answers every graphics query with OK,
+/// Lunatui uploads raw RGBA (`f=32`). Prismattyc answers every graphics query with OK,
 /// but releases before raw-upload support drop raw uploads, which would leave lanes erased and
 /// blank. So inside Prismattyc pixels need `raw_upload_shown`, a real upload that is answered.
 // Only the unix probe path uses this; the tests run everywhere.
@@ -262,55 +261,7 @@ fn spawn_input(pending: Vec<u8>) -> io::Result<Input> {
         .name("pmux-view-input".into())
         .spawn(move || {
             #[cfg(unix)]
-            {
-                use std::io::Read;
-                let mut parser = lunatui_term::Parser::new();
-                let send = |mut events: Vec<Event>| {
-                    events.retain(|event| matches!(event, Event::Key(_) | Event::Mouse(_)));
-                    events.is_empty() || sender.send(Ok(events)).is_ok()
-                };
-                if !send(decode(&mut parser, &pending)) {
-                    return;
-                }
-                let mut input = io::stdin();
-                let mut buffer = [0; 4096];
-                while !stopped.load(Ordering::Acquire) {
-                    let mut descriptor = libc::pollfd {
-                        fd: libc::STDIN_FILENO,
-                        events: libc::POLLIN,
-                        revents: 0,
-                    };
-                    // SAFETY: descriptor is valid writable storage for one pollfd.
-                    let ready = unsafe { libc::poll(&mut descriptor, 1, 100) };
-                    if ready == 0 {
-                        continue;
-                    }
-                    if ready < 0 {
-                        let error = io::Error::last_os_error();
-                        if error.kind() == io::ErrorKind::Interrupted {
-                            continue;
-                        }
-                        let _ = sender.send(Err(error));
-                        return;
-                    }
-                    match input.read(&mut buffer) {
-                        Ok(0) => {
-                            let _ = send(parser.flush());
-                            return;
-                        }
-                        Ok(length) => {
-                            if !send(decode(&mut parser, &buffer[..length])) {
-                                return;
-                            }
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                        Err(error) => {
-                            let _ = sender.send(Err(error));
-                            return;
-                        }
-                    }
-                }
-            }
+            read_unix_input(io::stdin(), pending, &sender, &stopped);
             #[cfg(windows)]
             {
                 let _ = pending;
@@ -345,17 +296,62 @@ fn spawn_input(pending: Vec<u8>) -> io::Result<Input> {
     })
 }
 
-/// Parses one read from the terminal.
-///
-/// A read that ends in ESC is the Esc key: terminals write each escape sequence in one piece,
-/// and no sequence ends with ESC. Without this, Esc waits for the next key.
 #[cfg(unix)]
-fn decode(parser: &mut lunatui_term::Parser, bytes: &[u8]) -> Vec<Event> {
-    let mut events = parser.push(bytes);
-    if bytes.last() == Some(&0x1b) {
-        events.extend(parser.flush());
+fn read_unix_input(
+    mut input: impl std::io::Read + std::os::fd::AsRawFd,
+    pending: Vec<u8>,
+    sender: &mpsc::SyncSender<io::Result<Vec<Event>>>,
+    stopped: &AtomicBool,
+) {
+    let mut parser = lunatui_term::Parser::new();
+    let send = |mut events: Vec<Event>| {
+        events.retain(|event| matches!(event, Event::Key(_) | Event::Mouse(_)));
+        events.is_empty() || sender.send(Ok(events)).is_ok()
+    };
+    if !send(parser.push(&pending)) {
+        return;
     }
-    events
+    let mut buffer = [0; 4096];
+    while !stopped.load(Ordering::Acquire) {
+        let mut descriptor = libc::pollfd {
+            fd: input.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let timeout = if parser.holds_escape() { 50 } else { 100 };
+        // SAFETY: descriptor is valid writable storage for one pollfd.
+        let ready = unsafe { libc::poll(&mut descriptor, 1, timeout) };
+        if ready == 0 {
+            if !send(parser.expire()) {
+                return;
+            }
+            continue;
+        }
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            let _ = sender.send(Err(error));
+            return;
+        }
+        match input.read(&mut buffer) {
+            Ok(0) => {
+                let _ = send(parser.flush());
+                return;
+            }
+            Ok(length) => {
+                if !send(parser.push(&buffer[..length])) {
+                    return;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => {
+                let _ = sender.send(Err(error));
+                return;
+            }
+        }
+    }
 }
 
 struct Frontend {
@@ -538,10 +534,9 @@ pub(super) fn run(
     let result = (|| -> Result<()> {
         let mut session = Session::enter_with_options(
             io::stdout(),
-            SessionOptions {
-                sync_output: SyncOutput::Enabled,
-                mouse_tracking: MouseTracking::Sgr,
-            },
+            SessionOptions::default()
+                .sync_output(SyncOutput::Enabled)
+                .mouse_tracking(MouseTracking::Sgr),
         )?;
         #[cfg(windows)]
         let _mouse_input = crate::platform::ConsoleMouseInput::enter()?;
@@ -595,7 +590,7 @@ fn mono_ms(duration: Duration) -> u64 {
 mod tests {
     use super::*;
     #[cfg(unix)]
-    use lunatui_term::{KeyCode, Parser};
+    use lunatui_term::KeyCode;
 
     #[cfg(unix)]
     fn codes(events: &[Event]) -> Vec<KeyCode> {
@@ -609,29 +604,93 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn reader(pending: &[u8], bytes: &[u8]) -> (Input, std::os::unix::net::UnixStream) {
+        use std::io::Write;
+        let (read, mut write) = std::os::unix::net::UnixStream::pair().unwrap();
+        write.write_all(bytes).unwrap();
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let pending = pending.to_vec();
+        let thread = std::thread::spawn(move || {
+            read_unix_input(read, pending, &sender, &stopped);
+        });
+        (
+            Input {
+                receiver: Some(receiver),
+                stop,
+                thread: Some(thread),
+            },
+            write,
+        )
+    }
+
+    #[cfg(unix)]
+    fn events(input: &Input) -> Vec<Event> {
+        input
+            .receiver
+            .as_ref()
+            .unwrap()
+            .recv_timeout(Duration::from_millis(500))
+            .unwrap()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
     #[test]
-    fn a_lone_escape_is_the_esc_key_without_waiting_for_more_input() {
-        let mut parser = Parser::new();
-        assert_eq!(codes(&decode(&mut parser, b"\x1b")), vec![KeyCode::Esc]);
-        assert_eq!(codes(&decode(&mut parser, b"f")), vec![KeyCode::Char('f')]);
+    fn a_lone_escape_arrives_while_the_input_stream_stays_open() {
+        use std::io::Write;
+        let (input, mut write) = reader(&[], b"\x1b");
+        assert_eq!(codes(&events(&input)), vec![KeyCode::Esc]);
+        write.write_all(b"f").unwrap();
+        assert!(matches!(&events(&input)[..], [Event::Key(key)]
+            if key.code == KeyCode::Char('f') && !key.modifiers.is_alt()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn split_escape_sequences_stay_arrow_keys() {
+        for (pending, rest) in [(&b"\x1b"[..], &b"[A"[..]), (&b"\x1b["[..], &b"A"[..])] {
+            let (input, _write) = reader(pending, rest);
+            assert_eq!(codes(&events(&input)), vec![KeyCode::Up]);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn split_alt_chords_keep_their_modifier() {
+        let (input, _write) = reader(b"\x1b", b"f");
+        assert!(matches!(&events(&input)[..], [Event::Key(key)]
+            if key.code == KeyCode::Char('f') && key.modifiers.is_alt()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn input_timeout_does_not_finish_an_open_paste() {
+        use std::io::Write;
+        let (input, mut write) = reader(b"\x1b[200~text\x1b", b"");
+        assert!(matches!(
+            input
+                .receiver
+                .as_ref()
+                .unwrap()
+                .recv_timeout(Duration::from_millis(150)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        write.write_all(b"z\x1b[201~q").unwrap();
+        assert_eq!(codes(&events(&input)), vec![KeyCode::Char('q')]);
     }
 
     #[cfg(unix)]
     #[test]
     fn whole_escape_sequences_still_parse_as_their_keys() {
-        let mut parser = Parser::new();
-        assert_eq!(
-            codes(&decode(&mut parser, b"\x1b[A\x1b[B")),
-            vec![KeyCode::Up, KeyCode::Down]
-        );
+        let (input, _write) = reader(&[], b"\x1b[A\x1b[B");
+        assert_eq!(codes(&events(&input)), vec![KeyCode::Up, KeyCode::Down]);
     }
     use lunatui_term::{Caps, GraphicsProtocol, ProbeEnv};
 
     fn kitty(term_program: &str) -> Caps {
-        let env = ProbeEnv {
-            term_program: term_program.to_owned(),
-            ..ProbeEnv::default()
-        };
+        let env = ProbeEnv::default().term_program(term_program);
         let mut caps = Caps::from_env(&env);
         caps.protocols.graphics = GraphicsProtocol::Kitty;
         caps
@@ -655,10 +714,7 @@ mod tests {
 
     #[test]
     fn a_terminal_without_graphics_is_never_probed() {
-        let env = ProbeEnv {
-            term_program: "prismattyc".to_owned(),
-            ..ProbeEnv::default()
-        };
+        let env = ProbeEnv::default().term_program("prismattyc");
         let caps = Caps::from_env(&env);
         assert_eq!(
             pixel_mode(true, &caps, || panic!("probed")),

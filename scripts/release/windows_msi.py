@@ -1,10 +1,23 @@
 """Per-user Windows MSI version mapping and checksum refresh.
 
-MSI ProductVersion has three numeric fields, each at most 65535, and cannot
-store a semver prerelease. Patch numbers through 64 are encoded as
-``patch * 1000 + slot``. A stable release uses slot 999. ``X.Y.Z-rc.N`` uses
-slot N (1 through 998). That orders ``0.3.29-rc.2`` (0.3.29002) before
-``0.3.29`` (0.3.29999) and before ``0.3.30-rc.1`` (0.3.30001).
+MSI ProductVersion is ``major.minor.build``. Major and minor are at most 255
+and build is at most 65535. It cannot store a semver prerelease, so every
+release also gets a slot: a stable release uses the top slot and
+``X.Y.Z-rc.N`` uses slot N, which keeps a candidate before its stable release.
+
+Two layouts exist, because 0.3.0 through 0.3.64 already shipped (or were
+tagged) with the first one and a newer MSI must always sort after an older one.
+
+Legacy, for 0.x releases up to 0.3.64: ``0.Y.patch*1000+slot``. Stable slot
+999, candidate slot 1 through 998. ``0.3.29-rc.2`` is ``0.3.29002``, ``0.3.29``
+is ``0.3.29999`` and ``0.3.64`` is ``0.3.64999``. It cannot go past patch 64
+because 65999 is the last build value that fits.
+
+Current, for everything after 0.3.64: ``(major+1).minor.patch*100+slot``. Stable
+slot 99, candidate slot 1 through 98. ``0.3.65`` is ``1.3.6599``, ``0.4.0`` is
+``1.4.99`` and ``1.0.0`` is ``2.0.99``. The major field starts at 1, so every
+current value sorts after every legacy value (which all have major 0). This
+reaches patch 654 and major 254.
 """
 import argparse
 import hashlib
@@ -37,8 +50,13 @@ SIGNING_SKIPPED = (
 # Pinned to the WiX release in build-windows.ps1.
 WIX_UTIL_EXTENSION = "WixToolset.Util.wixext/5.0.2"
 _RC = re.compile(r"^rc\.(0|[1-9][0-9]*)$")
-_MSI_FIELD_MAX = 65535
-_PATCH_MAX = 64
+_MSI_BUILD_MAX = 65535
+_MSI_MAJOR_MINOR_MAX = 255
+# Last release that keeps the legacy layout. Anything later sorts above it by
+# using a higher MSI major field.
+_LEGACY_LAST = (0, 3, 64)
+# Highest patch the current layout holds: 654*100 + 99 is 65499, 655*100 + 99 is not.
+_CURRENT_PATCH_MAX = 654
 
 
 def msi_product_version(version: str) -> str:
@@ -46,23 +64,39 @@ def msi_product_version(version: str) -> str:
     full, base = parse_release_version(version)
     full = full.split("+", 1)[0]
     major, minor, patch = (int(part) for part in base.split("."))
-    if patch > _PATCH_MAX:
-        raise ValueError(
-            f"MSI product version cannot encode patch {patch}; the maximum is {_PATCH_MAX}"
-        )
-    if full == base:
-        slot = 999
-    else:
+    candidate = None
+    if full != base:
         match = _RC.fullmatch(full[len(base) + 1 :])
         if match is None:
             raise ValueError("MSI packaging accepts X.Y.Z or X.Y.Z-rc.N only")
-        slot = int(match.group(1))
-        if slot < 1 or slot > 998:
-            raise ValueError("release candidate number must be 1 through 998")
-    third = patch * 1000 + slot
-    if third > _MSI_FIELD_MAX:
-        raise ValueError("MSI product version field exceeds 65535")
-    return f"{major}.{minor}.{third}"
+        candidate = int(match.group(1))
+    if (major, minor, patch) <= _LEGACY_LAST:
+        # Releases before 0.3.65: the layout the shipped installers use.
+        if major != 0 or patch > 64:
+            raise ValueError(
+                f"MSI product version cannot encode {base}: before 0.3.65 only 0.Y.Z with Z up to 64 exists"
+            )
+        slot_max, stable_slot, scale = 998, 999, 1000
+        out_major = major
+    else:
+        slot_max, stable_slot, scale = 98, 99, 100
+        out_major = major + 1
+        if patch > _CURRENT_PATCH_MAX:
+            # Not left to the build-field check: that would let the first few
+            # candidates of 0.3.655 through while rejecting its stable release.
+            raise ValueError(f"MSI product version cannot encode {base}: patch is too large")
+    if candidate is None:
+        slot = stable_slot
+    else:
+        slot = candidate
+        if slot < 1 or slot > slot_max:
+            raise ValueError(f"release candidate number must be 1 through {slot_max}")
+    build = patch * scale + slot
+    if out_major > _MSI_MAJOR_MINOR_MAX or minor > _MSI_MAJOR_MINOR_MAX:
+        raise ValueError(f"MSI product version cannot encode {base}: major or minor is too large")
+    if build > _MSI_BUILD_MAX:
+        raise ValueError(f"MSI product version cannot encode {base}: patch is too large")
+    return f"{out_major}.{minor}.{build}"
 
 
 def build_msi(payload: Path, repo: Path, version: str, out_msi: Path) -> None:

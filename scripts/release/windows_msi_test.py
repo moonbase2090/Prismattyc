@@ -44,9 +44,91 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertLess(stable, later)
 
     def test_unsupported_versions_are_rejected(self):
-        for version in ("0.3.65", "0.3.29-alpha.1", "0.3.29-rc.0", "0.3.29-rc.999"):
+        for version in (
+            "0.3.29-alpha.1",
+            "0.3.29-rc.0",
+            "0.3.29-rc.999",  # past the legacy candidate range
+            "0.3.65-rc.99",  # past the current candidate range
+            "0.3.655",  # patch*100+99 would pass 65535
+            "0.3.655-rc.1",  # fits 65535, but its stable release does not
+            "0.3.655-rc.35",
+            "0.2.65",  # a 0.2.x release past patch 64 never existed
+            "255.0.0",  # MSI major would be 256
+            "0.256.0",  # MSI minor is 256
+        ):
             with self.subTest(version=version), self.assertRaises(ValueError):
                 msi_product_version(version)
+
+    def test_shipped_and_current_encodings_are_pinned(self):
+        # Values written out by hand from the documented layouts. Installed
+        # MSIs carry the legacy ones, so they can never change.
+        expected = {
+            "0.3.29-rc.2": "0.3.29002",
+            "0.3.29": "0.3.29999",
+            "0.3.63": "0.3.63999",
+            "0.3.64-rc.1": "0.3.64001",
+            "0.3.64": "0.3.64999",
+            "0.3.65-rc.1": "1.3.6501",
+            "0.3.65-rc.98": "1.3.6598",
+            "0.3.65": "1.3.6599",
+            "0.3.66-rc.1": "1.3.6601",
+            "0.3.255": "1.3.25599",
+            "0.3.654": "1.3.65499",
+            "0.4.0-rc.1": "1.4.1",
+            "0.4.0": "1.4.99",
+            "1.0.0": "2.0.99",
+            "254.255.654": "255.255.65499",
+        }
+        for version, product in expected.items():
+            with self.subTest(version=version):
+                self.assertEqual(msi_product_version(version), product)
+
+    def test_later_releases_always_sort_after_earlier_ones(self):
+        # Listed in semver order. Each MSI ProductVersion must be strictly
+        # greater than the one before it, including across the change of
+        # layout at 0.3.65 and at the next minor and major releases.
+        in_semver_order = [
+            "0.2.5",
+            "0.3.0",
+            "0.3.29-rc.2",
+            "0.3.29",
+            "0.3.30-rc.1",
+            "0.3.63",
+            "0.3.64-rc.1",
+            "0.3.64",
+            "0.3.65-rc.1",
+            "0.3.65",
+            "0.3.66-rc.1",
+            "0.3.66",
+            "0.3.255",
+            "0.3.654",
+            "0.4.0-rc.1",
+            "0.4.0",
+            "0.4.1",
+            "0.10.0",
+            "1.0.0-rc.1",
+            "1.0.0",
+            "1.2.3",
+            "2.0.0",
+        ]
+        encoded = [
+            tuple(int(part) for part in msi_product_version(version).split("."))
+            for version in in_semver_order
+        ]
+        for earlier, later, a, b in zip(in_semver_order, in_semver_order[1:], encoded, encoded[1:]):
+            with self.subTest(earlier=earlier, later=later):
+                self.assertLess(a, b)
+
+    def test_every_encoding_fits_the_msi_field_limits(self):
+        versions = [f"0.3.{patch}" for patch in range(0, 655)]
+        versions += [f"{major}.{minor}.{patch}" for major in (0, 1, 100, 254) for minor in (0, 4, 255) for patch in (0, 1, 654) if (major, minor, patch) > (0, 3, 64)]
+        versions += [f"0.3.{patch}-rc.{n}" for patch in (65, 654) for n in (1, 98)]
+        for version in versions:
+            major, minor, build = (int(part) for part in msi_product_version(version).split("."))
+            with self.subTest(version=version):
+                self.assertLessEqual(major, 255)
+                self.assertLessEqual(minor, 255)
+                self.assertLessEqual(build, 65535)
 
     def test_signing_requires_every_setting(self):
         complete = {name: "value" for name in SIGNING_ENV}
@@ -394,7 +476,7 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertTrue(csc.is_file(), "csc.exe is required")
         script = ROOT / "scripts/release/start-windows-pmuxd.ps1"
         source = script.read_text(encoding="utf-8")
-        self.assertIn("CreateNoWindow = $true", source)
+        self.assertIn("UseShellExecute = $true", source)
         self.assertIn("Arguments = 'up'", source)
         self.assertIn("WaitForExit(30000)", source)
         self.assertNotIn("Stop-Process", source)

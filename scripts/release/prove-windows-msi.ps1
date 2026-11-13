@@ -66,6 +66,20 @@ try {
         -d "Repo=$repo" `
         -o $sameBuilt
     if ($LASTEXITCODE -ne 0) { throw "same-version MSI build exited $LASTEXITCODE" }
+    # Releases through 0.3.64 use major 0 (0.3.63 is 0.3.63999). A package that uses
+    # a higher major must still replace one of those installed MSIs.
+    $legacyProduct = '0.3.63999'
+    $legacyBuilt = Join-Path $stage 'legacy.msi'
+    $legacyCheck = [int]$parts[0] -ge 1
+    if ($legacyCheck) {
+        & $wix build $wxs -arch x64 -ext WixToolset.Util.wixext/5.0.2 `
+            -d "ProductVersion=$legacyProduct" `
+            -d "SourceVersion=$($manifest.version)" `
+            -d "Payload=$($payload.FullName)" `
+            -d "Repo=$repo" `
+            -o $legacyBuilt
+        if ($LASTEXITCODE -ne 0) { throw "legacy-encoding MSI build exited $LASTEXITCODE" }
+    }
 
     $proofDir = Join-Path ([System.IO.Path]::GetTempPath()) 'MSI Proof'
     if ($proofDir -notmatch ' ') { throw 'proof directory must contain a space' }
@@ -73,12 +87,18 @@ try {
     $olderCopy = Join-Path $proofDir 'older.msi'
     $sameCopy = Join-Path $proofDir 'same.msi'
     $newCopy = Join-Path $proofDir 'new.msi'
+    $legacyCopy = Join-Path $proofDir 'legacy.msi'
     Copy-Item -LiteralPath $olderBuilt -Destination $olderCopy -Force
     Copy-Item -LiteralPath $sameBuilt -Destination $sameCopy -Force
     Copy-Item -LiteralPath $shipped.FullName -Destination $newCopy -Force
+    if ($legacyCheck) { Copy-Item -LiteralPath $legacyBuilt -Destination $legacyCopy -Force }
 
     $script = Join-Path $repo 'scripts\release\test-windows-msi.ps1'
     & $script -Msi $newCopy -UpgradeFrom $olderCopy -ExpectedVersion $manifest.version -ExpectedProductVersion $manifest.msi_product_version -AddToPath 2>&1 | Tee-Object -Variable higher
+    $legacy = @()
+    if ($legacyCheck) {
+        & $script -Msi $newCopy -UpgradeFrom $legacyCopy -ExpectedVersion $manifest.version -ExpectedProductVersion $manifest.msi_product_version -AddToPath 2>&1 | Tee-Object -Variable legacy
+    }
     & $script -Msi $newCopy -UpgradeFrom $sameCopy -ExpectedVersion $manifest.version -ExpectedProductVersion $manifest.msi_product_version 2>&1 | Tee-Object -Variable same
     & $script -Msi $newCopy -UpgradeFrom $sameCopy -ExpectedVersion $manifest.version -ExpectedProductVersion $manifest.msi_product_version -NoAddToPath 2>&1 | Tee-Object -Variable optedOut
     $released = @()
@@ -103,6 +123,8 @@ try {
         "msi_name=$($shipped.Name)"
         ($released | Out-String).TrimEnd()
         'path_has_space=true'
+        $(if ($legacyCheck) { "legacy_upgrade_from=$legacyProduct" } else { 'legacy_upgrade_from=not needed' })
+        ($legacy | Out-String).TrimEnd()
         'higher_version:'
         ($higher | Out-String).TrimEnd()
         'same_version:'

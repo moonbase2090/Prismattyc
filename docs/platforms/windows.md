@@ -109,17 +109,31 @@ configuration and `%LOCALAPPDATA%\Prismattyc` data in place. The update store
 is `$XDG_DATA_HOME/prismattyc/updates` when `XDG_DATA_HOME` is nonempty, and
 otherwise `%LOCALAPPDATA%\prismattyc\updates`.
 
-MSI `ProductVersion` has three numbers of at most 65535 and cannot store a
-prerelease tag. Patch numbers through 64 map to `patch * 1000 + slot`. A
-stable `X.Y.Z` uses slot 999. `X.Y.Z-rc.N` uses slot N, from 1 through 998.
-`0.3.29-rc.2` is product version `0.3.29002`, `0.3.29` is `0.3.29999`, and
-`0.3.30-rc.1` is `0.3.30001`. The UpgradeCode
+MSI `ProductVersion` is `major.minor.build`. Major and minor are at most 255,
+build is at most 65535, and it cannot store a prerelease tag, so every release
+also gets a slot: a stable release takes the top slot and `X.Y.Z-rc.N` takes
+slot N. A candidate sorts before its stable release and before the next
+candidate. Two layouts exist, because 0.3.0 through 0.3.64 were built with the
+first one and a newer MSI must always sort after an older one.
+
+- Up to 0.3.64: `0.Y.(patch*1000+slot)`. The stable slot is 999 and candidates
+  use 1 through 998. `0.3.29-rc.2` is `0.3.29002`, `0.3.29` is `0.3.29999`,
+  `0.3.63` is `0.3.63999` and `0.3.64` is `0.3.64999`. These values are fixed
+  because installed MSIs carry them. This layout cannot go past patch 64.
+- After 0.3.64: `(major+1).minor.(patch*100+slot)`. The stable slot is 99 and
+  candidates use 1 through 98. `0.3.65-rc.1` is `1.3.6501`, `0.3.65` is
+  `1.3.6599`, `0.4.0` is `1.4.99` and `1.0.0` is `2.0.99`. The major field
+  starts at 1, so these sort after every older value, and 0.4.0 and 1.0.0
+  still sort after every 0.3.x. This reaches patch 654 and major 254. Apps &
+  features shows this number, not the release tag.
+
+The UpgradeCode
 `681faa33-88f2-5c22-aeba-86ab1fffd4da` stays fixed so a newer MSI replaces the
 older one. A rebuild of the same product version also replaces the installed
 product and leaves one Apps & features entry. Every build of one version shares
 a file version, so the package sets `REINSTALLMODE=emus`, which replaces files
 of an equal version. The rebuild's executables are the ones installed.
-Other prerelease spellings are rejected.
+Other prerelease spellings are rejected, and so is a version the fields cannot hold.
 
 The installer does not stop a running daemon or host. Restart Manager is
 disabled. That alone does not decide whether Windows replaces an in-use file

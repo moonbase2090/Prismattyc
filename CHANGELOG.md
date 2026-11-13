@@ -2,10 +2,16 @@
 
 ## [Unreleased]
 
+## [0.3.66] - 2026-11-13
+
 ### Fixed
 
 - A quiet Windows install no longer waits for the installer to time out after starting `pmuxd`. The start script now launches `pmux up` through the shell, so the install finishes when the script does.
 - The Windows installer's version number can now encode releases after 0.3.64. Releases from 0.3.65 on use a higher MSI major version, so they upgrade installers built for 0.3.63 and earlier, and the ones before them keep their existing numbers.
+
+## [0.3.66-rc.1]
+
+Release candidate for 0.3.66, with the [same changes](#0366---2026-11-13).
 
 ## [0.3.65] - 2026-11-13
 

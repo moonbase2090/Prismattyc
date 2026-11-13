@@ -604,7 +604,11 @@ fn confirm_macos_zip(
 }
 
 fn curl() -> Command {
-    let mut cmd = Command::new("curl");
+    curl_with("curl")
+}
+
+fn curl_with(program: &str) -> Command {
+    let mut cmd = Command::new(program);
     cmd.args([
         "--fail",
         "--silent",
@@ -640,18 +644,66 @@ fn listed_releases() -> Result<Vec<Release>> {
     serde_json::from_slice(&bytes).context("parse release list")
 }
 
+const GITHUB_API_PREFIX: &str = "https://api.github.com/";
+
+/// A curl config line that sends `token` as a bearer token, for GitHub API
+/// requests only. The unauthenticated API limit is shared by every runner on a
+/// network, so a CI job that fetches release metadata needs its own token.
+/// The line goes to curl on stdin, never on the command line, where other
+/// processes could read it. A token with any character outside what GitHub
+/// issues is ignored rather than quoted into the config.
+fn github_auth_config(url: &str, token: Option<&str>) -> Option<String> {
+    let token = token?.trim();
+    let usable = !token.is_empty()
+        && token.len() <= 255
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'));
+    if !url.starts_with(GITHUB_API_PREFIX) || !usable {
+        return None;
+    }
+    Some(format!("header = \"Authorization: Bearer {token}\"\n"))
+}
+
 pub(crate) fn fetch_release_json(url: &str) -> Result<Vec<u8>> {
-    let mut child = curl()
-        .args([
-            "--header",
-            "Accept: application/vnd.github+json",
-            "--max-filesize",
-            "4194304",
-        ])
+    let token = std::env::var("GITHUB_TOKEN").ok();
+    fetch_release_json_with("curl", url, token.as_deref())
+}
+
+/// Try with the token first. A stale or revoked token in someone's environment
+/// would make GitHub answer 401 to a request that works anonymously, so a
+/// failed authenticated attempt is retried once without it.
+fn fetch_release_json_with(program: &str, url: &str, token: Option<&str>) -> Result<Vec<u8>> {
+    if let Some(config) = github_auth_config(url, token) {
+        if let Ok(bytes) = run_release_json(program, url, Some(&config)) {
+            return Ok(bytes);
+        }
+    }
+    run_release_json(program, url, None)
+}
+
+fn run_release_json(program: &str, url: &str, auth_config: Option<&str>) -> Result<Vec<u8>> {
+    let mut cmd = curl_with(program);
+    cmd.args([
+        "--header",
+        "Accept: application/vnd.github+json",
+        "--max-filesize",
+        "4194304",
+    ]);
+    if auth_config.is_some() {
+        cmd.args(["--config", "-"]).stdin(Stdio::piped());
+    }
+    let mut child = cmd
         .arg(url)
         .stdout(Stdio::piped())
         .spawn()
         .context("start HTTPS download (curl is required)")?;
+    if let Some(config) = auth_config {
+        let mut stdin = child.stdin.take().context("curl stdin")?;
+        stdin
+            .write_all(config.as_bytes())
+            .context("send credentials to curl")?;
+    }
     read_capped_child_stdout(&mut child, 4_194_304)
 }
 
@@ -3603,5 +3655,122 @@ mod tests {
             .spawn()
             .unwrap();
         assert!(read_capped_child_stdout(&mut big, 3).is_err());
+    }
+
+    const API_URL: &str = "https://api.github.com/repos/o/r/releases/tags/t";
+
+    #[test]
+    fn github_auth_config_is_for_api_urls_and_plain_tokens_only() {
+        assert_eq!(
+            github_auth_config(API_URL, Some("ghs_AbC123-x.y_z")).as_deref(),
+            Some("header = \"Authorization: Bearer ghs_AbC123-x.y_z\"\n")
+        );
+        // Surrounding whitespace (a trailing newline from a secret file) is dropped.
+        assert_eq!(
+            github_auth_config(API_URL, Some(" tok_1\n")).as_deref(),
+            Some("header = \"Authorization: Bearer tok_1\"\n")
+        );
+        for url in [
+            "https://github.com/o/r/releases/download/t/a.zip",
+            "https://api.github.com.evil.example/x",
+            "http://api.github.com/x",
+            "https://example.com/https://api.github.com/",
+        ] {
+            assert_eq!(github_auth_config(url, Some("tok_1")), None, "{url}");
+        }
+        for token in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("a b"),
+            Some("a\"b"),
+            Some("a\nb"),
+            Some("a\\b"),
+        ] {
+            assert_eq!(github_auth_config(API_URL, token), None, "{token:?}");
+        }
+        let long = "a".repeat(256);
+        assert_eq!(github_auth_config(API_URL, Some(&long)), None);
+    }
+
+    /// A stand-in for curl that records its arguments and stdin, then answers
+    /// with `{}` unless stdin carried a config and `FAIL_AUTH` is set in it.
+    #[cfg(unix)]
+    fn fake_curl(directory: &Path, fail_when_authenticated: bool) -> PathBuf {
+        let script = directory.join("curl");
+        let body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{dir}/args.txt'\nif printf '%s' \"$*\" | grep -q -- '--config -'; then\n  cat >> '{dir}/stdin.txt'\n  {fail}\nfi\nprintf '{{}}'\n",
+            dir = directory.display(),
+            fail = if fail_when_authenticated { "exit 22" } else { ":" },
+        );
+        fs::write(&script, body).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
+    fn fake_curl_dir(name: &str) -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("pmux-curl-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn release_json_sends_the_token_on_stdin_and_never_in_arguments() {
+        let directory = fake_curl_dir("stdin");
+        let program = fake_curl(&directory, false);
+        let bytes =
+            fetch_release_json_with(program.to_str().unwrap(), API_URL, Some("tok_secret_1"))
+                .unwrap();
+        assert_eq!(bytes, b"{}");
+        let args = fs::read_to_string(directory.join("args.txt")).unwrap();
+        assert!(!args.contains("tok_secret_1"), "{args}");
+        assert!(args.lines().any(|line| line == API_URL), "{args}");
+        assert_eq!(
+            fs::read_to_string(directory.join("stdin.txt")).unwrap(),
+            "header = \"Authorization: Bearer tok_secret_1\"\n"
+        );
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn release_json_sends_no_token_for_other_hosts_or_when_unset() {
+        let directory = fake_curl_dir("other");
+        let program = fake_curl(&directory, false);
+        let program = program.to_str().unwrap();
+        fetch_release_json_with(program, "https://github.com/o/r/x", Some("tok_secret_1")).unwrap();
+        fetch_release_json_with(program, API_URL, None).unwrap();
+        assert!(!directory.join("stdin.txt").exists());
+        let args = fs::read_to_string(directory.join("args.txt")).unwrap();
+        assert!(!args.contains("--config"), "{args}");
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn release_json_retries_without_a_token_the_server_rejects() {
+        let directory = fake_curl_dir("retry");
+        let program = fake_curl(&directory, true);
+        let bytes =
+            fetch_release_json_with(program.to_str().unwrap(), API_URL, Some("tok_stale_1"))
+                .unwrap();
+        assert_eq!(bytes, b"{}");
+        // One authenticated attempt that failed, then one anonymous request.
+        let args = fs::read_to_string(directory.join("args.txt")).unwrap();
+        assert_eq!(
+            args.lines().filter(|line| *line == "--config").count(),
+            1,
+            "{args}"
+        );
+        assert_eq!(
+            args.lines().filter(|line| *line == API_URL).count(),
+            2,
+            "{args}"
+        );
+        fs::remove_dir_all(&directory).unwrap();
     }
 }

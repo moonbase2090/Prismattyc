@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.3.67] - 2026-11-13
+
+### Fixed
+
+- Fetching release metadata for the plug-in bundle sends the job's GitHub token when `GITHUB_TOKEN` is set, so a release build is no longer refused by the GitHub API's anonymous rate limit. The token goes to curl on standard input and only for `api.github.com`; if a token is rejected, the request is retried without it.
+
+## [0.3.67-rc.1]
+
+Release candidate for 0.3.67, with the [same changes](#0367---2026-11-13).
+
 ## [0.3.66] - 2026-11-13
 
 ### Fixed

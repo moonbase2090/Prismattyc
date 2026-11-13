@@ -56,5 +56,17 @@ class PluginReleasePreflightTests(unittest.TestCase):
         self.check_mode('candidate', 'release/v0.3.55-rc.1-changelog', True, 0)
 
 
+class PluginBundleFetchTokenTests(unittest.TestCase):
+    def test_the_bundle_fetch_step_gets_the_job_token(self):
+        # The fetch reads release metadata from the GitHub API; without the
+        # token it is refused by the anonymous rate limit (HTTP 403).
+        workflow = (REPO / '.github/workflows/plugin-artifacts.yml').read_text()
+        step = workflow.split(
+            '      - name: Build or fetch one target-neutral bundle\n', 1
+        )[1].split('\n      - name:', 1)[0]
+        environment = step.split('        env:\n', 1)[1].split('        run:', 1)[0]
+        self.assertIn('GITHUB_TOKEN: ${{ github.token }}', environment)
+
+
 if __name__ == '__main__':
     unittest.main()

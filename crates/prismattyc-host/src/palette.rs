@@ -410,7 +410,15 @@ impl Palette {
             }
             _ => {}
         }
-        if mods.control_key() && !mods.alt_key() && !mods.super_key() {
+        // Escape is exempt from the modifier gates: a held or stuck modifier
+        // must not make the palette impossible to dismiss.
+        let escape = is_escape(key);
+        let key = &if escape {
+            Key::Named(NamedKey::Escape)
+        } else {
+            key.clone()
+        };
+        if !escape && mods.control_key() && !mods.alt_key() && !mods.super_key() {
             match key {
                 Key::Named(NamedKey::ArrowRight) => self.cycle_filter(1),
                 Key::Named(NamedKey::ArrowLeft) => self.cycle_filter(-1),
@@ -418,7 +426,7 @@ impl Palette {
             }
             return PaletteVerdict::Consumed;
         }
-        if mods.alt_key() || mods.super_key() {
+        if !escape && (mods.alt_key() || mods.super_key()) {
             return PaletteVerdict::Consumed;
         }
 
@@ -944,7 +952,13 @@ impl SpacePicker {
         mods: ModifiersState,
         spaces: &[SpacePickerRow],
     ) -> SpacePickerVerdict {
-        if mods.control_key() || mods.alt_key() || mods.super_key() {
+        let escape = is_escape(key);
+        let key = &if escape {
+            Key::Named(NamedKey::Escape)
+        } else {
+            key.clone()
+        };
+        if !escape && (mods.control_key() || mods.alt_key() || mods.super_key()) {
             return SpacePickerVerdict::Consumed;
         }
         if let Some(name) = self.confirm.clone() {
@@ -1745,6 +1759,105 @@ mod tests {
             press(&mut mover, NamedKey::Enter),
             SpacePickerVerdict::Move("alpha".into())
         );
+    }
+
+    fn every_modifier_state() -> Vec<ModifiersState> {
+        vec![
+            ModifiersState::empty(),
+            ModifiersState::SHIFT,
+            ModifiersState::CONTROL,
+            ModifiersState::ALT,
+            ModifiersState::SUPER,
+            ModifiersState::CONTROL | ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::SUPER,
+        ]
+    }
+
+    fn escape_spellings() -> Vec<Key> {
+        vec![
+            Key::Named(NamedKey::Escape),
+            Key::Character("\u{1b}".into()),
+        ]
+    }
+
+    #[test]
+    fn escape_closes_the_palette_under_any_held_modifier_or_spelling() {
+        let keymap = KeyMap::default();
+        for mods in every_modifier_state() {
+            for key in escape_spellings() {
+                let mut palette = Palette::default();
+                assert_eq!(
+                    palette.key(&key, mods, None, &keymap, false),
+                    PaletteVerdict::Close,
+                    "{key:?} with {mods:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn escape_backs_out_of_a_digit_prompt_before_it_closes_the_palette() {
+        let keymap = KeyMap::default();
+        for mods in every_modifier_state() {
+            let mut palette = Palette {
+                awaiting_digit: Some(PaletteEntry::SelectTabFamily),
+                ..Palette::default()
+            };
+            let escape = Key::Named(NamedKey::Escape);
+            assert_eq!(
+                palette.key(&escape, mods, None, &keymap, false),
+                PaletteVerdict::Consumed,
+                "{mods:?}"
+            );
+            assert!(palette.awaiting_digit.is_none(), "{mods:?}");
+            assert_eq!(
+                palette.key(&escape, mods, None, &keymap, false),
+                PaletteVerdict::Close,
+                "{mods:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_keys_under_a_held_command_modifier_still_do_not_close_the_palette() {
+        let keymap = KeyMap::default();
+        let mut palette = Palette::default();
+        for key in [Key::Named(NamedKey::Enter), Key::Character("q".into())] {
+            assert_eq!(
+                palette.key(&key, ModifiersState::ALT, None, &keymap, false),
+                PaletteVerdict::Consumed
+            );
+        }
+    }
+
+    #[test]
+    fn escape_closes_the_space_picker_under_any_held_modifier_or_spelling() {
+        let spaces = sample_spaces();
+        for mods in every_modifier_state() {
+            for key in escape_spellings() {
+                let mut picker = SpacePicker::new(SpacePickerKind::Open);
+                assert_eq!(
+                    picker.key(&key, mods, &spaces),
+                    SpacePickerVerdict::Close,
+                    "{key:?} with {mods:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn escape_cancels_a_pending_delete_confirmation_under_a_held_modifier() {
+        let spaces = sample_spaces();
+        for mods in every_modifier_state() {
+            let mut picker = SpacePicker::new(SpacePickerKind::Delete);
+            let _ = picker.key(&Key::Named(NamedKey::Enter), empty_mods(), &spaces);
+            assert!(picker.confirm.is_some());
+            assert_eq!(
+                picker.key(&Key::Named(NamedKey::Escape), mods, &spaces),
+                SpacePickerVerdict::Consumed
+            );
+            assert!(picker.confirm.is_none(), "{mods:?}");
+        }
     }
 
     #[test]

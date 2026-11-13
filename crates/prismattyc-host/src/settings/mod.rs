@@ -10,7 +10,6 @@ use std::sync::mpsc::{self, Receiver};
 
 use anyhow::{Context, Result};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 use crate::config_document::{Change, Destination, Edit};
 use crate::{config, palette::PaletteRow};
@@ -1530,7 +1529,7 @@ pub(super) fn handle_key(host: &mut crate::HostState, event: &winit::event::KeyE
         return false;
     };
     let logical = crate::palette::typed_character_key(
-        &event.key_without_modifiers(),
+        &crate::overlay_key(event),
         &event.logical_key,
         event.text.as_deref(),
         host.modifiers,

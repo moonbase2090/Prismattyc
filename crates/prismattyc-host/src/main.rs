@@ -83,6 +83,13 @@ mod update_notes;
 // cargo-mutants 27.1 does not recognize nested cfg(all(test, ...)).
 // Keep cfg(test) separate so mutation targets exclude the test fixture.
 #[cfg(test)]
+mod escape_key_tests;
+// Keep cfg(test) separate so mutation targets exclude the test fixture.
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+mod escape_live_tests;
+// Keep cfg(test) separate so mutation targets exclude the test fixture.
+#[cfg(test)]
 #[cfg(target_os = "linux")]
 mod input_routing_tests;
 #[cfg(test)]
@@ -9567,7 +9574,7 @@ fn handle_rename_key(host: &mut HostState, event: &winit::event::KeyEvent) -> bo
     if host.tab_rename.is_none() {
         return false;
     }
-    if host.modifiers.control_key() || host.modifiers.alt_key() || host.modifiers.super_key() {
+    if command_modifier_blocks_text(&event.logical_key, host.modifiers) {
         return true;
     }
     let Some(stroke) = rename_stroke_from_logical(&event.logical_key) else {
@@ -11579,6 +11586,47 @@ fn activate_context_menu(
     }
 }
 
+/// Whether a press is Escape, from the pieces of a key event (testable without winit).
+fn is_escape_press(
+    logical: &Key,
+    unmodified: &Key,
+    text: Option<&str>,
+    physical: PhysicalKey,
+) -> bool {
+    palette::is_escape(logical)
+        || palette::is_escape(unmodified)
+        || text == Some("\u{1b}")
+        || physical == PhysicalKey::Code(KeyCode::Escape)
+}
+
+/// Whether this press is the Escape key, whatever name, modifier state or
+/// text the platform attaches to it.
+fn is_escape_event(event: &winit::event::KeyEvent) -> bool {
+    is_escape_press(
+        &event.logical_key,
+        &event.key_without_modifiers(),
+        event.text.as_deref(),
+        event.physical_key,
+    )
+}
+
+/// The modifier-free key an overlay should act on: Escape is always named as
+/// such, so a platform that reports it as text or under a modifier still closes.
+fn overlay_key(event: &winit::event::KeyEvent) -> Key {
+    if is_escape_event(event) {
+        Key::Named(NamedKey::Escape)
+    } else {
+        event.key_without_modifiers()
+    }
+}
+
+/// A held Ctrl, Alt or Super turns a text-field key into a shortcut the field
+/// ignores. Escape is the exception: it must always reach the field to cancel.
+fn command_modifier_blocks_text(logical: &Key, modifiers: ModifiersState) -> bool {
+    !matches!(logical, Key::Named(NamedKey::Escape))
+        && (modifiers.control_key() || modifiers.alt_key() || modifiers.super_key())
+}
+
 /// Escape closes an open context menu or panel before any other key
 /// handling, and before anything reaches the focused pane or plug-in view.
 /// It does not depend on the menu having rows to show, on a modifier the
@@ -11606,7 +11654,7 @@ fn handle_context_menu_key(
     }
     let _menu = host.context_menu.as_ref()?;
     let (_, rows) = context_menu_rows(host)?;
-    let logical = event.key_without_modifiers();
+    let logical = overlay_key(event);
     let verdict = host
         .context_menu
         .as_mut()
@@ -11644,10 +11692,9 @@ fn space_rail_key_decision(
     if !active {
         return SpaceRailKeyDecision::Unhandled;
     }
+    let escape = matches!(logical_key, Key::Named(NamedKey::Escape));
     if side == space_rail::RailSide::Off
-        || modifiers.control_key()
-        || modifiers.alt_key()
-        || modifiers.super_key()
+        || (!escape && (modifiers.control_key() || modifiers.alt_key() || modifiers.super_key()))
     {
         return SpaceRailKeyDecision::Leave;
     }
@@ -11753,7 +11800,8 @@ fn handle_space_name_key(host: &mut HostState, event: &winit::event::KeyEvent) {
     {
         return;
     }
-    if host.modifiers.control_key() || host.modifiers.super_key() {
+    let escape = matches!(event.logical_key, Key::Named(NamedKey::Escape));
+    if !escape && (host.modifiers.control_key() || host.modifiers.super_key()) {
         if let Key::Character(text) = &event.logical_key {
             if text.eq_ignore_ascii_case("a") {
                 host.space_rail.edit.as_mut().unwrap().selected = true;
@@ -11770,7 +11818,7 @@ fn handle_space_name_key(host: &mut HostState, event: &winit::event::KeyEvent) {
                 }
             }
         }
-    } else if !host.modifiers.alt_key() {
+    } else if escape || !host.modifiers.alt_key() {
         handle_space_rail_key(host, event);
     }
     host.dirty = true;
@@ -15939,7 +15987,7 @@ fn handle_space_picker_key(
     if host.space_picker.is_none() {
         return open_space_picker(host, action);
     }
-    let logical = event.key_without_modifiers();
+    let logical = overlay_key(event);
     let kind = host
         .space_picker
         .as_ref()
@@ -16115,7 +16163,7 @@ fn handle_palette_key(
 
     let keymap = host.keymap.clone();
     let typed = palette::typed_character_key(
-        &event.key_without_modifiers(),
+        &overlay_key(event),
         &event.logical_key,
         event.text.as_deref(),
         host.modifiers,
@@ -16275,7 +16323,7 @@ fn handle_find_key(
     event: &winit::event::KeyEvent,
     action: Option<keybind::Action>,
 ) -> bool {
-    handle_find_key_logical(host, &event.key_without_modifiers(), action, event.repeat)
+    handle_find_key_logical(host, &overlay_key(event), action, event.repeat)
 }
 
 fn cycle_theme_index(selected: Option<usize>, count: usize, forward: bool) -> Option<usize> {
@@ -16403,7 +16451,7 @@ fn handle_theme_picker_key(
         return true;
     }
 
-    let logical = event.key_without_modifiers();
+    let logical = overlay_key(event);
     if matches!(logical, Key::Named(NamedKey::Escape)) {
         cancel_theme_picker(host);
         return true;
@@ -16592,7 +16640,7 @@ fn handle_transparency_key(
 
 fn transparency_key_input(event: &winit::event::KeyEvent) -> Option<transparency::Input> {
     use transparency::Input;
-    match event.key_without_modifiers() {
+    match overlay_key(event) {
         Key::Named(NamedKey::Escape) => Some(Input::Escape),
         Key::Named(NamedKey::ArrowUp) => Some(Input::Up),
         Key::Named(NamedKey::ArrowDown) => Some(Input::Down),
@@ -21143,7 +21191,7 @@ impl ApplicationHandler<UserAction> for App {
                     host.window.request_redraw();
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => {
+            WindowEvent::KeyboardInput { mut event, .. } => {
                 // Wayland can deliver KeyboardInput before ModifiersChanged for the
                 // same physical chord. Fold modifier keys from this event into state.
                 let prior_chord = host.modifiers.control_key() && host.modifiers.shift_key();
@@ -21160,6 +21208,11 @@ impl ApplicationHandler<UserAction> for App {
 
                 if event.state != ElementState::Pressed {
                     return;
+                }
+                // Every dialog, menu and overlay below matches Escape by its
+                // logical key. Name it one way however the platform reports it.
+                if is_escape_event(&event) {
+                    event.logical_key = Key::Named(NamedKey::Escape);
                 }
                 if host.session_prompt.is_some() {
                     session_prompt::dispatch_key(host, &event.logical_key, event.repeat);

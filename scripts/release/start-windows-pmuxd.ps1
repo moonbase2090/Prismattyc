@@ -41,8 +41,15 @@ $start = New-Object System.Diagnostics.ProcessStartInfo
 $start.FileName = $pmux
 $start.Arguments = 'up'
 $start.WorkingDirectory = $bin
-$start.UseShellExecute = $false
-$start.CreateNoWindow = $true
+# ShellExecute starts pmux without inheriting this process's handles. The MSI
+# runs this script through WixQuietExec, and a quiet install used to stay
+# blocked for minutes after this script had finished. The likely cause is that
+# pmuxd inherited the installer's output pipe, which WixQuietExec reads until
+# every holder closes it; that was not isolated, but the install completes with
+# this launch. The exit code is enough here: a failure is reported below and
+# recorded in pmuxd-start.txt.
+$start.UseShellExecute = $true
+$start.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
 try {
     $process = [System.Diagnostics.Process]::Start($start)
 } catch {

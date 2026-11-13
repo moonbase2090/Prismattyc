@@ -476,7 +476,7 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertTrue(csc.is_file(), "csc.exe is required")
         script = ROOT / "scripts/release/start-windows-pmuxd.ps1"
         source = script.read_text(encoding="utf-8")
-        self.assertIn("CreateNoWindow = $true", source)
+        self.assertIn("UseShellExecute = $true", source)
         self.assertIn("Arguments = 'up'", source)
         self.assertIn("WaitForExit(30000)", source)
         self.assertNotIn("Stop-Process", source)

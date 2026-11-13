@@ -67,11 +67,11 @@ scan_pattern() {
   local file="$1"
   local pattern="$2"
   local out code=0
-  local case_flags=(-i)
+  local grep_flags=-nEIi
   if [[ "${3:-}" == --case-sensitive ]]; then
-    case_flags=()
+    grep_flags=-nEI
   fi
-  out="$(grep -n -E -I "${case_flags[@]}" -- "$pattern" "$file" 2>/dev/null)" || code=$?
+  out="$(grep "$grep_flags" -- "$pattern" "$file" 2>/dev/null)" || code=$?
   if [[ "$code" -eq 1 ]]; then
     return 0
   fi
@@ -203,7 +203,7 @@ collect_text_files() {
       esac
     done < <(find "$root/docs" -type f)
   fi
-  for path in "${extras[@]}"; do
+  for path in "${extras[@]-}"; do
     [[ -n "$path" && -f "$path" ]] || continue
     text_files+=("$path")
   done
@@ -517,10 +517,10 @@ scan_artifact_path() {
 
 load_denylist
 collect_text_files
-for path in "${text_files[@]}"; do
+for path in "${text_files[@]-}"; do
   scan_text_file "$path"
 done
-for path in "${artifacts[@]}"; do
+for path in "${artifacts[@]-}"; do
   [[ -n "$path" ]] || continue
   scan_artifact_path "$path"
 done

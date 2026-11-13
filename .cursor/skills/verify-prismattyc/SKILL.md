@@ -84,7 +84,10 @@ Use the exact recipes in the feature files. The CLI helper invokes production `p
 
 Run `bash scripts/check-release-text_test.sh` and the release text checker before
 a release. The regressions must accept ordinary `desktop-compositor` prose and
-reject uppercase Windows machine identifiers. The publication workflow also
+reject uppercase Windows machine identifiers. On macOS also run
+`CHECK_RELEASE_TEXT_BASH=/bin/bash bash scripts/check-release-text_test.sh`
+to exercise the actual system Bash scanner rather than its shebang choice.
+The publication workflow also
 scans generated notes, tag text, and packaged assets with its configured private
 denylist; a local generic-pattern test alone does not establish that final gate.
 

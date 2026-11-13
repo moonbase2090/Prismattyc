@@ -3,7 +3,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-checker="$root/scripts/check-release-text.sh"
+checker=("${CHECK_RELEASE_TEXT_BASH:-bash}" "$root/scripts/check-release-text.sh")
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
@@ -26,7 +26,7 @@ assert_clean() {
   local out err code=0
   out="$(mktemp)"
   err="$(mktemp)"
-  "$checker" --root "$dir" >"$out" 2>"$err" || code=$?
+  "${checker[@]}" --root "$dir" >"$out" 2>"$err" || code=$?
   if [[ "$code" -ne 0 || -s "$out" || -s "$err" ]]; then
     echo "expected a clean tree to pass" >&2
     cat "$out" "$err" >&2
@@ -41,7 +41,7 @@ assert_hit() {
   local out err code=0
   out="$(mktemp)"
   err="$(mktemp)"
-  "$checker" --root "$dir" >"$out" 2>"$err" || code=$?
+  "${checker[@]}" --root "$dir" >"$out" 2>"$err" || code=$?
   if [[ "$code" -eq 0 ]]; then
     echo "expected a hit" >&2
     exit 1
@@ -116,7 +116,7 @@ export RELEASE_DENYLIST="("
 out="$(mktemp)"
 err="$(mktemp)"
 code=0
-"$checker" --root "$work/bad-deny" >"$out" 2>"$err" || code=$?
+"${checker[@]}" --root "$work/bad-deny" >"$out" 2>"$err" || code=$?
 if [[ "$code" -eq 0 ]]; then
   echo "invalid denylist pattern must fail" >&2
   exit 1
@@ -137,7 +137,7 @@ printf 'prefix\0DESKTOP-ZZZZ9999\0suffix\n' >"$artifact"
 clean_tree "$work/bin"
 out="$(mktemp)"
 code=0
-"$checker" --root "$work/bin" --artifact "$artifact" >"$out" 2>"$work/bin.err" || code=$?
+"${checker[@]}" --root "$work/bin" --artifact "$artifact" >"$out" 2>"$work/bin.err" || code=$?
 if [[ "$code" -eq 0 ]]; then
   echo "artifact marker must fail" >&2
   exit 1
@@ -160,7 +160,7 @@ assert_artifact_hit() {
   local out err code=0
   out="$(mktemp)"
   err="$(mktemp)"
-  "$checker" --root "$work/$label" --artifact "$path" >"$out" 2>"$err" || code=$?
+  "${checker[@]}" --root "$work/$label" --artifact "$path" >"$out" 2>"$err" || code=$?
   if [[ "$code" -eq 0 ]]; then
     echo "$label: planted marker must fail" >&2
     exit 1
@@ -258,7 +258,7 @@ clean_tree "$work/encrypted"
 out="$(mktemp)"
 err="$(mktemp)"
 code=0
-"$checker" --root "$work/encrypted" --artifact "$work/encrypted.zip" >"$out" 2>"$err" || code=$?
+"${checker[@]}" --root "$work/encrypted" --artifact "$work/encrypted.zip" >"$out" 2>"$err" || code=$?
 if [[ "$code" -eq 0 ]]; then
   echo "encrypted zip must fail closed" >&2
   cat "$out" "$err" >&2
@@ -286,7 +286,7 @@ clean_tree "$work/oversize"
 out="$(mktemp)"
 err="$(mktemp)"
 code=0
-RELEASE_TEXT_MAX_MEMBER=8388608 "$checker" --root "$work/oversize" --artifact "$work/oversize.zip" >"$out" 2>"$err" || code=$?
+RELEASE_TEXT_MAX_MEMBER=8388608 "${checker[@]}" --root "$work/oversize" --artifact "$work/oversize.zip" >"$out" 2>"$err" || code=$?
 if [[ "$code" -eq 0 ]]; then
   echo "oversize zip member must fail closed" >&2
   cat "$out" "$err" >&2
@@ -323,7 +323,7 @@ clean_tree "$work/deep"
 out="$(mktemp)"
 err="$(mktemp)"
 code=0
-"$checker" --root "$work/deep" --artifact "$work/deep.zip" >"$out" 2>"$err" || code=$?
+"${checker[@]}" --root "$work/deep" --artifact "$work/deep.zip" >"$out" 2>"$err" || code=$?
 if [[ "$code" -eq 0 ]]; then
   echo "deeply nested zip must fail closed" >&2
   cat "$out" "$err" >&2
@@ -348,7 +348,7 @@ clean_tree "$work/clean-zip"
 out="$(mktemp)"
 err="$(mktemp)"
 code=0
-"$checker" --root "$work/clean-zip" --artifact "$work/clean-artifact.zip" >"$out" 2>"$err" || code=$?
+"${checker[@]}" --root "$work/clean-zip" --artifact "$work/clean-artifact.zip" >"$out" 2>"$err" || code=$?
 if [[ "$code" -ne 0 || -s "$out" || -s "$err" ]]; then
   echo "clean zip artifact must pass" >&2
   cat "$out" "$err" >&2
@@ -359,7 +359,7 @@ rm -f "$out" "$err"
 repo_out="$(mktemp)"
 repo_err="$(mktemp)"
 repo_code=0
-"$checker" --root "$root" >"$repo_out" 2>"$repo_err" || repo_code=$?
+"${checker[@]}" --root "$root" >"$repo_out" 2>"$repo_err" || repo_code=$?
 if [[ "$repo_code" -ne 0 || -s "$repo_out" || -s "$repo_err" ]]; then
   echo "current tree matched a generic pattern" >&2
   cat "$repo_out" "$repo_err" >&2

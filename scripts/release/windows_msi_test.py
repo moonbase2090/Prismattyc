@@ -50,6 +50,8 @@ class WindowsMsiTests(unittest.TestCase):
             "0.3.29-rc.999",  # past the legacy candidate range
             "0.3.65-rc.99",  # past the current candidate range
             "0.3.655",  # patch*100+99 would pass 65535
+            "0.3.655-rc.1",  # fits 65535, but its stable release does not
+            "0.3.655-rc.35",
             "0.2.65",  # a 0.2.x release past patch 64 never existed
             "255.0.0",  # MSI major would be 256
             "0.256.0",  # MSI minor is 256

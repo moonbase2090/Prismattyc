@@ -55,6 +55,8 @@ _MSI_MAJOR_MINOR_MAX = 255
 # Last release that keeps the legacy layout. Anything later sorts above it by
 # using a higher MSI major field.
 _LEGACY_LAST = (0, 3, 64)
+# Highest patch the current layout holds: 654*100 + 99 is 65499, 655*100 + 99 is not.
+_CURRENT_PATCH_MAX = 654
 
 
 def msi_product_version(version: str) -> str:
@@ -79,6 +81,10 @@ def msi_product_version(version: str) -> str:
     else:
         slot_max, stable_slot, scale = 98, 99, 100
         out_major = major + 1
+        if patch > _CURRENT_PATCH_MAX:
+            # Not left to the build-field check: that would let the first few
+            # candidates of 0.3.655 through while rejecting its stable release.
+            raise ValueError(f"MSI product version cannot encode {base}: patch is too large")
     if candidate is None:
         slot = stable_slot
     else:

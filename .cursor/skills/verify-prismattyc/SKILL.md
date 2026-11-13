@@ -80,6 +80,17 @@ After surprising output, stop driving until doctor passes. A healthy process wit
 
 Use the exact recipes in the feature files. The CLI helper invokes production `pmux` commands and uses a read-only protocol snapshot to check session identity. Native keyboard/mouse events prove desktop actions; a CLI mutation alone does not prove that a UI menu or shortcut works. If several mapped entry points changed, cover each affected entry point.
 
+## Release text
+
+Run `bash scripts/check-release-text_test.sh` and the release text checker before
+a release. The regressions must accept ordinary `desktop-compositor` prose and
+reject uppercase Windows machine identifiers. On macOS also run
+`CHECK_RELEASE_TEXT_BASH=/bin/bash bash scripts/check-release-text_test.sh`
+to exercise the actual system Bash scanner rather than its shebang choice.
+The publication workflow also
+scans generated notes, tag text, and packaged assets with its configured private
+denylist; a local generic-pattern test alone does not establish that final gate.
+
 ## Evidence
 
 Keep artifacts under `$verify_evidence`, outside disposable runtime state. The CLI helper writes `commands.jsonl` with arguments, stdout, stderr, and exit codes; `doctor.jsonl`; `pane.txt`; `daemon.log`; and `result.json`. The space drive also copies saved definitions before deletion.

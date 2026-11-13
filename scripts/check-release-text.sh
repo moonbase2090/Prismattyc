@@ -40,10 +40,9 @@ if [[ -z "$root" ]]; then
 fi
 
 allow_email="322824348+mb2090@users.noreply.github.com"
-# Generic patterns only. Case-insensitive except where the expression already is.
+# Generic patterns are case-insensitive. Windows desktop identifiers are checked separately.
 # A home-directory marker must not treat the word Home inside prose as a path.
 generic_patterns=(
-  'DESKTOP-[A-Z0-9]+'
   '[A-Za-z0-9-]+\.local\b'
   '/Users/'
   '(^|[^A-Za-z0-9])/home/[a-z]'
@@ -68,7 +67,11 @@ scan_pattern() {
   local file="$1"
   local pattern="$2"
   local out code=0
-  out="$(grep -n -E -I -i -- "$pattern" "$file" 2>/dev/null)" || code=$?
+  local grep_flags=-nEIi
+  if [[ "${3:-}" == --case-sensitive ]]; then
+    grep_flags=-nEI
+  fi
+  out="$(grep "$grep_flags" -- "$pattern" "$file" 2>/dev/null)" || code=$?
   if [[ "$code" -eq 1 ]]; then
     return 0
   fi
@@ -134,12 +137,8 @@ strip_ci_paths() {
 scan_artifact_text() {
   local file="$1"
   local pattern
-  # Case-sensitive: a case-insensitive match also hits update-desktop-database.
-  local out
-  out="$(grep -n -E -I -- 'DESKTOP-[A-Z0-9]+' "$file" 2>/dev/null)" || true
-  while IFS= read -r pattern; do
-    [[ -n "$pattern" ]] && report_line "$file" "${pattern%%:*}"
-  done <<<"$out"
+  # A case-insensitive match also hits update-desktop-database.
+  scan_pattern "$file" 'DESKTOP-[A-Z0-9]+' --case-sensitive
   for pattern in "${artifact_patterns[@]}"; do
     scan_pattern "$file" "$pattern"
   done
@@ -154,6 +153,7 @@ scan_text_file() {
   local file="$1"
   local pattern
   [[ -f "$file" ]] || return 0
+  scan_pattern "$file" 'DESKTOP-[A-Z0-9]+' --case-sensitive
   for pattern in "${generic_patterns[@]}"; do
     scan_pattern "$file" "$pattern"
   done
@@ -203,7 +203,7 @@ collect_text_files() {
       esac
     done < <(find "$root/docs" -type f)
   fi
-  for path in "${extras[@]}"; do
+  for path in "${extras[@]-}"; do
     [[ -n "$path" && -f "$path" ]] || continue
     text_files+=("$path")
   done
@@ -517,10 +517,10 @@ scan_artifact_path() {
 
 load_denylist
 collect_text_files
-for path in "${text_files[@]}"; do
+for path in "${text_files[@]-}"; do
   scan_text_file "$path"
 done
-for path in "${artifacts[@]}"; do
+for path in "${artifacts[@]-}"; do
   [[ -n "$path" ]] || continue
   scan_artifact_path "$path"
 done

@@ -6,6 +6,19 @@
 
 - A quiet Windows install no longer waits for the installer to time out after starting `pmuxd`. The start script now launches `pmux up` through the shell, so the install finishes when the script does.
 
+## [0.3.65] - 2026-11-13
+
+### Fixed
+
+- The release text check accepts ordinary desktop compositor prose while still rejecting uppercase Windows machine identifiers.
+- The Activity Monitor package is now 1.3.2 so its updated sources have a new immutable archive identity.
+- The terminal presenter preserves split arrow and Alt sequences, delivers lone Escape without waiting for another key, and keeps an idle bracketed paste open.
+- Windows updates restore a missing Activity Monitor command forwarder after verifying the installed frontend.
+
+## [0.3.65-rc.1]
+
+Release candidate for 0.3.65, with the [same changes](#0365---2026-11-13).
+
 ## [0.3.64] - 2026-11-12
 
 ### Added

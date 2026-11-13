@@ -4,7 +4,7 @@ Tested core revision: `0b80ecf05c82136afbddc8fe4f00d74a68407b07`
 Runtime: macOS 26.6.2 Tart VM, with a fresh private app profile and daemon
 Embedded Activity Monitor: 1.3.1 (`c6996fd88a6543789e7225a70bc8696397d029da1722a4c58f9380f3549e2e11`)
 
-The native host launched the bundled monitor in the VM. Native Quartz key events drove the monitor actions. The PNGs are the host frames passed to presentation (`PRISMATTYC_DUMP_PRESENT`), not desktop-compositor captures. Each frame has a matching saved pane-text capture. `recorder.jsonl` records the action, selection, visible assertions, and daemon session names before and after it. `result.json` records the seven completed steps and empty teardown leftovers.
+The native host launched the bundled monitor in the VM. Native Quartz key events drove the monitor actions. The PNGs are the host frames passed to presentation (`PRISMATTYC_DUMP_PRESENT`), not desktop compositor captures. Each frame has a matching saved pane-text capture. `recorder.jsonl` records the action, selection, visible assertions, and daemon session names before and after it. `result.json` records the seven completed steps and empty teardown leftovers.
 
 | Frame | Action | Verified outcome |
 | --- | --- | --- |

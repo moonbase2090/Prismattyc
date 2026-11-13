@@ -66,9 +66,13 @@ clean_tree "$work/clean"
 printf 'Contact 322824348+mb2090@users.noreply.github.com for the release.\n' >>"$work/clean/README.md"
 assert_clean "$work/clean"
 
+clean_tree "$work/desktop-prose"
+printf 'These are host frames, not desktop-compositor captures.\n' >>"$work/desktop-prose/docs/sample.md"
+assert_clean "$work/desktop-prose"
+
 clean_tree "$work/desktop"
-printf 'Machine DESKTOP-ABC123 was used.\n' >>"$work/desktop/CHANGELOG.md"
-assert_hit "$work/desktop" "DESKTOP-ABC123"
+printf 'Machine DESKTOP-AB12CD was used.\n' >>"$work/desktop/CHANGELOG.md"
+assert_hit "$work/desktop" "DESKTOP-AB12CD"
 
 clean_tree "$work/users"
 printf 'See /Users/someone/notes.\n' >>"$work/users/README.md"

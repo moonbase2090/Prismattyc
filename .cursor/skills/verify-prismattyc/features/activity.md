@@ -71,8 +71,18 @@ CI runs this flow on Linux, macOS, and Windows with the official bundle.
 
 Before preparing a release branch or core tag, run
 `python3 scripts/release/prepare-plugin-bundle.py` without `--candidate` and
-require exit 0. A missing official pin requires the owner to publish the first
-catalog and review its generated pin; follow `plugins/README.md`. CI candidate
+require exit 0. Then require the prepared bundle to contain the selected source
+versions and their exact fingerprints:
+
+```sh
+python3 scripts/release/check-plugin-sources.py \
+  --bundle "$verify_bundle" --require-published
+```
+
+An older valid pin can prepare successfully while missing a newly bumped guest.
+Publish and review its next catalog, generate the pin from actual release
+metadata, and check again before the core tag; follow `plugins/README.md`.
+CI candidate
 proof does not satisfy this release prerequisite. Native CI fetches the same
 official pin as public releases. Use the explicit candidate workflow when
 exercising unpublished guest changes. Release branches reject a missing

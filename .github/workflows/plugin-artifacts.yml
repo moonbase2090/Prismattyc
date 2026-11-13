@@ -64,6 +64,9 @@ jobs:
       - name: Build or fetch one target-neutral bundle
         env:
           BUNDLE_MODE: ${{ inputs.mode || 'candidate' }}
+          # The fetch reads release metadata from the GitHub API. Without a token
+          # it shares the anonymous rate limit of the runner's address and gets 403.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           case "$BUNDLE_MODE" in
             candidate)

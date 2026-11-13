@@ -41,6 +41,10 @@ python3 tests/native/macos-plugin-settings-e2e.py --bins "$verify_bins" \
 
 This fixture needs Python 3.11+, an unlocked display, Accessibility and screen
 capture permission, and matched binaries embedding production monitor 1.0.0.
+This intentionally exercises the retained historical package for Settings
+management. It does not prove selection of the newest monitor. Use the
+[production activity drive](activity.md#build-and-drive-the-actual-packages)
+with the reviewed official bundle to verify the current release package.
 Use `--check-desktop-only` to check Accessibility and an unlocked desktop
 without launching processes. This check does not test screen capture permission;
 the full fixture attempts capture later. Host permissions do not allocate its

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The Windows installer's version number can now encode releases after 0.3.64. Releases from 0.3.65 on use a higher MSI major version, so they upgrade installers built for 0.3.63 and earlier, and the ones before them keep their existing numbers.
+
 ## [0.3.65] - 2026-11-13
 
 ### Fixed

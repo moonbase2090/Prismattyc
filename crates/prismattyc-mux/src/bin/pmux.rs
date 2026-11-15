@@ -164,6 +164,9 @@ session
                                   publish metadata to an enabled activity feed
     activity-emit --seat ID --install-hooks FILE
                                   install seat-scoped runtime hooks explicitly
+    activity ticket <set|clear|show> [--seat ID] [TICKET]
+                                  the seat's current ticket, attached to its
+                                  activity events
     mail <verb> ...               mailbox (pmux mail --help)
     attention SESSION [MESSAGE]   raise attention
                                   (default: needs your attention)
@@ -308,6 +311,7 @@ enum Verb {
     Whoami,
     StatusSet,
     ActivityEmit,
+    Activity,
     Plugin,
     Send,
     PaneWrite,
@@ -370,6 +374,7 @@ const VERBS: &[(&str, Verb)] = &[
     ("whoami", Verb::Whoami),
     ("status-set", Verb::StatusSet),
     ("activity-emit", Verb::ActivityEmit),
+    ("activity", Verb::Activity),
     ("plugin", Verb::Plugin),
     ("send", Verb::Send),
     ("pane-write", Verb::PaneWrite),
@@ -587,6 +592,10 @@ fn main() -> Result<()> {
             reject_session_flag(cli_session.as_deref(), "activity-emit")?;
             activity_emit::run(&paths.socket, rest)
         }
+        Verb::Activity => {
+            reject_session_flag(cli_session.as_deref(), "activity")?;
+            activity_emit::run_activity(&paths.socket, rest)
+        }
         Verb::PaneWrite => {
             reject_session_flag(cli_session.as_deref(), "pane-write")?;
             pane_write::run(&paths, rest)
@@ -772,7 +781,7 @@ _prismattyc_mux() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
   cmd="${COMP_WORDS[1]}"
-  local cmds="up start attach ls list whoami status-set activity-emit send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session tab layout sync status stop restart versions session-config update completions config skills login"
+  local cmds="up start attach ls list whoami status-set activity-emit activity send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session tab layout sync status stop restart versions session-config update completions config skills login"
   case "$prev" in
     --instance) return ;;
     --session) return ;;
@@ -852,7 +861,7 @@ _arguments -C \
   '--session[Session name or id for stop]:name:' \
   '--socket[Absolute socket path]:path:_files' \
   '(-h --help)'{-h,--help}'[Help]' \
-  '1:command:(up start attach ls list whoami status-set activity-emit send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session tab layout sync status stop restart versions session-config update completions config skills login)' \
+  '1:command:(up start attach ls list whoami status-set activity-emit activity send save-buffer pipe-pane rename-pane break-pane join-pane arrange new doctor render-status kick attention mail space session tab layout sync status stop restart versions session-config update completions config skills login)' \
   '*::arg:->args'
 case $state in
   args)

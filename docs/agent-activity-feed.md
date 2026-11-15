@@ -245,7 +245,12 @@ Reading the matrix:
 - File and command text stay redacted and truncated by the adapter, or
   omitted. No field in any payload is a task or ticket reference; the
   adapter accepts an explicit `ticket` or `task_id` key only from a
-  producer that sets one deliberately. If a future runtime documents a
+  producer that sets one deliberately. A seat can also set its current
+  ticket itself with `pmux activity ticket set [--seat ID] TICKET`
+  (`clear [TICKET]` removes it, `show` prints it). The marker is one
+  validated ticket key per seat, stored beside the control socket, and
+  `activity-emit` attaches it to every event that names no ticket of
+  its own. It is never inferred from prompts, paths or branches. If a future runtime documents a
   structured ticket reference, add it as a separate optional schema
   field rather than overloading `task`.
 - No profile documents a quota or usage field in hook payloads. Quota

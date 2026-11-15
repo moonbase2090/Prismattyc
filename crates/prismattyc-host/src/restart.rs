@@ -186,6 +186,31 @@ fn perform(app: &mut App, request: &requests::Request) -> Result<()> {
     }
 }
 
+/// Attach targets for a saved view, one per session in saved order.
+///
+/// A target's title becomes the stable name the restored pane is marked with,
+/// and regroup matches the saved sessions against live panes by that name. It
+/// must be the session's own name. A tab's title would give every session in
+/// a split tab the same name, so regroup would see the real names as detached
+/// and attach those sessions a second time in an extra tab. The tab title
+/// stays on the saved tab record, which restore applies on its own.
+fn restore_targets(layout: &attach_tabs::AttachTabsFile) -> Vec<AttachTarget> {
+    layout
+        .tabs
+        .iter()
+        .flat_map(|tab| {
+            tab.sessions.iter().map(|session| AttachTarget {
+                session: session.clone(),
+                title: layout
+                    .session_names
+                    .get(session)
+                    .cloned()
+                    .unwrap_or_else(|| tab.title.clone()),
+            })
+        })
+        .collect()
+}
+
 pub(super) fn resume(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
     #[cfg(unix)]
     let resume = {
@@ -225,16 +250,7 @@ pub(super) fn resume(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
             }
             return true;
         };
-        app.cli.attach_sessions = layout
-            .tabs
-            .iter()
-            .flat_map(|tab| {
-                tab.sessions.iter().map(|session| AttachTarget {
-                    session: session.clone(),
-                    title: tab.title.clone(),
-                })
-            })
-            .collect();
+        app.cli.attach_sessions = restore_targets(&layout);
         app.restart_view = Some(path);
         match app.open_window(event_loop, false) {
             Ok(id) => {
@@ -275,4 +291,49 @@ pub(super) fn resume(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
         "windows restored; mux sessions kept running",
     );
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prismattyc_mux::attach_tabs::{AttachTabRecord, AttachTabsFile};
+
+    fn tab(title: &str, sessions: &[&str]) -> AttachTabRecord {
+        AttachTabRecord {
+            title: title.into(),
+            fixed_name: None,
+            sessions: sessions.iter().map(|s| (*s).to_string()).collect(),
+            layout: None,
+        }
+    }
+
+    #[test]
+    fn restored_sessions_keep_their_own_names_in_a_split_tab() {
+        let layout = AttachTabsFile {
+            tabs: vec![tab("alpha-1", &["2", "4"]), tab("alpha-2", &["3"])],
+            session_names: [("2", "alpha-1"), ("3", "alpha-2"), ("4", "alpha-3")]
+                .into_iter()
+                .map(|(id, name)| (id.to_string(), name.to_string()))
+                .collect(),
+            ..AttachTabsFile::default()
+        };
+        let targets: Vec<(String, String)> = restore_targets(&layout)
+            .into_iter()
+            .map(|t| (t.session, t.title))
+            .collect();
+        assert_eq!(
+            targets,
+            [("2", "alpha-1"), ("4", "alpha-3"), ("3", "alpha-2")]
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+        );
+    }
+
+    #[test]
+    fn a_session_without_a_saved_name_falls_back_to_its_tab_title() {
+        let layout = AttachTabsFile {
+            tabs: vec![tab("alpha-1", &["2"])],
+            ..AttachTabsFile::default()
+        };
+        assert_eq!(restore_targets(&layout)[0].title, "alpha-1");
+    }
 }

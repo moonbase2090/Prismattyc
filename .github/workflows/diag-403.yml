@@ -40,11 +40,12 @@ jobs:
           sed -i 's/^          //' /tmp/shim/curl
           chmod +x /tmp/shim/curl
           set +e
+          python3 -c "import os;print('python sees token:', bool(os.environ.get('GITHUB_TOKEN')), len(os.environ.get('GITHUB_TOKEN','')))"
           PATH=/tmp/shim:$PATH python3 scripts/release/prepare-plugin-bundle.py > /tmp/out.txt 2> /tmp/err.txt
-          echo "prepare exit=$?"
+          echo "prepare exit=$?"; ls /tmp/curl-log/*.args | wc -l
           tail -3 /tmp/err.txt | cut -c1-300
           for f in $(ls /tmp/curl-log/*.args | sort); do
             b=${f%.args}
-            echo "---- $(cat $f | tr '\n' ' ' | cut -c1-220)"
-            grep -iE '^(HTTP/|location:|x-ratelimit-(remaining|resource)|x-github-request-id)' $b.hdr 2>/dev/null | tr -d '\r' | cut -c1-160
+            echo "---- $(cat $f | tr '\n' ' ' | cut -c1-900)"
+            grep -iE '^(HTTP/|x-ratelimit-(limit|remaining))' $b.hdr 2>/dev/null | tr -d '\r' | cut -c1-160
           done

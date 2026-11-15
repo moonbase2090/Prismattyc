@@ -5,22 +5,46 @@ permissions:
   contents: read
 jobs:
   diag:
+    strategy:
+      fail-fast: false
+      matrix:
+        copy: [a, b]
     runs-on: ubuntu-24.04
     steps:
-      - name: Release list, authenticated and anonymous
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.90.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      - name: Install native helper dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --yes --no-install-recommends pkg-config libfontconfig1-dev libfreetype6-dev
+      - name: Fetch the pinned bundle with a logging curl shim
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          url="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=30"
-          show() { grep -iE '^(HTTP/|x-ratelimit-(limit|remaining|resource|used)|x-accepted-github-permissions|x-github-request-id|retry-after)' "$1" | tr -d '\r'; }
-          for i in 1 2 3; do
-            echo "== attempt $i authenticated"
-            curl -sS -D /tmp/h -o /tmp/b -H "Accept: application/vnd.github+json" -H "Authorization: Bearer ${GITHUB_TOKEN}" "$url" || true
-            show /tmp/h; head -c 300 /tmp/b | tr -d '\n'; echo
-            echo "== attempt $i anonymous"
-            curl -sS -D /tmp/h -o /tmp/b -H "Accept: application/vnd.github+json" "$url" || true
-            show /tmp/h; head -c 300 /tmp/b | tr -d '\n'; echo
-            sleep 5
+          mkdir -p /tmp/shim /tmp/curl-log
+          real=$(command -v curl)
+          cat > /tmp/shim/curl <<SH
+          #!/bin/bash
+          n=\$(date +%s%N)
+          printf '%s\n' "\$*" | sed -E 's/Bearer [A-Za-z0-9_.-]+/Bearer [x]/g' > /tmp/curl-log/\$n.args
+          $real -D /tmp/curl-log/\$n.hdr "\$@"
+          rc=\$?
+          echo "rc=\$rc" >> /tmp/curl-log/\$n.args
+          exit \$rc
+          SH
+          sed -i 's/^          //' /tmp/shim/curl
+          chmod +x /tmp/shim/curl
+          set +e
+          PATH=/tmp/shim:$PATH python3 scripts/release/prepare-plugin-bundle.py > /tmp/out.txt 2> /tmp/err.txt
+          echo "prepare exit=$?"
+          tail -3 /tmp/err.txt | cut -c1-300
+          for f in $(ls /tmp/curl-log/*.args | sort); do
+            b=${f%.args}
+            echo "---- $(cat $f | tr '\n' ' ' | cut -c1-220)"
+            grep -iE '^(HTTP/|location:|x-ratelimit-(remaining|resource)|x-github-request-id)' $b.hdr 2>/dev/null | tr -d '\r' | cut -c1-160
           done
-          echo "== rate_limit (authenticated)"
-          curl -sS -H "Authorization: Bearer ${GITHUB_TOKEN}" https://api.github.com/rate_limit | tr -d '\n ' | head -c 700; echo

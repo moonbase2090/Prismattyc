@@ -280,10 +280,15 @@ fn relative_file(value: &str, cwd: Option<&str>) -> Option<String> {
 }
 
 fn ticket_id(input: &Value) -> Option<String> {
-    let value = input
+    input
         .get("ticket")
         .or_else(|| input.get("task_id"))
-        .and_then(Value::as_str)?;
+        .and_then(Value::as_str)
+        .and_then(valid_ticket)
+}
+
+/// A board ticket key such as `PT-175`, upper-cased, or nothing.
+fn valid_ticket(value: &str) -> Option<String> {
     let (project, sequence) = value.split_once('-')?;
     (!project.is_empty()
         && project.chars().all(|ch| ch.is_ascii_alphanumeric())
@@ -291,6 +296,92 @@ fn ticket_id(input: &Value) -> Option<String> {
         && sequence.chars().all(|ch| ch.is_ascii_digit())
         && value.len() <= 32)
         .then(|| value.to_ascii_uppercase())
+}
+
+/// Where each seat's explicit current-ticket marker lives. It sits beside the
+/// control socket, so it follows that instance's runtime directory and a
+/// reboot cannot leave a stale ticket behind.
+fn marker_path(socket: &Path, seat: &AgentId) -> PathBuf {
+    socket.with_extension("tickets").join(seat.as_str())
+}
+
+fn read_marker(socket: &Path, seat: &AgentId) -> Option<String> {
+    let text = std::fs::read_to_string(marker_path(socket, seat)).ok()?;
+    valid_ticket(text.trim())
+}
+
+fn write_marker(socket: &Path, seat: &AgentId, ticket: &str) -> Result<()> {
+    let path = marker_path(socket, seat);
+    let directory = path.parent().context("marker directory")?;
+    std::fs::create_dir_all(directory).context("cannot create ticket marker directory")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let staging = path.with_extension("new");
+    std::fs::write(&staging, format!("{ticket}\n")).context("cannot write ticket marker")?;
+    std::fs::rename(&staging, &path).context("cannot store ticket marker")
+}
+
+/// Attach the seat's deliberately set ticket to an event that names none.
+/// A ticket the producer sent in the event itself wins.
+fn attach_marker(socket: &Path, event: &mut ActivityInput) {
+    let has_ticket = event.detail.as_ref().is_some_and(|d| d.task.is_some());
+    if has_ticket {
+        return;
+    }
+    if let Some(ticket) = read_marker(socket, &event.seat) {
+        event.detail.get_or_insert_with(Default::default).task = Some(ticket);
+    }
+}
+
+const TICKET_USAGE: &str = "pmux activity ticket set [--seat ID] TICKET\npmux activity ticket clear [--seat ID] [TICKET]\npmux activity ticket show [--seat ID]";
+
+/// `pmux activity ticket set|clear|show`: the seat's current-ticket marker.
+/// `clear TICKET` removes the marker only while it still names that ticket.
+pub(super) fn run_activity(socket: &Path, args: Vec<String>) -> Result<()> {
+    let mut args = args.into_iter();
+    if args.next().as_deref() != Some("ticket") {
+        bail!("usage:\n{TICKET_USAGE}");
+    }
+    let action = args.next().unwrap_or_default();
+    let mut seat = None;
+    let mut ticket = None;
+    while let Some(arg) = args.next() {
+        if arg == "--seat" && seat.is_none() {
+            seat = Some(AgentId::new(args.next().context("missing seat")?)?);
+        } else if !arg.starts_with('-') && ticket.is_none() {
+            ticket = Some(valid_ticket(&arg).context("not a ticket key like PT-175")?);
+        } else {
+            bail!("usage:\n{TICKET_USAGE}");
+        }
+    }
+    let seat = match seat {
+        Some(seat) => seat,
+        None => AgentId::new(
+            std::env::var("PMUX_AGENT").context("--seat is required (or set PMUX_AGENT)")?,
+        )?,
+    };
+    match (action.as_str(), ticket) {
+        ("set", Some(ticket)) => write_marker(socket, &seat, &ticket),
+        ("clear", wanted) => {
+            if wanted.is_some_and(|wanted| read_marker(socket, &seat) != Some(wanted)) {
+                return Ok(());
+            }
+            match std::fs::remove_file(marker_path(socket, &seat)) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                    Err(error).context("cannot clear ticket marker")
+                }
+                _ => Ok(()),
+            }
+        }
+        ("show", None) => {
+            println!("{}", read_marker(socket, &seat).unwrap_or_default());
+            Ok(())
+        }
+        _ => bail!("usage:\n{TICKET_USAGE}"),
+    }
 }
 
 fn hook_detail(input: &Value) -> Option<prismattyc_mux::activity::ActivityDetail> {
@@ -523,7 +614,10 @@ where
         || started.elapsed(),
         |remaining| read_hook_event(reader, seat, hook_event, Instant::now() + remaining),
         |remaining, event| match event {
-            Some(event) => publish_activity_event(socket, event, Instant::now() + remaining),
+            Some(mut event) => {
+                attach_marker(socket, &mut event);
+                publish_activity_event(socket, event, Instant::now() + remaining)
+            }
             None => Ok(()),
         },
     )
@@ -560,7 +654,10 @@ fn publish(cli: &Cli) -> Result<()> {
             return install::run(cli, file.as_ref(), *remove);
         }
     };
-    let Some(event) = event else { return Ok(()) };
+    let Some(mut event) = event else {
+        return Ok(());
+    };
+    attach_marker(&cli.socket, &mut event);
     match activity::exchange(
         &cli.socket,
         ControlRequest::PublishActivity {
@@ -871,5 +968,103 @@ mod tests {
             elapsed + Duration::from_millis(150) >= BOUND,
             "observation returned after {elapsed:?}, before the {BOUND:?} deadline: {error}"
         );
+    }
+
+    fn marker_socket(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pmux-marker-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("pmux.sock")
+    }
+
+    fn hook_for(seat: &str, extra: Value) -> ActivityInput {
+        let mut input = json!({"hook_event_name":"PostToolUse", "session_id":"session-m",
+            "tool_use_id":"call-m", "tool_name":"Bash"});
+        input
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        normalize(AgentId::new(seat).unwrap(), &input, false)
+            .unwrap()
+            .unwrap()
+    }
+
+    fn task_of(event: &ActivityInput) -> Option<&str> {
+        event.detail.as_ref().and_then(|d| d.task.as_deref())
+    }
+
+    #[test]
+    fn marker_reaches_events_that_name_no_ticket() {
+        let socket = marker_socket("attach");
+        run_activity(
+            &socket,
+            ["ticket", "set", "--seat", "worker-m", "pt-175"]
+                .map(String::from)
+                .to_vec(),
+        )
+        .unwrap();
+
+        let mut bare = hook_for("worker-m", json!({}));
+        assert_eq!(task_of(&bare), None);
+        attach_marker(&socket, &mut bare);
+        assert_eq!(task_of(&bare), Some("PT-175"));
+
+        // A notify event has no detail at all; the marker still lands.
+        let mut turn = ActivityInput {
+            detail: None,
+            ..hook_for("worker-m", json!({}))
+        };
+        attach_marker(&socket, &mut turn);
+        assert_eq!(task_of(&turn), Some("PT-175"));
+
+        // A producer's own explicit ticket is not overwritten.
+        let mut own = hook_for("worker-m", json!({"ticket":"WP-9"}));
+        attach_marker(&socket, &mut own);
+        assert_eq!(task_of(&own), Some("WP-9"));
+
+        // Another seat's events are untouched.
+        let mut other = hook_for("worker-n", json!({}));
+        attach_marker(&socket, &mut other);
+        assert_eq!(task_of(&other), None);
+        let _ = std::fs::remove_dir_all(socket.parent().unwrap());
+    }
+
+    #[test]
+    fn marker_clear_is_conditional_and_final() {
+        let socket = marker_socket("clear");
+        let seat = AgentId::new("worker-c").unwrap();
+        let run =
+            |args: &[&str]| run_activity(&socket, args.iter().map(|a| (*a).to_owned()).collect());
+        run(&["ticket", "set", "--seat", "worker-c", "PT-175"]).unwrap();
+        // Clearing a different ticket leaves this seat's marker alone.
+        run(&["ticket", "clear", "--seat", "worker-c", "PT-9"]).unwrap();
+        assert_eq!(read_marker(&socket, &seat).as_deref(), Some("PT-175"));
+        run(&["ticket", "clear", "--seat", "worker-c", "PT-175"]).unwrap();
+        assert_eq!(read_marker(&socket, &seat), None);
+        // Clearing with nothing set is fine; an unconditional clear removes.
+        run(&["ticket", "clear", "--seat", "worker-c"]).unwrap();
+        run(&["ticket", "set", "--seat", "worker-c", "PT-1"]).unwrap();
+        run(&["ticket", "clear", "--seat", "worker-c"]).unwrap();
+        assert_eq!(read_marker(&socket, &seat), None);
+        let _ = std::fs::remove_dir_all(socket.parent().unwrap());
+    }
+
+    #[test]
+    fn marker_rejects_anything_but_a_ticket_key() {
+        let socket = marker_socket("reject");
+        for bad in ["fix the build", "PT-", "PT-17x", "../etc", "PT-1/2"] {
+            let result = run_activity(
+                &socket,
+                ["ticket", "set", "--seat", "worker-r", bad]
+                    .map(String::from)
+                    .to_vec(),
+            );
+            assert!(result.is_err(), "{bad:?} was accepted");
+        }
+        assert_eq!(
+            read_marker(&socket, &AgentId::new("worker-r").unwrap()),
+            None
+        );
+        let _ = std::fs::remove_dir_all(socket.parent().unwrap());
     }
 }

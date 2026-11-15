@@ -1,0 +1,26 @@
+name: diag-403
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  diag:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Release list, authenticated and anonymous
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          url="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=30"
+          show() { grep -iE '^(HTTP/|x-ratelimit-(limit|remaining|resource|used)|x-accepted-github-permissions|x-github-request-id|retry-after)' "$1" | tr -d '\r'; }
+          for i in 1 2 3; do
+            echo "== attempt $i authenticated"
+            curl -sS -D /tmp/h -o /tmp/b -H "Accept: application/vnd.github+json" -H "Authorization: Bearer ${GITHUB_TOKEN}" "$url" || true
+            show /tmp/h; head -c 300 /tmp/b | tr -d '\n'; echo
+            echo "== attempt $i anonymous"
+            curl -sS -D /tmp/h -o /tmp/b -H "Accept: application/vnd.github+json" "$url" || true
+            show /tmp/h; head -c 300 /tmp/b | tr -d '\n'; echo
+            sleep 5
+          done
+          echo "== rate_limit (authenticated)"
+          curl -sS -H "Authorization: Bearer ${GITHUB_TOKEN}" https://api.github.com/rate_limit | tr -d '\n ' | head -c 700; echo

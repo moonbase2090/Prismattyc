@@ -139,12 +139,6 @@ fn restore(client: &mut Client, client_id: u64, paths: &Paths, file: &Path) -> R
                 window.cols > 0 && window.rows > 0,
                 "saved window has no size"
             );
-            for command in window.root.leaf_commands().into_iter().flatten() {
-                ensure!(
-                    !command_has_line_break(command),
-                    "saved command contains a line break"
-                );
-            }
         }
     }
     let mut restored = 0;
@@ -234,6 +228,15 @@ fn restore(client: &mut Client, client_id: u64, paths: &Paths, file: &Path) -> R
                 .zip(live_leaf_ids(&live_window.layout))
             {
                 if let Some(command) = command.filter(|value| !value.is_empty()) {
+                    // A line break would run as two commands. Skip this one
+                    // entry, as Space open does, and still restore the rest.
+                    if command_has_line_break(command) {
+                        println!(
+                            "Skipped the saved command for session {}: it contains a line break.",
+                            saved.name
+                        );
+                        continue;
+                    }
                     // The pane was just created for this restore, so nothing in it is a program to protect.
                     // On Windows a new pane's process tree can read as unknown, which skip_if_running
                     // treats as busy, leaving a bare shell.

@@ -1,0 +1,52 @@
+name: MSI quiet install timing
+on:
+  pull_request:
+    paths: [".github/workflows/msi-quiet-timing.yml"]
+jobs:
+  timing:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download the release MSI and zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path $env:RUNNER_TEMP\rel -Force | Out-Null
+          gh release download v0.3.67 -R ${{ github.repository }} -D $env:RUNNER_TEMP\rel -p '*windows-msvc.msi' -p '*windows-msvc.zip'
+          Get-ChildItem $env:RUNNER_TEMP\rel | Format-Table Name, Length
+          Expand-Archive $env:RUNNER_TEMP\rel\*.zip -DestinationPath $env:RUNNER_TEMP\zip
+          Get-ChildItem $env:RUNNER_TEMP\zip -Recurse | Select-Object -First 20 FullName
+      - name: Quiet install with no daemon, then with a resident daemon
+        shell: pwsh
+        run: |
+          $rel = "$env:RUNNER_TEMP\rel"; $msi = (Get-ChildItem $rel -Filter *.msi).FullName
+          $zip = Get-ChildItem "$env:RUNNER_TEMP\zip" -Recurse -Filter pmux.exe | Select-Object -First 1
+          function Install-Timed([string]$label) {
+            $log = "$env:RUNNER_TEMP\$label.log"
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", '/qn', '/norestart', '/l*v', "`"$log`"") -PassThru
+            $done = $p.WaitForExit(600000)
+            $sw.Stop()
+            if (-not $done) { try { $p.Kill() } catch {} }
+            "RESULT $label finished=$done exit=$(if ($done) {$p.ExitCode}) seconds=$([math]::Round($sw.Elapsed.TotalSeconds,1))"
+            Select-String -Path $log -Pattern 'StartPmuxd|pmuxd is running|did not start' | Select-Object -First 8 | ForEach-Object { $_.Line.Trim() }
+            $status = Join-Path $env:LOCALAPPDATA 'Prismattyc\pmuxd-start.txt'
+            if (Test-Path $status) { "pmuxd-start.txt:"; Get-Content $status }
+          }
+          function Remove-Install {
+            Get-Process pmuxd -ErrorAction SilentlyContinue | Stop-Process -Force
+            Start-Process msiexec.exe -ArgumentList @('/x', "`"$msi`"", '/qn', '/norestart') -Wait
+            Get-Process pmuxd -ErrorAction SilentlyContinue | Stop-Process -Force
+            Remove-Item (Join-Path $env:LOCALAPPDATA 'Prismattyc\pmuxd-start.txt') -ErrorAction SilentlyContinue
+          }
+          "== A: no resident daemon"
+          Install-Timed 'A-clean'
+          Remove-Install
+          "== B: resident daemon started from the zip before the install"
+          Start-Process $zip.FullName -ArgumentList 'up' -WindowStyle Hidden
+          Start-Sleep 5
+          "resident pmuxd before: " + ((Get-Process pmuxd -ErrorAction SilentlyContinue | Measure-Object).Count)
+          Install-Timed 'B-resident'
+          "pmuxd after: " + ((Get-Process pmuxd -ErrorAction SilentlyContinue | Measure-Object).Count)
+          Remove-Install

@@ -22,20 +22,26 @@ pub enum SeatState {
     Unknown,
     Working,
     Waiting,
+    /// An agent is running and waiting for input.
     Idle,
+    /// A turn started and nothing finished within the threshold.
     Stuck,
     Failed,
+    /// The pmux session is gone.
     Stopped,
+    /// The pmux session is alive but no agent runs under its shell.
+    NoAgent,
 }
 
 impl SeatState {
-    pub const ALL: [SeatState; 6] = [
+    pub const ALL: [SeatState; 7] = [
         Self::Working,
         Self::Waiting,
         Self::Idle,
         Self::Stuck,
         Self::Failed,
         Self::Stopped,
+        Self::NoAgent,
     ];
 
     pub fn word(self) -> &'static str {
@@ -47,6 +53,7 @@ impl SeatState {
             Self::Stuck => "stuck",
             Self::Failed => "failed",
             Self::Stopped => "down",
+            Self::NoAgent => "no agent",
         }
     }
 
@@ -59,6 +66,7 @@ impl SeatState {
             Self::Stuck => '!',
             Self::Failed => '✕',
             Self::Stopped => '■',
+            Self::NoAgent => '–',
         }
     }
 
@@ -71,7 +79,8 @@ impl SeatState {
             Self::Working => 2,
             Self::Idle => 3,
             Self::Stopped => 4,
-            Self::Unknown => 5,
+            Self::NoAgent => 5,
+            Self::Unknown => 6,
         }
     }
 }
@@ -237,8 +246,14 @@ impl Host {
             current.contains(id) || !seat.history.is_empty()
         });
         for session in sessions.seats {
+            // A hidden row returns when an agent starts in its session again.
+            let still_gone = matches!(
+                session.state,
+                prismattyc_core::activity::ActivitySessionState::Idle
+                    | prismattyc_core::activity::ActivitySessionState::Stopped
+            );
             self.dismissed.retain(|(seat, dismissed_id)| {
-                seat != &session.seat || *dismissed_id == Some(session.session_id)
+                seat != &session.seat || (*dismissed_id == Some(session.session_id) && still_gone)
             });
             let observation = session.observation(sessions.observed_at_ms);
             // pmux sends each value only when it is unambiguous, so the latest
@@ -282,6 +297,23 @@ impl Host {
                         ActivityKind::Stopped | ActivityKind::SessionFinished
                     )
                 });
+            // A turn is in flight when the last hook event says the agent is
+            // working. Only then can a quiet agent be stuck; one that finished
+            // its turn, or never reported one, is idle at its prompt.
+            let in_flight = seat
+                .history
+                .iter()
+                .rev()
+                .find(|record| {
+                    record.event.source != ActivitySource::Runtime
+                        && !matches!(
+                            record.event.kind,
+                            ActivityKind::MailSent | ActivityKind::MailReceived
+                        )
+                })
+                .is_some_and(|record| {
+                    next_state(SeatState::Unknown, record.event.kind) == SeatState::Working
+                });
             if !hooked
                 || matches!(
                     session.state,
@@ -291,8 +323,13 @@ impl Host {
                 )
             {
                 let state = match session.state {
-                    prismattyc_core::activity::ActivitySessionState::Idle => SeatState::Idle,
-                    prismattyc_core::activity::ActivitySessionState::Stuck => SeatState::Stuck,
+                    // The daemon reports Idle when the shell owns the terminal:
+                    // no agent process is running in the pane.
+                    prismattyc_core::activity::ActivitySessionState::Idle => SeatState::NoAgent,
+                    prismattyc_core::activity::ActivitySessionState::Stuck if in_flight => {
+                        SeatState::Stuck
+                    }
+                    prismattyc_core::activity::ActivitySessionState::Stuck => SeatState::Idle,
                     prismattyc_core::activity::ActivitySessionState::Stopped => SeatState::Stopped,
                     prismattyc_core::activity::ActivitySessionState::Working => SeatState::Working,
                     prismattyc_core::activity::ActivitySessionState::Waiting => SeatState::Waiting,
@@ -323,7 +360,7 @@ impl Host {
         let Some(seat) = self.seats.get(seat_id) else {
             return false;
         };
-        if seat.state != SeatState::Stopped {
+        if !matches!(seat.state, SeatState::Stopped | SeatState::NoAgent) {
             return false;
         }
         let session_id = seat.session_id();
@@ -396,6 +433,15 @@ pub fn is_stale(host: &Host, seat: &Seat, now_ms: u64) -> bool {
             record.received_at_ms
         });
     !host.connected() || now_ms.saturating_sub(observed) >= STALE_MS
+}
+
+/// Events that name no seat land on a seat called `unknown`. It has no pane to
+/// check, so its row is dropped once the last such event is this old.
+pub const UNATTRIBUTED_MS: u64 = 5 * 60 * 1000;
+
+/// Whether this row is the catch-all for events without a seat and has gone quiet.
+pub fn expired_unattributed(id: &AgentId, seat: &Seat, now_ms: u64) -> bool {
+    id.as_str() == "unknown" && seat.discovery.is_none() && age_ms(seat, now_ms) >= UNATTRIBUTED_MS
 }
 
 pub fn age_ms(seat: &Seat, now_ms: u64) -> u64 {
@@ -910,10 +956,95 @@ pub(crate) mod tests {
         let mut host = Host::new("local");
         host.apply(page, 0);
 
-        assert_eq!(seat(&host, "shell").state, SeatState::Idle);
-        assert_eq!(seat(&host, "agent").state, SeatState::Stuck);
+        // The shell owns the pane: the session is alive but no agent runs.
+        assert_eq!(seat(&host, "shell").state, SeatState::NoAgent);
+        assert_eq!(seat(&host, "shell").state.word(), "no agent");
+        // A quiet agent that never reported a turn is idle at its prompt.
+        assert_eq!(seat(&host, "agent").state, SeatState::Idle);
         assert_eq!(seat(&host, "finished").state, SeatState::Stopped);
         assert_eq!(seat(&host, "finished").state.word(), "down");
+        Ok(())
+    }
+
+    #[test]
+    fn the_unknown_seat_expires_after_its_last_event_and_real_seats_do_not() -> Result<()> {
+        let mut host = Host::new("local");
+        let page = page_in(
+            "e0",
+            vec![
+                record_at("unknown", 1, "command_started", 1_000)?,
+                record_at("worker", 2, "command_started", 1_000)?,
+            ],
+            None,
+        )?;
+        host.apply(page, 1_000);
+        let unknown = AgentId::new("unknown")?;
+        let worker = AgentId::new("worker")?;
+        let old = 1_000 + UNATTRIBUTED_MS;
+        assert!(!expired_unattributed(
+            &unknown,
+            &host.seats[&unknown],
+            old - 1
+        ));
+        assert!(expired_unattributed(&unknown, &host.seats[&unknown], old));
+        assert!(!expired_unattributed(
+            &worker,
+            &host.seats[&worker],
+            old * 10
+        ));
+        Ok(())
+    }
+
+    fn quiet_agent_after(kind: &str) -> Result<SeatState> {
+        use prismattyc_core::activity::ActivitySessionState;
+
+        let mut sessions = discovered(&["agent"], 10_000_000);
+        sessions.seats[0].state = ActivitySessionState::Stuck;
+        let mut page = page_in("e0", vec![record_at("agent", 1, kind, 1_000)?], None)?;
+        page.sessions = Some(sessions);
+        let mut host = Host::new("local");
+        host.apply(page, 0);
+        Ok(seat(&host, "agent").state)
+    }
+
+    #[test]
+    fn a_quiet_agent_is_stuck_only_when_its_turn_never_finished() -> Result<()> {
+        // A tool or command started and nothing followed: stuck.
+        assert_eq!(quiet_agent_after("tool_started")?, SeatState::Stuck);
+        assert_eq!(quiet_agent_after("turn_started")?, SeatState::Stuck);
+        // The turn finished and the agent waits for mail at its prompt: idle.
+        assert_eq!(quiet_agent_after("turn_finished")?, SeatState::Idle);
+        Ok(())
+    }
+
+    #[test]
+    fn a_no_agent_row_can_be_hidden_and_returns_when_an_agent_starts() -> Result<()> {
+        use prismattyc_core::activity::ActivitySessionState;
+
+        let mut host = Host::new("local");
+        let mut sessions = discovered(&["gone"], 1_000);
+        sessions.seats[0].state = ActivitySessionState::Idle;
+        let mut page = page_in("e0", vec![], None)?;
+        page.sessions = Some(sessions.clone());
+        host.apply(page, 0);
+        let id = AgentId::new("gone")?;
+        let session_id = seat(&host, "gone").session_id();
+        assert_eq!(seat(&host, "gone").state, SeatState::NoAgent);
+        assert!(host.dismiss_stopped(&id));
+        assert!(host.is_dismissed(&id, session_id));
+        // Still no agent on the next poll: stays hidden.
+        let mut page = page_in("e0", vec![], None)?;
+        page.sessions = Some(sessions.clone());
+        host.apply(page, 10);
+        assert!(host.is_dismissed(&id, session_id));
+        // An agent starts in the same session: the row comes back.
+        sessions.seats[0].state = ActivitySessionState::Waiting;
+        let mut page = page_in("e0", vec![], None)?;
+        page.sessions = Some(sessions);
+        host.apply(page, 20);
+        assert!(!host.is_dismissed(&id, session_id));
+        // A working or waiting seat cannot be hidden by mistake.
+        assert!(!host.dismiss_stopped(&id));
         Ok(())
     }
 

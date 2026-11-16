@@ -31,6 +31,7 @@ struct View {
     clock: frame::Clock,
     first_tick: Option<u64>,
     next_host: usize,
+    rescan_pending: bool,
 }
 
 impl View {
@@ -66,6 +67,7 @@ impl View {
             clock,
             first_tick: None,
             next_host: 0,
+            rescan_pending: false,
         })
     }
 
@@ -175,13 +177,22 @@ impl View {
             frame::Event::Resize(viewport) => self.reference.viewport = viewport,
             frame::Event::Tick(clock) => {
                 self.first_tick.get_or_insert(clock.monotonic_ms);
+                let polled = self.rescan_pending;
                 self.poll(&clock);
+                if polled && self.last_poll == Some(clock.monotonic_ms) {
+                    self.rescan_pending = false;
+                    self.monitor.ui.rescanned(&self.monitor.hosts);
+                }
                 self.clock = clock;
             }
             frame::Event::Key(key) => {
                 self.monitor.now_ms = self.clock.wall_ms;
                 if self.monitor.event(&Event::Key(key_event(key))) {
                     return Ok(lifecycle::Reply::Closed);
+                }
+                if self.monitor.ui.take_rescan() {
+                    self.last_poll = None;
+                    self.rescan_pending = true;
                 }
                 for request in self.monitor.ui.take_cleanup_requests() {
                     let result = self

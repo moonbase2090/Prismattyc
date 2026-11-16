@@ -442,7 +442,11 @@ fn leaf_meta(pane: &PaneSnapshot, cwd_source: CwdSource) -> LeafMeta {
                 .as_ref()
                 .and_then(|spawn| crate::procinfo::replay_spawn_command(spawn, pane.child_pid))
                 .or_else(|| pane.child_pid.and_then(crate::procinfo::foreground_command))
-                .filter(|command| !command.is_empty()),
+                .filter(|command| !command.is_empty())
+                // A wrapper's inline script (`python -c '<lines>'`) is not
+                // the launch command and would run as several commands on
+                // restore. Record nothing rather than that.
+                .filter(|command| !command.contains(['\n', '\r'])),
             CwdSource::Spawn => None,
         },
     }
@@ -1519,8 +1523,36 @@ mod tests {
         );
     }
 
+    static FOREGROUND_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn live_command_drops_a_multiline_wrapper_script() {
+        let _env = FOREGROUND_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut session = three_pane_session();
+        session.windows[0].panes[0].child_pid = Some(1);
+        let prior = std::env::var_os(crate::procinfo::TEST_FOREGROUND_COMMAND_ENV);
+        std::env::set_var(
+            crate::procinfo::TEST_FOREGROUND_COMMAND_ENV,
+            "python3 -c 'import os\nos.execvp(\"agent\", [\"agent\"])'",
+        );
+        let saved = from_snapshot_with(&session, CwdSource::Live);
+        match prior {
+            Some(value) => std::env::set_var(crate::procinfo::TEST_FOREGROUND_COMMAND_ENV, value),
+            None => std::env::remove_var(crate::procinfo::TEST_FOREGROUND_COMMAND_ENV),
+        }
+        assert_eq!(
+            saved.windows[0].root.leaf_commands(),
+            vec![None, None, None]
+        );
+    }
+
     #[test]
     fn live_command_records_foreground_via_test_hook() {
+        let _env = FOREGROUND_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut session = three_pane_session();
         session.windows[0].panes[0].child_pid = Some(1);
         let prior = std::env::var_os(crate::procinfo::TEST_FOREGROUND_COMMAND_ENV);

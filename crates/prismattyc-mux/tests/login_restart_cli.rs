@@ -1101,3 +1101,85 @@ fn consented_restart_and_restore_keep_every_space_member() {
     ok(&pmux(&["stop"]));
     drop(server);
 }
+
+/// One saved command with a line break must not abort the restore. The seat
+/// is reported and skipped; every session still comes back and the other
+/// seat's command still runs.
+#[test]
+fn restore_skips_a_saved_command_with_a_line_break_and_restores_the_rest() {
+    let root = temp_root("cfg-linebreak");
+    let socket = socket_path(&root);
+    let server = start_server(&socket, &root);
+    let mut dirs = Vec::new();
+    for name in ["good", "bad"] {
+        let cwd = root.join(name);
+        std::fs::create_dir(&cwd).unwrap();
+        let cwd = cwd.canonicalize().unwrap();
+        let mut create = Command::new(env!("CARGO_BIN_EXE_pmux"));
+        clear_command_env(&mut create);
+        apply_isolation(&mut create, &root);
+        ok(&create
+            .current_dir(&cwd)
+            .arg("--socket")
+            .arg(&socket)
+            .args(["new", "--no-attach", name])
+            .output()
+            .unwrap());
+        dirs.push(cwd);
+    }
+    let file = root.join("configuration.json");
+    ok(&pmux(
+        &socket,
+        &root,
+        &[(
+            prismattyc_mux::procinfo::TEST_FOREGROUND_COMMAND_ENV,
+            "printf ran >> launches",
+        )],
+        &["session-config", "save", file.to_str().unwrap()],
+    ));
+    // Make the bad seat's saved command a two-line wrapper, as a captured
+    // child process can be.
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    for session in saved["space"]["sessions"].as_array_mut().unwrap() {
+        if session["name"] == "bad" {
+            session["windows"][0]["root"]["command"] =
+                "printf ran >> launches\nprintf second >> launches".into();
+        }
+    }
+    std::fs::write(&file, serde_json::to_vec(&saved).unwrap()).unwrap();
+    ok(&pmux(&socket, &root, &[], &["stop", "good"]));
+    ok(&pmux(&socket, &root, &[], &["stop", "bad"]));
+    let restored = ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "restore", file.to_str().unwrap()],
+    ));
+    assert!(restored.contains("Restored 2 sessions."), "{restored}");
+    assert!(
+        restored.contains("Skipped the saved command for session bad"),
+        "{restored}"
+    );
+    let listing = ok(&pmux(&socket, &root, &[], &["ls"]));
+    assert!(
+        listing.contains("session good") && listing.contains("session bad"),
+        "{listing}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !dirs[0].join("launches").exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        std::fs::read_to_string(dirs[0].join("launches")).unwrap(),
+        "ran"
+    );
+    // Give a wrongly replayed command time to land before asserting it did not.
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        !dirs[1].join("launches").exists(),
+        "the line-break command must not run"
+    );
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}

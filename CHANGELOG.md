@@ -7,6 +7,7 @@
 - The activity monitor shows a seat whose agent has exited as `no agent` instead of `idle`, and `x` hides that row without stopping its session; the row returns if an agent starts there. `R` rescans the live panes on demand.
 - `stuck` now means a turn started and nothing happened for five minutes. An agent that finished its turn and waits for mail shows as `idle`.
 - The `unknown` row for events with no seat disappears five minutes after its last event.
+- The Activity Monitor package is now 1.3.3 so its updated sources have a new immutable archive identity.
 
 ### Added
 

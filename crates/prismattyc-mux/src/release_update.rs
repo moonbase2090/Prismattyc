@@ -646,6 +646,12 @@ fn listed_releases() -> Result<Vec<Release>> {
 
 const GITHUB_API_PREFIX: &str = "https://api.github.com/";
 
+/// Longest token sent. GitHub Actions now issues 377-character tokens and may
+/// lengthen them again, so this only bounds a pathological value. A token over
+/// the cap used to be dropped silently, which sent the request anonymously on
+/// the runner's shared rate limit and failed bundle fetches with 403.
+const MAX_GITHUB_TOKEN_LEN: usize = 4096;
+
 /// A curl config line that sends `token` as a bearer token, for GitHub API
 /// requests only. The unauthenticated API limit is shared by every runner on a
 /// network, so a CI job that fetches release metadata needs its own token.
@@ -655,7 +661,7 @@ const GITHUB_API_PREFIX: &str = "https://api.github.com/";
 fn github_auth_config(url: &str, token: Option<&str>) -> Option<String> {
     let token = token?.trim();
     let usable = !token.is_empty()
-        && token.len() <= 255
+        && token.len() <= MAX_GITHUB_TOKEN_LEN
         && token
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'));
@@ -3689,8 +3695,17 @@ mod tests {
         ] {
             assert_eq!(github_auth_config(API_URL, token), None, "{token:?}");
         }
-        let long = "a".repeat(256);
-        assert_eq!(github_auth_config(API_URL, Some(&long)), None);
+        // A 377-character Actions token is authentic and must be sent.
+        let actions = format!("ghs_{}", "aB3-_.".repeat(62));
+        assert_eq!(actions.len(), 376);
+        assert_eq!(
+            github_auth_config(API_URL, Some(&actions)).as_deref(),
+            Some(format!("header = \"Authorization: Bearer {actions}\"\n").as_str())
+        );
+        let limit = "a".repeat(MAX_GITHUB_TOKEN_LEN);
+        assert!(github_auth_config(API_URL, Some(&limit)).is_some());
+        let over = "a".repeat(MAX_GITHUB_TOKEN_LEN + 1);
+        assert_eq!(github_auth_config(API_URL, Some(&over)), None);
     }
 
     /// A stand-in for curl that records its arguments and stdin, then answers

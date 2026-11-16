@@ -1523,11 +1523,9 @@ mod tests {
         );
     }
 
-    static FOREGROUND_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn live_command_drops_a_multiline_wrapper_script() {
-        let _env = FOREGROUND_ENV_LOCK
+        let _env = crate::procinfo::FOREGROUND_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut session = three_pane_session();
@@ -1550,7 +1548,7 @@ mod tests {
 
     #[test]
     fn live_command_records_foreground_via_test_hook() {
-        let _env = FOREGROUND_ENV_LOCK
+        let _env = crate::procinfo::FOREGROUND_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut session = three_pane_session();

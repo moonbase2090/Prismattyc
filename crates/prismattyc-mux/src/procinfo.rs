@@ -162,6 +162,11 @@ pub fn server_pids_and_cwds(
 /// debug builds so a leftover env var cannot change a release save.
 pub const TEST_FOREGROUND_COMMAND_ENV: &str = "PMUX_TEST_FOREGROUND_COMMAND";
 
+/// Held by every unit test that sets [`TEST_FOREGROUND_COMMAND_ENV`]: the
+/// variable is process-wide and lib tests run in parallel.
+#[cfg(test)]
+pub(crate) static FOREGROUND_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Shell-quoted command line of the pane's **terminal foreground** process.
 ///
 /// `root` is the PTY child (usually a shell). Linux and macOS read the

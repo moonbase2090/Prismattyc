@@ -541,6 +541,9 @@ mod tests {
             *command = Some("agent --resume old --model old".into());
         }
         live.windows[0].panes[0].child_pid = Some(1);
+        let _env = crate::procinfo::FOREGROUND_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var_os(crate::procinfo::TEST_FOREGROUND_COMMAND_ENV);
         std::env::set_var(
             crate::procinfo::TEST_FOREGROUND_COMMAND_ENV,

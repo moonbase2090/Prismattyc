@@ -40,6 +40,9 @@ restart the host after changing it.
 pause the window. It defaults to `true`.
 `snapshot_client` is on by default; set it to false to turn the snapshot connection off. The host reads
 that key at startup only; a later edit does not start or stop the cache.
+With it off, each periodic poll asks pmuxd for a snapshot on the window's main
+thread, so a busy or stopped daemon can pause the window for up to the 2 s
+control timeout. Turn it off only to diagnose the connection.
 The host connects each pmuxd pane, and promotes it to a log replica, on a
 worker thread, so a slow or busy daemon does not pause the window. Set
 `PRISMATTYC_ASYNC_PANE_CONNECT=0` in the host's environment to connect on the
@@ -172,6 +175,7 @@ space_rail = "bottom"
 # Enable drag and Shift+arrow reordering for saved spaces. true | false.
 space_reorder = false
 # Keep one pmuxd snapshot connection for periodic polls. Startup only. true | false.
+# false makes each poll block the window on pmuxd; use it only to diagnose.
 snapshot_client = true
 # Restore and re-stroke only border rings that change. true | false.
 selective_border_rings = false

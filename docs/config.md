@@ -175,7 +175,6 @@ space_rail = "bottom"
 # Enable drag and Shift+arrow reordering for saved spaces. true | false.
 space_reorder = false
 # Keep one pmuxd snapshot connection for periodic polls. Startup only. true | false.
-# false makes each poll block the window on pmuxd; use it only to diagnose.
 snapshot_client = true
 # Restore and re-stroke only border rings that change. true | false.
 selective_border_rings = false

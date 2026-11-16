@@ -178,6 +178,11 @@ define_class!(
             let _ = self.ivars().proxy.send_event(UserAction::RollbackUpdate);
         }
 
+        #[unsafe(method(safeRestart:))]
+        fn safe_restart(&self, _sender: Option<&AnyObject>) {
+            let _ = self.ivars().proxy.send_event(UserAction::SafeRestart);
+        }
+
         /// Runs the host action at `MENU_HOST_ACTIONS[tag]` on the focused
         /// window, the same dispatch the keymap uses.
         #[unsafe(method(runAction:))]
@@ -517,6 +522,14 @@ pub fn install_main_menu(
         rollback_item.setAction(Some(sel!(rollbackUpdate:)));
     }
     app_menu.addItem(&rollback_item);
+    let restart_item = NSMenuItem::new(mtm);
+    restart_item.setTitle(&NSString::from_str("Restart…"));
+    // SAFETY: as for the items above.
+    unsafe {
+        restart_item.setTarget(Some(&target));
+        restart_item.setAction(Some(sel!(safeRestart:)));
+    }
+    app_menu.addItem(&restart_item);
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
     app_menu.addItem(&host_action_item(mtm, &target, 17, keymap));
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
@@ -659,6 +672,18 @@ pub fn confirm_rollback() -> bool {
         "Restore the previous verified release. The app will restart.",
     ));
     alert.addButtonWithTitle(&NSString::from_str("Roll Back"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    alert.runModal() == NSAlertFirstButtonReturn
+}
+
+pub fn confirm_restart(preview: &str) -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str("Restart Prismattyc?"));
+    alert.setInformativeText(&NSString::from_str(preview));
+    alert.addButtonWithTitle(&NSString::from_str("Restart"));
     alert.addButtonWithTitle(&NSString::from_str("Cancel"));
     alert.runModal() == NSAlertFirstButtonReturn
 }

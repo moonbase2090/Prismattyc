@@ -11,6 +11,16 @@ flow is available from **Update and restart** in the command palette on
 all platforms. **Roll Back Last Update…** restores the previous verified app.
 The command-line update path remains available on all platforms.
 
+## Restart without stopping sessions
+
+On macOS, choose **Restart…** from the Prismattyc app menu. A dialog shows
+what `pmux restart --plan` reports: the running sessions, which keep running,
+and the app windows and MCP adapters that will restart. Choose **Restart** to
+save a session configuration snapshot and then run `pmux restart`. If the
+snapshot cannot be saved, nothing restarts. This never stops sessions, so the
+daemon is left alone while any session is running. **Roll Back Last Update…**
+also saves a snapshot first and reports where it was written or why it was not.
+
 ## Update and restart all components
 
 Choose **Update and restart all components** in the update panel. The panel

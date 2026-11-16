@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The macOS app menu has **Restart…**. It previews what `pmux restart --plan` reports, saves a session configuration snapshot, then runs `pmux restart` without stopping any session. **Roll Back Last Update…** now saves a snapshot first too.
+
 ## [0.3.67] - 2026-11-13
 
 ### Fixed

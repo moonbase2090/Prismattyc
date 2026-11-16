@@ -214,19 +214,26 @@ fn require_same_sessions(plan: &Plan, pmux: &Path) -> Result<()> {
     Ok(())
 }
 
-fn install(plan: Plan, save: bool) -> Result<Resume> {
-    let pmux = find_mux_bin();
-    require_same_sessions(&plan, &pmux)?;
+/// A fresh, unused file in the private session-configuration directory.
+/// `session-config save` refuses to overwrite, so the name carries the pid and
+/// a millisecond timestamp.
+pub(super) fn snapshot_path(prefix: &str) -> Result<PathBuf> {
     let directory = prismattyc_mux::spaces_dir()
         .parent()
         .context("configuration data directory")?
         .join("session-configurations");
     prismattyc_mux::private_fs::create_dir(&directory)?;
-    let file = directory.join(format!(
-        "update-{}-{}.json",
+    Ok(directory.join(format!(
+        "{prefix}-{}-{}.json",
         std::process::id(),
         prismattyc_mux::host_render_status::unix_ms()
-    ));
+    )))
+}
+
+fn install(plan: Plan, save: bool) -> Result<Resume> {
+    let pmux = find_mux_bin();
+    require_same_sessions(&plan, &pmux)?;
+    let file = snapshot_path("update")?;
     run(&pmux, &["session-config", "save", &file.to_string_lossy()])?;
     let backup = save.then_some(file.clone());
     let result = complete_install(&plan, &pmux, &file, !save);
@@ -350,7 +357,7 @@ fn verify_installed_versions(value: &Value, expected: &str) -> Result<()> {
     Ok(())
 }
 
-fn run(pmux: &Path, args: &[&str]) -> Result<String> {
+pub(super) fn run(pmux: &Path, args: &[&str]) -> Result<String> {
     let mut cmd = prismattyc_mux::platform::hidden_command(pmux);
     if let Some(socket) = host_mux_socket() {
         cmd.arg("--socket").arg(socket);

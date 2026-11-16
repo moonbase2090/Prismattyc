@@ -68,6 +68,8 @@ mod remote_catalog;
 mod remote_rail;
 mod render_diagnostics;
 mod restart;
+#[cfg(target_os = "macos")]
+mod safe_restart;
 mod sidebar_resize;
 mod sidebar_width;
 mod snapshot_client;
@@ -3025,6 +3027,12 @@ enum UserAction {
     #[cfg(target_os = "macos")]
     RollbackUpdate,
     #[cfg(target_os = "macos")]
+    SafeRestart,
+    #[cfg(target_os = "macos")]
+    SafeRestartPlanned(Result<safe_restart::Plan, String>),
+    #[cfg(target_os = "macos")]
+    SafeRestartFinished(Result<String, String>),
+    #[cfg(target_os = "macos")]
     UpdateCheckFinished {
         result: Result<macos_update::ReleaseCheck, String>,
     },
@@ -3055,6 +3063,9 @@ impl PartialEq for UserAction {
             (Self::CheckForUpdates, Self::CheckForUpdates)
             | (Self::ToggleAutomaticUpdateChecks, Self::ToggleAutomaticUpdateChecks)
             | (Self::RollbackUpdate, Self::RollbackUpdate)
+            | (Self::SafeRestart, Self::SafeRestart)
+            | (Self::SafeRestartPlanned(_), Self::SafeRestartPlanned(_))
+            | (Self::SafeRestartFinished(_), Self::SafeRestartFinished(_))
             | (Self::UpdateCheckFinished { .. }, Self::UpdateCheckFinished { .. })
             | (Self::UpdateInstallFinished { .. }, Self::UpdateInstallFinished { .. }) => true,
             (Self::AccessKit(left), Self::AccessKit(right)) => left.window_id == right.window_id,
@@ -3114,6 +3125,9 @@ struct App {
     full_update: update_flow::Flow,
     #[cfg(target_os = "macos")]
     automatic_update_checks: bool,
+    /// A menu Restart is previewing or running; a second click is ignored.
+    #[cfg(target_os = "macos")]
+    safe_restart_inflight: bool,
     /// Captured once at startup; changing the config requires a restart.
     #[cfg(target_os = "macos")]
     macos_present: config::MacosPresent,
@@ -3210,6 +3224,8 @@ impl App {
             full_update: update_flow::Flow::default(),
             #[cfg(target_os = "macos")]
             automatic_update_checks,
+            #[cfg(target_os = "macos")]
+            safe_restart_inflight: false,
             #[cfg(target_os = "macos")]
             macos_present,
             #[cfg(target_os = "macos")]
@@ -22318,6 +22334,32 @@ impl ApplicationHandler<UserAction> for App {
             UserAction::RollbackUpdate => {
                 if macos_menu::confirm_rollback() {
                     macos_update::start_install(self.event_proxy.clone(), true);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            UserAction::SafeRestart => {
+                if !self.safe_restart_inflight {
+                    self.safe_restart_inflight = true;
+                    safe_restart::start_plan(self.event_proxy.clone());
+                }
+            }
+            #[cfg(target_os = "macos")]
+            UserAction::SafeRestartPlanned(result) => match result {
+                Ok(plan) if macos_menu::confirm_restart(&safe_restart::preview_text(&plan)) => {
+                    safe_restart::start_restart(self.event_proxy.clone());
+                }
+                Ok(_) => self.safe_restart_inflight = false,
+                Err(error) => {
+                    self.safe_restart_inflight = false;
+                    macos_menu::show_update_message("Could Not Preview the Restart", &error);
+                }
+            },
+            #[cfg(target_os = "macos")]
+            UserAction::SafeRestartFinished(result) => {
+                self.safe_restart_inflight = false;
+                match result {
+                    Ok(report) => macos_menu::show_update_message("Restart Finished", &report),
+                    Err(error) => macos_menu::show_update_message("Restart Failed", &error),
                 }
             }
             #[cfg(target_os = "macos")]

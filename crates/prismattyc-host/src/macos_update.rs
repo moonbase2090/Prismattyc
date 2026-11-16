@@ -62,6 +62,10 @@ fn check_release() -> Result<ReleaseCheck> {
 
 fn install_release(rollback: bool) -> Result<InstallResult> {
     let pmux = find_mux_bin();
+    // The menu path never stops sessions, but the app restarts afterwards, so
+    // keep a restorable record. A failed save is reported, not fatal: the
+    // rollback itself leaves sessions running.
+    let snapshot = rollback.then(|| save_snapshot(&pmux));
     let output = run(
         &pmux,
         if rollback {
@@ -88,8 +92,24 @@ fn install_release(rollback: bool) -> Result<InstallResult> {
         format!(" {message}")
     };
     Ok(InstallResult {
-        notice: format!("Prismattyc {operation} to {version}.{message} {daemon}"),
+        notice: format!(
+            "Prismattyc {operation} to {version}.{message} {daemon}{}",
+            snapshot.map(|s| format!(" {s}")).unwrap_or_default()
+        ),
     })
+}
+
+/// Saves a session configuration before an app-replacing step and describes
+/// the outcome for the result message.
+fn save_snapshot(pmux: &std::path::Path) -> String {
+    let saved = crate::update_flow::snapshot_path("rollback").and_then(|file| {
+        crate::update_flow::run(pmux, &["session-config", "save", &file.to_string_lossy()])?;
+        Ok(file)
+    });
+    match saved {
+        Ok(file) => format!("Session configuration saved at {}.", file.display()),
+        Err(error) => format!("No session configuration was saved: {error:#}."),
+    }
 }
 
 fn restart_daemon(pmux: &std::path::Path) -> String {
